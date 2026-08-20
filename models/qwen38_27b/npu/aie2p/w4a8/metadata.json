@@ -1,0 +1,108 @@
+{
+  "schemaVersion": "1.0.0",
+  "model": "Qwen3.8-27B-Instruct (qwen38_27b)",
+  "layer": "mtp.eh_proj",
+  "target": "npu2",
+  "abi": "xrt-elf-v1",
+  "tensorContract": "q4_k-u4-dyn-i8-g32-int32-fp32-m1-k10240-n5120-b40-t10-r1",
+  "issueRef": "issue #35, M004-C007 (see long-horizon-plan.md, deliverable 288-290)",
+  "xclbin": {
+    "kernel": "MLIR_AIE",
+    "aieKernels": [
+      "qwen_aie2p_w4a8_gemm",
+      "qwen_aie2p_w4a8_zero_f32"
+    ],
+    "source": [
+      "src/core/xdna2/programs/qwen_aie2p_w4a8/qwen_aie2p_w4a8.py",
+      "src/core/xdna2/programs/qwen_aie2p_w4a8/gemm.cc"
+    ],
+    "blocks": 40,
+    "tilesPerColumn": 10,
+    "rounds": 1,
+    "partitionColumns": 8,
+    "arrayColumns": 8,
+    "arrayRows": 4,
+    "cores": 32,
+    "xrtVersion": "unstable-2026-06-04",
+    "mlirAieVersion": "1.4.1",
+    "llvmAieVersion": "21.0.0.2026080301+c9c5ecb7",
+    "aiebuRevision": "27a302c5840773e79c79f0f2fc8a1832d6ab1774",
+    "sha256": {
+      "program": "ba3be6d08695d8a892303c6be24220679212a675b70aca1948c2291925b824c6",
+      "xclbin": "2a6b0367bc4086eaecc4fcf460e8514e3d47c19ee54e2c545fa6edc6947c0248",
+      "instruction": "35fc836444d22aecae6fb2f3e5887c71518d7c79041cb40b19ce3a617012f212",
+      "elf": "37f08cef8379babebab63305796272510563a317a00a140df52c5ce3ea67c94d",
+      "pdi": "fb1e2a805d7a1efb1e2d12b035204ed0dbbca61a1715f505eb45c012ba483263"
+    }
+  },
+  "quantization": {
+    "scheme": "W4A8",
+    "weights": {
+      "type": "SHQ4-T16 v1 (Q4_K lossless UINT4)",
+      "mode": "U4Z (d/dmin scale + zcorr; G64 scale packing)",
+      "documentation": "docs/QUANTIZATION.md; byte-exact vectors in tests/kernels/qwen38_27b/test_aie2p_w4a8.cpp"
+    },
+    "activations": {
+      "type": "dynamic INT8, group-32",
+      "semantics": "a_scale = amax/127 per group (amax==0 -> scale 0); codes = clamp(rne(x/a_scale), -127, 127); INT32 group sums",
+      "padding": "tail-K elements zero-coded with zero scales (padded tail K, dequantizes to zero)"
+    },
+    "accumulator": "INT32",
+    "epilogue": "fp32: wscale * code + zcorr per lane; zero kernel qwen_aie2p_w4a8_zero_f32 zeroes output tiles"
+  },
+  "recordLayouts": {
+    "weight": {
+      "bytes": 3072,
+      "perLaneBytes": 192,
+      "lanesPerTile": 16,
+      "codesBytes": 2048,
+      "scalesOffset": 2048,
+      "scalesBytes": 512,
+      "zcorrOffset": 2560,
+      "zcorrBytes": 512,
+      "groupsPerBlock": 8
+    },
+    "input": {
+      "bytes": 1280,
+      "rows": 5,
+      "rowBytes": 256,
+      "codeRows": 4,
+      "parameterRowOffset": 1024,
+      "scaleOffset": 1024,
+      "sumOffset": 1152
+    },
+    "outputTileBytes": 1024
+  },
+  "buffers": {
+    "weightBytes": 39321600,
+    "inputBytes": 51200,
+    "outputBytes": 81920,
+    "dram": {
+      "host": { "base": "0x4000000", "sizeKB": "0x10000" },
+      "sram": { "base": "0x4000000", "sizeKB": "0xc000" }
+    }
+  },
+  "shapeBounds": {
+    "hardware": {
+      "mMin": 1,
+      "mMax": 4,
+      "k": 10240,
+      "n": 5120,
+      "roundsBaked": 1,
+      "note": "baked b40/t10/r1 xclbin schedules exactly the M=1..4, K=10240, N=5120 shape (qwen_aie2p_w4a8_kMaxM=4)"
+    },
+    "oracle": {
+      "mBuckets": [8, 16, 32, 64, 128],
+      "kReal": [5120, 10240, 17408],
+      "nReal": [5120, 10240, 17408],
+      "kTail": [5105, 5135, 10225, 10255, 17393, 17423],
+      "nTail": [5105, 5135, 17423],
+      "note": "multi-round CPU-oracle chunking (rounds = ceil(m/4)); real 27B N shapes need no padding (5120/512=10, 10240/512=20, 17408/512=34)"
+    },
+    "openQuestion": "M=128 = 32 record rounds is unverified on hardware; plan long-horizon-plan.md §6 fallback: drop to M=64 if 32-round program-memory bounds blow up"
+  },
+  "benchmark": {
+    "tool": "tools/testing/qwen_aie2p_w4a8_shq4_matrix_bench",
+    "artifact": "artifacts/m004/c007-xdna2.json"
+  }
+}

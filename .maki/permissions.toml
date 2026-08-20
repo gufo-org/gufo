@@ -1,0 +1,15 @@
+[bash]
+allow = [
+    "head *",
+    "gh *",
+    "for *",
+    "ls *",
+    "echo *",
+    "find *",
+    "grep *",
+    "git *",
+    "jj *",
+    "nix *",
+    "cmake *",
+    "ctest *",
+]

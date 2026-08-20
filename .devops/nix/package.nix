@@ -8,6 +8,7 @@
   rocmPackages,
   aie-qwen-mtp-eh-proj,
   aie-qwen-mtp-rmsnorm,
+  aie-qwen-aie2p-w4a8,
   aie-smoke,
   xrt,
   xrt-plugin-amdxdna,
@@ -66,6 +67,7 @@ stdenv.mkDerivation (finalAttrs: {
   ++ lib.optionals xrtSupport [
     aie-qwen-mtp-eh-proj
     aie-qwen-mtp-rmsnorm
+    aie-qwen-aie2p-w4a8
     aie-smoke
     xrt
     xrt-plugin-amdxdna
@@ -83,6 +85,7 @@ stdenv.mkDerivation (finalAttrs: {
   ++ lib.optional xrtSupport "-DENGINE_ENABLE_XRT=ON"
   ++ lib.optional xrtSupport "-DSTRIX_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR=${placeholder "out"}/share/strix/aie/qwen-mtp-eh-proj"
   ++ lib.optional xrtSupport "-DSTRIX_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR=${placeholder "out"}/share/strix/aie/qwen-mtp-rmsnorm"
+  ++ lib.optional xrtSupport "-DSTRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR=${placeholder "out"}/share/strix/aie/qwen-aie2p-w4a8"
   ++ lib.optional xrtSupport "-DSTRIX_AIE_SMOKE_PROGRAM_DIR=${placeholder "out"}/share/strix/aie/smoke";
 
   env = lib.optionalAttrs rocmSupport {
@@ -91,6 +94,7 @@ stdenv.mkDerivation (finalAttrs: {
   // lib.optionalAttrs xrtSupport {
     STRIX_AIE_QWEN_MTP_EH_PROJ_ROOT = "${aie-qwen-mtp-eh-proj}";
     STRIX_AIE_QWEN_MTP_RMSNORM_ROOT = "${aie-qwen-mtp-rmsnorm}";
+    STRIX_AIE_QWEN_AIE2P_W4A8_ROOT = "${aie-qwen-aie2p-w4a8}";
     STRIX_AIE_SMOKE_ROOT = "${aie-smoke}";
     XRT_PATH = "${xrt}/opt/xilinx/xrt";
     # Combined NPU lib dir so XRT can discover the amdxdna plugin at runtime.
@@ -144,6 +148,17 @@ stdenv.mkDerivation (finalAttrs: {
         ${aie-qwen-mtp-eh-proj}/manifest.json \
         ${aie-qwen-mtp-eh-proj}/SHA256SUMS \
         $out/share/strix/aie/qwen-mtp-eh-proj/
+    fi
+    if [ -d ${aie-qwen-aie2p-w4a8} ]; then
+      mkdir -p $out/share/strix/aie/qwen-aie2p-w4a8
+      cp ${aie-qwen-aie2p-w4a8}/qwen_aie2p_w4a8.xclbin \
+        ${aie-qwen-aie2p-w4a8}/qwen_aie2p_w4a8.insts.elf \
+        ${aie-qwen-aie2p-w4a8}/qwen_aie2p_w4a8_insts.bin \
+        ${aie-qwen-aie2p-w4a8}/qwen_aie2p_w4a8.pdi \
+        ${aie-qwen-aie2p-w4a8}/qwen_aie2p_w4a8.aie-partition.json \
+        ${aie-qwen-aie2p-w4a8}/manifest.json \
+        ${aie-qwen-aie2p-w4a8}/SHA256SUMS \
+        $out/share/strix/aie/qwen-aie2p-w4a8/
     fi
     chmod +x $out/bin/*
 

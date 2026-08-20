@@ -55,6 +55,8 @@
             strixPackages.${system}.aie-qwen-mtp-eh-proj;
           aie-qwen-mtp-rmsnorm =
             strixPackages.${system}.aie-qwen-mtp-rmsnorm;
+          aie-qwen-aie2p-w4a8 =
+            strixPackages.${system}.aie-qwen-aie2p-w4a8;
           aie-smoke = strixPackages.${system}.aie-smoke;
         }
       );
@@ -76,6 +78,10 @@
                 "${strixPackages.${system}.aie-qwen-mtp-eh-proj}";
               STRIX_AIE_QWEN_MTP_EH_PROJ_ROOT =
                 "${strixPackages.${system}.aie-qwen-mtp-eh-proj}";
+              STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR =
+                "${strixPackages.${system}.aie-qwen-aie2p-w4a8}";
+              STRIX_AIE_QWEN_AIE2P_W4A8_ROOT =
+                "${strixPackages.${system}.aie-qwen-aie2p-w4a8}";
               STRIX_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR =
                 "${strixPackages.${system}.aie-qwen-mtp-rmsnorm}";
               STRIX_AIE_QWEN_MTP_RMSNORM_ROOT =
@@ -97,6 +103,10 @@
             env = {
               MLIR_AIE_INSTALL_DIR = "${strixPackages.${system}.mlir-aie}/${pkgs.${system}.python312.sitePackages}/mlir_aie";
               PEANO_INSTALL_DIR = "${strixPackages.${system}.llvm-aie}/${pkgs.${system}.python312.sitePackages}/llvm-aie";
+              STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR =
+                "${strixPackages.${system}.aie-qwen-aie2p-w4a8}";
+              STRIX_AIE_QWEN_AIE2P_W4A8_ROOT =
+                "${strixPackages.${system}.aie-qwen-aie2p-w4a8}";
               STRIX_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR =
                 "${strixPackages.${system}.aie-qwen-mtp-eh-proj}";
               STRIX_AIE_QWEN_MTP_EH_PROJ_ROOT =
@@ -167,6 +177,7 @@
               "cmake"
               "src"
               "tests"
+              "tools"
             ];
             files = [
               ".clang-format"
