@@ -2,13 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 // Pure-CPU W4A8 SHQ4-T16 packing and reference kernels for the Qwen3.8-27B
-// MTP AIE2P (XDNA2) program family. Header-only so CPU oracle tests and the
-// matrix bench can run without XRT; the host driver
-// (src/core/xdna2/qwen_aie2p_w4a8.cpp) uses the same builders to fill the NPU
-// input tensors.
+// MTP AIE2P (XDNA2) program family. This defines the byte and numerical
+// contracts independently of any XRT program.
 //
-// Record contracts (identical to the AIE kernel in
-// programs/qwen_aie2p_w4a8/gemm.cc):
+// Record contracts:
 //
 //   weight_record (16 lanes x 3072 B, one 256-K block):
 //     [0,2048)   codes:  8 groups x 2 half-tiles x (16 k x 16 lanes) uint4,
@@ -32,9 +29,9 @@
 //
 // Weight interpretations (host packing only; one kernel ELF):
 //   u4z:  codes = SHQ4 U4Z plane (uint4), wscale = BF16 scale,
-//         zcorr = UINT4 zero point decoded to FP32
-//   s4:   codes = SHQ4 S4 plane bytes read unsigned (u = s + 8),
-//         wscale = BF16 scale, zcorr = 8.0  (dot_u - 8*asum == dot_s)
+//         zcorr = wscale * UINT4 zero point
+//   s4:   codes = SHQ4 S4 nibbles biased to uint4 (u = s + 8),
+//         wscale = BF16 scale, zcorr = wscale * 8
 //   q4k:  Q4_K lossless: codes = Q4_K nibbles, wscale = d*scale6 FP32 exact,
 //         zcorr = dmin*min6 FP32 exact
 
@@ -42,15 +39,32 @@
 #define STRIX_CORE_XDNA2_QWEN_AIE2P_W4A8_PACK_H_
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 namespace strix::xdna2::w4a8 {
+
+template<typename T>
+concept RecordScalar = std::is_trivially_copyable_v<T>;
+
+template<RecordScalar T>
+T LoadScalar(const std::uint8_t* data, std::size_t offset) noexcept {
+  T value{};
+  std::memcpy(&value, data + offset, sizeof(value));
+  return value;
+}
+
+template<RecordScalar T>
+void StoreScalar(std::uint8_t* data, std::size_t offset, T value) noexcept {
+  std::memcpy(data + offset, &value, sizeof(value));
+}
 
 // ---------------------------------------------------------------------------
 // Geometry constants
@@ -58,7 +72,8 @@ namespace strix::xdna2::w4a8 {
 
 inline constexpr std::uint32_t kBlockElements = 256;
 inline constexpr std::uint32_t kGroupElements = 32;
-inline constexpr std::uint32_t kGroupsPerBlock = kBlockElements / kGroupElements;
+inline constexpr std::uint32_t kGroupsPerBlock =
+    kBlockElements / kGroupElements;
 inline constexpr std::uint32_t kMmulM = 4;
 inline constexpr std::uint32_t kMmulK = 16;
 inline constexpr std::uint32_t kMmulN = 16;
@@ -74,8 +89,8 @@ inline constexpr std::uint32_t kWeightRecordBytes =
 inline constexpr std::uint32_t kInputRecordCodesBytes = 1024;
 inline constexpr std::uint32_t kInputRecordScaleOffset = 1024;
 inline constexpr std::uint32_t kInputRecordSumOffset = 1152;
-inline constexpr std::uint32_t kInputRecordBytes = kInputRecordSumOffset +
-    (kMmulM * kGroupsPerBlock * sizeof(std::int32_t));
+inline constexpr std::uint32_t kInputRecordBytes =
+    kInputRecordSumOffset + (kMmulM * kGroupsPerBlock * sizeof(std::int32_t));
 
 inline constexpr std::uint32_t kOutputAccElements = kMmulM * kMmulN;
 
@@ -85,16 +100,9 @@ static_assert(kInputRecordSumOffset +
                   (kMmulM * kGroupsPerBlock * sizeof(std::int32_t)) ==
               kInputRecordBytes);
 
-// AIE2P array: 8 columns x 4 rows, 16 output lanes per core.
-inline constexpr std::uint32_t kArrayColumns = 8;
-inline constexpr std::uint32_t kArrayRows = 4;
-inline constexpr std::uint32_t kLanesPerArrayLayer =
-    kArrayColumns * kArrayRows * kMmulN;  // 512
-
 enum class WeightMode {
   kU4Z,
   kS4,
-  kQ4K,
 };
 
 struct Shape {
@@ -103,13 +111,10 @@ struct Shape {
   std::uint32_t k{0};
 
   [[nodiscard]] std::uint32_t Blocks() const noexcept {
-    return (k + kBlockElements - 1) / kBlockElements;
-  }
-  [[nodiscard]] std::uint32_t TilesPerColumn() const noexcept {
-    return (n + kLanesPerArrayLayer - 1) / kLanesPerArrayLayer;
+    return k == 0 ? 0 : 1 + ((k - 1) / kBlockElements);
   }
   [[nodiscard]] std::uint32_t Rounds() const noexcept {
-    return (m + kMmulM - 1) / kMmulM;
+    return m == 0 ? 0 : 1 + ((m - 1) / kMmulM);
   }
 };
 
@@ -135,9 +140,10 @@ inline float Bf16ToFloat32(std::uint16_t id) noexcept {
   return value;
 }
 
-// GGML Q4_K stores d/dmin as FP16 (10-bit mantissa). Exact for FP16-representable
-// values; mirrors src/core/quant/ggml_dequant.cpp Fp16ToFloat. Subnormals: an FP16
-// subnormal (exp==0, mant!=0) is 2^-24 * mant, representable in FP32.
+// GGML Q4_K stores d/dmin as FP16 (10-bit mantissa). Exact for
+// FP16-representable values; mirrors src/core/quant/ggml_dequant.cpp
+// Fp16ToFloat. Subnormals: an FP16 subnormal (exp==0, mant!=0) is 2^-24 * mant,
+// representable in FP32.
 inline float Fp16ToFloat32(std::uint16_t id) noexcept {
   const std::uint32_t sign = static_cast<std::uint32_t>(id & 0x8000U) << 16U;
   const std::uint32_t exp = (id >> 10U) & 0x1FU;
@@ -146,7 +152,8 @@ inline float Fp16ToFloat32(std::uint16_t id) noexcept {
   if (exp == 0) {
     if (mant != 0) {
       // subnormal: 2^-24 * mant
-      const float f = (static_cast<float>(mant) / 1024.0F) * std::ldexp(1.0F, -14);
+      const float f =
+          (static_cast<float>(mant) / 1024.0F) * std::ldexp(1.0F, -14);
       std::memcpy(&bits, &f, sizeof(bits));
       bits |= sign;
     } else {
@@ -183,17 +190,25 @@ inline std::uint8_t& WeightSpecCode(WeightBlockSpec& spec, std::uint32_t group,
 
 inline const std::uint8_t& WeightSpecCode(const WeightBlockSpec& spec,
                                           std::uint32_t group,
-                                          std::uint32_t half,
-                                          std::uint32_t k,
+                                          std::uint32_t half, std::uint32_t k,
                                           std::uint32_t lane) noexcept {
   return spec.codes[group][half][k][lane];
 }
 
 inline std::uint8_t* WeightRecordNibble(std::uint8_t* record,
-                                        std::uint32_t group,
-                                        std::uint32_t half,
+                                        std::uint32_t group, std::uint32_t half,
                                         std::uint32_t k,
                                         std::uint32_t lane) noexcept {
+  const std::uint32_t element_index = (k * kMmulN) + lane;
+  return record + ((group * 2U + half) * kMmulWeightElements / 2U) +
+         (element_index / 2U);
+}
+
+inline const std::uint8_t* WeightRecordNibble(const std::uint8_t* record,
+                                              std::uint32_t group,
+                                              std::uint32_t half,
+                                              std::uint32_t k,
+                                              std::uint32_t lane) noexcept {
   const std::uint32_t element_index = (k * kMmulN) + lane;
   return record + ((group * 2U + half) * kMmulWeightElements / 2U) +
          (element_index / 2U);
@@ -215,39 +230,81 @@ inline void SetWeightRecordNibble(std::uint8_t* record, std::uint32_t group,
 
 inline std::uint8_t GetWeightRecordNibble(const std::uint8_t* record,
                                           std::uint32_t group,
-                                          std::uint32_t half,
-                                          std::uint32_t k,
+                                          std::uint32_t half, std::uint32_t k,
                                           std::uint32_t lane) noexcept {
-  const std::uint8_t byte = *WeightRecordNibble(
-      const_cast<std::uint8_t*>(record), group, half, k, lane);
+  const std::uint8_t byte = *WeightRecordNibble(record, group, half, k, lane);
   return (lane & 1U) == 0U ? static_cast<std::uint8_t>(byte & 0x0FU)
                            : static_cast<std::uint8_t>(byte >> 4U);
 }
 
-inline float* WeightRecordScale(std::uint8_t* record, std::uint32_t group,
-                                std::uint32_t lane) noexcept {
-  return reinterpret_cast<float*>(
-      record + kWeightRecordScaleOffset + ((group * kMmulN) + lane) * 4U);
+inline std::size_t WeightRecordScaleByteOffset(std::uint32_t group,
+                                               std::uint32_t lane) noexcept {
+  return kWeightRecordScaleOffset +
+         static_cast<std::size_t>((group * kMmulN) + lane) * sizeof(float);
 }
 
-inline const float* WeightRecordScale(const std::uint8_t* record,
-                                      std::uint32_t group,
-                                      std::uint32_t lane) noexcept {
-  return reinterpret_cast<const float*>(
-      record + kWeightRecordScaleOffset + ((group * kMmulN) + lane) * 4U);
+inline float GetWeightRecordScale(const std::uint8_t* record,
+                                  std::uint32_t group,
+                                  std::uint32_t lane) noexcept {
+  return LoadScalar<float>(record, WeightRecordScaleByteOffset(group, lane));
 }
 
-inline float* WeightRecordZcorr(std::uint8_t* record, std::uint32_t group,
-                                std::uint32_t lane) noexcept {
-  return reinterpret_cast<float*>(
-      record + kWeightRecordZcorrOffset + ((group * kMmulN) + lane) * 4U);
+inline void SetWeightRecordScale(std::uint8_t* record, std::uint32_t group,
+                                 std::uint32_t lane, float value) noexcept {
+  StoreScalar(record, WeightRecordScaleByteOffset(group, lane), value);
 }
 
-inline const float* WeightRecordZcorr(const std::uint8_t* record,
-                                      std::uint32_t group,
-                                      std::uint32_t lane) noexcept {
-  return reinterpret_cast<const float*>(
-      record + kWeightRecordZcorrOffset + ((group * kMmulN) + lane) * 4U);
+inline std::size_t WeightRecordZcorrByteOffset(std::uint32_t group,
+                                               std::uint32_t lane) noexcept {
+  return kWeightRecordZcorrOffset +
+         static_cast<std::size_t>((group * kMmulN) + lane) * sizeof(float);
+}
+
+inline float GetWeightRecordZcorr(const std::uint8_t* record,
+                                  std::uint32_t group,
+                                  std::uint32_t lane) noexcept {
+  return LoadScalar<float>(record, WeightRecordZcorrByteOffset(group, lane));
+}
+
+inline void SetWeightRecordZcorr(std::uint8_t* record, std::uint32_t group,
+                                 std::uint32_t lane, float value) noexcept {
+  StoreScalar(record, WeightRecordZcorrByteOffset(group, lane), value);
+}
+
+inline std::size_t InputRecordScaleByteOffset(std::uint32_t row,
+                                              std::uint32_t group) noexcept {
+  return kInputRecordScaleOffset +
+         static_cast<std::size_t>((row * kGroupsPerBlock) + group) *
+             sizeof(float);
+}
+
+inline float GetInputRecordScale(const std::uint8_t* record, std::uint32_t row,
+                                 std::uint32_t group) noexcept {
+  return LoadScalar<float>(record, InputRecordScaleByteOffset(row, group));
+}
+
+inline void SetInputRecordScale(std::uint8_t* record, std::uint32_t row,
+                                std::uint32_t group, float value) noexcept {
+  StoreScalar(record, InputRecordScaleByteOffset(row, group), value);
+}
+
+inline std::size_t InputRecordSumByteOffset(std::uint32_t row,
+                                            std::uint32_t group) noexcept {
+  return kInputRecordSumOffset +
+         static_cast<std::size_t>((row * kGroupsPerBlock) + group) *
+             sizeof(std::int32_t);
+}
+
+inline std::int32_t GetInputRecordSum(const std::uint8_t* record,
+                                      std::uint32_t row,
+                                      std::uint32_t group) noexcept {
+  return LoadScalar<std::int32_t>(record, InputRecordSumByteOffset(row, group));
+}
+
+inline void SetInputRecordSum(std::uint8_t* record, std::uint32_t row,
+                              std::uint32_t group,
+                              std::int32_t value) noexcept {
+  StoreScalar(record, InputRecordSumByteOffset(row, group), value);
 }
 
 inline void PackWeightBlock(const WeightBlockSpec& spec,
@@ -263,8 +320,8 @@ inline void PackWeightBlock(const WeightBlockSpec& spec,
       }
     }
     for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
-      *WeightRecordScale(record, group, lane) = spec.wscale[group][lane];
-      *WeightRecordZcorr(record, group, lane) = spec.zcorr[group][lane];
+      SetWeightRecordScale(record, group, lane, spec.wscale[group][lane]);
+      SetWeightRecordZcorr(record, group, lane, spec.zcorr[group][lane]);
     }
   }
 }
@@ -287,8 +344,7 @@ struct BlockQ4K {
 #pragma pack(pop)
 
 inline void GetQ4ScaleMin(std::uint32_t group, const std::uint8_t* packed,
-                          std::uint8_t& scale,
-                          std::uint8_t& minimum) noexcept {
+                          std::uint8_t& scale, std::uint8_t& minimum) noexcept {
   if (group < 4) {
     scale = packed[group] & 0x3FU;
     minimum = packed[group + 4] & 0x3FU;
@@ -304,38 +360,6 @@ inline void GetQ4ScaleMin(std::uint32_t group, const std::uint8_t* packed,
 
 static_assert(sizeof(detail::BlockQ4K) == 144);
 
-inline WeightBlockSpec DecodeQ4KBlock(const std::uint8_t* src) noexcept {
-  const auto& block = *reinterpret_cast<const detail::BlockQ4K*>(src);
-  const float d = Fp16ToFloat32(block.d);
-  const float dmin = Fp16ToFloat32(block.dmin);
-  WeightBlockSpec spec;
-  for (std::uint32_t group = 0; group < kGroupsPerBlock; ++group) {
-    const std::uint32_t pair = group / 2;
-    const bool high_nibble = (group & 1U) != 0U;
-    std::uint8_t scale = 0;
-    std::uint8_t minimum = 0;
-    detail::GetQ4ScaleMin(group, block.scales, scale, minimum);
-    for (std::uint32_t half = 0; half < 2; ++half) {
-      for (std::uint32_t k = 0; k < kMmulK; ++k) {
-        const std::uint32_t lane_in_group = (half * kMmulK) + k;
-        const std::uint8_t source =
-            block.qs[(pair * kGroupElements) + lane_in_group];
-        const std::uint8_t quantized =
-            high_nibble ? static_cast<std::uint8_t>(source >> 4U)
-                        : static_cast<std::uint8_t>(source & 0x0FU);
-        for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
-          spec.codes[group][half][k][lane] = quantized;
-        }
-      }
-    }
-    for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
-      spec.wscale[group][lane] = d * static_cast<float>(scale);
-      spec.zcorr[group][lane] = dmin * static_cast<float>(minimum);
-    }
-  }
-  return spec;
-}
-
 // Decode one Q4_K row block (256 K elements of output row `row`) into the
 // `lane`-th 16-element K slice of a tile's WeightBlockSpec. The source tensor
 // is row-major: block index within the row = `block`, so the caller supplies
@@ -343,7 +367,8 @@ inline WeightBlockSpec DecodeQ4KBlock(const std::uint8_t* src) noexcept {
 inline void DecodeQ4KRowIntoSpec(const std::uint8_t* src_row_block,
                                  std::uint32_t lane,
                                  WeightBlockSpec& spec) noexcept {
-  const auto& block = *reinterpret_cast<const detail::BlockQ4K*>(src_row_block);
+  detail::BlockQ4K block{};
+  std::memcpy(&block, src_row_block, sizeof(block));
   const float d = Fp16ToFloat32(block.d);
   const float dmin = Fp16ToFloat32(block.dmin);
   for (std::uint32_t group = 0; group < kGroupsPerBlock; ++group) {
@@ -366,22 +391,6 @@ inline void DecodeQ4KRowIntoSpec(const std::uint8_t* src_row_block,
     spec.wscale[group][lane] = d * static_cast<float>(scale);
     spec.zcorr[group][lane] = dmin * static_cast<float>(minimum);
   }
-}
-
-// Fast path: one Q4_K block -> one weight record (no intermediate decode).
-// NOTE: one 256-element Q4_K block covers one output row's K range; a record
-// holds 16 DISTINCT rows, so callers must pass the 16 row blocks for the
-// (tile, block) pair (see DecodeQ4KRowIntoSpec for a lane-wise builder).
-inline void PackQ4KBlockToRecord(const std::uint8_t* src_q4k_block,
-                                 std::uint8_t* record) noexcept {
-  // Convenience: broadcast the single row block across all 16 lanes (a tile
-  // record normally holds 16 DISTINCT rows; use DecodeQ4KRowIntoSpec per lane
-  // for real tensors).
-  WeightBlockSpec spec;
-  for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
-    DecodeQ4KRowIntoSpec(src_q4k_block, lane, spec);
-  }
-  PackWeightBlock(spec, record);
 }
 
 // ---------------------------------------------------------------------------
@@ -410,10 +419,16 @@ inline void PackShq4BlockToRecord(WeightMode mode, const Shq4PlaneRefs& planes,
                                   std::uint32_t group_offset,
                                   std::uint8_t* record) noexcept {
   assert(mode == WeightMode::kU4Z || mode == WeightMode::kS4);
+  assert(planes.codes != nullptr);
+  assert(planes.scales != nullptr);
+  assert(planes.k_groups_total > 0);
+  assert(planes.k16_per_group >= 2);
+  assert(group_offset + kGroupsPerBlock <= planes.k_groups_total);
+  assert(mode != WeightMode::kU4Z || planes.zeros != nullptr);
   std::memset(record, 0, kWeightRecordBytes);
   for (std::uint32_t group = 0; group < kGroupsPerBlock; ++group) {
-    const std::uint32_t gidx = n_tile * planes.k_groups_total +
-                               group_offset + group;
+    const std::uint32_t gidx =
+        n_tile * planes.k_groups_total + group_offset + group;
     for (std::uint32_t half = 0; half < 2; ++half) {
       const std::uint32_t k16 = half;
       for (std::uint32_t k = 0; k < kMmulK; ++k) {
@@ -423,27 +438,30 @@ inline void PackShq4BlockToRecord(WeightMode mode, const Shq4PlaneRefs& planes,
             ((gidx * planes.k16_per_group + k16) * kMmulN) * 8U + kp;
         for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
           const std::uint8_t source = planes.codes[lane_base + (lane * 8U)];
-          const std::uint8_t value =
-              high ? static_cast<std::uint8_t>(source >> 4U)
-                   : static_cast<std::uint8_t>(source & 0x0FU);
+          std::uint8_t value = high ? static_cast<std::uint8_t>(source >> 4U)
+                                    : static_cast<std::uint8_t>(source & 0x0FU);
+          if (mode == WeightMode::kS4) {
+            value ^= 0x08U;
+          }
           SetWeightRecordNibble(record, group, half, k, lane, value);
         }
       }
     }
     for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
-      const std::uint16_t scale_id =
-          reinterpret_cast<const std::uint16_t*>(planes.scales)
-              [gidx * kMmulN + lane];
-      *WeightRecordScale(record, group, lane) = Bf16ToFloat32(scale_id);
+      const std::uint16_t scale_id = LoadScalar<std::uint16_t>(
+          planes.scales, static_cast<std::size_t>(gidx * kMmulN + lane) *
+                             sizeof(std::uint16_t));
+      const float scale = Bf16ToFloat32(scale_id);
+      SetWeightRecordScale(record, group, lane, scale);
       if (mode == WeightMode::kU4Z) {
-        const std::uint8_t packed =
-            planes.zeros[(gidx * kMmulN + lane) / 2U];
+        const std::uint8_t packed = planes.zeros[(gidx * kMmulN + lane) / 2U];
         const std::uint8_t zero =
             (lane & 1U) == 0U ? static_cast<std::uint8_t>(packed & 0x0FU)
                               : static_cast<std::uint8_t>(packed >> 4U);
-        *WeightRecordZcorr(record, group, lane) = static_cast<float>(zero);
+        SetWeightRecordZcorr(record, group, lane,
+                             scale * static_cast<float>(zero));
       } else {
-        *WeightRecordZcorr(record, group, lane) = 8.0F;
+        SetWeightRecordZcorr(record, group, lane, scale * 8.0F);
       }
     }
   }
@@ -460,16 +478,17 @@ inline void PackShq4BlockToRecord(WeightMode mode, const Shq4PlaneRefs& planes,
 //   a_scale = amax/127 (amax == 0 -> 0, codes 0, sum 0),
 //   codes = clamp(rne(x/a_scale),-127,127)
 //   scale stored BF16-RNE rounded FP32, sum stored INT32.
-inline void QuantizeActivationBlock(
-    const std::span<const float> rows[kMmulM], std::uint32_t k,
-    std::uint8_t* record) {
+inline void QuantizeActivationBlock(const std::span<const float> rows[kMmulM],
+                                    std::uint32_t k, std::uint8_t* record) {
   assert(k <= kBlockElements);
   std::memset(record, 0, kInputRecordBytes);
-  const std::uint32_t groups_in_block = (k + kGroupElements - 1) / kGroupElements;
+  const std::uint32_t groups_in_block =
+      (k + kGroupElements - 1) / kGroupElements;
   for (std::uint32_t row = 0; row < kMmulM; ++row) {
     if (rows[row].empty()) {
       continue;
     }
+    assert(rows[row].size() >= k);
     for (std::uint32_t group = 0; group < groups_in_block; ++group) {
       const std::uint32_t group_start = group * kGroupElements;
       const std::uint32_t group_end =
@@ -489,27 +508,19 @@ inline void QuantizeActivationBlock(
           const std::uint32_t lane = (half * kMmulK) + kk;
           std::int8_t quantized = 0;
           if (active && (group_start + lane) < k) {
-            const auto rounded =
-                static_cast<int>(std::nearbyint(rows[row][group_start + lane] /
-                                                scale_real));
-            quantized = static_cast<std::int8_t>(
-                std::clamp(rounded, -127, 127));
+            const auto rounded = static_cast<int>(
+                std::nearbyint(rows[row][group_start + lane] / scale_real));
+            quantized =
+                static_cast<std::int8_t>(std::clamp(rounded, -127, 127));
             quantized_sum += quantized;
           }
           tile[(row * kMmulK) + kk] = quantized;
         }
       }
-      float* scale_slot =
-          reinterpret_cast<float*>(record + kInputRecordScaleOffset +
-                                   ((row * kGroupsPerBlock) + group) * 4U);
-      *scale_slot = scale_real == 0.0F
-                        ? 0.0F
-                        : Bf16ToFloat32(RoundToBf16Rne(scale_real));
-      auto* sum_slot =
-          reinterpret_cast<std::int32_t*>(record + kInputRecordSumOffset +
-                                          ((row * kGroupsPerBlock) + group) *
-                                              sizeof(std::int32_t));
-      *sum_slot = quantized_sum;
+      const float stored_scale =
+          scale_real == 0.0F ? 0.0F : Bf16ToFloat32(RoundToBf16Rne(scale_real));
+      SetInputRecordScale(record, row, group, stored_scale);
+      SetInputRecordSum(record, row, group, quantized_sum);
     }
   }
 }
@@ -533,25 +544,22 @@ inline void ReferenceBlockAccumulate(const std::uint8_t* weight_record,
               input_record[((group * 2U + half) * kMmulActivationElements) +
                            (r * kMmulK) + k]));
           for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
-            dot[r][lane] +=
-                a * static_cast<int>(GetWeightRecordNibble(weight_record,
-                                                           group, half, k, lane));
+            dot[r][lane] += a * static_cast<int>(GetWeightRecordNibble(
+                                    weight_record, group, half, k, lane));
           }
         }
       }
     }
     for (std::uint32_t r = 0; r < kMmulM; ++r) {
-      const float activation_scale = reinterpret_cast<const float*>(
-          input_record + kInputRecordScaleOffset +
-          ((r * kGroupsPerBlock) + group) * 4U)[0];
+      const float activation_scale =
+          GetInputRecordScale(input_record, r, group);
       const float quantized_sum =
-          static_cast<float>(reinterpret_cast<const std::int32_t*>(
-              input_record + kInputRecordSumOffset +
-              ((r * kGroupsPerBlock) + group) * sizeof(std::int32_t))[0]);
+          static_cast<float>(GetInputRecordSum(input_record, r, group));
       for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
         const float weight_scale =
-            *WeightRecordScale(weight_record, group, lane);
-        const float weight_zero = *WeightRecordZcorr(weight_record, group, lane);
+            GetWeightRecordScale(weight_record, group, lane);
+        const float weight_zero =
+            GetWeightRecordZcorr(weight_record, group, lane);
         const float weighted_dot =
             static_cast<float>(dot[r][lane]) * weight_scale;
         const float zero_correction = weight_zero * quantized_sum;
@@ -574,11 +582,12 @@ inline void ReferenceGemm(std::span<const float> activations, Shape shape,
   const std::uint32_t rounds = shape.Rounds();
   const std::uint32_t k_pad = blocks * kBlockElements;
   const std::uint32_t n_padded = n_tiles * kMmulN;
-  std::memset(out, 0, static_cast<std::size_t>(rounds * kMmulM) * n_tiles *
-                          kMmulN * sizeof(float));
+  std::memset(out, 0,
+              static_cast<std::size_t>(rounds * kMmulM) * n_tiles * kMmulN *
+                  sizeof(float));
   std::vector<std::uint8_t> input_record(kInputRecordBytes);
-  std::vector<std::vector<float>> padded_rows(
-      kMmulM, std::vector<float>(k_pad));
+  std::vector<std::vector<float>> padded_rows(kMmulM,
+                                              std::vector<float>(k_pad));
   // ReferenceBlockAccumulate mirrors the per-core 4x16 tile accumulator of
   // gemm.cc; scatter each tile's 64 floats into the row-major padded grid.
   std::array<float, kOutputAccElements> tile_acc{};
@@ -591,8 +600,7 @@ inline void ReferenceGemm(std::span<const float> activations, Shape shape,
       if (logical_row < shape.m) {
         std::fill(padded_rows[r].begin(), padded_rows[r].end(), 0.0F);
         std::ranges::copy(
-            activations.subspan(static_cast<std::size_t>(logical_row) *
-                                    shape.k,
+            activations.subspan(static_cast<std::size_t>(logical_row) * shape.k,
                                 shape.k),
             padded_rows[r].begin());
         rows[r] = std::span<const float>(padded_rows[r].data(), k_pad);
@@ -612,11 +620,11 @@ inline void ReferenceGemm(std::span<const float> activations, Shape shape,
       QuantizeActivationBlock(block_rows, kBlockElements, input_record.data());
       for (std::uint32_t n_tile = 0; n_tile < n_tiles; ++n_tile) {
         const std::uint8_t* record =
-            weight_records + (static_cast<std::size_t>(n_tile) * blocks +
-                              block) * kWeightRecordBytes;
+            weight_records +
+            (static_cast<std::size_t>(n_tile) * blocks + block) *
+                kWeightRecordBytes;
         tile_acc.fill(0.0F);
-        ReferenceBlockAccumulate(record, input_record.data(),
-                                 tile_acc.data());
+        ReferenceBlockAccumulate(record, input_record.data(), tile_acc.data());
         for (std::uint32_t r = 0; r < kMmulM; ++r) {
           float* row_out =
               out + (static_cast<std::size_t>(m_base + r) * n_padded);

@@ -23,5 +23,4 @@ nix develop                        # dev shell
 
 - Use `gh` CLI to retrieve and update issues content. Verify if installed and configured with `gh auth status`, and use it unless the user explicitly says otherwise.
 - Follow Conventional Commits format with single-line commit messages (e.g., `feat(scope): summary (#issue)`, `fix(scope): summary (#issue)`).
-- Prefer Jujutsu (`jj`) over Git when possible. Verify that it is available by running `jj version`; fall back to Git if it is unavailable or if the user explicitly requires Git.
 

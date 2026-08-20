@@ -79,16 +79,6 @@ test-results/
 # Model artifacts, logit dumps, teacher captures (never commit weights/logits)
 artifacts/
 /models/
-!/models/
-/models/*
-!/models/qwen38_27b/
-/models/qwen38_27b/*
-!/models/qwen38_27b/npu/
-/models/qwen38_27b/npu/*
-!/models/qwen38_27b/npu/aie2p/
-/models/qwen38_27b/npu/aie2p/*
-!/models/qwen38_27b/npu/aie2p/w4a8/
-!/models/qwen38_27b/npu/aie2p/w4a8/**
 __pycache__/
 *.pyc
 

@@ -95,26 +95,11 @@ if (ENGINE_ENABLE_XRT)
   endif()
   set(STRIX_AIE_QWEN_MTP_EH_PROJ_INCLUDE_DIR
     "$ENV{STRIX_AIE_QWEN_MTP_EH_PROJ_ROOT}/include")
-  if (DEFINED ENV{STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR}
-      AND NOT "$ENV{STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR}" STREQUAL "")
-    set(STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR
-      "$ENV{STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR}"
-      CACHE PATH "Directory containing the reviewed Qwen AIE2P W4A8 artifacts"
-      FORCE)
-  else()
-    set(STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR
-      "${STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR}"
-      CACHE PATH "Directory containing the reviewed Qwen AIE2P W4A8 artifacts")
-  endif()
-  set(STRIX_AIE_QWEN_AIE2P_W4A8_INCLUDE_DIR
-    "$ENV{STRIX_AIE_QWEN_AIE2P_W4A8_ROOT}/include")
   if (NOT STRIX_AIE_SMOKE_PROGRAM_DIR OR NOT STRIX_AIE_SMOKE_INCLUDE_DIR
       OR NOT STRIX_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR
       OR NOT STRIX_AIE_QWEN_MTP_RMSNORM_INCLUDE_DIR
       OR NOT STRIX_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR
-      OR NOT STRIX_AIE_QWEN_MTP_EH_PROJ_INCLUDE_DIR
-      OR NOT STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR
-      OR NOT STRIX_AIE_QWEN_AIE2P_W4A8_INCLUDE_DIR)
+      OR NOT STRIX_AIE_QWEN_MTP_EH_PROJ_INCLUDE_DIR)
     message(FATAL_ERROR "XDNA2 program artifacts not found. Use the Nix development environment")
   endif()
   message(STATUS "strix: XRT NPU shim enabled, include=${XRT_INCLUDE_DIR}")
@@ -233,18 +218,15 @@ endif()
 if (ENGINE_ENABLE_XRT)
   target_sources(strix_core PRIVATE
     src/core/xdna2/qwen_mtp_eh_proj.cpp
-    src/core/xdna2/qwen_mtp_rmsnorm.cpp
-    src/core/xdna2/qwen_aie2p_w4a8.cpp)
+    src/core/xdna2/qwen_mtp_rmsnorm.cpp)
   target_compile_definitions(strix_core PUBLIC ENGINE_ENABLE_XRT=1)
   target_compile_definitions(strix_core PRIVATE
     STRIX_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR="${STRIX_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR}"
-    STRIX_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR="${STRIX_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR}"
-    STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR="${STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR}")
+    STRIX_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR="${STRIX_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR}")
   target_include_directories(strix_core SYSTEM PUBLIC
     ${XRT_INCLUDE_DIR}
     ${STRIX_AIE_QWEN_MTP_EH_PROJ_INCLUDE_DIR}
-    ${STRIX_AIE_QWEN_MTP_RMSNORM_INCLUDE_DIR}
-    ${STRIX_AIE_QWEN_AIE2P_W4A8_INCLUDE_DIR})
+    ${STRIX_AIE_QWEN_MTP_RMSNORM_INCLUDE_DIR})
   target_link_libraries(strix_core PUBLIC
     strix_diagnostics
     ${XRT_COREUTIL_LIB}
@@ -378,35 +360,15 @@ if (BUILD_TESTING)
     add_test(NAME qwen_mtp_eh_proj_test COMMAND qwen_mtp_eh_proj_test)
     set_tests_properties(qwen_mtp_eh_proj_test PROPERTIES
       LABELS "npu;xdna2;xrt;xrt-hardware;qwen;mtp;gemv")
-
-    add_executable(qwen_aie2p_w4a8_test
-      tests/kernels/qwen38_27b/test_aie2p_w4a8.cpp)
-    target_compile_definitions(qwen_aie2p_w4a8_test PRIVATE
-      STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR="${STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR}")
-    target_link_libraries(qwen_aie2p_w4a8_test PRIVATE
-      strix_core
-      strix_diagnostics)
-    add_test(NAME qwen_aie2p_w4a8_test COMMAND qwen_aie2p_w4a8_test)
-    set_tests_properties(qwen_aie2p_w4a8_test PROPERTIES
-      LABELS "cpu;npu;xdna2;xrt;xrt-hardware;qwen;mtp;w4a8;gemm;gemv"
-      SKIP_RETURN_CODE 77)
   endif()
 
-  # W4A8 SHQ4-T16 shape-matrix bench (issue #35, M004-C007 P3). Compiles and
-  # runs CPU-only (pack.hpp oracle); the NPU path is compiled only under
-  # ENGINE_ENABLE_XRT and SKIPs (exit 77) when XDNA2 is absent.
-  add_executable(qwen_aie2p_w4a8_shq4_matrix_bench
-    tools/testing/qwen_aie2p_w4a8_shq4_matrix_bench.cpp)
-  target_link_libraries(qwen_aie2p_w4a8_shq4_matrix_bench PRIVATE strix_core)
-  if (ENGINE_ENABLE_XRT)
-    target_compile_definitions(qwen_aie2p_w4a8_shq4_matrix_bench PRIVATE
-      STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR="${STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR}")
-  endif()
-  add_test(NAME qwen_aie2p_w4a8_shq4_matrix_bench
-    COMMAND qwen_aie2p_w4a8_shq4_matrix_bench)
-  set_tests_properties(qwen_aie2p_w4a8_shq4_matrix_bench PROPERTIES
-    LABELS "npu;xdna2;xrt;xrt-hardware;qwen;mtp;w4a8;bench;gemm;gemv"
-    SKIP_RETURN_CODE 77)
+  add_executable(qwen_aie2p_w4a8_pack_test
+    tests/kernels/qwen38_27b/test_aie2p_w4a8.cpp)
+  target_link_libraries(qwen_aie2p_w4a8_pack_test PRIVATE strix_core)
+  add_test(NAME qwen_aie2p_w4a8_pack_test
+    COMMAND qwen_aie2p_w4a8_pack_test)
+  set_tests_properties(qwen_aie2p_w4a8_pack_test PROPERTIES
+    LABELS "cpu;qwen;mtp;w4a8;quantization")
 
   add_executable(gguf_reader_test tests/core/gguf_reader_test.cpp)
   target_link_libraries(gguf_reader_test PRIVATE strix_core)

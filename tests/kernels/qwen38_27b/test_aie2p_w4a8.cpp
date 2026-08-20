@@ -1,8 +1,8 @@
 // Copyright (C) 2026 Strix Engine contributors
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// AIE2P W4A8 SHQ4-T16 kernel tests for the Qwen3.8-27B MTP family (issue #35,
-// M004-C007).
+// CPU-side W4A8 SHQ4-T16 packing and reference tests for the Qwen3.8-27B MTP
+// family (issue #35).
 //
 // CPU oracle gates (no XRT required):
 //   - BF16 RNE ties-to-even rounding (matches tools/strix/shq.py)
@@ -14,37 +14,22 @@
 //   - padded tail K (float-exact) and tail M rows
 //   - batch-1 GEMV vs packed GEMM row equivalence
 //   - group-boundary quantization
-//
-// Hardware gates (ENGINE_ENABLE_XRT only; SKIP semantics when the XDNA2/XRT
-// device or the STRIX_MTP_MODEL weights are unavailable; STRIX_REQUIRE_XDNA2=1
-// turns the device skip into a hard failure):
-//   - M=1 eh_proj on the real 27B MTP weights vs the CPU oracle
-//     (ReferenceGemm over Q4_K-lossless records from pack.hpp)
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/xdna2/qwen_aie2p_w4a8_pack.hpp"
-
-#ifdef ENGINE_ENABLE_XRT
-#include "src/core/xdna2/qwen_aie2p_w4a8.h"
-#include "src/core/diagnostics/system_inventory.h"
-#include "src/core/gguf_reader.hpp"
-#include "src/core/speculative/qwen_mtp_reference.hpp"
-#include "src/core/xdna2/device.h"
-#endif
 
 namespace {
 
@@ -77,16 +62,17 @@ void TestBf16Rne() {
     std::uint16_t expected;
   };
   constexpr Case kCases[] = {
-      {0.5F, 0x3F00U},   {1.0F, 0x3F80U},
-      {1.5F, 0x3FC0U},   {-2.0F, 0xC000U},
-      {0.0F, 0x0000U},   {-0.0F, 0x8000U},
-      // RNE rounds 65504 (exactly representable as BF16) to 2^16 = 0x4780;
-      // the constant-row expectation is skipped (shq.py has no such case).
+      {0.5F, 0x3F00U},
+      {1.0F, 0x3F80U},
+      {1.5F, 0x3FC0U},
+      {-2.0F, 0xC000U},
+      {0.0F, 0x0000U},
+      {-0.0F, 0x8000U},
+      // RNE rounds the largest finite FP16 value to BF16 2^16.
       {65504.0F, 0x4780U},
   };
   for (const auto& test : kCases) {
-    Expect(RoundToBf16Rne(test.value) == test.expected,
-           "BF16 RNE exact value");
+    Expect(RoundToBf16Rne(test.value) == test.expected, "BF16 RNE exact value");
   }
   // Ties-to-even: bit16 == 0 -> rounds down (even), bit16 == 1 -> rounds up.
   {
@@ -145,11 +131,11 @@ Shq4Plane MakeShq4Plane(const WeightBlockSpec& spec, std::uint32_t n_tiles,
                         std::uint32_t k_groups_total,
                         std::uint32_t group_offset, bool u4z) {
   Shq4Plane plane;
+  Expect(n_tiles > 0, "SHQ4 plane requires at least one N tile");
   // The packer indexes gidx = n_tile*k_groups_total + group_offset + group,
-  // which ranges over [group_offset, group_offset + kGroupsPerBlock) for a
-  // single tile. Allocate enough blocks to cover the max gidx actually used.
+  // so allocate through the last group used by the last tile.
   const std::uint32_t total_blocks =
-      std::max(kGroupsPerBlock, n_tiles * k_groups_total);
+      ((n_tiles - 1U) * k_groups_total) + group_offset + kGroupsPerBlock;
   plane.codes.assign(total_blocks * (kGroupElements / kMmulK) * kMmulN * 8U, 0);
   plane.scales.assign(total_blocks * kMmulN, 0);
   plane.zeros.assign(total_blocks * kMmulN / 2U, 0);
@@ -162,21 +148,18 @@ Shq4Plane MakeShq4Plane(const WeightBlockSpec& spec, std::uint32_t n_tiles,
           const bool high = (k & 1U) != 0U;
           for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
             const std::size_t byte_index =
-                (static_cast<std::size_t>(gidx) *
-                     (kGroupElements / kMmulK) +
+                (static_cast<std::size_t>(gidx) * (kGroupElements / kMmulK) +
                  half) *
                     kMmulN * 8U +
                 static_cast<std::size_t>(lane) * 8U + kp;
             const std::uint8_t nibble =
                 WeightSpecCode(spec, group, half, k, lane);
             if (high) {
-              plane.codes[byte_index] =
-                  static_cast<std::uint8_t>((plane.codes[byte_index] & 0x0FU) |
-                                            (nibble << 4U));
+              plane.codes[byte_index] = static_cast<std::uint8_t>(
+                  (plane.codes[byte_index] & 0x0FU) | (nibble << 4U));
             } else {
-              plane.codes[byte_index] =
-                  static_cast<std::uint8_t>((plane.codes[byte_index] & 0xF0U) |
-                                            nibble);
+              plane.codes[byte_index] = static_cast<std::uint8_t>(
+                  (plane.codes[byte_index] & 0xF0U) | nibble);
             }
           }
         }
@@ -185,17 +168,15 @@ Shq4Plane MakeShq4Plane(const WeightBlockSpec& spec, std::uint32_t n_tiles,
         plane.scales[gidx * kMmulN + lane] =
             RoundToBf16Rne(spec.wscale[group][lane]);
         if (u4z) {
-          const std::uint8_t zero = static_cast<std::uint8_t>(
-              std::lround(spec.zcorr[group][lane]));
+          const std::uint8_t zero =
+              static_cast<std::uint8_t>(std::lround(spec.zcorr[group][lane]));
           const std::size_t zero_index = (gidx * kMmulN + lane) / 2U;
           if ((lane & 1U) == 0U) {
-            plane.zeros[zero_index] =
-                static_cast<std::uint8_t>((plane.zeros[zero_index] & 0xF0U) |
-                                          zero);
+            plane.zeros[zero_index] = static_cast<std::uint8_t>(
+                (plane.zeros[zero_index] & 0xF0U) | zero);
           } else {
-            plane.zeros[zero_index] =
-                static_cast<std::uint8_t>((plane.zeros[zero_index] & 0x0FU) |
-                                          (zero << 4U));
+            plane.zeros[zero_index] = static_cast<std::uint8_t>(
+                (plane.zeros[zero_index] & 0x0FU) | (zero << 4U));
           }
         }
       }
@@ -221,7 +202,7 @@ void TestShq4U4zPacking() {
       spec.zcorr[group][lane] = static_cast<float>(lane % 8);
     }
   }
-  const std::uint32_t k_groups_total = 2;  // gidx = nt*2 + group
+  const std::uint32_t k_groups_total = kGroupsPerBlock;
   const auto plane = MakeShq4Plane(spec, /*n_tiles=*/1, k_groups_total,
                                    /*group_offset=*/0, /*u4z=*/true);
   const Shq4PlaneRefs refs{
@@ -245,11 +226,12 @@ void TestShq4U4zPacking() {
       }
     }
     for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
-      ExpectNear(*WeightRecordScale(record.data(), group, lane),
+      ExpectNear(GetWeightRecordScale(record.data(), group, lane),
                  spec.wscale[group][lane], 1e-6F,
                  "U4Z BF16 scale transposition");
-      ExpectNear(*WeightRecordZcorr(record.data(), group, lane),
-                 spec.zcorr[group][lane], 1e-6F, "U4Z zero transposition");
+      ExpectNear(GetWeightRecordZcorr(record.data(), group, lane),
+                 spec.wscale[group][lane] * spec.zcorr[group][lane], 1e-6F,
+                 "U4Z correction coefficient");
     }
   }
 }
@@ -271,7 +253,7 @@ void TestShq4S4Packing() {
       spec.zcorr[group][lane] = 8.0F;
     }
   }
-  const std::uint32_t k_groups_total = 2;
+  const std::uint32_t k_groups_total = kGroupsPerBlock;
   const auto plane = MakeShq4Plane(spec, /*n_tiles=*/1, k_groups_total,
                                    /*group_offset=*/0, /*u4z=*/false);
   const Shq4PlaneRefs refs{
@@ -285,11 +267,21 @@ void TestShq4S4Packing() {
   PackShq4BlockToRecord(WeightMode::kS4, refs, /*n_tile=*/0,
                         /*group_offset=*/0, record.data());
   for (std::uint32_t group = 0; group < kGroupsPerBlock; ++group) {
+    for (std::uint32_t half = 0; half < 2; ++half) {
+      for (std::uint32_t k = 0; k < kMmulK; ++k) {
+        for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
+          Expect(GetWeightRecordNibble(record.data(), group, half, k, lane) ==
+                     (spec.codes[group][half][k][lane] ^ 0x08U),
+                 "S4 nibbles are biased to unsigned");
+        }
+      }
+    }
     for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
-      ExpectNear(*WeightRecordZcorr(record.data(), group, lane), 8.0F, 0.0F,
-                 "S4 zero correction is 8");
-      ExpectNear(*WeightRecordScale(record.data(), group, lane),
-                 spec.wscale[group][lane], 1e-6F, "S4 BF16 scale");
+      const float scale = spec.wscale[group][lane];
+      ExpectNear(GetWeightRecordZcorr(record.data(), group, lane), scale * 8.0F,
+                 0.0F, "S4 correction coefficient");
+      ExpectNear(GetWeightRecordScale(record.data(), group, lane), scale, 1e-6F,
+                 "S4 BF16 scale");
     }
   }
 }
@@ -301,30 +293,27 @@ void TestShq4S4Packing() {
 std::array<float, kOutputAccElements> Int64Oracle(
     const std::uint8_t* weight_record, const std::uint8_t* input_record) {
   std::array<float, kOutputAccElements> out{};
-  const auto* scales = reinterpret_cast<const float*>(
-      input_record + kInputRecordScaleOffset);
-  const auto* sums = reinterpret_cast<const std::int32_t*>(
-      input_record + kInputRecordSumOffset);
   for (std::uint32_t group = 0; group < kGroupsPerBlock; ++group) {
     for (std::uint32_t r = 0; r < kMmulM; ++r) {
       for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
         std::int64_t dot = 0;
         for (std::uint32_t half = 0; half < 2; ++half) {
           for (std::uint32_t k = 0; k < kMmulK; ++k) {
-            const int a = static_cast<int>(
+            const int a = static_cast<int>(static_cast<std::int8_t>(
                 input_record[((group * 2U + half) * kMmulActivationElements) +
-                             (r * kMmulK) + k]);
+                             (r * kMmulK) + k]));
             dot += static_cast<std::int64_t>(a) *
-                   static_cast<int>(GetWeightRecordNibble(
-                       weight_record, group, half, k, lane));
+                   static_cast<int>(GetWeightRecordNibble(weight_record, group,
+                                                          half, k, lane));
           }
         }
         const float correction =
-            static_cast<float>(dot) * *WeightRecordScale(weight_record, group,
-                                                         lane) -
-            *WeightRecordZcorr(weight_record, group, lane) *
-                static_cast<float>(sums[(r * kGroupsPerBlock) + group]);
-        out[(r * kMmulN) + lane] += correction * scales[(r * kGroupsPerBlock) + group];
+            static_cast<float>(dot) *
+                GetWeightRecordScale(weight_record, group, lane) -
+            GetWeightRecordZcorr(weight_record, group, lane) *
+                static_cast<float>(GetInputRecordSum(input_record, r, group));
+        out[(r * kMmulN) + lane] +=
+            correction * GetInputRecordScale(input_record, r, group);
       }
     }
   }
@@ -359,8 +348,8 @@ void TestReferenceVsInt64Oracle() {
   for (std::uint32_t r = 0; r < kMmulM; ++r) {
     for (std::uint32_t group = 0; group < kGroupsPerBlock; ++group) {
       for (std::uint32_t lane = 0; lane < kGroupElements; ++lane) {
-        rows[r][group * kGroupElements + lane] =
-            static_cast<float>(static_cast<int>(lane + r) * (group % 2 == 0 ? 1 : -1) - r);
+        rows[r][group * kGroupElements + lane] = static_cast<float>(
+            static_cast<int>(lane + r) * (group % 2 == 0 ? 1 : -1) - r);
       }
     }
     rows[r][0] = 127.0F;  // scale 1 for group 0
@@ -425,8 +414,8 @@ void SetQuantTest(BlockQ4KTest& block, std::size_t index, std::uint8_t value) {
 std::vector<std::uint8_t> MakeQ4KTensor(std::uint32_t n, std::uint32_t k) {
   Expect(k % kBlockElements == 0, "Q4_K test K must be block aligned");
   const std::uint32_t blocks_per_row = k / kBlockElements;
-  std::vector<std::uint8_t> tensor_bytes(
-      n * blocks_per_row * sizeof(BlockQ4KTest));
+  std::vector<std::uint8_t> tensor_bytes(n * blocks_per_row *
+                                         sizeof(BlockQ4KTest));
   std::uint32_t seed = 0x5EEDU;
   auto next = [&seed]() {
     seed = seed * 1664525U + 1013904223U;
@@ -434,13 +423,9 @@ std::vector<std::uint8_t> MakeQ4KTensor(std::uint32_t n, std::uint32_t k) {
   };
   for (std::uint32_t row = 0; row < n; ++row) {
     for (std::uint32_t block_ix = 0; block_ix < blocks_per_row; ++block_ix) {
-      auto& block = *reinterpret_cast<BlockQ4KTest*>(
-          tensor_bytes.data() +
-          (static_cast<std::size_t>(row) * blocks_per_row + block_ix) *
-              sizeof(BlockQ4KTest));
-      std::memset(&block, 0, sizeof(block));
-      block.d = 0x3C00U;           // 1.0
-      block.dmin = 0x3800U;        // 0.5
+      BlockQ4KTest block{};
+      block.d = 0x3C00U;     // 1.0
+      block.dmin = 0x3800U;  // 0.5
       // Small magnitudes keep both accumulation orders FP32-exact.
       const std::uint8_t scale = 1 + static_cast<std::uint8_t>((next() % 6));
       const std::uint8_t minimum = static_cast<std::uint8_t>(next() % 8);
@@ -452,6 +437,10 @@ std::vector<std::uint8_t> MakeQ4KTensor(std::uint32_t n, std::uint32_t k) {
           SetQuantTest(block, group * kGroupElements + lane, value);
         }
       }
+      const std::size_t offset =
+          (static_cast<std::size_t>(row) * blocks_per_row + block_ix) *
+          sizeof(BlockQ4KTest);
+      std::memcpy(tensor_bytes.data() + offset, &block, sizeof(block));
     }
   }
   return tensor_bytes;
@@ -472,8 +461,8 @@ void TestQ4kLosslessVsDotProduct() {
 
   // Pack every (n_tile, block) into a record: 16 rows per tile, one Q4_K
   // row-block per lane (row-major tensor layout).
-  std::vector<std::uint8_t> records(
-      static_cast<std::size_t>(n_tiles) * blocks * kWeightRecordBytes);
+  std::vector<std::uint8_t> records(static_cast<std::size_t>(n_tiles) * blocks *
+                                    kWeightRecordBytes);
   for (std::uint32_t nt = 0; nt < n_tiles; ++nt) {
     for (std::uint32_t block = 0; block < blocks; ++block) {
       WeightBlockSpec spec;
@@ -484,10 +473,10 @@ void TestQ4kLosslessVsDotProduct() {
                                sizeof(BlockQ4KTest);
         DecodeQ4KRowIntoSpec(src, lane, spec);
       }
-      PackWeightBlock(spec, records.data() + (static_cast<std::size_t>(nt) *
-                                                   blocks +
-                                               block) *
-                                              kWeightRecordBytes);
+      PackWeightBlock(
+          spec,
+          records.data() + (static_cast<std::size_t>(nt) * blocks + block) *
+                               kWeightRecordBytes);
     }
   }
 
@@ -497,12 +486,13 @@ void TestQ4kLosslessVsDotProduct() {
   for (std::uint32_t r = 0; r < 4; ++r) {
     for (std::uint32_t block = 0; block < blocks; ++block) {
       for (std::uint32_t group = 0; group < kGroupsPerBlock; ++group) {
-        input[r * k + block * kBlockElements + group * kGroupElements] =
-            127.0F;
+        input[r * k + block * kBlockElements + group * kGroupElements] = 127.0F;
         for (std::uint32_t lane = 1; lane < kGroupElements; ++lane) {
-          input[r * k + block * kBlockElements + group * kGroupElements + lane] =
+          input[r * k + block * kBlockElements + group * kGroupElements +
+                lane] =
               static_cast<float>(
-                  (static_cast<int>(next_logical(r, block, group, lane) % 253)) -
+                  (static_cast<int>(next_logical(r, block, group, lane) %
+                                    253)) -
                   126);
         }
       }
@@ -519,9 +509,8 @@ void TestQ4kLosslessVsDotProduct() {
       std::vector<float> dequant(k);
       for (std::uint32_t block = 0; block < blocks; ++block) {
         strix::quant::DequantizeQ4_K(
-            bytes.data() +
-                (static_cast<std::size_t>(n_row) * blocks + block) *
-                    sizeof(BlockQ4KTest),
+            bytes.data() + (static_cast<std::size_t>(n_row) * blocks + block) *
+                               sizeof(BlockQ4KTest),
             dequant.data() + static_cast<std::size_t>(block) * kBlockElements,
             kBlockElements);
       }
@@ -552,14 +541,11 @@ void TestDynamicA8() {
                                                   rows[3]};
     QuantizeActivationBlock(spans, kBlockElements, record.data());
     for (std::uint32_t r = 0; r < kMmulM; ++r) {
-      const float* scales = reinterpret_cast<const float*>(
-          record.data() + kInputRecordScaleOffset);
-      const auto* sums = reinterpret_cast<const std::int32_t*>(
-          record.data() + kInputRecordSumOffset);
       for (std::uint32_t group = 0; group < kGroupsPerBlock; ++group) {
-        Expect(scales[(r * kGroupsPerBlock) + group] == 0.0F,
+        Expect(GetInputRecordScale(record.data(), r, group) == 0.0F,
                "zero group scale is 0");
-        Expect(sums[(r * kGroupsPerBlock) + group] == 0, "zero group sum is 0");
+        Expect(GetInputRecordSum(record.data(), r, group) == 0,
+               "zero group sum is 0");
       }
       for (std::uint32_t i = 0; i < kInputRecordCodesBytes; ++i) {
         Expect(record[i] == 0, "zero group codes are 0");
@@ -573,28 +559,23 @@ void TestDynamicA8() {
     for (std::uint32_t r = 0; r < kMmulM; ++r) {
       rows[r].resize(kBlockElements);
       for (std::uint32_t group = 0; group < kGroupsPerBlock; ++group) {
-        rows[r][group * kGroupElements] = static_cast<float>(127 - r);
+        rows[r][group * kGroupElements] = 127.0F;
         for (std::uint32_t lane = 1; lane < kGroupElements; ++lane) {
-          rows[r][group * kGroupElements + lane] =
-              static_cast<float>((static_cast<int>(lane) *
-                                  static_cast<int>(r + 1) % 254) -
-                                 127);
+          rows[r][group * kGroupElements + lane] = static_cast<float>(
+              (static_cast<int>(lane) * static_cast<int>(r + 1) % 254) - 127);
         }
       }
     }
     const std::span<const float> spans[kMmulM] = {rows[0], rows[1], rows[2],
                                                   rows[3]};
     QuantizeActivationBlock(spans, kBlockElements, record.data());
-    const bool has_min_128 =
-        std::ranges::any_of(record.begin(), record.begin() + kInputRecordCodesBytes,
-                            [](std::uint8_t b) { return b == 128; });
+    const bool has_min_128 = std::ranges::any_of(
+        record.begin(), record.begin() + kInputRecordCodesBytes,
+        [](std::uint8_t b) { return b == 128; });
     Expect(!has_min_128, "dynamic A8 never emits -128");
     for (std::uint32_t r = 0; r < kMmulM; ++r) {
-      const float scale = reinterpret_cast<const float*>(
-          record.data() + kInputRecordScaleOffset)[r * kGroupsPerBlock];
-      ExpectNear(scale, -1.0F + static_cast<float>(127 - r) / 127.0F + 1.0F,
-                 // group 0 of row r has amax 127 -> scale 1 exactly.
-                 0.01F, "A8 scale");
+      ExpectNear(GetInputRecordScale(record.data(), r, 0), 1.0F, 0.0F,
+                 "A8 scale");
       const std::int8_t code = static_cast<std::int8_t>(
           record.data()[r * kMmulK]);  // k=0 group 0 half 0
       Expect(code != -128, "no -128 code in group 0");
@@ -672,8 +653,8 @@ void TestGemvMatchesGemmRow() {
     }
   }
   const std::uint32_t n_tiles = n / kMmulN;
-  std::vector<std::uint8_t> records(
-      static_cast<std::size_t>(n_tiles) * 2 * kWeightRecordBytes);
+  std::vector<std::uint8_t> records(static_cast<std::size_t>(n_tiles) * 2 *
+                                    kWeightRecordBytes);
   for (std::uint32_t t = 0; t < n_tiles * 2; ++t) {
     PackWeightBlock(spec, records.data() + t * kWeightRecordBytes);
   }
@@ -705,12 +686,9 @@ void TestGroupBoundaries() {
   const std::span<const float> empty{};
   const std::span<const float> spans[kMmulM] = {row, empty, empty, empty};
   QuantizeActivationBlock(spans, 33, record.data());
-  const float* scales = reinterpret_cast<const float*>(
-      record.data() + kInputRecordScaleOffset);
-  const auto* sums =
-      reinterpret_cast<const std::int32_t*>(record.data() + kInputRecordSumOffset);
-  ExpectNear(scales[1], 1.0F, 0.0F, "group boundary scale from single element");
-  Expect(sums[1] == 127, "group boundary sum");
+  ExpectNear(GetInputRecordScale(record.data(), 0, 1), 1.0F, 0.0F,
+             "group boundary scale from single element");
+  Expect(GetInputRecordSum(record.data(), 0, 1) == 127, "group boundary sum");
   // Codes for group 1 half 0: k=0 holds 127. Layout: byte =
   // (group*2 + half)*kMmulActivationElements + row*kMmulK + kk, so group 1
   // half 0 row 0 k 0 sits at 2*kMmulActivationElements.
@@ -718,200 +696,10 @@ void TestGroupBoundaries() {
          "group boundary code");
   Expect(record.data()[kMmulActivationElements] == 0,
          "group boundary pad code zero");  // Group 0 must be all zero (amax 0).
-  Expect(scales[0] == 0.0F && sums[0] == 0, "group 0 untouched");
+  Expect(GetInputRecordScale(record.data(), 0, 0) == 0.0F &&
+             GetInputRecordSum(record.data(), 0, 0) == 0,
+         "group 0 untouched");
 }
-
-#ifdef ENGINE_ENABLE_XRT
-
-// ---------------------------------------------------------------------------
-// Hardware gate: M=1 eh_proj on the real 27B MTP weights vs the CPU oracle
-// ---------------------------------------------------------------------------
-
-bool Xdna2Required() {
-  const char* val = std::getenv("STRIX_REQUIRE_XDNA2");
-  if (val == nullptr) {
-    val = std::getenv("STRIX_REQUIRE_NPU");
-  }
-  return val != nullptr && std::string_view(val) != "0" &&
-         std::string_view(val) != "false";
-}
-
-std::vector<float> MakeRepresentableInput() {
-  std::vector<float> input(strix::xdna2::kQwenAie2pW4a8InputElements);
-  for (std::size_t group_start = 0; group_start < input.size();
-       group_start += kGroupElements) {
-    for (std::size_t lane = 0; lane < kGroupElements; ++lane) {
-      const int quantized =
-          lane == kGroupElements - 1 ? 127 : static_cast<int>(lane) - 16;
-      input[group_start + lane] = static_cast<float>(quantized) / 64.0F;
-    }
-  }
-  return input;
-}
-
-struct Comparison {
-  double rmse{0.0};
-  double cosine{0.0};
-  float max_abs{0.0F};
-};
-
-Comparison Compare(std::span<const float> actual,
-                   std::span<const float> expected, std::string_view message) {
-  Expect(actual.size() == expected.size(), std::string(message));
-  double squared_error = 0.0;
-  double actual_squared = 0.0;
-  double expected_squared = 0.0;
-  double dot = 0.0;
-  float max_abs = 0.0F;
-  for (std::size_t index = 0; index < actual.size(); ++index) {
-    const double lhs = actual[index];
-    const double rhs = expected[index];
-    const double difference = lhs - rhs;
-    squared_error += difference * difference;
-    actual_squared += lhs * lhs;
-    expected_squared += rhs * rhs;
-    dot += lhs * rhs;
-    max_abs = std::max(max_abs, static_cast<float>(std::abs(difference)));
-  }
-  return {
-      .rmse = std::sqrt(squared_error / static_cast<double>(actual.size())),
-      .cosine = dot / std::sqrt(actual_squared * expected_squared),
-      .max_abs = max_abs,
-  };
-}
-
-// Pack the real Q4_K eh_proj matrix into CPU-reference records (global 16-lane
-// n_tiles, as consumed by ReferenceGemm).
-std::vector<std::uint8_t> PackReferenceRecords(const void* q4k_data) {
-  constexpr std::size_t blocks =
-      strix::xdna2::kQwenAie2pW4a8InputElements / kBlockElements;
-  constexpr std::size_t n_tiles =
-      strix::xdna2::kQwenAie2pW4a8OutputElements / kMmulN;
-  const auto* rows = static_cast<const std::uint8_t*>(q4k_data);
-  const std::size_t row_bytes = strix::quant::QuantizedRowBytes(
-      strix::core::GgmlType::kQ4_K, strix::xdna2::kQwenAie2pW4a8InputElements);
-  std::vector<std::uint8_t> records(static_cast<std::size_t>(n_tiles) * blocks *
-                                    kWeightRecordBytes);
-  for (std::uint32_t nt = 0; nt < n_tiles; ++nt) {
-    for (std::uint32_t block = 0; block < blocks; ++block) {
-      WeightBlockSpec spec;
-      for (std::uint32_t lane = 0; lane < kMmulN; ++lane) {
-        const std::size_t row = nt * kMmulN + lane;
-        const auto* src =
-            rows + (row * row_bytes) + (block * sizeof(BlockQ4KTest));
-        DecodeQ4KRowIntoSpec(src, lane, spec);
-      }
-      PackWeightBlock(spec, records.data() +
-                                 (static_cast<std::size_t>(nt) * blocks +
-                                  block) *
-                                     kWeightRecordBytes);
-    }
-  }
-  return records;
-}
-
-// Returns true when a real hardware run happened; prints a SKIP marker
-// otherwise (missing model file only -- the caller skips on XDNA2 absence).
-bool TestHardwareM1EhProj(const strix::xdna2::XrtDeviceInfo& device) {
-  const char* model_path = std::getenv("STRIX_MTP_MODEL");
-  if (model_path == nullptr || std::string_view(model_path).empty()) {
-    if (Xdna2Required()) {
-      throw std::runtime_error(
-          "qwen_aie2p_w4a8 hardware gate requires STRIX_MTP_MODEL "
-          "(STRIX_REQUIRE_XDNA2=1)");
-    }
-    std::cout << "qwen_aie2p_w4a8_hardware_m1: skipped "
-                 "TODO(P2-hardware) (STRIX_MTP_MODEL not set)\n";
-    return false;
-  }
-  std::string error;
-  auto reader_owner = strix::core::GgufReader::OpenFile(model_path, &error);
-  Expect(reader_owner != nullptr, error);
-  std::shared_ptr<const strix::core::GgufReader> reader(
-      std::move(reader_owner));
-  const auto weights =
-      strix::speculative::QwenMtpWeights::LoadFromGguf(*reader, &error);
-  Expect(weights.has_value(), error);
-
-  const auto& q4k = weights->fusion_projection;
-  Expect(q4k.type == strix::core::GgmlType::kQ4_K,
-         "eh_proj weight must be Q4_K");
-  Expect(q4k.num_elements ==
-             strix::xdna2::kQwenAie2pW4a8OutputElements *
-                 strix::xdna2::kQwenAie2pW4a8InputElements,
-         "eh_proj weight must be 5120x10240");
-
-  const auto session_count =
-      strix::xdna2::QwenAie2pW4a8Session::ActiveSessionCountForDiagnostics();
-  const auto bo_count =
-      strix::xdna2::QwenAie2pW4a8Session::ActiveBoCountForDiagnostics();
-  strix::xdna2::QwenAie2pW4a8Failure failure;
-  auto session = strix::xdna2::QwenAie2pW4a8Session::Create(
-      {.program_dir = STRIX_AIE_QWEN_AIE2P_W4A8_PROGRAM_DIR}, device, q4k,
-      &failure);
-  Expect(session != nullptr,
-         "W4A8 session opens: " + failure.category + ": " + failure.message);
-  Expect(strix::xdna2::QwenAie2pW4a8Session::ActiveSessionCountForDiagnostics() ==
-             session_count + 1,
-         "session counter increments");
-  Expect(strix::xdna2::QwenAie2pW4a8Session::ActiveBoCountForDiagnostics() ==
-             bo_count + 3,
-         "BO counter increments");
-  const auto& info = session->ProgramInfo();
-  Expect(info.partition_columns == 8, "program uses all eight NPU2 columns");
-  Expect(info.blocks == 40 && info.tiles_per_column == 10 && info.rounds == 1,
-         "baked M=1 eh_proj configuration");
-  Expect(info.packed_weight_bytes == 39'321'600,
-         "packed weight view size (8x10x40x12288)");
-  Expect(info.packed_input_bytes == 40 * 1280,
-         "packed input view size (blocks x record)");
-
-  const auto input = MakeRepresentableInput();
-  std::vector<float> output(strix::xdna2::kQwenAie2pW4a8OutputElements);
-  strix::xdna2::QwenAie2pW4a8RunMetrics metrics;
-  Expect(session->Run(input, output, &metrics, &failure),
-         "W4A8 M=1 eh_proj command: " + failure.category + ": " +
-             failure.message);
-  Expect(!metrics.quarantined, "session remains usable");
-  Expect(metrics.command_us > 0.0, "command timing is positive");
-
-  const auto records = PackReferenceRecords(q4k.data);
-  std::vector<float> expected(4 *
-                              (strix::xdna2::kQwenAie2pW4a8OutputElements /
-                               kMmulN) * kMmulN);
-  ReferenceGemm(input, Shape{.m = 1,
-                             .n = strix::xdna2::kQwenAie2pW4a8OutputElements,
-                             .k = strix::xdna2::kQwenAie2pW4a8InputElements},
-                records.data(), expected.data());
-  const auto comparison =
-      Compare(output, std::span<const float>(expected.data(), output.size()),
-              "M=1 eh_proj comparison size");
-  Expect(std::isfinite(comparison.rmse), "M=1 eh_proj RMSE is finite");
-  Expect(comparison.rmse < 0.1, "M=1 eh_proj RMSE");
-  Expect(comparison.cosine > 0.9999, "M=1 eh_proj cosine");
-  Expect(comparison.max_abs < 1.0F, "M=1 eh_proj max absolute error");
-
-  std::cout << "qwen_aie2p_w4a8_hardware_m1: setup_ms=" << info.setup_ms
-            << " weight_pack_ms=" << info.weight_pack_ms
-            << " weight_upload_ms=" << info.weight_upload_ms
-            << " activation_pack_us=" << metrics.activation_pack_us
-            << " input_upload_us=" << metrics.input_upload_us
-            << " command_us=" << metrics.command_us
-            << " output_download_us=" << metrics.output_download_us
-            << " end_to_end_us=" << metrics.end_to_end_us
-            << " rmse=" << comparison.rmse << " cosine=" << comparison.cosine
-            << " max_abs=" << comparison.max_abs << '\n';
-  session.reset();
-  Expect(strix::xdna2::QwenAie2pW4a8Session::ActiveSessionCountForDiagnostics() ==
-             session_count,
-         "session counter returns to baseline");
-  Expect(strix::xdna2::QwenAie2pW4a8Session::ActiveBoCountForDiagnostics() ==
-             bo_count,
-         "BO counter returns to baseline");
-  return true;
-}
-
-#endif
 
 }  // namespace
 
@@ -928,30 +716,6 @@ int main() {
     TestGemvMatchesGemmRow();
     TestGroupBoundaries();
     std::cout << "qwen_aie2p_w4a8 CPU oracle gates: PASS\n";
-#ifdef ENGINE_ENABLE_XRT
-    const auto inventory = strix::diagnostics::CollectSystemInventory();
-    const auto device = strix::xdna2::DiscoverXrtDevice(0, inventory);
-    if (!device.available) {
-      if (Xdna2Required()) {
-        throw std::runtime_error(
-            "qwen_aie2p_w4a8 hardware gate required but XDNA2 unavailable: " +
-            device.error_category + " detected=" + device.detected +
-            " required=" + device.required + " remediation=" +
-            device.remediation);
-      }
-      std::cout << "qwen_aie2p_w4a8 hardware gates: SKIP "
-                   "TODO(P2-hardware) (XDNA2 unavailable: "
-                << device.error_category << ")\n";
-      return 77;
-    }
-    const bool hardware_ran = TestHardwareM1EhProj(device);
-    if (hardware_ran) {
-      std::cout << "qwen_aie2p_w4a8 hardware gates: PASS\n";
-    } else {
-      std::cout << "qwen_aie2p_w4a8 hardware gates: SKIP "
-                   "TODO(P2-hardware) (model weights unavailable)\n";
-    }
-#endif
     return 0;
   } catch (const std::exception& exception) {
     std::cerr << "qwen_aie2p_w4a8_test failed: " << exception.what() << '\n';
