@@ -78,8 +78,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                            hipMemcpyHostToDevice, arena_.stream));
 
   // 2. Batched Embedding lookup: d_hidden [B, hidden_size]
-  const bool embd_is_bf16 = weights_.token_embd.type == core::GgmlType::kBF16;
-  LaunchBatchedEmbeddingLookup(weights_.token_embd.data, embd_is_bf16,
+  LaunchBatchedEmbeddingLookup(weights_.token_embd.data,
+                               weights_.token_embd.type,
                                arena_.d_prompt_tokens, arena_.d_hidden,
                                batch_size, hidden_size, arena_.stream);
 
@@ -87,6 +87,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   auto t_start = std::chrono::high_resolution_clock::now();
   double time_attn_proj = 0, time_ssm_recur = 0, time_ssm_out = 0;
   double time_ffn = 0, time_norm = 0;
+  double time_dequant = 0, time_gemm = 0;
 
   constexpr std::size_t hipblaslt_min_dimension = 1024;
   const auto launch_bf16_gemm = [&](const void* weights, const void* input,
@@ -99,6 +100,33 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     if (!use_hipblaslt) {
       LaunchHipblasGEMMBF16(arena_.hipblas_handle, weights, input, output,
                             batch_size, m, k, arena_.stream);
+    }
+  };
+
+  // Centralized weight dispatch: BF16 -> direct BF16 GEMM on the BF16
+  // activations; F32 -> hipblas fp32 GEMM on the fp32 input; any quant
+  // (Q8_0/Q5_K/Q6_K/Q8_K) -> batched quant GEMM directly on the quantized
+  // weights (no dequantize-to-BF16, no BF16 GEMM).
+  const auto gemm_weight = [&](const models::QwenTensorRef& w,
+                               const void* bf16_input,
+                               const float* fp32_input, float* output,
+                               std::size_t m, std::size_t k) {
+    if (w.type == core::GgmlType::kBF16) {
+      launch_bf16_gemm(w.data, bf16_input, output, m, k);
+    } else if (w.type == core::GgmlType::kF32) {
+      LaunchHipblasGEMM(arena_.hipblas_handle, w.data, false, fp32_input,
+                        output, batch_size, m, k, arena_.d_scratch_bf16,
+                        arena_.stream);
+    } else {
+      auto tg0 = std::chrono::high_resolution_clock::now();
+      LaunchBatchedQuantGEMM(w.type, w.data, bf16_input, output, batch_size, m,
+                             k, arena_.stream);
+      if (do_profile) {
+        HIP_CHECK(hipStreamSynchronize(arena_.stream));
+        time_gemm += std::chrono::duration<double, std::milli>(
+                         std::chrono::high_resolution_clock::now() - tg0)
+                         .count();
+      }
     }
   };
 
@@ -125,38 +153,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     }
 
     if (layer.is_full_attention) {
-      const bool q_bf16 = layer.attn_q.type == core::GgmlType::kBF16;
-      const bool k_bf16 = layer.attn_k.type == core::GgmlType::kBF16;
-      const bool v_bf16 = layer.attn_v.type == core::GgmlType::kBF16;
-      const bool o_bf16 = layer.attn_output.type == core::GgmlType::kBF16;
-
-      if (q_bf16) {
-        launch_bf16_gemm(layer.attn_q.data, arena_.d_scratch_bf16,
-                         arena_.d_ssm_qkv, q_projection_size, hidden_size);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.attn_q.data, false,
-                          arena_.d_normed, arena_.d_ssm_qkv, batch_size,
-                          q_projection_size, hidden_size, arena_.d_scratch_bf16,
-                          arena_.stream);
-      }
-
-      if (k_bf16) {
-        launch_bf16_gemm(layer.attn_k.data, arena_.d_scratch_bf16, arena_.d_k,
-                         kv_size, hidden_size);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.attn_k.data, false,
-                          arena_.d_normed, arena_.d_k, batch_size, kv_size,
-                          hidden_size, arena_.d_scratch_bf16, arena_.stream);
-      }
-
-      if (v_bf16) {
-        launch_bf16_gemm(layer.attn_v.data, arena_.d_scratch_bf16, arena_.d_v,
-                         kv_size, hidden_size);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.attn_v.data, false,
-                          arena_.d_normed, arena_.d_v, batch_size, kv_size,
-                          hidden_size, arena_.d_scratch_bf16, arena_.stream);
-      }
+      gemm_weight(layer.attn_q, arena_.d_scratch_bf16, arena_.d_normed,
+                  arena_.d_ssm_qkv, q_projection_size, hidden_size);
+      gemm_weight(layer.attn_k, arena_.d_scratch_bf16, arena_.d_normed,
+                  arena_.d_k, kv_size, hidden_size);
+      gemm_weight(layer.attn_v, arena_.d_scratch_bf16, arena_.d_normed,
+                  arena_.d_v, kv_size, hidden_size);
 
       LaunchBatchedUnpackQG(arena_.d_ssm_qkv, arena_.d_q, arena_.d_ssm_gate,
                             batch_size, config.num_attention_heads,
@@ -279,17 +281,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                 : "optimized_attention: rejected");
       }
 
-      if (o_bf16) {
-        LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
-                              batch_size * attention_size, arena_.stream);
-        launch_bf16_gemm(layer.attn_output.data, arena_.d_scratch_bf16,
-                         arena_.d_attn_out, hidden_size, attention_size);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.attn_output.data, false,
-                          arena_.d_ssm_out, arena_.d_attn_out, batch_size,
-                          hidden_size, attention_size, arena_.d_scratch_bf16,
-                          arena_.stream);
-      }
+      LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                            batch_size * attention_size, arena_.stream);
+      gemm_weight(layer.attn_output, arena_.d_scratch_bf16, arena_.d_ssm_out,
+                  arena_.d_attn_out, hidden_size, attention_size);
       if (do_profile) {
         HIP_CHECK(hipStreamSynchronize(arena_.stream));
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -298,55 +293,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         t0 = t1;
       }
     } else {
-      const bool qkv_bf16 = layer.attn_qkv.type == core::GgmlType::kBF16;
-      const bool gate_bf16 = layer.attn_gate.type == core::GgmlType::kBF16;
-      const bool alpha_bf16 = layer.ssm_alpha.type == core::GgmlType::kBF16;
-      const bool beta_bf16 = layer.ssm_beta.type == core::GgmlType::kBF16;
-      const bool out_bf16 = layer.ssm_out.type == core::GgmlType::kBF16;
-
-      if (qkv_bf16) {
-        launch_bf16_gemm(layer.attn_qkv.data, arena_.d_scratch_bf16,
-                         arena_.d_ssm_qkv, ssm_qkv_size, hidden_size);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.attn_qkv.data, false,
-                          arena_.d_normed, arena_.d_ssm_qkv, batch_size,
-                          ssm_qkv_size, hidden_size, arena_.d_scratch_bf16,
-                          arena_.stream);
-      }
-
-      if (gate_bf16) {
-        launch_bf16_gemm(layer.attn_gate.data, arena_.d_scratch_bf16,
-                         arena_.d_ssm_gate, ssm_inner_size, hidden_size);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.attn_gate.data, false,
-                          arena_.d_normed, arena_.d_ssm_gate, batch_size,
-                          ssm_inner_size, hidden_size, arena_.d_scratch_bf16,
-                          arena_.stream);
-      }
-
-      if (alpha_bf16) {
-        LaunchHipblasGEMMBF16(arena_.hipblas_handle, layer.ssm_alpha.data,
-                              arena_.d_scratch_bf16, arena_.d_alpha_buf,
-                              batch_size, time_step_rank, hidden_size,
-                              arena_.stream);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.ssm_alpha.data, false,
-                          arena_.d_normed, arena_.d_alpha_buf, batch_size,
-                          time_step_rank, hidden_size, arena_.d_scratch_bf16,
-                          arena_.stream);
-      }
-
-      if (beta_bf16) {
-        LaunchHipblasGEMMBF16(arena_.hipblas_handle, layer.ssm_beta.data,
-                              arena_.d_scratch_bf16, arena_.d_beta_buf,
-                              batch_size, time_step_rank, hidden_size,
-                              arena_.stream);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.ssm_beta.data, false,
-                          arena_.d_normed, arena_.d_beta_buf, batch_size,
-                          time_step_rank, hidden_size, arena_.d_scratch_bf16,
-                          arena_.stream);
-      }
+      gemm_weight(layer.attn_qkv, arena_.d_scratch_bf16, arena_.d_normed,
+                  arena_.d_ssm_qkv, ssm_qkv_size, hidden_size);
+      gemm_weight(layer.attn_gate, arena_.d_scratch_bf16, arena_.d_normed,
+                  arena_.d_ssm_gate, ssm_inner_size, hidden_size);
+      gemm_weight(layer.ssm_alpha, arena_.d_scratch_bf16, arena_.d_normed,
+                  arena_.d_alpha_buf, time_step_rank, hidden_size);
+      gemm_weight(layer.ssm_beta, arena_.d_scratch_bf16, arena_.d_normed,
+                  arena_.d_beta_buf, time_step_rank, hidden_size);
       if (do_profile) {
         HIP_CHECK(hipStreamSynchronize(arena_.stream));
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -391,17 +345,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         t0 = t1;
       }
 
-      if (out_bf16) {
-        LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
-                              batch_size * ssm_inner_size, arena_.stream);
-        launch_bf16_gemm(layer.ssm_out.data, arena_.d_scratch_bf16,
-                         arena_.d_attn_out, hidden_size, ssm_inner_size);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.ssm_out.data, false,
-                          arena_.d_ssm_out, arena_.d_attn_out, batch_size,
-                          hidden_size, ssm_inner_size, arena_.d_scratch_bf16,
-                          arena_.stream);
-      }
+      LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                            batch_size * ssm_inner_size, arena_.stream);
+      gemm_weight(layer.ssm_out, arena_.d_scratch_bf16, arena_.d_ssm_out,
+                  arena_.d_attn_out, hidden_size, ssm_inner_size);
       if (do_profile) {
         HIP_CHECK(hipStreamSynchronize(arena_.stream));
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -433,7 +380,6 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 
     const bool ffn_g_bf16 = layer.ffn_gate.type == core::GgmlType::kBF16;
     const bool ffn_u_bf16 = layer.ffn_up.type == core::GgmlType::kBF16;
-    const bool ffn_d_bf16 = layer.ffn_down.type == core::GgmlType::kBF16;
 
     // Fused FFN gate/up projection with SwiGLU activation into one kernel
     // (opt-c010-ffn-swiglu). The fused kernel supports the BF16 weight route;
@@ -445,40 +391,19 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
           arena_.d_ffn_act, arena_.d_scratch_bf16, batch_size,
           intermediate_size, hidden_size, arena_.stream);
     } else {
-      if (ffn_g_bf16) {
-        launch_bf16_gemm(layer.ffn_gate.data, arena_.d_scratch_bf16,
-                         arena_.d_ffn_gate, intermediate_size, hidden_size);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.ffn_gate.data, false,
-                          arena_.d_normed, arena_.d_ffn_gate, batch_size,
-                          intermediate_size, hidden_size, arena_.d_scratch_bf16,
-                          arena_.stream);
-      }
+      gemm_weight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
+                  arena_.d_ffn_gate, intermediate_size, hidden_size);
 
-      if (ffn_u_bf16) {
-        launch_bf16_gemm(layer.ffn_up.data, arena_.d_scratch_bf16,
-                         arena_.d_ffn_up, intermediate_size, hidden_size);
-      } else {
-        LaunchHipblasGEMM(arena_.hipblas_handle, layer.ffn_up.data, false,
-                          arena_.d_normed, arena_.d_ffn_up, batch_size,
-                          intermediate_size, hidden_size, arena_.d_scratch_bf16,
-                          arena_.stream);
-      }
+      gemm_weight(layer.ffn_up, arena_.d_scratch_bf16, arena_.d_normed,
+                  arena_.d_ffn_up, intermediate_size, hidden_size);
 
       LaunchBatchedSwiGLUActivation(
           arena_.d_ffn_gate, arena_.d_ffn_up, arena_.d_ffn_act,
           arena_.d_scratch_bf16, batch_size * intermediate_size, arena_.stream);
     }
 
-    if (ffn_d_bf16) {
-      launch_bf16_gemm(layer.ffn_down.data, arena_.d_scratch_bf16,
-                       arena_.d_ffn_out, hidden_size, intermediate_size);
-    } else {
-      LaunchHipblasGEMM(arena_.hipblas_handle, layer.ffn_down.data, false,
-                        arena_.d_ffn_act, arena_.d_ffn_out, batch_size,
-                        hidden_size, intermediate_size, arena_.d_scratch_bf16,
-                        arena_.stream);
-    }
+    gemm_weight(layer.ffn_down, arena_.d_scratch_bf16, arena_.d_ffn_act,
+                arena_.d_ffn_out, hidden_size, intermediate_size);
 
     LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out, arena_.d_hidden,
                              batch_size, hidden_size, arena_.stream);
@@ -501,7 +426,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
               << "  - Input Proj: " << time_attn_proj << " ms\n"
               << "  - SSM Recur:  " << time_ssm_recur << " ms\n"
               << "  - SSM Out:    " << time_ssm_out << " ms\n"
-              << "  - FFN (3 GEMM): " << time_ffn << " ms\n";
+              << "  - FFN (3 GEMM): " << time_ffn << " ms\n"
+              << "  - Dequant:    " << time_dequant << " ms\n"
+              << "  - GEMM(deq):  " << time_gemm << " ms\n";
   }
 
   if (capture_prompt_hidden_) {
@@ -527,9 +454,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                 arena_.d_normed, hidden_size, eps, arena_.stream);
 
   // 5. LM Head Logits GEMV on final token
-  const bool out_bf16 = weights_.output.type == core::GgmlType::kBF16;
-  LaunchGEMV(weights_.output.data, out_bf16, arena_.d_normed, arena_.d_logits,
-             vocab_size, hidden_size, arena_.stream);
+  LaunchGEMV(weights_.output.data, weights_.output.type, arena_.d_normed,
+             arena_.d_logits, vocab_size, hidden_size, arena_.stream);
 
   // 6. GPU Argmax
   auto* d_out_token = reinterpret_cast<std::uint32_t*>(arena_.d_alpha_buf);

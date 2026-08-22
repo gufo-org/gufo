@@ -11,6 +11,8 @@
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/detail/gemv_dispatcher.hpp"
 #include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/core/hip/qwen_gpu_quant_ops.hpp"
+#include "src/core/gguf_reader.hpp"
 
 namespace strix::hip {
 
@@ -18,8 +20,11 @@ namespace {
 
 constexpr std::size_t kLargeGemvInput = 16384;
 
+// Quant block layouts (Q8_0 / Q5_K / Q6_K) and quant row-dot helpers are
+// shared via src/core/hip/qwen_gpu_quant_ops.hpp.
+
 __global__ void EmbeddingLookupKernel(const void* __restrict__ table,
-                                      bool is_bf16, std::uint32_t token_id,
+                                      core::GgmlType type, std::uint32_t token_id,
                                       float* __restrict__ out_hidden,
                                       std::size_t hidden_size) {
   const std::size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -28,17 +33,24 @@ __global__ void EmbeddingLookupKernel(const void* __restrict__ table,
 
   const std::size_t offset =
       static_cast<std::size_t>(token_id) * hidden_size + idx;
-  if (is_bf16) {
+  if (type == core::GgmlType::kBF16) {
     const auto* bf_ptr = static_cast<const hip_bfloat16*>(table);
     out_hidden[idx] = static_cast<float>(bf_ptr[offset]);
-  } else {
+  } else if (type == core::GgmlType::kF32) {
     const auto* f_ptr = static_cast<const float*>(table);
     out_hidden[idx] = f_ptr[offset];
+  } else {
+    const auto* q8 = static_cast<const Q8_0Block*>(table);
+    const Q8_0Block& wblk =
+        q8[static_cast<std::size_t>(token_id) * (hidden_size / kQ8_0BlockSize) +
+           idx / kQ8_0BlockSize];
+    out_hidden[idx] = __half2float(wblk.d) *
+                      static_cast<float>(wblk.qs[idx % kQ8_0BlockSize]);
   }
 }
 
 __global__ void EmbeddingLookupPtrKernel(
-    const void* __restrict__ table, bool is_bf16,
+    const void* __restrict__ table, core::GgmlType type,
     const std::uint32_t* __restrict__ d_token_id,
     float* __restrict__ out_hidden, std::size_t hidden_size) {
   const std::size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -48,12 +60,19 @@ __global__ void EmbeddingLookupPtrKernel(
   const std::uint32_t token_id = *d_token_id;
   const std::size_t offset =
       static_cast<std::size_t>(token_id) * hidden_size + idx;
-  if (is_bf16) {
+  if (type == core::GgmlType::kBF16) {
     const auto* bf_ptr = static_cast<const hip_bfloat16*>(table);
     out_hidden[idx] = static_cast<float>(bf_ptr[offset]);
-  } else {
+  } else if (type == core::GgmlType::kF32) {
     const auto* f_ptr = static_cast<const float*>(table);
     out_hidden[idx] = f_ptr[offset];
+  } else {
+    const auto* q8 = static_cast<const Q8_0Block*>(table);
+    const Q8_0Block& wblk =
+        q8[static_cast<std::size_t>(token_id) * (hidden_size / kQ8_0BlockSize) +
+           idx / kQ8_0BlockSize];
+    out_hidden[idx] = __half2float(wblk.d) *
+                      static_cast<float>(wblk.qs[idx % kQ8_0BlockSize]);
   }
 }
 
@@ -522,7 +541,8 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 }
 
-__global__ void FastGEMVBlockKernel(const void* __restrict__ A, bool is_bf16,
+__global__ void FastGEMVBlockKernel(const void* __restrict__ A,
+                                    core::GgmlType a_type,
                                     const float* __restrict__ x,
                                     float* __restrict__ y,
                                     const float* __restrict__ residual,
@@ -538,7 +558,7 @@ __global__ void FastGEMVBlockKernel(const void* __restrict__ A, bool is_bf16,
 
   float dot = 0.0F;
 
-  if (is_bf16) {
+  if (a_type == core::GgmlType::kBF16) {
     const auto* row = static_cast<const hip_bfloat16*>(A) + (m * K);
     const std::size_t K_vec = K / 8;
     const auto* row_vec = reinterpret_cast<const uint4*>(row);
@@ -780,13 +800,147 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 }
 
+// Q8_K block layout is defined in the shared qwen_gpu_quant_ops.hpp header.
+
+// Serial (per-thread) row dot for a Q8_K weight row: iterates every 256-wide
+// block, computes the activation scale from max|x|, quantizes x to int8 and
+// accumulates an integer MAC with qs, then applies d_w * scale. Correctness
+// path used by the fused SwiGLU fallback for Q8_K weight rows.
+__device__ float Q8KRowDot(const Q8KBlock* __restrict__ row_blocks,
+                           const float* __restrict__ x, std::size_t K) {
+  const std::size_t num_blocks = K / kQ8KBlockSize;
+  float sumf = 0.0F;
+  for (std::size_t b = 0; b < num_blocks; ++b) {
+    const Q8KBlock& wblk = row_blocks[b];
+    const float d_w = wblk.d;
+    const float* xb = x + (b * kQ8KBlockSize);
+
+    float max = 0.0F;
+    for (std::size_t k = 0; k < kQ8KBlockSize; ++k) {
+      max = fmaxf(max, fabsf(xb[k]));
+    }
+    const float scale = (max > 0.0F) ? (max / 127.0F) : 0.0F;
+
+    int acc = 0;
+    for (std::size_t k = 0; k < kQ8KBlockSize; ++k) {
+      const float xv = (scale > 0.0F) ? (xb[k] / scale) : 0.0F;
+      int xq = static_cast<int>(roundf(xv));
+      xq = (xq > 127) ? 127 : xq;
+      xq = (xq < -127) ? -127 : xq;
+      acc += static_cast<int>(wblk.qs[k]) * xq;
+    }
+
+    sumf += d_w * scale * static_cast<float>(acc);
+  }
+  return sumf;
+}
+
+// Q5KValue / Q6KValue (and the GetQKScaleMin unpacking they use) are defined
+// in the shared qwen_gpu_quant_ops.hpp header.
+// opt-r4-q5k-q6k: serial (per-thread) row dot for a Q5_K weight row: dequant
+// each element to fp and accumulate a fp MAC against x. Used by RowDot and the
+// fused kernels' fallback. Requires K % 256 == 0.
+__device__ float Q5KRowDot(const Q5KBlock* __restrict__ row_blocks,
+                           const float* __restrict__ x, std::size_t K) {
+  const std::size_t num_blocks = K / kQ5KBlockSize;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < num_blocks; ++b) {
+    const float* xb = x + (b * kQ5KBlockSize);
+    for (std::size_t i = 0; i < kQ5KBlockSize; ++i) {
+      sum += Q5KValue(row_blocks[b], i) * xb[i];
+    }
+  }
+  return sum;
+}
+
+// opt-r4-q5k-q6k: serial (per-thread) row dot for a Q6_K weight row: dequant
+// each element to fp and accumulate a fp MAC against x. Requires K % 256 == 0.
+__device__ float Q6KRowDot(const Q6KBlock* __restrict__ row_blocks,
+                           const float* __restrict__ x, std::size_t K) {
+  const std::size_t num_blocks = K / kQ6KBlockSize;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < num_blocks; ++b) {
+    const float* xb = x + (b * kQ6KBlockSize);
+    for (std::size_t i = 0; i < kQ6KBlockSize; ++i) {
+      sum += Q6KValue(row_blocks[b], i) * xb[i];
+    }
+  }
+  return sum;
+}
+
+// opt-r2-q8_0: Q8_0 row dot. Runs AT Q8 (integer MAC) exactly like Q8KRowDot
+// but per-32-element block with a half weight scale read via __half2float.
+// Requires K % 32 == 0.
+__device__ float Q8_0RowDot(const Q8_0Block* __restrict__ row_blocks,
+                            const float* __restrict__ x, std::size_t K) {
+  const std::size_t num_blocks = K / kQ8_0BlockSize;
+  float sumf = 0.0F;
+  for (std::size_t b = 0; b < num_blocks; ++b) {
+    const Q8_0Block& wblk = row_blocks[b];
+    const float d_w = __half2float(wblk.d);
+    const float* xb = x + (b * kQ8_0BlockSize);
+
+    float max = 0.0F;
+    for (std::size_t k = 0; k < kQ8_0BlockSize; ++k) {
+      max = fmaxf(max, fabsf(xb[k]));
+    }
+    const float scale = (max > 0.0F) ? (max / 127.0F) : 0.0F;
+
+    int acc = 0;
+    for (std::size_t k = 0; k < kQ8_0BlockSize; ++k) {
+      const float xv = (scale > 0.0F) ? (xb[k] / scale) : 0.0F;
+      int xq = static_cast<int>(roundf(xv));
+      xq = (xq > 127) ? 127 : xq;
+      xq = (xq < -127) ? -127 : xq;
+      acc += static_cast<int>(wblk.qs[k]) * xq;
+    }
+
+    sumf += d_w * scale * static_cast<float>(acc);
+  }
+  return sumf;
+}
+
+// QuantBlockBytes / QuantBlockQK are defined in the shared
+// qwen_gpu_quant_ops.hpp header.
+// Central dispatcher for a single quantized weight row's dot product. Routes
+// on the weight's GgmlType and OWNS the type-aware row stride: given the
+// weight base pointer and the output row index, it computes
+//   base + row_idx * (K / QuantBlockQK(type) * QuantBlockBytes(type))
+// then calls the type-specific row dot. Q8_0/Q8_K run at Q8 (integer MAC);
+// Q5_K/Q6_K dequant to fp and accumulate a fp MAC (both mirror the CPU
+// dequant oracles). bf16/fp32 are handled by the vectorized kernels and never
+// reach here, so unsupported types return 0 (acceptable until those types are
+// wired and the model is run).
+__device__ inline float RowDot(core::GgmlType type, const void* __restrict__ base,
+                               std::size_t row_idx, const float* __restrict__ x,
+                               std::size_t K) {
+  const std::size_t qk = QuantBlockQK(type);
+  const std::size_t block_bytes = QuantBlockBytes(type);
+  const char* row = static_cast<const char*>(base) + (row_idx * (K / qk * block_bytes));
+  switch (type) {
+    case core::GgmlType::kQ8_0:
+      return Q8_0RowDot(reinterpret_cast<const Q8_0Block*>(row), x, K);
+    case core::GgmlType::kQ8_K:
+      return Q8KRowDot(reinterpret_cast<const Q8KBlock*>(row), x, K);
+    case core::GgmlType::kQ5_K:
+      return Q5KRowDot(reinterpret_cast<const Q5KBlock*>(row), x, K);
+    case core::GgmlType::kQ6_K:
+      return Q6KRowDot(reinterpret_cast<const Q6KBlock*>(row), x, K);
+    default:
+      return 0.0F;  // remaining K-typed rows unwired
+  }
+}
+
+// QuantWarpBlockDot (warp-parallel quant row-dot) is defined as a template on
+// the input element type in the shared qwen_gpu_quant_ops.hpp header.
+
 template<std::uint32_t WavesPerBlock>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
     void Wave32FusedSSMInputProjectionsKernel_1Row(
-        const void* __restrict__ qkv_w, bool qkv_is_bf16,
-        const void* __restrict__ gate_w, bool gate_is_bf16,
-        const void* __restrict__ alpha_w, bool alpha_is_bf16,
-        const void* __restrict__ beta_w, bool beta_is_bf16,
+        const void* __restrict__ qkv_w, core::GgmlType qkv_type,
+        const void* __restrict__ gate_w, core::GgmlType gate_type,
+        const void* __restrict__ alpha_w, core::GgmlType alpha_type,
+        const void* __restrict__ beta_w, core::GgmlType beta_type,
         const float* __restrict__ x, float* __restrict__ qkv_out,
         float* __restrict__ gate_out, float* __restrict__ alpha_out,
         float* __restrict__ beta_out, std::size_t hidden_size,
@@ -803,35 +957,35 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
     return;
 
   const void* A = nullptr;
-  bool is_bf16 = false;
+  core::GgmlType weight_type = core::GgmlType::kF32;
   float* out_target = nullptr;
   std::size_t row_idx = 0;
 
   if (m < qkv_size) {
     A = qkv_w;
-    is_bf16 = qkv_is_bf16;
+    weight_type = qkv_type;
     out_target = qkv_out;
     row_idx = m;
   } else if (m < gate_end) {
     A = gate_w;
-    is_bf16 = gate_is_bf16;
+    weight_type = gate_type;
     out_target = gate_out;
     row_idx = m - qkv_size;
   } else if (m < alpha_end) {
     A = alpha_w;
-    is_bf16 = alpha_is_bf16;
+    weight_type = alpha_type;
     out_target = alpha_out;
     row_idx = m - gate_end;
   } else {
     A = beta_w;
-    is_bf16 = beta_is_bf16;
+    weight_type = beta_type;
     out_target = beta_out;
     row_idx = m - alpha_end;
   }
 
   float dot = 0.0F;
 
-  if (is_bf16) {
+  if (weight_type == core::GgmlType::kBF16) {
     const auto* row =
         static_cast<const hip_bfloat16*>(A) + (row_idx * hidden_size);
     const std::size_t K_vec = hidden_size / 8;
@@ -856,6 +1010,12 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
     for (std::size_t k = (K_vec * 8) + lane_id; k < hidden_size; k += 32) {
       dot += static_cast<float>(row[k]) * x[k];
     }
+  } else if (weight_type != core::GgmlType::kF32) {
+    // Quantized weight: route via QuantWarpBlockDot (block_q8_K now; Q8_0/Q5_K/
+    // Q6_K wired in later tasks). All 32 lanes cooperate on the row's blocks;
+    // lane 0 returns the warp's partial row-dot and the warp reduction below
+    // (num_warps == 1) broadcasts the single correct value.
+    dot = QuantWarpBlockDot(weight_type, A, row_idx, x, hidden_size, lane_id, 0, 1);
   } else {
     const auto* row = static_cast<const float*>(A) + (row_idx * hidden_size);
     const std::size_t K_vec = hidden_size / 4;
@@ -884,9 +1044,9 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
 template<std::uint32_t WavesPerBlock>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
     void Wave32FusedQKVProjectionsKernel_1Row(
-        const void* __restrict__ q_w, bool q_is_bf16,
-        const void* __restrict__ k_w, bool k_is_bf16,
-        const void* __restrict__ v_w, bool v_is_bf16,
+        const void* __restrict__ q_w, core::GgmlType q_type,
+        const void* __restrict__ k_w, core::GgmlType k_type,
+        const void* __restrict__ v_w, core::GgmlType v_type,
         const float* __restrict__ x, float* __restrict__ q_out,
         float* __restrict__ k_out, float* __restrict__ v_out, std::size_t q_dim,
         std::size_t kv_dim, std::size_t hidden_size) {
@@ -899,30 +1059,30 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
     return;
 
   const void* A = nullptr;
-  bool is_bf16 = false;
+  core::GgmlType weight_type = core::GgmlType::kF32;
   float* out_target = nullptr;
   std::size_t row_idx = 0;
 
   if (m < q_dim) {
     A = q_w;
-    is_bf16 = q_is_bf16;
+    weight_type = q_type;
     out_target = q_out;
     row_idx = m;
   } else if (m < q_dim + kv_dim) {
     A = k_w;
-    is_bf16 = k_is_bf16;
+    weight_type = k_type;
     out_target = k_out;
     row_idx = m - q_dim;
   } else {
     A = v_w;
-    is_bf16 = v_is_bf16;
+    weight_type = v_type;
     out_target = v_out;
     row_idx = m - q_dim - kv_dim;
   }
 
   float dot = 0.0F;
 
-  if (is_bf16) {
+  if (weight_type == core::GgmlType::kBF16) {
     const auto* row =
         static_cast<const hip_bfloat16*>(A) + (row_idx * hidden_size);
     const std::size_t K_vec = hidden_size / 8;
@@ -947,6 +1107,12 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
     for (std::size_t k = (K_vec * 8) + lane_id; k < hidden_size; k += 32) {
       dot += static_cast<float>(row[k]) * x[k];
     }
+  } else if (weight_type != core::GgmlType::kF32) {
+    // Quantized weight: route via QuantWarpBlockDot (block_q8_K now; Q8_0/Q5_K/
+    // Q6_K wired in later tasks). All 32 lanes cooperate on the row's blocks;
+    // lane 0 returns the warp's partial row-dot and the warp reduction below
+    // (num_warps == 1) broadcasts the single correct value.
+    dot = QuantWarpBlockDot(weight_type, A, row_idx, x, hidden_size, lane_id, 0, 1);
   } else {
     const auto* row = static_cast<const float*>(A) + (row_idx * hidden_size);
     const std::size_t K_vec = hidden_size / 4;
@@ -973,9 +1139,10 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
 }
 
 __global__ void FastFusedSwiGLUGEMVBlockKernel(
-    const void* __restrict__ gate_w, bool gate_is_bf16,
-    const void* __restrict__ up_w, bool up_is_bf16, const float* __restrict__ x,
-    float* __restrict__ out, std::size_t M, std::size_t K) {
+    const void* __restrict__ gate_w, core::GgmlType gate_type,
+    const void* __restrict__ up_w, core::GgmlType up_type,
+    const float* __restrict__ x, float* __restrict__ out, std::size_t M,
+    std::size_t K) {
   const std::size_t m = blockIdx.x;
   if (m >= M)
     return;
@@ -988,7 +1155,7 @@ __global__ void FastFusedSwiGLUGEMVBlockKernel(
   float dot_gate = 0.0F;
   float dot_up = 0.0F;
 
-  if (gate_is_bf16 && up_is_bf16) {
+  if (gate_type == core::GgmlType::kBF16 && up_type == core::GgmlType::kBF16) {
     const auto* g_row = static_cast<const hip_bfloat16*>(gate_w) + (m * K);
     const auto* u_row = static_cast<const hip_bfloat16*>(up_w) + (m * K);
     const std::size_t K_vec = K / 8;
@@ -1022,6 +1189,69 @@ __global__ void FastFusedSwiGLUGEMVBlockKernel(
                 (static_cast<float>(u_vals[6]) * x1.z) +
                 (static_cast<float>(u_vals[7]) * x1.w);
     }
+  } else {
+    // Per-weight fallback for the non-(both-bf16) route: each of gate/up is
+    // computed independently — Q8 (integer dot) or bf16 — based on its own
+    // flags. A weight that is neither (legacy fp32) keeps its initialized
+    // 0.0 dot so the block reduction collapses to 0, matching the pre-fallback
+    // (HEAD) semantics. For Q8 the full row dot is computed in thread 0 only;
+    // every other lane contributes 0 so the block reduction below collapses to
+    // exactly the row dot (not multiplied by block/thread count).
+    if (gate_type == core::GgmlType::kBF16) {
+      const auto* g_row = static_cast<const hip_bfloat16*>(gate_w) + (m * K);
+      const std::size_t K_vec = K / 8;
+      const auto* g_vec = reinterpret_cast<const uint4*>(g_row);
+      for (std::size_t vi = tid; vi < K_vec; vi += block_threads) {
+        const uint4 gv = g_vec[vi];
+        const auto* g_vals = reinterpret_cast<const hip_bfloat16*>(&gv);
+        const std::size_t k = vi * 8;
+        const float4 x0 = *reinterpret_cast<const float4*>(&x[k + 0]);
+        const float4 x1 = *reinterpret_cast<const float4*>(&x[k + 4]);
+        dot_gate += (static_cast<float>(g_vals[0]) * x0.x) +
+                    (static_cast<float>(g_vals[1]) * x0.y) +
+                    (static_cast<float>(g_vals[2]) * x0.z) +
+                    (static_cast<float>(g_vals[3]) * x0.w) +
+                    (static_cast<float>(g_vals[4]) * x1.x) +
+                    (static_cast<float>(g_vals[5]) * x1.y) +
+                    (static_cast<float>(g_vals[6]) * x1.z) +
+                    (static_cast<float>(g_vals[7]) * x1.w);
+      }
+    } else if (gate_type != core::GgmlType::kF32) {
+      // Quantized weight (Q8_K now; Q8_0/Q5_K/Q6_K wired later via
+      // QuantWarpBlockDot). All lanes cooperate; lane 0 returns this warp's
+      // partial row-dot and the block reduction below combines the warps.
+      dot_gate = QuantWarpBlockDot(gate_type, gate_w, m, x, K, lane_id, warp_id,
+                                   block_threads >> 5u);
+    }
+    // else (kF32 / legacy fp32) keeps dot_gate == 0.0, matching HEAD semantics.
+
+    if (up_type == core::GgmlType::kBF16) {
+      const auto* u_row = static_cast<const hip_bfloat16*>(up_w) + (m * K);
+      const std::size_t K_vec = K / 8;
+      const auto* u_vec = reinterpret_cast<const uint4*>(u_row);
+      for (std::size_t vi = tid; vi < K_vec; vi += block_threads) {
+        const uint4 uv = u_vec[vi];
+        const auto* u_vals = reinterpret_cast<const hip_bfloat16*>(&uv);
+        const std::size_t k = vi * 8;
+        const float4 x0 = *reinterpret_cast<const float4*>(&x[k + 0]);
+        const float4 x1 = *reinterpret_cast<const float4*>(&x[k + 4]);
+        dot_up += (static_cast<float>(u_vals[0]) * x0.x) +
+                  (static_cast<float>(u_vals[1]) * x0.y) +
+                  (static_cast<float>(u_vals[2]) * x0.z) +
+                  (static_cast<float>(u_vals[3]) * x0.w) +
+                  (static_cast<float>(u_vals[4]) * x1.x) +
+                  (static_cast<float>(u_vals[5]) * x1.y) +
+                  (static_cast<float>(u_vals[6]) * x1.z) +
+                  (static_cast<float>(u_vals[7]) * x1.w);
+      }
+    } else if (up_type != core::GgmlType::kF32) {
+      // Quantized weight (Q8_K now; Q8_0/Q5_K/Q6_K wired later via
+      // QuantWarpBlockDot). All lanes cooperate; lane 0 returns this warp's
+      // partial row-dot and the block reduction below combines the warps.
+      dot_up = QuantWarpBlockDot(up_type, up_w, m, x, K, lane_id, warp_id,
+                                 block_threads >> 5u);
+    }
+    // else (kF32 / legacy fp32) keeps dot_up == 0.0, matching HEAD semantics.
   }
 
   for (int offset = 16; offset > 0; offset >>= 1) {
@@ -1054,14 +1284,15 @@ __global__ void FastFusedSwiGLUGEMVBlockKernel(
 }
 
 __global__ void FusedSSMInputProjectionsKernel(
-    const void* __restrict__ qkv_w, bool qkv_is_bf16,
-    const void* __restrict__ gate_w, bool gate_is_bf16,
-    const void* __restrict__ alpha_w, bool alpha_is_bf16,
-    const void* __restrict__ beta_w, bool beta_is_bf16,
+    const void* __restrict__ qkv_w, core::GgmlType qkv_type,
+    const void* __restrict__ gate_w, core::GgmlType gate_type,
+    const void* __restrict__ alpha_w, core::GgmlType alpha_type,
+    const void* __restrict__ beta_w, core::GgmlType beta_type,
     const float* __restrict__ x, float* __restrict__ qkv_out,
     float* __restrict__ gate_out, float* __restrict__ alpha_out,
-    float* __restrict__ beta_out, std::size_t hidden_size, std::size_t qkv_size,
-    std::size_t inner_size, std::size_t time_step_rank) {
+    float* __restrict__ beta_out, std::size_t hidden_size,
+    std::size_t qkv_size, std::size_t inner_size,
+    std::size_t time_step_rank) {
   const std::size_t m = blockIdx.x;
   const std::size_t gate_end = qkv_size + inner_size;
   const std::size_t alpha_end = gate_end + time_step_rank;
@@ -1070,28 +1301,28 @@ __global__ void FusedSSMInputProjectionsKernel(
     return;
 
   const void* A = nullptr;
-  bool is_bf16 = false;
+  core::GgmlType weight_type = core::GgmlType::kF32;
   float* out_target = nullptr;
   std::size_t row_idx = 0;
 
   if (m < qkv_size) {
     A = qkv_w;
-    is_bf16 = qkv_is_bf16;
+    weight_type = qkv_type;
     out_target = qkv_out;
     row_idx = m;
   } else if (m < gate_end) {
     A = gate_w;
-    is_bf16 = gate_is_bf16;
+    weight_type = gate_type;
     out_target = gate_out;
     row_idx = m - qkv_size;
   } else if (m < alpha_end) {
     A = alpha_w;
-    is_bf16 = alpha_is_bf16;
+    weight_type = alpha_type;
     out_target = alpha_out;
     row_idx = m - gate_end;
   } else {
     A = beta_w;
-    is_bf16 = beta_is_bf16;
+    weight_type = beta_type;
     out_target = beta_out;
     row_idx = m - alpha_end;
   }
@@ -1103,7 +1334,7 @@ __global__ void FusedSSMInputProjectionsKernel(
 
   float dot = 0.0F;
 
-  if (is_bf16) {
+  if (weight_type == core::GgmlType::kBF16) {
     const auto* row =
         static_cast<const hip_bfloat16*>(A) + (row_idx * hidden_size);
     const std::size_t K_vec = hidden_size / 8;
@@ -1129,6 +1360,13 @@ __global__ void FusedSSMInputProjectionsKernel(
          k += block_threads) {
       dot += static_cast<float>(row[k]) * x[k];
     }
+  } else if (weight_type != core::GgmlType::kF32) {
+    // Quantized weight: route via QuantWarpBlockDot (block_q8_K now; Q8_0/Q5_K/
+    // Q6_K wired in later tasks). All lanes cooperate; lane 0 returns this
+    // warp's partial row-dot and the warp + cross-warp block reduction below
+    // combines the warps (num_warps = block_threads >> 5u).
+    dot = QuantWarpBlockDot(weight_type, A, row_idx, x, hidden_size, lane_id,
+                            warp_id, block_threads >> 5u);
   } else {
     const auto* row = static_cast<const float*>(A) + (row_idx * hidden_size);
     const std::size_t K_vec = hidden_size / 4;
@@ -1169,8 +1407,9 @@ __global__ void FusedSSMInputProjectionsKernel(
 }
 
 __global__ void FusedQKVProjectionsKernel(
-    const void* __restrict__ q_w, bool q_is_bf16, const void* __restrict__ k_w,
-    bool k_is_bf16, const void* __restrict__ v_w, bool v_is_bf16,
+    const void* __restrict__ q_w, core::GgmlType q_type,
+    const void* __restrict__ k_w, core::GgmlType k_type,
+    const void* __restrict__ v_w, core::GgmlType v_type,
     const float* __restrict__ x, float* __restrict__ q_out,
     float* __restrict__ k_out, float* __restrict__ v_out, std::size_t q_dim,
     std::size_t kv_dim, std::size_t hidden_size) {
@@ -1180,23 +1419,23 @@ __global__ void FusedQKVProjectionsKernel(
     return;
 
   const void* A = nullptr;
-  bool is_bf16 = false;
+  core::GgmlType weight_type = core::GgmlType::kF32;
   float* out_target = nullptr;
   std::size_t row_idx = 0;
 
   if (m < q_dim) {
     A = q_w;
-    is_bf16 = q_is_bf16;
+    weight_type = q_type;
     out_target = q_out;
     row_idx = m;
   } else if (m < q_dim + kv_dim) {
     A = k_w;
-    is_bf16 = k_is_bf16;
+    weight_type = k_type;
     out_target = k_out;
     row_idx = m - q_dim;
   } else {
     A = v_w;
-    is_bf16 = v_is_bf16;
+    weight_type = v_type;
     out_target = v_out;
     row_idx = m - q_dim - kv_dim;
   }
@@ -1208,7 +1447,7 @@ __global__ void FusedQKVProjectionsKernel(
 
   float dot = 0.0F;
 
-  if (is_bf16) {
+  if (weight_type == core::GgmlType::kBF16) {
     const auto* row =
         static_cast<const hip_bfloat16*>(A) + (row_idx * hidden_size);
     const std::size_t K_vec = hidden_size / 8;
@@ -1234,6 +1473,13 @@ __global__ void FusedQKVProjectionsKernel(
          k += block_threads) {
       dot += static_cast<float>(row[k]) * x[k];
     }
+  } else if (weight_type != core::GgmlType::kF32) {
+    // Quantized weight: route via QuantWarpBlockDot (block_q8_K now; Q8_0/Q5_K/
+    // Q6_K wired in later tasks). All lanes cooperate; lane 0 returns this
+    // warp's partial row-dot and the warp + cross-warp block reduction below
+    // combines the warps (num_warps = block_threads >> 5u).
+    dot = QuantWarpBlockDot(weight_type, A, row_idx, x, hidden_size, lane_id,
+                            warp_id, block_threads >> 5u);
   } else {
     const auto* row = static_cast<const float*>(A) + (row_idx * hidden_size);
     const std::size_t K_vec = hidden_size / 4;
@@ -1871,6 +2117,138 @@ __launch_bounds__(256, 4) __global__
     const_cast<unsigned char*>(p)[0] = 0U;
   }
 }
+
+template<std::uint32_t WavesPerBlock>
+__launch_bounds__(WavesPerBlock * 32, 4) __global__
+    void Q8KBlockGEMVKernel(const void* __restrict__ A, core::GgmlType type,
+                            const float* __restrict__ x,
+                            float* __restrict__ y, std::size_t M,
+                            std::size_t K) {
+  const std::size_t tid = threadIdx.x;
+  const std::size_t lane_id = tid & 31u;
+  const std::size_t warp_id = tid >> 5u;
+  const std::size_t m = (blockIdx.x * WavesPerBlock) + warp_id;
+  if (m >= M) {
+    return;
+  }
+
+  float sumf = 0.0F;
+  if (type == core::GgmlType::kQ8_K) {
+    const std::size_t num_blocks = K / kQ8KBlockSize;
+    const auto* row_blocks =
+        static_cast<const Q8KBlock*>(A) + (m * num_blocks);
+
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+      const Q8KBlock& wblk = row_blocks[b];
+      const float d_w = wblk.d;
+      const float* xb = x + (b * kQ8KBlockSize);
+
+      // Pass 1: per-lane max|x| over the 8 x values this lane owns, then a warp
+      // reduction to get the block max and derive the activation scale.
+      float local_max = 0.0F;
+#pragma unroll
+      for (std::size_t k = 0; k < 8; ++k) {
+        local_max = fmaxf(local_max, fabsf(xb[lane_id + (32 * k)]));
+      }
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        local_max = fmaxf(local_max, __shfl_xor(local_max, offset));
+      }
+      const float scale = (local_max > 0.0F) ? (local_max / 127.0F) : 0.0F;
+
+      // Pass 2: quantize x to int8 and integer MAC with the weight qs.
+      int acc = 0;
+#pragma unroll
+      for (std::size_t k = 0; k < 8; ++k) {
+        const std::size_t idx = lane_id + (32 * k);
+        const float xv = (scale > 0.0F) ? (xb[idx] / scale) : 0.0F;
+        int xq = static_cast<int>(roundf(xv));
+        xq = (xq > 127) ? 127 : xq;
+        xq = (xq < -127) ? -127 : xq;
+        acc += static_cast<int>(wblk.qs[idx]) * xq;
+      }
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_xor(acc, offset);
+      }
+
+      sumf += d_w * scale * static_cast<float>(acc);
+    }
+  } else if (type == core::GgmlType::kQ8_0) {
+    // Q8_0 path (QK = 32 = warp width): one element per lane. Scale derivation,
+    // quantize/clamp, int-MAC and end-scale mirror the Q8_K path AND
+    // Q8_0RowDot exactly (verified by the Q8_0 GEMV equivalence test).
+    const std::size_t num_blocks = K / kQ8_0BlockSize;
+    const auto* row_blocks =
+        static_cast<const Q8_0Block*>(A) + (m * num_blocks);
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+      const Q8_0Block& wblk = row_blocks[b];
+      const float d_w = __half2float(wblk.d);
+      const float* xb = x + (b * kQ8_0BlockSize);
+
+      float local_max = fabsf(xb[lane_id]);
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        local_max = fmaxf(local_max, __shfl_xor(local_max, offset));
+      }
+      const float scale = (local_max > 0.0F) ? (local_max / 127.0F) : 0.0F;
+
+      const float xv = (scale > 0.0F) ? (xb[lane_id] / scale) : 0.0F;
+      int xq = static_cast<int>(roundf(xv));
+      xq = (xq > 127) ? 127 : xq;
+      xq = (xq < -127) ? -127 : xq;
+      int acc = static_cast<int>(wblk.qs[lane_id]) * xq;
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_xor(acc, offset);
+      }
+
+      sumf += d_w * scale * static_cast<float>(acc);
+    }
+  } else if (type == core::GgmlType::kQ5_K) {
+    // Q5_K path (QK = 256): dequant each 256-wide element to fp via Q5KValue
+    // and accumulate a fp MAC against x. One warp per row; each lane owns 8
+    // elements (lane_id + 32*k) then a warp reduction. Mirrors CPU
+    // DequantizeQ5_K + dot exactly modulo fp accumulation order.
+    const std::size_t num_blocks = K / kQ5KBlockSize;
+    const auto* row_blocks =
+        static_cast<const Q5KBlock*>(A) + (m * num_blocks);
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+      const Q5KBlock& wblk = row_blocks[b];
+      const float* xb = x + (b * kQ5KBlockSize);
+      float acc = 0.0F;
+#pragma unroll
+      for (std::size_t k = 0; k < 8; ++k) {
+        const std::size_t idx = lane_id + (32u * k);
+        acc += Q5KValue(wblk, idx) * xb[idx];
+      }
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_xor(acc, offset);
+      }
+      sumf += acc;
+    }
+  } else if (type == core::GgmlType::kQ6_K) {
+    // Q6_K path (QK = 256): dequant each 256-wide element to fp via Q6KValue
+    // and accumulate a fp MAC against x. Mirrors CPU DequantizeQ6_K + dot.
+    const std::size_t num_blocks = K / kQ6KBlockSize;
+    const auto* row_blocks =
+        static_cast<const Q6KBlock*>(A) + (m * num_blocks);
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+      const Q6KBlock& wblk = row_blocks[b];
+      const float* xb = x + (b * kQ6KBlockSize);
+      float acc = 0.0F;
+#pragma unroll
+      for (std::size_t k = 0; k < 8; ++k) {
+        const std::size_t idx = lane_id + (32u * k);
+        acc += Q6KValue(wblk, idx) * xb[idx];
+      }
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_xor(acc, offset);
+      }
+      sumf += acc;
+    }
+  }
+
+  if (lane_id == 0) {
+    y[m] = sumf;
+  }
+}
 }  // namespace
 
 // opt-c014-layer-prefetch: touch one 16B chunk per 4KiB page of a weight
@@ -1884,6 +2262,18 @@ void LaunchLayerWeightPrefetch(const void* data, std::size_t bytes,
   const std::size_t num_pages = (bytes + 4095U) / 4096U;
   const std::size_t grid = (num_pages + 255U) / 256U;
   LayerWeightPrefetchKernel<<<grid, 256, 0, stream>>>(data, bytes);
+}
+
+// opt-c1xx-q8k-gemv: launches the Q8_K on-the-fly integer-dot GEMV. One warp
+// per output row (4 warps per block). Requires K % 256 == 0 (Q8_K block size).
+void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
+                        float* y, std::size_t M, std::size_t K,
+                        hipStream_t stream) {
+  constexpr std::uint32_t kWavesPerBlock = 4;
+  constexpr std::uint32_t kBlockThreads = kWavesPerBlock * 32;
+  const std::size_t grid = (M + kWavesPerBlock - 1U) / kWavesPerBlock;
+  Q8KBlockGEMVKernel<kWavesPerBlock>
+      <<<grid, kBlockThreads, 0, stream>>>(A, type, x, y, M, K);
 }
 
 __global__ void SSMConvKernel(const float* __restrict__ qkv_in,
@@ -2054,22 +2444,22 @@ __global__ void DeltaNetRecurrenceKernel(
   }
 }
 
-void LaunchEmbeddingLookup(const void* table, bool is_bf16,
+void LaunchEmbeddingLookup(const void* table, core::GgmlType type,
                            std::uint32_t token_id, float* out_hidden,
                            std::size_t hidden_size, hipStream_t stream) {
   const std::size_t block_size = 256;
   const std::size_t grid_size = (hidden_size + block_size - 1) / block_size;
   EmbeddingLookupKernel<<<grid_size, block_size, 0, stream>>>(
-      table, is_bf16, token_id, out_hidden, hidden_size);
+      table, type, token_id, out_hidden, hidden_size);
 }
 
-void LaunchEmbeddingLookup(const void* table, bool is_bf16,
+void LaunchEmbeddingLookup(const void* table, core::GgmlType type,
                            const std::uint32_t* d_token_id, float* out_hidden,
                            std::size_t hidden_size, hipStream_t stream) {
   const std::size_t block_size = 256;
   const std::size_t grid_size = (hidden_size + block_size - 1) / block_size;
   EmbeddingLookupPtrKernel<<<grid_size, block_size, 0, stream>>>(
-      table, is_bf16, d_token_id, out_hidden, hidden_size);
+      table, type, d_token_id, out_hidden, hidden_size);
 }
 
 void LaunchRMSNorm(const float* x, const float* weight, float* out,
@@ -2139,8 +2529,15 @@ void LaunchSwiGLU(const float* gate, const float* up, float* out,
                                                      intermediate_size);
 }
 
-void LaunchGEMV(const void* A, bool is_bf16, const float* x, float* y,
+void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
                 std::size_t M, std::size_t K, hipStream_t stream) {
+  // Quantized weights (kQ8_K now; more types added later) run the Q row-dot
+  // path, which has no residual epilogue.
+  if (a_type != core::GgmlType::kBF16 && a_type != core::GgmlType::kF32) {
+    LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
+    return;
+  }
+  const bool is_bf16 = (a_type == core::GgmlType::kBF16);
   const auto strategy = detail::SelectGemvStrategy(M, K, is_bf16);
   detail::EmitGemvDispatch(M, K, is_bf16, detail::GemvStrategyName(strategy));
   constexpr std::uint32_t kWavesPerBlock = 4;
@@ -2178,7 +2575,7 @@ void LaunchGEMV(const void* A, bool is_bf16, const float* x, float* y,
   }
 
   const std::size_t block_size = K >= kLargeGemvInput ? 512 : 256;
-  FastGEMVBlockKernel<<<M, block_size, 0, stream>>>(A, is_bf16, x, y, nullptr,
+  FastGEMVBlockKernel<<<M, block_size, 0, stream>>>(A, a_type, x, y, nullptr,
                                                     M, K);
 }
 
@@ -2187,9 +2584,17 @@ void LaunchGEMV(const void* A, bool is_bf16, const float* x, float* y,
 // and block strategies gain the residual fold, and the remaining strategies
 // fall back to the single-row residual kernel. Used to fold the post-SSM
 // residual add into the ssm_out GEMV for decode.
-void LaunchGEMVResidual(const void* A, bool is_bf16, const float* x, float* y,
-                        const float* residual, std::size_t M, std::size_t K,
-                        hipStream_t stream) {
+void LaunchGEMVResidual(const void* A, core::GgmlType a_type, const float* x,
+                        float* y, const float* residual, std::size_t M,
+                        std::size_t K, hipStream_t stream) {
+  // Quantized weights run the Q row-dot path. The residual add is not folded
+  // into the Q8K block GEMV, so a residual pointer is not applied (this path is
+  // only reached for the ssm_out residual, which is currently dead).
+  if (a_type != core::GgmlType::kBF16 && a_type != core::GgmlType::kF32) {
+    LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
+    return;
+  }
+  const bool is_bf16 = (a_type == core::GgmlType::kBF16);
   const auto strategy = detail::SelectGemvStrategy(M, K, is_bf16);
   detail::EmitGemvDispatch(M, K, is_bf16, detail::GemvStrategyName(strategy));
   constexpr std::uint32_t kWavesPerBlock = 4;
@@ -2204,17 +2609,17 @@ void LaunchGEMVResidual(const void* A, bool is_bf16, const float* x, float* y,
   }
 
   const std::size_t block_size = K >= kLargeGemvInput ? 512 : 256;
-  FastGEMVBlockKernel<<<M, block_size, 0, stream>>>(A, is_bf16, x, y, residual,
+  FastGEMVBlockKernel<<<M, block_size, 0, stream>>>(A, a_type, x, y, residual,
                                                     M, K);
 }
 
 void LaunchFusedSSMInputProjections(
-    const void* qkv_w, bool qkv_is_bf16, const void* gate_w, bool gate_is_bf16,
-    const void* alpha_w, bool alpha_is_bf16, const void* beta_w,
-    bool beta_is_bf16, const float* x, float* qkv_out, float* gate_out,
-    float* alpha_out, float* beta_out, std::size_t hidden_size,
-    std::size_t qkv_size, std::size_t inner_size, std::size_t time_step_rank,
-    hipStream_t stream) {
+    const void* qkv_w, core::GgmlType qkv_type, const void* gate_w,
+    core::GgmlType gate_type, const void* alpha_w, core::GgmlType alpha_type,
+    const void* beta_w, core::GgmlType beta_type, const float* x,
+    float* qkv_out, float* gate_out, float* alpha_out, float* beta_out,
+    std::size_t hidden_size, std::size_t qkv_size, std::size_t inner_size,
+    std::size_t time_step_rank, hipStream_t stream) {
   const std::size_t total_rows = qkv_size + inner_size + (2 * time_step_rank);
   if (hidden_size % 8 == 0) {
     constexpr std::uint32_t kWavesPerBlock = 4;
@@ -2222,20 +2627,21 @@ void LaunchFusedSSMInputProjections(
     const std::size_t grid = (total_rows + kWavesPerBlock - 1) / kWavesPerBlock;
     Wave32FusedSSMInputProjectionsKernel_1Row<kWavesPerBlock>
         <<<grid, kBlockThreads, 0, stream>>>(
-            qkv_w, qkv_is_bf16, gate_w, gate_is_bf16, alpha_w, alpha_is_bf16,
-            beta_w, beta_is_bf16, x, qkv_out, gate_out, alpha_out, beta_out,
-            hidden_size, qkv_size, inner_size, time_step_rank);
+            qkv_w, qkv_type, gate_w, gate_type, alpha_w, alpha_type, beta_w,
+            beta_type, x, qkv_out, gate_out, alpha_out, beta_out, hidden_size,
+            qkv_size, inner_size, time_step_rank);
     return;
   }
 
   FusedSSMInputProjectionsKernel<<<total_rows, 128, 0, stream>>>(
-      qkv_w, qkv_is_bf16, gate_w, gate_is_bf16, alpha_w, alpha_is_bf16, beta_w,
-      beta_is_bf16, x, qkv_out, gate_out, alpha_out, beta_out, hidden_size,
-      qkv_size, inner_size, time_step_rank);
+      qkv_w, qkv_type, gate_w, gate_type, alpha_w, alpha_type, beta_w, beta_type,
+      x, qkv_out, gate_out, alpha_out, beta_out, hidden_size, qkv_size,
+      inner_size, time_step_rank);
 }
 
-void LaunchFusedQKVProjections(const void* q_w, bool q_is_bf16, const void* k_w,
-                               bool k_is_bf16, const void* v_w, bool v_is_bf16,
+void LaunchFusedQKVProjections(const void* q_w, core::GgmlType q_type,
+                               const void* k_w, core::GgmlType k_type,
+                               const void* v_w, core::GgmlType v_type,
                                const float* x, float* q_out, float* k_out,
                                float* v_out, std::size_t q_dim,
                                std::size_t kv_dim, std::size_t hidden_size,
@@ -2246,22 +2652,24 @@ void LaunchFusedQKVProjections(const void* q_w, bool q_is_bf16, const void* k_w,
     constexpr std::uint32_t kBlockThreads = kWavesPerBlock * 32;
     const std::size_t grid = (total_rows + kWavesPerBlock - 1) / kWavesPerBlock;
     Wave32FusedQKVProjectionsKernel_1Row<kWavesPerBlock>
-        <<<grid, kBlockThreads, 0, stream>>>(q_w, q_is_bf16, k_w, k_is_bf16,
-                                             v_w, v_is_bf16, x, q_out, k_out,
-                                             v_out, q_dim, kv_dim, hidden_size);
+        <<<grid, kBlockThreads, 0, stream>>>(
+            q_w, q_type, k_w, k_type, v_w, v_type, x, q_out, k_out, v_out,
+            q_dim, kv_dim, hidden_size);
     return;
   }
 
   FusedQKVProjectionsKernel<<<total_rows, 128, 0, stream>>>(
-      q_w, q_is_bf16, k_w, k_is_bf16, v_w, v_is_bf16, x, q_out, k_out, v_out,
-      q_dim, kv_dim, hidden_size);
+      q_w, q_type, k_w, k_type, v_w, v_type, x, q_out, k_out, v_out, q_dim,
+      kv_dim, hidden_size);
 }
 
-void LaunchFusedSwiGLUGEMV(const void* gate_w, bool gate_is_bf16,
-                           const void* up_w, bool up_is_bf16, const float* x,
-                           float* out, std::size_t intermediate_size,
+void LaunchFusedSwiGLUGEMV(const void* gate_w, core::GgmlType gate_type,
+                           const void* up_w, core::GgmlType up_type,
+                           const float* x, float* out,
+                           std::size_t intermediate_size,
                            std::size_t hidden_size, hipStream_t stream) {
-  if (gate_is_bf16 && up_is_bf16 && (hidden_size % 8 == 0)) {
+  if (gate_type == core::GgmlType::kBF16 && up_type == core::GgmlType::kBF16 &&
+      (hidden_size % 8 == 0)) {
     constexpr std::uint32_t kWavesPerBlock = 4;
     constexpr std::uint32_t kBlockThreads = kWavesPerBlock * 32;
 
@@ -2288,8 +2696,7 @@ void LaunchFusedSwiGLUGEMV(const void* gate_w, bool gate_is_bf16,
   }
 
   FastFusedSwiGLUGEMVBlockKernel<<<intermediate_size, 512, 0, stream>>>(
-      gate_w, gate_is_bf16, up_w, up_is_bf16, x, out, intermediate_size,
-      hidden_size);
+      gate_w, gate_type, up_w, up_type, x, out, intermediate_size, hidden_size);
 }
 
 // opt-c010-rmsnorm-projection: fused layer pre-RMSNorm + Q/K/V projections.

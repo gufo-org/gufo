@@ -28,8 +28,13 @@ bool ValidateTensor(const QwenTensorRef& tensor, std::size_t expected_elements,
     }
     return false;
   }
+  // Issue #162: accept quantized tensors during model load.
   if (tensor.type != core::GgmlType::kF32 &&
-      tensor.type != core::GgmlType::kBF16) {
+      tensor.type != core::GgmlType::kBF16 &&
+      tensor.type != core::GgmlType::kQ8_K &&
+      tensor.type != core::GgmlType::kQ8_0 &&
+      tensor.type != core::GgmlType::kQ5_K &&
+      tensor.type != core::GgmlType::kQ6_K) {
     if (error_msg != nullptr) {
       *error_msg = "Unsupported tensor type for " + std::string(name) + ": " +
                    std::string(core::ToString(tensor.type));

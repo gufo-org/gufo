@@ -9,11 +9,15 @@
 #include <cstdint>
 
 #include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/core/hip/qwen_gpu_quant_ops.hpp"
 
 namespace strix::hip {
 
+// Quant block layouts (Q8_0 / Q5_K / Q6_K / Q8_K) and the quant helpers are
+// shared via src/core/hip/qwen_gpu_quant_ops.hpp.
+
 __global__ void BatchedEmbeddingLookupKernel(
-    const void* __restrict__ table, bool is_bf16,
+    const void* __restrict__ table, core::GgmlType type,
     const std::uint32_t* __restrict__ token_ids, float* __restrict__ out_hidden,
     std::size_t batch_size, std::size_t hidden_size) {
   const std::size_t b = blockIdx.y;
@@ -25,19 +29,24 @@ __global__ void BatchedEmbeddingLookupKernel(
 
   const std::uint32_t tok = token_ids[b];
   float* out_row = out_hidden + (b * hidden_size);
+  const std::size_t row_off = static_cast<std::size_t>(tok) * hidden_size;
 
-  if (is_bf16) {
+  if (type == core::GgmlType::kBF16) {
     const auto* table_bf16 = static_cast<const hip_bfloat16*>(table);
-    out_row[tid] = static_cast<float>(
-        table_bf16[(static_cast<std::size_t>(tok) * hidden_size) + tid]);
-  } else {
+    out_row[tid] = static_cast<float>(table_bf16[row_off + tid]);
+  } else if (type == core::GgmlType::kF32) {
     const auto* table_f32 = static_cast<const float*>(table);
-    out_row[tid] =
-        table_f32[(static_cast<std::size_t>(tok) * hidden_size) + tid];
+    out_row[tid] = table_f32[row_off + tid];
+  } else {
+    const auto* q8 = static_cast<const Q8_0Block*>(table);
+    const Q8_0Block& wblk =
+        q8[row_off / kQ8_0BlockSize + tid / kQ8_0BlockSize];
+    out_row[tid] = __half2float(wblk.d) *
+                   static_cast<float>(wblk.qs[tid % kQ8_0BlockSize]);
   }
 }
 
-void LaunchBatchedEmbeddingLookup(const void* table, bool is_bf16,
+void LaunchBatchedEmbeddingLookup(const void* table, core::GgmlType type,
                                   const std::uint32_t* token_ids,
                                   float* out_hidden, std::size_t batch_size,
                                   std::size_t hidden_size, hipStream_t stream) {
@@ -46,8 +55,8 @@ void LaunchBatchedEmbeddingLookup(const void* table, bool is_bf16,
   const dim3 grid(static_cast<unsigned int>(grid_x),
                   static_cast<unsigned int>(batch_size));
   BatchedEmbeddingLookupKernel<<<grid, static_cast<unsigned int>(block_size), 0,
-                                 stream>>>(table, is_bf16, token_ids,
-                                           out_hidden, batch_size, hidden_size);
+                                 stream>>>(table, type, token_ids, out_hidden,
+                                           batch_size, hidden_size);
 }
 
 __global__ void BatchedRMSNormKernel(const float* __restrict__ x,
@@ -1033,6 +1042,250 @@ void LaunchBatchedFusedSwiGLUGEMM(const void* gate_w, bool gate_is_bf16,
       gate_w, gate_is_bf16, up_w, up_is_bf16, X, out,
       static_cast<hip_bfloat16*>(out_bf16), batch_size, intermediate_size,
       hidden_size);
+}
+
+// opt-c162-q8k-prefill-dequant: device Q8_K weight dequantization to BF16 for
+// the prefill hipblas GEMM path. hipBLAS cannot consume block_q8_K weights, so
+// prefill first dequantizes the weight region into a BF16 scratch buffer and
+// runs the GF16 GEMM on that scratch. One block per 256-wide Q8_K block, one
+// thread per element; matches the CPU DequantizeQ8_K oracle
+// (out[j] = d * qs[j] for j in [0,256) per block). Decode is unaffected: it
+// already computes at Q8 via Q8KRowDot.
+// Q8_K block layout is defined in the shared qwen_gpu_quant_ops.hpp header.
+
+// Q5_K / Q6_K block layouts are defined in the shared qwen_gpu_quant_ops.hpp
+// header; dequant to BF16 uses Q5KValueFp / Q6KValueFp below.
+
+__global__ void DequantizeQ8KToBf16Kernel(const void* __restrict__ w,
+                                          hip_bfloat16* __restrict__ out,
+                                          std::size_t n_blocks) {
+  const std::size_t b = blockIdx.x;
+  if (b >= n_blocks) {
+    return;
+  }
+  const std::size_t j = threadIdx.x;
+  const auto* blk = static_cast<const Q8KBlock*>(w) + b;
+  out[(b * kQ8KBlockSize) + j] =
+      hip_bfloat16(blk->d * static_cast<float>(blk->qs[j]));
+}
+
+void LaunchDequantizeQ8KToBf16(const void* w, hip_bfloat16* out,
+                               std::size_t n_elems, hipStream_t stream) {
+  if (n_elems == 0) {
+    return;
+  }
+  // Requires the weight region to be a whole number of 256-wide Q8_K blocks.
+  if (n_elems % kQ8KBlockSize != 0) {
+    return;
+  }
+  const std::size_t n_blocks = n_elems / kQ8KBlockSize;
+  DequantizeQ8KToBf16Kernel<<<static_cast<unsigned int>(n_blocks),
+                              static_cast<unsigned int>(kQ8KBlockSize), 0,
+                              stream>>>(w, out, n_blocks);
+}
+
+// Per-value dequant helpers (fp32), matching the CPU oracles
+// Q5Value/Q6Value/DequantizeQ8_0 in ggml_dequant.cpp. GetQKScaleMin (used by
+// Q5KValueFp) is defined in the shared qwen_gpu_quant_ops.hpp header.
+
+__device__ float Q5KValueFp(const Q5KBlock& block,
+                            std::size_t index) noexcept {
+  const std::size_t gg = index / 64;   // 0..3
+  const std::size_t wv = index % 64;   // 0..63
+  const std::size_t lane = wv % 32;    // 0..31
+  const bool lohalf = (wv < 32);
+  const std::uint8_t qb = block.qs[(gg * 32) + lane];
+  const std::uint8_t quant4 = lohalf ? (qb & 0x0FU) : (qb >> 4U);
+  const int bit = static_cast<int>(2 * gg) + (lohalf ? 0 : 1);  // 0..7
+  const std::uint8_t quant = static_cast<std::uint8_t>(
+      quant4 + (((block.qh[lane] >> bit) & 1U) ? 16U : 0U));  // 0..31
+  const std::size_t sis = (2 * gg) + (lohalf ? 0 : 1);  // 0..7
+  std::uint8_t sc = 0;
+  std::uint8_t m = 0;
+  GetQKScaleMin(sis, block.scales, sc, m);
+  return __half2float(block.d) * static_cast<float>(sc) *
+             static_cast<float>(quant) -
+         __half2float(block.dmin) * static_cast<float>(m);
+}
+
+__device__ float Q6KValueFp(const Q6KBlock& block,
+                            std::size_t index) noexcept {
+  const std::size_t half = index / 128;
+  const std::size_t within = index % 128;
+  const std::size_t segment = within / 32;
+  const std::size_t lane = within % 32;
+  const std::size_t ql_base = half * 64;
+  const std::uint8_t qh_byte = block.qh[(half * 32) + lane];
+
+  std::uint8_t low = 0;
+  std::uint8_t high = 0;
+  switch (segment) {
+    case 0:
+      low = block.ql[ql_base + lane] & 0x0FU;
+      high = (qh_byte >> 0U) & 0x03U;
+      break;
+    case 1:
+      low = block.ql[ql_base + 32 + lane] & 0x0FU;
+      high = (qh_byte >> 2U) & 0x03U;
+      break;
+    case 2:
+      low = block.ql[ql_base + lane] >> 4U;
+      high = (qh_byte >> 4U) & 0x03U;
+      break;
+    default:
+      low = block.ql[ql_base + 32 + lane] >> 4U;
+      high = (qh_byte >> 6U) & 0x03U;
+      break;
+  }
+  const std::size_t scale_index = (half * 8) + (lane / 16) + (segment * 2);
+  const int quant = static_cast<int>((high << 4U) | low) - 32;
+  return __half2float(block.d) * static_cast<float>(block.scales[scale_index]) *
+         static_cast<float>(quant);
+}
+
+__device__ float Q8_0ValueFp(const Q8_0Block& block,
+                             std::size_t index) noexcept {
+  return __half2float(block.d) * static_cast<float>(block.qs[index]);
+}
+
+// Type-dispatched dequant-to-BF16 kernels. One block per quant block, one
+// thread per element; out[b*qk + j] = (hip_bfloat16)(per_value_dequant).
+__global__ void DequantizeQ8_0ToBf16Kernel(const void* __restrict__ w,
+                                           hip_bfloat16* __restrict__ out,
+                                           std::size_t n_blocks) {
+  const std::size_t b = blockIdx.x;
+  if (b >= n_blocks) {
+    return;
+  }
+  const std::size_t j = threadIdx.x;
+  if (j >= kQ8_0BlockSize) {
+    return;
+  }
+  const auto* blk = static_cast<const Q8_0Block*>(w) + b;
+  out[(b * kQ8_0BlockSize) + j] = hip_bfloat16(Q8_0ValueFp(*blk, j));
+}
+
+__global__ void DequantizeQ5KToBf16Kernel(const void* __restrict__ w,
+                                          hip_bfloat16* __restrict__ out,
+                                          std::size_t n_blocks) {
+  const std::size_t b = blockIdx.x;
+  if (b >= n_blocks) {
+    return;
+  }
+  const std::size_t j = threadIdx.x;
+  if (j >= kQ5KBlockSize) {
+    return;
+  }
+  const auto* blk = static_cast<const Q5KBlock*>(w) + b;
+  out[(b * kQ5KBlockSize) + j] = hip_bfloat16(Q5KValueFp(*blk, j));
+}
+
+__global__ void DequantizeQ6KToBf16Kernel(const void* __restrict__ w,
+                                          hip_bfloat16* __restrict__ out,
+                                          std::size_t n_blocks) {
+  const std::size_t b = blockIdx.x;
+  if (b >= n_blocks) {
+    return;
+  }
+  const std::size_t j = threadIdx.x;
+  if (j >= kQ6KBlockSize) {
+    return;
+  }
+  const auto* blk = static_cast<const Q6KBlock*>(w) + b;
+  out[(b * kQ6KBlockSize) + j] = hip_bfloat16(Q6KValueFp(*blk, j));
+}
+
+// opt-c162-q8k-prefill-dequant (extended): type-dispatched entry point that
+// converts a quantized weight region (Q8_0/Q5_K/Q6_K/Q8_K) into a BF16 scratch
+// for the prefill hipblas GEMM path. Q8_0 uses a 32-thread block (QK=32);
+// Q5_K/Q6_K/Q8_K use a 256-thread block (QK=256). Requires n_elems to be a
+// whole number of blocks. Unsupported types and non-multiple sizes are no-ops.
+void LaunchDequantizeToBf16(core::GgmlType type, const void* w,
+                            hip_bfloat16* out, std::size_t n_elems,
+                            hipStream_t stream) {
+  if (n_elems == 0) {
+    return;
+  }
+  if (type == core::GgmlType::kQ8_0) {
+    if (n_elems % kQ8_0BlockSize != 0) {
+      return;
+    }
+    const std::size_t n_blocks = n_elems / kQ8_0BlockSize;
+    DequantizeQ8_0ToBf16Kernel<<<static_cast<unsigned int>(n_blocks),
+                                 static_cast<unsigned int>(kQ8_0BlockSize), 0,
+                                 stream>>>(w, out, n_blocks);
+    return;
+  }
+  if (type == core::GgmlType::kQ5_K || type == core::GgmlType::kQ6_K ||
+      type == core::GgmlType::kQ8_K) {
+    if (n_elems % kQ5KBlockSize != 0) {
+      return;
+    }
+    const std::size_t n_blocks = n_elems / kQ5KBlockSize;
+    if (type == core::GgmlType::kQ5_K) {
+      DequantizeQ5KToBf16Kernel<<<static_cast<unsigned int>(n_blocks),
+                                  static_cast<unsigned int>(kQ5KBlockSize), 0,
+                                  stream>>>(w, out, n_blocks);
+    } else if (type == core::GgmlType::kQ6_K) {
+      DequantizeQ6KToBf16Kernel<<<static_cast<unsigned int>(n_blocks),
+                                  static_cast<unsigned int>(kQ6KBlockSize), 0,
+                                  stream>>>(w, out, n_blocks);
+    } else {
+      // kQ8_K: reuse the existing single-type kernel (one implementation).
+      LaunchDequantizeQ8KToBf16(w, out, n_elems, stream);
+    }
+    return;
+  }
+  // Unsupported quant type: no-op.
+}
+
+// opt-c162-prefill-quant-direct: batched prefill projection that computes the
+// matmul DIRECTLY on quantized weights (block_q8_0 / block_q8_K / block_q5_K /
+// block_q6_K) with NO dequantize-to-BF16 and NO BF16 GEMM. One warp per output
+// row; each warp reads the row's quant blocks and the bf16 activation and
+// reduces via QuantWarpBlockDot (num_warps=1 => full row dot in lane 0).
+// Output y[b*m + row] = qdot(weights[row], x[b]).
+__global__ void BatchedQuantGEMVKernel(core::GgmlType type,
+                                       const void* __restrict__ w,
+                                       const hip_bfloat16* __restrict__ x,
+                                       float* __restrict__ y, std::size_t m,
+                                       std::size_t k) {
+  constexpr std::size_t kWarp = 32;
+  const std::size_t warp_id = threadIdx.x / kWarp;
+  const std::size_t lane = threadIdx.x % kWarp;
+  const std::size_t warps_per_block = blockDim.x / kWarp;
+
+  const std::size_t b = blockIdx.y;
+  const std::size_t row = blockIdx.x * warps_per_block + warp_id;
+  if (row >= m) {
+    return;
+  }
+
+  const float dot = QuantWarpBlockDot<hip_bfloat16>(type, w, row, x + (b * k),
+                                                    k, lane, 0, 1);
+  if (lane == 0) {
+    y[(b * m) + row] = dot;
+  }
+}
+
+void LaunchBatchedQuantGEMM(core::GgmlType type, const void* w,
+                            const void* bf16_x, float* y, std::size_t batch,
+                            std::size_t m, std::size_t k, hipStream_t stream) {
+  if (m == 0 || k == 0 || batch == 0) {
+    return;
+  }
+  if (type == core::GgmlType::kBF16 || type == core::GgmlType::kF32) {
+    return;
+  }
+  constexpr std::size_t kWarp = 32;
+  const std::size_t warps_per_block = 8;
+  const std::size_t rows_per_block = warps_per_block;  // one row per warp
+  const std::size_t num_blocks_x = (m + rows_per_block - 1) / rows_per_block;
+  const dim3 grid(static_cast<unsigned int>(num_blocks_x),
+                  static_cast<unsigned int>(batch));
+  const dim3 block(static_cast<unsigned int>(kWarp * warps_per_block));
+  BatchedQuantGEMVKernel<<<grid, block, 0, stream>>>(
+      type, w, reinterpret_cast<const hip_bfloat16*>(bf16_x), y, m, k);
 }
 
 }  // namespace strix::hip

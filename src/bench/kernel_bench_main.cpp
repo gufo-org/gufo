@@ -507,7 +507,7 @@ strix::bench::KernelBenchResult BenchmarkGemv(const CommandLineOptions& options,
     FillBytes(weights, 0x3f, stream);
     weight_value = Bf16FromBits(kBf16PatternBits);
     samples_us = MeasureKernel(options, marker, stream, [&] {
-      strix::hip::LaunchGEMV(weights.Get(), true, input.Get(), output.Get(),
+      strix::hip::LaunchGEMV(weights.Get(), strix::core::GgmlType::kBF16, input.Get(), output.Get(),
                              options.m, options.k, stream);
     });
   } else {
@@ -515,7 +515,7 @@ strix::bench::KernelBenchResult BenchmarkGemv(const CommandLineOptions& options,
     FillBytes(weights, 0x3c, stream);
     weight_value = FloatFromBits(kFloatPatternBits);
     samples_us = MeasureKernel(options, marker, stream, [&] {
-      strix::hip::LaunchGEMV(weights.Get(), false, input.Get(), output.Get(),
+      strix::hip::LaunchGEMV(weights.Get(), strix::core::GgmlType::kF32, input.Get(), output.Get(),
                              options.m, options.k, stream);
     });
   }

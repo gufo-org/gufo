@@ -68,6 +68,16 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
   HIP_CHECK(
       hipMalloc(&d_scratch_bf16, scratch_elements * sizeof(hip_bfloat16)));
 
+  // Weight BF16 scratch: largest per-layer matmul weight in bf16 elements,
+  // used by the prefill dequant-to-BF16 then BF16 GEMM path.
+  const std::size_t max_weight_elems =
+      hidden_size *
+      std::max<std::size_t>({q_projection_size, kv_size, attention_size,
+                             intermediate_size, ssm_qkv_size, ssm_inner_size,
+                             time_step_rank});
+  HIP_CHECK(
+      hipMalloc(&d_weights_bf16, max_weight_elems * sizeof(hip_bfloat16)));
+
   const std::size_t total_kv = config_.FullAttentionLayerCount() *
                                num_kv_heads * max_context_ * head_dim;
   HIP_CHECK(hipMalloc(&d_kv_cache, total_kv * sizeof(float) * 2));
@@ -120,6 +130,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   hipblas_handle = other.hipblas_handle;
   hipblaslt_gemm = std::move(other.hipblaslt_gemm);
   d_scratch_bf16 = other.d_scratch_bf16;
+  d_weights_bf16 = other.d_weights_bf16;
   d_saved_ssm_conv_state_ = other.d_saved_ssm_conv_state_;
   d_saved_ssm_deltanet_state_ = other.d_saved_ssm_deltanet_state_;
   d_ssm_replay_qkv_ = other.d_ssm_replay_qkv_;
@@ -157,6 +168,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   other.stream = nullptr;
   other.hipblas_handle = nullptr;
   other.d_scratch_bf16 = nullptr;
+  other.d_weights_bf16 = nullptr;
   other.d_saved_ssm_conv_state_ = nullptr;
   other.d_saved_ssm_deltanet_state_ = nullptr;
   other.d_ssm_replay_qkv_ = nullptr;
@@ -202,6 +214,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     hipblas_handle = other.hipblas_handle;
     hipblaslt_gemm = std::move(other.hipblaslt_gemm);
     d_scratch_bf16 = other.d_scratch_bf16;
+    d_weights_bf16 = other.d_weights_bf16;
     d_saved_ssm_conv_state_ = other.d_saved_ssm_conv_state_;
     d_saved_ssm_deltanet_state_ = other.d_saved_ssm_deltanet_state_;
     d_ssm_replay_qkv_ = other.d_ssm_replay_qkv_;
@@ -239,6 +252,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     other.stream = nullptr;
     other.hipblas_handle = nullptr;
     other.d_scratch_bf16 = nullptr;
+    other.d_weights_bf16 = nullptr;
     other.d_saved_ssm_conv_state_ = nullptr;
     other.d_saved_ssm_deltanet_state_ = nullptr;
     other.d_ssm_replay_qkv_ = nullptr;
@@ -499,6 +513,8 @@ void QwenGpuArena::FreeAll() noexcept {
     HIP_CHECK(hipFree(d_prompt_tokens));
   if (d_scratch_bf16 != nullptr)
     HIP_CHECK(hipFree(d_scratch_bf16));
+  if (d_weights_bf16 != nullptr)
+    HIP_CHECK(hipFree(d_weights_bf16));
   if (d_saved_ssm_conv_state_ != nullptr)
     HIP_CHECK(hipFree(d_saved_ssm_conv_state_));
   if (d_saved_ssm_deltanet_state_ != nullptr)
@@ -544,6 +560,7 @@ void QwenGpuArena::FreeAll() noexcept {
   d_ssm_deltanet_state = nullptr;
   d_prompt_tokens = nullptr;
   d_scratch_bf16 = nullptr;
+  d_weights_bf16 = nullptr;
   d_saved_ssm_conv_state_ = nullptr;
   d_saved_ssm_deltanet_state_ = nullptr;
   d_ssm_replay_qkv_ = nullptr;

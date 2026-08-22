@@ -887,7 +887,7 @@ if (BUILD_TESTING)
     target_link_libraries(qwen_gpu_ops_test PRIVATE strix_core hip::host roc::hipblas roc::rocblas)
     add_test(NAME qwen_gpu_ops_test COMMAND qwen_gpu_ops_test)
     set_tests_properties(qwen_gpu_ops_test PROPERTIES
-      LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;opt-c010-qk-rope-kv;opt-c010-residual-rmsnorm;opt-c010-ffn-swiglu;opt-c010-ssm-gate-residual;opt-c010-rmsnorm-projection;opt-c014-layer-prefetch")
+      LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;opt-c010-qk-rope-kv;opt-c010-residual-rmsnorm;opt-c010-ffn-swiglu;opt-c010-ssm-gate-residual;opt-c010-rmsnorm-projection;opt-c014-layer-prefetch;opt-c162-q8k-model")
 
     add_executable(persistent_deltanet_test
       tests/kernels/persistent_deltanet_test.cpp)

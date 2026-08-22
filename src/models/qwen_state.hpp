@@ -12,6 +12,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/model_config.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 
 namespace strix::models {
 
@@ -36,6 +37,34 @@ struct QwenTensorRef {
       std::memcpy(&f, &u32, sizeof(float));
       return f;
     }
+    if (type == core::GgmlType::kQ8_K) {
+      constexpr std::size_t kBlockSize = 256;
+      struct Q8KBlock {
+        float d;
+        std::int8_t qs[kBlockSize];
+        std::int16_t bsums[16];
+      };
+      const std::size_t block_idx = index / kBlockSize;
+      const std::size_t pos = index % kBlockSize;
+      const auto* block = reinterpret_cast<const Q8KBlock*>(data) + block_idx;
+      return block->d * static_cast<float>(block->qs[pos]);
+    }
+    if (type == core::GgmlType::kQ8_0) {
+      // Q8_0 block: fp16 scale + 32 int8 values (QK=32, 34 bytes).
+      constexpr std::size_t kBlockSize = 32;
+      struct Q8_0Block {
+        std::uint16_t d;
+        std::int8_t qs[kBlockSize];
+      };
+      static_assert(sizeof(Q8_0Block) == 34);
+      const std::size_t block_idx = index / kBlockSize;
+      const std::size_t pos = index % kBlockSize;
+      const auto* block = reinterpret_cast<const Q8_0Block*>(data) + block_idx;
+      return strix::quant::Fp16ToFloat(block->d) *
+             static_cast<float>(block->qs[pos]);
+    }
+    // kQ5_K / kQ6_K Get() dequant is deferred to the quant support phase (they
+    // are matmul weights never read via this per-element accessor).
     return 0.0F;
   }
 

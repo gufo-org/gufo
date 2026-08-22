@@ -133,6 +133,7 @@ public:
   hipblasHandle_t hipblas_handle{nullptr};
   std::unique_ptr<HipblasLtGemm> hipblaslt_gemm;
   void* d_scratch_bf16{nullptr};
+  hip_bfloat16* d_weights_bf16{nullptr};
 
   [[nodiscard]] std::uint32_t GetMaxBatch() const noexcept {
     return max_batch_;

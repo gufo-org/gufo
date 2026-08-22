@@ -56,9 +56,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
 
   auto ExecuteStep = [&]() {
     // 1. Embedding lookup
-    const bool embd_is_bf16 = weights_.token_embd.type == core::GgmlType::kBF16;
-    LaunchEmbeddingLookup(weights_.token_embd.data, embd_is_bf16, d_in_token,
-                          arena_.d_hidden, hidden_size, arena_.stream);
+    LaunchEmbeddingLookup(weights_.token_embd.data, weights_.token_embd.type,
+                          d_in_token, arena_.d_hidden, hidden_size,
+                          arena_.stream);
 
     // opt-c014-layer-prefetch: touch the next layer's weight pages on a side
     // stream while the current layer computes, so the next layer's projection
@@ -139,7 +139,6 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
         const bool q_bf16 = layer.attn_q.type == core::GgmlType::kBF16;
         const bool k_bf16 = layer.attn_k.type == core::GgmlType::kBF16;
         const bool v_bf16 = layer.attn_v.type == core::GgmlType::kBF16;
-        const bool o_bf16 = layer.attn_output.type == core::GgmlType::kBF16;
         const std::size_t total_k = config.FullAttentionLayerCount() *
                                     config.num_key_value_heads *
                                     arena_.GetMaxContext() * config.head_dim;
@@ -154,10 +153,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
               arena_.stream);
         } else {
           LaunchFusedQKVProjections(
-              layer.attn_q.data, q_bf16, layer.attn_k.data, k_bf16,
-              layer.attn_v.data, v_bf16, arena_.d_normed, arena_.d_ssm_qkv,
-              arena_.d_k, arena_.d_v, q_projection_size, kv_size, hidden_size,
-              arena_.stream);
+              layer.attn_q.data, layer.attn_q.type, layer.attn_k.data,
+              layer.attn_k.type, layer.attn_v.data, layer.attn_v.type,
+              arena_.d_normed, arena_.d_ssm_qkv, arena_.d_k, arena_.d_v,
+              q_projection_size, kv_size, hidden_size, arena_.stream);
         }
 
         // De-interleave Q and Gate from attn_q projection
@@ -226,9 +225,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
         }
 
         // Output projection
-        LaunchGEMV(layer.attn_output.data, o_bf16, arena_.d_ssm_out,
-                   arena_.d_attn_out, hidden_size, attention_size,
-                   arena_.stream);
+        LaunchGEMV(layer.attn_output.data, layer.attn_output.type,
+                   arena_.d_ssm_out, arena_.d_attn_out, hidden_size,
+                   attention_size, arena_.stream);
       } else {
         // SSM path
         ssm_residual_folded = detail::ShouldFuseSSMGateResidual();
@@ -236,7 +235,6 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
         const bool gate_bf16 = layer.attn_gate.type == core::GgmlType::kBF16;
         const bool alpha_bf16 = layer.ssm_alpha.type == core::GgmlType::kBF16;
         const bool beta_bf16 = layer.ssm_beta.type == core::GgmlType::kBF16;
-        const bool out_bf16 = layer.ssm_out.type == core::GgmlType::kBF16;
 
         if (fused_rmsnorm_proj) {
           LaunchFusedRMSNormSSMInputProjections(
@@ -248,11 +246,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
               ssm_inner_size, time_step_rank, arena_.stream);
         } else {
           LaunchFusedSSMInputProjections(
-              layer.attn_qkv.data, qkv_bf16, layer.attn_gate.data, gate_bf16,
-              layer.ssm_alpha.data, alpha_bf16, layer.ssm_beta.data, beta_bf16,
-              arena_.d_normed, arena_.d_ssm_qkv, arena_.d_ssm_gate,
-              arena_.d_alpha_buf, arena_.d_beta_buf, hidden_size, ssm_qkv_size,
-              ssm_inner_size, time_step_rank, arena_.stream);
+              layer.attn_qkv.data, layer.attn_qkv.type, layer.attn_gate.data,
+              layer.attn_gate.type, layer.ssm_alpha.data, layer.ssm_alpha.type,
+              layer.ssm_beta.data, layer.ssm_beta.type, arena_.d_normed,
+              arena_.d_ssm_qkv, arena_.d_ssm_gate, arena_.d_alpha_buf,
+              arena_.d_beta_buf, hidden_size, ssm_qkv_size, ssm_inner_size,
+              time_step_rank, arena_.stream);
         }
 
         LaunchSSMConvRecurrence(
@@ -270,11 +269,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
         // ssm_out GEMV epilogue (y = A*x + hidden). The unfused chain (GEMV
         // into d_attn_out + residual add) stays wired as the reference.
         if (ssm_residual_folded) {
-          LaunchGEMVResidual(layer.ssm_out.data, out_bf16, arena_.d_ssm_out,
-                             arena_.d_hidden, arena_.d_hidden, hidden_size,
-                             ssm_inner_size, arena_.stream);
+          LaunchGEMVResidual(layer.ssm_out.data, layer.ssm_out.type,
+                             arena_.d_ssm_out, arena_.d_hidden,
+                             arena_.d_hidden, hidden_size, ssm_inner_size,
+                             arena_.stream);
         } else {
-          LaunchGEMV(layer.ssm_out.data, out_bf16, arena_.d_ssm_out,
+          LaunchGEMV(layer.ssm_out.data, layer.ssm_out.type, arena_.d_ssm_out,
                      arena_.d_attn_out, hidden_size, ssm_inner_size,
                      arena_.stream);
         }
@@ -311,7 +311,6 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
       // Fused SwiGLU FFN
       const bool ffn_g_bf16 = layer.ffn_gate.type == core::GgmlType::kBF16;
       const bool ffn_u_bf16 = layer.ffn_up.type == core::GgmlType::kBF16;
-      const bool ffn_d_bf16 = layer.ffn_down.type == core::GgmlType::kBF16;
 
       if (fused_rmsnorm_proj && ffn_g_bf16 && ffn_u_bf16) {
         LaunchFusedRMSNormSwiGLUGEMV(
@@ -319,13 +318,13 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
             1e-6F, layer.ffn_gate.data, layer.ffn_up.data, arena_.d_ffn_act,
             intermediate_size, hidden_size, arena_.stream);
       } else {
-        LaunchFusedSwiGLUGEMV(layer.ffn_gate.data, ffn_g_bf16,
-                              layer.ffn_up.data, ffn_u_bf16, arena_.d_normed,
-                              arena_.d_ffn_act, intermediate_size, hidden_size,
-                              arena_.stream);
+        LaunchFusedSwiGLUGEMV(layer.ffn_gate.data, layer.ffn_gate.type,
+                             layer.ffn_up.data, layer.ffn_up.type,
+                             arena_.d_normed, arena_.d_ffn_act,
+                             intermediate_size, hidden_size, arena_.stream);
       }
 
-      LaunchGEMV(layer.ffn_down.data, ffn_d_bf16, arena_.d_ffn_act,
+      LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, arena_.d_ffn_act,
                  arena_.d_ffn_out, hidden_size, intermediate_size,
                  arena_.stream);
 
@@ -341,8 +340,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
                     arena_.d_normed, hidden_size, 1e-6F, arena_.stream);
 
       // 4. LM Head Logits GEMV on final token
-      const bool out_bf16 = weights_.output.type == core::GgmlType::kBF16;
-      LaunchGEMV(weights_.output.data, out_bf16, arena_.d_normed,
+      LaunchGEMV(weights_.output.data, weights_.output.type, arena_.d_normed,
                  arena_.d_logits, vocab_size, hidden_size, arena_.stream);
 
       // 5. Parallel GPU Argmax

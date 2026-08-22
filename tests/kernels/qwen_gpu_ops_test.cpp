@@ -2,9 +2,11 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <vector>
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -15,6 +17,7 @@
 #include "src/core/hip/detail/qwen_attention_policy.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 
 static inline std::uint16_t FloatToBf16Bits(float f) {
   std::uint32_t bits = 0;
@@ -111,7 +114,7 @@ void TestGpuGEMV() {
     HIP_CHECK(
         hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-    strix::hip::LaunchGEMV(d_A, false, d_x, d_y, M, K);
+    strix::hip::LaunchGEMV(d_A, strix::core::GgmlType::kF32, d_x, d_y, M, K);
     HIP_CHECK(hipDeviceSynchronize());
 
     HIP_CHECK(
@@ -175,7 +178,7 @@ void TestGpuGEMV() {
     HIP_CHECK(
         hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-    strix::hip::LaunchGEMV(d_A, true, d_x, d_y, M, K);
+    strix::hip::LaunchGEMV(d_A, strix::core::GgmlType::kBF16, d_x, d_y, M, K);
     HIP_CHECK(hipDeviceSynchronize());
 
     HIP_CHECK(
@@ -1067,11 +1070,12 @@ void TestBatchedFusedProjectionsEquivalence() {
   // Sequential
   for (std::size_t t = 0; t < batch; ++t) {
     strix::hip::LaunchFusedSSMInputProjections(
-        d_qkv_w, false, d_gate_w, false, d_alpha_w, false, d_beta_w, false,
-        d_x + t * hidden_size, d_qkv_seq + t * qkv_size,
-        d_gate_seq + t * inner_size, d_alpha_seq + t * time_step_rank,
-        d_beta_seq + t * time_step_rank, hidden_size, qkv_size, inner_size,
-        time_step_rank);
+        d_qkv_w, strix::core::GgmlType::kF32, d_gate_w,
+        strix::core::GgmlType::kF32, d_alpha_w, strix::core::GgmlType::kF32,
+        d_beta_w, strix::core::GgmlType::kF32, d_x + t * hidden_size,
+        d_qkv_seq + t * qkv_size, d_gate_seq + t * inner_size,
+        d_alpha_seq + t * time_step_rank, d_beta_seq + t * time_step_rank,
+        hidden_size, qkv_size, inner_size, time_step_rank);
   }
 
   // Batched
@@ -1146,7 +1150,8 @@ void TestBatchedFusedSwiGLUEquivalence() {
   // Sequential
   for (std::size_t t = 0; t < batch; ++t) {
     strix::hip::LaunchFusedSwiGLUGEMV(
-        d_gate_w, false, d_up_w, false, d_x + t * hidden_size,
+        d_gate_w, strix::core::GgmlType::kF32, d_up_w,
+        strix::core::GgmlType::kF32, d_x + t * hidden_size,
         d_out_seq + t * intermediate_size, intermediate_size, hidden_size);
   }
 
@@ -1502,8 +1507,9 @@ void TestHipGraphDecodeStep() {
                              hipMemcpyHostToDevice, stream));
 
     auto StepOps = [&]() {
-      strix::hip::LaunchEmbeddingLookup(d_embd, false, d_params + 0, d_hidden,
-                                        hidden_size, stream);
+      strix::hip::LaunchEmbeddingLookup(d_embd, strix::core::GgmlType::kF32,
+                                        d_params + 0, d_hidden, hidden_size,
+                                        stream);
       strix::hip::LaunchRMSNorm(d_hidden, d_weight, d_normed, hidden_size,
                                 1e-6F, stream);
     };
@@ -2465,9 +2471,9 @@ void TestGEMVResidualEquivalence() {
   HIP_CHECK(
       hipMemcpy(d_res, h_res.data(), M * sizeof(float), hipMemcpyHostToDevice));
 
-  strix::hip::LaunchGEMV(d_A, true, d_x, d_y_ref, M, K);
+  strix::hip::LaunchGEMV(d_A, strix::core::GgmlType::kBF16, d_x, d_y_ref, M, K);
   strix::hip::LaunchResidualAdd(d_res, d_y_ref, d_y_ref, M);
-  strix::hip::LaunchGEMVResidual(d_A, true, d_x, d_y_fus, d_res, M, K);
+  strix::hip::LaunchGEMVResidual(d_A, strix::core::GgmlType::kBF16, d_x, d_y_fus, d_res, M, K);
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<float> ref(M);
@@ -2525,9 +2531,9 @@ void TestGEMVResidualEquivalence() {
   HIP_CHECK(hipMemcpy(d_res2, h_res2.data(), M2 * sizeof(float),
                       hipMemcpyHostToDevice));
 
-  strix::hip::LaunchGEMV(d_A2, false, d_x2, d_y_ref2, M2, K2);
+  strix::hip::LaunchGEMV(d_A2, strix::core::GgmlType::kF32, d_x2, d_y_ref2, M2, K2);
   strix::hip::LaunchResidualAdd(d_res2, d_y_ref2, d_y_ref2, M2);
-  strix::hip::LaunchGEMVResidual(d_A2, false, d_x2, d_y_fus2, d_res2, M2, K2);
+  strix::hip::LaunchGEMVResidual(d_A2, strix::core::GgmlType::kF32, d_x2, d_y_fus2, d_res2, M2, K2);
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<float> ref2(M2);
@@ -2639,9 +2645,10 @@ void TestFusedRMSNormQKVProjectionsEquivalence() {
                       hipMemcpyHostToDevice));
 
   strix::hip::LaunchRMSNorm(d_x, d_w, d_normed, hidden_size, eps);
-  strix::hip::LaunchFusedQKVProjections(d_qw, true, d_kw, true, d_vw, true,
-                                        d_normed, d_q_ref, d_k_ref, d_v_ref,
-                                        q_dim, kv_dim, hidden_size);
+  strix::hip::LaunchFusedQKVProjections(
+      d_qw, strix::core::GgmlType::kBF16, d_kw, strix::core::GgmlType::kBF16,
+      d_vw, strix::core::GgmlType::kBF16, d_normed, d_q_ref, d_k_ref, d_v_ref,
+      q_dim, kv_dim, hidden_size);
   strix::hip::LaunchFusedRMSNormQKVProjections(
       d_x, d_w, eps, d_qw, true, d_kw, true, d_vw, true, d_q_fus, d_k_fus,
       d_v_fus, q_dim, kv_dim, hidden_size);
@@ -2768,7 +2775,9 @@ void TestFusedRMSNormSSMInputProjectionsEquivalence() {
 
   strix::hip::LaunchRMSNorm(d_x, d_w, d_normed, hidden_size, eps);
   strix::hip::LaunchFusedSSMInputProjections(
-      d_qkv, true, d_gate, true, d_alpha, true, d_beta, true, d_normed,
+      d_qkv, strix::core::GgmlType::kBF16, d_gate,
+      strix::core::GgmlType::kBF16, d_alpha, strix::core::GgmlType::kBF16,
+      d_beta, strix::core::GgmlType::kBF16, d_normed,
       d_qkv_ref, d_gate_ref, d_alpha_ref, d_beta_ref, hidden_size, qkv_size,
       inner_size, time_step_rank);
   strix::hip::LaunchFusedRMSNormSSMInputProjections(
@@ -2879,8 +2888,10 @@ void TestFusedRMSNormSwiGLUEquivalence() {
                       hipMemcpyHostToDevice));
 
   strix::hip::LaunchRMSNorm(d_x, d_w, d_normed, hidden_size, eps);
-  strix::hip::LaunchFusedSwiGLUGEMV(d_gate_w, true, d_up_w, true, d_normed,
-                                    d_out_ref, intermediate_size, hidden_size);
+  strix::hip::LaunchFusedSwiGLUGEMV(d_gate_w, strix::core::GgmlType::kBF16,
+                                    d_up_w, strix::core::GgmlType::kBF16,
+                                    d_normed, d_out_ref, intermediate_size,
+                                    hidden_size);
   strix::hip::LaunchFusedRMSNormSwiGLUGEMV(d_x, d_w, eps, d_gate_w, d_up_w,
                                            d_out_fus, intermediate_size,
                                            hidden_size);
@@ -2909,6 +2920,865 @@ void TestFusedRMSNormSwiGLUEquivalence() {
   HIP_CHECK(hipFree(d_up_w));
   HIP_CHECK(hipFree(d_out_ref));
   HIP_CHECK(hipFree(d_out_fus));
+}
+
+// opt-c162-q8k-model: isolate the Q8_K integer-dot GEMV kernel correctness
+// BEFORE it is wired into the pipeline. The kernel (Q8KBlockGEMVKernel +
+// LaunchQ8KBlockGEMV) runs the dot at Q8: each 256-wide fp32 x block is
+// quantized in-register (max|x| -> scale = max/127, xq = clamp(round(x/scale),
+// -127, 127)) and accumulated as an int32 integer MAC with qs; the single fp
+// scale (d_w * scale) is applied at block end. These checks validate index
+// math, the 292B block stride, scale derivation, and the int-MAC exactly.
+void TestQ8KBlockGEMVEquivalence() {
+  constexpr std::size_t M = 4;
+  constexpr std::size_t QK = 256;
+  constexpr std::size_t K = 512;  // K % 256 == 0 required by the kernel
+  constexpr std::size_t num_blocks = K / QK;
+
+  struct Q8KBlockTest {
+    float d;
+    std::int8_t qs[QK];
+    std::int16_t bsums[16];
+  };
+  static_assert(sizeof(Q8KBlockTest) == 292, "Q8_K block must be 292 bytes");
+
+  // Deterministic pseudo-random generator (same values on every run).
+  std::uint32_t seed = 12345U;
+  auto rnd = [&seed]() -> std::uint32_t {
+    seed = seed * 1664525U + 1013904223U;
+    return seed;
+  };
+  auto rnd_float = [&rnd](float lo, float hi) -> float {
+    const float u = static_cast<float>(rnd() & 0xFFFFU) / 65535.0F;
+    return lo + u * (hi - lo);
+  };
+
+  // Synthetic Q8_K weights: qs in [-127,127], d in ~[-2,2]; x is fp32 in [-1,1].
+  std::vector<Q8KBlockTest> h_A(M * num_blocks);
+  std::vector<float> h_x(K);
+  for (auto& blk : h_A) {
+    blk.d = rnd_float(-2.0F, 2.0F);
+    for (std::size_t i = 0; i < QK; ++i) {
+      blk.qs[i] =
+          static_cast<std::int8_t>(static_cast<int>(rnd() % 255) - 127);
+    }
+    for (std::size_t i = 0; i < 16; ++i) {
+      blk.bsums[i] = 0;
+    }
+  }
+  for (std::size_t i = 0; i < K; ++i) {
+    h_x[i] = rnd_float(-1.0F, 1.0F);
+  }
+
+  void* d_A = nullptr;
+  float *d_x = nullptr, *d_y = nullptr;
+  HIP_CHECK(hipMalloc(&d_A, M * num_blocks * sizeof(Q8KBlockTest)));
+  HIP_CHECK(hipMalloc(&d_x, K * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * num_blocks * sizeof(Q8KBlockTest),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float),
+                      hipMemcpyHostToDevice));
+
+  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ8_K, d_x, d_y,
+                                 M, K, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  std::vector<float> y_gpu(M);
+  HIP_CHECK(hipMemcpy(y_gpu.data(), d_y, M * sizeof(float),
+                      hipMemcpyDeviceToHost));
+
+  // Check 3: finite, no NaN/Inf.
+  for (std::size_t m = 0; m < M; ++m) {
+    if (!std::isfinite(y_gpu[m])) {
+      std::cerr << "Q8K GEMV produced non-finite output at row " << m << ": "
+                << y_gpu[m] << "\n";
+      std::abort();
+    }
+  }
+
+  // Check 1 (PRIMARY, tight): CPU reference replicating the integer-Q8
+  // arithmetic (max|x| -> scale, xq clamp, int32 MAC, end scale).
+  std::vector<float> y_q8_ref(M, 0.0F);
+  for (std::size_t m = 0; m < M; ++m) {
+    float sumf = 0.0F;
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+      const Q8KBlockTest& wblk = h_A[m * num_blocks + b];
+      const float d_w = wblk.d;
+      const float* xb = h_x.data() + b * QK;
+      float local_max = 0.0F;
+      for (std::size_t i = 0; i < QK; ++i) {
+        local_max = std::max(local_max, std::abs(xb[i]));
+      }
+      const float scale = (local_max > 0.0F) ? (local_max / 127.0F) : 0.0F;
+      int acc = 0;
+      for (std::size_t i = 0; i < QK; ++i) {
+        const float xv = (scale > 0.0F) ? (xb[i] / scale) : 0.0F;
+        int xq = static_cast<int>(std::round(xv));
+        xq = (xq > 127) ? 127 : xq;
+        xq = (xq < -127) ? -127 : xq;
+        acc += static_cast<int>(wblk.qs[i]) * xq;
+      }
+      sumf += d_w * scale * static_cast<float>(acc);
+    }
+    y_q8_ref[m] = sumf;
+  }
+
+  // Check 2 (SANITY, loose): CPU DotProductQ8_K (exact fp dequant dot of the
+  // weights against the raw x, no activation quant) vs GPU. The difference is
+  // the activation-quantization error, expected ~1%, not a sign/index bug.
+  std::vector<float> y_dequant_ref(M, 0.0F);
+  for (std::size_t m = 0; m < M; ++m) {
+    y_dequant_ref[m] = strix::quant::DotProductQ8_K(
+        &h_A[m * num_blocks], std::span<const float>(h_x.data(), K), K);
+  }
+
+  float primary_max_rel = 0.0F, primary_max_abs = 0.0F;
+  float sanity_max_rel = 0.0F, sanity_max_abs = 0.0F;
+  for (std::size_t m = 0; m < M; ++m) {
+    const float abs_q8 = std::abs(y_gpu[m] - y_q8_ref[m]);
+    const float rel_q8 = abs_q8 / std::max(1e-6F, std::abs(y_q8_ref[m]));
+    primary_max_rel = std::max(primary_max_rel, rel_q8);
+    primary_max_abs = std::max(primary_max_abs, abs_q8);
+
+    const float abs_san = std::abs(y_gpu[m] - y_dequant_ref[m]);
+    const float rel_san =
+        abs_san / std::max(1e-3F, std::abs(y_dequant_ref[m]));
+    sanity_max_rel = std::max(sanity_max_rel, rel_san);
+    sanity_max_abs = std::max(sanity_max_abs, abs_san);
+  }
+
+  std::cout << "Q8K GEMV PRIMARY (int-Q8 vs GPU): max_rel=" << primary_max_rel
+            << " max_abs=" << primary_max_abs << "\n";
+  std::cout << "Q8K GEMV SANITY (dequant vs GPU): max_rel=" << sanity_max_rel
+            << " max_abs=" << sanity_max_abs << "\n";
+  if (primary_max_rel >= 1e-3F || primary_max_abs >= 1e-3F) {
+    std::cerr << "Q8K GEMV integer-dot mismatch (primary)\n";
+    std::abort();
+  }
+  if (sanity_max_rel >= 2e-2F) {
+    std::cerr
+        << "Q8K GEMV dequant delta out of the expected quantization band\n";
+    std::abort();
+  }
+
+  HIP_CHECK(hipFree(d_A));
+  HIP_CHECK(hipFree(d_x));
+  HIP_CHECK(hipFree(d_y));
+}
+
+// opt-r2-q8_0: isolate the Q8_0 integer-dot GEMV kernel correctness. The
+// generalized kernel (Q8KBlockGEMVKernel + LaunchQ8KBlockGEMV) runs the dot at
+// Q8 with Q8_0 blocks (34B, QK=32): each 32-wide fp32 x block is quantized
+// in-register (max|x| -> scale = max/127, xq = clamp(round(x/scale), -127,
+// 127)) and accumulated as an int32 integer MAC with qs; the single fp scale
+// (d_w * scale) is applied at block end. Validates the Q8_0 block stride, the
+// half d read, the scale derivation, and the int-MAC exactly.
+void TestQ8_0BlockGEMVEquivalence() {
+  constexpr std::size_t M = 4;
+  constexpr std::size_t QK = 32;
+  constexpr std::size_t K = 512;  // K % 32 == 0 required by the kernel
+  constexpr std::size_t num_blocks = K / QK;
+
+  struct Q8_0BlockTest {
+    std::uint16_t d;  // fp16 bit pattern (block_q8_0.d is a half)
+    std::int8_t qs[QK];
+  };
+  static_assert(sizeof(Q8_0BlockTest) == 34, "Q8_0 block must be 34 bytes");
+
+  // Deterministic pseudo-random generator (same values on every run).
+  std::uint32_t seed = 12345U;
+  auto rnd = [&seed]() -> std::uint32_t {
+    seed = seed * 1664525U + 1013904223U;
+    return seed;
+  };
+  auto rnd_float = [&rnd](float lo, float hi) -> float {
+    const float u = static_cast<float>(rnd() & 0xFFFFU) / 65535.0F;
+    return lo + u * (hi - lo);
+  };
+  auto float_to_half_bits = [](float f) -> std::uint16_t {
+    std::uint32_t x;
+    std::memcpy(&x, &f, sizeof(x));
+    const std::uint32_t sign = (x >> 16) & 0x8000u;
+    std::int32_t exp =
+        static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
+    std::uint32_t mant = (x >> 13) & 0x3FFu;
+    if (exp <= 0) {
+      if (exp < -10) {
+        return static_cast<std::uint16_t>(sign);
+      }
+      mant |= 0x400u;
+      const std::uint32_t shift = static_cast<std::uint32_t>(14 - exp);
+      return static_cast<std::uint16_t>(sign | (mant >> shift));
+    }
+    if (exp >= 31) {
+      return static_cast<std::uint16_t>(sign | 0x7C00u | (mant ? 0x200u : 0u));
+    }
+    return static_cast<std::uint16_t>(sign |
+                                      (static_cast<std::uint32_t>(exp) << 10) |
+                                      mant);
+  };
+  auto half_to_float = [](std::uint16_t h) -> float {
+    const std::uint32_t sign = (h >> 15) & 1u;
+    const std::uint32_t exp = (h >> 10) & 0x1Fu;
+    const std::uint32_t mant = h & 0x3FFu;
+    std::uint32_t f;
+    if (exp == 0) {
+      if (mant == 0) {
+        f = sign << 31;
+      } else {
+        std::uint32_t e = 0;
+        std::uint32_t m = mant;
+        while ((m & 0x400u) == 0) {
+          m <<= 1;
+          ++e;
+        }
+        m &= 0x3FFu;
+        f = (sign << 31) | ((127 - 15 - e) << 23) | (m << 13);
+      }
+    } else if (exp == 31) {
+      f = (sign << 31) | 0x7F800000u | (mant << 13);
+    } else {
+      f = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
+    }
+    float r;
+    std::memcpy(&r, &f, sizeof(r));
+    return r;
+  };
+
+  // Synthetic Q8_0 weights: qs in [-127,127], d (as fp16) in ~[-2,2]; x is fp32
+  // in [-1,1].
+  std::vector<Q8_0BlockTest> h_A(M * num_blocks);
+  std::vector<float> h_x(K);
+  for (auto& blk : h_A) {
+    blk.d = float_to_half_bits(rnd_float(-2.0F, 2.0F));
+    for (std::size_t i = 0; i < QK; ++i) {
+      blk.qs[i] =
+          static_cast<std::int8_t>(static_cast<int>(rnd() % 255) - 127);
+    }
+  }
+  for (std::size_t i = 0; i < K; ++i) {
+    h_x[i] = rnd_float(-1.0F, 1.0F);
+  }
+
+  void* d_A = nullptr;
+  float *d_x = nullptr, *d_y = nullptr;
+  HIP_CHECK(hipMalloc(&d_A, M * num_blocks * sizeof(Q8_0BlockTest)));
+  HIP_CHECK(hipMalloc(&d_x, K * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * num_blocks * sizeof(Q8_0BlockTest),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float),
+                      hipMemcpyHostToDevice));
+
+  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ8_0, d_x, d_y,
+                                 M, K, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  std::vector<float> y_gpu(M);
+  HIP_CHECK(hipMemcpy(y_gpu.data(), d_y, M * sizeof(float),
+                      hipMemcpyDeviceToHost));
+
+  // Check 3: finite, no NaN/Inf.
+  for (std::size_t m = 0; m < M; ++m) {
+    if (!std::isfinite(y_gpu[m])) {
+      std::cerr << "Q8_0 GEMV produced non-finite output at row " << m << ": "
+                << y_gpu[m] << "\n";
+      std::abort();
+    }
+  }
+
+  // Check 1 (PRIMARY, tight): CPU reference replicating the integer-Q8
+  // arithmetic (max|x| -> scale, xq clamp, int32 MAC, end scale).
+  std::vector<float> y_q8_ref(M, 0.0F);
+  for (std::size_t m = 0; m < M; ++m) {
+    float sumf = 0.0F;
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+      const Q8_0BlockTest& wblk = h_A[m * num_blocks + b];
+      const float d_w = half_to_float(wblk.d);
+      const float* xb = h_x.data() + b * QK;
+      float local_max = 0.0F;
+      for (std::size_t i = 0; i < QK; ++i) {
+        local_max = std::max(local_max, std::abs(xb[i]));
+      }
+      const float scale = (local_max > 0.0F) ? (local_max / 127.0F) : 0.0F;
+      int acc = 0;
+      for (std::size_t i = 0; i < QK; ++i) {
+        const float xv = (scale > 0.0F) ? (xb[i] / scale) : 0.0F;
+        int xq = static_cast<int>(std::round(xv));
+        xq = (xq > 127) ? 127 : xq;
+        xq = (xq < -127) ? -127 : xq;
+        acc += static_cast<int>(wblk.qs[i]) * xq;
+      }
+      sumf += d_w * scale * static_cast<float>(acc);
+    }
+    y_q8_ref[m] = sumf;
+  }
+
+  // Check 2 (SANITY, loose): CPU DotProductQ8_0 (exact fp dequant dot, no
+  // activation quant) vs GPU. The difference is the activation-quantization
+  // error, expected ~1%.
+  std::vector<float> y_dequant_ref(M, 0.0F);
+  for (std::size_t m = 0; m < M; ++m) {
+    y_dequant_ref[m] = strix::quant::DotProductQ8_0(
+        &h_A[m * num_blocks], std::span<const float>(h_x.data(), K), K);
+  }
+
+  float primary_max_rel = 0.0F, primary_max_abs = 0.0F;
+  float sanity_max_rel = 0.0F, sanity_max_abs = 0.0F;
+  for (std::size_t m = 0; m < M; ++m) {
+    const float abs_q8 = std::abs(y_gpu[m] - y_q8_ref[m]);
+    const float rel_q8 = abs_q8 / std::max(1e-6F, std::abs(y_q8_ref[m]));
+    primary_max_rel = std::max(primary_max_rel, rel_q8);
+    primary_max_abs = std::max(primary_max_abs, abs_q8);
+
+    const float abs_san = std::abs(y_gpu[m] - y_dequant_ref[m]);
+    const float rel_san =
+        abs_san / std::max(1e-3F, std::abs(y_dequant_ref[m]));
+    sanity_max_rel = std::max(sanity_max_rel, rel_san);
+    sanity_max_abs = std::max(sanity_max_abs, abs_san);
+  }
+
+  std::cout << "Q8_0 GEMV PRIMARY (int-Q8 vs GPU): max_rel=" << primary_max_rel
+            << " max_abs=" << primary_max_abs << "\n";
+  std::cout << "Q8_0 GEMV SANITY (dequant vs GPU): max_rel=" << sanity_max_rel
+            << " max_abs=" << sanity_max_abs << "\n";
+  if (primary_max_rel >= 1e-3F || primary_max_abs >= 1e-3F) {
+    std::cerr << "Q8_0 GEMV integer-dot mismatch (primary)\n";
+    std::abort();
+  }
+  if (sanity_max_rel >= 2e-2F) {
+    std::cerr
+        << "Q8_0 GEMV dequant delta out of the expected quantization band\n";
+    std::abort();
+  }
+
+  HIP_CHECK(hipFree(d_A));
+  HIP_CHECK(hipFree(d_x));
+  HIP_CHECK(hipFree(d_y));
+}
+
+// opt-r4-q5k-q6k: isolate the Q5_K dequant-to-fp GEMV kernel correctness. The
+// generalized kernel (Q8KBlockGEMVKernel + LaunchQ8KBlockGEMV) dequantizes each
+// 256-wide Q5_K block to fp (Q5KValue) and accumulates a fp MAC against x, one
+// warp per row. Validates the 176B block stride, the Q5KValue dequant (fp16
+// d/dmin, packed qs/qh, GetQKScaleMin scale/min unpack), and the warp
+// reduction. Oracle = CPU DotProductQ5_K (dequant + dot). Dequantized values
+// are bit-identical between CPU and GPU, so the delta is pure fp reordering
+// noise.
+void TestQ5KBlockGEMVEquivalence() {
+  constexpr std::size_t M = 4;
+  constexpr std::size_t QK = 256;
+  constexpr std::size_t K = 256;  // K % 256 == 0 required by the kernel
+  constexpr std::size_t num_blocks = K / QK;
+
+  struct Q5KBlockTest {
+    std::uint16_t d;     // fp16 bit pattern
+    std::uint16_t dmin;  // fp16 bit pattern
+    std::uint8_t scales[12];
+    std::uint8_t qh[32];
+    std::uint8_t qs[128];
+  };
+  static_assert(sizeof(Q5KBlockTest) == 176, "Q5_K block must be 176 bytes");
+
+  auto float_to_half_bits = [](float f) -> std::uint16_t {
+    std::uint32_t x;
+    std::memcpy(&x, &f, sizeof(x));
+    const std::uint32_t sign = (x >> 16) & 0x8000u;
+    std::int32_t exp =
+        static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
+    std::uint32_t mant = (x >> 13) & 0x3FFu;
+    if (exp <= 0) {
+      if (exp < -10) {
+        return static_cast<std::uint16_t>(sign);
+      }
+      mant |= 0x400u;
+      const std::uint32_t shift = static_cast<std::uint32_t>(14 - exp);
+      return static_cast<std::uint16_t>(sign | (mant >> shift));
+    }
+    if (exp >= 31) {
+      return static_cast<std::uint16_t>(sign | 0x7C00u |
+                                        (mant ? 0x200u : 0u));
+    }
+    return static_cast<std::uint16_t>(
+        sign | (static_cast<std::uint32_t>(exp) << 10) | mant);
+  };
+
+  // Deterministic Q5_K weights: d=0.25, dmin=0.125; scales set so
+  // GetQKScaleMin(0..7) = (4,1) via the high-bit encoding; qh full (0xFF) on
+  // even rows / zero (0x00) on odd rows; qs nibbles 0x11/0x22/0x33/0x44 across
+  // the four 64-element groups.
+  std::vector<Q5KBlockTest> h_A(M * num_blocks);
+  std::vector<float> h_x(K);
+  const std::uint16_t d16 = float_to_half_bits(0.25F);
+  const std::uint16_t dmin16 = float_to_half_bits(0.125F);
+  const std::uint8_t scales[12] = {0x04, 0x04, 0x04, 0x04, 0x01, 0x01,
+                                   0x01, 0x01, 0x14, 0x14, 0x14, 0x14};
+  const std::uint8_t nibbles[4] = {0x11, 0x22, 0x33, 0x44};
+  for (std::size_t r = 0; r < M * num_blocks; ++r) {
+    Q5KBlockTest& blk = h_A[r];
+    blk.d = d16;
+    blk.dmin = dmin16;
+    std::memcpy(blk.scales, scales, sizeof(scales));
+    std::memset(blk.qh, (r % 2 == 0) ? 0xFF : 0x00, sizeof(blk.qh));
+    for (std::size_t g = 0; g < 4; ++g) {
+      std::memset(blk.qs + (g * 32), nibbles[g], 32);
+    }
+  }
+  for (std::size_t i = 0; i < K; ++i) {
+    h_x[i] = 0.1F + (static_cast<float>((i * 37 + 11) % 1000) / 2000.0F);
+  }
+
+  void* d_A = nullptr;
+  float *d_x = nullptr, *d_y = nullptr;
+  HIP_CHECK(hipMalloc(&d_A, M * num_blocks * sizeof(Q5KBlockTest)));
+  HIP_CHECK(hipMalloc(&d_x, K * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * num_blocks * sizeof(Q5KBlockTest),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float),
+                      hipMemcpyHostToDevice));
+
+  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ5_K, d_x, d_y,
+                                 M, K, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  std::vector<float> y_gpu(M);
+  HIP_CHECK(hipMemcpy(y_gpu.data(), d_y, M * sizeof(float),
+                      hipMemcpyDeviceToHost));
+
+  // CPU oracle: exact fp dequant + dot (no activation quantization).
+  std::vector<float> y_ref(M, 0.0F);
+  for (std::size_t m = 0; m < M; ++m) {
+    y_ref[m] = strix::quant::DotProductQ5_K(
+        &h_A[m * num_blocks], std::span<const float>(h_x.data(), K), K);
+  }
+
+  float max_rel = 0.0F;
+  for (std::size_t m = 0; m < M; ++m) {
+    if (!std::isfinite(y_gpu[m])) {
+      std::cerr << "Q5_K GEMV produced non-finite output at row " << m << ": "
+                << y_gpu[m] << "\n";
+      std::abort();
+    }
+    const float rel =
+        std::abs(y_gpu[m] - y_ref[m]) / std::max(1e-6F, std::abs(y_ref[m]));
+    max_rel = std::max(max_rel, rel);
+  }
+
+  std::cout << "Q5_K GEMV (dequant-dot vs GPU): max_rel=" << max_rel << "\n";
+  if (max_rel >= 1e-3F) {
+    std::cerr << "Q5_K GEMV dequant-dot mismatch\n";
+    std::abort();
+  }
+
+  HIP_CHECK(hipFree(d_A));
+  HIP_CHECK(hipFree(d_x));
+  HIP_CHECK(hipFree(d_y));
+}
+
+// opt-r4-q5k-q6k: isolate the Q6_K dequant-to-fp GEMV kernel correctness. The
+// generalized kernel (Q8KBlockGEMVKernel + LaunchQ8KBlockGEMV) dequantizes each
+// 256-wide Q6_K block to fp (Q6KValue) and accumulates a fp MAC against x, one
+// warp per row. Validates the 210B block stride, the Q6KValue dequant (fp16 d,
+// packed ql/qh, int8 scales), and the warp reduction. Oracle = CPU
+// DotProductQ6_K (dequant + dot), matched modulo fp reordering noise.
+void TestQ6KBlockGEMVEquivalence() {
+  constexpr std::size_t M = 4;
+  constexpr std::size_t QK = 256;
+  constexpr std::size_t K = 256;  // K % 256 == 0 required by the kernel
+  constexpr std::size_t num_blocks = K / QK;
+
+  struct Q6KBlockTest {
+    std::uint8_t ql[128];
+    std::uint8_t qh[64];
+    std::int8_t scales[16];
+    std::uint16_t d;  // fp16 bit pattern
+  };
+  static_assert(sizeof(Q6KBlockTest) == 210, "Q6_K block must be 210 bytes");
+
+  auto float_to_half_bits = [](float f) -> std::uint16_t {
+    std::uint32_t x;
+    std::memcpy(&x, &f, sizeof(x));
+    const std::uint32_t sign = (x >> 16) & 0x8000u;
+    std::int32_t exp =
+        static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
+    std::uint32_t mant = (x >> 13) & 0x3FFu;
+    if (exp <= 0) {
+      if (exp < -10) {
+        return static_cast<std::uint16_t>(sign);
+      }
+      mant |= 0x400u;
+      const std::uint32_t shift = static_cast<std::uint32_t>(14 - exp);
+      return static_cast<std::uint16_t>(sign | (mant >> shift));
+    }
+    if (exp >= 31) {
+      return static_cast<std::uint16_t>(sign | 0x7C00u |
+                                        (mant ? 0x200u : 0u));
+    }
+    return static_cast<std::uint16_t>(
+        sign | (static_cast<std::uint32_t>(exp) << 10) | mant);
+  };
+
+  // Deterministic Q6_K weights: d=0.3; ql varies per byte, qh=0xFF (every
+  // 2-bit field = 3 -> quant = 16 + ql nibble, always positive), scales are
+  // positive int8 [7..4]. No cancellation -> robust fp reordering comparison.
+  std::vector<Q6KBlockTest> h_A(M * num_blocks);
+  std::vector<float> h_x(K);
+  const std::uint16_t d16 = float_to_half_bits(0.3F);
+  for (std::size_t r = 0; r < M * num_blocks; ++r) {
+    Q6KBlockTest& blk = h_A[r];
+    blk.d = d16;
+    for (std::size_t i = 0; i < 128; ++i) {
+      blk.ql[i] = static_cast<std::uint8_t>((i * 13 + 5) & 0xFF);
+    }
+    std::memset(blk.qh, 0xFF, sizeof(blk.qh));
+    for (std::size_t i = 0; i < 16; ++i) {
+      blk.scales[i] = static_cast<std::int8_t>(7 - (i % 4));
+    }
+  }
+  for (std::size_t i = 0; i < K; ++i) {
+    h_x[i] = 0.1F + (static_cast<float>((i * 37 + 11) % 1000) / 2000.0F);
+  }
+
+  void* d_A = nullptr;
+  float *d_x = nullptr, *d_y = nullptr;
+  HIP_CHECK(hipMalloc(&d_A, M * num_blocks * sizeof(Q6KBlockTest)));
+  HIP_CHECK(hipMalloc(&d_x, K * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * num_blocks * sizeof(Q6KBlockTest),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float),
+                      hipMemcpyHostToDevice));
+
+  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ6_K, d_x, d_y,
+                                 M, K, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  std::vector<float> y_gpu(M);
+  HIP_CHECK(hipMemcpy(y_gpu.data(), d_y, M * sizeof(float),
+                      hipMemcpyDeviceToHost));
+
+  // CPU oracle: exact fp dequant + dot (no activation quantization).
+  std::vector<float> y_ref(M, 0.0F);
+  for (std::size_t m = 0; m < M; ++m) {
+    y_ref[m] = strix::quant::DotProductQ6_K(
+        &h_A[m * num_blocks], std::span<const float>(h_x.data(), K), K);
+  }
+
+  float max_rel = 0.0F;
+  for (std::size_t m = 0; m < M; ++m) {
+    if (!std::isfinite(y_gpu[m])) {
+      std::cerr << "Q6_K GEMV produced non-finite output at row " << m << ": "
+                << y_gpu[m] << "\n";
+      std::abort();
+    }
+    const float rel =
+        std::abs(y_gpu[m] - y_ref[m]) / std::max(1e-6F, std::abs(y_ref[m]));
+    max_rel = std::max(max_rel, rel);
+  }
+
+  std::cout << "Q6_K GEMV (dequant-dot vs GPU): max_rel=" << max_rel << "\n";
+  if (max_rel >= 1e-3F) {
+    std::cerr << "Q6_K GEMV dequant-dot mismatch\n";
+    std::abort();
+  }
+
+  HIP_CHECK(hipFree(d_A));
+  HIP_CHECK(hipFree(d_x));
+  HIP_CHECK(hipFree(d_y));
+}
+
+void TestDequantizeQ8KToBf16Equivalence() {
+  constexpr std::size_t QK = 256;
+  constexpr std::size_t num_blocks = 4;
+  constexpr std::size_t n_elems = num_blocks * QK;
+
+  struct Q8KBlockTest {
+    float d;
+    std::int8_t qs[QK];
+    std::int16_t bsums[16];
+  };
+  static_assert(sizeof(Q8KBlockTest) == 292, "Q8_K block must be 292 bytes");
+
+  // Deterministic pseudo-random weights (same values every run).
+  std::uint32_t seed = 777U;
+  auto rnd = [&seed]() -> std::uint32_t {
+    seed = seed * 1664525U + 1013904223U;
+    return seed;
+  };
+  auto rnd_float = [&rnd](float lo, float hi) -> float {
+    const float u = static_cast<float>(rnd() & 0xFFFFU) / 65535.0F;
+    return lo + u * (hi - lo);
+  };
+
+  std::vector<Q8KBlockTest> h_w(num_blocks);
+  for (auto& blk : h_w) {
+    blk.d = rnd_float(-1.0F, 1.0F);
+    for (std::size_t i = 0; i < QK; ++i) {
+      blk.qs[i] =
+          static_cast<std::int8_t>(static_cast<int>(rnd() % 255) - 127);
+    }
+    for (std::size_t i = 0; i < 16; ++i) {
+      blk.bsums[i] = 0;
+    }
+  }
+
+  // CPU reference oracle (full-precision float dequant).
+  std::vector<float> h_ref(n_elems);
+  strix::quant::DequantizeQ8_K(h_w.data(), h_ref.data(), n_elems);
+
+  void* d_w = nullptr;
+  hip_bfloat16* d_out = nullptr;
+  HIP_CHECK(hipMalloc(&d_w, num_blocks * sizeof(Q8KBlockTest)));
+  HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_out),
+                      n_elems * sizeof(hip_bfloat16)));
+  HIP_CHECK(hipMemcpy(d_w, h_w.data(), num_blocks * sizeof(Q8KBlockTest),
+                      hipMemcpyHostToDevice));
+
+  strix::hip::LaunchDequantizeQ8KToBf16(d_w, d_out, n_elems, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  std::vector<hip_bfloat16> h_gpu(n_elems);
+  HIP_CHECK(hipMemcpy(h_gpu.data(), d_out, n_elems * sizeof(hip_bfloat16),
+                      hipMemcpyDeviceToHost));
+
+  float max_rel = 0.0F, max_abs = 0.0F;
+  for (std::size_t i = 0; i < n_elems; ++i) {
+    std::uint16_t bits = 0;
+    std::memcpy(&bits, &h_gpu[i], sizeof(bits));
+    const float gpu = Bf16BitsToFloat(bits);
+    const float ref = h_ref[i];
+    if (!std::isfinite(gpu)) {
+      std::cerr << "Q8K dequant produced non-finite output at " << i << ": "
+                << gpu << "\n";
+      std::abort();
+    }
+    const float abs_d = std::abs(gpu - ref);
+    const float rel_d = abs_d / std::max(1e-3F, std::abs(ref));
+    max_rel = std::max(max_rel, rel_d);
+    max_abs = std::max(max_abs, abs_d);
+  }
+  std::cout << "Q8K dequant (GPU BF16 vs CPU): max_rel=" << max_rel
+            << " max_abs=" << max_abs << "\n";
+  if (max_rel >= 1e-2F) {
+    std::cerr << "Q8K dequant BF16 mismatch (relative)\n";
+    std::abort();
+  }
+
+  HIP_CHECK(hipFree(d_w));
+  HIP_CHECK(hipFree(d_out));
+}
+
+// opt-c162-q8k-prefill-dequant (extended): shared BF16-vs-CPU oracle check.
+// The device kernel writes (hip_bfloat16)(per_value_dequant), so the GPU value
+// is the CPU fp32 oracle rounded to BF16. Compare in the fp32 domain with a
+// small relative tolerance (BF16 has ~2-3 significant digits).
+static void CheckDequantToBf16(const char* name, const std::vector<float>& ref,
+                               const std::vector<hip_bfloat16>& gpu) {
+  float max_rel = 0.0F, max_abs = 0.0F;
+  for (std::size_t i = 0; i < ref.size(); ++i) {
+    std::uint16_t bits = 0;
+    std::memcpy(&bits, &gpu[i], sizeof(bits));
+    const float g = Bf16BitsToFloat(bits);
+    const float r = ref[i];
+    if (!std::isfinite(g)) {
+      std::cerr << name << " dequant produced non-finite output at " << i
+                << ": " << g << "\n";
+      std::abort();
+    }
+    const float abs_d = std::abs(g - r);
+    const float rel_d = abs_d / std::max(1e-3F, std::abs(r));
+    max_rel = std::max(max_rel, rel_d);
+    max_abs = std::max(max_abs, abs_d);
+  }
+  std::cout << name << " dequant (GPU BF16 vs CPU): max_rel=" << max_rel
+            << " max_abs=" << max_abs << "\n";
+  if (max_rel >= 1e-2F) {
+    std::cerr << name << " dequant BF16 mismatch (relative)\n";
+    std::abort();
+  }
+}
+
+// opt-c162-q8k-prefill-dequant (extended): validate the type-dispatched
+// LaunchDequantizeToBf16 against the CPU per-type oracles (DequantizeQ8_0 /
+// Q5_K / Q6_K / Q8_K). For each type we build a small deterministic quantized
+// region, dequantize on the device to a BF16 scratch, and compare to the CPU
+// oracle rounded to BF16.
+void TestDequantizeToBf16Equivalence() {
+  auto float_to_half_bits = [](float f) -> std::uint16_t {
+    std::uint32_t x;
+    std::memcpy(&x, &f, sizeof(x));
+    const std::uint32_t sign = (x >> 16) & 0x8000u;
+    std::int32_t exp =
+        static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
+    std::uint32_t mant = (x >> 13) & 0x3FFu;
+    if (exp <= 0) {
+      if (exp < -10) {
+        return static_cast<std::uint16_t>(sign);
+      }
+      mant |= 0x400u;
+      const std::uint32_t shift = static_cast<std::uint32_t>(14 - exp);
+      return static_cast<std::uint16_t>(sign | (mant >> shift));
+    }
+    if (exp >= 31) {
+      return static_cast<std::uint16_t>(sign | 0x7C00u |
+                                        (mant ? 0x200u : 0u));
+    }
+    return static_cast<std::uint16_t>(
+        sign | (static_cast<std::uint32_t>(exp) << 10) | mant);
+  };
+
+  // ---- Q8_0: 2 blocks (64 elems), d=0.5, deterministic qs across [-127,127].
+  constexpr std::size_t Q80_QK = 32;
+  constexpr std::size_t Q80_BLOCKS = 2;
+  constexpr std::size_t Q80_ELEMS = Q80_BLOCKS * Q80_QK;
+  struct Q8_0BlockTest {
+    std::uint16_t d;  // fp16 bit pattern
+    std::int8_t qs[Q80_QK];
+  };
+  static_assert(sizeof(Q8_0BlockTest) == 34, "Q8_0 block must be 34 bytes");
+
+  std::vector<Q8_0BlockTest> h_q80(Q80_BLOCKS);
+  for (auto& blk : h_q80) {
+    blk.d = float_to_half_bits(0.5F);
+    for (std::size_t i = 0; i < Q80_QK; ++i) {
+      blk.qs[i] = static_cast<std::int8_t>((i * 13 + 7) % 255 - 127);
+    }
+  }
+  std::vector<float> h_ref_q80(Q80_ELEMS);
+  strix::quant::DequantizeQ8_0(h_q80.data(), h_ref_q80.data(), Q80_ELEMS);
+
+  void* d_w = nullptr;
+  hip_bfloat16* d_out = nullptr;
+  HIP_CHECK(hipMalloc(&d_w, Q80_BLOCKS * sizeof(Q8_0BlockTest)));
+  HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_out),
+                      Q80_ELEMS * sizeof(hip_bfloat16)));
+  HIP_CHECK(hipMemcpy(d_w, h_q80.data(), Q80_BLOCKS * sizeof(Q8_0BlockTest),
+                      hipMemcpyHostToDevice));
+  strix::hip::LaunchDequantizeToBf16(strix::core::GgmlType::kQ8_0, d_w, d_out,
+                                     Q80_ELEMS, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  std::vector<hip_bfloat16> h_gpu_q80(Q80_ELEMS);
+  HIP_CHECK(hipMemcpy(h_gpu_q80.data(), d_out, Q80_ELEMS * sizeof(hip_bfloat16),
+                      hipMemcpyDeviceToHost));
+  CheckDequantToBf16("Q8_0", h_ref_q80, h_gpu_q80);
+  HIP_CHECK(hipFree(d_w));
+  HIP_CHECK(hipFree(d_out));
+
+  // ---- Q5_K: 1 block (256 elems), d=0.25 dmin=0.125, high-bit scales,
+  // qh=0xFF, qs nibbles across the four 64-element groups.
+  constexpr std::size_t QK = 256;
+  struct Q5KBlockTest {
+    std::uint16_t d;
+    std::uint16_t dmin;
+    std::uint8_t scales[12];
+    std::uint8_t qh[32];
+    std::uint8_t qs[128];
+  };
+  static_assert(sizeof(Q5KBlockTest) == 176, "Q5_K block must be 176 bytes");
+
+  Q5KBlockTest q5k{};
+  q5k.d = float_to_half_bits(0.25F);
+  q5k.dmin = float_to_half_bits(0.125F);
+  const std::uint8_t scales[12] = {0x04, 0x04, 0x04, 0x04, 0x01, 0x01,
+                                   0x01, 0x01, 0x14, 0x14, 0x14, 0x14};
+  std::memcpy(q5k.scales, scales, sizeof(scales));
+  std::memset(q5k.qh, 0xFF, sizeof(q5k.qh));
+  const std::uint8_t nibbles[4] = {0x11, 0x22, 0x33, 0x44};
+  for (std::size_t g = 0; g < 4; ++g) {
+    std::memset(q5k.qs + (g * 32), nibbles[g], 32);
+  }
+  std::vector<float> h_ref_q5k(QK);
+  strix::quant::DequantizeQ5_K(&q5k, h_ref_q5k.data(), QK);
+
+  HIP_CHECK(hipMalloc(&d_w, sizeof(Q5KBlockTest)));
+  HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_out),
+                      QK * sizeof(hip_bfloat16)));
+  HIP_CHECK(hipMemcpy(d_w, &q5k, sizeof(Q5KBlockTest), hipMemcpyHostToDevice));
+  strix::hip::LaunchDequantizeToBf16(strix::core::GgmlType::kQ5_K, d_w, d_out,
+                                     QK, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  std::vector<hip_bfloat16> h_gpu_q5k(QK);
+  HIP_CHECK(hipMemcpy(h_gpu_q5k.data(), d_out, QK * sizeof(hip_bfloat16),
+                      hipMemcpyDeviceToHost));
+  CheckDequantToBf16("Q5_K", h_ref_q5k, h_gpu_q5k);
+  HIP_CHECK(hipFree(d_w));
+  HIP_CHECK(hipFree(d_out));
+
+  // ---- Q6_K: 1 block, d=0.3, ql varies, qh=0xFF, scales [7..4] (positive).
+  struct Q6KBlockTest {
+    std::uint8_t ql[128];
+    std::uint8_t qh[64];
+    std::int8_t scales[16];
+    std::uint16_t d;  // fp16 bit pattern
+  };
+  static_assert(sizeof(Q6KBlockTest) == 210, "Q6_K block must be 210 bytes");
+
+  Q6KBlockTest q6k{};
+  q6k.d = float_to_half_bits(0.3F);
+  for (std::size_t i = 0; i < 128; ++i) {
+    q6k.ql[i] = static_cast<std::uint8_t>((i * 13 + 5) & 0xFF);
+  }
+  std::memset(q6k.qh, 0xFF, sizeof(q6k.qh));
+  for (std::size_t i = 0; i < 16; ++i) {
+    q6k.scales[i] = static_cast<std::int8_t>(7 - (i % 4));
+  }
+  std::vector<float> h_ref_q6k(QK);
+  strix::quant::DequantizeQ6_K(&q6k, h_ref_q6k.data(), QK);
+
+  HIP_CHECK(hipMalloc(&d_w, sizeof(Q6KBlockTest)));
+  HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_out),
+                      QK * sizeof(hip_bfloat16)));
+  HIP_CHECK(hipMemcpy(d_w, &q6k, sizeof(Q6KBlockTest), hipMemcpyHostToDevice));
+  strix::hip::LaunchDequantizeToBf16(strix::core::GgmlType::kQ6_K, d_w, d_out,
+                                     QK, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  std::vector<hip_bfloat16> h_gpu_q6k(QK);
+  HIP_CHECK(hipMemcpy(h_gpu_q6k.data(), d_out, QK * sizeof(hip_bfloat16),
+                      hipMemcpyDeviceToHost));
+  CheckDequantToBf16("Q6_K", h_ref_q6k, h_gpu_q6k);
+  HIP_CHECK(hipFree(d_w));
+  HIP_CHECK(hipFree(d_out));
+
+  // ---- Q8_K via the dispatcher (delegates to the existing Q8_K kernel):
+  // 2 blocks (512 elems), deterministic d/qs.
+  constexpr std::size_t Q8K_QK = 256;
+  constexpr std::size_t Q8K_BLOCKS = 2;
+  constexpr std::size_t Q8K_ELEMS = Q8K_BLOCKS * Q8K_QK;
+  struct Q8KBlockTest {
+    float d;
+    std::int8_t qs[Q8K_QK];
+    std::int16_t bsums[16];
+  };
+  static_assert(sizeof(Q8KBlockTest) == 292, "Q8_K block must be 292 bytes");
+
+  std::vector<Q8KBlockTest> h_q8k(Q8K_BLOCKS);
+  for (std::size_t blk_idx = 0; blk_idx < Q8K_BLOCKS; ++blk_idx) {
+    Q8KBlockTest& blk = h_q8k[blk_idx];
+    blk.d = 0.5F + static_cast<float>(blk_idx);
+    for (std::size_t i = 0; i < Q8K_QK; ++i) {
+      blk.qs[i] = static_cast<std::int8_t>((i * 7 + 13) % 255 - 127);
+    }
+    std::memset(blk.bsums, 0, sizeof(blk.bsums));
+  }
+  std::vector<float> h_ref_q8k(Q8K_ELEMS);
+  strix::quant::DequantizeQ8_K(h_q8k.data(), h_ref_q8k.data(), Q8K_ELEMS);
+
+  HIP_CHECK(hipMalloc(&d_w, Q8K_BLOCKS * sizeof(Q8KBlockTest)));
+  HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_out),
+                      Q8K_ELEMS * sizeof(hip_bfloat16)));
+  HIP_CHECK(hipMemcpy(d_w, h_q8k.data(), Q8K_BLOCKS * sizeof(Q8KBlockTest),
+                      hipMemcpyHostToDevice));
+  strix::hip::LaunchDequantizeToBf16(strix::core::GgmlType::kQ8_K, d_w, d_out,
+                                     Q8K_ELEMS, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  std::vector<hip_bfloat16> h_gpu_q8k(Q8K_ELEMS);
+  HIP_CHECK(hipMemcpy(h_gpu_q8k.data(), d_out, Q8K_ELEMS * sizeof(hip_bfloat16),
+                      hipMemcpyDeviceToHost));
+  CheckDequantToBf16("Q8_K", h_ref_q8k, h_gpu_q8k);
+  HIP_CHECK(hipFree(d_w));
+  HIP_CHECK(hipFree(d_out));
 }
 
 int main() {
@@ -2946,6 +3816,12 @@ int main() {
   TestFusedRMSNormQKVProjectionsEquivalence();
   TestFusedRMSNormSSMInputProjectionsEquivalence();
   TestFusedRMSNormSwiGLUEquivalence();
+  TestQ8KBlockGEMVEquivalence();
+  TestQ8_0BlockGEMVEquivalence();
+  TestQ5KBlockGEMVEquivalence();
+  TestQ6KBlockGEMVEquivalence();
+  TestDequantizeQ8KToBf16Equivalence();
+  TestDequantizeToBf16Equivalence();
   std::cout << "All Qwen HIP GPU kernel tests passed on gfx1151.\n";
   return 0;
 }

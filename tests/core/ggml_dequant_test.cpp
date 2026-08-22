@@ -204,6 +204,144 @@ void TestQ3() {
              expected_dot, "Q3_K dot product");
 }
 
+void TestQ8() {
+  struct Q8Block {
+    float d;
+    std::int8_t qs[256];
+    std::int16_t bsums[16];
+  };
+  Q8Block block{};
+  block.d = 0.00390625F;
+  for (std::size_t i = 0; i < kBlockElements; ++i) {
+    block.qs[i] =
+        static_cast<std::int8_t>(static_cast<int>(i % 65) - 32);
+    block.bsums[i / 16] += block.qs[i];
+  }
+
+  std::array<float, kBlockElements> actual{};
+  strix::quant::DequantizeQ8_K(&block, actual.data(), actual.size());
+
+  std::array<float, kBlockElements> expected{};
+  for (std::size_t index = 0; index < kBlockElements; ++index) {
+    expected[index] = block.d * static_cast<float>(block.qs[index]);
+    ExpectNear(actual[index], expected[index], "Q8_K dequant value");
+  }
+
+  std::array<float, kBlockElements> vector{};
+  std::iota(vector.begin(), vector.end(), -0.75F);
+  const float expected_dot = std::inner_product(
+      expected.begin(), expected.end(), vector.begin(), 0.0F);
+  ExpectNear(strix::quant::DotProductQ8_K(&block, vector, vector.size()),
+             expected_dot, "Q8_K dot product");
+}
+
+void TestQ8_0() {
+  constexpr std::size_t kQ8_0Elements = 32;
+  struct Q8_0Block {
+    std::uint16_t d;
+    std::int8_t qs[kQ8_0Elements];
+  };
+  static_assert(sizeof(Q8_0Block) == 34);
+  Q8_0Block block{};
+  block.d = 0x3800;  // fp16 0.5
+  for (std::size_t i = 0; i < kQ8_0Elements; ++i) {
+    block.qs[i] =
+        static_cast<std::int8_t>(static_cast<int>(i % 65) - 32);
+  }
+
+  std::array<float, kQ8_0Elements> actual{};
+  strix::quant::DequantizeQ8_0(&block, actual.data(), actual.size());
+
+  std::array<float, kQ8_0Elements> expected{};
+  for (std::size_t index = 0; index < kQ8_0Elements; ++index) {
+    expected[index] = strix::quant::Fp16ToFloat(block.d) *
+                      static_cast<float>(block.qs[index]);
+    ExpectNear(actual[index], expected[index], "Q8_0 dequant value");
+  }
+
+  std::array<float, kQ8_0Elements> vector{};
+  std::iota(vector.begin(), vector.end(), -0.75F);
+  const float expected_dot = std::inner_product(
+      expected.begin(), expected.end(), vector.begin(), 0.0F);
+  ExpectNear(strix::quant::DotProductQ8_0(&block, vector, vector.size()),
+             expected_dot, "Q8_0 dot product");
+}
+
+void TestQ5_K() {
+  constexpr std::size_t kQ5Elements = 256;
+  struct Q5Block {
+    std::uint16_t d;
+    std::uint16_t dmin;
+    std::uint8_t scales[12];
+    std::uint8_t qh[32];
+    std::uint8_t qs[128];
+  };
+  static_assert(sizeof(Q5Block) == 176);
+
+  // QuantizedRowBytes: Q5_K is 176 bytes per 256-element block; Q8_0 is 34
+  // bytes per 32-element block (alignment now permits elements%32==0).
+  if (strix::quant::QuantizedRowBytes(strix::core::GgmlType::kQ5_K,
+                                      kQ5Elements) != 176 ||
+      strix::quant::QuantizedRowBytes(strix::core::GgmlType::kQ8_0, 32) != 34) {
+    std::cerr << "Assertion failed: QuantizedRowBytes contract\n";
+    std::exit(1);
+  }
+
+  // Build a handcrafted block. scales[12] is chosen so GetQ4ScaleMin(0..7)
+  // yields (scale=4, min=1) for every index: packed[0..3]=4, packed[4..7]=1,
+  // packed[8..11]=0x14 (high-half scale/min encodings) -> sc=4, m=1 all 8.
+  const auto make_block = [](bool high_bits) {
+    Q5Block block{};
+    block.d = 0x3400;    // fp16 0.25
+    block.dmin = 0x3000;  // fp16 0.125
+    for (std::size_t index = 0; index < 4; ++index) {
+      block.scales[index] = 4;
+      block.scales[index + 4] = 1;
+      block.scales[index + 8] = 0x14;
+    }
+    // qs[gg*32+lane] nibbles: group 0 low nibble=1, group 1 -> 2, etc.
+    for (std::size_t gg = 0; gg < 4; ++gg) {
+      const auto nibble = static_cast<std::uint8_t>(gg + 1);
+      const auto val = static_cast<std::uint8_t>(nibble | (nibble << 4U));
+      for (std::size_t lane = 0; lane < 32; ++lane) {
+        block.qs[(gg * 32) + lane] = val;
+      }
+    }
+    if (high_bits) {
+      for (std::size_t lane = 0; lane < 32; ++lane) {
+        block.qh[lane] = 0xFF;
+      }
+    }
+    return block;
+  };
+
+  const auto check_block = [](const Q5Block& block, bool high_bits) {
+    std::array<float, kQ5Elements> actual{};
+    strix::quant::DequantizeQ5_K(&block, actual.data(), actual.size());
+
+    std::array<float, kQ5Elements> expected{};
+    for (std::size_t index = 0; index < kQ5Elements; ++index) {
+      const std::size_t gg = index / 64;
+      const auto quant =
+          static_cast<float>(gg + 1 + (high_bits ? 16 : 0));
+      // Fp16ToFloat(0x3400)=0.25, Fp16ToFloat(0x3000)=0.125, sc=4, m=1.
+      expected[index] = quant - 0.125F;
+      ExpectNear(actual[index], expected[index],
+                 high_bits ? "Q5_K dequant (high bits)" : "Q5_K dequant value");
+    }
+
+    std::array<float, kQ5Elements> unit{};
+    unit.fill(1.0F);
+    const float expected_dot =
+        std::accumulate(expected.begin(), expected.end(), 0.0F);
+    ExpectNear(strix::quant::DotProductQ5_K(&block, unit, unit.size()),
+               expected_dot, "Q5_K dot product");
+  };
+
+  check_block(make_block(false), false);  // no high bits
+  check_block(make_block(true), true);    // all high bits set
+}
+
 struct ModelSample {
   std::size_t index;
   float value;
@@ -314,6 +452,9 @@ int main() {
   TestQ4();
   TestQ6();
   TestQ3();
+  TestQ8();
+  TestQ8_0();
+  TestQ5_K();
   if (const char* model = std::getenv("STRIX_MTP_MODEL");
       model != nullptr && std::string_view(model).size() > 0) {
     TestModelRows(model);

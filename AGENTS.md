@@ -19,9 +19,10 @@ nix develop                        # dev shell
 
 - `git add` before `nix build` — Nix sees only tracked files.
 - Use binaries under `build/gpu-test` for focused correctness and debugging
-  only; that CMake tree is intentionally unoptimized. Measure and report
-  inference performance with the release binaries produced by `nix build`
-  under `result/bin`.
+  only; that CMake tree is intentionally unoptimized. Run models and measure
+  performance with the release binaries produced by `nix build` under
+  `result/bin`. Example:
+  `./result/bin/strix-server bench --model <model.gguf> -p 128 -n 16 --validate-prefill 128`.
 
 ## Development
 
