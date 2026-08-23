@@ -3922,8 +3922,8 @@ void TestGpuFfnForwardModule() {
 
   std::span<const float> x(d_x, hidden_size);
   // The HIP fused path computes both GEMVs internally; gate/up scratch are unused.
-  std::span<float> gate_scratch(nullptr, 0);
-  std::span<float> up_scratch(nullptr, 0);
+  std::span<float> gate_scratch;
+  std::span<float> up_scratch;
   std::span<float> act(d_act, intermediate_size);
   std::span<float> out(d_out, hidden_size);
   strix::models::qwen::FfnForward(ctx, view, x, gate_scratch, up_scratch, act, out);

@@ -324,8 +324,8 @@ endif()
 
 if (ENGINE_ENABLE_XRT)
   target_sources(strix_core PRIVATE
-    src/core/xdna2/qwen_mtp_eh_proj.cpp
-    src/core/xdna2/qwen_mtp_rmsnorm.cpp)
+    src/models/qwen/xdna2/qwen_mtp_eh_proj.cpp
+    src/models/qwen/xdna2/qwen_mtp_rmsnorm.cpp)
   target_compile_definitions(strix_core PUBLIC ENGINE_ENABLE_XRT=1)
   target_compile_definitions(strix_core PRIVATE
     STRIX_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR="${STRIX_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR}"
