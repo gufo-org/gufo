@@ -245,7 +245,7 @@ add_library(strix_core STATIC
   src/models/qwen/modules/ssm.cpp
   src/models/qwen/modules/unembed.cpp
   src/models/qwen/qwen_generator.cpp
-  src/core/speculative/qwen_mtp_reference.cpp
+  src/models/qwen/qwen_mtp_reference.cpp
   src/testing/compare/logit_comparator.cpp
   src/eval/regrade.cpp
   src/core/hip/hipblaslt_plan_database.cpp

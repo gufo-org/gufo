@@ -1,4 +1,4 @@
-#include "src/core/speculative/qwen_mtp_reference.hpp"
+#include "src/models/qwen/qwen_mtp_reference.hpp"
 
 #include <algorithm>
 #include <array>

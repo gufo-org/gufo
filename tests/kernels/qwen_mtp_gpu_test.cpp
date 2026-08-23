@@ -16,7 +16,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen/hip/qwen_gpu_executor.hpp"
-#include "src/core/speculative/qwen_mtp_reference.hpp"
+#include "src/models/qwen/qwen_mtp_reference.hpp"
 
 namespace {
 
