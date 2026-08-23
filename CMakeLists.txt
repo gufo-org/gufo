@@ -286,7 +286,9 @@ if (ENGINE_ENABLE_HIP)
     src/models/qwen/hip/qwen_gpu_executor.cpp
     src/models/qwen/hip/qwen_gpu_model_loader.cpp
     src/models/qwen/hip/qwen_gpu_prefill.cpp
-    src/models/qwen/hip/qwen_mtp_gpu.cpp
+    src/models/qwen/hip/mtp/model.cpp
+    src/models/qwen/hip/mtp/executor.cpp
+    src/models/qwen/hip/mtp/backend.cpp
     src/models/minimax_h3/audio_vae.hip
     src/models/minimax_h3/denoiser.hip
     src/models/minimax_h3/dit.hip
