@@ -713,7 +713,7 @@ if (BUILD_TESTING)
   target_link_libraries(qwen_forward_test PRIVATE strix_core)
 
   add_test(NAME qwen_forward_test COMMAND qwen_forward_test)
-  set_tests_properties(qwen_forward_test PROPERTIES LABELS "cpu;models;forward")
+  set_tests_properties(qwen_forward_test PROPERTIES LABELS "cpu;models;forward;reference")
 
   add_executable(qwen_generator_test tests/models/qwen_generator_test.cpp)
   target_link_libraries(qwen_generator_test PRIVATE strix_core)
@@ -725,7 +725,7 @@ if (BUILD_TESTING)
   target_link_libraries(qwen_ssm_test PRIVATE strix_core)
 
   add_test(NAME qwen_ssm_test COMMAND qwen_ssm_test)
-  set_tests_properties(qwen_ssm_test PROPERTIES LABELS "cpu;models;ssm")
+  set_tests_properties(qwen_ssm_test PROPERTIES LABELS "cpu;models;ssm;reference")
   add_executable(qwen_l1_ssm_module_test tests/models/qwen_l1_ssm_module_test.cpp)
   target_link_libraries(qwen_l1_ssm_module_test PRIVATE strix_core)
   add_test(NAME qwen_l1_ssm_module_test COMMAND qwen_l1_ssm_module_test)
