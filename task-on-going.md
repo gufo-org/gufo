@@ -57,3 +57,27 @@ throughput. Options: (a) accept regression (correctness/refactor done, perf defe
 later tiled/reused kernel), (b) revert quant branch to dequant+hipblas for now, (c) design a
 faster tiled direct-quant GEMM (weight-tile reuse across batch) before landing. Recommend (c)
 as the path consistent with the no-dequant hard rule; (b) is the safe interim.
+
+---
+
+## Qwen refactor — Phase 0 baseline (recorded 2026-08-23)
+
+Status: **correctness baseline frozen**; perf benchmark deferred (tree known perf-red).
+
+### Baseline anchor
+- Baseline commit: `psnyxxwx c499821e` (bookmark `refactor-qwen-modules`).
+  Production code = pre-refactor `ynoskzoq` tree. Only doc change = `notes-for-refactoring.md` (442 lines).
+- Refactor working copy: `okpnvpzo c29d58d7` (empty, clean, desc `refactor(qwen): baseline recorded; wip`).
+
+### Asserts
+LIVE in test builds: NDEBUG count 0 in `CMakeLists.txt`/`CMakePresets.json`/`flake.nix`; test presets Debug + BUILD_TESTING=ON.
+
+### Gates (Phase 0)
+- **testCheck**: PASS — 44/44 (0 failed), `nix build .#checks.x86_64-linux.tests`. NOTE: plan references `.testCheck`, which DOES NOT EXIST; correct attr = `.tests` (doc fix needed).
+- **gpu-full**: PASS — 69/69 (0 failed); 14 hardware-gated skips. Via `nix develop -c cmake --build build/gpu-test` + `nix develop -c ctest --preset gpu-full`. NOTE: `qwen-gpu-kernel-oracle` ctest preset mis-wired to `build/hardware-test` ("No tests found"); the qwen-kernel-oracle test ran+passed inside gpu-full.
+- **capture-smoke**: PASS — `miss_captured` ×2 then `hit` ×17 (STRIX_DISPATCH_TELEMETRY=1, `strix-server bench -m models/Qwen3.5-4B-BF16.gguf -p 16 -n 16`). pp16=230 tok/s, tg16=17.58 tok/s.
+- **bench envelope + A/B headline**: DEFERRED (user decision). Tree known perf-red (Phase B pp128 regressed 92.71→2.61 tok/s); re-run after in-flight prefill fix settles. Model used: Qwen3.5-4B-BF16.gguf.
+
+### Environment notes
+- `cmake`/`ninja`/`hipcc` only reachable via `nix develop` (not on bare PATH).
+- After running `.tests` check, `result` symlink points to tests derivation; restore prod via `nix build` (done). Prod binary restored to `/nix/store/kc15q9fq97j174wypgbgrm43vawwawz2-strix-c499821`.
