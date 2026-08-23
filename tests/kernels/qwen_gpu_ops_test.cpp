@@ -18,6 +18,12 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/qwen_gpu_ops.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/models/qwen/modules/module_ctx.hpp"
+#include "src/models/qwen/modules/norm.hpp"
+#include "src/models/qwen/modules/residual.hpp"
+#include "src/models/qwen/modules/ffn.hpp"
+#include "src/models/qwen/modules/quant_gemm.hpp"
+#include "src/models/qwen/modules/layer_view.hpp"
 
 static inline std::uint16_t FloatToBf16Bits(float f) {
   std::uint32_t bits = 0;
@@ -3741,6 +3747,227 @@ void TestDequantizeToBf16Equivalence() {
   HIP_CHECK(hipFree(d_out));
 }
 
+// ---- L1 GPU module e2e tests: exercise the ModuleCtx/Backend::Hip dispatch ----------------
+// These drive the refactor-introduced module functions (NormForward/ResidualAdd/
+// FfnForward/QuantGemm) through the HIP branch, i.e. the module seam rather than
+// the raw Launch* wrappers used by the equivalence tests above. Device pointers
+// are handed in as std::span over arena-style device buffers; the weight views
+// carry a QwenTensorRef whose .data is a device pointer.
+
+void TestGpuNormForwardModule() {
+  constexpr std::size_t dim = 256;
+  std::vector<float> h_x(dim, 1.0F);
+  std::vector<float> h_w(dim, 2.0F);
+  std::vector<float> h_out(dim, 0.0F);
+
+  float* d_x = nullptr;
+  float* d_w = nullptr;
+  float* d_out = nullptr;
+  HIP_CHECK(hipMalloc(&d_x, dim * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_w, dim * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_out, dim * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_x, h_x.data(), dim * sizeof(float), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_w, h_w.data(), dim * sizeof(float), hipMemcpyHostToDevice));
+
+  strix::models::qwen::ModuleCtx ctx;
+  ctx.backend = strix::models::qwen::Backend::Hip;
+  ctx.stream = nullptr;  // null hipStream_t = default stream
+
+  strix::models::qwen::NormLayerView view;
+  view.weight.data = d_w;
+  view.weight.type = strix::core::GgmlType::kF32;
+  view.weight.num_elements = dim;
+  view.eps = 1e-6F;
+
+  std::span<const float> x_span(d_x, dim);
+  std::span<float> out_span(d_out, dim);
+  strix::models::qwen::NormForward(ctx, view, x_span, out_span);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  HIP_CHECK(hipMemcpy(h_out.data(), d_out, dim * sizeof(float), hipMemcpyDeviceToHost));
+  // mean(x^2)=1, rms=1 => out = x * w = 2.0
+  for (std::size_t i = 0; i < dim; ++i) {
+    assert(std::abs(h_out[i] - 2.0F) < 1e-3F);
+  }
+
+  HIP_CHECK(hipFree(d_x));
+  HIP_CHECK(hipFree(d_w));
+  HIP_CHECK(hipFree(d_out));
+}
+
+void TestGpuResidualAddModule() {
+  constexpr std::size_t dim = 128;
+  std::vector<float> h_a(dim, 3.5F);
+  std::vector<float> h_b(dim, 1.5F);
+  std::vector<float> h_out(dim, 0.0F);
+
+  float* d_a = nullptr;
+  float* d_b = nullptr;
+  float* d_dst = nullptr;
+  HIP_CHECK(hipMalloc(&d_a, dim * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_b, dim * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_dst, dim * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_a, h_a.data(), dim * sizeof(float), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_b, h_b.data(), dim * sizeof(float), hipMemcpyHostToDevice));
+
+  strix::models::qwen::ModuleCtx ctx;
+  ctx.backend = strix::models::qwen::Backend::Hip;
+  ctx.stream = nullptr;
+
+  // ResidualAdd is in-place on dst: dst = a, src = b => dst = a + b.
+  std::span<float> dst(d_dst, dim);
+  std::span<const float> src(d_b, dim);
+  // Seed dst on device with a (the module reads dst as the accumulator).
+  std::vector<float> h_dst(h_a);
+  HIP_CHECK(hipMemcpy(d_dst, h_dst.data(), dim * sizeof(float), hipMemcpyHostToDevice));
+  strix::models::qwen::ResidualAdd(ctx, dst, src);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  HIP_CHECK(hipMemcpy(h_out.data(), d_dst, dim * sizeof(float), hipMemcpyDeviceToHost));
+  for (std::size_t i = 0; i < dim; ++i) {
+    assert(std::abs(h_out[i] - 5.0F) < 1e-4F);
+  }
+
+  HIP_CHECK(hipFree(d_a));
+  HIP_CHECK(hipFree(d_b));
+  HIP_CHECK(hipFree(d_dst));
+}
+
+void TestGpuQuantGemmModule() {
+  constexpr std::size_t M = 4;
+  constexpr std::size_t K = 8;
+  std::vector<float> h_A(M * K, 1.0F);  // all ones
+  std::vector<float> h_x(K, 2.0F);      // all twos
+  std::vector<float> h_y(M, 0.0F);
+
+  float* d_A = nullptr;
+  float* d_x = nullptr;
+  float* d_y = nullptr;
+  HIP_CHECK(hipMalloc(&d_A, M * K * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_x, K * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * K * sizeof(float), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
+
+  strix::models::qwen::ModuleCtx ctx;
+  ctx.backend = strix::models::qwen::Backend::Hip;
+  ctx.stream = nullptr;
+
+  strix::models::QwenTensorRef A;
+  A.data = d_A;
+  A.type = strix::core::GgmlType::kF32;
+  A.num_elements = M * K;
+
+  std::span<const float> x(d_x, K);
+  std::span<float> y(d_y, M);
+  strix::models::qwen::QuantGemm(ctx, A, x, M, K, y);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  HIP_CHECK(hipMemcpy(h_y.data(), d_y, M * sizeof(float), hipMemcpyDeviceToHost));
+  for (std::size_t m = 0; m < M; ++m) {
+    assert(std::abs(h_y[m] - 16.0F) < 1e-3F);  // K=8 ones * 2.0
+  }
+
+  HIP_CHECK(hipFree(d_A));
+  HIP_CHECK(hipFree(d_x));
+  HIP_CHECK(hipFree(d_y));
+}
+
+void TestGpuFfnForwardModule() {
+  // Shape proven by TestBatchedFusedSwiGLUEquivalence (decode-realistic, F32).
+  constexpr std::size_t hidden_size = 2560;
+  constexpr std::size_t intermediate_size = 9216;
+  std::vector<float> h_x(hidden_size, 0.5F);
+  std::vector<float> h_gate(intermediate_size * hidden_size, 0.01F);
+  std::vector<float> h_up(intermediate_size * hidden_size, 0.02F);
+  std::vector<float> h_down(hidden_size * intermediate_size, 0.03F);
+  std::vector<float> h_out(hidden_size, 0.0F);
+
+  float* d_x = nullptr;
+  float* d_gate = nullptr;
+  float* d_up = nullptr;
+  float* d_down = nullptr;
+  float* d_act = nullptr;
+  float* d_out = nullptr;
+  HIP_CHECK(hipMalloc(&d_x, hidden_size * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_gate, intermediate_size * hidden_size * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_up, intermediate_size * hidden_size * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_down, hidden_size * intermediate_size * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_act, intermediate_size * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_out, hidden_size * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_x, h_x.data(), hidden_size * sizeof(float), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_gate, h_gate.data(), intermediate_size * hidden_size * sizeof(float),
+                     hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_up, h_up.data(), intermediate_size * hidden_size * sizeof(float),
+                     hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_down, h_down.data(), hidden_size * intermediate_size * sizeof(float),
+                     hipMemcpyHostToDevice));
+
+  strix::models::qwen::ModuleCtx ctx;
+  ctx.backend = strix::models::qwen::Backend::Hip;
+  ctx.stream = nullptr;
+
+  strix::models::qwen::FfnLayerView view;
+  view.gate.data = d_gate;
+  view.gate.type = strix::core::GgmlType::kF32;
+  view.gate.num_elements = intermediate_size * hidden_size;
+  view.up.data = d_up;
+  view.up.type = strix::core::GgmlType::kF32;
+  view.up.num_elements = intermediate_size * hidden_size;
+  view.down.data = d_down;
+  view.down.type = strix::core::GgmlType::kF32;
+  view.down.num_elements = hidden_size * intermediate_size;
+  view.hidden_size = hidden_size;
+  view.intermediate_size = intermediate_size;
+
+  std::span<const float> x(d_x, hidden_size);
+  // The HIP fused path computes both GEMVs internally; gate/up scratch are unused.
+  std::span<float> gate_scratch(nullptr, 0);
+  std::span<float> up_scratch(nullptr, 0);
+  std::span<float> act(d_act, intermediate_size);
+  std::span<float> out(d_out, hidden_size);
+  strix::models::qwen::FfnForward(ctx, view, x, gate_scratch, up_scratch, act, out);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  HIP_CHECK(hipMemcpy(h_out.data(), d_out, hidden_size * sizeof(float), hipMemcpyDeviceToHost));
+
+  // CPU reference (F32): out[h] = sum_i down[h*inter+i] * silu(gate[i]) * up[i].
+  std::vector<float> ref_gate(intermediate_size), ref_up(intermediate_size);
+  std::vector<float> ref_act(intermediate_size);
+  std::vector<float> ref_out(hidden_size, 0.0F);
+  for (std::size_t i = 0; i < intermediate_size; ++i) {
+    float g = 0.0F, u = 0.0F;
+    for (std::size_t k = 0; k < hidden_size; ++k) {
+      g += h_gate[i * hidden_size + k] * h_x[k];
+      u += h_up[i * hidden_size + k] * h_x[k];
+    }
+    ref_gate[i] = g;
+    ref_up[i] = u;
+    ref_act[i] = (g / (1.0F + std::exp(-g))) * u;
+  }
+  for (std::size_t h = 0; h < hidden_size; ++h) {
+    float acc = 0.0F;
+    for (std::size_t i = 0; i < intermediate_size; ++i) {
+      acc += h_down[h * intermediate_size + i] * ref_act[i];
+    }
+    ref_out[h] = acc;
+  }
+
+  // Loose sanity band: constant-weight synthetic inputs, expect near-exact, but
+  // band generously (2%) to absorb F32 GEMV accumulation differences.
+  for (std::size_t h = 0; h < hidden_size; ++h) {
+    const float ref = ref_out[h];
+    assert(std::abs(h_out[h] - ref) < 0.02F * std::abs(ref));
+  }
+
+  HIP_CHECK(hipFree(d_x));
+  HIP_CHECK(hipFree(d_gate));
+  HIP_CHECK(hipFree(d_up));
+  HIP_CHECK(hipFree(d_down));
+  HIP_CHECK(hipFree(d_act));
+  HIP_CHECK(hipFree(d_out));
+}
+
 int main() {
   int device_count = 0;
   HIP_CHECK(hipGetDeviceCount(&device_count));
@@ -3754,6 +3981,10 @@ int main() {
   TestGpuRMSNorm();
   TestGpuResidualAdd();
   TestGpuGEMV();
+  TestGpuNormForwardModule();
+  TestGpuResidualAddModule();
+  TestGpuQuantGemmModule();
+  TestGpuFfnForwardModule();
   TestBatchedGEMM();
   TestHipblasGEMM();
   TestHipblasLtGEMM();

@@ -16,7 +16,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 #if defined(ENGINE_ENABLE_XRT)
-#include "src/core/xdna2/qwen_mtp_eh_proj.h"
+#include "src/models/qwen/xdna2/qwen_mtp_eh_proj.h"
 #endif
 
 namespace strix::hip {

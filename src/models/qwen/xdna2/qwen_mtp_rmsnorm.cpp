@@ -1,4 +1,4 @@
-#include "src/core/xdna2/qwen_mtp_rmsnorm.h"
+#include "src/models/qwen/xdna2/qwen_mtp_rmsnorm.h"
 
 #include <algorithm>
 #include <atomic>

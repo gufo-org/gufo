@@ -23,7 +23,7 @@ runCommand "strix-aie-qwen-mtp-eh-proj-program" {
     pythonEnv
     xrt
   ];
-  src = ../../src/core/xdna2/programs/qwen_mtp_eh_proj;
+  src = ../../src/models/qwen/xdna2/programs/qwen_mtp_eh_proj;
   passthru = {
     inherit aiebu mlir-aie llvm-aie;
     modelKind = "qwen3.8-27b-mtp";

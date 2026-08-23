@@ -18,7 +18,7 @@
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/qwen_mtp_reference.hpp"
 #include "src/core/xdna2/device.h"
-#include "src/core/xdna2/qwen_mtp_eh_proj.h"
+#include "src/models/qwen/xdna2/qwen_mtp_eh_proj.h"
 
 namespace {
 

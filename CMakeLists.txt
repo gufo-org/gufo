@@ -726,6 +726,10 @@ if (BUILD_TESTING)
 
   add_test(NAME qwen_ssm_test COMMAND qwen_ssm_test)
   set_tests_properties(qwen_ssm_test PROPERTIES LABELS "cpu;models;ssm")
+  add_executable(qwen_l1_ssm_module_test tests/models/qwen_l1_ssm_module_test.cpp)
+  target_link_libraries(qwen_l1_ssm_module_test PRIVATE strix_core)
+  add_test(NAME qwen_l1_ssm_module_test COMMAND qwen_l1_ssm_module_test)
+  set_tests_properties(qwen_l1_ssm_module_test PROPERTIES LABELS "cpu;module;ssm")
 
   add_executable(qwen_oracle_test tests/models/qwen_oracle_test.cpp)
   target_link_libraries(qwen_oracle_test PRIVATE strix_core)
