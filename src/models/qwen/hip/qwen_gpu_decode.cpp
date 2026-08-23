@@ -332,7 +332,7 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
       const bool ffn_g_bf16 = layer.ffn_gate.type == core::GgmlType::kBF16;
       const bool ffn_u_bf16 = layer.ffn_up.type == core::GgmlType::kBF16;
 
-      if (fused_rmsnorm_proj && ffn_g_bf16 && ffn_u_bf16) {
+      if (fused_rmsnorm_proj && ffn_g_bf16 && ffn_u_bf16 && detail::ShouldFuseFFNSwiGLU()) {
         // Cross-module fusion: RMSNorm folded into the SwiGLU GEMV. Owned by
         // the composition layer (Option B); the standalone FFN below is the
         // module. Keep the fused launch + shared down GEMV inline.
