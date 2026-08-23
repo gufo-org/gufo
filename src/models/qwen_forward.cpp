@@ -1,9 +1,11 @@
 #include "src/models/qwen_forward.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 
@@ -13,17 +15,61 @@
 namespace strix::models {
 namespace {
 
+// Packed-row byte stride for the six canonical quantized block types.
+// Mirrors quant::QuantizedRowBytes but also covers kQ8_K (which the older
+// helper omits), so kQ8_K routes through the unified quant:: dispatch.
+[[nodiscard]] std::size_t PackedQuantizedRowBytes(core::GgmlType type,
+                                                  std::size_t columns) noexcept {
+  std::size_t block_qk = 0;
+  std::size_t block_bytes = 0;
+  switch (type) {
+    case core::GgmlType::kQ3_K:
+      block_qk = 256;
+      block_bytes = sizeof(strix::quant::block_q3_K);
+      break;
+    case core::GgmlType::kQ4_K:
+      block_qk = 256;
+      block_bytes = sizeof(strix::quant::block_q4_K);
+      break;
+    case core::GgmlType::kQ5_K:
+      block_qk = 256;
+      block_bytes = sizeof(strix::quant::block_q5_K);
+      break;
+    case core::GgmlType::kQ6_K:
+      block_qk = 256;
+      block_bytes = sizeof(strix::quant::block_q6_K);
+      break;
+    case core::GgmlType::kQ8_K:
+      block_qk = 256;
+      block_bytes = sizeof(strix::quant::block_q8_K);
+      break;
+    case core::GgmlType::kQ8_0:
+      block_qk = 32;
+      block_bytes = sizeof(strix::quant::block_q8_0);
+      break;
+    default:
+      return 0;
+  }
+  if ((columns % block_qk) != 0) {
+    return 0;
+  }
+  return (columns / block_qk) * block_bytes;
+}
+
 const void* QuantizedRow(const QwenTensorRef& tensor, std::size_t row,
                          std::size_t columns) noexcept {
-  const std::size_t row_bytes = quant::QuantizedRowBytes(tensor.type, columns);
+  const std::size_t row_bytes = PackedQuantizedRowBytes(tensor.type, columns);
   if (row_bytes == 0) {
     return nullptr;
   }
   return static_cast<const std::uint8_t*>(tensor.data) + (row * row_bytes);
 }
 
-float QuantizedDot(const QwenTensorRef& tensor, const void* row,
-                   std::span<const float> input, std::size_t columns) noexcept {
+// Kept for the transition; the cut-over routes TensorGEMV directly through the
+// canonical quant::DotProductQ* helpers, so this is now a dead-code candidate.
+[[maybe_unused]] float QuantizedDot(const QwenTensorRef& tensor, const void* row,
+                                    std::span<const float> input,
+                                    std::size_t columns) noexcept {
   switch (tensor.type) {
     case core::GgmlType::kQ3_K:
       return quant::DotProductQ3_K(row, input, columns);
@@ -85,12 +131,56 @@ void TensorGEMV(const QwenTensorRef& A, std::span<const float> x, std::size_t M,
       }
       y[m] = dot;
     }
-  } else if (quant::QuantizedRowBytes(A.type, K) != 0) {
+  } else if (A.type == core::GgmlType::kF16) {
+    const auto* ptr = static_cast<const std::uint16_t*>(A.data);
+#pragma omp parallel for schedule(static)
+    for (std::size_t m = 0; m < M; ++m) {
+      const auto* row = ptr + (m * K);
+      float dot = 0.0F;
+      for (std::size_t k = 0; k < K; ++k) {
+        dot += quant::Fp16ToFloat(row[k]) * x[k];
+      }
+      y[m] = dot;
+    }
+  } else if (PackedQuantizedRowBytes(A.type, K) != 0) {
+    // Canonical parity-tested dot helpers (the routines the unified quant::Dot
+    // dispatch wraps). All six quantized types route here; the guard above
+    // guarantees one of them, so genuinely unsupported types never reach the
+    // switch and instead fall to the loud-fail below.
 #pragma omp parallel for schedule(static)
     for (std::size_t m = 0; m < M; ++m) {
       const void* row = QuantizedRow(A, m, K);
-      y[m] = QuantizedDot(A, row, x, K);
+      float dot = 0.0F;
+      switch (A.type) {
+        case core::GgmlType::kQ3_K:
+          dot = quant::DotProductQ3_K(row, x, K);
+          break;
+        case core::GgmlType::kQ4_K:
+          dot = quant::DotProductQ4_K(row, x, K);
+          break;
+        case core::GgmlType::kQ5_K:
+          dot = quant::DotProductQ5_K(row, x, K);
+          break;
+        case core::GgmlType::kQ6_K:
+          dot = quant::DotProductQ6_K(row, x, K);
+          break;
+        case core::GgmlType::kQ8_K:
+          dot = quant::DotProductQ8_K(row, x, K);
+          break;
+        case core::GgmlType::kQ8_0:
+          dot = quant::DotProductQ8_0(row, x, K);
+          break;
+        default:
+          assert(false && "TensorGEMV: unsupported quantized GgmlType");
+          std::abort();
+      }
+      y[m] = dot;
     }
+  } else {
+    // Unsupported (or non-block-aligned) type: fail loudly instead of the old
+    // silent 0.0F / uninitialized fallthrough.
+    assert(false && "TensorGEMV: unsupported GgmlType");
+    std::abort();
   }
 }
 
