@@ -338,20 +338,39 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
       const bool ffn_u_bf16 = layer.ffn_up.type == core::GgmlType::kBF16;
 
       if (fused_rmsnorm_proj && ffn_g_bf16 && ffn_u_bf16) {
+        // Cross-module fusion: RMSNorm folded into the SwiGLU GEMV. Owned by
+        // the composition layer (Option B); the standalone FFN below is the
+        // module. Keep the fused launch + shared down GEMV inline.
         LaunchFusedRMSNormSwiGLUGEMV(
             arena_.d_hidden, static_cast<const float*>(layer.ffn_norm.data),
             1e-6F, layer.ffn_gate.data, layer.ffn_up.data, arena_.d_ffn_act,
             intermediate_size, hidden_size, arena_.stream);
+        LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, arena_.d_ffn_act,
+                   arena_.d_ffn_out, hidden_size, intermediate_size,
+                   arena_.stream);
       } else {
-        LaunchFusedSwiGLUGEMV(layer.ffn_gate.data, layer.ffn_gate.type,
-                             layer.ffn_up.data, layer.ffn_up.type,
-                             arena_.d_normed, arena_.d_ffn_act,
-                             intermediate_size, hidden_size, arena_.stream);
+        // Non-fused FFN, routed through the module. Same fused SwiGLU kernel +
+        // same down GEMV as the former inline calls; behavior identical. The
+        // module reads the arena device spans (x = d_normed, act_scratch =
+        // d_ffn_act, out = d_ffn_out) directly.
+        strix::models::qwen::ModuleCtx ffn_ctx;
+        ffn_ctx.backend = strix::models::qwen::Backend::Hip;
+        ffn_ctx.config = &config;
+        ffn_ctx.stream = static_cast<void*>(arena_.stream);
+        ffn_ctx.layer_idx = l;
+        // arena_ is a QwenGpuArena (HIP device buffers), while ModuleCtx::arena
+        // is the CPU QwenScratchArena. The ffn module reads the device spans
+        // passed in directly, so ctx.arena stays null here.
+        ffn_ctx.arena = nullptr;
+        const auto ffn_view = strix::models::qwen::MakeFfnView(layer, config);
+        strix::models::qwen::FfnForward(
+            ffn_ctx, ffn_view,
+            std::span<const float>(arena_.d_normed, hidden_size),
+            std::span<float>(arena_.d_ffn_act, intermediate_size),
+            std::span<float>(arena_.d_ffn_act, intermediate_size),
+            std::span<float>(arena_.d_ffn_act, intermediate_size),
+            std::span<float>(arena_.d_ffn_out, hidden_size));
       }
-
-      LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, arena_.d_ffn_act,
-                 arena_.d_ffn_out, hidden_size, intermediate_size,
-                 arena_.stream);
 
       // Residual Add
       strix::models::qwen::ModuleCtx res_ctx;
