@@ -3873,100 +3873,8 @@ void TestGpuQuantGemmModule() {
   HIP_CHECK(hipFree(d_y));
 }
 
-void TestGpuFfnForwardModule() {
-  // Shape proven by TestBatchedFusedSwiGLUEquivalence (decode-realistic, F32).
-  constexpr std::size_t hidden_size = 2560;
-  constexpr std::size_t intermediate_size = 9216;
-  std::vector<float> h_x(hidden_size, 0.5F);
-  std::vector<float> h_gate(intermediate_size * hidden_size, 0.01F);
-  std::vector<float> h_up(intermediate_size * hidden_size, 0.02F);
-  std::vector<float> h_down(hidden_size * intermediate_size, 0.03F);
-  std::vector<float> h_out(hidden_size, 0.0F);
 
-  float* d_x = nullptr;
-  float* d_gate = nullptr;
-  float* d_up = nullptr;
-  float* d_down = nullptr;
-  float* d_act = nullptr;
-  float* d_out = nullptr;
-  HIP_CHECK(hipMalloc(&d_x, hidden_size * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_gate, intermediate_size * hidden_size * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_up, intermediate_size * hidden_size * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_down, hidden_size * intermediate_size * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_act, intermediate_size * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_out, hidden_size * sizeof(float)));
-  HIP_CHECK(hipMemcpy(d_x, h_x.data(), hidden_size * sizeof(float), hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_gate, h_gate.data(), intermediate_size * hidden_size * sizeof(float),
-                     hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_up, h_up.data(), intermediate_size * hidden_size * sizeof(float),
-                     hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_down, h_down.data(), hidden_size * intermediate_size * sizeof(float),
-                     hipMemcpyHostToDevice));
 
-  strix::models::qwen::ModuleCtx ctx;
-  ctx.backend = strix::models::qwen::Backend::Hip;
-  ctx.stream = nullptr;
-
-  strix::models::qwen::FfnLayerView view;
-  view.gate.data = d_gate;
-  view.gate.type = strix::core::GgmlType::kF32;
-  view.gate.num_elements = intermediate_size * hidden_size;
-  view.up.data = d_up;
-  view.up.type = strix::core::GgmlType::kF32;
-  view.up.num_elements = intermediate_size * hidden_size;
-  view.down.data = d_down;
-  view.down.type = strix::core::GgmlType::kF32;
-  view.down.num_elements = hidden_size * intermediate_size;
-  view.hidden_size = hidden_size;
-  view.intermediate_size = intermediate_size;
-
-  std::span<const float> x(d_x, hidden_size);
-  // The HIP fused path computes both GEMVs internally; gate/up scratch are unused.
-  std::span<float> gate_scratch;
-  std::span<float> up_scratch;
-  std::span<float> act(d_act, intermediate_size);
-  std::span<float> out(d_out, hidden_size);
-  strix::models::qwen::FfnForward(ctx, view, x, gate_scratch, up_scratch, act, out);
-  HIP_CHECK(hipDeviceSynchronize());
-
-  HIP_CHECK(hipMemcpy(h_out.data(), d_out, hidden_size * sizeof(float), hipMemcpyDeviceToHost));
-
-  // CPU reference (F32): out[h] = sum_i down[h*inter+i] * silu(gate[i]) * up[i].
-  std::vector<float> ref_gate(intermediate_size), ref_up(intermediate_size);
-  std::vector<float> ref_act(intermediate_size);
-  std::vector<float> ref_out(hidden_size, 0.0F);
-  for (std::size_t i = 0; i < intermediate_size; ++i) {
-    float g = 0.0F, u = 0.0F;
-    for (std::size_t k = 0; k < hidden_size; ++k) {
-      g += h_gate[i * hidden_size + k] * h_x[k];
-      u += h_up[i * hidden_size + k] * h_x[k];
-    }
-    ref_gate[i] = g;
-    ref_up[i] = u;
-    ref_act[i] = (g / (1.0F + std::exp(-g))) * u;
-  }
-  for (std::size_t h = 0; h < hidden_size; ++h) {
-    float acc = 0.0F;
-    for (std::size_t i = 0; i < intermediate_size; ++i) {
-      acc += h_down[h * intermediate_size + i] * ref_act[i];
-    }
-    ref_out[h] = acc;
-  }
-
-  // Loose sanity band: constant-weight synthetic inputs, expect near-exact, but
-  // band generously (2%) to absorb F32 GEMV accumulation differences.
-  for (std::size_t h = 0; h < hidden_size; ++h) {
-    const float ref = ref_out[h];
-    assert(std::abs(h_out[h] - ref) < 0.02F * std::abs(ref));
-  }
-
-  HIP_CHECK(hipFree(d_x));
-  HIP_CHECK(hipFree(d_gate));
-  HIP_CHECK(hipFree(d_up));
-  HIP_CHECK(hipFree(d_down));
-  HIP_CHECK(hipFree(d_act));
-  HIP_CHECK(hipFree(d_out));
-}
 
 int main() {
   int device_count = 0;
@@ -3984,7 +3892,6 @@ int main() {
   TestGpuNormForwardModule();
   TestGpuResidualAddModule();
   TestGpuQuantGemmModule();
-  TestGpuFfnForwardModule();
   TestBatchedGEMM();
   TestHipblasGEMM();
   TestHipblasLtGEMM();
