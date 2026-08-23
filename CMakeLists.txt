@@ -283,6 +283,7 @@ if (ENGINE_ENABLE_HIP)
     src/models/qwen/hip/kernels/common.hip
     src/models/qwen/hip/kernels/qkv.hip
     src/models/qwen/hip/kernels/ssm.hip
+    src/models/qwen/hip/kernels/ssm_recurrence.hip
     src/models/qwen/hip/kernels/swiglu.hip
     src/models/qwen/hip/kernels/attention_batched.hip
     src/models/qwen/hip/kernels/attention_ck.hip

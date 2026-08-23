@@ -1,7 +1,6 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -9,21 +8,68 @@
 
 namespace strix::hip {
 
-__global__ void BatchedSSMConvKernel(
-    const float* __restrict__ qkv_in, const float* __restrict__ conv_weights,
-    float* __restrict__ conv_state, float* __restrict__ conv_out,
-    std::size_t batch_size, std::size_t qkv_dim);
+// Batched Causal SSM Conv1D + token-serial DeltaNet recurrence (pure recurrence
+// unit). The fused per-head post-RMSNorm + gate epilogue lives in
+// qwen_gpu_batched_ssm.hip (Option B: composition layer owns the fusion); the
+// non-fused launcher references it through this forward declaration.
+__global__ void BatchedSSMPostNormGateKernel(
+    const float* __restrict__ raw_out, const float* __restrict__ ssm_norm,
+    const float* __restrict__ gate, float* __restrict__ out_buf,
+    std::size_t batch_size, std::size_t inner_size, std::uint32_t num_heads,
+    std::uint32_t val_dim);
 
-// opt-c010-ssm-gate-residual: batched DeltaNet recurrence with the per-head
-// post-RMSNorm + SiLU gate folded into the token epilogue. Replaces the
-// separate BatchedSSMPostNormGateKernel pass (raw_out write + read round trip
-// eliminated); the reduction order matches that kernel exactly so the fused
-// output is bit-identical to the unfused chain (recurrence + post-norm).
-__global__ void BatchedDeltaNetRecurrenceNormGateKernel(
+__global__ void BatchedSSMConvKernel(const float* __restrict__ qkv_in,
+                                     const float* __restrict__ conv_weights,
+                                     float* __restrict__ conv_state,
+                                     float* __restrict__ conv_out,
+                                     std::size_t batch_size,
+                                     std::size_t qkv_dim) {
+  const std::size_t c = (blockIdx.x * blockDim.x) + threadIdx.x;
+  const std::size_t t = blockIdx.y;
+  if (c >= qkv_dim || t >= batch_size) {
+    return;
+  }
+
+  const std::size_t c_off = c * 4;
+  const float w0 = (conv_weights != nullptr) ? conv_weights[c * 4 + 0] : 0.0F;
+  const float w1 = (conv_weights != nullptr) ? conv_weights[c * 4 + 1] : 0.0F;
+  const float w2 = (conv_weights != nullptr) ? conv_weights[c * 4 + 2] : 0.0F;
+  const float w3 = (conv_weights != nullptr) ? conv_weights[c * 4 + 3] : 1.0F;
+
+  const float s3 = qkv_in[(t * qkv_dim) + c];
+  const float s2 =
+      (t >= 1) ? qkv_in[((t - 1) * qkv_dim) + c] : conv_state[c_off + 3];
+  const float s1 = (t >= 2)   ? qkv_in[((t - 2) * qkv_dim) + c]
+                   : (t == 1) ? conv_state[c_off + 3]
+                              : conv_state[c_off + 2];
+  const float s0 = (t >= 3)   ? qkv_in[((t - 3) * qkv_dim) + c]
+                   : (t == 2) ? conv_state[c_off + 3]
+                   : (t == 1) ? conv_state[c_off + 2]
+                              : conv_state[c_off + 1];
+
+  float dot = 0.0F;
+  if (conv_weights != nullptr) {
+    dot = (s0 * w0) + (s1 * w1) + (s2 * w2) + (s3 * w3);
+  } else {
+    dot = s3;
+  }
+
+  const float sig = 1.0F / (1.0F + expf(-dot));
+  conv_out[(t * qkv_dim) + c] = dot * sig;
+
+  // Final token updates state for future decode steps
+  if (t == batch_size - 1) {
+    conv_state[c_off + 0] = s0;
+    conv_state[c_off + 1] = s1;
+    conv_state[c_off + 2] = s2;
+    conv_state[c_off + 3] = s3;
+  }
+}
+
+__global__ void BatchedDeltaNetRecurrenceKernel(
     const float* __restrict__ conv_out, float* __restrict__ deltanet_state,
     const float* __restrict__ alpha_buf, const float* __restrict__ beta_buf,
     const float* __restrict__ ssm_a, const float* __restrict__ ssm_dt,
-    const float* __restrict__ ssm_norm, const float* __restrict__ gate,
     float* __restrict__ raw_out, std::uint32_t layer_idx,
     std::size_t batch_size, std::size_t qkv_size, std::uint32_t num_key_heads,
     std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim) {
@@ -50,9 +96,6 @@ __global__ void BatchedDeltaNetRecurrenceNormGateKernel(
   __shared__ float s_warp_q[8];
   __shared__ float s_warp_kq[8];
   __shared__ float s_scales[3];  // inv_k_norm, q_scale, kq_dot
-  __shared__ float s_o[128];
-  __shared__ float s_warp_rms[8];
-  __shared__ float s_inv_rms;
 
   // Two adjacent lanes own one state row, cutting the live register tile in
   // half while preserving the token-serial recurrence.
@@ -184,7 +227,9 @@ __global__ void BatchedDeltaNetRecurrenceNormGateKernel(
       u_j += __shfl_xor(u_j, 1);
       p_j += __shfl_xor(p_j, 1);
       const float d_j = (v_h[j] - u_j) * beta_h;
-      s_o[j] = p_j + (d_j * kq_dot);
+      if (row_segment == 0) {
+        o_h[j] = p_j + (d_j * kq_dot);
+      }
 
 #pragma unroll
       for (std::size_t vi = 0; vi < row_vectors_per_thread; ++vi) {
@@ -197,46 +242,6 @@ __global__ void BatchedDeltaNetRecurrenceNormGateKernel(
         s_reg[vi] = s4;
       }
     }
-
-    // 4. Fused per-head RMSNorm + gate epilogue. Reduction matches
-    // BatchedSSMPostNormGateKernel: warps 0..3 carry the val_dim values and
-    // warps 4..7 contribute zeros, so the summed square and inv-rms are
-    // bit-identical to the unfused pass.
-    __syncthreads();
-
-    const float o_val = (tid < val_dim) ? s_o[tid] : 0.0F;
-    float o_sq = o_val * o_val;
-    for (int offset = 16; offset > 0; offset >>= 1) {
-      o_sq += __shfl_xor(o_sq, offset);
-    }
-    if (lane_id == 0) {
-      s_warp_rms[warp_id] = o_sq;
-    }
-    __syncthreads();
-
-    if (tid == 0) {
-      float total_o_sq = 0.0F;
-#pragma unroll
-      for (std::size_t warp = 0; warp < 8; ++warp) {
-        total_o_sq += s_warp_rms[warp];
-      }
-      s_inv_rms =
-          rsqrtf((total_o_sq / static_cast<float>(val_dim)) + 1e-6F);
-    }
-    __syncthreads();
-
-    if (tid < val_dim) {
-      const float normed = s_o[tid] * s_inv_rms;
-      const float w = (ssm_norm != nullptr) ? ssm_norm[tid] : 1.0F;
-      float val = normed * w;
-      if (gate != nullptr) {
-        const float g = (gate + (t * inner_size))[h * val_dim + tid];
-        const float sig = 1.0F / (1.0F + expf(-g));
-        val *= (g * sig);
-      }
-      o_h[tid] = val;
-    }
-    __syncthreads();
   }
 
   // Write final row state back to global memory ONCE
@@ -250,66 +255,7 @@ __global__ void BatchedDeltaNetRecurrenceNormGateKernel(
   }
 }
 
-__global__ void BatchedSSMPostNormGateKernel(
-    const float* __restrict__ raw_out, const float* __restrict__ ssm_norm,
-    const float* __restrict__ gate, float* __restrict__ out_buf,
-    std::size_t batch_size, std::size_t inner_size, std::uint32_t num_heads,
-    std::uint32_t val_dim) {
-  const std::size_t h = blockIdx.x;
-  const std::size_t t = blockIdx.y;
-  if (h >= num_heads || t >= batch_size) {
-    return;
-  }
-
-  const std::size_t tid = threadIdx.x;
-  const std::size_t lane_id = tid & 31u;
-  const std::size_t warp_id = tid >> 5u;
-
-  const float* in_h = raw_out + (t * inner_size) + (h * val_dim);
-  float* o_h = out_buf + (t * inner_size) + (h * val_dim);
-
-  const float in_val = (tid < val_dim) ? in_h[tid] : 0.0F;
-  float o_sq = in_val * in_val;
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    o_sq += __shfl_xor(o_sq, offset);
-  }
-
-  __shared__ float s_warp_rms[4];
-  if (lane_id == 0) {
-    s_warp_rms[warp_id] = o_sq;
-  }
-  __syncthreads();
-
-  __shared__ float s_inv_rms;
-  if (tid == 0) {
-    const float total_o_sq =
-        s_warp_rms[0] + s_warp_rms[1] + s_warp_rms[2] + s_warp_rms[3];
-    const float mean_sq = total_o_sq / static_cast<float>(val_dim);
-    s_inv_rms = rsqrtf(mean_sq + 1e-6F);
-  }
-  __syncthreads();
-
-  if (tid < val_dim) {
-    const float normed = in_val * s_inv_rms;
-    const float w = (ssm_norm != nullptr) ? ssm_norm[tid] : 1.0F;
-    float val = normed * w;
-    if (gate != nullptr) {
-      const float g = (gate + (t * inner_size))[h * val_dim + tid];
-      const float sig = 1.0F / (1.0F + expf(-g));
-      val *= (g * sig);
-    }
-    o_h[tid] = val;
-  }
-}
-
-
-
-// opt-c010-ssm-gate-residual: batched SSM Conv1D + DeltaNet recurrence with
-// the per-head post-RMSNorm + SiLU gate folded into the recurrence epilogue.
-// Writes the final gated output into out_buf directly; the unfused
-// LaunchBatchedSSMConvRecurrence (recurrence + BatchedSSMPostNormGateKernel)
-// stays wired as the independent reference.
-void LaunchBatchedSSMConvRecurrenceNormGate(
+void LaunchBatchedSSMConvRecurrence(
     const float* qkv_in, const float* conv_weights, float* conv_state,
     float* conv_out, float* deltanet_state, const float* alpha_buf,
     const float* beta_buf, const float* ssm_a, const float* ssm_dt,
@@ -328,10 +274,16 @@ void LaunchBatchedSSMConvRecurrenceNormGate(
                          stream>>>(qkv_in, conv_weights, conv_layer_state,
                                    conv_out, batch_size, qkv_size);
 
-  BatchedDeltaNetRecurrenceNormGateKernel<<<num_heads, 256, 0, stream>>>(
-      conv_out, deltanet_state, alpha_buf, beta_buf, ssm_a, ssm_dt, ssm_norm,
-      gate, out_buf, layer_idx, batch_size, qkv_size, num_key_heads, num_heads,
-      key_dim, val_dim);
+  BatchedDeltaNetRecurrenceKernel<<<num_heads, 256, 0, stream>>>(
+      conv_out, deltanet_state, alpha_buf, beta_buf, ssm_a, ssm_dt, out_buf,
+      layer_idx, batch_size, qkv_size, num_key_heads, num_heads, key_dim,
+      val_dim);
+
+  const dim3 post_grid(num_heads, static_cast<unsigned int>(batch_size));
+  const std::size_t inner_size = static_cast<std::size_t>(num_heads) * val_dim;
+  BatchedSSMPostNormGateKernel<<<post_grid, 128, 0, stream>>>(
+      out_buf, ssm_norm, gate, out_buf, batch_size, inner_size, num_heads,
+      val_dim);
 }
 
 }  // namespace strix::hip
