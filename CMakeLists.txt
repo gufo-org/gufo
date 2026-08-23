@@ -741,6 +741,11 @@ if (BUILD_TESTING)
   add_test(NAME qwen_l1_ffn_module_test COMMAND qwen_l1_ffn_module_test)
   set_tests_properties(qwen_l1_ffn_module_test PROPERTIES LABELS "cpu;module;ffn")
 
+  add_executable(qwen_fusion_route_test tests/models/qwen_fusion_route_test.cpp)
+  target_link_libraries(qwen_fusion_route_test PRIVATE strix_core)
+  add_test(NAME qwen_fusion_route_test COMMAND qwen_fusion_route_test)
+  set_tests_properties(qwen_fusion_route_test PROPERTIES LABELS "cpu;module;fusion")
+
   add_executable(qwen_oracle_test tests/models/qwen_oracle_test.cpp)
   target_link_libraries(qwen_oracle_test PRIVATE strix_core)
   add_test(NAME qwen_oracle_test COMMAND qwen_oracle_test)
