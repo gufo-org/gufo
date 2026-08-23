@@ -239,10 +239,22 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
               fused_qknorm_rope_kv);
         }
 
-        // Output projection
-        LaunchGEMV(layer.attn_output.data, layer.attn_output.type,
-                   arena_.d_ssm_out, arena_.d_attn_out, hidden_size,
-                   attention_size, arena_.stream);
+        // Output projection, routed through the quant_gemm module (HIP
+        // backend). Same kernel, same args, same arena slices (d_ssm_out in,
+        // d_attn_out out); behavior-identical to the former inline `LaunchGEMV`.
+        strix::models::qwen::ModuleCtx qg_ctx;
+        qg_ctx.backend = strix::models::qwen::Backend::Hip;
+        qg_ctx.config = &config;
+        qg_ctx.stream = static_cast<void*>(arena_.stream);
+        qg_ctx.layer_idx = l;
+        // ModuleCtx::arena is the CPU QwenScratchArena; the module reads the
+        // device spans passed in directly, so ctx.arena stays null here.
+        qg_ctx.arena = nullptr;
+        strix::models::qwen::QuantGemm(
+            qg_ctx, layer.attn_output,
+            std::span<const float>(arena_.d_ssm_out, attention_size),
+            hidden_size, attention_size,
+            std::span<float>(arena_.d_attn_out, hidden_size));
       } else {
         // SSM path
         ssm_residual_folded = detail::ShouldFuseSSMGateResidual();
