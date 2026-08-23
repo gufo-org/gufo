@@ -18,6 +18,12 @@
       "sourceType": "github",
       "skillPath": "skills/cpp-testing/SKILL.md",
       "computedHash": "fbe37695056aa5cf9454f8cf6d883f38c3bca0324ca7aeb288db2fe3b887e97d"
+    },
+    "refactoring-patterns": {
+      "source": "wondelai/skills",
+      "sourceType": "github",
+      "skillPath": "refactoring-patterns/SKILL.md",
+      "computedHash": "b896bb518a3c6233e93c3a3d319f0e98b9eb0c65813c432e4452d8287942cd1b"
     }
   }
 }
