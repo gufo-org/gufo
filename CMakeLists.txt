@@ -280,6 +280,10 @@ if (ENGINE_ENABLE_HIP)
     src/models/qwen/hip/kernels/norm.hip
     src/models/qwen/hip/kernels/gemv.hip
     src/models/qwen/hip/kernels/fused.hip
+    src/models/qwen/hip/kernels/common.hip
+    src/models/qwen/hip/kernels/qkv.hip
+    src/models/qwen/hip/kernels/ssm.hip
+    src/models/qwen/hip/kernels/swiglu.hip
     src/models/qwen/hip/kernels/attention_batched.hip
     src/models/qwen/hip/kernels/attention_ck.hip
     src/models/qwen/hip/kernels/attention_decode.hip
