@@ -234,6 +234,7 @@ add_library(strix_core STATIC
   src/models/qwen_state.cpp
   src/models/qwen_ssm.cpp
   src/models/qwen_forward.cpp
+  src/models/qwen/modules/norm.cpp
   src/models/qwen_generator.cpp
   src/core/speculative/qwen_mtp_reference.cpp
   src/testing/compare/logit_comparator.cpp

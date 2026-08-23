@@ -10,6 +10,7 @@
 #include <span>
 
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/models/qwen/modules/norm.hpp"
 #include "src/models/qwen_oracles.hpp"
 
 namespace strix::models {
@@ -211,15 +212,14 @@ void ForwardEmbedding(std::uint32_t token_id, const QwenTensorRef& token_embd,
 
 void ForwardRMSNorm(std::span<const float> x, const QwenTensorRef& weight,
                     float eps, std::span<float> out) noexcept {
-  if (weight.type == core::GgmlType::kF32) {
-    qwen::ReferenceRMSNorm(x, weight.AsFloatSpan(), eps, out);
-  } else {
-    std::vector<float> w_f32(x.size());
-    for (std::size_t i = 0; i < x.size(); ++i) {
-      w_f32[i] = weight.Get(i);
-    }
-    qwen::ReferenceRMSNorm(x, w_f32, eps, out);
-  }
+  // Thin wrapper: the norm body now lives in the norm module's CPU backend
+  // (NormForward). This free function is kept as-is for the existing CPU
+  // callers (ForwardLayer / ForwardSSM / MTP reference) so behavior is
+  // unchanged. NormForward ignores the (defaulted) ModuleCtx fields and just
+  // reproduces the RMSNorm computation above.
+  qwen::NormLayerView view{weight, eps};
+  qwen::ModuleCtx ctx{};
+  qwen::NormForward(ctx, view, x, out);
 }
 
 void ForwardRoPE(std::span<float> q, std::span<float> k,
