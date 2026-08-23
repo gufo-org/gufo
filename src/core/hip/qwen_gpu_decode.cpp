@@ -5,6 +5,7 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/qwen_gpu_executor.hpp"
 #include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/modules/modules.hpp"
 
 namespace strix::hip {
 tokenization::TokenId QwenGpuExecutor::ForwardToken(
@@ -123,10 +124,24 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
       // (RMSNormKernel + projection kernel) stays wired as the reference.
       const bool fused_rmsnorm_proj = detail::ShouldFuseRMSNormProjection();
       if (!fused_rmsnorm_proj) {
-        // Pre-RMSNorm
-        LaunchRMSNorm(arena_.d_hidden,
-                      static_cast<const float*>(layer.attn_norm.data),
-                      arena_.d_normed, hidden_size, 1e-6F, arena_.stream);
+        // Pre-RMSNorm, routed through the norm module (HIP backend). Same
+        // kernel, same args, same arena slices (d_hidden in, d_normed out);
+        // behavior identical to the former inline `LaunchRMSNorm` call.
+        strix::models::qwen::ModuleCtx norm_ctx;
+        norm_ctx.backend = strix::models::qwen::Backend::Hip;
+        norm_ctx.config = &config;
+        norm_ctx.stream = static_cast<void*>(arena_.stream);
+        norm_ctx.layer_idx = l;
+        // arena_ is a QwenGpuArena (HIP device buffers), while ModuleCtx::arena
+        // is the CPU QwenScratchArena. The norm module reads the device spans
+        // passed in directly, so ctx.arena stays null here.
+        norm_ctx.arena = nullptr;
+        const auto norm_view =
+            strix::models::qwen::MakeAttnNormView(layer, config);
+        strix::models::qwen::NormForward(
+            norm_ctx, norm_view,
+            std::span<const float>(arena_.d_hidden, hidden_size),
+            std::span<float>(arena_.d_normed, hidden_size));
       }
 
       // opt-c010-ssm-gate-residual: the SSM branch folds the post-SSM residual
