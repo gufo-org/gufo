@@ -234,12 +234,16 @@ add_library(strix_core STATIC
   src/models/qwen_state.cpp
   src/models/qwen_ssm.cpp
   src/models/qwen_forward.cpp
+  src/models/qwen/modules/attention.cpp
+  src/models/qwen/modules/embed.cpp
   src/models/qwen/modules/ffn.cpp
   src/models/qwen/modules/norm.cpp
   src/models/qwen/modules/quant_gemm.cpp
   src/models/qwen/modules/residual.cpp
   src/models/qwen/modules/rope.cpp
+  src/models/qwen/modules/sample.cpp
   src/models/qwen/modules/ssm.cpp
+  src/models/qwen/modules/unembed.cpp
   src/models/qwen_generator.cpp
   src/core/speculative/qwen_mtp_reference.cpp
   src/testing/compare/logit_comparator.cpp

@@ -67,6 +67,21 @@ void QuantGemm(ModuleCtx& ctx, const QwenTensorRef& A,
                std::span<const float> x, std::size_t M, std::size_t K,
                std::span<float> y) noexcept;
 
+/// Token embedding lookup: copies the embedding row for token_id into out.
+void EmbedForward(ModuleCtx& ctx, std::uint32_t token_id,
+                  const QwenTensorRef& token_embd, std::size_t hidden_size,
+                  std::span<float> out) noexcept;
+
+/// Final output: RMSNorm the hidden state then project through the LM head.
+void UnembedForward(ModuleCtx& ctx, const QwenTensorRef& output_norm,
+                    const QwenTensorRef& output_weight,
+                    std::span<const float> hidden,
+                    std::span<float> logits_out) noexcept;
+
+/// Greedy argmax over a logit distribution (sampling-policy module seam).
+std::uint32_t SampleForward(ModuleCtx& ctx,
+                            std::span<const float> logits) noexcept;
+
 }  // namespace strix::models::qwen
 
 #endif  // STRIX_MODELS_QWEN_MODULES_FWD_HPP_

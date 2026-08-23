@@ -10,10 +10,13 @@
 #include <span>
 
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/models/qwen/modules/attention.hpp"
+#include "src/models/qwen/modules/embed.hpp"
 #include "src/models/qwen/modules/ffn.hpp"
 #include "src/models/qwen/modules/norm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "src/models/qwen/modules/rope.hpp"
+#include "src/models/qwen/modules/unembed.hpp"
 #include "src/models/qwen_oracles.hpp"
 
 namespace strix::models {
@@ -352,74 +355,19 @@ void ForwardLayer(std::span<float> hidden, const QwenLayerWeights& layer,
                   QwenSsmCache& ssm_cache, std::uint32_t layer_idx,
                   std::uint32_t pos, QwenScratchArena& arena) noexcept {
   const std::size_t hidden_size = config.hidden_size;
-  const std::uint32_t head_dim = config.head_dim;
-  const std::size_t q_size = config.AttentionSize();
-  const std::size_t kv_size =
-      static_cast<std::size_t>(config.num_key_value_heads) * head_dim;
 
   // 1. Pre-RMSNorm
   ForwardRMSNorm(hidden, layer.attn_norm, 1e-6F, arena.normed);
 
   // 2. Self-Attention / SSM
   if (layer.is_full_attention) {
-    if (!layer.attn_q.empty()) {
-      const std::size_t q_projection_size =
-          layer.attn_q.num_elements / hidden_size;
-      if (q_projection_size == 2 * q_size) {
-        TensorGEMV(layer.attn_q, arena.normed, q_projection_size, hidden_size,
-                   arena.ssm_qkv);
-        for (std::uint32_t h = 0; h < config.num_attention_heads; ++h) {
-          const auto q_src = arena.ssm_qkv.subspan(
-              (static_cast<std::size_t>(h) * head_dim * 2), head_dim);
-          const auto g_src = arena.ssm_qkv.subspan(
-              (static_cast<std::size_t>(h) * head_dim * 2) + head_dim,
-              head_dim);
-          std::ranges::copy(
-              q_src,
-              arena.q.begin() + static_cast<std::ptrdiff_t>(
-                                    static_cast<std::size_t>(h) * head_dim));
-          std::ranges::copy(g_src,
-                            arena.ssm_gate.begin() +
-                                static_cast<std::ptrdiff_t>(
-                                    static_cast<std::size_t>(h) * head_dim));
-        }
-      } else {
-        TensorGEMV(layer.attn_q, arena.normed, q_size, hidden_size, arena.q);
-        std::ranges::fill(arena.ssm_gate, 0.0F);
-      }
-    }
-    if (!layer.attn_k.empty()) {
-      TensorGEMV(layer.attn_k, arena.normed, kv_size, hidden_size, arena.k);
-    }
-    if (!layer.attn_v.empty()) {
-      TensorGEMV(layer.attn_v, arena.normed, kv_size, hidden_size, arena.v);
-    }
-
-    // Apply QK-Norm
-    if (!layer.attn_q_norm.empty()) {
-      for (std::uint32_t h = 0; h < config.num_attention_heads; ++h) {
-        auto q_head =
-            arena.q.subspan(static_cast<std::size_t>(h) * head_dim, head_dim);
-        ForwardRMSNorm(q_head, layer.attn_q_norm, 1e-6F, q_head);
-      }
-    }
-    if (!layer.attn_k_norm.empty()) {
-      for (std::uint32_t h = 0; h < config.num_key_value_heads; ++h) {
-        auto k_head =
-            arena.k.subspan(static_cast<std::size_t>(h) * head_dim, head_dim);
-        ForwardRMSNorm(k_head, layer.attn_k_norm, 1e-6F, k_head);
-      }
-    }
-
-    ForwardRoPE(arena.q, arena.k, config.num_attention_heads,
-                config.num_key_value_heads, config.head_dim, config.rotary_dim,
-                pos, config.rope_theta);
-
-    ForwardAttention(
-        arena.q, arena.k, arena.v, arena.ssm_gate.subspan(0, q_size),
-        layer.attn_output, kv_cache, layer_idx / config.full_attention_interval,
-        pos, config.num_attention_heads, config.num_key_value_heads,
-        config.head_dim, hidden_size, arena.attn_scores, arena.attn_out);
+    qwen::ModuleCtx actx{};
+    actx.config = &config;
+    actx.arena = &arena;
+    actx.layer_idx = layer_idx;
+    actx.pos = pos;
+    qwen::AttnLayerView av = qwen::MakeAttnView(layer, config);
+    qwen::AttnForward(actx, av, arena.normed, kv_cache, pos, arena.attn_out);
   } else {
     ForwardSSM(arena.normed, layer, config, ssm_cache, layer_idx, arena.ssm_qkv,
                arena.ssm_gate, arena.ssm_out_buf, arena.attn_out);
@@ -445,20 +393,19 @@ void ForwardModel(std::uint32_t token_id, std::uint32_t pos,
                   const QwenModelWeights& weights, QwenKvCache& kv_cache,
                   QwenSsmCache& ssm_cache, QwenScratchArena& arena,
                   std::span<float> logits_out) noexcept {
-  ForwardEmbedding(token_id, weights.token_embd, weights.config.hidden_size,
-                   arena.hidden);
+  qwen::ModuleCtx ctx{};
+  ctx.config = &weights.config;
+  ctx.arena = &arena;
+  qwen::EmbedForward(ctx, token_id, weights.token_embd,
+                     weights.config.hidden_size, arena.hidden);
 
   for (std::uint32_t l = 0; l < weights.config.num_layers; ++l) {
     ForwardLayer(arena.hidden, weights.layers[l], weights.config, kv_cache,
                  ssm_cache, l, pos, arena);
   }
 
-  ForwardRMSNorm(arena.hidden, weights.output_norm, 1e-6F, arena.normed);
-
-  if (!weights.output.empty()) {
-    TensorGEMV(weights.output, arena.normed, weights.config.vocab_size,
-               weights.config.hidden_size, logits_out);
-  }
+  qwen::UnembedForward(ctx, weights.output_norm, weights.output, arena.hidden,
+                       logits_out);
 }
 
 std::uint32_t GreedyArgmax(std::span<const float> logits) noexcept {
