@@ -310,8 +310,18 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
             static_cast<const float*>(layer.ffn_norm.data), arena_.d_normed,
             hidden_size, 1e-6F, arena_.stream);
       } else {
-        LaunchResidualAdd(arena_.d_hidden, arena_.d_attn_out, arena_.d_hidden,
-                          hidden_size, arena_.stream);
+        strix::models::qwen::ModuleCtx res_ctx;
+        res_ctx.backend = strix::models::qwen::Backend::Hip;
+        res_ctx.config = &config;
+        res_ctx.stream = static_cast<void*>(arena_.stream);
+        res_ctx.layer_idx = l;
+        // arena_ is a QwenGpuArena (HIP device buffers), while ModuleCtx::arena
+        // is the CPU QwenScratchArena. The residual module reads the device
+        // spans passed in directly, so ctx.arena stays null here.
+        res_ctx.arena = nullptr;
+        strix::models::qwen::ResidualAdd(
+            res_ctx, std::span<float>(arena_.d_hidden, hidden_size),
+            std::span<const float>(arena_.d_attn_out, hidden_size));
 
         if (fused_rmsnorm_proj) {
           // FFN Pre-RMSNorm is folded into the SwiGLU GEMV below.
@@ -344,8 +354,18 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
                  arena_.stream);
 
       // Residual Add
-      LaunchResidualAdd(arena_.d_hidden, arena_.d_ffn_out, arena_.d_hidden,
-                        hidden_size, arena_.stream);
+      strix::models::qwen::ModuleCtx res_ctx;
+      res_ctx.backend = strix::models::qwen::Backend::Hip;
+      res_ctx.config = &config;
+      res_ctx.stream = static_cast<void*>(arena_.stream);
+      res_ctx.layer_idx = l;
+      // arena_ is a QwenGpuArena (HIP device buffers), while ModuleCtx::arena
+      // is the CPU QwenScratchArena. The residual module reads the device spans
+      // passed in directly, so ctx.arena stays null here.
+      res_ctx.arena = nullptr;
+      strix::models::qwen::ResidualAdd(
+          res_ctx, std::span<float>(arena_.d_hidden, hidden_size),
+          std::span<const float>(arena_.d_ffn_out, hidden_size));
     }
 
     if (compute_logits) {
