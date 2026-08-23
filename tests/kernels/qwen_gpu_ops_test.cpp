@@ -2935,11 +2935,7 @@ void TestQ8KBlockGEMVEquivalence() {
   constexpr std::size_t K = 512;  // K % 256 == 0 required by the kernel
   constexpr std::size_t num_blocks = K / QK;
 
-  struct Q8KBlockTest {
-    float d;
-    std::int8_t qs[QK];
-    std::int16_t bsums[16];
-  };
+  using Q8KBlockTest = strix::quant::block_q8_K;
   static_assert(sizeof(Q8KBlockTest) == 292, "Q8_K block must be 292 bytes");
 
   // Deterministic pseudo-random generator (same values on every run).
@@ -3080,10 +3076,7 @@ void TestQ8_0BlockGEMVEquivalence() {
   constexpr std::size_t K = 512;  // K % 32 == 0 required by the kernel
   constexpr std::size_t num_blocks = K / QK;
 
-  struct Q8_0BlockTest {
-    std::uint16_t d;  // fp16 bit pattern (block_q8_0.d is a half)
-    std::int8_t qs[QK];
-  };
+  using Q8_0BlockTest = strix::quant::block_q8_0;
   static_assert(sizeof(Q8_0BlockTest) == 34, "Q8_0 block must be 34 bytes");
 
   // Deterministic pseudo-random generator (same values on every run).
@@ -3272,13 +3265,7 @@ void TestQ5KBlockGEMVEquivalence() {
   constexpr std::size_t K = 256;  // K % 256 == 0 required by the kernel
   constexpr std::size_t num_blocks = K / QK;
 
-  struct Q5KBlockTest {
-    std::uint16_t d;     // fp16 bit pattern
-    std::uint16_t dmin;  // fp16 bit pattern
-    std::uint8_t scales[12];
-    std::uint8_t qh[32];
-    std::uint8_t qs[128];
-  };
+  using Q5KBlockTest = strix::quant::block_q5_K;
   static_assert(sizeof(Q5KBlockTest) == 176, "Q5_K block must be 176 bytes");
 
   auto float_to_half_bits = [](float f) -> std::uint16_t {
@@ -3389,12 +3376,7 @@ void TestQ6KBlockGEMVEquivalence() {
   constexpr std::size_t K = 256;  // K % 256 == 0 required by the kernel
   constexpr std::size_t num_blocks = K / QK;
 
-  struct Q6KBlockTest {
-    std::uint8_t ql[128];
-    std::uint8_t qh[64];
-    std::int8_t scales[16];
-    std::uint16_t d;  // fp16 bit pattern
-  };
+  using Q6KBlockTest = strix::quant::block_q6_K;
   static_assert(sizeof(Q6KBlockTest) == 210, "Q6_K block must be 210 bytes");
 
   auto float_to_half_bits = [](float f) -> std::uint16_t {
@@ -3494,11 +3476,7 @@ void TestDequantizeQ8KToBf16Equivalence() {
   constexpr std::size_t num_blocks = 4;
   constexpr std::size_t n_elems = num_blocks * QK;
 
-  struct Q8KBlockTest {
-    float d;
-    std::int8_t qs[QK];
-    std::int16_t bsums[16];
-  };
+  using Q8KBlockTest = strix::quant::block_q8_K;
   static_assert(sizeof(Q8KBlockTest) == 292, "Q8_K block must be 292 bytes");
 
   // Deterministic pseudo-random weights (same values every run).
@@ -3633,10 +3611,7 @@ void TestDequantizeToBf16Equivalence() {
   constexpr std::size_t Q80_QK = 32;
   constexpr std::size_t Q80_BLOCKS = 2;
   constexpr std::size_t Q80_ELEMS = Q80_BLOCKS * Q80_QK;
-  struct Q8_0BlockTest {
-    std::uint16_t d;  // fp16 bit pattern
-    std::int8_t qs[Q80_QK];
-  };
+  using Q8_0BlockTest = strix::quant::block_q8_0;
   static_assert(sizeof(Q8_0BlockTest) == 34, "Q8_0 block must be 34 bytes");
 
   std::vector<Q8_0BlockTest> h_q80(Q80_BLOCKS);
@@ -3669,13 +3644,7 @@ void TestDequantizeToBf16Equivalence() {
   // ---- Q5_K: 1 block (256 elems), d=0.25 dmin=0.125, high-bit scales,
   // qh=0xFF, qs nibbles across the four 64-element groups.
   constexpr std::size_t QK = 256;
-  struct Q5KBlockTest {
-    std::uint16_t d;
-    std::uint16_t dmin;
-    std::uint8_t scales[12];
-    std::uint8_t qh[32];
-    std::uint8_t qs[128];
-  };
+  using Q5KBlockTest = strix::quant::block_q5_K;
   static_assert(sizeof(Q5KBlockTest) == 176, "Q5_K block must be 176 bytes");
 
   Q5KBlockTest q5k{};
@@ -3707,12 +3676,7 @@ void TestDequantizeToBf16Equivalence() {
   HIP_CHECK(hipFree(d_out));
 
   // ---- Q6_K: 1 block, d=0.3, ql varies, qh=0xFF, scales [7..4] (positive).
-  struct Q6KBlockTest {
-    std::uint8_t ql[128];
-    std::uint8_t qh[64];
-    std::int8_t scales[16];
-    std::uint16_t d;  // fp16 bit pattern
-  };
+  using Q6KBlockTest = strix::quant::block_q6_K;
   static_assert(sizeof(Q6KBlockTest) == 210, "Q6_K block must be 210 bytes");
 
   Q6KBlockTest q6k{};
@@ -3746,11 +3710,7 @@ void TestDequantizeToBf16Equivalence() {
   constexpr std::size_t Q8K_QK = 256;
   constexpr std::size_t Q8K_BLOCKS = 2;
   constexpr std::size_t Q8K_ELEMS = Q8K_BLOCKS * Q8K_QK;
-  struct Q8KBlockTest {
-    float d;
-    std::int8_t qs[Q8K_QK];
-    std::int16_t bsums[16];
-  };
+  using Q8KBlockTest = strix::quant::block_q8_K;
   static_assert(sizeof(Q8KBlockTest) == 292, "Q8_K block must be 292 bytes");
 
   std::vector<Q8KBlockTest> h_q8k(Q8K_BLOCKS);

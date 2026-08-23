@@ -27,14 +27,7 @@ constexpr std::size_t kGroupElements = 32;
 constexpr std::size_t kBlocksPerRow =
     strix::xdna2::kQwenMtpEhProjInputElements / kBlockElements;
 
-#pragma pack(push, 1)
-struct BlockQ4K {
-  std::uint16_t d;
-  std::uint16_t dmin;
-  std::uint8_t scales[12];
-  std::uint8_t qs[128];
-};
-#pragma pack(pop)
+using BlockQ4K = strix::quant::block_q4_K;
 
 static_assert(sizeof(BlockQ4K) == 144);
 
