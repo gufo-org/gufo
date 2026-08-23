@@ -240,6 +240,7 @@ add_library(strix_core STATIC
   src/eval/regrade.cpp
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
+  src/core/quant/ggml_gemm.cpp
 )
 target_include_directories(strix_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_definitions(strix_core PRIVATE
@@ -645,6 +646,12 @@ if (BUILD_TESTING)
 
   add_test(NAME ggml_dequant_test COMMAND ggml_dequant_test)
   set_tests_properties(ggml_dequant_test PROPERTIES LABELS "cpu;core;quant")
+
+  add_executable(ggml_gemm_parity_test tests/core/ggml_gemm_parity_test.cpp)
+  target_link_libraries(ggml_gemm_parity_test PRIVATE strix_core)
+
+  add_test(NAME ggml_gemm_parity_test COMMAND ggml_gemm_parity_test)
+  set_tests_properties(ggml_gemm_parity_test PROPERTIES LABELS "cpu;core;quant")
 
   add_executable(qwen_mtp_reference_test
     tests/core/qwen_mtp_reference_test.cpp)
