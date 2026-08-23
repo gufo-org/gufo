@@ -274,6 +274,10 @@ if (ENGINE_ENABLE_HIP)
     src/models/qwen/hip/qwen_gpu_decode_ops.hip
     src/models/qwen/hip/qwen_gpu_prefill_ops.hip
     src/models/qwen/hip/kernels/embed.hip
+    src/models/qwen/hip/kernels/residual.hip
+    src/models/qwen/hip/kernels/unpack.hip
+    src/models/qwen/hip/kernels/rope.hip
+    src/models/qwen/hip/kernels/sample.hip
     src/models/qwen/hip/qwen_gpu_arena.cpp
     src/models/qwen/hip/qwen_gpu_decode.cpp
     src/models/qwen/hip/qwen_gpu_executor.cpp
