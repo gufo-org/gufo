@@ -45,8 +45,15 @@ void SsmForward(ModuleCtx& ctx, const SsmLayerView& view,
                 std::span<float> out) noexcept;
 
 /// SwiGLU FFN.
+//
+// CPU backend operates on three intermediate scratch buffers (the GEMV
+// results for gate/up and the activation); the composition layer supplies them
+// from the arena's `mlp_gate`/`mlp_up`/`mlp_act`. This mirrors the existing
+// `ForwardFFN` reference signature (which has no arena in its call — the old
+// callers pass raw scratch spans), so the module can be a thin wrapper over it.
 void FfnForward(ModuleCtx& ctx, const FfnLayerView& view,
-                std::span<const float> x, QwenScratchArena& arena,
+                std::span<const float> x, std::span<float> gate_scratch,
+                std::span<float> up_scratch, std::span<float> act_scratch,
                 std::span<float> out) noexcept;
 
 /// Residual add: dst += src (standalone; the fused residual+norm route is a

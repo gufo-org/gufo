@@ -10,7 +10,10 @@
 #include <span>
 
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/models/qwen/modules/ffn.hpp"
 #include "src/models/qwen/modules/norm.hpp"
+#include "src/models/qwen/modules/residual.hpp"
+#include "src/models/qwen/modules/rope.hpp"
 #include "src/models/qwen_oracles.hpp"
 
 namespace strix::models {
@@ -226,18 +229,13 @@ void ForwardRoPE(std::span<float> q, std::span<float> k,
                  std::uint32_t num_heads, std::uint32_t num_kv_heads,
                  std::uint32_t head_dim, std::uint32_t rotary_dim,
                  std::uint32_t pos, float rope_theta) noexcept {
-  const std::uint32_t r_dim =
-      (rotary_dim > 0 && rotary_dim <= head_dim) ? rotary_dim : head_dim;
-  for (std::uint32_t h = 0; h < num_heads; ++h) {
-    const auto q_slice =
-        q.subspan(static_cast<std::size_t>(h) * head_dim, r_dim);
-    qwen::ReferenceRoPE(q_slice, pos, rope_theta, q_slice);
-  }
-  for (std::uint32_t h = 0; h < num_kv_heads; ++h) {
-    const auto k_slice =
-        k.subspan(static_cast<std::size_t>(h) * head_dim, r_dim);
-    qwen::ReferenceRoPE(k_slice, pos, rope_theta, k_slice);
-  }
+  // Thin wrapper: the RoPE body now lives in the rope module's CPU backend
+  // (RopeForward). This free function is kept for the existing CPU callers
+  // (ForwardLayer / qwen_forward_test) so behavior is unchanged.
+  qwen::RopeLayerView view{num_heads, num_kv_heads, head_dim, rotary_dim,
+                           rope_theta};
+  qwen::ModuleCtx ctx{};
+  qwen::RopeForward(ctx, view, q, k, pos);
 }
 
 void ForwardAttention(std::span<const float> q, std::span<const float> k,
@@ -339,24 +337,14 @@ void ForwardFFN(std::span<const float> x, const QwenTensorRef& gate_weight,
                 std::size_t intermediate_size, std::span<float> gate_scratch,
                 std::span<float> up_scratch, std::span<float> act_scratch,
                 std::span<float> ffn_out) noexcept {
-  if (!gate_weight.empty()) {
-    TensorGEMV(gate_weight, x, intermediate_size, hidden_size, gate_scratch);
-  }
-  if (!up_weight.empty()) {
-    TensorGEMV(up_weight, x, intermediate_size, hidden_size, up_scratch);
-  }
-
-  // SwiGLU activation
-  for (std::size_t i = 0; i < intermediate_size; ++i) {
-    const float g = gate_scratch[i];
-    const float silu_g = g / (1.0F + std::exp(-g));
-    act_scratch[i] = silu_g * up_scratch[i];
-  }
-
-  if (!down_weight.empty()) {
-    TensorGEMV(down_weight, act_scratch, hidden_size, intermediate_size,
-               ffn_out);
-  }
+  // Thin wrapper: the SwiGLU FFN body now lives in the ffn module's CPU
+  // backend (FfnForward). Kept for the existing CPU callers (ForwardLayer /
+  // qwen_forward_test) so behavior is unchanged.
+  qwen::FfnLayerView view{gate_weight, up_weight, down_weight, hidden_size,
+                          intermediate_size};
+  qwen::ModuleCtx ctx{};
+  qwen::FfnForward(ctx, view, x, gate_scratch, up_scratch, act_scratch,
+                   ffn_out);
 }
 
 void ForwardLayer(std::span<float> hidden, const QwenLayerWeights& layer,
@@ -437,10 +425,9 @@ void ForwardLayer(std::span<float> hidden, const QwenLayerWeights& layer,
                arena.ssm_gate, arena.ssm_out_buf, arena.attn_out);
   }
 
-  // 3. Residual Add
-  for (std::size_t i = 0; i < hidden_size; ++i) {
-    hidden[i] += arena.attn_out[i];
-  }
+  // 3. Residual Add (composition layer drives the residual module)
+  qwen::ModuleCtx ctx{};
+  qwen::ResidualAdd(ctx, hidden, arena.attn_out);
 
   // 4. FFN Pre-RMSNorm
   ForwardRMSNorm(hidden, layer.ffn_norm, 1e-6F, arena.normed);
@@ -451,9 +438,7 @@ void ForwardLayer(std::span<float> hidden, const QwenLayerWeights& layer,
              arena.mlp_up, arena.mlp_act, arena.mlp_out);
 
   // 6. Residual Add
-  for (std::size_t i = 0; i < hidden_size; ++i) {
-    hidden[i] += arena.mlp_out[i];
-  }
+  qwen::ResidualAdd(ctx, hidden, arena.mlp_out);
 }
 
 void ForwardModel(std::uint32_t token_id, std::uint32_t pos,
