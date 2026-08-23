@@ -61,6 +61,11 @@ struct SsmLayerView {
   std::uint32_t key_dim = 0;
   std::uint32_t val_dim = 0;
   std::uint32_t conv_kernel = 0;
+
+  /// Backing layer the old `ForwardSSM` needs while this is a thin-forwarding
+  /// shim (Phase 1). Dropped once the module body is extracted (Phase 2), when
+  /// SsmForward reads only its own slice. Non-owning; set by MakeSsmView.
+  QwenLayerWeights const* source = nullptr;
 };
 
 /// SwiGLU FFN layer slice.
@@ -110,7 +115,7 @@ inline SsmLayerView MakeSsmView(const QwenLayerWeights& w,
   return SsmLayerView{w.attn_qkv, w.attn_gate, w.ssm_a,       w.ssm_dt,
                       w.ssm_alpha, w.ssm_beta, w.ssm_norm,    w.ssm_out,
                       w.ssm_conv1d, c.ssm_group_count,        c.ssm_state_size,
-                      c.SsmValueSize(), c.ssm_conv_kernel};
+                      c.SsmValueSize(), c.ssm_conv_kernel, &w};
 }
 inline FfnLayerView MakeFfnView(const QwenLayerWeights& w,
                                 const core::ModelConfig& c) {
