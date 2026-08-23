@@ -338,7 +338,7 @@ rollback anchor until the bookmark lands.
 
 | What could break | Gate | Cost | Run when |
 |---|---|---|---|
-| CPU numerics/build | `nix build .#checks.x86_64-linux.testCheck` (Debug CPU build, `BUILD_TESTING=ON`, full ctest) | low (ccache) | **every commit** |
+| CPU numerics/build | `nix build .#checks.x86_64-linux.tests` (Debug CPU build, `BUILD_TESTING=ON`, full ctest) | low (ccache) | **every commit** |
 | GPU numerics | `cmake --build --preset gpu-test` + `ctest --preset gpu-full` (also the `qwen-gpu-kernel-oracle` preset) | high (HIP) | commits touching `src/core/hip/` or GPU-visible APIs |
 | GPU launch structure | `STRIX_DISPATCH_TELEMETRY=1 ... bench -p 16 -n 16` -> expect `miss_captured` then `hit` | low | any commit changing launch structure in decode |
 | End-to-end quality | `strix-server bench --validate-prefill 1024 --n-prompt 1024 --n-gen 0` — envelope must not regress (current: rmse `0.02007260`, cosine `0.99997753`, top-1 `198`) | **very high** | phase boundaries only |
@@ -349,7 +349,7 @@ Rules:
 - **Never refactor red.** Gates green before starting a step and after.
 - One concern per commit. A commit touching both layout and dispatch is two commits.
 - Red step -> `jj restore` the files, redo smaller. Do not debug forward on a broken intermediate state.
-- Per-commit: testCheck. GPU ctest only when HIP code touched. Logits envelope + bench A/B **only at phase boundaries** (logits comparison is extremely slow - never per commit).
+- Per-commit: tests. GPU ctest only when HIP code touched. Logits envelope + bench A/B **only at phase boundaries** (logits comparison is extremely slow - never per commit).
 - Untouched during the whole refactor: `src/core/xdna2/` (NPU), `src/server/`, `src/tokenization/`, `minimax_h3/`, `deepseek_v4_flash/`.
 - **Coordinate (do not expand): `qwen_gpu_prefill.cpp` / `qwen_gpu_prefill_ops.hip`** — just rewritten (Phase B direct-quant prefill, pp128 92.71→2.61 tok/s per `task-on-going.md`); §4.3 quant dispatch overlaps this path. Sequence §4.3 after the prefill work settles to avoid a merge conflict and to keep the refactor's perf gates from being confused by a known-regressed state.
 
@@ -359,7 +359,7 @@ Rules:
 > perf gates from the in-flight prefill fix so the two efforts don't get
 > confused; treat Phase 0 perf numbers as a snapshot of a transient state.
 1. `jj new -m "qwen refactor baseline"`; record revision.
-2. Run + record all gates: testCheck, gpu-full, capture smoke, bench envelope + headline numbers (per optimize-kernel skill: fingerprint, revision, raw samples). Store in `task-on-going.md`.
+2. Run + record all gates: tests, gpu-full, capture smoke, bench envelope + headline numbers (per optimize-kernel skill: fingerprint, revision, raw samples). Store in `task-on-going.md`.
 3. Verify asserts are live in test builds (no `NDEBUG` in `cpu-test`/`gpu-test` configure paths) - the existing hand-rolled tests are the safety net only if asserts are live.
 
 ### Phase 1 - Expand (purely additive; zero behavior change)
@@ -370,7 +370,7 @@ Only new files/symbols. Old code byte-identical -> cannot break behavior.
 4. `src/models/qwen/modules/` headers: `ModuleCtx`, `LayerView`s, module function declarations (`SsmForward`, `AttnForward`, `FfnForward`, `NormForward`, ...). Nothing wired yet.
 5. Module functions as **thin wrappers** around existing code (new function calls the old one; no caller changes). `ssm` first.
 6. **Synthetic-weights builder** (no GgufReader): a helper to build `QwenModelWeights` for a small synthetic 1–3 layer model from in-memory tensors. The whole L1 tier depends on this seam (the executor normally builds weights from a `GgufReader`; there is no existing in-memory path). Also add the `QwenTensorRef` reader keep-alive (`shared_ptr<GgufReader>`) + ctor assert per §6.
-Gate: testCheck green, zero test output changes.
+Gate: tests green, zero test output changes.
 
 ### Phase 2 - Migrate (callers move, behavior identical)
 1. Replace the 12 local block-struct copies with the canonical ones, one file per commit (static_asserts make it mechanical and provably safe).
@@ -380,7 +380,7 @@ Gate: testCheck green, zero test output changes.
 3. Extract module bodies out of `qwen_forward.cpp` / `qwen_ssm.cpp` into the module .cpp files, one module per commit; the forward<->ssm include tangle dissolves when `norm` gets its own header.
 4. Re-home `qwen_oracles.{cpp,hpp}` as the CPU backends of the norm/rope/ssm modules. Still compiled into `strix_core`, no library change.
 5. HIP side: `ForwardToken` per-layer loop calls module functions (which currently wrap the old inline bodies); policy toggles unchanged.
-Gate: testCheck green every commit; GPU ctest for commits in 2.5; ASAN through 2.1-2.4; envelope + short bench (`-p 128 -n 16`) at phase end.
+Gate: tests green every commit; GPU ctest for commits in 2.5; ASAN through 2.1-2.4; envelope + short bench (`-p 128 -n 16`) at phase end.
 
 ### Phase 3 - Wire the fast loop (the payoff)
 1. L1 `ssm` module e2e test: synthetic 1-3 layer model, GPU vs CPU backend, `CompareLogits` envelope, timing (via the direct-launcher loop per §6) + baseline file under `artifacts/baselines/`. Target < 1-2 s.
@@ -391,11 +391,11 @@ Gate: testCheck green every commit; GPU ctest for commits in 2.5; ASAN through 2
 Gate: gpu-full green; module envelopes match Phase 0 baseline.
 
 ### Phase 4 - Organize (mechanical moves, lowest urgency)
-1. `src/models/qwen35/` subdirectory + `add_subdirectory` in the root CMakeLists (keep flat until this phase - moving files is the riskiest "obviously safe" step; do it once, testCheck after).
+1. `src/models/qwen35/` subdirectory + `add_subdirectory` in the root CMakeLists (keep flat until this phase - moving files is the riskiest "obviously safe" step; do it once, tests after).
 2. `tests/modules/CMakeLists.txt` for the L1 tier; keep root-list per-test entries for the rest.
 3. Re-file tests: `qwen_oracle_test.cpp` -> `tests/core/logit_comparator_test.cpp` (it is 80% logit-comparator coverage); oracles test follows the CPU backends. Delete `tests/tools/__pycache__/` (jj honors `.gitignore`).
 4. Contract: delete the old local structs/switches now that nothing uses them (the Parallel Change cleanup half).
-Gate: full flake check set (format, static-analysis, testCheck) + gpu-full.
+Gate: full flake check set (format, static-analysis, tests) + gpu-full.
 
 ### Phase 5 - Optional, separate project
 - GoogleTest adoption per the cpp-testing skill (FetchContent + nix change) - its own bookmark, its own gates.
