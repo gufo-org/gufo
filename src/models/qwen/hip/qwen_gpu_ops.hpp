@@ -401,13 +401,6 @@ void LaunchBatchedFusedSSMInputProjections(
     std::size_t hidden_size, std::size_t qkv_size, std::size_t inner_size,
     std::size_t time_step_rank, hipStream_t stream = nullptr);
 
-/// Batched Fused QKV Projections across B tokens
-void LaunchBatchedFusedQKVProjections(
-    const void* q_w, bool q_is_bf16, const void* k_w, bool k_is_bf16,
-    const void* v_w, bool v_is_bf16, const float* X, float* q_out, float* k_out,
-    float* v_out, std::size_t batch_size, std::size_t q_dim, std::size_t kv_dim,
-    std::size_t hidden_size, hipStream_t stream = nullptr);
-
 /// Batched Fused SwiGLU GEMM: Out[B, intermediate] = SiLU(X[B, K] * W_gate^T) *
 /// (X[B, K] * W_up^T), with optional BF16 output (opt-c010-ffn-swiglu)
 void LaunchBatchedFusedSwiGLUGEMM(const void* gate_w, bool gate_is_bf16,

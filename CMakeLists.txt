@@ -271,7 +271,14 @@ if (ENGINE_ENABLE_HIP)
     src/models/qwen/hip/qwen_gpu_attention.hip
     src/models/qwen/hip/qwen_gpu_batched_ssm.hip
     src/models/qwen/hip/qwen_gpu_decode_ops.hip
-    src/models/qwen/hip/qwen_gpu_prefill_ops.hip
+    src/models/qwen/hip/kernels/prefill_embed.hip
+    src/models/qwen/hip/kernels/prefill_gemm.hip
+    src/models/qwen/hip/kernels/prefill_norm.hip
+    src/models/qwen/hip/kernels/prefill_residual.hip
+    src/models/qwen/hip/kernels/prefill_rope.hip
+    src/models/qwen/hip/kernels/prefill_ssm.hip
+    src/models/qwen/hip/kernels/prefill_swiglu.hip
+    src/models/qwen/hip/kernels/prefill_unpack.hip
     src/models/qwen/hip/kernels/embed.hip
     src/models/qwen/hip/kernels/residual.hip
     src/models/qwen/hip/kernels/unpack.hip
