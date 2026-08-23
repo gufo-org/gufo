@@ -11,7 +11,7 @@
 #include "src/models/qwen/hip/qwen_gpu_executor.hpp"
 #include "src/core/speculative/draft_backend.hpp"
 #include "src/models/qwen/qwen_mtp_reference.hpp"
-#include "src/tokenization/qwen_tokenizer.hpp"
+#include "src/models/qwen/qwen_tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>

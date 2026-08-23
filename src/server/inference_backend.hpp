@@ -9,8 +9,8 @@
 #include <string_view>
 #include <vector>
 
-#include "src/tokenization/qwen_chat_template.hpp"
-#include "src/tokenization/qwen_tokenizer.hpp"
+#include "src/models/qwen/qwen_chat_template.hpp"
+#include "src/models/qwen/qwen_tokenizer.hpp"
 
 namespace strix::hip {
 class QwenGpuModel;

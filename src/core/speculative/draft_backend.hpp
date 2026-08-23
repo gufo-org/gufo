@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "src/tokenization/qwen_tokenizer.hpp"
+#include "src/models/qwen/qwen_tokenizer.hpp"
 
 namespace strix::speculative {
 

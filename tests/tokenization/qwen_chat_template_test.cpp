@@ -1,4 +1,4 @@
-#include "src/tokenization/qwen_chat_template.hpp"
+#include "src/models/qwen/qwen_chat_template.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/tokenization/qwen_tokenizer.hpp"
+#include "src/models/qwen/qwen_tokenizer.hpp"
 
 namespace {
 

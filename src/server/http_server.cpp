@@ -26,7 +26,7 @@
 #include "src/server/tts_service.hpp"
 #include "src/server/video_api.hpp"
 #include "src/server/video_jobs.hpp"
-#include "src/tokenization/qwen_chat_template.hpp"
+#include "src/models/qwen/qwen_chat_template.hpp"
 
 namespace strix::server {
 namespace {

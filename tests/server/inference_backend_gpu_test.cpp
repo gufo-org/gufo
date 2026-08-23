@@ -16,7 +16,7 @@
 #include "src/models/qwen/hip/qwen_gpu_executor.hpp"
 #include "src/models/qwen/qwen_generator.hpp"
 #include "src/server/inference_backend.hpp"
-#include "src/tokenization/qwen_chat_template.hpp"
+#include "src/models/qwen/qwen_chat_template.hpp"
 
 namespace {
 

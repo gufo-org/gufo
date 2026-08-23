@@ -13,7 +13,7 @@
 #include "src/models/qwen/qwen_forward.hpp"
 #include "src/models/qwen/qwen_generator.hpp"
 #include "src/models/qwen/qwen_state.hpp"
-#include "src/tokenization/qwen_tokenizer.hpp"
+#include "src/models/qwen/qwen_tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>

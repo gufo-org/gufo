@@ -228,8 +228,8 @@ add_library(strix_core STATIC
   src/models/minimax_h3/sha256.cpp
   src/models/minimax_h3/tokenizer.cpp
   src/models/minimax_h3/video_vae.cpp
-  src/tokenization/qwen_tokenizer.cpp
-  src/tokenization/qwen_chat_template.cpp
+  src/models/qwen/qwen_tokenizer.cpp
+  src/models/qwen/qwen_chat_template.cpp
   src/models/qwen/qwen_oracles.cpp
   src/models/qwen/qwen_state.cpp
   src/models/qwen/qwen_ssm.cpp

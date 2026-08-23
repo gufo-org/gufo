@@ -8,7 +8,7 @@
 
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/server/inference_backend.hpp"
-#include "src/tokenization/qwen_chat_template.hpp"
+#include "src/models/qwen/qwen_chat_template.hpp"
 
 namespace {
 
