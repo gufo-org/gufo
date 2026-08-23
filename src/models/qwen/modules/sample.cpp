@@ -1,6 +1,6 @@
 #include "src/models/qwen/modules/sample.hpp"
 
-#include "src/models/qwen_forward.hpp"  // GreedyArgmax
+#include "src/models/qwen/qwen_forward.hpp"  // GreedyArgmax
 
 namespace strix::models::qwen {
 

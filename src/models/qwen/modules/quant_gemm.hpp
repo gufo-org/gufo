@@ -5,7 +5,7 @@
 #include <span>
 
 #include "src/models/qwen/modules/module_ctx.hpp"
-#include "src/models/qwen_state.hpp"  // QwenTensorRef
+#include "src/models/qwen/qwen_state.hpp"  // QwenTensorRef
 
 namespace strix::models::qwen {
 

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <ranges>
 
-#include "src/models/qwen_forward.hpp"  // TensorGEMV, ForwardRMSNorm, ForwardRoPE, ForwardAttention
+#include "src/models/qwen/qwen_forward.hpp"  // TensorGEMV, ForwardRMSNorm, ForwardRoPE, ForwardAttention
 
 namespace strix::models::qwen {
 

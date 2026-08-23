@@ -2,8 +2,8 @@
 #include <algorithm>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/core/hip/qwen_gpu_executor.hpp"
-#include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
 
 namespace strix::hip {
 namespace {

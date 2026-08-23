@@ -230,10 +230,10 @@ add_library(strix_core STATIC
   src/models/minimax_h3/video_vae.cpp
   src/tokenization/qwen_tokenizer.cpp
   src/tokenization/qwen_chat_template.cpp
-  src/models/qwen_oracles.cpp
-  src/models/qwen_state.cpp
-  src/models/qwen_ssm.cpp
-  src/models/qwen_forward.cpp
+  src/models/qwen/qwen_oracles.cpp
+  src/models/qwen/qwen_state.cpp
+  src/models/qwen/qwen_ssm.cpp
+  src/models/qwen/qwen_forward.cpp
   src/models/qwen/modules/attention.cpp
   src/models/qwen/modules/embed.cpp
   src/models/qwen/modules/ffn.cpp
@@ -244,7 +244,7 @@ add_library(strix_core STATIC
   src/models/qwen/modules/sample.cpp
   src/models/qwen/modules/ssm.cpp
   src/models/qwen/modules/unembed.cpp
-  src/models/qwen_generator.cpp
+  src/models/qwen/qwen_generator.cpp
   src/core/speculative/qwen_mtp_reference.cpp
   src/testing/compare/logit_comparator.cpp
   src/eval/regrade.cpp
@@ -268,17 +268,17 @@ if (ENGINE_ENABLE_HIP)
   set_property(SOURCE src/models/minimax_h3/dit.hip
     APPEND PROPERTY COMPILE_OPTIONS -O2)
   target_sources(strix_core PRIVATE
-    src/core/hip/qwen_gpu_attention.hip
-    src/core/hip/qwen_gpu_batched_ssm.hip
-    src/core/hip/qwen_gpu_blas.hip
-    src/core/hip/qwen_gpu_decode_ops.hip
-    src/core/hip/qwen_gpu_prefill_ops.hip
-    src/core/hip/qwen_gpu_arena.cpp
-    src/core/hip/qwen_gpu_decode.cpp
-    src/core/hip/qwen_gpu_executor.cpp
-    src/core/hip/qwen_gpu_model_loader.cpp
-    src/core/hip/qwen_gpu_prefill.cpp
-    src/core/hip/qwen_mtp_gpu.cpp
+    src/models/qwen/hip/qwen_gpu_attention.hip
+    src/models/qwen/hip/qwen_gpu_batched_ssm.hip
+    src/models/qwen/hip/qwen_gpu_blas.hip
+    src/models/qwen/hip/qwen_gpu_decode_ops.hip
+    src/models/qwen/hip/qwen_gpu_prefill_ops.hip
+    src/models/qwen/hip/qwen_gpu_arena.cpp
+    src/models/qwen/hip/qwen_gpu_decode.cpp
+    src/models/qwen/hip/qwen_gpu_executor.cpp
+    src/models/qwen/hip/qwen_gpu_model_loader.cpp
+    src/models/qwen/hip/qwen_gpu_prefill.cpp
+    src/models/qwen/hip/qwen_mtp_gpu.cpp
     src/models/minimax_h3/audio_vae.hip
     src/models/minimax_h3/denoiser.hip
     src/models/minimax_h3/dit.hip

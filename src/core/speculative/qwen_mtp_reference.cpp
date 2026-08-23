@@ -10,7 +10,7 @@
 #include <utility>
 
 #include "src/core/quant/ggml_dequant.hpp"
-#include "src/models/qwen_forward.hpp"
+#include "src/models/qwen/qwen_forward.hpp"
 
 namespace strix::speculative {
 namespace {

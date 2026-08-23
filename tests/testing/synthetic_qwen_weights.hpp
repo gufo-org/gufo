@@ -21,7 +21,7 @@
 #include <vector>
 
 #include "src/core/model_config.hpp"
-#include "src/models/qwen_state.hpp"
+#include "src/models/qwen/qwen_state.hpp"
 #include "tests/testing/test_common.hpp"
 
 namespace strix::models::qwen {

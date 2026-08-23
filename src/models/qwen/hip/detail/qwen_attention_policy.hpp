@@ -1,5 +1,5 @@
-#ifndef STRIX_CORE_HIP_DETAIL_QWEN_ATTENTION_POLICY_HPP_
-#define STRIX_CORE_HIP_DETAIL_QWEN_ATTENTION_POLICY_HPP_
+#ifndef STRIX_MODELS_QWEN_HIP_DETAIL_QWEN_ATTENTION_POLICY_HPP_
+#define STRIX_MODELS_QWEN_HIP_DETAIL_QWEN_ATTENTION_POLICY_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -150,4 +150,4 @@ inline void DispatchPrefillAttention(std::size_t visible_context,
 
 }  // namespace strix::hip::detail
 
-#endif  // STRIX_CORE_HIP_DETAIL_QWEN_ATTENTION_POLICY_HPP_
+#endif  // STRIX_MODELS_QWEN_HIP_DETAIL_QWEN_ATTENTION_POLICY_HPP_

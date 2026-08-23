@@ -1,4 +1,4 @@
-#include "src/models/qwen_oracles.hpp"
+#include "src/models/qwen/qwen_oracles.hpp"
 
 #include <algorithm>
 #include <cmath>

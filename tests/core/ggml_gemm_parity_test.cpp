@@ -7,7 +7,7 @@
 //       returning 0.0F, matching the canonical DequantizeQ* routines exactly;
 //   (3) F32/F16/BF16 handling is correct.
 // The OLD reference below mirrors QuantizedDot/DequantizeRow in
-// src/models/qwen_forward.cpp (Q3_K/Q4_K/Q6_K only; everything else -> 0.0F).
+// src/models/qwen/qwen_forward.cpp (Q3_K/Q4_K/Q6_K only; everything else -> 0.0F).
 
 #include <cmath>
 #include <cstdint>

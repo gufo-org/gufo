@@ -13,10 +13,10 @@
 #include <utility>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen_generator.hpp"
+#include "src/models/qwen/qwen_generator.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/core/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #endif
 

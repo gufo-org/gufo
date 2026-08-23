@@ -1,6 +1,6 @@
 #include "src/models/qwen/modules/rope.hpp"
 
-#include "src/models/qwen_oracles.hpp"
+#include "src/models/qwen/qwen_oracles.hpp"
 
 namespace strix::models::qwen {
 

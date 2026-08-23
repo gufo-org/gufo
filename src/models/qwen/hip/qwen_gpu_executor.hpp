@@ -1,5 +1,5 @@
-#ifndef STRIX_CORE_HIP_QWEN_GPU_EXECUTOR_HPP_
-#define STRIX_CORE_HIP_QWEN_GPU_EXECUTOR_HPP_
+#ifndef STRIX_MODELS_QWEN_HIP_QWEN_GPU_EXECUTOR_HPP_
+#define STRIX_MODELS_QWEN_HIP_QWEN_GPU_EXECUTOR_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -10,9 +10,9 @@
 #include <vector>
 
 #include "src/core/model_config.hpp"
-#include "src/models/qwen_forward.hpp"
-#include "src/models/qwen_generator.hpp"
-#include "src/models/qwen_state.hpp"
+#include "src/models/qwen/qwen_forward.hpp"
+#include "src/models/qwen/qwen_generator.hpp"
+#include "src/models/qwen/qwen_state.hpp"
 #include "src/tokenization/qwen_tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -21,7 +21,7 @@
 #include <hipblas/hipblas.h>
 
 #include "src/core/hip/detail/hip_graph_decode_executor.hpp"
-#include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
 
 namespace strix::hip {
 
@@ -266,4 +266,4 @@ private:
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // STRIX_CORE_HIP_QWEN_GPU_EXECUTOR_HPP_
+#endif  // STRIX_MODELS_QWEN_HIP_QWEN_GPU_EXECUTOR_HPP_

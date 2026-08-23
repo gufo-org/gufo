@@ -10,8 +10,8 @@
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/core/hip/qwen_gpu_executor.hpp"
-#include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
 #include "src/core/model_config.hpp"
 
 namespace {

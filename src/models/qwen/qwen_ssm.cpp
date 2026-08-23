@@ -1,4 +1,4 @@
-#include "src/models/qwen_ssm.hpp"
+#include "src/models/qwen/qwen_ssm.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,7 +8,7 @@
 #include <span>
 #include <vector>
 
-#include "src/models/qwen_forward.hpp"
+#include "src/models/qwen/qwen_forward.hpp"
 
 namespace strix::models {
 

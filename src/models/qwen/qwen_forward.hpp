@@ -5,8 +5,8 @@
 #include <cstdint>
 #include <span>
 
-#include "src/models/qwen_ssm.hpp"
-#include "src/models/qwen_state.hpp"
+#include "src/models/qwen/qwen_ssm.hpp"
+#include "src/models/qwen/qwen_state.hpp"
 
 namespace strix::models {
 

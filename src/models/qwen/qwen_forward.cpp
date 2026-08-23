@@ -1,4 +1,4 @@
-#include "src/models/qwen_forward.hpp"
+#include "src/models/qwen/qwen_forward.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -17,7 +17,7 @@
 #include "src/models/qwen/modules/residual.hpp"
 #include "src/models/qwen/modules/rope.hpp"
 #include "src/models/qwen/modules/unembed.hpp"
-#include "src/models/qwen_oracles.hpp"
+#include "src/models/qwen/qwen_oracles.hpp"
 
 namespace strix::models {
 namespace {

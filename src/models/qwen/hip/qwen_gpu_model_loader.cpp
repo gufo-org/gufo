@@ -3,8 +3,8 @@
 #include <string_view>
 #include <utility>
 
-#include "src/core/hip/detail/qwen_gpu_weight_regions.hpp"
-#include "src/core/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/hip/detail/qwen_gpu_weight_regions.hpp"
+#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
 
 namespace strix::hip {
 namespace detail {

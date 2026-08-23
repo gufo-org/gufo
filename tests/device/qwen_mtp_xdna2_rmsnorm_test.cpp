@@ -18,7 +18,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/xdna2/device.h"
 #include "src/core/xdna2/qwen_mtp_rmsnorm.h"
-#include "src/models/qwen_oracles.hpp"
+#include "src/models/qwen/qwen_oracles.hpp"
 
 namespace {
 

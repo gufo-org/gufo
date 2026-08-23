@@ -10,8 +10,8 @@
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/detail/gemv_dispatcher.hpp"
-#include "src/core/hip/qwen_gpu_ops.hpp"
-#include "src/core/hip/qwen_gpu_quant_ops.hpp"
+#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/qwen_gpu_quant_ops.hpp"
 #include "src/core/gguf_reader.hpp"
 
 namespace strix::hip {
@@ -21,7 +21,7 @@ namespace {
 constexpr std::size_t kLargeGemvInput = 16384;
 
 // Quant block layouts (Q8_0 / Q5_K / Q6_K) and quant row-dot helpers are
-// shared via src/core/hip/qwen_gpu_quant_ops.hpp.
+// shared via src/models/qwen/hip/qwen_gpu_quant_ops.hpp.
 
 __global__ void EmbeddingLookupKernel(const void* __restrict__ table,
                                       core::GgmlType type, std::uint32_t token_id,

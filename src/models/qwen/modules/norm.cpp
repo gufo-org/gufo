@@ -3,12 +3,12 @@
 #include <cstddef>
 #include <vector>
 
-#include "src/models/qwen_oracles.hpp"
+#include "src/models/qwen/qwen_oracles.hpp"
 
 // GOP ops (LaunchRMSNorm etc.) only exist under a HIP build; the CPU-only
 // strix_core build must not reference them.
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
 #endif
 
 namespace strix::models::qwen {

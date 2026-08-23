@@ -4,7 +4,7 @@
 #include <span>
 
 #include "src/models/qwen/modules/module_ctx.hpp"
-#include "src/models/qwen_state.hpp"
+#include "src/models/qwen/qwen_state.hpp"
 
 namespace strix::models::qwen {
 

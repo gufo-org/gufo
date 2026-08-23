@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include "src/models/qwen_oracles.hpp"
+#include "src/models/qwen/qwen_oracles.hpp"
 
 namespace {
 

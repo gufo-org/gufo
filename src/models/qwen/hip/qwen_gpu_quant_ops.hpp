@@ -1,5 +1,5 @@
-#ifndef STRIX_CORE_HIP_QWEN_GPU_QUANT_OPS_HPP_
-#define STRIX_CORE_HIP_QWEN_GPU_QUANT_OPS_HPP_
+#ifndef STRIX_MODELS_QWEN_HIP_QWEN_GPU_QUANT_OPS_HPP_
+#define STRIX_MODELS_QWEN_HIP_QWEN_GPU_QUANT_OPS_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -290,4 +290,4 @@ __device__ inline float QuantWarpBlockDot(
 
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // STRIX_CORE_HIP_QWEN_GPU_QUANT_OPS_HPP_
+#endif  // STRIX_MODELS_QWEN_HIP_QWEN_GPU_QUANT_OPS_HPP_

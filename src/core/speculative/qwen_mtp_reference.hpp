@@ -10,8 +10,8 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen_ssm.hpp"
-#include "src/models/qwen_state.hpp"
+#include "src/models/qwen/qwen_ssm.hpp"
+#include "src/models/qwen/qwen_state.hpp"
 #include "src/tokenization/qwen_tokenizer.hpp"
 
 namespace strix::speculative {

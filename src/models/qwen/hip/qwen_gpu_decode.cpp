@@ -1,10 +1,10 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <stdexcept>
 
-#include "src/core/hip/detail/qwen_attention_policy.hpp"
+#include "src/models/qwen/hip/detail/qwen_attention_policy.hpp"
 #include "src/core/hip/hip_utils.hpp"
-#include "src/core/hip/qwen_gpu_executor.hpp"
-#include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
 #include "src/models/qwen/modules/modules.hpp"
 
 namespace strix::hip {

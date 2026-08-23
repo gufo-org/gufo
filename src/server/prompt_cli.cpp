@@ -11,7 +11,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
-#include "src/models/qwen_generator.hpp"
+#include "src/models/qwen/qwen_generator.hpp"
 #include "src/tokenization/qwen_chat_template.hpp"
 #include "src/tokenization/qwen_tokenizer.hpp"
 
@@ -19,8 +19,8 @@
 #include <hip/hip_runtime.h>
 
 #include "src/core/heterogeneous/npu_drafter.hpp"
-#include "src/core/hip/qwen_gpu_executor.hpp"
-#include "src/core/hip/qwen_mtp_gpu.hpp"
+#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/hip/qwen_mtp_gpu.hpp"
 #include "src/core/speculative/draft_heads.hpp"
 #include "src/core/speculative/prompt_lookup_backend.hpp"
 #include "src/core/speculative/self_speculative.hpp"

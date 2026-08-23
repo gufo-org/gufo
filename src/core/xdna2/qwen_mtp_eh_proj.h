@@ -9,7 +9,7 @@
 #include <string>
 
 #include "src/core/xdna2/device.h"
-#include "src/models/qwen_state.hpp"
+#include "src/models/qwen/qwen_state.hpp"
 
 namespace strix::xdna2 {
 

@@ -1,5 +1,5 @@
-#ifndef STRIX_CORE_HIP_QWEN_MTP_GPU_HPP_
-#define STRIX_CORE_HIP_QWEN_MTP_GPU_HPP_
+#ifndef STRIX_MODELS_QWEN_HIP_QWEN_MTP_GPU_HPP_
+#define STRIX_MODELS_QWEN_HIP_QWEN_MTP_GPU_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "src/core/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
 #include "src/core/speculative/draft_backend.hpp"
 #include "src/core/speculative/qwen_mtp_reference.hpp"
 #include "src/tokenization/qwen_tokenizer.hpp"
@@ -247,4 +247,4 @@ private:
 }  // namespace strix::hip
 #endif  // defined(ENGINE_ENABLE_HIP)
 
-#endif  // STRIX_CORE_HIP_QWEN_MTP_GPU_HPP_
+#endif  // STRIX_MODELS_QWEN_HIP_QWEN_MTP_GPU_HPP_

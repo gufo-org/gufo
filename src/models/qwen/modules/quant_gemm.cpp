@@ -1,6 +1,6 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 
-#include "src/models/qwen_forward.hpp"  // TensorGEMV
+#include "src/models/qwen/qwen_forward.hpp"  // TensorGEMV
 
 namespace strix::models::qwen {
 

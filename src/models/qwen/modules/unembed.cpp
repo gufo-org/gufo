@@ -1,6 +1,6 @@
 #include "src/models/qwen/modules/unembed.hpp"
 
-#include "src/models/qwen_forward.hpp"  // ForwardRMSNorm, TensorGEMV
+#include "src/models/qwen/qwen_forward.hpp"  // ForwardRMSNorm, TensorGEMV
 
 namespace strix::models::qwen {
 

@@ -13,8 +13,8 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/hip_utils.hpp"
-#include "src/core/hip/qwen_gpu_executor.hpp"
-#include "src/models/qwen_generator.hpp"
+#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/qwen_generator.hpp"
 #include "src/server/inference_backend.hpp"
 #include "src/tokenization/qwen_chat_template.hpp"
 

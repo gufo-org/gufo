@@ -23,7 +23,7 @@
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/detail/hipblaslt_plan_database.hpp"
 #include "src/core/hip/hip_utils.hpp"
-#include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
 
 namespace strix::hip {
 

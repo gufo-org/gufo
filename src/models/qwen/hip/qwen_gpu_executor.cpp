@@ -1,5 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/core/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
 
 #include <cstdlib>
 #include <stdexcept>

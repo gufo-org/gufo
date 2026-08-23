@@ -1,4 +1,4 @@
-#include "src/models/qwen_ssm.hpp"
+#include "src/models/qwen/qwen_ssm.hpp"
 
 #include <cassert>
 #include <cmath>

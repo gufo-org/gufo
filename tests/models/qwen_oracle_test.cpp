@@ -2,7 +2,7 @@
 #include <iostream>
 #include <vector>
 
-#include "src/models/qwen_oracles.hpp"
+#include "src/models/qwen/qwen_oracles.hpp"
 #include "src/testing/compare/logit_comparator.hpp"
 
 void TestLogitComparatorExactMatch() {
