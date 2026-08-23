@@ -10,6 +10,64 @@
 
 namespace strix::quant {
 
+// Canonical quantized block layouts. These are the authoritative field
+// layouts for the dequant/dot paths. Relocated verbatim from the internal
+// definitions in ggml_dequant.cpp so the header is the single source of
+// truth; field order and byte sizes match the HIP path
+// (src/core/hip/qwen_gpu_quant_ops.hpp) and the historical per-file copies
+// (qwen_state.hpp, tests/). Do NOT redefine block_* locally. Sizes are
+// static_asserted; this is the layout contract (see the parity test that
+// proves field order against the byte-level spec).
+#pragma pack(push, 1)
+struct block_q4_K {
+  std::uint16_t d;
+  std::uint16_t dmin;
+  std::uint8_t scales[12];
+  std::uint8_t qs[128];
+};
+
+struct block_q5_K {
+  std::uint16_t d;
+  std::uint16_t dmin;
+  std::uint8_t scales[12];
+  std::uint8_t qh[32];
+  std::uint8_t qs[128];
+};
+
+struct block_q6_K {
+  std::uint8_t ql[128];
+  std::uint8_t qh[64];
+  std::int8_t scales[16];
+  std::uint16_t d;
+};
+
+struct block_q3_K {
+  std::uint8_t hmask[32];
+  std::uint8_t qs[64];
+  std::uint8_t scales[12];
+  std::uint16_t d;
+};
+
+struct block_q8_K {
+  float d;
+  std::int8_t qs[256];
+  std::int16_t bsums[16];
+};
+
+// Q8_0: fp16 scale + 32 int8 quantized values (QK=32).
+struct block_q8_0 {
+  std::uint16_t d;
+  std::int8_t qs[32];
+};
+#pragma pack(pop)
+
+static_assert(sizeof(block_q4_K) == 144, "block_q4_K must be 144 bytes");
+static_assert(sizeof(block_q5_K) == 176, "block_q5_K must be 176 bytes");
+static_assert(sizeof(block_q6_K) == 210, "block_q6_K must be 210 bytes");
+static_assert(sizeof(block_q3_K) == 110, "block_q3_K must be 110 bytes");
+static_assert(sizeof(block_q8_K) == 292, "block_q8_K must be 292 bytes");
+static_assert(sizeof(block_q8_0) == 34, "block_q8_0 must be 34 bytes");
+
 /// Returns the encoded byte count for one logical row, or zero when the type
 /// is unsupported or the element count is not block aligned.
 [[nodiscard]] std::size_t QuantizedRowBytes(core::GgmlType type,

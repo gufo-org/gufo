@@ -35,55 +35,9 @@ float Fp16ToFloat(std::uint16_t h) noexcept {
   return f;
 }
 
-#pragma pack(push, 1)
-struct block_q4_K {
-  std::uint16_t d;
-  std::uint16_t dmin;
-  std::uint8_t scales[12];
-  std::uint8_t qs[128];
-};
-
-struct block_q5_K {
-  std::uint16_t d;
-  std::uint16_t dmin;
-  std::uint8_t scales[12];
-  std::uint8_t qh[32];
-  std::uint8_t qs[128];
-};
-
-struct block_q6_K {
-  std::uint8_t ql[128];
-  std::uint8_t qh[64];
-  std::int8_t scales[16];
-  std::uint16_t d;
-};
-
-struct block_q3_K {
-  std::uint8_t hmask[32];
-  std::uint8_t qs[64];
-  std::uint8_t scales[12];
-  std::uint16_t d;
-};
-
-struct block_q8_K {
-  float d;
-  std::int8_t qs[256];
-  std::int16_t bsums[16];
-};
-
-// Q8_0 block: fp16 scale + 32 int8 quantized values (QK=32).
-struct block_q8_0 {
-  std::uint16_t d;
-  std::int8_t qs[32];
-};
-#pragma pack(pop)
-
-static_assert(sizeof(block_q4_K) == 144);
-static_assert(sizeof(block_q5_K) == 176);
-static_assert(sizeof(block_q6_K) == 210);
-static_assert(sizeof(block_q3_K) == 110);
-static_assert(sizeof(block_q8_K) == 292);
-static_assert(sizeof(block_q8_0) == 34);
+// Block layouts (block_q4_K, block_q5_K, block_q6_K, block_q3_K,
+// block_q8_K, block_q8_0) now live in the header; they are the canonical
+// layout source. Definitions removed here to avoid ODR redefinition.
 
 namespace {
 
