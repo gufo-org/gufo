@@ -270,7 +270,6 @@ if (ENGINE_ENABLE_HIP)
   target_sources(strix_core PRIVATE
     src/models/qwen/hip/qwen_gpu_attention.hip
     src/models/qwen/hip/qwen_gpu_batched_ssm.hip
-    src/models/qwen/hip/qwen_gpu_blas.hip
     src/models/qwen/hip/qwen_gpu_decode_ops.hip
     src/models/qwen/hip/qwen_gpu_prefill_ops.hip
     src/models/qwen/hip/kernels/embed.hip
@@ -281,6 +280,12 @@ if (ENGINE_ENABLE_HIP)
     src/models/qwen/hip/kernels/norm.hip
     src/models/qwen/hip/kernels/gemv.hip
     src/models/qwen/hip/kernels/fused.hip
+    src/models/qwen/hip/kernels/attention_batched.hip
+    src/models/qwen/hip/kernels/attention_ck.hip
+    src/models/qwen/hip/kernels/attention_decode.hip
+    src/models/qwen/hip/kernels/attention_tile.hip
+    src/models/qwen/hip/kernels/hipblas_gemm.hip
+    src/models/qwen/hip/kernels/hipblaslt_gemm.hip
     src/models/qwen/hip/qwen_gpu_arena.cpp
     src/models/qwen/hip/qwen_gpu_decode.cpp
     src/models/qwen/hip/qwen_gpu_executor.cpp
