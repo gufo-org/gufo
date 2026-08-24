@@ -937,26 +937,47 @@ if (BUILD_TESTING)
     endfunction()
 
     add_qwen_hip_test(qwen_gpu_ops_test
-      tests/models/qwen/hip/basic_ops_test.cpp
+      tests/models/qwen/hip/basic/blas_ops_test.cpp
       "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;basic;blas")
+    add_qwen_hip_test(qwen_elementwise_ops_test
+      tests/models/qwen/hip/basic/elementwise_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;basic;elementwise")
+
     add_qwen_hip_test(qwen_attention_decode_ops_test
-      tests/models/qwen/hip/attention_decode_ops_test.cpp
-      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;decode")
+      tests/models/qwen/hip/attention/backend_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;decode;backend")
+    add_qwen_hip_test(qwen_attention_long_context_ops_test
+      tests/models/qwen/hip/attention/long_context_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;decode;long-context")
     add_qwen_hip_test(qwen_attention_fusion_ops_test
-      tests/models/qwen/hip/attention_fusion_ops_test.cpp
-      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;fusion;opt-c010-qk-rope-kv;opt-c010-rmsnorm-projection")
+      tests/models/qwen/hip/attention/qk_rope_kv_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;fusion;opt-c010-qk-rope-kv")
+    add_qwen_hip_test(qwen_attention_projection_ops_test
+      tests/models/qwen/hip/attention/projection_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;projection;opt-c010-rmsnorm-projection")
+    add_qwen_hip_test(qwen_attention_component_ops_test
+      tests/models/qwen/hip/attention/component_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;component")
+
     add_qwen_hip_test(qwen_ssm_ops_test
       tests/models/qwen/hip/ssm_ops_test.cpp
       "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;ssm;opt-c010-ssm-gate-residual;opt-c010-rmsnorm-projection")
     add_qwen_hip_test(qwen_ffn_fusion_ops_test
-      tests/models/qwen/hip/ffn_fusion_ops_test.cpp
-      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;ffn;fusion;opt-c010-residual-rmsnorm;opt-c010-ffn-swiglu")
+      tests/models/qwen/hip/ffn/swiglu_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;ffn;fusion;opt-c010-ffn-swiglu")
+    add_qwen_hip_test(qwen_ffn_residual_ops_test
+      tests/models/qwen/hip/ffn/residual_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;ffn;residual;opt-c010-residual-rmsnorm;opt-c010-ssm-gate-residual")
+
     add_qwen_hip_test(qwen_graph_prefetch_ops_test
       tests/models/qwen/hip/graph_prefetch_ops_test.cpp
       "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;graph;prefetch;opt-c014-layer-prefetch")
     add_qwen_hip_test(qwen_quant_gemv_ops_test
-      tests/models/qwen/hip/quant_gemv_ops_test.cpp
-      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemv;opt-c162-q8k-model")
+      tests/models/qwen/hip/quant/q8_gemv_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemv;q8;opt-c162-q8k-model")
+    add_qwen_hip_test(qwen_kquant_gemv_ops_test
+      tests/models/qwen/hip/quant/kquant_gemv_ops_test.cpp
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemv;k-quant")
     add_qwen_hip_test(qwen_dequant_ops_test
       tests/models/qwen/hip/dequant_ops_test.cpp
       "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;dequant;opt-c162-q8k-model")

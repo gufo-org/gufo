@@ -27,69 +27,7 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
-
-void TestGpuRMSNorm() {
-  const std::size_t dim = 256;
-  std::vector<float> h_x(dim, 1.0F);
-  std::vector<float> h_w(dim, 2.0F);
-  std::vector<float> h_out(dim, 0.0F);
-
-  float *d_x = nullptr, *d_w = nullptr, *d_out = nullptr;
-  HIP_CHECK(hipMalloc(&d_x, dim * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_w, dim * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_out, dim * sizeof(float)));
-
-  HIP_CHECK(
-      hipMemcpy(d_x, h_x.data(), dim * sizeof(float), hipMemcpyHostToDevice));
-  HIP_CHECK(
-      hipMemcpy(d_w, h_w.data(), dim * sizeof(float), hipMemcpyHostToDevice));
-
-  strix::hip::LaunchRMSNorm(d_x, d_w, d_out, dim, 1e-6F);
-  HIP_CHECK(hipDeviceSynchronize());
-
-  HIP_CHECK(hipMemcpy(h_out.data(), d_out, dim * sizeof(float),
-                      hipMemcpyDeviceToHost));
-
-  // mean(x^2) = 1.0, rms = 1.0, out = (1.0 / 1.0) * 2.0 = 2.0
-  for (std::size_t i = 0; i < dim; ++i) {
-    assert(std::abs(h_out[i] - 2.0F) < 1e-4F);
-  }
-
-  HIP_CHECK(hipFree(d_x));
-  HIP_CHECK(hipFree(d_w));
-  HIP_CHECK(hipFree(d_out));
-}
-
-void TestGpuResidualAdd() {
-  const std::size_t dim = 128;
-  std::vector<float> h_a(dim, 3.5F);
-  std::vector<float> h_b(dim, 1.5F);
-  std::vector<float> h_out(dim, 0.0F);
-
-  float *d_a = nullptr, *d_b = nullptr, *d_out = nullptr;
-  HIP_CHECK(hipMalloc(&d_a, dim * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_b, dim * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_out, dim * sizeof(float)));
-
-  HIP_CHECK(
-      hipMemcpy(d_a, h_a.data(), dim * sizeof(float), hipMemcpyHostToDevice));
-  HIP_CHECK(
-      hipMemcpy(d_b, h_b.data(), dim * sizeof(float), hipMemcpyHostToDevice));
-
-  strix::hip::LaunchResidualAdd(d_a, d_b, d_out, dim);
-  HIP_CHECK(hipDeviceSynchronize());
-
-  HIP_CHECK(hipMemcpy(h_out.data(), d_out, dim * sizeof(float),
-                      hipMemcpyDeviceToHost));
-
-  for (std::size_t i = 0; i < dim; ++i) {
-    assert(std::abs(h_out[i] - 5.0F) < 1e-5F);
-  }
-
-  HIP_CHECK(hipFree(d_a));
-  HIP_CHECK(hipFree(d_b));
-  HIP_CHECK(hipFree(d_out));
-}
+#include "tests/models/qwen/hip/support/device.hpp"
 
 void TestGpuGEMV() {
   // Test 1: FP32 GEMV baseline fallback
@@ -414,23 +352,19 @@ void TestHipblasLtGEMM() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  int device_count = 0;
-  HIP_CHECK(hipGetDeviceCount(&device_count));
-  if (device_count == 0) {
-    std::cout << "No HIP device found, skipping Qwen basic ops test.\n";
+  if (!strix::test::HasHipDevice()) {
+    std::cout << "No HIP device found, skipping Qwen dense GEMM and BLAS ops test.\n";
     return 0;
   }
 
-  TestGpuRMSNorm();
-  TestGpuResidualAdd();
   TestGpuGEMV();
   TestBatchedGEMM();
   TestHipblasGEMM();
   TestHipblasLtGEMM();
-  std::cout << "Qwen basic ops test passed on gfx1151.\n";
+  std::cout << "Qwen dense GEMM and BLAS ops test passed on gfx1151.\n";
   return 0;
 #else
-  std::cout << "HIP disabled, skipping Qwen basic ops test.\n";
+  std::cout << "HIP disabled, skipping Qwen dense GEMM and BLAS ops test.\n";
   return 0;
 #endif
 }
