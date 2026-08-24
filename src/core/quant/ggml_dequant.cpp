@@ -177,6 +177,9 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kQ6_K:
       block_bytes = sizeof(block_q6_K);
       break;
+    case core::GgmlType::kQ8_K:
+      block_bytes = sizeof(block_q8_K);
+      break;
     case core::GgmlType::kQ8_0:
       block_qk = 32U;
       block_bytes = sizeof(block_q8_0);
@@ -189,6 +192,19 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
   }
   const std::size_t blocks = elements / block_qk;
   return blocks * block_bytes;
+}
+
+std::size_t EncodedSizeBytes(core::GgmlType type,
+                             std::size_t elements) noexcept {
+  switch (type) {
+    case core::GgmlType::kF32:
+      return elements * sizeof(float);
+    case core::GgmlType::kF16:
+    case core::GgmlType::kBF16:
+      return elements * sizeof(std::uint16_t);
+    default:
+      return QuantizedRowBytes(type, elements);
+  }
 }
 
 void DequantizeQ4_K(const void* src, float* dst, std::size_t k) {

@@ -55,10 +55,10 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
         if (tensor.empty()) {
           return;
         }
-        const std::size_t element_bytes =
-            tensor.type == core::GgmlType::kBF16 ? 2U : 4U;
-        LaunchLayerWeightPrefetch(tensor.data,
-                                  tensor.num_elements * element_bytes, stream);
+        const std::size_t encoded_bytes = tensor.EncodedSizeBytes();
+        if (encoded_bytes != 0) {
+          LaunchLayerWeightPrefetch(tensor.data, encoded_bytes, stream);
+        }
       };
       PrefetchTensor(layer.attn_norm);
       PrefetchTensor(layer.ffn_norm);

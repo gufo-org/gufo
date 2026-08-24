@@ -68,10 +68,15 @@ static_assert(sizeof(block_q3_K) == 110, "block_q3_K must be 110 bytes");
 static_assert(sizeof(block_q8_K) == 292, "block_q8_K must be 292 bytes");
 static_assert(sizeof(block_q8_0) == 34, "block_q8_0 must be 34 bytes");
 
-/// Returns the encoded byte count for one logical row, or zero when the type
-/// is unsupported or the element count is not block aligned.
+/// Returns the encoded byte count for one logical quantized row, or zero when
+/// the type is not quantized or the element count is not block aligned.
 [[nodiscard]] std::size_t QuantizedRowBytes(core::GgmlType type,
                                             std::size_t elements) noexcept;
+
+/// Returns the physical byte count for a tensor with `elements` logical
+/// elements, or zero when the format is unsupported/misaligned.
+[[nodiscard]] std::size_t EncodedSizeBytes(core::GgmlType type,
+                                           std::size_t elements) noexcept;
 
 // Standard 16-bit float helper
 float Fp16ToFloat(std::uint16_t h) noexcept;

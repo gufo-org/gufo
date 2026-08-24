@@ -18,7 +18,8 @@
 
 namespace strix::models {
 
-/// Generic reference to a mapped tensor supporting F32 and BF16 formats.
+/// Non-owning reference to a mapped tensor. Consumers validate the exact
+/// formats supported for each tensor role.
 struct QwenTensorRef {
   const void* data = nullptr;
   core::GgmlType type = core::GgmlType::kF32;
@@ -26,6 +27,10 @@ struct QwenTensorRef {
 
   [[nodiscard]] bool empty() const noexcept {
     return data == nullptr || num_elements == 0;
+  }
+
+  [[nodiscard]] std::size_t EncodedSizeBytes() const noexcept {
+    return strix::quant::EncodedSizeBytes(type, num_elements);
   }
 
   [[nodiscard]] float Get(std::size_t index) const noexcept {

@@ -278,11 +278,16 @@ void TestQ5_K() {
   };
   static_assert(sizeof(Q5Block) == 176);
 
-  // QuantizedRowBytes: Q5_K is 176 bytes per 256-element block; Q8_0 is 34
-  // bytes per 32-element block (alignment now permits elements%32==0).
+  // QuantizedRowBytes covers every packed projection/embedding format used by
+  // Qwen, including both Q8 layouts.
   if (strix::quant::QuantizedRowBytes(strix::core::GgmlType::kQ5_K,
                                       kQ5Elements) != 176 ||
-      strix::quant::QuantizedRowBytes(strix::core::GgmlType::kQ8_0, 32) != 34) {
+      strix::quant::QuantizedRowBytes(strix::core::GgmlType::kQ8_K, 256) !=
+          292 ||
+      strix::quant::QuantizedRowBytes(strix::core::GgmlType::kQ8_0, 32) != 34 ||
+      strix::quant::EncodedSizeBytes(strix::core::GgmlType::kF32, 8) != 32 ||
+      strix::quant::EncodedSizeBytes(strix::core::GgmlType::kBF16, 8) != 16 ||
+      strix::quant::EncodedSizeBytes(strix::core::GgmlType::kQ8_K, 256) != 292) {
     std::cerr << "Assertion failed: QuantizedRowBytes contract\n";
     std::exit(1);
   }

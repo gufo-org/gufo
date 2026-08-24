@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <numeric>
 #include <vector>
@@ -22,6 +23,28 @@ void TestEmbeddingLookup() {
   assert(hidden[1] == 6.0F);
   assert(hidden[2] == 7.0F);
   assert(hidden[3] == 8.0F);
+}
+
+void TestQ8_0EmbeddingLookup() {
+  constexpr std::size_t hidden_size = 32;
+  std::vector<strix::quant::block_q8_0> table(2);
+  for (std::size_t token = 0; token < table.size(); ++token) {
+    table[token].d = 0x3C00;  // fp16 1.0
+    for (std::size_t i = 0; i < hidden_size; ++i) {
+      table[token].qs[i] = static_cast<std::int8_t>(token * 32 + i);
+    }
+  }
+
+  std::vector<float> hidden(hidden_size, 0.0F);
+  const strix::models::QwenTensorRef ref = {
+      .data = table.data(),
+      .type = strix::core::GgmlType::kQ8_0,
+      .num_elements = table.size() * hidden_size};
+  strix::models::ForwardEmbedding(1, ref, hidden_size, hidden);
+
+  for (std::size_t i = 0; i < hidden_size; ++i) {
+    assert(hidden[i] == static_cast<float>(32 + i));
+  }
 }
 
 void TestRoPEPreservation() {
@@ -102,6 +125,7 @@ void TestAttentionWithKvCache() {
 
 int main() {
   TestEmbeddingLookup();
+  TestQ8_0EmbeddingLookup();
   TestRoPEPreservation();
   TestSwiGLUFFN();
   TestGreedyArgmax();
