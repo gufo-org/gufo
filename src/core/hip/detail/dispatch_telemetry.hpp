@@ -2,6 +2,7 @@
 #define STRIX_CORE_HIP_DETAIL_DISPATCH_TELEMETRY_HPP_
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
@@ -92,6 +93,12 @@ inline void EmitHipblasLtDispatch(
 inline void EmitGraphDispatch(std::string_view cache_status) {
   EmitDispatchTelemetry("hip_graph", [&](std::ostringstream& output) {
     WriteTelemetryField(output, "cacheStatus", cache_status);
+  });
+}
+
+inline void EmitQwenExecutionPolicy(std::uint64_t fingerprint) {
+  EmitDispatchTelemetry("qwen_policy", [&](std::ostringstream& output) {
+    output << ",\"fingerprint\":" << fingerprint;
   });
 }
 

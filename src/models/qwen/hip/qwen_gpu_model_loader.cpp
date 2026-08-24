@@ -256,7 +256,7 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
     std::shared_ptr<const QwenGpuModel> model, std::string* error_msg,
-    std::uint32_t max_context) {
+    std::uint32_t max_context, QwenExecutionPolicy policy) {
   if (model == nullptr) {
     if (error_msg != nullptr) {
       *error_msg = "Qwen GPU model must not be null";
@@ -274,17 +274,18 @@ std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
     return nullptr;
   }
 
-  return std::make_unique<QwenGpuExecutor>(std::move(model), max_context);
+  return std::make_unique<QwenGpuExecutor>(std::move(model), max_context,
+                                           policy);
 }
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::CreateFromGguf(
     std::shared_ptr<const core::GgufReader> reader, std::string* error_msg,
-    std::uint32_t max_context) {
+    std::uint32_t max_context, QwenExecutionPolicy policy) {
   auto model = QwenGpuModel::CreateFromGguf(std::move(reader), error_msg);
   if (model == nullptr) {
     return nullptr;
   }
-  return Create(std::move(model), error_msg, max_context);
+  return Create(std::move(model), error_msg, max_context, policy);
 }
 
 }  // namespace strix::hip

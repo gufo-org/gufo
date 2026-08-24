@@ -15,6 +15,7 @@ namespace strix::hip {
 // `arena` and every kernel launch uses `arena.stream`.
 static void ExecuteDecodeStep(QwenGpuArena& arena,
                               const models::QwenModelWeights& weights,
+                              const QwenExecutionPolicy& policy,
                               tokenization::TokenId token_id,
                               std::uint32_t pos, bool compute_logits) {
   (void)token_id;
@@ -85,13 +86,15 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
     // 2. Layer stack
     for (std::uint32_t l = 0; l < config.num_layers; ++l) {
       const auto& layer = weights.layers[l];
+      const auto route_plan = ResolveQwenLayerRoute(
+          policy, QwenExecutionMode::kDecode, layer.is_full_attention);
 
       // opt-c014-layer-prefetch: start the next layer's page touch on the side
       // stream while this layer runs, then join before layer l+1 computes.
       // The side stream records the completion marker; the captured main
       // stream waits on it (the capture-compatible dependency direction), so
       // HIP-graph capture keeps working.
-      if (detail::ShouldPrefetchNextLayer() && l + 1 < config.num_layers) {
+      if (route_plan.prefetch_next_layer && l + 1 < config.num_layers) {
         if (l > 0) {
           HIP_CHECK(
               hipStreamWaitEvent(arena.stream, arena.prefetch_event, 0));
@@ -105,7 +108,7 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
       // projection GEMVs below (QKV / SSM input / FFN SwiGLU), so the
       // projection kernel prepares its own normed input. The unfused chain
       // (RMSNormKernel + projection kernel) stays wired as the reference.
-      const bool fused_rmsnorm_proj = detail::ShouldFuseRMSNormProjection();
+      const bool fused_rmsnorm_proj = route_plan.fuse_rmsnorm_projection;
       if (!fused_rmsnorm_proj) {
         // Pre-RMSNorm, routed through the norm module (HIP backend). Same
         // kernel, same args, same arena slices (d_hidden in, d_normed out);
@@ -165,7 +168,7 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
         // QK-Norm + RoPE + KV-cache write fused into one kernel
         // (opt-c010-qk-rope-kv). The unfused chain stays wired behind the
         // policy toggle as the independent reference.
-        const bool fused_qknorm_rope_kv = detail::ShouldFuseQKNormRoPEKvWrite();
+        const bool fused_qknorm_rope_kv = route_plan.fuse_qk_norm_rope_kv;
         if (fused_qknorm_rope_kv) {
           LaunchFusedQKNormRoPEKvWrite(
               arena.d_q, arena.d_k, arena.d_v,
@@ -240,7 +243,7 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
             std::span<float>(arena.d_attn_out, hidden_size));
       } else {
         // SSM path
-        ssm_residual_folded = detail::ShouldFuseSSMGateResidual();
+        ssm_residual_folded = route_plan.fuse_ssm_epilogue;
         const bool qkv_bf16 = layer.attn_qkv.type == core::GgmlType::kBF16;
         const bool gate_bf16 = layer.attn_gate.type == core::GgmlType::kBF16;
         const bool alpha_bf16 = layer.ssm_alpha.type == core::GgmlType::kBF16;
@@ -299,7 +302,7 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
         LaunchRMSNorm(arena.d_hidden,
                       static_cast<const float*>(layer.ffn_norm.data),
                       arena.d_normed, hidden_size, 1e-6F, arena.stream);
-      } else if (detail::ShouldFuseResidualAddRMSNorm()) {
+      } else if (route_plan.fuse_residual_rmsnorm) {
         LaunchFusedResidualAddRMSNorm(
             arena.d_hidden, arena.d_attn_out, arena.d_hidden,
             static_cast<const float*>(layer.ffn_norm.data), arena.d_normed,
@@ -332,7 +335,7 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
       const bool ffn_g_bf16 = layer.ffn_gate.type == core::GgmlType::kBF16;
       const bool ffn_u_bf16 = layer.ffn_up.type == core::GgmlType::kBF16;
 
-      if (fused_rmsnorm_proj && ffn_g_bf16 && ffn_u_bf16 && detail::ShouldFuseFFNSwiGLU()) {
+      if (fused_rmsnorm_proj && ffn_g_bf16 && ffn_u_bf16 && route_plan.fuse_ffn_swiglu) {
         // Cross-module fusion: RMSNorm folded into the SwiGLU GEMV. Owned by
         // the composition layer (Option B); the standalone FFN below is the
         // module. Keep the fused launch + shared down GEMV inline.
@@ -435,17 +438,20 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
     if (graph_executor_.IsCaptured()) {
       graph_executor_.Launch(arena_.stream);
     } else {
-      const bool ok = graph_executor_.TryCapture(
-          arena_.stream,
-          [&]() { ExecuteDecodeStep(arena_, weights_, token_id, pos, compute_logits); });
+      const bool ok = graph_executor_.TryCapture(arena_.stream, [&]() {
+        ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
+                          compute_logits);
+      });
       if (ok) {
         graph_executor_.Launch(arena_.stream);
       } else {
-        ExecuteDecodeStep(arena_, weights_, token_id, pos, compute_logits);
+        ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
+                          compute_logits);
       }
     }
   } else {
-    ExecuteDecodeStep(arena_, weights_, token_id, pos, compute_logits);
+    ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
+                      compute_logits);
   }
 
 

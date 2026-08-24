@@ -133,6 +133,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   // 3. Layer stack across all 32 layers
   for (std::uint32_t l = 0; l < config.num_layers; ++l) {
     const auto& layer = weights_.layers[l];
+    const auto route_plan = ResolveQwenLayerRoute(
+        policy_, QwenExecutionMode::kPrefill, layer.is_full_attention);
 
     if (do_profile) {
       HIP_CHECK(hipStreamSynchronize(arena_.stream));
@@ -172,7 +174,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // QK-Norm + RoPE + KV-cache write fused into one kernel
       // (opt-c010-qk-rope-kv). The unfused chain stays wired behind the policy
       // toggle as the independent reference.
-      const bool fused_qknorm_rope_kv = detail::ShouldFuseQKNormRoPEKvWrite();
+      const bool fused_qknorm_rope_kv = route_plan.fuse_qk_norm_rope_kv;
       if (fused_qknorm_rope_kv) {
         LaunchBatchedFusedQKNormRoPEKvWrite(
             arena_.d_q, arena_.d_k, arena_.d_v,
@@ -313,7 +315,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // gate into the DeltaNet recurrence epilogue (one launch, no raw_out
       // global round trip). The unfused chain (recurrence +
       // BatchedSSMPostNormGateKernel) stays wired as the reference.
-      if (detail::ShouldFuseSSMGateResidual()) {
+      if (route_plan.fuse_ssm_epilogue) {
         LaunchBatchedSSMConvRecurrenceNormGate(
             arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
             arena_.d_ssm_conv_state, arena_.d_conv_out,
@@ -361,7 +363,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // Residual Add + FFN RMSNorm fused into one kernel
     // (opt-c010-residual-rmsnorm). The unfused chain stays wired behind the
     // policy toggle as the independent reference.
-    if (detail::ShouldFuseResidualAddRMSNorm()) {
+    if (route_plan.fuse_residual_rmsnorm) {
       LaunchBatchedFusedResidualAddRMSNorm(
           arena_.d_hidden, arena_.d_attn_out, arena_.d_hidden,
           static_cast<const float*>(layer.ffn_norm.data), arena_.d_normed,
@@ -385,7 +387,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // (opt-c010-ffn-swiglu). The fused kernel supports the BF16 weight route;
     // the unfused chain stays wired behind the policy toggle as the
     // independent reference.
-    if (detail::ShouldFuseFFNSwiGLU() && ffn_g_bf16 && ffn_u_bf16) {
+    if (route_plan.fuse_ffn_swiglu && ffn_g_bf16 && ffn_u_bf16) {
       LaunchBatchedFusedSwiGLUGEMM(
           layer.ffn_gate.data, true, layer.ffn_up.data, true, arena_.d_normed,
           arena_.d_ffn_act, arena_.d_scratch_bf16, batch_size,

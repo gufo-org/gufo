@@ -21,6 +21,7 @@
 #include <hipblas/hipblas.h>
 
 #include "src/core/hip/detail/hip_graph_decode_executor.hpp"
+#include "src/models/qwen/hip/qwen_execution_policy.hpp"
 #include "src/models/qwen/hip/qwen_gpu_ops.hpp"
 
 namespace strix::hip {
@@ -166,17 +167,21 @@ private:
 /// End-to-end GPU model executor running directly on the gfx1151 RDNA 3.5 CUs.
 class QwenGpuExecutor {
 public:
-  explicit QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
-                           std::uint32_t max_context = 4096);
+  explicit QwenGpuExecutor(
+      std::shared_ptr<const QwenGpuModel> model,
+      std::uint32_t max_context = 4096,
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   ~QwenGpuExecutor();
 
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> Create(
       std::shared_ptr<const QwenGpuModel> model,
-      std::string* error_msg = nullptr, std::uint32_t max_context = 4096);
+      std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
 
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
-      std::string* error_msg = nullptr, std::uint32_t max_context = 4096);
+      std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
 
   /// Generates tokens auto-regressively on GPU with streaming callback.
   std::vector<tokenization::TokenId> Generate(
@@ -201,6 +206,10 @@ public:
   [[nodiscard]] const std::shared_ptr<const QwenGpuModel>& GetSharedModel()
       const noexcept {
     return model_;
+  }
+
+  [[nodiscard]] const QwenExecutionPolicy& GetExecutionPolicy() const noexcept {
+    return policy_;
   }
 
   /// Runs one single token forward step on GPU, returning next token ID.
@@ -252,6 +261,7 @@ private:
   std::shared_ptr<const QwenGpuModel> model_;
   const models::QwenModelWeights& weights_;
   const tokenization::QwenTokenizer* tokenizer_;
+  const QwenExecutionPolicy policy_;
   QwenGpuArena arena_;
   detail::HipGraphDecodeExecutor graph_executor_;
   std::vector<float> h_logits_;

@@ -2,8 +2,8 @@
 // between fused kernels (owned by the ExecuteStep composition layer, Option B) and
 // the unfused module fallback (modules are pure).
 //
-// CPU-only. The toggles are host `constexpr` in strix::hip::detail, so a CPU test
-// asserts the routing decisions directly. For the cross-module fusions that are
+// CPU-only. The production defaults and immutable executor policy are host-side,
+// so a CPU test asserts the routing decisions directly. For the cross-module fusions that are
 // currently DISABLED, the decode falls back to the module path (NormForward /
 // ResidualAdd / RopeForward) — this test drives those module fallbacks over small
 // synthetic data and checks they produce correct output, so a false toggle cannot
@@ -49,6 +49,24 @@ void TestFusionToggleValues() {
   assert(strix::hip::detail::ShouldFuseRMSNormProjection() == false);
   assert(strix::hip::detail::ShouldFuseFFNSwiGLU() == false);
   assert(strix::hip::detail::ShouldPrefetchNextLayer() == false);
+
+  auto candidate = strix::hip::QwenExecutionPolicy::Production();
+  candidate.fuse_decode_ssm_output_residual = true;
+  candidate.prefetch_next_layer = true;
+  assert(strix::hip::detail::ShouldFuseDecodeSSMOutputResidual(candidate));
+  assert(strix::hip::detail::ShouldPrefetchNextLayer(candidate));
+  assert(candidate.Fingerprint() == ((1ULL << 0U) | (1ULL << 4U) |
+                                     (1ULL << 7U)));
+
+  const auto decode_plan = strix::hip::ResolveQwenLayerRoute(
+      candidate, strix::hip::QwenExecutionMode::kDecode, false);
+  const auto prefill_plan = strix::hip::ResolveQwenLayerRoute(
+      candidate, strix::hip::QwenExecutionMode::kPrefill, false);
+  assert(decode_plan.fuse_ssm_epilogue);
+  assert(decode_plan.prefetch_next_layer);
+  assert(!prefill_plan.fuse_ssm_epilogue);
+  assert(!prefill_plan.prefetch_next_layer);
+  assert(decode_plan.Fingerprint() != prefill_plan.Fingerprint());
 }
 
 // --- 2. Unfused fallback: attn pre-norm RMSNorm (RMSNormProjection fusion off) ---

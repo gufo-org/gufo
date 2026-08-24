@@ -6,6 +6,7 @@
 #include <string_view>
 #include <utility>
 
+#include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
 
 namespace strix::hip {
@@ -31,12 +32,16 @@ const QwenGpuModel& RequireModel(
 }  // namespace
 
 QwenGpuExecutor::QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
-                                 std::uint32_t max_context)
+                                 std::uint32_t max_context,
+                                 QwenExecutionPolicy policy)
     : model_(std::move(model)),
       weights_(RequireModel(model_).GetWeights()),
       tokenizer_(&model_->GetTokenizer()),
+      policy_(policy),
       arena_(weights_.config, max_context),
-      h_logits_(weights_.config.vocab_size, 0.0F) {}
+      h_logits_(weights_.config.vocab_size, 0.0F) {
+  detail::EmitQwenExecutionPolicy(policy_.Fingerprint());
+}
 
 QwenGpuExecutor::~QwenGpuExecutor() {
   (void)hipStreamSynchronize(arena_.stream);

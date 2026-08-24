@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <utility>
 
+#include "src/models/qwen/hip/qwen_execution_policy.hpp"
+
 namespace strix::hip::detail {
 
 inline constexpr std::size_t kOptimizedAttentionMinBatch{1024};
@@ -37,16 +39,26 @@ struct AttentionSupportParams {
 // into a single kernel per token (decode) / per token row (prefill). Flip to
 // false to revert to the unfused chain (PerHeadRMSNorm x2 + RoPE +
 // WriteKVCache*), which stays wired as the independent reference.
+[[nodiscard]] constexpr bool ShouldFuseQKNormRoPEKvWrite(
+    const QwenExecutionPolicy& policy) noexcept {
+  return policy.fuse_qk_norm_rope_kv;
+}
+
 [[nodiscard]] constexpr bool ShouldFuseQKNormRoPEKvWrite() noexcept {
-  return true;
+  return ShouldFuseQKNormRoPEKvWrite(QwenExecutionPolicy::Production());
 }
 
 // opt-c010-residual-rmsnorm: fuse the post-attention residual add with the
 // subsequent FFN RMSNorm into a single kernel per token (decode) / per token
 // row (prefill). Flip to false to revert to the unfused chain
 // (ResidualAdd + RMSNorm), which stays wired as the independent reference.
+[[nodiscard]] constexpr bool ShouldFuseResidualAddRMSNorm(
+    const QwenExecutionPolicy& policy) noexcept {
+  return policy.fuse_residual_rmsnorm;
+}
+
 [[nodiscard]] constexpr bool ShouldFuseResidualAddRMSNorm() noexcept {
-  return false;
+  return ShouldFuseResidualAddRMSNorm(QwenExecutionPolicy::Production());
 }
 
 // opt-c010-ffn-swiglu: fuse the FFN gate/up projections with the SwiGLU
@@ -54,8 +66,13 @@ struct AttentionSupportParams {
 // the naive per-row fused kernel regresses prefill ~37x (pp1024 9.70 vs 362.87
 // tok/s) against the hipBLASLt BF16 gate/up GEMMs plus SwiGLU activation, so
 // the unfused chain is the production route. Kept at false for re-evaluation.
+[[nodiscard]] constexpr bool ShouldFuseFFNSwiGLU(
+    const QwenExecutionPolicy& policy) noexcept {
+  return policy.fuse_prefill_ffn_swiglu;
+}
+
 [[nodiscard]] constexpr bool ShouldFuseFFNSwiGLU() noexcept {
-  return false;
+  return ShouldFuseFFNSwiGLU(QwenExecutionPolicy::Production());
 }
 
 // opt-c010-ssm-gate-residual: fuse the SSM per-head post-RMSNorm + SiLU gate
@@ -64,8 +81,20 @@ struct AttentionSupportParams {
 // ssm_out GEMV (decode). Flip to false to revert to the unfused chain
 // (recurrence + post-norm kernel; ssm_out GEMV + residual add), which stays
 // wired as the independent reference.
+[[nodiscard]] constexpr bool ShouldFuseDecodeSSMOutputResidual(
+    const QwenExecutionPolicy& policy) noexcept {
+  return policy.fuse_decode_ssm_output_residual;
+}
+
+[[nodiscard]] constexpr bool ShouldFusePrefillSSMPostNormGate(
+    const QwenExecutionPolicy& policy) noexcept {
+  return policy.fuse_prefill_ssm_post_norm_gate;
+}
+
 [[nodiscard]] constexpr bool ShouldFuseSSMGateResidual() noexcept {
-  return false;
+  const auto policy = QwenExecutionPolicy::Production();
+  return ShouldFuseDecodeSSMOutputResidual(policy) &&
+         ShouldFusePrefillSSMPostNormGate(policy);
 }
 
 // opt-c010-rmsnorm-projection: fuse the layer pre-RMSNorm into the fused
@@ -74,8 +103,13 @@ struct AttentionSupportParams {
 // false to revert to the unfused chain (RMSNormKernel + projection kernel),
 // which stays wired as the independent reference. Prefill is unaffected: its
 // batched norm kernel already fuses the FP32 + BF16 input preparation.
+[[nodiscard]] constexpr bool ShouldFuseRMSNormProjection(
+    const QwenExecutionPolicy& policy) noexcept {
+  return policy.fuse_decode_rmsnorm_projection;
+}
+
 [[nodiscard]] constexpr bool ShouldFuseRMSNormProjection() noexcept {
-  return false;
+  return ShouldFuseRMSNormProjection(QwenExecutionPolicy::Production());
 }
 
 // opt-c014-layer-prefetch: issue an asynchronous GPU touch of the next layer's
@@ -83,8 +117,13 @@ struct AttentionSupportParams {
 // layer's projection kernels do not stall on first-touch page walks. Flip to
 // false to revert to the no-prefetch route, which stays wired as the
 // independent reference.
+[[nodiscard]] constexpr bool ShouldPrefetchNextLayer(
+    const QwenExecutionPolicy& policy) noexcept {
+  return policy.prefetch_next_layer;
+}
+
 [[nodiscard]] constexpr bool ShouldPrefetchNextLayer() noexcept {
-  return false;
+  return ShouldPrefetchNextLayer(QwenExecutionPolicy::Production());
 }
 
 [[nodiscard]] constexpr std::uint32_t SelectDecodeAttentionSplitCount(
