@@ -45,10 +45,12 @@ inline std::vector<float> make_constant_tensor(std::size_t n, float v = 0.0F) {
 }
 
 inline std::vector<float> make_random_tensor(std::size_t n, std::mt19937& rng,
-                                             float lo = -1.0F, float hi = 1.0F) {
+                                             float lo = -1.0F,
+                                             float hi = 1.0F) {
   std::uniform_real_distribution<float> dist(lo, hi);
   std::vector<float> out(n);
-  for (float& x : out) x = dist(rng);
+  for (float& x : out)
+    x = dist(rng);
   return out;
 }
 
@@ -90,26 +92,31 @@ struct TimingStats {
 inline TimingStats summarize_times(std::vector<double> times) {
   TimingStats s;
   s.samples = static_cast<int>(times.size());
-  if (times.empty()) return s;
+  if (times.empty())
+    return s;
 
   std::vector<double> sorted = times;
   std::sort(sorted.begin(), sorted.end());
 
   double sum = 0.0;
-  for (double v : sorted) sum += v;
+  for (double v : sorted)
+    sum += v;
   s.mean_ms = sum / static_cast<double>(sorted.size());
 
   auto median = [](const std::vector<double>& v) {
     std::size_t n = v.size();
-    if (n == 0) return 0.0;
-    if (n % 2 == 1) return v[n / 2];
+    if (n == 0)
+      return 0.0;
+    if (n % 2 == 1)
+      return v[n / 2];
     return 0.5 * (v[n / 2 - 1] + v[n / 2]);
   };
   s.median_ms = median(sorted);
 
   std::size_t p99_idx = static_cast<std::size_t>(
       std::ceil(0.99 * static_cast<double>(sorted.size())) - 1.0);
-  if (p99_idx >= sorted.size()) p99_idx = sorted.size() - 1;
+  if (p99_idx >= sorted.size())
+    p99_idx = sorted.size() - 1;
   s.p99_ms = sorted[p99_idx];
 
   s.min_ms = sorted.front();
@@ -117,12 +124,12 @@ inline TimingStats summarize_times(std::vector<double> times) {
   return s;
 }
 
-template <class F>
+template<class F>
 TimingStats measure_time(F&& fn, int reps = 20, int warmup = 3) {
   return measure_time(fn, reps, warmup, [] {});
 }
 
-template <class F, class Sync>
+template<class F, class Sync>
 TimingStats measure_time(F&& fn, int reps, int warmup, Sync&& post) {
   using clock = std::chrono::steady_clock;
   for (int i = 0; i < warmup; ++i) {
@@ -136,8 +143,7 @@ TimingStats measure_time(F&& fn, int reps, int warmup, Sync&& post) {
     fn();
     post();
     auto t1 = clock::now();
-    times.push_back(
-        std::chrono::duration<double, std::milli>(t1 - t0).count());
+    times.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
   }
   return summarize_times(std::move(times));
 }
@@ -184,9 +190,8 @@ inline std::vector<std::pair<std::string, std::string>> parse_flat_json(
   std::size_t i = 0;
 
   auto skip_ws = [&] {
-    while (i < txt.size() &&
-           (txt[i] == ' ' || txt[i] == '\t' || txt[i] == '\n' ||
-            txt[i] == '\r')) {
+    while (i < txt.size() && (txt[i] == ' ' || txt[i] == '\t' ||
+                              txt[i] == '\n' || txt[i] == '\r')) {
       ++i;
     }
   };
@@ -204,18 +209,21 @@ inline std::vector<std::pair<std::string, std::string>> parse_flat_json(
         ++i;
       }
     }
-    if (i >= txt.size()) return false;
+    if (i >= txt.size())
+      return false;
     ++i;  // consume closing quote
     return true;
   };
 
   skip_ws();
-  if (i >= txt.size() || txt[i] != '{') return out;
+  if (i >= txt.size() || txt[i] != '{')
+    return out;
   ++i;  // consume '{'
 
   while (true) {
     skip_ws();
-    if (i >= txt.size()) break;
+    if (i >= txt.size())
+      break;
     if (txt[i] == '}') {
       ++i;
       break;
@@ -224,17 +232,21 @@ inline std::vector<std::pair<std::string, std::string>> parse_flat_json(
       ++i;
       continue;
     }
-    if (txt[i] != '"') break;
+    if (txt[i] != '"')
+      break;
     std::string key;
-    if (!parse_string(key)) break;
+    if (!parse_string(key))
+      break;
     skip_ws();
-    if (i >= txt.size() || txt[i] != ':') break;
+    if (i >= txt.size() || txt[i] != ':')
+      break;
     ++i;  // consume ':'
     skip_ws();
 
     std::string val;
     if (i < txt.size() && txt[i] == '"') {
-      if (!parse_string(val)) break;
+      if (!parse_string(val))
+        break;
     } else {
       // bare token (number / true / false / null) up to ",", "}" or whitespace
       while (i < txt.size() && txt[i] != ',' && txt[i] != '}' &&
@@ -260,11 +272,13 @@ inline std::vector<std::pair<std::string, std::string>> parse_flat_json(
 
 inline std::optional<BaselineRecord> load_baseline(std::string_view path) {
   std::ifstream in{std::string(path)};
-  if (!in) return std::nullopt;
+  if (!in)
+    return std::nullopt;
   std::ostringstream ss;
   ss << in.rdbuf();
   auto kv = parse_flat_json(ss.str());
-  if (kv.empty()) return std::nullopt;
+  if (kv.empty())
+    return std::nullopt;
 
   BaselineRecord rec;
   bool have_time = false;
@@ -278,7 +292,8 @@ inline std::optional<BaselineRecord> load_baseline(std::string_view path) {
       rec.config_hash = v;
     }
   }
-  if (!have_time) return std::nullopt;
+  if (!have_time)
+    return std::nullopt;
   return rec;
 }
 
@@ -287,10 +302,12 @@ inline bool save_baseline(std::string_view path, const BaselineRecord& rec) {
   if (p.has_parent_path()) {
     std::error_code ec;
     std::filesystem::create_directories(p.parent_path(), ec);
-    if (ec) return false;
+    if (ec)
+      return false;
   }
   std::ofstream out(std::string(path), std::ios::trunc);
-  if (!out) return false;
+  if (!out)
+    return false;
   out << "{\n"
       << "  \"time_us\": " << rec.time_us << ",\n"
       << "  \"model\": \"" << rec.model << "\",\n"
@@ -356,8 +373,7 @@ inline std::string format_module_result(std::string_view name, bool pass,
   std::ostringstream s;
   s << "MODULE " << name << ": " << (pass ? "PASS" : "FAIL")
     << " correctness=" << correctness << "  time=" << time_us
-    << " us  baseline=" << baseline_us << " us  delta=" << delta_pct
-    << "%";
+    << " us  baseline=" << baseline_us << " us  delta=" << delta_pct << "%";
   return s.str();
 }
 

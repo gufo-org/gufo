@@ -23,11 +23,11 @@
 #include "src/bench/kernel_bench.hpp"
 #include "src/core/diagnostics/fingerprint.h"
 #include "src/core/diagnostics/system_inventory.h"
+#include "src/core/hip/hip_utils.hpp"
+#include "src/core/model_config.hpp"
 #include "src/models/qwen/gemm_route.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
-#include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/ops.hpp"
-#include "src/core/model_config.hpp"
 
 #ifndef STRIX_VERSION
 #define STRIX_VERSION "development"
@@ -493,8 +493,8 @@ strix::bench::KernelBenchResult BenchmarkGemv(const CommandLineOptions& options,
   HipBuffer<float> output(options.m);
   FillBytes(input, 0x3c, stream);
 
-  const auto weight_type = is_bf16 ? strix::core::GgmlType::kBF16
-                                   : strix::core::GgmlType::kF32;
+  const auto weight_type =
+      is_bf16 ? strix::core::GgmlType::kBF16 : strix::core::GgmlType::kF32;
   const auto resolution = strix::models::qwen::ResolveQwenGemmRoute(
       {.type = weight_type,
        .batch_size = 1,
@@ -506,10 +506,10 @@ strix::bench::KernelBenchResult BenchmarkGemv(const CommandLineOptions& options,
   }
   const std::string strategy(
       strix::models::qwen::QwenGemmRouteName(resolution.route));
-  const std::string marker =
-      "gemv/m=" + std::to_string(options.m) +
-      "/k=" + std::to_string(options.k) + "/type=" + options.data_type +
-      "/layout=row_major/strategy=" + strategy;
+  const std::string marker = "gemv/m=" + std::to_string(options.m) +
+                             "/k=" + std::to_string(options.k) +
+                             "/type=" + options.data_type +
+                             "/layout=row_major/strategy=" + strategy;
   std::vector<double> samples_us;
   float weight_value = 0.0F;
   if (is_bf16) {
@@ -517,16 +517,18 @@ strix::bench::KernelBenchResult BenchmarkGemv(const CommandLineOptions& options,
     FillBytes(weights, 0x3f, stream);
     weight_value = Bf16FromBits(kBf16PatternBits);
     samples_us = MeasureKernel(options, marker, stream, [&] {
-      strix::hip::LaunchGEMV(weights.Get(), strix::core::GgmlType::kBF16, input.Get(), output.Get(),
-                             options.m, options.k, stream);
+      strix::hip::LaunchGEMV(weights.Get(), strix::core::GgmlType::kBF16,
+                             input.Get(), output.Get(), options.m, options.k,
+                             stream);
     });
   } else {
     HipBuffer<float> weights(options.m * options.k);
     FillBytes(weights, 0x3c, stream);
     weight_value = FloatFromBits(kFloatPatternBits);
     samples_us = MeasureKernel(options, marker, stream, [&] {
-      strix::hip::LaunchGEMV(weights.Get(), strix::core::GgmlType::kF32, input.Get(), output.Get(),
-                             options.m, options.k, stream);
+      strix::hip::LaunchGEMV(weights.Get(), strix::core::GgmlType::kF32,
+                             input.Get(), output.Get(), options.m, options.k,
+                             stream);
     });
   }
 

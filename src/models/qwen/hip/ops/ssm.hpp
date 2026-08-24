@@ -31,7 +31,6 @@ void LaunchFusedSSMInputProjections(
     std::size_t hidden_size, std::size_t qkv_size, std::size_t inner_size,
     std::size_t time_step_rank, hipStream_t stream = nullptr);
 
-
 /// Fused layer pre-RMSNorm + SSM input projections (QKV, Gate, Alpha, Beta).
 void LaunchFusedRMSNormSSMInputProjections(
     const float* x, const float* norm_w, float eps, const void* qkv_w,
@@ -41,7 +40,6 @@ void LaunchFusedRMSNormSSMInputProjections(
     float* beta_out, std::size_t hidden_size, std::size_t qkv_size,
     std::size_t inner_size, std::size_t time_step_rank,
     hipStream_t stream = nullptr);
-
 
 void LaunchSSMConvRecurrence(
     const float* qkv_in, const float* conv_weights, float* conv_state,

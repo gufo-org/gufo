@@ -168,9 +168,9 @@ void TestLayerWeightPrefetch() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int gate = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen graph prefetch ops test");
+  const int gate =
+      strix::test::GateHipDevice(strix::test::HipDeviceRequirement::kOptional,
+                                 "Qwen graph prefetch ops test");
   if (gate != strix::test::kHipTestSuccess) {
     return gate;
   }

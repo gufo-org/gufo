@@ -11,29 +11,29 @@ namespace strix::models::qwen {
 /// Capability token for stateless CPU module calls.
 struct CpuModuleContext final {};
 
-/// CPU capabilities required by stateful layer modules. References make an
-/// incomplete context unrepresentable and keep ownership in the composition
-/// layer.
+/// CPU capabilities required by stateful layer modules. Non-owning pointers
+/// keep ownership in the composition layer; the constructor guarantees they
+/// are non-null.
 class CpuLayerContext final {
 public:
   CpuLayerContext(const core::ModelConfig& config, QwenScratchArena& scratch,
                   std::uint32_t layer_idx = 0,
                   std::uint32_t position = 0) noexcept
-      : config_(config),
-        scratch_(scratch),
+      : config_(&config),
+        scratch_(&scratch),
         layer_idx_(layer_idx),
         position_(position) {}
 
   [[nodiscard]] const core::ModelConfig& Config() const noexcept {
-    return config_;
+    return *config_;
   }
-  [[nodiscard]] QwenScratchArena& Scratch() const noexcept { return scratch_; }
+  [[nodiscard]] QwenScratchArena& Scratch() const noexcept { return *scratch_; }
   [[nodiscard]] std::uint32_t LayerIndex() const noexcept { return layer_idx_; }
   [[nodiscard]] std::uint32_t Position() const noexcept { return position_; }
 
 private:
-  const core::ModelConfig& config_;
-  QwenScratchArena& scratch_;
+  const core::ModelConfig* config_;
+  QwenScratchArena* scratch_;
   std::uint32_t layer_idx_;
   std::uint32_t position_;
 };
@@ -43,8 +43,7 @@ private:
 /// capability.
 class HipModuleContext final {
 public:
-  explicit HipModuleContext(void* stream = nullptr,
-                            std::uint32_t layer_idx = 0,
+  explicit HipModuleContext(void* stream = nullptr, std::uint32_t layer_idx = 0,
                             std::uint32_t position = 0) noexcept
       : stream_(stream), layer_idx_(layer_idx), position_(position) {}
 

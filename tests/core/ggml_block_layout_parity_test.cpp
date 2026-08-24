@@ -12,13 +12,13 @@
 // If (A)==(B) for every position, the header struct field order matches the
 // byte layout. If the canonical layout were wrong, (A) would diverge from (B).
 
-#include "src/core/quant/ggml_dequant.hpp"
-
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
+
+#include "src/core/quant/ggml_dequant.hpp"
 
 using strix::quant::Fp16ToFloat;
 
@@ -83,8 +83,8 @@ float Q5Val(const std::uint8_t* p, std::size_t index) {
   const std::uint8_t quant4 = lohalf ? (qb & 0x0FU) : (qb >> 4U);
   const std::uint8_t qhb = qh[lane];
   const int bit = static_cast<int>(2 * gg) + (lohalf ? 0 : 1);
-  const std::uint8_t quant = static_cast<std::uint8_t>(
-      quant4 + (((qhb >> bit) & 1U) ? 16U : 0U));
+  const std::uint8_t quant =
+      static_cast<std::uint8_t>(quant4 + (((qhb >> bit) & 1U) ? 16U : 0U));
   const std::size_t sis = (2 * gg) + (lohalf ? 0 : 1);
   std::uint8_t sc = 0;
   std::uint8_t m = 0;
@@ -131,9 +131,8 @@ float Q6Val(const std::uint8_t* p, std::size_t index) {
 }
 
 std::int8_t UnpackQ3Scale(const std::uint8_t* packed, std::size_t index) {
-  const auto low = index < 8
-                       ? packed[index] & 0x0FU
-                       : (packed[index - 8] >> 4U) & 0x0FU;
+  const auto low =
+      index < 8 ? packed[index] & 0x0FU : (packed[index - 8] >> 4U) & 0x0FU;
   const auto high = (packed[8 + (index % 4)] >> (2U * (index / 4))) & 0x03U;
   return static_cast<std::int8_t>(static_cast<int>(low | (high << 4U)) - 32);
 }
@@ -210,7 +209,8 @@ int main() {
     FillPattern(bytes, 0x1234);
     std::vector<float> ref(k), ind(k);
     strix::quant::DequantizeQ8_0(bytes.data(), ref.data(), k);
-    for (std::size_t i = 0; i < k; ++i) ind[i] = Q8_0Val(bytes.data(), i);
+    for (std::size_t i = 0; i < k; ++i)
+      ind[i] = Q8_0Val(bytes.data(), i);
     failures += Compare("Q8_0", k, ref, ind);
   }
 
@@ -221,7 +221,8 @@ int main() {
     FillPattern(bytes, 0x5678);
     std::vector<float> ref(k), ind(k);
     strix::quant::DequantizeQ8_K(bytes.data(), ref.data(), k);
-    for (std::size_t i = 0; i < k; ++i) ind[i] = Q8_KVal(bytes.data(), i);
+    for (std::size_t i = 0; i < k; ++i)
+      ind[i] = Q8_KVal(bytes.data(), i);
     failures += Compare("Q8_K", k, ref, ind);
   }
 
@@ -232,7 +233,8 @@ int main() {
     FillPattern(bytes, 0x9abc);
     std::vector<float> ref(k), ind(k);
     strix::quant::DequantizeQ4_K(bytes.data(), ref.data(), k);
-    for (std::size_t i = 0; i < k; ++i) ind[i] = Q4Val(bytes.data(), i);
+    for (std::size_t i = 0; i < k; ++i)
+      ind[i] = Q4Val(bytes.data(), i);
     failures += Compare("Q4_K", k, ref, ind);
   }
 
@@ -243,7 +245,8 @@ int main() {
     FillPattern(bytes, 0xdef0);
     std::vector<float> ref(k), ind(k);
     strix::quant::DequantizeQ5_K(bytes.data(), ref.data(), k);
-    for (std::size_t i = 0; i < k; ++i) ind[i] = Q5Val(bytes.data(), i);
+    for (std::size_t i = 0; i < k; ++i)
+      ind[i] = Q5Val(bytes.data(), i);
     failures += Compare("Q5_K", k, ref, ind);
   }
 
@@ -254,7 +257,8 @@ int main() {
     FillPattern(bytes, 0x1357);
     std::vector<float> ref(k), ind(k);
     strix::quant::DequantizeQ6_K(bytes.data(), ref.data(), k);
-    for (std::size_t i = 0; i < k; ++i) ind[i] = Q6Val(bytes.data(), i);
+    for (std::size_t i = 0; i < k; ++i)
+      ind[i] = Q6Val(bytes.data(), i);
     failures += Compare("Q6_K", k, ref, ind);
   }
 
@@ -265,7 +269,8 @@ int main() {
     FillPattern(bytes, 0x2468);
     std::vector<float> ref(k), ind(k);
     strix::quant::DequantizeQ3_K(bytes.data(), ref.data(), k);
-    for (std::size_t i = 0; i < k; ++i) ind[i] = Q3Val(bytes.data(), i);
+    for (std::size_t i = 0; i < k; ++i)
+      ind[i] = Q3Val(bytes.data(), i);
     failures += Compare("Q3_K", k, ref, ind);
   }
 

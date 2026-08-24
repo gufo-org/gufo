@@ -21,12 +21,12 @@ void QuantGemm(const CpuModuleContext&, const QwenTensorRef& A,
 void QuantGemm(const HipModuleContext& ctx, const QwenTensorRef& A,
                std::span<const float> x, std::size_t M, std::size_t K,
                std::span<float> y) noexcept {
-  const auto resolution = ResolveQwenGemmRoute(
-      {.type = A.type,
-       .batch_size = 1,
-       .m = M,
-       .k = K,
-       .mode = QwenGemmMode::kHipDecode});
+  const auto resolution =
+      ResolveQwenGemmRoute({.type = A.type,
+                            .batch_size = 1,
+                            .m = M,
+                            .k = K,
+                            .mode = QwenGemmMode::kHipDecode});
   if (A.empty() || !resolution.accepted() || x.size() < K || y.size() < M ||
       A.num_elements < M * K) {
     std::abort();

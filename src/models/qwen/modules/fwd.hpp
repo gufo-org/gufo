@@ -24,8 +24,8 @@ void RopeForward(const CpuModuleContext& ctx, const RopeLayerView& view,
                  std::uint32_t pos) noexcept;
 
 void AttnForward(const CpuLayerContext& ctx, const AttnLayerView& view,
-                 std::span<const float> x, QwenKvCache& kv,
-                 std::uint32_t pos, std::span<float> out) noexcept;
+                 std::span<const float> x, QwenKvCache& kv, std::uint32_t pos,
+                 std::span<float> out) noexcept;
 
 void SsmForward(const CpuLayerContext& ctx, const SsmLayerView& view,
                 std::span<const float> x, QwenSsmCache& state,

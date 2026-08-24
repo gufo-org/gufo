@@ -118,7 +118,7 @@ __device__ inline void GetQKScaleMin(std::size_t index,
     return;
   }
   sc = static_cast<std::uint8_t>((packed[index + 4] & 0x0FU) |
-                                ((packed[index - 4] >> 6U) << 4U));
+                                 ((packed[index - 4] >> 6U) << 4U));
   m = static_cast<std::uint8_t>((packed[index + 4] >> 4U) |
                                 ((packed[index] >> 6U) << 4U));
 }
@@ -127,16 +127,16 @@ __device__ inline void GetQKScaleMin(std::size_t index,
 // Mirrors CPU Q5Value in ggml_dequant.cpp exactly.
 __device__ inline float Q5KValue(const Q5KBlock& block,
                                  std::size_t index) noexcept {
-  const std::size_t gg = index / 64;   // 0..3
-  const std::size_t wv = index % 64;   // 0..63
-  const std::size_t lane = wv % 32;    // 0..31
+  const std::size_t gg = index / 64;  // 0..3
+  const std::size_t wv = index % 64;  // 0..63
+  const std::size_t lane = wv % 32;   // 0..31
   const bool lohalf = (wv < 32);
   const std::uint8_t qb = block.qs[(gg * 32) + lane];
   const std::uint8_t quant4 = lohalf ? (qb & 0x0FU) : (qb >> 4U);
   const int bit = static_cast<int>(2 * gg) + (lohalf ? 0 : 1);  // 0..7
   const std::uint8_t quant = static_cast<std::uint8_t>(
       quant4 + (((block.qh[lane] >> bit) & 1U) ? 16U : 0U));  // 0..31
-  const std::size_t sis = (2 * gg) + (lohalf ? 0 : 1);  // 0..7
+  const std::size_t sis = (2 * gg) + (lohalf ? 0 : 1);        // 0..7
   std::uint8_t sc = 0;
   std::uint8_t m = 0;
   GetQKScaleMin(sis, block.scales, sc, m);
@@ -178,8 +178,7 @@ __device__ inline float Q6KValue(const Q6KBlock& block,
   }
   const std::size_t scale_index = (half * 8) + (lane / 16) + (segment * 2);
   const int quant = static_cast<int>((high << 4U) | low) - 32;
-  return __half2float(block.d) *
-         static_cast<float>(block.scales[scale_index]) *
+  return __half2float(block.d) * static_cast<float>(block.scales[scale_index]) *
          static_cast<float>(quant);
 }
 
@@ -195,15 +194,15 @@ __device__ inline float Q6KValue(const Q6KBlock& block,
 // num_warps == 1 the warp processes the entire row. Mirrors Q8KBlockGEMVKernel
 // exactly. The only TX-dependent code is the x reads, wrapped in
 // static_cast<float> so TX=float is identity and TX=hip_bfloat16 converts.
-template <typename TX>
+template<typename TX>
 __device__ inline float QuantWarpBlockDot(
-    core::GgmlType type, const void* __restrict__ base,
-    std::size_t row_idx, const TX* __restrict__ x, std::size_t K,
-    std::size_t lane_id, std::size_t warp_id, std::size_t num_warps) {
+    core::GgmlType type, const void* __restrict__ base, std::size_t row_idx,
+    const TX* __restrict__ x, std::size_t K, std::size_t lane_id,
+    std::size_t warp_id, std::size_t num_warps) {
   const std::size_t qk = QuantBlockQK(type);
   const std::size_t block_bytes = QuantBlockBytes(type);
-  const char* row = static_cast<const char*>(base) +
-                    (row_idx * (K / qk * block_bytes));
+  const char* row =
+      static_cast<const char*>(base) + (row_idx * (K / qk * block_bytes));
   const std::size_t num_blocks = K / qk;
   const std::size_t chunk = (num_blocks + num_warps - 1) / num_warps;
   const std::size_t b0 = warp_id * chunk;
@@ -217,13 +216,17 @@ __device__ inline float QuantWarpBlockDot(
         const float d_w = __half2float(wblk.d);
         const TX* xb = x + (b * kQ8_0BlockSize);
         float local_max = fabsf(static_cast<float>(xb[lane_id]));
-        for (int off = 16; off > 0; off >>= 1) local_max = fmaxf(local_max, __shfl_xor(local_max, off));
+        for (int off = 16; off > 0; off >>= 1)
+          local_max = fmaxf(local_max, __shfl_xor(local_max, off));
         const float scale = (local_max > 0.0F) ? (local_max / 127.0F) : 0.0F;
-        const float xv = (scale > 0.0F) ? (static_cast<float>(xb[lane_id]) / scale) : 0.0F;
+        const float xv =
+            (scale > 0.0F) ? (static_cast<float>(xb[lane_id]) / scale) : 0.0F;
         int xq = static_cast<int>(roundf(xv));
-        xq = (xq > 127) ? 127 : xq; xq = (xq < -127) ? -127 : xq;
+        xq = (xq > 127) ? 127 : xq;
+        xq = (xq < -127) ? -127 : xq;
         int acc = static_cast<int>(wblk.qs[lane_id]) * xq;
-        for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor(acc, off);
+        for (int off = 16; off > 0; off >>= 1)
+          acc += __shfl_xor(acc, off);
         sumf += d_w * scale * static_cast<float>(acc);
       }
       break;
@@ -236,19 +239,25 @@ __device__ inline float QuantWarpBlockDot(
         const TX* xb = x + (b * kQ8KBlockSize);
         float local_max = 0.0F;
 #pragma unroll
-        for (std::size_t k = 0; k < 8; ++k) local_max = fmaxf(local_max, fabsf(static_cast<float>(xb[lane_id + (32 * k)])));
-        for (int off = 16; off > 0; off >>= 1) local_max = fmaxf(local_max, __shfl_xor(local_max, off));
+        for (std::size_t k = 0; k < 8; ++k)
+          local_max = fmaxf(local_max,
+                            fabsf(static_cast<float>(xb[lane_id + (32 * k)])));
+        for (int off = 16; off > 0; off >>= 1)
+          local_max = fmaxf(local_max, __shfl_xor(local_max, off));
         const float scale = (local_max > 0.0F) ? (local_max / 127.0F) : 0.0F;
         int acc = 0;
 #pragma unroll
         for (std::size_t k = 0; k < 8; ++k) {
           const std::size_t idx = lane_id + (32 * k);
-          const float xv = (scale > 0.0F) ? (static_cast<float>(xb[idx]) / scale) : 0.0F;
+          const float xv =
+              (scale > 0.0F) ? (static_cast<float>(xb[idx]) / scale) : 0.0F;
           int xq = static_cast<int>(roundf(xv));
-          xq = (xq > 127) ? 127 : xq; xq = (xq < -127) ? -127 : xq;
+          xq = (xq > 127) ? 127 : xq;
+          xq = (xq < -127) ? -127 : xq;
           acc += static_cast<int>(wblk.qs[idx]) * xq;
         }
-        for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor(acc, off);
+        for (int off = 16; off > 0; off >>= 1)
+          acc += __shfl_xor(acc, off);
         sumf += d_w * scale * static_cast<float>(acc);
       }
       break;
@@ -260,8 +269,11 @@ __device__ inline float QuantWarpBlockDot(
         const TX* xb = x + (b * kQ5KBlockSize);
         float acc = 0.0F;
 #pragma unroll
-        for (std::size_t k = 0; k < 8; ++k) acc += Q5KValue(wblk, lane_id + (32u * k)) * static_cast<float>(xb[lane_id + (32u * k)]);
-        for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor(acc, off);
+        for (std::size_t k = 0; k < 8; ++k)
+          acc += Q5KValue(wblk, lane_id + (32u * k)) *
+                 static_cast<float>(xb[lane_id + (32u * k)]);
+        for (int off = 16; off > 0; off >>= 1)
+          acc += __shfl_xor(acc, off);
         sumf += acc;
       }
       break;
@@ -273,8 +285,11 @@ __device__ inline float QuantWarpBlockDot(
         const TX* xb = x + (b * kQ6KBlockSize);
         float acc = 0.0F;
 #pragma unroll
-        for (std::size_t k = 0; k < 8; ++k) acc += Q6KValue(wblk, lane_id + (32u * k)) * static_cast<float>(xb[lane_id + (32u * k)]);
-        for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor(acc, off);
+        for (std::size_t k = 0; k < 8; ++k)
+          acc += Q6KValue(wblk, lane_id + (32u * k)) *
+                 static_cast<float>(xb[lane_id + (32u * k)]);
+        for (int off = 16; off > 0; off >>= 1)
+          acc += __shfl_xor(acc, off);
         sumf += acc;
       }
       break;
@@ -282,7 +297,8 @@ __device__ inline float QuantWarpBlockDot(
     default:
       break;
   }
-  if (lane_id != 0) return 0.0F;
+  if (lane_id != 0)
+    return 0.0F;
   return sumf;
 }
 

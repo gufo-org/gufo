@@ -1,6 +1,4 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/mtp.hpp"
-
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -10,8 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
+#include "src/models/qwen/hip/mtp.hpp"
+#include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 #if defined(ENGINE_ENABLE_XRT)
 #include "src/core/diagnostics/system_inventory.h"
@@ -134,7 +133,8 @@ void QwenMtpGpuExecutor::Allocate() {
   AllocateBuffer(d_feedback_hidden_, hidden);
   AllocateBuffer(d_logits_, config.vocab_size);
   AllocateBuffer(d_kv_cache_, 2 * total_kv);
-  d_kv_cache_f16_ = detail::AllocateDevice(2 * total_kv * sizeof(std::uint16_t));
+  d_kv_cache_f16_ =
+      detail::AllocateDevice(2 * total_kv * sizeof(std::uint16_t));
   AllocateBuffer(d_split_k_scratch_,
                  detail::DecodeAttentionScratchElements(
                      config.num_attention_heads, config.head_dim));
@@ -290,11 +290,10 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
 
   LaunchRMSNorm(d_hidden_, static_cast<const float*>(layer.attn_norm.data),
                 d_normed_, hidden, 1.0e-6F, stream_);
-  LaunchFusedQKVProjections(layer.attn_q.data, layer.attn_q.type,
-                            layer.attn_k.data, layer.attn_k.type,
-                            layer.attn_v.data, layer.attn_v.type, d_normed_,
-                            d_qg_, d_k_, d_v_, 2 * attention, kv, hidden,
-                            stream_);
+  LaunchFusedQKVProjections(
+      layer.attn_q.data, layer.attn_q.type, layer.attn_k.data,
+      layer.attn_k.type, layer.attn_v.data, layer.attn_v.type, d_normed_, d_qg_,
+      d_k_, d_v_, 2 * attention, kv, hidden, stream_);
   LaunchUnpackQG(d_qg_, d_q_, d_gate_, config.num_attention_heads,
                  config.head_dim, stream_);
   LaunchPerHeadRMSNorm(d_q_, static_cast<const float*>(layer.attn_q_norm.data),

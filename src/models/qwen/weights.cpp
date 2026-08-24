@@ -1,10 +1,10 @@
-#include "src/models/qwen/state.hpp"
-
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "src/models/qwen/state.hpp"
 
 namespace strix::models {
 namespace {
@@ -16,8 +16,7 @@ QwenTensorRef ExtractTensorRef(const core::GgufReader& reader,
     return {};
   }
 
-  const auto tensor_address =
-      reinterpret_cast<std::uintptr_t>(tensor->data);
+  const auto tensor_address = reinterpret_cast<std::uintptr_t>(tensor->data);
   std::size_t available_bytes = 0;
   for (const auto& region : reader.GetMappedRegions()) {
     const auto region_address = reinterpret_cast<std::uintptr_t>(region.data);
@@ -35,7 +34,7 @@ QwenTensorRef ExtractTensorRef(const core::GgufReader& reader,
           .available_bytes = available_bytes};
 }
 
-enum class TensorRole {
+enum class TensorRole : std::uint8_t {
   kEmbedding,
   kNorm,
   kProjection,
@@ -64,8 +63,7 @@ enum class TensorRole {
       // The production HIP embedding kernel has exact F32, BF16, and Q8_0
       // implementations. Treating every other type as Q8_0 would decode the
       // wrong block layout.
-      return type == core::GgmlType::kF32 ||
-             type == core::GgmlType::kBF16 ||
+      return type == core::GgmlType::kF32 || type == core::GgmlType::kBF16 ||
              type == core::GgmlType::kQ8_0;
     case TensorRole::kNorm:
     case TensorRole::kSsmParameter:
@@ -73,12 +71,9 @@ enum class TensorRole {
       // float pointers. Accepting BF16 or packed data would reinterpret bytes.
       return type == core::GgmlType::kF32;
     case TensorRole::kProjection:
-      return type == core::GgmlType::kF32 ||
-             type == core::GgmlType::kBF16 ||
-             type == core::GgmlType::kQ8_K ||
-             type == core::GgmlType::kQ8_0 ||
-             type == core::GgmlType::kQ5_K ||
-             type == core::GgmlType::kQ6_K;
+      return type == core::GgmlType::kF32 || type == core::GgmlType::kBF16 ||
+             type == core::GgmlType::kQ8_K || type == core::GgmlType::kQ8_0 ||
+             type == core::GgmlType::kQ5_K || type == core::GgmlType::kQ6_K;
   }
   return false;
 }
@@ -121,9 +116,9 @@ bool ValidateTensor(const QwenTensorRef& tensor, std::size_t expected_elements,
   if (quantized && row_elements != 0 &&
       strix::quant::QuantizedRowBytes(tensor.type, row_elements) == 0) {
     if (error_msg != nullptr) {
-      *error_msg = "Quantized tensor row is not block aligned: " +
-                   std::string(name) + " (row elements " +
-                   std::to_string(row_elements) + ")";
+      *error_msg =
+          "Quantized tensor row is not block aligned: " + std::string(name) +
+          " (row elements " + std::to_string(row_elements) + ")";
     }
     return false;
   }
@@ -315,16 +310,14 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
           !ValidateTensor(l.ssm_dt, rank, TensorRole::kSsmParameter,
                           prefix + "ssm_dt.bias", error_msg) ||
           !ValidateTensor(l.ssm_alpha, rank * hidden_size,
-                          TensorRole::kProjection,
-                          prefix + "ssm_alpha.weight", error_msg,
-                          hidden_size) ||
+                          TensorRole::kProjection, prefix + "ssm_alpha.weight",
+                          error_msg, hidden_size) ||
           !ValidateTensor(l.ssm_beta, rank * hidden_size,
-                          TensorRole::kProjection,
-                          prefix + "ssm_beta.weight", error_msg,
-                          hidden_size) ||
+                          TensorRole::kProjection, prefix + "ssm_beta.weight",
+                          error_msg, hidden_size) ||
           !ValidateTensor(l.ssm_norm, weights.config.SsmValueSize(),
-                          TensorRole::kSsmParameter,
-                          prefix + "ssm_norm.weight", error_msg) ||
+                          TensorRole::kSsmParameter, prefix + "ssm_norm.weight",
+                          error_msg) ||
           !ValidateTensor(l.ssm_out, hidden_size * inner_size,
                           TensorRole::kProjection, prefix + "ssm_out.weight",
                           error_msg, inner_size)) {

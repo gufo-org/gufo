@@ -1,7 +1,7 @@
 // CPU module contract test for the SwiGLU FFN module (FfnForward).
 //
-// Drives the public typed CPU seam and explicit scratch spans over deterministic
-// synthetic weights. Asserts the module
+// Drives the public typed CPU seam and explicit scratch spans over
+// deterministic synthetic weights. Asserts the module
 //   (1) reproduces an independent oracle (ReferenceGEMV + ReferenceSwiGLU for
 //       gate/up/down projections — a DIFFERENT GEMV implementation than the
 //       module's TensorGEMV path, so this is a genuine cross-check), and
@@ -9,11 +9,6 @@
 //
 // CPU-only; no HIP dependency. Shared deterministic data and comparisons live
 // in the Qwen support builder and tests/testing/test_common.hpp.
-
-#include "src/models/qwen/modules/modules.hpp"
-#include "src/models/qwen/oracles.hpp"
-#include "tests/models/qwen/support/synthetic_weights.hpp"
-#include "tests/testing/test_common.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -24,16 +19,21 @@
 #include <span>
 #include <vector>
 
+#include "src/models/qwen/modules/modules.hpp"
+#include "src/models/qwen/oracles.hpp"
+#include "tests/models/qwen/support/synthetic_weights.hpp"
+#include "tests/testing/test_common.hpp"
+
 namespace {
 
 using strix::core::ModelConfig;
 using strix::models::QwenLayerWeights;
 using strix::models::qwen::build_synthetic_qwen_weights;
-using strix::models::qwen::make_small_qwen_config;
-using strix::models::qwen::MakeFfnView;
 using strix::models::qwen::CpuModuleContext;
 using strix::models::qwen::FfnForward;
 using strix::models::qwen::FfnLayerView;
+using strix::models::qwen::make_small_qwen_config;
+using strix::models::qwen::MakeFfnView;
 using strix::models::qwen::ReferenceGEMV;
 using strix::models::qwen::ReferenceSwiGLU;
 
@@ -46,7 +46,8 @@ void TestFfnModuleMatchesOracle() {
   const std::size_t inter = config.intermediate_size;
   const auto& layer = weights.layers[0];
 
-  std::vector<float> x = strix::test::make_random_tensor(hidden, rng, -0.5F, 0.5F);
+  std::vector<float> x =
+      strix::test::make_random_tensor(hidden, rng, -0.5F, 0.5F);
 
   // Module output.
   FfnLayerView view = MakeFfnView(layer, config);

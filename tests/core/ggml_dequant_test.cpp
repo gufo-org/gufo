@@ -213,8 +213,7 @@ void TestQ8() {
   Q8Block block{};
   block.d = 0.00390625F;
   for (std::size_t i = 0; i < kBlockElements; ++i) {
-    block.qs[i] =
-        static_cast<std::int8_t>(static_cast<int>(i % 65) - 32);
+    block.qs[i] = static_cast<std::int8_t>(static_cast<int>(i % 65) - 32);
     block.bsums[i / 16] += block.qs[i];
   }
 
@@ -245,8 +244,7 @@ void TestQ8_0() {
   Q8_0Block block{};
   block.d = 0x3800;  // fp16 0.5
   for (std::size_t i = 0; i < kQ8_0Elements; ++i) {
-    block.qs[i] =
-        static_cast<std::int8_t>(static_cast<int>(i % 65) - 32);
+    block.qs[i] = static_cast<std::int8_t>(static_cast<int>(i % 65) - 32);
   }
 
   std::array<float, kQ8_0Elements> actual{};
@@ -287,7 +285,8 @@ void TestQ5_K() {
       strix::quant::QuantizedRowBytes(strix::core::GgmlType::kQ8_0, 32) != 34 ||
       strix::quant::EncodedSizeBytes(strix::core::GgmlType::kF32, 8) != 32 ||
       strix::quant::EncodedSizeBytes(strix::core::GgmlType::kBF16, 8) != 16 ||
-      strix::quant::EncodedSizeBytes(strix::core::GgmlType::kQ8_K, 256) != 292) {
+      strix::quant::EncodedSizeBytes(strix::core::GgmlType::kQ8_K, 256) !=
+          292) {
     std::cerr << "Assertion failed: QuantizedRowBytes contract\n";
     std::exit(1);
   }
@@ -297,7 +296,7 @@ void TestQ5_K() {
   // packed[8..11]=0x14 (high-half scale/min encodings) -> sc=4, m=1 all 8.
   const auto make_block = [](bool high_bits) {
     Q5Block block{};
-    block.d = 0x3400;    // fp16 0.25
+    block.d = 0x3400;     // fp16 0.25
     block.dmin = 0x3000;  // fp16 0.125
     for (std::size_t index = 0; index < 4; ++index) {
       block.scales[index] = 4;
@@ -327,8 +326,7 @@ void TestQ5_K() {
     std::array<float, kQ5Elements> expected{};
     for (std::size_t index = 0; index < kQ5Elements; ++index) {
       const std::size_t gg = index / 64;
-      const auto quant =
-          static_cast<float>(gg + 1 + (high_bits ? 16 : 0));
+      const auto quant = static_cast<float>(gg + 1 + (high_bits ? 16 : 0));
       // Fp16ToFloat(0x3400)=0.25, Fp16ToFloat(0x3000)=0.125, sc=4, m=1.
       expected[index] = quant - 0.125F;
       ExpectNear(actual[index], expected[index],

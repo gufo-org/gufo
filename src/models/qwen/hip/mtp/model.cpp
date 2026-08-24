@@ -1,6 +1,4 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/mtp.hpp"
-
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -11,8 +9,9 @@
 #include <utility>
 #include <vector>
 
-#include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/models/qwen/hip/mtp.hpp"
+#include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 
 namespace strix::hip {
 namespace {

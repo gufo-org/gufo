@@ -107,5 +107,4 @@ QwenScratchArena::QwenScratchArena(const core::ModelConfig& config) {
   logits = alloc_span(vocab_size);
 }
 
-
 }  // namespace strix::models

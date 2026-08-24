@@ -102,10 +102,8 @@ void TestBatchedRoPEEquivalence() {
   }
   std::cout << "RoPE Seq vs Batch max Q diff: " << max_q_diff
             << " K diff: " << max_k_diff << "\n";
-  strix::test::Expect(max_q_diff < 1e-4F,
-                      "batched RoPE Q result mismatch");
-  strix::test::Expect(max_k_diff < 1e-4F,
-                      "batched RoPE K result mismatch");
+  strix::test::Expect(max_q_diff < 1e-4F, "batched RoPE Q result mismatch");
+  strix::test::Expect(max_k_diff < 1e-4F, "batched RoPE K result mismatch");
 
   HIP_CHECK(hipFree(d_q_seq));
   HIP_CHECK(hipFree(d_k_seq));
@@ -174,9 +172,9 @@ void TestBatchedPerHeadRMSNormEquivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen attention component ops test");
+  const int device_status =
+      strix::test::GateHipDevice(strix::test::HipDeviceRequirement::kOptional,
+                                 "Qwen attention component ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }

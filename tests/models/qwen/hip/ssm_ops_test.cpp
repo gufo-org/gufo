@@ -354,11 +354,11 @@ void TestFusedRMSNormSSMInputProjectionsEquivalence() {
 
   strix::hip::LaunchRMSNorm(d_x, d_w, d_normed, hidden_size, eps);
   strix::hip::LaunchFusedSSMInputProjections(
-      d_qkv, strix::core::GgmlType::kBF16, d_gate,
-      strix::core::GgmlType::kBF16, d_alpha, strix::core::GgmlType::kBF16,
-      d_beta, strix::core::GgmlType::kBF16, d_normed,
-      d_qkv_ref, d_gate_ref, d_alpha_ref, d_beta_ref, hidden_size, qkv_size,
-      inner_size, time_step_rank);
+      d_qkv, strix::core::GgmlType::kBF16, d_gate, strix::core::GgmlType::kBF16,
+      d_alpha, strix::core::GgmlType::kBF16, d_beta,
+      strix::core::GgmlType::kBF16, d_normed, d_qkv_ref, d_gate_ref,
+      d_alpha_ref, d_beta_ref, hidden_size, qkv_size, inner_size,
+      time_step_rank);
   strix::hip::LaunchFusedRMSNormSSMInputProjections(
       d_x, d_w, eps, d_qkv, true, d_gate, true, d_alpha, true, d_beta, true,
       d_qkv_fus, d_gate_fus, d_alpha_fus, d_beta_fus, hidden_size, qkv_size,
@@ -426,8 +426,7 @@ void TestFusedRMSNormSSMInputProjectionsEquivalence() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen SSM ops test");
+      strix::test::HipDeviceRequirement::kOptional, "Qwen SSM ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }

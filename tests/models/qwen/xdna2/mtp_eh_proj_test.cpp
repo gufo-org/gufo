@@ -1,3 +1,5 @@
+#include "src/models/qwen/xdna2/mtp_eh_proj.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -16,9 +18,8 @@
 #include "src/core/diagnostics/system_inventory.h"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
-#include "src/models/qwen/mtp_reference.hpp"
 #include "src/core/xdna2/device.h"
-#include "src/models/qwen/xdna2/mtp_eh_proj.h"
+#include "src/models/qwen/mtp_reference.hpp"
 
 namespace {
 

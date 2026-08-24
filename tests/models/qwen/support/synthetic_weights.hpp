@@ -91,30 +91,30 @@ inline SyntheticQwenWeights build_synthetic_qwen_weights(
   // (output is tied to token_embd: no separate buffer)
   for (std::uint32_t i = 0; i < config.num_layers; ++i) {
     const bool full = ((i + 1) % config.full_attention_interval) == 0;
-    total += hidden + hidden;                        // attn_norm, ffn_norm
-    total += inter * hidden + inter * hidden;        // ffn_gate, ffn_up
-    total += hidden * inter;                         // ffn_down
+    total += hidden + hidden;                  // attn_norm, ffn_norm
+    total += inter * hidden + inter * hidden;  // ffn_gate, ffn_up
+    total += hidden * inter;                   // ffn_down
     if (full) {
       const std::size_t attn = config.AttentionSize();
       const std::size_t kv =
           static_cast<std::size_t>(config.num_key_value_heads) *
           config.head_dim;
-      total += 2 * attn * hidden;                    // attn_q
-      total += kv * hidden + kv * hidden;            // attn_k, attn_v
-      total += hidden * attn;                        // attn_output
-      total += config.head_dim + config.head_dim;    // attn_q/k_norm
+      total += 2 * attn * hidden;                  // attn_q
+      total += kv * hidden + kv * hidden;          // attn_k, attn_v
+      total += hidden * attn;                      // attn_output
+      total += config.head_dim + config.head_dim;  // attn_q/k_norm
     } else {
       const std::size_t qkv = config.SsmQkvSize();
       const std::size_t inner = config.ssm_inner_size;
       const std::size_t rank = config.ssm_time_step_rank;
-      total += qkv * hidden;                             // attn_qkv
-      total += inner * hidden;                           // attn_gate
-      total += rank;                                     // ssm_a
-      total += qkv * config.ssm_conv_kernel;             // ssm_conv1d
-      total += rank;                                     // ssm_dt
-      total += rank * hidden + rank * hidden;            // ssm_alpha, ssm_beta
-      total += config.SsmValueSize();                    // ssm_norm
-      total += hidden * inner;                           // ssm_out
+      total += qkv * hidden;                   // attn_qkv
+      total += inner * hidden;                 // attn_gate
+      total += rank;                           // ssm_a
+      total += qkv * config.ssm_conv_kernel;   // ssm_conv1d
+      total += rank;                           // ssm_dt
+      total += rank * hidden + rank * hidden;  // ssm_alpha, ssm_beta
+      total += config.SsmValueSize();          // ssm_norm
+      total += hidden * inner;                 // ssm_out
     }
   }
 
@@ -127,7 +127,8 @@ inline SyntheticQwenWeights build_synthetic_qwen_weights(
       // Should never happen given the first-pass total.
       throw std::length_error("synthetic weights: pool overflow");
     }
-    for (std::size_t i = 0; i < n; ++i) out.pool[cur + i] = dist(rng);
+    for (std::size_t i = 0; i < n; ++i)
+      out.pool[cur + i] = dist(rng);
     QwenTensorRef ref{out.pool.data() + cur, core::GgmlType::kF32, n};
     cur += n;
     return ref;

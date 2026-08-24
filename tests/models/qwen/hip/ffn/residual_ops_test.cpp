@@ -282,8 +282,8 @@ void TestGEMVResidualEquivalence() {
   HIP_CHECK(hipMemcpy(d_res2, h_res2.data(), M2 * sizeof(float),
                       hipMemcpyHostToDevice));
 
-  strix::hip::LaunchGEMV(d_A2, strix::core::GgmlType::kF32, d_x2, d_y_ref2,
-                         M2, K2);
+  strix::hip::LaunchGEMV(d_A2, strix::core::GgmlType::kF32, d_x2, d_y_ref2, M2,
+                         K2);
   strix::hip::LaunchResidualAdd(d_res2, d_y_ref2, d_y_ref2, M2);
   strix::hip::LaunchGEMVResidual(d_A2, strix::core::GgmlType::kF32, d_x2,
                                  d_y_fus2, d_res2, M2, K2);
@@ -319,9 +319,9 @@ void TestGEMVResidualEquivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen FFN residual ops test");
+  const int device_status =
+      strix::test::GateHipDevice(strix::test::HipDeviceRequirement::kOptional,
+                                 "Qwen FFN residual ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }
@@ -332,7 +332,8 @@ int main() {
   std::cout << "Qwen FFN residual and epilogue ops test passed on gfx1151.\n";
   return 0;
 #else
-  std::cout << "HIP disabled, skipping Qwen FFN residual and epilogue ops test.\n";
+  std::cout
+      << "HIP disabled, skipping Qwen FFN residual and epilogue ops test.\n";
   return 77;
 #endif
 }

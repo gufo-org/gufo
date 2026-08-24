@@ -31,8 +31,8 @@ void FfnForward(const CpuModuleContext&, const FfnLayerView& view,
   }
 
   if (!view.down.empty()) {
-    TensorGEMV(view.down, act_scratch, view.hidden_size,
-               view.intermediate_size, out);
+    TensorGEMV(view.down, act_scratch, view.hidden_size, view.intermediate_size,
+               out);
   }
 }
 
@@ -48,8 +48,8 @@ void FfnForward(const HipModuleContext& ctx, const FfnLayerView& view,
       view.gate.data, view.gate.type, view.up.data, view.up.type, x.data(),
       act_scratch.data(), view.intermediate_size, view.hidden_size, stream);
   ::strix::hip::LaunchGEMV(view.down.data, view.down.type, act_scratch.data(),
-                           out.data(), view.hidden_size,
-                           view.intermediate_size, stream);
+                           out.data(), view.hidden_size, view.intermediate_size,
+                           stream);
 }
 #endif
 

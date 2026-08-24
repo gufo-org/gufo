@@ -8,8 +8,8 @@
 #include <string>
 #include <vector>
 
-#include "src/models/qwen/hip/executor.hpp"
 #include "src/core/speculative/draft_backend.hpp"
+#include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/mtp_reference.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 

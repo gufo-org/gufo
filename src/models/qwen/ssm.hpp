@@ -33,9 +33,7 @@ public:
   [[nodiscard]] std::uint32_t KeyDim() const noexcept { return key_dim_; }
   [[nodiscard]] std::uint32_t ValDim() const noexcept { return val_dim_; }
 
-  [[nodiscard]] std::uint32_t NumLayers() const noexcept {
-    return num_layers_;
-  }
+  [[nodiscard]] std::uint32_t NumLayers() const noexcept { return num_layers_; }
   [[nodiscard]] std::size_t ConvChannels() const noexcept {
     return conv_channels_;
   }
@@ -97,9 +95,8 @@ struct QwenSsmParameters {
 /// Computes Qwen 3.5 Gated DeltaNet linear attention from a self-contained
 /// tensor slice. Invalid shapes safely zero-fill `out` without touching state.
 void ForwardSSM(std::span<const float> x_normed,
-                const QwenSsmParameters& parameters,
-                QwenSsmCache& ssm_cache, std::uint32_t layer_idx,
-                std::span<float> ssm_qkv_scratch,
+                const QwenSsmParameters& parameters, QwenSsmCache& ssm_cache,
+                std::uint32_t layer_idx, std::span<float> ssm_qkv_scratch,
                 std::span<float> ssm_gate_scratch,
                 std::span<float> ssm_out_scratch,
                 std::span<float> out) noexcept;

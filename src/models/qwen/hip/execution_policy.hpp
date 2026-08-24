@@ -99,9 +99,10 @@ struct QwenLayerRouteResolution {
   QwenRouteRejection rejected{QwenRouteRejection::kNone};
 };
 
-[[nodiscard]] constexpr QwenLayerRouteResolution ResolveQwenLayerRouteWithReasons(
-    const QwenExecutionPolicy& policy, QwenExecutionMode mode,
-    bool full_attention) noexcept {
+[[nodiscard]] constexpr QwenLayerRouteResolution
+ResolveQwenLayerRouteWithReasons(const QwenExecutionPolicy& policy,
+                                 QwenExecutionMode mode,
+                                 bool full_attention) noexcept {
   const bool decode = mode == QwenExecutionMode::kDecode;
   QwenRouteRejection rejected = QwenRouteRejection::kNone;
 
@@ -141,11 +142,10 @@ struct QwenLayerRouteResolution {
               .fuse_qk_norm_rope_kv =
                   full_attention && policy.fuse_qk_norm_rope_kv,
               .fuse_residual_rmsnorm = policy.fuse_residual_rmsnorm,
-              .fuse_ffn_swiglu =
-                  decode ? policy.fuse_decode_rmsnorm_swiglu
-                         : policy.fuse_prefill_ffn_swiglu,
-              .fuse_ssm_epilogue = !full_attention &&
-                                   requested_mode_ssm_epilogue,
+              .fuse_ffn_swiglu = decode ? policy.fuse_decode_rmsnorm_swiglu
+                                        : policy.fuse_prefill_ffn_swiglu,
+              .fuse_ssm_epilogue =
+                  !full_attention && requested_mode_ssm_epilogue,
               .fuse_rmsnorm_projection =
                   decode && policy.fuse_decode_rmsnorm_projection,
               .prefetch_next_layer = decode && policy.prefetch_next_layer,
@@ -163,7 +163,8 @@ struct QwenLayerRouteResolution {
 /// FNV-1a-style composition helpers for a deterministic executor-local graph
 /// workload identity. Callers add configuration fields and resolved route
 /// fingerprints; raw addresses must never participate.
-[[nodiscard]] constexpr std::uint64_t BeginQwenGraphWorkloadIdentity() noexcept {
+[[nodiscard]] constexpr std::uint64_t
+BeginQwenGraphWorkloadIdentity() noexcept {
   return 14695981039346656037ULL;
 }
 

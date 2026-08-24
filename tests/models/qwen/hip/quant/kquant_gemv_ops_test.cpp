@@ -41,8 +41,7 @@ void TestQ5KBlockGEMVEquivalence() {
     std::uint32_t x;
     std::memcpy(&x, &f, sizeof(x));
     const std::uint32_t sign = (x >> 16) & 0x8000u;
-    std::int32_t exp =
-        static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
+    std::int32_t exp = static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
     std::uint32_t mant = (x >> 13) & 0x3FFu;
     if (exp <= 0) {
       if (exp < -10) {
@@ -53,8 +52,7 @@ void TestQ5KBlockGEMVEquivalence() {
       return static_cast<std::uint16_t>(sign | (mant >> shift));
     }
     if (exp >= 31) {
-      return static_cast<std::uint16_t>(sign | 0x7C00u |
-                                        (mant ? 0x200u : 0u));
+      return static_cast<std::uint16_t>(sign | 0x7C00u | (mant ? 0x200u : 0u));
     }
     return static_cast<std::uint16_t>(
         sign | (static_cast<std::uint32_t>(exp) << 10) | mant);
@@ -92,16 +90,16 @@ void TestQ5KBlockGEMVEquivalence() {
   HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
   HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * num_blocks * sizeof(Q5KBlockTest),
                       hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float),
-                      hipMemcpyHostToDevice));
+  HIP_CHECK(
+      hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ5_K, d_x, d_y,
-                                 M, K, nullptr);
+  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ5_K, d_x, d_y, M,
+                                 K, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<float> y_gpu(M);
-  HIP_CHECK(hipMemcpy(y_gpu.data(), d_y, M * sizeof(float),
-                      hipMemcpyDeviceToHost));
+  HIP_CHECK(
+      hipMemcpy(y_gpu.data(), d_y, M * sizeof(float), hipMemcpyDeviceToHost));
 
   // CPU oracle: exact fp dequant + dot (no activation quantization).
   std::vector<float> y_ref(M, 0.0F);
@@ -146,8 +144,7 @@ void TestQ6KBlockGEMVEquivalence() {
     std::uint32_t x;
     std::memcpy(&x, &f, sizeof(x));
     const std::uint32_t sign = (x >> 16) & 0x8000u;
-    std::int32_t exp =
-        static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
+    std::int32_t exp = static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
     std::uint32_t mant = (x >> 13) & 0x3FFu;
     if (exp <= 0) {
       if (exp < -10) {
@@ -158,8 +155,7 @@ void TestQ6KBlockGEMVEquivalence() {
       return static_cast<std::uint16_t>(sign | (mant >> shift));
     }
     if (exp >= 31) {
-      return static_cast<std::uint16_t>(sign | 0x7C00u |
-                                        (mant ? 0x200u : 0u));
+      return static_cast<std::uint16_t>(sign | 0x7C00u | (mant ? 0x200u : 0u));
     }
     return static_cast<std::uint16_t>(
         sign | (static_cast<std::uint32_t>(exp) << 10) | mant);
@@ -193,16 +189,16 @@ void TestQ6KBlockGEMVEquivalence() {
   HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
   HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * num_blocks * sizeof(Q6KBlockTest),
                       hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float),
-                      hipMemcpyHostToDevice));
+  HIP_CHECK(
+      hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ6_K, d_x, d_y,
-                                 M, K, nullptr);
+  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ6_K, d_x, d_y, M,
+                                 K, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<float> y_gpu(M);
-  HIP_CHECK(hipMemcpy(y_gpu.data(), d_y, M * sizeof(float),
-                      hipMemcpyDeviceToHost));
+  HIP_CHECK(
+      hipMemcpy(y_gpu.data(), d_y, M * sizeof(float), hipMemcpyDeviceToHost));
 
   // CPU oracle: exact fp dequant + dot (no activation quantization).
   std::vector<float> y_ref(M, 0.0F);
@@ -238,9 +234,9 @@ void TestQ6KBlockGEMVEquivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen K-quant GEMV ops test");
+  const int device_status =
+      strix::test::GateHipDevice(strix::test::HipDeviceRequirement::kOptional,
+                                 "Qwen K-quant GEMV ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }

@@ -11,10 +11,6 @@
 // CPU-only; no HIP dependency. Shared deterministic data and comparisons live
 // in the Qwen support builder and tests/testing/test_common.hpp.
 
-#include "src/models/qwen/modules/modules.hpp"
-#include "tests/models/qwen/support/synthetic_weights.hpp"
-#include "tests/testing/test_common.hpp"
-
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -24,15 +20,19 @@
 #include <span>
 #include <vector>
 
+#include "src/models/qwen/modules/modules.hpp"
+#include "tests/models/qwen/support/synthetic_weights.hpp"
+#include "tests/testing/test_common.hpp"
+
 namespace {
 
 using strix::core::ModelConfig;
 using strix::models::QwenLayerWeights;
 using strix::models::qwen::build_synthetic_qwen_weights;
+using strix::models::qwen::CpuModuleContext;
 using strix::models::qwen::make_small_qwen_config;
 using strix::models::qwen::MakeAttnNormView;
 using strix::models::qwen::MakeFfnNormView;
-using strix::models::qwen::CpuModuleContext;
 using strix::models::qwen::NormForward;
 using strix::models::qwen::NormLayerView;
 
@@ -53,8 +53,7 @@ void ComputeManualRmsNorm(std::span<const float> x, std::span<const float> w,
     sum += static_cast<double>(v) * static_cast<double>(v);
   }
   const double rms =
-      std::sqrt(sum / static_cast<double>(x.size()) +
-                static_cast<double>(eps));
+      std::sqrt(sum / static_cast<double>(x.size()) + static_cast<double>(eps));
   for (std::size_t i = 0; i < x.size(); ++i) {
     out[i] = static_cast<float>(static_cast<double>(x[i]) / rms *
                                 static_cast<double>(w[i]));
@@ -69,7 +68,8 @@ void TestNormModuleMatchesIndependentReference() {
   const std::size_t hidden = config.hidden_size;
   const auto& layer = weights.layers[0];
 
-  std::vector<float> x = strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
+  std::vector<float> x =
+      strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
 
   // attn pre-norm slice (MakeAttnNormView).
   {

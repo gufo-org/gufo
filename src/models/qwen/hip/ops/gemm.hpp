@@ -116,7 +116,6 @@ void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
                         float* y, std::size_t M, std::size_t K,
                         hipStream_t stream = nullptr);
 
-
 /// Dequantizes a block_q8_K weight region ({ float d; int8_t qs[256]; int16_t
 /// bsums[16]; }, QK=256) into a BF16 scratch buffer for the prefill hipblas
 /// GEMM path (opt-c162-q8k-prefill-dequant). hipBLAS cannot consume Q8_K

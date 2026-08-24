@@ -25,12 +25,12 @@
 
 #include "src/core/heterogeneous/npu_drafter.hpp"
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/hip/executor.hpp"
-#include "src/models/qwen/hip/mtp.hpp"
 #include "src/core/speculative/draft_heads.hpp"
 #include "src/core/speculative/prompt_lookup_backend.hpp"
 #include "src/core/speculative/self_speculative.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
+#include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/mtp.hpp"
 #endif
 
 namespace strix::server {

@@ -19,12 +19,10 @@ void TestHipDeviceGateDecisions() {
   using strix::test::HipDeviceRequirement;
   using strix::test::ResolveHipDeviceGate;
 
-  Check(ResolveHipDeviceGate(hipSuccess, 1,
-                             HipDeviceRequirement::kOptional) ==
+  Check(ResolveHipDeviceGate(hipSuccess, 1, HipDeviceRequirement::kOptional) ==
             strix::test::kHipTestSuccess,
         "visible device must pass");
-  Check(ResolveHipDeviceGate(hipSuccess, 0,
-                             HipDeviceRequirement::kOptional) ==
+  Check(ResolveHipDeviceGate(hipSuccess, 0, HipDeviceRequirement::kOptional) ==
             strix::test::kCtestSkipReturnCode,
         "zero optional devices must skip");
   Check(ResolveHipDeviceGate(hipErrorNoDevice, 0,

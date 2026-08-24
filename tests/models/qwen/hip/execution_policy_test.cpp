@@ -1,23 +1,21 @@
-// Fusion-route (#44): verify the detail:: toggles that route the per-token decode
-// between fused kernels (owned by the ExecuteStep composition layer, Option B) and
-// the unfused module fallback (modules are pure).
+// Fusion-route (#44): verify the detail:: toggles that route the per-token
+// decode between fused kernels (owned by the ExecuteStep composition layer,
+// Option B) and the unfused module fallback (modules are pure).
 //
-// CPU-only. The production defaults and immutable executor policy are host-side,
-// so a CPU test asserts the routing decisions directly. For the cross-module fusions that are
-// currently DISABLED, the decode falls back to the module path (NormForward /
-// ResidualAdd / RopeForward) — this test drives those module fallbacks over small
-// synthetic data and checks they produce correct output, so a false toggle cannot
-// silently strand a broken fallback. The literal fused-kernel-vs-module GPU
-// comparison is covered by the L2-GPU integration test (orchestrator-gated).
+// CPU-only. The production defaults and immutable executor policy are
+// host-side, so a CPU test asserts the routing decisions directly. For the
+// cross-module fusions that are currently DISABLED, the decode falls back to
+// the module path (NormForward / ResidualAdd / RopeForward) — this test drives
+// those module fallbacks over small synthetic data and checks they produce
+// correct output, so a false toggle cannot silently strand a broken fallback.
+// The literal fused-kernel-vs-module GPU comparison is covered by the L2-GPU
+// integration test (orchestrator-gated).
 
-#include "src/models/qwen/modules/modules.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
+#include "src/models/qwen/modules/modules.hpp"
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/qwen/hip/executor.hpp"
 #endif
-#include "tests/models/qwen/support/synthetic_weights.hpp"
-#include "tests/testing/test_common.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -27,15 +25,18 @@
 #include <type_traits>
 #include <vector>
 
+#include "tests/models/qwen/support/synthetic_weights.hpp"
+#include "tests/testing/test_common.hpp"
+
 namespace {
 
 using strix::core::ModelConfig;
 using strix::models::qwen::build_synthetic_qwen_weights;
-using strix::models::qwen::make_small_qwen_config;
-using strix::models::qwen::MakeAttnNormView;
 using strix::models::qwen::CpuLayerContext;
 using strix::models::qwen::CpuModuleContext;
 using strix::models::qwen::HipModuleContext;
+using strix::models::qwen::make_small_qwen_config;
+using strix::models::qwen::MakeAttnNormView;
 using strix::models::qwen::NormForward;
 using strix::models::qwen::NormLayerView;
 using strix::models::qwen::ResidualAdd;
@@ -59,9 +60,9 @@ static_assert(std::is_trivially_copyable_v<strix::hip::QwenAttentionScratch>);
 static_assert(std::is_trivially_copyable_v<strix::hip::QwenSsmScratch>);
 static_assert(std::is_trivially_copyable_v<strix::hip::QwenFfnScratch>);
 static_assert(std::is_trivially_copyable_v<strix::hip::QwenGpuScratchView>);
-static_assert(std::is_same_v<
-              decltype(strix::hip::QwenDecodeScratch::sampled_token),
-              std::span<std::uint32_t>>);
+static_assert(
+    std::is_same_v<decltype(strix::hip::QwenDecodeScratch::sampled_token),
+                   std::span<std::uint32_t>>);
 #endif
 
 // --- 1. Fusion-toggle routing values (strix::hip::detail, host constexpr) ---
@@ -69,8 +70,9 @@ void TestFusionToggleValues() {
   // Q/K norm + RoPE + KV write: ENABLED -> decode uses the fused kernel.
   Check(strix::hip::detail::ShouldFuseQKNormRoPEKvWrite() == true);
 
-  // The cross-module fusions below are DISABLED -> decode uses the unfused module
-  // fallback. Each must stay consistent with the composition layer's choice.
+  // The cross-module fusions below are DISABLED -> decode uses the unfused
+  // module fallback. Each must stay consistent with the composition layer's
+  // choice.
   Check(strix::hip::detail::ShouldFuseResidualAddRMSNorm() == false);
   Check(strix::hip::detail::ShouldFuseSSMGateResidual() == false);
   Check(strix::hip::detail::ShouldFuseRMSNormProjection() == false);
@@ -82,8 +84,8 @@ void TestFusionToggleValues() {
   candidate.prefetch_next_layer = true;
   Check(strix::hip::detail::ShouldFuseDecodeSSMOutputResidual(candidate));
   Check(strix::hip::detail::ShouldPrefetchNextLayer(candidate));
-  Check(candidate.Fingerprint() == ((1ULL << 0U) | (1ULL << 4U) |
-                                     (1ULL << 7U)));
+  Check(candidate.Fingerprint() ==
+        ((1ULL << 0U) | (1ULL << 4U) | (1ULL << 7U)));
 
   const auto decode_plan = strix::hip::ResolveQwenLayerRoute(
       candidate, strix::hip::QwenExecutionMode::kDecode, false);
@@ -149,21 +151,19 @@ void TestFusionToggleValues() {
       prefill_ssm.rejected,
       strix::hip::QwenRouteRejection::kPrefetchRequiresDecode));
 
-  const auto graph_rejections = strix::hip::ResolveQwenGraphRejections(
-      false, true, true, false);
+  const auto graph_rejections =
+      strix::hip::ResolveQwenGraphRejections(false, true, true, false);
   Check(strix::hip::HasQwenGraphRejection(
-      graph_rejections,
-      strix::hip::QwenGraphRejection::kLogitsNotRequested));
+      graph_rejections, strix::hip::QwenGraphRejection::kLogitsNotRequested));
   Check(strix::hip::HasQwenGraphRejection(
       graph_rejections,
       strix::hip::QwenGraphRejection::kSplitKAttentionRequired));
   Check(strix::hip::HasQwenGraphRejection(
-      graph_rejections,
-      strix::hip::QwenGraphRejection::kLayerPrefetchEnabled));
+      graph_rejections, strix::hip::QwenGraphRejection::kLayerPrefetchEnabled));
   Check(strix::hip::HasQwenGraphRejection(
       graph_rejections, strix::hip::QwenGraphRejection::kGraphDisabled));
   Check(strix::hip::ResolveQwenGraphRejections(true, false, false, true) ==
-         strix::hip::QwenGraphRejection::kNone);
+        strix::hip::QwenGraphRejection::kNone);
 
   const auto workload_seed = strix::hip::BeginQwenGraphWorkloadIdentity();
   const auto workload_a = strix::hip::ExtendQwenGraphWorkloadIdentity(
@@ -176,7 +176,8 @@ void TestFusionToggleValues() {
   Check(workload_a != workload_b);
 }
 
-// --- 2. Unfused fallback: attn pre-norm RMSNorm (RMSNormProjection fusion off) ---
+// --- 2. Unfused fallback: attn pre-norm RMSNorm (RMSNormProjection fusion off)
+// ---
 void TestUnfusedFallback_Norm() {
   const ModelConfig config = make_small_qwen_config();
   auto sw = build_synthetic_qwen_weights(config);
@@ -184,7 +185,8 @@ void TestUnfusedFallback_Norm() {
   const std::size_t hidden = config.hidden_size;
 
   std::mt19937 rng = strix::test::make_seeded_rng(0xF0U);
-  std::vector<float> x = strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
+  std::vector<float> x =
+      strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
 
   NormLayerView view = MakeAttnNormView(layer, config);
   const CpuModuleContext ctx;
@@ -211,7 +213,8 @@ void TestUnfusedFallback_Norm() {
   Check(res.finite);
 }
 
-// --- 3. Unfused fallback: residual add (SSM gate+residual and residual+norm off) ---
+// --- 3. Unfused fallback: residual add (SSM gate+residual and residual+norm
+// off) ---
 void TestUnfusedFallback_Residual() {
   std::vector<float> dst = {1.0F, 2.0F, 3.0F, 4.0F};
   std::vector<float> src = {0.5F, -1.0F, 2.5F, -0.5F};
@@ -224,7 +227,8 @@ void TestUnfusedFallback_Residual() {
   }
 }
 
-// --- 4. Unfused fallback: RoPE (QK-norm+RoPE+KV-write fusion ENABLED; standalone
+// --- 4. Unfused fallback: RoPE (QK-norm+RoPE+KV-write fusion ENABLED;
+// standalone
 //        module must still be correct as the unfused alternative) ---
 void TestUnfusedFallback_Rope() {
   const std::uint32_t head_dim = 4;
@@ -245,7 +249,8 @@ void TestUnfusedFallback_Rope() {
       Check(std::abs(k0[i] - k[i]) < 1e-5F);
     }
   }
-  // pos>0 -> finite output; the first head pair actually rotates (changes value).
+  // pos>0 -> finite output; the first head pair actually rotates (changes
+  // value).
   {
     std::vector<float> q5 = q;
     std::vector<float> k5 = k;
@@ -256,8 +261,8 @@ void TestUnfusedFallback_Rope() {
     for (float v : k5) {
       Check(std::isfinite(v));
     }
-    const bool rotated = std::abs(q5[0] - q[0]) > 1e-4F ||
-                         std::abs(q5[1] - q[1]) > 1e-4F;
+    const bool rotated =
+        std::abs(q5[0] - q[0]) > 1e-4F || std::abs(q5[1] - q[1]) > 1e-4F;
     Check(rotated);
   }
 }

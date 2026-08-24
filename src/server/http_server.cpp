@@ -21,12 +21,12 @@
 #include <thread>
 #include <utility>
 
+#include "src/models/qwen/chat_template.hpp"
 #include "src/server/audio_tts_api.hpp"
 #include "src/server/json.hpp"
 #include "src/server/tts_service.hpp"
 #include "src/server/video_api.hpp"
 #include "src/server/video_jobs.hpp"
-#include "src/models/qwen/chat_template.hpp"
 
 namespace strix::server {
 namespace {

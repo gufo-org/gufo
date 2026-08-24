@@ -64,8 +64,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
     if (graph_executor_.IsCapturedFor(graph_key_)) {
       launch_captured_graph();
     } else {
-      const bool ok = graph_executor_.TryCapture(
-          arena_.stream, graph_key_, [&]() {
+      const bool ok =
+          graph_executor_.TryCapture(arena_.stream, graph_key_, [&]() {
             ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
                               compute_logits);
           });
@@ -77,8 +77,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
       }
     }
   } else {
-    ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
-                      compute_logits);
+    ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos, compute_logits);
   }
 
   if (!compute_logits) {

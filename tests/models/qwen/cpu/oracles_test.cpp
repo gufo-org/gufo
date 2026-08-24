@@ -1,3 +1,5 @@
+#include "src/models/qwen/oracles.hpp"
+
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -5,8 +7,6 @@
 #include <numeric>
 #include <string_view>
 #include <vector>
-
-#include "src/models/qwen/oracles.hpp"
 
 namespace {
 

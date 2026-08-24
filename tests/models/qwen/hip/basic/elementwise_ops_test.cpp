@@ -44,8 +44,7 @@ void TestGpuRMSNorm() {
   HIP_CHECK(hipDeviceSynchronize());
 
   const auto actual = output.CopyToHost();
-  strix::test::ExpectSpanNear(expected, actual, 1e-4F,
-                              "GPU RMSNorm output");
+  strix::test::ExpectSpanNear(expected, actual, 1e-4F, "GPU RMSNorm output");
 }
 
 void TestGpuResidualAdd() {
@@ -69,9 +68,9 @@ void TestGpuResidualAdd() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen elementwise GPU ops test");
+  const int device_status =
+      strix::test::GateHipDevice(strix::test::HipDeviceRequirement::kOptional,
+                                 "Qwen elementwise GPU ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }

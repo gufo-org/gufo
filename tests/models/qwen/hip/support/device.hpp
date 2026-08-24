@@ -2,11 +2,11 @@
 #define STRIX_TESTS_MODELS_QWEN_HIP_SUPPORT_DEVICE_HPP_
 
 #if defined(ENGINE_ENABLE_HIP)
+#include <hip/hip_runtime.h>
+
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
-
-#include <hip/hip_runtime.h>
 
 namespace strix::test {
 
@@ -23,9 +23,8 @@ inline constexpr int kCtestSkipReturnCode = 77;
     return kHipTestSuccess;
   }
   if (status == hipSuccess || status == hipErrorNoDevice) {
-    return requirement == HipDeviceRequirement::kOptional
-               ? kCtestSkipReturnCode
-               : kHipTestFailure;
+    return requirement == HipDeviceRequirement::kOptional ? kCtestSkipReturnCode
+                                                          : kHipTestFailure;
   }
   return kHipTestFailure;
 }
@@ -39,13 +38,13 @@ inline constexpr int kCtestSkipReturnCode = 77;
     return result;
   }
   if (status != hipSuccess && status != hipErrorNoDevice) {
-    std::cerr << test_name << ": HIP device discovery failed: "
-              << hipGetErrorString(status) << "; failing test\n";
+    std::cerr << test_name
+              << ": HIP device discovery failed: " << hipGetErrorString(status)
+              << "; failing test\n";
     return result;
   }
   if (result == kCtestSkipReturnCode) {
-    std::cout << test_name
-              << ": no HIP device found; skipping optional test\n";
+    std::cout << test_name << ": no HIP device found; skipping optional test\n";
     return result;
   }
   std::cerr << test_name << ": no HIP device found; failing required test\n";

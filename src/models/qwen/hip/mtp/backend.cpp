@@ -1,6 +1,4 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/mtp.hpp"
-
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +6,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "src/models/qwen/hip/mtp.hpp"
 
 namespace strix::hip {
 

@@ -70,8 +70,7 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
       hipMalloc(&d_scratch_bf16, scratch_elements * sizeof(hip_bfloat16)));
   const std::size_t split_k_elements = detail::DecodeAttentionScratchElements(
       config_.num_attention_heads, config_.head_dim);
-  HIP_CHECK(
-      hipMalloc(&d_split_k_attention, split_k_elements * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_split_k_attention, split_k_elements * sizeof(float)));
 
   // Weight BF16 scratch: largest per-layer matmul weight in bf16 elements,
   // used by the prefill dequant-to-BF16 then BF16 GEMM path.
@@ -114,56 +113,62 @@ QwenGpuScratchView QwenGpuArena::GetScratchView(
       static_cast<std::size_t>(config_.num_key_value_heads) * config_.head_dim;
   const std::size_t q_projection = 2 * attention;
   const std::size_t ssm_qkv = config_.SsmQkvSize();
-  const std::size_t recurrent = std::max<std::size_t>(
-      attention, config_.ssm_inner_size);
-  const std::size_t projection =
-      std::max<std::size_t>(q_projection, ssm_qkv);
+  const std::size_t recurrent =
+      std::max<std::size_t>(attention, config_.ssm_inner_size);
+  const std::size_t projection = std::max<std::size_t>(q_projection, ssm_qkv);
   const std::size_t bf16_scratch =
-      batch * std::max<std::size_t>(
-                  {config_.intermediate_size, hidden, projection,
-                   ssm_qkv + config_.ssm_inner_size +
-                       (2 * config_.ssm_time_step_rank)});
+      batch *
+      std::max<std::size_t>({config_.intermediate_size, hidden, projection,
+                             ssm_qkv + config_.ssm_inner_size +
+                                 (2 * config_.ssm_time_step_rank)});
   const std::size_t split_k = detail::DecodeAttentionScratchElements(
       config_.num_attention_heads, config_.head_dim);
   const std::size_t weight_bf16 =
-      hidden * std::max<std::size_t>(
-                   {q_projection, kv, attention, config_.intermediate_size,
-                    ssm_qkv, config_.ssm_inner_size,
-                    config_.ssm_time_step_rank});
+      hidden * std::max<std::size_t>({q_projection, kv, attention,
+                                      config_.intermediate_size, ssm_qkv,
+                                      config_.ssm_inner_size,
+                                      config_.ssm_time_step_rank});
   return {
-      .decode = {
-          .hidden = {d_hidden, batch * hidden},
-          .normed = {d_normed, batch * hidden},
-          .logits = {d_logits, config_.vocab_size},
-          .bf16 = {static_cast<hip_bfloat16*>(d_scratch_bf16), bf16_scratch},
-          .weight_bf16 = {d_weights_bf16, weight_bf16},
-          .prompt_tokens = {d_prompt_tokens,
-                            std::max<std::size_t>(batch, 2)},
-          // d_alpha_buf is reused only after all SSM layers finish. Preserve
-          // that exact address while exposing the sampling epoch's uint32 view.
-          .sampled_token = {reinterpret_cast<std::uint32_t*>(d_alpha_buf), 1},
-      },
-      .attention = {
-          .q = {d_q, batch * attention},
-          .k = {d_k, batch * kv},
-          .v = {d_v, batch * kv},
-          .output = {d_attn_out, batch * hidden},
-          .split_k = {d_split_k_attention, split_k},
-      },
-      .ssm = {
-          .qkv = {d_ssm_qkv, batch * projection},
-          .conv_out = {d_conv_out, batch * ssm_qkv},
-          .gate = {d_ssm_gate, batch * recurrent},
-          .out = {d_ssm_out, batch * recurrent},
-          .alpha = {d_alpha_buf, batch * config_.ssm_time_step_rank},
-          .beta = {d_beta_buf, batch * config_.ssm_time_step_rank},
-      },
-      .ffn = {
-          .gate = {d_ffn_gate, batch * config_.intermediate_size},
-          .up = {d_ffn_up, batch * config_.intermediate_size},
-          .activation = {d_ffn_act, batch * config_.intermediate_size},
-          .out = {d_ffn_out, batch * hidden},
-      },
+      .decode =
+          {
+              .hidden = {d_hidden, batch * hidden},
+              .normed = {d_normed, batch * hidden},
+              .logits = {d_logits, config_.vocab_size},
+              .bf16 = {static_cast<hip_bfloat16*>(d_scratch_bf16),
+                       bf16_scratch},
+              .weight_bf16 = {d_weights_bf16, weight_bf16},
+              .prompt_tokens = {d_prompt_tokens,
+                                std::max<std::size_t>(batch, 2)},
+              // d_alpha_buf is reused only after all SSM layers finish.
+              // Preserve that exact address while exposing the sampling epoch's
+              // uint32 view.
+              .sampled_token = {reinterpret_cast<std::uint32_t*>(d_alpha_buf),
+                                1},
+          },
+      .attention =
+          {
+              .q = {d_q, batch * attention},
+              .k = {d_k, batch * kv},
+              .v = {d_v, batch * kv},
+              .output = {d_attn_out, batch * hidden},
+              .split_k = {d_split_k_attention, split_k},
+          },
+      .ssm =
+          {
+              .qkv = {d_ssm_qkv, batch * projection},
+              .conv_out = {d_conv_out, batch * ssm_qkv},
+              .gate = {d_ssm_gate, batch * recurrent},
+              .out = {d_ssm_out, batch * recurrent},
+              .alpha = {d_alpha_buf, batch * config_.ssm_time_step_rank},
+              .beta = {d_beta_buf, batch * config_.ssm_time_step_rank},
+          },
+      .ffn =
+          {
+              .gate = {d_ffn_gate, batch * config_.intermediate_size},
+              .up = {d_ffn_up, batch * config_.intermediate_size},
+              .activation = {d_ffn_act, batch * config_.intermediate_size},
+              .out = {d_ffn_out, batch * hidden},
+          },
   };
 }
 

@@ -52,8 +52,7 @@ void TestDequantizeQ8KToBf16Equivalence() {
   for (auto& blk : h_w) {
     blk.d = rnd_float(-1.0F, 1.0F);
     for (std::size_t i = 0; i < QK; ++i) {
-      blk.qs[i] =
-          static_cast<std::int8_t>(static_cast<int>(rnd() % 255) - 127);
+      blk.qs[i] = static_cast<std::int8_t>(static_cast<int>(rnd() % 255) - 127);
     }
     for (std::size_t i = 0; i < 16; ++i) {
       blk.bsums[i] = 0;
@@ -137,8 +136,7 @@ void TestDequantizeToBf16Equivalence() {
     std::uint32_t x;
     std::memcpy(&x, &f, sizeof(x));
     const std::uint32_t sign = (x >> 16) & 0x8000u;
-    std::int32_t exp =
-        static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
+    std::int32_t exp = static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
     std::uint32_t mant = (x >> 13) & 0x3FFu;
     if (exp <= 0) {
       if (exp < -10) {
@@ -149,8 +147,7 @@ void TestDequantizeToBf16Equivalence() {
       return static_cast<std::uint16_t>(sign | (mant >> shift));
     }
     if (exp >= 31) {
-      return static_cast<std::uint16_t>(sign | 0x7C00u |
-                                        (mant ? 0x200u : 0u));
+      return static_cast<std::uint16_t>(sign | 0x7C00u | (mant ? 0x200u : 0u));
     }
     return static_cast<std::uint16_t>(
         sign | (static_cast<std::uint32_t>(exp) << 10) | mant);
@@ -211,8 +208,8 @@ void TestDequantizeToBf16Equivalence() {
   strix::quant::DequantizeQ5_K(&q5k, h_ref_q5k.data(), QK);
 
   HIP_CHECK(hipMalloc(&d_w, sizeof(Q5KBlockTest)));
-  HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_out),
-                      QK * sizeof(hip_bfloat16)));
+  HIP_CHECK(
+      hipMalloc(reinterpret_cast<void**>(&d_out), QK * sizeof(hip_bfloat16)));
   HIP_CHECK(hipMemcpy(d_w, &q5k, sizeof(Q5KBlockTest), hipMemcpyHostToDevice));
   strix::hip::LaunchDequantizeToBf16(strix::core::GgmlType::kQ5_K, d_w, d_out,
                                      QK, nullptr);
@@ -241,8 +238,8 @@ void TestDequantizeToBf16Equivalence() {
   strix::quant::DequantizeQ6_K(&q6k, h_ref_q6k.data(), QK);
 
   HIP_CHECK(hipMalloc(&d_w, sizeof(Q6KBlockTest)));
-  HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_out),
-                      QK * sizeof(hip_bfloat16)));
+  HIP_CHECK(
+      hipMalloc(reinterpret_cast<void**>(&d_out), QK * sizeof(hip_bfloat16)));
   HIP_CHECK(hipMemcpy(d_w, &q6k, sizeof(Q6KBlockTest), hipMemcpyHostToDevice));
   strix::hip::LaunchDequantizeToBf16(strix::core::GgmlType::kQ6_K, d_w, d_out,
                                      QK, nullptr);
@@ -295,8 +292,7 @@ void TestDequantizeToBf16Equivalence() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen dequant ops test");
+      strix::test::HipDeviceRequirement::kOptional, "Qwen dequant ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }

@@ -12,11 +12,7 @@
 // CPU-only; no HIP dependency. Shared deterministic data and comparisons live
 // in the Qwen support builder and tests/testing/test_common.hpp.
 
-#include "src/models/qwen/modules/modules.hpp"
 #include "src/models/qwen/ssm.hpp"
-#include "src/models/qwen/state.hpp"
-#include "tests/models/qwen/support/synthetic_weights.hpp"
-#include "tests/testing/test_common.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -31,6 +27,11 @@
 #include <type_traits>
 #include <vector>
 
+#include "src/models/qwen/modules/modules.hpp"
+#include "src/models/qwen/state.hpp"
+#include "tests/models/qwen/support/synthetic_weights.hpp"
+#include "tests/testing/test_common.hpp"
+
 namespace {
 
 using strix::core::ModelConfig;
@@ -40,9 +41,9 @@ using strix::models::QwenScratchArena;
 using strix::models::QwenSsmCache;
 using strix::models::QwenSsmParameters;
 using strix::models::qwen::build_synthetic_qwen_weights;
+using strix::models::qwen::CpuLayerContext;
 using strix::models::qwen::make_small_qwen_config;
 using strix::models::qwen::MakeSsmView;
-using strix::models::qwen::CpuLayerContext;
 using strix::models::qwen::SsmForward;
 using strix::models::qwen::SsmLayerView;
 
@@ -62,9 +63,9 @@ QwenSsmCache MakeCache(const ModelConfig& c) {
 
 // Runs the module once over a freshly constructed arena + cache (each call is
 // an independent decode step, i.e. position 0 with a zeroed recurrent state).
-void RunSsmModule(const ModelConfig& config,
-                  const QwenLayerWeights& layer, std::uint32_t layer_idx,
-                  std::span<const float> x, std::vector<float>& out) {
+void RunSsmModule(const ModelConfig& config, const QwenLayerWeights& layer,
+                  std::uint32_t layer_idx, std::span<const float> x,
+                  std::vector<float>& out) {
   QwenScratchArena arena(config);
   QwenSsmCache cache = MakeCache(config);
   cache.Reset();
@@ -89,7 +90,8 @@ void TestSsmModuleMatchesProduction() {
   const auto& layer = weights.layers[layer_idx];
   Check(!layer.is_full_attention, "synthetic layer 0 must be an SSM layer");
 
-  std::vector<float> x = strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
+  std::vector<float> x =
+      strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
 
   // Module output.
   std::vector<float> out;
@@ -130,11 +132,13 @@ void TestSsmModuleDeterministicAcrossReset() {
   const auto& layer = weights.layers[layer_idx];
   Check(!layer.is_full_attention, "synthetic layer 0 must be an SSM layer");
 
-  std::vector<float> x = strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
+  std::vector<float> x =
+      strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
 
   std::vector<float> a, b;
   RunSsmModule(config, layer, layer_idx, x, a);
-  RunSsmModule(config, layer, layer_idx, x, b);  // fresh arena+cache -> independent
+  RunSsmModule(config, layer, layer_idx, x,
+               b);  // fresh arena+cache -> independent
 
   Check(a == b, "fresh SSM cache runs must be deterministic");
 }
@@ -150,15 +154,13 @@ bool SameBytes(std::span<const float> lhs, std::span<const float> rhs) {
 }
 
 bool SameCacheState(const CacheState& lhs, const CacheState& rhs) {
-  return SameBytes(lhs.conv, rhs.conv) &&
-         SameBytes(lhs.deltanet, rhs.deltanet);
+  return SameBytes(lhs.conv, rhs.conv) && SameBytes(lhs.deltanet, rhs.deltanet);
 }
 
 CacheState CaptureCacheState(QwenSsmCache& cache, std::uint32_t layer_idx) {
   const auto conv = cache.GetConvState(layer_idx);
-  CacheState state{
-      .conv = std::vector<float>(conv.begin(), conv.end()),
-      .deltanet = {}};
+  CacheState state{.conv = std::vector<float>(conv.begin(), conv.end()),
+                   .deltanet = {}};
   for (std::uint32_t head = 0; head < cache.NumHeads(); ++head) {
     const auto matrix = cache.GetDeltaNetState(layer_idx, head);
     state.deltanet.insert(state.deltanet.end(), matrix.begin(), matrix.end());
@@ -174,8 +176,7 @@ void SeedCacheState(QwenSsmCache& cache, std::uint32_t layer_idx) {
   for (std::uint32_t head = 0; head < cache.NumHeads(); ++head) {
     auto matrix = cache.GetDeltaNetState(layer_idx, head);
     for (std::size_t index = 0; index < matrix.size(); ++index) {
-      matrix[index] =
-          static_cast<float>(((index + head) % 19U) + 1U) * 0.0001F;
+      matrix[index] = static_cast<float>(((index + head) % 19U) + 1U) * 0.0001F;
     }
   }
 }
@@ -330,14 +331,16 @@ void TestSsmModuleSensitivity() {
   Check(!layer.is_full_attention, "synthetic layer 0 must be an SSM layer");
   Check(!layer.ssm_norm.empty(), "synthetic SSM norm must be present");
 
-  std::vector<float> x = strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
+  std::vector<float> x =
+      strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
   std::vector<float> out_base;
   RunSsmModule(config, layer, layer_idx, x, out_base);
 
   // (a) Input perturbation: a real transform must move the output. 0.1 is a
   // meaningful fraction of the U(-1,1) input range.
   std::vector<float> xp = x;
-  for (float& v : xp) v += 0.1F;
+  for (float& v : xp)
+    v += 0.1F;
   std::vector<float> out_input;
   RunSsmModule(config, layer, layer_idx, xp, out_input);
   const float input_delta = MaxAbsDiff(out_base, out_input);

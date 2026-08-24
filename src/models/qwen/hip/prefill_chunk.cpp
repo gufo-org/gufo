@@ -6,9 +6,9 @@
 #include <stdexcept>
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
-#include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/gemm_route.hpp"
+#include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
@@ -61,9 +61,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   // Execute the pure Qwen route decision while keeping hipBLASLt failure as a
   // runtime fallback to hipBLAS, not as resolver state.
   const auto gemm_weight = [&](const models::QwenTensorRef& w,
-                               const void* bf16_input,
-                               const float* fp32_input, float* output,
-                               std::size_t m, std::size_t k) {
+                               const void* bf16_input, const float* fp32_input,
+                               float* output, std::size_t m, std::size_t k) {
     const auto resolution = models::qwen::ResolveQwenGemmRoute(
         {.type = w.type,
          .batch_size = batch_size,
@@ -83,8 +82,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         }
         [[fallthrough]];
       case models::qwen::QwenGemmRoute::kHipPrefillBf16Blas:
-        LaunchHipblasGEMMBF16(arena_.hipblas_handle, w.data, bf16_input,
-                              output, batch_size, m, k, arena_.stream);
+        LaunchHipblasGEMMBF16(arena_.hipblas_handle, w.data, bf16_input, output,
+                              batch_size, m, k, arena_.stream);
         return;
       case models::qwen::QwenGemmRoute::kHipPrefillF32Blas:
         LaunchHipblasGEMM(arena_.hipblas_handle, w.data, false, fp32_input,
@@ -422,10 +421,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     const std::size_t old_size = h_prompt_hidden_.size();
     const std::size_t chunk_elements = batch_size * hidden_size;
     h_prompt_hidden_.resize(old_size + chunk_elements);
-    HIP_CHECK(hipMemcpyAsync(h_prompt_hidden_.data() + old_size,
-                             scratch.decode.hidden.data(),
-                             chunk_elements * sizeof(float),
-                             hipMemcpyDeviceToHost, arena_.stream));
+    HIP_CHECK(hipMemcpyAsync(
+        h_prompt_hidden_.data() + old_size, scratch.decode.hidden.data(),
+        chunk_elements * sizeof(float), hipMemcpyDeviceToHost, arena_.stream));
     HIP_CHECK(hipStreamSynchronize(arena_.stream));
   }
   last_hidden_offset_ = (batch_size - 1) * hidden_size;

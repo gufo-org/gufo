@@ -89,8 +89,7 @@ void TestBatchedFusedSwiGLUEquivalence() {
       max_diff = d;
   }
   std::cout << "Fused SwiGLU Seq vs Batch max diff: " << max_diff << "\n";
-  strix::test::Expect(max_diff < 1e-4F,
-                      "batched fused SwiGLU result mismatch");
+  strix::test::Expect(max_diff < 1e-4F, "batched fused SwiGLU result mismatch");
 
   HIP_CHECK(hipFree(d_x));
   HIP_CHECK(hipFree(d_gate_w));
@@ -296,8 +295,7 @@ void TestFusedRMSNormSwiGLUEquivalence() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen SwiGLU ops test");
+      strix::test::HipDeviceRequirement::kOptional, "Qwen SwiGLU ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }

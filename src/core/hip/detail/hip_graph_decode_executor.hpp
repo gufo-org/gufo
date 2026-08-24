@@ -59,8 +59,7 @@ public:
                   CaptureFn&& capture_fn) {
     if (is_captured_ && !IsCapturedFor(key)) {
       EmitGraphDispatch("miss_identity_mismatch", key.execution_identity,
-                        key.workload_identity,
-                        capture_key_->execution_identity,
+                        key.workload_identity, capture_key_->execution_identity,
                         capture_key_->workload_identity);
       return false;
     }
@@ -124,8 +123,7 @@ public:
     }
     if (*capture_key_ != key) {
       EmitGraphDispatch("launch_identity_mismatch", key.execution_identity,
-                        key.workload_identity,
-                        capture_key_->execution_identity,
+                        key.workload_identity, capture_key_->execution_identity,
                         capture_key_->workload_identity);
       return false;
     }

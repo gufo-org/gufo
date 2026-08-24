@@ -55,8 +55,7 @@ void TestQ8KBlockGEMVEquivalence() {
   for (auto& blk : h_A) {
     blk.d = rnd_float(-2.0F, 2.0F);
     for (std::size_t i = 0; i < QK; ++i) {
-      blk.qs[i] =
-          static_cast<std::int8_t>(static_cast<int>(rnd() % 255) - 127);
+      blk.qs[i] = static_cast<std::int8_t>(static_cast<int>(rnd() % 255) - 127);
     }
     for (std::size_t i = 0; i < 16; ++i) {
       blk.bsums[i] = 0;
@@ -73,16 +72,16 @@ void TestQ8KBlockGEMVEquivalence() {
   HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
   HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * num_blocks * sizeof(Q8KBlockTest),
                       hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float),
-                      hipMemcpyHostToDevice));
+  HIP_CHECK(
+      hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ8_K, d_x, d_y,
-                                 M, K, nullptr);
+  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ8_K, d_x, d_y, M,
+                                 K, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<float> y_gpu(M);
-  HIP_CHECK(hipMemcpy(y_gpu.data(), d_y, M * sizeof(float),
-                      hipMemcpyDeviceToHost));
+  HIP_CHECK(
+      hipMemcpy(y_gpu.data(), d_y, M * sizeof(float), hipMemcpyDeviceToHost));
 
   // Check 3: finite, no NaN/Inf.
   for (std::size_t m = 0; m < M; ++m) {
@@ -138,8 +137,7 @@ void TestQ8KBlockGEMVEquivalence() {
     primary_max_abs = std::max(primary_max_abs, abs_q8);
 
     const float abs_san = std::abs(y_gpu[m] - y_dequant_ref[m]);
-    const float rel_san =
-        abs_san / std::max(1e-3F, std::abs(y_dequant_ref[m]));
+    const float rel_san = abs_san / std::max(1e-3F, std::abs(y_dequant_ref[m]));
     sanity_max_rel = std::max(sanity_max_rel, rel_san);
     sanity_max_abs = std::max(sanity_max_abs, abs_san);
   }
@@ -186,8 +184,7 @@ void TestQ8_0BlockGEMVEquivalence() {
     std::uint32_t x;
     std::memcpy(&x, &f, sizeof(x));
     const std::uint32_t sign = (x >> 16) & 0x8000u;
-    std::int32_t exp =
-        static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
+    std::int32_t exp = static_cast<std::int32_t>((x >> 23) & 0xFFu) - 127 + 15;
     std::uint32_t mant = (x >> 13) & 0x3FFu;
     if (exp <= 0) {
       if (exp < -10) {
@@ -200,9 +197,8 @@ void TestQ8_0BlockGEMVEquivalence() {
     if (exp >= 31) {
       return static_cast<std::uint16_t>(sign | 0x7C00u | (mant ? 0x200u : 0u));
     }
-    return static_cast<std::uint16_t>(sign |
-                                      (static_cast<std::uint32_t>(exp) << 10) |
-                                      mant);
+    return static_cast<std::uint16_t>(
+        sign | (static_cast<std::uint32_t>(exp) << 10) | mant);
   };
   auto half_to_float = [](std::uint16_t h) -> float {
     const std::uint32_t sign = (h >> 15) & 1u;
@@ -239,8 +235,7 @@ void TestQ8_0BlockGEMVEquivalence() {
   for (auto& blk : h_A) {
     blk.d = float_to_half_bits(rnd_float(-2.0F, 2.0F));
     for (std::size_t i = 0; i < QK; ++i) {
-      blk.qs[i] =
-          static_cast<std::int8_t>(static_cast<int>(rnd() % 255) - 127);
+      blk.qs[i] = static_cast<std::int8_t>(static_cast<int>(rnd() % 255) - 127);
     }
   }
   for (std::size_t i = 0; i < K; ++i) {
@@ -254,16 +249,16 @@ void TestQ8_0BlockGEMVEquivalence() {
   HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
   HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * num_blocks * sizeof(Q8_0BlockTest),
                       hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float),
-                      hipMemcpyHostToDevice));
+  HIP_CHECK(
+      hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ8_0, d_x, d_y,
-                                 M, K, nullptr);
+  strix::hip::LaunchQ8KBlockGEMV(d_A, strix::core::GgmlType::kQ8_0, d_x, d_y, M,
+                                 K, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<float> y_gpu(M);
-  HIP_CHECK(hipMemcpy(y_gpu.data(), d_y, M * sizeof(float),
-                      hipMemcpyDeviceToHost));
+  HIP_CHECK(
+      hipMemcpy(y_gpu.data(), d_y, M * sizeof(float), hipMemcpyDeviceToHost));
 
   // Check 3: finite, no NaN/Inf.
   for (std::size_t m = 0; m < M; ++m) {
@@ -319,8 +314,7 @@ void TestQ8_0BlockGEMVEquivalence() {
     primary_max_abs = std::max(primary_max_abs, abs_q8);
 
     const float abs_san = std::abs(y_gpu[m] - y_dequant_ref[m]);
-    const float rel_san =
-        abs_san / std::max(1e-3F, std::abs(y_dequant_ref[m]));
+    const float rel_san = abs_san / std::max(1e-3F, std::abs(y_dequant_ref[m]));
     sanity_max_rel = std::max(sanity_max_rel, rel_san);
     sanity_max_abs = std::max(sanity_max_abs, abs_san);
   }
@@ -349,8 +343,7 @@ void TestQ8_0BlockGEMVEquivalence() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen Q8 GEMV ops test");
+      strix::test::HipDeviceRequirement::kOptional, "Qwen Q8 GEMV ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }

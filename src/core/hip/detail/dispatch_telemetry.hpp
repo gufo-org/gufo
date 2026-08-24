@@ -97,10 +97,8 @@ inline void EmitGraphDispatch(std::string_view cache_status,
                               std::uint64_t stored_workload_identity = 0) {
   EmitDispatchTelemetry("hip_graph", [&](std::ostringstream& output) {
     WriteTelemetryField(output, "cacheStatus", cache_status);
-    output << ",\"requestedExecutionIdentity\":"
-           << requested_execution_identity
-           << ",\"requestedWorkloadIdentity\":"
-           << requested_workload_identity
+    output << ",\"requestedExecutionIdentity\":" << requested_execution_identity
+           << ",\"requestedWorkloadIdentity\":" << requested_workload_identity
            << ",\"storedExecutionIdentity\":" << stored_execution_identity
            << ",\"storedWorkloadIdentity\":" << stored_workload_identity;
   });
@@ -129,14 +127,12 @@ inline void EmitQwenRouteResolution(std::string_view mode,
 inline void EmitQwenGraphEligibility(std::uint64_t policy_fingerprint,
                                      std::uint64_t workload_identity,
                                      std::uint32_t rejection_mask) {
-  EmitDispatchTelemetry("qwen_graph_eligibility",
-                        [&](std::ostringstream& output) {
-                          output << ",\"policyFingerprint\":"
-                                 << policy_fingerprint
-                                 << ",\"workloadIdentity\":"
-                                 << workload_identity
-                                 << ",\"rejectionMask\":" << rejection_mask;
-                        });
+  EmitDispatchTelemetry(
+      "qwen_graph_eligibility", [&](std::ostringstream& output) {
+        output << ",\"policyFingerprint\":" << policy_fingerprint
+               << ",\"workloadIdentity\":" << workload_identity
+               << ",\"rejectionMask\":" << rejection_mask;
+      });
 }
 
 }  // namespace strix::hip::detail

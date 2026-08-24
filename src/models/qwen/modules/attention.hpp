@@ -20,8 +20,8 @@ namespace strix::models::qwen {
 /// core. KV state lives in `kv`; required scratch/config capabilities are held
 /// by the non-nullable CPU layer context.
 void AttnForward(const CpuLayerContext& ctx, const AttnLayerView& view,
-                 std::span<const float> x, QwenKvCache& kv,
-                 std::uint32_t pos, std::span<float> out) noexcept;
+                 std::span<const float> x, QwenKvCache& kv, std::uint32_t pos,
+                 std::span<float> out) noexcept;
 
 }  // namespace strix::models::qwen
 

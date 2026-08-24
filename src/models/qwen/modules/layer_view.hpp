@@ -84,14 +84,20 @@ inline NormLayerView MakeFfnNormView(const QwenLayerWeights& w,
 }
 inline RopeLayerView MakeRopeView(const QwenLayerWeights&,
                                   const core::ModelConfig& c) {
-  return RopeLayerView{c.num_attention_heads, c.num_key_value_heads,
-                       c.head_dim, c.rotary_dim, c.rope_theta};
+  return RopeLayerView{c.num_attention_heads, c.num_key_value_heads, c.head_dim,
+                       c.rotary_dim, c.rope_theta};
 }
 inline AttnLayerView MakeAttnView(const QwenLayerWeights& w,
                                   const core::ModelConfig& c) {
-  return AttnLayerView{w.attn_q, w.attn_k, w.attn_v, w.attn_output,
-                       w.attn_q_norm, w.attn_k_norm, c.num_attention_heads,
-                       c.num_key_value_heads, c.head_dim};
+  return AttnLayerView{w.attn_q,
+                       w.attn_k,
+                       w.attn_v,
+                       w.attn_output,
+                       w.attn_q_norm,
+                       w.attn_k_norm,
+                       c.num_attention_heads,
+                       c.num_key_value_heads,
+                       c.head_dim};
 }
 inline SsmLayerView MakeSsmView(const QwenLayerWeights& w,
                                 const core::ModelConfig& c) {

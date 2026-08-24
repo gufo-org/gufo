@@ -18,11 +18,6 @@
 //   is the module-seam surface the composition layer will call. It exercises
 //   the exact typed HIP overload path.
 
-#include "src/core/hip/hip_utils.hpp"  // HIP_CHECK
-#include "src/models/qwen/modules/modules.hpp"
-#include "tests/models/qwen/support/synthetic_weights.hpp"
-#include "tests/testing/test_common.hpp"
-
 #include <hip/hip_runtime.h>
 
 #include <cassert>
@@ -32,18 +27,23 @@
 #include <span>
 #include <vector>
 
+#include "src/core/hip/hip_utils.hpp"  // HIP_CHECK
+#include "src/models/qwen/modules/modules.hpp"
+#include "tests/models/qwen/support/synthetic_weights.hpp"
+#include "tests/testing/test_common.hpp"
+
 namespace {
 
 using strix::core::GgmlType;
 using strix::core::ModelConfig;
 using strix::models::QwenTensorRef;
+using strix::models::qwen::build_synthetic_qwen_weights;
 using strix::models::qwen::HipModuleContext;
+using strix::models::qwen::make_small_qwen_config;
 using strix::models::qwen::NormForward;
 using strix::models::qwen::NormLayerView;
 using strix::models::qwen::QuantGemm;
 using strix::models::qwen::ResidualAdd;
-using strix::models::qwen::build_synthetic_qwen_weights;
-using strix::models::qwen::make_small_qwen_config;
 using strix::test::make_random_tensor;
 using strix::test::make_seeded_rng;
 
@@ -56,7 +56,8 @@ void ToDevice(const QwenTensorRef& host, float** dptr) {
 
 float MaxAbs(std::span<const float> v) {
   float m = 0.0F;
-  for (float x : v) m = std::max(m, std::abs(x));
+  for (float x : v)
+    m = std::max(m, std::abs(x));
   return m;
 }
 
@@ -71,8 +72,7 @@ std::vector<float> RunMultiLayerForward() {
   const std::size_t hidden = config.hidden_size;
   const std::size_t inter = config.intermediate_size;
   const std::size_t vocab = config.vocab_size;
-  const std::size_t nlayers =
-      std::min<std::size_t>(3, config.num_layers);
+  const std::size_t nlayers = std::min<std::size_t>(3, config.num_layers);
 
   const HipModuleContext ctx;  // null hipStream_t = default stream
 
@@ -139,14 +139,18 @@ std::vector<float> RunMultiLayerForward() {
                         hipMemcpyDeviceToHost));
     HIP_CHECK(hipMemcpy(hidden_o.data(), d_hidden, hidden * sizeof(float),
                         hipMemcpyDeviceToHost));
-    for (float v : normed) assert(std::isfinite(v));
-    for (float v : gate) assert(std::isfinite(v));
-    for (float v : proj) assert(std::isfinite(v));
-    for (float v : hidden_o) assert(std::isfinite(v));
-    assert(MaxAbs(normed) > 1e-4F);         // norm did a real transform
-    assert(MaxAbs(gate) > 1e-4F);           // ffn_gate GEMV non-trivial
-    assert(MaxAbs(proj) > 1e-4F);           // ffn_down GEMV non-trivial
-    assert(MaxAbs(hidden_o) > 1e-4F);       // residual preserved a signal
+    for (float v : normed)
+      assert(std::isfinite(v));
+    for (float v : gate)
+      assert(std::isfinite(v));
+    for (float v : proj)
+      assert(std::isfinite(v));
+    for (float v : hidden_o)
+      assert(std::isfinite(v));
+    assert(MaxAbs(normed) > 1e-4F);    // norm did a real transform
+    assert(MaxAbs(gate) > 1e-4F);      // ffn_gate GEMV non-trivial
+    assert(MaxAbs(proj) > 1e-4F);      // ffn_down GEMV non-trivial
+    assert(MaxAbs(hidden_o) > 1e-4F);  // residual preserved a signal
     // MaxAbs(proj) above implies the residual add changed hidden non-trivially.
 
     HIP_CHECK(hipFree(d_nw));
@@ -158,8 +162,8 @@ std::vector<float> RunMultiLayerForward() {
   float* d_head = nullptr;
   ToDevice(w.output, &d_head);
   QwenTensorRef head_w{d_head, GgmlType::kF32, vocab * hidden};
-  QuantGemm(ctx, head_w, std::span<const float>(d_hidden, hidden), vocab, hidden,
-            std::span<float>(d_logits, vocab));
+  QuantGemm(ctx, head_w, std::span<const float>(d_hidden, hidden), vocab,
+            hidden, std::span<float>(d_logits, vocab));
   HIP_CHECK(hipDeviceSynchronize());
 
   std::vector<float> logits(vocab, 0.0F);
@@ -180,7 +184,8 @@ void TestGpuL2MultiLayerModuleForward() {
   std::vector<float> logits = RunMultiLayerForward();
 
   // Finite, non-trivial logits (a real head projection happened).
-  for (float v : logits) assert(std::isfinite(v));
+  for (float v : logits)
+    assert(std::isfinite(v));
   assert(MaxAbs(logits) > 1e-4F);
 }
 

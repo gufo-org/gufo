@@ -27,7 +27,7 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
 #include "src/models/qwen3_tts/hip/talker_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
 
@@ -721,8 +721,8 @@ struct TalkerHipRuntime::Impl {
                               hipMemcpyHostToDevice, stream),
                "hipMemcpyAsync text token ids");
     strix::hip::LaunchBatchedEmbeddingLookup(
-        text_embedding, true, prompt_ids.get(), hidden.get(), token_ids.size(),
-        config.text_hidden_size, stream);
+        text_embedding, core::GgmlType::kBF16, prompt_ids.get(), hidden.get(),
+        token_ids.size(), config.text_hidden_size, stream);
     strix::hip::LaunchFloatToBfloat16(hidden.get(), bfloat16_scratch.get(),
                                       elements, stream);
     Gemm(text_projection_fc1, bfloat16_scratch.get(), normalized.get(),
@@ -762,8 +762,8 @@ struct TalkerHipRuntime::Impl {
                               hipMemcpyHostToDevice, stream),
                "hipMemcpyAsync codec token ids");
     strix::hip::LaunchBatchedEmbeddingLookup(
-        codec_embedding, true, prompt_ids.get(), hidden.get(), token_ids.size(),
-        config.hidden_size, stream);
+        codec_embedding, core::GgmlType::kBF16, prompt_ids.get(), hidden.get(),
+        token_ids.size(), config.hidden_size, stream);
     std::vector<float> result(token_ids.size() * config.hidden_size);
     RequireHip(hipMemcpyAsync(result.data(), hidden.get(),
                               result.size() * sizeof(float),
@@ -980,7 +980,7 @@ struct TalkerHipRuntime::Impl {
       const void* table =
           group == 0 ? codec_embedding : predictor_embeddings[group - 1];
       strix::hip::LaunchEmbeddingLookup(
-          table, true, code,
+          table, core::GgmlType::kBF16, code,
           attention_output.get() + (group * talker.hidden_size),
           talker.hidden_size, stream);
     }
@@ -1381,7 +1381,7 @@ bool TalkerHipRuntime::PredictFrame(std::span<const float> talker_hidden,
                        hipMemcpyHostToDevice, impl_->stream),
         "hipMemcpyAsync predictor talker hidden");
     strix::hip::LaunchEmbeddingLookup(
-        impl_->codec_embedding, true, first_code,
+        impl_->codec_embedding, core::GgmlType::kBF16, first_code,
         impl_->attention_output.get() + talker.hidden_size, talker.hidden_size,
         impl_->stream);
     impl_->ProjectPredictorInput(impl_->attention_output.get(), 2);
@@ -1404,7 +1404,7 @@ bool TalkerHipRuntime::PredictFrame(std::span<const float> talker_hidden,
     output->codes.push_back(code);
     for (std::size_t head = 1; head < impl_->predictor_heads.size(); ++head) {
       strix::hip::LaunchEmbeddingLookup(
-          impl_->predictor_embeddings[head - 1], true, code,
+          impl_->predictor_embeddings[head - 1], core::GgmlType::kBF16, code,
           impl_->attention_output.get(), talker.hidden_size, impl_->stream);
       impl_->ProjectPredictorInput(impl_->attention_output.get(), 1);
       code = impl_->RunPredictor(1, static_cast<std::uint32_t>(head + 1), head,

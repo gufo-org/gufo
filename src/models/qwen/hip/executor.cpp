@@ -30,8 +30,8 @@ const QwenGpuModel& RequireModel(
 }
 
 [[nodiscard]] detail::HipGraphCaptureKey BuildGraphCaptureKey(
-    const models::QwenModelWeights& weights,
-    const QwenExecutionPolicy& policy, std::uint32_t max_context) noexcept {
+    const models::QwenModelWeights& weights, const QwenExecutionPolicy& policy,
+    std::uint32_t max_context) noexcept {
   const auto& config = weights.config;
   std::uint64_t workload = BeginQwenGraphWorkloadIdentity();
   const std::uint64_t fields[] = {
@@ -53,8 +53,8 @@ const QwenGpuModel& RequireModel(
     const auto& layer = weights.layers[layer_index];
     const auto resolution = ResolveQwenLayerRouteWithReasons(
         policy, QwenExecutionMode::kDecode, layer.is_full_attention);
-    workload = ExtendQwenGraphWorkloadIdentity(
-        workload, resolution.plan.Fingerprint());
+    workload = ExtendQwenGraphWorkloadIdentity(workload,
+                                               resolution.plan.Fingerprint());
   }
   return {
       .execution_identity = policy.Fingerprint(),
@@ -117,8 +117,7 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position) {
         arena_.GetReplayQkv(layer_idx, position),
         static_cast<const float*>(layer.ssm_conv1d.data),
         arena_.d_ssm_conv_state, scratch.ssm.conv_out.data(),
-        arena_.d_ssm_deltanet_state,
-        arena_.GetReplayAlpha(layer_idx, position),
+        arena_.d_ssm_deltanet_state, arena_.GetReplayAlpha(layer_idx, position),
         arena_.GetReplayBeta(layer_idx, position),
         static_cast<const float*>(layer.ssm_a.data),
         static_cast<const float*>(layer.ssm_dt.data), nullptr, nullptr,

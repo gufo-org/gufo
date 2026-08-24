@@ -84,12 +84,12 @@ struct QwenTensorRef {
       const std::size_t block_idx = index / kBlockSize;
       const std::size_t pos = index % kBlockSize;
       const std::size_t block_bytes =
-          type == core::GgmlType::kQ3_K ? sizeof(strix::quant::block_q3_K)
+          type == core::GgmlType::kQ3_K   ? sizeof(strix::quant::block_q3_K)
           : type == core::GgmlType::kQ4_K ? sizeof(strix::quant::block_q4_K)
           : type == core::GgmlType::kQ5_K ? sizeof(strix::quant::block_q5_K)
                                           : sizeof(strix::quant::block_q6_K);
-      const auto* block_ptr = static_cast<const std::uint8_t*>(data) +
-                              block_idx * block_bytes;
+      const auto* block_ptr =
+          static_cast<const std::uint8_t*>(data) + block_idx * block_bytes;
       float block_buf[kBlockSize];
       switch (type) {
         case core::GgmlType::kQ3_K:

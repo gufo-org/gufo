@@ -22,8 +22,7 @@ public:
 
   explicit DeviceBuffer(std::size_t size) : size_(size) {
     if (size_ != 0) {
-      HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&data_),
-                          size_ * sizeof(T)));
+      HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&data_), size_ * sizeof(T)));
     }
   }
 

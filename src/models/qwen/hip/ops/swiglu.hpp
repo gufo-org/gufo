@@ -15,7 +15,8 @@ void LaunchFusedSwiGLUGEMV(const void* gate_w, core::GgmlType gate_type,
                            const void* up_w, core::GgmlType up_type,
                            const float* x, float* out,
                            std::size_t intermediate_size,
-                           std::size_t hidden_size, hipStream_t stream = nullptr);
+                           std::size_t hidden_size,
+                           hipStream_t stream = nullptr);
 
 /// Fused layer pre-RMSNorm + FFN SwiGLU gate/up GEMV (BF16 weights).
 void LaunchFusedRMSNormSwiGLUGEMV(const float* x, const float* norm_w,

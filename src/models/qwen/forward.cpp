@@ -26,8 +26,7 @@ namespace {
 
 const void* QuantizedRow(const QwenTensorRef& tensor, std::size_t row,
                          std::size_t columns) noexcept {
-  const std::size_t row_bytes =
-      quant::QuantizedRowBytes(tensor.type, columns);
+  const std::size_t row_bytes = quant::QuantizedRowBytes(tensor.type, columns);
   if (row_bytes == 0) {
     return nullptr;
   }
@@ -41,12 +40,12 @@ void TensorGEMV(const QwenTensorRef& A, std::span<const float> x, std::size_t M,
   if (A.empty() || x.size() < K || y.size() < M) {
     return;
   }
-  const auto resolution = qwen::ResolveQwenGemmRoute(
-      {.type = A.type,
-       .batch_size = 1,
-       .m = M,
-       .k = K,
-       .mode = qwen::QwenGemmMode::kCpu});
+  const auto resolution =
+      qwen::ResolveQwenGemmRoute({.type = A.type,
+                                  .batch_size = 1,
+                                  .m = M,
+                                  .k = K,
+                                  .mode = qwen::QwenGemmMode::kCpu});
   if (!resolution.accepted()) {
     assert(false && "TensorGEMV: unsupported GEMM request");
     std::abort();
@@ -139,7 +138,7 @@ void ForwardRMSNorm(std::span<const float> x, const QwenTensorRef& weight,
   // (NormForward). This free function is kept as-is for the existing CPU
   // callers (ForwardLayer / ForwardSSM / MTP reference) so behavior is
   // unchanged.
-  qwen::NormLayerView view{weight, eps};
+  const qwen::NormLayerView view{weight, eps};
   const qwen::CpuModuleContext ctx;
   qwen::NormForward(ctx, view, x, out);
 }
@@ -151,8 +150,8 @@ void ForwardRoPE(std::span<float> q, std::span<float> k,
   // Thin wrapper: the RoPE body now lives in the rope module's CPU backend
   // (RopeForward). This free function is kept for the existing CPU callers
   // (ForwardLayer / qwen_forward_test) so behavior is unchanged.
-  qwen::RopeLayerView view{num_heads, num_kv_heads, head_dim, rotary_dim,
-                           rope_theta};
+  const qwen::RopeLayerView view{num_heads, num_kv_heads, head_dim, rotary_dim,
+                                 rope_theta};
   const qwen::CpuModuleContext ctx;
   qwen::RopeForward(ctx, view, q, k, pos);
 }
@@ -259,8 +258,8 @@ void ForwardFFN(std::span<const float> x, const QwenTensorRef& gate_weight,
   // Thin wrapper: the SwiGLU FFN body now lives in the ffn module's CPU
   // backend (FfnForward). Kept for the existing CPU callers (ForwardLayer /
   // qwen_forward_test) so behavior is unchanged.
-  qwen::FfnLayerView view{gate_weight, up_weight, down_weight, hidden_size,
-                          intermediate_size};
+  const qwen::FfnLayerView view{gate_weight, up_weight, down_weight,
+                                hidden_size, intermediate_size};
   const qwen::CpuModuleContext ctx;
   qwen::FfnForward(ctx, view, x, gate_scratch, up_scratch, act_scratch,
                    ffn_out);
@@ -278,7 +277,7 @@ void ForwardLayer(std::span<float> hidden, const QwenLayerWeights& layer,
   // 2. Self-Attention / SSM
   if (layer.is_full_attention) {
     const qwen::CpuLayerContext actx(config, arena, layer_idx, pos);
-    qwen::AttnLayerView av = qwen::MakeAttnView(layer, config);
+    const qwen::AttnLayerView av = qwen::MakeAttnView(layer, config);
     qwen::AttnForward(actx, av, arena.normed, kv_cache, pos, arena.attn_out);
   } else {
     ForwardSSM(arena.normed, layer, config, ssm_cache, layer_idx, arena.ssm_qkv,

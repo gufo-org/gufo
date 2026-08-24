@@ -280,9 +280,8 @@ float QwenMtpReference::ComputeLogit(std::uint32_t token_id) const noexcept {
     return 0.0F;
   }
   const void* row = OutputRow(weights_.output, token_id, hidden);
-  const models::QwenTensorRef tensor{.data = row,
-                                     .type = weights_.output.type,
-                                     .num_elements = hidden};
+  const models::QwenTensorRef tensor{
+      .data = row, .type = weights_.output.type, .num_elements = hidden};
   float result = 0.0F;
   models::TensorGEMV(tensor, feedback_hidden_, 1, hidden,
                      std::span<float>(&result, 1));

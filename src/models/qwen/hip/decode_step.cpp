@@ -23,14 +23,13 @@ void EmitDecodeRouteTelemetry(const models::QwenModelWeights& weights,
   if (!detail::DispatchTelemetryEnabled()) {
     return;
   }
-  for (std::uint32_t layer_index = 0;
-       layer_index < weights.config.num_layers; ++layer_index) {
+  for (std::uint32_t layer_index = 0; layer_index < weights.config.num_layers;
+       ++layer_index) {
     const auto& layer = weights.layers[layer_index];
     const auto resolution = ResolveQwenLayerRouteWithReasons(
         policy, QwenExecutionMode::kDecode, layer.is_full_attention);
     detail::EmitQwenRouteResolution(
-        "decode", layer_index,
-        layer.is_full_attention ? "attention" : "ssm",
+        "decode", layer_index, layer.is_full_attention ? "attention" : "ssm",
         resolution.plan.Fingerprint(),
         static_cast<std::uint32_t>(resolution.rejected));
   }
@@ -157,9 +156,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // behavior identical to the former inline `LaunchRMSNorm` call.
       const auto norm_view =
           strix::models::qwen::MakeAttnNormView(layer, config);
-      strix::models::qwen::NormForward(module_ctx, norm_view,
-                                       decode_scratch.hidden,
-                                       decode_scratch.normed);
+      strix::models::qwen::NormForward(
+          module_ctx, norm_view, decode_scratch.hidden, decode_scratch.normed);
     }
 
     // opt-c010-ssm-gate-residual: the SSM branch folds the post-SSM residual
@@ -250,10 +248,10 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
             arena.d_kv_cache, arena.d_kv_cache + total_k,
             arena.d_attention_kv_f16,
             static_cast<std::uint16_t*>(arena.d_attention_kv_f16) + total_k,
-            ssm_scratch.out.data(), attn_layer_idx, pos,
-            arena.GetMaxContext(), config.num_attention_heads,
-            config.num_key_value_heads, config.head_dim, arena.stream,
-            attention_scratch.split_k.data(), fused_qknorm_rope_kv);
+            ssm_scratch.out.data(), attn_layer_idx, pos, arena.GetMaxContext(),
+            config.num_attention_heads, config.num_key_value_heads,
+            config.head_dim, arena.stream, attention_scratch.split_k.data(),
+            fused_qknorm_rope_kv);
       } else {
         LaunchAttention(
             attention_scratch.q.data(), attention_scratch.k.data(),
@@ -271,14 +269,12 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // backend). Same kernel, same args, same arena slices (d_ssm_out in,
       // d_attn_out out); behavior-identical to the former inline `LaunchGEMV`.
       strix::models::qwen::QuantGemm(
-          module_ctx, layer.attn_output,
-          ssm_scratch.out.first(attention_size), hidden_size, attention_size,
-          attention_scratch.output);
+          module_ctx, layer.attn_output, ssm_scratch.out.first(attention_size),
+          hidden_size, attention_size, attention_scratch.output);
     } else {
       // SSM path
-      ssm_residual_folded =
-          route_plan.fuse_ssm_epilogue &&
-          SupportsDenseFusedProjection(layer.ssm_out.type);
+      ssm_residual_folded = route_plan.fuse_ssm_epilogue &&
+                            SupportsDenseFusedProjection(layer.ssm_out.type);
       const bool qkv_bf16 = layer.attn_qkv.type == core::GgmlType::kBF16;
       const bool gate_bf16 = layer.attn_gate.type == core::GgmlType::kBF16;
       const bool alpha_bf16 = layer.ssm_alpha.type == core::GgmlType::kBF16;
@@ -300,8 +296,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
             layer.ssm_beta.data, layer.ssm_beta.type,
             decode_scratch.normed.data(), ssm_scratch.qkv.data(),
             ssm_scratch.gate.data(), ssm_scratch.alpha.data(),
-            ssm_scratch.beta.data(), hidden_size, ssm_qkv_size,
-            ssm_inner_size, time_step_rank, arena.stream);
+            ssm_scratch.beta.data(), hidden_size, ssm_qkv_size, ssm_inner_size,
+            time_step_rank, arena.stream);
       }
 
       LaunchSSMConvRecurrence(
@@ -321,10 +317,10 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // ssm_out GEMV epilogue (y = A*x + hidden). The unfused chain (GEMV
       // into d_attn_out + residual add) stays wired as the reference.
       if (ssm_residual_folded) {
-        LaunchGEMVResidual(
-            layer.ssm_out.data, layer.ssm_out.type, ssm_scratch.out.data(),
-            decode_scratch.hidden.data(), decode_scratch.hidden.data(),
-            hidden_size, ssm_inner_size, arena.stream);
+        LaunchGEMVResidual(layer.ssm_out.data, layer.ssm_out.type,
+                           ssm_scratch.out.data(), decode_scratch.hidden.data(),
+                           decode_scratch.hidden.data(), hidden_size,
+                           ssm_inner_size, arena.stream);
       } else {
         LaunchGEMV(layer.ssm_out.data, layer.ssm_out.type,
                    ssm_scratch.out.data(), attention_scratch.output.data(),

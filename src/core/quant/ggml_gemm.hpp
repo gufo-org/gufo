@@ -10,8 +10,8 @@ namespace strix::quant {
 
 // Unified dequant/dot dispatch that routes by GgmlType. This is the single
 // dispatch point for the quant_gemm module; it lives beside (Parallel Change)
-// the older per-file switches in models/qwen/forward.cpp, which are removed in a
-// later phase. It additionally handles the types the old CPU GEMV switch
+// the older per-file switches in models/qwen/forward.cpp, which are removed in
+// a later phase. It additionally handles the types the old CPU GEMV switch
 // silently skipped (Q8_K, Q8_0, Q5_K) and fails loudly instead of returning
 // 0.0F for unsupported types.
 

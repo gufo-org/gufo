@@ -1,5 +1,3 @@
-#include "src/models/qwen/mtp_reference.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -13,6 +11,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen/mtp_reference.hpp"
 
 namespace {
 

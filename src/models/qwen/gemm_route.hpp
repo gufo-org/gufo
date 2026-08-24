@@ -175,12 +175,10 @@ struct QwenGemmResolution {
   }
 
   const auto format = DescribeQwenGemmFormat(request.type);
-  const bool supported =
-      request.mode == QwenGemmMode::kCpu
-          ? format.cpu_direct
-          : request.mode == QwenGemmMode::kHipPrefill
-                ? format.hip_prefill_direct
-                : format.hip_decode_direct;
+  const bool supported = request.mode == QwenGemmMode::kCpu ? format.cpu_direct
+                         : request.mode == QwenGemmMode::kHipPrefill
+                             ? format.hip_prefill_direct
+                             : format.hip_decode_direct;
   if (!supported) {
     return RejectQwenGemm(QwenGemmRejection::kUnsupportedFormat);
   }
@@ -196,8 +194,7 @@ struct QwenGemmResolution {
     if (format.quantized) {
       constexpr std::size_t kRowsPerBlock = 4;
       constexpr std::size_t kRoundUp = kRowsPerBlock - 1U;
-      const std::size_t max_grid =
-          std::numeric_limits<std::uint32_t>::max();
+      const std::size_t max_grid = std::numeric_limits<std::uint32_t>::max();
       if (request.batch_size > max_grid || request.m > max_size - kRoundUp ||
           (request.m + kRoundUp) / kRowsPerBlock > max_grid) {
         return RejectQwenGemm(QwenGemmRejection::kShapeOverflow);
@@ -248,16 +245,14 @@ struct QwenGemmResolution {
     return {.route = QwenGemmRoute::kHipQuantDirect};
   }
   if (request.type == core::GgmlType::kF32) {
-    return {.route = request.k >= 16384
-                         ? QwenGemmRoute::kHipF32Baseline512
-                         : QwenGemmRoute::kHipF32Baseline256};
+    return {.route = request.k >= 16384 ? QwenGemmRoute::kHipF32Baseline512
+                                        : QwenGemmRoute::kHipF32Baseline256};
   }
   if (request.k % 8 == 0 && request.k < 8192) {
     return {.route = QwenGemmRoute::kHipBf16Wave32Single};
   }
-  return {.route = request.k >= 16384
-                       ? QwenGemmRoute::kHipBf16Baseline512
-                       : QwenGemmRoute::kHipBf16Baseline256};
+  return {.route = request.k >= 16384 ? QwenGemmRoute::kHipBf16Baseline512
+                                      : QwenGemmRoute::kHipBf16Baseline256};
 }
 
 }  // namespace strix::models::qwen

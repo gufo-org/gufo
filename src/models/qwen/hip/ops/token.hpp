@@ -23,7 +23,6 @@ void LaunchEmbeddingLookup(const void* table, core::GgmlType type,
                            std::size_t hidden_size,
                            hipStream_t stream = nullptr);
 
-
 /// De-interleaves [Q0 (head_dim), Gate0 (head_dim), Q1, Gate1, ...] into
 /// separate Q and Gate buffers
 void LaunchUnpackQG(const float* qg_interleaved, float* q_out, float* gate_out,

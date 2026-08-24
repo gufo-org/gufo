@@ -124,8 +124,8 @@ void TestGpuQuantGemmModule() {
   HIP_CHECK(hipMalloc(&d_A, M * K * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_x, K * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_y, M * sizeof(float)));
-  HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * K * sizeof(float),
-                      hipMemcpyHostToDevice));
+  HIP_CHECK(
+      hipMemcpy(d_A, h_A.data(), M * K * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(
       hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
@@ -157,8 +157,7 @@ void TestGpuQuantGemmModule() {
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen module ops test");
+      strix::test::HipDeviceRequirement::kOptional, "Qwen module ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }

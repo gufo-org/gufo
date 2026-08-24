@@ -70,8 +70,8 @@ namespace {
   return true;
 }
 
-[[nodiscard]] bool HasReadableTensorStorage(
-    const QwenTensorRef& tensor, std::size_t required) noexcept {
+[[nodiscard]] bool HasReadableTensorStorage(const QwenTensorRef& tensor,
+                                            std::size_t required) noexcept {
   return tensor.empty() ||
          (tensor.num_elements >= required && tensor.FitsAvailableStorage());
 }
@@ -83,8 +83,7 @@ namespace {
           qwen::DescribeQwenGemmFormat(tensor.type).cpu_direct);
 }
 
-[[nodiscard]] bool HasCpuProjection(const QwenTensorRef& tensor,
-                                    std::size_t m,
+[[nodiscard]] bool HasCpuProjection(const QwenTensorRef& tensor, std::size_t m,
                                     std::size_t k) noexcept {
   if (tensor.empty()) {
     return true;
@@ -106,8 +105,8 @@ namespace {
     std::span<const float> x, const QwenSsmParameters& parameters,
     const QwenSsmCache& cache, std::uint32_t layer_idx,
     std::span<float> qkv_scratch, std::span<float> gate_scratch,
-    std::span<float> out_scratch, std::span<float> out,
-    std::size_t& qkv_dim, std::size_t& gate_dim) noexcept {
+    std::span<float> out_scratch, std::span<float> out, std::size_t& qkv_dim,
+    std::size_t& gate_dim) noexcept {
   if (x.empty() || parameters.key_head_count == 0 ||
       parameters.value_head_count == 0 || parameters.key_dim == 0 ||
       parameters.val_dim == 0 || parameters.conv_kernel == 0 ||
@@ -161,9 +160,8 @@ namespace {
 }  // namespace
 
 void ForwardSSM(std::span<const float> x_normed,
-                const QwenSsmParameters& parameters,
-                QwenSsmCache& ssm_cache, std::uint32_t layer_idx,
-                std::span<float> ssm_qkv_scratch,
+                const QwenSsmParameters& parameters, QwenSsmCache& ssm_cache,
+                std::uint32_t layer_idx, std::span<float> ssm_qkv_scratch,
                 std::span<float> ssm_gate_scratch,
                 std::span<float> ssm_out_scratch,
                 std::span<float> out) noexcept {
@@ -177,16 +175,15 @@ void ForwardSSM(std::span<const float> x_normed,
   std::size_t gate_dim = 0;
 
   if (!ValidateSsmInvocation(x_normed, parameters, ssm_cache, layer_idx,
-                             ssm_qkv_scratch, ssm_gate_scratch,
-                             ssm_out_scratch, out, qkv_dim, gate_dim)) {
+                             ssm_qkv_scratch, ssm_gate_scratch, ssm_out_scratch,
+                             out, qkv_dim, gate_dim)) {
     std::ranges::fill(out, 0.0F);
     return;
   }
 
   // 1. QKV, Gate, Alpha, and Beta Projections
   if (!parameters.qkv.empty()) {
-    TensorGEMV(parameters.qkv, x_normed, qkv_dim, hidden_size,
-               ssm_qkv_scratch);
+    TensorGEMV(parameters.qkv, x_normed, qkv_dim, hidden_size, ssm_qkv_scratch);
   } else {
     std::ranges::fill(ssm_qkv_scratch, 0.0F);
   }
@@ -201,8 +198,7 @@ void ForwardSSM(std::span<const float> x_normed,
   std::vector<float> alpha_buf(num_v_heads, 0.0F);
   std::vector<float> beta_buf(num_v_heads, 0.0F);
   if (!parameters.alpha.empty()) {
-    TensorGEMV(parameters.alpha, x_normed, num_v_heads, hidden_size,
-               alpha_buf);
+    TensorGEMV(parameters.alpha, x_normed, num_v_heads, hidden_size, alpha_buf);
   }
   if (!parameters.beta.empty()) {
     TensorGEMV(parameters.beta, x_normed, num_v_heads, hidden_size, beta_buf);
@@ -342,8 +338,7 @@ void ForwardSSM(std::span<const float> x_normed,
   }
 }
 
-void ForwardSSM(std::span<const float> x_normed,
-                const QwenLayerWeights& layer,
+void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
                 const core::ModelConfig& config, QwenSsmCache& ssm_cache,
                 std::uint32_t layer_idx, std::span<float> ssm_qkv_scratch,
                 std::span<float> ssm_gate_scratch,

@@ -361,9 +361,9 @@ void TestAttentionBackendEquivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen attention backend ops test");
+  const int device_status =
+      strix::test::GateHipDevice(strix::test::HipDeviceRequirement::kOptional,
+                                 "Qwen attention backend ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }

@@ -492,19 +492,21 @@ void TestBatchedFusedQKNormRoPEKvWriteEquivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen QK/RoPE/KV fusion ops test");
+  const int device_status =
+      strix::test::GateHipDevice(strix::test::HipDeviceRequirement::kOptional,
+                                 "Qwen QK/RoPE/KV fusion ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }
 
   TestFusedQKNormRoPEKvWriteEquivalence();
   TestBatchedFusedQKNormRoPEKvWriteEquivalence();
-  std::cout << "Qwen QK norm, RoPE, and KV fusion ops test passed on gfx1151.\n";
+  std::cout
+      << "Qwen QK norm, RoPE, and KV fusion ops test passed on gfx1151.\n";
   return 0;
 #else
-  std::cout << "HIP disabled, skipping Qwen QK norm, RoPE, and KV fusion ops test.\n";
+  std::cout
+      << "HIP disabled, skipping Qwen QK norm, RoPE, and KV fusion ops test.\n";
   return 77;
 #endif
 }

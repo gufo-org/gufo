@@ -84,16 +84,16 @@ float Q4Value(const block_q4_K& block, std::size_t index) noexcept {
 }
 
 float Q5Value(const block_q5_K& block, std::size_t index) noexcept {
-  const std::size_t gg = index / 64;        // 0..3
-  const std::size_t wv = index % 64;        // 0..63
-  const std::size_t lane = wv % 32;         // 0..31
+  const std::size_t gg = index / 64;  // 0..3
+  const std::size_t wv = index % 64;  // 0..63
+  const std::size_t lane = wv % 32;   // 0..31
   const bool lohalf = (wv < 32);
   const std::uint8_t qb = block.qs[(gg * 32) + lane];
   const std::uint8_t quant4 = lohalf ? (qb & 0x0FU) : (qb >> 4U);
   const std::uint8_t qhb = block.qh[lane];
   const int bit = static_cast<int>(2 * gg) + (lohalf ? 0 : 1);  // 0..7
   const std::uint8_t quant = static_cast<std::uint8_t>(
-      quant4 + (((qhb >> bit) & 1U) ? 16U : 0U));  // 0..31
+      quant4 + (((qhb >> bit) & 1U) ? 16U : 0U));       // 0..31
   const std::size_t sis = (2 * gg) + (lohalf ? 0 : 1);  // 0..7
   std::uint8_t sc = 0;
   std::uint8_t m = 0;
@@ -268,8 +268,7 @@ void DequantizeQ8_K(const void* src, float* dst, std::size_t k) {
 
   for (std::size_t b = 0; b < nb; ++b) {
     for (std::size_t i = 0; i < 256; ++i) {
-      dst[(b * 256) + i] =
-          blocks[b].d * static_cast<float>(blocks[b].qs[i]);
+      dst[(b * 256) + i] = blocks[b].d * static_cast<float>(blocks[b].qs[i]);
     }
   }
 }

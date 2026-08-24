@@ -107,22 +107,25 @@ void TestBatchedFusedProjectionsEquivalence() {
   std::vector<float> alpha_batch(batch * time_step_rank);
   std::vector<float> beta_seq(batch * time_step_rank);
   std::vector<float> beta_batch(batch * time_step_rank);
-  HIP_CHECK(hipMemcpy(qkv_seq.data(), d_qkv_seq,
-                      qkv_seq.size() * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(qkv_seq.data(), d_qkv_seq, qkv_seq.size() * sizeof(float),
+                      hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(qkv_batch.data(), d_qkv_batch,
                       qkv_batch.size() * sizeof(float), hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(gate_seq.data(), d_gate_seq,
                       gate_seq.size() * sizeof(float), hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(gate_batch.data(), d_gate_batch,
-                      gate_batch.size() * sizeof(float), hipMemcpyDeviceToHost));
+                      gate_batch.size() * sizeof(float),
+                      hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(alpha_seq.data(), d_alpha_seq,
                       alpha_seq.size() * sizeof(float), hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(alpha_batch.data(), d_alpha_batch,
-                      alpha_batch.size() * sizeof(float), hipMemcpyDeviceToHost));
+                      alpha_batch.size() * sizeof(float),
+                      hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(beta_seq.data(), d_beta_seq,
                       beta_seq.size() * sizeof(float), hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(beta_batch.data(), d_beta_batch,
-                      beta_batch.size() * sizeof(float), hipMemcpyDeviceToHost));
+                      beta_batch.size() * sizeof(float),
+                      hipMemcpyDeviceToHost));
 
   strix::test::ExpectSpanNear(qkv_seq, qkv_batch, 1e-4F,
                               "batched SSM QKV projection mismatch");
@@ -261,9 +264,9 @@ void TestFusedRMSNormQKVProjectionsEquivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int device_status = strix::test::GateHipDevice(
-      strix::test::HipDeviceRequirement::kOptional,
-      "Qwen attention projection ops test");
+  const int device_status =
+      strix::test::GateHipDevice(strix::test::HipDeviceRequirement::kOptional,
+                                 "Qwen attention projection ops test");
   if (device_status != strix::test::kHipTestSuccess) {
     return device_status;
   }
