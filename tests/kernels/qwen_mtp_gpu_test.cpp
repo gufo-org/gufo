@@ -1,4 +1,4 @@
-#include "src/models/qwen/hip/qwen_mtp_gpu.hpp"
+#include "src/models/qwen/hip/mtp.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,8 +15,8 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
-#include "src/models/qwen/qwen_mtp_reference.hpp"
+#include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/mtp_reference.hpp"
 
 namespace {
 

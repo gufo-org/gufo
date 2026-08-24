@@ -8,8 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
-#include "src/models/qwen/hip/qwen_gpu_quant_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/quant_ops.hpp"
 
 namespace strix::hip {
 
@@ -132,9 +132,9 @@ void LaunchFloatToBfloat16(const float* in, void* out, std::size_t num_elements,
 // thread per element; matches the CPU DequantizeQ8_K oracle
 // (out[j] = d * qs[j] for j in [0,256) per block). Decode is unaffected: it
 // already computes at Q8 via Q8KRowDot.
-// Q8_K block layout is defined in the shared qwen_gpu_quant_ops.hpp header.
+// Q8_K block layout is defined in the shared quant_ops.hpp header.
 
-// Q5_K / Q6_K block layouts are defined in the shared qwen_gpu_quant_ops.hpp
+// Q5_K / Q6_K block layouts are defined in the shared quant_ops.hpp
 // header; dequant to BF16 uses Q5KValueFp / Q6KValueFp below.
 __global__ void DequantizeQ8KToBf16Kernel(const void* __restrict__ w,
                                           hip_bfloat16* __restrict__ out,
@@ -166,7 +166,7 @@ void LaunchDequantizeQ8KToBf16(const void* w, hip_bfloat16* out,
 
 // Per-value dequant helpers (fp32), matching the CPU oracles
 // Q5Value/Q6Value/DequantizeQ8_0 in ggml_dequant.cpp. GetQKScaleMin (used by
-// Q5KValueFp) is defined in the shared qwen_gpu_quant_ops.hpp header.
+// Q5KValueFp) is defined in the shared quant_ops.hpp header.
 __device__ float Q5KValueFp(const Q5KBlock& block,
                             std::size_t index) noexcept {
   const std::size_t gg = index / 64;   // 0..3

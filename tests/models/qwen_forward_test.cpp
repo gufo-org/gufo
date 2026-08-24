@@ -1,4 +1,4 @@
-#include "src/models/qwen/qwen_forward.hpp"
+#include "src/models/qwen/forward.hpp"
 
 #include <cassert>
 #include <cmath>

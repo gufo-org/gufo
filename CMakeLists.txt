@@ -228,12 +228,12 @@ add_library(strix_core STATIC
   src/models/minimax_h3/sha256.cpp
   src/models/minimax_h3/tokenizer.cpp
   src/models/minimax_h3/video_vae.cpp
-  src/models/qwen/qwen_tokenizer.cpp
-  src/models/qwen/qwen_chat_template.cpp
-  src/models/qwen/qwen_oracles.cpp
-  src/models/qwen/qwen_state.cpp
-  src/models/qwen/qwen_ssm.cpp
-  src/models/qwen/qwen_forward.cpp
+  src/models/qwen/tokenizer.cpp
+  src/models/qwen/chat_template.cpp
+  src/models/qwen/oracles.cpp
+  src/models/qwen/state.cpp
+  src/models/qwen/ssm.cpp
+  src/models/qwen/forward.cpp
   src/models/qwen/modules/attention.cpp
   src/models/qwen/modules/embed.cpp
   src/models/qwen/modules/ffn.cpp
@@ -244,8 +244,8 @@ add_library(strix_core STATIC
   src/models/qwen/modules/sample.cpp
   src/models/qwen/modules/ssm.cpp
   src/models/qwen/modules/unembed.cpp
-  src/models/qwen/qwen_generator.cpp
-  src/models/qwen/qwen_mtp_reference.cpp
+  src/models/qwen/generator.cpp
+  src/models/qwen/mtp_reference.cpp
   src/testing/compare/logit_comparator.cpp
   src/eval/regrade.cpp
   src/core/hip/hipblaslt_plan_database.cpp
@@ -268,9 +268,9 @@ if (ENGINE_ENABLE_HIP)
   set_property(SOURCE src/models/minimax_h3/dit.hip
     APPEND PROPERTY COMPILE_OPTIONS -O2)
   target_sources(strix_core PRIVATE
-    src/models/qwen/hip/qwen_gpu_attention.hip
-    src/models/qwen/hip/qwen_gpu_batched_ssm.hip
-    src/models/qwen/hip/qwen_gpu_decode_ops.hip
+    src/models/qwen/hip/attention.hip
+    src/models/qwen/hip/batched_ssm.hip
+    src/models/qwen/hip/decode_ops.hip
     src/models/qwen/hip/kernels/prefill_embed.hip
     src/models/qwen/hip/kernels/prefill_gemm.hip
     src/models/qwen/hip/kernels/prefill_norm.hip
@@ -298,11 +298,11 @@ if (ENGINE_ENABLE_HIP)
     src/models/qwen/hip/kernels/attention_tile.hip
     src/models/qwen/hip/kernels/hipblas_gemm.hip
     src/models/qwen/hip/kernels/hipblaslt_gemm.hip
-    src/models/qwen/hip/qwen_gpu_arena.cpp
-    src/models/qwen/hip/qwen_gpu_decode.cpp
-    src/models/qwen/hip/qwen_gpu_executor.cpp
-    src/models/qwen/hip/qwen_gpu_model_loader.cpp
-    src/models/qwen/hip/qwen_gpu_prefill.cpp
+    src/models/qwen/hip/arena.cpp
+    src/models/qwen/hip/decode.cpp
+    src/models/qwen/hip/executor.cpp
+    src/models/qwen/hip/model_loader.cpp
+    src/models/qwen/hip/prefill.cpp
     src/models/qwen/hip/mtp/model.cpp
     src/models/qwen/hip/mtp/executor.cpp
     src/models/qwen/hip/mtp/backend.cpp
@@ -332,8 +332,8 @@ endif()
 
 if (ENGINE_ENABLE_XRT)
   target_sources(strix_core PRIVATE
-    src/models/qwen/xdna2/qwen_mtp_eh_proj.cpp
-    src/models/qwen/xdna2/qwen_mtp_rmsnorm.cpp)
+    src/models/qwen/xdna2/mtp_eh_proj.cpp
+    src/models/qwen/xdna2/mtp_rmsnorm.cpp)
   target_compile_definitions(strix_core PUBLIC ENGINE_ENABLE_XRT=1)
   target_compile_definitions(strix_core PRIVATE
     STRIX_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR="${STRIX_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR}"

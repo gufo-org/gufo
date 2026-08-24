@@ -1,9 +1,9 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 
-#include "src/models/qwen/qwen_forward.hpp"  // TensorGEMV
+#include "src/models/qwen/forward.hpp"  // TensorGEMV
 
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
 #endif
 
 namespace strix::models::qwen {

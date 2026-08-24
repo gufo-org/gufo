@@ -29,7 +29,7 @@
 #include <vector>
 
 #include "src/core/quant/ggml_dequant.hpp"
-#include "src/models/qwen/xdna2/qwen_aie2p_w4a8_pack.hpp"
+#include "src/models/qwen/xdna2/aie2p_w4a8_pack.hpp"
 
 namespace {
 

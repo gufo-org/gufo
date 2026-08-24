@@ -2,8 +2,8 @@
 #include <iostream>
 #include <vector>
 
-#include "src/models/qwen/qwen_forward.hpp"
-#include "src/models/qwen/qwen_generator.hpp"
+#include "src/models/qwen/forward.hpp"
+#include "src/models/qwen/generator.hpp"
 
 void TestDeterministicArgmax() {
   std::vector<float> logits = {0.1F, 5.2F, -1.0F, 5.19F, 2.0F};

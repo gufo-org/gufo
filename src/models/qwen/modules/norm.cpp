@@ -3,10 +3,10 @@
 #include <cstddef>
 #include <vector>
 
-#include "src/models/qwen/qwen_oracles.hpp"
+#include "src/models/qwen/oracles.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
 #endif
 
 namespace strix::models::qwen {

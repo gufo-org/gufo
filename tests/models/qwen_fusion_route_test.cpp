@@ -11,7 +11,7 @@
 // comparison is covered by the L2-GPU integration test (orchestrator-gated).
 
 #include "src/models/qwen/modules/modules.hpp"
-#include "src/models/qwen/hip/detail/qwen_attention_policy.hpp"
+#include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "tests/testing/synthetic_qwen_weights.hpp"
 #include "tests/testing/test_common.hpp"
 

@@ -8,8 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
-#include "src/models/qwen/hip/qwen_gpu_quant_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/quant_ops.hpp"
 
 namespace strix::hip {
 

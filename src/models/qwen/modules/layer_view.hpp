@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/qwen_state.hpp"
+#include "src/models/qwen/state.hpp"
 
 namespace strix::models::qwen {
 
@@ -16,7 +16,7 @@ namespace strix::models::qwen {
 // caches, and the arena into every forward. A module gets exactly the weight
 // slice + dims it needs.
 
-inline constexpr float kNormEps = 1e-6F;  ///< matches qwen_forward.cpp RMSNorm calls
+inline constexpr float kNormEps = 1e-6F;  ///< matches forward.cpp RMSNorm calls
 
 /// Layer-norm slice (attn pre-norm, ffn pre-norm, or final output norm).
 struct NormLayerView {

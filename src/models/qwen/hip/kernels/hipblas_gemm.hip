@@ -2,7 +2,7 @@
 #include <cstddef>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
 
 namespace strix::hip {
 

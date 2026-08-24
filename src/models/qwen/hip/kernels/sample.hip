@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
 
 namespace strix::hip {
 

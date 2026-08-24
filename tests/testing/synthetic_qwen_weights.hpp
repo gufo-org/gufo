@@ -11,7 +11,7 @@
 // on no GgufReader / model file.
 //
 // Purely additive Phase 1. Header-only + inline (no CMake wiring yet). It
-// depends only on src headers (model_config.hpp, qwen_state.hpp) and the test
+// depends only on src headers (model_config.hpp, state.hpp) and the test
 // RNG helpers in tests/testing/test_common.hpp, so it can be included by both
 // CPU-only and HIP module test binaries.
 
@@ -21,7 +21,7 @@
 #include <vector>
 
 #include "src/core/model_config.hpp"
-#include "src/models/qwen/qwen_state.hpp"
+#include "src/models/qwen/state.hpp"
 #include "tests/testing/test_common.hpp"
 
 namespace strix::models::qwen {

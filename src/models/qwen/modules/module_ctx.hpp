@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "src/core/model_config.hpp"
-#include "src/models/qwen/qwen_state.hpp"
+#include "src/models/qwen/state.hpp"
 
 namespace strix::models::qwen {
 

@@ -14,8 +14,8 @@ namespace strix::quant {
 // layouts for the dequant/dot paths. Relocated verbatim from the internal
 // definitions in ggml_dequant.cpp so the header is the single source of
 // truth; field order and byte sizes match the HIP path
-// (src/models/qwen/hip/qwen_gpu_quant_ops.hpp) and the historical per-file copies
-// (qwen_state.hpp, tests/). Do NOT redefine block_* locally. Sizes are
+// (src/models/qwen/hip/quant_ops.hpp) and the historical per-file copies
+// (models/qwen/state.hpp, tests/). Do NOT redefine block_* locally. Sizes are
 // static_asserted; this is the layout contract (see the parity test that
 // proves field order against the byte-level spec).
 #pragma pack(push, 1)

@@ -4,13 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
 
 namespace strix::hip {
 
 // Batched Causal SSM Conv1D + token-serial DeltaNet recurrence (pure recurrence
 // unit). The fused per-head post-RMSNorm + gate epilogue lives in
-// qwen_gpu_batched_ssm.hip (Option B: composition layer owns the fusion); the
+// batched_ssm.hip (Option B: composition layer owns the fusion); the
 // non-fused launcher references it through this forward declaration.
 __global__ void BatchedSSMPostNormGateKernel(
     const float* __restrict__ raw_out, const float* __restrict__ ssm_norm,

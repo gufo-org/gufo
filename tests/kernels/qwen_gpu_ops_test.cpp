@@ -14,9 +14,9 @@
 #include <hip/hip_runtime.h>
 
 #include "src/core/hip/detail/hip_graph_decode_executor.hpp"
-#include "src/models/qwen/hip/detail/qwen_attention_policy.hpp"
+#include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/modules/module_ctx.hpp"
 #include "src/models/qwen/modules/norm.hpp"

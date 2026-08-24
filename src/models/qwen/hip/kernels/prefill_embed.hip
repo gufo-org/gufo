@@ -8,13 +8,13 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
-#include "src/models/qwen/hip/qwen_gpu_quant_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/quant_ops.hpp"
 
 namespace strix::hip {
 
 // Quant block layouts (Q8_0 / Q5_K / Q6_K / Q8_K) and the quant helpers are
-// shared via src/models/qwen/hip/qwen_gpu_quant_ops.hpp.
+// shared via src/models/qwen/hip/quant_ops.hpp.
 __global__ void BatchedEmbeddingLookupKernel(
     const void* __restrict__ table, core::GgmlType type,
     const std::uint32_t* __restrict__ token_ids, float* __restrict__ out_hidden,

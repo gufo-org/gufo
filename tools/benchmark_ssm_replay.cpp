@@ -15,8 +15,8 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
-#include "src/models/qwen/qwen_tokenizer.hpp"
+#include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/tokenizer.hpp"
 
 namespace {
 

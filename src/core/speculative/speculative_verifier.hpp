@@ -10,11 +10,11 @@
 #include <vector>
 
 #include "src/core/speculative/draft_backend.hpp"
-#include "src/models/qwen/qwen_generator.hpp"
-#include "src/models/qwen/qwen_tokenizer.hpp"
+#include "src/models/qwen/generator.hpp"
+#include "src/models/qwen/tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/qwen_gpu_executor.hpp"
+#include "src/models/qwen/hip/executor.hpp"
 #endif
 
 namespace strix::speculative {

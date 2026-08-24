@@ -1,6 +1,6 @@
 #include "src/models/qwen/modules/embed.hpp"
 
-#include "src/models/qwen/qwen_forward.hpp"  // ForwardEmbedding
+#include "src/models/qwen/forward.hpp"  // ForwardEmbedding
 
 namespace strix::models::qwen {
 

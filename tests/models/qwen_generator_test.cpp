@@ -1,4 +1,4 @@
-#include "src/models/qwen/qwen_generator.hpp"
+#include "src/models/qwen/generator.hpp"
 
 #include <cassert>
 #include <iostream>

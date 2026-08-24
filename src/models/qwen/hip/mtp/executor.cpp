@@ -1,5 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/qwen_mtp_gpu.hpp"
+#include "src/models/qwen/hip/mtp.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -10,9 +10,9 @@
 #include <utility>
 #include <vector>
 
-#include "src/models/qwen/hip/mtp/detail/qwen_mtp_gpu_allocation.hpp"
-#include "src/models/qwen/hip/detail/qwen_attention_policy.hpp"
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/mtp/detail/allocation.hpp"
+#include "src/models/qwen/hip/detail/attention_policy.hpp"
+#include "src/models/qwen/hip/ops.hpp"
 #if defined(ENGINE_ENABLE_XRT)
 #include "src/core/diagnostics/system_inventory.h"
 #include "src/core/xdna2/device.h"

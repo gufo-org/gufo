@@ -1,5 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/qwen_mtp_gpu.hpp"
+#include "src/models/qwen/hip/mtp.hpp"
 
 #include <algorithm>
 #include <cstddef>

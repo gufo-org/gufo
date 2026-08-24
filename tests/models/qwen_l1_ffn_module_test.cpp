@@ -12,7 +12,7 @@
 // builder headers (both header-only inline).
 
 #include "src/models/qwen/modules/modules.hpp"
-#include "src/models/qwen/qwen_oracles.hpp"
+#include "src/models/qwen/oracles.hpp"
 #include "tests/testing/synthetic_qwen_weights.hpp"
 #include "tests/testing/test_common.hpp"
 

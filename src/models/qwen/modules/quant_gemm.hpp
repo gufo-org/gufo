@@ -5,7 +5,7 @@
 #include <span>
 
 #include "src/models/qwen/modules/module_ctx.hpp"
-#include "src/models/qwen/qwen_state.hpp"  // QwenTensorRef
+#include "src/models/qwen/state.hpp"  // QwenTensorRef
 
 namespace strix::models::qwen {
 
@@ -13,7 +13,7 @@ namespace strix::models::qwen {
 /// Q4_K/Q5_K/Q6_K/Q8_0/Q8_K.
 ///
 /// CPU backend proxies the shared `TensorGEMV` dispatch (src/models/
-/// qwen_forward.cpp), which routes through the canonical `quant::` helpers.
+/// forward.cpp), which routes through the canonical `quant::` helpers.
 /// The module wraps the existing dispatch (the shared quant_gemm seam) rather
 /// than moving `TensorGEMV`'s body in — `TensorGEMV` has many callers (SSM,
 /// attention, MTP) that must not change. Behavior-identical.

@@ -24,9 +24,9 @@
 #include "src/core/diagnostics/fingerprint.h"
 #include "src/core/diagnostics/system_inventory.h"
 #include "src/core/hip/detail/gemv_dispatcher.hpp"
-#include "src/models/qwen/hip/detail/qwen_attention_policy.hpp"
+#include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/hip/qwen_gpu_ops.hpp"
+#include "src/models/qwen/hip/ops.hpp"
 #include "src/core/model_config.hpp"
 
 #ifndef STRIX_VERSION
