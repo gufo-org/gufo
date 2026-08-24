@@ -174,9 +174,11 @@ void TestBatchedPerHeadRMSNormEquivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  if (!strix::test::HasHipDevice()) {
-    std::cout << "No HIP device found, skipping Qwen attention component ops test.\n";
-    return 0;
+  const int device_status = strix::test::GateHipDevice(
+      strix::test::HipDeviceRequirement::kOptional,
+      "Qwen attention component ops test");
+  if (device_status != strix::test::kHipTestSuccess) {
+    return device_status;
   }
 
   TestBatchedRoPEEquivalence();

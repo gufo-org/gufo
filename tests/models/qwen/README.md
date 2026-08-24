@@ -28,8 +28,17 @@ avoid compiling or running unrelated kernels:
   `qwen_module_ops_test`.
 
 Small utilities under `hip/support/` provide move-only device allocation,
-host/device copies, device availability, BF16 conversion, and always-on numeric
-checks. They intentionally do not replace CTest or introduce a test registry.
+host/device copies, explicit device requirements, BF16 conversion, and
+always-on numeric checks. They intentionally do not replace CTest or introduce
+a test registry.
+
+The focused basic, attention, FFN, and quant kernel executables declare HIP
+hardware optional at their device gate. No visible HIP device therefore returns
+CTest skip code 77 rather than success. HIP runtime discovery errors and tests
+that declare hardware required return failure. The shared CMake helper records
+77 as the skip code for every focused HIP target; targets without an explicit
+device gate still run normally and cannot skip merely because the property is
+present.
 
 Labels add `qwen` and the relevant tier, allowing focused runs on a supported
 Linux x86-64 Strix Halo host:

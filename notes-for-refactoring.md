@@ -265,8 +265,11 @@ CheckSpanNear(actual, expected, tolerance, "message");
 return RunTests({{"case name", TestFunction}, ...});
 ```
 
-Checks must not disappear under `NDEBUG`. Hardware/model absence should map to
-CTest skip code 77 only for tests explicitly allowed to skip.
+Checks must not disappear under `NDEBUG`. Hardware/model absence maps to CTest
+skip code 77 only when a test explicitly declares the device optional. HIP
+runtime discovery errors and absence for required-device tests fail. The
+focused Qwen HIP CMake helper recognizes 77, while tests without an explicit
+device gate cannot skip merely because that property is present.
 
 A CMake helper should preserve current CTest names while adding consistent
 labels such as:

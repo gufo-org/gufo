@@ -100,7 +100,9 @@ if (ENGINE_ENABLE_HIP)
     target_link_libraries(${target} PRIVATE
       strix_core hip::host roc::hipblas roc::rocblas)
     add_test(NAME ${target} COMMAND ${target})
-    set_tests_properties(${target} PROPERTIES LABELS "${labels}")
+    set_tests_properties(${target} PROPERTIES
+      LABELS "${labels}"
+      SKIP_RETURN_CODE 77)
   endfunction()
 
   add_qwen_hip_test(qwen_gpu_ops_test

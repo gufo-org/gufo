@@ -295,9 +295,11 @@ void TestFusedRMSNormSwiGLUEquivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  if (!strix::test::HasHipDevice()) {
-    std::cout << "No HIP device found, skipping Qwen SwiGLU ops test.\n";
-    return 0;
+  const int device_status = strix::test::GateHipDevice(
+      strix::test::HipDeviceRequirement::kOptional,
+      "Qwen SwiGLU ops test");
+  if (device_status != strix::test::kHipTestSuccess) {
+    return device_status;
   }
 
   TestBatchedFusedSwiGLUEquivalence();
