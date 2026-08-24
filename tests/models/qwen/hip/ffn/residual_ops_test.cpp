@@ -333,6 +333,6 @@ int main() {
   return 0;
 #else
   std::cout << "HIP disabled, skipping Qwen FFN residual and epilogue ops test.\n";
-  return 0;
+  return 77;
 #endif
 }

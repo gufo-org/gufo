@@ -19,9 +19,9 @@
 #include "tests/testing/test_common.hpp"
 
 #include <algorithm>
-#include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <span>
 #include <type_traits>
@@ -42,6 +42,13 @@ using strix::models::qwen::ResidualAdd;
 using strix::models::qwen::RopeForward;
 using strix::models::qwen::RopeLayerView;
 
+void Check(bool condition) {
+  if (!condition) {
+    std::cerr << "Qwen execution policy test failure\n";
+    std::abort();
+  }
+}
+
 static_assert(std::is_empty_v<CpuModuleContext>);
 static_assert(!std::is_default_constructible_v<CpuLayerContext>);
 static_assert(!std::is_convertible_v<CpuModuleContext, HipModuleContext>);
@@ -60,51 +67,51 @@ static_assert(std::is_same_v<
 // --- 1. Fusion-toggle routing values (strix::hip::detail, host constexpr) ---
 void TestFusionToggleValues() {
   // Q/K norm + RoPE + KV write: ENABLED -> decode uses the fused kernel.
-  assert(strix::hip::detail::ShouldFuseQKNormRoPEKvWrite() == true);
+  Check(strix::hip::detail::ShouldFuseQKNormRoPEKvWrite() == true);
 
   // The cross-module fusions below are DISABLED -> decode uses the unfused module
   // fallback. Each must stay consistent with the composition layer's choice.
-  assert(strix::hip::detail::ShouldFuseResidualAddRMSNorm() == false);
-  assert(strix::hip::detail::ShouldFuseSSMGateResidual() == false);
-  assert(strix::hip::detail::ShouldFuseRMSNormProjection() == false);
-  assert(strix::hip::detail::ShouldFuseFFNSwiGLU() == false);
-  assert(strix::hip::detail::ShouldPrefetchNextLayer() == false);
+  Check(strix::hip::detail::ShouldFuseResidualAddRMSNorm() == false);
+  Check(strix::hip::detail::ShouldFuseSSMGateResidual() == false);
+  Check(strix::hip::detail::ShouldFuseRMSNormProjection() == false);
+  Check(strix::hip::detail::ShouldFuseFFNSwiGLU() == false);
+  Check(strix::hip::detail::ShouldPrefetchNextLayer() == false);
 
   auto candidate = strix::hip::QwenExecutionPolicy::Production();
   candidate.fuse_decode_ssm_output_residual = true;
   candidate.prefetch_next_layer = true;
-  assert(strix::hip::detail::ShouldFuseDecodeSSMOutputResidual(candidate));
-  assert(strix::hip::detail::ShouldPrefetchNextLayer(candidate));
-  assert(candidate.Fingerprint() == ((1ULL << 0U) | (1ULL << 4U) |
+  Check(strix::hip::detail::ShouldFuseDecodeSSMOutputResidual(candidate));
+  Check(strix::hip::detail::ShouldPrefetchNextLayer(candidate));
+  Check(candidate.Fingerprint() == ((1ULL << 0U) | (1ULL << 4U) |
                                      (1ULL << 7U)));
 
   const auto decode_plan = strix::hip::ResolveQwenLayerRoute(
       candidate, strix::hip::QwenExecutionMode::kDecode, false);
   const auto prefill_plan = strix::hip::ResolveQwenLayerRoute(
       candidate, strix::hip::QwenExecutionMode::kPrefill, false);
-  assert(decode_plan.fuse_ssm_epilogue);
-  assert(decode_plan.prefetch_next_layer);
-  assert(!prefill_plan.fuse_ssm_epilogue);
-  assert(!prefill_plan.prefetch_next_layer);
-  assert(decode_plan.Fingerprint() != prefill_plan.Fingerprint());
+  Check(decode_plan.fuse_ssm_epilogue);
+  Check(decode_plan.prefetch_next_layer);
+  Check(!prefill_plan.fuse_ssm_epilogue);
+  Check(!prefill_plan.prefetch_next_layer);
+  Check(decode_plan.Fingerprint() != prefill_plan.Fingerprint());
 
   auto ffn_candidate = strix::hip::QwenExecutionPolicy::Production();
   ffn_candidate.fuse_decode_rmsnorm_projection = true;
   auto ffn_plan = strix::hip::ResolveQwenLayerRoute(
       ffn_candidate, strix::hip::QwenExecutionMode::kDecode, true);
-  assert(ffn_plan.fuse_rmsnorm_projection);
-  assert(!ffn_plan.fuse_ffn_swiglu);
+  Check(ffn_plan.fuse_rmsnorm_projection);
+  Check(!ffn_plan.fuse_ffn_swiglu);
 
   ffn_candidate.fuse_decode_rmsnorm_swiglu = true;
   ffn_plan = strix::hip::ResolveQwenLayerRoute(
       ffn_candidate, strix::hip::QwenExecutionMode::kDecode, true);
-  assert(ffn_plan.fuse_rmsnorm_projection);
-  assert(ffn_plan.fuse_ffn_swiglu);
+  Check(ffn_plan.fuse_rmsnorm_projection);
+  Check(ffn_plan.fuse_ffn_swiglu);
 
   const auto production_ssm = strix::hip::ResolveQwenLayerRouteWithReasons(
       strix::hip::QwenExecutionPolicy::Production(),
       strix::hip::QwenExecutionMode::kDecode, false);
-  assert(strix::hip::HasQwenRouteRejection(
+  Check(strix::hip::HasQwenRouteRejection(
       production_ssm.rejected,
       strix::hip::QwenRouteRejection::kQkNormRopeKvRequiresAttention));
 
@@ -117,45 +124,45 @@ void TestFusionToggleValues() {
   all_routes.prefetch_next_layer = true;
   const auto decode_attention = strix::hip::ResolveQwenLayerRouteWithReasons(
       all_routes, strix::hip::QwenExecutionMode::kDecode, true);
-  assert(strix::hip::HasQwenRouteRejection(
+  Check(strix::hip::HasQwenRouteRejection(
       decode_attention.rejected,
       strix::hip::QwenRouteRejection::kSsmEpilogueRequiresSsm));
-  assert(strix::hip::HasQwenRouteRejection(
+  Check(strix::hip::HasQwenRouteRejection(
       decode_attention.rejected,
       strix::hip::QwenRouteRejection::kPrefillFfnSwiGluRequiresPrefill));
-  assert(strix::hip::HasQwenRouteRejection(
+  Check(strix::hip::HasQwenRouteRejection(
       decode_attention.rejected,
       strix::hip::QwenRouteRejection::kPrefillSsmEpilogueRequiresPrefill));
 
   const auto prefill_ssm = strix::hip::ResolveQwenLayerRouteWithReasons(
       all_routes, strix::hip::QwenExecutionMode::kPrefill, false);
-  assert(strix::hip::HasQwenRouteRejection(
+  Check(strix::hip::HasQwenRouteRejection(
       prefill_ssm.rejected,
       strix::hip::QwenRouteRejection::kDecodeFfnSwiGluRequiresDecode));
-  assert(strix::hip::HasQwenRouteRejection(
+  Check(strix::hip::HasQwenRouteRejection(
       prefill_ssm.rejected,
       strix::hip::QwenRouteRejection::kDecodeSsmEpilogueRequiresDecode));
-  assert(strix::hip::HasQwenRouteRejection(
+  Check(strix::hip::HasQwenRouteRejection(
       prefill_ssm.rejected,
       strix::hip::QwenRouteRejection::kRmsNormProjectionRequiresDecode));
-  assert(strix::hip::HasQwenRouteRejection(
+  Check(strix::hip::HasQwenRouteRejection(
       prefill_ssm.rejected,
       strix::hip::QwenRouteRejection::kPrefetchRequiresDecode));
 
   const auto graph_rejections = strix::hip::ResolveQwenGraphRejections(
       false, true, true, false);
-  assert(strix::hip::HasQwenGraphRejection(
+  Check(strix::hip::HasQwenGraphRejection(
       graph_rejections,
       strix::hip::QwenGraphRejection::kLogitsNotRequested));
-  assert(strix::hip::HasQwenGraphRejection(
+  Check(strix::hip::HasQwenGraphRejection(
       graph_rejections,
       strix::hip::QwenGraphRejection::kSplitKAttentionRequired));
-  assert(strix::hip::HasQwenGraphRejection(
+  Check(strix::hip::HasQwenGraphRejection(
       graph_rejections,
       strix::hip::QwenGraphRejection::kLayerPrefetchEnabled));
-  assert(strix::hip::HasQwenGraphRejection(
+  Check(strix::hip::HasQwenGraphRejection(
       graph_rejections, strix::hip::QwenGraphRejection::kGraphDisabled));
-  assert(strix::hip::ResolveQwenGraphRejections(true, false, false, true) ==
+  Check(strix::hip::ResolveQwenGraphRejections(true, false, false, true) ==
          strix::hip::QwenGraphRejection::kNone);
 
   const auto workload_seed = strix::hip::BeginQwenGraphWorkloadIdentity();
@@ -165,8 +172,8 @@ void TestFusionToggleValues() {
       workload_seed, decode_plan.Fingerprint());
   const auto workload_b = strix::hip::ExtendQwenGraphWorkloadIdentity(
       workload_seed, prefill_plan.Fingerprint());
-  assert(workload_a == workload_a_repeat);
-  assert(workload_a != workload_b);
+  Check(workload_a == workload_a_repeat);
+  Check(workload_a != workload_b);
 }
 
 // --- 2. Unfused fallback: attn pre-norm RMSNorm (RMSNormProjection fusion off) ---
@@ -200,8 +207,8 @@ void TestUnfusedFallback_Norm() {
   }
 
   auto res = strix::test::compare_module_logits(ref, out);
-  assert(res.match);
-  assert(res.finite);
+  Check(res.match);
+  Check(res.finite);
 }
 
 // --- 3. Unfused fallback: residual add (SSM gate+residual and residual+norm off) ---
@@ -213,7 +220,7 @@ void TestUnfusedFallback_Residual() {
   const CpuModuleContext ctx;
   ResidualAdd(ctx, dst, src);  // dst += src, in-place
   for (std::size_t i = 0; i < dst.size(); ++i) {
-    assert(std::abs(dst[i] - expect[i]) < 1e-6F);
+    Check(std::abs(dst[i] - expect[i]) < 1e-6F);
   }
 }
 
@@ -234,8 +241,8 @@ void TestUnfusedFallback_Rope() {
     std::vector<float> k0 = k;
     RopeForward(ctx, view, q0, k0, 0u);
     for (std::size_t i = 0; i < q0.size(); ++i) {
-      assert(std::abs(q0[i] - q[i]) < 1e-5F);
-      assert(std::abs(k0[i] - k[i]) < 1e-5F);
+      Check(std::abs(q0[i] - q[i]) < 1e-5F);
+      Check(std::abs(k0[i] - k[i]) < 1e-5F);
     }
   }
   // pos>0 -> finite output; the first head pair actually rotates (changes value).
@@ -244,14 +251,14 @@ void TestUnfusedFallback_Rope() {
     std::vector<float> k5 = k;
     RopeForward(ctx, view, q5, k5, 5u);
     for (float v : q5) {
-      assert(std::isfinite(v));
+      Check(std::isfinite(v));
     }
     for (float v : k5) {
-      assert(std::isfinite(v));
+      Check(std::isfinite(v));
     }
     const bool rotated = std::abs(q5[0] - q[0]) > 1e-4F ||
                          std::abs(q5[1] - q[1]) > 1e-4F;
-    assert(rotated);
+    Check(rotated);
   }
 }
 

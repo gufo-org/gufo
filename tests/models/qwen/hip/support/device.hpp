@@ -16,25 +16,40 @@ inline constexpr int kHipTestSuccess = EXIT_SUCCESS;
 inline constexpr int kHipTestFailure = EXIT_FAILURE;
 inline constexpr int kCtestSkipReturnCode = 77;
 
+[[nodiscard]] constexpr int ResolveHipDeviceGate(
+    hipError_t status, int device_count,
+    HipDeviceRequirement requirement) noexcept {
+  if (status == hipSuccess && device_count > 0) {
+    return kHipTestSuccess;
+  }
+  if (status == hipSuccess || status == hipErrorNoDevice) {
+    return requirement == HipDeviceRequirement::kOptional
+               ? kCtestSkipReturnCode
+               : kHipTestFailure;
+  }
+  return kHipTestFailure;
+}
+
 [[nodiscard]] inline int GateHipDevice(HipDeviceRequirement requirement,
                                        std::string_view test_name) {
   int device_count = 0;
   const hipError_t status = hipGetDeviceCount(&device_count);
-  if (status != hipSuccess) {
+  const int result = ResolveHipDeviceGate(status, device_count, requirement);
+  if (result == kHipTestSuccess) {
+    return result;
+  }
+  if (status != hipSuccess && status != hipErrorNoDevice) {
     std::cerr << test_name << ": HIP device discovery failed: "
               << hipGetErrorString(status) << "; failing test\n";
-    return kHipTestFailure;
+    return result;
   }
-  if (device_count > 0) {
-    return kHipTestSuccess;
-  }
-  if (requirement == HipDeviceRequirement::kOptional) {
+  if (result == kCtestSkipReturnCode) {
     std::cout << test_name
               << ": no HIP device found; skipping optional test\n";
-    return kCtestSkipReturnCode;
+    return result;
   }
   std::cerr << test_name << ": no HIP device found; failing required test\n";
-  return kHipTestFailure;
+  return result;
 }
 
 }  // namespace strix::test

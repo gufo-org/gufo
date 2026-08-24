@@ -192,6 +192,31 @@ struct QwenGemmResolution {
     return RejectQwenGemm(QwenGemmRejection::kQuantResidualEpilogue);
   }
 
+  if (request.mode == QwenGemmMode::kHipPrefill) {
+    if (format.quantized) {
+      constexpr std::size_t kRowsPerBlock = 4;
+      constexpr std::size_t kRoundUp = kRowsPerBlock - 1U;
+      const std::size_t max_grid =
+          std::numeric_limits<std::uint32_t>::max();
+      if (request.batch_size > max_grid || request.m > max_size - kRoundUp ||
+          (request.m + kRoundUp) / kRowsPerBlock > max_grid) {
+        return RejectQwenGemm(QwenGemmRejection::kShapeOverflow);
+      }
+    } else {
+      const std::size_t max_blas =
+          static_cast<std::size_t>(std::numeric_limits<int>::max());
+      if (request.batch_size > max_blas || request.m > max_blas ||
+          request.k > max_blas) {
+        return RejectQwenGemm(QwenGemmRejection::kShapeOverflow);
+      }
+    }
+  } else if (request.mode == QwenGemmMode::kHipDecode ||
+             request.mode == QwenGemmMode::kHipMtp) {
+    if (request.m > std::numeric_limits<std::uint32_t>::max()) {
+      return RejectQwenGemm(QwenGemmRejection::kShapeOverflow);
+    }
+  }
+
   if (request.mode == QwenGemmMode::kCpu) {
     switch (request.type) {
       case core::GgmlType::kF32:

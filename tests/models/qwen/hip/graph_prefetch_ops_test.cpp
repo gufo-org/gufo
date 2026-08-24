@@ -181,6 +181,6 @@ int main() {
   return 0;
 #else
   std::cout << "HIP disabled, skipping Qwen graph prefetch ops test.\n";
-  return 0;
+  return 77;
 #endif
 }

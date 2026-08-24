@@ -505,6 +505,6 @@ int main() {
   return 0;
 #else
   std::cout << "HIP disabled, skipping Qwen QK norm, RoPE, and KV fusion ops test.\n";
-  return 0;
+  return 77;
 #endif
 }

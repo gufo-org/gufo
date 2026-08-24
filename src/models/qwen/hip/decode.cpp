@@ -52,9 +52,17 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
       graph_key_.execution_identity, graph_key_.workload_identity,
       static_cast<std::uint32_t>(graph_rejections));
 
+  const auto launch_captured_graph = [&]() {
+    if (!graph_executor_.Launch(arena_.stream, graph_key_)) {
+      graph_executor_.Reset();
+      throw std::runtime_error(
+          "Qwen HIP graph launch failed; captured graph was invalidated");
+    }
+  };
+
   if (graph_rejections == QwenGraphRejection::kNone) {
     if (graph_executor_.IsCapturedFor(graph_key_)) {
-      graph_executor_.Launch(arena_.stream, graph_key_);
+      launch_captured_graph();
     } else {
       const bool ok = graph_executor_.TryCapture(
           arena_.stream, graph_key_, [&]() {
@@ -62,7 +70,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
                               compute_logits);
           });
       if (ok) {
-        graph_executor_.Launch(arena_.stream, graph_key_);
+        launch_captured_graph();
       } else {
         ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
                           compute_logits);

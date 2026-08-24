@@ -27,6 +27,7 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
+#include "tests/models/qwen/hip/support/device.hpp"
 
 void TestDequantizeQ8KToBf16Equivalence() {
   constexpr std::size_t QK = 256;
@@ -293,11 +294,11 @@ void TestDequantizeToBf16Equivalence() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  int device_count = 0;
-  HIP_CHECK(hipGetDeviceCount(&device_count));
-  if (device_count == 0) {
-    std::cout << "No HIP device found, skipping Qwen dequant ops test.\n";
-    return 0;
+  const int device_status = strix::test::GateHipDevice(
+      strix::test::HipDeviceRequirement::kOptional,
+      "Qwen dequant ops test");
+  if (device_status != strix::test::kHipTestSuccess) {
+    return device_status;
   }
 
   TestDequantizeQ8KToBf16Equivalence();
@@ -306,6 +307,6 @@ int main() {
   return 0;
 #else
   std::cout << "HIP disabled, skipping Qwen dequant ops test.\n";
-  return 0;
+  return 77;
 #endif
 }

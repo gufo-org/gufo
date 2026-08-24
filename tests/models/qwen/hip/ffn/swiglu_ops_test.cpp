@@ -309,6 +309,6 @@ int main() {
   return 0;
 #else
   std::cout << "HIP disabled, skipping Qwen SwiGLU ops test.\n";
-  return 0;
+  return 77;
 #endif
 }

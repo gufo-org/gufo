@@ -368,6 +368,6 @@ int main() {
   return 0;
 #else
   std::cout << "HIP disabled, skipping Qwen dense GEMM and BLAS ops test.\n";
-  return 0;
+  return 77;
 #endif
 }

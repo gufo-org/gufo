@@ -108,6 +108,10 @@ if (ENGINE_ENABLE_HIP)
       SKIP_RETURN_CODE 77)
   endfunction()
 
+  add_qwen_hip_test(qwen_hip_device_gate_test
+    tests/models/qwen/hip/device_gate_test.cpp
+    "hip;qwen;test-support;device-gate")
+
   add_qwen_hip_test(qwen_gpu_ops_test
     tests/models/qwen/hip/basic/blas_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;basic;blas")

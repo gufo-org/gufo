@@ -1,6 +1,7 @@
 #include "src/models/qwen/gemm_route.hpp"
 
 #include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -23,18 +24,27 @@ void Check(bool condition, const char* message) {
   }
 }
 
-QwenGemmRoute Route(GgmlType type, std::size_t m, std::size_t k,
-                    QwenGemmMode mode,
-                    QwenGemmCapabilities capabilities = {},
-                    bool residual_epilogue = false,
-                    std::size_t batch_size = 1) {
+auto Resolution(GgmlType type, std::size_t m, std::size_t k,
+                QwenGemmMode mode,
+                QwenGemmCapabilities capabilities = {},
+                bool residual_epilogue = false,
+                std::size_t batch_size = 1) {
   return ResolveQwenGemmRoute({.type = type,
                                .batch_size = batch_size,
                                .m = m,
                                .k = k,
                                .mode = mode,
                                .capabilities = capabilities,
-                               .residual_epilogue = residual_epilogue})
+                               .residual_epilogue = residual_epilogue});
+}
+
+QwenGemmRoute Route(GgmlType type, std::size_t m, std::size_t k,
+                    QwenGemmMode mode,
+                    QwenGemmCapabilities capabilities = {},
+                    bool residual_epilogue = false,
+                    std::size_t batch_size = 1) {
+  return Resolution(type, m, k, mode, capabilities, residual_epilogue,
+                    batch_size)
       .route;
 }
 
@@ -58,13 +68,28 @@ void TestFormatCapabilities() {
     const std::size_t k = descriptor.block_elements == 0
                               ? 32
                               : descriptor.block_elements;
-    const auto cpu = ResolveQwenGemmRoute({.type = type,
-                                           .batch_size = 1,
-                                           .m = 1,
-                                           .k = k,
-                                           .mode = QwenGemmMode::kCpu});
-    Check(cpu.accepted() == descriptor.cpu_direct,
-          "CPU route must match the format capability descriptor");
+    constexpr std::array modes{
+        QwenGemmMode::kCpu,
+        QwenGemmMode::kHipDecode,
+        QwenGemmMode::kHipPrefill,
+        QwenGemmMode::kHipMtp,
+    };
+    for (const auto mode : modes) {
+      const auto resolution = Resolution(type, 1, k, mode);
+      const bool expected =
+          mode == QwenGemmMode::kCpu
+              ? descriptor.cpu_direct
+              : mode == QwenGemmMode::kHipPrefill
+                    ? descriptor.hip_prefill_direct
+                    : descriptor.hip_decode_direct;
+      Check(resolution.accepted() == expected,
+            "route must match the format/mode capability descriptor");
+      Check(expected
+                ? resolution.rejection == QwenGemmRejection::kNone
+                : resolution.rejection ==
+                      QwenGemmRejection::kUnsupportedFormat,
+            "format/mode route must expose the expected rejection reason");
+    }
   }
 
   Check(DescribeQwenGemmFormat(GgmlType::kQ8_0).block_elements == 32,
@@ -163,6 +188,78 @@ void TestPrefillRoutes() {
         "prefill quant direct route");
 }
 
+void TestBackendDimensionBoundaries() {
+  const std::size_t int_max =
+      static_cast<std::size_t>(std::numeric_limits<int>::max());
+  const std::size_t uint_max =
+      static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max());
+
+  Check(Resolution(GgmlType::kBF16, int_max, 1,
+                   QwenGemmMode::kHipPrefill)
+            .accepted(),
+        "hipBLAS M=INT_MAX must remain representable");
+  Check(Resolution(GgmlType::kBF16, 1, int_max,
+                   QwenGemmMode::kHipPrefill)
+            .accepted(),
+        "hipBLAS K=INT_MAX must remain representable");
+  Check(Resolution(GgmlType::kBF16, 1, 1,
+                   QwenGemmMode::kHipPrefill, {}, false, int_max)
+            .accepted(),
+        "hipBLAS batch=INT_MAX must remain representable");
+  Check(Resolution(GgmlType::kBF16, int_max + 1U, 1,
+                   QwenGemmMode::kHipPrefill)
+            .rejection == QwenGemmRejection::kShapeOverflow,
+        "hipBLAS M above INT_MAX must reject");
+  Check(Resolution(GgmlType::kBF16, 1, int_max + 1U,
+                   QwenGemmMode::kHipPrefill)
+            .rejection == QwenGemmRejection::kShapeOverflow,
+        "hipBLAS K above INT_MAX must reject");
+  Check(Resolution(GgmlType::kBF16, 1, 1,
+                   QwenGemmMode::kHipPrefill, {}, false, int_max + 1U)
+            .rejection == QwenGemmRejection::kShapeOverflow,
+        "hipBLAS batch above INT_MAX must reject");
+
+  Check(Resolution(GgmlType::kF32, uint_max, 1,
+                   QwenGemmMode::kHipDecode)
+            .accepted(),
+        "decode grid M=UINT_MAX must remain representable");
+  Check(Resolution(GgmlType::kF32, uint_max + 1U, 1,
+                   QwenGemmMode::kHipDecode)
+            .rejection == QwenGemmRejection::kShapeOverflow,
+        "decode grid M above UINT_MAX must reject");
+  Check(Resolution(GgmlType::kBF16, uint_max, 1,
+                   QwenGemmMode::kHipMtp)
+            .accepted(),
+        "MTP grid M=UINT_MAX must remain representable");
+  Check(Resolution(GgmlType::kBF16, uint_max + 1U, 1,
+                   QwenGemmMode::kHipMtp)
+            .rejection == QwenGemmRejection::kShapeOverflow,
+        "MTP grid M above UINT_MAX must reject");
+
+  Check(Resolution(GgmlType::kQ8_0, 1, 32,
+                   QwenGemmMode::kHipPrefill, {}, false, uint_max)
+            .accepted(),
+        "quant prefill batch=UINT_MAX must remain representable");
+  Check(Resolution(GgmlType::kQ8_0, 1, 32,
+                   QwenGemmMode::kHipPrefill, {}, false, uint_max + 1U)
+            .rejection == QwenGemmRejection::kShapeOverflow,
+        "quant prefill batch above UINT_MAX must reject");
+
+  constexpr std::size_t rows_per_block = 4;
+  if (uint_max <=
+      std::numeric_limits<std::size_t>::max() / rows_per_block) {
+    const std::size_t max_rounded_m = uint_max * rows_per_block;
+    Check(Resolution(GgmlType::kQ8_0, max_rounded_m, 32,
+                     QwenGemmMode::kHipPrefill)
+              .accepted(),
+          "quant prefill rounded grid at UINT_MAX must remain representable");
+    Check(Resolution(GgmlType::kQ8_0, max_rounded_m + 1U, 32,
+                     QwenGemmMode::kHipPrefill)
+              .rejection == QwenGemmRejection::kShapeOverflow,
+          "quant prefill rounded grid above UINT_MAX must reject");
+  }
+}
+
 void TestRejections() {
   auto result = ResolveQwenGemmRoute(
       {.type = GgmlType::kF32, .batch_size = 0, .m = 1, .k = 1});
@@ -173,12 +270,30 @@ void TestRejections() {
   Check(result.rejection == QwenGemmRejection::kZeroShape,
         "zero M rejection");
   result = ResolveQwenGemmRoute(
+      {.type = GgmlType::kF32, .batch_size = 1, .m = 1, .k = 0});
+  Check(result.rejection == QwenGemmRejection::kZeroShape,
+        "zero K rejection");
+  result = ResolveQwenGemmRoute(
       {.type = GgmlType::kF32,
        .batch_size = 1,
        .m = std::numeric_limits<std::size_t>::max(),
        .k = 2});
   Check(result.rejection == QwenGemmRejection::kShapeOverflow,
-        "shape overflow rejection");
+        "M*K overflow rejection");
+  result = ResolveQwenGemmRoute(
+      {.type = GgmlType::kF32,
+       .batch_size = std::numeric_limits<std::size_t>::max(),
+       .m = 2,
+       .k = 1});
+  Check(result.rejection == QwenGemmRejection::kShapeOverflow,
+        "batch*M overflow rejection");
+  result = ResolveQwenGemmRoute(
+      {.type = GgmlType::kF32,
+       .batch_size = std::numeric_limits<std::size_t>::max(),
+       .m = 1,
+       .k = 2});
+  Check(result.rejection == QwenGemmRejection::kShapeOverflow,
+        "batch*K overflow rejection");
   result = ResolveQwenGemmRoute(
       {.type = GgmlType::kQ8_0, .batch_size = 1, .m = 1, .k = 31});
   Check(result.rejection == QwenGemmRejection::kMisalignedQuantK,
@@ -205,6 +320,7 @@ int main() {
   TestCpuRoutes();
   TestDecodeAndMtpRoutes();
   TestPrefillRoutes();
+  TestBackendDimensionBoundaries();
   TestRejections();
   std::cout << "Qwen GEMM route tests passed.\n";
   return 0;

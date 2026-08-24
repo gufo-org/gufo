@@ -338,6 +338,6 @@ int main() {
   return 0;
 #else
   std::cout << "HIP disabled, skipping Qwen long-context attention ops test.\n";
-  return 0;
+  return 77;
 #endif
 }

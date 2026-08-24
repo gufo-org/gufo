@@ -274,6 +274,6 @@ int main() {
   return 0;
 #else
   std::cout << "HIP disabled, skipping Qwen attention projection ops test.\n";
-  return 0;
+  return 77;
 #endif
 }

@@ -93,7 +93,9 @@ Policy identity now participates in every Qwen decode graph-capture key, whose
 workload identity also includes deterministic configuration and resolved decode
 route fingerprints. Pure resolution records report why requested routes are
 masked by mode or layer kind, and graph eligibility reports why capture is
-rejected. Remaining policy work is to expose a controlled same-binary A/B
+rejected. A failed graph launch invalidates the captured instance and fails the
+decode instead of executing an eager fallback after potentially partial queue
+submission. Remaining policy work is to expose a controlled same-binary A/B
 selection surface without reading mutable process state during capture. A
 benchmark result without its resolved route IDs and policy fingerprint is not
 reproducible evidence.
@@ -154,8 +156,10 @@ different consumer capabilities.
 `gemm_route.hpp` now provides the host-only pure Qwen GEMM route contract. Its
 format descriptor distinguishes CPU, HIP decode/MTP, and HIP prefill support;
 its resolver owns shape/alignment rejection and the existing BF16 wave32,
-baseline block, hipBLAS, hipBLASLt-try, and direct-quant thresholds. CPU
-`TensorGEMV`, HIP decode, prefill, modules, and MTP delegate to that contract.
+baseline block, hipBLAS, hipBLASLt-try, and direct-quant thresholds. It also
+rejects dimensions that cannot be represented by hipBLAS integer arguments or
+HIP `dim3` grid axes before any narrowing conversion. CPU `TensorGEMV`, HIP
+decode, prefill, modules, and MTP delegate to that contract.
 Kernel bodies and hipBLASLt runtime fallback remain unchanged, while NPU MTP
 projection stays outside the GEMM resolver because it is a cross-device
 composition route with a distinct packed ABI.
@@ -197,6 +201,10 @@ The CPU SSM module now owns a self-contained `QwenSsmParameters` slice with
 exactly the nine SSM tensors and all recurrence dimensions. The whole-layer
 `ForwardSSM` entry point remains as a compatibility wrapper, while module and
 production callers share one validated implementation and no layer back-pointer.
+Before recurrent state changes, every nonempty tensor is checked for its exact
+role shape, encoded-storage extent, supported CPU access/GEMM route, and the SSM
+normalization width must equal `val_dim`; rejected slices zero-fill output and
+leave both recurrent caches byte-identical.
 
 The remaining extraction work is:
 

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/models/qwen/forward.hpp"
+#include "src/models/qwen/gemm_route.hpp"
 
 namespace strix::models {
 
@@ -69,9 +70,36 @@ namespace {
   return true;
 }
 
-[[nodiscard]] bool HasTensorElements(const QwenTensorRef& tensor,
-                                     std::size_t required) noexcept {
-  return tensor.empty() || tensor.num_elements >= required;
+[[nodiscard]] bool HasReadableTensorStorage(
+    const QwenTensorRef& tensor, std::size_t required) noexcept {
+  return tensor.empty() ||
+         (tensor.num_elements >= required && tensor.FitsAvailableStorage());
+}
+
+[[nodiscard]] bool HasCpuElementAccess(const QwenTensorRef& tensor,
+                                       std::size_t required) noexcept {
+  return tensor.empty() ||
+         (HasReadableTensorStorage(tensor, required) &&
+          qwen::DescribeQwenGemmFormat(tensor.type).cpu_direct);
+}
+
+[[nodiscard]] bool HasCpuProjection(const QwenTensorRef& tensor,
+                                    std::size_t m,
+                                    std::size_t k) noexcept {
+  if (tensor.empty()) {
+    return true;
+  }
+  std::size_t required = 0;
+  if (!CheckedMultiply(m, k, required) ||
+      !HasReadableTensorStorage(tensor, required)) {
+    return false;
+  }
+  return qwen::ResolveQwenGemmRoute({.type = tensor.type,
+                                     .batch_size = 1,
+                                     .m = m,
+                                     .k = k,
+                                     .mode = qwen::QwenGemmMode::kCpu})
+      .accepted();
 }
 
 [[nodiscard]] bool ValidateSsmInvocation(
@@ -110,31 +138,24 @@ namespace {
     return false;
   }
 
-  std::size_t qkv_projection_elements = 0;
-  std::size_t gate_projection_elements = 0;
-  std::size_t scalar_projection_elements = 0;
-  std::size_t output_projection_elements = 0;
   std::size_t conv_elements = 0;
-  if (!CheckedMultiply(qkv_dim, x.size(), qkv_projection_elements) ||
-      !CheckedMultiply(gate_dim, x.size(), gate_projection_elements) ||
-      !CheckedMultiply(parameters.value_head_count, x.size(),
-                       scalar_projection_elements) ||
-      !CheckedMultiply(x.size(), gate_dim, output_projection_elements) ||
-      !CheckedMultiply(qkv_dim, parameters.conv_kernel, conv_elements)) {
+  if (!CheckedMultiply(qkv_dim, parameters.conv_kernel, conv_elements)) {
     return false;
   }
 
-  return HasTensorElements(parameters.qkv, qkv_projection_elements) &&
-         HasTensorElements(parameters.gate, gate_projection_elements) &&
-         HasTensorElements(parameters.a, parameters.value_head_count) &&
-         HasTensorElements(parameters.dt, parameters.value_head_count) &&
-         HasTensorElements(parameters.alpha, scalar_projection_elements) &&
-         HasTensorElements(parameters.beta, scalar_projection_elements) &&
+  return HasCpuProjection(parameters.qkv, qkv_dim, x.size()) &&
+         HasCpuProjection(parameters.gate, gate_dim, x.size()) &&
+         HasCpuElementAccess(parameters.a, parameters.value_head_count) &&
+         HasCpuElementAccess(parameters.dt, parameters.value_head_count) &&
+         HasCpuProjection(parameters.alpha, parameters.value_head_count,
+                          x.size()) &&
+         HasCpuProjection(parameters.beta, parameters.value_head_count,
+                          x.size()) &&
          (parameters.norm.empty() ||
-          (parameters.norm.num_elements != 0 &&
-           gate_dim % parameters.norm.num_elements == 0)) &&
-         HasTensorElements(parameters.output, output_projection_elements) &&
-         HasTensorElements(parameters.conv1d, conv_elements);
+          (parameters.norm.num_elements == parameters.val_dim &&
+           HasCpuElementAccess(parameters.norm, parameters.val_dim))) &&
+         HasCpuProjection(parameters.output, x.size(), gate_dim) &&
+         HasCpuElementAccess(parameters.conv1d, conv_elements);
 }
 
 }  // namespace

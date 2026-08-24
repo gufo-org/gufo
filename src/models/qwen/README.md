@@ -71,10 +71,6 @@ layer-64 graph, and feeds proposed tokens through the speculative backend.
 | [`oracles.*`](oracles.hpp) | Independent reference helpers used for correctness comparison. |
 | [`CMakeLists.txt`](CMakeLists.txt) | Explicit Qwen production source registration and HIP/XRT source ownership. |
 
-The longer-term architecture and deferred sequencing live in
-[`notes-for-refactoring.md`](../../../notes-for-refactoring.md); that document is
-a roadmap, while this README describes the current implementation.
-
 ## Runtime entry points
 
 ### CPU/reference
@@ -358,9 +354,9 @@ When adding or changing a route:
 
 ## Known limitations and deferred work
 
-- The current refactoring has not yet been compiled or run on the supported
-  Linux x86-64 Strix Halo target. Static checks cannot establish numerical,
-  capture/replay, quality, or performance parity.
+- Changes must be validated on the supported Linux x86-64 Strix Halo target;
+  static checks cannot establish numerical, capture/replay, quality, or
+  performance parity.
 - CPU code is an oracle and fallback for tests, not the supported production
   performance path.
 - HIP module extraction is incomplete: decode/prefill composition still owns

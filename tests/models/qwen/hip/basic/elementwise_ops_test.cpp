@@ -82,6 +82,6 @@ int main() {
   return 0;
 #else
   std::cout << "HIP disabled, skipping Qwen elementwise GPU ops test.\n";
-  return 0;
+  return 77;
 #endif
 }
