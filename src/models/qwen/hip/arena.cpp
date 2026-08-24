@@ -131,28 +131,39 @@ QwenGpuScratchView QwenGpuArena::GetScratchView(
                     ssm_qkv, config_.ssm_inner_size,
                     config_.ssm_time_step_rank});
   return {
-      .hidden = {d_hidden, batch * hidden},
-      .normed = {d_normed, batch * hidden},
-      .q = {d_q, batch * attention},
-      .k = {d_k, batch * kv},
-      .v = {d_v, batch * kv},
-      .attention_out = {d_attn_out, batch * hidden},
-      .ffn_gate = {d_ffn_gate, batch * config_.intermediate_size},
-      .ffn_up = {d_ffn_up, batch * config_.intermediate_size},
-      .ffn_activation = {d_ffn_act, batch * config_.intermediate_size},
-      .ffn_out = {d_ffn_out, batch * hidden},
-      .ssm_qkv = {d_ssm_qkv, batch * projection},
-      .conv_out = {d_conv_out, batch * ssm_qkv},
-      .ssm_gate = {d_ssm_gate, batch * recurrent},
-      .ssm_out = {d_ssm_out, batch * recurrent},
-      .alpha = {d_alpha_buf, batch * config_.ssm_time_step_rank},
-      .beta = {d_beta_buf, batch * config_.ssm_time_step_rank},
-      .logits = {d_logits, config_.vocab_size},
-      .bf16 = {static_cast<hip_bfloat16*>(d_scratch_bf16), bf16_scratch},
-      .split_k_attention = {d_split_k_attention, split_k},
-      .weight_bf16 = {d_weights_bf16, weight_bf16},
-      .prompt_tokens = {d_prompt_tokens,
-                        std::max<std::size_t>(batch, 2)},
+      .decode = {
+          .hidden = {d_hidden, batch * hidden},
+          .normed = {d_normed, batch * hidden},
+          .logits = {d_logits, config_.vocab_size},
+          .bf16 = {static_cast<hip_bfloat16*>(d_scratch_bf16), bf16_scratch},
+          .weight_bf16 = {d_weights_bf16, weight_bf16},
+          .prompt_tokens = {d_prompt_tokens,
+                            std::max<std::size_t>(batch, 2)},
+          // d_alpha_buf is reused only after all SSM layers finish. Preserve
+          // that exact address while exposing the sampling epoch's uint32 view.
+          .sampled_token = {reinterpret_cast<std::uint32_t*>(d_alpha_buf), 1},
+      },
+      .attention = {
+          .q = {d_q, batch * attention},
+          .k = {d_k, batch * kv},
+          .v = {d_v, batch * kv},
+          .output = {d_attn_out, batch * hidden},
+          .split_k = {d_split_k_attention, split_k},
+      },
+      .ssm = {
+          .qkv = {d_ssm_qkv, batch * projection},
+          .conv_out = {d_conv_out, batch * ssm_qkv},
+          .gate = {d_ssm_gate, batch * recurrent},
+          .out = {d_ssm_out, batch * recurrent},
+          .alpha = {d_alpha_buf, batch * config_.ssm_time_step_rank},
+          .beta = {d_beta_buf, batch * config_.ssm_time_step_rank},
+      },
+      .ffn = {
+          .gate = {d_ffn_gate, batch * config_.intermediate_size},
+          .up = {d_ffn_up, batch * config_.intermediate_size},
+          .activation = {d_ffn_act, batch * config_.intermediate_size},
+          .out = {d_ffn_out, batch * hidden},
+      },
   };
 }
 

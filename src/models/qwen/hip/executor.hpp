@@ -7,6 +7,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "src/core/model_config.hpp"
@@ -78,31 +79,61 @@ private:
   std::vector<QwenGpuWeightRegion> weight_regions_;
 };
 
-/// Typed non-owning views over stable Qwen GPU arena allocations. Spans carry
-/// element counts while preserving the exact device addresses used by kernels.
-struct QwenGpuScratchView {
+/// Shared decode-lifetime workspaces over stable arena allocations.
+struct QwenDecodeScratch {
   std::span<float> hidden;
   std::span<float> normed;
+  std::span<float> logits;
+  std::span<hip_bfloat16> bf16;
+  std::span<hip_bfloat16> weight_bf16;
+  std::span<std::uint32_t> prompt_tokens;
+
+  /// Aliases the first element of QwenSsmScratch::alpha. It is legal only
+  /// after all layer execution has completed, during the sampling/output epoch.
+  std::span<std::uint32_t> sampled_token;
+};
+
+struct QwenAttentionScratch {
   std::span<float> q;
   std::span<float> k;
   std::span<float> v;
-  std::span<float> attention_out;
-  std::span<float> ffn_gate;
-  std::span<float> ffn_up;
-  std::span<float> ffn_activation;
-  std::span<float> ffn_out;
-  std::span<float> ssm_qkv;
+  std::span<float> output;
+  std::span<float> split_k;
+};
+
+struct QwenSsmScratch {
+  std::span<float> qkv;
   std::span<float> conv_out;
-  std::span<float> ssm_gate;
-  std::span<float> ssm_out;
+  std::span<float> gate;
+  std::span<float> out;
   std::span<float> alpha;
   std::span<float> beta;
-  std::span<float> logits;
-  std::span<hip_bfloat16> bf16;
-  std::span<float> split_k_attention;
-  std::span<hip_bfloat16> weight_bf16;
-  std::span<std::uint32_t> prompt_tokens;
 };
+
+struct QwenFfnScratch {
+  std::span<float> gate;
+  std::span<float> up;
+  std::span<float> activation;
+  std::span<float> out;
+};
+
+/// Typed non-owning capability views over stable Qwen GPU arena allocations.
+/// The nested aggregates carry element counts without owning memory or changing
+/// any address used by kernels or graph capture.
+struct QwenGpuScratchView {
+  QwenDecodeScratch decode;
+  QwenAttentionScratch attention;
+  QwenSsmScratch ssm;
+  QwenFfnScratch ffn;
+};
+
+static_assert(std::is_trivially_copyable_v<QwenDecodeScratch>);
+static_assert(std::is_trivially_copyable_v<QwenAttentionScratch>);
+static_assert(std::is_trivially_copyable_v<QwenSsmScratch>);
+static_assert(std::is_trivially_copyable_v<QwenFfnScratch>);
+static_assert(std::is_trivially_copyable_v<QwenGpuScratchView>);
+static_assert(std::is_same_v<decltype(QwenDecodeScratch::sampled_token),
+                             std::span<std::uint32_t>>);
 
 /// Preallocated, zero-allocation GPU execution arena on gfx1151.
 class QwenGpuArena {

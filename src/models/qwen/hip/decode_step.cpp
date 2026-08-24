@@ -54,19 +54,24 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
   const std::size_t ssm_inner_size = config.ssm_inner_size;
   const std::size_t time_step_rank = config.ssm_time_step_rank;
   auto scratch = arena.GetScratchView();
+  auto& decode_scratch = scratch.decode;
+  auto& attention_scratch = scratch.attention;
+  auto& ssm_scratch = scratch.ssm;
+  auto& ffn_scratch = scratch.ffn;
   const std::size_t sequence_length = static_cast<std::size_t>(pos) + 1;
   const bool use_split_k_decode = detail::IsSplitKDecodeAttentionSupported(
       sequence_length, config.num_attention_heads, config.num_key_value_heads,
       config.head_dim);
 
   // GPU parameter buffers
-  const std::uint32_t* d_in_token = scratch.prompt_tokens.data();
-  const std::uint32_t* d_in_pos = scratch.prompt_tokens.data() + 1;
-  auto* d_out_token = reinterpret_cast<std::uint32_t*>(arena.d_alpha_buf);
+  const std::uint32_t* d_in_token = decode_scratch.prompt_tokens.data();
+  const std::uint32_t* d_in_pos = decode_scratch.prompt_tokens.data() + 1;
+  auto* d_out_token = decode_scratch.sampled_token.data();
 
   // 1. Embedding lookup
   LaunchEmbeddingLookup(weights.token_embd.data, weights.token_embd.type,
-                        d_in_token, arena.d_hidden, hidden_size, arena.stream);
+                        d_in_token, decode_scratch.hidden.data(), hidden_size,
+                        arena.stream);
 
   // opt-c014-layer-prefetch: touch the next layer's weight pages on a side
   // stream while the current layer computes, so the next layer's projection
@@ -152,8 +157,9 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // behavior identical to the former inline `LaunchRMSNorm` call.
       const auto norm_view =
           strix::models::qwen::MakeAttnNormView(layer, config);
-      strix::models::qwen::NormForward(module_ctx, norm_view, scratch.hidden,
-                                       scratch.normed);
+      strix::models::qwen::NormForward(module_ctx, norm_view,
+                                       decode_scratch.hidden,
+                                       decode_scratch.normed);
     }
 
     // opt-c010-ssm-gate-residual: the SSM branch folds the post-SSM residual
@@ -173,23 +179,25 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
 
       if (fuse_input_rmsnorm_projection) {
         LaunchFusedRMSNormQKVProjections(
-            arena.d_hidden, static_cast<const float*>(layer.attn_norm.data),
-            1e-6F, layer.attn_q.data, q_bf16, layer.attn_k.data, k_bf16,
-            layer.attn_v.data, v_bf16, arena.d_ssm_qkv, arena.d_k,
-            arena.d_v, q_projection_size, kv_size, hidden_size,
-            arena.stream);
+            decode_scratch.hidden.data(),
+            static_cast<const float*>(layer.attn_norm.data), 1e-6F,
+            layer.attn_q.data, q_bf16, layer.attn_k.data, k_bf16,
+            layer.attn_v.data, v_bf16, ssm_scratch.qkv.data(),
+            attention_scratch.k.data(), attention_scratch.v.data(),
+            q_projection_size, kv_size, hidden_size, arena.stream);
       } else {
         LaunchFusedQKVProjections(
             layer.attn_q.data, layer.attn_q.type, layer.attn_k.data,
             layer.attn_k.type, layer.attn_v.data, layer.attn_v.type,
-            arena.d_normed, arena.d_ssm_qkv, arena.d_k, arena.d_v,
+            decode_scratch.normed.data(), ssm_scratch.qkv.data(),
+            attention_scratch.k.data(), attention_scratch.v.data(),
             q_projection_size, kv_size, hidden_size, arena.stream);
       }
 
       // De-interleave Q and Gate from attn_q projection
-      LaunchUnpackQG(arena.d_ssm_qkv, arena.d_q, arena.d_ssm_gate,
-                     config.num_attention_heads, config.head_dim,
-                     arena.stream);
+      LaunchUnpackQG(ssm_scratch.qkv.data(), attention_scratch.q.data(),
+                     ssm_scratch.gate.data(), config.num_attention_heads,
+                     config.head_dim, arena.stream);
 
       // QK-Norm + RoPE + KV-cache write fused into one kernel
       // (opt-c010-qk-rope-kv). The unfused chain stays wired behind the
@@ -199,10 +207,12 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
           detail::IsFusedQkNormSupported(config.head_dim);
       if (fused_qknorm_rope_kv) {
         LaunchFusedQKNormRoPEKvWrite(
-            arena.d_q, arena.d_k, arena.d_v,
+            attention_scratch.q.data(), attention_scratch.k.data(),
+            attention_scratch.v.data(),
             static_cast<const float*>(layer.attn_q_norm.data),
-            static_cast<const float*>(layer.attn_k_norm.data), arena.d_q,
-            arena.d_k, arena.d_kv_cache, arena.d_kv_cache + total_k,
+            static_cast<const float*>(layer.attn_k_norm.data),
+            attention_scratch.q.data(), attention_scratch.k.data(),
+            arena.d_kv_cache, arena.d_kv_cache + total_k,
             arena.d_attention_kv_f16,
             static_cast<std::uint16_t*>(arena.d_attention_kv_f16) + total_k,
             attn_layer_idx, d_in_pos, arena.GetMaxContext(),
@@ -212,42 +222,46 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       } else {
         if (!layer.attn_q_norm.empty()) {
           LaunchPerHeadRMSNorm(
-              arena.d_q, static_cast<const float*>(layer.attn_q_norm.data),
-              arena.d_q, config.num_attention_heads, config.head_dim, 1e-6F,
-              arena.stream);
+              attention_scratch.q.data(),
+              static_cast<const float*>(layer.attn_q_norm.data),
+              attention_scratch.q.data(), config.num_attention_heads,
+              config.head_dim, 1e-6F, arena.stream);
         }
         if (!layer.attn_k_norm.empty()) {
           LaunchPerHeadRMSNorm(
-              arena.d_k, static_cast<const float*>(layer.attn_k_norm.data),
-              arena.d_k, config.num_key_value_heads, config.head_dim, 1e-6F,
-              arena.stream);
+              attention_scratch.k.data(),
+              static_cast<const float*>(layer.attn_k_norm.data),
+              attention_scratch.k.data(), config.num_key_value_heads,
+              config.head_dim, 1e-6F, arena.stream);
         }
 
         // RoPE (using device pos pointer for graph capture invariance)
-        LaunchRoPE(arena.d_q, arena.d_k, config.num_attention_heads,
-                   config.num_key_value_heads, config.head_dim,
-                   config.rotary_dim, d_in_pos, config.rope_theta,
-                   arena.stream);
+        LaunchRoPE(attention_scratch.q.data(), attention_scratch.k.data(),
+                   config.num_attention_heads, config.num_key_value_heads,
+                   config.head_dim, config.rotary_dim, d_in_pos,
+                   config.rope_theta, arena.stream);
       }
 
       // Softmax Attention + Gating
       if (use_split_k_decode) {
         LaunchAttention(
-            arena.d_q, arena.d_k, arena.d_v, arena.d_ssm_gate,
+            attention_scratch.q.data(), attention_scratch.k.data(),
+            attention_scratch.v.data(), ssm_scratch.gate.data(),
             arena.d_kv_cache, arena.d_kv_cache + total_k,
             arena.d_attention_kv_f16,
             static_cast<std::uint16_t*>(arena.d_attention_kv_f16) + total_k,
-            arena.d_ssm_out, attn_layer_idx, pos, arena.GetMaxContext(),
-            config.num_attention_heads, config.num_key_value_heads,
-            config.head_dim, arena.stream, scratch.split_k_attention.data(),
-            fused_qknorm_rope_kv);
+            ssm_scratch.out.data(), attn_layer_idx, pos,
+            arena.GetMaxContext(), config.num_attention_heads,
+            config.num_key_value_heads, config.head_dim, arena.stream,
+            attention_scratch.split_k.data(), fused_qknorm_rope_kv);
       } else {
         LaunchAttention(
-            arena.d_q, arena.d_k, arena.d_v, arena.d_ssm_gate,
+            attention_scratch.q.data(), attention_scratch.k.data(),
+            attention_scratch.v.data(), ssm_scratch.gate.data(),
             arena.d_kv_cache, arena.d_kv_cache + total_k,
             arena.d_attention_kv_f16,
             static_cast<std::uint16_t*>(arena.d_attention_kv_f16) + total_k,
-            arena.d_ssm_out, attn_layer_idx, d_in_pos,
+            ssm_scratch.out.data(), attn_layer_idx, d_in_pos,
             arena.GetMaxContext(), config.num_attention_heads,
             config.num_key_value_heads, config.head_dim, arena.stream,
             fused_qknorm_rope_kv);
@@ -258,8 +272,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // d_attn_out out); behavior-identical to the former inline `LaunchGEMV`.
       strix::models::qwen::QuantGemm(
           module_ctx, layer.attn_output,
-          scratch.ssm_out.first(attention_size), hidden_size, attention_size,
-          scratch.attention_out);
+          ssm_scratch.out.first(attention_size), hidden_size, attention_size,
+          attention_scratch.output);
     } else {
       // SSM path
       ssm_residual_folded =
@@ -272,45 +286,49 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
 
       if (fuse_input_rmsnorm_projection) {
         LaunchFusedRMSNormSSMInputProjections(
-            arena.d_hidden, static_cast<const float*>(layer.attn_norm.data),
-            1e-6F, layer.attn_qkv.data, qkv_bf16, layer.attn_gate.data,
-            gate_bf16, layer.ssm_alpha.data, alpha_bf16, layer.ssm_beta.data,
-            beta_bf16, arena.d_ssm_qkv, arena.d_ssm_gate,
-            arena.d_alpha_buf, arena.d_beta_buf, hidden_size, ssm_qkv_size,
-            ssm_inner_size, time_step_rank, arena.stream);
+            decode_scratch.hidden.data(),
+            static_cast<const float*>(layer.attn_norm.data), 1e-6F,
+            layer.attn_qkv.data, qkv_bf16, layer.attn_gate.data, gate_bf16,
+            layer.ssm_alpha.data, alpha_bf16, layer.ssm_beta.data, beta_bf16,
+            ssm_scratch.qkv.data(), ssm_scratch.gate.data(),
+            ssm_scratch.alpha.data(), ssm_scratch.beta.data(), hidden_size,
+            ssm_qkv_size, ssm_inner_size, time_step_rank, arena.stream);
       } else {
         LaunchFusedSSMInputProjections(
             layer.attn_qkv.data, layer.attn_qkv.type, layer.attn_gate.data,
             layer.attn_gate.type, layer.ssm_alpha.data, layer.ssm_alpha.type,
-            layer.ssm_beta.data, layer.ssm_beta.type, arena.d_normed,
-            arena.d_ssm_qkv, arena.d_ssm_gate, arena.d_alpha_buf,
-            arena.d_beta_buf, hidden_size, ssm_qkv_size, ssm_inner_size,
-            time_step_rank, arena.stream);
+            layer.ssm_beta.data, layer.ssm_beta.type,
+            decode_scratch.normed.data(), ssm_scratch.qkv.data(),
+            ssm_scratch.gate.data(), ssm_scratch.alpha.data(),
+            ssm_scratch.beta.data(), hidden_size, ssm_qkv_size,
+            ssm_inner_size, time_step_rank, arena.stream);
       }
 
       LaunchSSMConvRecurrence(
-          arena.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
-          arena.d_ssm_conv_state, arena.d_conv_out,
-          arena.d_ssm_deltanet_state, arena.d_alpha_buf, arena.d_beta_buf,
-          static_cast<const float*>(layer.ssm_a.data),
+          ssm_scratch.qkv.data(),
+          static_cast<const float*>(layer.ssm_conv1d.data),
+          arena.d_ssm_conv_state, ssm_scratch.conv_out.data(),
+          arena.d_ssm_deltanet_state, ssm_scratch.alpha.data(),
+          ssm_scratch.beta.data(), static_cast<const float*>(layer.ssm_a.data),
           static_cast<const float*>(layer.ssm_dt.data),
-          static_cast<const float*>(layer.ssm_norm.data), arena.d_ssm_gate,
-          arena.d_ssm_out, l, ssm_qkv_size, config.ssm_group_count,
-          config.ssm_time_step_rank, config.ssm_state_size,
-          config.SsmValueSize(), arena.stream, arena.GetSsmReplayCapture());
+          static_cast<const float*>(layer.ssm_norm.data),
+          ssm_scratch.gate.data(), ssm_scratch.out.data(), l, ssm_qkv_size,
+          config.ssm_group_count, config.ssm_time_step_rank,
+          config.ssm_state_size, config.SsmValueSize(), arena.stream,
+          arena.GetSsmReplayCapture());
 
       // opt-c010-ssm-gate-residual: fold the post-SSM residual add into the
       // ssm_out GEMV epilogue (y = A*x + hidden). The unfused chain (GEMV
       // into d_attn_out + residual add) stays wired as the reference.
       if (ssm_residual_folded) {
-        LaunchGEMVResidual(layer.ssm_out.data, layer.ssm_out.type,
-                           arena.d_ssm_out, arena.d_hidden,
-                           arena.d_hidden, hidden_size, ssm_inner_size,
-                           arena.stream);
+        LaunchGEMVResidual(
+            layer.ssm_out.data, layer.ssm_out.type, ssm_scratch.out.data(),
+            decode_scratch.hidden.data(), decode_scratch.hidden.data(),
+            hidden_size, ssm_inner_size, arena.stream);
       } else {
-        LaunchGEMV(layer.ssm_out.data, layer.ssm_out.type, arena.d_ssm_out,
-                   arena.d_attn_out, hidden_size, ssm_inner_size,
-                   arena.stream);
+        LaunchGEMV(layer.ssm_out.data, layer.ssm_out.type,
+                   ssm_scratch.out.data(), attention_scratch.output.data(),
+                   hidden_size, ssm_inner_size, arena.stream);
       }
     }
 
@@ -321,24 +339,27 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
     // residual-add step is already applied, so only the FFN pre-norm runs.
     if (ssm_residual_folded) {
       if (!fuse_ffn_norm_swiglu) {
-        LaunchRMSNorm(arena.d_hidden,
+        LaunchRMSNorm(decode_scratch.hidden.data(),
                       static_cast<const float*>(layer.ffn_norm.data),
-                      arena.d_normed, hidden_size, 1e-6F, arena.stream);
+                      decode_scratch.normed.data(), hidden_size, 1e-6F,
+                      arena.stream);
       }
     } else if (route_plan.fuse_residual_rmsnorm) {
       LaunchFusedResidualAddRMSNorm(
-          arena.d_hidden, arena.d_attn_out, arena.d_hidden,
-          static_cast<const float*>(layer.ffn_norm.data), arena.d_normed,
-          hidden_size, 1e-6F, arena.stream);
+          decode_scratch.hidden.data(), attention_scratch.output.data(),
+          decode_scratch.hidden.data(),
+          static_cast<const float*>(layer.ffn_norm.data),
+          decode_scratch.normed.data(), hidden_size, 1e-6F, arena.stream);
     } else {
-      strix::models::qwen::ResidualAdd(module_ctx, scratch.hidden,
-                                       scratch.attention_out);
+      strix::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
+                                       attention_scratch.output);
 
       if (!fuse_ffn_norm_swiglu) {
         // FFN Pre-RMSNorm
-        LaunchRMSNorm(arena.d_hidden,
+        LaunchRMSNorm(decode_scratch.hidden.data(),
                       static_cast<const float*>(layer.ffn_norm.data),
-                      arena.d_normed, hidden_size, 1e-6F, arena.stream);
+                      decode_scratch.normed.data(), hidden_size, 1e-6F,
+                      arena.stream);
       }
     }
 
@@ -348,12 +369,13 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // the composition layer (Option B); the standalone FFN below is the
       // module. Keep the fused launch + shared down GEMV inline.
       LaunchFusedRMSNormSwiGLUGEMV(
-          arena.d_hidden, static_cast<const float*>(layer.ffn_norm.data),
-          1e-6F, layer.ffn_gate.data, layer.ffn_up.data, arena.d_ffn_act,
+          decode_scratch.hidden.data(),
+          static_cast<const float*>(layer.ffn_norm.data), 1e-6F,
+          layer.ffn_gate.data, layer.ffn_up.data, ffn_scratch.activation.data(),
           intermediate_size, hidden_size, arena.stream);
-      LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, arena.d_ffn_act,
-                 arena.d_ffn_out, hidden_size, intermediate_size,
-                 arena.stream);
+      LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type,
+                 ffn_scratch.activation.data(), ffn_scratch.out.data(),
+                 hidden_size, intermediate_size, arena.stream);
     } else {
       // Non-fused FFN, routed through the module. Same fused SwiGLU kernel +
       // same down GEMV as the former inline calls; behavior identical. The
@@ -361,27 +383,29 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
       // d_ffn_act, out = d_ffn_out) directly.
       const auto ffn_view = strix::models::qwen::MakeFfnView(layer, config);
       strix::models::qwen::FfnForward(
-          module_ctx, ffn_view, scratch.normed, scratch.ffn_activation,
-          scratch.ffn_activation, scratch.ffn_activation, scratch.ffn_out);
+          module_ctx, ffn_view, decode_scratch.normed, ffn_scratch.activation,
+          ffn_scratch.activation, ffn_scratch.activation, ffn_scratch.out);
     }
 
     // Residual Add
-    strix::models::qwen::ResidualAdd(module_ctx, scratch.hidden,
-                                     scratch.ffn_out);
+    strix::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
+                                     ffn_scratch.out);
   }
 
   if (compute_logits) {
     // 3. Final Output Norm
-    LaunchRMSNorm(arena.d_hidden,
+    LaunchRMSNorm(decode_scratch.hidden.data(),
                   static_cast<const float*>(weights.output_norm.data),
-                  arena.d_normed, hidden_size, 1e-6F, arena.stream);
+                  decode_scratch.normed.data(), hidden_size, 1e-6F,
+                  arena.stream);
 
     // 4. LM Head Logits GEMV on final token
-    LaunchGEMV(weights.output.data, weights.output.type, arena.d_normed,
-               scratch.logits.data(), vocab_size, hidden_size, arena.stream);
+    LaunchGEMV(weights.output.data, weights.output.type,
+               decode_scratch.normed.data(), decode_scratch.logits.data(),
+               vocab_size, hidden_size, arena.stream);
 
     // 5. Parallel GPU Argmax
-    LaunchGPUArgmax(scratch.logits.data(), d_out_token, vocab_size,
+    LaunchGPUArgmax(decode_scratch.logits.data(), d_out_token, vocab_size,
                     arena.stream);
   }
 }

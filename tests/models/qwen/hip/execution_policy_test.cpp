@@ -12,6 +12,9 @@
 
 #include "src/models/qwen/modules/modules.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/models/qwen/hip/executor.hpp"
+#endif
 #include "tests/models/qwen/support/synthetic_weights.hpp"
 #include "tests/testing/test_common.hpp"
 
@@ -42,6 +45,17 @@ using strix::models::qwen::RopeLayerView;
 static_assert(std::is_empty_v<CpuModuleContext>);
 static_assert(!std::is_default_constructible_v<CpuLayerContext>);
 static_assert(!std::is_convertible_v<CpuModuleContext, HipModuleContext>);
+
+#if defined(ENGINE_ENABLE_HIP)
+static_assert(std::is_trivially_copyable_v<strix::hip::QwenDecodeScratch>);
+static_assert(std::is_trivially_copyable_v<strix::hip::QwenAttentionScratch>);
+static_assert(std::is_trivially_copyable_v<strix::hip::QwenSsmScratch>);
+static_assert(std::is_trivially_copyable_v<strix::hip::QwenFfnScratch>);
+static_assert(std::is_trivially_copyable_v<strix::hip::QwenGpuScratchView>);
+static_assert(std::is_same_v<
+              decltype(strix::hip::QwenDecodeScratch::sampled_token),
+              std::span<std::uint32_t>>);
+#endif
 
 // --- 1. Fusion-toggle routing values (strix::hip::detail, host constexpr) ---
 void TestFusionToggleValues() {

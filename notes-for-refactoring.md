@@ -119,13 +119,20 @@ HIP graph capture and replay depend on stable device addresses. Refactoring the
 arena must not introduce allocation into module calls or change buffer
 lifetimes.
 
-`QwenGpuArena::GetScratchView()` now exposes non-owning typed spans over the
-existing stable allocations, and decode module calls consume those spans. This
-is an additive parallel change: raw pointers remain for kernels not yet migrated.
-The next step is to split the broad view into `DecodeScratch`,
-`AttentionScratch`, `SsmScratch`, and `FfnScratch`, document legal aliases and
-live epochs, migrate remaining call sites, and only then make raw pointers
-private.
+`QwenGpuArena::GetScratchView()` now exposes non-owning `QwenDecodeScratch`,
+`QwenAttentionScratch`, `QwenSsmScratch`, and `QwenFfnScratch` aggregates over
+the existing stable allocations. Decode composition and executor copy/replay
+paths consume the narrow views. The sampled-token output is an explicit
+`std::span<std::uint32_t>` over the first `SsmScratch::alpha` element and is
+legal only after layer execution enters the sampling/output epoch.
+
+This remains an additive parallel change: allocation order, addresses, extents,
+and graph-capture lifetimes are unchanged. Prefill's broad kernel launch chain
+still uses many public raw arena pointers, and recurrent state/KV-cache buffers
+remain outside scratch capabilities because they are persistent state rather
+than scratch. Migrate prefill stage by stage, then make scratch ownership
+pointers private only after supported-host validation confirms address and
+capture parity.
 
 ### Dispatch has one source of truth
 
@@ -309,8 +316,9 @@ thresholds are characterized on controlled Strix Halo hardware.
 5. Introduce immutable execution policy with current defaults. **Done;** graph
    capture is keyed by policy and deterministic resolved-route identity, with
    pure rejection reasons emitted through dispatch telemetry.
-6. Add typed GPU scratch views while preserving addresses and aliases. **Broad
-   view done;** narrower lifetime-specific views remain.
+6. Add typed GPU scratch views while preserving addresses and aliases. **Done
+   for decode and shared output/replay paths;** prefill kernel launches still
+   need staged migration before raw scratch ownership becomes private.
 7. Split backend contexts. **Done;** physical CPU/HIP implementation-file
    separation remains.
 8. Complete attention and SSM module extraction.

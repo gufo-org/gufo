@@ -35,12 +35,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
       sequence_length, config.num_attention_heads, config.num_key_value_heads,
       config.head_dim);
 
-  auto* d_out_token = reinterpret_cast<std::uint32_t*>(arena_.d_alpha_buf);
+  auto scratch = arena_.GetScratchView();
+  auto* d_out_token = scratch.decode.sampled_token.data();
 
   // Copy token_id and pos to GPU device memory
   const std::uint32_t in_params[2] = {token_id, pos};
-  HIP_CHECK(hipMemcpyAsync(arena_.d_prompt_tokens, in_params, sizeof(in_params),
-                           hipMemcpyHostToDevice, arena_.stream));
+  HIP_CHECK(hipMemcpyAsync(scratch.decode.prompt_tokens.data(), in_params,
+                           sizeof(in_params), hipMemcpyHostToDevice,
+                           arena_.stream));
 
   EmitDecodeRouteTelemetry(weights_, policy_);
   const QwenGraphRejection graph_rejections = ResolveQwenGraphRejections(

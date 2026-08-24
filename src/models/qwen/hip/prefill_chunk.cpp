@@ -35,19 +35,21 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   if (batch_size > arena_.GetMaxBatch()) {
     throw std::length_error("prompt chunk exceeds the GPU batch length");
   }
+  auto scratch = arena_.GetScratchView(batch_size);
 
   // 1. Copy prompt token IDs to GPU
   std::vector<std::uint32_t> host_tokens(prompt_tokens.begin(),
                                          prompt_tokens.end());
-  HIP_CHECK(hipMemcpyAsync(arena_.d_prompt_tokens, host_tokens.data(),
+  HIP_CHECK(hipMemcpyAsync(scratch.decode.prompt_tokens.data(),
+                           host_tokens.data(),
                            batch_size * sizeof(std::uint32_t),
                            hipMemcpyHostToDevice, arena_.stream));
 
   // 2. Batched Embedding lookup: d_hidden [B, hidden_size]
-  LaunchBatchedEmbeddingLookup(weights_.token_embd.data,
-                               weights_.token_embd.type,
-                               arena_.d_prompt_tokens, arena_.d_hidden,
-                               batch_size, hidden_size, arena_.stream);
+  LaunchBatchedEmbeddingLookup(
+      weights_.token_embd.data, weights_.token_embd.type,
+      scratch.decode.prompt_tokens.data(), scratch.decode.hidden.data(),
+      batch_size, hidden_size, arena_.stream);
 
   const bool do_profile = (std::getenv("STRIX_PROFILE") != nullptr);
   auto t_start = std::chrono::high_resolution_clock::now();
@@ -411,7 +413,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     const std::size_t chunk_elements = batch_size * hidden_size;
     h_prompt_hidden_.resize(old_size + chunk_elements);
     HIP_CHECK(hipMemcpyAsync(h_prompt_hidden_.data() + old_size,
-                             arena_.d_hidden, chunk_elements * sizeof(float),
+                             scratch.decode.hidden.data(),
+                             chunk_elements * sizeof(float),
                              hipMemcpyDeviceToHost, arena_.stream));
     HIP_CHECK(hipStreamSynchronize(arena_.stream));
   }
@@ -423,18 +426,21 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 
   // 4. Output Norm for final token
   const float* final_hidden =
-      arena_.d_hidden + ((batch_size - 1) * hidden_size);
+      scratch.decode.hidden.data() + ((batch_size - 1) * hidden_size);
   LaunchRMSNorm(final_hidden,
                 static_cast<const float*>(weights_.output_norm.data),
-                arena_.d_normed, hidden_size, eps, arena_.stream);
+                scratch.decode.normed.data(), hidden_size, eps, arena_.stream);
 
   // 5. LM Head Logits GEMV on final token
-  LaunchGEMV(weights_.output.data, weights_.output.type, arena_.d_normed,
-             arena_.d_logits, vocab_size, hidden_size, arena_.stream);
+  LaunchGEMV(weights_.output.data, weights_.output.type,
+             scratch.decode.normed.data(), scratch.decode.logits.data(),
+             vocab_size, hidden_size, arena_.stream);
 
-  // 6. GPU Argmax
-  auto* d_out_token = reinterpret_cast<std::uint32_t*>(arena_.d_alpha_buf);
-  LaunchGPUArgmax(arena_.d_logits, d_out_token, vocab_size, arena_.stream);
+  // 6. GPU Argmax. The sampled-token view enters its documented alias epoch
+  // only after all SSM layer uses of alpha have completed.
+  auto* d_out_token = scratch.decode.sampled_token.data();
+  LaunchGPUArgmax(scratch.decode.logits.data(), d_out_token, vocab_size,
+                  arena_.stream);
 
   std::uint32_t next_token_id = 0;
   HIP_CHECK(hipMemcpyAsync(&next_token_id, d_out_token, sizeof(std::uint32_t),
