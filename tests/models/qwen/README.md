@@ -44,9 +44,11 @@ Labels add `qwen` and the relevant tier, allowing focused runs on a supported
 Linux x86-64 Strix Halo host:
 
 ```sh
-ctest --test-dir build/gpu-test -L qwen --output-on-failure
-ctest --test-dir build/gpu-test -L qwen -L module --output-on-failure
-ctest --test-dir build/gpu-test -L qwen -L hip --output-on-failure
+nix develop -c ctest --test-dir build/gpu-test -L qwen --output-on-failure
+nix develop -c ctest --test-dir build/gpu-test \
+  -L qwen -L module --output-on-failure
+nix develop -c ctest --test-dir build/gpu-test \
+  -L qwen -L hip --output-on-failure
 ```
 
 `hip/attention_policy_test.cpp`, `hip/execution_policy_test.cpp`, and
