@@ -8,7 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/swiglu.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
 namespace strix::hip {

@@ -33,7 +33,14 @@ The refactor has established the following foundations:
 - Quant block layouts are canonicalized in `src/core/quant/ggml_dequant.hpp`.
 - Shared quantized GEMM/dequantization entry points exist in
   `src/core/quant/ggml_gemm.*`.
-- `ExecuteDecodeStep` is the decode composition root.
+- `ExecuteDecodeStep` is the decode composition root in its own translation
+  unit; `decode.cpp` owns token I/O and graph orchestration.
+- HIP launch declarations are split by operation family under
+  `src/models/qwen/hip/ops/`; `ops.hpp` remains a compatibility umbrella.
+- GGUF weight extraction and tensor validation live in `weights.cpp`, separate
+  from CPU cache and scratch state.
+- GPU allocation ownership remains in `arena.cpp`, while recurrent snapshot and
+  SSM replay behavior live in `ssm_replay.cpp`.
 - Immutable `QwenExecutionPolicy` data selects production or experimental
   routes, with distinct decode/prefill SSM and FFN decisions.
 - `ResolveQwenLayerRoute()` produces pure per-layer decision records with
@@ -50,9 +57,11 @@ The refactor has established the following foundations:
   coverage exists.
 
 The refactor is not complete merely because files were moved. Attention and SSM
-still contain transitional composition seams, and raw GPU arena pointers remain
-public beside the typed view. HIP operation coverage is now split by kernel
-family so each experiment has a focused build and CTest target.
+still contain transitional composition seams, raw GPU arena pointers remain
+public beside the typed view, and the isolated `prefill_chunk.cpp` composition
+still owns a broad direct launch chain that should become stage plans. HIP
+operation coverage is split by kernel family so each
+experiment has a focused build and CTest target.
 
 ## Architectural rules
 
@@ -287,7 +296,8 @@ thresholds are characterized on controlled Strix Halo hardware.
 8. Complete attention and SSM module extraction.
 9. Consolidate GEMM dispatch by parallel change: CPU, decode, prefill, then MTP.
 10. Keep decode/prefill on shared pure route resolution and grow thin
-    mode-specific plans. **Initial layer plan done.**
+    mode-specific plans. **Initial layer plan and decode-step translation-unit
+    seam done;** narrower attention/SSM/FFN composition remains.
 11. Split Qwen CMake ownership and the monolithic GPU operations test. **GPU
     operation tests done;** source-level Qwen CMake ownership remains.
 12. Enable runtime experiment overrides and same-binary A/B only after policy

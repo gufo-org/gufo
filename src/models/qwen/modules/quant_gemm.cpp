@@ -6,7 +6,7 @@
 #include "src/models/qwen/forward.hpp"  // TensorGEMV
 
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/gemm.hpp"
 #endif
 
 namespace strix::models::qwen {

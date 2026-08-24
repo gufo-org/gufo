@@ -10,7 +10,7 @@
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/detail/gemv_dispatcher.hpp"
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/ssm.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 #include "src/core/gguf_reader.hpp"
 

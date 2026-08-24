@@ -7,7 +7,7 @@
 #include <cstdint>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
 namespace strix::hip {

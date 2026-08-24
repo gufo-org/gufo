@@ -63,4 +63,3 @@ void LaunchLayerWeightPrefetch(const void* data, std::size_t bytes,
 
 }  // namespace strix::hip
 #endif  // defined(ENGINE_ENABLE_HIP)
-

@@ -8,7 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/attention.hpp"
+#include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
 
 namespace strix::hip {

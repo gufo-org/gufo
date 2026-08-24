@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/ssm.hpp"
 
 namespace strix::hip {
 

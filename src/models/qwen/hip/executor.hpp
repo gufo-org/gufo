@@ -22,7 +22,8 @@
 
 #include "src/core/hip/detail/hip_graph_decode_executor.hpp"
 #include "src/models/qwen/hip/execution_policy.hpp"
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/models/qwen/hip/ops/ssm.hpp"
 
 namespace strix::hip {
 

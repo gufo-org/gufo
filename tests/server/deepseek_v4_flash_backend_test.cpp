@@ -7,8 +7,8 @@
 #include <vector>
 
 #include "src/models/deepseek_v4_flash/engine.hpp"
-#include "src/server/inference_backend.hpp"
 #include "src/models/qwen/chat_template.hpp"
+#include "src/server/inference_backend.hpp"
 
 namespace {
 

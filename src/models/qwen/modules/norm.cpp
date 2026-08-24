@@ -6,7 +6,7 @@
 #include "src/models/qwen/oracles.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/norm_residual.hpp"
 #endif
 
 namespace strix::models::qwen {

@@ -232,6 +232,7 @@ add_library(strix_core STATIC
   src/models/qwen/chat_template.cpp
   src/models/qwen/oracles.cpp
   src/models/qwen/state.cpp
+  src/models/qwen/weights.cpp
   src/models/qwen/ssm.cpp
   src/models/qwen/forward.cpp
   src/models/qwen/modules/attention.cpp
@@ -300,9 +301,12 @@ if (ENGINE_ENABLE_HIP)
     src/models/qwen/hip/kernels/hipblaslt_gemm.hip
     src/models/qwen/hip/arena.cpp
     src/models/qwen/hip/decode.cpp
+    src/models/qwen/hip/decode_step.cpp
     src/models/qwen/hip/executor.cpp
     src/models/qwen/hip/model_loader.cpp
     src/models/qwen/hip/prefill.cpp
+    src/models/qwen/hip/prefill_chunk.cpp
+    src/models/qwen/hip/ssm_replay.cpp
     src/models/qwen/hip/mtp/model.cpp
     src/models/qwen/hip/mtp/executor.cpp
     src/models/qwen/hip/mtp/backend.cpp

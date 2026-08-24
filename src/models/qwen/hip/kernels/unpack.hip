@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/token.hpp"
 
 namespace strix::hip {
 
