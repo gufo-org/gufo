@@ -185,9 +185,11 @@ The remaining extraction work is:
 
 ## Build boundaries
 
-A kernel experiment should not require editing the repository root build list or
-recompiling unrelated model sources. Qwen should own CMake registration through
-subdirectories or helper functions, without source globbing.
+A kernel experiment should not require editing the repository root build list.
+Qwen now owns its production source attachment and classic-Qwen test
+registration through model-local CMake files with explicit source lists and no
+globbing. The public `strix_core` target and all existing test targets remain
+unchanged.
 
 Target seams should distinguish at least:
 
@@ -309,8 +311,9 @@ thresholds are characterized on controlled Strix Halo hardware.
 10. Keep decode/prefill on shared pure route resolution and grow thin
     mode-specific plans. **Initial layer plan and decode-step translation-unit
     seam done;** narrower attention/SSM/FFN composition remains.
-11. Split Qwen CMake ownership and the monolithic GPU operations test. **GPU
-    operation tests done;** source-level Qwen CMake ownership remains.
+11. Split Qwen CMake ownership and the monolithic GPU operations test. **Done:**
+    production sources and classic-Qwen tests now register from model-owned
+    CMake files with explicit source lists.
 12. Enable runtime experiment overrides and same-binary A/B only after policy
     identity participates in capture caches.
 
