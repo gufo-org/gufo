@@ -2,6 +2,7 @@
 #include <algorithm>
 
 #include "src/core/hip/hip_utils.hpp"
+#include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
@@ -67,6 +68,10 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
                    ssm_qkv_size + ssm_inner_size + (2 * time_step_rank)});
   HIP_CHECK(
       hipMalloc(&d_scratch_bf16, scratch_elements * sizeof(hip_bfloat16)));
+  const std::size_t split_k_elements = detail::DecodeAttentionScratchElements(
+      config_.num_attention_heads, config_.head_dim);
+  HIP_CHECK(
+      hipMalloc(&d_split_k_attention, split_k_elements * sizeof(float)));
 
   // Weight BF16 scratch: largest per-layer matmul weight in bf16 elements,
   // used by the prefill dequant-to-BF16 then BF16 GEMM path.
@@ -118,6 +123,8 @@ QwenGpuScratchView QwenGpuArena::GetScratchView(
                   {config_.intermediate_size, hidden, projection,
                    ssm_qkv + config_.ssm_inner_size +
                        (2 * config_.ssm_time_step_rank)});
+  const std::size_t split_k = detail::DecodeAttentionScratchElements(
+      config_.num_attention_heads, config_.head_dim);
   const std::size_t weight_bf16 =
       hidden * std::max<std::size_t>(
                    {q_projection, kv, attention, config_.intermediate_size,
@@ -142,6 +149,7 @@ QwenGpuScratchView QwenGpuArena::GetScratchView(
       .beta = {d_beta_buf, batch * config_.ssm_time_step_rank},
       .logits = {d_logits, config_.vocab_size},
       .bf16 = {static_cast<hip_bfloat16*>(d_scratch_bf16), bf16_scratch},
+      .split_k_attention = {d_split_k_attention, split_k},
       .weight_bf16 = {d_weights_bf16, weight_bf16},
       .prompt_tokens = {d_prompt_tokens,
                         std::max<std::size_t>(batch, 2)},
@@ -175,9 +183,12 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   d_ssm_deltanet_state = other.d_ssm_deltanet_state;
   d_prompt_tokens = other.d_prompt_tokens;
   stream = other.stream;
+  prefetch_stream = other.prefetch_stream;
+  prefetch_event = other.prefetch_event;
   hipblas_handle = other.hipblas_handle;
   hipblaslt_gemm = std::move(other.hipblaslt_gemm);
   d_scratch_bf16 = other.d_scratch_bf16;
+  d_split_k_attention = other.d_split_k_attention;
   d_weights_bf16 = other.d_weights_bf16;
   d_saved_ssm_conv_state_ = other.d_saved_ssm_conv_state_;
   d_saved_ssm_deltanet_state_ = other.d_saved_ssm_deltanet_state_;
@@ -214,8 +225,11 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   other.d_ssm_deltanet_state = nullptr;
   other.d_prompt_tokens = nullptr;
   other.stream = nullptr;
+  other.prefetch_stream = nullptr;
+  other.prefetch_event = nullptr;
   other.hipblas_handle = nullptr;
   other.d_scratch_bf16 = nullptr;
+  other.d_split_k_attention = nullptr;
   other.d_weights_bf16 = nullptr;
   other.d_saved_ssm_conv_state_ = nullptr;
   other.d_saved_ssm_deltanet_state_ = nullptr;
@@ -259,9 +273,12 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     d_ssm_deltanet_state = other.d_ssm_deltanet_state;
     d_prompt_tokens = other.d_prompt_tokens;
     stream = other.stream;
+    prefetch_stream = other.prefetch_stream;
+    prefetch_event = other.prefetch_event;
     hipblas_handle = other.hipblas_handle;
     hipblaslt_gemm = std::move(other.hipblaslt_gemm);
     d_scratch_bf16 = other.d_scratch_bf16;
+    d_split_k_attention = other.d_split_k_attention;
     d_weights_bf16 = other.d_weights_bf16;
     d_saved_ssm_conv_state_ = other.d_saved_ssm_conv_state_;
     d_saved_ssm_deltanet_state_ = other.d_saved_ssm_deltanet_state_;
@@ -298,8 +315,11 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     other.d_ssm_deltanet_state = nullptr;
     other.d_prompt_tokens = nullptr;
     other.stream = nullptr;
+    other.prefetch_stream = nullptr;
+    other.prefetch_event = nullptr;
     other.hipblas_handle = nullptr;
     other.d_scratch_bf16 = nullptr;
+    other.d_split_k_attention = nullptr;
     other.d_weights_bf16 = nullptr;
     other.d_saved_ssm_conv_state_ = nullptr;
     other.d_saved_ssm_deltanet_state_ = nullptr;
@@ -561,6 +581,8 @@ void QwenGpuArena::FreeAll() noexcept {
     HIP_CHECK(hipFree(d_prompt_tokens));
   if (d_scratch_bf16 != nullptr)
     HIP_CHECK(hipFree(d_scratch_bf16));
+  if (d_split_k_attention != nullptr)
+    HIP_CHECK(hipFree(d_split_k_attention));
   if (d_weights_bf16 != nullptr)
     HIP_CHECK(hipFree(d_weights_bf16));
   if (d_saved_ssm_conv_state_ != nullptr)
@@ -608,6 +630,7 @@ void QwenGpuArena::FreeAll() noexcept {
   d_ssm_deltanet_state = nullptr;
   d_prompt_tokens = nullptr;
   d_scratch_bf16 = nullptr;
+  d_split_k_attention = nullptr;
   d_weights_bf16 = nullptr;
   d_saved_ssm_conv_state_ = nullptr;
   d_saved_ssm_deltanet_state_ = nullptr;
@@ -622,6 +645,8 @@ void QwenGpuArena::FreeAll() noexcept {
   replay_capture_active_ = false;
   hipblas_handle = nullptr;
   stream = nullptr;
+  prefetch_stream = nullptr;
+  prefetch_event = nullptr;
 }
 
 }  // namespace strix::hip

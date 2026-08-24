@@ -98,6 +98,7 @@ struct QwenGpuScratchView {
   std::span<float> beta;
   std::span<float> logits;
   std::span<hip_bfloat16> bf16;
+  std::span<float> split_k_attention;
   std::span<hip_bfloat16> weight_bf16;
   std::span<std::uint32_t> prompt_tokens;
 };
@@ -159,6 +160,7 @@ public:
   hipblasHandle_t hipblas_handle{nullptr};
   std::unique_ptr<HipblasLtGemm> hipblaslt_gemm;
   void* d_scratch_bf16{nullptr};
+  float* d_split_k_attention{nullptr};
   hip_bfloat16* d_weights_bf16{nullptr};
 
   [[nodiscard]] std::uint32_t GetMaxBatch() const noexcept {

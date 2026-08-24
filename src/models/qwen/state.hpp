@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -24,6 +25,9 @@ struct QwenTensorRef {
   const void* data = nullptr;
   core::GgmlType type = core::GgmlType::kF32;
   std::size_t num_elements = 0;
+  /// Bytes available from `data` to the end of its mapped storage region.
+  /// Synthetic/in-process tensors default to unbounded trusted storage.
+  std::size_t available_bytes = std::numeric_limits<std::size_t>::max();
 
   [[nodiscard]] bool empty() const noexcept {
     return data == nullptr || num_elements == 0;
@@ -31,6 +35,11 @@ struct QwenTensorRef {
 
   [[nodiscard]] std::size_t EncodedSizeBytes() const noexcept {
     return strix::quant::EncodedSizeBytes(type, num_elements);
+  }
+
+  [[nodiscard]] bool FitsAvailableStorage() const noexcept {
+    const std::size_t encoded_bytes = EncodedSizeBytes();
+    return encoded_bytes != 0 && encoded_bytes <= available_bytes;
   }
 
   [[nodiscard]] float Get(std::size_t index) const noexcept {

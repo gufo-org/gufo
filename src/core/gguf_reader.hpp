@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -127,8 +128,12 @@ struct GgufTensorInfo {
       return 0;
     }
     std::uint64_t count = 1;
-    for (auto d : dimensions) {
-      count *= d;
+    for (const auto dimension : dimensions) {
+      if (dimension == 0 ||
+          count > std::numeric_limits<std::uint64_t>::max() / dimension) {
+        return 0;
+      }
+      count *= dimension;
     }
     return count;
   }

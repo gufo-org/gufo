@@ -9,8 +9,12 @@
 
 namespace strix::models::qwen {
 
-/// Quantized GEMV dispatch: y = A @ x for quantized `A` (F32/BF16/F16/Q3_K/
-/// Q4_K/Q5_K/Q6_K/Q8_0/Q8_K.
+/// GEMV dispatch: y = A @ x.
+///
+/// The CPU backend supports F32, BF16, F16, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0,
+/// and Q8_K through the canonical host dispatch. The HIP backend supports only
+/// the formats implemented by `LaunchGEMV`: F32, BF16, Q5_K, Q6_K, Q8_0, and
+/// Q8_K. Unsupported formats or invalid row geometry fail before launch.
 ///
 /// CPU backend proxies the shared `TensorGEMV` dispatch (src/models/
 /// forward.cpp), which routes through the canonical `quant::` helpers.

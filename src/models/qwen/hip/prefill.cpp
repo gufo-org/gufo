@@ -174,7 +174,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // QK-Norm + RoPE + KV-cache write fused into one kernel
       // (opt-c010-qk-rope-kv). The unfused chain stays wired behind the policy
       // toggle as the independent reference.
-      const bool fused_qknorm_rope_kv = route_plan.fuse_qk_norm_rope_kv;
+      const bool fused_qknorm_rope_kv =
+          route_plan.fuse_qk_norm_rope_kv &&
+          detail::IsFusedQkNormSupported(config.head_dim);
       if (fused_qknorm_rope_kv) {
         LaunchBatchedFusedQKNormRoPEKvWrite(
             arena_.d_q, arena_.d_k, arena_.d_v,

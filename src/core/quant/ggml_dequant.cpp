@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace strix::quant {
 
@@ -191,6 +192,9 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     return 0;
   }
   const std::size_t blocks = elements / block_qk;
+  if (blocks > std::numeric_limits<std::size_t>::max() / block_bytes) {
+    return 0;
+  }
   return blocks * block_bytes;
 }
 
@@ -198,9 +202,16 @@ std::size_t EncodedSizeBytes(core::GgmlType type,
                              std::size_t elements) noexcept {
   switch (type) {
     case core::GgmlType::kF32:
+      if (elements > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
+        return 0;
+      }
       return elements * sizeof(float);
     case core::GgmlType::kF16:
     case core::GgmlType::kBF16:
+      if (elements >
+          std::numeric_limits<std::size_t>::max() / sizeof(std::uint16_t)) {
+        return 0;
+      }
       return elements * sizeof(std::uint16_t);
     default:
       return QuantizedRowBytes(type, elements);

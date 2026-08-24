@@ -17,6 +17,7 @@ inline constexpr std::uint32_t kCkAttentionKvHeads{4};
 inline constexpr std::uint32_t kCkAttentionHeadDim{256};
 inline constexpr std::size_t kSplitKDecodeAttentionMinContext{4096};
 inline constexpr std::uint32_t kSplitKDecodeAttentionMaxSplits{32};
+inline constexpr std::uint32_t kFusedQkNormMaxHeadDim{256};
 
 struct AttentionSupportParams {
   std::size_t batch_size{0};
@@ -132,6 +133,11 @@ struct AttentionSupportParams {
     return 1;
   }
   return kSplitKDecodeAttentionMaxSplits;
+}
+
+[[nodiscard]] constexpr bool IsFusedQkNormSupported(
+    std::uint32_t head_dim) noexcept {
+  return head_dim != 0 && head_dim <= kFusedQkNormMaxHeadDim;
 }
 
 [[nodiscard]] constexpr bool IsSplitKDecodeAttentionSupported(

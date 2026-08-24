@@ -15,9 +15,24 @@ QwenTensorRef ExtractTensorRef(const core::GgufReader& reader,
   if (tensor == nullptr || tensor->data == nullptr) {
     return {};
   }
+
+  const auto tensor_address =
+      reinterpret_cast<std::uintptr_t>(tensor->data);
+  std::size_t available_bytes = 0;
+  for (const auto& region : reader.GetMappedRegions()) {
+    const auto region_address = reinterpret_cast<std::uintptr_t>(region.data);
+    if (tensor_address >= region_address) {
+      const auto offset = tensor_address - region_address;
+      if (offset < region.size) {
+        available_bytes = region.size - offset;
+        break;
+      }
+    }
+  }
   return {.data = tensor->data,
           .type = tensor->type,
-          .num_elements = tensor->ElementCount()};
+          .num_elements = tensor->ElementCount(),
+          .available_bytes = available_bytes};
 }
 
 enum class TensorRole {
@@ -70,7 +85,7 @@ enum class TensorRole {
 
 bool ValidateTensor(const QwenTensorRef& tensor, std::size_t expected_elements,
                     TensorRole role, std::string_view name,
-                    std::string* error_msg) {
+                    std::string* error_msg, std::size_t row_elements = 0) {
   if (tensor.empty()) {
     if (error_msg != nullptr) {
       *error_msg = "Missing required Qwen tensor: " + std::string(name);
@@ -90,6 +105,25 @@ bool ValidateTensor(const QwenTensorRef& tensor, std::size_t expected_elements,
       *error_msg = "Tensor shape mismatch for " + std::string(name) +
                    ": expected " + std::to_string(expected_elements) +
                    " elements, found " + std::to_string(tensor.num_elements);
+    }
+    return false;
+  }
+  if (!tensor.FitsAvailableStorage()) {
+    if (error_msg != nullptr) {
+      *error_msg = "Tensor payload is truncated or has invalid encoded size: " +
+                   std::string(name);
+    }
+    return false;
+  }
+  const bool quantized = tensor.type != core::GgmlType::kF32 &&
+                         tensor.type != core::GgmlType::kF16 &&
+                         tensor.type != core::GgmlType::kBF16;
+  if (quantized && row_elements != 0 &&
+      strix::quant::QuantizedRowBytes(tensor.type, row_elements) == 0) {
+    if (error_msg != nullptr) {
+      *error_msg = "Quantized tensor row is not block aligned: " +
+                   std::string(name) + " (row elements " +
+                   std::to_string(row_elements) + ")";
     }
     return false;
   }
@@ -118,11 +152,13 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
   const std::size_t hidden_size = weights.config.hidden_size;
   const std::size_t vocab_size = weights.config.vocab_size;
   if (!ValidateTensor(weights.token_embd, vocab_size * hidden_size,
-                      TensorRole::kEmbedding, "token_embd.weight", error_msg) ||
+                      TensorRole::kEmbedding, "token_embd.weight", error_msg,
+                      hidden_size) ||
       !ValidateTensor(weights.output_norm, hidden_size, TensorRole::kNorm,
                       "output_norm.weight", error_msg) ||
       !ValidateTensor(weights.output, vocab_size * hidden_size,
-                      TensorRole::kProjection, "output.weight", error_msg)) {
+                      TensorRole::kProjection, "output.weight", error_msg,
+                      hidden_size)) {
     return std::nullopt;
   }
 
@@ -224,13 +260,13 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
                         prefix + "post_attention_norm.weight", error_msg) ||
         !ValidateTensor(l.ffn_gate, intermediate_size * hidden_size,
                         TensorRole::kProjection, prefix + "ffn_gate.weight",
-                        error_msg) ||
+                        error_msg, hidden_size) ||
         !ValidateTensor(l.ffn_up, intermediate_size * hidden_size,
                         TensorRole::kProjection, prefix + "ffn_up.weight",
-                        error_msg) ||
+                        error_msg, hidden_size) ||
         !ValidateTensor(l.ffn_down, hidden_size * intermediate_size,
                         TensorRole::kProjection, prefix + "ffn_down.weight",
-                        error_msg)) {
+                        error_msg, intermediate_size)) {
       return std::nullopt;
     }
 
@@ -241,16 +277,17 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
           weights.config.head_dim;
       if (!ValidateTensor(l.attn_q, 2 * attention_size * hidden_size,
                           TensorRole::kProjection, prefix + "attn_q.weight",
-                          error_msg) ||
+                          error_msg, hidden_size) ||
           !ValidateTensor(l.attn_k, kv_size * hidden_size,
                           TensorRole::kProjection, prefix + "attn_k.weight",
-                          error_msg) ||
+                          error_msg, hidden_size) ||
           !ValidateTensor(l.attn_v, kv_size * hidden_size,
                           TensorRole::kProjection, prefix + "attn_v.weight",
-                          error_msg) ||
+                          error_msg, hidden_size) ||
           !ValidateTensor(l.attn_output, hidden_size * attention_size,
                           TensorRole::kProjection,
-                          prefix + "attn_output.weight", error_msg) ||
+                          prefix + "attn_output.weight", error_msg,
+                          attention_size) ||
           !ValidateTensor(l.attn_q_norm, weights.config.head_dim,
                           TensorRole::kNorm, prefix + "attn_q_norm.weight",
                           error_msg) ||
@@ -265,10 +302,10 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
       const std::size_t rank = weights.config.ssm_time_step_rank;
       if (!ValidateTensor(l.attn_qkv, qkv_size * hidden_size,
                           TensorRole::kProjection, prefix + "attn_qkv.weight",
-                          error_msg) ||
+                          error_msg, hidden_size) ||
           !ValidateTensor(l.attn_gate, inner_size * hidden_size,
                           TensorRole::kProjection, prefix + "attn_gate.weight",
-                          error_msg) ||
+                          error_msg, hidden_size) ||
           !ValidateTensor(l.ssm_a, rank, TensorRole::kSsmParameter,
                           prefix + "ssm_a", error_msg) ||
           !ValidateTensor(l.ssm_conv1d,
@@ -279,16 +316,18 @@ std::optional<QwenModelWeights> QwenModelWeights::LoadFromGguf(
                           prefix + "ssm_dt.bias", error_msg) ||
           !ValidateTensor(l.ssm_alpha, rank * hidden_size,
                           TensorRole::kProjection,
-                          prefix + "ssm_alpha.weight", error_msg) ||
+                          prefix + "ssm_alpha.weight", error_msg,
+                          hidden_size) ||
           !ValidateTensor(l.ssm_beta, rank * hidden_size,
                           TensorRole::kProjection,
-                          prefix + "ssm_beta.weight", error_msg) ||
+                          prefix + "ssm_beta.weight", error_msg,
+                          hidden_size) ||
           !ValidateTensor(l.ssm_norm, weights.config.SsmValueSize(),
                           TensorRole::kSsmParameter,
                           prefix + "ssm_norm.weight", error_msg) ||
           !ValidateTensor(l.ssm_out, hidden_size * inner_size,
                           TensorRole::kProjection, prefix + "ssm_out.weight",
-                          error_msg)) {
+                          error_msg, inner_size)) {
         return std::nullopt;
       }
     }

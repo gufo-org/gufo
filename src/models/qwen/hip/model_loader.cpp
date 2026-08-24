@@ -164,12 +164,16 @@ enum class WeightMappingMode {
   for (const auto& region : regions) {
     const auto region_address =
         reinterpret_cast<std::uintptr_t>(region.host_data);
-    if (tensor_address >= region_address &&
-        tensor_address < region_address + region.size) {
+    if (tensor_address >= region_address) {
       const auto offset = tensor_address - region_address;
-      tensor.data =
-          static_cast<const std::uint8_t*>(region.device_data) + offset;
-      return true;
+      const std::size_t encoded_bytes = tensor.EncodedSizeBytes();
+      if (offset < region.size && encoded_bytes != 0 &&
+          encoded_bytes <= region.size - offset) {
+        tensor.data =
+            static_cast<const std::uint8_t*>(region.device_data) + offset;
+        tensor.available_bytes = region.size - offset;
+        return true;
+      }
     }
   }
   return false;
