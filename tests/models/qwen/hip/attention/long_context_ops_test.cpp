@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,6 +26,7 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
+#include "tests/models/qwen/hip/support/comparisons.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 
 void TestLongContextDecodeAttention() {
@@ -275,7 +275,8 @@ void TestBaselineToTiledKvCacheTransition() {
       d_out_trans + chunk0_size * attention_width, 0,
       static_cast<std::uint32_t>(chunk0_size), chunk1_size, max_context,
       num_heads, num_kv_heads, head_dim);
-  assert(chunk1_ok);
+  strix::test::Expect(chunk1_ok,
+                      "long-context tiled attention launch was rejected");
 
   HIP_CHECK(hipDeviceSynchronize());
 
@@ -306,7 +307,8 @@ done_diff:
     max_diff = std::max(max_diff, std::abs(golden[i] - transition[i]));
   }
   std::cout << "Baseline-to-Tiled transition max diff: " << max_diff << "\n";
-  assert(max_diff < 5e-3F);
+  strix::test::Expect(max_diff < 5e-3F,
+                      "baseline-to-tiled attention transition mismatch");
 
   HIP_CHECK(hipFree(d_q));
   HIP_CHECK(hipFree(d_k));

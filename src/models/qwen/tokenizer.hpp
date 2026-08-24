@@ -1,6 +1,7 @@
 #ifndef STRIX_TOKENIZATION_QWEN_TOKENIZER_HPP_
 #define STRIX_TOKENIZATION_QWEN_TOKENIZER_HPP_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -12,7 +13,9 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/gguf_reader.hpp"
+namespace strix::core {
+class GgufReader;
+}
 
 namespace strix::tokenization {
 

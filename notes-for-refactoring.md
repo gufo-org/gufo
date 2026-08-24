@@ -199,7 +199,18 @@ Target seams should distinguish at least:
 - test support and focused test executables.
 
 The final `strix_core` interface can remain stable while internal object-library
-boundaries reduce incremental HIP build churn.
+boundaries reduce incremental HIP build churn. Decode attention graph variants,
+decode SSM recurrence, quantized GEMV, and fused RMSNorm+SwiGLU now have separate
+translation units because each has an independent launcher and experiment loop.
+
+Some large files intentionally remain cohesive. `hipblaslt_gemm.hip` shares a
+single private plan/cache implementation whose algorithm selection, persistence,
+and execution paths must change together. `aie2p_w4a8_pack.hpp` defines the
+shared XDNA2 packing ABI and compile-time layout helpers. `mtp_eh_proj.cpp`
+contains the session lifecycle for a different row-major W4A8 projection ABI;
+it must not reuse the tiled AIE2P packer because the two XDNA W4A8 layouts are
+not interchangeable. Splitting those files is deferred until their private
+state or ABI can be separated without duplicating contracts.
 
 ## Test architecture
 

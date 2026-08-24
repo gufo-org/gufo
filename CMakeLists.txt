@@ -287,15 +287,19 @@ if (ENGINE_ENABLE_HIP)
     src/models/qwen/hip/kernels/sample.hip
     src/models/qwen/hip/kernels/norm.hip
     src/models/qwen/hip/kernels/gemv.hip
+    src/models/qwen/hip/kernels/gemv_quant.hip
     src/models/qwen/hip/kernels/fused.hip
     src/models/qwen/hip/kernels/common.hip
     src/models/qwen/hip/kernels/qkv.hip
     src/models/qwen/hip/kernels/ssm.hip
+    src/models/qwen/hip/kernels/ssm_decode_recurrence.hip
     src/models/qwen/hip/kernels/ssm_recurrence.hip
     src/models/qwen/hip/kernels/swiglu.hip
+    src/models/qwen/hip/kernels/swiglu_rmsnorm.hip
     src/models/qwen/hip/kernels/attention_batched.hip
     src/models/qwen/hip/kernels/attention_ck.hip
     src/models/qwen/hip/kernels/attention_decode.hip
+    src/models/qwen/hip/kernels/attention_decode_graph.hip
     src/models/qwen/hip/kernels/attention_tile.hip
     src/models/qwen/hip/kernels/hipblas_gemm.hip
     src/models/qwen/hip/kernels/hipblaslt_gemm.hip
@@ -954,7 +958,7 @@ if (BUILD_TESTING)
       "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;fusion;opt-c010-qk-rope-kv")
     add_qwen_hip_test(qwen_attention_projection_ops_test
       tests/models/qwen/hip/attention/projection_ops_test.cpp
-      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;projection;opt-c010-rmsnorm-projection")
+      "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;ssm;projection;opt-c010-rmsnorm-projection")
     add_qwen_hip_test(qwen_attention_component_ops_test
       tests/models/qwen/hip/attention/component_ops_test.cpp
       "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;component")

@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,6 +26,7 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
+#include "tests/models/qwen/hip/support/comparisons.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 
 void TestBatchedFusedSwiGLUEquivalence() {
@@ -89,7 +89,8 @@ void TestBatchedFusedSwiGLUEquivalence() {
       max_diff = d;
   }
   std::cout << "Fused SwiGLU Seq vs Batch max diff: " << max_diff << "\n";
-  assert(max_diff < 1e-4F);
+  strix::test::Expect(max_diff < 1e-4F,
+                      "batched fused SwiGLU result mismatch");
 
   HIP_CHECK(hipFree(d_x));
   HIP_CHECK(hipFree(d_gate_w));

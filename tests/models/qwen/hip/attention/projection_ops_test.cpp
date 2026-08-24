@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,6 +26,7 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
+#include "tests/models/qwen/hip/support/comparisons.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 
 void TestBatchedFusedProjectionsEquivalence() {
@@ -99,22 +99,39 @@ void TestBatchedFusedProjectionsEquivalence() {
 
   HIP_CHECK(hipDeviceSynchronize());
 
-  std::vector<float> res_seq(batch * qkv_size);
-  std::vector<float> res_batch(batch * qkv_size);
-  HIP_CHECK(hipMemcpy(res_seq.data(), d_qkv_seq,
-                      batch * qkv_size * sizeof(float), hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(res_batch.data(), d_qkv_batch,
-                      batch * qkv_size * sizeof(float), hipMemcpyDeviceToHost));
+  std::vector<float> qkv_seq(batch * qkv_size);
+  std::vector<float> qkv_batch(batch * qkv_size);
+  std::vector<float> gate_seq(batch * inner_size);
+  std::vector<float> gate_batch(batch * inner_size);
+  std::vector<float> alpha_seq(batch * time_step_rank);
+  std::vector<float> alpha_batch(batch * time_step_rank);
+  std::vector<float> beta_seq(batch * time_step_rank);
+  std::vector<float> beta_batch(batch * time_step_rank);
+  HIP_CHECK(hipMemcpy(qkv_seq.data(), d_qkv_seq,
+                      qkv_seq.size() * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(qkv_batch.data(), d_qkv_batch,
+                      qkv_batch.size() * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(gate_seq.data(), d_gate_seq,
+                      gate_seq.size() * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(gate_batch.data(), d_gate_batch,
+                      gate_batch.size() * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(alpha_seq.data(), d_alpha_seq,
+                      alpha_seq.size() * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(alpha_batch.data(), d_alpha_batch,
+                      alpha_batch.size() * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(beta_seq.data(), d_beta_seq,
+                      beta_seq.size() * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(beta_batch.data(), d_beta_batch,
+                      beta_batch.size() * sizeof(float), hipMemcpyDeviceToHost));
 
-  float max_diff = 0.0F;
-  for (std::size_t i = 0; i < res_seq.size(); ++i) {
-    const float d = std::abs(res_seq[i] - res_batch[i]);
-    if (d > max_diff)
-      max_diff = d;
-  }
-  std::cout << "Fused SSM Projections Seq vs Batch max diff: " << max_diff
-            << "\n";
-  assert(max_diff < 1e-4F);
+  strix::test::ExpectSpanNear(qkv_seq, qkv_batch, 1e-4F,
+                              "batched SSM QKV projection mismatch");
+  strix::test::ExpectSpanNear(gate_seq, gate_batch, 1e-4F,
+                              "batched SSM gate projection mismatch");
+  strix::test::ExpectSpanNear(alpha_seq, alpha_batch, 1e-4F,
+                              "batched SSM alpha projection mismatch");
+  strix::test::ExpectSpanNear(beta_seq, beta_batch, 1e-4F,
+                              "batched SSM beta projection mismatch");
 
   HIP_CHECK(hipFree(d_x));
   HIP_CHECK(hipFree(d_qkv_w));

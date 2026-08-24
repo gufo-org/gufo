@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,6 +26,7 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
+#include "tests/models/qwen/hip/support/comparisons.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 
 void TestBatchedRoPEEquivalence() {
@@ -102,8 +102,10 @@ void TestBatchedRoPEEquivalence() {
   }
   std::cout << "RoPE Seq vs Batch max Q diff: " << max_q_diff
             << " K diff: " << max_k_diff << "\n";
-  assert(max_q_diff < 1e-4F);
-  assert(max_k_diff < 1e-4F);
+  strix::test::Expect(max_q_diff < 1e-4F,
+                      "batched RoPE Q result mismatch");
+  strix::test::Expect(max_k_diff < 1e-4F,
+                      "batched RoPE K result mismatch");
 
   HIP_CHECK(hipFree(d_q_seq));
   HIP_CHECK(hipFree(d_k_seq));
@@ -160,7 +162,8 @@ void TestBatchedPerHeadRMSNormEquivalence() {
       max_diff = d;
   }
   std::cout << "PerHeadRMSNorm Seq vs Batch max diff: " << max_diff << "\n";
-  assert(max_diff < 1e-4F);
+  strix::test::Expect(max_diff < 1e-4F,
+                      "batched per-head RMSNorm result mismatch");
 
   HIP_CHECK(hipFree(d_x_seq));
   HIP_CHECK(hipFree(d_x_batch));

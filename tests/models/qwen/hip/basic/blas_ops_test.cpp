@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,6 +26,7 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
+#include "tests/models/qwen/hip/support/comparisons.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 
 void TestGpuGEMV() {
@@ -56,7 +56,8 @@ void TestGpuGEMV() {
 
     // Each row has K=8 ones * 2.0 = 16.0
     for (std::size_t m = 0; m < M; ++m) {
-      assert(std::abs(h_y[m] - 16.0F) < 1e-4F);
+      strix::test::ExpectNear(16.0F, h_y[m], 1e-4F,
+                              "FP32 GEMV result mismatch");
     }
 
     HIP_CHECK(hipFree(d_A));
@@ -129,7 +130,7 @@ void TestGpuGEMV() {
     }
     std::cout << "Shape M=" << M << " K=" << K << " max diff=" << max_diff
               << " y[0]=" << h_y[0] << " ref[0]=" << h_y_ref[0] << "\n";
-    assert(max_diff < 1e-2F);
+    strix::test::Expect(max_diff < 1e-2F, "BF16 GEMV result mismatch");
 
     HIP_CHECK(hipFree(d_A));
     HIP_CHECK(hipFree(d_x));
@@ -176,7 +177,7 @@ void TestBatchedGEMM() {
         std::cerr << "BatchedGEMM mismatch at b=" << b << " m=" << m
                   << " got=" << h_Y[b * M + m] << " expected=" << expected
                   << "\n";
-        assert(false);
+        strix::test::Expect(false, "batched GEMM result mismatch");
       }
     }
   }
