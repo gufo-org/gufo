@@ -14,7 +14,7 @@ namespace strix::models::qwen {
 /// CPU backend reproduces the existing `ForwardRoPE` computation exactly
 /// (`ReferenceRoPE` applied per head). In-place safe: `q`/`k` may be mutated
 /// in place.
-void RopeForward(ModuleCtx& ctx, const RopeLayerView& view,
+void RopeForward(const CpuModuleContext& ctx, const RopeLayerView& view,
                  std::span<float> q, std::span<float> k,
                  std::uint32_t pos) noexcept;
 

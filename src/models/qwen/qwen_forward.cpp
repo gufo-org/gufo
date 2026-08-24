@@ -120,10 +120,9 @@ void ForwardRMSNorm(std::span<const float> x, const QwenTensorRef& weight,
   // Thin wrapper: the norm body now lives in the norm module's CPU backend
   // (NormForward). This free function is kept as-is for the existing CPU
   // callers (ForwardLayer / ForwardSSM / MTP reference) so behavior is
-  // unchanged. NormForward ignores the (defaulted) ModuleCtx fields and just
-  // reproduces the RMSNorm computation above.
+  // unchanged.
   qwen::NormLayerView view{weight, eps};
-  qwen::ModuleCtx ctx{};
+  const qwen::CpuModuleContext ctx;
   qwen::NormForward(ctx, view, x, out);
 }
 
@@ -136,7 +135,7 @@ void ForwardRoPE(std::span<float> q, std::span<float> k,
   // (ForwardLayer / qwen_forward_test) so behavior is unchanged.
   qwen::RopeLayerView view{num_heads, num_kv_heads, head_dim, rotary_dim,
                            rope_theta};
-  qwen::ModuleCtx ctx{};
+  const qwen::CpuModuleContext ctx;
   qwen::RopeForward(ctx, view, q, k, pos);
 }
 
@@ -244,7 +243,7 @@ void ForwardFFN(std::span<const float> x, const QwenTensorRef& gate_weight,
   // qwen_forward_test) so behavior is unchanged.
   qwen::FfnLayerView view{gate_weight, up_weight, down_weight, hidden_size,
                           intermediate_size};
-  qwen::ModuleCtx ctx{};
+  const qwen::CpuModuleContext ctx;
   qwen::FfnForward(ctx, view, x, gate_scratch, up_scratch, act_scratch,
                    ffn_out);
 }
@@ -260,11 +259,7 @@ void ForwardLayer(std::span<float> hidden, const QwenLayerWeights& layer,
 
   // 2. Self-Attention / SSM
   if (layer.is_full_attention) {
-    qwen::ModuleCtx actx{};
-    actx.config = &config;
-    actx.arena = &arena;
-    actx.layer_idx = layer_idx;
-    actx.pos = pos;
+    const qwen::CpuLayerContext actx(config, arena, layer_idx, pos);
     qwen::AttnLayerView av = qwen::MakeAttnView(layer, config);
     qwen::AttnForward(actx, av, arena.normed, kv_cache, pos, arena.attn_out);
   } else {
@@ -273,7 +268,7 @@ void ForwardLayer(std::span<float> hidden, const QwenLayerWeights& layer,
   }
 
   // 3. Residual Add (composition layer drives the residual module)
-  qwen::ModuleCtx ctx{};
+  const qwen::CpuModuleContext ctx;
   qwen::ResidualAdd(ctx, hidden, arena.attn_out);
 
   // 4. FFN Pre-RMSNorm
@@ -292,10 +287,8 @@ void ForwardModel(std::uint32_t token_id, std::uint32_t pos,
                   const QwenModelWeights& weights, QwenKvCache& kv_cache,
                   QwenSsmCache& ssm_cache, QwenScratchArena& arena,
                   std::span<float> logits_out) noexcept {
-  qwen::ModuleCtx ctx{};
-  ctx.config = &weights.config;
-  ctx.arena = &arena;
-  qwen::EmbedForward(ctx, token_id, weights.token_embd,
+  const qwen::CpuModuleContext module_ctx;
+  qwen::EmbedForward(module_ctx, token_id, weights.token_embd,
                      weights.config.hidden_size, arena.hidden);
 
   for (std::uint32_t l = 0; l < weights.config.num_layers; ++l) {
@@ -303,8 +296,9 @@ void ForwardModel(std::uint32_t token_id, std::uint32_t pos,
                  ssm_cache, l, pos, arena);
   }
 
-  qwen::UnembedForward(ctx, weights.output_norm, weights.output, arena.hidden,
-                       logits_out);
+  const qwen::CpuLayerContext layer_ctx(weights.config, arena);
+  qwen::UnembedForward(layer_ctx, weights.output_norm, weights.output,
+                       arena.hidden, logits_out);
 }
 
 std::uint32_t GreedyArgmax(std::span<const float> logits) noexcept {

@@ -4,16 +4,19 @@
 
 namespace strix::models::qwen {
 
-void UnembedForward(ModuleCtx& ctx, const QwenTensorRef& output_norm,
+void UnembedForward(const CpuLayerContext& ctx,
+                    const QwenTensorRef& output_norm,
                     const QwenTensorRef& output_weight,
                     std::span<const float> hidden,
                     std::span<float> logits_out) noexcept {
   // CPU backend: the final-norm + lm_head block lifted verbatim from
   // ForwardModel.
-  ForwardRMSNorm(hidden, output_norm, 1e-6F, ctx.arena->normed);
+  auto& scratch = ctx.Scratch();
+  const auto& config = ctx.Config();
+  ForwardRMSNorm(hidden, output_norm, 1e-6F, scratch.normed);
   if (!output_weight.empty()) {
-    TensorGEMV(output_weight, ctx.arena->normed, ctx.config->vocab_size,
-               ctx.config->hidden_size, logits_out);
+    TensorGEMV(output_weight, scratch.normed, config.vocab_size,
+               config.hidden_size, logits_out);
   }
 }
 

@@ -15,7 +15,11 @@ namespace strix::models::qwen {
 /// The three scratch buffers (`gate_scratch`, `up_scratch`, `act_scratch`)
 /// hold the intermediate GEMV results; the composition layer supplies them
 /// (typically from the arena's `mlp_gate`/`mlp_up`/`mlp_act`/`mlp_out`).
-void FfnForward(ModuleCtx& ctx, const FfnLayerView& view,
+void FfnForward(const CpuModuleContext& ctx, const FfnLayerView& view,
+                std::span<const float> x, std::span<float> gate_scratch,
+                std::span<float> up_scratch, std::span<float> act_scratch,
+                std::span<float> out) noexcept;
+void FfnForward(const HipModuleContext& ctx, const FfnLayerView& view,
                 std::span<const float> x, std::span<float> gate_scratch,
                 std::span<float> up_scratch, std::span<float> act_scratch,
                 std::span<float> out) noexcept;

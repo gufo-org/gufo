@@ -1,7 +1,7 @@
 // L2 GPU module integration test (#22, REQUIRED gate).
 //
 // Wire a short multi-layer forward through the Qwen module seam on the HIP
-// backend end-to-end: ModuleCtx Backend::Hip, real synthetic weights pulled
+// backend end-to-end: typed HipModuleContext, real synthetic weights pulled
 // from build_synthetic_qwen_weights (unit-scaled, seeded), a few layers, and
 // assert the pipeline produces finite, non-trivial logits and that the module
 // functions return non-zero activations across layers.
@@ -16,7 +16,7 @@
 //   few layers (hidden -> intermediate -> hidden, mirroring the FFN body's
 //   projection cycle) and emits a logit vector through a head QuantGemm, which
 //   is the module-seam surface the composition layer will call. It exercises
-//   the exact ModuleCtx/Backend::Hip dispatch path.
+//   the exact typed HIP overload path.
 
 #include "src/core/hip/hip_utils.hpp"  // HIP_CHECK
 #include "src/models/qwen/modules/modules.hpp"
@@ -37,8 +37,7 @@ namespace {
 using strix::core::GgmlType;
 using strix::core::ModelConfig;
 using strix::models::QwenTensorRef;
-using strix::models::qwen::Backend;
-using strix::models::qwen::ModuleCtx;
+using strix::models::qwen::HipModuleContext;
 using strix::models::qwen::NormForward;
 using strix::models::qwen::NormLayerView;
 using strix::models::qwen::QuantGemm;
@@ -75,10 +74,7 @@ std::vector<float> RunMultiLayerForward() {
   const std::size_t nlayers =
       std::min<std::size_t>(3, config.num_layers);
 
-  ModuleCtx ctx;
-  ctx.config = &config;
-  ctx.backend = Backend::Hip;
-  ctx.stream = nullptr;  // null hipStream_t = default stream
+  const HipModuleContext ctx;  // null hipStream_t = default stream
 
   // Deterministic seed hidden state.
   std::mt19937 rng = make_seeded_rng(0x1BADB0B0u);
@@ -99,7 +95,6 @@ std::vector<float> RunMultiLayerForward() {
 
   for (std::uint32_t layer_idx = 0; layer_idx < nlayers; ++layer_idx) {
     const auto& layer = w.layers[layer_idx];
-    ctx.layer_idx = layer_idx;
 
     float* d_nw = nullptr;  // attn_norm (pre-norm) weight
     float* d_gw = nullptr;  // ffn_gate (inter, hidden)

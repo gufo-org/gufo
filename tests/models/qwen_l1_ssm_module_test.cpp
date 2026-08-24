@@ -1,7 +1,7 @@
 // L1 CPU module e2e test for the SSM module (gated DeltaNet linear attention).
 //
-// Phase 3 (#18): drive the module through its public seam — a ModuleCtx +
-// SsmLayerView over a small synthetic model built by build_synthetic_qwen_weights
+// Phase 3 (#18): drive the module through its public seam — a typed CPU layer
+// context + SsmLayerView over a small synthetic model built by build_synthetic_qwen_weights
 // (no GgufReader). Asserts the module:
 //   (1) reproduces exactly the production ForwardSSM result (validates the
 //       view.source / arena-slice / config / layer_idx seam wiring), and
@@ -33,11 +33,10 @@ using strix::models::ForwardSSM;
 using strix::models::QwenLayerWeights;
 using strix::models::QwenScratchArena;
 using strix::models::QwenSsmCache;
-using strix::models::qwen::Backend;
 using strix::models::qwen::build_synthetic_qwen_weights;
 using strix::models::qwen::make_small_qwen_config;
 using strix::models::qwen::MakeSsmView;
-using strix::models::qwen::ModuleCtx;
+using strix::models::qwen::CpuLayerContext;
 using strix::models::qwen::SsmForward;
 using strix::models::qwen::SsmLayerView;
 
@@ -55,11 +54,7 @@ void RunSsmModule(const ModelConfig& config,
   QwenSsmCache cache = MakeCache(config);
   cache.Reset();
 
-  ModuleCtx ctx;
-  ctx.config = &config;
-  ctx.arena = &arena;
-  ctx.backend = Backend::Cpu;
-  ctx.layer_idx = layer_idx;
+  const CpuLayerContext ctx(config, arena, layer_idx);
 
   SsmLayerView view = MakeSsmView(layer, config);
   out.assign(x.size(), 0.0F);

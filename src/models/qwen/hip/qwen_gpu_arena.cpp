@@ -100,6 +100,54 @@ QwenGpuArena::~QwenGpuArena() {
   FreeAll();
 }
 
+QwenGpuScratchView QwenGpuArena::GetScratchView(
+    std::size_t batch_size) noexcept {
+  const std::size_t batch = std::min<std::size_t>(batch_size, max_batch_);
+  const std::size_t hidden = config_.hidden_size;
+  const std::size_t attention = config_.AttentionSize();
+  const std::size_t kv =
+      static_cast<std::size_t>(config_.num_key_value_heads) * config_.head_dim;
+  const std::size_t q_projection = 2 * attention;
+  const std::size_t ssm_qkv = config_.SsmQkvSize();
+  const std::size_t recurrent = std::max<std::size_t>(
+      attention, config_.ssm_inner_size);
+  const std::size_t projection =
+      std::max<std::size_t>(q_projection, ssm_qkv);
+  const std::size_t bf16_scratch =
+      batch * std::max<std::size_t>(
+                  {config_.intermediate_size, hidden, projection,
+                   ssm_qkv + config_.ssm_inner_size +
+                       (2 * config_.ssm_time_step_rank)});
+  const std::size_t weight_bf16 =
+      hidden * std::max<std::size_t>(
+                   {q_projection, kv, attention, config_.intermediate_size,
+                    ssm_qkv, config_.ssm_inner_size,
+                    config_.ssm_time_step_rank});
+  return {
+      .hidden = {d_hidden, batch * hidden},
+      .normed = {d_normed, batch * hidden},
+      .q = {d_q, batch * attention},
+      .k = {d_k, batch * kv},
+      .v = {d_v, batch * kv},
+      .attention_out = {d_attn_out, batch * hidden},
+      .ffn_gate = {d_ffn_gate, batch * config_.intermediate_size},
+      .ffn_up = {d_ffn_up, batch * config_.intermediate_size},
+      .ffn_activation = {d_ffn_act, batch * config_.intermediate_size},
+      .ffn_out = {d_ffn_out, batch * hidden},
+      .ssm_qkv = {d_ssm_qkv, batch * projection},
+      .conv_out = {d_conv_out, batch * ssm_qkv},
+      .ssm_gate = {d_ssm_gate, batch * recurrent},
+      .ssm_out = {d_ssm_out, batch * recurrent},
+      .alpha = {d_alpha_buf, batch * config_.ssm_time_step_rank},
+      .beta = {d_beta_buf, batch * config_.ssm_time_step_rank},
+      .logits = {d_logits, config_.vocab_size},
+      .bf16 = {static_cast<hip_bfloat16*>(d_scratch_bf16), bf16_scratch},
+      .weight_bf16 = {d_weights_bf16, weight_bf16},
+      .prompt_tokens = {d_prompt_tokens,
+                        std::max<std::size_t>(batch, 2)},
+  };
+}
+
 QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
     : config_(other.config_),
       max_context_(other.max_context_),

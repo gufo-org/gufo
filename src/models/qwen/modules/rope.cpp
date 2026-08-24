@@ -4,7 +4,7 @@
 
 namespace strix::models::qwen {
 
-void RopeForward(ModuleCtx&, const RopeLayerView& view,
+void RopeForward(const CpuModuleContext&, const RopeLayerView& view,
                  std::span<float> q, std::span<float> k,
                  std::uint32_t pos) noexcept {
   // CPU backend: the RoPE body lifted verbatim from ForwardRoPE. Per-head

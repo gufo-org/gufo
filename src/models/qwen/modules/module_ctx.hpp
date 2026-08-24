@@ -1,7 +1,6 @@
 #ifndef STRIX_MODELS_QWEN_MODULES_MODULE_CTX_HPP_
 #define STRIX_MODELS_QWEN_MODULES_MODULE_CTX_HPP_
 
-#include <cstddef>
 #include <cstdint>
 
 #include "src/core/model_config.hpp"
@@ -9,42 +8,54 @@
 
 namespace strix::models::qwen {
 
-/// Which compute backend drives a module call. The same module signature is
-/// implemented twice — a CPU reference (oracle) and a HIP kernel path — and the
-/// per-forward dispatch selects one via this tag. The plan's two-backend
-/// contract; implementations land in Phase 2 extraction.
-enum class Backend : std::uint8_t { Cpu = 0, Hip = 1 };
+/// Capability token for stateless CPU module calls.
+struct CpuModuleContext final {};
 
-/// Opaque handle to the hipBLASLt plan cache.
-///
-/// NOTE: no `BlasPlanCache` type exists in this codebase yet (the refactor is
-/// what introduces it). The name is forward-declared so `ModuleCtx` reserves
-/// the slot the plan's contract specifies; the definition arrives with the
-/// hipBLASLt plan-cache work. Until then callers pass nullptr.
-struct BlasPlanCache;
+/// CPU capabilities required by stateful layer modules. References make an
+/// incomplete context unrepresentable and keep ownership in the composition
+/// layer.
+class CpuLayerContext final {
+public:
+  CpuLayerContext(const core::ModelConfig& config, QwenScratchArena& scratch,
+                  std::uint32_t layer_idx = 0,
+                  std::uint32_t position = 0) noexcept
+      : config_(config),
+        scratch_(scratch),
+        layer_idx_(layer_idx),
+        position_(position) {}
 
-/// Everything a module needs from the runtime, one object.
-///
-/// Modules are pure single-stage stateless functions: they read named slices
-/// out of `arena` (via the accessors: hidden, normed, q, k, v, attn_scores,
-/// ssm_qkv, ssm_gate, mlp_gate, ...) and exchange spans. Cross-module fusion
-/// ownership lives in the composition layer (the per-layer `ForwardToken`
-/// loop), NOT inside any one module.
-struct ModuleCtx {
-  core::ModelConfig const* config = nullptr;  ///< model/config dims (never owned)
-  QwenScratchArena* arena = nullptr;          ///< named-slice scratch accessors
-  BlasPlanCache* blas_plans = nullptr;        ///< hipBLASLt plan cache (placeholder)
-  Backend backend = Backend::Cpu;             ///< selected call path (oracle/HIP)
+  [[nodiscard]] const core::ModelConfig& Config() const noexcept {
+    return config_;
+  }
+  [[nodiscard]] QwenScratchArena& Scratch() const noexcept { return scratch_; }
+  [[nodiscard]] std::uint32_t LayerIndex() const noexcept { return layer_idx_; }
+  [[nodiscard]] std::uint32_t Position() const noexcept { return position_; }
 
-  /// Opaque async-stream handle. nullptr on CPU builds. On HIP builds the real
-  /// hipStream_t is a pointer type, so a HIP TU recovers it with:
-  ///   hipStream_t s = static_cast<hipStream_t>(ctx.stream);
-  /// Kept opaque so this header compiles in CPU-only translation units without
-  /// dragging in <hip/hip_runtime.h>.
-  void* stream = nullptr;
+private:
+  const core::ModelConfig& config_;
+  QwenScratchArena& scratch_;
+  std::uint32_t layer_idx_;
+  std::uint32_t position_;
+};
 
-  std::uint32_t layer_idx = 0;  ///< index into QwenModelWeights::layers
-  std::uint32_t pos = 0;        ///< sequence position (RoPE / KV write)
+/// HIP launch capability. A null stream is valid and denotes the HIP default
+/// stream; no CPU scratch/config pointers can accidentally be paired with this
+/// capability.
+class HipModuleContext final {
+public:
+  explicit HipModuleContext(void* stream = nullptr,
+                            std::uint32_t layer_idx = 0,
+                            std::uint32_t position = 0) noexcept
+      : stream_(stream), layer_idx_(layer_idx), position_(position) {}
+
+  [[nodiscard]] void* Stream() const noexcept { return stream_; }
+  [[nodiscard]] std::uint32_t LayerIndex() const noexcept { return layer_idx_; }
+  [[nodiscard]] std::uint32_t Position() const noexcept { return position_; }
+
+private:
+  void* stream_;
+  std::uint32_t layer_idx_;
+  std::uint32_t position_;
 };
 
 }  // namespace strix::models::qwen

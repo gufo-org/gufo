@@ -1,7 +1,7 @@
 // L1 CPU module e2e test for the RMSNorm module (NormForward).
 //
-// Phase 3 (#21): drive the module through its public seam (a ModuleCtx +
-// NormLayerView) over a small synthetic model built by build_synthetic_qwen_weights
+// Phase 3 (#21): drive the module through its public seam (a typed CPU
+// context + NormLayerView) over a small synthetic model built by build_synthetic_qwen_weights
 // (no GgufReader). Asserts the module:
 //   (1) reproduces an independent F32 RMSNorm reference (a different code path
 //       than the module's FP64 ReferenceRMSNorm oracle), for both the attn
@@ -29,20 +29,18 @@ namespace {
 
 using strix::core::ModelConfig;
 using strix::models::QwenLayerWeights;
-using strix::models::qwen::Backend;
 using strix::models::qwen::build_synthetic_qwen_weights;
 using strix::models::qwen::make_small_qwen_config;
 using strix::models::qwen::MakeAttnNormView;
 using strix::models::qwen::MakeFfnNormView;
-using strix::models::qwen::ModuleCtx;
+using strix::models::qwen::CpuModuleContext;
 using strix::models::qwen::NormForward;
 using strix::models::qwen::NormLayerView;
 
 void RunNormModule(const ModelConfig& c, const NormLayerView& view,
                    std::span<const float> x, std::vector<float>& out) {
-  ModuleCtx ctx;
-  ctx.config = &c;
-  ctx.backend = Backend::Cpu;
+  (void)c;
+  const CpuModuleContext ctx;
   out.assign(x.size(), 0.0F);
   NormForward(ctx, view, x, out);
 }

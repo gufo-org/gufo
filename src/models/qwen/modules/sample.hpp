@@ -9,7 +9,7 @@
 namespace strix::models::qwen {
 
 /// Greedy argmax over a logit distribution (sampling-policy module seam).
-std::uint32_t SampleForward(ModuleCtx& ctx,
+std::uint32_t SampleForward(const CpuModuleContext& ctx,
                             std::span<const float> logits) noexcept;
 
 }  // namespace strix::models::qwen

@@ -11,12 +11,11 @@ namespace strix::models::qwen {
 /// Layer norm (attn pre-norm, ffn pre-norm, final output norm):
 /// out = (x / rms(x) + eps) * weight.
 ///
-/// CPU backend reproduces the existing `ForwardRMSNorm` computation exactly
-/// (the pure FP64 `ReferenceRMSNorm` oracle, with non-F32 weight dequantized
-/// to F32 first). The HIP backend lands in a later phase — `ctx.backend` is
-/// not consulted yet. In-place is safe (`x == out`): the oracle reads all of
-/// `x` before it writes any of `out`.
-void NormForward(ModuleCtx& ctx, const NormLayerView& view,
+/// CPU reproduces `ForwardRMSNorm`; HIP launches the existing RMSNorm kernel.
+/// In-place is safe (`x == out`) on the CPU reference path.
+void NormForward(const CpuModuleContext& ctx, const NormLayerView& view,
+                 std::span<const float> x, std::span<float> out) noexcept;
+void NormForward(const HipModuleContext& ctx, const NormLayerView& view,
                  std::span<const float> x, std::span<float> out) noexcept;
 
 }  // namespace strix::models::qwen

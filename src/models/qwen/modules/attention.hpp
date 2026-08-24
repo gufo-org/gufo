@@ -17,8 +17,9 @@ namespace strix::models::qwen {
 /// CPU backend reproduces the exact attention branch formerly inlined in
 /// `ForwardLayer` (both the fused `2*q_size` Q+gate projection and the plain
 /// Q path), calling the kept `ForwardAttention` helper for the score/context
-/// core. Stateless in signature; KV state lives in `kv` + `ctx.layer_idx`.
-void AttnForward(ModuleCtx& ctx, const AttnLayerView& view,
+/// core. KV state lives in `kv`; required scratch/config capabilities are held
+/// by the non-nullable CPU layer context.
+void AttnForward(const CpuLayerContext& ctx, const AttnLayerView& view,
                  std::span<const float> x, QwenKvCache& kv,
                  std::uint32_t pos, std::span<float> out) noexcept;
 

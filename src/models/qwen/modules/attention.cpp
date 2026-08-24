@@ -9,15 +9,15 @@
 
 namespace strix::models::qwen {
 
-void AttnForward(ModuleCtx& ctx, const AttnLayerView& view,
+void AttnForward(const CpuLayerContext& ctx, const AttnLayerView& view,
                  std::span<const float> x, QwenKvCache& kv,
                  std::uint32_t pos, std::span<float> out) noexcept {
   // CPU backend: the full-attention branch lifted verbatim from ForwardLayer
   // (see ForwardLayer's `if (layer.is_full_attention)` block). Weights come
-  // from the view; scratch from `ctx.arena`; dims from `ctx.config`. `pos` is
-  // the caller's token index (matches the original ForwardLayer argument).
-  const core::ModelConfig& config = *ctx.config;
-  QwenScratchArena& arena = *ctx.arena;
+  // from the view; scratch and dimensions come from the typed context. `pos`
+  // is the caller's token index (matches the original ForwardLayer argument).
+  const core::ModelConfig& config = ctx.Config();
+  QwenScratchArena& arena = ctx.Scratch();
   const std::size_t hidden_size = config.hidden_size;
   const std::uint32_t head_dim = config.head_dim;
   const std::size_t q_size = config.AttentionSize();
@@ -76,7 +76,8 @@ void AttnForward(ModuleCtx& ctx, const AttnLayerView& view,
               pos, config.rope_theta);
 
   ForwardAttention(arena.q, arena.k, arena.v, arena.ssm_gate.subspan(0, q_size),
-                   view.output, kv, ctx.layer_idx / config.full_attention_interval,
+                   view.output, kv,
+                   ctx.LayerIndex() / config.full_attention_interval,
                    pos, config.num_attention_heads, config.num_key_value_heads,
                    config.head_dim, hidden_size, arena.attn_scores, out);
 }

@@ -17,7 +17,10 @@ namespace strix::models::qwen {
 /// The module wraps the existing dispatch (the shared quant_gemm seam) rather
 /// than moving `TensorGEMV`'s body in — `TensorGEMV` has many callers (SSM,
 /// attention, MTP) that must not change. Behavior-identical.
-void QuantGemm(ModuleCtx& ctx, const QwenTensorRef& A,
+void QuantGemm(const CpuModuleContext& ctx, const QwenTensorRef& A,
+               std::span<const float> x, std::size_t M, std::size_t K,
+               std::span<float> y) noexcept;
+void QuantGemm(const HipModuleContext& ctx, const QwenTensorRef& A,
                std::span<const float> x, std::size_t M, std::size_t K,
                std::span<float> y) noexcept;
 

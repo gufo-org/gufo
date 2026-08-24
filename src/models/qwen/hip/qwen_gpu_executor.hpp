@@ -77,6 +77,31 @@ private:
   std::vector<QwenGpuWeightRegion> weight_regions_;
 };
 
+/// Typed non-owning views over stable Qwen GPU arena allocations. Spans carry
+/// element counts while preserving the exact device addresses used by kernels.
+struct QwenGpuScratchView {
+  std::span<float> hidden;
+  std::span<float> normed;
+  std::span<float> q;
+  std::span<float> k;
+  std::span<float> v;
+  std::span<float> attention_out;
+  std::span<float> ffn_gate;
+  std::span<float> ffn_up;
+  std::span<float> ffn_activation;
+  std::span<float> ffn_out;
+  std::span<float> ssm_qkv;
+  std::span<float> conv_out;
+  std::span<float> ssm_gate;
+  std::span<float> ssm_out;
+  std::span<float> alpha;
+  std::span<float> beta;
+  std::span<float> logits;
+  std::span<hip_bfloat16> bf16;
+  std::span<hip_bfloat16> weight_bf16;
+  std::span<std::uint32_t> prompt_tokens;
+};
+
 /// Preallocated, zero-allocation GPU execution arena on gfx1151.
 class QwenGpuArena {
 public:
@@ -142,6 +167,8 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }
+  [[nodiscard]] QwenGpuScratchView GetScratchView(
+      std::size_t batch_size = 1) noexcept;
 
 private:
   void FreeAll() noexcept;

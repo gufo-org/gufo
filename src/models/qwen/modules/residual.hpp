@@ -12,7 +12,9 @@ namespace strix::models::qwen {
 /// The fused residual+norm route is a composition-layer concern (owned by the
 /// per-layer `ExecuteStep`), not a module-local one, so the module is the
 /// standalone add only.
-void ResidualAdd(ModuleCtx& ctx, std::span<float> dst,
+void ResidualAdd(const CpuModuleContext& ctx, std::span<float> dst,
+                 std::span<const float> src) noexcept;
+void ResidualAdd(const HipModuleContext& ctx, std::span<float> dst,
                  std::span<const float> src) noexcept;
 
 }  // namespace strix::models::qwen

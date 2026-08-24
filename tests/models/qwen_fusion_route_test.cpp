@@ -21,21 +21,27 @@
 #include <cstdint>
 #include <iostream>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 namespace {
 
 using strix::core::ModelConfig;
-using strix::models::qwen::Backend;
 using strix::models::qwen::build_synthetic_qwen_weights;
 using strix::models::qwen::make_small_qwen_config;
 using strix::models::qwen::MakeAttnNormView;
-using strix::models::qwen::ModuleCtx;
+using strix::models::qwen::CpuLayerContext;
+using strix::models::qwen::CpuModuleContext;
+using strix::models::qwen::HipModuleContext;
 using strix::models::qwen::NormForward;
 using strix::models::qwen::NormLayerView;
 using strix::models::qwen::ResidualAdd;
 using strix::models::qwen::RopeForward;
 using strix::models::qwen::RopeLayerView;
+
+static_assert(std::is_empty_v<CpuModuleContext>);
+static_assert(!std::is_default_constructible_v<CpuLayerContext>);
+static_assert(!std::is_convertible_v<CpuModuleContext, HipModuleContext>);
 
 // --- 1. Fusion-toggle routing values (strix::hip::detail, host constexpr) ---
 void TestFusionToggleValues() {
@@ -80,9 +86,7 @@ void TestUnfusedFallback_Norm() {
   std::vector<float> x = strix::test::make_random_tensor(hidden, rng, -1.0F, 1.0F);
 
   NormLayerView view = MakeAttnNormView(layer, config);
-  ModuleCtx ctx;
-  ctx.config = &config;
-  ctx.backend = Backend::Cpu;
+  const CpuModuleContext ctx;
   std::vector<float> out(hidden, 0.0F);
   NormForward(ctx, view, x, out);
 
@@ -112,8 +116,7 @@ void TestUnfusedFallback_Residual() {
   std::vector<float> src = {0.5F, -1.0F, 2.5F, -0.5F};
   std::vector<float> expect = {1.5F, 1.0F, 5.5F, 3.5F};
 
-  ModuleCtx ctx;
-  ctx.backend = Backend::Cpu;
+  const CpuModuleContext ctx;
   ResidualAdd(ctx, dst, src);  // dst += src, in-place
   for (std::size_t i = 0; i < dst.size(); ++i) {
     assert(std::abs(dst[i] - expect[i]) < 1e-6F);
@@ -129,8 +132,7 @@ void TestUnfusedFallback_Rope() {
   std::vector<float> q = {1.0F, 2.0F, 3.0F, 4.0F};
   std::vector<float> k = {5.0F, 6.0F, 7.0F, 8.0F};
 
-  ModuleCtx ctx;
-  ctx.backend = Backend::Cpu;
+  const CpuModuleContext ctx;
 
   // pos=0 -> RoPE is the identity rotation (cos=0, sin=1) -> q/k unchanged.
   {

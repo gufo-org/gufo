@@ -12,74 +12,57 @@
 
 namespace strix::models::qwen {
 
-// Module function declarations.
-//
-// One signature per architectural component, parameterized on the module's OWN
-// LayerView (fixes the Data Clump) and a ModuleCtx. Activation tensors are
-// `std::span<float>` (matching the existing CPU forward code); weights are
-// QwenTensorRef inside the views. The plan's generic `const Tensor& x` maps to
-// `std::span<const float>` / `std::span<float>` in this codebase.
-//
-// Each function has two backends (CPU reference / HIP kernels) behind the same
-// signature; the CPU/HIP split is a Phase 2 implementation concern driven by
-// `ctx.backend`. These are DECLARATIONS ONLY — bodies land in Phase 2 extraction.
-
-/// Layer norm: out = (x / rms(x)) * weight. (attn pre-norm, ffn pre-norm, final.)
-void NormForward(ModuleCtx& ctx, const NormLayerView& view,
+/// CPU reference and HIP launch overloads are intentionally distinct. Backend
+/// selection is a composition-time type choice, not a runtime tag branch.
+void NormForward(const CpuModuleContext& ctx, const NormLayerView& view,
+                 std::span<const float> x, std::span<float> out) noexcept;
+void NormForward(const HipModuleContext& ctx, const NormLayerView& view,
                  std::span<const float> x, std::span<float> out) noexcept;
 
-/// RoPE rotation on Q and K heads for the given position.
-void RopeForward(ModuleCtx& ctx, const RopeLayerView& view,
+void RopeForward(const CpuModuleContext& ctx, const RopeLayerView& view,
                  std::span<float> q, std::span<float> k,
                  std::uint32_t pos) noexcept;
 
-/// Full attention: QKV proj -> RoPE -> KV write -> score -> out proj.
-void AttnForward(ModuleCtx& ctx, const AttnLayerView& view,
+void AttnForward(const CpuLayerContext& ctx, const AttnLayerView& view,
                  std::span<const float> x, QwenKvCache& kv,
                  std::uint32_t pos, std::span<float> out) noexcept;
 
-/// Gated DeltaNet linear attention: in-proj -> conv -> recurrent update -> gate
-/// -> out.
-void SsmForward(ModuleCtx& ctx, const SsmLayerView& view,
+void SsmForward(const CpuLayerContext& ctx, const SsmLayerView& view,
                 std::span<const float> x, QwenSsmCache& state,
                 std::span<float> out) noexcept;
 
-/// SwiGLU FFN.
-//
-// CPU backend operates on three intermediate scratch buffers (the GEMV
-// results for gate/up and the activation); the composition layer supplies them
-// from the arena's `mlp_gate`/`mlp_up`/`mlp_act`. This mirrors the existing
-// `ForwardFFN` reference signature (which has no arena in its call — the old
-// callers pass raw scratch spans), so the module can be a thin wrapper over it.
-void FfnForward(ModuleCtx& ctx, const FfnLayerView& view,
+void FfnForward(const CpuModuleContext& ctx, const FfnLayerView& view,
+                std::span<const float> x, std::span<float> gate_scratch,
+                std::span<float> up_scratch, std::span<float> act_scratch,
+                std::span<float> out) noexcept;
+void FfnForward(const HipModuleContext& ctx, const FfnLayerView& view,
                 std::span<const float> x, std::span<float> gate_scratch,
                 std::span<float> up_scratch, std::span<float> act_scratch,
                 std::span<float> out) noexcept;
 
-/// Residual add: dst += src (standalone; the fused residual+norm route is a
-/// composition-layer concern, not a module-local one).
-void ResidualAdd(ModuleCtx& ctx, std::span<float> dst,
+void ResidualAdd(const CpuModuleContext& ctx, std::span<float> dst,
+                 std::span<const float> src) noexcept;
+void ResidualAdd(const HipModuleContext& ctx, std::span<float> dst,
                  std::span<const float> src) noexcept;
 
-/// Quantized GEMV dispatch: y = A @ x for quantized `A` (F32/BF16/Q3_K/Q4_K/
-/// Q5_K/Q6_K/Q8_0/Q8_K), proxying src/core/quant/ggml_gemm.hpp.
-void QuantGemm(ModuleCtx& ctx, const QwenTensorRef& A,
+void QuantGemm(const CpuModuleContext& ctx, const QwenTensorRef& A,
+               std::span<const float> x, std::size_t M, std::size_t K,
+               std::span<float> y) noexcept;
+void QuantGemm(const HipModuleContext& ctx, const QwenTensorRef& A,
                std::span<const float> x, std::size_t M, std::size_t K,
                std::span<float> y) noexcept;
 
-/// Token embedding lookup: copies the embedding row for token_id into out.
-void EmbedForward(ModuleCtx& ctx, std::uint32_t token_id,
+void EmbedForward(const CpuModuleContext& ctx, std::uint32_t token_id,
                   const QwenTensorRef& token_embd, std::size_t hidden_size,
                   std::span<float> out) noexcept;
 
-/// Final output: RMSNorm the hidden state then project through the LM head.
-void UnembedForward(ModuleCtx& ctx, const QwenTensorRef& output_norm,
+void UnembedForward(const CpuLayerContext& ctx,
+                    const QwenTensorRef& output_norm,
                     const QwenTensorRef& output_weight,
                     std::span<const float> hidden,
                     std::span<float> logits_out) noexcept;
 
-/// Greedy argmax over a logit distribution (sampling-policy module seam).
-std::uint32_t SampleForward(ModuleCtx& ctx,
+std::uint32_t SampleForward(const CpuModuleContext& ctx,
                             std::span<const float> logits) noexcept;
 
 }  // namespace strix::models::qwen

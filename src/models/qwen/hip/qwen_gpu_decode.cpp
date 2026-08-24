@@ -30,14 +30,15 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
   const std::size_t ssm_qkv_size = config.SsmQkvSize();
   const std::size_t ssm_inner_size = config.ssm_inner_size;
   const std::size_t time_step_rank = config.ssm_time_step_rank;
+  auto scratch = arena.GetScratchView();
   const std::size_t sequence_length = static_cast<std::size_t>(pos) + 1;
   const bool use_split_k_decode = detail::IsSplitKDecodeAttentionSupported(
       sequence_length, config.num_attention_heads, config.num_key_value_heads,
       config.head_dim);
 
   // GPU parameter buffers
-  const std::uint32_t* d_in_token = arena.d_prompt_tokens + 0;
-  const std::uint32_t* d_in_pos = arena.d_prompt_tokens + 1;
+  const std::uint32_t* d_in_token = scratch.prompt_tokens.data();
+  const std::uint32_t* d_in_pos = scratch.prompt_tokens.data() + 1;
   auto* d_out_token = reinterpret_cast<std::uint32_t*>(arena.d_alpha_buf);
 
     // 1. Embedding lookup
@@ -88,6 +89,8 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
       const auto& layer = weights.layers[l];
       const auto route_plan = ResolveQwenLayerRoute(
           policy, QwenExecutionMode::kDecode, layer.is_full_attention);
+      const strix::models::qwen::HipModuleContext module_ctx(
+          static_cast<void*>(arena.stream), l, pos);
 
       // opt-c014-layer-prefetch: start the next layer's page touch on the side
       // stream while this layer runs, then join before layer l+1 computes.
@@ -113,21 +116,10 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
         // Pre-RMSNorm, routed through the norm module (HIP backend). Same
         // kernel, same args, same arena slices (d_hidden in, d_normed out);
         // behavior identical to the former inline `LaunchRMSNorm` call.
-        strix::models::qwen::ModuleCtx norm_ctx;
-        norm_ctx.backend = strix::models::qwen::Backend::Hip;
-        norm_ctx.config = &config;
-        norm_ctx.stream = static_cast<void*>(arena.stream);
-        norm_ctx.layer_idx = l;
-        // arena_ is a QwenGpuArena (HIP device buffers), while ModuleCtx::arena
-        // is the CPU QwenScratchArena. The norm module reads the device spans
-        // passed in directly, so ctx.arena stays null here.
-        norm_ctx.arena = nullptr;
         const auto norm_view =
             strix::models::qwen::MakeAttnNormView(layer, config);
-        strix::models::qwen::NormForward(
-            norm_ctx, norm_view,
-            std::span<const float>(arena.d_hidden, hidden_size),
-            std::span<float>(arena.d_normed, hidden_size));
+        strix::models::qwen::NormForward(module_ctx, norm_view, scratch.hidden,
+                                         scratch.normed);
       }
 
       // opt-c010-ssm-gate-residual: the SSM branch folds the post-SSM residual
@@ -228,19 +220,10 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
         // Output projection, routed through the quant_gemm module (HIP
         // backend). Same kernel, same args, same arena slices (d_ssm_out in,
         // d_attn_out out); behavior-identical to the former inline `LaunchGEMV`.
-        strix::models::qwen::ModuleCtx qg_ctx;
-        qg_ctx.backend = strix::models::qwen::Backend::Hip;
-        qg_ctx.config = &config;
-        qg_ctx.stream = static_cast<void*>(arena.stream);
-        qg_ctx.layer_idx = l;
-        // ModuleCtx::arena is the CPU QwenScratchArena; the module reads the
-        // device spans passed in directly, so ctx.arena stays null here.
-        qg_ctx.arena = nullptr;
         strix::models::qwen::QuantGemm(
-            qg_ctx, layer.attn_output,
-            std::span<const float>(arena.d_ssm_out, attention_size),
-            hidden_size, attention_size,
-            std::span<float>(arena.d_attn_out, hidden_size));
+            module_ctx, layer.attn_output,
+            scratch.ssm_out.first(attention_size), hidden_size, attention_size,
+            scratch.attention_out);
       } else {
         // SSM path
         ssm_residual_folded = route_plan.fuse_ssm_epilogue;
@@ -308,18 +291,8 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
             static_cast<const float*>(layer.ffn_norm.data), arena.d_normed,
             hidden_size, 1e-6F, arena.stream);
       } else {
-        strix::models::qwen::ModuleCtx res_ctx;
-        res_ctx.backend = strix::models::qwen::Backend::Hip;
-        res_ctx.config = &config;
-        res_ctx.stream = static_cast<void*>(arena.stream);
-        res_ctx.layer_idx = l;
-        // arena_ is a QwenGpuArena (HIP device buffers), while ModuleCtx::arena
-        // is the CPU QwenScratchArena. The residual module reads the device
-        // spans passed in directly, so ctx.arena stays null here.
-        res_ctx.arena = nullptr;
-        strix::models::qwen::ResidualAdd(
-            res_ctx, std::span<float>(arena.d_hidden, hidden_size),
-            std::span<const float>(arena.d_attn_out, hidden_size));
+        strix::models::qwen::ResidualAdd(module_ctx, scratch.hidden,
+                                         scratch.attention_out);
 
         if (fused_rmsnorm_proj) {
           // FFN Pre-RMSNorm is folded into the SwiGLU GEMV below.
@@ -351,38 +324,15 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
         // same down GEMV as the former inline calls; behavior identical. The
         // module reads the arena device spans (x = d_normed, act_scratch =
         // d_ffn_act, out = d_ffn_out) directly.
-        strix::models::qwen::ModuleCtx ffn_ctx;
-        ffn_ctx.backend = strix::models::qwen::Backend::Hip;
-        ffn_ctx.config = &config;
-        ffn_ctx.stream = static_cast<void*>(arena.stream);
-        ffn_ctx.layer_idx = l;
-        // arena_ is a QwenGpuArena (HIP device buffers), while ModuleCtx::arena
-        // is the CPU QwenScratchArena. The ffn module reads the device spans
-        // passed in directly, so ctx.arena stays null here.
-        ffn_ctx.arena = nullptr;
         const auto ffn_view = strix::models::qwen::MakeFfnView(layer, config);
         strix::models::qwen::FfnForward(
-            ffn_ctx, ffn_view,
-            std::span<const float>(arena.d_normed, hidden_size),
-            std::span<float>(arena.d_ffn_act, intermediate_size),
-            std::span<float>(arena.d_ffn_act, intermediate_size),
-            std::span<float>(arena.d_ffn_act, intermediate_size),
-            std::span<float>(arena.d_ffn_out, hidden_size));
+            module_ctx, ffn_view, scratch.normed, scratch.ffn_activation,
+            scratch.ffn_activation, scratch.ffn_activation, scratch.ffn_out);
       }
 
       // Residual Add
-      strix::models::qwen::ModuleCtx res_ctx;
-      res_ctx.backend = strix::models::qwen::Backend::Hip;
-      res_ctx.config = &config;
-      res_ctx.stream = static_cast<void*>(arena.stream);
-      res_ctx.layer_idx = l;
-      // arena_ is a QwenGpuArena (HIP device buffers), while ModuleCtx::arena
-      // is the CPU QwenScratchArena. The residual module reads the device spans
-      // passed in directly, so ctx.arena stays null here.
-      res_ctx.arena = nullptr;
-      strix::models::qwen::ResidualAdd(
-          res_ctx, std::span<float>(arena.d_hidden, hidden_size),
-          std::span<const float>(arena.d_ffn_out, hidden_size));
+      strix::models::qwen::ResidualAdd(module_ctx, scratch.hidden,
+                                       scratch.ffn_out);
     }
 
     if (compute_logits) {
@@ -393,10 +343,11 @@ static void ExecuteDecodeStep(QwenGpuArena& arena,
 
       // 4. LM Head Logits GEMV on final token
       LaunchGEMV(weights.output.data, weights.output.type, arena.d_normed,
-                 arena.d_logits, vocab_size, hidden_size, arena.stream);
+                 scratch.logits.data(), vocab_size, hidden_size, arena.stream);
 
       // 5. Parallel GPU Argmax
-      LaunchGPUArgmax(arena.d_logits, d_out_token, vocab_size, arena.stream);
+      LaunchGPUArgmax(scratch.logits.data(), d_out_token, vocab_size,
+                      arena.stream);
     }
 }
 tokenization::TokenId QwenGpuExecutor::ForwardToken(

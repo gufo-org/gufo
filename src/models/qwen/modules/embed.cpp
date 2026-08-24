@@ -4,7 +4,7 @@
 
 namespace strix::models::qwen {
 
-void EmbedForward(ModuleCtx&, std::uint32_t token_id,
+void EmbedForward(const CpuModuleContext&, std::uint32_t token_id,
                   const QwenTensorRef& token_embd, std::size_t hidden_size,
                   std::span<float> out) noexcept {
   // CPU backend: delegates to the existing embedding lookup (already a small

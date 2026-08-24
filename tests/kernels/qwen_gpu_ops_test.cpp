@@ -3747,9 +3747,9 @@ void TestDequantizeToBf16Equivalence() {
   HIP_CHECK(hipFree(d_out));
 }
 
-// ---- L1 GPU module e2e tests: exercise the ModuleCtx/Backend::Hip dispatch ----------------
+// ---- L1 GPU module e2e tests: exercise typed HIP module contexts -----------
 // These drive the refactor-introduced module functions (NormForward/ResidualAdd/
-// FfnForward/QuantGemm) through the HIP branch, i.e. the module seam rather than
+// FfnForward/QuantGemm) through the HIP overload, i.e. the module seam rather than
 // the raw Launch* wrappers used by the equivalence tests above. Device pointers
 // are handed in as std::span over arena-style device buffers; the weight views
 // carry a QwenTensorRef whose .data is a device pointer.
@@ -3769,9 +3769,7 @@ void TestGpuNormForwardModule() {
   HIP_CHECK(hipMemcpy(d_x, h_x.data(), dim * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(d_w, h_w.data(), dim * sizeof(float), hipMemcpyHostToDevice));
 
-  strix::models::qwen::ModuleCtx ctx;
-  ctx.backend = strix::models::qwen::Backend::Hip;
-  ctx.stream = nullptr;  // null hipStream_t = default stream
+  const strix::models::qwen::HipModuleContext ctx;  // default HIP stream
 
   strix::models::qwen::NormLayerView view;
   view.weight.data = d_w;
@@ -3810,9 +3808,7 @@ void TestGpuResidualAddModule() {
   HIP_CHECK(hipMemcpy(d_a, h_a.data(), dim * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(d_b, h_b.data(), dim * sizeof(float), hipMemcpyHostToDevice));
 
-  strix::models::qwen::ModuleCtx ctx;
-  ctx.backend = strix::models::qwen::Backend::Hip;
-  ctx.stream = nullptr;
+  const strix::models::qwen::HipModuleContext ctx;
 
   // ResidualAdd is in-place on dst: dst = a, src = b => dst = a + b.
   std::span<float> dst(d_dst, dim);
@@ -3849,9 +3845,7 @@ void TestGpuQuantGemmModule() {
   HIP_CHECK(hipMemcpy(d_A, h_A.data(), M * K * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(d_x, h_x.data(), K * sizeof(float), hipMemcpyHostToDevice));
 
-  strix::models::qwen::ModuleCtx ctx;
-  ctx.backend = strix::models::qwen::Backend::Hip;
-  ctx.stream = nullptr;
+  const strix::models::qwen::HipModuleContext ctx;
 
   strix::models::QwenTensorRef A;
   A.data = d_A;

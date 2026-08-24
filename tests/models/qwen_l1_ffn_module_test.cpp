@@ -1,7 +1,7 @@
 // L1 CPU module e2e test for the SwiGLU FFN module (FfnForward).
 //
-// Phase 3 (#21): drive the module through its public seam (a ModuleCtx +
-// FfnLayerView plus the three intermediate scratch spans) over a small
+// Phase 3 (#21): drive the module through its public seam (a typed CPU context
+// + FfnLayerView plus the three intermediate scratch spans) over a small
 // synthetic model built by build_synthetic_qwen_weights. Asserts the module
 //   (1) reproduces an independent oracle (ReferenceGEMV + ReferenceSwiGLU for
 //       gate/up/down projections — a DIFFERENT GEMV implementation than the
@@ -29,11 +29,10 @@ namespace {
 
 using strix::core::ModelConfig;
 using strix::models::QwenLayerWeights;
-using strix::models::qwen::Backend;
 using strix::models::qwen::build_synthetic_qwen_weights;
 using strix::models::qwen::make_small_qwen_config;
 using strix::models::qwen::MakeFfnView;
-using strix::models::qwen::ModuleCtx;
+using strix::models::qwen::CpuModuleContext;
 using strix::models::qwen::FfnForward;
 using strix::models::qwen::FfnLayerView;
 using strix::models::qwen::ReferenceGEMV;
@@ -54,9 +53,7 @@ void TestFfnModuleMatchesOracle() {
   FfnLayerView view = MakeFfnView(layer, config);
   std::vector<float> gate_s(inter, 0.0F), up_s(inter, 0.0F), act_s(inter, 0.0F);
   std::vector<float> out(hidden, 0.0F);
-  ModuleCtx ctx;
-  ctx.config = &config;
-  ctx.backend = Backend::Cpu;
+  const CpuModuleContext ctx;
   FfnForward(ctx, view, x, gate_s, up_s, act_s, out);
 
   // Independent oracle: ReferenceGEMV + ReferenceSwiGLU (FP64 reference GEMV).
