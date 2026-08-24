@@ -8,6 +8,7 @@
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/core/hip/hip_utils.hpp"
+#include "src/models/qwen/gemm_route.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
@@ -57,44 +58,53 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   double time_ffn = 0, time_norm = 0;
   double time_dequant = 0, time_gemm = 0;
 
-  constexpr std::size_t hipblaslt_min_dimension = 1024;
-  const auto launch_bf16_gemm = [&](const void* weights, const void* input,
-                                    float* output, std::size_t m,
-                                    std::size_t k) {
-    const bool use_hipblaslt =
-        m >= hipblaslt_min_dimension && k >= hipblaslt_min_dimension &&
-        arena_.hipblaslt_gemm->RunBf16(weights, input, output, batch_size, m, k,
-                                       arena_.stream);
-    if (!use_hipblaslt) {
-      LaunchHipblasGEMMBF16(arena_.hipblas_handle, weights, input, output,
-                            batch_size, m, k, arena_.stream);
-    }
-  };
-
-  // Centralized weight dispatch: BF16 -> direct BF16 GEMM on the BF16
-  // activations; F32 -> hipblas fp32 GEMM on the fp32 input; any quant
-  // (Q8_0/Q5_K/Q6_K/Q8_K) -> batched quant GEMM directly on the quantized
-  // weights (no dequantize-to-BF16, no BF16 GEMM).
+  // Execute the pure Qwen route decision while keeping hipBLASLt failure as a
+  // runtime fallback to hipBLAS, not as resolver state.
   const auto gemm_weight = [&](const models::QwenTensorRef& w,
                                const void* bf16_input,
                                const float* fp32_input, float* output,
                                std::size_t m, std::size_t k) {
-    if (w.type == core::GgmlType::kBF16) {
-      launch_bf16_gemm(w.data, bf16_input, output, m, k);
-    } else if (w.type == core::GgmlType::kF32) {
-      LaunchHipblasGEMM(arena_.hipblas_handle, w.data, false, fp32_input,
-                        output, batch_size, m, k, arena_.d_scratch_bf16,
-                        arena_.stream);
-    } else {
-      auto tg0 = std::chrono::high_resolution_clock::now();
-      LaunchBatchedQuantGEMM(w.type, w.data, bf16_input, output, batch_size, m,
-                             k, arena_.stream);
-      if (do_profile) {
-        HIP_CHECK(hipStreamSynchronize(arena_.stream));
-        time_gemm += std::chrono::duration<double, std::milli>(
-                         std::chrono::high_resolution_clock::now() - tg0)
-                         .count();
+    const auto resolution = models::qwen::ResolveQwenGemmRoute(
+        {.type = w.type,
+         .batch_size = batch_size,
+         .m = m,
+         .k = k,
+         .mode = models::qwen::QwenGemmMode::kHipPrefill,
+         .capabilities = {.can_try_hipblaslt =
+                              arena_.hipblaslt_gemm != nullptr}});
+    if (!resolution.accepted()) {
+      std::abort();
+    }
+    switch (resolution.route) {
+      case models::qwen::QwenGemmRoute::kHipPrefillBf16LtTryThenBlas:
+        if (arena_.hipblaslt_gemm->RunBf16(w.data, bf16_input, output,
+                                           batch_size, m, k, arena_.stream)) {
+          return;
+        }
+        [[fallthrough]];
+      case models::qwen::QwenGemmRoute::kHipPrefillBf16Blas:
+        LaunchHipblasGEMMBF16(arena_.hipblas_handle, w.data, bf16_input,
+                              output, batch_size, m, k, arena_.stream);
+        return;
+      case models::qwen::QwenGemmRoute::kHipPrefillF32Blas:
+        LaunchHipblasGEMM(arena_.hipblas_handle, w.data, false, fp32_input,
+                          output, batch_size, m, k, arena_.d_scratch_bf16,
+                          arena_.stream);
+        return;
+      case models::qwen::QwenGemmRoute::kHipPrefillQuantDirect: {
+        const auto tg0 = std::chrono::high_resolution_clock::now();
+        LaunchBatchedQuantGEMM(w.type, w.data, bf16_input, output, batch_size,
+                               m, k, arena_.stream);
+        if (do_profile) {
+          HIP_CHECK(hipStreamSynchronize(arena_.stream));
+          time_gemm += std::chrono::duration<double, std::milli>(
+                           std::chrono::high_resolution_clock::now() - tg0)
+                           .count();
+        }
+        return;
       }
+      default:
+        std::abort();
     }
   };
 

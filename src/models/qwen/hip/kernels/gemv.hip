@@ -6,15 +6,14 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
-#include "src/core/hip/detail/gemv_dispatcher.hpp"
+#include "src/models/qwen/gemm_route.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 
 namespace strix::hip {
-
-constexpr std::size_t kLargeGemvInput = 16384;
 
 template<std::uint32_t WavesPerBlock>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
@@ -343,78 +342,17 @@ __global__ void FastGEMVBlockKernel(const void* __restrict__ A,
   }
 }
 
-void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
-                std::size_t M, std::size_t K, hipStream_t stream) {
-  // Quantized weights (kQ8_K now; more types added later) run the Q row-dot
-  // path, which has no residual epilogue.
-  if (a_type != core::GgmlType::kBF16 && a_type != core::GgmlType::kF32) {
-    LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
-    return;
-  }
-  const bool is_bf16 = (a_type == core::GgmlType::kBF16);
-  const auto strategy = detail::SelectGemvStrategy(M, K, is_bf16);
-  detail::EmitGemvDispatch(M, K, is_bf16, detail::GemvStrategyName(strategy));
+namespace {
+
+void ExecuteDenseGemv(models::qwen::QwenGemmRoute route, const void* A,
+                      core::GgmlType a_type, const float* x, float* y,
+                      const float* residual, std::size_t M, std::size_t K,
+                      hipStream_t stream) {
   constexpr std::uint32_t kWavesPerBlock = 4;
   constexpr std::uint32_t kBlockThreads = kWavesPerBlock * 32;
-
-  switch (strategy) {
-    case detail::GemvStrategy::kWave32QuadRow: {
-      const auto* A_bf16 = static_cast<const hip_bfloat16*>(A);
-      const std::size_t num_quads = (M + 3) / 4;
-      const std::size_t grid =
-          (num_quads + kWavesPerBlock - 1) / kWavesPerBlock;
-      Wave32GEMVKernel_4Rows<kWavesPerBlock>
-          <<<grid, kBlockThreads, 0, stream>>>(A_bf16, x, y, M, K);
-      return;
-    }
-    case detail::GemvStrategy::kWave32DualRow: {
-      const auto* A_bf16 = static_cast<const hip_bfloat16*>(A);
-      const std::size_t num_pairs = (M + 1) / 2;
-      const std::size_t grid =
-          (num_pairs + kWavesPerBlock - 1) / kWavesPerBlock;
-      Wave32GEMVKernel_2Rows<kWavesPerBlock>
-          <<<grid, kBlockThreads, 0, stream>>>(A_bf16, x, y, M, K);
-      return;
-    }
-    case detail::GemvStrategy::kWave32SingleRow: {
-      const auto* A_bf16 = static_cast<const hip_bfloat16*>(A);
-      const std::size_t grid = (M + kWavesPerBlock - 1) / kWavesPerBlock;
-      Wave32GEMVKernel_1Row<kWavesPerBlock>
-          <<<grid, kBlockThreads, 0, stream>>>(A_bf16, x, y, nullptr, M, K);
-      return;
-    }
-    case detail::GemvStrategy::kBaselineBlock:
-    default:
-      break;
-  }
-
-  const std::size_t block_size = K >= kLargeGemvInput ? 512 : 256;
-  FastGEMVBlockKernel<<<M, block_size, 0, stream>>>(A, a_type, x, y, nullptr,
-                                                    M, K);
-}
-
-// opt-c010-ssm-gate-residual: GEMV with an optional residual-add epilogue
-// (y = A*x + residual). The dispatch mirrors LaunchGEMV; the Wave32 single-row
-// and block strategies gain the residual fold, and the remaining strategies
-// fall back to the single-row residual kernel. Used to fold the post-SSM
-// residual add into the ssm_out GEMV for decode.
-void LaunchGEMVResidual(const void* A, core::GgmlType a_type, const float* x,
-                        float* y, const float* residual, std::size_t M,
-                        std::size_t K, hipStream_t stream) {
-  // Quantized weights run the Q row-dot path. The residual add is not folded
-  // into the Q8K block GEMV, so a residual pointer is not applied (this path is
-  // only reached for the ssm_out residual, which is currently dead).
-  if (a_type != core::GgmlType::kBF16 && a_type != core::GgmlType::kF32) {
-    LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
-    return;
-  }
-  const bool is_bf16 = (a_type == core::GgmlType::kBF16);
-  const auto strategy = detail::SelectGemvStrategy(M, K, is_bf16);
-  detail::EmitGemvDispatch(M, K, is_bf16, detail::GemvStrategyName(strategy));
-  constexpr std::uint32_t kWavesPerBlock = 4;
-  constexpr std::uint32_t kBlockThreads = kWavesPerBlock * 32;
-
-  if (strategy != detail::GemvStrategy::kBaselineBlock) {
+  if (route == models::qwen::QwenGemmRoute::kHipBf16Wave32Single) {
+    detail::EmitGemvDispatch(
+        M, K, true, models::qwen::QwenGemmRouteName(route));
     const auto* A_bf16 = static_cast<const hip_bfloat16*>(A);
     const std::size_t grid = (M + kWavesPerBlock - 1) / kWavesPerBlock;
     Wave32GEMVKernel_1Row<kWavesPerBlock>
@@ -422,9 +360,70 @@ void LaunchGEMVResidual(const void* A, core::GgmlType a_type, const float* x,
     return;
   }
 
-  const std::size_t block_size = K >= kLargeGemvInput ? 512 : 256;
+  detail::EmitGemvDispatch(M, K, a_type == core::GgmlType::kBF16,
+                           models::qwen::QwenGemmRouteName(route));
+  const std::size_t block_size =
+      route == models::qwen::QwenGemmRoute::kHipF32Baseline512 ||
+              route == models::qwen::QwenGemmRoute::kHipBf16Baseline512
+          ? 512
+          : 256;
   FastGEMVBlockKernel<<<M, block_size, 0, stream>>>(A, a_type, x, y, residual,
                                                     M, K);
+}
+
+}  // namespace
+
+void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
+                std::size_t M, std::size_t K, hipStream_t stream,
+                models::qwen::QwenGemmMode mode) {
+  const auto resolution = models::qwen::ResolveQwenGemmRoute(
+      {.type = a_type,
+       .batch_size = 1,
+       .m = M,
+       .k = K,
+       .mode = mode});
+  switch (resolution.route) {
+    case models::qwen::QwenGemmRoute::kHipQuantDirect:
+      LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
+      return;
+    case models::qwen::QwenGemmRoute::kHipF32Baseline256:
+    case models::qwen::QwenGemmRoute::kHipF32Baseline512:
+    case models::qwen::QwenGemmRoute::kHipBf16Baseline256:
+    case models::qwen::QwenGemmRoute::kHipBf16Baseline512:
+    case models::qwen::QwenGemmRoute::kHipBf16Wave32Single:
+      ExecuteDenseGemv(resolution.route, A, a_type, x, y, nullptr, M, K,
+                       stream);
+      return;
+    default:
+      std::abort();
+  }
+}
+
+// opt-c010-ssm-gate-residual: GEMV with an optional residual-add epilogue.
+// Quantized formats are rejected because their direct kernel has no residual
+// epilogue; callers must launch the residual add explicitly.
+void LaunchGEMVResidual(const void* A, core::GgmlType a_type, const float* x,
+                        float* y, const float* residual, std::size_t M,
+                        std::size_t K, hipStream_t stream) {
+  const auto resolution = models::qwen::ResolveQwenGemmRoute(
+      {.type = a_type,
+       .batch_size = 1,
+       .m = M,
+       .k = K,
+       .mode = models::qwen::QwenGemmMode::kHipDecode,
+       .residual_epilogue = true});
+  switch (resolution.route) {
+    case models::qwen::QwenGemmRoute::kHipF32Baseline256:
+    case models::qwen::QwenGemmRoute::kHipF32Baseline512:
+    case models::qwen::QwenGemmRoute::kHipBf16Baseline256:
+    case models::qwen::QwenGemmRoute::kHipBf16Baseline512:
+    case models::qwen::QwenGemmRoute::kHipBf16Wave32Single:
+      ExecuteDenseGemv(resolution.route, A, a_type, x, y, residual, M, K,
+                       stream);
+      return;
+    default:
+      std::abort();
+  }
 }
 
 }  // namespace strix::hip

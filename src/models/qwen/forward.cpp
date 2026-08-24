@@ -11,6 +11,7 @@
 
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/quant/ggml_gemm.hpp"
+#include "src/models/qwen/gemm_route.hpp"
 #include "src/models/qwen/modules/attention.hpp"
 #include "src/models/qwen/modules/embed.hpp"
 #include "src/models/qwen/modules/ffn.hpp"
@@ -40,53 +41,70 @@ void TensorGEMV(const QwenTensorRef& A, std::span<const float> x, std::size_t M,
   if (A.empty() || x.size() < K || y.size() < M) {
     return;
   }
-  if (A.type == core::GgmlType::kF32) {
-    const auto* ptr = static_cast<const float*>(A.data);
-#pragma omp parallel for schedule(static)
-    for (std::size_t m = 0; m < M; ++m) {
-      const auto* row = ptr + (m * K);
-      float dot = 0.0F;
-      for (std::size_t k = 0; k < K; ++k) {
-        dot += row[k] * x[k];
-      }
-      y[m] = dot;
-    }
-  } else if (A.type == core::GgmlType::kBF16) {
-    const auto* ptr = static_cast<const std::uint16_t*>(A.data);
-#pragma omp parallel for schedule(static)
-    for (std::size_t m = 0; m < M; ++m) {
-      const auto* row = ptr + (m * K);
-      float dot = 0.0F;
-      for (std::size_t k = 0; k < K; ++k) {
-        const std::uint32_t u32 = static_cast<std::uint32_t>(row[k]) << 16;
-        float val = 0.0F;
-        std::memcpy(&val, &u32, sizeof(float));
-        dot += val * x[k];
-      }
-      y[m] = dot;
-    }
-  } else if (A.type == core::GgmlType::kF16) {
-    const auto* ptr = static_cast<const std::uint16_t*>(A.data);
-#pragma omp parallel for schedule(static)
-    for (std::size_t m = 0; m < M; ++m) {
-      const auto* row = ptr + (m * K);
-      float dot = 0.0F;
-      for (std::size_t k = 0; k < K; ++k) {
-        dot += quant::Fp16ToFloat(row[k]) * x[k];
-      }
-      y[m] = dot;
-    }
-  } else if (quant::QuantizedRowBytes(A.type, K) != 0) {
-#pragma omp parallel for schedule(static)
-    for (std::size_t m = 0; m < M; ++m) {
-      const void* row = QuantizedRow(A, m, K);
-      y[m] = quant::Dot(A.type, row, x, K);
-    }
-  } else {
-    // Unsupported (or non-block-aligned) type: fail loudly instead of the old
-    // silent 0.0F / uninitialized fallthrough.
-    assert(false && "TensorGEMV: unsupported GgmlType");
+  const auto resolution = qwen::ResolveQwenGemmRoute(
+      {.type = A.type,
+       .batch_size = 1,
+       .m = M,
+       .k = K,
+       .mode = qwen::QwenGemmMode::kCpu});
+  if (!resolution.accepted()) {
+    assert(false && "TensorGEMV: unsupported GEMM request");
     std::abort();
+  }
+
+  switch (resolution.route) {
+    case qwen::QwenGemmRoute::kCpuF32Rows: {
+      const auto* ptr = static_cast<const float*>(A.data);
+#pragma omp parallel for schedule(static)
+      for (std::size_t m = 0; m < M; ++m) {
+        const auto* row = ptr + (m * K);
+        float dot = 0.0F;
+        for (std::size_t k = 0; k < K; ++k) {
+          dot += row[k] * x[k];
+        }
+        y[m] = dot;
+      }
+      return;
+    }
+    case qwen::QwenGemmRoute::kCpuBf16Rows: {
+      const auto* ptr = static_cast<const std::uint16_t*>(A.data);
+#pragma omp parallel for schedule(static)
+      for (std::size_t m = 0; m < M; ++m) {
+        const auto* row = ptr + (m * K);
+        float dot = 0.0F;
+        for (std::size_t k = 0; k < K; ++k) {
+          const std::uint32_t u32 = static_cast<std::uint32_t>(row[k]) << 16;
+          float val = 0.0F;
+          std::memcpy(&val, &u32, sizeof(float));
+          dot += val * x[k];
+        }
+        y[m] = dot;
+      }
+      return;
+    }
+    case qwen::QwenGemmRoute::kCpuF16Rows: {
+      const auto* ptr = static_cast<const std::uint16_t*>(A.data);
+#pragma omp parallel for schedule(static)
+      for (std::size_t m = 0; m < M; ++m) {
+        const auto* row = ptr + (m * K);
+        float dot = 0.0F;
+        for (std::size_t k = 0; k < K; ++k) {
+          dot += quant::Fp16ToFloat(row[k]) * x[k];
+        }
+        y[m] = dot;
+      }
+      return;
+    }
+    case qwen::QwenGemmRoute::kCpuQuantDot:
+#pragma omp parallel for schedule(static)
+      for (std::size_t m = 0; m < M; ++m) {
+        const void* row = QuantizedRow(A, m, K);
+        y[m] = quant::Dot(A.type, row, x, K);
+      }
+      return;
+    default:
+      assert(false && "TensorGEMV: non-CPU GEMM route");
+      std::abort();
   }
 }
 

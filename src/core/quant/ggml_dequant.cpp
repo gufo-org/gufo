@@ -163,7 +163,7 @@ float Q3Value(const block_q3_K& block,
 
 std::size_t QuantizedRowBytes(core::GgmlType type,
                               std::size_t elements) noexcept {
-  std::size_t block_qk = 256U;
+  const std::size_t block_qk = QuantizedBlockElements(type);
   std::size_t block_bytes = 0;
   switch (type) {
     case core::GgmlType::kQ3_K:
@@ -182,7 +182,6 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
       block_bytes = sizeof(block_q8_K);
       break;
     case core::GgmlType::kQ8_0:
-      block_qk = 32U;
       block_bytes = sizeof(block_q8_0);
       break;
     default:

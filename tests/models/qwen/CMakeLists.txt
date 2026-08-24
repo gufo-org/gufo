@@ -85,6 +85,9 @@ add_qwen_cpu_test(qwen_fusion_route_test
 add_qwen_cpu_test(qwen_attention_policy_test
   tests/models/qwen/hip/attention_policy_test.cpp
   "cpu;models;qwen;hip;attention;dispatch")
+add_qwen_cpu_test(qwen_gemm_route_test
+  tests/models/qwen/gemm_route_test.cpp
+  "cpu;models;qwen;gemm;dispatch")
 
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen_mtp_gpu_test

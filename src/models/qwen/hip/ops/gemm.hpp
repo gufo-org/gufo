@@ -7,6 +7,7 @@
 #include <string>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen/gemm_route.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
@@ -90,8 +91,10 @@ private:
 
 /// Computes Matrix-Vector Multiplication: y = A * x
 /// Supports both F32 and BF16 weights A
-void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
-                std::size_t M, std::size_t K, hipStream_t stream = nullptr);
+void LaunchGEMV(
+    const void* A, core::GgmlType a_type, const float* x, float* y,
+    std::size_t M, std::size_t K, hipStream_t stream = nullptr,
+    models::qwen::QwenGemmMode mode = models::qwen::QwenGemmMode::kHipDecode);
 
 /// Computes Matrix-Vector Multiplication with a residual-add epilogue:
 /// y = A*x + residual (opt-c010-ssm-gate-residual). The residual is read

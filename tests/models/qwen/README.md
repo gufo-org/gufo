@@ -49,9 +49,10 @@ ctest --test-dir build/gpu-test -L qwen -L module --output-on-failure
 ctest --test-dir build/gpu-test -L qwen -L hip --output-on-failure
 ```
 
-`hip/attention_policy_test.cpp` and `hip/execution_policy_test.cpp` exercise
-pure route selection and do not require a GPU even though they mirror HIP
-composition. The other files under `hip/` require the supported gfx1151 target.
+`hip/attention_policy_test.cpp`, `hip/execution_policy_test.cpp`, and
+`gemm_route_test.cpp` exercise pure route selection and do not require a GPU
+even though they mirror HIP composition. The other files under `hip/` require
+the supported gfx1151 target.
 
 The module-seam integration test does not yet cover the complete production
 executor: embedding, fused attention/SSM composition, unembedding, sampling,

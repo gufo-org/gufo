@@ -23,7 +23,7 @@
 #include "src/bench/kernel_bench.hpp"
 #include "src/core/diagnostics/fingerprint.h"
 #include "src/core/diagnostics/system_inventory.h"
-#include "src/core/hip/detail/gemv_dispatcher.hpp"
+#include "src/models/qwen/gemm_route.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/ops.hpp"
@@ -493,13 +493,23 @@ strix::bench::KernelBenchResult BenchmarkGemv(const CommandLineOptions& options,
   HipBuffer<float> output(options.m);
   FillBytes(input, 0x3c, stream);
 
-  const auto strategy =
-      strix::hip::detail::SelectGemvStrategy(options.m, options.k, is_bf16);
+  const auto weight_type = is_bf16 ? strix::core::GgmlType::kBF16
+                                   : strix::core::GgmlType::kF32;
+  const auto resolution = strix::models::qwen::ResolveQwenGemmRoute(
+      {.type = weight_type,
+       .batch_size = 1,
+       .m = options.m,
+       .k = options.k,
+       .mode = strix::models::qwen::QwenGemmMode::kHipDecode});
+  if (!resolution.accepted()) {
+    throw std::invalid_argument("unsupported Qwen GEMV benchmark route");
+  }
+  const std::string strategy(
+      strix::models::qwen::QwenGemmRouteName(resolution.route));
   const std::string marker =
       "gemv/m=" + std::to_string(options.m) +
       "/k=" + std::to_string(options.k) + "/type=" + options.data_type +
-      "/layout=row_major/strategy=" +
-      std::string(strix::hip::detail::GemvStrategyName(strategy));
+      "/layout=row_major/strategy=" + strategy;
   std::vector<double> samples_us;
   float weight_value = 0.0F;
   if (is_bf16) {
@@ -544,8 +554,7 @@ strix::bench::KernelBenchResult BenchmarkGemv(const CommandLineOptions& options,
   result.elements = static_cast<std::uint64_t>(options.m) * options.k;
   result.tokens_per_iteration = 1;
   result.estimated_bytes_per_iteration = estimated_bytes;
-  result.dispatch.gemv_strategy =
-      std::string(strix::hip::detail::GemvStrategyName(strategy));
+  result.dispatch.gemv_strategy = strategy;
   return FinalizeResult(std::move(result), std::move(samples_us));
 }
 

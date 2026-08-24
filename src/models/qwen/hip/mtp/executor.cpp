@@ -283,15 +283,16 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
         "MTP NPU execution requested without ENGINE_ENABLE_XRT");
 #endif
   } else {
-    LaunchGEMV(weights.fusion_projection.data, core::GgmlType::kBF16, d_fusion_, d_hidden_,
-               hidden, 2 * hidden, stream_);
+    LaunchGEMV(weights.fusion_projection.data, weights.fusion_projection.type,
+               d_fusion_, d_hidden_, hidden, 2 * hidden, stream_,
+               models::qwen::QwenGemmMode::kHipMtp);
   }
 
   LaunchRMSNorm(d_hidden_, static_cast<const float*>(layer.attn_norm.data),
                 d_normed_, hidden, 1.0e-6F, stream_);
-  LaunchFusedQKVProjections(layer.attn_q.data, core::GgmlType::kBF16,
-                            layer.attn_k.data, core::GgmlType::kBF16,
-                            layer.attn_v.data, core::GgmlType::kBF16, d_normed_,
+  LaunchFusedQKVProjections(layer.attn_q.data, layer.attn_q.type,
+                            layer.attn_k.data, layer.attn_k.type,
+                            layer.attn_v.data, layer.attn_v.type, d_normed_,
                             d_qg_, d_k_, d_v_, 2 * attention, kv, hidden,
                             stream_);
   LaunchUnpackQG(d_qg_, d_q_, d_gate_, config.num_attention_heads,
@@ -310,17 +311,19 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
       d_kv_cache_f16_, static_cast<std::uint16_t*>(d_kv_cache_f16_) + total_kv,
       d_context_, 0, position, max_context_, config.num_attention_heads,
       config.num_key_value_heads, config.head_dim, stream_, d_split_k_scratch_);
-  LaunchGEMV(layer.attn_output.data, core::GgmlType::kBF16, d_context_, d_attn_out_, hidden,
-             attention, stream_);
+  LaunchGEMV(layer.attn_output.data, layer.attn_output.type, d_context_,
+             d_attn_out_, hidden, attention, stream_,
+             models::qwen::QwenGemmMode::kHipMtp);
   LaunchResidualAdd(d_hidden_, d_attn_out_, d_hidden_, hidden, stream_);
 
   LaunchRMSNorm(d_hidden_, static_cast<const float*>(layer.ffn_norm.data),
                 d_normed_, hidden, 1.0e-6F, stream_);
-  LaunchFusedSwiGLUGEMV(layer.ffn_gate.data, core::GgmlType::kBF16,
-                        layer.ffn_up.data, core::GgmlType::kBF16, d_normed_,
+  LaunchFusedSwiGLUGEMV(layer.ffn_gate.data, layer.ffn_gate.type,
+                        layer.ffn_up.data, layer.ffn_up.type, d_normed_,
                         d_ffn_act_, config.intermediate_size, hidden, stream_);
-  LaunchGEMV(layer.ffn_down.data, core::GgmlType::kBF16, d_ffn_act_, d_ffn_out_, hidden,
-             config.intermediate_size, stream_);
+  LaunchGEMV(layer.ffn_down.data, layer.ffn_down.type, d_ffn_act_, d_ffn_out_,
+             hidden, config.intermediate_size, stream_,
+             models::qwen::QwenGemmMode::kHipMtp);
   LaunchResidualAdd(d_hidden_, d_ffn_out_, d_hidden_, hidden, stream_);
   LaunchRMSNorm(d_hidden_,
                 static_cast<const float*>(weights.shared_head_norm.data),
@@ -330,8 +333,9 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
   if (!compute_logits) {
     return 0;
   }
-  LaunchGEMV(weights.output.data, weights.output.type,
-             d_feedback_hidden_, d_logits_, config.vocab_size, hidden, stream_);
+  LaunchGEMV(weights.output.data, weights.output.type, d_feedback_hidden_,
+             d_logits_, config.vocab_size, hidden, stream_,
+             models::qwen::QwenGemmMode::kHipMtp);
   LaunchGPUArgmax(d_logits_, d_out_token_, config.vocab_size, stream_);
   tokenization::TokenId result = 0;
   const auto copy_error = hipMemcpyAsync(&result, d_out_token_, sizeof(result),

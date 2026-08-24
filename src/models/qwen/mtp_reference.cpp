@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <numeric>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -281,30 +280,13 @@ float QwenMtpReference::ComputeLogit(std::uint32_t token_id) const noexcept {
     return 0.0F;
   }
   const void* row = OutputRow(weights_.output, token_id, hidden);
-  switch (weights_.output.type) {
-    case core::GgmlType::kF32: {
-      const auto values =
-          std::span<const float>(static_cast<const float*>(row), hidden);
-      return std::inner_product(values.begin(), values.end(),
-                                feedback_hidden_.begin(), 0.0F);
-    }
-    case core::GgmlType::kBF16: {
-      const models::QwenTensorRef tensor{
-          .data = row, .type = core::GgmlType::kBF16, .num_elements = hidden};
-      float result = 0.0F;
-      models::TensorGEMV(tensor, feedback_hidden_, 1, hidden,
-                         std::span<float>(&result, 1));
-      return result;
-    }
-    case core::GgmlType::kQ3_K:
-      return quant::DotProductQ3_K(row, feedback_hidden_, hidden);
-    case core::GgmlType::kQ4_K:
-      return quant::DotProductQ4_K(row, feedback_hidden_, hidden);
-    case core::GgmlType::kQ6_K:
-      return quant::DotProductQ6_K(row, feedback_hidden_, hidden);
-    default:
-      return 0.0F;
-  }
+  const models::QwenTensorRef tensor{.data = row,
+                                     .type = weights_.output.type,
+                                     .num_elements = hidden};
+  float result = 0.0F;
+  models::TensorGEMV(tensor, feedback_hidden_, 1, hidden,
+                     std::span<float>(&result, 1));
+  return result;
 }
 
 }  // namespace strix::speculative

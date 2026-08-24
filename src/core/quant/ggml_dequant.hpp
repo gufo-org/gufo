@@ -68,6 +68,24 @@ static_assert(sizeof(block_q3_K) == 110, "block_q3_K must be 110 bytes");
 static_assert(sizeof(block_q8_K) == 292, "block_q8_K must be 292 bytes");
 static_assert(sizeof(block_q8_0) == 34, "block_q8_0 must be 34 bytes");
 
+/// Returns the logical elements represented by one supported quant block, or
+/// zero for dense and unsupported storage types.
+[[nodiscard]] constexpr std::size_t QuantizedBlockElements(
+    core::GgmlType type) noexcept {
+  switch (type) {
+    case core::GgmlType::kQ8_0:
+      return 32;
+    case core::GgmlType::kQ3_K:
+    case core::GgmlType::kQ4_K:
+    case core::GgmlType::kQ5_K:
+    case core::GgmlType::kQ6_K:
+    case core::GgmlType::kQ8_K:
+      return 256;
+    default:
+      return 0;
+  }
+}
+
 /// Returns the encoded byte count for one logical quantized row, or zero when
 /// the type is not quantized or the element count is not block aligned.
 [[nodiscard]] std::size_t QuantizedRowBytes(core::GgmlType type,

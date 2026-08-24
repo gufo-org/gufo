@@ -151,6 +151,15 @@ Model loading must validate formats by tensor role. Accepting a type globally is
 unsafe when embeddings, norms, projections, and recurrent parameters have
 different consumer capabilities.
 
+`gemm_route.hpp` now provides the host-only pure Qwen GEMM route contract. Its
+format descriptor distinguishes CPU, HIP decode/MTP, and HIP prefill support;
+its resolver owns shape/alignment rejection and the existing BF16 wave32,
+baseline block, hipBLAS, hipBLASLt-try, and direct-quant thresholds. CPU
+`TensorGEMV`, HIP decode, prefill, modules, and MTP delegate to that contract.
+Kernel bodies and hipBLASLt runtime fallback remain unchanged, while NPU MTP
+projection stays outside the GEMM resolver because it is a cross-device
+composition route with a distinct packed ABI.
+
 ### Decode and prefill share decisions, not executors
 
 Decode and prefill need different kernels and performance strategies. They
@@ -327,6 +336,8 @@ thresholds are characterized on controlled Strix Halo hardware.
    separation remains.
 8. Complete attention and SSM module extraction.
 9. Consolidate GEMM dispatch by parallel change: CPU, decode, prefill, then MTP.
+   **Done:** all four modes share the pure route and format capability contract;
+   fused multi-projection kernels and the NPU MTP composition remain separate.
 10. Keep decode/prefill on shared pure route resolution and grow thin
     mode-specific plans. **Initial layer plan and decode-step translation-unit
     seam done;** narrower attention/SSM/FFN composition remains.
