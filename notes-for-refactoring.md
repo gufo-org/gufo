@@ -34,17 +34,25 @@ The refactor has established the following foundations:
 - Shared quantized GEMM/dequantization entry points exist in
   `src/core/quant/ggml_gemm.*`.
 - `ExecuteDecodeStep` is the decode composition root.
-- Cross-stage fusion choices are represented by `ShouldFuse*()` policy
-  functions.
+- Immutable `QwenExecutionPolicy` data selects production or experimental
+  routes, with distinct decode/prefill SSM and FFN decisions.
+- `ResolveQwenLayerRoute()` produces pure per-layer decision records with
+  stable fingerprints; policy fingerprints are available in dispatch telemetry.
+- CPU and HIP module contexts are distinct types rather than a nullable
+  backend-tagged union.
+- `QwenGpuArena` exposes typed non-owning scratch spans without changing the
+  allocation addresses used by graph capture.
 - Deterministic synthetic Qwen weights and shared comparison/timing helpers
   exist for module tests.
+- Tests now mirror production under `tests/models/qwen/`, while preserving
+  existing CTest executable names.
 - Norm, FFN, SSM, fusion-route, quant parity, and partial HIP integration
   coverage exists.
 
-The refactor is not complete merely because files were moved. Several APIs are
-still transitional, execution policy is compile-time global state, decode and
-prefill duplicate route selection, and tests do not yet mirror production
-ownership.
+The refactor is not complete merely because files were moved. Attention and SSM
+still contain transitional composition seams, and raw GPU arena pointers remain
+public beside the typed view. HIP operation coverage is now split by kernel
+family so each experiment has a focused build and CTest target.
 
 ## Architectural rules
 
@@ -67,52 +75,31 @@ editing a module's mathematical contract.
 
 ### Policies are data, not scattered compile-time decisions
 
-The current `ShouldFuse*()` functions are useful migration seams, but the target
-is an immutable `QwenExecutionPolicy` resolved before graph capture. The policy
-must:
+`QwenExecutionPolicy` is immutable inside an executor and is resolved into a
+pure `QwenLayerRoutePlan` before each layer launch chain. It carries independent
+decode and prefill decisions, preserves current production defaults, and emits
+a stable policy fingerprint through dispatch telemetry.
 
-- carry independent decode and prefill decisions;
-- validate incompatible combinations;
-- produce stable route identifiers for telemetry;
-- contribute a fingerprint to graph-cache identity;
-- support current production defaults;
-- eventually allow same-binary A/B selection without reading mutable process
-  state during capture.
-
-A benchmark result without its resolved route IDs and policy fingerprint is not
-reproducible evidence.
+Remaining policy work is to validate incompatible combinations, include policy
+identity in every graph-cache key, report route rejection reasons, and expose a
+controlled same-binary A/B selection surface without reading mutable process
+state during capture. A benchmark result without its resolved route IDs and
+policy fingerprint is not reproducible evidence.
 
 ### Backends expose capabilities explicitly
 
-The transitional `ModuleCtx` combines a backend tag, nullable CPU arena, opaque
-stream, configuration, and invocation state. HIP call sites legitimately leave
-CPU-only fields null, so invalid states are representable.
+The former backend-tagged `ModuleCtx` has been replaced by explicit capability
+types:
 
-The target contracts separate shared invocation metadata from backend-specific
-capabilities:
+- `CpuModuleContext` for stateless CPU stages;
+- `CpuLayerContext` for CPU stages that require configuration, stable scratch,
+  and layer/position metadata;
+- `HipModuleContext` for HIP launches and their stream.
 
-```cpp
-struct LayerInvocation {
-  const core::ModelConfig& config;
-  std::uint32_t layer_index;
-  std::uint32_t position;
-};
-
-struct CpuModuleContext {
-  LayerInvocation invocation;
-  QwenScratchArena& scratch;
-};
-
-struct HipModuleContext {
-  LayerInvocation invocation;
-  HipScratchView scratch;
-  hipStream_t stream;
-  GemmDispatcher& gemm;
-};
-```
-
-Exact types may differ, but nullable fields must not be the mechanism for
-backend selection.
+Reference members make incomplete stateful CPU contexts unrepresentable, while
+C++ overload selection chooses CPU or HIP behavior without a runtime backend
+tag. Future HIP module extraction can add narrow scratch and GEMM capabilities
+to `HipModuleContext`; nullable fields must not return as backend selectors.
 
 ### Scratch aliases are typed and address-stable
 
@@ -120,10 +107,13 @@ HIP graph capture and replay depend on stable device addresses. Refactoring the
 arena must not introduce allocation into module calls or change buffer
 lifetimes.
 
-`QwenGpuArena` should first expose non-owning phase views such as
-`DecodeScratch`, `AttentionScratch`, `SsmScratch`, and `FfnScratch`. Each view
-must document legal aliases and the epoch during which data remains live. Only
-after call sites use these views should the underlying pointers become private.
+`QwenGpuArena::GetScratchView()` now exposes non-owning typed spans over the
+existing stable allocations, and decode module calls consume those spans. This
+is an additive parallel change: raw pointers remain for kernels not yet migrated.
+The next step is to split the broad view into `DecodeScratch`,
+`AttentionScratch`, `SsmScratch`, and `FfnScratch`, document legal aliases and
+live epochs, migrate remaining call sites, and only then make raw pointers
+private.
 
 ### Dispatch has one source of truth
 
@@ -204,32 +194,23 @@ boundaries reduce incremental HIP build churn.
 
 ## Test architecture
 
-Tests should mirror production ownership under `tests/models/qwen/`:
+Tests mirror production ownership under `tests/models/qwen/`:
 
 ```text
 tests/models/qwen/
-├── support/
-│   ├── checks.hpp
-│   ├── deterministic_data.hpp
-│   ├── synthetic_weights.hpp
-│   ├── hip_test_utils.hpp
-│   └── external_model.hpp
-├── cpu/
-│   ├── modules/
-│   ├── forward_test.cpp
-│   ├── generator_test.cpp
-│   ├── tokenizer_test.cpp
-│   └── chat_template_test.cpp
-├── hip/
-│   ├── kernels/
-│   └── integration/
-├── xdna2/
-├── quality/
-└── experiments/
+├── cpu/             # model-level CPU/reference behavior
+├── modules/         # extracted stage contracts
+├── hip/             # policy, kernel, MTP, and integration coverage
+├── mtp/             # CPU MTP reference behavior
+├── tokenization/    # tokenizer and chat-template behavior
+├── xdna2/           # XDNA2 MTP kernels
+└── support/         # deterministic Qwen-only synthetic weights
 ```
 
-Generic quant and comparison tests remain under `tests/core/` or
-`src/testing/`; ownership, not filename, determines placement.
+`tests/models/qwen/README.md` documents focused CTest labels and current GPU
+integration limitations. Generic quant and comparison helpers remain under
+`tests/core/` and `tests/testing/`; ownership, not filename, determines
+placement.
 
 ### Testing tiers
 
@@ -294,17 +275,21 @@ thresholds are characterized on controlled Strix Halo hardware.
 
 1. Rebase and remove machine-specific run logs.
 2. Make tensor-role validation and physical-size metadata correct.
-3. Add always-on test checks and organize Qwen test support.
-4. Introduce stable route IDs and pure decision records without changing
-   launches.
-5. Introduce immutable execution policy with current defaults and graph-cache
-   fingerprinting.
-6. Add typed GPU scratch views while preserving addresses and aliases.
-7. Split backend contexts and backend implementation files.
+3. Organize Qwen test support and mirror production ownership. **Done.**
+4. Introduce stable route fingerprints and pure decision records without
+   changing launches. **Done.**
+5. Introduce immutable execution policy with current defaults. **Done;** graph
+   cache identity still needs the policy fingerprint.
+6. Add typed GPU scratch views while preserving addresses and aliases. **Broad
+   view done;** narrower lifetime-specific views remain.
+7. Split backend contexts. **Done;** physical CPU/HIP implementation-file
+   separation remains.
 8. Complete attention and SSM module extraction.
 9. Consolidate GEMM dispatch by parallel change: CPU, decode, prefill, then MTP.
-10. Add shared decode/prefill route resolution and thin mode-specific plans.
-11. Split Qwen CMake ownership and the monolithic GPU kernel test.
+10. Keep decode/prefill on shared pure route resolution and grow thin
+    mode-specific plans. **Initial layer plan done.**
+11. Split Qwen CMake ownership and the monolithic GPU operations test. **GPU
+    operation tests done;** source-level Qwen CMake ownership remains.
 12. Enable runtime experiment overrides and same-binary A/B only after policy
     identity participates in capture caches.
 

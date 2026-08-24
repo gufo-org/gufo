@@ -182,6 +182,7 @@ void TestBackendSupportPredicates() {
 
 void TestDecodeSplitPolicy() {
   using strix::hip::detail::DecodeAttentionScratchElements;
+  using strix::hip::detail::IsFusedQkNormSupported;
   using strix::hip::detail::IsSplitKDecodeAttentionSupported;
   using strix::hip::detail::SelectDecodeAttentionSplitCount;
 
@@ -211,6 +212,10 @@ void TestDecodeSplitPolicy() {
   Check(DecodeAttentionScratchElements(24, 256) ==
             static_cast<std::size_t>(24 * 32 * 258),
         "split-K scratch layout covers stats and partial values");
+  Check(IsFusedQkNormSupported(256),
+        "fused Q/K norm accepts its shared-memory capacity");
+  Check(!IsFusedQkNormSupported(257),
+        "fused Q/K norm rejects larger head dimensions");
 }
 
 static_assert(!strix::hip::detail::ShouldAttemptOptimizedAttention(1023));

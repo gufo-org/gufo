@@ -1,4 +1,4 @@
-// L2 GPU module integration test (#22, REQUIRED gate).
+// GPU module-seam integration test.
 //
 // Wire a short multi-layer forward through the Qwen module seam on the HIP
 // backend end-to-end: typed HipModuleContext, real synthetic weights pulled
@@ -20,7 +20,7 @@
 
 #include "src/core/hip/hip_utils.hpp"  // HIP_CHECK
 #include "src/models/qwen/modules/modules.hpp"
-#include "tests/testing/synthetic_qwen_weights.hpp"
+#include "tests/models/qwen/support/synthetic_weights.hpp"
 #include "tests/testing/test_common.hpp"
 
 #include <hip/hip_runtime.h>

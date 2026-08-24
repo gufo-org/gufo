@@ -1,19 +1,18 @@
-// L1 CPU module e2e test for the SwiGLU FFN module (FfnForward).
+// CPU module contract test for the SwiGLU FFN module (FfnForward).
 //
-// Phase 3 (#21): drive the module through its public seam (a typed CPU context
-// + FfnLayerView plus the three intermediate scratch spans) over a small
-// synthetic model built by build_synthetic_qwen_weights. Asserts the module
+// Drives the public typed CPU seam and explicit scratch spans over deterministic
+// synthetic weights. Asserts the module
 //   (1) reproduces an independent oracle (ReferenceGEMV + ReferenceSwiGLU for
 //       gate/up/down projections — a DIFFERENT GEMV implementation than the
 //       module's TensorGEMV path, so this is a genuine cross-check), and
 //   (2) emits finite, non-trivial output.
 //
-// CPU-only; no HIP dependency. Uses the Phase 1 test_common + synthetic-weights
-// builder headers (both header-only inline).
+// CPU-only; no HIP dependency. Shared deterministic data and comparisons live
+// in the Qwen support builder and tests/testing/test_common.hpp.
 
 #include "src/models/qwen/modules/modules.hpp"
 #include "src/models/qwen/oracles.hpp"
-#include "tests/testing/synthetic_qwen_weights.hpp"
+#include "tests/models/qwen/support/synthetic_weights.hpp"
 #include "tests/testing/test_common.hpp"
 
 #include <algorithm>

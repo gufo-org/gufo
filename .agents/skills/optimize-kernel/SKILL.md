@@ -17,8 +17,10 @@ evidence is a valid card completion.
   "any active-layer degradation from bus contention rejects/disables
   prefetch"). The `## Verify` snippet may name stale presets; the real ones
   are `gpu-test` (build) and `gpu-full` (test).
-- Register the equivalence test under the card's CTest label (add the label to
-  the `qwen_gpu_ops_test` LABELS list in `CMakeLists.txt`).
+- Register the equivalence test under the card's CTest label on the focused
+  Qwen HIP target that owns the kernel family in `CMakeLists.txt` (attention,
+  SSM, FFN, quant GEMV, dequant, graph/prefetch, module, or basic/BLAS). Add a
+  new focused target rather than growing an unrelated executable.
 
 ## Task scratch file
 

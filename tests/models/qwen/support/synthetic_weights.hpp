@@ -1,6 +1,6 @@
 #pragma once
 
-// Synthetic Qwen weights builder for the Phase 3 L1 module-test tier.
+// Deterministic synthetic Qwen weights for CPU and HIP contract tests.
 //
 // QwenModelWeights holds NON-OWNING QwenTensorRef that, in production, point
 // directly into GgufReader-mapped GGUF storage (see QwenModelWeights::
@@ -10,10 +10,9 @@
 // and guarantees the refs stay valid for the lifetime of the holder. It relies
 // on no GgufReader / model file.
 //
-// Purely additive Phase 1. Header-only + inline (no CMake wiring yet). It
-// depends only on src headers (model_config.hpp, state.hpp) and the test
-// RNG helpers in tests/testing/test_common.hpp, so it can be included by both
-// CPU-only and HIP module test binaries.
+// Header-only and independent of GGUF files. It depends only on model state and
+// the deterministic RNG helpers in tests/testing/test_common.hpp, so CPU and
+// HIP test binaries can share exactly the same fixtures.
 
 #include <cstddef>
 #include <cstdint>

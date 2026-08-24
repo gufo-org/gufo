@@ -12,7 +12,7 @@
 
 #include "src/models/qwen/modules/modules.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
-#include "tests/testing/synthetic_qwen_weights.hpp"
+#include "tests/models/qwen/support/synthetic_weights.hpp"
 #include "tests/testing/test_common.hpp"
 
 #include <algorithm>
@@ -73,6 +73,19 @@ void TestFusionToggleValues() {
   assert(!prefill_plan.fuse_ssm_epilogue);
   assert(!prefill_plan.prefetch_next_layer);
   assert(decode_plan.Fingerprint() != prefill_plan.Fingerprint());
+
+  auto ffn_candidate = strix::hip::QwenExecutionPolicy::Production();
+  ffn_candidate.fuse_decode_rmsnorm_projection = true;
+  auto ffn_plan = strix::hip::ResolveQwenLayerRoute(
+      ffn_candidate, strix::hip::QwenExecutionMode::kDecode, true);
+  assert(ffn_plan.fuse_rmsnorm_projection);
+  assert(!ffn_plan.fuse_ffn_swiglu);
+
+  ffn_candidate.fuse_decode_rmsnorm_swiglu = true;
+  ffn_plan = strix::hip::ResolveQwenLayerRoute(
+      ffn_candidate, strix::hip::QwenExecutionMode::kDecode, true);
+  assert(ffn_plan.fuse_rmsnorm_projection);
+  assert(ffn_plan.fuse_ffn_swiglu);
 }
 
 // --- 2. Unfused fallback: attn pre-norm RMSNorm (RMSNormProjection fusion off) ---

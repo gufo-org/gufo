@@ -1,21 +1,20 @@
-// L1 CPU module e2e test for the SSM module (gated DeltaNet linear attention).
+// CPU module contract test for the SSM (gated DeltaNet linear attention).
 //
-// Phase 3 (#18): drive the module through its public seam — a typed CPU layer
-// context + SsmLayerView over a small synthetic model built by build_synthetic_qwen_weights
-// (no GgufReader). Asserts the module:
+// Drives the public typed CPU layer seam over deterministic synthetic weights
+// without a GgufReader. Asserts the module:
 //   (1) reproduces exactly the production ForwardSSM result (validates the
 //       view.source / arena-slice / config / layer_idx seam wiring), and
 //   (2) is deterministic across a fresh arena+cache (the SSM recurrent cache is
 //       restored to its zero state), and
 //   (3) emits finite, non-trivial output.
 //
-// CPU-only; no HIP dependency. Uses the Phase 1 test_common + synthetic-weights
-// builder headers (both header-only inline).
+// CPU-only; no HIP dependency. Shared deterministic data and comparisons live
+// in the Qwen support builder and tests/testing/test_common.hpp.
 
 #include "src/models/qwen/modules/modules.hpp"
 #include "src/models/qwen/ssm.hpp"
 #include "src/models/qwen/state.hpp"
-#include "tests/testing/synthetic_qwen_weights.hpp"
+#include "tests/models/qwen/support/synthetic_weights.hpp"
 #include "tests/testing/test_common.hpp"
 
 #include <cassert>
@@ -134,7 +133,7 @@ float MaxAbsDiff(std::span<const float> a, std::span<const float> b) {
   return m;
 }
 
-// Phase 3 (#20): sensitivity/adversarial check on the L1 SSM module test.
+// Sensitivity/adversarial check on the SSM module contract.
 // Proves the module is not trivially constant and that a shared component (the
 // per-head output RMSNorm, layer.ssm_norm) is genuinely exercised by the
 // module seam. (a) perturbing the input must move the output meaningfully;

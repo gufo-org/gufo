@@ -1,19 +1,18 @@
-// L1 CPU module e2e test for the RMSNorm module (NormForward).
+// CPU module contract test for RMSNorm (NormForward).
 //
-// Phase 3 (#21): drive the module through its public seam (a typed CPU
-// context + NormLayerView) over a small synthetic model built by build_synthetic_qwen_weights
-// (no GgufReader). Asserts the module:
+// Drives the public typed CPU seam over deterministic synthetic weights without
+// a GgufReader. Asserts the module:
 //   (1) reproduces an independent F32 RMSNorm reference (a different code path
 //       than the module's FP64 ReferenceRMSNorm oracle), for both the attn
 //       pre-norm and ffn pre-norm weight slices (validates MakeAttnNormView /
 //       MakeFfnNormView seam wiring), and
 //   (2) emits finite, non-trivial output.
 //
-// CPU-only; no HIP dependency. Uses the Phase 1 test_common + synthetic-weights
-// builder headers (both header-only inline).
+// CPU-only; no HIP dependency. Shared deterministic data and comparisons live
+// in the Qwen support builder and tests/testing/test_common.hpp.
 
 #include "src/models/qwen/modules/modules.hpp"
-#include "tests/testing/synthetic_qwen_weights.hpp"
+#include "tests/models/qwen/support/synthetic_weights.hpp"
 #include "tests/testing/test_common.hpp"
 
 #include <algorithm>
