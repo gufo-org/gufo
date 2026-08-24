@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,6 +26,8 @@
 #include "src/models/qwen/modules/quant_gemm.hpp"
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
+#include "tests/models/qwen/hip/support/comparisons.hpp"
+#include "tests/models/qwen/hip/support/device.hpp"
 
 void TestHipGraphDecodeStep() {
   hipStream_t stream = nullptr;
@@ -59,8 +60,17 @@ void TestHipGraphDecodeStep() {
                       hipMemcpyHostToDevice));
 
   strix::hip::detail::HipGraphDecodeExecutor executor;
-  assert(executor.IsEnabled());
-  assert(!executor.IsCaptured());
+  constexpr strix::hip::detail::HipGraphCaptureKey graph_key{
+      .execution_identity = 11,
+      .workload_identity = 29,
+  };
+  constexpr strix::hip::detail::HipGraphCaptureKey mismatched_key{
+      .execution_identity = 11,
+      .workload_identity = 31,
+  };
+  strix::test::Expect(executor.IsEnabled(), "HIP graph executor disabled");
+  strix::test::Expect(!executor.IsCaptured(),
+                      "new HIP graph executor is already captured");
 
   // Test across 5 consecutive tokens with graph replay
   for (std::uint32_t step = 0; step < 5; ++step) {
@@ -79,14 +89,19 @@ void TestHipGraphDecodeStep() {
     };
 
     if (!executor.IsCaptured()) {
-      const bool ok = executor.TryCapture(stream, StepOps);
-      assert(ok);
-      assert(executor.IsCaptured());
-      const bool l_ok = executor.Launch(stream);
-      assert(l_ok);
+      const bool ok = executor.TryCapture(stream, graph_key, StepOps);
+      strix::test::Expect(ok, "HIP graph capture failed");
+      strix::test::Expect(executor.IsCapturedFor(graph_key),
+                          "HIP graph capture key was not retained");
+      strix::test::Expect(!executor.IsCapturedFor(mismatched_key),
+                          "mismatched HIP graph key was accepted");
+      strix::test::Expect(!executor.Launch(stream, mismatched_key),
+                          "HIP graph replay accepted a mismatched key");
+      const bool launch_ok = executor.Launch(stream, graph_key);
+      strix::test::Expect(launch_ok, "HIP graph launch failed");
     } else {
-      const bool ok = executor.Launch(stream);
-      assert(ok);
+      const bool ok = executor.Launch(stream, graph_key);
+      strix::test::Expect(ok, "HIP graph replay failed");
     }
 
     HIP_CHECK(hipStreamSynchronize(stream));
@@ -105,12 +120,16 @@ void TestHipGraphDecodeStep() {
         std::sqrt(sum_sq / static_cast<float>(hidden_size) + 1e-6F);
     for (std::size_t i = 0; i < hidden_size; ++i) {
       const float expected = (h_embd[token_id * hidden_size + i] / rms) * 1.5F;
-      assert(std::abs(h_out[i] - expected) < 1e-4F);
+      strix::test::ExpectNear(expected, h_out[i], 1e-4F,
+                              "captured RMSNorm result mismatch");
     }
   }
 
   executor.Reset();
-  assert(!executor.IsCaptured());
+  strix::test::Expect(!executor.IsCaptured(),
+                      "HIP graph reset retained capture state");
+  strix::test::Expect(!executor.IsCapturedFor(graph_key),
+                      "HIP graph reset retained capture identity");
 
   HIP_CHECK(hipFree(d_embd));
   HIP_CHECK(hipFree(d_hidden));
@@ -139,7 +158,8 @@ void TestLayerWeightPrefetch() {
 
   std::vector<unsigned char> h_out(kBytes);
   HIP_CHECK(hipMemcpy(h_out.data(), d_buf, kBytes, hipMemcpyDeviceToHost));
-  assert(h_out == h_buf);
+  strix::test::Expect(h_out == h_buf,
+                      "layer weight prefetch modified the buffer");
 
   HIP_CHECK(hipFree(d_buf));
 }
@@ -148,12 +168,11 @@ void TestLayerWeightPrefetch() {
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  int device_count = 0;
-  HIP_CHECK(hipGetDeviceCount(&device_count));
-  if (device_count == 0) {
-    std::cout
-        << "No HIP device found, skipping Qwen graph prefetch ops test.\n";
-    return 0;
+  const int gate = strix::test::GateHipDevice(
+      strix::test::HipDeviceRequirement::kOptional,
+      "Qwen graph prefetch ops test");
+  if (gate != strix::test::kHipTestSuccess) {
+    return gate;
   }
 
   TestHipGraphDecodeStep();

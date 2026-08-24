@@ -86,6 +86,73 @@ void TestFusionToggleValues() {
       ffn_candidate, strix::hip::QwenExecutionMode::kDecode, true);
   assert(ffn_plan.fuse_rmsnorm_projection);
   assert(ffn_plan.fuse_ffn_swiglu);
+
+  const auto production_ssm = strix::hip::ResolveQwenLayerRouteWithReasons(
+      strix::hip::QwenExecutionPolicy::Production(),
+      strix::hip::QwenExecutionMode::kDecode, false);
+  assert(strix::hip::HasQwenRouteRejection(
+      production_ssm.rejected,
+      strix::hip::QwenRouteRejection::kQkNormRopeKvRequiresAttention));
+
+  auto all_routes = strix::hip::QwenExecutionPolicy::Production();
+  all_routes.fuse_prefill_ffn_swiglu = true;
+  all_routes.fuse_decode_rmsnorm_swiglu = true;
+  all_routes.fuse_decode_ssm_output_residual = true;
+  all_routes.fuse_prefill_ssm_post_norm_gate = true;
+  all_routes.fuse_decode_rmsnorm_projection = true;
+  all_routes.prefetch_next_layer = true;
+  const auto decode_attention = strix::hip::ResolveQwenLayerRouteWithReasons(
+      all_routes, strix::hip::QwenExecutionMode::kDecode, true);
+  assert(strix::hip::HasQwenRouteRejection(
+      decode_attention.rejected,
+      strix::hip::QwenRouteRejection::kSsmEpilogueRequiresSsm));
+  assert(strix::hip::HasQwenRouteRejection(
+      decode_attention.rejected,
+      strix::hip::QwenRouteRejection::kPrefillFfnSwiGluRequiresPrefill));
+  assert(strix::hip::HasQwenRouteRejection(
+      decode_attention.rejected,
+      strix::hip::QwenRouteRejection::kPrefillSsmEpilogueRequiresPrefill));
+
+  const auto prefill_ssm = strix::hip::ResolveQwenLayerRouteWithReasons(
+      all_routes, strix::hip::QwenExecutionMode::kPrefill, false);
+  assert(strix::hip::HasQwenRouteRejection(
+      prefill_ssm.rejected,
+      strix::hip::QwenRouteRejection::kDecodeFfnSwiGluRequiresDecode));
+  assert(strix::hip::HasQwenRouteRejection(
+      prefill_ssm.rejected,
+      strix::hip::QwenRouteRejection::kDecodeSsmEpilogueRequiresDecode));
+  assert(strix::hip::HasQwenRouteRejection(
+      prefill_ssm.rejected,
+      strix::hip::QwenRouteRejection::kRmsNormProjectionRequiresDecode));
+  assert(strix::hip::HasQwenRouteRejection(
+      prefill_ssm.rejected,
+      strix::hip::QwenRouteRejection::kPrefetchRequiresDecode));
+
+  const auto graph_rejections = strix::hip::ResolveQwenGraphRejections(
+      false, true, true, false);
+  assert(strix::hip::HasQwenGraphRejection(
+      graph_rejections,
+      strix::hip::QwenGraphRejection::kLogitsNotRequested));
+  assert(strix::hip::HasQwenGraphRejection(
+      graph_rejections,
+      strix::hip::QwenGraphRejection::kSplitKAttentionRequired));
+  assert(strix::hip::HasQwenGraphRejection(
+      graph_rejections,
+      strix::hip::QwenGraphRejection::kLayerPrefetchEnabled));
+  assert(strix::hip::HasQwenGraphRejection(
+      graph_rejections, strix::hip::QwenGraphRejection::kGraphDisabled));
+  assert(strix::hip::ResolveQwenGraphRejections(true, false, false, true) ==
+         strix::hip::QwenGraphRejection::kNone);
+
+  const auto workload_seed = strix::hip::BeginQwenGraphWorkloadIdentity();
+  const auto workload_a = strix::hip::ExtendQwenGraphWorkloadIdentity(
+      workload_seed, decode_plan.Fingerprint());
+  const auto workload_a_repeat = strix::hip::ExtendQwenGraphWorkloadIdentity(
+      workload_seed, decode_plan.Fingerprint());
+  const auto workload_b = strix::hip::ExtendQwenGraphWorkloadIdentity(
+      workload_seed, prefill_plan.Fingerprint());
+  assert(workload_a == workload_a_repeat);
+  assert(workload_a != workload_b);
 }
 
 // --- 2. Unfused fallback: attn pre-norm RMSNorm (RMSNormProjection fusion off) ---

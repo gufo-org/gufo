@@ -293,6 +293,7 @@ private:
   const tokenization::QwenTokenizer* tokenizer_;
   const QwenExecutionPolicy policy_;
   QwenGpuArena arena_;
+  const detail::HipGraphCaptureKey graph_key_;
   detail::HipGraphDecodeExecutor graph_executor_;
   std::vector<float> h_logits_;
   std::vector<float> h_prompt_hidden_;

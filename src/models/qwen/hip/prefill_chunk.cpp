@@ -99,8 +99,13 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   // 3. Layer stack across all 32 layers
   for (std::uint32_t l = 0; l < config.num_layers; ++l) {
     const auto& layer = weights_.layers[l];
-    const auto route_plan = ResolveQwenLayerRoute(
+    const auto route_resolution = ResolveQwenLayerRouteWithReasons(
         policy_, QwenExecutionMode::kPrefill, layer.is_full_attention);
+    const auto& route_plan = route_resolution.plan;
+    detail::EmitQwenRouteResolution(
+        "prefill", l, layer.is_full_attention ? "attention" : "ssm",
+        route_plan.Fingerprint(),
+        static_cast<std::uint32_t>(route_resolution.rejected));
 
     if (do_profile) {
       HIP_CHECK(hipStreamSynchronize(arena_.stream));

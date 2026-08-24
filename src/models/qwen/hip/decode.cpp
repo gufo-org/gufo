@@ -1,6 +1,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <stdexcept>
 
+#include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
@@ -41,17 +42,25 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
   HIP_CHECK(hipMemcpyAsync(arena_.d_prompt_tokens, in_params, sizeof(in_params),
                            hipMemcpyHostToDevice, arena_.stream));
 
-  if (compute_logits && !use_split_k_decode &&
-      !policy_.prefetch_next_layer && graph_executor_.IsEnabled()) {
-    if (graph_executor_.IsCaptured()) {
-      graph_executor_.Launch(arena_.stream);
+  EmitDecodeRouteTelemetry(weights_, policy_);
+  const QwenGraphRejection graph_rejections = ResolveQwenGraphRejections(
+      compute_logits, use_split_k_decode, policy_.prefetch_next_layer,
+      graph_executor_.IsEnabled());
+  detail::EmitQwenGraphEligibility(
+      graph_key_.execution_identity, graph_key_.workload_identity,
+      static_cast<std::uint32_t>(graph_rejections));
+
+  if (graph_rejections == QwenGraphRejection::kNone) {
+    if (graph_executor_.IsCapturedFor(graph_key_)) {
+      graph_executor_.Launch(arena_.stream, graph_key_);
     } else {
-      const bool ok = graph_executor_.TryCapture(arena_.stream, [&]() {
-        ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
-                          compute_logits);
-      });
+      const bool ok = graph_executor_.TryCapture(
+          arena_.stream, graph_key_, [&]() {
+            ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
+                              compute_logits);
+          });
       if (ok) {
-        graph_executor_.Launch(arena_.stream);
+        graph_executor_.Launch(arena_.stream, graph_key_);
       } else {
         ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
                           compute_logits);

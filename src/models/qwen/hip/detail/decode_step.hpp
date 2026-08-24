@@ -14,6 +14,11 @@ namespace strix::hip {
 class QwenGpuArena;
 struct QwenExecutionPolicy;
 
+/// Emits pure decode route decisions before entering graph capture. This must
+/// never be called from the capture callback.
+void EmitDecodeRouteTelemetry(const models::QwenModelWeights& weights,
+                              const QwenExecutionPolicy& policy);
+
 /// Runs one graph-capture-safe decode layer stack using stable arena storage.
 void ExecuteDecodeStep(QwenGpuArena& arena,
                        const models::QwenModelWeights& weights,

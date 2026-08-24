@@ -1,6 +1,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 
+#include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -16,6 +17,24 @@ namespace {
 }
 
 }  // namespace
+
+void EmitDecodeRouteTelemetry(const models::QwenModelWeights& weights,
+                              const QwenExecutionPolicy& policy) {
+  if (!detail::DispatchTelemetryEnabled()) {
+    return;
+  }
+  for (std::uint32_t layer_index = 0;
+       layer_index < weights.config.num_layers; ++layer_index) {
+    const auto& layer = weights.layers[layer_index];
+    const auto resolution = ResolveQwenLayerRouteWithReasons(
+        policy, QwenExecutionMode::kDecode, layer.is_full_attention);
+    detail::EmitQwenRouteResolution(
+        "decode", layer_index,
+        layer.is_full_attention ? "attention" : "ssm",
+        resolution.plan.Fingerprint(),
+        static_cast<std::uint32_t>(resolution.rejected));
+  }
+}
 
 void ExecuteDecodeStep(QwenGpuArena& arena,
                        const models::QwenModelWeights& weights,

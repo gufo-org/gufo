@@ -90,9 +90,19 @@ inline void EmitHipblasLtDispatch(
   });
 }
 
-inline void EmitGraphDispatch(std::string_view cache_status) {
+inline void EmitGraphDispatch(std::string_view cache_status,
+                              std::uint64_t requested_execution_identity = 0,
+                              std::uint64_t requested_workload_identity = 0,
+                              std::uint64_t stored_execution_identity = 0,
+                              std::uint64_t stored_workload_identity = 0) {
   EmitDispatchTelemetry("hip_graph", [&](std::ostringstream& output) {
     WriteTelemetryField(output, "cacheStatus", cache_status);
+    output << ",\"requestedExecutionIdentity\":"
+           << requested_execution_identity
+           << ",\"requestedWorkloadIdentity\":"
+           << requested_workload_identity
+           << ",\"storedExecutionIdentity\":" << stored_execution_identity
+           << ",\"storedWorkloadIdentity\":" << stored_workload_identity;
   });
 }
 
@@ -100,6 +110,33 @@ inline void EmitQwenExecutionPolicy(std::uint64_t fingerprint) {
   EmitDispatchTelemetry("qwen_policy", [&](std::ostringstream& output) {
     output << ",\"fingerprint\":" << fingerprint;
   });
+}
+
+inline void EmitQwenRouteResolution(std::string_view mode,
+                                    std::uint32_t layer_index,
+                                    std::string_view layer_kind,
+                                    std::uint64_t route_fingerprint,
+                                    std::uint32_t rejection_mask) {
+  EmitDispatchTelemetry("qwen_route", [&](std::ostringstream& output) {
+    WriteTelemetryField(output, "mode", mode);
+    output << ",\"layerIndex\":" << layer_index;
+    WriteTelemetryField(output, "layerKind", layer_kind);
+    output << ",\"routeFingerprint\":" << route_fingerprint
+           << ",\"rejectionMask\":" << rejection_mask;
+  });
+}
+
+inline void EmitQwenGraphEligibility(std::uint64_t policy_fingerprint,
+                                     std::uint64_t workload_identity,
+                                     std::uint32_t rejection_mask) {
+  EmitDispatchTelemetry("qwen_graph_eligibility",
+                        [&](std::ostringstream& output) {
+                          output << ",\"policyFingerprint\":"
+                                 << policy_fingerprint
+                                 << ",\"workloadIdentity\":"
+                                 << workload_identity
+                                 << ",\"rejectionMask\":" << rejection_mask;
+                        });
 }
 
 }  // namespace strix::hip::detail

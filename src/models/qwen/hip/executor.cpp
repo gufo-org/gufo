@@ -29,6 +29,39 @@ const QwenGpuModel& RequireModel(
   return *model;
 }
 
+[[nodiscard]] detail::HipGraphCaptureKey BuildGraphCaptureKey(
+    const models::QwenModelWeights& weights,
+    const QwenExecutionPolicy& policy, std::uint32_t max_context) noexcept {
+  const auto& config = weights.config;
+  std::uint64_t workload = BeginQwenGraphWorkloadIdentity();
+  const std::uint64_t fields[] = {
+      config.num_layers,
+      config.hidden_size,
+      config.intermediate_size,
+      config.num_attention_heads,
+      config.num_key_value_heads,
+      config.head_dim,
+      config.vocab_size,
+      max_context,
+      1U,  // Captured decode always computes logits.
+  };
+  for (const std::uint64_t field : fields) {
+    workload = ExtendQwenGraphWorkloadIdentity(workload, field);
+  }
+  for (std::uint32_t layer_index = 0; layer_index < config.num_layers;
+       ++layer_index) {
+    const auto& layer = weights.layers[layer_index];
+    const auto resolution = ResolveQwenLayerRouteWithReasons(
+        policy, QwenExecutionMode::kDecode, layer.is_full_attention);
+    workload = ExtendQwenGraphWorkloadIdentity(
+        workload, resolution.plan.Fingerprint());
+  }
+  return {
+      .execution_identity = policy.Fingerprint(),
+      .workload_identity = workload,
+  };
+}
+
 }  // namespace
 
 QwenGpuExecutor::QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
@@ -39,6 +72,7 @@ QwenGpuExecutor::QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
       tokenizer_(&model_->GetTokenizer()),
       policy_(policy),
       arena_(weights_.config, max_context),
+      graph_key_(BuildGraphCaptureKey(weights_, policy_, max_context)),
       h_logits_(weights_.config.vocab_size, 0.0F) {
   detail::EmitQwenExecutionPolicy(policy_.Fingerprint());
 }

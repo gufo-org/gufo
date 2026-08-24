@@ -89,11 +89,14 @@ pure `QwenLayerRoutePlan` before each layer launch chain. It carries independent
 decode and prefill decisions, preserves current production defaults, and emits
 a stable policy fingerprint through dispatch telemetry.
 
-Remaining policy work is to validate incompatible combinations, include policy
-identity in every graph-cache key, report route rejection reasons, and expose a
-controlled same-binary A/B selection surface without reading mutable process
-state during capture. A benchmark result without its resolved route IDs and
-policy fingerprint is not reproducible evidence.
+Policy identity now participates in every Qwen decode graph-capture key, whose
+workload identity also includes deterministic configuration and resolved decode
+route fingerprints. Pure resolution records report why requested routes are
+masked by mode or layer kind, and graph eligibility reports why capture is
+rejected. Remaining policy work is to expose a controlled same-binary A/B
+selection surface without reading mutable process state during capture. A
+benchmark result without its resolved route IDs and policy fingerprint is not
+reproducible evidence.
 
 ### Backends expose capabilities explicitly
 
@@ -304,7 +307,8 @@ thresholds are characterized on controlled Strix Halo hardware.
 4. Introduce stable route fingerprints and pure decision records without
    changing launches. **Done.**
 5. Introduce immutable execution policy with current defaults. **Done;** graph
-   cache identity still needs the policy fingerprint.
+   capture is keyed by policy and deterministic resolved-route identity, with
+   pure rejection reasons emitted through dispatch telemetry.
 6. Add typed GPU scratch views while preserving addresses and aliases. **Broad
    view done;** narrower lifetime-specific views remain.
 7. Split backend contexts. **Done;** physical CPU/HIP implementation-file
