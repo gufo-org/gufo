@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -59,38 +60,118 @@ namespace {
   return x * Sigmoid(x);
 }
 
+[[nodiscard]] bool CheckedMultiply(std::size_t lhs, std::size_t rhs,
+                                   std::size_t& product) noexcept {
+  if (rhs != 0 && lhs > std::numeric_limits<std::size_t>::max() / rhs) {
+    return false;
+  }
+  product = lhs * rhs;
+  return true;
+}
+
+[[nodiscard]] bool HasTensorElements(const QwenTensorRef& tensor,
+                                     std::size_t required) noexcept {
+  return tensor.empty() || tensor.num_elements >= required;
+}
+
+[[nodiscard]] bool ValidateSsmInvocation(
+    std::span<const float> x, const QwenSsmParameters& parameters,
+    const QwenSsmCache& cache, std::uint32_t layer_idx,
+    std::span<float> qkv_scratch, std::span<float> gate_scratch,
+    std::span<float> out_scratch, std::span<float> out,
+    std::size_t& qkv_dim, std::size_t& gate_dim) noexcept {
+  if (x.empty() || parameters.key_head_count == 0 ||
+      parameters.value_head_count == 0 || parameters.key_dim == 0 ||
+      parameters.val_dim == 0 || parameters.conv_kernel == 0 ||
+      layer_idx >= cache.NumLayers()) {
+    return false;
+  }
+
+  std::size_t key_channels = 0;
+  std::size_t value_channels = 0;
+  if (!CheckedMultiply(parameters.key_head_count, parameters.key_dim,
+                       key_channels) ||
+      !CheckedMultiply(parameters.value_head_count, parameters.val_dim,
+                       value_channels) ||
+      key_channels >
+          (std::numeric_limits<std::size_t>::max() - value_channels) / 2U) {
+    return false;
+  }
+  qkv_dim = (2U * key_channels) + value_channels;
+  gate_dim = value_channels;
+
+  if (cache.ConvChannels() != qkv_dim ||
+      cache.ConvKernel() != parameters.conv_kernel ||
+      cache.NumHeads() != parameters.value_head_count ||
+      cache.KeyDim() != parameters.key_dim ||
+      cache.ValDim() != parameters.val_dim || qkv_scratch.size() < qkv_dim ||
+      gate_scratch.size() < gate_dim || out_scratch.size() < gate_dim ||
+      out.size() < x.size()) {
+    return false;
+  }
+
+  std::size_t qkv_projection_elements = 0;
+  std::size_t gate_projection_elements = 0;
+  std::size_t scalar_projection_elements = 0;
+  std::size_t output_projection_elements = 0;
+  std::size_t conv_elements = 0;
+  if (!CheckedMultiply(qkv_dim, x.size(), qkv_projection_elements) ||
+      !CheckedMultiply(gate_dim, x.size(), gate_projection_elements) ||
+      !CheckedMultiply(parameters.value_head_count, x.size(),
+                       scalar_projection_elements) ||
+      !CheckedMultiply(x.size(), gate_dim, output_projection_elements) ||
+      !CheckedMultiply(qkv_dim, parameters.conv_kernel, conv_elements)) {
+    return false;
+  }
+
+  return HasTensorElements(parameters.qkv, qkv_projection_elements) &&
+         HasTensorElements(parameters.gate, gate_projection_elements) &&
+         HasTensorElements(parameters.a, parameters.value_head_count) &&
+         HasTensorElements(parameters.dt, parameters.value_head_count) &&
+         HasTensorElements(parameters.alpha, scalar_projection_elements) &&
+         HasTensorElements(parameters.beta, scalar_projection_elements) &&
+         (parameters.norm.empty() ||
+          (parameters.norm.num_elements != 0 &&
+           gate_dim % parameters.norm.num_elements == 0)) &&
+         HasTensorElements(parameters.output, output_projection_elements) &&
+         HasTensorElements(parameters.conv1d, conv_elements);
+}
+
 }  // namespace
 
-void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
-                const core::ModelConfig& config, QwenSsmCache& ssm_cache,
-                std::uint32_t layer_idx, std::span<float> ssm_qkv_scratch,
+void ForwardSSM(std::span<const float> x_normed,
+                const QwenSsmParameters& parameters,
+                QwenSsmCache& ssm_cache, std::uint32_t layer_idx,
+                std::span<float> ssm_qkv_scratch,
                 std::span<float> ssm_gate_scratch,
                 std::span<float> ssm_out_scratch,
                 std::span<float> out) noexcept {
   const std::size_t hidden_size = x_normed.size();
-  const std::size_t qkv_dim = config.SsmQkvSize();
-  const std::size_t gate_dim = config.ssm_inner_size;
-  const std::uint32_t num_k_heads = config.ssm_group_count;
-  const std::uint32_t num_v_heads = config.ssm_time_step_rank;
-  const std::uint32_t key_dim = config.ssm_state_size;
-  const std::uint32_t val_dim = config.SsmValueSize();
-  const std::uint32_t conv_kernel = config.ssm_conv_kernel;
+  const std::uint32_t num_k_heads = parameters.key_head_count;
+  const std::uint32_t num_v_heads = parameters.value_head_count;
+  const std::uint32_t key_dim = parameters.key_dim;
+  const std::uint32_t val_dim = parameters.val_dim;
+  const std::uint32_t conv_kernel = parameters.conv_kernel;
+  std::size_t qkv_dim = 0;
+  std::size_t gate_dim = 0;
 
-  if (ssm_qkv_scratch.size() < qkv_dim || ssm_gate_scratch.size() < gate_dim ||
-      ssm_out_scratch.size() < gate_dim || out.size() < hidden_size) {
+  if (!ValidateSsmInvocation(x_normed, parameters, ssm_cache, layer_idx,
+                             ssm_qkv_scratch, ssm_gate_scratch,
+                             ssm_out_scratch, out, qkv_dim, gate_dim)) {
     std::ranges::fill(out, 0.0F);
     return;
   }
 
   // 1. QKV, Gate, Alpha, and Beta Projections
-  if (!layer.attn_qkv.empty()) {
-    TensorGEMV(layer.attn_qkv, x_normed, qkv_dim, hidden_size, ssm_qkv_scratch);
+  if (!parameters.qkv.empty()) {
+    TensorGEMV(parameters.qkv, x_normed, qkv_dim, hidden_size,
+               ssm_qkv_scratch);
   } else {
     std::ranges::fill(ssm_qkv_scratch, 0.0F);
   }
 
-  if (!layer.attn_gate.empty()) {
-    TensorGEMV(layer.attn_gate, x_normed, gate_dim, hidden_size,
+  if (!parameters.gate.empty()) {
+    TensorGEMV(parameters.gate, x_normed, gate_dim, hidden_size,
                ssm_gate_scratch);
   } else {
     std::ranges::fill(ssm_gate_scratch, 0.0F);
@@ -98,11 +179,12 @@ void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
 
   std::vector<float> alpha_buf(num_v_heads, 0.0F);
   std::vector<float> beta_buf(num_v_heads, 0.0F);
-  if (!layer.ssm_alpha.empty()) {
-    TensorGEMV(layer.ssm_alpha, x_normed, num_v_heads, hidden_size, alpha_buf);
+  if (!parameters.alpha.empty()) {
+    TensorGEMV(parameters.alpha, x_normed, num_v_heads, hidden_size,
+               alpha_buf);
   }
-  if (!layer.ssm_beta.empty()) {
-    TensorGEMV(layer.ssm_beta, x_normed, num_v_heads, hidden_size, beta_buf);
+  if (!parameters.beta.empty()) {
+    TensorGEMV(parameters.beta, x_normed, num_v_heads, hidden_size, beta_buf);
   }
 
   // 2. 1D Causal Convolution with rolling conv state
@@ -119,10 +201,10 @@ void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
 
     // Compute convolution
     float dot = 0.0F;
-    if (!layer.ssm_conv1d.empty()) {
+    if (!parameters.conv1d.empty()) {
       for (std::uint32_t k = 0; k < conv_kernel; ++k) {
-        dot +=
-            conv_state[c_off + k] * layer.ssm_conv1d.Get((c * conv_kernel) + k);
+        dot += conv_state[c_off + k] *
+               parameters.conv1d.Get((c * conv_kernel) + k);
       }
     } else {
       dot = ssm_qkv_scratch[c];
@@ -152,12 +234,12 @@ void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
     // Compute decay alpha_h = exp(ssm_a * softplus(alpha + ssm_dt)) and beta_h
     // = sigmoid(beta)
     float dt = 0.0F;
-    if (!layer.ssm_dt.empty()) {
-      dt = layer.ssm_dt.Get(h);
+    if (!parameters.dt.empty()) {
+      dt = parameters.dt.Get(h);
     }
     float a_val = -0.05F;
-    if (!layer.ssm_a.empty()) {
-      a_val = layer.ssm_a.Get(h);
+    if (!parameters.a.empty()) {
+      a_val = parameters.a.Get(h);
     }
     const float alpha_biased = alpha_buf[h] + dt;
     const float alpha_softplus = (alpha_biased > 20.0F)
@@ -215,12 +297,12 @@ void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
   }
 
   // 5. Per-Head Output RMSNorm (128 elements per head norm)
-  if (!layer.ssm_norm.empty()) {
-    const std::size_t norm_dim = layer.ssm_norm.num_elements;
+  if (!parameters.norm.empty()) {
+    const std::size_t norm_dim = parameters.norm.num_elements;
     const std::size_t num_norm_heads = gate_dim / norm_dim;
     for (std::size_t h = 0; h < num_norm_heads; ++h) {
       auto slice = ssm_out_scratch.subspan(h * norm_dim, norm_dim);
-      ForwardRMSNorm(slice, layer.ssm_norm, 1e-6F, slice);
+      ForwardRMSNorm(slice, parameters.norm, 1e-6F, slice);
     }
   }
 
@@ -231,12 +313,24 @@ void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
   }
 
   // 7. Linear Output Projection
-  if (!layer.ssm_out.empty()) {
-    TensorGEMV(layer.ssm_out, ssm_out_scratch.subspan(0, gate_dim), hidden_size,
-               gate_dim, out);
+  if (!parameters.output.empty()) {
+    TensorGEMV(parameters.output, ssm_out_scratch.subspan(0, gate_dim),
+               hidden_size, gate_dim, out);
   } else {
     std::ranges::fill(out, 0.0F);
   }
+}
+
+void ForwardSSM(std::span<const float> x_normed,
+                const QwenLayerWeights& layer,
+                const core::ModelConfig& config, QwenSsmCache& ssm_cache,
+                std::uint32_t layer_idx, std::span<float> ssm_qkv_scratch,
+                std::span<float> ssm_gate_scratch,
+                std::span<float> ssm_out_scratch,
+                std::span<float> out) noexcept {
+  ForwardSSM(x_normed, MakeQwenSsmParameters(layer, config), ssm_cache,
+             layer_idx, ssm_qkv_scratch, ssm_gate_scratch, ssm_out_scratch,
+             out);
 }
 
 }  // namespace strix::models

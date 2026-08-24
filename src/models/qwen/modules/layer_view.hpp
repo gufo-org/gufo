@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "src/models/qwen/ssm.hpp"
 #include "src/models/qwen/state.hpp"
 
 namespace strix::models::qwen {
@@ -46,27 +47,9 @@ struct AttnLayerView {
   std::uint32_t head_dim = 0;
 };
 
-/// Linear-attention / SSM layer slice (DeltaNet + conv + gating).
-struct SsmLayerView {
-  QwenTensorRef qkv;
-  QwenTensorRef gate;
-  QwenTensorRef a;
-  QwenTensorRef dt;
-  QwenTensorRef alpha;
-  QwenTensorRef beta;
-  QwenTensorRef norm;
-  QwenTensorRef out;
-  QwenTensorRef conv1d;
-  std::uint32_t num_heads = 0;
-  std::uint32_t key_dim = 0;
-  std::uint32_t val_dim = 0;
-  std::uint32_t conv_kernel = 0;
-
-  /// Backing layer the old `ForwardSSM` needs while this is a thin-forwarding
-  /// shim (Phase 1). Dropped once the module body is extracted (Phase 2), when
-  /// SsmForward reads only its own slice. Non-owning; set by MakeSsmView.
-  QwenLayerWeights const* source = nullptr;
-};
+/// Linear-attention / SSM layer slice (DeltaNet + conv + gating). The module
+/// and compatibility wrapper share this exact tensor-and-shape contract.
+using SsmLayerView = QwenSsmParameters;
 
 /// SwiGLU FFN layer slice.
 struct FfnLayerView {
@@ -112,10 +95,7 @@ inline AttnLayerView MakeAttnView(const QwenLayerWeights& w,
 }
 inline SsmLayerView MakeSsmView(const QwenLayerWeights& w,
                                 const core::ModelConfig& c) {
-  return SsmLayerView{w.attn_qkv, w.attn_gate, w.ssm_a,       w.ssm_dt,
-                      w.ssm_alpha, w.ssm_beta, w.ssm_norm,    w.ssm_out,
-                      w.ssm_conv1d, c.ssm_group_count,        c.ssm_state_size,
-                      c.SsmValueSize(), c.ssm_conv_kernel, &w};
+  return MakeQwenSsmParameters(w, c);
 }
 inline FfnLayerView MakeFfnView(const QwenLayerWeights& w,
                                 const core::ModelConfig& c) {

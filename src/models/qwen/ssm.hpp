@@ -33,6 +33,16 @@ public:
   [[nodiscard]] std::uint32_t KeyDim() const noexcept { return key_dim_; }
   [[nodiscard]] std::uint32_t ValDim() const noexcept { return val_dim_; }
 
+  [[nodiscard]] std::uint32_t NumLayers() const noexcept {
+    return num_layers_;
+  }
+  [[nodiscard]] std::size_t ConvChannels() const noexcept {
+    return conv_channels_;
+  }
+  [[nodiscard]] std::uint32_t ConvKernel() const noexcept {
+    return conv_kernel_;
+  }
+
 private:
   std::uint32_t num_layers_;
   std::size_t conv_channels_;
@@ -44,14 +54,58 @@ private:
   std::vector<float> deltanet_states_;
 };
 
-/// Computes Qwen 3.5 Gated DeltaNet linear attention operator:
-/// 1. Linear QKV, Gate, Alpha, Beta projections
-/// 2. 1D Causal Convolution with rolling conv state
-/// 3. Associative retrieval: u = S^T * k
-/// 4. Delta update: S = alpha * S + beta * (k * (v - u)^T)
-/// 5. Readout: o = S^T * q
-/// 6. Gated activation: y = RMSNorm(o) * SiLU(gate)
-/// 7. Linear output projection to out
+/// Complete non-owning tensor and shape contract for one Qwen SSM layer.
+/// The nine tensor references intentionally match the SSM subset of
+/// QwenLayerWeights; dimensions make the slice independently executable.
+struct QwenSsmParameters {
+  QwenTensorRef qkv;
+  QwenTensorRef gate;
+  QwenTensorRef a;
+  QwenTensorRef dt;
+  QwenTensorRef alpha;
+  QwenTensorRef beta;
+  QwenTensorRef norm;
+  QwenTensorRef output;
+  QwenTensorRef conv1d;
+  std::uint32_t key_head_count = 0;
+  std::uint32_t value_head_count = 0;
+  std::uint32_t key_dim = 0;
+  std::uint32_t val_dim = 0;
+  std::uint32_t conv_kernel = 0;
+};
+
+[[nodiscard]] inline QwenSsmParameters MakeQwenSsmParameters(
+    const QwenLayerWeights& layer, const core::ModelConfig& config) noexcept {
+  return {
+      .qkv = layer.attn_qkv,
+      .gate = layer.attn_gate,
+      .a = layer.ssm_a,
+      .dt = layer.ssm_dt,
+      .alpha = layer.ssm_alpha,
+      .beta = layer.ssm_beta,
+      .norm = layer.ssm_norm,
+      .output = layer.ssm_out,
+      .conv1d = layer.ssm_conv1d,
+      .key_head_count = config.ssm_group_count,
+      .value_head_count = config.ssm_time_step_rank,
+      .key_dim = config.ssm_state_size,
+      .val_dim = config.SsmValueSize(),
+      .conv_kernel = config.ssm_conv_kernel,
+  };
+}
+
+/// Computes Qwen 3.5 Gated DeltaNet linear attention from a self-contained
+/// tensor slice. Invalid shapes safely zero-fill `out` without touching state.
+void ForwardSSM(std::span<const float> x_normed,
+                const QwenSsmParameters& parameters,
+                QwenSsmCache& ssm_cache, std::uint32_t layer_idx,
+                std::span<float> ssm_qkv_scratch,
+                std::span<float> ssm_gate_scratch,
+                std::span<float> ssm_out_scratch,
+                std::span<float> out) noexcept;
+
+/// Compatibility entry point for whole-layer production callers. It constructs
+/// QwenSsmParameters and delegates to the slice overload above.
 void ForwardSSM(std::span<const float> x_normed, const QwenLayerWeights& layer,
                 const core::ModelConfig& config, QwenSsmCache& ssm_cache,
                 std::uint32_t layer_idx, std::span<float> ssm_qkv_scratch,

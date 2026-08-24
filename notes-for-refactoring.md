@@ -184,14 +184,18 @@ embed
 The composition root selects fused or unfused edges. Leaf module implementations
 select kernels only within their own stage.
 
+The CPU SSM module now owns a self-contained `QwenSsmParameters` slice with
+exactly the nine SSM tensors and all recurrence dimensions. The whole-layer
+`ForwardSSM` entry point remains as a compatibility wrapper, while module and
+production callers share one validated implementation and no layer back-pointer.
+
 The remaining extraction work is:
 
 1. split CPU and HIP backend implementations into explicit files/namespaces;
-2. replace the SSM forwarding shim and remove `SsmLayerView::source`;
-3. expose complete HIP attention and SSM module operations;
-4. route decode and prefill through plans rather than direct launch chains;
-5. consolidate GEMM selection across CPU, decode, prefill, and MTP;
-6. make route selection pure and independently testable.
+2. expose complete HIP attention and SSM module operations;
+3. route decode and prefill through plans rather than direct launch chains;
+4. consolidate GEMM selection across CPU, decode, prefill, and MTP;
+5. make route selection pure and independently testable.
 
 ## Build boundaries
 

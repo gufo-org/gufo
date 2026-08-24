@@ -2,11 +2,12 @@
 //
 // Drives the public typed CPU layer seam over deterministic synthetic weights
 // without a GgufReader. Asserts the module:
-//   (1) reproduces exactly the production ForwardSSM result (validates the
-//       view.source / arena-slice / config / layer_idx seam wiring), and
+//   (1) reproduces exactly the whole-layer ForwardSSM compatibility wrapper,
+//       proving both paths use the same typed tensor slice implementation;
 //   (2) is deterministic across a fresh arena+cache (the SSM recurrent cache is
-//       restored to its zero state), and
-//   (3) emits finite, non-trivial output.
+//       restored to its zero state);
+//   (3) safely zero-fills invalid typed views; and
+//   (4) emits finite, non-trivial output.
 //
 // CPU-only; no HIP dependency. Shared deterministic data and comparisons live
 // in the Qwen support builder and tests/testing/test_common.hpp.
@@ -23,6 +24,7 @@
 #include <iostream>
 #include <random>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -32,12 +34,15 @@ using strix::models::ForwardSSM;
 using strix::models::QwenLayerWeights;
 using strix::models::QwenScratchArena;
 using strix::models::QwenSsmCache;
+using strix::models::QwenSsmParameters;
 using strix::models::qwen::build_synthetic_qwen_weights;
 using strix::models::qwen::make_small_qwen_config;
 using strix::models::qwen::MakeSsmView;
 using strix::models::qwen::CpuLayerContext;
 using strix::models::qwen::SsmForward;
 using strix::models::qwen::SsmLayerView;
+
+static_assert(std::is_same_v<SsmLayerView, QwenSsmParameters>);
 
 QwenSsmCache MakeCache(const ModelConfig& c) {
   return QwenSsmCache(c.num_layers, c.SsmQkvSize(), c.ssm_conv_kernel,
@@ -55,7 +60,7 @@ void RunSsmModule(const ModelConfig& config,
 
   const CpuLayerContext ctx(config, arena, layer_idx);
 
-  SsmLayerView view = MakeSsmView(layer, config);
+  const SsmLayerView view = MakeSsmView(layer, config);
   out.assign(x.size(), 0.0F);
   SsmForward(ctx, view, x, cache, out);
 }
@@ -79,7 +84,8 @@ void TestSsmModuleMatchesProduction() {
   std::vector<float> out;
   RunSsmModule(config, layer, layer_idx, x, out);
 
-  // Direct production reference.
+  // Whole-layer compatibility-wrapper reference. Both calls must converge on
+  // the same typed-slice implementation.
   QwenScratchArena arena_ref(config);
   QwenSsmCache cache_ref = MakeCache(config);
   cache_ref.Reset();
@@ -121,6 +127,23 @@ void TestSsmModuleDeterministicAcrossReset() {
   assert(a.size() == b.size());
   for (std::size_t i = 0; i < a.size(); ++i) {
     assert(a[i] == b[i]);
+  }
+}
+
+void TestInvalidSsmViewZeroFills() {
+  const ModelConfig config = make_small_qwen_config();
+  QwenScratchArena arena(config);
+  QwenSsmCache cache = MakeCache(config);
+  cache.Reset();
+  const CpuLayerContext ctx(config, arena, 0);
+  const SsmLayerView invalid_view{};
+  std::vector<float> input(config.hidden_size, 1.0F);
+  std::vector<float> out(config.hidden_size, 7.0F);
+
+  SsmForward(ctx, invalid_view, input, cache, out);
+
+  for (const float value : out) {
+    assert(value == 0.0F);
   }
 }
 
@@ -186,6 +209,7 @@ void TestSsmModuleSensitivity() {
 int main() {
   TestSsmModuleMatchesProduction();
   TestSsmModuleDeterministicAcrossReset();
+  TestInvalidSsmViewZeroFills();
   TestSsmModuleSensitivity();
   std::cout << "All Qwen L1 SSM module tests passed.\n";
   return 0;
