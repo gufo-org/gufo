@@ -923,11 +923,14 @@ int RunBench(std::span<const char* const> args) {
       std::vector<double> hybrid_command_runs;
       std::vector<double> hybrid_end_to_end_runs;
       std::vector<double> hybrid_host_to_gpu_runs;
+      heterogeneous::NpuDrafterMetrics npu_summary_metrics{};
+      bool has_npu_metrics = false;
       for (std::size_t r = 0; r < opt.repetitions; ++r) {
         restore_depth();
 
         std::unique_ptr<speculative::IDraftBackend> draft_backend;
         hip::QwenMtpGpuDraftBackend* mtp_backend = nullptr;
+        heterogeneous::NpuDraftBackend* npu_draft_backend = nullptr;
         if (opt.speculative_backend == "dflash" ||
             opt.speculative_backend == "dflash2" ||
             opt.speculative_backend == "dflash-2") {
@@ -974,11 +977,24 @@ int RunBench(std::span<const char* const> args) {
           cfg.draft_step_count = opt.draft_tokens;
           draft_backend =
               std::make_unique<speculative::SelfSpeculativeBackend>(cfg);
-        } else if (opt.speculative_backend == "npu") {
+        } else if (opt.speculative_backend == "npu" ||
+                   opt.speculative_backend == "dflash-npu") {
           heterogeneous::NpuDrafterConfig cfg;
+          cfg.mode = (opt.speculative_backend == "dflash-npu" ||
+                      !opt.dflash_model_path.empty())
+                         ? heterogeneous::NpuDraftMode::kDFlash2
+                         : heterogeneous::NpuDraftMode::kMTP;
+          if (!opt.dflash_model_path.empty()) {
+            cfg.dflash_model_path = opt.dflash_model_path;
+          }
+          if (!opt.mtp_model_path.empty()) {
+            cfg.mtp_model_path = opt.mtp_model_path;
+          }
           cfg.max_draft_tokens = opt.draft_tokens;
           cfg.vocab_size = config.vocab_size;
           draft_backend = std::make_unique<heterogeneous::NpuDraftBackend>(cfg);
+          npu_draft_backend =
+              static_cast<heterogeneous::NpuDraftBackend*>(draft_backend.get());
         } else if (opt.speculative_backend == "pld" ||
                    opt.speculative_backend == "lookup") {
           speculative::PromptLookupConfig cfg;
@@ -1001,7 +1017,9 @@ int RunBench(std::span<const char* const> args) {
           }
           if (opt.speculative_backend == "dflash" ||
               opt.speculative_backend == "dflash2" ||
-              opt.speculative_backend == "dflash-2") {
+              opt.speculative_backend == "dflash-2" ||
+              opt.speculative_backend == "dflash-npu" ||
+              opt.speculative_backend == "npu") {
             s_opts.use_batched_verification = true;
             s_opts.use_batched_lm_head = true;
             s_opts.target_bf16_from_layer = 48;
@@ -1078,6 +1096,10 @@ int RunBench(std::span<const char* const> args) {
               hybrid_host_to_gpu_runs.push_back(metrics.host_to_gpu_us / count);
             }
           }
+          if (npu_draft_backend != nullptr) {
+            npu_summary_metrics = npu_draft_backend->GetMetrics();
+            has_npu_metrics = true;
+          }
         } else {
           for (std::size_t step = 0; step < g_len; ++step) {
             greedy_current_token = gpu_exec->ForwardToken(greedy_current_token,
@@ -1118,6 +1140,15 @@ int RunBench(std::span<const char* const> args) {
                   << " npu_command=" << command.mean
                   << " npu_end_to_end=" << npu_end_to_end.mean
                   << " host_to_gpu=" << host_to_gpu.mean << '\n';
+      }
+      if (opt.verbose && has_npu_metrics) {
+        std::cerr << test_name << " [NPU Profiler Telemetry]: invocations="
+                  << npu_summary_metrics.proposal_invocations
+                  << " npu_submissions=" << npu_summary_metrics.npu_submissions
+                  << " dma_bytes=" << npu_summary_metrics.dma_bytes_transferred
+                  << " dma_time_us=" << npu_summary_metrics.total_dma_time_us
+                  << " npu_time_us=" << npu_summary_metrics.total_npu_time_us
+                  << '\n';
       }
     }
   }
