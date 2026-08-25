@@ -42,16 +42,16 @@ not be required to serve requests.
 
 ## Single Executable and Model Configuration
 
-The deployed product is one `strix-server` executable. Supported model graphs,
+The deployed product is one `strix` executable. Supported model graphs,
 tokenizers, HIP kernels, and AIE programs are compiled into it.
 
 The executable provides subcommands rather than separate inference binaries:
 
 ```text
-strix-server serve
-strix-server chat
-strix-server prompt
-strix-server video
+strix serve
+strix chat
+strix prompt
+strix video
 ```
 
 `chat` and `prompt` are transport adapters over the same scheduler and may
@@ -71,12 +71,13 @@ continuous batching.
 ```sh
 nix build
 
-./result/bin/strix-server serve \
-  --model models/qwen.gguf \
-  --context 4096 \
-  --sessions 1 \
+./result/bin/strix serve \
   --host 127.0.0.1 \
-  --port 8080
+  --port 8080 \
+  --sessions 1 \
+  llm \
+  --model models/qwen.gguf \
+  --context 4096
 ```
 
 Cancellation and exceptions return a reset session to the pool. Model
@@ -128,7 +129,7 @@ Model artifacts cannot provide:
 - Tokenizer plugins.
 - Executable chat templates.
 
-Adding another model architecture requires rebuilding `strix-server`.
+Adding another model architecture requires rebuilding `strix`.
 Changing weights for an already supported kind does not.
 
 ## Process and State Ownership
@@ -367,7 +368,7 @@ terminated by a local reverse proxy, though native TLS may be added later.
 
 Prompt and generated text logging is disabled by default.
 
-Tool definitions and generated tool calls are treated as data. `strix-server`
+Tool definitions and generated tool calls are treated as data. `strix`
 never executes tools, shell commands, URLs, or generated code.
 
 Browser access requires an explicit CORS origin allowlist. Do not enable a

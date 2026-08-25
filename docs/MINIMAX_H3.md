@@ -375,7 +375,7 @@ matching Diffusers' NumPy conversion and h3.c's `lrintf` behavior.
 
 ## Text-to-Video CLI and Frozen Presets
 
-`strix-server video` is the first complete text-only serving path. It requires
+`strix video` is the first complete text-only serving path. It requires
 an explicit operator-supplied model directory, validates the pinned manifest,
 tokenizes and encodes layer 50, denoises on gfx1151, decodes the released
 VisualVAE and AudioVAE, and atomically publishes either an audiovisual MP4 or
@@ -402,7 +402,7 @@ prefix of the first 45 or 40 transformer blocks.
 Rapid development example:
 
 ```sh
-nix develop -c ./build-h3-173/strix-server video \
+nix develop -c ./build-h3-173/strix video \
   --model /var/llms/huggingface/MiniMax-H3 \
   --preset dev \
   --frames-dir /tmp/h3-fox-dev \
@@ -413,7 +413,7 @@ nix develop -c ./build-h3-173/strix-server video \
 Manual end-user or release exact output:
 
 ```sh
-nix develop -c ./build-h3-173/strix-server video \
+nix develop -c ./build-h3-173/strix video \
   --model /var/llms/huggingface/MiniMax-H3 \
   --preset exact \
   --seed 42 \
@@ -426,7 +426,7 @@ nix develop -c ./build-h3-173/strix-server video \
 Released five-second full-resolution output uses 124 aligned frames at 24 fps:
 
 ```sh
-nix develop -c ./build/hardware-test/strix-server video \
+nix develop -c ./build/hardware-test/strix video \
   --model /var/llms/huggingface/MiniMax-H3 \
   --preset exact-1344x768 \
   --seed 42 \
@@ -462,12 +462,12 @@ names or silently enter the exact route.
 
 ## Asynchronous Video API
 
-`strix-server serve --video-model <DIR>` enables the versioned
+`strix serve --video-model <DIR>` enables the versioned
 `strix.video-api.v1` text-to-video API. When `--model` is not also supplied,
 the process is video-only and does not load an unrelated text model:
 
 ```sh
-nix develop -c ./build-h3-173/strix-server serve \
+nix develop -c ./build-h3-173/strix serve \
   --host 127.0.0.1 \
   --port 8080 \
   --video-model /var/llms/huggingface/MiniMax-H3 \
@@ -854,7 +854,7 @@ complete generation:
 
 ```sh
 nix develop -c python3 tools/strix/h3_profile.py \
-  --binary ./build-h3-173/strix-server \
+  --binary ./build-h3-173/strix \
   --model /var/llms/huggingface/MiniMax-H3 \
   --output-root /var/llms/huggingface/strix-h3-profiles/bf16-v1 \
   --presets exact \

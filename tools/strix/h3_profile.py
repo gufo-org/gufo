@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Manual MiniMax H3 end-to-end profiling harness.
 
-The harness runs the public ``strix-server video`` path, preserves its
+The harness runs the public ``strix video`` path, preserves its
 parameter and telemetry reports, and adds bounded process I/O, memory, power,
 and clock samples. It never writes the prompt text or model path to its reports.
 

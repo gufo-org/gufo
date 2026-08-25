@@ -4,7 +4,7 @@ Status: design draft, 2026-08-11
 
 ## Purpose
 
-The `strix-server` executable also provides terminal interfaces for:
+The `strix` executable also provides terminal interfaces for:
 
 - Interactive conversations.
 - One-shot prompt testing.
@@ -19,10 +19,10 @@ contain a second inference path.
 ## Commands
 
 ```text
-strix-server serve
-strix-server chat
-strix-server prompt
-strix-server diagnose
+strix serve
+strix chat
+strix prompt
+strix diagnose
 ```
 
 `serve` starts the OpenAI-compatible server. `chat` maintains an interactive
@@ -41,7 +41,7 @@ combinations return an error instead of being ignored.
 Direct mode loads the configured model in the current process:
 
 ```bash
-strix-server prompt \
+strix prompt \
   --config strix.toml \
   --model qwen-current-27b \
   --prompt "Explain wave32 in three sentences."
@@ -56,7 +56,7 @@ logit checks, and isolating HTTP from inference failures.
 Client mode sends a request to a running Strix-Halo.cpp server:
 
 ```bash
-strix-server prompt \
+strix prompt \
   --connect http://127.0.0.1:8080 \
   --model qwen-current-27b \
   --prompt "Explain wave32 in three sentences."
@@ -73,14 +73,14 @@ used, but the effective mode must be printed by verbose diagnostics.
 The prompt may be supplied as a named option:
 
 ```bash
-strix-server prompt --config strix.toml --model qwen-current-27b \
+strix prompt --config strix.toml --model qwen-current-27b \
   --prompt "Write a JSON object with the keys name and value."
 ```
 
 It may also be the final positional argument:
 
 ```bash
-strix-server prompt --config strix.toml --model qwen-current-27b \
+strix prompt --config strix.toml --model qwen-current-27b \
   "Summarize how paged KV caches work."
 ```
 
@@ -89,11 +89,11 @@ The two forms are mutually exclusive.
 Additional input forms:
 
 ```bash
-strix-server prompt --config strix.toml --model qwen-current-27b \
+strix prompt --config strix.toml --model qwen-current-27b \
   --prompt-file prompt.txt
 
 printf '%s\n' "Explain INT4 zero points." |
-  strix-server prompt --config strix.toml --model qwen-current-27b --stdin
+  strix prompt --config strix.toml --model qwen-current-27b --stdin
 ```
 
 Exactly one of the following may provide the user prompt:
@@ -111,13 +111,13 @@ for a model-specific test.
 Start a direct interactive session:
 
 ```bash
-strix-server chat --config strix.toml --model qwen-current-27b
+strix chat --config strix.toml --model qwen-current-27b
 ```
 
 Or connect to a running server:
 
 ```bash
-strix-server chat \
+strix chat \
   --connect http://127.0.0.1:8080 \
   --model qwen-current-27b
 ```
@@ -250,17 +250,17 @@ Direct mode reports:
 
 ## System Diagnostics
 
-`strix-server diagnose` executes non-interactive platform, system, toolchain,
+`strix diagnose` executes non-interactive platform, system, toolchain,
 GPU, and NPU diagnostics without starting a server or loading a model:
 
 ```bash
-strix-server diagnose
-strix-server diagnose --json
-strix-server diagnose --json --section inventory
-strix-server diagnose --fingerprint --json --output /tmp/strix-fingerprint.json
-strix-server diagnose --validate-artifact /tmp/strix-fingerprint.json
-strix-server diagnose --benchmark bandwidth --backends cpu,hip,xrt --output /tmp/strix-bandwidth.json
-strix-server diagnose --smoke xrt --iterations 100 --timeout-ms 30000 \
+strix diagnose
+strix diagnose --json
+strix diagnose --json --section inventory
+strix diagnose --fingerprint --json --output /tmp/strix-fingerprint.json
+strix diagnose --validate-artifact /tmp/strix-fingerprint.json
+strix diagnose --benchmark bandwidth --backends cpu,hip,xrt --output /tmp/strix-bandwidth.json
+strix diagnose --smoke xrt --iterations 100 --timeout-ms 30000 \
   --json --output /tmp/strix-xrt-smoke.json
 ```
 

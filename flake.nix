@@ -438,7 +438,7 @@
           prCheck = pkgsSys.runCommand "check-pr" { } ''
             mkdir -p $out/bin
             cp "${self.packages.${system}.default}/bin/strix" $out/bin/strix
-            cp "${self.packages.${system}.default}/bin/strix-server" $out/bin/strix-server
+            ln -sf strix $out/bin/strix-server
 
             cat "${formatCheck}/result.txt"
             cat "${staticAnalysisCheck}/result.txt"

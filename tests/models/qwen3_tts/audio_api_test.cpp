@@ -6,8 +6,8 @@
 #include <string>
 #include <utility>
 
-#include "src/server/audio_tts_api.hpp"
-#include "src/server/tts_service.hpp"
+#include "src/cli/serve/audio_tts_api.hpp"
+#include "src/cli/serve/tts_service.hpp"
 
 namespace {
 

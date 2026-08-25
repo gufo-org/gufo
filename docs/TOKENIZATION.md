@@ -9,7 +9,7 @@ execute every kernel correctly and still produce incompatible results through
 a different tokenizer, chat template, special-token policy, stop condition, or
 sampling stream.
 
-`strix-server` contains compiled-in tokenizer and prompt-formatting
+`strix` contains compiled-in tokenizer and prompt-formatting
 implementations for its curated model kinds. Weight artifacts provide validated
 vocabulary and tokenizer data, not executable tokenizer or template code.
 

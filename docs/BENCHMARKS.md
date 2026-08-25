@@ -157,7 +157,7 @@ and its SHA-256 identifier (`fingerprintId`):
   XDNA2 NPU identity, kernel drivers (`amdgpu`, `amdxdna`), ROCm/HIP, and XRT toolchain pins.
 - **Privacy Redaction**: Hostnames, usernames, process secrets, timestamps, and local
   user paths are strictly excluded from the canonical identity and forbidden in benchmark artifacts.
-- **Validation**: Artifacts can be validated with `strix-server diagnose --validate-artifact <path>`,
+- **Validation**: Artifacts can be validated with `strix diagnose --validate-artifact <path>`,
   which checks schema compliance (`schemaVersion: 1.0.0`), re-hashes canonical fields,
   and rejects mismatched fingerprints or incompatible architectures.
 

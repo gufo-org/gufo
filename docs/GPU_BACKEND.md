@@ -49,7 +49,7 @@ nix build
   --out "$HOME/.cache/strix/hipblaslt-plans.bin"
 
 STRIX_HIPBLASLT_PLAN_CACHE="$HOME/.cache/strix/hipblaslt-plans.bin" \
-  ./result/bin/strix-server prompt --model "$MODEL" "Hello"
+  ./result/bin/strix prompt --model "$MODEL" "Hello"
 ```
 
 The tuner covers the seven Qwen3.8 projection shapes at prompt batches
@@ -281,7 +281,7 @@ models/<model>/gpu/gfx1151/
 
 Each model is compiled as an independent object target with unique host and
 device symbol prefixes. The final link places all targets in the single
-`strix-server` executable, but does not merge their kernel ownership.
+`strix` executable, but does not merge their kernel ownership.
 
 There is no global numerical kernel registry or production `common/kernels`
 directory. A model binds its tensors to its own dispatch table during load.

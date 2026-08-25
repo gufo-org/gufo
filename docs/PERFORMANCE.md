@@ -134,20 +134,20 @@ changes.
 ```sh
 MODEL=models/<model>/<artifact>.gguf
 
-./result/bin/strix-server bench \
+./result/bin/strix bench \
   --model "$MODEL" \
   --n-prompt 128,512,1024,2048,4096 \
   --n-gen 0 \
   --repetitions 3
 
-./result/bin/strix-server bench \
+./result/bin/strix bench \
   --model "$MODEL" \
   --n-prompt 2048 \
   --n-gen 128 \
   --n-depth 4096,8192,12288,16384 \
   --repetitions 1
 
-./result/bin/strix-server bench \
+./result/bin/strix bench \
   --model "$MODEL" \
   --validate-prefill 1024 \
   --n-prompt 1024 \
@@ -231,7 +231,7 @@ busy, and what changed between two runs.
 ```sh
 # profile a command and analyze in one step
 nix develop -c python3 tools/prof.py run --stages qwen -- \
-  ./result/bin/strix-server bench --model "$MODEL" -p 2048 -n 0 -r 1
+  ./result/bin/strix bench --model "$MODEL" -p 2048 -n 0 -r 1
 
 # re-analyze an existing database
 nix develop -c python3 tools/prof.py show /tmp/prof/prof_results.db --top 20
@@ -295,7 +295,7 @@ microbenchmark before acting on the mix.
   --repetitions 10
 
 STRIX_HIPBLASLT_PLAN_CACHE=/tmp/strix-hipblaslt-plans.bin \
-  ./result/bin/strix-server bench ...
+  ./result/bin/strix bench ...
 
 ./result/bin/benchmark_ssm_replay \
   --model "$MODEL" \

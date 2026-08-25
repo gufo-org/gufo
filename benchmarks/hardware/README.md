@@ -33,7 +33,7 @@ This document retains the hardware memory bandwidth baseline measurements for AM
 ## Reproduction Command
 
 ```sh
-./result/bin/strix-server diagnose \
+./result/bin/strix diagnose \
   --benchmark bandwidth \
   --backends cpu,hip,xrt \
   --warmup 3 \
@@ -42,5 +42,5 @@ This document retains the hardware memory bandwidth baseline measurements for AM
   --json \
   --output /tmp/strix-bandwidth.json
 
-./result/bin/strix-server diagnose --validate-artifact /tmp/strix-bandwidth.json
+./result/bin/strix diagnose --validate-artifact /tmp/strix-bandwidth.json
 ```

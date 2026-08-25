@@ -45,18 +45,18 @@ MODEL=models/Qwen3.8-27B-GGUF/BF16/Qwen3.8-27B-BF16-00001-of-00002.gguf
 Measure Strix prompt processing, shallow decode, and context depth:
 
 ```sh
-./result/bin/strix-server bench \
+./result/bin/strix bench \
   --model "$MODEL" \
   --n-prompt 32,64,128,256,512,1024,2048,4096 \
   --n-gen 0 \
   --repetitions 3
 
-./result/bin/strix-server bench \
+./result/bin/strix bench \
   --model "$MODEL" \
   --n-gen 8,128 \
   --repetitions 3
 
-./result/bin/strix-server bench \
+./result/bin/strix bench \
   --model "$MODEL" \
   --n-prompt 2048 \
   --n-gen 128 \
@@ -67,7 +67,7 @@ Measure Strix prompt processing, shallow decode, and context depth:
 Check the complete final-token vocabulary against sequential execution:
 
 ```sh
-./result/bin/strix-server bench \
+./result/bin/strix bench \
   --model "$MODEL" \
   --validate-prefill 1024 \
   --n-prompt 1024 \
@@ -180,14 +180,14 @@ verification.
 ```sh
 MTP_MODEL=/path/to/mtp-Qwen3.8-27B-Q4_0.gguf
 
-./result/bin/strix-server bench --model "$MODEL" \
+./result/bin/strix bench --model "$MODEL" \
   --n-prompt 1 --n-gen 128 --repetitions 1
 
-./result/bin/strix-server bench --model "$MODEL" \
+./result/bin/strix bench --model "$MODEL" \
   --n-prompt 1 --n-gen 128 --repetitions 1 \
   --speculative mtp --mtp-model "$MTP_MODEL" --draft-tokens 2
 
-./result/bin/strix-server bench --model "$MODEL" \
+./result/bin/strix bench --model "$MODEL" \
   --n-prompt 1 --n-gen 128 --repetitions 1 \
   --speculative mtp-npu --mtp-model "$MTP_MODEL" --draft-tokens 2 --verbose
 ```
@@ -746,7 +746,7 @@ that was never needed.
 
 ### Prefill stage budget (`pp2048`, per pass)
 
-Captured with `nix develop -c python3 tools/prof.py run -- ./result/bin/strix-server bench ...`.
+Captured with `nix develop -c python3 tools/prof.py run -- ./result/bin/strix bench ...`.
 The bench emits one token per repetition, so a profile of `-p 2048 -n 0` also
 contains one decode pass: the `W8A8BlockedWmmaGEMMKernel<128, 64, 4, 8, 1>`
 dispatches with a single token block are that decode, about 1.9% of the recorded

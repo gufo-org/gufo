@@ -15,7 +15,7 @@ memory layout will be extremely tailored for Strix Halo.
 
 The native C++ runtime supports model-owned ROCm inference paths for
 Qwen3.8-27B BF16 and DeepSeek V4 Flash Q2-imatrix. Both models run through the
-terminal prompt command, `strix-bench`, and the OpenAI-compatible server.
+terminal `strix prompt` command, `strix bench`, and `strix serve`.
 DeepSeek uses its own graph, state, quantized layouts, and kernels under
 `src/models/deepseek_v4_flash`; it does not call Qwen compute code.
 
@@ -43,8 +43,8 @@ Build with Nix only; direct host builds are unsupported:
 
 ```sh
 nix build                          # build default package (gfx1151 + XRT)
-./result/bin/strix                 # run hardware probe
-./result/bin/strix-server          # run server
+./result/bin/strix diagnose        # run hardware probe & diagnostics
+./result/bin/strix serve           # run server
 nix build .#checks.x86_64-linux.pr # canonical PR test command (all gates)
 ```
 

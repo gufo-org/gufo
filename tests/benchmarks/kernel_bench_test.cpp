@@ -1,4 +1,4 @@
-#include "src/bench/kernel_bench.hpp"
+#include "src/cli/bench/kernel_bench.hpp"
 
 #include <cmath>
 #include <cstdlib>

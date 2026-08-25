@@ -11,8 +11,8 @@ Build and test with Nix only. Direct host builds and Makefiles are unsupported.
 
 ```sh
 nix build                          # build default package (gfx1151 + XRT)
-./result/bin/strix                 # run hardware probe
-./result/bin/strix-server          # run server
+./result/bin/strix diagnose        # run hardware probe & diagnostics
+./result/bin/strix serve           # run server
 nix build .#checks.x86_64-linux.pr # canonical PR test command (all gates)
 nix develop                        # dev shell
 ```
@@ -22,7 +22,7 @@ nix develop                        # dev shell
   only; that CMake tree is intentionally unoptimized. Run models and measure
   performance with the release binaries produced by `nix build` under
   `result/bin`. Example:
-  `./result/bin/strix-server bench --model <model.gguf> -p 128 -n 16 --validate-prefill 128`.
+  `./result/bin/strix bench --model <model.gguf> -p 128 -n 16 --validate-prefill 128`.
 
 ## Profiling and kernel work
 

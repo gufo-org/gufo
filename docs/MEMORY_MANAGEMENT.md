@@ -9,7 +9,7 @@ GPU, and NPU. Physical unification does not imply that every allocation has the
 same virtual address, access permissions, cache behavior, residency, or
 performance on every agent.
 
-One broker in `strix-server` owns global memory policy. HIP, XDNA2, model
+One broker in `strix` owns global memory policy. HIP, XDNA2, model
 implementations, KV cache, graphs, persistence, and future modalities request
 memory from that broker instead of maintaining unrelated capacity estimates.
 

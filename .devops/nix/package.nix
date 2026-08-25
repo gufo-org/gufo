@@ -128,7 +128,7 @@ stdenv.mkDerivation (finalAttrs: {
 
     mkdir -p $out/bin
     cp strix $out/bin/strix
-    cp strix-server $out/bin/strix-server
+    ln -sf strix $out/bin/strix-server
     mkdir -p $out/share/strix/models/qwen3_tts
     cp $src/src/models/qwen3_tts/reference/run_official.py \
       $out/share/strix/models/qwen3_tts/
@@ -183,6 +183,8 @@ stdenv.mkDerivation (finalAttrs: {
   installCheckPhase = ''
     runHook preInstallCheck
 
+    $out/bin/strix --version
+    $out/bin/strix --help >/dev/null
     $out/bin/strix-server --version
     $out/bin/strix-server --help >/dev/null
     if [ -x $out/bin/strix-kernel-bench ]; then

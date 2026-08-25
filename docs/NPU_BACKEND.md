@@ -10,11 +10,11 @@ without ONNX Runtime, PyTorch, or a Python runtime in the serving process.
 The backend is a separate source module with no dependency on HIP headers:
 
 ```text
-strix-server
+strix
   core/xdna2/
 ```
 
-The NPU module is statically linked into `strix-server`. The core runtime may
+The NPU module is statically linked into `strix`. The core runtime may
 initialize both GPU and NPU backends.
 
 ## Current Status
@@ -245,7 +245,7 @@ Programs are compiled ahead of time for fixed shape families:
 - Model-specific fused operations.
 
 JIT compilation is a development feature only. Production builds contain
-content-addressed artifacts embedded in `strix-server` and built by a pinned
+content-addressed artifacts embedded in `strix` and built by a pinned
 compiler toolchain.
 
 ## Model Isolation

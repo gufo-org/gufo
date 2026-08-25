@@ -89,14 +89,14 @@ docs/
 
 - A clean checkout configures and builds on the supported Strix Halo Linux
   environment.
-- A placeholder `strix-server --version` runs.
+- A placeholder `strix --version` runs.
 - The PR test command succeeds from one documented entry point.
 
 ## Milestone 1: Hardware Diagnostics and Baselines
 
 ### Tasks
 
-1. Implement `strix-server diagnose`.
+1. Implement `strix diagnose`.
 2. Record CPU, memory, GPU, NPU, driver, runtime, firmware, clock, and power
    information.
 3. Measure sustained CPU, GPU, and NPU-visible memory bandwidth.
@@ -207,9 +207,9 @@ complete model.
 5. Implement request-owned model and sampling state.
 6. Implement the capability evaluation drift gate, trace format, and offline
    regrade (EVAL.md).
-7. Implement `strix-server prompt` in direct greedy mode.
+7. Implement `strix prompt` in direct greedy mode.
 8. Add exact-token fixtures comparing the native CLI with the pinned reference.
-9. Add sampling and `strix-server chat` only after the greedy slice passes.
+9. Add sampling and `strix chat` only after the greedy slice passes.
 10. Add eager execution first; add HIP graphs only after correctness.
 
 Start with BF16 or SHQ8 where it simplifies bring-up, then introduce SHQ4
@@ -424,8 +424,8 @@ Do not place the following on the critical path for the first production model:
 The first concrete issues should be opened in this order:
 
 1. Add the MIT license and repository skeleton.
-2. Create CMake presets and build `strix-server --version`.
-3. Implement `strix-server diagnose`.
+2. Create CMake presets and build `strix --version`.
+3. Implement `strix diagnose`.
 4. Add HIP and XRT smoke programs.
 5. Define tensor descriptors and checked byte arithmetic.
 6. Implement safetensors inspection.

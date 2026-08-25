@@ -167,19 +167,6 @@ if (STRIX_ENABLE_SANITIZERS)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
-add_executable(strix src/main.cpp)
-
-if (ENGINE_ENABLE_HIP)
-  target_compile_definitions(strix PRIVATE ENGINE_ENABLE_HIP=1)
-  target_link_libraries(strix PRIVATE hip::host roc::hipblas roc::rocblas)
-endif()
-
-if (ENGINE_ENABLE_XRT)
-  target_compile_definitions(strix PRIVATE ENGINE_ENABLE_XRT=1)
-  target_include_directories(strix SYSTEM PRIVATE ${XRT_INCLUDE_DIR})
-  target_link_libraries(strix PRIVATE ${XRT_COREUTIL_LIB} ${UUID_LIBRARY})
-endif()
-
 add_library(strix_diagnostics STATIC
   src/core/diagnostics/linux_sysfs.cpp
   src/core/diagnostics/system_inventory.cpp
@@ -192,7 +179,7 @@ add_library(strix_diagnostics STATIC
   src/core/xdna2/device.cpp
   src/core/xdna2/smoke.cpp
   src/core/diagnostics/report.cpp
-  src/cli/diagnose.cpp
+  src/cli/diagnose/diagnose.cpp
 )
 target_include_directories(strix_diagnostics PUBLIC ${CMAKE_SOURCE_DIR})
 
@@ -277,37 +264,43 @@ if (ENGINE_ENABLE_HIP)
     roc::hipblaslt roc::rocblas aotriton_v2)
 endif()
 
-add_executable(strix-server
-  src/server/main.cpp
-  src/server/bench_cli.cpp
-  src/server/prompt_cli.cpp
-  src/server/audio_tts_api.cpp
-  src/server/tts_service.cpp
-  src/server/video_api.cpp
-  src/server/video_jobs.cpp
-  src/server/video_cli.cpp
-  src/server/inference_backend.cpp
-  src/server/http_server.cpp
+add_executable(strix
+  src/cli/main.cpp
+  src/cli/bench/bench.cpp
+  src/cli/prompt/prompt.cpp
+  src/cli/video/video.cpp
+  src/cli/serve/serve.cpp
+  src/cli/serve/audio_tts_api.cpp
+  src/cli/serve/tts_service.cpp
+  src/cli/serve/video_api.cpp
+  src/cli/serve/video_jobs.cpp
+  src/cli/serve/inference_backend.cpp
+  src/cli/serve/http_server.cpp
 )
-target_link_libraries(strix-server PRIVATE strix_diagnostics strix_core)
-target_compile_definitions(strix-server PRIVATE
+target_link_libraries(strix PRIVATE strix_diagnostics strix_core)
+target_compile_definitions(strix PRIVATE
   STRIX_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   STRIX_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/strix/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   STRIX_QWEN3_TTS_REFERENCE_RUNNER="${CMAKE_CURRENT_SOURCE_DIR}/src/models/qwen3_tts/reference/run_official.py"
   STRIX_QWEN3_TTS_INSTALLED_REFERENCE_RUNNER="${CMAKE_INSTALL_PREFIX}/share/strix/models/qwen3_tts/run_official.py")
 
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(strix-server PRIVATE strix_deepseek_v4_flash)
+  target_link_libraries(strix PRIVATE strix_deepseek_v4_flash)
 endif()
-target_link_libraries(strix-server PRIVATE strix_qwen3_tts)
+target_link_libraries(strix PRIVATE strix_qwen3_tts)
+
+add_custom_target(strix-server ALL
+  COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:strix> ${CMAKE_CURRENT_BINARY_DIR}/strix-server
+  DEPENDS strix
+)
 add_library(strix_kernel_bench_support STATIC
-  src/bench/kernel_bench.cpp
+  src/cli/bench/kernel_bench.cpp
 )
 target_include_directories(strix_kernel_bench_support PUBLIC ${CMAKE_SOURCE_DIR})
 
 if (ENGINE_ENABLE_HIP)
   add_executable(strix-kernel-bench
-    src/bench/kernel_bench_main.cpp
+    src/cli/bench/kernel_bench_main.cpp
   )
   target_compile_definitions(strix-kernel-bench PRIVATE
     STRIX_VERSION="${STRIX_VERSION}")
@@ -335,7 +328,7 @@ if (ENGINE_ENABLE_HIP)
   endif()
 endif()
 
-install(TARGETS strix strix-server DESTINATION bin)
+install(TARGETS strix DESTINATION bin)
 install(FILES
   src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
   DESTINATION share/strix/models/minimax_h3)
@@ -355,34 +348,44 @@ if (BUILD_TESTING)
 
   add_subdirectory(tests/models/qwen)
 
-  add_test(NAME strix_server_version COMMAND strix-server --version)
-  set_tests_properties(strix_server_version PROPERTIES LABELS "cpu")
+  add_test(NAME strix_version COMMAND strix --version)
+  set_tests_properties(strix_version PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_server_help COMMAND strix-server --help)
-  set_tests_properties(strix_server_help PROPERTIES LABELS "cpu")
+  add_test(NAME strix_help COMMAND strix --help)
+  set_tests_properties(strix_help PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_server_diagnose_help COMMAND strix-server diagnose --help)
-  set_tests_properties(strix_server_diagnose_help PROPERTIES LABELS "cpu")
+  add_test(NAME strix_probe COMMAND strix probe)
+  set_tests_properties(strix_probe PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_server_diagnose_json COMMAND strix-server diagnose --json --section platform)
-  set_tests_properties(strix_server_diagnose_json PROPERTIES LABELS "cpu")
+  add_test(NAME strix_diagnose_help COMMAND strix diagnose --help)
+  set_tests_properties(strix_diagnose_help PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_server_prompt_help COMMAND strix-server prompt --help)
-  set_tests_properties(strix_server_prompt_help PROPERTIES LABELS "cpu;server;cli")
+  add_test(NAME strix_diagnose_json COMMAND strix diagnose --json --section platform)
+  set_tests_properties(strix_diagnose_json PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_server_video_help COMMAND strix-server video --help)
-  set_tests_properties(strix_server_video_help PROPERTIES
+  add_test(NAME strix_prompt_help COMMAND strix prompt --help)
+  set_tests_properties(strix_prompt_help PROPERTIES LABELS "cpu;server;cli")
+
+  add_test(NAME strix_video_help COMMAND strix video --help)
+  set_tests_properties(strix_video_help PROPERTIES
     LABELS "cpu;server;cli;minimax-h3")
 
-  add_test(NAME strix_server_serve_help COMMAND strix-server serve --help)
-  set_tests_properties(strix_server_serve_help PROPERTIES LABELS "cpu;server;cli")
+  add_test(NAME strix_serve_help COMMAND strix serve --help)
+  set_tests_properties(strix_serve_help PROPERTIES LABELS "cpu;server;cli")
 
-  add_test(NAME strix_server_prompt_smoke COMMAND strix-server prompt "Hello world")
-  set_tests_properties(strix_server_prompt_smoke PROPERTIES LABELS "cpu;server;cli")
+  add_test(NAME strix_prompt_smoke COMMAND strix prompt "Hello world")
+  set_tests_properties(strix_prompt_smoke PROPERTIES LABELS "cpu;server;cli")
+
+  add_executable(arg_parser_test
+    tests/cli/arg_parser_test.cpp
+  )
+  target_link_libraries(arg_parser_test PRIVATE strix_core)
+  add_test(NAME arg_parser_test COMMAND arg_parser_test)
+  set_tests_properties(arg_parser_test PROPERTIES LABELS "cpu;cli")
 
   add_executable(prompt_cli_test
-    tests/server/prompt_cli_test.cpp
-    src/server/prompt_cli.cpp
+    tests/cli/prompt_test.cpp
+    src/cli/prompt/prompt.cpp
   )
   target_link_libraries(prompt_cli_test PRIVATE strix_core)
   if (ENGINE_ENABLE_HIP)
@@ -393,8 +396,8 @@ if (BUILD_TESTING)
   set_tests_properties(prompt_cli_test PROPERTIES LABELS "cpu;server;cli")
 
   add_executable(bench_cli_test
-    tests/server/bench_cli_test.cpp
-    src/server/bench_cli.cpp
+    tests/cli/bench_test.cpp
+    src/cli/bench/bench.cpp
   )
   target_link_libraries(bench_cli_test PRIVATE strix_core)
   if (ENGINE_ENABLE_HIP)
@@ -405,8 +408,8 @@ if (BUILD_TESTING)
   set_tests_properties(bench_cli_test PROPERTIES LABELS "cpu;server;cli")
 
   add_executable(video_cli_test
-    tests/server/video_cli_test.cpp
-    src/server/video_cli.cpp
+    tests/cli/video_test.cpp
+    src/cli/video/video.cpp
   )
   target_link_libraries(video_cli_test PRIVATE strix_core)
   add_test(NAME video_cli_test COMMAND video_cli_test)
@@ -414,8 +417,8 @@ if (BUILD_TESTING)
     LABELS "cpu;server;cli;minimax-h3;quality")
 
   add_executable(video_jobs_test
-    tests/server/video_jobs_test.cpp
-    src/server/video_jobs.cpp
+    tests/cli/video_jobs_test.cpp
+    src/cli/serve/video_jobs.cpp
   )
   target_link_libraries(video_jobs_test PRIVATE strix_core)
   add_test(NAME video_jobs_test COMMAND video_jobs_test)
@@ -423,14 +426,16 @@ if (BUILD_TESTING)
     LABELS "cpu;server;video;minimax-h3;queue;cancellation;quality")
 
   add_executable(video_api_test
-    tests/server/video_api_test.cpp
-    src/server/video_api.cpp
-    src/server/video_jobs.cpp
+    tests/cli/video_api_test.cpp
+    src/cli/serve/video_api.cpp
+    src/cli/serve/video_jobs.cpp
   )
   target_link_libraries(video_api_test PRIVATE strix_core)
   add_test(NAME video_api_test COMMAND video_api_test)
   set_tests_properties(video_api_test PROPERTIES
     LABELS "cpu;server;api;video;minimax-h3;quality")
+
+
 
   add_test(NAME h3_profile_test
     COMMAND ${Python3_EXECUTABLE}
@@ -517,8 +522,8 @@ if (BUILD_TESTING)
 
   add_executable(qwen3_tts_audio_api_test
     tests/models/qwen3_tts/audio_api_test.cpp
-    src/server/audio_tts_api.cpp
-    src/server/tts_service.cpp)
+    src/cli/serve/audio_tts_api.cpp
+    src/cli/serve/tts_service.cpp)
   target_link_libraries(qwen3_tts_audio_api_test PRIVATE strix_qwen3_tts)
   add_test(NAME qwen3_tts_audio_api_test COMMAND qwen3_tts_audio_api_test)
   set_tests_properties(qwen3_tts_audio_api_test PROPERTIES
@@ -819,8 +824,8 @@ if (BUILD_TESTING)
       LABELS "hip;gpu;kernels;deltanet;speculative")
 
     add_executable(inference_backend_gpu_test
-      tests/server/inference_backend_gpu_test.cpp
-      src/server/inference_backend.cpp)
+      tests/cli/inference_backend_gpu_test.cpp
+      src/cli/serve/inference_backend.cpp)
     target_link_libraries(inference_backend_gpu_test PRIVATE
       strix_core strix_deepseek_v4_flash hip::host)
     add_test(NAME inference_backend_gpu_test COMMAND inference_backend_gpu_test)
@@ -829,8 +834,8 @@ if (BUILD_TESTING)
       SKIP_RETURN_CODE 77)
 
     add_executable(deepseek_v4_flash_backend_test
-      tests/server/deepseek_v4_flash_backend_test.cpp
-      src/server/inference_backend.cpp)
+      tests/cli/deepseek_v4_flash_backend_test.cpp
+      src/cli/serve/inference_backend.cpp)
     target_link_libraries(deepseek_v4_flash_backend_test PRIVATE
       strix_core strix_deepseek_v4_flash hip::host)
     add_test(NAME deepseek_v4_flash_backend_test

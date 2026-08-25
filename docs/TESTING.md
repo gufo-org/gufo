@@ -448,7 +448,7 @@ strix-compare         Compare exact, tolerant, or distribution artifacts
 strix-quality         Run teacher-forced logits, perplexity, and task suites
                       (task suites defined in EVAL.md)
 strix-stress          Run concurrency, cancellation, and lifecycle tests
-strix-server bench    Produce correctness-linked performance artifacts
+strix bench    Produce correctness-linked performance artifacts
 strix-report          Validate JSON artifacts and render summaries
 ```
 
@@ -522,7 +522,7 @@ package hashes only production sources and builds with `BUILD_TESTING=OFF`;
 CTest compiles and runs from a separate test derivation.
 
 The production package remains a dependency of the PR gate. Its build and
-install checks execute `strix-server --version` and `--help`.
+install checks execute `strix --version` and `--help`.
 
 ## Hardware Test Tiers
 

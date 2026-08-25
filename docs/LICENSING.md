@@ -71,7 +71,7 @@ userspace program communicating through the documented kernel UAPI.
 
 Do not:
 
-- Copy GPL kernel-driver implementation code into `strix-server`.
+- Copy GPL kernel-driver implementation code into `strix`.
 - Compile kernel implementation files into a userspace library.
 - Treat an internal kernel function as a stable userspace interface.
 - Remove SPDX identifiers or copyright notices from copied UAPI material.

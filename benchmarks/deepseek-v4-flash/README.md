@@ -32,12 +32,12 @@ MODEL=/path/to/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatr
 Run a terminal prompt:
 
 ```sh
-./result/bin/strix-server prompt \
+./result/bin/strix prompt \
   --model "$MODEL" \
-  --raw-prompt \
+  --raw \
   --prompt 'The capital of France is' \
-  --max-tokens 16 \
-  --temperature 0
+  -n 16 \
+  -t 0
 ```
 
 Run the sparse long-context benchmark. Each prompt row adds a 2K suffix to the
@@ -45,7 +45,7 @@ prepared depth, and each generation row produces 128 autoregressive tokens.
 Frontiers are extended incrementally and restored from in-memory snapshots.
 
 ```sh
-./result/bin/strix-server bench \
+./result/bin/strix bench \
   --model "$MODEL" \
   --n-prompt 2048 \
   --n-gen 128 \
@@ -58,10 +58,11 @@ The same artifact can be served through the existing OpenAI-compatible
 completion and chat endpoints:
 
 ```sh
-./result/bin/strix-server serve \
-  --model "$MODEL" \
+./result/bin/strix serve \
   --host 127.0.0.1 \
-  --port 8080
+  --port 8080 \
+  llm \
+  --model "$MODEL"
 ```
 
 ## Current Results
