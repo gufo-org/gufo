@@ -9,6 +9,7 @@
   python3,
   libbacktrace,
   rocmPackages,
+  zstd,
 }:
 
 let
@@ -28,11 +29,14 @@ let
     sha256 = "sha256-L571fRWGoH+ezaR/3JvvKIKfe1azG4ajerC/b4jVnKs=";
   };
 
-  clangStdenv = stdenv.override {
-    cc = rocmPackages.llvm.clang;
+  isa-xml-src = fetchzip {
+    url = "https://gpuopen.com/download/AMD_GPU_MR_ISA_XML_2026_03_05.zip";
+    sha256 = "sha256-yFuzMB6Wh2uVRNGpUIc5lTX7UnK9V+y4HPHnCWKYiE0=";
+    stripRoot = false;
   };
+
 in
-clangStdenv.mkDerivation {
+stdenv.mkDerivation {
   pname = "hrx-system";
   version = "unstable-2026-08";
 
@@ -48,6 +52,7 @@ clangStdenv.mkDerivation {
     ninja
     pkg-config
     python3
+    rocmPackages.llvm.clang
   ];
 
   buildInputs = [
@@ -56,23 +61,49 @@ clangStdenv.mkDerivation {
     rocmPackages.rocm-runtime
     rocmPackages.aqlprofile
     rocmPackages.rocm-device-libs
+    zstd
   ];
 
+  preConfigure = ''
+    mkdir -p build/_deps/amdgpu_isa_xml-src
+    cp -r ${isa-xml-src}/* build/_deps/amdgpu_isa_xml-src/
+  '';
+
   cmakeFlags = [
+    "-DCMAKE_C_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
+    "-DCMAKE_CXX_COMPILER=${rocmPackages.llvm.clang}/bin/clang++"
     "-DFETCHCONTENT_SOURCE_DIR_FLATCC=${flatcc-src}"
     "-DFETCHCONTENT_SOURCE_DIR_HSA_RUNTIME_HEADERS=${hsa-headers-src}"
     "-DFETCHCONTENT_SOURCE_DIR_HIP_API_HEADERS=${hip-headers-src}"
-    "-DIREE_DEPENDENCY_MODE=pinned"
+    "-DFETCHCONTENT_SOURCE_DIR_LOOM_AMDGPU_ISA_XML=${isa-xml-src}"
+    "-DIREE_DEPENDENCY_MODE=auto"
     "-DIREE_ROCM_DEPENDENCY_MODE=pinned"
-    "-DCMAKE_PREFIX_PATH=${rocmPackages.aqlprofile}"
+    "-DCMAKE_PREFIX_PATH=${rocmPackages.aqlprofile};${zstd.dev or zstd}"
     "-DIREE_ROCM_PATH=${rocmPackages.clr}"
     "-DIREE_BUILD_TESTS=OFF"
     "-DIREE_BUILD_BENCHMARKS=OFF"
     "-DIREE_HAL_DRIVER_AMDGPU=ON"
     "-DIREE_HAL_DRIVER_HIP=ON"
     "-DLIBHRX_BUILD=ON"
-    "-DLOOM_BUILD=OFF"
+    "-DLOOM_BUILD=ON"
+    "-DLOOM_TARGET_AMDGPU=ON"
+    "-DLOOM_TARGET_AMDGPU_TARGETS=gfx1151"
+    "-DLOOM_TARGET_SPIRV=OFF"
+    "-DLOOM_TARGET_WASM=OFF"
+    "-DLOOM_TARGET_X86=ON"
+    "-DLOOM_TARGET_IREE_VM=ON"
+    "-DLOOM_TARGET_LLVMIR=ON"
+    "-DCMAKE_INSTALL_RPATH=${lib.makeLibraryPath [ rocmPackages.rocm-runtime rocmPackages.clr zstd ]}"
+    "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"
   ];
+
+  postFixup = ''
+    for f in $out/lib/*.so* $out/bin/*; do
+      if [ -f "$f" ] && patchelf --print-rpath "$f" >/dev/null 2>&1; then
+        patchelf --add-rpath "${lib.makeLibraryPath [ rocmPackages.rocm-runtime rocmPackages.clr zstd ]}" "$f"
+      fi
+    done
+  '';
 
   meta = with lib; {
     description = "HRX (Hip Runtime Extended) system runtime components and AMDGPU/HIP driver";

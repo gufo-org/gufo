@@ -112,11 +112,17 @@
             rocmSupport = true;
             rocmGpuTargets = [ "gfx1151" ];
           };
+          hrx = base.override {
+            rocmSupport = true;
+            rocmGpuTargets = [ "gfx1151" ];
+            hrxSupport = true;
+          };
           aie-qwen-mtp-eh-proj =
             gufoPackages.${system}.aie-qwen-mtp-eh-proj;
           aie-qwen-mtp-rmsnorm =
             gufoPackages.${system}.aie-qwen-mtp-rmsnorm;
           aie-smoke = gufoPackages.${system}.aie-smoke;
+          hrx-system = gufoPackages.${system}.hrx-system;
         }
       );
 

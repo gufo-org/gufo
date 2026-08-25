@@ -14,6 +14,7 @@
   aie-smoke,
   xrt,
   xrt-plugin-amdxdna,
+  hrx-system,
   config,
   version,
 
@@ -22,6 +23,9 @@
   rocmGpuTargets ? (lib.optionals rocmSupport rocmPackages.clr.gpuTargets),
   # Wire the XRT NPU shim + amdxdna plugin into the build.
   xrtSupport ? true,
+  # Build the native HRX/Loom runtime variant. The default package stays on
+  # the established ROCm/HIP route.
+  hrxSupport ? false,
 }:
 
 let
@@ -51,7 +55,9 @@ let
       || relativePath == "tools/quant/gguf_dump_types.cpp"
       || relativePath == "tools/gufo"
       || relativePath == "tools/gufo/compile_h3_attention.py"
-      || relativePath == "tools/gufo/h3_attention_kernel.py";
+      || relativePath == "tools/gufo/h3_attention_kernel.py"
+      || relativePath == "tools/loom"
+      || lib.hasPrefix "tools/loom/" relativePath;
   };
 in
 stdenv.mkDerivation (finalAttrs: {
@@ -92,7 +98,8 @@ stdenv.mkDerivation (finalAttrs: {
     xrt
     xrt-plugin-amdxdna
     libuuid
-  ];
+  ]
+  ++ lib.optional hrxSupport hrx-system;
 
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
@@ -107,6 +114,9 @@ stdenv.mkDerivation (finalAttrs: {
   ++ lib.optional rocmSupport "-DHIPCUB_INCLUDE_DIR=${rocmPackages.hipcub}/include"
   ++ lib.optional rocmSupport "-DROCPRIM_INCLUDE_DIR=${rocmPackages.rocprim}/include"
   ++ lib.optional rocmSupport "-DROCWMMA_INCLUDE_DIR=${rocmPackages.rocwmma}/include"
+  ++ lib.optional xrtSupport "-DENGINE_ENABLE_XRT=ON"
+  ++ lib.optional hrxSupport "-DENGINE_ENABLE_HRX=ON"
+  ++ lib.optional hrxSupport "-DHRX_ROOT=${hrx-system}"
   ++ lib.optional xrtSupport "-DENGINE_ENABLE_XRT=ON"
   ++ lib.optional xrtSupport "-DGUFO_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR=${placeholder "out"}/share/gufo/aie/qwen-mtp-eh-proj"
   ++ lib.optional xrtSupport "-DGUFO_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR=${placeholder "out"}/share/gufo/aie/qwen-mtp-rmsnorm"
