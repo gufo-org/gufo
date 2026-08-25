@@ -142,12 +142,22 @@ void QwenGpuExecutor::SetPromptHiddenCapture(bool enabled) {
 }
 
 std::span<const float> QwenGpuExecutor::CopyLastHidden() {
-  h_last_hidden_.resize(weights_.config.hidden_size);
-  auto scratch = arena_.GetScratchView(arena_.GetMaxBatch());
-  HIP_CHECK(hipMemcpyAsync(h_last_hidden_.data(),
-                           scratch.decode.hidden.data() + last_hidden_offset_,
-                           h_last_hidden_.size() * sizeof(float),
-                           hipMemcpyDeviceToHost, arena_.stream));
+  const std::size_t hidden_size = weights_.config.hidden_size;
+  h_last_hidden_.resize(5 * hidden_size);
+  if (arena_.d_target_layer_features != nullptr) {
+    HIP_CHECK(hipMemcpyAsync(h_last_hidden_.data(),
+                             arena_.d_target_layer_features,
+                             5 * hidden_size * sizeof(float),
+                             hipMemcpyDeviceToHost, arena_.stream));
+  } else {
+    auto scratch = arena_.GetScratchView(arena_.GetMaxBatch());
+    for (std::size_t l = 0; l < 5; ++l) {
+      HIP_CHECK(hipMemcpyAsync(h_last_hidden_.data() + (l * hidden_size),
+                               scratch.decode.hidden.data() + last_hidden_offset_,
+                               hidden_size * sizeof(float),
+                               hipMemcpyDeviceToHost, arena_.stream));
+    }
+  }
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
   return h_last_hidden_;
 }

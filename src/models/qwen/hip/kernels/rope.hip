@@ -22,7 +22,7 @@ __global__ void RoPEKernel(float* __restrict__ q, float* __restrict__ k,
       static_cast<std::size_t>(num_kv_heads) * half_rot;
 
   // Process Q heads
-  if (tid < total_q_pairs) {
+  if (tid < total_q_pairs && q != nullptr) {
     const std::uint32_t h = static_cast<std::uint32_t>(tid / half_rot);
     const std::uint32_t pair = static_cast<std::uint32_t>(tid % half_rot);
 
@@ -80,7 +80,7 @@ __global__ void RoPEPtrKernel(float* __restrict__ q, float* __restrict__ k,
   const std::uint32_t pos = *d_pos;
 
   // Process Q heads
-  if (tid < total_q_pairs) {
+  if (tid < total_q_pairs && q != nullptr) {
     const std::uint32_t h = static_cast<std::uint32_t>(tid / half_rot);
     const std::uint32_t pair = static_cast<std::uint32_t>(tid % half_rot);
 

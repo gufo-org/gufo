@@ -65,6 +65,7 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
   HIP_CHECK(hipMalloc(&d_logits, vocab_size * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_prompt_tokens,
                       std::max<std::size_t>(batch, 2) * sizeof(std::uint32_t)));
+  HIP_CHECK(hipMalloc(&d_target_layer_features, 5 * hidden_size * sizeof(float)));
 
   const std::size_t scratch_elements =
       batch * std::max<std::size_t>(
@@ -494,6 +495,10 @@ void QwenGpuArena::FreeAll() noexcept {
     HIP_CHECK(hipFree(d_attn_lse_prefix));
   if (d_attn_prefix_out != nullptr)
     HIP_CHECK(hipFree(d_attn_prefix_out));
+  if (d_target_layer_features != nullptr) {
+    HIP_CHECK(hipFree(d_target_layer_features));
+    d_target_layer_features = nullptr;
+  }
   if (d_attn_prefix_f16 != nullptr)
     HIP_CHECK(hipFree(d_attn_prefix_f16));
   if (d_attn_q_f16 != nullptr)

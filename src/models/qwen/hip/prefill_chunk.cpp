@@ -650,6 +650,24 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out, arena_.d_hidden,
                              batch_size, hidden_size, arena_.stream);
 
+    // DFlash draft feature tap for target layers [1, 7, 13, 19, 25]
+    if (arena_.d_target_layer_features != nullptr) {
+      const std::size_t last_tok_offset = (batch_size - 1) * hidden_size;
+      std::size_t tap_idx = 999;
+      if (l == 1) tap_idx = 0;
+      else if (l == 7) tap_idx = 1;
+      else if (l == 13) tap_idx = 2;
+      else if (l == 19) tap_idx = 3;
+      else if (l == 25) tap_idx = 4;
+
+      if (tap_idx < 5) {
+        (void)hipMemcpyAsync(
+            arena_.d_target_layer_features + (tap_idx * hidden_size),
+            arena_.d_hidden + last_tok_offset,
+            hidden_size * sizeof(float), hipMemcpyDeviceToDevice, arena_.stream);
+      }
+    }
+
     if (do_profile) {
       HIP_CHECK(hipStreamSynchronize(arena_.stream));
       auto t1 = std::chrono::high_resolution_clock::now();
@@ -712,6 +730,50 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
 
   return next_token_id;
+}
+
+std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
+    std::span<const tokenization::TokenId> candidate_tokens,
+    std::uint32_t start_pos) {
+  const std::size_t batch_size = candidate_tokens.size();
+  if (batch_size == 0) {
+    return {};
+  }
+  const auto& config = weights_.config;
+  const std::size_t hidden_size = config.hidden_size;
+  const std::size_t vocab_size = config.vocab_size;
+  const float eps = 1e-6F;
+
+  // 1. Run all 64 layers across all candidate tokens in a single parallel prefill chunk pass
+  (void)ForwardPromptChunk(candidate_tokens, start_pos, false);
+
+  auto scratch = arena_.GetScratchView(batch_size);
+
+  // 2. Batched Output RMSNorm across all candidate tokens
+  LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
+                       static_cast<const float*>(weights_.output_norm.data),
+                       scratch.decode.normed.data(), nullptr, batch_size,
+                       hidden_size, eps, arena_.stream);
+
+  // 3. Batched LM head GEMV & Argmax
+  auto* d_out_tokens = scratch.decode.sampled_token.data();
+  for (std::size_t b = 0; b < batch_size; ++b) {
+    LaunchGEMV(weights_.output.data, weights_.output.type,
+               scratch.decode.normed.data() + (b * hidden_size),
+               scratch.decode.logits.data(),
+               vocab_size, hidden_size, arena_.stream,
+               models::qwen::QwenGemmMode::kHipMtp);
+    LaunchGPUArgmax(scratch.decode.logits.data(),
+                    d_out_tokens + b, vocab_size, arena_.stream);
+  }
+
+  std::vector<tokenization::TokenId> predictions(batch_size, 0);
+  HIP_CHECK(hipMemcpyAsync(predictions.data(), d_out_tokens,
+                           batch_size * sizeof(tokenization::TokenId),
+                           hipMemcpyDeviceToHost, arena_.stream));
+  HIP_CHECK(hipStreamSynchronize(arena_.stream));
+
+  return predictions;
 }
 
 }  // namespace strix::hip

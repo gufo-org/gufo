@@ -386,6 +386,23 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
     // Residual Add
     strix::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
                                      ffn_scratch.out);
+
+    // DFlash draft feature tap for target layers [1, 7, 13, 19, 25]
+    if (arena.d_target_layer_features != nullptr) {
+      std::size_t tap_idx = 999;
+      if (l == 1) tap_idx = 0;
+      else if (l == 7) tap_idx = 1;
+      else if (l == 13) tap_idx = 2;
+      else if (l == 19) tap_idx = 3;
+      else if (l == 25) tap_idx = 4;
+
+      if (tap_idx < 5) {
+        (void)hipMemcpyAsync(
+            arena.d_target_layer_features + (tap_idx * hidden_size),
+            decode_scratch.hidden.data(),
+            hidden_size * sizeof(float), hipMemcpyDeviceToDevice, arena.stream);
+      }
+    }
   }
 
   if (compute_logits) {

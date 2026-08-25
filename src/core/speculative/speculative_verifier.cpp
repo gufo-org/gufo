@@ -44,6 +44,12 @@ public:
     return executor_.CopyLastHidden();
   }
 
+  std::vector<tokenization::TokenId> ForwardVerificationChunk(
+      std::span<const tokenization::TokenId> candidate_tokens,
+      std::uint32_t start_pos) override {
+    return executor_.ForwardVerificationChunk(candidate_tokens, start_pos);
+  }
+
   tokenization::TokenId GetEosTokenId() const noexcept override {
     return executor_.GetTokenizer().GetEosTokenId();
   }
@@ -164,57 +170,34 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
 
   const std::size_t num_draft = proposal.tokens.size();
 
-  // 2. Transactional state checkpoint at cur_pos
-  target_executor_->SaveState(cur_pos);
-
-  // 3. Execute target forward verification pass
-  std::vector<tokenization::TokenId> target_predictions;
-  target_predictions.reserve(num_draft + 1);
-
-  tokenization::TokenId in_tok = current_token;
-  std::uint32_t eval_pos = cur_pos;
-
-  for (std::size_t i = 0; i < num_draft; ++i) {
-    const auto target_pred = target_executor_->ForwardToken(in_tok, eval_pos);
-    target_predictions.push_back(target_pred);
-    if (target_pred != proposal.tokens[i]) {
-      break;
-    }
-    in_tok = proposal.tokens[i];
-    ++eval_pos;
+  // 2. Build candidate sequence: [current_token, D_0, ..., D_{num_draft-1}]
+  std::vector<tokenization::TokenId> candidates;
+  candidates.reserve(num_draft + 1);
+  candidates.push_back(current_token);
+  for (const auto tok : proposal.tokens) {
+    candidates.push_back(tok);
   }
+
+  // 3. Execute batched target forward verification in 1 single GPU prefill pass!
+  const auto target_predictions =
+      target_executor_->ForwardVerificationChunk(candidates, cur_pos);
 
   // 4. Determine acceptance prefix
   std::size_t accepted_count = 0;
-  while (accepted_count < target_predictions.size() &&
-         accepted_count < num_draft &&
-         target_predictions[accepted_count] ==
-             proposal.tokens[accepted_count]) {
+  while (accepted_count < num_draft &&
+         accepted_count < target_predictions.size() &&
+         target_predictions[accepted_count] == proposal.tokens[accepted_count]) {
     ++accepted_count;
   }
 
-  // 5. Transactional state commit / rollback
-  tokenization::TokenId correction_token = 0;
-  if (accepted_count == num_draft) {
-    // All draft tokens were accepted. Process the final accepted token to
-    // commit it and produce the target model's bonus token.
-    correction_token = target_executor_->ForwardToken(in_tok, eval_pos);
-  } else {
-    // Rollback speculative state beyond accepted tokens
-    target_executor_->RestoreState();
-
-    // Replay accepted tokens
-    tokenization::TokenId replay_in = current_token;
-    std::uint32_t replay_pos = cur_pos;
-    for (std::size_t i = 0; i < accepted_count; ++i) {
-      (void)target_executor_->ForwardToken(replay_in, replay_pos, false);
-      replay_in = proposal.tokens[i];
-      ++replay_pos;
-    }
-    // Commit authoritative correction token
-    correction_token =
-        target_executor_->ForwardToken(replay_in, replay_pos, true);
-  }
+  // 5. Authoritative correction token (computed in parallel by ForwardVerificationChunk)
+  const tokenization::TokenId correction_token =
+      (accepted_count < target_predictions.size())
+          ? target_predictions[accepted_count]
+          : target_executor_->ForwardToken(
+                (accepted_count > 0) ? proposal.tokens[accepted_count - 1]
+                                     : current_token,
+                cur_pos + static_cast<std::uint32_t>(accepted_count));
 
   StepResult result;
   result.draft_count = num_draft;

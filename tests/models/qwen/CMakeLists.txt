@@ -89,6 +89,10 @@ add_qwen_cpu_test(qwen_gemm_route_test
   tests/models/qwen/gemm_route_test.cpp
   "cpu;models;qwen;gemm;dispatch")
 
+add_qwen_cpu_test(qwen_dflash_reference_test
+  tests/models/qwen/dflash/reference_test.cpp
+  "cpu;core;qwen;dflash;dflash2")
+
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen_mtp_gpu_test
     ${PROJECT_SOURCE_DIR}/tests/models/qwen/hip/mtp_test.cpp)
@@ -96,6 +100,14 @@ if (ENGINE_ENABLE_HIP)
   add_test(NAME qwen_mtp_gpu_test COMMAND qwen_mtp_gpu_test)
   set_tests_properties(qwen_mtp_gpu_test PROPERTIES
     LABELS "gpu;hip;gfx1151;qwen;mtp;external-model"
+    SKIP_RETURN_CODE 77)
+
+  add_executable(qwen_dflash_gpu_test
+    ${PROJECT_SOURCE_DIR}/tests/models/qwen/hip/dflash_test.cpp)
+  target_link_libraries(qwen_dflash_gpu_test PRIVATE strix_core)
+  add_test(NAME qwen_dflash_gpu_test COMMAND qwen_dflash_gpu_test)
+  set_tests_properties(qwen_dflash_gpu_test PROPERTIES
+    LABELS "gpu;hip;gfx1151;qwen;dflash;dflash2;external-model"
     SKIP_RETURN_CODE 77)
 
   function(add_qwen_hip_test target source labels)

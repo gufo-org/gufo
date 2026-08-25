@@ -66,6 +66,8 @@ layer-64 graph, and feeds proposed tokens through the speculative backend.
 | [`hip/kernels/`](hip/kernels/) | HIP implementations split by launch/experiment boundary; graph-pointer attention, decode recurrence, quant GEMV, and fused RMSNorm+SwiGLU have independent translation units. |
 | [`mtp_reference.hpp`](mtp_reference.hpp), [`mtp_reference.cpp`](mtp_reference.cpp) | Stateful CPU oracle for the single-layer MTP graph. |
 | [`hip/mtp/`](hip/mtp/), [`hip/mtp.hpp`](hip/mtp.hpp) | GPU MTP model conversion, executor, and speculative draft backend; optional hybrid NPU EH projection. |
+| [`dflash_reference.hpp`](dflash_reference.hpp), [`dflash_reference.cpp`](dflash_reference.cpp) | Stateful CPU reference and oracle for DFlash (v1) and DFlash-2 block-diffusion drafting. |
+| [`hip/dflash/`](hip/dflash/), [`hip/dflash.hpp`](hip/dflash.hpp), [`hip/kernels/dflash_kernels.*`](hip/kernels/dflash_kernels.hip) | GPU DFlash / DFlash-2 model, non-causal block attention kernels, 2-tap dynamic convs, bilinear path selector, and speculative draft backend. |
 | [`xdna2/`](xdna2/) | XRT sessions, packing contracts, and AIE2P programs for Qwen MTP operations. |
 | [`tokenizer.*`](tokenizer.hpp), [`chat_template.*`](chat_template.hpp) | BPE vocabulary/merge handling and bounded deterministic Qwen ChatML formatting. |
 | [`oracles.*`](oracles.hpp) | Independent reference helpers used for correctness comparison. |
@@ -283,6 +285,93 @@ shape does not make packed bytes compatible. Any packing change must be checked
 against the exact program manifest, host session, CPU reference, and device
 program that consume that ABI. See also
 [`docs/QUANTIZATION.md`](../../../docs/QUANTIZATION.md).
+
+## DFlash and DFlash-2 block diffusion drafting
+
+DFlash and DFlash-2 are parallel block-diffusion speculative drafting systems. Unlike traditional autoregressive drafters (such as EAGLE-3 or sequential draft models) that predict draft tokens one step at a time, DFlash predicts an entire block of $K$ candidate tokens ($K \in [8, 16]$) simultaneously in a single forward pass.
+
+> [!WARNING]
+> **Model Quant Compatibility Requirement**:
+> Only **`ggml-org`** quants (such as `ggml-org/Qwen3.8-27B-GGUF` `Q8_0`) must be used as the base target model.
+> **Do not use Unsloth quants** (such as `unsloth/Qwen3.8-27B-GGUF`), as Unsloth builds embed Multi-Token Prediction (MTP) and vision projector tensors whose non-standard tensor mappings and layer offsets conflict with DFlash companion draft models.
+
+### Execution topology and phase separation
+
+```mermaid
+flowchart TD
+  subgraph TargetModel["Target Model Execution (Qwen3.5 / Qwen3.8)"]
+    TargetPrefill["Target Prompt Prefill / Verification"]
+    TargetLayers["Sampled Intermediate Layers (target_layers)"]
+    TargetPrefill --> TargetLayers
+  end
+
+  subgraph Phase1["Phase 1: Feature Fusion & KV Injection"]
+    TargetLayers -->|Multi-layer hidden states| ConcatFeatures["Concatenated Target Features\n(n_tokens × (n_layers × n_embd_tgt))"]
+    ConcatFeatures --> FC["FC Feature Projection (fc.weight)"]
+    FC --> FCNorm["Encoder RMSNorm (output_norm_enc.weight)"]
+    FCNorm --> KVProj["Draft Layer W_k, W_v Projections"]
+    KVProj --> InjectedKV["Injected Target KV Cache"]
+  end
+
+  subgraph Phase2["Phase 2: Non-Causal Block Diffusion"]
+    NoiseInput["Noise Block Tokens: [id_last, MASK, MASK, ...]"]
+    NoiseEmbed["Tied Target Token Embeddings"]
+    NoiseInput --> NoiseEmbed
+    InjectedKV -.-> NonCausalAttn["Non-Causal Block Attention\n(Queries attend to Injected KV + all block tokens)"]
+    NoiseEmbed --> DynamicConv1["(DFlash-2) 2-Tap Dynamic Depthwise Conv"]
+    DynamicConv1 --> NonCausalAttn
+    NonCausalAttn --> SwiGLU["Draft SwiGLU FFN"]
+    SwiGLU --> DynamicConv2["(DFlash-2) 2-Tap Dynamic Depthwise Conv"]
+    DynamicConv2 --> OutNorm["Decoder Output Norm"]
+    OutNorm --> LMHead["Target LM Head / d2t Mapping"]
+  end
+
+  subgraph Phase3["Phase 3: Candidate Selection"]
+    LMHead --> Logits["Block Logits [draft_count, vocab_size]"]
+    Logits --> PathSelector{"Path Selection Route"}
+    PathSelector -->|DFlash v1| Greedy["Parallel Per-Position Argmax"]
+    PathSelector -->|DFlash-2 / DSpark| BilinearSelector["Parallel Bilinear Path Selector\n(W2 · W1[prev] + Base Logits)"]
+    BilinearSelector --> ProposedTokens["Globally Coherent Draft Proposal"]
+    Greedy --> ProposedTokens
+  end
+```
+
+### DFlash-2 architectural enhancements
+
+DFlash-2 resolves two fundamental limitations of block-diffusion drafting:
+
+1. **Suffix Decay Mitigation:** In non-causal block drafting, prediction accuracy historically decays towards the end of the generated block ($k \approx 8..16$). DFlash-2 incorporates **two-tap grouped dynamic depthwise convolutions** before and after attention/FFN blocks:
+   $$y_{t, c} = w_{0, c} \cdot x_{t, c} + w_{1, c} \cdot x_{t-1, c} + b_c$$
+   This introduces local sequence inductive bias across adjacent token positions without increasing compute latency.
+
+2. **Parallel Bilinear Candidate Path Selector:** Instead of selecting tokens independently via greedy per-position argmax, DFlash-2 uses low-rank Markov transition matrices $W_1 \in \mathbb{R}^{R \times V}$ and $W_2 \in \mathbb{R}^{R \times V_{\text{draft}}}$:
+   $$\text{logits}_t = \text{logits}_t + W_2 \cdot W_1[\text{prev}]$$
+   This traces the most coherent trajectory across the top candidate lattice on GPU shared memory in parallel.
+
+```mermaid
+flowchart LR
+  subgraph LocalConv["2-Tap Dynamic Depthwise Convolution"]
+    X_prev["x_{t-1, c}"] -->|w_{1, c}| AddConv["Add + Bias"]
+    X_curr["x_{t, c}"] -->|w_{0, c}| AddConv
+    AddConv --> Y_curr["y_{t, c}"]
+  end
+
+  subgraph BilinearSelection["Low-Rank Bilinear Path Selection"]
+    PrevTok["Token c_{t-1}"] --> W1["W_1 Table Lookup"]
+    W1 --> W2["W_2 Matrix Projection"]
+    W2 --> AddBias["+ Base Logits_t"]
+    AddBias --> ArgMax["Device-Resident Argmax"]
+    ArgMax --> CurrTok["Token c_t"]
+  end
+```
+
+### Drafting systems comparison
+
+| System | Drafting Scheme | Target Feature Conditioning | Autoregressive Bottleneck | Suffix Decay Handling | Path Optimization |
+|---|---|---|---|---|---|
+| **MTP** | 1-step token forward | Layer-64 target hidden state + next token embed | Yes (sequential decode) | N/A (single token step) | Greedy sampling |
+| **DFlash (v1)** | Parallel block diffusion | Fused multi-layer hidden states $\to$ KV injection | No (1 forward pass / block) | None (accuracy decay at tail) | Independent per-position argmax |
+| **DFlash-2** | Parallel block diffusion | Fused multi-layer hidden states $\to$ KV injection | No (1 forward pass / block) | 2-tap dynamic depthwise convs | Parallel low-rank bilinear path selector |
 
 ## Build and tests
 

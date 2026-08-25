@@ -16,8 +16,9 @@ target_sources(strix_core PRIVATE
   ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/sample.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/ssm.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/unembed.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/generator.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/mtp_reference.cpp)
+   ${PROJECT_SOURCE_DIR}/src/models/qwen/generator.cpp
+   ${PROJECT_SOURCE_DIR}/src/models/qwen/mtp_reference.cpp
+   ${PROJECT_SOURCE_DIR}/src/models/qwen/dflash_reference.cpp)
 
 if (ENGINE_ENABLE_HIP)
   target_sources(strix_core PRIVATE
@@ -59,6 +60,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_wmma.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/hipblas_gemm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/hipblaslt_gemm.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/dflash_kernels.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/arena.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/decode.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/decode_step.cpp
@@ -69,7 +71,10 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/ssm_replay.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/model.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/executor.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/backend.cpp)
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/backend.cpp
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/model.cpp
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/executor.cpp
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/backend.cpp)
 endif()
 
 if (ENGINE_ENABLE_XRT)

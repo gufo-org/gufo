@@ -58,6 +58,11 @@ void PrintServeHelp() {
       << "  --tts-model <DIR>   Qwen3-TTS 12Hz 1.7B model directory\n"
       << "  --tts-context <N>   Native prompt+generation capacity "
          "(default: 4096)\n"
+      << "  --speculative, --speculative-decoding <MODE>\n"
+      << "                      Draft backend: dflash, dflash2, mtp, "
+         "mtp-npu, npu, pld, self, or off\n"
+      << "  --dflash-model <PATH> Quantized Qwen DFlash/DFlash-2 GGUF\n"
+      << "  --mtp-model <PATH>    Quantized Qwen MTP GGUF for mtp modes\n"
       << "  -h, --help         Print this help\n";
 }
 
@@ -68,6 +73,9 @@ int RunServe(std::span<const char* const> args) {
   bool text_model_explicit = false;
   std::uint32_t max_context = 4096;
   std::size_t session_count = 1;
+  std::string speculative_backend;
+  std::string dflash_model;
+  std::string mtp_model;
   std::filesystem::path video_model;
   std::filesystem::path video_root = "video-jobs";
   std::filesystem::path video_manifest = DefaultH3SourceManifest();
@@ -98,6 +106,13 @@ int RunServe(std::span<const char* const> args) {
     } else if ((a == "-j" || a == "--sessions") && i + 1 < args.size()) {
       session_count = std::stoul(std::string(args[i + 1]));
       ++i;
+    } else if ((a == "--speculative" || a == "--speculative-decoding") &&
+               i + 1 < args.size()) {
+      speculative_backend = args[++i];
+    } else if (a == "--dflash-model" && i + 1 < args.size()) {
+      dflash_model = args[++i];
+    } else if (a == "--mtp-model" && i + 1 < args.size()) {
+      mtp_model = args[++i];
     } else if (a == "--video-model" && i + 1 < args.size()) {
       video_model = args[++i];
     } else if (a == "--video-root" && i + 1 < args.size()) {

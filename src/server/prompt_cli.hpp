@@ -23,6 +23,7 @@ struct PromptOptions {
   bool force_cpu = false;
   std::string speculative_backend;
   std::string mtp_model_path;
+  std::string dflash_model_path;
   std::size_t draft_tokens = 3;
 };
 

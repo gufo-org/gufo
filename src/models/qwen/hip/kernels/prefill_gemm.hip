@@ -13,27 +13,30 @@
 
 namespace strix::hip {
 
+template<std::uint32_t WavesPerBlock>
+__launch_bounds__(WavesPerBlock * 32, 4)
 __global__ void BatchedGEMMKernel(const void* __restrict__ A, bool is_bf16,
                                   const float* __restrict__ X,
                                   float* __restrict__ Y, std::size_t batch_size,
                                   std::size_t M, std::size_t K) {
-  const std::size_t m = blockIdx.x;
-  const std::size_t b = blockIdx.y;
-  if (m >= M || b >= batch_size)
-    return;
-
   const std::size_t tid = threadIdx.x;
-  const std::size_t block_threads = blockDim.x;
+  const std::size_t lane_id = tid & 31u;
+  const std::size_t warp_id = tid >> 5u;
+  const std::size_t m = (blockIdx.x * WavesPerBlock) + warp_id;
+  const std::size_t b = blockIdx.y;
+  if (m >= M || b >= batch_size) {
+    return;
+  }
+
   const float* x_row = X + (b * K);
   float* y_row = Y + (b * M);
 
   float dot = 0.0F;
   if (is_bf16) {
     const auto* row = static_cast<const hip_bfloat16*>(A) + (m * K);
-    const std::size_t K_vec = K / 8;
     const auto* row_vec = reinterpret_cast<const uint4*>(row);
-
-    for (std::size_t vi = tid; vi < K_vec; vi += block_threads) {
+    const std::size_t K_vec = K / 8;
+    for (std::size_t vi = lane_id; vi < K_vec; vi += 32) {
       const uint4 v = row_vec[vi];
       const auto* vals = reinterpret_cast<const hip_bfloat16*>(&v);
       const std::size_t k = vi * 8;
@@ -49,21 +52,20 @@ __global__ void BatchedGEMMKernel(const void* __restrict__ A, bool is_bf16,
              (static_cast<float>(vals[6]) * x1.z) +
              (static_cast<float>(vals[7]) * x1.w);
     }
-    for (std::size_t k = (K_vec * 8) + tid; k < K; k += block_threads) {
+    for (std::size_t k = (K_vec * 8) + lane_id; k < K; k += 32) {
       dot += static_cast<float>(row[k]) * x_row[k];
     }
   } else {
     const auto* row = static_cast<const float*>(A) + (m * K);
-    const std::size_t K_vec = K / 4;
     const auto* row_vec = reinterpret_cast<const float4*>(row);
-
-    for (std::size_t vi = tid; vi < K_vec; vi += block_threads) {
-      const float4 v = row_vec[vi];
+    const std::size_t K_vec = K / 4;
+    for (std::size_t vi = lane_id; vi < K_vec; vi += 32) {
+      const float4 a_v = row_vec[vi];
       const std::size_t k = vi * 4;
-      const float4 xv = *reinterpret_cast<const float4*>(&x_row[k]);
-      dot += (v.x * xv.x) + (v.y * xv.y) + (v.z * xv.z) + (v.w * xv.w);
+      const float4 x_v = *reinterpret_cast<const float4*>(&x_row[k]);
+      dot += (a_v.x * x_v.x) + (a_v.y * x_v.y) + (a_v.z * x_v.z) + (a_v.w * x_v.w);
     }
-    for (std::size_t k = (K_vec * 4) + tid; k < K; k += block_threads) {
+    for (std::size_t k = (K_vec * 4) + lane_id; k < K; k += 32) {
       dot += row[k] * x_row[k];
     }
   }
@@ -72,23 +74,8 @@ __global__ void BatchedGEMMKernel(const void* __restrict__ A, bool is_bf16,
     dot += __shfl_xor(dot, offset);
   }
 
-  __shared__ float s_warp_sums[8];
-  const std::size_t lane_id = tid & 31u;
-  const std::size_t warp_id = tid >> 5u;
   if (lane_id == 0) {
-    s_warp_sums[warp_id] = dot;
-  }
-  __syncthreads();
-
-  if (warp_id == 0) {
-    const std::size_t num_warps = block_threads >> 5u;
-    float block_sum = (lane_id < num_warps) ? s_warp_sums[lane_id] : 0.0F;
-    for (int offset = 4; offset > 0; offset >>= 1) {
-      block_sum += __shfl_xor(block_sum, offset);
-    }
-    if (lane_id == 0) {
-      y_row[m] = block_sum;
-    }
+    y_row[m] = dot;
   }
 }
 
@@ -98,10 +85,11 @@ void LaunchBatchedGEMM(const void* A, bool is_bf16, const float* X, float* Y,
   if (batch_size == 0 || M == 0 || K == 0) {
     return;
   }
-  const dim3 grid(static_cast<unsigned int>(M),
+  constexpr std::uint32_t kWaves = 4;
+  const dim3 grid(static_cast<unsigned int>((M + kWaves - 1) / kWaves),
                   static_cast<unsigned int>(batch_size));
-  BatchedGEMMKernel<<<grid, 128, 0, stream>>>(A, is_bf16, X, Y, batch_size, M,
-                                              K);
+  BatchedGEMMKernel<kWaves><<<grid, kWaves * 32, 0, stream>>>(
+      A, is_bf16, X, Y, batch_size, M, K);
 }
 
 __global__ void FloatToBfloat16Kernel(const float* __restrict__ in,

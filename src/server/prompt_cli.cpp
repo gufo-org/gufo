@@ -23,6 +23,7 @@
 #include "src/core/speculative/prompt_lookup_backend.hpp"
 #include "src/core/speculative/self_speculative.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
+#include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
 #endif
@@ -54,8 +55,10 @@ void PrintPromptHelp(std::string_view program_name) {
          "greedy)\n"
       << "  --system <PROMPT>       Custom system prompt\n"
       << "  --raw                   Disable chat template framing\n"
-      << "  --speculative <MODE>    Draft backend: mtp, mtp-npu, npu, pld, "
-         "or self\n"
+      << "  --speculative, --speculative-decoding <MODE>\n"
+      << "                          Draft backend: dflash, dflash2, mtp, "
+         "mtp-npu, npu, pld, self, or off\n"
+      << "  --dflash-model <PATH>   Quantized Qwen DFlash/DFlash-2 GGUF\n"
       << "  --mtp-model <PATH>      Quantized Qwen MTP GGUF for mtp modes\n"
       << "  --draft-tokens <N>      Maximum speculative block length\n"
       << "  -v, --verbose           Print detailed timing and token metrics\n"
@@ -271,14 +274,20 @@ std::optional<PromptOptions> ParsePromptOptions(
       continue;
     }
 
-    if (arg == "--speculative") {
+    if (arg == "--speculative" || arg == "--speculative-decoding") {
       if (i + 1 >= args.size()) {
         if (error_msg != nullptr) {
-          *error_msg = "Missing argument for --speculative";
+          *error_msg = "Missing argument for " + std::string(arg);
         }
         return std::nullopt;
       }
-      opt.speculative_backend = args[i + 1];
+      const std::string_view mode = args[i + 1];
+      if (mode == "none" || mode == "off" || mode == "false" ||
+          mode == "disabled") {
+        opt.speculative_backend = "";
+      } else {
+        opt.speculative_backend = std::string(mode);
+      }
       skip_next = true;
       continue;
     }
@@ -291,6 +300,18 @@ std::optional<PromptOptions> ParsePromptOptions(
         return std::nullopt;
       }
       opt.mtp_model_path = args[i + 1];
+      skip_next = true;
+      continue;
+    }
+
+    if (arg == "--dflash-model") {
+      if (i + 1 >= args.size()) {
+        if (error_msg != nullptr) {
+          *error_msg = "Missing argument for --dflash-model";
+        }
+        return std::nullopt;
+      }
+      opt.dflash_model_path = args[i + 1];
       skip_next = true;
       continue;
     }
@@ -436,7 +457,30 @@ int RunPrompt(std::span<const char* const> args) {
       if (!opt.speculative_backend.empty()) {
         const auto& config = gpu_exec->GetConfig();
         std::unique_ptr<speculative::IDraftBackend> draft_backend;
-        if (opt.speculative_backend == "npu") {
+        if (opt.speculative_backend == "dflash" ||
+            opt.speculative_backend == "dflash2" ||
+            opt.speculative_backend == "dflash-2") {
+          std::string dflash_path = opt.dflash_model_path;
+          if (dflash_path.empty()) {
+            if (const char* environment = std::getenv("STRIX_DFLASH_MODEL");
+                environment != nullptr) {
+              dflash_path = environment;
+            }
+          }
+          if (dflash_path.empty()) {
+            dflash_path = opt.model_path;
+          }
+          hip::QwenDFlashGpuDraftConfig cfg{
+              .max_context = gpu_exec->GetMaxContext(),
+              .max_draft_tokens = static_cast<std::uint32_t>(opt.draft_tokens),
+          };
+          draft_backend = hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
+              dflash_path, gpu_exec->GetSharedModel(), cfg, &err);
+          if (draft_backend == nullptr) {
+            std::cerr << "Failed to initialize DFlash backend: " << err << '\n';
+            return 1;
+          }
+        } else if (opt.speculative_backend == "npu") {
           heterogeneous::NpuDrafterConfig cfg;
           cfg.max_draft_tokens = opt.draft_tokens;
           cfg.vocab_size = config.vocab_size;

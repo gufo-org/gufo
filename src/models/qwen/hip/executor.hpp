@@ -190,6 +190,7 @@ public:
   float* d_ssm_conv_state{nullptr};
   float* d_ssm_deltanet_state{nullptr};
   std::uint32_t* d_prompt_tokens{nullptr};
+  float* d_target_layer_features{nullptr};
 
   hipStream_t stream{nullptr};
   hipStream_t prefetch_stream{nullptr};
@@ -298,6 +299,12 @@ public:
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t start_pos = 0, bool compute_logits = true);
 
+  /// Verifies a chunk of speculative draft candidate tokens in a single parallel
+  /// prefill forward pass on the GPU.
+  [[nodiscard]] std::vector<tokenization::TokenId> ForwardVerificationChunk(
+      std::span<const tokenization::TokenId> candidate_tokens,
+      std::uint32_t start_pos);
+
   /// Copies the logits produced by the most recent forward pass to host memory.
   [[nodiscard]] std::span<const float> CopyLastLogits();
 
@@ -344,6 +351,7 @@ private:
   std::vector<float> h_prompt_hidden_;
   std::vector<float> h_last_hidden_;
   std::size_t last_hidden_offset_{0};
+  float* d_target_layer_features_{nullptr};
   bool capture_prompt_hidden_{false};
   bool replaying_ssm_state_{false};
 };

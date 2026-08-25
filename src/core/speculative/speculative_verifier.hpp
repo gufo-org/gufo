@@ -61,6 +61,18 @@ public:
     return {};
   }
   [[nodiscard]] virtual std::span<const float> CopyLastHidden() { return {}; }
+  [[nodiscard]] virtual std::vector<tokenization::TokenId>
+  ForwardVerificationChunk(
+      std::span<const tokenization::TokenId> candidate_tokens,
+      std::uint32_t start_pos) {
+    std::vector<tokenization::TokenId> preds;
+    preds.reserve(candidate_tokens.size());
+    std::uint32_t pos = start_pos;
+    for (auto tok : candidate_tokens) {
+      preds.push_back(ForwardToken(tok, pos++));
+    }
+    return preds;
+  }
   [[nodiscard]] virtual tokenization::TokenId GetEosTokenId()
       const noexcept = 0;
   [[nodiscard]] virtual std::string_view DecodeToken(
