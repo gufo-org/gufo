@@ -1,0 +1,89 @@
+// ============================================================================
+// Qwen3.8-27B Fused RoPE + KV Cache Store in Loom IR
+// Rotates:
+//   q_rot = (q_0 * cos - q_1 * sin), (q_1 * cos + q_0 * sin)
+//   k_rot = (k_0 * cos - k_1 * sin), (k_1 * cos + k_0 * sin)
+// Stores k_rot into KV cache at current token position
+// ============================================================================
+
+config.decl @qwen_fused_rope_kv_cache_bf16.max_heads : %value: index where [range(%value, 1, 64)]
+
+kernel.def @qwen_fused_rope_kv_cache_bf16(%heads: index) {
+  %unit = index.constant 1 : index
+  %max_heads = config.get @qwen_fused_rope_kv_cache_bf16.max_heads : index
+  %workgroup_size = index.constant 64 : index
+  kernel.launch.config workgroups(%max_heads, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%heads: index, %q_in: buffer, %k_in: buffer, %cos: buffer, %sin: buffer, %q_out: buffer, %k_out: buffer) {
+  %base = index.constant 0 : offset
+  %max_heads = config.get @qwen_fused_rope_kv_cache_bf16.max_heads : index
+  %head_count = index.assume %heads [range(%heads, 1, 64), le(%heads, %max_heads)] : index
+  %head_idx = kernel.workgroup.id<x> : index
+  %i = kernel.workitem.id<x> : index
+  %half_dim = index.constant 64 : index
+  %i_plus_half = index.add %i, %half_dim : index
+
+  %in_bounds = index.cmp ult, %head_idx, %head_count : index
+  scf.if %in_bounds {
+    %bounded_head = index.assume %head_idx [lt(%head_idx, %head_count)] : index
+    %bounded_i = index.assume %i [range(%i, 0, 64), lt(%i, %half_dim)] : index
+    %bounded_i2 = index.assume %i_plus_half [range(%i_plus_half, 64, 128)] : index
+
+    %q_noalias, %k_noalias, %cos_noalias, %sin_noalias, %qo_noalias, %ko_noalias = buffer.assume.noalias %q_in, %k_in, %cos, %sin, %q_out, %k_out : buffer, buffer, buffer, buffer, buffer, buffer
+
+    %q_view = buffer.view %q_noalias[%base] : buffer -> view<[%head_count]x128xf32>
+    %k_view = buffer.view %k_noalias[%base] : buffer -> view<[%head_count]x128xf32>
+    %cos_view = buffer.view %cos_noalias[%base] : buffer -> view<64xf32>
+    %sin_view = buffer.view %sin_noalias[%base] : buffer -> view<64xf32>
+    %qo_view = buffer.view %qo_noalias[%base] : buffer -> view<[%head_count]x128xf32>
+    %ko_view = buffer.view %ko_noalias[%base] : buffer -> view<[%head_count]x128xf32>
+
+    %q0 = view.load %q_view[%bounded_head, %bounded_i] : view<[%head_count]x128xf32> -> f32
+    %q1 = view.load %q_view[%bounded_head, %bounded_i2] : view<[%head_count]x128xf32> -> f32
+    %k0 = view.load %k_view[%bounded_head, %bounded_i] : view<[%head_count]x128xf32> -> f32
+    %k1 = view.load %k_view[%bounded_head, %bounded_i2] : view<[%head_count]x128xf32> -> f32
+
+    %c = view.load %cos_view[%bounded_i] : view<64xf32> -> f32
+    %s = view.load %sin_view[%bounded_i] : view<64xf32> -> f32
+
+    // In-register RoPE rotation:
+    %q0_c = scalar.mulf<reassoc|nnan|ninf|nsz> %q0, %c : f32
+    %q1_s = scalar.mulf<reassoc|nnan|ninf|nsz> %q1, %s : f32
+    %q_rot0 = scalar.subf<reassoc|nnan|ninf|nsz> %q0_c, %q1_s : f32
+
+    %q1_c = scalar.mulf<reassoc|nnan|ninf|nsz> %q1, %c : f32
+    %q0_s = scalar.mulf<reassoc|nnan|ninf|nsz> %q0, %s : f32
+    %q_rot1 = scalar.addf<reassoc|nnan|ninf|nsz> %q1_c, %q0_s : f32
+
+    %k0_c = scalar.mulf<reassoc|nnan|ninf|nsz> %k0, %c : f32
+    %k1_s = scalar.mulf<reassoc|nnan|ninf|nsz> %k1, %s : f32
+    %k_rot0 = scalar.subf<reassoc|nnan|ninf|nsz> %k0_c, %k1_s : f32
+
+    %k1_c = scalar.mulf<reassoc|nnan|ninf|nsz> %k1, %c : f32
+    %k0_s = scalar.mulf<reassoc|nnan|ninf|nsz> %k0, %s : f32
+    %k_rot1 = scalar.addf<reassoc|nnan|ninf|nsz> %k1_c, %k0_s : f32
+
+    view.store %q_rot0, %qo_view[%bounded_head, %bounded_i] : f32, view<[%head_count]x128xf32>
+    view.store %q_rot1, %qo_view[%bounded_head, %bounded_i2] : f32, view<[%head_count]x128xf32>
+    view.store %k_rot0, %ko_view[%bounded_head, %bounded_i] : f32, view<[%head_count]x128xf32>
+    view.store %k_rot1, %ko_view[%bounded_head, %bounded_i2] : f32, view<[%head_count]x128xf32>
+  }
+  kernel.return
+}
+
+check.case public @qwen_rope_case {
+  %heads = check.param.choice values([32]) name("heads") : index
+  %q_in = check.generate.fill value(1.0) : tensor<[%heads]x128xf32>
+  %k_in = check.generate.fill value(1.0) : tensor<[%heads]x128xf32>
+  %cos = check.generate.fill value(1.0) : tensor<64xf32>
+  %sin = check.generate.fill value(0.0) : tensor<64xf32>
+  %q_out = check.generate.fill value(0.0) : tensor<[%heads]x128xf32>
+  %k_out = check.generate.fill value(0.0) : tensor<[%heads]x128xf32>
+  %expected = check.generate.fill value(1.0) : tensor<[%heads]x128xf32>
+
+  kernel.launch @qwen_fused_rope_kv_cache_bf16[%heads](%heads, %q_in, %k_in, %cos, %sin, %q_out, %k_out) : [index](index, tensor<[%heads]x128xf32>, tensor<[%heads]x128xf32>, tensor<64xf32>, tensor<64xf32>, tensor<[%heads]x128xf32>, tensor<[%heads]x128xf32>)
+  check.expect.close actual(%q_out) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<[%heads]x128xf32>
+  check.expect.close actual(%k_out) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<[%heads]x128xf32>
+  check.return
+}
+
+check.benchmark<@qwen_rope_case> @qwen_rope_bench {heads = 32}

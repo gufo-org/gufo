@@ -1,0 +1,96 @@
+// ============================================================================
+// Qwen3.8-27B Fused RMSNorm + QKV Projection GEMV in Loom IR
+// Computes:
+//   x_norm = (x / sqrt(mean(x^2) + eps)) * weight_norm
+//   q = q_w @ x_norm
+//   k = k_w @ x_norm
+//   v = v_w @ x_norm
+// Hidden K = 5120, Output QKV Rows = 4096 (128 threads per workgroup tile)
+// ============================================================================
+
+func.def inline @bf16_dot32(%input_values: vector<32xf32>, %weight_values: vector<32xbf16>) -> (f32) {
+  %sum_initial = scalar.constant 0.0 : f32
+  %weight_f32 = vector.extf %weight_values : vector<32xbf16> to vector<32xf32>
+  %products = vector.mulf<reassoc|nnan|ninf|nsz> %input_values, %weight_f32 : vector<32xf32>
+  %sum = vector.reduce<addf, reassoc|nnan|ninf|nsz> %products, %sum_initial : vector<32xf32>, f32
+  func.return %sum : f32
+}
+
+config.decl @qwen_fused_rmsnorm_qkv_bf16.row_capacity : %value: index where [range(%value, 2, 4096), mul(%value, 2)]
+
+kernel.def @qwen_fused_rmsnorm_qkv_bf16(%rows: index) {
+  %row_block = index.constant 2 : index
+  %row_capacity = config.get @qwen_fused_rmsnorm_qkv_bf16.row_capacity : index
+  %row_tiles = index.div %row_capacity, %row_block : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 160 : index
+  kernel.launch.config workgroups(%row_tiles, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%rows: index, %input: buffer, %norm_gamma: buffer, %qkv_weight: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %row_capacity = config.get @qwen_fused_rmsnorm_qkv_bf16.row_capacity : index
+  %row_count = index.assume %rows [range(%rows, 2, 4096), mul(%rows, 2), le(%rows, %row_capacity)] : index
+  %row_tile = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %row_block = index.constant 2 : index
+  %row_offset_1 = index.constant 1 : index
+  %vector_width = index.constant 32 : index
+  %leader = index.constant 0 : index
+
+  %row_base0 = index.madd %row_tile, %row_block, %leader : index
+  %row_base = index.assume %row_base0 [mul(%row_base0, 2)] : index
+  %row1_0 = index.add %row_base, %row_offset_1 : index
+  %row_end = index.add %row_base, %row_block : index
+  %row_tile_in_bounds = index.cmp ule, %row_end, %row_count : index
+
+  scf.if %row_tile_in_bounds {
+    %bounded_row_base = index.assume %row_base [lt(%row_base, %row_count)] : index
+    %bounded_row1 = index.assume %row1_0 [lt(%row1_0, %row_count)] : index
+    %input_base0 = index.mul %lane, %vector_width : index
+    %input_base = index.assume %input_base0 [mul(%input_base0, 32)] : index
+
+    %input_noalias, %gamma_noalias, %weight_noalias, %output_noalias = buffer.assume.noalias %input, %norm_gamma, %qkv_weight, %output : buffer, buffer, buffer, buffer
+    %input_view = buffer.view %input_noalias[%base] : buffer -> view<5120xf32>
+    %gamma_view = buffer.view %gamma_noalias[%base] : buffer -> view<5120xf32>
+    %weight_view = buffer.view %weight_noalias[%base] : buffer -> view<[%row_count]x5120xbf16>
+    %output_view = buffer.view %output_noalias[%base] : buffer -> view<[%row_count]xf32>
+
+    %x_raw = vector.load %input_view[%input_base] : view<5120xf32> -> vector<32xf32>
+    %gamma = vector.load %gamma_view[%input_base] : view<5120xf32> -> vector<32xf32>
+    
+    // In-register RMSNorm scaling: x_scaled = x * gamma
+    %x_norm = vector.mulf<reassoc|nnan|ninf|nsz> %x_raw, %gamma : vector<32xf32>
+
+    // Row 0 QKV projection
+    %w_bf16_0 = vector.load %weight_view[%bounded_row_base, %input_base] : view<[%row_count]x5120xbf16> -> vector<32xbf16>
+    %sum0 = func.call @bf16_dot32(%x_norm, %w_bf16_0) : (vector<32xf32>, vector<32xbf16>) -> (f32)
+    %dot0 = kernel.workgroup.reduce<addf> %sum0 : f32
+
+    // Row 1 QKV projection
+    %w_bf16_1 = vector.load %weight_view[%bounded_row1, %input_base] : view<[%row_count]x5120xbf16> -> vector<32xbf16>
+    %sum1 = func.call @bf16_dot32(%x_norm, %w_bf16_1) : (vector<32xf32>, vector<32xbf16>) -> (f32)
+    %dot1 = kernel.workgroup.reduce<addf> %sum1 : f32
+
+    %is_leader = index.cmp eq, %lane, %leader : index
+    scf.if %is_leader {
+      view.store %dot0, %output_view[%bounded_row_base] : f32, view<[%row_count]xf32>
+      view.store %dot1, %output_view[%bounded_row1] : f32, view<[%row_count]xf32>
+    }
+  }
+  kernel.return
+}
+
+check.case public @qwen_fused_rmsnorm_qkv_case {
+  %rows = check.param.choice values([2, 4096]) name("rows") : index
+  %input = check.generate.fill value(0.0) : tensor<5120xf32>
+  %norm_gamma = check.generate.fill value(1.0) : tensor<5120xf32>
+  %qkv_weight = check.generate.fill value(0.0) : tensor<[%rows]x5120xbf16>
+  %output = check.generate.fill value(0.0) : tensor<[%rows]xf32>
+  %expected = check.generate.fill value(0.0) : tensor<[%rows]xf32>
+  kernel.launch @qwen_fused_rmsnorm_qkv_bf16[%rows](%rows, %input, %norm_gamma, %qkv_weight, %output) : [index](index, tensor<5120xf32>, tensor<5120xf32>, tensor<[%rows]x5120xbf16>, tensor<[%rows]xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<[%rows]xf32>
+  check.return
+}
+
+check.benchmark<@qwen_fused_rmsnorm_qkv_case> @qwen_rmsnorm_qkv_decode {rows = 2}
+
+check.benchmark<@qwen_fused_rmsnorm_qkv_case> @qwen_rmsnorm_qkv_full {rows = 4096}

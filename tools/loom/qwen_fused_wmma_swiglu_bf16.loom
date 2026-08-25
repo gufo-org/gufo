@@ -1,0 +1,124 @@
+// ============================================================================
+// Qwen3.8-27B 2D Batched Fused SwiGLU GEMM in Loom IR
+// Computes 2D Matrix Multiplication with SwiGLU activation for Prefill Batches:
+//   Gate = X[T, K] @ W_gate[M, K]^T
+//   Up   = X[T, K] @ W_up[M, K]^T
+//   Out  = (SiLU(Gate) * Up)
+// Intermediate: M = 17408, Hidden: K = 5120, Batch tokens: T (multiples of 16)
+// ============================================================================
+
+func.def inline @bf16_dot32_acc(%input_values: vector<32xf32>, %weight_values: vector<32xbf16>, %acc: f32) -> (f32) {
+  %weight_f32 = vector.extf %weight_values : vector<32xbf16> to vector<32xf32>
+  %products = vector.mulf<reassoc|nnan|ninf|nsz> %input_values, %weight_f32 : vector<32xf32>
+  %sum = vector.reduce<addf, reassoc|nnan|ninf|nsz> %products, %acc : vector<32xf32>, f32
+  func.return %sum : f32
+}
+
+config.decl @qwen_fused_wmma_swiglu_bf16.row_capacity : %value: index where [range(%value, 2, 17408), mul(%value, 2)]
+config.decl @qwen_fused_wmma_swiglu_bf16.max_tokens : %value: index where [range(%value, 1, 2048)]
+
+kernel.def @qwen_fused_wmma_swiglu_bf16(%tokens: index, %rows: index) {
+  %row_block = index.constant 2 : index
+  %row_capacity = config.get @qwen_fused_wmma_swiglu_bf16.row_capacity : index
+  %row_tiles = index.div %row_capacity, %row_block : index
+  %max_tokens = config.get @qwen_fused_wmma_swiglu_bf16.max_tokens : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 160 : index
+  kernel.launch.config workgroups(%row_tiles, %max_tokens, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%tokens: index, %rows: index, %input: buffer, %gate_weight: buffer, %up_weight: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %row_capacity = config.get @qwen_fused_wmma_swiglu_bf16.row_capacity : index
+  %max_tokens = config.get @qwen_fused_wmma_swiglu_bf16.max_tokens : index
+  %row_count = index.assume %rows [range(%rows, 2, 17408), mul(%rows, 2), le(%rows, %row_capacity)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048), le(%tokens, %max_tokens)] : index
+  
+  %row_tile = kernel.workgroup.id<x> : index
+  %tok_idx = kernel.workgroup.id<y> : index
+  %lane = kernel.workitem.id<x> : index
+  
+  %row_block = index.constant 2 : index
+  %row_offset_1 = index.constant 1 : index
+  %vector_width = index.constant 32 : index
+  %leader = index.constant 0 : index
+  %one = scalar.constant 1.0 : f32
+
+  %token_in_bounds = index.cmp ult, %tok_idx, %token_count : index
+  scf.if %token_in_bounds {
+    %row_base0 = index.madd %row_tile, %row_block, %leader : index
+    %row_base = index.assume %row_base0 [mul(%row_base0, 2)] : index
+    %row1_0 = index.add %row_base, %row_offset_1 : index
+    %row_end = index.add %row_base, %row_block : index
+    %row_tile_in_bounds = index.cmp ule, %row_end, %row_count : index
+
+    scf.if %row_tile_in_bounds {
+      %bounded_row_base = index.assume %row_base [lt(%row_base, %row_count)] : index
+      %bounded_row1 = index.assume %row1_0 [lt(%row1_0, %row_count)] : index
+      %bounded_tok = index.assume %tok_idx [lt(%tok_idx, %token_count)] : index
+      
+      %input_base0 = index.mul %lane, %vector_width : index
+      %input_base = index.assume %input_base0 [mul(%input_base0, 32)] : index
+
+      %input_noalias, %gate_noalias, %up_noalias, %output_noalias = buffer.assume.noalias %input, %gate_weight, %up_weight, %output : buffer, buffer, buffer, buffer
+      %input_view = buffer.view %input_noalias[%base] : buffer -> view<[%token_count]x5120xf32>
+      %gate_view = buffer.view %gate_noalias[%base] : buffer -> view<[%row_count]x5120xbf16>
+      %up_view = buffer.view %up_noalias[%base] : buffer -> view<[%row_count]x5120xbf16>
+      %output_view = buffer.view %output_noalias[%base] : buffer -> view<[%token_count]x[%row_count]xf32>
+
+      %input_values = vector.load %input_view[%bounded_tok, %input_base] : view<[%token_count]x5120xf32> -> vector<32xf32>
+      
+      // Row 0: Gate and Up dot products for this token
+      %g_bf16_0 = vector.load %gate_view[%bounded_row_base, %input_base] : view<[%row_count]x5120xbf16> -> vector<32xbf16>
+      %u_bf16_0 = vector.load %up_view[%bounded_row_base, %input_base] : view<[%row_count]x5120xbf16> -> vector<32xbf16>
+      %zero = scalar.constant 0.0 : f32
+      %g_sum0 = func.call @bf16_dot32_acc(%input_values, %g_bf16_0, %zero) : (vector<32xf32>, vector<32xbf16>, f32) -> (f32)
+      %u_sum0 = func.call @bf16_dot32_acc(%input_values, %u_bf16_0, %zero) : (vector<32xf32>, vector<32xbf16>, f32) -> (f32)
+      %dot_g0 = kernel.workgroup.reduce<addf> %g_sum0 : f32
+      %dot_u0 = kernel.workgroup.reduce<addf> %u_sum0 : f32
+
+      // Row 1: Gate and Up dot products for this token
+      %g_bf16_1 = vector.load %gate_view[%bounded_row1, %input_base] : view<[%row_count]x5120xbf16> -> vector<32xbf16>
+      %u_bf16_1 = vector.load %up_view[%bounded_row1, %input_base] : view<[%row_count]x5120xbf16> -> vector<32xbf16>
+      %g_sum1 = func.call @bf16_dot32_acc(%input_values, %g_bf16_1, %zero) : (vector<32xf32>, vector<32xbf16>, f32) -> (f32)
+      %u_sum1 = func.call @bf16_dot32_acc(%input_values, %u_bf16_1, %zero) : (vector<32xf32>, vector<32xbf16>, f32) -> (f32)
+      %dot_g1 = kernel.workgroup.reduce<addf> %g_sum1 : f32
+      %dot_u1 = kernel.workgroup.reduce<addf> %u_sum1 : f32
+
+      // Row 0 SwiGLU activation: (g0 / (1 + exp(-g0))) * u0
+      %neg_g0 = scalar.negf %dot_g0 : f32
+      %exp_g0 = scalar.expf<afn> %neg_g0 : f32
+      %denom0 = scalar.addf<reassoc|nnan|ninf|nsz> %one, %exp_g0 : f32
+      %silu_g0 = scalar.divf<reassoc|nnan|ninf|nsz> %dot_g0, %denom0 : f32
+      %act0 = scalar.mulf<reassoc|nnan|ninf|nsz> %silu_g0, %dot_u0 : f32
+
+      // Row 1 SwiGLU activation: (g1 / (1 + exp(-g1))) * u1
+      %neg_g1 = scalar.negf %dot_g1 : f32
+      %exp_g1 = scalar.expf<afn> %neg_g1 : f32
+      %denom1 = scalar.addf<reassoc|nnan|ninf|nsz> %one, %exp_g1 : f32
+      %silu_g1 = scalar.divf<reassoc|nnan|ninf|nsz> %dot_g1, %denom1 : f32
+      %act1 = scalar.mulf<reassoc|nnan|ninf|nsz> %silu_g1, %dot_u1 : f32
+
+      %is_leader = index.cmp eq, %lane, %leader : index
+      scf.if %is_leader {
+        view.store %act0, %output_view[%bounded_tok, %bounded_row_base] : f32, view<[%token_count]x[%row_count]xf32>
+        view.store %act1, %output_view[%bounded_tok, %bounded_row1] : f32, view<[%token_count]x[%row_count]xf32>
+      }
+    }
+  }
+  kernel.return
+}
+
+check.case public @qwen_fused_wmma_swiglu_case {
+  %tokens = check.param.choice values([1, 16]) name("tokens") : index
+  %rows = check.param.choice values([2, 17408]) name("rows") : index
+  %input = check.generate.fill value(0.0) : tensor<[%tokens]x5120xf32>
+  %gate_weight = check.generate.fill value(0.0) : tensor<[%rows]x5120xbf16>
+  %up_weight = check.generate.fill value(0.0) : tensor<[%rows]x5120xbf16>
+  %output = check.generate.fill value(0.0) : tensor<[%tokens]x[%rows]xf32>
+  %expected = check.generate.fill value(0.0) : tensor<[%tokens]x[%rows]xf32>
+  kernel.launch @qwen_fused_wmma_swiglu_bf16[%tokens, %rows](%tokens, %rows, %input, %gate_weight, %up_weight, %output) : [index, index](index, index, tensor<[%tokens]x5120xf32>, tensor<[%rows]x5120xbf16>, tensor<[%rows]x5120xbf16>, tensor<[%tokens]x[%rows]xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<[%tokens]x[%rows]xf32>
+  check.return
+}
+
+check.benchmark<@qwen_fused_wmma_swiglu_case> @qwen_wmma_swiglu_t1 {tokens = 1, rows = 17408}
+check.benchmark<@qwen_fused_wmma_swiglu_case> @qwen_wmma_swiglu_t16 {tokens = 16, rows = 17408}

@@ -18,6 +18,9 @@ set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
 # ROCm/HIP GPU backend — compiled natively for the Strix Halo gfx1151 target.
 option(ENGINE_ENABLE_HIP "Build gufo with ROCm/HIP GPU backend" OFF)
 
+# HRX GPU backend — compiled natively for the Strix Halo gfx1151 target.
+option(ENGINE_ENABLE_HRX "Build gufo with native HRX GPU backend" OFF)
+
 # ROCm/HIP GPU discovery — compiled natively for the Strix Halo gfx1151 target.
 # Dependencies are supplied by the Nix environment via $ROCM_PATH.
 # Host ambient /usr fallbacks are rejected.
@@ -262,6 +265,99 @@ if (ENGINE_ENABLE_HIP)
     "${GUFO_H3_ATTENTION_GENERATED_DIR}")
   target_link_libraries(gufo_core PUBLIC hip::host roc::hipblas
     roc::hipblaslt roc::rocblas aotriton_v2)
+endif()
+
+if (ENGINE_ENABLE_HRX)
+  target_sources(gufo_core PRIVATE
+    src/core/hrx/hrx_backend.cpp
+    src/core/hrx/hrx_module_loader.cpp
+    src/models/qwen/hrx/qwen_hrx_executor.cpp
+  )
+  target_compile_definitions(gufo_core PUBLIC ENGINE_ENABLE_HRX=1)
+  set(HRX_ROOT "" CACHE PATH "Prefix containing the native HRX runtime")
+  find_path(HRX_INCLUDE_DIR NAMES hrx/hrx_runtime.h
+    HINTS "${HRX_ROOT}/include" "${HRX_ROOT}/libhrx/include"
+    REQUIRED)
+  # Public HRX wrapper headers include <hrx/hrx_runtime.h>, so consumers of
+  # gufo_core need the installed HRX include directory as well.
+  target_include_directories(gufo_core PUBLIC "${HRX_INCLUDE_DIR}")
+  find_library(HRX_LIBRARY NAMES hrx
+    HINTS "${HRX_ROOT}/lib" "$ENV{HRX_PATH}/lib"
+    REQUIRED)
+  target_link_libraries(gufo_core PUBLIC "${HRX_LIBRARY}")
+  # Ahead-of-Time (AOT) Loom Kernel Packaging
+  find_program(LOOM_COMPILE_EXECUTABLE loom-compile
+    HINTS "${HRX_ROOT}/bin" "$ENV{HRX_PATH}/bin")
+
+  if (LOOM_COMPILE_EXECUTABLE)
+    set(GUFO_AOT_KERNELS_DIR "${CMAKE_CURRENT_BINARY_DIR}/share/gufo/kernels")
+    file(MAKE_DIRECTORY "${GUFO_AOT_KERNELS_DIR}")
+
+    set(LOOM_KERNELS
+      tools/loom/qwen_fused_swiglu_bf16.loom
+      tools/loom/qwen_fused_rmsnorm_qkv_bf16.loom
+      tools/loom/qwen_fused_deltanet_recurrence_bf16.loom
+      tools/loom/qwen_fused_down_residual_bf16.loom
+      tools/loom/qwen_fused_rope_kv_cache_bf16.loom
+      tools/loom/qwen_fused_final_norm_head_bf16.loom
+      tools/loom/qwen_fused_layer_attn_bf16.loom
+      tools/loom/qwen_fused_layer_ffn_bf16.loom
+    )
+    set(LOOM_CONFIG_qwen_fused_swiglu_bf16 "qwen_fused_swiglu_bf16.row_capacity=17408")
+    set(LOOM_CONFIG_qwen_fused_rmsnorm_qkv_bf16 "qwen_fused_rmsnorm_qkv_bf16.row_capacity=4096")
+    set(LOOM_CONFIG_qwen_fused_deltanet_recurrence_bf16 "qwen_fused_deltanet_recurrence_bf16.head_capacity=64")
+    set(LOOM_CONFIG_qwen_fused_down_residual_bf16 "qwen_fused_down_residual_bf16.hidden_dim=5120")
+    set(LOOM_CONFIG_qwen_fused_rope_kv_cache_bf16 "qwen_fused_rope_kv_cache_bf16.max_heads=64")
+    set(LOOM_CONFIG_qwen_fused_final_norm_head_bf16 "qwen_fused_final_norm_head_bf16.vocab_capacity=152064")
+    set(LOOM_CONFIG_qwen_fused_layer_attn_bf16 "qwen_fused_layer_attn_bf16.qkv_dim=8192")
+    set(LOOM_CONFIG_qwen_fused_layer_ffn_bf16 "qwen_fused_layer_ffn_bf16.hidden_dim=5120")
+
+    set(COMPILED_LOOM_ARTIFACTS "")
+    foreach(LOOM_SRC IN LISTS LOOM_KERNELS)
+      get_filename_component(KERNEL_NAME "${LOOM_SRC}" NAME_WE)
+      set(OUTPUT_FB "${GUFO_AOT_KERNELS_DIR}/${KERNEL_NAME}.fb")
+      list(APPEND COMPILED_LOOM_ARTIFACTS "${OUTPUT_FB}")
+
+      set(CONFIG_FLAGS "")
+      if (DEFINED LOOM_CONFIG_${KERNEL_NAME})
+        foreach(CFG_ITEM IN LISTS LOOM_CONFIG_${KERNEL_NAME})
+          list(APPEND CONFIG_FLAGS "--config=${CFG_ITEM}")
+        endforeach()
+      endif()
+
+      add_custom_command(
+        OUTPUT "${OUTPUT_FB}"
+        COMMAND "${LOOM_COMPILE_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/${LOOM_SRC}"
+          --target=gfx1151 --backend=amdgpu-hal
+          ${CONFIG_FLAGS}
+          --output="${OUTPUT_FB}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${LOOM_SRC}"
+        COMMENT "Compiling AOT Loom kernel ${KERNEL_NAME} for gfx1151"
+        VERBATIM
+      )
+    endforeach()
+
+    add_custom_target(gufo_loom_kernels ALL DEPENDS ${COMPILED_LOOM_ARTIFACTS})
+    add_dependencies(gufo_core gufo_loom_kernels)
+
+    install(DIRECTORY "${GUFO_AOT_KERNELS_DIR}/"
+      DESTINATION share/gufo/kernels)
+  endif()
+
+  if (BUILD_TESTING AND LOOM_COMPILE_EXECUTABLE)
+    add_executable(hrx_backend_test tests/core/hrx_backend_test.cpp)
+    target_link_libraries(hrx_backend_test PRIVATE gufo_core)
+    add_test(NAME hrx_backend_test COMMAND hrx_backend_test)
+    set_tests_properties(hrx_backend_test PROPERTIES LABELS "gpu;hrx;core;backend")
+
+    add_executable(qwen_hrx_executor_test tests/models/qwen/qwen_hrx_executor_test.cpp)
+    target_compile_definitions(qwen_hrx_executor_test PRIVATE
+      GUFO_HRX_KERNEL_DIR=\"${GUFO_AOT_KERNELS_DIR}\")
+    target_link_libraries(qwen_hrx_executor_test PRIVATE gufo_core)
+    add_test(NAME qwen_hrx_executor_test COMMAND qwen_hrx_executor_test)
+    set_tests_properties(qwen_hrx_executor_test PROPERTIES LABELS "gpu;hrx;models;qwen")
+  endif()
 endif()
 
 add_executable(gufo

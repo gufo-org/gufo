@@ -1,0 +1,69 @@
+// ============================================================================
+// Qwen3.8-27B Fused SSM / DeltaNet Linear Attention Recurrence in Loom IR
+// State S: d_state x d_inner (128 x 128)
+// Computes: out = S @ q + beta * v
+// ============================================================================
+
+func.def inline @bf16_dot32(%a: vector<32xf32>, %b: vector<32xbf16>) -> (f32) {
+  %sum_initial = scalar.constant 0.0 : f32
+  %b_f32 = vector.extf %b : vector<32xbf16> to vector<32xf32>
+  %prod = vector.mulf<reassoc|nnan|ninf|nsz> %a, %b_f32 : vector<32xf32>
+  %sum = vector.reduce<addf, reassoc|nnan|ninf|nsz> %prod, %sum_initial : vector<32xf32>, f32
+  func.return %sum : f32
+}
+
+config.decl @qwen_fused_deltanet_recurrence_bf16.head_capacity : %value: index where [range(%value, 1, 64)]
+
+kernel.def @qwen_fused_deltanet_recurrence_bf16(%heads: index) {
+  %unit = index.constant 1 : index
+  %head_capacity = config.get @qwen_fused_deltanet_recurrence_bf16.head_capacity : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%head_capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%heads: index, %state: buffer, %q: buffer, %v: buffer, %beta: buffer, %out: buffer) {
+  %base = index.constant 0 : offset
+  %head_capacity = config.get @qwen_fused_deltanet_recurrence_bf16.head_capacity : index
+  %head_count = index.assume %heads [range(%heads, 1, 64), le(%heads, %head_capacity)] : index
+  %head_idx = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %leader = index.constant 0 : index
+
+  %in_bounds = index.cmp ult, %head_idx, %head_count : index
+  scf.if %in_bounds {
+    %bounded_head = index.assume %head_idx [lt(%head_idx, %head_count)] : index
+    %state_noalias, %q_noalias, %v_noalias, %beta_noalias, %out_noalias = buffer.assume.noalias %state, %q, %v, %beta, %out : buffer, buffer, buffer, buffer, buffer
+    %state_view = buffer.view %state_noalias[%base] : buffer -> view<[%head_count]x128x128xf32>
+    %q_view = buffer.view %q_noalias[%base] : buffer -> view<[%head_count]x128xbf16>
+    %v_view = buffer.view %v_noalias[%base] : buffer -> view<[%head_count]x128xf32>
+    %beta_view = buffer.view %beta_noalias[%base] : buffer -> view<[%head_count]xf32>
+    %out_view = buffer.view %out_noalias[%base] : buffer -> view<[%head_count]x128xf32>
+
+    %q_vec = vector.load %q_view[%bounded_head, %lane] : view<[%head_count]x128xbf16> -> vector<32xbf16>
+    %v_val = view.load %v_view[%bounded_head, %lane] : view<[%head_count]x128xf32> -> f32
+    %b_val = view.load %beta_view[%bounded_head] : view<[%head_count]xf32> -> f32
+
+    // Compute recurrence dot product along state row:
+    %s_row = vector.load %state_view[%bounded_head, %lane, %leader] : view<[%head_count]x128x128xf32> -> vector<32xf32>
+    %dot = func.call @bf16_dot32(%s_row, %q_vec) : (vector<32xf32>, vector<32xbf16>) -> (f32)
+    %bv = scalar.mulf<reassoc|nnan|ninf|nsz> %b_val, %v_val : f32
+    %res = scalar.addf<reassoc|nnan|ninf|nsz> %dot, %bv : f32
+
+    view.store %res, %out_view[%bounded_head, %lane] : f32, view<[%head_count]x128xf32>
+  }
+  kernel.return
+}
+
+check.case public @qwen_deltanet_case {
+  %heads = check.param.choice values([16]) name("heads") : index
+  %state = check.generate.fill value(0.0) : tensor<[%heads]x128x128xf32>
+  %q = check.generate.fill value(0.0) : tensor<[%heads]x128xbf16>
+  %v = check.generate.fill value(0.0) : tensor<[%heads]x128xf32>
+  %beta = check.generate.fill value(1.0) : tensor<[%heads]xf32>
+  %out = check.generate.fill value(0.0) : tensor<[%heads]x128xf32>
+  %expected = check.generate.fill value(0.0) : tensor<[%heads]x128xf32>
+
+  kernel.launch @qwen_fused_deltanet_recurrence_bf16[%heads](%heads, %state, %q, %v, %beta, %out) : [index](index, tensor<[%heads]x128x128xf32>, tensor<[%heads]x128xbf16>, tensor<[%heads]x128xf32>, tensor<[%heads]xf32>, tensor<[%heads]x128xf32>)
+  check.expect.close actual(%out) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<[%heads]x128xf32>
+  check.return
+}
+
+check.benchmark<@qwen_deltanet_case> @qwen_deltanet_bench {heads = 16}
