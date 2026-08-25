@@ -39,7 +39,8 @@ public:
   /// Dispatches Pre-RMSNorm + QKV Projection
   bool DispatchRMSNormQKV(hrx_buffer_t input_buf, hrx_buffer_t gamma_buf,
                           hrx_buffer_t w_qkv_buf, hrx_buffer_t out_buf,
-                          uint32_t num_rows = 4096, uint32_t hidden_dim = 5120);
+                          uint32_t num_rows = 10240,
+                          uint32_t hidden_dim = 5120);
 
   /// Dispatches RoPE + KV Cache store
   bool DispatchRoPEKVCache(hrx_buffer_t q_buf, hrx_buffer_t k_buf,

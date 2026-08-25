@@ -570,7 +570,12 @@ int RunPrompt(std::span<const char* const> args) {
 
       if (opt.verbose) {
         const auto& config = gpu_exec->GetConfig();
-        std::cout << "[Engine]: AMD Strix Halo gfx1151 GPU Executor\n"
+        std::cout << "[Engine]: AMD Strix Halo gfx1151 "
+#if defined(ENGINE_ENABLE_HRX)
+                  << "HRX (HIP compatibility) Executor\n"
+#else
+                  << "GPU Executor\n"
+#endif
                   << "Model: " << config.architecture << " ("
                   << config.num_layers
                   << " layers, hidden=" << config.hidden_size

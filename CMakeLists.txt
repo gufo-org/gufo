@@ -271,6 +271,7 @@ if (ENGINE_ENABLE_HRX)
   target_sources(gufo_core PRIVATE
     src/core/hrx/hrx_backend.cpp
     src/core/hrx/hrx_module_loader.cpp
+    src/models/qwen/hrx/qwen_hrx_model.cpp
     src/models/qwen/hrx/qwen_hrx_executor.cpp
   )
   target_compile_definitions(gufo_core PUBLIC ENGINE_ENABLE_HRX=1)
@@ -304,7 +305,7 @@ if (ENGINE_ENABLE_HRX)
       tools/loom/qwen_fused_layer_ffn_bf16.loom
     )
     set(LOOM_CONFIG_qwen_fused_swiglu_bf16 "qwen_fused_swiglu_bf16.row_capacity=17408")
-    set(LOOM_CONFIG_qwen_fused_rmsnorm_qkv_bf16 "qwen_fused_rmsnorm_qkv_bf16.row_capacity=4096")
+    set(LOOM_CONFIG_qwen_fused_rmsnorm_qkv_bf16 "qwen_fused_rmsnorm_qkv_bf16.row_capacity=10240")
     set(LOOM_CONFIG_qwen_fused_deltanet_recurrence_bf16 "qwen_fused_deltanet_recurrence_bf16.head_capacity=64")
     set(LOOM_CONFIG_qwen_fused_down_residual_bf16 "qwen_fused_down_residual_bf16.hidden_dim=5120")
     set(LOOM_CONFIG_qwen_fused_rope_kv_cache_bf16 "qwen_fused_rope_kv_cache_bf16.max_heads=64")
@@ -357,6 +358,12 @@ if (ENGINE_ENABLE_HRX)
     target_link_libraries(qwen_hrx_executor_test PRIVATE gufo_core)
     add_test(NAME qwen_hrx_executor_test COMMAND qwen_hrx_executor_test)
     set_tests_properties(qwen_hrx_executor_test PROPERTIES LABELS "gpu;hrx;models;qwen")
+
+    add_executable(qwen_hrx_model_contract_test
+      tests/models/qwen/qwen_hrx_model_contract_test.cpp)
+    target_link_libraries(qwen_hrx_model_contract_test PRIVATE strix_core)
+    add_test(NAME qwen_hrx_model_contract_test COMMAND qwen_hrx_model_contract_test)
+    set_tests_properties(qwen_hrx_model_contract_test PROPERTIES LABELS "hrx;models;qwen")
   endif()
 endif()
 

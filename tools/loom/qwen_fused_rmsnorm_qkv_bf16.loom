@@ -5,7 +5,9 @@
 //   q = q_w @ x_norm
 //   k = k_w @ x_norm
 //   v = v_w @ x_norm
-// Hidden K = 5120, Output QKV Rows = 4096 (128 threads per workgroup tile)
+// This is the linear-attention/SSM projection. Qwen3.8-27B has
+// 2 * groups * state + inner = 2 * 16 * 128 + 6144 = 10240 output rows.
+// Hidden K = 5120, Output QKV Rows = 10240 (160 threads per workgroup tile)
 // ============================================================================
 
 func.def inline @bf16_dot32(%input_values: vector<32xf32>, %weight_values: vector<32xbf16>) -> (f32) {
@@ -16,7 +18,7 @@ func.def inline @bf16_dot32(%input_values: vector<32xf32>, %weight_values: vecto
   func.return %sum : f32
 }
 
-config.decl @qwen_fused_rmsnorm_qkv_bf16.row_capacity : %value: index where [range(%value, 2, 4096), mul(%value, 2)]
+config.decl @qwen_fused_rmsnorm_qkv_bf16.row_capacity : %value: index where [range(%value, 2, 10240), mul(%value, 2)]
 
 kernel.def @qwen_fused_rmsnorm_qkv_bf16(%rows: index) {
   %row_block = index.constant 2 : index
@@ -28,7 +30,7 @@ kernel.def @qwen_fused_rmsnorm_qkv_bf16(%rows: index) {
 } launch(%rows: index, %input: buffer, %norm_gamma: buffer, %qkv_weight: buffer, %output: buffer) {
   %base = index.constant 0 : offset
   %row_capacity = config.get @qwen_fused_rmsnorm_qkv_bf16.row_capacity : index
-  %row_count = index.assume %rows [range(%rows, 2, 4096), mul(%rows, 2), le(%rows, %row_capacity)] : index
+  %row_count = index.assume %rows [range(%rows, 2, 10240), mul(%rows, 2), le(%rows, %row_capacity)] : index
   %row_tile = kernel.workgroup.id<x> : index
   %lane = kernel.workitem.id<x> : index
   %row_block = index.constant 2 : index
@@ -57,8 +59,19 @@ kernel.def @qwen_fused_rmsnorm_qkv_bf16(%rows: index) {
     %x_raw = vector.load %input_view[%input_base] : view<5120xf32> -> vector<32xf32>
     %gamma = vector.load %gamma_view[%input_base] : view<5120xf32> -> vector<32xf32>
     
-    // In-register RMSNorm scaling: x_scaled = x * gamma
-    %x_norm = vector.mulf<reassoc|nnan|ninf|nsz> %x_raw, %gamma : vector<32xf32>
+    // RMSNorm reduction is shared by every output row in this workgroup.
+    %squares = vector.mulf<reassoc|nnan|ninf|nsz> %x_raw, %x_raw : vector<32xf32>
+    %zero = scalar.constant 0.0 : f32
+    %local_sum = vector.reduce<addf, reassoc|nnan|ninf|nsz> %squares, %zero : vector<32xf32>, f32
+    %sum_squares = kernel.workgroup.reduce<addf> %local_sum : f32
+    %hidden_size = scalar.constant 5120.0 : f32
+    %epsilon = scalar.constant 0.000001 : f32
+    %mean_square = scalar.divf<reassoc|nnan|ninf|nsz> %sum_squares, %hidden_size : f32
+    %variance = scalar.addf<reassoc|nnan|ninf|nsz> %mean_square, %epsilon : f32
+    %inverse_rms = scalar.rsqrtf<afn> %variance : f32
+    %inverse_rms_vector = vector.splat %inverse_rms : vector<32xf32>
+    %scaled = vector.mulf<reassoc|nnan|ninf|nsz> %x_raw, %gamma : vector<32xf32>
+    %x_norm = vector.mulf<reassoc|nnan|ninf|nsz> %scaled, %inverse_rms_vector : vector<32xf32>
 
     // Row 0 QKV projection
     %w_bf16_0 = vector.load %weight_view[%bounded_row_base, %input_base] : view<[%row_count]x5120xbf16> -> vector<32xbf16>
@@ -80,7 +93,7 @@ kernel.def @qwen_fused_rmsnorm_qkv_bf16(%rows: index) {
 }
 
 check.case public @qwen_fused_rmsnorm_qkv_case {
-  %rows = check.param.choice values([2, 4096]) name("rows") : index
+  %rows = check.param.choice values([2, 10240]) name("rows") : index
   %input = check.generate.fill value(0.0) : tensor<5120xf32>
   %norm_gamma = check.generate.fill value(1.0) : tensor<5120xf32>
   %qkv_weight = check.generate.fill value(0.0) : tensor<[%rows]x5120xbf16>

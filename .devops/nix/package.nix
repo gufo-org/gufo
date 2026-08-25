@@ -2,6 +2,7 @@
   lib,
   stdenv,
   cmake,
+  makeWrapper,
   ninja,
   pkg-config,
   python313,
@@ -67,6 +68,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   nativeBuildInputs = [
     cmake
+    makeWrapper
     ninja
     pkg-config
   ]
@@ -142,7 +144,11 @@ stdenv.mkDerivation (finalAttrs: {
 
     mkdir -p $out/bin
     cp gufo $out/bin/gufo
-    ln -sf gufo $out/bin/gufo-server
+    if [ "${if hrxSupport then "1" else "0"}" = 1 ]; then
+      mv $out/bin/gufo $out/bin/.gufo-hrx-real
+      makeWrapper $out/bin/.gufo-hrx-real $out/bin/gufo \
+        --prefix LD_PRELOAD : ${hrx-system}/lib/libamdhip64.so
+    fi
     mkdir -p $out/share/gufo/models/qwen3_tts
     cp $src/src/models/qwen3_tts/reference/run_official.py \
       $out/share/gufo/models/qwen3_tts/

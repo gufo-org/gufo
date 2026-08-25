@@ -789,8 +789,13 @@ int RunBench(std::span<const char* const> args) {
   ss_size << std::fixed << std::setprecision(2) << model_size_gib << " GiB";
   ss_params << std::fixed << std::setprecision(2) << model_params_b << " B";
 
-  const std::string_view backend_name =
-      opt.speculative_backend == "mtp-npu" ? "HIP+XDNA2" : "ROCm (HIP)";
+  const std::string_view backend_name = opt.speculative_backend == "mtp-npu"
+                                            ? "HIP+XDNA2"
+#if defined(ENGINE_ENABLE_HRX)
+                                            : "HRX (HIP)";
+#else
+                                            : "ROCm (HIP)";
+#endif
   const auto print_result = [&](std::string_view test_name,
                                 const BenchStats& stats) {
     std::ostringstream ss_ts;

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -128,6 +129,69 @@ void TestQwenHrxExecutorLifecycleAndDispatch() {
   hrx_buffer_release(buf_out);
 }
 
+void TestRMSNormQKVParity() {
+  strix::hrx::QwenHrxExecutor executor(0);
+  Expect(executor.InitializeAllKernels(std::string(kHrxKernelDir)),
+         "QwenHrxExecutor loads the Qwen3.8 artifact set");
+
+  auto& backend = executor.Backend();
+  constexpr uint32_t kHiddenSize = 5120;
+  constexpr uint32_t kRows = 2;
+  constexpr float kEpsilon = 0.000001F;
+  const std::vector<float> input(kHiddenSize, 1.0F);
+  const std::vector<float> gamma(kHiddenSize, 1.0F);
+  const std::vector<uint16_t> weights(kRows * kHiddenSize, 0x3F80U);
+  std::vector<float> output(kRows, 0.0F);
+
+  hrx_buffer_t input_buffer = nullptr;
+  hrx_buffer_t gamma_buffer = nullptr;
+  hrx_buffer_t weight_buffer = nullptr;
+  hrx_buffer_t output_buffer = nullptr;
+  HRX_CHECK(hrx_buffer_allocate(backend.Stream(), input.size() * sizeof(float),
+                               HRX_MEMORY_TYPE_DEVICE_LOCAL,
+                               HRX_BUFFER_USAGE_STORAGE | HRX_BUFFER_USAGE_TRANSFER,
+                               &input_buffer));
+  HRX_CHECK(hrx_buffer_allocate(backend.Stream(), gamma.size() * sizeof(float),
+                               HRX_MEMORY_TYPE_DEVICE_LOCAL,
+                               HRX_BUFFER_USAGE_STORAGE | HRX_BUFFER_USAGE_TRANSFER,
+                               &gamma_buffer));
+  HRX_CHECK(hrx_buffer_allocate(backend.Stream(),
+                               weights.size() * sizeof(uint16_t),
+                               HRX_MEMORY_TYPE_DEVICE_LOCAL,
+                               HRX_BUFFER_USAGE_STORAGE | HRX_BUFFER_USAGE_TRANSFER,
+                               &weight_buffer));
+  HRX_CHECK(hrx_buffer_allocate(backend.Stream(), output.size() * sizeof(float),
+                               HRX_MEMORY_TYPE_DEVICE_LOCAL,
+                               HRX_BUFFER_USAGE_STORAGE | HRX_BUFFER_USAGE_TRANSFER,
+                               &output_buffer));
+  HRX_CHECK(hrx_synchronous_h2d(backend.Device(), input.data(), input_buffer,
+                                0, input.size() * sizeof(float)));
+  HRX_CHECK(hrx_synchronous_h2d(backend.Device(), gamma.data(), gamma_buffer,
+                                0, gamma.size() * sizeof(float)));
+  HRX_CHECK(hrx_synchronous_h2d(backend.Device(), weights.data(),
+                                weight_buffer, 0,
+                                weights.size() * sizeof(uint16_t)));
+
+  Expect(executor.DispatchRMSNormQKV(input_buffer, gamma_buffer, weight_buffer,
+                                     output_buffer, kRows, kHiddenSize),
+         "native HRX RMSNorm+SSM-QKV dispatch succeeds");
+  HRX_CHECK(hrx_stream_synchronize(backend.Stream()));
+  HRX_CHECK(hrx_synchronous_d2h(backend.Device(), output_buffer, 0,
+                                output.data(), output.size() * sizeof(float)));
+
+  const float expected =
+      static_cast<float>(kHiddenSize) / std::sqrt(1.0F + kEpsilon);
+  for (const float value : output) {
+    Expect(std::abs(value - expected) < 0.02F,
+           "native HRX RMSNorm+SSM-QKV matches the CPU oracle");
+  }
+
+  hrx_buffer_release(input_buffer);
+  hrx_buffer_release(gamma_buffer);
+  hrx_buffer_release(weight_buffer);
+  hrx_buffer_release(output_buffer);
+}
+
 void TestQwenHrxExecutorMultiKernelAndGraph() {
   gufo::hrx::QwenHrxExecutor executor(0);
   bool ready = executor.InitializeAllKernels(std::string(kHrxKernelDir));
@@ -207,6 +271,7 @@ void TestQwenHrxExecutorMultiKernelAndGraph() {
 int main() {
   std::cout << "Running qwen_hrx_executor_test...\n";
   TestQwenHrxExecutorLifecycleAndDispatch();
+  TestRMSNormQKVParity();
   TestQwenHrxExecutorMultiKernelAndGraph();
   std::cout << "All qwen_hrx_executor_test assertions passed!\n";
   return 0;
