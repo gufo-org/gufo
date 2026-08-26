@@ -121,6 +121,199 @@ void TestQ8KBlockGEMVEquivalence() {
   HIP_CHECK(hipFree(d_y));
 }
 
+void TestQ8KSmallBatchFp32GEMMEquivalence() {
+  constexpr std::size_t kRows = 16;
+  constexpr std::size_t kBlockSize = 256;
+  constexpr std::size_t kColumns = 512;
+  constexpr std::size_t kBlocksPerRow = kColumns / kBlockSize;
+  constexpr std::size_t kMaximumBatch = 8;
+
+  using Q8KBlockTest = strix::quant::block_q8_K;
+  std::uint32_t seed = 98431U;
+  auto random = [&seed]() -> std::uint32_t {
+    seed = seed * 1664525U + 1013904223U;
+    return seed;
+  };
+  auto random_float = [&random](float low, float high) -> float {
+    const float unit = static_cast<float>(random() & 0xFFFFU) / 65535.0F;
+    return low + unit * (high - low);
+  };
+
+  std::vector<Q8KBlockTest> weights(kRows * kBlocksPerRow);
+  std::vector<float> inputs(kMaximumBatch * kColumns);
+  for (auto& block : weights) {
+    block.d = random_float(-0.25F, 0.25F);
+    for (auto& value : block.qs) {
+      value = static_cast<std::int8_t>(static_cast<int>(random() % 255U) - 127);
+    }
+    std::fill(std::begin(block.bsums), std::end(block.bsums), 0);
+  }
+  for (auto& input : inputs) {
+    input = random_float(-1.0F, 1.0F);
+  }
+
+  void* device_weights = nullptr;
+  float* device_inputs = nullptr;
+  float* device_reference = nullptr;
+  float* device_batched = nullptr;
+  HIP_CHECK(hipMalloc(&device_weights, weights.size() * sizeof(Q8KBlockTest)));
+  HIP_CHECK(hipMalloc(&device_inputs, inputs.size() * sizeof(float)));
+  HIP_CHECK(
+      hipMalloc(&device_reference, kMaximumBatch * kRows * sizeof(float)));
+  HIP_CHECK(hipMalloc(&device_batched, kMaximumBatch * kRows * sizeof(float)));
+  HIP_CHECK(hipMemcpy(device_weights, weights.data(),
+                      weights.size() * sizeof(Q8KBlockTest),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(device_inputs, inputs.data(),
+                      inputs.size() * sizeof(float), hipMemcpyHostToDevice));
+
+  if (setenv("STRIX_Q8_SMALL_BATCH_EXACT_SHARED", "1", 1) != 0) {
+    std::cerr << "failed to enable shared Q8_K small-batch route\n";
+    std::abort();
+  }
+
+  for (const std::size_t batch :
+       {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5},
+        std::size_t{6}, std::size_t{8}}) {
+    for (std::size_t token = 0; token < batch; ++token) {
+      strix::hip::LaunchQ8KBlockGEMV(
+          device_weights, strix::core::GgmlType::kQ8_K,
+          device_inputs + (token * kColumns),
+          device_reference + (token * kRows), kRows, kColumns, nullptr);
+    }
+    strix::hip::LaunchBatchedQuantGEMMFp32(
+        strix::core::GgmlType::kQ8_K, device_weights, device_inputs,
+        device_batched, batch, kRows, kColumns, nullptr);
+    HIP_CHECK(hipDeviceSynchronize());
+
+    std::vector<float> reference(batch * kRows);
+    std::vector<float> batched(batch * kRows);
+    HIP_CHECK(hipMemcpy(reference.data(), device_reference,
+                        reference.size() * sizeof(float),
+                        hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(batched.data(), device_batched,
+                        batched.size() * sizeof(float), hipMemcpyDeviceToHost));
+
+    for (std::size_t index = 0; index < reference.size(); ++index) {
+      if (reference[index] != batched[index]) {
+        std::cerr << "shared Q8_K small-batch mismatch at batch " << batch
+                  << " index " << index << ": expected " << reference[index]
+                  << ", got " << batched[index] << "\n";
+        std::abort();
+      }
+    }
+  }
+
+  HIP_CHECK(hipFree(device_weights));
+  HIP_CHECK(hipFree(device_inputs));
+  HIP_CHECK(hipFree(device_reference));
+  HIP_CHECK(hipFree(device_batched));
+}
+
+void TestQ8_0SmallBatchFp32GEMMEquivalence() {
+  constexpr std::size_t kRows = 16;
+  constexpr std::size_t kBlockSize = 32;
+  constexpr std::size_t kColumns = 512;
+  constexpr std::size_t kBlocksPerRow = kColumns / kBlockSize;
+  constexpr std::size_t kMaximumBatch = 8;
+
+  using Q8_0BlockTest = strix::quant::block_q8_0;
+  std::uint32_t seed = 31789U;
+  auto random = [&seed]() -> std::uint32_t {
+    seed = seed * 1664525U + 1013904223U;
+    return seed;
+  };
+  auto random_float = [&random](float low, float high) -> float {
+    const float unit = static_cast<float>(random() & 0xFFFFU) / 65535.0F;
+    return low + unit * (high - low);
+  };
+  auto float_to_half_bits = [](float value) -> std::uint16_t {
+    std::uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint32_t sign = (bits >> 16) & 0x8000U;
+    std::int32_t exponent =
+        static_cast<std::int32_t>((bits >> 23) & 0xFFU) - 127 + 15;
+    std::uint32_t mantissa = (bits >> 13) & 0x3FFU;
+    if (exponent <= 0) {
+      if (exponent < -10) {
+        return static_cast<std::uint16_t>(sign);
+      }
+      mantissa |= 0x400U;
+      const std::uint32_t shift = static_cast<std::uint32_t>(14 - exponent);
+      return static_cast<std::uint16_t>(sign | (mantissa >> shift));
+    }
+    if (exponent >= 31) {
+      return static_cast<std::uint16_t>(sign | 0x7C00U |
+                                        (mantissa != 0 ? 0x200U : 0U));
+    }
+    return static_cast<std::uint16_t>(
+        sign | (static_cast<std::uint32_t>(exponent) << 10) | mantissa);
+  };
+
+  std::vector<Q8_0BlockTest> weights(kRows * kBlocksPerRow);
+  std::vector<float> inputs(kMaximumBatch * kColumns);
+  for (auto& block : weights) {
+    block.d = float_to_half_bits(random_float(-0.25F, 0.25F));
+    for (auto& value : block.qs) {
+      value = static_cast<std::int8_t>(static_cast<int>(random() % 255U) - 127);
+    }
+  }
+  for (auto& input : inputs) {
+    input = random_float(-1.0F, 1.0F);
+  }
+
+  void* device_weights = nullptr;
+  float* device_inputs = nullptr;
+  float* device_reference = nullptr;
+  float* device_batched = nullptr;
+  HIP_CHECK(hipMalloc(&device_weights, weights.size() * sizeof(Q8_0BlockTest)));
+  HIP_CHECK(hipMalloc(&device_inputs, inputs.size() * sizeof(float)));
+  HIP_CHECK(
+      hipMalloc(&device_reference, kMaximumBatch * kRows * sizeof(float)));
+  HIP_CHECK(hipMalloc(&device_batched, kMaximumBatch * kRows * sizeof(float)));
+  HIP_CHECK(hipMemcpy(device_weights, weights.data(),
+                      weights.size() * sizeof(Q8_0BlockTest),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(device_inputs, inputs.data(),
+                      inputs.size() * sizeof(float), hipMemcpyHostToDevice));
+
+  for (const std::size_t batch :
+       {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5},
+        std::size_t{6}, std::size_t{8}}) {
+    for (std::size_t token = 0; token < batch; ++token) {
+      strix::hip::LaunchQ8KBlockGEMV(
+          device_weights, strix::core::GgmlType::kQ8_0,
+          device_inputs + (token * kColumns),
+          device_reference + (token * kRows), kRows, kColumns, nullptr);
+    }
+    strix::hip::LaunchBatchedQuantGEMMFp32(
+        strix::core::GgmlType::kQ8_0, device_weights, device_inputs,
+        device_batched, batch, kRows, kColumns, nullptr);
+    HIP_CHECK(hipDeviceSynchronize());
+
+    std::vector<float> reference(batch * kRows);
+    std::vector<float> batched(batch * kRows);
+    HIP_CHECK(hipMemcpy(reference.data(), device_reference,
+                        reference.size() * sizeof(float),
+                        hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(batched.data(), device_batched,
+                        batched.size() * sizeof(float), hipMemcpyDeviceToHost));
+    for (std::size_t index = 0; index < reference.size(); ++index) {
+      if (reference[index] != batched[index]) {
+        std::cerr << "exact Q8_0 small-batch mismatch at batch " << batch
+                  << " index " << index << ": expected " << reference[index]
+                  << ", got " << batched[index] << "\n";
+        std::abort();
+      }
+    }
+  }
+
+  HIP_CHECK(hipFree(device_weights));
+  HIP_CHECK(hipFree(device_inputs));
+  HIP_CHECK(hipFree(device_reference));
+  HIP_CHECK(hipFree(device_batched));
+}
+
 void TestQ8_0BlockGEMVEquivalence() {
   constexpr std::size_t M = 4;
   constexpr std::size_t QK = 32;
@@ -242,6 +435,8 @@ int main() {
   }
 
   TestQ8KBlockGEMVEquivalence();
+  TestQ8KSmallBatchFp32GEMMEquivalence();
+  TestQ8_0SmallBatchFp32GEMMEquivalence();
   TestQ8_0BlockGEMVEquivalence();
   std::cout << "Qwen Q8 GEMV ops test passed on gfx1151.\n";
   return 0;

@@ -386,6 +386,7 @@ depth. Read the Q8 section for the current state of the engine.
 | Area | Retained | Rejected |
 | --- | --- | --- |
 | Projection | Shape-specific hipBLASLt plans and tuned decode GEMV | Blanket algorithm overrides and concurrent gate/up launches |
+| Exact small-batch Q8 projection | Shared-weight FP32 Q8_0/Q8_K kernels for physical C=2/C=4/C=8, with masked C=3/C=5/C=6 and structural C=1 fallback (`opt-c206-q8-small-batch`) | Standalone Q8_K-only promotion on the current Q8_K_XL artifact; the measured small-batch bottleneck dispatches Q8_0 |
 | DeltaNet | Two-lane persistent recurrence and SSM input replay | Four-lane recurrence |
 | Prefill attention | 64-key native tile, odd LDS stride, CK fallback | Head-major KV and lower-precision weighted-V accumulation |
 | Decode attention | Online softmax and 32-way split-K | Context-sized LDS scores and oversized GEMV launches |
@@ -408,6 +409,10 @@ they did not beat the unfused routes end-to-end on gfx1151.
 
 ## TODOs
 
+- Feed the measured exact-Q8 C=2/C=4/C=8 and masked C=3/C=5/C=6 costs into
+  the physical-plan selector, then qualify useful tokens/s and per-request
+  latency under real staggered server traffic before claiming arbitrary-width
+  scheduling.
 - Re-evaluate `opt-c010-ffn-swiglu` with a tiled fused gate/up GEMM + SwiGLU
   kernel (block-level K tiling and LDS staging, e.g. the decode
   `FastFusedSwiGLUGEMVBlockKernel` pattern) so prefill can compete with the

@@ -157,6 +157,8 @@ void LaunchBatchedQuantGEMMBf16(core::GgmlType type, const void* w,
 /// Directly computes Y[B, M] = X_fp32[B, K] * W_quant[M, K]^T using the same
 /// quant-block dot product and FP32 activation precision as decode. Intended
 /// for short verification batches where exact target-path numerics matter.
+/// Q8_0 and Q8_K batches of two through eight rows share weight loads while
+/// preserving the isolated production GEMV arithmetic order.
 void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
                                 const float* fp32_x, float* y,
                                 std::size_t batch, std::size_t m, std::size_t k,
