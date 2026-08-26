@@ -88,6 +88,14 @@ until their lease ends. Generation responses include:
 Server-Timing: ttft;dur=<milliseconds>, inter_token;dur=<milliseconds>
 ```
 
+When `stream_options.include_usage` is enabled, the terminal Chat Completions
+usage chunk also includes a namespaced `usage.strix` object. It reports
+privacy-safe scheduler and stage metrics used by
+`tools/strix-serving-bench.py`: queue, prefill, decode, TTFT and ITL timing;
+actual prefill work; cache use; logical concurrency; physical execution width;
+and the executed plan. Prompts, generated text, local paths, request IDs, and
+token IDs are excluded.
+
 Diagnostic telemetry is limited to status, token counts, timing, and
 cancellation state. It must not contain prompt text, model paths, machine
 identity, request IDs, or token IDs.

@@ -158,6 +158,58 @@ MODEL=models/<model>/<artifact>.gguf
 Keep current per-model results and matching third-party commands in that
 model's benchmark README.
 
+### Canonical serving benchmark
+
+Build and start the release server with enough resident sessions for the
+largest requested concurrency:
+
+```sh
+MODEL=models/<model>/<artifact>.gguf
+
+./result/bin/strix serve \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --sessions 4 \
+  llm \
+  --model "$MODEL" \
+  --context 4096
+```
+
+In another shell, run the canonical C=1/C=2/C=4 harness:
+
+```sh
+tools/strix-serving-bench.py \
+  --base-url http://127.0.0.1:8080 \
+  --concurrency 1,2,4 \
+  --warmup 1 \
+  --repetitions 3 \
+  --max-tokens 128 \
+  --output artifacts/serving/benchmark.json
+
+./result/bin/strix diagnose \
+  --validate-artifact artifacts/serving/benchmark.json
+```
+
+The report keeps these metrics separate:
+
+- Prefill throughput: actual uncached prefill tokens divided by server
+  prefill time.
+- TTFT: both scheduler-observed and client-observed time to first useful
+  streamed output.
+- Decode `tg`: completion tokens divided by server decode time.
+- ITL: scheduler-observed token-to-token latency; client SSE event spacing is
+  retained separately.
+- Whole-request throughput: actual prefill plus completion tokens divided by
+  client request wall time.
+- Aggregate throughput: summed useful tokens divided by the synchronized
+  C=1, C=2, or C=4 round span.
+
+Raw per-request samples and p50/p95/p99 summaries are retained. Endpoint hosts,
+prompt text, generated text, model paths, timestamps, and token IDs are never
+written to the artifact. `strix bench` remains the direct model-path
+microbenchmark; use this serving harness for TTFT, ITL, queueing, and
+concurrency decisions.
+
 ### Focused HIP benchmark
 
 List cases, then run the smallest relevant matrix:

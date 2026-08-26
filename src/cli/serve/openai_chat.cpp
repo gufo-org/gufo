@@ -749,6 +749,28 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
   json::Value prompt_details = json::Value::object();
   prompt_details["cached_tokens"] = result.cached_prompt_tokens;
   usage["prompt_tokens_details"] = std::move(prompt_details);
+
+  json::Value metrics = json::Value::object();
+  metrics["cache_hit"] = result.cache_hit;
+  metrics["prefill_tokens"] = result.prefill_tokens;
+  metrics["prefill_chunks"] = result.prefill_chunks;
+  metrics["active_decode_prefill_chunks"] = result.active_decode_prefill_chunks;
+  metrics["max_prefill_chunk_tokens"] = result.max_prefill_chunk_tokens;
+  metrics["queue_depth_at_submit"] = result.queue_depth_at_submit;
+  metrics["client_queue_depth_at_submit"] = result.client_queue_depth_at_submit;
+  metrics["resident_requests_at_admission"] =
+      result.resident_requests_at_admission;
+  metrics["requested_logical_concurrency"] =
+      result.requested_logical_concurrency;
+  metrics["physical_execution_width"] = result.physical_execution_width;
+  metrics["queue_ms"] = result.queue_ms;
+  metrics["prefill_ms"] = result.prefill_ms;
+  metrics["decode_ms"] = result.decode_ms;
+  metrics["ttft_ms"] = result.ttft_ms;
+  metrics["mean_inter_token_ms"] = result.mean_inter_token_ms;
+  metrics["max_inter_token_ms"] = result.max_inter_token_ms;
+  metrics["execution_plan"] = result.execution_plan;
+  usage["strix"] = std::move(metrics);
   return usage;
 }
 

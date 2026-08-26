@@ -148,6 +148,20 @@ Generated databases, traces, and replay reports are local artifacts and are
 not committed. See [Performance Engineering](PERFORMANCE.md) for commands and
 promotion rules.
 
+## Serving benchmark
+
+`tools/strix-serving-bench.py` is the canonical HTTP serving harness. It sends
+synchronized streamed Chat Completions requests at C=1, C=2, and C=4 by
+default. Its `strix.serving-benchmark.v1` artifact reports direct server-stage
+prefill/decode throughput, scheduler and client TTFT, token ITL, whole-request
+throughput, and aggregate concurrency throughput as distinct metrics.
+
+The harness consumes the terminal `usage.strix` metrics emitted by
+`strix serve llm`, retains every request and round sample, and summarizes
+median, p95, and p99 behavior. It embeds the canonical machine fingerprint and
+source revision while excluding endpoint hosts, prompts, generated text, local
+paths, raw token IDs, and timestamps.
+
 ## Machine Fingerprint & Artifact Binding
 
 All diagnostic and benchmark artifacts must embed a canonical machine fingerprint

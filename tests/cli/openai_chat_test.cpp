@@ -49,6 +49,20 @@ public:
     Result result;
     result.prompt_tokens = 7;
     result.cached_prompt_tokens = 5;
+    result.prefill_tokens = 2;
+    result.prefill_chunks = 1;
+    result.queue_depth_at_submit = 3;
+    result.client_queue_depth_at_submit = 1;
+    result.resident_requests_at_admission = 2;
+    result.requested_logical_concurrency = 4;
+    result.physical_execution_width = 2;
+    result.queue_ms = 1.25;
+    result.prefill_ms = 2.5;
+    result.decode_ms = 4.0;
+    result.ttft_ms = 3.75;
+    result.mean_inter_token_ms = 2.0;
+    result.max_inter_token_ms = 2.5;
+    result.execution_plan = "serial-fallback";
     result.cache_hit = true;
     for (const std::string& piece : pieces) {
       if ((is_cancelled && is_cancelled()) || (on_token && !on_token(piece))) {
@@ -191,6 +205,18 @@ void TestStreamingIsLive() {
          "Usage is emitted when requested");
   Expect(output.find(R"("cached_tokens":5)") != std::string::npos,
          "Usage reports transparently reused prompt tokens");
+  Expect(output.find(R"("prefill_tokens":2)") != std::string::npos,
+         "Usage reports actual prefill work");
+  Expect(output.find(R"("prefill_ms":2.5)") != std::string::npos,
+         "Usage reports server prefill time");
+  Expect(output.find(R"("decode_ms":4)") != std::string::npos,
+         "Usage reports server decode time");
+  Expect(
+      output.find(R"("requested_logical_concurrency":4)") != std::string::npos,
+      "Usage reports configured logical concurrency");
+  Expect(
+      output.find(R"("execution_plan":"serial-fallback")") != std::string::npos,
+      "Usage reports the executed serving plan");
   Expect(output.ends_with("data: [DONE]\n\n"),
          "Stream terminates with the OpenAI DONE sentinel");
 }

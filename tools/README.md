@@ -77,6 +77,7 @@ tools/strix-gguf.py --gguf artifacts/gguf/Qwen3.5-0.8B-Q4_K_M.gguf --recon \
 - `strix-quantize.py` — deterministic conversion (recipe + range/imatrix search)
 - `strix-mp-experiment.py` — quantize+bench sweep across presets (comparison table)
 - `strix-bench.py` — correctness-linked benchmark
+- `strix-serving-bench.py` — canonical C=1/C=2/C=4 HTTP serving benchmark
 - `strix-gguf.py` — GGUF header/tensor-info inspection + Q4-family dequant
   (`--card` model card, `--recon` per-tensor retention vs bf16 with our SHQ4
   stats merged from the quantization plan; see `benchmarks/qwen3.5-0.8b/`)
