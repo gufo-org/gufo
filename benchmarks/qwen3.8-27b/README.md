@@ -386,7 +386,7 @@ depth. Read the Q8 section for the current state of the engine.
 | Area | Retained | Rejected |
 | --- | --- | --- |
 | Projection | Shape-specific hipBLASLt plans and tuned decode GEMV | Blanket algorithm overrides and concurrent gate/up launches |
-| Exact small-batch Q8 projection | Shared-weight FP32 Q8_0/Q8_K kernels for physical C=2/C=4/C=8, with masked C=3/C=5/C=6 and structural C=1 fallback (`opt-c206-q8-small-batch`) | Standalone Q8_K-only promotion on the current Q8_K_XL artifact; the measured small-batch bottleneck dispatches Q8_0 |
+| Exact small-batch Q8 projection | Shared-weight FP32 Q8_0/Q8_K kernels for physical C=2/C=4/C=8, with masked C=3/C=5/C=6 and structural C=1 fallback (`opt-c206-q8-small-batch`) | Standalone Q8_K-only promotion on the current Q8_K_XL artifact; C=1 Q8_0 one-row/two-row specialization, four rows per wave, and eight-wave workgroups were neutral or regressive (`opt-c206-q8-c1`) |
 | DeltaNet | Two-lane persistent recurrence and SSM input replay | Four-lane recurrence |
 | Prefill attention | 64-key native tile, odd LDS stride, CK fallback | Head-major KV and lower-precision weighted-V accumulation |
 | Decode attention | Online softmax and 32-way split-K | Context-sized LDS scores and oversized GEMV launches |
@@ -397,6 +397,23 @@ depth. Read the Q8 section for the current state of the engine.
 | RMSNorm + projection input | Decode RMSNorm kernel + fused QKV/SSM-input/SwiGLU projection GEMVs | Norm folded into the projection GEMVs: bit-exact but every block redundantly re-normalizes the row, +9-21% per projection launch and ~9% decode regression (`opt-c010-rmsnorm-projection`) |
 | Layer prefetch | Single-stream decode; no prefetch | Async next-layer page-touch on a side stream: tg128 -1.6%, and the per-layer cross-stream join serializes the non-graph (split-K) decode path, ~4x regression at depth 4K/8K/16K (`opt-c014-layer-prefetch`) |
 | Speculation | Official DFlash2 graph and selector, transactional batched target verification, and exact GPU MTP verification policies | W8A8-only verification where it changes greedy output; small-batch dual gate/up despite a faster isolated GEMM because it regresses end-to-end throughput |
+
+### Rejected C=1 Q8 decode experiments
+
+The production C=1 route remains unchanged. All candidates were exact and used
+zero LDS and zero scratch/private bytes, but none produced a stable
+end-to-end improvement:
+
+| Candidate | Measured result | Decision |
+| --- | --- | --- |
+| Q8_0 SwiGLU, one row per wave | C=1, `tg128`: 7.15 -> 7.05 tok/s; hotspot +3.5% | Rejected: slower |
+| Type-specialized two-row Q8_0 SwiGLU | C=1, `tg128`: 7.15 -> 7.08-7.09 tok/s; hotspot +2.3% | Rejected: slower |
+| Type-specialized two-row Q8 projection | 4,904.32 versus 4,904.99 ms | Rejected: neutral |
+| Four Q8 projection rows per wave | C=1, `tg128`: 7.14 -> 6.90 tok/s; hotspot +13.7% | Rejected: slower |
+| Eight-wave Q8 projection workgroup | Projection stage: 4,907.39 -> 4,899.21 ms; total kernel time -0.05% | Rejected: noise with no stable end-to-end gain |
+
+Final production requalification measured C=1, `pp2048` at 557.91 tok/s and
+C=1, `tg128` at 7.15 tok/s.
 
 This table records only decisions that affect the current direction. Detailed
 profiling data belongs in issue discussions or local artifacts, not in this
@@ -413,6 +430,9 @@ they did not beat the unfused routes end-to-end on gfx1151.
   the physical-plan selector, then qualify useful tokens/s and per-request
   latency under real staggered server traffic before claiming arbitrary-width
   scheduling.
+- Revisit exact C=1 Q8 decode only with a materially different weight/data
+  layout or instruction path. Type specialization and workgroup/row-count
+  tuning moved the 128-token kernel timeline by at most 0.05% or regressed it.
 - Re-evaluate `opt-c010-ffn-swiglu` with a tiled fused gate/up GEMM + SwiGLU
   kernel (block-level K tiling and LDS staging, e.g. the decode
   `FastFusedSwiGLUGEMVBlockKernel` pattern) so prefill can compete with the
