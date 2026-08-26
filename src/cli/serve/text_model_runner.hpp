@@ -58,6 +58,11 @@ struct TextRunnerResourceClaim {
   bool requires_device_runtime_lock{false};
 };
 
+struct TextRunnerMeasuredResources {
+  std::optional<std::size_t> per_request_state_bytes;
+  std::optional<std::size_t> temporary_scratch_bytes;
+};
+
 struct TextPrefillStep {
   std::size_t consumed_tokens{0};
   bool decode_ready{false};
@@ -79,11 +84,28 @@ public:
   /// keep the default no-op behavior.
   virtual void SetCancellationCheck(const CancellationCheck&) {}
 
-  /// Actual request-state allocation when the provider can measure it.
-  [[nodiscard]] virtual std::optional<std::size_t> MeasuredStateBytes()
+  /// Actual request-owned allocations when the provider can measure them.
+  [[nodiscard]] virtual TextRunnerMeasuredResources MeasuredResources()
       const noexcept {
-    return std::nullopt;
+    return {};
   }
+};
+
+/// Immutable model-owned continuation payload.
+///
+/// Common serving code may account for the payload but must not inspect or
+/// reinterpret its bytes.
+class TextRunnerSnapshot {
+public:
+  TextRunnerSnapshot() = default;
+  virtual ~TextRunnerSnapshot() = default;
+
+  TextRunnerSnapshot(const TextRunnerSnapshot&) = delete;
+  TextRunnerSnapshot& operator=(const TextRunnerSnapshot&) = delete;
+  TextRunnerSnapshot(TextRunnerSnapshot&&) = delete;
+  TextRunnerSnapshot& operator=(TextRunnerSnapshot&&) = delete;
+
+  [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
 };
 
 struct TextRunnerAdvance {
@@ -130,6 +152,15 @@ public:
   virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
+
+  /// Captures an immutable exact continuation at CheckpointPosition(state).
+  ///
+  /// The default implementations fail explicitly for runners that do not
+  /// advertise the corresponding capabilities.
+  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const;
+  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> RestoreOrFork(
+      const TextRunnerSnapshot& snapshot) const;
 };
 
 /// Bounded pool of opaque runner states with exact-prefix continuation reuse.

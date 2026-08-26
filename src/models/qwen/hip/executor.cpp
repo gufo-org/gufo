@@ -108,6 +108,22 @@ void QwenGpuExecutor::Reset() noexcept {
   graph_executor_.Reset();
 }
 
+std::unique_ptr<QwenGpuSnapshot> QwenGpuExecutor::SaveSnapshot(
+    std::uint32_t valid_context) {
+  return arena_.SaveSnapshot(valid_context);
+}
+
+void QwenGpuExecutor::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
+  replaying_ssm_state_ = false;
+  next_token_.reset();
+  h_prompt_hidden_.clear();
+  h_verification_hidden_.clear();
+  h_last_hidden_.clear();
+  last_hidden_offset_ = 0;
+  arena_.RestoreSnapshot(snapshot);
+  graph_executor_.Reset();
+}
+
 void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
   replaying_ssm_state_ = false;
   arena_.SaveState(valid_context);

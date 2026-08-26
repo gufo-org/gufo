@@ -16,6 +16,21 @@ struct ValidatedRunner {
   std::vector<TextExecutionPlan> plans;
 };
 
+std::optional<std::size_t> PerStateReservationBytes(
+    const TextRunnerResourceClaim& resources) {
+  if (!resources.per_request_state_bytes.has_value() ||
+      !resources.temporary_scratch_bytes.has_value()) {
+    return std::nullopt;
+  }
+  if (*resources.per_request_state_bytes >
+      std::numeric_limits<std::size_t>::max() -
+          *resources.temporary_scratch_bytes) {
+    throw std::invalid_argument("text runner resource claim overflows");
+  }
+  return *resources.per_request_state_bytes +
+         *resources.temporary_scratch_bytes;
+}
+
 ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
                                std::size_t state_count) {
   if (runner == nullptr) {
@@ -36,11 +51,16 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
     throw std::invalid_argument(
         "text runner maximum context must be at least one token");
   }
+  if (descriptor.capabilities.fork && !descriptor.capabilities.snapshot) {
+    throw std::invalid_argument(
+        "text runner fork capability requires snapshot support");
+  }
 
   auto resources = runner->ResourceClaim();
+  const auto per_state_reservation = PerStateReservationBytes(resources);
   if (resources.state_capacity_bytes.has_value() &&
-      resources.per_request_state_bytes.has_value()) {
-    const std::size_t per_request = *resources.per_request_state_bytes;
+      per_state_reservation.has_value()) {
+    const std::size_t per_request = *per_state_reservation;
     const std::size_t capacity = *resources.state_capacity_bytes;
     if (per_request != 0 && state_count > capacity / per_request) {
       throw std::invalid_argument(
@@ -92,13 +112,18 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
 
 void ReconcileStateBytes(const TextRunnerResourceClaim& resources,
                          const TextRunnerState& state) {
-  const auto measured = state.MeasuredStateBytes();
-  if (!measured.has_value() || !resources.per_request_state_bytes.has_value()) {
-    return;
-  }
-  if (*measured > *resources.per_request_state_bytes) {
+  const auto measured = state.MeasuredResources();
+  if (measured.per_request_state_bytes.has_value() &&
+      resources.per_request_state_bytes.has_value() &&
+      *measured.per_request_state_bytes > *resources.per_request_state_bytes) {
     throw std::runtime_error(
         "text runner measured state exceeds its resource claim");
+  }
+  if (measured.temporary_scratch_bytes.has_value() &&
+      resources.temporary_scratch_bytes.has_value() &&
+      *measured.temporary_scratch_bytes > *resources.temporary_scratch_bytes) {
+    throw std::runtime_error(
+        "text runner measured scratch exceeds its resource claim");
   }
 }
 
@@ -115,6 +140,16 @@ void TextModelRunner::AdvanceBatch(
   for (const auto& advance : advances) {
     Advance(advance.state.get(), advance.token);
   }
+}
+
+std::unique_ptr<TextRunnerSnapshot> TextModelRunner::Snapshot(
+    const TextRunnerState&) const {
+  throw std::logic_error("text runner does not support snapshots");
+}
+
+std::unique_ptr<TextRunnerState> TextModelRunner::RestoreOrFork(
+    const TextRunnerSnapshot&) const {
+  throw std::logic_error("text runner does not support snapshot restore/fork");
 }
 
 struct TextRunnerPool::Impl {

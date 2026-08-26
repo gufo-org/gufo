@@ -1,5 +1,6 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <cstdlib>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -194,6 +195,17 @@ QwenGpuModel::QwenGpuModel(
 
 QwenGpuModel::~QwenGpuModel() {
   ReleaseWeightRegions(weight_regions_);
+}
+
+std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
+  std::size_t total = 0;
+  for (const auto& region : weight_regions_) {
+    if (region.size > std::numeric_limits<std::size_t>::max() - total) {
+      return std::numeric_limits<std::size_t>::max();
+    }
+    total += region.size;
+  }
+  return total;
 }
 
 std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(

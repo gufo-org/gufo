@@ -115,6 +115,19 @@ public:
     frontier_.reset();
   }
 
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
+      const noexcept override {
+    try {
+      const auto usage = executor_->GetMemoryUsage();
+      return {
+          .per_request_state_bytes = usage.request_state_bytes,
+          .temporary_scratch_bytes = usage.temporary_scratch_bytes,
+      };
+    } catch (...) {
+      return {};
+    }
+  }
+
   [[nodiscard]] hip::QwenGpuExecutor& executor() const { return *executor_; }
   [[nodiscard]] std::size_t position() const noexcept { return position_; }
   void set_position(std::size_t position) noexcept { position_ = position; }
@@ -128,6 +141,27 @@ private:
   std::unique_ptr<hip::QwenGpuExecutor> executor_;
   std::size_t position_{0};
   std::optional<TextRunnerToken> frontier_;
+};
+
+class QwenTextRunnerSnapshot final : public TextRunnerSnapshot {
+public:
+  QwenTextRunnerSnapshot(std::shared_ptr<const hip::QwenGpuModel> model,
+                         std::unique_ptr<hip::QwenGpuSnapshot> snapshot,
+                         std::size_t position,
+                         std::optional<TextRunnerToken> frontier)
+      : model(std::move(model)),
+        snapshot(std::move(snapshot)),
+        position(position),
+        frontier(frontier) {}
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
+    return snapshot != nullptr ? snapshot->PayloadBytes() : 0;
+  }
+
+  std::shared_ptr<const hip::QwenGpuModel> model;
+  std::unique_ptr<hip::QwenGpuSnapshot> snapshot;
+  std::size_t position;
+  std::optional<TextRunnerToken> frontier;
 };
 
 QwenTextRunnerState& RequireQwenState(TextRunnerState& state) {
@@ -160,18 +194,26 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = false,
-                .fork = false,
+                .snapshot = true,
+                .fork = true,
             },
     };
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    const auto usage = hip::QwenGpuExecutor::EstimateMemoryUsage(
+        model_->GetConfig(), max_context_);
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      capacity = free_bytes;
+    }
     return {
-        .resident_weights_bytes = std::nullopt,
-        .state_capacity_bytes = std::nullopt,
-        .per_request_state_bytes = std::nullopt,
-        .temporary_scratch_bytes = std::nullopt,
+        .resident_weights_bytes = model_->GetResidentBytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = usage.request_state_bytes,
+        .temporary_scratch_bytes = usage.temporary_scratch_bytes,
         .requires_device_runtime_lock = true,
     };
   }
@@ -328,6 +370,37 @@ public:
     return RequireQwenState(state).position();
   }
 
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const override {
+    const auto& qwen = RequireQwenState(state);
+    if (!qwen.frontier().has_value()) {
+      throw std::logic_error("Qwen state has no exact frontier to snapshot");
+    }
+    return std::make_unique<QwenTextRunnerSnapshot>(
+        model_,
+        qwen.executor().SaveSnapshot(
+            static_cast<std::uint32_t>(qwen.position())),
+        qwen.position(), qwen.frontier());
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> RestoreOrFork(
+      const TextRunnerSnapshot& snapshot) const override {
+    const auto* qwen_snapshot =
+        dynamic_cast<const QwenTextRunnerSnapshot*>(&snapshot);
+    if (qwen_snapshot == nullptr ||
+        qwen_snapshot->model.get() != model_.get() ||
+        qwen_snapshot->snapshot == nullptr ||
+        !qwen_snapshot->frontier.has_value()) {
+      throw std::invalid_argument(
+          "Qwen snapshot does not belong to this model");
+    }
+    auto restored = std::make_unique<QwenTextRunnerState>(model_, max_context_);
+    restored->executor().RestoreSnapshot(*qwen_snapshot->snapshot);
+    restored->set_position(qwen_snapshot->position);
+    restored->set_frontier(*qwen_snapshot->frontier);
+    return restored;
+  }
+
 private:
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::uint32_t max_context_;
@@ -451,14 +524,17 @@ public:
     position_ = 0;
   }
 
-  [[nodiscard]] std::optional<std::size_t> MeasuredStateBytes()
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
     const std::uint64_t bytes = session_->PayloadBytes();
     if (bytes == 0 || bytes > static_cast<std::uint64_t>(
                                   std::numeric_limits<std::size_t>::max())) {
-      return std::nullopt;
+      return {};
     }
-    return static_cast<std::size_t>(bytes);
+    return {
+        .per_request_state_bytes = static_cast<std::size_t>(bytes),
+        .temporary_scratch_bytes = std::nullopt,
+    };
   }
 
   [[nodiscard]] models::deepseek_v4_flash::Session& session() const {
@@ -470,6 +546,30 @@ public:
 private:
   std::unique_ptr<models::deepseek_v4_flash::Session> session_;
   std::size_t position_{0};
+};
+
+class DeepSeekTextRunnerSnapshot final : public TextRunnerSnapshot {
+public:
+  DeepSeekTextRunnerSnapshot(
+      std::shared_ptr<models::deepseek_v4_flash::Model> model,
+      std::unique_ptr<models::deepseek_v4_flash::SessionSnapshot> snapshot,
+      std::size_t position)
+      : model(std::move(model)),
+        snapshot(std::move(snapshot)),
+        position(position) {}
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
+    if (snapshot == nullptr ||
+        snapshot->SizeBytes() > static_cast<std::uint64_t>(
+                                    std::numeric_limits<std::size_t>::max())) {
+      return 0;
+    }
+    return static_cast<std::size_t>(snapshot->SizeBytes());
+  }
+
+  std::shared_ptr<models::deepseek_v4_flash::Model> model;
+  std::unique_ptr<models::deepseek_v4_flash::SessionSnapshot> snapshot;
+  std::size_t position;
 };
 
 DeepSeekTextRunnerState& RequireDeepSeekState(TextRunnerState& state) {
@@ -503,8 +603,8 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = false,
-                .fork = false,
+                .snapshot = true,
+                .fork = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
             },
@@ -655,6 +755,39 @@ public:
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
     return RequireDeepSeekState(state).position();
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const override {
+    const auto& deepseek = RequireDeepSeekState(state);
+    std::string error;
+    auto snapshot = deepseek.session().SaveSnapshot(&error);
+    if (snapshot == nullptr) {
+      throw std::runtime_error("DeepSeek snapshot failed: " + error);
+    }
+    return std::make_unique<DeepSeekTextRunnerSnapshot>(
+        model_, std::move(snapshot), deepseek.position());
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> RestoreOrFork(
+      const TextRunnerSnapshot& snapshot) const override {
+    const auto* deepseek_snapshot =
+        dynamic_cast<const DeepSeekTextRunnerSnapshot*>(&snapshot);
+    if (deepseek_snapshot == nullptr ||
+        deepseek_snapshot->model.get() != model_.get() ||
+        deepseek_snapshot->snapshot == nullptr) {
+      throw std::invalid_argument(
+          "DeepSeek snapshot does not belong to this model");
+    }
+    auto restored =
+        std::make_unique<DeepSeekTextRunnerState>(model_, max_context_);
+    std::string error;
+    if (!restored->session().RestoreSnapshot(*deepseek_snapshot->snapshot,
+                                             &error)) {
+      throw std::runtime_error("DeepSeek snapshot restore failed: " + error);
+    }
+    restored->set_position(deepseek_snapshot->position);
+    return restored;
   }
 
 private:

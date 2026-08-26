@@ -73,6 +73,31 @@ int main(int argc, const char* const* argv) {
 
     const std::string raw_prompt = "The capital of France is";
     const auto raw_prompt_tokens = model->GetTokenizer().Encode(raw_prompt);
+
+    {
+      auto snapshot_source =
+          strix::hip::QwenGpuExecutor::Create(model, &error, context);
+      Expect(snapshot_source != nullptr, error);
+      const auto frontier =
+          snapshot_source->ForwardPromptBatch(raw_prompt_tokens);
+      auto snapshot = snapshot_source->SaveSnapshot(
+          static_cast<std::uint32_t>(raw_prompt_tokens.size()));
+      Expect(snapshot != nullptr && snapshot->PayloadBytes() > 0,
+             "Qwen snapshot must own an accounted payload");
+      const auto uninterrupted = snapshot_source->ForwardToken(
+          frontier, static_cast<std::uint32_t>(raw_prompt_tokens.size()));
+
+      for (int fork_index = 0; fork_index < 2; ++fork_index) {
+        auto fork = strix::hip::QwenGpuExecutor::Create(model, &error, context);
+        Expect(fork != nullptr, error);
+        fork->RestoreSnapshot(*snapshot);
+        const auto forked = fork->ForwardToken(
+            frontier, static_cast<std::uint32_t>(raw_prompt_tokens.size()));
+        Expect(forked == uninterrupted,
+               "Qwen snapshot fork differs from uninterrupted execution");
+      }
+    }
+
     const auto direct_raw = GenerateDirect(*direct, raw_prompt_tokens, 2);
     const auto http_raw = backend.complete(raw_prompt, 2, 0.0F);
     Expect(http_raw.tokens == direct_raw,

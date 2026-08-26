@@ -52,6 +52,15 @@ struct QwenGpuWeightRegion {
   bool host_registered{false};
 };
 
+struct QwenGpuMemoryUsage {
+  std::size_t request_state_bytes{0};
+  std::size_t temporary_scratch_bytes{0};
+
+  [[nodiscard]] std::size_t TotalBytes() const noexcept {
+    return request_state_bytes + temporary_scratch_bytes;
+  }
+};
+
 /// Immutable GPU-visible Qwen model resources shared by executor sessions.
 class QwenGpuModel {
 public:
@@ -83,6 +92,7 @@ public:
   [[nodiscard]] std::size_t GetWeightRegionCount() const noexcept {
     return weight_regions_.size();
   }
+  [[nodiscard]] std::size_t GetResidentBytes() const noexcept;
 
 private:
   // Keep the mapped GGUF storage alive until every registered region is
@@ -91,6 +101,40 @@ private:
   models::QwenModelWeights weights_;
   std::shared_ptr<const tokenization::QwenTokenizer> tokenizer_;
   std::vector<QwenGpuWeightRegion> weight_regions_;
+};
+
+class QwenGpuSnapshot final {
+public:
+  ~QwenGpuSnapshot();
+
+  QwenGpuSnapshot(const QwenGpuSnapshot&) = delete;
+  QwenGpuSnapshot& operator=(const QwenGpuSnapshot&) = delete;
+  QwenGpuSnapshot(QwenGpuSnapshot&&) = delete;
+  QwenGpuSnapshot& operator=(QwenGpuSnapshot&&) = delete;
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept {
+    return payload_bytes_;
+  }
+  [[nodiscard]] std::uint32_t ValidContext() const noexcept {
+    return valid_context_;
+  }
+
+private:
+  QwenGpuSnapshot() = default;
+
+  void* d_kv_f32_{nullptr};
+  void* d_kv_f16_{nullptr};
+  void* d_ssm_conv_{nullptr};
+  void* d_ssm_deltanet_{nullptr};
+  std::size_t kv_elements_per_plane_{0};
+  std::size_t conv_elements_{0};
+  std::size_t deltanet_elements_{0};
+  std::uint32_t attention_layers_{0};
+  std::uint32_t kv_width_{0};
+  std::uint32_t valid_context_{0};
+  std::size_t payload_bytes_{0};
+
+  friend class QwenGpuArena;
 };
 
 /// Shared decode-lifetime workspaces over stable arena allocations.
@@ -233,6 +277,12 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }
+  [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
+      const core::ModelConfig& config, std::uint32_t max_context);
+  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
+  [[nodiscard]] std::unique_ptr<QwenGpuSnapshot> SaveSnapshot(
+      std::uint32_t valid_context);
+  void RestoreSnapshot(const QwenGpuSnapshot& snapshot);
   [[nodiscard]] QwenGpuScratchView GetScratchView(
       std::size_t batch_size = 1) noexcept;
   void SetTargetLayerCapture(std::span<const std::uint32_t> target_layer_ids);
@@ -379,6 +429,16 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return arena_.GetMaxContext();
   }
+  [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
+      const core::ModelConfig& config, std::uint32_t max_context) {
+    return QwenGpuArena::EstimateMemoryUsage(config, max_context);
+  }
+  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const {
+    return arena_.GetMemoryUsage();
+  }
+  [[nodiscard]] std::unique_ptr<QwenGpuSnapshot> SaveSnapshot(
+      std::uint32_t valid_context);
+  void RestoreSnapshot(const QwenGpuSnapshot& snapshot);
 
   /// Resets GPU cache and recurrent states in the arena.
   void Reset() noexcept;

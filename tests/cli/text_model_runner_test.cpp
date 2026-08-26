@@ -24,8 +24,10 @@ using strix::server::TextPrefillStep;
 using strix::server::TextRunnerAdvance;
 using strix::server::TextRunnerCapabilities;
 using strix::server::TextRunnerDescriptor;
+using strix::server::TextRunnerMeasuredResources;
 using strix::server::TextRunnerPool;
 using strix::server::TextRunnerResourceClaim;
+using strix::server::TextRunnerSnapshot;
 using strix::server::TextRunnerState;
 using strix::server::TextRunnerToken;
 
@@ -66,9 +68,12 @@ public:
     frontier.reset();
   }
 
-  [[nodiscard]] std::optional<std::size_t> MeasuredStateBytes()
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
-    return measured_bytes_;
+    return {
+        .per_request_state_bytes = measured_bytes_,
+        .temporary_scratch_bytes = 16,
+    };
   }
 
   std::size_t position{0};
@@ -96,7 +101,7 @@ const FakeState& RequireFakeState(const TextRunnerState& state) {
   return *fake;
 }
 
-class FakeRunner final : public TextModelRunner {
+class FakeRunner : public TextModelRunner {
 public:
   FakeRunner(std::shared_ptr<FakeStats> stats, std::size_t measured_bytes = 64,
              std::size_t state_capacity_bytes = 256)
@@ -121,7 +126,7 @@ public:
         .resident_weights_bytes = std::nullopt,
         .state_capacity_bytes = state_capacity_bytes_,
         .per_request_state_bytes = 64,
-        .temporary_scratch_bytes = std::nullopt,
+        .temporary_scratch_bytes = 16,
         .requires_device_runtime_lock = false,
     };
   }
@@ -366,7 +371,7 @@ void TestResourceClaimsAreValidatedBeforeAllocation() {
   auto stats = std::make_shared<FakeStats>();
   bool rejected = false;
   try {
-    auto runner = std::make_shared<FakeRunner>(stats, 64, 64);
+    auto runner = std::make_shared<FakeRunner>(stats, 64, 159);
     TextRunnerPool pool(runner, 2);
   } catch (const std::invalid_argument&) {
     rejected = true;
@@ -374,6 +379,67 @@ void TestResourceClaimsAreValidatedBeforeAllocation() {
   Expect(rejected, "aggregate request-state claim must fit capacity");
   Expect(stats->states_created == 0,
          "invalid resource claim is rejected before state allocation");
+}
+
+class FakeSnapshot final : public TextRunnerSnapshot {
+public:
+  explicit FakeSnapshot(std::size_t position) : position(position) {}
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
+    return sizeof(position);
+  }
+
+  std::size_t position;
+};
+
+class SnapshotRunner final : public FakeRunner {
+public:
+  using FakeRunner::FakeRunner;
+
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = FakeRunner::Descriptor();
+    descriptor.capabilities.snapshot = true;
+    descriptor.capabilities.fork = true;
+    return descriptor;
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const override {
+    return std::make_unique<FakeSnapshot>(RequireFakeState(state).position);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> RestoreOrFork(
+      const TextRunnerSnapshot& snapshot) const override {
+    const auto* fake = dynamic_cast<const FakeSnapshot*>(&snapshot);
+    if (fake == nullptr) {
+      throw std::invalid_argument("snapshot type mismatch");
+    }
+    auto state = CreateState();
+    RequireFakeState(*state).position = fake->position;
+    return state;
+  }
+};
+
+void TestSnapshotForkAndUnsupportedCapabilities() {
+  auto stats = std::make_shared<FakeStats>();
+  SnapshotRunner runner(stats);
+  auto state = runner.CreateState();
+  RequireFakeState(*state).position = 7;
+  auto snapshot = runner.Snapshot(*state);
+  Expect(snapshot != nullptr && snapshot->PayloadBytes() == sizeof(std::size_t),
+         "snapshot reports its opaque payload bytes");
+  auto fork = runner.RestoreOrFork(*snapshot);
+  Expect(RequireFakeState(*fork).position == 7,
+         "fork restores the exact runner-owned boundary");
+
+  FakeRunner unsupported(stats);
+  bool snapshot_rejected = false;
+  try {
+    (void)unsupported.Snapshot(*state);
+  } catch (const std::logic_error&) {
+    snapshot_rejected = true;
+  }
+  Expect(snapshot_rejected, "unsupported snapshots fail explicitly");
 }
 
 void TestMeasuredStateIsReconciledWithClaim() {
@@ -398,6 +464,7 @@ int main() {
   TestRequestBindsAndClearsCancellation();
   TestBatchedAdvancePreservesIndependentRequests();
   TestResourceClaimsAreValidatedBeforeAllocation();
+  TestSnapshotForkAndUnsupportedCapabilities();
   TestMeasuredStateIsReconciledWithClaim();
   std::cout << "All text model runner tests passed\n";
   return 0;

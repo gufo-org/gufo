@@ -1,5 +1,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <limits>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 
@@ -14,7 +16,326 @@ namespace {
 constexpr std::uint32_t kMaxPromptBatch = 4096;
 constexpr std::size_t kMaxTargetLayerTaps = 5;
 
+std::size_t CheckedMultiply(std::size_t left, std::size_t right) {
+  if (left != 0 && right > std::numeric_limits<std::size_t>::max() / left) {
+    throw std::overflow_error("Qwen GPU allocation size overflows");
+  }
+  return left * right;
+}
+
+std::size_t CheckedSum(std::size_t left, std::size_t right) {
+  if (right > std::numeric_limits<std::size_t>::max() - left) {
+    throw std::overflow_error("Qwen GPU allocation total overflows");
+  }
+  return left + right;
+}
+
+void CheckedAdd(std::size_t value, std::size_t* total) {
+  *total = CheckedSum(*total, value);
+}
+
+void AddAllocation(std::size_t elements, std::size_t element_bytes,
+                   std::size_t* total) {
+  CheckedAdd(CheckedMultiply(elements, element_bytes), total);
+}
+
+void ThrowOnHipError(hipError_t error, std::string_view operation) {
+  if (error != hipSuccess) {
+    throw std::runtime_error(std::string(operation) + ": " +
+                             hipGetErrorString(error));
+  }
+}
+
 }  // namespace
+
+QwenGpuSnapshot::~QwenGpuSnapshot() {
+  if (d_kv_f32_ != nullptr) {
+    (void)hipFree(d_kv_f32_);
+  }
+  if (d_kv_f16_ != nullptr) {
+    (void)hipFree(d_kv_f16_);
+  }
+  if (d_ssm_conv_ != nullptr) {
+    (void)hipFree(d_ssm_conv_);
+  }
+  if (d_ssm_deltanet_ != nullptr) {
+    (void)hipFree(d_ssm_deltanet_);
+  }
+}
+
+QwenGpuMemoryUsage QwenGpuArena::EstimateMemoryUsage(
+    const core::ModelConfig& config, std::uint32_t max_context) {
+  const std::size_t context = std::max(max_context, 1U);
+  const std::size_t batch = std::min<std::size_t>(context, kMaxPromptBatch);
+  const std::size_t hidden = config.hidden_size;
+  const std::size_t intermediate = config.intermediate_size;
+  const std::size_t attention = config.AttentionSize();
+  const std::size_t kv =
+      CheckedMultiply(config.num_key_value_heads, config.head_dim);
+  const std::size_t q_projection = CheckedMultiply(2, attention);
+  const std::size_t ssm_qkv = config.SsmQkvSize();
+  const std::size_t recurrent =
+      std::max<std::size_t>(attention, config.ssm_inner_size);
+  const std::size_t projection = std::max(q_projection, ssm_qkv);
+  const std::size_t time_step = config.ssm_time_step_rank;
+
+  QwenGpuMemoryUsage usage;
+  auto& scratch = usage.temporary_scratch_bytes;
+  AddAllocation(CheckedMultiply(batch, hidden), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, hidden), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, attention), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, kv), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, kv), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, hidden), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, intermediate), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, intermediate), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, intermediate), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, hidden), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, projection), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, ssm_qkv), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, recurrent), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, recurrent), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, time_step), sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(batch, time_step), sizeof(float), &scratch);
+  AddAllocation(
+      CheckedMultiply(CheckedMultiply(batch, config.ssm_group_count), 3),
+      sizeof(float), &scratch);
+  AddAllocation(CheckedMultiply(CheckedMultiply(batch, time_step), 2),
+                sizeof(float), &scratch);
+  AddAllocation(config.vocab_size, sizeof(float), &scratch);
+  AddAllocation(std::max<std::size_t>(batch, 2), sizeof(std::uint32_t),
+                &scratch);
+  AddAllocation(CheckedMultiply(kMaxTargetLayerTaps, hidden), sizeof(float),
+                &scratch);
+
+  const std::size_t maximum_scratch_width = std::max<std::size_t>(
+      {intermediate, hidden, projection,
+       CheckedSum(ssm_qkv, CheckedSum(config.ssm_inner_size,
+                                      CheckedMultiply(2, time_step)))});
+  const std::size_t scratch_elements =
+      CheckedMultiply(batch, maximum_scratch_width);
+  AddAllocation(scratch_elements, sizeof(hip_bfloat16), &scratch);
+
+  const std::size_t q8_rows = CheckedMultiply((batch + 15) / 16, 16);
+  const std::size_t q8_row_elements = scratch_elements / batch;
+  const std::size_t q8_elements = CheckedMultiply(q8_rows, q8_row_elements);
+  const std::size_t q8_blocks = (q8_elements + 31) / 32;
+  CheckedAdd(CheckedMultiply(CheckedMultiply(q8_blocks, sizeof(float)), 9),
+             &scratch);
+  CheckedAdd(4096, &scratch);
+
+  AddAllocation(detail::DecodeAttentionScratchElements(
+                    config.num_attention_heads, config.head_dim),
+                sizeof(float), &scratch);
+
+  const std::size_t maximum_weight_width =
+      std::max<std::size_t>({q_projection, kv, attention, intermediate, ssm_qkv,
+                             config.ssm_inner_size, time_step});
+  const std::size_t maximum_weight =
+      CheckedMultiply(hidden, maximum_weight_width);
+  AddAllocation(maximum_weight, sizeof(hip_bfloat16), &scratch);
+  AddAllocation(maximum_weight, sizeof(hip_bfloat16), &scratch);
+
+  const std::size_t attention_elements = CheckedMultiply(batch, attention);
+  AddAllocation(attention_elements, sizeof(std::uint16_t), &scratch);
+  AddAllocation(attention_elements, sizeof(std::uint16_t), &scratch);
+  AddAllocation(attention_elements, sizeof(float), &scratch);
+  const std::size_t lse_elements =
+      CheckedMultiply(batch, config.num_attention_heads);
+  AddAllocation(lse_elements, sizeof(float), &scratch);
+  AddAllocation(lse_elements, sizeof(float), &scratch);
+
+  auto& state = usage.request_state_bytes;
+  const std::size_t total_kv = CheckedMultiply(
+      CheckedMultiply(CheckedMultiply(config.FullAttentionLayerCount(), kv),
+                      context),
+      1);
+  AddAllocation(CheckedMultiply(total_kv, 2), sizeof(float), &state);
+  AddAllocation(CheckedMultiply(total_kv, 2), sizeof(std::uint16_t), &state);
+
+  const std::size_t total_conv = CheckedMultiply(
+      CheckedMultiply(config.num_layers, ssm_qkv), config.ssm_conv_kernel);
+  AddAllocation(total_conv, sizeof(float), &state);
+  const std::size_t total_deltanet = CheckedMultiply(
+      CheckedMultiply(CheckedMultiply(config.num_layers, time_step),
+                      config.ssm_state_size),
+      config.SsmValueSize());
+  AddAllocation(total_deltanet, sizeof(float), &state);
+  return usage;
+}
+
+QwenGpuMemoryUsage QwenGpuArena::GetMemoryUsage() const {
+  return EstimateMemoryUsage(config_, max_context_);
+}
+
+std::unique_ptr<QwenGpuSnapshot> QwenGpuArena::SaveSnapshot(
+    std::uint32_t valid_context) {
+  if (valid_context > max_context_) {
+    throw std::length_error("Qwen snapshot exceeds the context length");
+  }
+
+  auto snapshot = std::unique_ptr<QwenGpuSnapshot>(new QwenGpuSnapshot());
+  snapshot->attention_layers_ = config_.FullAttentionLayerCount();
+  snapshot->kv_width_ = config_.num_key_value_heads * config_.head_dim;
+  snapshot->valid_context_ = valid_context;
+  snapshot->kv_elements_per_plane_ = CheckedMultiply(
+      CheckedMultiply(snapshot->attention_layers_, valid_context),
+      snapshot->kv_width_);
+  snapshot->conv_elements_ =
+      CheckedMultiply(CheckedMultiply(config_.num_layers, config_.SsmQkvSize()),
+                      config_.ssm_conv_kernel);
+  snapshot->deltanet_elements_ = CheckedMultiply(
+      CheckedMultiply(
+          CheckedMultiply(config_.num_layers, config_.ssm_time_step_rank),
+          config_.ssm_state_size),
+      config_.SsmValueSize());
+
+  const std::size_t kv_f32_bytes = CheckedMultiply(
+      CheckedMultiply(snapshot->kv_elements_per_plane_, 2), sizeof(float));
+  const std::size_t kv_f16_bytes =
+      CheckedMultiply(CheckedMultiply(snapshot->kv_elements_per_plane_, 2),
+                      sizeof(std::uint16_t));
+  const std::size_t conv_bytes =
+      CheckedMultiply(snapshot->conv_elements_, sizeof(float));
+  const std::size_t deltanet_bytes =
+      CheckedMultiply(snapshot->deltanet_elements_, sizeof(float));
+  CheckedAdd(kv_f32_bytes, &snapshot->payload_bytes_);
+  CheckedAdd(kv_f16_bytes, &snapshot->payload_bytes_);
+  CheckedAdd(conv_bytes, &snapshot->payload_bytes_);
+  CheckedAdd(deltanet_bytes, &snapshot->payload_bytes_);
+
+  if (kv_f32_bytes != 0) {
+    ThrowOnHipError(hipMalloc(&snapshot->d_kv_f32_, kv_f32_bytes),
+                    "failed to allocate Qwen FP32 snapshot KV");
+    ThrowOnHipError(hipMalloc(&snapshot->d_kv_f16_, kv_f16_bytes),
+                    "failed to allocate Qwen FP16 snapshot KV");
+  }
+  ThrowOnHipError(hipMalloc(&snapshot->d_ssm_conv_, conv_bytes),
+                  "failed to allocate Qwen convolution snapshot");
+  ThrowOnHipError(hipMalloc(&snapshot->d_ssm_deltanet_, deltanet_bytes),
+                  "failed to allocate Qwen DeltaNet snapshot");
+
+  const std::size_t live_layer_elements =
+      CheckedMultiply(max_context_, snapshot->kv_width_);
+  const std::size_t snapshot_layer_elements =
+      CheckedMultiply(valid_context, snapshot->kv_width_);
+  const std::size_t live_plane_elements =
+      CheckedMultiply(snapshot->attention_layers_, live_layer_elements);
+  for (std::size_t layer = 0; layer < snapshot->attention_layers_; ++layer) {
+    const std::size_t live_offset = layer * live_layer_elements;
+    const std::size_t compact_offset = layer * snapshot_layer_elements;
+    const std::size_t layer_f32_bytes = snapshot_layer_elements * sizeof(float);
+    const std::size_t layer_f16_bytes =
+        snapshot_layer_elements * sizeof(std::uint16_t);
+    auto* compact_f32 = static_cast<float*>(snapshot->d_kv_f32_);
+    auto* compact_f16 = static_cast<std::uint16_t*>(snapshot->d_kv_f16_);
+    const auto* live_f16 =
+        static_cast<const std::uint16_t*>(d_attention_kv_f16);
+    if (layer_f32_bytes != 0) {
+      ThrowOnHipError(
+          hipMemcpyAsync(compact_f32 + compact_offset, d_kv_cache + live_offset,
+                         layer_f32_bytes, hipMemcpyDeviceToDevice, stream),
+          "failed to capture Qwen K snapshot");
+      ThrowOnHipError(
+          hipMemcpyAsync(
+              compact_f32 + snapshot->kv_elements_per_plane_ + compact_offset,
+              d_kv_cache + live_plane_elements + live_offset, layer_f32_bytes,
+              hipMemcpyDeviceToDevice, stream),
+          "failed to capture Qwen V snapshot");
+      ThrowOnHipError(
+          hipMemcpyAsync(compact_f16 + compact_offset, live_f16 + live_offset,
+                         layer_f16_bytes, hipMemcpyDeviceToDevice, stream),
+          "failed to capture Qwen FP16 K snapshot");
+      ThrowOnHipError(
+          hipMemcpyAsync(
+              compact_f16 + snapshot->kv_elements_per_plane_ + compact_offset,
+              live_f16 + live_plane_elements + live_offset, layer_f16_bytes,
+              hipMemcpyDeviceToDevice, stream),
+          "failed to capture Qwen FP16 V snapshot");
+    }
+  }
+  ThrowOnHipError(hipMemcpyAsync(snapshot->d_ssm_conv_, d_ssm_conv_state,
+                                 conv_bytes, hipMemcpyDeviceToDevice, stream),
+                  "failed to capture Qwen convolution snapshot");
+  ThrowOnHipError(
+      hipMemcpyAsync(snapshot->d_ssm_deltanet_, d_ssm_deltanet_state,
+                     deltanet_bytes, hipMemcpyDeviceToDevice, stream),
+      "failed to capture Qwen DeltaNet snapshot");
+  ThrowOnHipError(hipStreamSynchronize(stream),
+                  "failed to synchronize Qwen snapshot");
+  return snapshot;
+}
+
+void QwenGpuArena::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
+  const std::uint32_t attention_layers = config_.FullAttentionLayerCount();
+  const std::uint32_t kv_width = config_.num_key_value_heads * config_.head_dim;
+  const std::size_t conv_elements =
+      CheckedMultiply(CheckedMultiply(config_.num_layers, config_.SsmQkvSize()),
+                      config_.ssm_conv_kernel);
+  const std::size_t deltanet_elements = CheckedMultiply(
+      CheckedMultiply(
+          CheckedMultiply(config_.num_layers, config_.ssm_time_step_rank),
+          config_.ssm_state_size),
+      config_.SsmValueSize());
+  if (snapshot.valid_context_ > max_context_ ||
+      snapshot.attention_layers_ != attention_layers ||
+      snapshot.kv_width_ != kv_width ||
+      snapshot.conv_elements_ != conv_elements ||
+      snapshot.deltanet_elements_ != deltanet_elements) {
+    throw std::invalid_argument("Qwen snapshot is incompatible with the arena");
+  }
+
+  Reset();
+  const std::size_t live_layer_elements =
+      CheckedMultiply(max_context_, snapshot.kv_width_);
+  const std::size_t snapshot_layer_elements =
+      CheckedMultiply(snapshot.valid_context_, snapshot.kv_width_);
+  const std::size_t live_plane_elements =
+      CheckedMultiply(snapshot.attention_layers_, live_layer_elements);
+  for (std::size_t layer = 0; layer < snapshot.attention_layers_; ++layer) {
+    const std::size_t live_offset = layer * live_layer_elements;
+    const std::size_t compact_offset = layer * snapshot_layer_elements;
+    const std::size_t layer_f32_bytes = snapshot_layer_elements * sizeof(float);
+    const std::size_t layer_f16_bytes =
+        snapshot_layer_elements * sizeof(std::uint16_t);
+    const auto* compact_f32 = static_cast<const float*>(snapshot.d_kv_f32_);
+    const auto* compact_f16 =
+        static_cast<const std::uint16_t*>(snapshot.d_kv_f16_);
+    auto* live_f16 = static_cast<std::uint16_t*>(d_attention_kv_f16);
+    if (layer_f32_bytes != 0) {
+      ThrowOnHipError(
+          hipMemcpyAsync(d_kv_cache + live_offset, compact_f32 + compact_offset,
+                         layer_f32_bytes, hipMemcpyDeviceToDevice, stream),
+          "failed to restore Qwen K snapshot");
+      ThrowOnHipError(
+          hipMemcpyAsync(
+              d_kv_cache + live_plane_elements + live_offset,
+              compact_f32 + snapshot.kv_elements_per_plane_ + compact_offset,
+              layer_f32_bytes, hipMemcpyDeviceToDevice, stream),
+          "failed to restore Qwen V snapshot");
+      ThrowOnHipError(
+          hipMemcpyAsync(live_f16 + live_offset, compact_f16 + compact_offset,
+                         layer_f16_bytes, hipMemcpyDeviceToDevice, stream),
+          "failed to restore Qwen FP16 K snapshot");
+      ThrowOnHipError(
+          hipMemcpyAsync(
+              live_f16 + live_plane_elements + live_offset,
+              compact_f16 + snapshot.kv_elements_per_plane_ + compact_offset,
+              layer_f16_bytes, hipMemcpyDeviceToDevice, stream),
+          "failed to restore Qwen FP16 V snapshot");
+    }
+  }
+  ThrowOnHipError(hipMemcpyAsync(d_ssm_conv_state, snapshot.d_ssm_conv_,
+                                 snapshot.conv_elements_ * sizeof(float),
+                                 hipMemcpyDeviceToDevice, stream),
+                  "failed to restore Qwen convolution snapshot");
+  ThrowOnHipError(hipMemcpyAsync(d_ssm_deltanet_state, snapshot.d_ssm_deltanet_,
+                                 snapshot.deltanet_elements_ * sizeof(float),
+                                 hipMemcpyDeviceToDevice, stream),
+                  "failed to restore Qwen DeltaNet snapshot");
+  ThrowOnHipError(hipStreamSynchronize(stream),
+                  "failed to synchronize Qwen snapshot restore");
+}
 
 QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
                            std::uint32_t max_context)
