@@ -22,6 +22,9 @@ void TestDefaultOptions() {
   Expect(options->n_depths == std::vector<std::size_t>{0},
          "default depth is zero");
   Expect(options->repetitions == 1, "default is one repetition");
+  Expect(options->draft_tokens == 7, "default draft ceiling is seven");
+  Expect(options->draft_policy == "rolling", "default draft policy is rolling");
+  Expect(options->min_draft_tokens == 1, "default minimum draft is one");
 }
 
 void TestDepthOptions() {
@@ -42,14 +45,17 @@ void TestDepthOptions() {
 }
 
 void TestHybridMtpOptions() {
-  const std::array<const char*, 8> args = {
-      "--speculative",  "mtp-npu", "--mtp-model", "mtp.gguf",
-      "--draft-tokens", "2",       "--n-gen",     "128"};
+  const std::array<const char*, 12> args = {
+      "--speculative",      "mtp-npu", "--mtp-model",    "mtp.gguf",
+      "--draft-tokens",     "2",       "--draft-policy", "fixed",
+      "--min-draft-tokens", "2",       "--n-gen",        "128"};
   const auto options = strix::server::ParseBenchOptions(args);
   Expect(options.has_value(), "hybrid MTP options parse");
   Expect(options->speculative_backend == "mtp-npu", "hybrid MTP mode parsed");
   Expect(options->mtp_model_path == "mtp.gguf", "MTP model path parsed");
   Expect(options->draft_tokens == 2, "draft token count parsed");
+  Expect(options->draft_policy == "fixed", "fixed draft policy parsed");
+  Expect(options->min_draft_tokens == 2, "minimum draft count parsed");
 }
 
 void TestInvalidDepth() {
@@ -58,6 +64,15 @@ void TestInvalidDepth() {
   Expect(!strix::server::ParseBenchOptions(args, &error).has_value(),
          "invalid depth rejected");
   Expect(!error.empty(), "invalid depth reports an error");
+
+  const std::array<const char*, 2> policy_args = {"--draft-policy", "unknown"};
+  Expect(!strix::server::ParseBenchOptions(policy_args, &error).has_value(),
+         "invalid draft policy rejected");
+
+  const std::array<const char*, 4> range_args = {"--draft-tokens", "3",
+                                                 "--min-draft-tokens", "4"};
+  Expect(!strix::server::ParseBenchOptions(range_args, &error).has_value(),
+         "invalid draft range rejected");
 }
 
 }  // namespace

@@ -35,9 +35,6 @@ CONTROLLED_ENV = {
     "STRIX_SPEC_BATCH_LM_HEAD",
     "STRIX_SPEC_BATCH_VERIFY",
     "STRIX_SPEC_BATCH_VERIFY_CHECK",
-    "STRIX_SPEC_ADAPTIVE_POLICY",
-    "STRIX_SPEC_FIXED_DRAFT",
-    "STRIX_SPEC_MIN_DRAFT_TOKENS",
 }
 
 
@@ -109,6 +106,10 @@ def run_prompt(
                 args.backend,
                 "--draft-tokens",
                 str(args.draft_tokens),
+                "--draft-policy",
+                args.draft_policy,
+                "--min-draft-tokens",
+                str(args.min_draft_tokens),
             ]
         )
         option = (
@@ -259,14 +260,6 @@ def main() -> int:
         environment.update(parse_environment(args.env))
     except ValueError as error:
         parser.error(str(error))
-    if args.draft_policy == "fixed":
-        environment["STRIX_SPEC_FIXED_DRAFT"] = "1"
-    else:
-        environment["STRIX_SPEC_ADAPTIVE_POLICY"] = args.draft_policy
-        environment["STRIX_SPEC_MIN_DRAFT_TOKENS"] = str(
-            args.min_draft_tokens
-        )
-
     print(
         "| prompt | category | exact | AR tok/s | speculative tok/s | "
         "speedup | acceptance | avg draft |"

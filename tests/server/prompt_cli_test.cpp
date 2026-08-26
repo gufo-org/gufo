@@ -15,6 +15,9 @@ void TestDefaultOptions() {
   assert(opt->temperature == 0.0F);
   assert(opt->use_chat_template);
   assert(!opt->verbose);
+  assert(opt->draft_tokens == 7);
+  assert(opt->draft_policy == "rolling");
+  assert(opt->min_draft_tokens == 1);
 }
 
 void TestExplicitFlags() {
@@ -32,14 +35,17 @@ void TestExplicitFlags() {
 }
 
 void TestHybridMtpFlags() {
-  const std::array<const char*, 7> args = {
-      "--speculative",  "mtp-npu", "--mtp-model", "mtp.gguf",
-      "--draft-tokens", "2",       "Prompt"};
+  const std::array<const char*, 11> args = {
+      "--speculative",      "mtp-npu", "--mtp-model",    "mtp.gguf",
+      "--draft-tokens",     "2",       "--draft-policy", "fixed",
+      "--min-draft-tokens", "2",       "Prompt"};
   const auto opt = strix::server::ParsePromptOptions(args);
   assert(opt.has_value());
   assert(opt->speculative_backend == "mtp-npu");
   assert(opt->mtp_model_path == "mtp.gguf");
   assert(opt->draft_tokens == 2);
+  assert(opt->draft_policy == "fixed");
+  assert(opt->min_draft_tokens == 2);
 }
 
 void TestInvalidFlags() {
@@ -53,6 +59,13 @@ void TestInvalidFlags() {
 
   const std::array<const char*, 2> args3 = {"-t", "invalid_float"};
   assert(!strix::server::ParsePromptOptions(args3, &err).has_value());
+
+  const std::array<const char*, 2> args4 = {"--draft-policy", "unknown"};
+  assert(!strix::server::ParsePromptOptions(args4, &err).has_value());
+
+  const std::array<const char*, 4> args5 = {"--draft-tokens", "3",
+                                            "--min-draft-tokens", "4"};
+  assert(!strix::server::ParsePromptOptions(args5, &err).has_value());
 }
 
 int main() {

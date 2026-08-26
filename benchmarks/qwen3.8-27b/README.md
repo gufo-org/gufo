@@ -303,9 +303,10 @@ Exact greedy output is a validity gate:
 
 Only the rolling controller remained exact across all three long-form tasks,
 so it stays the default. The EMA controller remains behind
-`STRIX_SPEC_ADAPTIVE_POLICY=accepted-ema` for further verifier-quality work;
-its higher aggregate throughput is not a valid production win while code and
-prose diverge. Fixed widths also diverged, which makes the remaining issue
+`--draft-policy accepted-ema` for further verifier-quality work; its higher
+aggregate throughput is not a valid production win while code and prose
+diverge. Use `--draft-policy fixed` for an explicit fixed-width comparison.
+Fixed widths also diverged, which makes the remaining issue
 verification-trajectory dependent rather than specific to the EMA formula.
 
 The production DFlash verifier batches the target block and LM head, uses the

@@ -2,7 +2,6 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -175,49 +174,6 @@ bool IsStopToken(tokenization::TokenId token,
   return setting != "0" && setting != "false" && setting != "off";
 }
 
-[[nodiscard]] bool UseFixedDraftLength() noexcept {
-  const char* value = std::getenv("STRIX_SPEC_FIXED_DRAFT");
-  if (value == nullptr) {
-    return false;
-  }
-  const std::string_view setting{value};
-  return setting != "0" && setting != "false" && setting != "off";
-}
-
-[[nodiscard]] AdaptiveDraftPolicy ResolveAdaptiveDraftPolicy(
-    AdaptiveDraftPolicy fallback) {
-  const char* value = std::getenv("STRIX_SPEC_ADAPTIVE_POLICY");
-  if (value == nullptr) {
-    return fallback;
-  }
-  const std::string_view setting{value};
-  if (setting == "rolling" || setting == "rolling-rate") {
-    return AdaptiveDraftPolicy::kRollingAcceptanceRate;
-  }
-  if (setting == "accepted-ema" || setting == "ema") {
-    return AdaptiveDraftPolicy::kAcceptedTokenEma;
-  }
-  throw std::invalid_argument(
-      "STRIX_SPEC_ADAPTIVE_POLICY must be rolling or accepted-ema");
-}
-
-[[nodiscard]] std::uint32_t ResolveMinimumDraftTokens(std::uint32_t fallback) {
-  const char* value = std::getenv("STRIX_SPEC_MIN_DRAFT_TOKENS");
-  if (value == nullptr) {
-    return fallback;
-  }
-  const std::string_view setting{value};
-  std::uint32_t result{0};
-  const auto parsed =
-      std::from_chars(setting.data(), setting.data() + setting.size(), result);
-  if (parsed.ec != std::errc{} ||
-      parsed.ptr != setting.data() + setting.size() || result == 0) {
-    throw std::invalid_argument(
-        "STRIX_SPEC_MIN_DRAFT_TOKENS must be a positive integer");
-  }
-  return result;
-}
-
 }  // namespace
 
 SpeculativeVerifier::SpeculativeVerifier(
@@ -236,9 +192,6 @@ SpeculativeVerifier::SpeculativeVerifier(
       .bf16_from_layer = options_.target_bf16_from_layer,
       .fp32_from_layer = options_.target_fp32_from_layer,
   });
-  if (UseFixedDraftLength()) {
-    options_.enable_adaptive_draft_length = false;
-  }
   ConfigureAdaptiveDraftPolicy();
 }
 
@@ -251,9 +204,6 @@ SpeculativeVerifier::SpeculativeVerifier(
       current_draft_length_(options_.initial_draft_tokens),
       use_batched_verification_(ResolveFlag(
           "STRIX_SPEC_BATCH_VERIFY", options_.use_batched_verification)) {
-  if (UseFixedDraftLength()) {
-    options_.enable_adaptive_draft_length = false;
-  }
   ConfigureAdaptiveDraftPolicy();
 }
 
@@ -266,12 +216,9 @@ void SpeculativeVerifier::Reset() noexcept {
 }
 
 void SpeculativeVerifier::ConfigureAdaptiveDraftPolicy() {
-  options_.adaptive_draft_policy =
-      ResolveAdaptiveDraftPolicy(options_.adaptive_draft_policy);
   options_.max_draft_tokens = std::max(options_.max_draft_tokens, 1U);
   options_.min_draft_tokens =
-      std::clamp(ResolveMinimumDraftTokens(options_.min_draft_tokens), 1U,
-                 options_.max_draft_tokens);
+      std::clamp(options_.min_draft_tokens, 1U, options_.max_draft_tokens);
   options_.initial_draft_tokens =
       std::clamp(options_.initial_draft_tokens, options_.min_draft_tokens,
                  options_.max_draft_tokens);
