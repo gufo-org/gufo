@@ -65,9 +65,9 @@ The binary database stores:
 - Algorithm ID and the same-version serialized hipBLASLt descriptor.
 - Required workspace, tuning median, solution name, and kernel name.
 
-Runtime loading is opt-in. A compatible hit reconstructs the first algorithm
-through hipBLASLt to initialize its solution library, then restores later
-descriptors directly. Every restored algorithm is checked with
+Runtime loading is opt-in. A compatible hit reconstructs every algorithm from
+its stable hipBLASLt solution index; opaque algorithm descriptor bytes are not
+replayed across processes. Every reconstructed algorithm is checked with
 `matmulIsAlgoSupported`, including its exact workspace requirement. A schema,
 device, runtime, library, algorithm-ID, kernel-identity, support, or workspace
 mismatch falls back to the ordinary heuristic search for that exact shape.

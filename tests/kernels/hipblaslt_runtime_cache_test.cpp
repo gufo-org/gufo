@@ -44,6 +44,7 @@ int main() {
   constexpr std::size_t batch_size = 32;
   constexpr std::size_t m = 256;
   constexpr std::size_t k = 64;
+  constexpr std::size_t second_m = 64;
   const auto test_id =
       std::chrono::steady_clock::now().time_since_epoch().count();
   const auto directory = std::filesystem::temp_directory_path() /
@@ -81,6 +82,21 @@ int main() {
   HIP_CHECK(hipMemcpy(host_y.data(), device_y, host_y.size() * sizeof(float),
                       hipMemcpyDeviceToHost));
   Verify(host_y, 3.0F * static_cast<float>(k));
+
+  strix::hip::HipblasLtDispatchInfo original_second_info;
+  Expect(original.RunBf16(device_a, device_x, device_y, batch_size, second_m, k,
+                          nullptr, &original_second_info),
+         "resolve second hipBLASLt plan");
+  Expect(original_second_info.algorithm_id != original_info.algorithm_id,
+         "exercise a second hipBLASLt algorithm ID");
+  HIP_CHECK(hipDeviceSynchronize());
+  HIP_CHECK(hipMemcpy(host_y.data(), device_y,
+                      batch_size * second_m * sizeof(float),
+                      hipMemcpyDeviceToHost));
+  Verify(std::vector<float>(host_y.begin(),
+                            host_y.begin() + (batch_size * second_m)),
+         3.0F * static_cast<float>(k));
+
   std::string error;
   Expect(original.SavePlans(database_path.string(), &error),
          "save resolved plan: " + error);
@@ -104,13 +120,39 @@ int main() {
                       hipMemcpyDeviceToHost));
   Verify(host_y, 3.0F * static_cast<float>(k));
 
+  strix::hip::HipblasLtDispatchInfo persisted_second_info;
+  Expect(persisted.RunBf16(device_a, device_x, device_y, batch_size, second_m,
+                           k, nullptr, &persisted_second_info),
+         "run second reconstructed plan");
+  Expect(persisted_second_info.plan_source == "persistent",
+         "select second persisted plan");
+  Expect(persisted_second_info.persistent_cache_status == "hit",
+         "report second persistent cache hit");
+  Expect(
+      persisted_second_info.algorithm_id == original_second_info.algorithm_id,
+      "preserve second algorithm ID");
+  HIP_CHECK(hipDeviceSynchronize());
+  HIP_CHECK(hipMemcpy(host_y.data(), device_y,
+                      batch_size * second_m * sizeof(float),
+                      hipMemcpyDeviceToHost));
+  Verify(std::vector<float>(host_y.begin(),
+                            host_y.begin() + (batch_size * second_m)),
+         3.0F * static_cast<float>(k));
+
   auto changed_database =
       strix::hip::detail::InspectHipblasLtPlanDatabase(database_path);
   Expect(changed_database.status ==
                  strix::hip::detail::HipblasLtPlanDatabaseLoadStatus::kLoaded &&
-             changed_database.database.records.size() == 1,
+             changed_database.database.records.size() == 2,
          "inspect saved runtime database");
-  ++changed_database.database.records.front().algorithm_id;
+  const auto changed_record = std::ranges::find_if(
+      changed_database.database.records, [](const auto& record) {
+        return record.batch_size == batch_size && record.m == m &&
+               record.k == k;
+      });
+  Expect(changed_record != changed_database.database.records.end(),
+         "find primary persisted plan");
+  ++changed_record->algorithm_id;
   Expect(strix::hip::detail::SaveHipblasLtPlanDatabase(
              changed_path, changed_database.database, &error),
          "save changed algorithm identity: " + error);

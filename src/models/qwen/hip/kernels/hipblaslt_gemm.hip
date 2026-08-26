@@ -176,21 +176,22 @@ struct HipblasLtPlan {
     return false;
   }
 
-  hipblasLtMatmulAlgo_t algorithm{};
-  if (*solution_library_ready) {
-    std::memcpy(&algorithm, record.algorithm_blob.data(), sizeof(algorithm));
-  } else {
-    std::vector<int> indices{record.algorithm_id};
-    std::vector<hipblasLtMatmulHeuristicResult_t> results;
-    if (hipblaslt_ext::getAlgosFromIndex(handle, indices, results) !=
-            HIPBLAS_STATUS_SUCCESS ||
-        results.empty()) {
-      plan.persistent_cache_status = "algorithm_unavailable";
-      return false;
-    }
-    algorithm = results.front().algo;
-    *solution_library_ready = true;
+  // hipblasLtMatmulAlgo_t is trivially copyable but not process-stable: its
+  // opaque bytes can contain solution-library state established by the
+  // process that wrote the database. Replaying one raw descriptor happened to
+  // work after the first library lookup, but a database containing a second
+  // algorithm ID could segfault during prewarm. Reconstruct every descriptor
+  // from the stable solution index, then validate it below.
+  std::vector<int> indices{record.algorithm_id};
+  std::vector<hipblasLtMatmulHeuristicResult_t> results;
+  if (hipblaslt_ext::getAlgosFromIndex(handle, indices, results) !=
+          HIPBLAS_STATUS_SUCCESS ||
+      results.empty()) {
+    plan.persistent_cache_status = "algorithm_unavailable";
+    return false;
   }
+  hipblasLtMatmulAlgo_t algorithm = results.front().algo;
+  *solution_library_ready = true;
   if (hipblaslt_ext::getIndexFromAlgo(algorithm) != record.algorithm_id) {
     plan.persistent_cache_status = "algorithm_changed";
     return false;

@@ -301,6 +301,14 @@ isolated cold-process 16K run on the final build reports 9.13 tok/s at 100%
 acceptance; the difference from the 16.47 tok/s sweep result is hipBLASLt plan
 warmup from the preceding 4K/8K cases.
 
+Offline tuning of the DFlash2 BF16 output head and injected K/V shapes found
+an 11% isolated head improvement and a 2.1-2.2x K/V improvement at batches
+1-8. The full corpus moved only from 12.48 to 12.51 tok/s, so these plans
+remain optional rather than becoming a production dependency. This experiment
+also exposed unsafe cross-process memcpy replay when one plan database held
+multiple hipBLASLt algorithm IDs; runtime replay now reconstructs every opaque
+descriptor from its stable solution index before validating and using it.
+
 ## Runtime Status
 
 | Area | Current production route |
