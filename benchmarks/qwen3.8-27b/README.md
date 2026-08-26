@@ -1,6 +1,6 @@
 # Qwen3.8-27B BF16 on Strix Halo
 
-Status: 2026-08-20. This page is the current performance snapshot, not an
+Status: 2026-08-26. This page is the current performance snapshot, not an
 optimization history.
 
 ## Model
@@ -210,6 +210,97 @@ This route proves real Q4_K MTP execution on XDNA2, but it is not a performance
 win for single-request decode. It remains explicit and opt-in; autoregressive
 GPU execution is the default.
 
+### DFlash2 and batched MTP on the Unsloth Q8 target
+
+The speculative results below use the single-file Unsloth target and the
+official DFlash2 topology:
+
+```sh
+nix develop -c hf download unsloth/Qwen3.8-27B-GGUF \
+  Qwen3.8-27B-UD-Q8_K_XL.gguf \
+  --repo-type model \
+  --local-dir models/Qwen3.8-27B-GGUF
+
+nix develop -c hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
+  Qwen3.8-27B-DFlash2-Q8_0.gguf \
+  --repo-type model \
+  --local-dir models/Qwen3.8-27B-DFlash2-GGUF
+```
+
+The implementation validates and executes the official five-layer DFlash2
+graph: target taps `5/19/33/47/61`, block size 8, 2,048-token attention
+window, grouped dynamic attention/MLP convolution, and the top-16 rank-256
+path selector. Q8_0 draft matrices stay quantized on the GPU.
+
+Use the shared corpus runner for matched greedy output and throughput:
+
+```sh
+TARGET=models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf
+DFLASH=models/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q8_0.gguf
+MTP_MODEL=/path/to/mtp-Qwen3.8-27B-Q4_0.gguf
+
+nix develop -c python3 tools/speculative-corpus.py \
+  --binary ./result/bin/strix-server \
+  --model "$TARGET" \
+  --draft-model "$DFLASH" \
+  --backend dflash2
+
+nix develop -c python3 tools/speculative-corpus.py \
+  --binary ./result/bin/strix-server \
+  --model "$TARGET" \
+  --draft-model "$MTP_MODEL" \
+  --backend mtp
+```
+
+The 10-prompt suite has hash `59321d75dbd1` and covers explanatory prose,
+code, reasoning, summarization, Italian and Chinese, structured JSON,
+creative text, repetition, and instruction following. Each row generates 32
+tokens greedily. Speculative output must match the autoregressive completion
+exactly.
+
+| Backend | Exact prompts | AR | Speculative | Speedup | Median speedup | Acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| DFlash2 Q8_0 | 10/10 | 6.66 tok/s | 12.48 tok/s | 1.87x | 1.93x | 52.8% |
+| MTP Q4_0 | 10/10 | 6.67 tok/s | 9.88 tok/s | 1.48x | 1.48x | 47.9% |
+
+DFlash2 spans 1.29-3.26x by corpus category. The three-case rapid suite is
+13.66 tok/s, or 2.05x AR. Low-acceptance prompts remain below 2x; explanatory,
+code, Italian, creative, and repetitive cases reach 2.03-3.26x.
+At 64 generated tokens the rapid suite remains exact 3/3 and reaches
+14.49 tok/s, 2.10x AR. The matching MTP run remains exact 3/3 at
+10.01 tok/s, 1.45x AR.
+
+The production DFlash verifier batches the target block and LM head, uses the
+AR-compatible W8A8 route through layer 47, and switches to BF16-activation
+Q8-weight GEMMs from layer 48. The MTP verifier uses BF16-activation GEMMs for
+all target layers and FP32 only in the final layer; the final FP32 tail is
+required for exact structured-output parity. Rejected blocks restore the
+target checkpoint and replay captured SSM inputs only for the committed
+prefix.
+
+Small verifier batches use shape-specific W8A8 tiles: 32 tokens for FFN
+expansion and 16 for contractions and SSM projections. The corresponding
+microbenchmark is bit-exact and improves the batch-8 production shapes by
+about 7% for expansion, 16% for FFN down, 47% for SSM QKV, and 53% for SSM
+out. The BF16-activation/Q8-weight path similarly selects 2/4/8-token tiles.
+
+Synthetic context-depth results are listed separately because their repeated
+token stream can drive acceptance to 100% and is not representative of the
+corpus:
+
+| Depth | AR `tg16` | DFlash2 `tg16` | Speedup | Acceptance |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 7.15 | 5.11 | 0.71x | 19.4% |
+| 4K | 7.02 | 11.02 | 1.57x | 32.4% |
+| 8K | 6.90 | 21.45 | 3.11x | 100.0% |
+| 16K | 6.67 | 16.47 | 2.47x | 100.0% |
+
+The 16K DFlash2 result remains well above AR, so the 2,048-token draft window
+and target verifier do not introduce a large-context throughput collapse. An
+isolated cold-process 16K run on the final build reports 9.13 tok/s at 100%
+acceptance; the difference from the 16.47 tok/s sweep result is hipBLASLt plan
+warmup from the preceding 4K/8K cases.
+
 ## Runtime Status
 
 | Area | Current production route |
@@ -244,7 +335,7 @@ depth. Read the Q8 section for the current state of the engine.
 | SSM norm + gate + residual | Unfused recurrence + post-norm kernel; ssm_out GEMV + residual add | Fused recurrence + post-norm + gate: bit-exact but +41% recurrence time and 104B scratch spill; decode residual folded into ssm_out GEMV: bit-exact, one fewer launch, no end-to-end gain (`opt-c010-ssm-gate-residual`) |
 | RMSNorm + projection input | Decode RMSNorm kernel + fused QKV/SSM-input/SwiGLU projection GEMVs | Norm folded into the projection GEMVs: bit-exact but every block redundantly re-normalizes the row, +9-21% per projection launch and ~9% decode regression (`opt-c010-rmsnorm-projection`) |
 | Layer prefetch | Single-stream decode; no prefetch | Async next-layer page-touch on a side stream: tg128 -1.6%, and the per-layer cross-stream join serializes the non-graph (split-K) decode path, ~4x regression at depth 4K/8K/16K (`opt-c014-layer-prefetch`) |
-| Speculation | Exact target verification and explicit GPU/XDNA2 MTP experiments | MTP as a default route while it reduces decode throughput |
+| Speculation | Official DFlash2 graph and selector, transactional batched target verification, and exact GPU MTP verification policies | W8A8-only verification where it changes greedy output; small-batch dual gate/up despite a faster isolated GEMM because it regresses end-to-end throughput |
 
 This table records only decisions that affect the current direction. Detailed
 profiling data belongs in issue discussions or local artifacts, not in this
@@ -647,5 +738,3 @@ Remaining ranked headroom, from the profile above:
 | DeltaNet recurrence beyond 2567 cycles/token | 3.0% | Now within 2.1x of the 1229-cycle FP32 VALU floor. The remaining gap is k/q cache traffic against register pressure, and the two obvious reformulations are both rejected above |
 | BF16 attention Q/K/V | 5.3% | hipBLASLt is already at 48-57% of peak here, so a hand-written blocked BF16 kernel reaching the W8A8 kernel's 60% is worth about 0.3-1.3% of prefill (`opt-c172-bf16-gemm-ceiling`) |
 | Folding the post-FFN residual into the next layer's pre-norm | 0.9% | Measured and rejected (`opt-c175-residual-defer`): inside noise, because it trades a fast streaming pass for an LDS-limited one |
-
-

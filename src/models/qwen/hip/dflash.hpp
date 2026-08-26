@@ -22,7 +22,7 @@ namespace strix::hip {
 
 /// Immutable GPU-visible DFlash / DFlash-2 model weights and topology.
 class QwenDFlashGpuModel final {
- public:
+public:
   ~QwenDFlashGpuModel();
 
   QwenDFlashGpuModel(const QwenDFlashGpuModel&) = delete;
@@ -35,20 +35,22 @@ class QwenDFlashGpuModel final {
       std::shared_ptr<const QwenGpuModel> target_model,
       std::string* error_msg = nullptr);
 
-  [[nodiscard]] const speculative::QwenDFlashWeights& GetWeights() const noexcept {
+  [[nodiscard]] const speculative::QwenDFlashWeights& GetWeights()
+      const noexcept {
     return weights_;
   }
   [[nodiscard]] const core::ModelConfig& GetConfig() const noexcept {
     return weights_.config;
   }
-  [[nodiscard]] const speculative::QwenDFlashConfig& GetDFlashConfig() const noexcept {
+  [[nodiscard]] const speculative::QwenDFlashConfig& GetDFlashConfig()
+      const noexcept {
     return weights_.dflash_config;
   }
   [[nodiscard]] std::size_t GetPackedWeightBytes() const noexcept {
     return packed_weight_bytes_;
   }
 
- private:
+private:
   QwenDFlashGpuModel(std::shared_ptr<const core::GgufReader> dflash_reader,
                      std::shared_ptr<const QwenGpuModel> target_model,
                      speculative::QwenDFlashWeights weights,
@@ -64,7 +66,7 @@ class QwenDFlashGpuModel final {
 
 /// Session executor for GPU DFlash / DFlash-2 parallel block drafting.
 class QwenDFlashGpuExecutor final {
- public:
+public:
   ~QwenDFlashGpuExecutor();
 
   QwenDFlashGpuExecutor(const QwenDFlashGpuExecutor&) = delete;
@@ -78,7 +80,8 @@ class QwenDFlashGpuExecutor final {
 
   void Reset() noexcept;
 
-  /// Ingests target multi-layer hidden states and injects K/V into the draft cache.
+  /// Ingests target multi-layer hidden states and injects K/V into the draft
+  /// cache.
   bool InjectTargetContext(std::span<const float> target_features,
                            std::uint32_t position, std::uint32_t num_tokens);
 
@@ -100,17 +103,23 @@ class QwenDFlashGpuExecutor final {
     return *model_;
   }
 
- private:
+private:
   QwenDFlashGpuExecutor(std::shared_ptr<const QwenDFlashGpuModel> model,
                         std::uint32_t max_context);
 
   void Allocate();
   void Free() noexcept;
+  void PrewarmBlockGemms();
+  void RunBlockGemm(const models::QwenTensorRef& weight, const float* input,
+                    float* output, std::size_t batch_size,
+                    std::size_t output_size, std::size_t input_size);
 
   std::shared_ptr<const QwenDFlashGpuModel> model_;
   std::uint32_t max_context_{4096};
   std::uint32_t injected_context_len_{0};
   hipStream_t stream_{nullptr};
+  hipblasHandle_t hipblas_handle_{nullptr};
+  std::unique_ptr<HipblasLtGemm> hipblaslt_gemm_;
 
   // GPU Allocations for draft KV cache
   std::vector<float*> d_injected_k_;
@@ -121,6 +130,8 @@ class QwenDFlashGpuExecutor final {
   float* d_fused_features_{nullptr};
   float* d_block_hidden_{nullptr};
   float* d_block_normed_{nullptr};
+  float* d_conv_hidden_{nullptr};
+  float* d_dynamic_coefficients_{nullptr};
   float* d_q_{nullptr};
   float* d_k_block_{nullptr};
   float* d_v_block_{nullptr};
@@ -129,8 +140,12 @@ class QwenDFlashGpuExecutor final {
   float* d_ffn_up_{nullptr};
   float* d_ffn_down_{nullptr};
   float* d_logits_{nullptr};
+  float* d_selector_hidden_{nullptr};
+  float* d_selector_partial_scores_{nullptr};
+  std::uint32_t* d_selector_partial_ids_{nullptr};
+  float* d_confidences_{nullptr};
   std::uint32_t* d_out_token_{nullptr};
-  unsigned long long* d_argmax_out_{nullptr};
+  hip_bfloat16* d_bf16_input_{nullptr};
 
   // Host buffers for asynchronous synchronization
   std::vector<float> h_target_features_;
@@ -142,19 +157,21 @@ struct QwenDFlashGpuDraftConfig {
   std::uint32_t max_draft_tokens{16};
 };
 
-/// Adapts the GPU DFlash executor to the repository's IDraftBackend speculative interface.
+/// Adapts the GPU DFlash executor to the repository's IDraftBackend speculative
+/// interface.
 class QwenDFlashGpuDraftBackend final : public speculative::IDraftBackend {
- public:
+public:
   ~QwenDFlashGpuDraftBackend() override = default;
 
   [[nodiscard]] static std::unique_ptr<QwenDFlashGpuDraftBackend> Create(
       std::shared_ptr<const QwenDFlashGpuModel> model,
       QwenDFlashGpuDraftConfig config = {}, std::string* error_msg = nullptr);
 
-  [[nodiscard]] static std::unique_ptr<QwenDFlashGpuDraftBackend> CreateFromGguf(
-      std::string_view dflash_model_path,
-      std::shared_ptr<const QwenGpuModel> target_model,
-      QwenDFlashGpuDraftConfig config = {}, std::string* error_msg = nullptr);
+  [[nodiscard]] static std::unique_ptr<QwenDFlashGpuDraftBackend>
+  CreateFromGguf(std::string_view dflash_model_path,
+                 std::shared_ptr<const QwenGpuModel> target_model,
+                 QwenDFlashGpuDraftConfig config = {},
+                 std::string* error_msg = nullptr);
 
   [[nodiscard]] std::string_view Name() const noexcept override {
     return "QwenDFlashGpuDraftBackend";
@@ -162,6 +179,11 @@ class QwenDFlashGpuDraftBackend final : public speculative::IDraftBackend {
 
   [[nodiscard]] bool RequiresTargetHiddenStates() const noexcept override {
     return true;
+  }
+
+  [[nodiscard]] std::span<const std::uint32_t> TargetHiddenLayerIds()
+      const noexcept override {
+    return executor_->GetModel().GetDFlashConfig().target_layer_ids;
   }
 
   [[nodiscard]] bool PrimeTargetContext(
@@ -178,13 +200,13 @@ class QwenDFlashGpuDraftBackend final : public speculative::IDraftBackend {
 
   void Reset() noexcept override;
 
- private:
+private:
   QwenDFlashGpuDraftBackend(std::unique_ptr<QwenDFlashGpuExecutor> executor,
                             QwenDFlashGpuDraftConfig config);
 
   std::unique_ptr<QwenDFlashGpuExecutor> executor_;
   QwenDFlashGpuDraftConfig config_;
-  std::vector<float> target_hidden_accumulator_;
+  std::vector<float> pending_target_features_;
   std::vector<tokenization::TokenId> proposed_tokens_;
   std::uint32_t proposal_checkpoint_{0};
   tokenization::TokenId proposal_input_{0};

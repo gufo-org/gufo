@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <string_view>
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
@@ -15,6 +17,32 @@ namespace strix::hip {
 
 using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
+
+[[nodiscard]] bool UseCompactBf16SmallBatchTile() noexcept {
+  static const bool enabled = [] {
+    const char* value = std::getenv("STRIX_PREFILL_SMALL_BATCH_BF16_TILE");
+    if (value == nullptr) {
+      return true;
+    }
+    const std::string_view setting{value};
+    return setting != "fixed8" && setting != "baseline" && setting != "0" &&
+           setting != "false" && setting != "off";
+  }();
+  return enabled;
+}
+
+[[nodiscard]] bool UseCompactW8A8SmallBatchTile() noexcept {
+  static const bool enabled = [] {
+    const char* value = std::getenv("STRIX_PREFILL_SMALL_BATCH_W8A8_TILE");
+    if (value == nullptr) {
+      return true;
+    }
+    const std::string_view setting{value};
+    return setting != "fixed64" && setting != "baseline" && setting != "0" &&
+           setting != "false" && setting != "off";
+  }();
+  return enabled;
+}
 
 // Tiled Q8_1 activation layout (opt-c163-blocked-w8a8).
 //
@@ -596,21 +624,21 @@ __launch_bounds__(256) __global__
   }
 }
 
-template<std::uint32_t WavesPerBlock>
+template<std::uint32_t WavesPerBlock, std::uint32_t TokensPerWave>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
     void TiledBatchedQ8_0GEMMKernel(const void* __restrict__ w,
                                     const hip_bfloat16* __restrict__ x,
                                     float* __restrict__ y, std::size_t batch,
                                     std::size_t m, std::size_t k) {
   constexpr std::size_t kRowsPerWave = 4;
-  constexpr std::size_t kTokensPerWave = 8;
+  static_assert(TokensPerWave == 2 || TokensPerWave == 4 || TokensPerWave == 8);
   const std::size_t tid = threadIdx.x;
   const std::size_t lane_id = tid & 31u;
   const std::size_t warp_id = tid >> 5u;
 
   const std::size_t row_base =
       (blockIdx.x * WavesPerBlock + warp_id) * kRowsPerWave;
-  const std::size_t tok_base = blockIdx.y * kTokensPerWave;
+  const std::size_t tok_base = blockIdx.y * TokensPerWave;
   if (row_base >= m || tok_base >= batch) {
     return;
   }
@@ -630,17 +658,17 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   const std::size_t lane_in_group = lane_id & 7u;   // 0..7
   const std::size_t elem_off = lane_in_group * 4u;  // 0, 4, 8..28
 
-  float acc[4][8] = {{0.0F}};
+  float acc[4][TokensPerWave] = {};
 
   const std::size_t num_steps = (num_blocks + 3) / 4;
   for (std::size_t step = 0; step < num_steps; ++step) {
     const std::size_t b = (step * 4) + group_id;
 
     if (b < num_blocks) {
-      // Load 4 bfloat16 activation values for each of the 8 tokens
-      hip_bfloat16 xv[8][4];
+      // Load four bfloat16 activation values for each token column.
+      hip_bfloat16 xv[TokensPerWave][4];
 #pragma unroll
-      for (std::size_t t = 0; t < 8; ++t) {
+      for (std::size_t t = 0; t < TokensPerWave; ++t) {
         if (tok_base + t < batch) {
           *reinterpret_cast<uint64_t*>(&xv[t][0]) =
               *reinterpret_cast<const uint64_t*>(
@@ -653,17 +681,17 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
         const Q8_0Block& b0 = row0[b];
         const float d0 = __half2float(b0.d);
         const auto* qs0 = b0.qs + elem_off;
-        float dot0[8] = {0.0F};
+        float dot0[TokensPerWave] = {};
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
           const float q = d0 * static_cast<float>(qs0[i]);
 #pragma unroll
-          for (std::size_t t = 0; t < 8; ++t) {
+          for (std::size_t t = 0; t < TokensPerWave; ++t) {
             dot0[t] += q * static_cast<float>(xv[t][i]);
           }
         }
 #pragma unroll
-        for (std::size_t t = 0; t < 8; ++t) {
+        for (std::size_t t = 0; t < TokensPerWave; ++t) {
           acc[0][t] += dot0[t];
         }
       }
@@ -673,17 +701,17 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
         const Q8_0Block& b1 = row1[b];
         const float d1 = __half2float(b1.d);
         const auto* qs1 = b1.qs + elem_off;
-        float dot1[8] = {0.0F};
+        float dot1[TokensPerWave] = {};
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
           const float q = d1 * static_cast<float>(qs1[i]);
 #pragma unroll
-          for (std::size_t t = 0; t < 8; ++t) {
+          for (std::size_t t = 0; t < TokensPerWave; ++t) {
             dot1[t] += q * static_cast<float>(xv[t][i]);
           }
         }
 #pragma unroll
-        for (std::size_t t = 0; t < 8; ++t) {
+        for (std::size_t t = 0; t < TokensPerWave; ++t) {
           acc[1][t] += dot1[t];
         }
       }
@@ -693,17 +721,17 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
         const Q8_0Block& b2 = row2[b];
         const float d2 = __half2float(b2.d);
         const auto* qs2 = b2.qs + elem_off;
-        float dot2[8] = {0.0F};
+        float dot2[TokensPerWave] = {};
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
           const float q = d2 * static_cast<float>(qs2[i]);
 #pragma unroll
-          for (std::size_t t = 0; t < 8; ++t) {
+          for (std::size_t t = 0; t < TokensPerWave; ++t) {
             dot2[t] += q * static_cast<float>(xv[t][i]);
           }
         }
 #pragma unroll
-        for (std::size_t t = 0; t < 8; ++t) {
+        for (std::size_t t = 0; t < TokensPerWave; ++t) {
           acc[2][t] += dot2[t];
         }
       }
@@ -713,17 +741,17 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
         const Q8_0Block& b3 = row3[b];
         const float d3 = __half2float(b3.d);
         const auto* qs3 = b3.qs + elem_off;
-        float dot3[8] = {0.0F};
+        float dot3[TokensPerWave] = {};
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
           const float q = d3 * static_cast<float>(qs3[i]);
 #pragma unroll
-          for (std::size_t t = 0; t < 8; ++t) {
+          for (std::size_t t = 0; t < TokensPerWave; ++t) {
             dot3[t] += q * static_cast<float>(xv[t][i]);
           }
         }
 #pragma unroll
-        for (std::size_t t = 0; t < 8; ++t) {
+        for (std::size_t t = 0; t < TokensPerWave; ++t) {
           acc[3][t] += dot3[t];
         }
       }
@@ -736,7 +764,7 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
 #pragma unroll
     for (std::size_t r = 0; r < 4; ++r) {
 #pragma unroll
-      for (std::size_t t = 0; t < 8; ++t) {
+      for (std::size_t t = 0; t < TokensPerWave; ++t) {
         acc[r][t] += __shfl_xor(acc[r][t], off);
       }
     }
@@ -748,7 +776,7 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
       const std::size_t row = row_base + r;
       if (row < m) {
 #pragma unroll
-        for (std::size_t t = 0; t < 8; ++t) {
+        for (std::size_t t = 0; t < TokensPerWave; ++t) {
           const std::size_t tok = tok_base + t;
           if (tok < batch) {
             y[(tok * m) + row] = acc[r][t];
@@ -759,9 +787,10 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 }
 
+template<typename Input>
 __global__ void BatchedQuantGEMVKernel(core::GgmlType type,
                                        const void* __restrict__ w,
-                                       const hip_bfloat16* __restrict__ x,
+                                       const Input* __restrict__ x,
                                        float* __restrict__ y, std::size_t m,
                                        std::size_t k) {
   constexpr std::size_t kWarp = 32;
@@ -776,9 +805,58 @@ __global__ void BatchedQuantGEMVKernel(core::GgmlType type,
   }
 
   const float dot =
-      QuantWarpBlockDot<hip_bfloat16>(type, w, row, x + (b * k), k, lane, 0, 1);
+      QuantWarpBlockDot<Input>(type, w, row, x + (b * k), k, lane, 0, 1);
   if (lane == 0) {
     y[(b * m) + row] = dot;
+  }
+}
+
+template<std::uint32_t WavesPerBlock>
+__launch_bounds__(WavesPerBlock * 32, 4) __global__
+    void SmallBatchQ8_0Fp32GEMMKernel(const void* __restrict__ w,
+                                      const float* __restrict__ x,
+                                      float* __restrict__ y, std::size_t batch,
+                                      std::size_t m, std::size_t k) {
+  constexpr std::size_t kMaxBatch = 8;
+  const std::size_t lane = threadIdx.x & 31u;
+  const std::size_t warp_id = threadIdx.x >> 5u;
+  const std::size_t row = (blockIdx.x * WavesPerBlock) + warp_id;
+  if (row >= m) {
+    return;
+  }
+
+  const std::size_t num_blocks = k / kQ8_0BlockSize;
+  const auto* row_blocks =
+      static_cast<const Q8_0Block*>(w) + (row * num_blocks);
+  float sums[kMaxBatch] = {0.0F};
+
+  // This is the Q8_0 branch of QuantWarpBlockDot<float>, with its exact
+  // per-block reduction and accumulation order retained for every token.
+  // Keeping the candidate loop inside one warp lets all candidates share the
+  // same weight load, which is the dominant traffic at these small batches.
+  for (std::size_t b = 0; b < num_blocks; ++b) {
+    const Q8_0Block& wblk = row_blocks[b];
+    const float d_w = __half2float(wblk.d);
+    const float q = static_cast<float>(wblk.qs[lane]);
+#pragma unroll
+    for (std::size_t tok = 0; tok < kMaxBatch; ++tok) {
+      if (tok < batch) {
+        float dot = q * x[(tok * k) + (b * kQ8_0BlockSize) + lane];
+        for (int off = 16; off > 0; off >>= 1) {
+          dot += __shfl_xor(dot, off);
+        }
+        sums[tok] += d_w * dot;
+      }
+    }
+  }
+
+  if (lane == 0) {
+#pragma unroll
+    for (std::size_t tok = 0; tok < kMaxBatch; ++tok) {
+      if (tok < batch) {
+        y[(tok * m) + row] = sums[tok];
+      }
+    }
   }
 }
 
@@ -906,6 +984,18 @@ void LaunchBatchedQuantGEMMPreQuantized(core::GgmlType type, const void* w,
   if (type != core::GgmlType::kQ8_0) {
     return;
   }
+  if (batch <= 8 && UseCompactW8A8SmallBatchTile()) {
+    constexpr int kBM = 128;
+    const dim3 grid(1, static_cast<unsigned int>((m + kBM - 1) / kBM));
+    if (m >= (3 * k)) {
+      W8A8BlockedWmmaGEMMKernel<kBM, 32, 4, 4, 2>
+          <<<grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
+    } else {
+      W8A8BlockedWmmaGEMMKernel<kBM, 16, 4, 8, 1>
+          <<<grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
+    }
+    return;
+  }
   // A 128-token macro tile is the throughput configuration; short prompt chunks
   // would leave most of it idle, so they take the 64-token variant.
   if (batch >= 96) {
@@ -984,8 +1074,77 @@ void LaunchBatchedQuantGEMM(core::GgmlType type, const void* w,
   const dim3 grid(static_cast<unsigned int>(num_blocks_x),
                   static_cast<unsigned int>(batch));
   const dim3 block(static_cast<unsigned int>(kWarp * warps_per_block));
-  BatchedQuantGEMVKernel<<<grid, block, 0, stream>>>(
+  BatchedQuantGEMVKernel<hip_bfloat16><<<grid, block, 0, stream>>>(
       type, w, reinterpret_cast<const hip_bfloat16*>(bf16_x), y, m, k);
+}
+
+void LaunchBatchedQuantGEMMBf16(core::GgmlType type, const void* w,
+                                const void* bf16_x, float* y, std::size_t batch,
+                                std::size_t m, std::size_t k,
+                                hipStream_t stream) {
+  if (m == 0 || k == 0 || batch == 0 || type == core::GgmlType::kBF16 ||
+      type == core::GgmlType::kF32) {
+    return;
+  }
+
+  constexpr std::size_t kWarp = 32;
+  constexpr std::size_t kWarpsPerBlock = 8;
+  if (type == core::GgmlType::kQ8_0 && batch <= 8) {
+    constexpr std::size_t kRowsPerWave = 4;
+    const std::size_t tokens_per_wave =
+        UseCompactBf16SmallBatchTile() ? (batch <= 2 ? 2 : (batch <= 4 ? 4 : 8))
+                                       : 8;
+    const dim3 grid(
+        static_cast<unsigned int>((m + (kWarpsPerBlock * kRowsPerWave) - 1) /
+                                  (kWarpsPerBlock * kRowsPerWave)),
+        1);
+    const dim3 block(static_cast<unsigned int>(kWarp * kWarpsPerBlock));
+    if (tokens_per_wave == 2) {
+      TiledBatchedQ8_0GEMMKernel<kWarpsPerBlock, 2><<<grid, block, 0, stream>>>(
+          w, reinterpret_cast<const hip_bfloat16*>(bf16_x), y, batch, m, k);
+    } else if (tokens_per_wave == 4) {
+      TiledBatchedQ8_0GEMMKernel<kWarpsPerBlock, 4><<<grid, block, 0, stream>>>(
+          w, reinterpret_cast<const hip_bfloat16*>(bf16_x), y, batch, m, k);
+    } else {
+      TiledBatchedQ8_0GEMMKernel<kWarpsPerBlock, 8><<<grid, block, 0, stream>>>(
+          w, reinterpret_cast<const hip_bfloat16*>(bf16_x), y, batch, m, k);
+    }
+    return;
+  }
+
+  const std::size_t num_blocks_x = (m + kWarpsPerBlock - 1) / kWarpsPerBlock;
+  const dim3 grid(static_cast<unsigned int>(num_blocks_x),
+                  static_cast<unsigned int>(batch));
+  const dim3 block(static_cast<unsigned int>(kWarp * kWarpsPerBlock));
+  BatchedQuantGEMVKernel<hip_bfloat16><<<grid, block, 0, stream>>>(
+      type, w, reinterpret_cast<const hip_bfloat16*>(bf16_x), y, m, k);
+}
+
+void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
+                                const float* fp32_x, float* y,
+                                std::size_t batch, std::size_t m, std::size_t k,
+                                hipStream_t stream) {
+  if (m == 0 || k == 0 || batch == 0 || type == core::GgmlType::kBF16 ||
+      type == core::GgmlType::kF32) {
+    return;
+  }
+
+  constexpr std::size_t kWarp = 32;
+  constexpr std::size_t kWarpsPerBlock = 8;
+  const std::size_t num_blocks_x = (m + kWarpsPerBlock - 1) / kWarpsPerBlock;
+  if (type == core::GgmlType::kQ8_0 && batch <= 8) {
+    const dim3 block(static_cast<unsigned int>(kWarp * kWarpsPerBlock));
+    SmallBatchQ8_0Fp32GEMMKernel<kWarpsPerBlock>
+        <<<static_cast<unsigned int>(num_blocks_x), block, 0, stream>>>(
+            w, fp32_x, y, batch, m, k);
+    return;
+  }
+
+  const dim3 grid(static_cast<unsigned int>(num_blocks_x),
+                  static_cast<unsigned int>(batch));
+  const dim3 block(static_cast<unsigned int>(kWarp * kWarpsPerBlock));
+  BatchedQuantGEMVKernel<float>
+      <<<grid, block, 0, stream>>>(type, w, fp32_x, y, m, k);
 }
 
 }  // namespace strix::hip

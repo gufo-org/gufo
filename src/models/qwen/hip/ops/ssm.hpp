@@ -21,6 +21,15 @@ struct SsmReplayCapture {
   const std::uint32_t* enabled{nullptr};
 };
 
+/// Captures the raw recurrent inputs for every row in a verification batch so
+/// a rejected speculative suffix can restore the checkpoint and replay only
+/// the committed SSM transitions.
+void LaunchCaptureBatchedSsmReplay(
+    const float* qkv, const float* alpha, const float* beta,
+    SsmReplayCapture replay_capture, std::uint32_t layer_idx,
+    std::uint32_t start_pos, std::size_t batch_size, std::size_t qkv_size,
+    std::size_t time_step_rank, hipStream_t stream = nullptr);
+
 /// Computes Fused SSM Input Projections (QKV, Gate, Alpha, Beta) in a single
 /// kernel
 void LaunchFusedSSMInputProjections(

@@ -81,6 +81,18 @@ public:
     metadata_count_++;
   }
 
+  void AddMetadataInt32Array(std::string_view key,
+                             const std::vector<std::int32_t>& values) {
+    AppendString(key);
+    AppendPod(static_cast<std::uint32_t>(strix::core::GgufValueType::kArray));
+    AppendPod(static_cast<std::uint32_t>(strix::core::GgufValueType::kInt32));
+    AppendPod(static_cast<std::uint64_t>(values.size()));
+    for (const auto value : values) {
+      AppendPod(value);
+    }
+    metadata_count_++;
+  }
+
   void AddTensor(std::string_view name, const std::vector<std::uint64_t>& dims,
                  strix::core::GgmlType type, std::uint64_t offset) {
     tensors_to_write_.push_back({std::string(name), dims, type, offset});
@@ -161,6 +173,8 @@ void TestBasicGgufParsing() {
   builder.AddMetadataUint32("qwen35.context_length", 32768);
   builder.AddMetadataUint32("qwen35.full_attention_interval", 4);
   builder.AddMetadataFloat32("qwen35.rope.freq_base", 1000000.0F);
+  builder.AddMetadataInt32Array("qwen35.rope.dimension_sections",
+                                {64, 0, 0, 0});
 
   builder.AddTensor("token_embd.weight", {248320, 2560},
                     strix::core::GgmlType::kBF16, 0);
@@ -177,7 +191,7 @@ void TestBasicGgufParsing() {
   Expect(reader != nullptr, "Reader open succeeds: " + err);
   Expect(reader->GetVersion() == 3, "GGUF version 3");
   Expect(reader->GetTensorCount() == 3, "3 tensors parsed");
-  Expect(reader->GetMetadataCount() == 11, "11 metadata entries");
+  Expect(reader->GetMetadataCount() == 12, "12 metadata entries");
 
   // Metadata retrieval
   Expect(reader->GetMetadataString("general.architecture") == "qwen35",
@@ -185,6 +199,15 @@ void TestBasicGgufParsing() {
   Expect(reader->GetMetadataUint32("qwen35.block_count") == 36, "36 layers");
   Expect(reader->GetMetadataUint32("qwen35.embedding_length") == 2560,
          "Hidden size 2560");
+  const auto* rope_sections =
+      reader->FindMetadata("qwen35.rope.dimension_sections");
+  Expect(rope_sections != nullptr, "signed integer array found");
+  Expect(
+      std::holds_alternative<std::vector<std::int64_t>>(rope_sections->value),
+      "signed integer array retains its type");
+  Expect(std::get<std::vector<std::int64_t>>(rope_sections->value) ==
+             std::vector<std::int64_t>({64, 0, 0, 0}),
+         "signed integer array values match");
 
   // Tensor inspection
   const auto* t0 = reader->FindTensor("token_embd.weight");

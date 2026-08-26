@@ -1,5 +1,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <stdexcept>
+#include <utility>
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
@@ -10,6 +12,7 @@ namespace strix::hip {
 namespace {
 
 constexpr std::uint32_t kMaxPromptBatch = 4096;
+constexpr std::size_t kMaxTargetLayerTaps = 5;
 
 }  // namespace
 
@@ -65,7 +68,8 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
   HIP_CHECK(hipMalloc(&d_logits, vocab_size * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_prompt_tokens,
                       std::max<std::size_t>(batch, 2) * sizeof(std::uint32_t)));
-  HIP_CHECK(hipMalloc(&d_target_layer_features, 5 * hidden_size * sizeof(float)));
+  HIP_CHECK(
+      hipMalloc(&d_target_layer_features, 5 * hidden_size * sizeof(float)));
 
   const std::size_t scratch_elements =
       batch * std::max<std::size_t>(
@@ -202,10 +206,34 @@ QwenGpuScratchView QwenGpuArena::GetScratchView(
   };
 }
 
+void QwenGpuArena::SetTargetLayerCapture(
+    std::span<const std::uint32_t> target_layer_ids) {
+  if (target_layer_ids.size() > kMaxTargetLayerTaps) {
+    throw std::invalid_argument("too many target hidden-layer taps");
+  }
+  for (const std::uint32_t layer : target_layer_ids) {
+    if (layer >= config_.num_layers) {
+      throw std::invalid_argument("target hidden-layer tap is out of range");
+    }
+  }
+  target_layer_ids_.assign(target_layer_ids.begin(), target_layer_ids.end());
+}
+
+std::optional<std::size_t> QwenGpuArena::GetTargetLayerCaptureIndex(
+    std::uint32_t layer) const noexcept {
+  const auto iterator = std::ranges::find(target_layer_ids_, layer);
+  if (iterator == target_layer_ids_.end()) {
+    return std::nullopt;
+  }
+  return static_cast<std::size_t>(
+      std::distance(target_layer_ids_.begin(), iterator));
+}
+
 QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
     : config_(other.config_),
       max_context_(other.max_context_),
-      max_batch_(other.max_batch_) {
+      max_batch_(other.max_batch_),
+      target_layer_ids_(std::move(other.target_layer_ids_)) {
   d_hidden = other.d_hidden;
   d_normed = other.d_normed;
   d_q = other.d_q;
@@ -235,6 +263,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   d_ssm_conv_state = other.d_ssm_conv_state;
   d_ssm_deltanet_state = other.d_ssm_deltanet_state;
   d_prompt_tokens = other.d_prompt_tokens;
+  d_target_layer_features = other.d_target_layer_features;
   stream = other.stream;
   prefetch_stream = other.prefetch_stream;
   prefetch_event = other.prefetch_event;
@@ -286,6 +315,7 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   other.d_ssm_conv_state = nullptr;
   other.d_ssm_deltanet_state = nullptr;
   other.d_prompt_tokens = nullptr;
+  other.d_target_layer_features = nullptr;
   other.stream = nullptr;
   other.prefetch_stream = nullptr;
   other.prefetch_event = nullptr;
@@ -314,6 +344,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     config_ = other.config_;
     max_context_ = other.max_context_;
     max_batch_ = other.max_batch_;
+    target_layer_ids_ = std::move(other.target_layer_ids_);
     d_hidden = other.d_hidden;
     d_normed = other.d_normed;
     d_q = other.d_q;
@@ -343,6 +374,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     d_ssm_conv_state = other.d_ssm_conv_state;
     d_ssm_deltanet_state = other.d_ssm_deltanet_state;
     d_prompt_tokens = other.d_prompt_tokens;
+    d_target_layer_features = other.d_target_layer_features;
     stream = other.stream;
     prefetch_stream = other.prefetch_stream;
     prefetch_event = other.prefetch_event;
@@ -394,6 +426,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     other.d_ssm_conv_state = nullptr;
     other.d_ssm_deltanet_state = nullptr;
     other.d_prompt_tokens = nullptr;
+    other.d_target_layer_features = nullptr;
     other.stream = nullptr;
     other.prefetch_stream = nullptr;
     other.prefetch_event = nullptr;

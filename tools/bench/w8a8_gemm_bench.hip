@@ -65,10 +65,11 @@ struct LdsWeight8Blocks {
   float dw[8][16];
 };
 
-__launch_bounds__(256, 4) __global__ void BaselineSingle(
-    const void* __restrict__ w,
-    const Q8_1ActivationBlock* __restrict__ x_blocks, float* __restrict__ y,
-    std::size_t batch, std::size_t m, std::size_t k) {
+__launch_bounds__(256, 4) __global__
+    void BaselineSingle(const void* __restrict__ w,
+                        const Q8_1ActivationBlock* __restrict__ x_blocks,
+                        float* __restrict__ y, std::size_t batch, std::size_t m,
+                        std::size_t k) {
   __shared__ LdsWeight8Blocks s_w;
 
   const std::size_t num_blocks = k / 32;
@@ -239,20 +240,22 @@ __global__ void RepackActivationsKernel(
 // synthetic operands, which isolates that stage's contribution to the limit.
 enum Ablate : unsigned {
   kFull = 0,
-  kNoEpilogue = 1u,   // accumulate int32 only, scale once at the end
-  kNoActLoad = 2u,    // synthetic B fragment, no activation global traffic
-  kNoWeightLoad = 4u, // synthetic A fragment, no weight global/LDS traffic
-  kNoStore = 8u,      // drop the output store
+  kNoEpilogue = 1u,    // accumulate int32 only, scale once at the end
+  kNoActLoad = 2u,     // synthetic B fragment, no activation global traffic
+  kNoWeightLoad = 4u,  // synthetic A fragment, no weight global/LDS traffic
+  kNoStore = 8u,       // drop the output store
 };
 
 // TT: 16-token WMMA column tiles per wave.
 // KB: 32-element K blocks staged per LDS round.
 // SPLIT: use two independent int32 accumulators to shorten the WMMA chain.
 template<int TT, int KB, unsigned ABL, bool SPLIT>
-__launch_bounds__(256) __global__ void TiledSingle(
-    const std::int8_t* __restrict__ wq, const __half* __restrict__ wd,
-    const std::int8_t* __restrict__ xq, const float* __restrict__ xd,
-    float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k) {
+__launch_bounds__(256) __global__
+    void TiledSingle(const std::int8_t* __restrict__ wq,
+                     const __half* __restrict__ wd,
+                     const std::int8_t* __restrict__ xq,
+                     const float* __restrict__ xd, float* __restrict__ y,
+                     std::size_t batch, std::size_t m, std::size_t k) {
   __shared__ int32x4_t s_a[KB][32];
   __shared__ float s_d[KB][16];
 
@@ -264,8 +267,7 @@ __launch_bounds__(256) __global__ void TiledSingle(
   const std::size_t half_id = lane_id >> 4u;
 
   const std::size_t rt = blockIdx.y;
-  const std::size_t tt_base =
-      (blockIdx.x * (8 * TT)) + (wave_id * TT);
+  const std::size_t tt_base = (blockIdx.x * (8 * TT)) + (wave_id * TT);
 
   float acc[TT][8];
 #pragma unroll
@@ -421,12 +423,13 @@ __launch_bounds__(256) __global__ void TiledSingle(
 //   wave   = (BM/WM) rows x (BN/WN) tokens
 // ---------------------------------------------------------------------------
 
-template<int BM, int BN, int BK, int WM, int WN, bool LdsStore, unsigned ABL = kFull,
-         bool CoarseDx = false>
-__launch_bounds__(256) __global__ void BlockedW8A8(
-    const Q8_0Block* __restrict__ w, const std::int8_t* __restrict__ xq,
-    const float* __restrict__ xd, float* __restrict__ y, std::size_t batch,
-    std::size_t m, std::size_t k) {
+template<int BM, int BN, int BK, int WM, int WN, bool LdsStore,
+         unsigned ABL = kFull, bool CoarseDx = false>
+__launch_bounds__(256) __global__
+    void BlockedW8A8(const Q8_0Block* __restrict__ w,
+                     const std::int8_t* __restrict__ xq,
+                     const float* __restrict__ xd, float* __restrict__ y,
+                     std::size_t batch, std::size_t m, std::size_t k) {
   static_assert(WM * WN == 8, "256 threads == 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
   constexpr int RS = BM / 16;   // row subtiles per block
@@ -592,9 +595,9 @@ __launch_bounds__(256) __global__ void BlockedW8A8(
         }
 #pragma unroll
         for (int l = 0; l < 8; ++l) {
-          const std::size_t r = r_block +
-                                static_cast<std::size_t>(((wr * WRS) + i) * 16) +
-                                (2u * l) + hi;
+          const std::size_t r =
+              r_block + static_cast<std::size_t>(((wr * WRS) + i) * 16) +
+              (2u * l) + hi;
           if (r < m) {
             y[(tok * m) + r] = acc[i][j][l];
           }
@@ -638,7 +641,6 @@ __launch_bounds__(256) __global__ void BlockedW8A8(
   }
 }
 
-
 // ---------------------------------------------------------------------------
 // Software-pipelined variant: the next K stage's weight blocks are fetched into
 // registers before the current stage's WMMA work, so the global latency of the
@@ -647,10 +649,11 @@ __launch_bounds__(256) __global__ void BlockedW8A8(
 // ---------------------------------------------------------------------------
 
 template<int BM, int BN, int BK, int WM, int WN>
-__launch_bounds__(256) __global__ void BlockedW8A8Pipe(
-    const Q8_0Block* __restrict__ w, const std::int8_t* __restrict__ xq,
-    const float* __restrict__ xd, float* __restrict__ y, std::size_t batch,
-    std::size_t m, std::size_t k) {
+__launch_bounds__(256) __global__
+    void BlockedW8A8Pipe(const Q8_0Block* __restrict__ w,
+                         const std::int8_t* __restrict__ xq,
+                         const float* __restrict__ xd, float* __restrict__ y,
+                         std::size_t batch, std::size_t m, std::size_t k) {
   static_assert(WM * WN == 8);
   constexpr int RS = BM / 16;
   constexpr int TS = BN / 16;
@@ -719,8 +722,8 @@ __launch_bounds__(256) __global__ void BlockedW8A8Pipe(
 #pragma unroll
       for (int i = 0; i < BK; ++i) {
         rb[i] = src[(i * 32) + lane];
-        rbx[i] =
-            xd[((((tt_block + b_tile) * num_kb) + kb0 + i) * kTileScales) + lane % 16];
+        rbx[i] = xd[((((tt_block + b_tile) * num_kb) + kb0 + i) * kTileScales) +
+                    lane % 16];
       }
     }
   };
@@ -766,11 +769,18 @@ __launch_bounds__(256) __global__ void BlockedW8A8Pipe(
         const int rs = (wr * WRS) + i;
         a0[i] = s_a[kb][rs][sl];
         a1[i] = s_a[kb][rs][16 + sl];
-        const float4 lo = *reinterpret_cast<const float4*>(&s_dw[kb][rs][hi * 8]);
+        const float4 lo =
+            *reinterpret_cast<const float4*>(&s_dw[kb][rs][hi * 8]);
         const float4 up =
             *reinterpret_cast<const float4*>(&s_dw[kb][rs][(hi * 8) + 4]);
-        dw[i][0] = lo.x; dw[i][1] = lo.y; dw[i][2] = lo.z; dw[i][3] = lo.w;
-        dw[i][4] = up.x; dw[i][5] = up.y; dw[i][6] = up.z; dw[i][7] = up.w;
+        dw[i][0] = lo.x;
+        dw[i][1] = lo.y;
+        dw[i][2] = lo.z;
+        dw[i][3] = lo.w;
+        dw[i][4] = up.x;
+        dw[i][5] = up.y;
+        dw[i][6] = up.z;
+        dw[i][7] = up.w;
       }
 #pragma unroll
       for (int j = 0; j < WTS; ++j) {
@@ -803,8 +813,10 @@ __launch_bounds__(256) __global__ void BlockedW8A8Pipe(
         scratch[(sl * 16) + (2 * l) + hi] = acc[i][j][l];
       }
       __builtin_amdgcn_wave_barrier();
-      const std::size_t r0 = r_block + static_cast<std::size_t>(((wr * WRS) + i) * 16);
-      const std::size_t t0 = t_block + static_cast<std::size_t>(((wt * WTS) + j) * 16);
+      const std::size_t r0 =
+          r_block + static_cast<std::size_t>(((wr * WRS) + i) * 16);
+      const std::size_t t0 =
+          t_block + static_cast<std::size_t>(((wt * WTS) + j) * 16);
 #pragma unroll
       for (int s = 0; s < 8; ++s) {
         const int flat = (s * 32) + lane;
@@ -818,7 +830,6 @@ __launch_bounds__(256) __global__ void BlockedW8A8Pipe(
     }
   }
 }
-
 
 // ---------------------------------------------------------------------------
 // Same blocking as BlockedW8A8Pipe, with the instruction overhead removed.
@@ -837,10 +848,12 @@ __launch_bounds__(256) __global__ void BlockedW8A8Pipe(
 // ---------------------------------------------------------------------------
 
 template<int BM, int BN, int BK, int WM, int WN, int THREADS = 256>
-__launch_bounds__(THREADS) __global__ void BlockedW8A8Fast(
-    const Q8_0Block* __restrict__ w, const std::int8_t* __restrict__ xq,
-    const float* __restrict__ xd, float* __restrict__ y, std::size_t batch_in,
-    std::size_t m_in, std::size_t k_in) {
+__launch_bounds__(THREADS) __global__
+    void BlockedW8A8Fast(const Q8_0Block* __restrict__ w,
+                         const std::int8_t* __restrict__ xq,
+                         const float* __restrict__ xd, float* __restrict__ y,
+                         std::size_t batch_in, std::size_t m_in,
+                         std::size_t k_in) {
   static_assert(WM * WN == THREADS / 32);
   static_assert(BN / 16 <= THREADS / 32);
   constexpr int RS = BM / 16;
@@ -972,11 +985,18 @@ __launch_bounds__(THREADS) __global__ void BlockedW8A8Fast(
         const int rs = (wr * WRS) + i;
         a0[i] = s_a[kb][rs][sl];
         a1[i] = s_a[kb][rs][16 + sl];
-        const float4 lo = *reinterpret_cast<const float4*>(&s_dw[kb][rs][hi * 8]);
+        const float4 lo =
+            *reinterpret_cast<const float4*>(&s_dw[kb][rs][hi * 8]);
         const float4 up =
             *reinterpret_cast<const float4*>(&s_dw[kb][rs][(hi * 8) + 4]);
-        dw[i][0] = lo.x; dw[i][1] = lo.y; dw[i][2] = lo.z; dw[i][3] = lo.w;
-        dw[i][4] = up.x; dw[i][5] = up.y; dw[i][6] = up.z; dw[i][7] = up.w;
+        dw[i][0] = lo.x;
+        dw[i][1] = lo.y;
+        dw[i][2] = lo.z;
+        dw[i][3] = lo.w;
+        dw[i][4] = up.x;
+        dw[i][5] = up.y;
+        dw[i][6] = up.z;
+        dw[i][7] = up.w;
       }
 #pragma unroll
       for (int j = 0; j < WTS; ++j) {
@@ -1018,8 +1038,8 @@ __launch_bounds__(THREADS) __global__ void BlockedW8A8Fast(
 #pragma unroll
         for (int s = 0; s < 8; ++s) {
           const int flat = (s * 32) + lane;
-          y[out_base + (static_cast<std::size_t>(flat >> 4) * m) + (flat & 15)] =
-              scratch[flat];
+          y[out_base + (static_cast<std::size_t>(flat >> 4) * m) +
+            (flat & 15)] = scratch[flat];
         }
       } else {
 #pragma unroll
@@ -1046,11 +1066,13 @@ __launch_bounds__(THREADS) __global__ void BlockedW8A8Fast(
 // ---------------------------------------------------------------------------
 
 template<int BM, int BN, int BK, int WM, int WN, int THREADS>
-__launch_bounds__(THREADS) __global__ void BlockedW8A8Dual(
-    const Q8_0Block* __restrict__ wg, const Q8_0Block* __restrict__ wu,
-    const std::int8_t* __restrict__ xq, const float* __restrict__ xd,
-    float* __restrict__ yg, float* __restrict__ yu, std::size_t batch,
-    std::size_t m, std::size_t k) {
+__launch_bounds__(THREADS) __global__
+    void BlockedW8A8Dual(const Q8_0Block* __restrict__ wg,
+                         const Q8_0Block* __restrict__ wu,
+                         const std::int8_t* __restrict__ xq,
+                         const float* __restrict__ xd, float* __restrict__ yg,
+                         float* __restrict__ yu, std::size_t batch,
+                         std::size_t m, std::size_t k) {
   static_assert(WM * WN == THREADS / 32);
   constexpr int RS = BM / 16;
   constexpr int TS = BN / 16;
@@ -1331,14 +1353,16 @@ int main(int argc, char** argv) {
 
     const std::size_t row_tiles = m / 16;
     const std::size_t tok_tiles = (batch + 15) / 16;
+    const std::size_t allocated_tok_tiles = std::max<std::size_t>(tok_tiles, 4);
     std::int8_t* d_wq = nullptr;
     __half* d_wd = nullptr;
     std::int8_t* d_xq = nullptr;
     float* d_xd = nullptr;
     HIP_OK(hipMalloc(&d_wq, row_tiles * num_kb * kTileBytes));
     HIP_OK(hipMalloc(&d_wd, row_tiles * num_kb * kTileScales * sizeof(__half)));
-    HIP_OK(hipMalloc(&d_xq, tok_tiles * num_kb * kTileBytes));
-    HIP_OK(hipMalloc(&d_xd, tok_tiles * num_kb * kTileScales * sizeof(float)));
+    HIP_OK(hipMalloc(&d_xq, allocated_tok_tiles * num_kb * kTileBytes));
+    HIP_OK(hipMalloc(
+        &d_xd, allocated_tok_tiles * num_kb * kTileScales * sizeof(float)));
     {
       const std::size_t n = row_tiles * num_kb * 16;
       RepackWeightsKernel<<<(n + 255) / 256, 256>>>(
@@ -1402,17 +1426,17 @@ int main(int argc, char** argv) {
              0);
     }
 
-#define RUN(NAME, TT, KB, ABL, SPLIT, MODE)                                 \
-  {                                                                         \
-    const dim3 grid((tok_tiles + (8 * (TT)) - 1) / (8 * (TT)), m / 16);      \
-    report(NAME,                                                            \
-           BenchMs(                                                         \
-               [&] {                                                        \
-                 TiledSingle<(TT), (KB), (ABL), (SPLIT)><<<grid, 256>>>(     \
-                     d_wq, d_wd, d_xq, d_xd, d_y, batch, m, k);             \
-               },                                                           \
-               iters),                                                      \
-           (MODE));                                                         \
+#define RUN(NAME, TT, KB, ABL, SPLIT, MODE)                              \
+  if (batch >= 128) {                                                    \
+    const dim3 grid((tok_tiles + (8 * (TT)) - 1) / (8 * (TT)), m / 16);  \
+    report(NAME,                                                         \
+           BenchMs(                                                      \
+               [&] {                                                     \
+                 TiledSingle<(TT), (KB), (ABL), (SPLIT)><<<grid, 256>>>( \
+                     d_wq, d_wd, d_xq, d_xd, d_y, batch, m, k);          \
+               },                                                        \
+               iters),                                                   \
+           (MODE));                                                      \
   }
 
     RUN("tiled tt=4 kb=16", 4, 16, kFull, false, 1)
@@ -1422,26 +1446,28 @@ int main(int argc, char** argv) {
     RUN("abl: -weightload", 4, 16, kNoWeightLoad, false, 2)
 #undef RUN
 
-#define RUN_BLK(TAG, BM, BN, BK, WM, WN, LDSST, ABL, CDX, MODE)              \
-  if (m % (BM) == 0) {                                                       \
-    const dim3 grid(static_cast<unsigned>((batch + (BN) - 1) / (BN)),         \
-                    static_cast<unsigned>(m / (BM)));                        \
-    char nm[64];                                                             \
-    std::snprintf(nm, sizeof(nm), "blk %dx%dx%d w%dx%d%s", (BM), (BN), (BK), \
-                  (WM), (WN), (TAG));                                        \
-    report(nm,                                                               \
-           BenchMs(                                                          \
-               [&] {                                                         \
-                 BlockedW8A8<(BM), (BN), (BK), (WM), (WN), (LDSST), (ABL),    \
-                             (CDX)><<<grid, 256>>>(                          \
-                     static_cast<const Q8_0Block*>(d_w), d_xq, d_xd, d_y,    \
-                     batch, m, k);                                          \
-               },                                                            \
-               iters),                                                       \
-           (MODE));                                                          \
+#define RUN_BLK(TAG, BM, BN, BK, WM, WN, LDSST, ABL, CDX, MODE)                \
+  if (m % (BM) == 0 && (batch >= (BN) || (BN) == 16)) {                        \
+    const dim3 grid(static_cast<unsigned>((batch + (BN) - 1) / (BN)),          \
+                    static_cast<unsigned>(m / (BM)));                          \
+    char nm[64];                                                               \
+    std::snprintf(nm, sizeof(nm), "blk %dx%dx%d w%dx%d%s", (BM), (BN), (BK),   \
+                  (WM), (WN), (TAG));                                          \
+    report(                                                                    \
+        nm,                                                                    \
+        BenchMs(                                                               \
+            [&] {                                                              \
+              BlockedW8A8<(BM), (BN), (BK), (WM), (WN), (LDSST), (ABL), (CDX)> \
+                  <<<grid, 256>>>(static_cast<const Q8_0Block*>(d_w), d_xq,    \
+                                  d_xd, d_y, batch, m, k);                     \
+            },                                                                 \
+            iters),                                                            \
+        (MODE));                                                               \
   }
 
     RUN_BLK("", 64, 128, 4, 2, 4, false, kFull, false, 1)
+    RUN_BLK("", 128, 16, 2, 8, 1, false, kFull, false, 1)
+    RUN_BLK("", 128, 16, 4, 8, 1, false, kFull, false, 1)
     RUN_BLK("", 128, 64, 4, 4, 2, false, kFull, false, 1)
     RUN_BLK("", 128, 128, 4, 4, 2, false, kFull, false, 1)
     RUN_BLK(" ldsst", 128, 128, 4, 4, 2, true, kFull, false, 1)
@@ -1453,45 +1479,51 @@ int main(int argc, char** argv) {
     RUN_BLK(" ldsst coarsedx", 128, 128, 4, 4, 2, true, kFull, true, 2)
 #undef RUN_BLK
 
-#define RUN_PIPE(BM, BN, BK, WM, WN)                                         \
-  if (m % (BM) == 0) {                                                       \
-    const dim3 grid(static_cast<unsigned>((batch + (BN) - 1) / (BN)),         \
-                    static_cast<unsigned>(m / (BM)));                        \
-    char nm[64];                                                             \
-    std::snprintf(nm, sizeof(nm), "pipe %dx%dx%d w%dx%d", (BM), (BN), (BK),  \
-                  (WM), (WN));                                               \
-    report(nm,                                                               \
-           BenchMs(                                                          \
-               [&] {                                                         \
-                 BlockedW8A8Pipe<(BM), (BN), (BK), (WM), (WN)>                \
-                     <<<grid, 256>>>(static_cast<const Q8_0Block*>(d_w),      \
-                                     d_xq, d_xd, d_y, batch, m, k);          \
-               },                                                            \
-               iters),                                                       \
-           1);                                                               \
+#define RUN_PIPE(BM, BN, BK, WM, WN)                                           \
+  if (m % (BM) == 0 &&                                                         \
+      (batch >= (BN) || (BN) == 16 || (BN) == 32 || (BN) == 64)) {             \
+    const dim3 grid(static_cast<unsigned>((batch + (BN) - 1) / (BN)),          \
+                    static_cast<unsigned>(m / (BM)));                          \
+    char nm[64];                                                               \
+    std::snprintf(nm, sizeof(nm), "pipe %dx%dx%d w%dx%d", (BM), (BN), (BK),    \
+                  (WM), (WN));                                                 \
+    report(nm,                                                                 \
+           BenchMs(                                                            \
+               [&] {                                                           \
+                 BlockedW8A8Pipe<(BM), (BN), (BK), (WM), (WN)>                 \
+                     <<<grid, 256>>>(static_cast<const Q8_0Block*>(d_w), d_xq, \
+                                     d_xd, d_y, batch, m, k);                  \
+               },                                                              \
+               iters),                                                         \
+           1);                                                                 \
   }
     RUN_PIPE(128, 128, 4, 4, 2)
+    RUN_PIPE(128, 16, 2, 8, 1)
+    RUN_PIPE(128, 16, 4, 8, 1)
+    RUN_PIPE(128, 32, 4, 8, 1)
+    RUN_PIPE(128, 32, 4, 4, 2)
+    RUN_PIPE(128, 64, 4, 8, 1)
     // The production kernel is this shape. BK=2 is the same structure with half
     // the LDS stage, which is the one-template-argument version of the change.
     RUN_PIPE(128, 128, 2, 4, 2)
 #undef RUN_PIPE
 
-#define RUN_FAST(BM, BN, BK, WM, WN, TH)                                     \
-  if (m % (BM) == 0) {                                                       \
-    const dim3 grid(static_cast<unsigned>((batch + (BN) - 1) / (BN)),         \
-                    static_cast<unsigned>((m + (BM) - 1) / (BM)));           \
-    char nm[64];                                                             \
-    std::snprintf(nm, sizeof(nm), "FAST %dx%dx%d w%dx%d t%d", (BM), (BN),     \
-                  (BK), (WM), (WN), (TH));                                   \
-    report(nm,                                                               \
-           BenchMs(                                                          \
-               [&] {                                                         \
-                 BlockedW8A8Fast<(BM), (BN), (BK), (WM), (WN), (TH)>          \
-                     <<<grid, (TH)>>>(static_cast<const Q8_0Block*>(d_w),     \
-                                      d_xq, d_xd, d_y, batch, m, k);         \
-               },                                                            \
-               iters),                                                       \
-           1);                                                               \
+#define RUN_FAST(BM, BN, BK, WM, WN, TH)                                  \
+  if (m % (BM) == 0 && batch >= (BN)) {                                   \
+    const dim3 grid(static_cast<unsigned>((batch + (BN) - 1) / (BN)),     \
+                    static_cast<unsigned>((m + (BM) - 1) / (BM)));        \
+    char nm[64];                                                          \
+    std::snprintf(nm, sizeof(nm), "FAST %dx%dx%d w%dx%d t%d", (BM), (BN), \
+                  (BK), (WM), (WN), (TH));                                \
+    report(nm,                                                            \
+           BenchMs(                                                       \
+               [&] {                                                      \
+                 BlockedW8A8Fast<(BM), (BN), (BK), (WM), (WN), (TH)>      \
+                     <<<grid, (TH)>>>(static_cast<const Q8_0Block*>(d_w), \
+                                      d_xq, d_xd, d_y, batch, m, k);      \
+               },                                                         \
+               iters),                                                    \
+           1);                                                            \
   }
     RUN_FAST(128, 128, 4, 4, 2, 256)
     RUN_FAST(128, 256, 4, 4, 4, 512)
@@ -1518,27 +1550,28 @@ int main(int argc, char** argv) {
         std::printf("%-13s %-26s %9.3f %8.2f %6.0f%% %8s\n", c.name, name, ms,
                     tops, 100.0 * tops / kWmmaPeakTops, "-");
       };
-#define RUN_DUAL(BM, BN, BK, WM, WN, TH)                                     \
-  if (m % (BM) == 0) {                                                       \
+#define RUN_DUAL(BM, BN, BK, WM, WN, TH)                                      \
+  if (m % (BM) == 0 && (batch >= (BN) || (BN) == 16)) {                       \
     const dim3 grid(static_cast<unsigned>((batch + (BN) - 1) / (BN)),         \
-                    static_cast<unsigned>(m / (BM)));                        \
-    char nm[64];                                                             \
+                    static_cast<unsigned>(m / (BM)));                         \
+    char nm[64];                                                              \
     std::snprintf(nm, sizeof(nm), "DUAL %dx%dx%d w%dx%d t%d", (BM), (BN),     \
-                  (BK), (WM), (WN), (TH));                                   \
-    report_dual(nm, BenchMs(                                                 \
-                        [&] {                                                \
+                  (BK), (WM), (WN), (TH));                                    \
+    report_dual(nm, BenchMs(                                                  \
+                        [&] {                                                 \
                           BlockedW8A8Dual<(BM), (BN), (BK), (WM), (WN), (TH)> \
-                              <<<grid, (TH)>>>(                              \
-                                  static_cast<const Q8_0Block*>(d_w),        \
-                                  static_cast<const Q8_0Block*>(d_w), d_xq,  \
-                                  d_xd, d_y, d_y2, batch, m, k);             \
-                        },                                                   \
-                        iters));                                             \
+                              <<<grid, (TH)>>>(                               \
+                                  static_cast<const Q8_0Block*>(d_w),         \
+                                  static_cast<const Q8_0Block*>(d_w), d_xq,   \
+                                  d_xd, d_y, d_y2, batch, m, k);              \
+                        },                                                    \
+                        iters));                                              \
   }
       RUN_DUAL(128, 128, 4, 4, 4, 512)
       RUN_DUAL(128, 128, 2, 4, 4, 512)
       RUN_DUAL(64, 128, 4, 2, 4, 256)
       RUN_DUAL(128, 64, 4, 4, 2, 256)
+      RUN_DUAL(128, 16, 4, 8, 1, 256)
 #undef RUN_DUAL
       HIP_OK(hipFree(d_y2));
     }

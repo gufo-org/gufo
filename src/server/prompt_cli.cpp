@@ -451,7 +451,7 @@ int RunPrompt(std::span<const char* const> args) {
       gen_opts.max_new_tokens = opt.max_tokens;
       gen_opts.temperature = opt.temperature;
 
-      const auto start_time = std::chrono::steady_clock::now();
+      auto start_time = std::chrono::steady_clock::now();
       std::size_t generated_count = 0;
 
       if (!opt.speculative_backend.empty()) {
@@ -531,9 +531,23 @@ int RunPrompt(std::span<const char* const> args) {
           speculative::SpeculativeOptions s_opts;
           s_opts.max_draft_tokens = opt.draft_tokens;
           s_opts.initial_draft_tokens = opt.draft_tokens;
+          if (opt.speculative_backend == "dflash" ||
+              opt.speculative_backend == "dflash2" ||
+              opt.speculative_backend == "dflash-2") {
+            s_opts.use_batched_verification = true;
+            s_opts.use_batched_lm_head = true;
+            s_opts.target_bf16_from_layer = 48;
+          } else if (opt.speculative_backend == "mtp" ||
+                     opt.speculative_backend == "mtp-npu") {
+            s_opts.use_batched_verification = true;
+            s_opts.use_batched_lm_head = true;
+            s_opts.target_bf16_from_layer = 0;
+            s_opts.target_fp32_from_layer = 63;
+          }
           speculative::SpeculativeVerifier spec_verifier(
               *gpu_exec, std::move(draft_backend), s_opts);
 
+          start_time = std::chrono::steady_clock::now();
           (void)spec_verifier.Generate(
               prompt_tokens, gen_opts,
               [&](tokenization::TokenId, std::string_view piece) -> bool {
@@ -541,8 +555,18 @@ int RunPrompt(std::span<const char* const> args) {
                 ++generated_count;
                 return true;
               });
+          if (opt.verbose) {
+            const auto& stats = spec_verifier.GetStats();
+            std::cerr << "\n[Speculative]: acceptance="
+                      << stats.AcceptanceRate()
+                      << " drafted=" << stats.total_draft_tokens
+                      << " accepted=" << stats.total_accepted_tokens
+                      << " verification_steps="
+                      << stats.total_verification_steps << '\n';
+          }
         }
       } else {
+        start_time = std::chrono::steady_clock::now();
         gpu_exec->Generate(
             prompt_tokens, gen_opts,
             [&](tokenization::TokenId, std::string_view piece) -> bool {

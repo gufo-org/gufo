@@ -1,0 +1,58 @@
+{
+  "schema": "strix.speculative-corpus.v1",
+  "prompts": [
+    {
+      "id": "expository_pangram",
+      "category": "expository",
+      "quick": true,
+      "text": "The quick brown fox jumps over the lazy dog. Explain why this sentence is commonly used."
+    },
+    {
+      "id": "cpp_ring_buffer",
+      "category": "code",
+      "quick": true,
+      "text": "Write a concise C++20 implementation of a fixed-capacity ring buffer with push, pop, front, and size. Explain the invariants."
+    },
+    {
+      "id": "reasoning_train",
+      "category": "reasoning",
+      "quick": true,
+      "text": "A train travels 120 km at 80 km/h and then 180 km at 60 km/h. Compute its average speed for the whole trip and show the reasoning."
+    },
+    {
+      "id": "summary_gpu",
+      "category": "summarization",
+      "text": "Summarize this in two sentences: An integrated processor shares memory between CPU and GPU. Avoiding copies can reduce latency, but bandwidth contention and synchronization still determine real application performance."
+    },
+    {
+      "id": "italian_explanation",
+      "category": "multilingual",
+      "text": "Spiega in italiano, con un esempio semplice, la differenza tra latenza e throughput in un sistema di calcolo."
+    },
+    {
+      "id": "chinese_explanation",
+      "category": "multilingual",
+      "text": "请用简洁的中文解释什么是推测解码，以及为什么草稿模型的接受率会影响性能。"
+    },
+    {
+      "id": "json_schedule",
+      "category": "structured",
+      "text": "Return only JSON for a three-day study plan. Each day must contain a topic, minutes, and one measurable goal."
+    },
+    {
+      "id": "creative_station",
+      "category": "creative",
+      "text": "Write the opening paragraph of a science-fiction story set in a silent railway station orbiting Jupiter."
+    },
+    {
+      "id": "repetition_sequence",
+      "category": "repetitive",
+      "text": "Continue the pattern for twenty more terms and briefly state the rule: red, blue, blue, red, blue, blue, red,"
+    },
+    {
+      "id": "instruction_debug",
+      "category": "instruction",
+      "text": "A service becomes slow only after several hours. Give a prioritized debugging checklist that distinguishes memory growth, lock contention, thermal throttling, and external dependency latency."
+    }
+  ]
+}

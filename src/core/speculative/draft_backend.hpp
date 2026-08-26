@@ -46,6 +46,13 @@ public:
     return false;
   }
 
+  /// Exact zero-based target layer outputs required by the draft backend.
+  /// An empty span means the final target layer only.
+  [[nodiscard]] virtual std::span<const std::uint32_t> TargetHiddenLayerIds()
+      const noexcept {
+    return {};
+  }
+
   /// Primes provider-specific state after target prompt prefill.
   [[nodiscard]] virtual bool PrimeTargetContext(
       const DraftTargetContext& context) {

@@ -1,19 +1,20 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
-
-#include <hip/hip_runtime.h>
 #include <hip/hip_bfloat16.h>
+#include <hip/hip_runtime.h>
+
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <string_view>
+
+#include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 
 namespace strix::hip::kernels {
 
-__global__ void dflash_rmsnorm_kernel(
-    const float* __restrict__ input,
-    const float* __restrict__ weight,
-    float* __restrict__ output,
-    uint32_t dim,
-    float eps) {
+__global__ void dflash_rmsnorm_kernel(const float* __restrict__ input,
+                                      const float* __restrict__ weight,
+                                      float* __restrict__ output, uint32_t dim,
+                                      float eps) {
   const uint32_t row = blockIdx.x;
   const float* row_in = input + (uint64_t)row * dim;
   float* row_out = output + (uint64_t)row * dim;
@@ -44,36 +45,49 @@ __global__ void dflash_rmsnorm_kernel(
   }
 }
 
-__global__ void dflash_dynamic_conv_2tap_kernel(
+__global__ void dflash_grouped_dynamic_conv_kernel(
     const float* __restrict__ input,
-    const float* __restrict__ weight,
-    const float* __restrict__ bias,
-    float* __restrict__ output,
-    uint32_t num_tokens,
-    uint32_t hidden_size) {
-  const uint32_t tok = blockIdx.x;
-  const uint32_t tid = threadIdx.x;
-  if (tok >= num_tokens) return;
-
-  for (uint32_t c = blockIdx.y * blockDim.x + tid; c < hidden_size;
-       c += gridDim.y * blockDim.x) {
-    const float w0 = weight[c * 2u + 0u];
-    const float w1 = weight[c * 2u + 1u];
-    const float b = (bias != nullptr) ? bias[c] : 0.0F;
-
-    const float x_curr = input[(uint64_t)tok * hidden_size + c];
-    const float x_prev = (tok > 0) ? input[(uint64_t)(tok - 1u) * hidden_size + c] : x_curr;
-
-    output[(uint64_t)tok * hidden_size + c] = (w0 * x_curr) + (w1 * x_prev) + b;
+    const float* __restrict__ dynamic_coefficients,
+    const float* __restrict__ base_kernel, float* __restrict__ output,
+    uint32_t num_tokens, uint32_t hidden_size, uint32_t kernel_size,
+    uint32_t group_size, uint32_t side) {
+  const uint64_t index =
+      static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const uint64_t total = static_cast<uint64_t>(num_tokens) * hidden_size;
+  if (index >= total) {
+    return;
   }
+
+  const uint32_t token = index / hidden_size;
+  const uint32_t channel = index % hidden_size;
+  const uint32_t groups = hidden_size / group_size;
+  const uint32_t group = channel / group_size;
+  const uint32_t coefficients_per_token = 2U * kernel_size * groups;
+
+  float sum = 0.0F;
+  for (uint32_t tap = 0; tap < kernel_size; ++tap) {
+    if (token < tap) {
+      continue;
+    }
+    const uint64_t dynamic_index =
+        static_cast<uint64_t>(token) * coefficients_per_token +
+        (side * kernel_size + tap) * groups + group;
+    const uint64_t base_index =
+        static_cast<uint64_t>(side * kernel_size + tap) * hidden_size + channel;
+    const uint64_t input_index =
+        static_cast<uint64_t>(token - tap) * hidden_size + channel;
+    sum += (base_kernel[base_index] + dynamic_coefficients[dynamic_index]) *
+           input[input_index];
+  }
+  output[index] = sum;
 }
 
-__global__ void dflash_silu_mul_kernel(
-    float* __restrict__ gate,
-    const float* __restrict__ up,
-    uint32_t total_elements) {
+__global__ void dflash_silu_mul_kernel(float* __restrict__ gate,
+                                       const float* __restrict__ up,
+                                       uint32_t total_elements) {
   const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= total_elements) return;
+  if (idx >= total_elements)
+    return;
 
   const float g = gate[idx];
   const float silu_g = g / (1.0F + expf(-g));
@@ -81,51 +95,60 @@ __global__ void dflash_silu_mul_kernel(
 }
 
 __global__ void dflash_noncausal_attention_kernel(
-    const float* __restrict__ q,
-    const float* __restrict__ injected_k,
-    const float* __restrict__ injected_v,
-    const float* __restrict__ block_k,
-    const float* __restrict__ block_v,
-    float* __restrict__ out,
-    uint32_t current_pos,
-    uint32_t draft_count,
-    uint32_t num_q_heads,
-    uint32_t num_kv_heads,
-    uint32_t head_dim,
-    float scale) {
+    const float* __restrict__ q, const float* __restrict__ injected_k,
+    const float* __restrict__ injected_v, const float* __restrict__ block_k,
+    const float* __restrict__ block_v, float* __restrict__ out,
+    uint32_t current_pos, uint32_t history_length, uint32_t block_count,
+    uint32_t sliding_window, uint32_t num_q_heads, uint32_t num_kv_heads,
+    uint32_t head_dim, float scale) {
   const uint32_t tok = blockIdx.x;
   const uint32_t h = blockIdx.y;
-  if (tok >= draft_count || h >= num_q_heads) return;
+  if (tok >= block_count || h >= num_q_heads)
+    return;
 
   const uint32_t gqa_group = num_q_heads / num_kv_heads;
   const uint32_t kv_h = h / gqa_group;
   const uint32_t q_dim = num_q_heads * head_dim;
   const uint32_t kv_dim = num_kv_heads * head_dim;
-  const uint32_t total_k = current_pos + draft_count;
+  const uint32_t query_position = current_pos + tok;
+  const uint32_t history_start = current_pos + 1U > sliding_window
+                                     ? current_pos + 1U - sliding_window
+                                     : 0U;
+  const uint32_t history_count =
+      history_length > history_start ? history_length - history_start : 0U;
+  const uint32_t total_k = history_count + block_count;
 
   const float* q_ptr = q + ((uint64_t)tok * q_dim + (uint64_t)h * head_dim);
   float* out_ptr = out + ((uint64_t)tok * q_dim + (uint64_t)h * head_dim);
 
   extern __shared__ float s_scores[];
 
-  // 1. Compute dot products against historical injected KV
-  for (uint32_t p = threadIdx.x; p < current_pos; p += blockDim.x) {
-    const float* k_ptr = injected_k + ((uint64_t)p * kv_dim + (uint64_t)kv_h * head_dim);
+  for (uint32_t local = threadIdx.x; local < history_count;
+       local += blockDim.x) {
+    const uint32_t position = history_start + local;
+    const float* k_ptr =
+        injected_k + ((uint64_t)position * kv_dim + (uint64_t)kv_h * head_dim);
     float dot = 0.0F;
     for (uint32_t d = 0; d < head_dim; ++d) {
       dot += q_ptr[d] * k_ptr[d];
     }
-    s_scores[p] = dot * scale;
+    s_scores[local] =
+        query_position - position < sliding_window ? dot * scale : -1e20F;
   }
 
-  // 2. Compute non-causal dot products against noise block KV
-  for (uint32_t p = threadIdx.x; p < draft_count; p += blockDim.x) {
-    const float* k_ptr = block_k + ((uint64_t)p * kv_dim + (uint64_t)kv_h * head_dim);
+  for (uint32_t p = threadIdx.x; p < block_count; p += blockDim.x) {
+    const float* k_ptr =
+        block_k + ((uint64_t)p * kv_dim + (uint64_t)kv_h * head_dim);
     float dot = 0.0F;
     for (uint32_t d = 0; d < head_dim; ++d) {
       dot += q_ptr[d] * k_ptr[d];
     }
-    s_scores[current_pos + p] = dot * scale;
+    const uint32_t key_position = current_pos + p;
+    const uint32_t distance = query_position > key_position
+                                  ? query_position - key_position
+                                  : key_position - query_position;
+    s_scores[history_count + p] =
+        distance < sliding_window ? dot * scale : -1e20F;
   }
   __syncthreads();
 
@@ -140,7 +163,8 @@ __global__ void dflash_noncausal_attention_kernel(
 
   for (uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
     if (threadIdx.x < stride) {
-      s_reduce[threadIdx.x] = fmaxf(s_reduce[threadIdx.x], s_reduce[threadIdx.x + stride]);
+      s_reduce[threadIdx.x] =
+          fmaxf(s_reduce[threadIdx.x], s_reduce[threadIdx.x + stride]);
     }
     __syncthreads();
   }
@@ -175,69 +199,376 @@ __global__ void dflash_noncausal_attention_kernel(
   // Multiply by V
   for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
     float acc = 0.0F;
-    for (uint32_t p = 0; p < current_pos; ++p) {
-      const float* v_ptr = injected_v + ((uint64_t)p * kv_dim + (uint64_t)kv_h * head_dim);
-      acc += s_scores[p] * v_ptr[d];
+    for (uint32_t local = 0; local < history_count; ++local) {
+      const uint32_t position = history_start + local;
+      const float* v_ptr = injected_v + ((uint64_t)position * kv_dim +
+                                         (uint64_t)kv_h * head_dim);
+      acc += s_scores[local] * v_ptr[d];
     }
-    for (uint32_t p = 0; p < draft_count; ++p) {
-      const float* v_ptr = block_v + ((uint64_t)p * kv_dim + (uint64_t)kv_h * head_dim);
-      acc += s_scores[current_pos + p] * v_ptr[d];
+    for (uint32_t p = 0; p < block_count; ++p) {
+      const float* v_ptr =
+          block_v + ((uint64_t)p * kv_dim + (uint64_t)kv_h * head_dim);
+      acc += s_scores[history_count + p] * v_ptr[d];
     }
     out_ptr[d] = acc;
   }
 }
 
-void LaunchDFlashRMSNorm(
-    const float* input,
-    const float* weight,
-    float* output,
-    std::uint32_t dim,
-    float eps,
-    hipStream_t stream) {
+constexpr uint32_t kSelectorThreads = 128;
+constexpr uint32_t kMaxSelectorTopK = 16;
+constexpr uint32_t kSelectorTokensPerBlock = 2048;
+
+__device__ __forceinline__ void InsertSelectorCandidate(
+    float score, uint32_t id, float* scores, uint32_t* ids,
+    uint32_t selector_top_k) {
+  if (score <= scores[selector_top_k - 1U]) {
+    return;
+  }
+  uint32_t insertion = selector_top_k - 1U;
+  while (insertion > 0U && score > scores[insertion - 1U]) {
+    scores[insertion] = scores[insertion - 1U];
+    ids[insertion] = ids[insertion - 1U];
+    --insertion;
+  }
+  scores[insertion] = score;
+  ids[insertion] = id;
+}
+
+__global__ void dflash_selector_partial_topk_kernel(
+    const float* __restrict__ logits, float* __restrict__ partial_scores,
+    uint32_t* __restrict__ partial_ids, uint32_t vocab_size,
+    uint32_t selector_top_k) {
+  __shared__ float shared_scores[kSelectorThreads * kMaxSelectorTopK];
+  __shared__ uint32_t shared_ids[kSelectorThreads * kMaxSelectorTopK];
+
+  float local_scores[kMaxSelectorTopK];
+  uint32_t local_ids[kMaxSelectorTopK];
+#pragma unroll
+  for (uint32_t index = 0; index < kMaxSelectorTopK; ++index) {
+    local_scores[index] = -INFINITY;
+    local_ids[index] = 0;
+  }
+
+  const uint32_t begin = blockIdx.x * kSelectorTokensPerBlock;
+  const uint32_t requested_end = begin + kSelectorTokensPerBlock;
+  const uint32_t end = requested_end < vocab_size ? requested_end : vocab_size;
+  for (uint32_t token = begin + threadIdx.x; token < end; token += blockDim.x) {
+    InsertSelectorCandidate(logits[token], token, local_scores, local_ids,
+                            selector_top_k);
+  }
+
+  const uint32_t shared_offset = threadIdx.x * kMaxSelectorTopK;
+#pragma unroll
+  for (uint32_t index = 0; index < kMaxSelectorTopK; ++index) {
+    shared_scores[shared_offset + index] = local_scores[index];
+    shared_ids[shared_offset + index] = local_ids[index];
+  }
+  __syncthreads();
+
+  if (threadIdx.x != 0U) {
+    return;
+  }
+  float top_scores[kMaxSelectorTopK];
+  uint32_t top_ids[kMaxSelectorTopK];
+#pragma unroll
+  for (uint32_t index = 0; index < kMaxSelectorTopK; ++index) {
+    top_scores[index] = -INFINITY;
+    top_ids[index] = 0;
+  }
+  for (uint32_t thread = 0; thread < kSelectorThreads; ++thread) {
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      const uint32_t shared_index = thread * kMaxSelectorTopK + index;
+      InsertSelectorCandidate(shared_scores[shared_index],
+                              shared_ids[shared_index], top_scores, top_ids,
+                              selector_top_k);
+    }
+  }
+  const uint32_t output_offset = blockIdx.x * kMaxSelectorTopK;
+  for (uint32_t index = 0; index < selector_top_k; ++index) {
+    partial_scores[output_offset + index] = top_scores[index];
+    partial_ids[output_offset + index] = top_ids[index];
+  }
+}
+
+__global__ void dflash_selector_finalize_kernel(
+    const float* __restrict__ partial_scores,
+    const uint32_t* __restrict__ partial_ids,
+    const float* __restrict__ projected_hidden,
+    const hip_bfloat16* __restrict__ predecessor_codebook,
+    const hip_bfloat16* __restrict__ successor_codebook,
+    const uint32_t* __restrict__ predecessor_token,
+    uint32_t* __restrict__ output_token, float* __restrict__ output_confidence,
+    uint32_t partial_count, uint32_t selector_rank, uint32_t selector_top_k) {
+  __shared__ float shared_scores[kSelectorThreads * kMaxSelectorTopK];
+  __shared__ uint32_t shared_ids[kSelectorThreads * kMaxSelectorTopK];
+
+  float local_scores[kMaxSelectorTopK];
+  uint32_t local_ids[kMaxSelectorTopK];
+#pragma unroll
+  for (uint32_t index = 0; index < kMaxSelectorTopK; ++index) {
+    local_scores[index] = -INFINITY;
+    local_ids[index] = 0;
+  }
+  const uint32_t candidate_count = partial_count * kMaxSelectorTopK;
+  for (uint32_t index = threadIdx.x; index < candidate_count;
+       index += blockDim.x) {
+    InsertSelectorCandidate(partial_scores[index], partial_ids[index],
+                            local_scores, local_ids, selector_top_k);
+  }
+
+  const uint32_t shared_offset = threadIdx.x * kMaxSelectorTopK;
+#pragma unroll
+  for (uint32_t index = 0; index < kMaxSelectorTopK; ++index) {
+    shared_scores[shared_offset + index] = local_scores[index];
+    shared_ids[shared_offset + index] = local_ids[index];
+  }
+  __syncthreads();
+  if (threadIdx.x != 0U) {
+    return;
+  }
+
+  float top_scores[kMaxSelectorTopK];
+  uint32_t top_ids[kMaxSelectorTopK];
+#pragma unroll
+  for (uint32_t index = 0; index < kMaxSelectorTopK; ++index) {
+    top_scores[index] = -INFINITY;
+    top_ids[index] = 0;
+  }
+  for (uint32_t thread = 0; thread < kSelectorThreads; ++thread) {
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      const uint32_t index_in_shared = thread * kMaxSelectorTopK + index;
+      InsertSelectorCandidate(shared_scores[index_in_shared],
+                              shared_ids[index_in_shared], top_scores, top_ids,
+                              selector_top_k);
+    }
+  }
+
+  const uint32_t predecessor = *predecessor_token;
+  const hip_bfloat16* predecessor_row =
+      predecessor_codebook + (uint64_t)predecessor * selector_rank;
+  float best_score = -INFINITY;
+  uint32_t best_index = 0;
+  float path_scores[kMaxSelectorTopK];
+  for (uint32_t candidate_index = 0; candidate_index < selector_top_k;
+       ++candidate_index) {
+    const uint32_t candidate = top_ids[candidate_index];
+    const hip_bfloat16* successor_row =
+        successor_codebook + (uint64_t)candidate * selector_rank;
+    float transition = 0.0F;
+    for (uint32_t rank = 0; rank < selector_rank; ++rank) {
+      transition += static_cast<float>(predecessor_row[rank]) *
+                    projected_hidden[rank] *
+                    static_cast<float>(successor_row[rank]);
+    }
+    const float score = top_scores[candidate_index] + transition;
+    path_scores[candidate_index] = score;
+    if (score > best_score) {
+      best_score = score;
+      best_index = candidate_index;
+    }
+  }
+
+  *output_token = top_ids[best_index];
+  if (output_confidence != nullptr) {
+    float denominator = 0.0F;
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      denominator += expf(path_scores[index] - best_score);
+    }
+    *output_confidence = 1.0F / fmaxf(denominator, 1e-30F);
+  }
+}
+
+__global__ void dflash_selector_step_kernel(
+    const float* __restrict__ logits,
+    const float* __restrict__ projected_hidden,
+    const hip_bfloat16* __restrict__ predecessor_codebook,
+    const hip_bfloat16* __restrict__ successor_codebook,
+    const uint32_t* __restrict__ predecessor_token,
+    uint32_t* __restrict__ output_token, float* __restrict__ output_confidence,
+    uint32_t vocab_size, uint32_t selector_rank, uint32_t selector_top_k) {
+  __shared__ float shared_scores[kSelectorThreads * kMaxSelectorTopK];
+  __shared__ uint32_t shared_ids[kSelectorThreads * kMaxSelectorTopK];
+
+  float local_scores[kMaxSelectorTopK];
+  uint32_t local_ids[kMaxSelectorTopK];
+  for (uint32_t index = 0; index < selector_top_k; ++index) {
+    local_scores[index] = -INFINITY;
+    local_ids[index] = 0;
+  }
+
+  for (uint32_t token = threadIdx.x; token < vocab_size; token += blockDim.x) {
+    const float score = logits[token];
+    if (score <= local_scores[selector_top_k - 1U]) {
+      continue;
+    }
+    uint32_t insertion = selector_top_k - 1U;
+    while (insertion > 0U && score > local_scores[insertion - 1U]) {
+      local_scores[insertion] = local_scores[insertion - 1U];
+      local_ids[insertion] = local_ids[insertion - 1U];
+      --insertion;
+    }
+    local_scores[insertion] = score;
+    local_ids[insertion] = token;
+  }
+
+  const uint32_t shared_offset = threadIdx.x * kMaxSelectorTopK;
+  for (uint32_t index = 0; index < selector_top_k; ++index) {
+    shared_scores[shared_offset + index] = local_scores[index];
+    shared_ids[shared_offset + index] = local_ids[index];
+  }
+  __syncthreads();
+
+  if (threadIdx.x != 0U) {
+    return;
+  }
+
+  float top_scores[kMaxSelectorTopK];
+  uint32_t top_ids[kMaxSelectorTopK];
+  for (uint32_t index = 0; index < selector_top_k; ++index) {
+    top_scores[index] = -INFINITY;
+    top_ids[index] = 0;
+  }
+  for (uint32_t thread = 0; thread < kSelectorThreads; ++thread) {
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      const uint32_t shared_index = thread * kMaxSelectorTopK + index;
+      const float score = shared_scores[shared_index];
+      if (score <= top_scores[selector_top_k - 1U]) {
+        continue;
+      }
+      uint32_t insertion = selector_top_k - 1U;
+      while (insertion > 0U && score > top_scores[insertion - 1U]) {
+        top_scores[insertion] = top_scores[insertion - 1U];
+        top_ids[insertion] = top_ids[insertion - 1U];
+        --insertion;
+      }
+      top_scores[insertion] = score;
+      top_ids[insertion] = shared_ids[shared_index];
+    }
+  }
+
+  const uint32_t predecessor = *predecessor_token;
+  const hip_bfloat16* predecessor_row =
+      predecessor_codebook + (uint64_t)predecessor * selector_rank;
+  float best_score = -INFINITY;
+  uint32_t best_index = 0;
+  float path_scores[kMaxSelectorTopK];
+  for (uint32_t candidate_index = 0; candidate_index < selector_top_k;
+       ++candidate_index) {
+    const uint32_t candidate = top_ids[candidate_index];
+    const hip_bfloat16* successor_row =
+        successor_codebook + (uint64_t)candidate * selector_rank;
+    float transition = 0.0F;
+    for (uint32_t rank = 0; rank < selector_rank; ++rank) {
+      transition += static_cast<float>(predecessor_row[rank]) *
+                    projected_hidden[rank] *
+                    static_cast<float>(successor_row[rank]);
+    }
+    const float score = top_scores[candidate_index] + transition;
+    path_scores[candidate_index] = score;
+    if (score > best_score) {
+      best_score = score;
+      best_index = candidate_index;
+    }
+  }
+
+  *output_token = top_ids[best_index];
+  if (output_confidence != nullptr) {
+    float denominator = 0.0F;
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      denominator += expf(path_scores[index] - best_score);
+    }
+    *output_confidence = 1.0F / fmaxf(denominator, 1e-30F);
+  }
+}
+
+void LaunchDFlashRMSNorm(const float* input, const float* weight, float* output,
+                         std::uint32_t dim, float eps, hipStream_t stream) {
   dflash_rmsnorm_kernel<<<1, 256, 0, stream>>>(input, weight, output, dim, eps);
 }
 
-void LaunchDFlashDynamicConv2Tap(
-    const float* input,
-    const float* weight,
-    const float* bias,
-    float* output,
-    std::uint32_t num_tokens,
-    std::uint32_t hidden_size,
-    hipStream_t stream) {
-  dim3 grid(num_tokens, (hidden_size + 255u) / 256u);
-  dflash_dynamic_conv_2tap_kernel<<<grid, 256, 0, stream>>>(
-      input, weight, bias, output, num_tokens, hidden_size);
+void LaunchDFlashGroupedDynamicConv(
+    const float* input, const float* dynamic_coefficients,
+    const float* base_kernel, float* output, std::uint32_t num_tokens,
+    std::uint32_t hidden_size, std::uint32_t kernel_size,
+    std::uint32_t group_size, std::uint32_t side, hipStream_t stream) {
+  const uint64_t total = static_cast<uint64_t>(num_tokens) * hidden_size;
+  const uint32_t blocks = static_cast<uint32_t>((total + 255U) / 256U);
+  dflash_grouped_dynamic_conv_kernel<<<blocks, 256, 0, stream>>>(
+      input, dynamic_coefficients, base_kernel, output, num_tokens, hidden_size,
+      kernel_size, group_size, side);
 }
 
-void LaunchDFlashSiLUMul(
-    float* gate,
-    const float* up,
-    std::uint32_t total_elements,
-    hipStream_t stream) {
+void LaunchDFlashSiLUMul(float* gate, const float* up,
+                         std::uint32_t total_elements, hipStream_t stream) {
   const uint32_t blocks = (total_elements + 255u) / 256u;
   dflash_silu_mul_kernel<<<blocks, 256, 0, stream>>>(gate, up, total_elements);
 }
 
 void LaunchDFlashNonCausalAttention(
-    const float* q,
-    const float* injected_k,
-    const float* injected_v,
-    const float* block_k,
-    const float* block_v,
-    float* out,
-    std::uint32_t current_pos,
-    std::uint32_t draft_count,
-    std::uint32_t num_q_heads,
-    std::uint32_t num_kv_heads,
-    std::uint32_t head_dim,
-    float scale,
-    hipStream_t stream) {
-  const std::size_t shared_bytes = (current_pos + draft_count) * sizeof(float);
-  dim3 grid(draft_count, num_q_heads);
+    const float* q, const float* injected_k, const float* injected_v,
+    const float* block_k, const float* block_v, float* out,
+    std::uint32_t current_pos, std::uint32_t history_length,
+    std::uint32_t block_count, std::uint32_t sliding_window,
+    std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
+    std::uint32_t head_dim, float scale, hipStream_t stream) {
+  const std::uint32_t history_start = current_pos + 1U > sliding_window
+                                          ? current_pos + 1U - sliding_window
+                                          : 0U;
+  const std::uint32_t history_count =
+      history_length > history_start ? history_length - history_start : 0U;
+  const std::size_t shared_bytes =
+      (history_count + block_count) * sizeof(float);
+  dim3 grid(block_count, num_q_heads);
   dflash_noncausal_attention_kernel<<<grid, 256, shared_bytes, stream>>>(
       q, injected_k, injected_v, block_k, block_v, out, current_pos,
-      draft_count, num_q_heads, num_kv_heads, head_dim, scale);
+      history_length, block_count, sliding_window, num_q_heads, num_kv_heads,
+      head_dim, scale);
+}
+
+std::size_t DFlashSelectorScratchElements(std::uint32_t vocab_size) noexcept {
+  const std::size_t partial_count =
+      (static_cast<std::size_t>(vocab_size) + kSelectorTokensPerBlock - 1U) /
+      kSelectorTokensPerBlock;
+  return partial_count * kMaxSelectorTopK;
+}
+
+void LaunchDFlashSelectorStep(
+    const float* logits, const float* projected_hidden,
+    const void* predecessor_codebook_bf16, const void* successor_codebook_bf16,
+    const std::uint32_t* predecessor_token, std::uint32_t* output_token,
+    float* output_confidence, float* partial_scores, std::uint32_t* partial_ids,
+    std::uint32_t vocab_size, std::uint32_t selector_rank,
+    std::uint32_t selector_top_k, hipStream_t stream) {
+  static const bool use_parallel = [] {
+    const char* value = std::getenv("STRIX_DFLASH_SELECTOR");
+    if (value == nullptr) {
+      return true;
+    }
+    const std::string_view setting{value};
+    return setting != "serial" && setting != "baseline" && setting != "0" &&
+           setting != "false" && setting != "off";
+  }();
+  if (use_parallel && partial_scores != nullptr && partial_ids != nullptr &&
+      selector_top_k > 0 && selector_top_k <= kMaxSelectorTopK) {
+    const std::uint32_t partial_count =
+        (vocab_size + kSelectorTokensPerBlock - 1U) / kSelectorTokensPerBlock;
+    dflash_selector_partial_topk_kernel<<<partial_count, kSelectorThreads, 0,
+                                          stream>>>(
+        logits, partial_scores, partial_ids, vocab_size, selector_top_k);
+    dflash_selector_finalize_kernel<<<1, kSelectorThreads, 0, stream>>>(
+        partial_scores, partial_ids, projected_hidden,
+        static_cast<const hip_bfloat16*>(predecessor_codebook_bf16),
+        static_cast<const hip_bfloat16*>(successor_codebook_bf16),
+        predecessor_token, output_token, output_confidence, partial_count,
+        selector_rank, selector_top_k);
+    return;
+  }
+  dflash_selector_step_kernel<<<1, kSelectorThreads, 0, stream>>>(
+      logits, projected_hidden,
+      static_cast<const hip_bfloat16*>(predecessor_codebook_bf16),
+      static_cast<const hip_bfloat16*>(successor_codebook_bf16),
+      predecessor_token, output_token, output_confidence, vocab_size,
+      selector_rank, selector_top_k);
 }
 
 }  // namespace strix::hip::kernels

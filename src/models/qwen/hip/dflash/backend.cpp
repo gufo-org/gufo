@@ -1,6 +1,4 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/dflash.hpp"
-
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -10,14 +8,14 @@
 #include <utility>
 #include <vector>
 
+#include "src/models/qwen/hip/dflash.hpp"
+
 namespace strix::hip {
 
 QwenDFlashGpuDraftBackend::QwenDFlashGpuDraftBackend(
     std::unique_ptr<QwenDFlashGpuExecutor> executor,
     QwenDFlashGpuDraftConfig config)
-    : executor_(std::move(executor)),
-      config_(config),
-      target_hidden_accumulator_(executor_->GetTargetFeaturesSize()) {}
+    : executor_(std::move(executor)), config_(config) {}
 
 std::unique_ptr<QwenDFlashGpuDraftBackend> QwenDFlashGpuDraftBackend::Create(
     std::shared_ptr<const QwenDFlashGpuModel> model,
@@ -28,8 +26,8 @@ std::unique_ptr<QwenDFlashGpuDraftBackend> QwenDFlashGpuDraftBackend::Create(
     }
     return nullptr;
   }
-  auto executor =
-      QwenDFlashGpuExecutor::Create(std::move(model), config.max_context, error_msg);
+  auto executor = QwenDFlashGpuExecutor::Create(std::move(model),
+                                                config.max_context, error_msg);
   if (executor == nullptr) {
     return nullptr;
   }
@@ -71,42 +69,18 @@ bool QwenDFlashGpuDraftBackend::PrimeTargetContext(
   }
 
   const std::size_t num_tokens = context.prompt_tokens.size();
-  const std::size_t hidden_size = executor_->GetHiddenSize();
-  const std::size_t target_layers_count =
-      executor_->GetModel().GetDFlashConfig().target_layer_ids.size();
   const std::size_t enc_in_dim = executor_->GetTargetFeaturesSize();
 
-  if (context.prompt_hidden_states.empty()) {
-    primed_ = true;
-    proposal_input_ = context.first_token;
-    return true;
-  }
-
-  std::vector<float> expanded_features;
-  std::span<const float> features_to_inject;
-
-  if (context.prompt_hidden_states.size() == num_tokens * enc_in_dim) {
-    features_to_inject = context.prompt_hidden_states;
-  } else if (context.prompt_hidden_states.size() == num_tokens * hidden_size) {
-    expanded_features.resize(num_tokens * enc_in_dim);
-    for (std::size_t t = 0; t < num_tokens; ++t) {
-      const auto src_tok = std::span<const float>(
-          context.prompt_hidden_states.data() + (t * hidden_size), hidden_size);
-      for (std::size_t l = 0; l < target_layers_count; ++l) {
-        std::copy_n(src_tok.data(), hidden_size,
-                    expanded_features.data() + (t * enc_in_dim) +
-                        (l * hidden_size));
-      }
-    }
-    features_to_inject = expanded_features;
-  } else {
+  if (context.hidden_size != enc_in_dim ||
+      context.prompt_hidden_states.size() != num_tokens * enc_in_dim) {
     last_error_ = "DFlash target features dimension mismatch";
     return false;
   }
 
   try {
-    const auto ok = executor_->InjectTargetContext(
-        features_to_inject, 0, static_cast<std::uint32_t>(num_tokens));
+    const auto ok =
+        executor_->InjectTargetContext(context.prompt_hidden_states, 0,
+                                       static_cast<std::uint32_t>(num_tokens));
     if (!ok) {
       last_error_ = "DFlash target context injection failed";
       return false;
@@ -134,9 +108,22 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::Propose(
   // Inject newly committed target tokens into DFlash draft KV cache
   if (current_pos > executor_->GetInjectedContextLength()) {
     const std::uint32_t start_p = executor_->GetInjectedContextLength();
-    for (std::uint32_t p = start_p; p < current_pos; ++p) {
-      executor_->InjectTargetContext(target_hidden_accumulator_, p, 1);
+    const std::uint32_t count = current_pos - start_p;
+    const std::size_t expected =
+        static_cast<std::size_t>(count) * executor_->GetTargetFeaturesSize();
+    if (pending_target_features_.size() != expected) {
+      throw std::logic_error(
+          "DFlash committed target feature history is incomplete");
     }
+    if (!executor_->InjectTargetContext(pending_target_features_, start_p,
+                                        count)) {
+      throw std::runtime_error(
+          "DFlash committed target feature injection failed");
+    }
+    pending_target_features_.clear();
+  } else if (!pending_target_features_.empty()) {
+    throw std::logic_error(
+        "DFlash has target features without a matching committed position");
   }
 
   speculative::DraftProposal proposal;
@@ -171,24 +158,18 @@ void QwenDFlashGpuDraftBackend::AcceptFeedback(
 
 void QwenDFlashGpuDraftBackend::UpdateTargetHidden(
     std::span<const float> hidden) {
-  const std::size_t hidden_size = executor_->GetHiddenSize();
-  const std::size_t target_layers_count =
-      executor_->GetModel().GetDFlashConfig().target_layer_ids.size();
   const std::size_t enc_in_dim = executor_->GetTargetFeaturesSize();
-
-  if (hidden.size() == enc_in_dim) {
-    std::copy_n(hidden.data(), enc_in_dim, target_hidden_accumulator_.data());
-  } else if (hidden.size() == hidden_size) {
-    for (std::size_t l = 0; l < target_layers_count; ++l) {
-      std::copy_n(hidden.data(), hidden_size,
-                  target_hidden_accumulator_.data() + (l * hidden_size));
-    }
+  if (hidden.size() != enc_in_dim) {
+    throw std::invalid_argument(
+        "DFlash committed target feature width is invalid");
   }
+  pending_target_features_.insert(pending_target_features_.end(),
+                                  hidden.begin(), hidden.end());
 }
 
 void QwenDFlashGpuDraftBackend::Reset() noexcept {
   executor_->Reset();
-  std::ranges::fill(target_hidden_accumulator_, 0.0F);
+  pending_target_features_.clear();
   proposed_tokens_.clear();
   proposal_input_ = 0;
   proposal_checkpoint_ = 0;

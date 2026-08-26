@@ -1,6 +1,7 @@
 #ifndef STRIX_MODELS_QWEN_HIP_KERNELS_DFLASH_KERNELS_HPP_
 #define STRIX_MODELS_QWEN_HIP_KERNELS_DFLASH_KERNELS_HPP_
 
+#include <cstddef>
 #include <cstdint>
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -8,43 +9,36 @@
 
 namespace strix::hip::kernels {
 
-void LaunchDFlashRMSNorm(
-    const float* input,
-    const float* weight,
-    float* output,
-    std::uint32_t dim,
-    float eps,
-    hipStream_t stream);
+void LaunchDFlashRMSNorm(const float* input, const float* weight, float* output,
+                         std::uint32_t dim, float eps, hipStream_t stream);
 
-void LaunchDFlashDynamicConv2Tap(
-    const float* input,
-    const float* weight,
-    const float* bias,
-    float* output,
-    std::uint32_t num_tokens,
-    std::uint32_t hidden_size,
-    hipStream_t stream);
+void LaunchDFlashGroupedDynamicConv(
+    const float* input, const float* dynamic_coefficients,
+    const float* base_kernel, float* output, std::uint32_t num_tokens,
+    std::uint32_t hidden_size, std::uint32_t kernel_size,
+    std::uint32_t group_size, std::uint32_t side, hipStream_t stream);
 
-void LaunchDFlashSiLUMul(
-    float* gate,
-    const float* up,
-    std::uint32_t total_elements,
-    hipStream_t stream);
+void LaunchDFlashSiLUMul(float* gate, const float* up,
+                         std::uint32_t total_elements, hipStream_t stream);
 
 void LaunchDFlashNonCausalAttention(
-    const float* q,
-    const float* injected_k,
-    const float* injected_v,
-    const float* block_k,
-    const float* block_v,
-    float* out,
-    std::uint32_t current_pos,
-    std::uint32_t draft_count,
-    std::uint32_t num_q_heads,
-    std::uint32_t num_kv_heads,
-    std::uint32_t head_dim,
-    float scale,
-    hipStream_t stream);
+    const float* q, const float* injected_k, const float* injected_v,
+    const float* block_k, const float* block_v, float* out,
+    std::uint32_t current_pos, std::uint32_t history_length,
+    std::uint32_t block_count, std::uint32_t sliding_window,
+    std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
+    std::uint32_t head_dim, float scale, hipStream_t stream);
+
+[[nodiscard]] std::size_t DFlashSelectorScratchElements(
+    std::uint32_t vocab_size) noexcept;
+
+void LaunchDFlashSelectorStep(
+    const float* logits, const float* projected_hidden,
+    const void* predecessor_codebook_bf16, const void* successor_codebook_bf16,
+    const std::uint32_t* predecessor_token, std::uint32_t* output_token,
+    float* output_confidence, float* partial_scores, std::uint32_t* partial_ids,
+    std::uint32_t vocab_size, std::uint32_t selector_rank,
+    std::uint32_t selector_top_k, hipStream_t stream);
 
 }  // namespace strix::hip::kernels
 #endif  // defined(ENGINE_ENABLE_HIP)

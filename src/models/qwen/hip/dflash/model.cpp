@@ -1,6 +1,4 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include "src/models/qwen/hip/dflash.hpp"
-
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -12,6 +10,7 @@
 #include <vector>
 
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 
 namespace strix::hip {
@@ -144,9 +143,33 @@ models::QwenTensorRef PackMatrixBf16(const models::QwenTensorRef& source,
   };
 }
 
+models::QwenTensorRef PackBlockMatrix(const models::QwenTensorRef& source,
+                                      std::size_t rows, std::size_t columns,
+                                      std::vector<void*>& allocations,
+                                      std::size_t& packed_bytes) {
+  if (source.type != core::GgmlType::kQ8_0) {
+    return PackMatrixBf16(source, rows, columns, allocations, packed_bytes);
+  }
+
+  const std::size_t row_bytes = quant::QuantizedRowBytes(source.type, columns);
+  if (source.empty() || rows == 0 || columns == 0 || row_bytes == 0) {
+    return {};
+  }
+  const std::size_t total_bytes = rows * row_bytes;
+  void* device = detail::AllocateDevice(total_bytes);
+  allocations.push_back(device);
+  CopyToDevice(device, source.data, total_bytes);
+  packed_bytes += total_bytes;
+  return {
+      .data = device,
+      .type = source.type,
+      .num_elements = rows * columns,
+  };
+}
+
 void PackDFlashWeights(speculative::QwenDFlashWeights& weights,
-                      std::vector<void*>& allocations,
-                      std::size_t& packed_bytes) {
+                       std::vector<void*>& allocations,
+                       std::size_t& packed_bytes) {
   const auto& cfg = weights.config;
   const auto& df_cfg = weights.dflash_config;
   const std::size_t hidden = cfg.hidden_size;
@@ -159,55 +182,67 @@ void PackDFlashWeights(speculative::QwenDFlashWeights& weights,
   // Feature Fusion Encoder
   weights.fc_norm =
       CopyVectorF32(weights.fc_norm, hidden, allocations, packed_bytes);
-  weights.fc_projection =
-      PackMatrixBf16(weights.fc_projection, hidden, enc_in_dim, allocations,
-                     packed_bytes);
+  weights.fc_projection = PackMatrixBf16(weights.fc_projection, hidden,
+                                         enc_in_dim, allocations, packed_bytes);
 
-  // Dynamic Convolutions (DFlash-2)
-  if (!weights.in_conv_weight.empty()) {
-    weights.in_conv_weight = CopyVectorF32(weights.in_conv_weight, hidden * 2,
-                                           allocations, packed_bytes);
-    weights.in_conv_bias = CopyVectorF32(weights.in_conv_bias, hidden,
-                                         allocations, packed_bytes);
-  }
-  if (!weights.out_conv_weight.empty()) {
-    weights.out_conv_weight = CopyVectorF32(weights.out_conv_weight, hidden * 2,
-                                            allocations, packed_bytes);
-    weights.out_conv_bias = CopyVectorF32(weights.out_conv_bias, hidden,
-                                          allocations, packed_bytes);
-  }
+  weights.output_norm =
+      CopyVectorF32(weights.output_norm, hidden, allocations, packed_bytes);
 
-  // Draft Output Norm if present
-  if (!weights.output_norm.empty()) {
-    weights.output_norm = CopyVectorF32(weights.output_norm, hidden,
-                                        allocations, packed_bytes);
-  }
+  // Candidate selector.
+  weights.selector_predecessor =
+      PackMatrixBf16(weights.selector_predecessor, cfg.vocab_size,
+                     df_cfg.selector_rank, allocations, packed_bytes);
+  weights.selector_successor =
+      PackMatrixBf16(weights.selector_successor, cfg.vocab_size,
+                     df_cfg.selector_rank, allocations, packed_bytes);
+  weights.selector_hidden =
+      PackBlockMatrix(weights.selector_hidden, df_cfg.selector_rank, hidden,
+                      allocations, packed_bytes);
 
   // Draft Transformer Layers
   for (std::size_t i = 0; i < weights.layers.size(); ++i) {
     auto& layer = weights.layers[i];
-    layer.attn_norm =
-        CopyVectorF32(layer.attn_norm, hidden, allocations, packed_bytes);
-    layer.attn_q = PackMatrixBf16(layer.attn_q, attention, hidden,
-                                  allocations, packed_bytes);
-    layer.attn_k =
-        PackMatrixBf16(layer.attn_k, kv, hidden, allocations, packed_bytes);
-    layer.attn_v =
-        PackMatrixBf16(layer.attn_v, kv, hidden, allocations, packed_bytes);
-    layer.attn_output = PackMatrixBf16(layer.attn_output, hidden, attention,
-                                       allocations, packed_bytes);
-    layer.attn_q_norm = CopyVectorF32(layer.attn_q_norm, cfg.head_dim,
-                                      allocations, packed_bytes);
-    layer.attn_k_norm = CopyVectorF32(layer.attn_k_norm, cfg.head_dim,
-                                      allocations, packed_bytes);
-    layer.ffn_norm =
-        CopyVectorF32(layer.ffn_norm, hidden, allocations, packed_bytes);
-    layer.ffn_gate = PackMatrixBf16(layer.ffn_gate, intermediate, hidden,
-                                    allocations, packed_bytes);
-    layer.ffn_up = PackMatrixBf16(layer.ffn_up, intermediate, hidden, allocations,
-                                  packed_bytes);
-    layer.ffn_down = PackMatrixBf16(layer.ffn_down, hidden, intermediate,
-                                    allocations, packed_bytes);
+    auto& transformer = layer.transformer;
+    transformer.attn_norm =
+        CopyVectorF32(transformer.attn_norm, hidden, allocations, packed_bytes);
+    transformer.attn_q = PackBlockMatrix(transformer.attn_q, attention, hidden,
+                                         allocations, packed_bytes);
+    // Prompt target-feature injection projects a full context through K/V
+    // with the dense batched GEMM path, so these two matrices retain BF16
+    // storage even when the draft artifact is Q8_0.
+    transformer.attn_k = PackMatrixBf16(transformer.attn_k, kv, hidden,
+                                        allocations, packed_bytes);
+    transformer.attn_v = PackMatrixBf16(transformer.attn_v, kv, hidden,
+                                        allocations, packed_bytes);
+    transformer.attn_output = PackBlockMatrix(
+        transformer.attn_output, hidden, attention, allocations, packed_bytes);
+    transformer.attn_q_norm = CopyVectorF32(
+        transformer.attn_q_norm, cfg.head_dim, allocations, packed_bytes);
+    transformer.attn_k_norm = CopyVectorF32(
+        transformer.attn_k_norm, cfg.head_dim, allocations, packed_bytes);
+    transformer.ffn_norm =
+        CopyVectorF32(transformer.ffn_norm, hidden, allocations, packed_bytes);
+    transformer.ffn_gate = PackBlockMatrix(transformer.ffn_gate, intermediate,
+                                           hidden, allocations, packed_bytes);
+    transformer.ffn_up = PackBlockMatrix(transformer.ffn_up, intermediate,
+                                         hidden, allocations, packed_bytes);
+    transformer.ffn_down = PackBlockMatrix(
+        transformer.ffn_down, hidden, intermediate, allocations, packed_bytes);
+
+    const std::size_t groups = hidden / df_cfg.conv_group_size;
+    const std::size_t dynamic_size = 2U * df_cfg.conv_kernel_size * groups;
+    layer.attention_conv_base = CopyVectorF32(
+        layer.attention_conv_base, hidden * df_cfg.conv_kernel_size * 2U,
+        allocations, packed_bytes);
+    layer.ffn_conv_base = CopyVectorF32(layer.ffn_conv_base,
+                                        hidden * df_cfg.conv_kernel_size * 2U,
+                                        allocations, packed_bytes);
+    layer.attention_conv_projection =
+        PackBlockMatrix(layer.attention_conv_projection, dynamic_size, hidden,
+                        allocations, packed_bytes);
+    layer.ffn_conv_projection =
+        PackBlockMatrix(layer.ffn_conv_projection, dynamic_size, hidden,
+                        allocations, packed_bytes);
   }
 }
 
@@ -216,8 +251,7 @@ void PackDFlashWeights(speculative::QwenDFlashWeights& weights,
 QwenDFlashGpuModel::QwenDFlashGpuModel(
     std::shared_ptr<const core::GgufReader> dflash_reader,
     std::shared_ptr<const QwenGpuModel> target_model,
-    speculative::QwenDFlashWeights weights,
-    std::vector<void*> allocations,
+    speculative::QwenDFlashWeights weights, std::vector<void*> allocations,
     std::size_t packed_weight_bytes)
     : dflash_reader_(std::move(dflash_reader)),
       target_model_(std::move(target_model)),
@@ -235,8 +269,7 @@ QwenDFlashGpuModel::~QwenDFlashGpuModel() {
 
 std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     std::shared_ptr<const core::GgufReader> dflash_reader,
-    std::shared_ptr<const QwenGpuModel> target_model,
-    std::string* error_msg) {
+    std::shared_ptr<const QwenGpuModel> target_model, std::string* error_msg) {
   if (dflash_reader == nullptr || target_model == nullptr) {
     if (error_msg != nullptr) {
       *error_msg = "DFlash reader and target GPU model are required";
@@ -250,6 +283,27 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     return nullptr;
   }
 
+  const auto& target_config = target_model->GetConfig();
+  const auto& draft_config = raw_weights->config;
+  if (target_config.hidden_size != draft_config.hidden_size ||
+      target_config.vocab_size != draft_config.vocab_size) {
+    if (error_msg != nullptr) {
+      *error_msg =
+          "DFlash-2 target hidden/vocabulary dimensions do not match the "
+          "draft";
+    }
+    return nullptr;
+  }
+  if (raw_weights->dflash_config.target_layer_ids.empty() ||
+      raw_weights->dflash_config.target_layer_ids.back() >=
+          target_config.num_layers) {
+    if (error_msg != nullptr) {
+      *error_msg =
+          "DFlash-2 target layer taps exceed the target model layer count";
+    }
+    return nullptr;
+  }
+
   std::vector<void*> allocations;
   std::size_t packed_bytes = 0;
   try {
@@ -258,20 +312,21 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     // Pack all private DFlash matrices and vectors into GPU device memory
     PackDFlashWeights(weights, allocations, packed_bytes);
 
-    // Unconditionally bind GPU device pointers from the target model for tied weights
+    // Unconditionally bind GPU device pointers from the target model for tied
+    // weights
     weights.token_embedding = target_model->GetWeights().token_embd;
     weights.output = target_model->GetWeights().output;
     if (weights.output_norm.empty()) {
       weights.output_norm = target_model->GetWeights().output_norm;
     }
 
-    return std::shared_ptr<const QwenDFlashGpuModel>(
-        new QwenDFlashGpuModel(std::move(dflash_reader), std::move(target_model),
-                               std::move(weights), std::move(allocations),
-                               packed_bytes));
+    return std::shared_ptr<const QwenDFlashGpuModel>(new QwenDFlashGpuModel(
+        std::move(dflash_reader), std::move(target_model), std::move(weights),
+        std::move(allocations), packed_bytes));
   } catch (const std::exception& ex) {
     for (void* ptr : allocations) {
-      if (ptr != nullptr) (void)hipFree(ptr);
+      if (ptr != nullptr)
+        (void)hipFree(ptr);
     }
     if (error_msg != nullptr) {
       *error_msg = ex.what();

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <type_traits>
@@ -29,6 +30,12 @@
 namespace strix::hip {
 
 class HipblasLtGemm;
+
+struct QwenVerificationPolicy {
+  bool batched_lm_head{false};
+  int bf16_from_layer{-1};
+  int fp32_from_layer{-1};
+};
 
 struct QwenGpuWeightRegion {
   const void* host_data{nullptr};
@@ -156,6 +163,9 @@ public:
   [[nodiscard]] bool CanReplaySsmPosition(
       std::uint32_t position) const noexcept;
   [[nodiscard]] SsmReplayCapture GetSsmReplayCapture() const noexcept;
+  [[nodiscard]] bool IsSsmReplayCaptureActive() const noexcept {
+    return replay_capture_active_;
+  }
   [[nodiscard]] const float* GetReplayQkv(std::uint32_t layer,
                                           std::uint32_t position) const;
   [[nodiscard]] const float* GetReplayAlpha(std::uint32_t layer,
@@ -218,6 +228,13 @@ public:
   }
   [[nodiscard]] QwenGpuScratchView GetScratchView(
       std::size_t batch_size = 1) noexcept;
+  void SetTargetLayerCapture(std::span<const std::uint32_t> target_layer_ids);
+  [[nodiscard]] std::span<const std::uint32_t> GetTargetLayerCapture()
+      const noexcept {
+    return target_layer_ids_;
+  }
+  [[nodiscard]] std::optional<std::size_t> GetTargetLayerCaptureIndex(
+      std::uint32_t layer) const noexcept;
 
 private:
   void FreeAll() noexcept;
@@ -227,6 +244,7 @@ private:
   core::ModelConfig config_;
   std::uint32_t max_context_;
   std::uint32_t max_batch_;
+  std::vector<std::uint32_t> target_layer_ids_;
   float* d_saved_ssm_conv_state_{nullptr};
   float* d_saved_ssm_deltanet_state_{nullptr};
   float* d_ssm_replay_qkv_{nullptr};
@@ -299,18 +317,26 @@ public:
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t start_pos = 0, bool compute_logits = true);
 
-  /// Verifies a chunk of speculative draft candidate tokens in a single parallel
-  /// prefill forward pass on the GPU.
+  /// Verifies a chunk of speculative draft candidate tokens in a single
+  /// parallel prefill forward pass on the GPU.
   [[nodiscard]] std::vector<tokenization::TokenId> ForwardVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,
       std::uint32_t start_pos);
+  void CommitVerificationChunk(
+      std::span<const tokenization::TokenId> committed_tokens,
+      std::uint32_t start_pos);
+  [[nodiscard]] std::span<const float> GetVerificationHiddenStates()
+      const noexcept {
+    return h_verification_hidden_;
+  }
 
   /// Copies the logits produced by the most recent forward pass to host memory.
   [[nodiscard]] std::span<const float> CopyLastLogits();
 
   /// Enables host capture of every final-layer prompt hidden state. Disabled
   /// by default so ordinary prefill does not incur device-to-host copies.
-  void SetPromptHiddenCapture(bool enabled);
+  void SetPromptHiddenCapture(
+      bool enabled, std::span<const std::uint32_t> target_layer_ids = {});
 
   /// Returns the flattened [prompt_tokens, hidden_size] capture from the most
   /// recent ForwardPromptBatch call.
@@ -320,6 +346,8 @@ public:
 
   /// Copies the final-layer hidden state from the most recent forward pass.
   [[nodiscard]] std::span<const float> CopyLastHidden();
+
+  void SetVerificationPolicy(QwenVerificationPolicy policy) noexcept;
 
   [[nodiscard]] std::uint32_t GetMaxPromptBatch() const noexcept {
     return arena_.GetMaxBatch();
@@ -335,6 +363,7 @@ public:
 
 private:
   void ReplaySsmState(std::uint32_t position);
+  void EnsureVerificationLogits(std::size_t batch_size);
 
   [[nodiscard]] tokenization::TokenId ForwardPromptChunk(
       std::span<const tokenization::TokenId> prompt_tokens,
@@ -349,10 +378,15 @@ private:
   detail::HipGraphDecodeExecutor graph_executor_;
   std::vector<float> h_logits_;
   std::vector<float> h_prompt_hidden_;
+  std::vector<float> h_verification_hidden_;
   std::vector<float> h_last_hidden_;
+  float* d_verification_logits_{nullptr};
+  std::size_t verification_logits_capacity_{0};
   std::size_t last_hidden_offset_{0};
   float* d_target_layer_features_{nullptr};
+  QwenVerificationPolicy verification_policy_;
   bool capture_prompt_hidden_{false};
+  bool verification_chunk_active_{false};
   bool replaying_ssm_state_{false};
 };
 

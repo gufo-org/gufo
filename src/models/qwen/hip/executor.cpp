@@ -79,11 +79,28 @@ QwenGpuExecutor::QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
 
 QwenGpuExecutor::~QwenGpuExecutor() {
   (void)hipStreamSynchronize(arena_.stream);
+  if (d_verification_logits_ != nullptr) {
+    (void)hipFree(d_verification_logits_);
+  }
+}
+
+void QwenGpuExecutor::EnsureVerificationLogits(std::size_t batch_size) {
+  if (batch_size <= verification_logits_capacity_) {
+    return;
+  }
+  if (d_verification_logits_ != nullptr) {
+    HIP_CHECK(hipFree(d_verification_logits_));
+    d_verification_logits_ = nullptr;
+  }
+  HIP_CHECK(hipMalloc(&d_verification_logits_,
+                      batch_size * weights_.config.vocab_size * sizeof(float)));
+  verification_logits_capacity_ = batch_size;
 }
 
 void QwenGpuExecutor::Reset() noexcept {
   replaying_ssm_state_ = false;
   h_prompt_hidden_.clear();
+  h_verification_hidden_.clear();
   h_last_hidden_.clear();
   last_hidden_offset_ = 0;
   arena_.Reset();
@@ -136,27 +153,44 @@ std::span<const float> QwenGpuExecutor::CopyLastLogits() {
   return h_logits_;
 }
 
-void QwenGpuExecutor::SetPromptHiddenCapture(bool enabled) {
+void QwenGpuExecutor::SetPromptHiddenCapture(
+    bool enabled, std::span<const std::uint32_t> target_layer_ids) {
   capture_prompt_hidden_ = enabled;
   h_prompt_hidden_.clear();
+  h_verification_hidden_.clear();
+  arena_.SetTargetLayerCapture(enabled ? target_layer_ids
+                                       : std::span<const std::uint32_t>{});
+}
+
+void QwenGpuExecutor::SetVerificationPolicy(
+    QwenVerificationPolicy policy) noexcept {
+  if (policy.bf16_from_layer < 0 ||
+      policy.bf16_from_layer > static_cast<int>(weights_.config.num_layers)) {
+    policy.bf16_from_layer = -1;
+  }
+  if (policy.fp32_from_layer < 0 ||
+      policy.fp32_from_layer > static_cast<int>(weights_.config.num_layers)) {
+    policy.fp32_from_layer = -1;
+  }
+  verification_policy_ = policy;
 }
 
 std::span<const float> QwenGpuExecutor::CopyLastHidden() {
   const std::size_t hidden_size = weights_.config.hidden_size;
-  h_last_hidden_.resize(5 * hidden_size);
-  if (arena_.d_target_layer_features != nullptr) {
+  const std::size_t target_layer_count = arena_.GetTargetLayerCapture().size();
+  if (target_layer_count > 0) {
+    h_last_hidden_.resize(target_layer_count * hidden_size);
     HIP_CHECK(hipMemcpyAsync(h_last_hidden_.data(),
                              arena_.d_target_layer_features,
-                             5 * hidden_size * sizeof(float),
+                             h_last_hidden_.size() * sizeof(float),
                              hipMemcpyDeviceToHost, arena_.stream));
   } else {
+    h_last_hidden_.resize(hidden_size);
     auto scratch = arena_.GetScratchView(arena_.GetMaxBatch());
-    for (std::size_t l = 0; l < 5; ++l) {
-      HIP_CHECK(hipMemcpyAsync(h_last_hidden_.data() + (l * hidden_size),
-                               scratch.decode.hidden.data() + last_hidden_offset_,
-                               hidden_size * sizeof(float),
-                               hipMemcpyDeviceToHost, arena_.stream));
-    }
+    HIP_CHECK(hipMemcpyAsync(h_last_hidden_.data(),
+                             scratch.decode.hidden.data() + last_hidden_offset_,
+                             hidden_size * sizeof(float), hipMemcpyDeviceToHost,
+                             arena_.stream));
   }
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
   return h_last_hidden_;

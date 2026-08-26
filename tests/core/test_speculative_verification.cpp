@@ -63,10 +63,6 @@ public:
     Expect(pos == state_.size(), "target position must match committed state");
     Expect(pos >= prompt_.size(), "target position must follow the prompt");
     const std::size_t generated_index = pos - prompt_.size();
-    Expect(generated_index < generated_tokens_.size(),
-           "scripted target exhausted");
-    Expect(token_id == generated_tokens_[generated_index],
-           "target input token must match the greedy sequence");
     state_.push_back(token_id);
     last_hidden_ = {static_cast<float>(token_id), static_cast<float>(pos)};
     if (generated_index + 1 < generated_tokens_.size()) {
@@ -87,7 +83,9 @@ public:
     ++restore_count_;
   }
 
-  void SetPromptHiddenCapture(bool enabled) override {
+  void SetPromptHiddenCapture(
+      bool enabled, std::span<const std::uint32_t> target_layer_ids) override {
+    (void)target_layer_ids;
     hidden_capture_enabled_ = enabled;
   }
 

@@ -9,6 +9,66 @@
 
 namespace strix::hip {
 
+__global__ void CaptureBatchedSsmReplayKernel(
+    const float* __restrict__ qkv, const float* __restrict__ alpha,
+    const float* __restrict__ beta, SsmReplayCapture replay_capture,
+    std::uint32_t layer_idx, std::uint32_t start_pos, std::size_t batch_size,
+    std::size_t qkv_size, std::size_t time_step_rank) {
+  if (replay_capture.qkv == nullptr || replay_capture.alpha == nullptr ||
+      replay_capture.beta == nullptr || replay_capture.enabled == nullptr ||
+      replay_capture.enabled[0] == 0U) {
+    return;
+  }
+
+  const std::size_t row_width = qkv_size + (2 * time_step_rank);
+  const std::size_t flat_index =
+      (blockIdx.x * static_cast<std::size_t>(blockDim.x)) + threadIdx.x;
+  if (flat_index >= batch_size * row_width) {
+    return;
+  }
+
+  const std::size_t row = flat_index / row_width;
+  const std::size_t element = flat_index - (row * row_width);
+  const std::size_t slot =
+      (static_cast<std::size_t>(start_pos) + row) % kSsmReplayCapacity;
+  const std::size_t layer_slot =
+      (static_cast<std::size_t>(layer_idx) * kSsmReplayCapacity) + slot;
+
+  if (element < qkv_size) {
+    replay_capture.qkv[(layer_slot * qkv_size) + element] =
+        qkv[(row * qkv_size) + element];
+    return;
+  }
+
+  const std::size_t projection_element = element - qkv_size;
+  if (projection_element < time_step_rank) {
+    replay_capture.alpha[(layer_slot * time_step_rank) + projection_element] =
+        alpha[(row * time_step_rank) + projection_element];
+  } else {
+    const std::size_t beta_element = projection_element - time_step_rank;
+    replay_capture.beta[(layer_slot * time_step_rank) + beta_element] =
+        beta[(row * time_step_rank) + beta_element];
+  }
+}
+
+void LaunchCaptureBatchedSsmReplay(
+    const float* qkv, const float* alpha, const float* beta,
+    SsmReplayCapture replay_capture, std::uint32_t layer_idx,
+    std::uint32_t start_pos, std::size_t batch_size, std::size_t qkv_size,
+    std::size_t time_step_rank, hipStream_t stream) {
+  if (batch_size == 0 || qkv_size == 0 || time_step_rank == 0 ||
+      replay_capture.qkv == nullptr) {
+    return;
+  }
+  const std::size_t elements = batch_size * (qkv_size + (2 * time_step_rank));
+  constexpr unsigned int kBlockSize = 256;
+  const auto grid_size =
+      static_cast<unsigned int>((elements + kBlockSize - 1) / kBlockSize);
+  CaptureBatchedSsmReplayKernel<<<grid_size, kBlockSize, 0, stream>>>(
+      qkv, alpha, beta, replay_capture, layer_idx, start_pos, batch_size,
+      qkv_size, time_step_rank);
+}
+
 __global__ void SSMConvKernel(const float* __restrict__ qkv_in,
                               const float* __restrict__ conv_weights,
                               float* __restrict__ conv_state,

@@ -46,6 +46,11 @@ void LaunchRoPE(float* q, float* k, std::uint32_t num_heads,
 void LaunchGPUArgmax(const float* logits, std::uint32_t* out_token,
                      std::size_t vocab_size, hipStream_t stream = nullptr);
 
+/// Computes one argmax per row of a [batch_size, vocab_size] logits matrix.
+void LaunchBatchedGPUArgmax(const float* logits, std::uint32_t* out_tokens,
+                            std::size_t batch_size, std::size_t vocab_size,
+                            hipStream_t stream = nullptr);
+
 /// Batched Embedding lookup for B tokens
 void LaunchBatchedEmbeddingLookup(const void* table, core::GgmlType type,
                                   const std::uint32_t* token_ids,

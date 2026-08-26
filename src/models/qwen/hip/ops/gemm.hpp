@@ -146,6 +146,22 @@ void LaunchBatchedQuantGEMM(core::GgmlType type, const void* w,
                             std::size_t m, std::size_t k,
                             hipStream_t stream = nullptr);
 
+/// Directly computes Y[B, M] = X_bf16[B, K] * W_quant[M, K]^T without
+/// quantizing the activation. The Q8_0 small-batch route shares each weight
+/// load across up to eight verification rows.
+void LaunchBatchedQuantGEMMBf16(core::GgmlType type, const void* w,
+                                const void* bf16_x, float* y, std::size_t batch,
+                                std::size_t m, std::size_t k,
+                                hipStream_t stream = nullptr);
+
+/// Directly computes Y[B, M] = X_fp32[B, K] * W_quant[M, K]^T using the same
+/// quant-block dot product and FP32 activation precision as decode. Intended
+/// for short verification batches where exact target-path numerics matter.
+void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
+                                const float* fp32_x, float* y,
+                                std::size_t batch, std::size_t m, std::size_t k,
+                                hipStream_t stream = nullptr);
+
 /// Quantizes BF16 activation tensor X[B, K] to block_q8_1 activation blocks
 void LaunchQuantizeActivationQ8_1(const void* bf16_x, void* q8_1_out,
                                   std::size_t batch, std::size_t k,

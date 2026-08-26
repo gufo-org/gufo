@@ -51,33 +51,34 @@ void PrintModelLoadTime(std::chrono::steady_clock::time_point start,
 }
 
 void PrintBenchHelp(std::string_view program_name) {
-  std::cout << "Usage: " << program_name << " bench [options]\n\n"
-            << "Benchmark prompt processing (pp) and token generation (tg) "
-               "throughput.\n\n"
-            << "Options:\n"
-            << "  -h, --help                  Print help\n"
-            << "  -m, --model <PATH>          Path to GGUF model file "
-               "(default: models/Qwen3.5-4B-BF16.gguf)\n"
-            << "  -p, --n-prompt <n,n,...>    Prompt token lengths to "
-               "benchmark (default: 64,128,512)\n"
-            << "  -n, --n-gen <n,n,...>       Number of text generation tokens "
-               "(default: 128)\n"
-            << "  -d, --n-depth <n,n,...>     Context depths prepared outside "
-               "the timed region (default: 0)\n"
-            << "  -r, --repetitions <N>       Number of repetitions per test "
-               "(default: 1)\n"
-            << "  --validate-prefill <N>      Compare batched logits against "
-               "sequential prefill\n"
-            << "  --speculative, --speculative-decoding <MODE>\n"
-            << "                              Draft backend: dflash, dflash2, "
-               "mtp, mtp-npu, npu, pld, self, or off\n"
-            << "  --dflash-model <PATH>       Quantized Qwen DFlash/DFlash-2 GGUF\n"
-            << "  --mtp-model <PATH>          Quantized Qwen MTP GGUF\n"
-            << "  --draft-tokens <N>          Maximum speculative block "
-               "length\n"
-            << "  -ngl, --n-gpu-layers <N>    Number of layers offloaded to "
-               "GPU (default: 99)\n"
-            << "  -v, --verbose               Verbose progress output\n";
+  std::cout
+      << "Usage: " << program_name << " bench [options]\n\n"
+      << "Benchmark prompt processing (pp) and token generation (tg) "
+         "throughput.\n\n"
+      << "Options:\n"
+      << "  -h, --help                  Print help\n"
+      << "  -m, --model <PATH>          Path to GGUF model file "
+         "(default: models/Qwen3.5-4B-BF16.gguf)\n"
+      << "  -p, --n-prompt <n,n,...>    Prompt token lengths to "
+         "benchmark (default: 64,128,512)\n"
+      << "  -n, --n-gen <n,n,...>       Number of text generation tokens "
+         "(default: 128)\n"
+      << "  -d, --n-depth <n,n,...>     Context depths prepared outside "
+         "the timed region (default: 0)\n"
+      << "  -r, --repetitions <N>       Number of repetitions per test "
+         "(default: 1)\n"
+      << "  --validate-prefill <N>      Compare batched logits against "
+         "sequential prefill\n"
+      << "  --speculative, --speculative-decoding <MODE>\n"
+      << "                              Draft backend: dflash, dflash2, "
+         "mtp, mtp-npu, npu, pld, self, or off\n"
+      << "  --dflash-model <PATH>       Quantized Qwen DFlash/DFlash-2 GGUF\n"
+      << "  --mtp-model <PATH>          Quantized Qwen MTP GGUF\n"
+      << "  --draft-tokens <N>          Maximum speculative block "
+         "length\n"
+      << "  -ngl, --n-gpu-layers <N>    Number of layers offloaded to "
+         "GPU (default: 99)\n"
+      << "  -v, --verbose               Verbose progress output\n";
 }
 
 std::vector<std::size_t> ParseCommaSeparatedSizes(std::string_view str,
@@ -936,7 +937,7 @@ int RunBench(std::span<const char* const> args) {
             throw std::runtime_error("DFlash initialization failed: " + err);
           }
         } else if (opt.speculative_backend == "mtp" ||
-            opt.speculative_backend == "mtp-npu") {
+                   opt.speculative_backend == "mtp-npu") {
           hip::QwenMtpGpuDraftConfig cfg{
               .max_context = static_cast<std::uint32_t>(required_context),
               .max_draft_tokens = opt.draft_tokens,
@@ -977,6 +978,19 @@ int RunBench(std::span<const char* const> args) {
           speculative::SpeculativeOptions s_opts;
           s_opts.max_draft_tokens = opt.draft_tokens;
           s_opts.initial_draft_tokens = opt.draft_tokens;
+          if (opt.speculative_backend == "dflash" ||
+              opt.speculative_backend == "dflash2" ||
+              opt.speculative_backend == "dflash-2") {
+            s_opts.use_batched_verification = true;
+            s_opts.use_batched_lm_head = true;
+            s_opts.target_bf16_from_layer = 48;
+          } else if (opt.speculative_backend == "mtp" ||
+                     opt.speculative_backend == "mtp-npu") {
+            s_opts.use_batched_verification = true;
+            s_opts.use_batched_lm_head = true;
+            s_opts.target_bf16_from_layer = 0;
+            s_opts.target_fp32_from_layer = 63;
+          }
           spec_verifier = std::make_unique<speculative::SpeculativeVerifier>(
               *gpu_exec, std::move(draft_backend), s_opts);
         }

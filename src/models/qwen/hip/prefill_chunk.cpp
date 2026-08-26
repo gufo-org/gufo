@@ -3,7 +3,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
+#include <string_view>
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
@@ -13,6 +15,64 @@
 #include "src/models/qwen/hip/ops.hpp"
 
 namespace strix::hip {
+namespace {
+
+[[nodiscard]] bool UseDirectSmallBatchQuantGemm() noexcept {
+  const char* value = std::getenv("STRIX_PREFILL_SMALL_BATCH_QUANT");
+  if (value == nullptr) {
+    return false;
+  }
+  const std::string_view setting{value};
+  return setting == "direct" || setting == "bf16" || setting == "fp32";
+}
+
+[[nodiscard]] bool UseBf16SmallBatchQuantGemm() noexcept {
+  const char* value = std::getenv("STRIX_PREFILL_SMALL_BATCH_QUANT");
+  return value != nullptr && std::string_view{value} == "bf16";
+}
+
+[[nodiscard]] int SmallBatchStartLayer(const char* variable) noexcept {
+  const char* value = std::getenv(variable);
+  if (value == nullptr) {
+    return -1;
+  }
+  char* end = nullptr;
+  const long parsed = std::strtol(value, &end, 10);
+  if (end == value || *end != '\0' || parsed < 0 ||
+      parsed > std::numeric_limits<int>::max()) {
+    return -1;
+  }
+  return static_cast<int>(parsed);
+}
+
+[[nodiscard]] int Bf16SmallBatchStartLayer() noexcept {
+  static const int start_layer =
+      SmallBatchStartLayer("STRIX_PREFILL_SMALL_BATCH_BF16_FROM_LAYER");
+  return start_layer;
+}
+
+[[nodiscard]] bool UseFp32SmallBatchQuantGemm() noexcept {
+  const char* value = std::getenv("STRIX_PREFILL_SMALL_BATCH_QUANT");
+  return value != nullptr && std::string_view{value} == "fp32";
+}
+
+[[nodiscard]] int Fp32SmallBatchStartLayer() noexcept {
+  static const int start_layer =
+      SmallBatchStartLayer("STRIX_PREFILL_SMALL_BATCH_FP32_FROM_LAYER");
+  return start_layer;
+}
+
+[[nodiscard]] bool UseBatchedVerificationLmHead(bool fallback) noexcept {
+  const char* value = std::getenv("STRIX_SPEC_BATCH_LM_HEAD");
+  if (value == nullptr) {
+    return fallback;
+  }
+  const std::string_view setting{value};
+  return setting != "0" && setting != "false" && setting != "off";
+}
+
+}  // namespace
+
 tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     std::span<const tokenization::TokenId> prompt_tokens,
     std::uint32_t start_pos, bool compute_logits) {
@@ -37,6 +97,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     throw std::length_error("prompt chunk exceeds the GPU batch length");
   }
   auto scratch = arena_.GetScratchView(batch_size);
+  const std::size_t target_layer_count = arena_.GetTargetLayerCapture().size();
+  const std::size_t prompt_capture_offset = h_prompt_hidden_.size();
+  if (capture_prompt_hidden_ && target_layer_count > 0) {
+    h_prompt_hidden_.resize(prompt_capture_offset +
+                            batch_size * target_layer_count * hidden_size);
+  }
 
   // 1. Copy prompt token IDs to GPU
   std::vector<std::uint32_t> host_tokens(prompt_tokens.begin(),
@@ -57,6 +123,24 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   double time_attn_proj = 0, time_ssm_recur = 0, time_ssm_out = 0;
   double time_ffn = 0, time_norm = 0;
   double time_dequant = 0, time_gemm = 0;
+  const bool use_direct_small_batch_quant =
+      batch_size <= 8 && UseDirectSmallBatchQuantGemm();
+  const bool use_fp32_small_batch_quant_all =
+      batch_size <= 8 && UseFp32SmallBatchQuantGemm();
+  const bool use_bf16_small_batch_quant_all =
+      batch_size <= 8 && UseBf16SmallBatchQuantGemm();
+  int bf16_small_batch_start_layer =
+      batch_size <= 8 ? Bf16SmallBatchStartLayer() : -1;
+  if (bf16_small_batch_start_layer < 0 && verification_chunk_active_) {
+    bf16_small_batch_start_layer = verification_policy_.bf16_from_layer;
+  }
+  int fp32_small_batch_start_layer =
+      batch_size <= 8 ? Fp32SmallBatchStartLayer() : -1;
+  if (fp32_small_batch_start_layer < 0 && verification_chunk_active_) {
+    fp32_small_batch_start_layer = verification_policy_.fp32_from_layer;
+  }
+  bool use_bf16_small_batch_quant = use_bf16_small_batch_quant_all;
+  bool use_fp32_small_batch_quant = use_fp32_small_batch_quant_all;
 
   // Execute the pure Qwen route decision while keeping hipBLASLt failure as a
   // runtime fallback to hipBLAS, not as resolver state.
@@ -93,10 +177,15 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         return;
       case models::qwen::QwenGemmRoute::kHipPrefillQuantDirect: {
         const auto tg0 = std::chrono::high_resolution_clock::now();
-        // Route Q8_0 weights through the native W8A8 WMMA matrix-core kernel
-        // (zero scratch dequantization). Other quant types (Q6_K / Q5_K) and
-        // batch==1 decode path keep their proven routes.
-        if (w.type == core::GgmlType::kQ8_0) {
+        if (use_fp32_small_batch_quant) {
+          LaunchBatchedQuantGEMMFp32(w.type, w.data, fp32_input, output,
+                                     batch_size, m, k, arena_.stream);
+        } else if (use_bf16_small_batch_quant) {
+          LaunchBatchedQuantGEMMBf16(w.type, w.data, bf16_input, output,
+                                     batch_size, m, k, arena_.stream);
+        } else if (w.type == core::GgmlType::kQ8_0) {
+          // Route Q8_0 weights through the native W8A8 WMMA matrix-core kernel
+          // with zero scratch dequantization.
           if (q8_act != nullptr) {
             LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, q8_act, output,
                                                batch_size, m, k, arena_.stream);
@@ -104,7 +193,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             LaunchBatchedQuantGEMM(w.type, w.data, bf16_input, output,
                                    batch_size, m, k, arena_.stream);
           }
-        } else if (batch_size > 1) {
+        } else if (batch_size > 1 && !use_direct_small_batch_quant) {
           const auto td0 = std::chrono::high_resolution_clock::now();
           LaunchDequantizeToBf16(w.type, w.data, arena_.d_weights_bf16, m * k,
                                  arena_.stream);
@@ -143,6 +232,16 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 
   // 3. Layer stack across all 32 layers
   for (std::uint32_t l = 0; l < config.num_layers; ++l) {
+    use_bf16_small_batch_quant =
+        use_bf16_small_batch_quant_all ||
+        (bf16_small_batch_start_layer >= 0 &&
+         l >= static_cast<std::uint32_t>(bf16_small_batch_start_layer));
+    use_fp32_small_batch_quant =
+        use_fp32_small_batch_quant_all ||
+        (fp32_small_batch_start_layer >= 0 &&
+         l >= static_cast<std::uint32_t>(fp32_small_batch_start_layer));
+    const bool use_precise_small_batch_quant =
+        use_fp32_small_batch_quant || use_bf16_small_batch_quant;
     const auto& layer = weights_.layers[l];
     const auto route_resolution = ResolveQwenLayerRouteWithReasons(
         policy_, QwenExecutionMode::kPrefill, layer.is_full_attention);
@@ -164,6 +263,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // FP32 normed row and the BF16 staging copy are both dead, so the norm can
     // write the tiled Q8_1 activation directly and skip two round trips.
     const bool norm_feeds_q8_only =
+        !use_precise_small_batch_quant &&
         IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
         (layer.is_full_attention
              ? (is_q8(layer.attn_q) && is_q8(layer.attn_k) &&
@@ -175,6 +275,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // activation, and the flags are exactly the condition that every consumer
     // is Q8_0, so no route can reach them.
     const bool ffn_feeds_q8_only =
+        !use_precise_small_batch_quant &&
         IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
         !route_plan.fuse_ffn_swiglu && is_q8(layer.ffn_gate) &&
         is_q8(layer.ffn_up);
@@ -203,9 +304,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // The quantized activation is read only by Q8_0 projections; when q/k/v
       // are all BF16 (as in the Q8_K_XL artifact) nothing consumes it, and when
       // they are all Q8_0 the fused norm already wrote it.
-      if (!norm_feeds_q8_only && (layer.attn_q.type == core::GgmlType::kQ8_0 ||
-                                  layer.attn_k.type == core::GgmlType::kQ8_0 ||
-                                  layer.attn_v.type == core::GgmlType::kQ8_0)) {
+      if (!use_precise_small_batch_quant && !norm_feeds_q8_only &&
+          (layer.attn_q.type == core::GgmlType::kQ8_0 ||
+           layer.attn_k.type == core::GgmlType::kQ8_0 ||
+           layer.attn_v.type == core::GgmlType::kQ8_0)) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
@@ -422,9 +524,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // at batch 2048) and keeps the activation's full precision going into the
       // Q8_1 codes instead of rounding to BF16 first.
       if (layer.attn_output.type == core::GgmlType::kQ8_0) {
-        LaunchQuantizeActivationQ8_1FromFp32(
-            arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
-            attention_size, arena_.stream);
+        if (use_bf16_small_batch_quant) {
+          LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                                batch_size * attention_size, arena_.stream);
+        } else if (!use_fp32_small_batch_quant) {
+          LaunchQuantizeActivationQ8_1FromFp32(
+              arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
+              attention_size, arena_.stream);
+        }
       } else {
         LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
                               batch_size * attention_size, arena_.stream);
@@ -443,7 +550,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         t0 = t1;
       }
     } else {
-      if (!norm_feeds_q8_only) {
+      if (!use_precise_small_batch_quant && !norm_feeds_q8_only) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
@@ -460,6 +567,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       gemm_weight(layer.ssm_beta, arena_.d_scratch_bf16, arena_.d_normed,
                   arena_.d_beta_buf, time_step_rank, hidden_size,
                   arena_.d_scratch_q8_act);
+      if (arena_.IsSsmReplayCaptureActive()) {
+        LaunchCaptureBatchedSsmReplay(
+            arena_.d_ssm_qkv, arena_.d_alpha_buf, arena_.d_beta_buf,
+            arena_.GetSsmReplayCapture(), l, start_pos, batch_size,
+            ssm_qkv_size, time_step_rank, arena_.stream);
+      }
       if (do_profile) {
         HIP_CHECK(hipStreamSynchronize(arena_.stream));
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -482,6 +595,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // ssm_out projection, so the epilogue can emit the quantized activation
       // and skip the FP32 round trip.
       const bool ssm_epilogue_q8 =
+          !use_precise_small_batch_quant &&
           layer.ssm_out.type == core::GgmlType::kQ8_0 &&
           IsFusedSSMEpilogueQuantizeQ8_1Supported(config.SsmValueSize(),
                                                   ssm_inner_size);
@@ -538,9 +652,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       if (ssm_row_split && ssm_epilogue_q8) {
         // The recurrence epilogue already wrote the quantized activation.
       } else if (layer.ssm_out.type == core::GgmlType::kQ8_0) {
-        LaunchQuantizeActivationQ8_1FromFp32(
-            arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
-            ssm_inner_size, arena_.stream);
+        if (use_bf16_small_batch_quant) {
+          LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                                batch_size * ssm_inner_size, arena_.stream);
+        } else if (!use_fp32_small_batch_quant) {
+          LaunchQuantizeActivationQ8_1FromFp32(
+              arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
+              ssm_inner_size, arena_.stream);
+        }
       } else {
         LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
                               batch_size * ssm_inner_size, arena_.stream);
@@ -601,12 +720,13 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
           arena_.d_ffn_act, arena_.d_scratch_bf16, batch_size,
           intermediate_size, hidden_size, arena_.stream);
     } else {
-      if (!ffn_feeds_q8_only) {
+      if (!use_precise_small_batch_quant && !ffn_feeds_q8_only) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
       }
-      if (layer.ffn_gate.type == core::GgmlType::kQ8_0 &&
+      if (!use_precise_small_batch_quant &&
+          layer.ffn_gate.type == core::GgmlType::kQ8_0 &&
           layer.ffn_up.type == core::GgmlType::kQ8_0) {
         LaunchBatchedDualQuantGEMMPreQuantized(
             layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
@@ -628,7 +748,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // (about 500 MB per layer at batch 2048) and one kernel launch. Other
       // ffn_down formats still need the FP32/BF16 forms, so they keep the
       // unfused chain.
-      if (layer.ffn_down.type == core::GgmlType::kQ8_0) {
+      if (!use_precise_small_batch_quant &&
+          layer.ffn_down.type == core::GgmlType::kQ8_0) {
         LaunchBatchedFusedSwiGLUQuantizeQ8_1(
             arena_.d_ffn_gate, arena_.d_ffn_up, arena_.d_scratch_q8_act,
             batch_size, intermediate_size, arena_.stream);
@@ -637,9 +758,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                       arena_.d_ffn_act, arena_.d_scratch_bf16,
                                       batch_size * intermediate_size,
                                       arena_.stream);
-        LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
-                                     arena_.d_scratch_q8_act, batch_size,
-                                     intermediate_size, arena_.stream);
+        if (!use_precise_small_batch_quant) {
+          LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                       arena_.d_scratch_q8_act, batch_size,
+                                       intermediate_size, arena_.stream);
+        }
       }
     }
 
@@ -650,21 +773,16 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out, arena_.d_hidden,
                              batch_size, hidden_size, arena_.stream);
 
-    // DFlash draft feature tap for target layers [1, 7, 13, 19, 25]
-    if (arena_.d_target_layer_features != nullptr) {
-      const std::size_t last_tok_offset = (batch_size - 1) * hidden_size;
-      std::size_t tap_idx = 999;
-      if (l == 1) tap_idx = 0;
-      else if (l == 7) tap_idx = 1;
-      else if (l == 13) tap_idx = 2;
-      else if (l == 19) tap_idx = 3;
-      else if (l == 25) tap_idx = 4;
-
-      if (tap_idx < 5) {
-        (void)hipMemcpyAsync(
-            arena_.d_target_layer_features + (tap_idx * hidden_size),
-            arena_.d_hidden + last_tok_offset,
-            hidden_size * sizeof(float), hipMemcpyDeviceToDevice, arena_.stream);
+    if (capture_prompt_hidden_) {
+      if (const auto tap_index = arena_.GetTargetLayerCaptureIndex(l);
+          tap_index.has_value()) {
+        float* destination = h_prompt_hidden_.data() + prompt_capture_offset +
+                             (*tap_index * hidden_size);
+        HIP_CHECK(hipMemcpy2DAsync(
+            destination, target_layer_count * hidden_size * sizeof(float),
+            scratch.decode.hidden.data(), hidden_size * sizeof(float),
+            hidden_size * sizeof(float), batch_size, hipMemcpyDeviceToHost,
+            arena_.stream));
       }
     }
 
@@ -692,12 +810,15 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   }
 
   if (capture_prompt_hidden_) {
-    const std::size_t old_size = h_prompt_hidden_.size();
-    const std::size_t chunk_elements = batch_size * hidden_size;
-    h_prompt_hidden_.resize(old_size + chunk_elements);
-    HIP_CHECK(hipMemcpyAsync(
-        h_prompt_hidden_.data() + old_size, scratch.decode.hidden.data(),
-        chunk_elements * sizeof(float), hipMemcpyDeviceToHost, arena_.stream));
+    if (target_layer_count == 0) {
+      const std::size_t old_size = h_prompt_hidden_.size();
+      const std::size_t chunk_elements = batch_size * hidden_size;
+      h_prompt_hidden_.resize(old_size + chunk_elements);
+      HIP_CHECK(hipMemcpyAsync(h_prompt_hidden_.data() + old_size,
+                               scratch.decode.hidden.data(),
+                               chunk_elements * sizeof(float),
+                               hipMemcpyDeviceToHost, arena_.stream));
+    }
     HIP_CHECK(hipStreamSynchronize(arena_.stream));
   }
   last_hidden_offset_ = (batch_size - 1) * hidden_size;
@@ -737,6 +858,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
     std::uint32_t start_pos) {
   const std::size_t batch_size = candidate_tokens.size();
   if (batch_size == 0) {
+    h_verification_hidden_.clear();
     return {};
   }
   const auto& config = weights_.config;
@@ -744,27 +866,85 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
   const std::size_t vocab_size = config.vocab_size;
   const float eps = 1e-6F;
 
-  // 1. Run all 64 layers across all candidate tokens in a single parallel prefill chunk pass
-  (void)ForwardPromptChunk(candidate_tokens, start_pos, false);
+  replaying_ssm_state_ = false;
+  const std::size_t capture_offset = h_prompt_hidden_.size();
+
+  // 1. Run all 64 layers across all candidate tokens in a single parallel
+  // prefill chunk pass
+  verification_chunk_active_ = true;
+  try {
+    (void)ForwardPromptChunk(candidate_tokens, start_pos, false);
+  } catch (...) {
+    verification_chunk_active_ = false;
+    throw;
+  }
+  verification_chunk_active_ = false;
+  for (std::size_t row = 0; row < batch_size; ++row) {
+    arena_.MarkSsmReplayPosition(start_pos + static_cast<std::uint32_t>(row));
+  }
+  arena_.DisableSsmReplayCapture();
+  h_verification_hidden_.clear();
+  if (capture_prompt_hidden_) {
+    const std::size_t captured_layers =
+        std::max<std::size_t>(arena_.GetTargetLayerCapture().size(), 1U);
+    const std::size_t captured_elements =
+        batch_size * captured_layers * hidden_size;
+    if (h_prompt_hidden_.size() != capture_offset + captured_elements) {
+      throw std::runtime_error(
+          "verification target hidden-state capture is incomplete");
+    }
+    h_verification_hidden_.assign(
+        h_prompt_hidden_.begin() + static_cast<std::ptrdiff_t>(capture_offset),
+        h_prompt_hidden_.end());
+    h_prompt_hidden_.resize(capture_offset);
+  }
 
   auto scratch = arena_.GetScratchView(batch_size);
 
   // 2. Batched Output RMSNorm across all candidate tokens
   LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
                        static_cast<const float*>(weights_.output_norm.data),
-                       scratch.decode.normed.data(), nullptr, batch_size,
-                       hidden_size, eps, arena_.stream);
+                       scratch.decode.normed.data(), arena_.d_scratch_bf16,
+                       batch_size, hidden_size, eps, arena_.stream);
 
   // 3. Batched LM head GEMV & Argmax
   auto* d_out_tokens = scratch.decode.sampled_token.data();
-  for (std::size_t b = 0; b < batch_size; ++b) {
-    LaunchGEMV(weights_.output.data, weights_.output.type,
-               scratch.decode.normed.data() + (b * hidden_size),
-               scratch.decode.logits.data(),
-               vocab_size, hidden_size, arena_.stream,
-               models::qwen::QwenGemmMode::kHipMtp);
-    LaunchGPUArgmax(scratch.decode.logits.data(),
-                    d_out_tokens + b, vocab_size, arena_.stream);
+  if (UseBatchedVerificationLmHead(verification_policy_.batched_lm_head)) {
+    EnsureVerificationLogits(batch_size);
+    if (weights_.output.type == core::GgmlType::kBF16) {
+      const bool used_lt = arena_.hipblaslt_gemm != nullptr &&
+                           arena_.hipblaslt_gemm->RunBf16(
+                               weights_.output.data, arena_.d_scratch_bf16,
+                               d_verification_logits_, batch_size, vocab_size,
+                               hidden_size, arena_.stream);
+      if (!used_lt) {
+        LaunchHipblasGEMMBF16(arena_.hipblas_handle, weights_.output.data,
+                              arena_.d_scratch_bf16, d_verification_logits_,
+                              batch_size, vocab_size, hidden_size,
+                              arena_.stream);
+      }
+    } else if (weights_.output.type == core::GgmlType::kF32) {
+      LaunchHipblasGEMM(arena_.hipblas_handle, weights_.output.data, false,
+                        scratch.decode.normed.data(), d_verification_logits_,
+                        batch_size, vocab_size, hidden_size,
+                        arena_.d_scratch_bf16, arena_.stream);
+    } else {
+      LaunchBatchedQuantGEMM(weights_.output.type, weights_.output.data,
+                             arena_.d_scratch_bf16, d_verification_logits_,
+                             batch_size, vocab_size, hidden_size,
+                             arena_.stream);
+    }
+    LaunchBatchedGPUArgmax(d_verification_logits_, d_out_tokens, batch_size,
+                           vocab_size, arena_.stream);
+  } else {
+    for (std::size_t b = 0; b < batch_size; ++b) {
+      LaunchGEMV(weights_.output.data, weights_.output.type,
+                 scratch.decode.normed.data() + (b * hidden_size),
+                 scratch.decode.logits.data(), vocab_size, hidden_size,
+                 arena_.stream, models::qwen::QwenGemmMode::kHipMtp);
+      LaunchGPUArgmax(scratch.decode.logits.data(), d_out_tokens + b,
+                      vocab_size, arena_.stream);
+    }
   }
 
   std::vector<tokenization::TokenId> predictions(batch_size, 0);
@@ -774,6 +954,41 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
 
   return predictions;
+}
+
+void QwenGpuExecutor::CommitVerificationChunk(
+    std::span<const tokenization::TokenId> committed_tokens,
+    std::uint32_t start_pos) {
+  if (committed_tokens.empty()) {
+    return;
+  }
+  if (replaying_ssm_state_) {
+    bool can_replay = true;
+    for (std::size_t row = 0; row < committed_tokens.size(); ++row) {
+      can_replay = can_replay &&
+                   arena_.CanReplaySsmPosition(start_pos +
+                                               static_cast<std::uint32_t>(row));
+    }
+    if (can_replay) {
+      for (std::size_t row = 0; row < committed_tokens.size(); ++row) {
+        ReplaySsmState(start_pos + static_cast<std::uint32_t>(row));
+      }
+      replaying_ssm_state_ = false;
+      return;
+    }
+  }
+  replaying_ssm_state_ = false;
+  arena_.DisableSsmReplayCapture();
+
+  const bool capture_hidden = capture_prompt_hidden_;
+  capture_prompt_hidden_ = false;
+  try {
+    (void)ForwardPromptChunk(committed_tokens, start_pos, false);
+  } catch (...) {
+    capture_prompt_hidden_ = capture_hidden;
+    throw;
+  }
+  capture_prompt_hidden_ = capture_hidden;
 }
 
 }  // namespace strix::hip

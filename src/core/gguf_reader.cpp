@@ -509,6 +509,24 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
             u_arr.push_back(val);
           }
           meta_val.value = u_arr;
+        } else if (item_type == GgufValueType::kInt32 ||
+                   item_type == GgufValueType::kInt64) {
+          std::vector<std::int64_t> i_arr;
+          i_arr.reserve(array_len);
+          for (std::uint64_t a = 0; a < array_len; ++a) {
+            std::int64_t val = 0;
+            if (item_type == GgufValueType::kInt32) {
+              std::int32_t val32 = 0;
+              if (!ReadPod(data_, size_, offset, val32)) {
+                return false;
+              }
+              val = val32;
+            } else if (!ReadPod(data_, size_, offset, val)) {
+              return false;
+            }
+            i_arr.push_back(val);
+          }
+          meta_val.value = i_arr;
         } else {
           // Skip other array types cleanly
           std::size_t item_size = 4;

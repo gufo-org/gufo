@@ -110,7 +110,7 @@ struct GgufMetadataValue {
   GgufValueType type{GgufValueType::kUint32};
   std::variant<std::uint64_t, std::int64_t, double, bool, std::string_view,
                std::vector<std::string_view>, std::vector<std::uint64_t>,
-               std::vector<double>>
+               std::vector<std::int64_t>, std::vector<double>>
       value;
 };
 
