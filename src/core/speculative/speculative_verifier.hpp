@@ -20,6 +20,11 @@
 
 namespace strix::speculative {
 
+enum class AdaptiveDraftPolicy {
+  kRollingAcceptanceRate,
+  kAcceptedTokenEma,
+};
+
 struct SpeculativeOptions {
   std::uint32_t max_draft_tokens{4};
   std::uint32_t min_draft_tokens{1};
@@ -27,6 +32,8 @@ struct SpeculativeOptions {
   std::size_t rolling_window{16};
   float target_acceptance_rate{0.70F};
   bool enable_adaptive_draft_length{true};
+  AdaptiveDraftPolicy adaptive_draft_policy{
+      AdaptiveDraftPolicy::kRollingAcceptanceRate};
   bool use_batched_verification{false};
   bool use_batched_lm_head{false};
   int target_bf16_from_layer{-1};
@@ -165,6 +172,8 @@ public:
   void Reset() noexcept;
 
 private:
+  void ConfigureAdaptiveDraftPolicy();
+  void ResetAdaptiveDraftLength() noexcept;
   void UpdateDraftTargetHidden();
   void UpdateAdaptiveDraftLength(std::size_t accepted, std::size_t drafted);
 
@@ -175,6 +184,7 @@ private:
   SpeculativeStats stats_;
   std::uint32_t current_draft_length_{3};
   std::deque<float> rolling_acceptance_;
+  float accepted_token_ema_{2.0F};
   bool use_batched_verification_{false};
 };
 

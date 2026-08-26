@@ -270,6 +270,44 @@ At 64 generated tokens the rapid suite remains exact 3/3 and reaches
 14.49 tok/s, 2.10x AR. The matching MTP run remains exact 3/3 at
 10.01 tok/s, 1.45x AR.
 
+The accepted-token EMA controller from LaurentZuijdwijk's llama.cpp fork is
+available as an experimental policy. It starts at 2 accepted tokens, probes
+upward by one after a fully accepted block, and otherwise updates a 0.25 EMA of
+the accepted count. `--min-draft-tokens 3` applies the floor recommended by
+that implementation:
+
+```sh
+nix develop -c python3 tools/speculative-corpus.py \
+  --binary ./result/bin/strix-server \
+  --model "$TARGET" \
+  --draft-model "$DFLASH" \
+  --backend dflash2 \
+  --suite benchmarks/qwen3.8-27b/speculative-adaptive-corpus.json \
+  --max-tokens 300 \
+  --draft-tokens 7 \
+  --draft-policy accepted-ema \
+  --min-draft-tokens 3
+```
+
+The `baea40559c61` stress suite generates 300 tokens each for C++20 code,
+structured JSON, and continuous prose. The fixed policies use widths 3 and 7;
+rolling is the production controller; accepted EMA uses the 3-to-7 range.
+Exact greedy output is a validity gate:
+
+| Policy | Exact | Speculative | Speedup | Median | Acceptance | Average draft |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Fixed 3 | 2/3 | 13.84 tok/s | 1.97x | 2.07x | 68.0% | 3.00 |
+| Fixed 7 | 1/3 | 16.47 tok/s | 2.34x | 2.60x | 42.8% | 7.00 |
+| Rolling 1-7 | 3/3 | 15.62 tok/s | 2.22x | 2.36x | 58.4% | 4.55 |
+| Accepted EMA 3-7 | 1/3 | 16.33 tok/s | 2.32x | 2.33x | 65.6% | 4.23 |
+
+Only the rolling controller remained exact across all three long-form tasks,
+so it stays the default. The EMA controller remains behind
+`STRIX_SPEC_ADAPTIVE_POLICY=accepted-ema` for further verifier-quality work;
+its higher aggregate throughput is not a valid production win while code and
+prose diverge. Fixed widths also diverged, which makes the remaining issue
+verification-trajectory dependent rather than specific to the EMA formula.
+
 The production DFlash verifier batches the target block and LM head, uses the
 AR-compatible W8A8 route through layer 47, and switches to BF16-activation
 Q8-weight GEMMs from layer 48. The MTP verifier uses BF16-activation GEMMs for

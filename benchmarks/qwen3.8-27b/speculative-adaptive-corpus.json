@@ -1,0 +1,20 @@
+{
+  "schema": "strix.speculative-corpus.v1",
+  "prompts": [
+    {
+      "id": "cpp_lru_cache",
+      "category": "code",
+      "text": "Write a complete, compilable C++20 implementation of a fixed-capacity LRU cache template using std::list and std::unordered_map. Include get, put, size, and a short main with assertions. Return only code."
+    },
+    {
+      "id": "json_records",
+      "category": "structured",
+      "text": "Return ONLY a JSON array of 12 objects, no prose. Each object must have exactly the keys \"id\" (integer), \"name\" (string), \"category\" (string), \"score\" (number) and \"active\" (boolean). Begin your reply with [ and end it with ]."
+    },
+    {
+      "id": "prose_tides",
+      "category": "prose",
+      "text": "Write a continuous, flowing essay of several paragraphs about how tidal patterns shaped the settlement of coastal towns. Do not use lists or headings."
+    }
+  ]
+}

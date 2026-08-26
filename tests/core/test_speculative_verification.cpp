@@ -199,6 +199,59 @@ private:
   std::vector<float> updated_hidden_;
 };
 
+class ScriptedAcceptanceDraftBackend final
+    : public strix::speculative::IDraftBackend {
+public:
+  ScriptedAcceptanceDraftBackend(std::vector<TokenId> target_tokens,
+                                 std::size_t prompt_size,
+                                 std::vector<std::size_t> accepted_per_step)
+      : target_tokens_(std::move(target_tokens)),
+        prompt_size_(prompt_size),
+        accepted_per_step_(std::move(accepted_per_step)) {}
+
+  [[nodiscard]] std::string_view Name() const noexcept override {
+    return "ScriptedAcceptanceDraftBackend";
+  }
+
+  [[nodiscard]] strix::speculative::DraftProposal Propose(
+      std::span<const TokenId> prompt_tokens, std::uint32_t current_pos,
+      std::uint32_t max_tokens) override {
+    (void)prompt_tokens;
+    Expect(current_pos >= prompt_size_, "draft position follows prompt");
+
+    const std::size_t proposal_index = requested_lengths_.size();
+    requested_lengths_.push_back(max_tokens);
+    const std::size_t accepted = proposal_index < accepted_per_step_.size()
+                                     ? accepted_per_step_[proposal_index]
+                                     : static_cast<std::size_t>(max_tokens);
+    const std::size_t target_start =
+        static_cast<std::size_t>(current_pos) - prompt_size_ + 1U;
+    const std::size_t available = target_tokens_.size() - target_start;
+    const std::size_t count = std::min<std::size_t>(max_tokens, available);
+
+    strix::speculative::DraftProposal proposal;
+    proposal.start_pos = current_pos;
+    proposal.tokens.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      const TokenId target_token = target_tokens_[target_start + index];
+      proposal.tokens.push_back(index == accepted ? target_token + 10000U
+                                                  : target_token);
+    }
+    return proposal;
+  }
+
+  [[nodiscard]] const std::vector<std::uint32_t>& RequestedLengths()
+      const noexcept {
+    return requested_lengths_;
+  }
+
+private:
+  std::vector<TokenId> target_tokens_;
+  std::size_t prompt_size_;
+  std::vector<std::size_t> accepted_per_step_;
+  std::vector<std::uint32_t> requested_lengths_;
+};
+
 strix::models::GenerationOptions GenerationOptions(std::size_t max_tokens,
                                                    TokenId eos_id) {
   strix::models::GenerationOptions options;
@@ -319,6 +372,40 @@ void TestImmediateRejectionRestoresGreedyState() {
   Expect(target.RestoreCount() == 1, "immediate rejection must restore once");
 }
 
+void TestAcceptedTokenEmaDraftPolicy() {
+  constexpr TokenId eos_id = 900;
+  const std::vector<TokenId> prompt = {1, 2, 3};
+  std::vector<TokenId> generated_tokens;
+  generated_tokens.reserve(32);
+  for (TokenId token = 10; token < 42; ++token) {
+    generated_tokens.push_back(token);
+  }
+
+  ScriptedTargetExecutor target(generated_tokens, eos_id);
+  auto backend = std::make_unique<ScriptedAcceptanceDraftBackend>(
+      generated_tokens, prompt.size(), std::vector<std::size_t>{3, 3, 1, 3});
+  auto* backend_view = backend.get();
+
+  strix::speculative::SpeculativeOptions options;
+  options.max_draft_tokens = 7;
+  options.min_draft_tokens = 3;
+  options.initial_draft_tokens = 7;
+  options.adaptive_draft_policy =
+      strix::speculative::AdaptiveDraftPolicy::kAcceptedTokenEma;
+  strix::speculative::SpeculativeVerifier verifier(target, std::move(backend),
+                                                   options);
+
+  const auto output = verifier.Generate(prompt, GenerationOptions(15, eos_id));
+  const std::vector<TokenId> expected(generated_tokens.begin(),
+                                      generated_tokens.begin() + 15);
+
+  Expect(output == expected, "EMA policy must preserve target output");
+  Expect(backend_view->RequestedLengths() ==
+             std::vector<std::uint32_t>({3, 3, 4, 3}),
+         "EMA policy must probe after full acceptance and back off after a "
+         "partial block");
+}
+
 void TestFirstPrefillTokenHonorsBudgetAndCallback() {
   constexpr TokenId eos_id = 900;
   ScriptedTargetExecutor target({10, 11}, eos_id);
@@ -370,6 +457,7 @@ int main() {
   TestFullAcceptanceProducesTargetBonusToken();
   TestPartialRejectionRestoresAndReplaysState();
   TestImmediateRejectionRestoresGreedyState();
+  TestAcceptedTokenEmaDraftPolicy();
   TestHiddenAwareBackendReceivesCommittedTargetState();
   TestFirstPrefillTokenHonorsBudgetAndCallback();
   TestFirstPrefillEosIsNotEmitted();

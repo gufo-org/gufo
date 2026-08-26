@@ -35,7 +35,9 @@ CONTROLLED_ENV = {
     "STRIX_SPEC_BATCH_LM_HEAD",
     "STRIX_SPEC_BATCH_VERIFY",
     "STRIX_SPEC_BATCH_VERIFY_CHECK",
+    "STRIX_SPEC_ADAPTIVE_POLICY",
     "STRIX_SPEC_FIXED_DRAFT",
+    "STRIX_SPEC_MIN_DRAFT_TOKENS",
 }
 
 
@@ -227,6 +229,12 @@ def main() -> int:
     )
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--draft-tokens", type=int, default=7)
+    parser.add_argument(
+        "--draft-policy",
+        choices=("fixed", "rolling", "accepted-ema"),
+        default="rolling",
+    )
+    parser.add_argument("--min-draft-tokens", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--quick", action="store_true")
@@ -236,7 +244,13 @@ def main() -> int:
     parser.add_argument("--env", action="append", default=[])
     args = parser.parse_args()
 
-    if args.max_tokens <= 0 or args.draft_tokens <= 0 or args.repetitions <= 0:
+    if (
+        args.max_tokens <= 0
+        or args.draft_tokens <= 0
+        or args.min_draft_tokens <= 0
+        or args.min_draft_tokens > args.draft_tokens
+        or args.repetitions <= 0
+    ):
         parser.error("token counts and repetitions must be positive")
 
     prompts = load_prompts(Path(args.suite), args.quick, args.limit, args.case)
@@ -245,12 +259,19 @@ def main() -> int:
         environment.update(parse_environment(args.env))
     except ValueError as error:
         parser.error(str(error))
+    if args.draft_policy == "fixed":
+        environment["STRIX_SPEC_FIXED_DRAFT"] = "1"
+    else:
+        environment["STRIX_SPEC_ADAPTIVE_POLICY"] = args.draft_policy
+        environment["STRIX_SPEC_MIN_DRAFT_TOKENS"] = str(
+            args.min_draft_tokens
+        )
 
     print(
         "| prompt | category | exact | AR tok/s | speculative tok/s | "
-        "speedup | acceptance |"
+        "speedup | acceptance | avg draft |"
     )
-    print("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+    print("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
 
     mismatches: list[str] = []
     total_tokens = 0
@@ -258,6 +279,7 @@ def main() -> int:
     total_spec_seconds = 0.0
     total_drafted = 0
     total_accepted = 0
+    total_steps = 0
     speedups: list[float] = []
 
     for case in prompts:
@@ -279,6 +301,10 @@ def main() -> int:
         acceptance = statistics.median(
             float(run["acceptance"]) for run in speculative_runs
         )
+        average_draft = statistics.median(
+            int(run["drafted"]) / max(int(run["steps"]), 1)
+            for run in speculative_runs
+        )
         ar_seconds = float(autoregressive["seconds"])
         ar_tps = float(autoregressive["tps"])
         speedup = spec_tps / ar_tps if ar_tps > 0.0 else 0.0
@@ -290,11 +316,13 @@ def main() -> int:
         total_spec_seconds += spec_seconds
         total_drafted += int(representative["drafted"])
         total_accepted += int(representative["accepted"])
+        total_steps += int(representative["steps"])
 
         print(
             f"| {case['id']} | {case['category']} | "
             f"{'yes' if exact else 'NO'} | {ar_tps:.2f} | {spec_tps:.2f} | "
-            f"{speedup:.2f}x | {acceptance * 100.0:.1f}% |"
+            f"{speedup:.2f}x | {acceptance * 100.0:.1f}% | "
+            f"{average_draft:.2f} |"
         )
         if not exact:
             detail = mismatch_summary(
@@ -318,7 +346,8 @@ def main() -> int:
         f"AR={aggregate_ar:.2f} tok/s speculative={aggregate_spec:.2f} tok/s "
         f"speedup={aggregate_spec / aggregate_ar:.2f}x "
         f"median_speedup={statistics.median(speedups):.2f}x "
-        f"acceptance={aggregate_acceptance * 100.0:.1f}%"
+        f"acceptance={aggregate_acceptance * 100.0:.1f}% "
+        f"avg_draft={total_drafted / max(total_steps, 1):.2f}"
     )
     for mismatch in mismatches:
         print(f"mismatch: {mismatch}", file=sys.stderr)

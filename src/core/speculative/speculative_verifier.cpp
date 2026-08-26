@@ -2,6 +2,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -183,6 +184,40 @@ bool IsStopToken(tokenization::TokenId token,
   return setting != "0" && setting != "false" && setting != "off";
 }
 
+[[nodiscard]] AdaptiveDraftPolicy ResolveAdaptiveDraftPolicy(
+    AdaptiveDraftPolicy fallback) {
+  const char* value = std::getenv("STRIX_SPEC_ADAPTIVE_POLICY");
+  if (value == nullptr) {
+    return fallback;
+  }
+  const std::string_view setting{value};
+  if (setting == "rolling" || setting == "rolling-rate") {
+    return AdaptiveDraftPolicy::kRollingAcceptanceRate;
+  }
+  if (setting == "accepted-ema" || setting == "ema") {
+    return AdaptiveDraftPolicy::kAcceptedTokenEma;
+  }
+  throw std::invalid_argument(
+      "STRIX_SPEC_ADAPTIVE_POLICY must be rolling or accepted-ema");
+}
+
+[[nodiscard]] std::uint32_t ResolveMinimumDraftTokens(std::uint32_t fallback) {
+  const char* value = std::getenv("STRIX_SPEC_MIN_DRAFT_TOKENS");
+  if (value == nullptr) {
+    return fallback;
+  }
+  const std::string_view setting{value};
+  std::uint32_t result{0};
+  const auto parsed =
+      std::from_chars(setting.data(), setting.data() + setting.size(), result);
+  if (parsed.ec != std::errc{} ||
+      parsed.ptr != setting.data() + setting.size() || result == 0) {
+    throw std::invalid_argument(
+        "STRIX_SPEC_MIN_DRAFT_TOKENS must be a positive integer");
+  }
+  return result;
+}
+
 }  // namespace
 
 SpeculativeVerifier::SpeculativeVerifier(
@@ -204,6 +239,7 @@ SpeculativeVerifier::SpeculativeVerifier(
   if (UseFixedDraftLength()) {
     options_.enable_adaptive_draft_length = false;
   }
+  ConfigureAdaptiveDraftPolicy();
 }
 
 SpeculativeVerifier::SpeculativeVerifier(
@@ -218,20 +254,66 @@ SpeculativeVerifier::SpeculativeVerifier(
   if (UseFixedDraftLength()) {
     options_.enable_adaptive_draft_length = false;
   }
+  ConfigureAdaptiveDraftPolicy();
 }
 
 void SpeculativeVerifier::Reset() noexcept {
   stats_ = {};
-  rolling_acceptance_.clear();
-  current_draft_length_ = options_.initial_draft_tokens;
+  ResetAdaptiveDraftLength();
   if (draft_backend_ != nullptr) {
     draft_backend_->Reset();
   }
 }
 
+void SpeculativeVerifier::ConfigureAdaptiveDraftPolicy() {
+  options_.adaptive_draft_policy =
+      ResolveAdaptiveDraftPolicy(options_.adaptive_draft_policy);
+  options_.max_draft_tokens = std::max(options_.max_draft_tokens, 1U);
+  options_.min_draft_tokens =
+      std::clamp(ResolveMinimumDraftTokens(options_.min_draft_tokens), 1U,
+                 options_.max_draft_tokens);
+  options_.initial_draft_tokens =
+      std::clamp(options_.initial_draft_tokens, options_.min_draft_tokens,
+                 options_.max_draft_tokens);
+  ResetAdaptiveDraftLength();
+}
+
+void SpeculativeVerifier::ResetAdaptiveDraftLength() noexcept {
+  constexpr float initial_accepted_token_ema = 2.0F;
+  rolling_acceptance_.clear();
+  accepted_token_ema_ = initial_accepted_token_ema;
+  if (options_.enable_adaptive_draft_length &&
+      options_.adaptive_draft_policy ==
+          AdaptiveDraftPolicy::kAcceptedTokenEma) {
+    current_draft_length_ =
+        std::clamp(static_cast<std::uint32_t>(std::lround(accepted_token_ema_)),
+                   options_.min_draft_tokens, options_.max_draft_tokens);
+    return;
+  }
+  current_draft_length_ = options_.initial_draft_tokens;
+}
+
 void SpeculativeVerifier::UpdateAdaptiveDraftLength(std::size_t accepted,
                                                     std::size_t drafted) {
   if (!options_.enable_adaptive_draft_length || drafted == 0) {
+    return;
+  }
+
+  if (options_.adaptive_draft_policy ==
+      AdaptiveDraftPolicy::kAcceptedTokenEma) {
+    constexpr float ema_alpha = 0.25F;
+    constexpr float full_accept_probe = 1.0F;
+    if (accepted >= drafted) {
+      accepted_token_ema_ += full_accept_probe;
+    } else {
+      accepted_token_ema_ = ((1.0F - ema_alpha) * accepted_token_ema_) +
+                            (ema_alpha * static_cast<float>(accepted));
+    }
+    accepted_token_ema_ = std::min(
+        accepted_token_ema_, static_cast<float>(options_.max_draft_tokens));
+    current_draft_length_ =
+        std::clamp(static_cast<std::uint32_t>(std::lround(accepted_token_ema_)),
+                   options_.min_draft_tokens, options_.max_draft_tokens);
     return;
   }
 
