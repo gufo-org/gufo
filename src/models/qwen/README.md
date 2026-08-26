@@ -290,10 +290,15 @@ program that consume that ABI. See also
 
 DFlash and DFlash-2 are parallel block-diffusion speculative drafting systems. Unlike traditional autoregressive drafters (such as EAGLE-3 or sequential draft models) that predict draft tokens one step at a time, DFlash predicts an entire block of $K$ candidate tokens ($K \in [8, 16]$) simultaneously in a single forward pass.
 
-> [!WARNING]
-> **Model Quant Compatibility Requirement**:
-> Only **`ggml-org`** quants (such as `ggml-org/Qwen3.8-27B-GGUF` `Q8_0`) must be used as the base target model.
-> **Do not use Unsloth quants** (such as `unsloth/Qwen3.8-27B-GGUF`), as Unsloth builds embed Multi-Token Prediction (MTP) and vision projector tensors whose non-standard tensor mappings and layer offsets conflict with DFlash companion draft models.
+The validated Qwen3.8 pairing is the Unsloth
+`Qwen3.8-27B-UD-Q8_K_XL.gguf` target with the z-lab
+`Qwen3.8-27B-DFlash2-Q8_0.gguf` companion. Extra MTP and vision tensors in the
+Unsloth GGUF do not shift target-layer indices: the target loader resolves
+base-model tensors by name, while the DFlash loader validates the companion
+topology, target taps, vocabulary, and tied embedding/output dimensions
+independently. Other target/draft combinations still need the same
+compatibility checks rather than being assumed compatible from the repository
+name alone.
 
 ### Execution topology and phase separation
 

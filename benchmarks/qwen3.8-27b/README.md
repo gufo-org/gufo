@@ -278,6 +278,19 @@ required for exact structured-output parity. Rejected blocks restore the
 target checkpoint and replay captured SSM inputs only for the committed
 prefix.
 
+The layer-48 DFlash precision boundary is quality-driven. Moving the BF16
+transition later made the 32-token corpus slightly faster but changed greedy
+output, so none of those settings is retained:
+
+| BF16 starts at layer | Exact prompts | Speculative | Speedup |
+| ---: | ---: | ---: | ---: |
+| 48 (production) | 10/10 | 12.48 tok/s | 1.87x |
+| 49 | 9/10 | 12.94 tok/s | 1.94x |
+| 50 | 9/10 | 12.85 tok/s | 1.93x |
+| 52 | 9/10 | 12.86 tok/s | 1.93x |
+| 56 | 9/10 | 12.92 tok/s | 1.94x |
+| 60 | 8/10 | 13.65 tok/s | 2.05x |
+
 Small verifier batches use shape-specific W8A8 tiles: 32 tokens for FFN
 expansion and 16 for contractions and SSM projections. The corresponding
 microbenchmark is bit-exact and improves the batch-8 production shapes by
