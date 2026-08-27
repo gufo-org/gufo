@@ -34,10 +34,10 @@ kernel.def @qwen_q8_0_gemv_k6144(%rows: index) {
     %scale_view = buffer.view %weight[%block_byte_base] : buffer -> view<1xf16>
     %scale_f16 = view.load %scale_view[%packed_index] : view<1xf16> -> f16
     %scale = scalar.extf %scale_f16 : f16 to f32
-    %scale_vec = vector.splat %scale : vector<4xf32>
     %input_block_base = index.mul %block, %qk : index
+    %input_view = buffer.view %input[%base] : buffer -> view<6144xf32>
     %zero = scalar.constant 0.0 : f32
-    %sum = scf.for %quarter = [%loop_begin to %quarter_count step %loop_step](%acc = %zero : f32) -> (f32) unroll {
+    %unscaled_sum = scf.for %quarter = [%loop_begin to %quarter_count step %loop_step](%acc = %zero : f32) -> (f32) unroll {
       %quarter_byte = index.scale %quarter, %packed_bytes : index, offset -> offset
       %payload_base = index.add %block_byte_base, %qs_offset : offset
       %q_byte_offset = index.add %payload_base, %quarter_byte : offset
@@ -45,14 +45,13 @@ kernel.def @qwen_q8_0_gemv_k6144(%rows: index) {
       %q_packed = vector.load %q_word_view[%packed_index] : view<1xi32> -> vector<1xi32>
       %q_i32 = vector.bitunpacks<8> %q_packed : vector<1xi32> -> vector<4xi32>
       %q_f32 = vector.sitofp %q_i32 : vector<4xi32> to vector<4xf32>
-      %q_scaled = vector.mulf<reassoc|nnan|ninf|nsz|contract> %q_f32, %scale_vec : vector<4xf32>
       %quarter_values = index.mul %quarter, %packed_values : index
       %input_index = index.add %input_block_base, %quarter_values : index
-      %input_view = buffer.view %input[%base] : buffer -> view<6144xf32>
       %x = vector.load %input_view[%input_index] : view<6144xf32> -> vector<4xf32>
-      %next = vector.dotf %q_scaled, %x, %acc : vector<4xf32>, vector<4xf32>, f32
+      %next = vector.dotf %q_f32, %x, %acc : vector<4xf32>, vector<4xf32>, f32
       scf.yield %next : f32
     }
+    %sum = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %unscaled_sum, %scale : f32
     %dot = kernel.workgroup.reduce<addf> %sum : f32
     %is_leader = index.cmp eq, %block, %leader : index
     scf.if %is_leader {
