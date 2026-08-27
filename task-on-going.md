@@ -150,6 +150,15 @@
   - `nix build .#checks.x86_64-linux.pr`: PASSED.
 - Card 10 Gate: PASSED
 
+## Card 11: Implement adaptive draft depth and acceptance rate heuristics
+- Implementation:
+  - Supported `--draft-policy fixed, rolling, accepted-ema` and `--min-draft-tokens` CLI controls.
+  - Dynamically modulated draft tokens based on rolling EMA acceptance rate heuristics to prevent compute degradation on low-entropy / high-entropy regimes.
+- Acceptance Gate:
+  - `nix build .#checks.x86_64-linux.pr`: PASSED.
+- Card 11 Gate: PASSED
+
+
 
 
 
