@@ -224,6 +224,7 @@ add_library(gufo_core STATIC
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
   src/models/qwen/hrx/qwen_hrx_manifest.cpp
+  src/models/qwen/hrx/qwen_hrx_capabilities.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_definitions(gufo_core PRIVATE

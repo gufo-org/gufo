@@ -22,6 +22,7 @@
 #include "src/testing/compare/logit_comparator.hpp"
 
 #if defined(ENGINE_ENABLE_HRX)
+#include "src/models/qwen/hrx/qwen_hrx_capabilities.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_executor.hpp"
 #endif
 
@@ -55,8 +56,8 @@ void PrintBenchHelp(std::string_view program_name) {
                    "Number of layers offloaded to GPU (default: 99)", "Model",
                    &opt.n_gpu_layers);
   parser.AddOption("", "--qwen-backend", "MODE",
-                   "Qwen backend: hip or hrx-native (default: hip)", "Model",
-                   &opt.qwen_backend);
+                   "Qwen backend: auto, hip, or hrx-native (default: hip)",
+                   "Model", &opt.qwen_backend);
 
   parser.AddOption("-p", "--n-prompt", "n,n,...",
                    "Prompt token lengths to benchmark (default: 64,128,512)",
@@ -599,12 +600,13 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
                    &opt.n_gpu_layers);
   parser.AddCustomOption(
       "", "--qwen-backend", "MODE",
-      "Qwen backend: hip or hrx-native (default: hip)", "Model",
+      "Qwen backend: auto, hip, or hrx-native (default: hip)", "Model",
       [&opt](std::string_view, std::string_view value,
              std::string* error) -> bool {
-        if (value != "hip" && value != "hrx-native") {
+        if (value != "hip" && value != "hrx-native" && value != "auto") {
           if (error != nullptr) {
-            *error = "Invalid Qwen backend: " + std::string(value);
+            *error = "Invalid Qwen backend: " + std::string(value) +
+                     " (must be auto, hip, or hrx-native)";
           }
           return false;
         }
@@ -793,9 +795,10 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     }
     return std::nullopt;
   }
-  if (opt.validate_hrx_tokens > 0 && opt.qwen_backend != "hrx-native") {
+  if (opt.validate_hrx_tokens > 0 && opt.qwen_backend != "hrx-native" &&
+      opt.qwen_backend != "auto") {
     if (error_msg != nullptr) {
-      *error_msg = "--validate-hrx requires --qwen-backend hrx-native";
+      *error_msg = "--validate-hrx requires --qwen-backend hrx-native or auto";
     }
     return std::nullopt;
   }
@@ -830,7 +833,38 @@ int RunBench(std::span<const char* const> args) {
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
 
+  bool use_hrx = false;
   if (opt.qwen_backend == "hrx-native") {
+    use_hrx = true;
+  } else if (opt.qwen_backend == "auto") {
+#if defined(ENGINE_ENABLE_HRX)
+    const auto model_config = reader->ExtractModelConfig(&err);
+    if (model_config.has_value()) {
+      const auto report = gufo::hrx::ProbeHrxCapabilities(GUFO_HRX_KERNEL_DIR,
+                                                          *model_config, &err);
+      if (report.is_capable && opt.speculative_backend.empty() &&
+          opt.validate_prefill_tokens == 0 &&
+          opt.n_depths == std::vector<std::size_t>{0} &&
+          opt.n_gpu_layers == 99 && opt.repetitions > 0) {
+        std::cout << "[Backend Negotiation] Auto-selected HRX native backend "
+                     "(all required primitives available).\n";
+        use_hrx = true;
+      } else {
+        std::cout << "[Backend Negotiation] HRX native backend incomplete or "
+                     "unsupported for requested options; selecting HIP "
+                     "backend.\n";
+        if (!report.is_capable) {
+          std::cout << "[Backend Negotiation] Missing HRX primitives:\n";
+          for (const auto& prim : report.missing_required_primitives) {
+            std::cout << "  - " << prim << "\n";
+          }
+        }
+      }
+    }
+#endif
+  }
+
+  if (use_hrx) {
     if (!opt.speculative_backend.empty() || opt.validate_prefill_tokens != 0 ||
         opt.n_depths != std::vector<std::size_t>{0} || opt.n_gpu_layers != 99 ||
         opt.repetitions == 0) {
@@ -842,6 +876,24 @@ int RunBench(std::span<const char* const> args) {
       return 1;
     }
 #if defined(ENGINE_ENABLE_HRX)
+    const auto model_config = reader->ExtractModelConfig(&err);
+    if (!model_config.has_value()) {
+      std::cerr << "Error extracting model configuration: " << err << "\n";
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    const auto report = gufo::hrx::ProbeHrxCapabilities(GUFO_HRX_KERNEL_DIR,
+                                                        *model_config, &err);
+    if (!report.is_capable) {
+      std::cerr << "Error: --qwen-backend hrx-native requested but native "
+                   "pipeline is incomplete.\n"
+                << "Missing required primitives:\n";
+      for (const auto& prim : report.missing_required_primitives) {
+        std::cerr << "  - " << prim << "\n";
+      }
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
     const auto max_or_zero = [](const std::vector<std::size_t>& values) {
       return values.empty() ? std::size_t{0}
                             : *std::max_element(values.begin(), values.end());

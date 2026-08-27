@@ -53,6 +53,10 @@ public:
       const noexcept {
     return entries_;
   }
+  [[nodiscard]] std::vector<HrxArtifactManifestEntry>&
+  MutableEntries() noexcept {
+    return entries_;
+  }
   [[nodiscard]] const HrxArtifactManifestEntry* FindEntry(
       std::string_view name) const noexcept;
   [[nodiscard]] const HrxArtifactManifestEntry* FindEntryByFilename(

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdlib>
@@ -7,6 +8,7 @@
 #include <string_view>
 
 #include "src/models/qwen/hrx/qwen_hrx_arena_layout.hpp"
+#include "src/models/qwen/hrx/qwen_hrx_capabilities.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_contract.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_manifest.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_tensor_binding.hpp"
@@ -297,6 +299,97 @@ void TestManifestValidation() {
          "rejection error specifies missing artifact");
 }
 
+void TestHrxCapabilityNegotiation() {
+  const auto config = Qwen38Config();
+  std::string error;
+
+  // 1. Builtin manifest with all entries present -> capable
+  auto manifest = gufo::hrx::HrxArtifactManifest::CreateBuiltin();
+  for (auto& entry : manifest->MutableEntries()) {
+    entry.sha256 =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  }
+  auto report = gufo::hrx::ProbeHrxCapabilities(*manifest, config, &error);
+  Expect(report.is_capable, "full manifest reports capable");
+  Expect(report.missing_required_primitives.empty(),
+         "no missing required primitives");
+  Expect(report.available_required_primitives.size() == 5,
+         "5 required primitives available");
+  Expect(!report.ToString().empty(), "report string is non-empty");
+
+  // 2. Missing Embedding
+  auto no_emb = gufo::hrx::HrxArtifactManifest::CreateBuiltin();
+  for (auto& entry : no_emb->MutableEntries()) {
+    if (entry.name != "qwen_q8_embedding") {
+      entry.sha256 = "aaa";
+    }
+  }
+  auto rep_no_emb = gufo::hrx::ProbeHrxCapabilities(*no_emb, config, &error);
+  Expect(!rep_no_emb.is_capable, "missing embedding is not capable");
+  Expect(std::find(rep_no_emb.missing_required_primitives.begin(),
+                   rep_no_emb.missing_required_primitives.end(),
+                   "Embedding") != rep_no_emb.missing_required_primitives.end(),
+         "missing primitives list includes Embedding");
+
+  // 3. Missing SSM
+  auto no_ssm = gufo::hrx::HrxArtifactManifest::CreateBuiltin();
+  for (auto& entry : no_ssm->MutableEntries()) {
+    if (entry.name != "qwen_deltanet_recurrence") {
+      entry.sha256 = "aaa";
+    }
+  }
+  auto rep_no_ssm = gufo::hrx::ProbeHrxCapabilities(*no_ssm, config, &error);
+  Expect(!rep_no_ssm.is_capable, "missing SSM is not capable");
+  Expect(std::find(rep_no_ssm.missing_required_primitives.begin(),
+                   rep_no_ssm.missing_required_primitives.end(),
+                   "SSM") != rep_no_ssm.missing_required_primitives.end(),
+         "missing primitives list includes SSM");
+
+  // 4. Missing Attention
+  auto no_attn = gufo::hrx::HrxArtifactManifest::CreateBuiltin();
+  for (auto& entry : no_attn->MutableEntries()) {
+    if (entry.name != "qwen_attention_decode") {
+      entry.sha256 = "aaa";
+    }
+  }
+  auto rep_no_attn = gufo::hrx::ProbeHrxCapabilities(*no_attn, config, &error);
+  Expect(!rep_no_attn.is_capable, "missing Attention is not capable");
+  Expect(
+      std::find(rep_no_attn.missing_required_primitives.begin(),
+                rep_no_attn.missing_required_primitives.end(),
+                "Attention") != rep_no_attn.missing_required_primitives.end(),
+      "missing primitives list includes Attention");
+
+  // 5. Missing FFN
+  auto no_ffn = gufo::hrx::HrxArtifactManifest::CreateBuiltin();
+  for (auto& entry : no_ffn->MutableEntries()) {
+    if (entry.name != "qwen_q8_gemv_k17408") {
+      entry.sha256 = "aaa";
+    }
+  }
+  auto rep_no_ffn = gufo::hrx::ProbeHrxCapabilities(*no_ffn, config, &error);
+  Expect(!rep_no_ffn.is_capable, "missing FFN is not capable");
+  Expect(std::find(rep_no_ffn.missing_required_primitives.begin(),
+                   rep_no_ffn.missing_required_primitives.end(),
+                   "FFN") != rep_no_ffn.missing_required_primitives.end(),
+         "missing primitives list includes FFN");
+
+  // 6. Missing Argmax
+  auto no_argmax = gufo::hrx::HrxArtifactManifest::CreateBuiltin();
+  for (auto& entry : no_argmax->MutableEntries()) {
+    if (entry.name != "qwen_argmax") {
+      entry.sha256 = "aaa";
+    }
+  }
+  auto rep_no_argmax =
+      gufo::hrx::ProbeHrxCapabilities(*no_argmax, config, &error);
+  Expect(!rep_no_argmax.is_capable, "missing Argmax is not capable");
+  Expect(std::find(rep_no_argmax.missing_required_primitives.begin(),
+                   rep_no_argmax.missing_required_primitives.end(),
+                   "Argmax") != rep_no_argmax.missing_required_primitives.end(),
+         "missing primitives list includes Argmax");
+}
+
 }  // namespace
 
 int main() {
@@ -307,6 +400,7 @@ int main() {
   TestCheckedMatrixElementCount();
   TestArenaLayout();
   TestManifestValidation();
+  TestHrxCapabilityNegotiation();
   std::cout << "All qwen_hrx_model_contract_test assertions passed!\n";
   return 0;
 }
