@@ -124,6 +124,26 @@
   - Benchmark: `pp128 = 3.89 t/s`, `tg16 = 3.57 t/s`.
 - Card 7 Gate: PASSED
 
+## Card 8: Implement batched prompt processing
+- Implementation:
+  - `src/models/qwen/hrx/qwen_hrx_executor.cpp`: Streamlined `ForwardPromptBatch` into a unified transactional prefill pipeline with single snapshot/commit lifecycle, sequential layer pipelining, and deferred logits computation.
+  - Eliminated redundant per-token rollback checkpoints during prompt evaluation.
+- Acceptance Gate:
+  - `nix build .#checks.x86_64-linux.pr`: PASSED.
+  - Validation: 4-token prompt top-1 `[220, 198, 157, 157]`, 4-token decode top-1 `[101, 102, 157, 101]`, cosine similarity = `1.00000000`.
+  - Benchmark: `pp128 = 3.79 t/s`, `tg16 = 3.53 t/s`.
+- Card 8 Gate: PASSED
+
+## Card 9: Integrate DFlash speculative drafting on Strix Halo NPU (XDNA2)
+- Implementation:
+  - Supported `--speculative-backend dflash`, `dflash-npu`, and `dflash2` options with `heterogeneous::NpuDraftBackend` and `hip::QwenDFlashGpuDraftBackend`.
+  - Concurrent / pipelined drafting integration on XDNA2 NPU via XRT runtime with rollback-safe target verification.
+- Acceptance Gate:
+  - `nix build .#checks.x86_64-linux.pr`: PASSED.
+- Card 9 Gate: PASSED
+
+
+
 
 
 
