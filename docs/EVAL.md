@@ -166,6 +166,10 @@ The retained report is a Gufo regression baseline. Score variance across
 repeated runs is reported rather than hidden, and no serving-throughput claim
 is inferred from the sequential single-user run.
 
+The first retained DeepSeek V4 Flash result and its independent repeat are
+documented in
+[the benchmark baseline](../benchmarks/deepseek-v4-flash/eval/README.md).
+
 ## Tests
 
 The Nix test suite verifies:

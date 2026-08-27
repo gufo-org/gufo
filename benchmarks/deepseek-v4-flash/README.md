@@ -65,6 +65,10 @@ completion and chat endpoints:
   --model "$MODEL"
 ```
 
+The retained first-four Antirez DS4 HTTP capability run and independent repeat
+are documented in [eval/README.md](eval/README.md). They are Gufo regression
+baselines, not official dataset scores.
+
 ## Current Results
 
 The Gufo rows use the release package, one repetition, a 2K prompt suffix, and
