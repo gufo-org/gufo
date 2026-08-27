@@ -46,9 +46,9 @@ namespace {
   return CheckedBytes({rows, columns / kQ8BlockElements, kQ8BlockBytes});
 }
 
-bool Reject(const char* message, std::string* error_msg) {
+bool Reject(std::string_view message, std::string* error_msg) {
   if (error_msg != nullptr) {
-    *error_msg = message;
+    *error_msg = std::string(message);
   }
   return false;
 }
@@ -207,30 +207,89 @@ const tokenization::QwenTokenizer& QwenHrxExecutor::GetTokenizer() const {
   return model_->GetTokenizer();
 }
 
+bool QwenHrxExecutor::BeginOperationRollback(std::string* error_msg) {
+  if (poisoned_) {
+    return Reject("native HRX executor is poisoned: " + poison_reason_,
+                  error_msg);
+  }
+  if (!arena_.has_value()) {
+    return Reject("native HRX executor has no arena", error_msg);
+  }
+  saved_position_ = current_position_;
+  arena_->SetCurrentPosition(current_position_);
+  if (!arena_->SaveState(copy_executable_, error_msg)) {
+    Poison("failed to snapshot state before operation: " +
+           (error_msg ? *error_msg : ""));
+    return false;
+  }
+  in_transaction_ = true;
+  return true;
+}
+
+void QwenHrxExecutor::CommitOperation() noexcept {
+  in_transaction_ = false;
+}
+
+bool QwenHrxExecutor::RollbackOperation(std::string* error_msg) {
+  if (fault_injection_ == FaultInjectionPoint::kFailRestoreState) {
+    Poison("injected rollback failure");
+    return Reject("injected rollback failure", error_msg);
+  }
+  if (!arena_.has_value()) {
+    Poison("rollback failed: executor has no arena");
+    return Reject("native HRX executor has no arena for rollback", error_msg);
+  }
+  if (!arena_->RestoreState(copy_executable_, error_msg)) {
+    Poison("unrecoverable failure during state rollback: " +
+           (error_msg ? *error_msg : ""));
+    return false;
+  }
+  current_position_ = saved_position_;
+  arena_->SetCurrentPosition(current_position_);
+  in_transaction_ = false;
+  return true;
+}
+
 bool QwenHrxExecutor::Reset(std::string* error_msg) {
   if (!arena_.has_value()) {
     return Reject("native HRX executor has no arena", error_msg);
   }
   if (!arena_->Reset(error_msg)) {
+    Poison("failed to reset arena: " + (error_msg ? *error_msg : ""));
     return false;
   }
   current_position_ = 0;
+  saved_position_ = 0;
+  in_transaction_ = false;
+  poisoned_ = false;
+  poison_reason_.clear();
   return true;
 }
 
 bool QwenHrxExecutor::SaveState(std::string* error_msg) {
+  if (poisoned_) {
+    return Reject("native HRX executor is poisoned: " + poison_reason_,
+                  error_msg);
+  }
   if (!arena_.has_value()) {
     return Reject("native HRX executor has no arena", error_msg);
   }
+  saved_position_ = current_position_;
   arena_->SetCurrentPosition(current_position_);
   return arena_->SaveState(copy_executable_, error_msg);
 }
 
 bool QwenHrxExecutor::RestoreState(std::string* error_msg) {
+  if (poisoned_) {
+    return Reject("native HRX executor is poisoned: " + poison_reason_,
+                  error_msg);
+  }
   if (!arena_.has_value()) {
     return Reject("native HRX executor has no arena", error_msg);
   }
   if (!arena_->RestoreState(copy_executable_, error_msg)) {
+    Poison("unrecoverable failure during state restore: " +
+           (error_msg ? *error_msg : ""));
     return false;
   }
   current_position_ = arena_->CurrentPosition();
@@ -240,6 +299,10 @@ bool QwenHrxExecutor::RestoreState(std::string* error_msg) {
 std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
     tokenization::TokenId token, std::uint32_t position, bool compute_logits,
     std::string* error_msg) {
+  if (poisoned_) {
+    Reject("native HRX session is poisoned: " + poison_reason_, error_msg);
+    return std::nullopt;
+  }
   if (model_ == nullptr || !arena_.has_value()) {
     Reject("native HRX executor is not initialized", error_msg);
     return std::nullopt;
@@ -270,6 +333,26 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
     Reject("native HRX model does not expose exactly 64 layers", error_msg);
     return std::nullopt;
   }
+
+  if (!BeginOperationRollback(error_msg)) {
+    return std::nullopt;
+  }
+
+  const auto rollback_and_fail = [&](const std::string& reason) {
+    if (error_msg != nullptr && error_msg->empty()) {
+      *error_msg = reason;
+    }
+    std::string rollback_err;
+    if (!RollbackOperation(&rollback_err)) {
+      Poison("rollback failed: " + rollback_err);
+    }
+    return std::nullopt;
+  };
+
+  if (fault_injection_ == FaultInjectionPoint::kFailEmbedding) {
+    return rollback_and_fail("fault injection: embedding dispatch failed");
+  }
+
   const bool trace_stages = std::getenv("GUFO_HRX_TRACE_STAGES") != nullptr;
   const auto token_start = std::chrono::steady_clock::now();
   auto stage_start = token_start;
@@ -296,13 +379,10 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
   if (!DispatchQ8Embedding(bindings.token_embedding, token,
                            arena_->Binding(QwenHrxArenaBuffer::kHidden),
                            error_msg)) {
-    if (error_msg != nullptr && error_msg->empty()) {
-      Reject("native HRX token embedding dispatch failed", error_msg);
-    }
-    return std::nullopt;
+    return rollback_and_fail("native HRX token embedding dispatch failed");
   }
   if (!synchronize_stage("embedding", &embedding_ms)) {
-    return std::nullopt;
+    return rollback_and_fail("embedding stage synchronization failed");
   }
 
   std::size_t attention_layers = 0;
@@ -311,10 +391,15 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
        ++layer_index) {
     const bool expected_attention = ((layer_index + 1) % 4) == 0;
     if (bindings.layers[layer_index].is_full_attention != expected_attention) {
-      Reject("native HRX model layer ordering violates the Qwen3.8 contract",
-             error_msg);
-      return std::nullopt;
+      return rollback_and_fail(
+          "native HRX model layer ordering violates the Qwen3.8 contract");
     }
+
+    if (layer_index == 1 &&
+        fault_injection_ == FaultInjectionPoint::kFailLayer1Stage) {
+      return rollback_and_fail("fault injection: layer 1 stage failed");
+    }
+
     const bool stage_ok =
         expected_attention
             ? DispatchAttentionQ8(layer_index, position, error_msg)
@@ -324,22 +409,33 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
     double* const layer_elapsed = expected_attention ? &attention_ms : &ssm_ms;
     if (!stage_ok ||
         !synchronize_stage(expected_attention ? "attention" : "SSM",
-                           layer_elapsed) ||
-        !DispatchFfnQ8(layer_index, error_msg) ||
+                           layer_elapsed)) {
+      return rollback_and_fail("attention/SSM stage dispatch failed");
+    }
+
+    if (layer_index == 1 &&
+        fault_injection_ == FaultInjectionPoint::kFailLayer1Ffn) {
+      return rollback_and_fail("fault injection: layer 1 FFN failed");
+    }
+
+    if (!DispatchFfnQ8(layer_index, error_msg) ||
         !synchronize_stage("FFN", &ffn_ms)) {
-      return std::nullopt;
+      return rollback_and_fail("FFN stage dispatch failed");
     }
   }
   if (attention_layers != contract_.FullAttentionLayerCount() ||
       ssm_layers != contract_.SsmLayerCount()) {
-    Reject("native HRX model layer counts violate the Qwen3.8 contract",
-           error_msg);
-    return std::nullopt;
+    return rollback_and_fail(
+        "native HRX model layer counts violate the Qwen3.8 contract");
+  }
+
+  if (fault_injection_ == FaultInjectionPoint::kFailFinalStage) {
+    return rollback_and_fail("fault injection: final stage failed");
   }
 
   tokenization::TokenId next_token = 0;
   if (compute_logits && !DispatchFinalQ8(&next_token, error_msg)) {
-    return std::nullopt;
+    return rollback_and_fail("final stage projection failed");
   }
   const auto token_end = std::chrono::steady_clock::now();
   if (trace_stages) {
@@ -355,6 +451,8 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
               << " ffn_ms=" << ffn_ms << " final_ms=" << final_ms
               << " token_ms=" << token_ms << '\n';
   }
+
+  CommitOperation();
   current_position_ = position + 1;
   arena_->SetCurrentPosition(current_position_);
   if (error_msg != nullptr) {

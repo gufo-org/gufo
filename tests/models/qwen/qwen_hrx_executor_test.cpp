@@ -747,6 +747,113 @@ void TestManifestValidationInExecutor() {
          "rejection message includes filename and sha256 mismatch");
 }
 
+void TestTransactionalRollbackLifecycle() {
+  gufo::hrx::QwenHrxExecutor executor(Qwen38Contract(), 0);
+  Expect(executor.InitializeAllKernels(std::string(kHrxKernelDir)),
+         "retained HRX prototype artifacts load");
+
+  std::string error;
+  Expect(!executor.IsPoisoned(), "fresh executor is not poisoned");
+  executor.Poison("manual fault injection");
+  Expect(executor.IsPoisoned(), "executor is poisoned");
+  Expect(executor.PoisonReason() == "manual fault injection",
+         "poison reason matches");
+
+  // Operations fail fast on poisoned executor
+  const auto tok = executor.ForwardToken(1, 0, false, &error);
+  Expect(!tok.has_value(), "forward fails fast when poisoned");
+  Expect(error.find("poisoned") != std::string::npos,
+         "rejection message mentions poisoned");
+}
+
+void TestTransactionalMutationAndRollback() {
+  const auto model_path = GetTestModelPath();
+  if (model_path.empty()) {
+    std::cout
+        << "Skipping TestTransactionalMutationAndRollback (no test model)\n";
+    return;
+  }
+  std::string error;
+  auto reader = gufo::core::GgufReader::Open(model_path, &error);
+  Expect(reader != nullptr, "model GGUF reader opens for transaction test");
+
+  auto executor = gufo::hrx::QwenHrxExecutor::CreateFromGguf(
+      reader, 4, std::string(kHrxKernelDir), &error);
+  Expect(executor != nullptr, "executor creates for transaction test");
+  Expect(executor->ModelExecutionReady(), "executor model execution ready");
+  Expect(!executor->IsPoisoned(), "executor is initially unpoisoned");
+
+  const auto& weights = executor->GetConfig();
+
+  // Step 0: Initial clean forward token
+  const auto tok0 = executor->ForwardToken(1, 0, true, &error);
+  Expect(tok0.has_value() && *tok0 < weights.vocab_size,
+         "step 0 forward succeeds");
+  Expect(executor->CurrentPosition() == 1, "position advances to 1");
+
+  // Step 1: Inject failure at layer 1 SSM/Attention stage
+  executor->SetFaultInjection(
+      gufo::hrx::QwenHrxExecutor::FaultInjectionPoint::kFailLayer1Stage);
+  const auto tok1_fail = executor->ForwardToken(1, 1, true, &error);
+  Expect(!tok1_fail.has_value(), "step 1 with injected fault is rejected");
+  Expect(executor->CurrentPosition() == 1,
+         "position rolled back to 1 after failure");
+  Expect(!executor->IsPoisoned(),
+         "session remains unpoisoned after successful rollback");
+
+  // Retry Step 1 with fault cleared
+  executor->SetFaultInjection(
+      gufo::hrx::QwenHrxExecutor::FaultInjectionPoint::kNone);
+  const auto tok1_success = executor->ForwardToken(1, 1, true, &error);
+  Expect(tok1_success.has_value() && *tok1_success < weights.vocab_size,
+         "step 1 succeeds after rollback");
+  Expect(executor->CurrentPosition() == 2, "position advances to 2");
+
+  // Step 2: Inject failure at final stage
+  executor->SetFaultInjection(
+      gufo::hrx::QwenHrxExecutor::FaultInjectionPoint::kFailFinalStage);
+  const auto tok2_fail = executor->ForwardToken(1, 2, true, &error);
+  Expect(!tok2_fail.has_value(),
+         "step 2 with injected final fault is rejected");
+  Expect(executor->CurrentPosition() == 2,
+         "position rolled back to 2 after final stage failure");
+  Expect(!executor->IsPoisoned(), "session remains unpoisoned after rollback");
+
+  // Retry Step 2 with fault cleared
+  executor->SetFaultInjection(
+      gufo::hrx::QwenHrxExecutor::FaultInjectionPoint::kNone);
+  const auto tok2_success = executor->ForwardToken(1, 2, true, &error);
+  Expect(tok2_success.has_value(), "step 2 succeeds after rollback");
+  Expect(executor->CurrentPosition() == 3, "position advances to 3");
+
+  // Step 3: Inject unrecoverable rollback failure -> session must poison
+  executor->SetFaultInjection(
+      gufo::hrx::QwenHrxExecutor::FaultInjectionPoint::kFailRestoreState);
+  const auto tok3_fail = executor->ForwardToken(1, 3, true, &error);
+  Expect(!tok3_fail.has_value(), "step 3 with restore failure fails");
+  Expect(executor->IsPoisoned(), "session is permanently poisoned");
+  Expect(!executor->PoisonReason().empty(), "poison reason is recorded");
+
+  // Subsequent operations must fail fast without touching hardware
+  const auto tok3_fast_fail = executor->ForwardToken(1, 3, true, &error);
+  Expect(!tok3_fast_fail.has_value(),
+         "subsequent forward fails fast on poisoned session");
+  Expect(error.find("poisoned") != std::string::npos,
+         "error mentions poisoned session");
+
+  // Reset clears poison and restores session to clean state
+  Expect(executor->Reset(&error), "reset succeeds and clears poison");
+  Expect(!executor->IsPoisoned(), "session is unpoisoned after reset");
+  Expect(executor->CurrentPosition() == 0, "position reset to 0");
+
+  executor->SetFaultInjection(
+      gufo::hrx::QwenHrxExecutor::FaultInjectionPoint::kNone);
+  const auto tok0_after_reset = executor->ForwardToken(1, 0, true, &error);
+  Expect(tok0_after_reset.has_value(), "forward succeeds after reset");
+  Expect(executor->CurrentPosition() == 1,
+         "position advances to 1 after reset");
+}
+
 }  // namespace
 
 int main() {
@@ -760,6 +867,8 @@ int main() {
   TestQwenHrxArenaLifecycle();
   TestPrototypeArtifactReadiness();
   TestManifestValidationInExecutor();
+  TestTransactionalRollbackLifecycle();
+  TestTransactionalMutationAndRollback();
   std::cout << "All qwen_hrx_executor_test assertions passed!\n";
   return 0;
 }

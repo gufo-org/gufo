@@ -114,6 +114,32 @@ public:
     return arena_->Binding(buffer);
   }
 
+  enum class FaultInjectionPoint {
+    kNone = 0,
+    kFailEmbedding,
+    kFailLayer1Stage,
+    kFailLayer1Ffn,
+    kFailFinalStage,
+    kFailRestoreState,
+  };
+
+  void SetFaultInjection(FaultInjectionPoint point) noexcept {
+    fault_injection_ = point;
+  }
+
+  [[nodiscard]] bool IsPoisoned() const noexcept { return poisoned_; }
+  [[nodiscard]] const std::string& PoisonReason() const noexcept {
+    return poison_reason_;
+  }
+  void Poison(std::string reason) noexcept {
+    poisoned_ = true;
+    poison_reason_ = std::move(reason);
+  }
+
+  [[nodiscard]] bool BeginOperationRollback(std::string* error_msg = nullptr);
+  void CommitOperation() noexcept;
+  [[nodiscard]] bool RollbackOperation(std::string* error_msg = nullptr);
+
   [[nodiscard]] bool Reset(std::string* error_msg = nullptr);
   [[nodiscard]] bool SaveState(std::string* error_msg = nullptr);
   [[nodiscard]] bool RestoreState(std::string* error_msg = nullptr);
@@ -264,6 +290,11 @@ private:
   std::optional<QwenHrxArena> arena_;
   std::uint32_t max_context_{0};
   std::uint32_t current_position_{0};
+  std::uint32_t saved_position_{0};
+  bool in_transaction_{false};
+  bool poisoned_{false};
+  std::string poison_reason_;
+  FaultInjectionPoint fault_injection_{FaultInjectionPoint::kNone};
   bool prototype_artifacts_ready_{false};
   bool model_execution_ready_{false};
 };
