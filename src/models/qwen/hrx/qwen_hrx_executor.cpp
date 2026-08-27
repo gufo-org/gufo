@@ -479,16 +479,89 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardPromptBatch(
     Reject("native HRX prompt exceeds max_context", error_msg);
     return std::nullopt;
   }
-  std::optional<tokenization::TokenId> result;
+  if (tokens.size() == 1) {
+    return ForwardToken(tokens[0], start_position, compute_logits, error_msg);
+  }
+
+  if (poisoned_) {
+    Reject("native HRX session is poisoned: " + poison_reason_, error_msg);
+    return std::nullopt;
+  }
+  if (model_ == nullptr || !arena_.has_value()) {
+    Reject("native HRX executor is not initialized", error_msg);
+    return std::nullopt;
+  }
+  if (!model_execution_ready_) {
+    Reject("native HRX Q8_0 model execution is unavailable", error_msg);
+    return std::nullopt;
+  }
+  if (start_position != current_position_) {
+    Reject("native HRX token position is not the next sequential position",
+           error_msg);
+    return std::nullopt;
+  }
+
+  if (!BeginOperationRollback(error_msg)) {
+    return std::nullopt;
+  }
+
+  const auto rollback_and_fail = [&](const std::string& reason) {
+    if (error_msg != nullptr && error_msg->empty()) {
+      *error_msg = reason;
+    }
+    std::string rollback_err;
+    if (!RollbackOperation(&rollback_err)) {
+      Poison("rollback failed: " + rollback_err);
+    }
+    return std::nullopt;
+  };
+
+  const auto& bindings = model_->GetNativeBindings();
+  tokenization::TokenId next_token = 0;
+
   for (std::size_t index = 0; index < tokens.size(); ++index) {
-    result = ForwardToken(
-        tokens[index], start_position + static_cast<std::uint32_t>(index),
-        compute_logits && index + 1 == tokens.size(), error_msg);
-    if (!result.has_value()) {
-      return std::nullopt;
+    const auto token = tokens[index];
+    const std::uint32_t position =
+        start_position + static_cast<std::uint32_t>(index);
+    const bool is_last = (index + 1 == tokens.size());
+
+    if (token >= contract_.VocabSize()) {
+      return rollback_and_fail("native HRX input token is outside vocabulary");
+    }
+
+    if (!DispatchQ8Embedding(bindings.token_embedding, token,
+                             arena_->Binding(QwenHrxArenaBuffer::kHidden),
+                             error_msg)) {
+      return rollback_and_fail("native HRX token embedding dispatch failed");
+    }
+
+    for (std::size_t layer_index = 0; layer_index < bindings.layers.size();
+         ++layer_index) {
+      const bool expected_attention = ((layer_index + 1) % 4) == 0;
+      const bool stage_ok =
+          expected_attention
+              ? DispatchAttentionQ8(layer_index, position, error_msg)
+              : DispatchSsmQ8(layer_index, error_msg);
+      if (!stage_ok || !DispatchFfnQ8(layer_index, error_msg)) {
+        return rollback_and_fail("layer stage dispatch failed");
+      }
+    }
+
+    if (is_last && compute_logits) {
+      if (!DispatchFinalQ8(&next_token, error_msg)) {
+        return rollback_and_fail("final stage projection failed");
+      }
     }
   }
-  return result;
+
+  CommitOperation();
+  current_position_ =
+      start_position + static_cast<std::uint32_t>(tokens.size());
+  arena_->SetCurrentPosition(current_position_);
+  if (error_msg != nullptr) {
+    error_msg->clear();
+  }
+  return next_token;
 }
 
 std::vector<float> QwenHrxExecutor::CopyLastLogits(
