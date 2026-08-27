@@ -142,6 +142,15 @@
   - `nix build .#checks.x86_64-linux.pr`: PASSED.
 - Card 9 Gate: PASSED
 
+## Card 10: Integrate MTP speculative drafting (GPU/NPU hybrid)
+- Implementation:
+  - Supported `--speculative-backend mtp` and `mtp-npu` options with `hip::QwenMtpGpuDraftBackend` and hybrid NPU EH projection mode.
+  - Pipelined auxiliary prediction head speculative drafting with rollback transactions on verification mismatch.
+- Acceptance Gate:
+  - `nix build .#checks.x86_64-linux.pr`: PASSED.
+- Card 10 Gate: PASSED
+
+
 
 
 
