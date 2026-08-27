@@ -223,6 +223,7 @@ add_library(gufo_core STATIC
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
+  src/models/qwen/hrx/qwen_hrx_manifest.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_definitions(gufo_core PRIVATE
@@ -284,6 +285,7 @@ if (ENGINE_ENABLE_HRX)
   # Public HRX wrapper headers include <hrx/hrx_runtime.h>, so consumers of
   # gufo_core need the installed HRX include directory as well.
   target_include_directories(gufo_core PUBLIC "${HRX_INCLUDE_DIR}")
+  target_include_directories(gufo_core PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/include")
   find_library(HRX_LIBRARY NAMES hrx
     HINTS "${HRX_ROOT}/lib" "$ENV{HRX_PATH}/lib"
     REQUIRED)
@@ -364,13 +366,27 @@ if (ENGINE_ENABLE_HRX)
     endforeach()
 
     add_custom_target(gufo_loom_kernels ALL DEPENDS ${COMPILED_LOOM_ARTIFACTS})
-    add_dependencies(gufo_core gufo_loom_kernels)
+
+    set(MANIFEST_JSON "${GUFO_AOT_KERNELS_DIR}/hrx_manifest.json")
+    set(MANIFEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/include/gufo/generated/hrx_manifest.hpp")
+    add_custom_command(
+      OUTPUT "${MANIFEST_JSON}" "${MANIFEST_HEADER}"
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/loom/generate_hrx_manifest.py"
+        --kernels-dir=${GUFO_AOT_KERNELS_DIR}
+        --output-json=${MANIFEST_JSON}
+        --output-header=${MANIFEST_HEADER}
+      DEPENDS ${COMPILED_LOOM_ARTIFACTS} "${CMAKE_CURRENT_SOURCE_DIR}/tools/loom/generate_hrx_manifest.py"
+      COMMENT "Generating HRX artifact manifest and header"
+      VERBATIM
+    )
+    add_custom_target(gufo_loom_manifest ALL DEPENDS "${MANIFEST_JSON}" "${MANIFEST_HEADER}")
+    add_dependencies(gufo_loom_manifest gufo_loom_kernels)
+    add_dependencies(gufo_core gufo_loom_manifest)
 
     install(DIRECTORY "${GUFO_AOT_KERNELS_DIR}/"
       DESTINATION share/gufo/kernels)
   endif()
-
-
 endif()
 
 add_executable(gufo

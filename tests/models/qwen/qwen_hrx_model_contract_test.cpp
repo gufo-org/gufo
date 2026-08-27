@@ -8,6 +8,7 @@
 
 #include "src/models/qwen/hrx/qwen_hrx_arena_layout.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_contract.hpp"
+#include "src/models/qwen/hrx/qwen_hrx_manifest.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_tensor_binding.hpp"
 
 namespace {
@@ -227,6 +228,75 @@ void TestArenaLayout() {
          "arena byte-size overflow is rejected");
 }
 
+void TestManifestValidation() {
+  const auto contract =
+      gufo::hrx::QwenHrxArtifactContract::FromConfig(Qwen38Config());
+  Expect(contract.has_value(), "valid production contract for manifest test");
+
+  // 1. Builtin manifest creation
+  auto manifest = gufo::hrx::HrxArtifactManifest::CreateBuiltin();
+  Expect(manifest != nullptr, "builtin manifest creates");
+  Expect(manifest->SchemaVersion() == "1.0.0", "manifest schema is 1.0.0");
+  Expect(manifest->ModelKind() == "qwen3.8-27b",
+         "manifest model kind is qwen3.8-27b");
+  Expect(manifest->Target() == "gfx1151", "manifest target is gfx1151");
+  Expect(manifest->WaveSize() == 32, "manifest wave size is 32");
+  Expect(manifest->HrxAbiRevision() == "hrx-loom-v1",
+         "manifest ABI is hrx-loom-v1");
+  Expect(!manifest->Entries().empty(), "manifest contains entries");
+
+  std::string error;
+
+  // 2. Wrong schema version rejection
+  manifest->SetSchemaVersion("2.0.0");
+  Expect(!manifest->ValidateDirectory("/nonexistent", *contract, &error),
+         "wrong schema version is rejected");
+  Expect(!error.empty(), "rejection error is populated");
+  manifest->SetSchemaVersion("1.0.0");
+
+  // 3. Wrong model kind rejection
+  manifest->SetModelKind("llama-3-8b");
+  Expect(!manifest->ValidateDirectory("/nonexistent", *contract, &error),
+         "wrong model kind is rejected");
+  manifest->SetModelKind("qwen3.8-27b");
+
+  // 4. Wrong target rejection
+  manifest->SetTarget("gfx1100");
+  Expect(!manifest->ValidateDirectory("/nonexistent", *contract, &error),
+         "wrong target is rejected");
+  manifest->SetTarget("gfx1151");
+
+  // 5. Wrong wave size rejection
+  manifest->SetWaveSize(64);
+  Expect(!manifest->ValidateDirectory("/nonexistent", *contract, &error),
+         "wrong wave size is rejected");
+  manifest->SetWaveSize(32);
+
+  // 6. Wrong ABI revision rejection
+  manifest->SetHrxAbiRevision("legacy-abi-v0");
+  Expect(!manifest->ValidateDirectory("/nonexistent", *contract, &error),
+         "wrong ABI revision is rejected");
+  manifest->SetHrxAbiRevision("hrx-loom-v1");
+
+  // 7. Duplicate entry name rejection
+  auto dup_manifest = gufo::hrx::HrxArtifactManifest::CreateBuiltin();
+  gufo::hrx::HrxArtifactManifestEntry dup_entry;
+  dup_entry.name = "qwen_argmax";
+  dup_entry.filename = "qwen_argmax_dup.fb";
+  dup_entry.export_name = "qwen_argmax_dup";
+  dup_entry.binding_count = 2;
+  dup_manifest->AddEntry(dup_entry);
+  Expect(!dup_manifest->ValidateDirectory("/nonexistent", *contract, &error),
+         "duplicate entry name is rejected");
+
+  // 8. Missing required file rejection in directory
+  Expect(!manifest->ValidateDirectory("/nonexistent_empty_dir_xyz", *contract,
+                                      &error),
+         "missing required artifact file in directory is rejected");
+  Expect(error.find("missing:") != std::string::npos,
+         "rejection error specifies missing artifact");
+}
+
 }  // namespace
 
 int main() {
@@ -236,6 +306,7 @@ int main() {
   TestTypedTensorPayloadValidation();
   TestCheckedMatrixElementCount();
   TestArenaLayout();
+  TestManifestValidation();
   std::cout << "All qwen_hrx_model_contract_test assertions passed!\n";
   return 0;
 }

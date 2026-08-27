@@ -125,12 +125,27 @@ std::unique_ptr<QwenHrxExecutor> QwenHrxExecutor::CreateFromGguf(
     return nullptr;
   }
 
+  auto manifest =
+      HrxArtifactManifest::LoadFromDirectory(kernels_dir, error_msg);
+  if (manifest == nullptr) {
+    return nullptr;
+  }
+  if (!manifest->ValidateDirectory(kernels_dir, *contract, error_msg)) {
+    return nullptr;
+  }
+
   auto executor = std::unique_ptr<QwenHrxExecutor>(
       new QwenHrxExecutor(*contract, device_index));
   if (!executor->backend_.IsInitialized()) {
     Reject("failed to initialize the native HRX backend", error_msg);
     return nullptr;
   }
+  executor->manifest_ = std::move(manifest);
+  if (!executor->InitializeAllKernels(kernels_dir, error_msg)) {
+    Reject("failed to initialize native HRX kernel artifacts", error_msg);
+    return nullptr;
+  }
+
   executor->model_ = QwenHrxModel::CreateFromGguf(
       std::move(reader), executor->backend_.Device(), error_msg);
   if (executor->model_ == nullptr) {
@@ -144,7 +159,6 @@ std::unique_ptr<QwenHrxExecutor> QwenHrxExecutor::CreateFromGguf(
   }
   executor->arena_.emplace(std::move(*arena));
   executor->max_context_ = max_context;
-  (void)executor->InitializeAllKernels(kernels_dir);
 
   // Capabilities stay explicit so the opt-in CLI cannot silently run an
   // incomplete model.
@@ -463,90 +477,94 @@ bool QwenHrxExecutor::Initialize(const std::string& loom_artifact_path) {
   return true;
 }
 
-bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir) {
+bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
+                                           std::string* error_msg) {
   loader_.UnloadAll();
   ResetKernelState();
   if (!backend_.IsInitialized()) {
+    if (error_msg != nullptr) {
+      *error_msg = "HRX backend is not initialized";
+    }
     return false;
   }
 
-  const struct {
-    const char* name;
-    const char* filename;
-    hrx_executable_t* target_ptr;
-  } kernel_specs[] = {
-      {"qwen_swiglu", "qwen_fused_swiglu_bf16.fb", &swiglu_executable_},
-      {"qwen_rmsnorm_qkv", "qwen_fused_rmsnorm_qkv_bf16.fb",
-       &rmsnorm_ssm_qkv_executable_},
-      {"qwen_rope_kv", "qwen_fused_rope_kv_cache_bf16.fb",
-       &rope_kv_executable_},
-      {"qwen_down_residual", "qwen_fused_down_residual_bf16.fb",
-       &down_residual_executable_},
-      {"qwen_rmsnorm", "qwen_rmsnorm_f32.fb", &rmsnorm_executable_},
-      {"qwen_residual_add", "qwen_residual_add_f32.fb",
-       &residual_add_executable_},
-      {"qwen_swiglu_pointwise", "qwen_swiglu_pointwise_f32.fb",
-       &swiglu_pointwise_executable_},
-      {"qwen_split_q_gate", "qwen_split_q_gate_f32.fb",
-       &split_q_gate_executable_},
-      {"qwen_copy", "qwen_copy_f32.fb", &copy_executable_},
-      {"qwen_q8_embedding", "qwen_q8_0_embedding_k5120.fb",
-       &q8_embedding_executable_},
-      {"qwen_q8_gemv_k5120", "qwen_q8_0_gemv_k5120.fb",
-       &q8_gemv_k5120_executable_},
-      {"qwen_q8_gemv_k6144", "qwen_q8_0_gemv_k6144.fb",
-       &q8_gemv_k6144_executable_},
-      {"qwen_q8_gemv_k17408", "qwen_q8_0_gemv_k17408.fb",
-       &q8_gemv_k17408_executable_},
-      {"qwen_q8_vocab_gemv_k5120", "qwen_q8_0_vocab_gemv_k5120.fb",
-       &q8_vocab_gemv_k5120_executable_},
-      {"qwen_per_head_rmsnorm", "qwen_per_head_rmsnorm_f32.fb",
-       &per_head_rmsnorm_executable_},
-      {"qwen_attention_decode", "qwen_attention_decode_f32.fb",
-       &attention_decode_executable_},
-      {"qwen_ssm_conv", "qwen_ssm_conv_silu_f32.fb", &ssm_conv_executable_},
-      {"qwen_deltanet_prepare", "qwen_deltanet_prepare_f32.fb",
-       &deltanet_prepare_executable_},
-      {"qwen_deltanet_recurrence", "qwen_deltanet_recurrence_f32.fb",
-       &deltanet_recurrence_executable_},
-      {"qwen_argmax", "qwen_argmax_f32.fb", &argmax_executable_},
-  };
-
-  for (const auto& spec : kernel_specs) {
-    const std::string found_path =
-        (std::filesystem::path(kernels_dir) / spec.filename).string();
-    if (!std::filesystem::exists(found_path)) {
-      missing_kernel_artifacts_.emplace_back(spec.filename);
-      continue;
-    }
-
-    hrx_status_t status = loader_.LoadFromFile(backend_.Device(), spec.name,
-                                               found_path, "amdgpu", "gfx1151");
-    if (!hrx_status_is_ok(status)) {
-      hrx_status_ignore(status);
-      missing_kernel_artifacts_.emplace_back(spec.filename);
-      continue;
-    }
-
-    *spec.target_ptr = loader_.GetExecutable(spec.name);
-    if (*spec.target_ptr == nullptr) {
-      missing_kernel_artifacts_.emplace_back(spec.filename);
+  if (manifest_ == nullptr) {
+    manifest_ = HrxArtifactManifest::LoadFromDirectory(kernels_dir, error_msg);
+    if (manifest_ == nullptr) {
+      return false;
     }
   }
 
-  // Optimization candidates are optional so existing artifact directories
-  // retain feature parity with the required reference path.
-  const auto q8_k17408_wg256_path =
-      std::filesystem::path(kernels_dir) / "qwen_q8_0_gemv_k17408_wg256.fb";
-  if (std::filesystem::exists(q8_k17408_wg256_path)) {
-    hrx_status_t status = loader_.LoadFromFile(
-        backend_.Device(), "qwen_q8_gemv_k17408_wg256",
-        q8_k17408_wg256_path.string(), "amdgpu", "gfx1151");
-    if (hrx_status_is_ok(status)) {
-      q8_gemv_k17408_wg256_executable_ =
-          loader_.GetExecutable("qwen_q8_gemv_k17408_wg256");
-    } else {
+  for (const auto& entry : manifest_->Entries()) {
+    const std::string found_path =
+        (std::filesystem::path(kernels_dir) / entry.filename).string();
+    if (!std::filesystem::exists(found_path)) {
+      if (!entry.optional) {
+        missing_kernel_artifacts_.emplace_back(entry.filename);
+      }
+      continue;
+    }
+
+    hrx_status_t status = loader_.LoadFromFile(backend_.Device(), entry.name,
+                                               found_path, "amdgpu", "gfx1151");
+    if (!hrx_status_is_ok(status)) {
       hrx_status_ignore(status);
+      if (!entry.optional) {
+        missing_kernel_artifacts_.emplace_back(entry.filename);
+      }
+      continue;
+    }
+
+    hrx_executable_t exec = loader_.GetExecutable(entry.name);
+    if (exec == nullptr) {
+      if (!entry.optional) {
+        missing_kernel_artifacts_.emplace_back(entry.filename);
+      }
+      continue;
+    }
+
+    if (entry.name == "qwen_swiglu") {
+      swiglu_executable_ = exec;
+    } else if (entry.name == "qwen_rmsnorm_qkv") {
+      rmsnorm_ssm_qkv_executable_ = exec;
+    } else if (entry.name == "qwen_rope_kv") {
+      rope_kv_executable_ = exec;
+    } else if (entry.name == "qwen_down_residual") {
+      down_residual_executable_ = exec;
+    } else if (entry.name == "qwen_rmsnorm") {
+      rmsnorm_executable_ = exec;
+    } else if (entry.name == "qwen_residual_add") {
+      residual_add_executable_ = exec;
+    } else if (entry.name == "qwen_swiglu_pointwise") {
+      swiglu_pointwise_executable_ = exec;
+    } else if (entry.name == "qwen_split_q_gate") {
+      split_q_gate_executable_ = exec;
+    } else if (entry.name == "qwen_copy") {
+      copy_executable_ = exec;
+    } else if (entry.name == "qwen_q8_embedding") {
+      q8_embedding_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemv_k5120") {
+      q8_gemv_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemv_k6144") {
+      q8_gemv_k6144_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemv_k17408") {
+      q8_gemv_k17408_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemv_k17408_wg256") {
+      q8_gemv_k17408_wg256_executable_ = exec;
+    } else if (entry.name == "qwen_q8_vocab_gemv_k5120") {
+      q8_vocab_gemv_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_per_head_rmsnorm") {
+      per_head_rmsnorm_executable_ = exec;
+    } else if (entry.name == "qwen_attention_decode") {
+      attention_decode_executable_ = exec;
+    } else if (entry.name == "qwen_ssm_conv") {
+      ssm_conv_executable_ = exec;
+    } else if (entry.name == "qwen_deltanet_prepare") {
+      deltanet_prepare_executable_ = exec;
+    } else if (entry.name == "qwen_deltanet_recurrence") {
+      deltanet_recurrence_executable_ = exec;
+    } else if (entry.name == "qwen_argmax") {
+      argmax_executable_ = exec;
     }
   }
 

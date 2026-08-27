@@ -707,6 +707,46 @@ void TestPrototypeArtifactReadiness() {
          "artifacts without strict model bindings do not enable execution");
 }
 
+void TestManifestValidationInExecutor() {
+  const auto contract = Qwen38Contract();
+  std::string error;
+
+  // 1. Valid manifest in kernels dir
+  auto manifest = gufo::hrx::HrxArtifactManifest::LoadFromDirectory(
+      std::string(kHrxKernelDir), &error);
+  Expect(manifest != nullptr, "manifest loads from kernels dir");
+  Expect(
+      manifest->ValidateDirectory(std::string(kHrxKernelDir), contract, &error),
+      "manifest validates against installed kernel directory");
+  Expect(error.empty(), "validation clears error string");
+
+  // 2. Corrupted hash is rejected
+  auto bad_manifest = gufo::hrx::HrxArtifactManifest::CreateBuiltin();
+  gufo::hrx::HrxArtifactManifestEntry altered_entry;
+  altered_entry.name = "qwen_argmax";
+  altered_entry.filename = "qwen_argmax_f32.fb";
+  altered_entry.export_name = "qwen_argmax_f32";
+  altered_entry.binding_count = 2;
+  altered_entry.sha256 =
+      "0000000000000000000000000000000000000000000000000000000000000000";
+  altered_entry.optional = false;
+  // Replace the argmax entry
+  auto test_manifest = std::make_unique<gufo::hrx::HrxArtifactManifest>();
+  for (const auto& entry : manifest->Entries()) {
+    if (entry.name == "qwen_argmax") {
+      test_manifest->AddEntry(altered_entry);
+    } else {
+      test_manifest->AddEntry(entry);
+    }
+  }
+  Expect(!test_manifest->ValidateDirectory(std::string(kHrxKernelDir), contract,
+                                           &error),
+         "altered SHA-256 is rejected");
+  Expect(error.find("qwen_argmax_f32.fb") != std::string::npos &&
+             error.find("sha256 mismatch") != std::string::npos,
+         "rejection message includes filename and sha256 mismatch");
+}
+
 }  // namespace
 
 int main() {
@@ -719,6 +759,7 @@ int main() {
   TestComposedNativeStagesWhenModelIsProvided();
   TestQwenHrxArenaLifecycle();
   TestPrototypeArtifactReadiness();
+  TestManifestValidationInExecutor();
   std::cout << "All qwen_hrx_executor_test assertions passed!\n";
   return 0;
 }

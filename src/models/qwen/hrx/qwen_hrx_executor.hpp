@@ -15,6 +15,7 @@
 #include "src/core/hrx/hrx_utils.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_arena.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_contract.hpp"
+#include "src/models/qwen/hrx/qwen_hrx_manifest.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_model.hpp"
 
 namespace gufo::hrx {
@@ -36,7 +37,12 @@ public:
 
   bool Initialize(const std::string& loom_artifact_path);
   bool InitializeAllKernels(
-      const std::string& kernels_dir = "share/gufo/kernels");
+      const std::string& kernels_dir = "share/gufo/kernels",
+      std::string* error_msg = nullptr);
+
+  [[nodiscard]] const HrxArtifactManifest* Manifest() const noexcept {
+    return manifest_.get();
+  }
 
   /// True only when every required runtime artifact has loaded. Model-level
   /// readiness additionally requires valid model bindings and arena state.
@@ -253,6 +259,7 @@ private:
 
   std::vector<std::string> missing_kernel_artifacts_;
   std::vector<std::string> missing_model_capabilities_;
+  std::unique_ptr<HrxArtifactManifest> manifest_;
   std::unique_ptr<QwenHrxModel> model_;
   std::optional<QwenHrxArena> arena_;
   std::uint32_t max_context_{0};
