@@ -69,8 +69,8 @@ public:
   [[nodiscard]] const QwenHrxArenaLayout& Layout() const noexcept {
     return layout_;
   }
-  [[nodiscard]] HrxBufferBinding Binding(QwenHrxArenaBuffer buffer) const
-      noexcept;
+  [[nodiscard]] HrxBufferBinding Binding(
+      QwenHrxArenaBuffer buffer) const noexcept;
   void SetCurrentPosition(std::uint32_t position) noexcept {
     current_position_ = position;
   }

@@ -1,11 +1,11 @@
 #ifndef GUFO_CORE_HRX_HRX_UTILS_HPP_
 #define GUFO_CORE_HRX_HRX_UTILS_HPP_
 
+#include <hrx/hrx_runtime.h>
+
 #include <cstdlib>
 #include <iostream>
 #include <string>
-
-#include <hrx/hrx_runtime.h>
 
 #define HRX_CHECK(expr)                                                     \
   do {                                                                      \

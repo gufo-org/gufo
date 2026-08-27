@@ -31,7 +31,7 @@ kernel.def @qwen_rmsnorm_f32(%elements: index) {
   %scale = vector.splat %inverse_rms : vector<32xf32>
   %normalized = vector.mulf<reassoc|nnan|ninf|nsz> %x, %scale : vector<32xf32>
   %result = vector.mulf<reassoc|nnan|ninf|nsz> %normalized, %g : vector<32xf32>
-  vector.store %result, %output_view[%element_base] : vector<32xf32> -> view<5120xf32>
+  vector.store %result, %output_view[%element_base] : vector<32xf32>, view<5120xf32>
   kernel.return
 }
 

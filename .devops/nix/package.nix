@@ -2,7 +2,6 @@
   lib,
   stdenv,
   cmake,
-  makeWrapper,
   ninja,
   pkg-config,
   python313,
@@ -58,7 +57,8 @@ let
       || relativePath == "tools/gufo/compile_h3_attention.py"
       || relativePath == "tools/gufo/h3_attention_kernel.py"
       || relativePath == "tools/loom"
-      || lib.hasPrefix "tools/loom/" relativePath;
+      || lib.hasPrefix "tools/loom/" relativePath
+      || relativePath == "tools/gufo/hrx-wrapper.sh";
   };
 in
 stdenv.mkDerivation (finalAttrs: {
@@ -68,7 +68,6 @@ stdenv.mkDerivation (finalAttrs: {
 
   nativeBuildInputs = [
     cmake
-    makeWrapper
     ninja
     pkg-config
   ]
@@ -148,8 +147,9 @@ stdenv.mkDerivation (finalAttrs: {
       mkdir -p $out/share/gufo/kernels
       cp -R share/gufo/kernels/. $out/share/gufo/kernels/
       mv $out/bin/gufo $out/bin/.gufo-hrx-real
-      makeWrapper $out/bin/.gufo-hrx-real $out/bin/gufo \
-        --prefix LD_PRELOAD : ${hrx-system}/lib/libamdhip64.so
+      cp $src/tools/gufo/hrx-wrapper.sh $out/bin/gufo
+      substituteInPlace $out/bin/gufo \
+        --replace-fail '@HRX_HIP_LIBRARY@' '${hrx-system}/lib/libamdhip64.so'
     fi
     mkdir -p $out/share/gufo/models/qwen3_tts
     cp $src/src/models/qwen3_tts/reference/run_official.py \
@@ -207,8 +207,7 @@ stdenv.mkDerivation (finalAttrs: {
 
     $out/bin/gufo --version
     $out/bin/gufo --help >/dev/null
-    $out/bin/gufo-server --version
-    $out/bin/gufo-server --help >/dev/null
+    $out/bin/gufo serve --help >/dev/null
     if [ -x $out/bin/gufo-kernel-bench ]; then
       $out/bin/gufo-kernel-bench --help >/dev/null
     fi

@@ -16,7 +16,8 @@ namespace gufo::hrx {
     std::initializer_list<std::size_t> factors) noexcept {
   std::size_t product = 1;
   for (const std::size_t factor : factors) {
-    if (factor == 0 || product > std::numeric_limits<std::size_t>::max() / factor) {
+    if (factor == 0 ||
+        product > std::numeric_limits<std::size_t>::max() / factor) {
       return std::nullopt;
     }
     product *= factor;
@@ -85,12 +86,10 @@ struct QwenHrxArenaLayout {
     // Only full-attention layers own KV rows. SSM layers keep independent
     // convolution and recurrent state below.
     const auto kv_cache =
-        bytes({contract.FullAttentionLayerCount(), 2U,
-               contract.KvHeadCount(), max_context, contract.HeadDim(),
-               sizeof(float)});
-    const auto conv_state =
-        bytes({contract.NumLayers(), contract.SsmQkvWidth(),
-               contract.SsmConvKernel(), sizeof(float)});
+        bytes({contract.FullAttentionLayerCount(), 2U, contract.KvHeadCount(),
+               max_context, contract.HeadDim(), sizeof(float)});
+    const auto conv_state = bytes({contract.NumLayers(), contract.SsmQkvWidth(),
+                                   contract.SsmConvKernel(), sizeof(float)});
     const auto recurrent_state =
         bytes({contract.NumLayers(), contract.SsmValueHeadCount(),
                contract.SsmKeyDim(), contract.SsmValueDim(), sizeof(float)});
@@ -99,8 +98,7 @@ struct QwenHrxArenaLayout {
         !ssm_qkv || !ssm_gate || !ssm_ab || !ssm_recurrent_output || !ffn ||
         !logits || !token || !kv_cache || !conv_state || !recurrent_state) {
       if (error_msg != nullptr) {
-        *error_msg =
-            "native HRX arena dimensions are zero or overflow size_t";
+        *error_msg = "native HRX arena dimensions are zero or overflow size_t";
       }
       return std::nullopt;
     }

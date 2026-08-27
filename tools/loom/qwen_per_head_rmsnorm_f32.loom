@@ -35,7 +35,7 @@ kernel.def @qwen_per_head_rmsnorm_f32(%heads: index) {
     %inv_vec = vector.splat %inv : vector<8xf32>
     %normed = vector.mulf<reassoc|nnan|ninf|nsz> %x, %inv_vec : vector<8xf32>
     %result = vector.mulf<reassoc|nnan|ninf|nsz> %normed, %g : vector<8xf32>
-    vector.store %result, %output_view[%bounded_head, %element] : vector<8xf32> -> view<[%head_count]x256xf32>
+    vector.store %result, %output_view[%bounded_head, %element] : vector<8xf32>, view<[%head_count]x256xf32>
   }
   kernel.return
 }

@@ -1,12 +1,13 @@
 #ifndef GUFO_CORE_HRX_HRX_GRAPH_EXECUTOR_HPP_
 #define GUFO_CORE_HRX_HRX_GRAPH_EXECUTOR_HPP_
 
+#include <hrx/hrx_runtime.h>
+
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
 #include <string_view>
 
-#include <hrx/hrx_runtime.h>
 #include "src/core/hrx/hrx_utils.hpp"
 
 namespace gufo::hrx {

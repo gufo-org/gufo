@@ -37,7 +37,9 @@ bool RejectStatus(hrx_status_t status, const char* operation,
 
 }  // namespace
 
-HrxOwnedBuffer::~HrxOwnedBuffer() { Reset(); }
+HrxOwnedBuffer::~HrxOwnedBuffer() {
+  Reset();
+}
 
 HrxOwnedBuffer::HrxOwnedBuffer(HrxOwnedBuffer&& other) noexcept
     : buffer_(std::exchange(other.buffer_, nullptr)),
@@ -52,8 +54,9 @@ HrxOwnedBuffer& HrxOwnedBuffer::operator=(HrxOwnedBuffer&& other) noexcept {
   return *this;
 }
 
-std::optional<HrxOwnedBuffer> HrxOwnedBuffer::Allocate(
-    hrx_stream_t stream, std::size_t size, std::string* error_msg) {
+std::optional<HrxOwnedBuffer> HrxOwnedBuffer::Allocate(hrx_stream_t stream,
+                                                       std::size_t size,
+                                                       std::string* error_msg) {
   if (stream == nullptr) {
     Reject("HRX allocation requires a stream", error_msg);
     return std::nullopt;
@@ -85,7 +88,8 @@ std::optional<HrxBufferBinding> HrxOwnedBuffer::Slice(
   if (!IsValid() || length == 0 || offset > size_ || length > size_ - offset) {
     return std::nullopt;
   }
-  return HrxBufferBinding{.buffer = buffer_, .offset = offset, .length = length};
+  return HrxBufferBinding{
+      .buffer = buffer_, .offset = offset, .length = length};
 }
 
 void HrxOwnedBuffer::Reset() noexcept {
@@ -135,19 +139,20 @@ bool HrxCopyToHost(hrx_device_t device, const HrxBufferBinding& source,
 }
 
 bool HrxFillBuffer(hrx_device_t device, hrx_stream_t stream,
-                   const HrxBufferBinding& destination,
-                   std::uint32_t pattern, std::string* error_msg) {
+                   const HrxBufferBinding& destination, std::uint32_t pattern,
+                   std::string* error_msg) {
   if (device == nullptr || stream == nullptr || !destination.IsValid() ||
       (destination.length % sizeof(pattern)) != 0) {
-    return Reject("HRX fill requires an aligned destination, device, and stream",
-                  error_msg);
+    return Reject(
+        "HRX fill requires an aligned destination, device, and stream",
+        error_msg);
   }
 
   // Fill is a mandatory memory-management primitive. It must remain usable
   // when optional model graph capture is disabled via GUFO_ENABLE_HRX_GRAPH.
   HrxGraphDecodeExecutor graph(/*ignore_graph_kill_switch=*/true);
-  const HrxGraphCaptureKey key{
-      static_cast<std::uint64_t>(destination.length), pattern};
+  const HrxGraphCaptureKey key{static_cast<std::uint64_t>(destination.length),
+                               pattern};
   if (!graph.InitializeGraph(device, key)) {
     return Reject("failed to create HRX fill graph", error_msg);
   }

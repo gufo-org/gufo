@@ -7,19 +7,19 @@
 
 #include "hrx-system/libhrx/include/hrx_runtime.h"
 
-#define HRX_CHECK(expr)                                                        \
-  do {                                                                         \
-    hrx_status_t status = (expr);                                              \
-    if (!hrx_status_is_ok(status)) {                                           \
-      char* msg = nullptr;                                                     \
-      size_t len = 0;                                                          \
-      hrx_status_to_string(status, &msg, &len);                                \
-      std::fprintf(stderr, "HRX error at %s:%d: %s\n", __FILE__, __LINE__,     \
-                   msg ? msg : "unknown");                                     \
-      hrx_status_free_message(msg);                                            \
-      hrx_status_ignore(status);                                               \
-      std::abort();                                                            \
-    }                                                                          \
+#define HRX_CHECK(expr)                                                    \
+  do {                                                                     \
+    hrx_status_t status = (expr);                                          \
+    if (!hrx_status_is_ok(status)) {                                       \
+      char* msg = nullptr;                                                 \
+      size_t len = 0;                                                      \
+      hrx_status_to_string(status, &msg, &len);                            \
+      std::fprintf(stderr, "HRX error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   msg ? msg : "unknown");                                 \
+      hrx_status_free_message(msg);                                        \
+      hrx_status_ignore(status);                                           \
+      std::abort();                                                        \
+    }                                                                      \
   } while (0)
 
 static inline float Bf16ToFloat(uint16_t val) {
@@ -60,8 +60,8 @@ int main() {
 
   // Load the Loom-compiled executable artifact
   hrx_executable_t executable = nullptr;
-  HRX_CHECK(hrx_executable_load_file(
-      device, "/tmp/qwen_swiglu.fb", "amdgpu", "gfx1151", &executable));
+  HRX_CHECK(hrx_executable_load_file(device, "/tmp/qwen_swiglu.fb", "amdgpu",
+                                     "gfx1151", &executable));
   std::printf("Loaded Loom executable artifact /tmp/qwen_swiglu.fb!\n");
 
   // Host data
@@ -92,18 +92,31 @@ int main() {
   }
 
   // Allocate native HRX device buffers
-  hrx_buffer_t buf_x = nullptr, buf_gate = nullptr, buf_up = nullptr, buf_out = nullptr;
-  HRX_CHECK(hrx_buffer_allocate(stream, K * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_x));
-  HRX_CHECK(hrx_buffer_allocate(stream, M * K * sizeof(uint16_t), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_gate));
-  HRX_CHECK(hrx_buffer_allocate(stream, M * K * sizeof(uint16_t), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_up));
-  HRX_CHECK(hrx_buffer_allocate(stream, M * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_out));
+  hrx_buffer_t buf_x = nullptr, buf_gate = nullptr, buf_up = nullptr,
+               buf_out = nullptr;
+  HRX_CHECK(hrx_buffer_allocate(stream, K * sizeof(float),
+                                HRX_MEMORY_TYPE_DEVICE_LOCAL,
+                                HRX_BUFFER_USAGE_DEFAULT, &buf_x));
+  HRX_CHECK(hrx_buffer_allocate(stream, M * K * sizeof(uint16_t),
+                                HRX_MEMORY_TYPE_DEVICE_LOCAL,
+                                HRX_BUFFER_USAGE_DEFAULT, &buf_gate));
+  HRX_CHECK(hrx_buffer_allocate(stream, M * K * sizeof(uint16_t),
+                                HRX_MEMORY_TYPE_DEVICE_LOCAL,
+                                HRX_BUFFER_USAGE_DEFAULT, &buf_up));
+  HRX_CHECK(hrx_buffer_allocate(stream, M * sizeof(float),
+                                HRX_MEMORY_TYPE_DEVICE_LOCAL,
+                                HRX_BUFFER_USAGE_DEFAULT, &buf_out));
 
   // Copy data to device
-  HRX_CHECK(hrx_synchronous_h2d(device, h_x.data(), buf_x, 0, K * sizeof(float)));
-  HRX_CHECK(hrx_synchronous_h2d(device, h_gate.data(), buf_gate, 0, M * K * sizeof(uint16_t)));
-  HRX_CHECK(hrx_synchronous_h2d(device, h_up.data(), buf_up, 0, M * K * sizeof(uint16_t)));
+  HRX_CHECK(
+      hrx_synchronous_h2d(device, h_x.data(), buf_x, 0, K * sizeof(float)));
+  HRX_CHECK(hrx_synchronous_h2d(device, h_gate.data(), buf_gate, 0,
+                                M * K * sizeof(uint16_t)));
+  HRX_CHECK(hrx_synchronous_h2d(device, h_up.data(), buf_up, 0,
+                                M * K * sizeof(uint16_t)));
 
-  // Setup dispatch config: 2 rows per workgroup tile -> M/2 workgroups of 160 threads
+  // Setup dispatch config: 2 rows per workgroup tile -> M/2 workgroups of 160
+  // threads
   hrx_dispatch_config_t config{};
   config.workgroup_count[0] = static_cast<uint32_t>(M / 2);
   config.workgroup_count[1] = 1;
@@ -136,37 +149,52 @@ int main() {
 
   // Warmup
   for (int i = 0; i < 5; ++i) {
-    HRX_CHECK(hrx_stream_dispatch(stream, executable, 0, &config, &rows_param, sizeof(rows_param), bindings, 4, 0));
+    HRX_CHECK(hrx_stream_dispatch(stream, executable, 0, &config, &rows_param,
+                                  sizeof(rows_param), bindings, 4, 0));
   }
   HRX_CHECK(hrx_stream_synchronize(stream));
 
   // Benchmark native libhrx dispatch
   auto t0 = std::chrono::high_resolution_clock::now();
   for (int i = 0; i < iters; ++i) {
-    HRX_CHECK(hrx_stream_dispatch(stream, executable, 0, &config, &rows_param, sizeof(rows_param), bindings, 4, 0));
+    HRX_CHECK(hrx_stream_dispatch(stream, executable, 0, &config, &rows_param,
+                                  sizeof(rows_param), bindings, 4, 0));
   }
   HRX_CHECK(hrx_stream_synchronize(stream));
   auto t1 = std::chrono::high_resolution_clock::now();
 
-  double lat_us = std::chrono::duration<double, std::micro>(t1 - t0).count() / iters;
+  double lat_us =
+      std::chrono::duration<double, std::micro>(t1 - t0).count() / iters;
 
   // Readback and verify correctness
-  HRX_CHECK(hrx_synchronous_d2h(device, buf_out, 0, h_out_hrx.data(), M * sizeof(float)));
+  HRX_CHECK(hrx_synchronous_d2h(device, buf_out, 0, h_out_hrx.data(),
+                                M * sizeof(float)));
 
   float max_diff = 0.0F;
   for (std::size_t i = 0; i < M; ++i) {
-    float diff = std::fabs(h_out_hrx[i] - h_out_ref[i]) / (std::fabs(h_out_ref[i]) + 1e-4F);
-    if (diff > max_diff) max_diff = diff;
+    float diff = std::fabs(h_out_hrx[i] - h_out_ref[i]) /
+                 (std::fabs(h_out_ref[i]) + 1e-4F);
+    if (diff > max_diff)
+      max_diff = diff;
   }
 
-  double total_bytes = static_cast<double>(2 * M * K * sizeof(uint16_t) + K * sizeof(float) + M * sizeof(float));
+  double total_bytes = static_cast<double>(
+      2 * M * K * sizeof(uint16_t) + K * sizeof(float) + M * sizeof(float));
   double bw_gbps = (total_bytes / (lat_us * 1e-6)) / 1e9;
 
-  std::printf("\n======================================================================\n");
-  std::printf("  Native libhrx Direct Dispatch Benchmark (N=%zu, K=%zu, %d iters)\n", M, K, iters);
-  std::printf("======================================================================\n");
-  std::printf("Native libhrx JIT Dispatch : %7.2f us | Bandwidth: %6.2f GB/s | Max Diff: %.2e\n",
-              lat_us, bw_gbps, max_diff);
+  std::printf(
+      "\n======================================================================"
+      "\n");
+  std::printf(
+      "  Native libhrx Direct Dispatch Benchmark (N=%zu, K=%zu, %d iters)\n", M,
+      K, iters);
+  std::printf(
+      "======================================================================"
+      "\n");
+  std::printf(
+      "Native libhrx JIT Dispatch : %7.2f us | Bandwidth: %6.2f GB/s | Max "
+      "Diff: %.2e\n",
+      lat_us, bw_gbps, max_diff);
 
   hrx_buffer_release(buf_x);
   hrx_buffer_release(buf_gate);

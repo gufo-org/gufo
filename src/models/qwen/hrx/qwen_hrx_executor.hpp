@@ -30,8 +30,7 @@ public:
   /// Creates the strict native Q8_0 model/session boundary. Creation rejects
   /// mixed quantization before any token execution is attempted.
   [[nodiscard]] static std::unique_ptr<QwenHrxExecutor> CreateFromGguf(
-      std::shared_ptr<const core::GgufReader> reader,
-      std::uint32_t max_context,
+      std::shared_ptr<const core::GgufReader> reader, std::uint32_t max_context,
       const std::string& kernels_dir = "share/gufo/kernels",
       std::string* error_msg = nullptr, int device_index = 0);
 
@@ -125,32 +124,29 @@ public:
   /// Decodes one Q8_0 token-embedding row into the 5120-wide hidden buffer.
   bool DispatchQ8Embedding(const HrxBufferBinding& embedding,
                            tokenization::TokenId token,
-                           const HrxBufferBinding& output);
+                           const HrxBufferBinding& output,
+                           std::string* error_msg = nullptr);
 
   /// Dispatches a native Q8_0 GEMV for one of the production input widths.
   bool DispatchQ8Gemv(const HrxBufferBinding& weight,
                       const HrxBufferBinding& input,
-                      const HrxBufferBinding& output,
-                      std::uint32_t rows, std::uint32_t input_elements);
+                      const HrxBufferBinding& output, std::uint32_t rows,
+                      std::uint32_t input_elements);
 
   /// Executes one complete production FFN stage in arena storage:
   /// RMSNorm, gate/up Q8_0 GEMVs, SwiGLU, down Q8_0 GEMV, and residual.
-  bool DispatchFfnQ8(std::size_t layer_index,
-                     std::string* error_msg = nullptr);
+  bool DispatchFfnQ8(std::size_t layer_index, std::string* error_msg = nullptr);
   bool DispatchAttentionQ8(std::size_t layer_index, std::uint32_t position,
                            std::string* error_msg = nullptr);
   /// Executes the complete SSM stage, including native alpha/beta preparation.
-  bool DispatchSsmQ8(std::size_t layer_index,
-                     std::string* error_msg = nullptr);
+  bool DispatchSsmQ8(std::size_t layer_index, std::string* error_msg = nullptr);
   bool DispatchFinalQ8(tokenization::TokenId* token,
                        std::string* error_msg = nullptr);
 
   /// Dispatches the independently tested BF16 SwiGLU projection artifact.
   bool DispatchSwiGLU(const HrxBufferBinding& input,
-                      const HrxBufferBinding& gate,
-                      const HrxBufferBinding& up,
-                      const HrxBufferBinding& output,
-                      std::uint32_t num_rows);
+                      const HrxBufferBinding& gate, const HrxBufferBinding& up,
+                      const HrxBufferBinding& output, std::uint32_t num_rows);
 
   /// Dispatches true RMSNorm followed by the SSM QKV projection. The artifact
   /// accepts the SSM projection layout only; it is not a full-attention QKV
@@ -163,8 +159,7 @@ public:
 
   /// Applies RoPE to separate full-attention Q/K projections and stores K/V for
   /// one position. It does not compute attention scores or output projection.
-  bool DispatchRoPEKVCache(const HrxBufferBinding& q,
-                           const HrxBufferBinding& k,
+  bool DispatchRoPEKVCache(const HrxBufferBinding& q, const HrxBufferBinding& k,
                            const HrxBufferBinding& v,
                            const HrxBufferBinding& cos,
                            const HrxBufferBinding& sin,
@@ -228,25 +223,27 @@ private:
   hrx_executable_t deltanet_recurrence_executable_{nullptr};
   hrx_executable_t argmax_executable_{nullptr};
 
-  [[nodiscard]] bool DispatchPerHeadRmsNorm(
-      const HrxBufferBinding& input, const HrxBufferBinding& gamma,
-      const HrxBufferBinding& output, std::uint32_t heads);
+  [[nodiscard]] bool DispatchPerHeadRmsNorm(const HrxBufferBinding& input,
+                                            const HrxBufferBinding& gamma,
+                                            const HrxBufferBinding& output,
+                                            std::uint32_t heads);
   [[nodiscard]] bool DispatchAttentionDecode(
       const HrxBufferBinding& query, const HrxBufferBinding& gate,
-      const HrxBufferBinding& key_cache,
-      const HrxBufferBinding& value_cache,
+      const HrxBufferBinding& key_cache, const HrxBufferBinding& value_cache,
       const HrxBufferBinding& output, std::uint32_t position);
-  [[nodiscard]] bool DispatchSsmConv(
-      const HrxBufferBinding& input, const HrxBufferBinding& weights,
-      const HrxBufferBinding& state, const HrxBufferBinding& output);
-  [[nodiscard]] bool DispatchDeltaNetPrepare(
-      const HrxBufferBinding& alpha, const HrxBufferBinding& beta,
-      const HrxBufferBinding& a, const HrxBufferBinding& dt);
+  [[nodiscard]] bool DispatchSsmConv(const HrxBufferBinding& input,
+                                     const HrxBufferBinding& weights,
+                                     const HrxBufferBinding& state,
+                                     const HrxBufferBinding& output);
+  [[nodiscard]] bool DispatchDeltaNetPrepare(const HrxBufferBinding& alpha,
+                                             const HrxBufferBinding& beta,
+                                             const HrxBufferBinding& a,
+                                             const HrxBufferBinding& dt);
   [[nodiscard]] bool DispatchDeltaNetPrepared(
       const HrxBufferBinding& conv, const HrxBufferBinding& alpha_decay,
-      const HrxBufferBinding& beta_correction,
-      const HrxBufferBinding& norm, const HrxBufferBinding& gate,
-      const HrxBufferBinding& state, const HrxBufferBinding& output);
+      const HrxBufferBinding& beta_correction, const HrxBufferBinding& norm,
+      const HrxBufferBinding& gate, const HrxBufferBinding& state,
+      const HrxBufferBinding& output);
   [[nodiscard]] bool DispatchArgmax(const HrxBufferBinding& logits,
                                     const HrxBufferBinding& token);
   [[nodiscard]] bool DispatchCopyF32(const HrxBufferBinding& source,

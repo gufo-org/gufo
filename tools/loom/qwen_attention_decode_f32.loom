@@ -20,6 +20,7 @@ kernel.def @qwen_attention_decode_f32(%position: index, %max_context: index) {
   %group_size = index.constant 6 : index
   %kv_heads = index.constant 4 : index
   %kv_head = index.div %head, %group_size : index
+  %bounded_kv_head = index.assume %kv_head [range(%kv_head, 0, 3)] : index
   %vector_width = index.constant 8 : index
   %element = index.mul %lane, %vector_width : index
   %head_width = index.constant 256 : index
@@ -27,10 +28,8 @@ kernel.def @qwen_attention_decode_f32(%position: index, %max_context: index) {
   %query_index = index.add %query_head_base, %element : index
   %query_view = buffer.view %query[%base] : buffer -> view<6144xf32>
   %gate_view = buffer.view %gate[%base] : buffer -> view<6144xf32>
-  %cache_elements = index.mul %context, %head_width : index
-  %all_cache_elements = index.mul %cache_elements, %kv_heads : index
-  %key_view = buffer.view %key_cache[%base] : buffer -> view<[%all_cache_elements]xf32>
-  %value_view = buffer.view %value_cache[%base] : buffer -> view<[%all_cache_elements]xf32>
+  %key_view = buffer.view %key_cache[%base] : buffer -> view<131072x4x256xf32>
+  %value_view = buffer.view %value_cache[%base] : buffer -> view<131072x4x256xf32>
   %output_view = buffer.view %output[%base] : buffer -> view<6144xf32>
   %q = vector.load %query_view[%query_index] : view<6144xf32> -> vector<8xf32>
   %g = vector.load %gate_view[%query_index] : view<6144xf32> -> vector<8xf32>
@@ -43,12 +42,8 @@ kernel.def @qwen_attention_decode_f32(%position: index, %max_context: index) {
   %scale = scalar.constant 0.0625 : f32
   %final_max, %final_sum, %final_acc = scf.for %p = [%loop_begin to %sequence step %loop_step](%running_max = %negative_large : f32, %running_sum = %zero : f32, %running_acc = %zero_vector : vector<8xf32>) -> (f32, f32, vector<8xf32>) {
     // The cache ABI is position-major: [position][kv_head][head_dim].
-    %position_row = index.mul %p, %kv_heads : index
-    %position_head = index.add %position_row, %kv_head : index
-    %cache_row_base = index.mul %position_head, %head_width : index
-    %cache_index = index.add %cache_row_base, %element : index
-    %k = vector.load %key_view[%cache_index] : view<[%all_cache_elements]xf32> -> vector<8xf32>
-    %v = vector.load %value_view[%cache_index] : view<[%all_cache_elements]xf32> -> vector<8xf32>
+    %k = vector.load %key_view[%p, %bounded_kv_head, %element] : view<131072x4x256xf32> -> vector<8xf32>
+    %v = vector.load %value_view[%p, %bounded_kv_head, %element] : view<131072x4x256xf32> -> vector<8xf32>
     %local_score = vector.dotf %q, %k, %zero : vector<8xf32>, vector<8xf32>, f32
     %dot = kernel.workgroup.reduce<addf> %local_score : f32
     %score = scalar.mulf<reassoc|nnan|ninf|nsz> %dot, %scale : f32
@@ -70,6 +65,6 @@ kernel.def @qwen_attention_decode_f32(%position: index, %max_context: index) {
   %inverse_vector = vector.splat %inverse_sum : vector<8xf32>
   %normalized = vector.mulf<reassoc|nnan|ninf|nsz> %final_acc, %inverse_vector : vector<8xf32>
   %gated = vector.mulf<reassoc|nnan|ninf|nsz> %normalized, %g : vector<8xf32>
-  vector.store %gated, %output_view[%query_index] : vector<8xf32> -> view<6144xf32>
+  vector.store %gated, %output_view[%query_index] : vector<8xf32>, view<6144xf32>
   kernel.return
 }

@@ -36,8 +36,7 @@ public:
         config.IsValidQwen() && config.num_layers == 64 &&
         config.full_attention_interval == 4 && full_attention_layers == 16 &&
         ssm_layers == 48 && config.hidden_size == 5120 &&
-        config.intermediate_size == 17408 &&
-        config.num_attention_heads == 24 &&
+        config.intermediate_size == 17408 && config.num_attention_heads == 24 &&
         config.num_key_value_heads == 4 && config.head_dim == 256 &&
         config.rotary_dim == 64 && attention_query_width == 6144 &&
         attention_q_gate_width == 12288 && attention_key_width == 1024 &&
@@ -45,9 +44,8 @@ public:
         attention_packed_projection_width == 14336 &&
         config.ssm_group_count == 16 && config.ssm_time_step_rank == 48 &&
         config.ssm_state_size == 128 && config.ssm_inner_size == 6144 &&
-        config.ssm_conv_kernel == 4 &&
-        config.SsmValueSize() == 128 && ssm_qkv_width == 10240 &&
-        config.vocab_size == 248320;
+        config.ssm_conv_kernel == 4 && config.SsmValueSize() == 128 &&
+        ssm_qkv_width == 10240 && config.vocab_size == 248320;
     if (!supported) {
       if (error_msg != nullptr) {
         *error_msg =
@@ -132,8 +130,7 @@ public:
       const noexcept {
     return attention_q_gate_width_;
   }
-  [[nodiscard]] constexpr std::uint32_t FullAttentionKeyWidth()
-      const noexcept {
+  [[nodiscard]] constexpr std::uint32_t FullAttentionKeyWidth() const noexcept {
     return attention_key_width_;
   }
   [[nodiscard]] constexpr std::uint32_t FullAttentionValueWidth()
@@ -142,8 +139,8 @@ public:
   }
   /// Sum of separate Q+gate, K, and V projection rows for diagnostics and
   /// allocation accounting only. No native artifact accepts a packed matrix.
-  [[nodiscard]] constexpr std::uint32_t
-  FullAttentionPackedProjectionWidth() const noexcept {
+  [[nodiscard]] constexpr std::uint32_t FullAttentionPackedProjectionWidth()
+      const noexcept {
     return attention_packed_projection_width_;
   }
   [[nodiscard]] constexpr std::uint32_t SsmQkvWidth() const noexcept {
@@ -181,8 +178,7 @@ private:
       std::uint32_t ffn_size, std::uint32_t q_head_count,
       std::uint32_t kv_head_count, std::uint32_t head_dim,
       std::uint32_t rotary_dim, std::uint32_t attention_query_width,
-      std::uint32_t attention_q_gate_width,
-      std::uint32_t attention_key_width,
+      std::uint32_t attention_q_gate_width, std::uint32_t attention_key_width,
       std::uint32_t attention_value_width,
       std::uint32_t attention_packed_projection_width,
       std::uint32_t ssm_qkv_width, std::uint32_t ssm_gate_width,

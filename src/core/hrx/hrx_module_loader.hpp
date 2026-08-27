@@ -1,13 +1,13 @@
 #ifndef GUFO_CORE_HRX_HRX_MODULE_LOADER_HPP_
 #define GUFO_CORE_HRX_HRX_MODULE_LOADER_HPP_
 
+#include <hrx/hrx_runtime.h>
+
 #include <cstdint>
 #include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
-
-#include <hrx/hrx_runtime.h>
 
 namespace gufo::hrx {
 

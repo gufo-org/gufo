@@ -1,10 +1,13 @@
 #include "src/models/qwen/hrx/qwen_hrx_executor.hpp"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
 #include <initializer_list>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -40,8 +43,7 @@ namespace {
   if (columns == 0 || (columns % kQ8BlockElements) != 0) {
     return std::nullopt;
   }
-  return CheckedBytes(
-      {rows, columns / kQ8BlockElements, kQ8BlockBytes});
+  return CheckedBytes({rows, columns / kQ8BlockElements, kQ8BlockBytes});
 }
 
 bool Reject(const char* message, std::string* error_msg) {
@@ -49,6 +51,27 @@ bool Reject(const char* message, std::string* error_msg) {
     *error_msg = message;
   }
   return false;
+}
+
+void ReportHrxStatus(hrx_status_t status, const char* operation,
+                     std::string* error_msg) {
+  char* message = nullptr;
+  std::size_t length = 0;
+  const auto format_status = hrx_status_to_string(status, &message, &length);
+  if (error_msg != nullptr) {
+    *error_msg = std::string("native HRX ") + operation + " failed";
+    if (hrx_status_is_ok(format_status) && message != nullptr) {
+      error_msg->append(": ");
+      error_msg->append(message, length);
+    }
+  }
+  if (message != nullptr) {
+    hrx_status_free_message(message);
+  }
+  if (!hrx_status_is_ok(format_status)) {
+    hrx_status_ignore(format_status);
+  }
+  hrx_status_ignore(status);
 }
 
 [[nodiscard]] std::optional<HrxBufferBinding> SliceBinding(
@@ -65,7 +88,6 @@ bool Reject(const char* message, std::string* error_msg) {
 }
 
 }  // namespace
->>>>>>> conflict 1 of 2 ends
 
 QwenHrxExecutor::QwenHrxExecutor(QwenHrxArtifactContract contract,
                                  int device_index)
@@ -114,9 +136,9 @@ std::unique_ptr<QwenHrxExecutor> QwenHrxExecutor::CreateFromGguf(
   if (executor->model_ == nullptr) {
     return nullptr;
   }
-  auto arena = QwenHrxArena::Create(
-      executor->backend_.Device(), executor->backend_.Stream(), *contract,
-      max_context, error_msg);
+  auto arena = QwenHrxArena::Create(executor->backend_.Device(),
+                                    executor->backend_.Stream(), *contract,
+                                    max_context, error_msg);
   if (!arena.has_value()) {
     return nullptr;
   }
@@ -209,9 +231,10 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
     return std::nullopt;
   }
   if (!model_execution_ready_) {
-    Reject("native HRX Q8_0 model execution is unavailable because required "
-           "artifacts are missing; no HIP or host fallback is permitted",
-           error_msg);
+    Reject(
+        "native HRX Q8_0 model execution is unavailable because required "
+        "artifacts are missing; no HIP or host fallback is permitted",
+        error_msg);
     return std::nullopt;
   }
   if (token >= contract_.VocabSize()) {
@@ -233,10 +256,38 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
     Reject("native HRX model does not expose exactly 64 layers", error_msg);
     return std::nullopt;
   }
-  if (!DispatchQ8Embedding(
-          bindings.token_embedding, token,
-          arena_->Binding(QwenHrxArenaBuffer::kHidden))) {
-    Reject("native HRX token embedding dispatch failed", error_msg);
+  const bool trace_stages = std::getenv("GUFO_HRX_TRACE_STAGES") != nullptr;
+  const auto token_start = std::chrono::steady_clock::now();
+  auto stage_start = token_start;
+  double embedding_ms = 0.0;
+  double attention_ms = 0.0;
+  double ssm_ms = 0.0;
+  double ffn_ms = 0.0;
+  double final_ms = 0.0;
+  const auto synchronize_stage = [&](const char* stage, double* elapsed_ms) {
+    if (!trace_stages) {
+      return true;
+    }
+    const auto status = hrx_stream_synchronize(backend_.Stream());
+    const auto now = std::chrono::steady_clock::now();
+    *elapsed_ms +=
+        std::chrono::duration<double, std::milli>(now - stage_start).count();
+    stage_start = now;
+    if (!hrx_status_is_ok(status)) {
+      ReportHrxStatus(status, stage, error_msg);
+      return false;
+    }
+    return true;
+  };
+  if (!DispatchQ8Embedding(bindings.token_embedding, token,
+                           arena_->Binding(QwenHrxArenaBuffer::kHidden),
+                           error_msg)) {
+    if (error_msg != nullptr && error_msg->empty()) {
+      Reject("native HRX token embedding dispatch failed", error_msg);
+    }
+    return std::nullopt;
+  }
+  if (!synchronize_stage("embedding", &embedding_ms)) {
     return std::nullopt;
   }
 
@@ -250,13 +301,18 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
              error_msg);
       return std::nullopt;
     }
-    const bool stage_ok = expected_attention
-                              ? DispatchAttentionQ8(layer_index, position,
-                                                    error_msg)
-                              : DispatchSsmQ8(layer_index, error_msg);
+    const bool stage_ok =
+        expected_attention
+            ? DispatchAttentionQ8(layer_index, position, error_msg)
+            : DispatchSsmQ8(layer_index, error_msg);
     attention_layers += expected_attention ? 1 : 0;
     ssm_layers += expected_attention ? 0 : 1;
-    if (!stage_ok || !DispatchFfnQ8(layer_index, error_msg)) {
+    double* const layer_elapsed = expected_attention ? &attention_ms : &ssm_ms;
+    if (!stage_ok ||
+        !synchronize_stage(expected_attention ? "attention" : "SSM",
+                           layer_elapsed) ||
+        !DispatchFfnQ8(layer_index, error_msg) ||
+        !synchronize_stage("FFN", &ffn_ms)) {
       return std::nullopt;
     }
   }
@@ -271,6 +327,20 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
   if (compute_logits && !DispatchFinalQ8(&next_token, error_msg)) {
     return std::nullopt;
   }
+  const auto token_end = std::chrono::steady_clock::now();
+  if (trace_stages) {
+    final_ms =
+        std::chrono::duration<double, std::milli>(token_end - stage_start)
+            .count();
+    const double token_ms =
+        std::chrono::duration<double, std::milli>(token_end - token_start)
+            .count();
+    std::cerr << "[HRX native profile] position=" << position
+              << " embedding_ms=" << embedding_ms
+              << " attention_ms=" << attention_ms << " ssm_ms=" << ssm_ms
+              << " ffn_ms=" << ffn_ms << " final_ms=" << final_ms
+              << " token_ms=" << token_ms << '\n';
+  }
   current_position_ = position + 1;
   arena_->SetCurrentPosition(current_position_);
   if (error_msg != nullptr) {
@@ -280,9 +350,8 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
 }
 
 std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardPromptBatch(
-    std::span<const tokenization::TokenId> tokens,
-    std::uint32_t start_position, bool compute_logits,
-    std::string* error_msg) {
+    std::span<const tokenization::TokenId> tokens, std::uint32_t start_position,
+    bool compute_logits, std::string* error_msg) {
   if (tokens.empty()) {
     Reject("native HRX prompt must contain at least one token", error_msg);
     return std::nullopt;
@@ -294,10 +363,9 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardPromptBatch(
   }
   std::optional<tokenization::TokenId> result;
   for (std::size_t index = 0; index < tokens.size(); ++index) {
-    result = ForwardToken(tokens[index],
-                          start_position + static_cast<std::uint32_t>(index),
-                          compute_logits && index + 1 == tokens.size(),
-                          error_msg);
+    result = ForwardToken(
+        tokens[index], start_position + static_cast<std::uint32_t>(index),
+        compute_logits && index + 1 == tokens.size(), error_msg);
     if (!result.has_value()) {
       return std::nullopt;
     }
@@ -309,6 +377,11 @@ std::vector<float> QwenHrxExecutor::CopyLastLogits(
     std::string* error_msg) const {
   if (!arena_.has_value()) {
     Reject("native HRX executor has no logits arena", error_msg);
+    return {};
+  }
+  auto status = hrx_stream_synchronize(backend_.Stream());
+  if (!hrx_status_is_ok(status)) {
+    ReportHrxStatus(status, "logit synchronization", error_msg);
     return {};
   }
   std::vector<float> logits(contract_.VocabSize());
@@ -430,8 +503,7 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir) {
        &per_head_rmsnorm_executable_},
       {"qwen_attention_decode", "qwen_attention_decode_f32.fb",
        &attention_decode_executable_},
-      {"qwen_ssm_conv", "qwen_ssm_conv_silu_f32.fb",
-       &ssm_conv_executable_},
+      {"qwen_ssm_conv", "qwen_ssm_conv_silu_f32.fb", &ssm_conv_executable_},
       {"qwen_deltanet_prepare", "qwen_deltanet_prepare_f32.fb",
        &deltanet_prepare_executable_},
       {"qwen_deltanet_recurrence", "qwen_deltanet_recurrence_f32.fb",
@@ -447,8 +519,8 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir) {
       continue;
     }
 
-    hrx_status_t status = loader_.LoadFromFile(
-        backend_.Device(), spec.name, found_path, "amdgpu", "gfx1151");
+    hrx_status_t status = loader_.LoadFromFile(backend_.Device(), spec.name,
+                                               found_path, "amdgpu", "gfx1151");
     if (!hrx_status_is_ok(status)) {
       hrx_status_ignore(status);
       missing_kernel_artifacts_.emplace_back(spec.filename);
@@ -465,9 +537,10 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir) {
   return prototype_artifacts_ready_;
 }
 
-bool QwenHrxExecutor::DispatchQ8Embedding(
-    const HrxBufferBinding& embedding, tokenization::TokenId token,
-    const HrxBufferBinding& output) {
+bool QwenHrxExecutor::DispatchQ8Embedding(const HrxBufferBinding& embedding,
+                                          tokenization::TokenId token,
+                                          const HrxBufferBinding& output,
+                                          std::string* error_msg) {
   if (q8_embedding_executable_ == nullptr || token >= contract_.VocabSize()) {
     return false;
   }
@@ -491,22 +564,23 @@ bool QwenHrxExecutor::DispatchQ8Embedding(
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
-  const std::array<std::uint32_t, 2> params{
-      static_cast<std::uint32_t>(token), contract_.VocabSize()};
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), q8_embedding_executable_, 0, &config, params.data(),
-      sizeof(params), bindings, 2, 0);
+  const std::array<std::uint32_t, 2> params{static_cast<std::uint32_t>(token),
+                                            contract_.VocabSize()};
+  auto status = hrx_stream_dispatch(backend_.Stream(), q8_embedding_executable_,
+                                    0, &config, params.data(), sizeof(params),
+                                    bindings, 2, 0);
   if (!hrx_status_is_ok(status)) {
-    hrx_status_ignore(status);
+    ReportHrxStatus(status, "embedding dispatch", error_msg);
     return false;
   }
   return true;
 }
 
-bool QwenHrxExecutor::DispatchQ8Gemv(
-    const HrxBufferBinding& weight, const HrxBufferBinding& input,
-    const HrxBufferBinding& output, std::uint32_t rows,
-    std::uint32_t input_elements) {
+bool QwenHrxExecutor::DispatchQ8Gemv(const HrxBufferBinding& weight,
+                                     const HrxBufferBinding& input,
+                                     const HrxBufferBinding& output,
+                                     std::uint32_t rows,
+                                     std::uint32_t input_elements) {
   hrx_executable_t executable = nullptr;
   std::uint32_t workgroup_size = 0;
   std::uint32_t row_capacity = 0;
@@ -549,9 +623,8 @@ bool QwenHrxExecutor::DispatchQ8Gemv(
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), executable, 0, &config, &rows, sizeof(rows), bindings,
-      3, 0);
+  auto status = hrx_stream_dispatch(backend_.Stream(), executable, 0, &config,
+                                    &rows, sizeof(rows), bindings, 3, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -559,11 +632,10 @@ bool QwenHrxExecutor::DispatchQ8Gemv(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchCopyF32(
-    const HrxBufferBinding& source, const HrxBufferBinding& destination,
-    std::uint32_t elements) {
-  if (copy_executable_ == nullptr || elements < 256 ||
-      (elements % 256) != 0) {
+bool QwenHrxExecutor::DispatchCopyF32(const HrxBufferBinding& source,
+                                      const HrxBufferBinding& destination,
+                                      std::uint32_t elements) {
+  if (copy_executable_ == nullptr || elements < 256 || (elements % 256) != 0) {
     return false;
   }
   const auto bytes = CheckedBytes({elements, sizeof(float)});
@@ -580,9 +652,9 @@ bool QwenHrxExecutor::DispatchCopyF32(
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), copy_executable_, 0, &config, &elements,
-      sizeof(elements), bindings, 2, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), copy_executable_, 0, &config,
+                          &elements, sizeof(elements), bindings, 2, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -614,8 +686,7 @@ bool QwenHrxExecutor::DispatchFfnQ8(std::size_t layer_index,
       !DispatchSwiGLUPointwise(gate, up, activation, contract_.FfnSize()) ||
       !DispatchQ8Gemv(layer.ffn_down, activation, projected,
                       contract_.HiddenSize(), contract_.FfnSize()) ||
-      !DispatchResidualAdd(hidden, projected, normed,
-                           contract_.HiddenSize()) ||
+      !DispatchResidualAdd(hidden, projected, normed, contract_.HiddenSize()) ||
       !DispatchCopyF32(normed, hidden, contract_.HiddenSize())) {
     return Reject("native HRX Q8_0 FFN dispatch failed", error_msg);
   }
@@ -704,14 +775,12 @@ bool QwenHrxExecutor::DispatchAttentionQ8(std::size_t layer_index,
   if (!key_cache || !value_cache) {
     return Reject("native HRX attention cache slice is invalid", error_msg);
   }
-  const auto key_row = SliceBinding(*key_cache,
-                                    static_cast<std::size_t>(position) *
-                                        cache_row_bytes,
-                                    cache_row_bytes);
-  const auto value_row = SliceBinding(*value_cache,
-                                      static_cast<std::size_t>(position) *
-                                          cache_row_bytes,
-                                      cache_row_bytes);
+  const auto key_row = SliceBinding(
+      *key_cache, static_cast<std::size_t>(position) * cache_row_bytes,
+      cache_row_bytes);
+  const auto value_row = SliceBinding(
+      *value_cache, static_cast<std::size_t>(position) * cache_row_bytes,
+      cache_row_bytes);
   if (!key_row || !value_row ||
       !DispatchRoPEKVCache(query, key, value, cos_binding, sin_binding,
                            *key_row, *value_row) ||
@@ -720,11 +789,9 @@ bool QwenHrxExecutor::DispatchAttentionQ8(std::size_t layer_index,
       !DispatchQ8Gemv(layer.attn_output, context, projected,
                       contract_.HiddenSize(),
                       contract_.FullAttentionQueryWidth()) ||
-      !DispatchResidualAdd(hidden, projected, normed,
-                           contract_.HiddenSize()) ||
+      !DispatchResidualAdd(hidden, projected, normed, contract_.HiddenSize()) ||
       !DispatchCopyF32(normed, hidden, contract_.HiddenSize())) {
-    return Reject("native HRX causal GQA attention dispatch failed",
-                  error_msg);
+    return Reject("native HRX causal GQA attention dispatch failed", error_msg);
   }
   if (error_msg != nullptr) {
     error_msg->clear();
@@ -759,18 +826,18 @@ bool QwenHrxExecutor::DispatchSsmQ8(std::size_t layer_index,
   const std::size_t recurrent_state_bytes =
       static_cast<std::size_t>(contract_.SsmValueHeadCount()) *
       contract_.SsmKeyDim() * contract_.SsmValueDim() * sizeof(float);
-  const auto conv_state = SliceBinding(
-      arena_->Binding(QwenHrxArenaBuffer::kSsmConvState),
-      layer_index * conv_state_bytes, conv_state_bytes);
-  const auto recurrent_state = SliceBinding(
-      arena_->Binding(QwenHrxArenaBuffer::kSsmRecurrentState),
-      layer_index * recurrent_state_bytes, recurrent_state_bytes);
+  const auto conv_state =
+      SliceBinding(arena_->Binding(QwenHrxArenaBuffer::kSsmConvState),
+                   layer_index * conv_state_bytes, conv_state_bytes);
+  const auto recurrent_state =
+      SliceBinding(arena_->Binding(QwenHrxArenaBuffer::kSsmRecurrentState),
+                   layer_index * recurrent_state_bytes, recurrent_state_bytes);
   if (!conv_state || !recurrent_state ||
       !DispatchRMSNorm(hidden, layer.attn_norm, normed) ||
       !DispatchQ8Gemv(layer.attn_qkv, normed, qkv, contract_.SsmQkvWidth(),
                       contract_.HiddenSize()) ||
-      !DispatchQ8Gemv(layer.attn_gate, normed, gate,
-                      contract_.SsmGateWidth(), contract_.HiddenSize()) ||
+      !DispatchQ8Gemv(layer.attn_gate, normed, gate, contract_.SsmGateWidth(),
+                      contract_.HiddenSize()) ||
       !DispatchQ8Gemv(layer.ssm_alpha, normed, alpha,
                       contract_.SsmAlphaBetaWidth(), contract_.HiddenSize()) ||
       !DispatchQ8Gemv(layer.ssm_beta, normed, beta,
@@ -781,8 +848,7 @@ bool QwenHrxExecutor::DispatchSsmQ8(std::size_t layer_index,
                                 *recurrent_state, recurrent) ||
       !DispatchQ8Gemv(layer.ssm_out, recurrent, projected,
                       contract_.HiddenSize(), contract_.SsmGateWidth()) ||
-      !DispatchResidualAdd(hidden, projected, normed,
-                           contract_.HiddenSize()) ||
+      !DispatchResidualAdd(hidden, projected, normed, contract_.HiddenSize()) ||
       !DispatchCopyF32(normed, hidden, contract_.HiddenSize())) {
     return Reject("native HRX SSM dispatch failed", error_msg);
   }
@@ -806,10 +872,12 @@ bool QwenHrxExecutor::DispatchFinalQ8(tokenization::TokenId* token,
   if (!DispatchRMSNorm(hidden, bindings.output_norm, normed)) {
     return Reject("native HRX final RMSNorm failed", error_msg);
   }
-  const auto weight_bytes = Q8_0MatrixBytes(contract_.VocabSize(),
-                                             contract_.HiddenSize());
-  const auto input_bytes = CheckedBytes({contract_.HiddenSize(), sizeof(float)});
-  const auto output_bytes = CheckedBytes({contract_.VocabSize(), sizeof(float)});
+  const auto weight_bytes =
+      Q8_0MatrixBytes(contract_.VocabSize(), contract_.HiddenSize());
+  const auto input_bytes =
+      CheckedBytes({contract_.HiddenSize(), sizeof(float)});
+  const auto output_bytes =
+      CheckedBytes({contract_.VocabSize(), sizeof(float)});
   hrx_buffer_ref_t gemv_bindings[3];
   if (!TryBindOperand(bindings.output, weight_bytes, &gemv_bindings[0]) ||
       !TryBindOperand(normed, input_bytes, &gemv_bindings[1]) ||
@@ -832,18 +900,26 @@ bool QwenHrxExecutor::DispatchFinalQ8(tokenization::TokenId* token,
     hrx_status_ignore(status);
     return Reject("native HRX vocabulary GEMV dispatch failed", error_msg);
   }
-  if (!DispatchArgmax(logits, token_binding) ||
-      !HrxCopyToHost(backend_.Device(), token_binding, token, sizeof(*token),
+  if (!DispatchArgmax(logits, token_binding)) {
+    return Reject("native HRX argmax dispatch failed", error_msg);
+  }
+  status = hrx_stream_synchronize(backend_.Stream());
+  if (!hrx_status_is_ok(status)) {
+    ReportHrxStatus(status, "final-stage synchronization", error_msg);
+    return false;
+  }
+  if (!HrxCopyToHost(backend_.Device(), token_binding, token, sizeof(*token),
                      error_msg)) {
     return false;
   }
   return true;
 }
 
-bool QwenHrxExecutor::DispatchSwiGLU(
-    const HrxBufferBinding& input, const HrxBufferBinding& gate,
-    const HrxBufferBinding& up, const HrxBufferBinding& output,
-    std::uint32_t num_rows) {
+bool QwenHrxExecutor::DispatchSwiGLU(const HrxBufferBinding& input,
+                                     const HrxBufferBinding& gate,
+                                     const HrxBufferBinding& up,
+                                     const HrxBufferBinding& output,
+                                     std::uint32_t num_rows) {
   if (swiglu_executable_ == nullptr || num_rows < 2 ||
       num_rows > contract_.FfnSize() || (num_rows % 2) != 0) {
     return false;
@@ -884,10 +960,11 @@ bool QwenHrxExecutor::DispatchSwiGLU(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchRMSNormSsmQKV(
-    const HrxBufferBinding& input, const HrxBufferBinding& gamma,
-    const HrxBufferBinding& qkv_weight, const HrxBufferBinding& output,
-    std::uint32_t num_rows) {
+bool QwenHrxExecutor::DispatchRMSNormSsmQKV(const HrxBufferBinding& input,
+                                            const HrxBufferBinding& gamma,
+                                            const HrxBufferBinding& qkv_weight,
+                                            const HrxBufferBinding& output,
+                                            std::uint32_t num_rows) {
   if (rmsnorm_ssm_qkv_executable_ == nullptr || num_rows < 2 ||
       num_rows > contract_.SsmQkvWidth() || (num_rows % 2) != 0) {
     return false;
@@ -926,11 +1003,13 @@ bool QwenHrxExecutor::DispatchRMSNormSsmQKV(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchRoPEKVCache(
-    const HrxBufferBinding& q, const HrxBufferBinding& k,
-    const HrxBufferBinding& v, const HrxBufferBinding& cos,
-    const HrxBufferBinding& sin, const HrxBufferBinding& k_cache,
-    const HrxBufferBinding& v_cache) {
+bool QwenHrxExecutor::DispatchRoPEKVCache(const HrxBufferBinding& q,
+                                          const HrxBufferBinding& k,
+                                          const HrxBufferBinding& v,
+                                          const HrxBufferBinding& cos,
+                                          const HrxBufferBinding& sin,
+                                          const HrxBufferBinding& k_cache,
+                                          const HrxBufferBinding& v_cache) {
   if (rope_kv_executable_ == nullptr) {
     return false;
   }
@@ -965,10 +1044,9 @@ bool QwenHrxExecutor::DispatchRoPEKVCache(
   config.subgroup_size = 32;
 
   const std::array<std::uint32_t, 2> head_params{q_heads, kv_heads};
-  hrx_status_t status =
-      hrx_stream_dispatch(backend_.Stream(), rope_kv_executable_, 0, &config,
-                          head_params.data(), sizeof(head_params), bindings, 7,
-                          0);
+  hrx_status_t status = hrx_stream_dispatch(
+      backend_.Stream(), rope_kv_executable_, 0, &config, head_params.data(),
+      sizeof(head_params), bindings, 7, 0);
 
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
@@ -977,9 +1055,9 @@ bool QwenHrxExecutor::DispatchRoPEKVCache(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchRMSNorm(
-    const HrxBufferBinding& input, const HrxBufferBinding& gamma,
-    const HrxBufferBinding& output) {
+bool QwenHrxExecutor::DispatchRMSNorm(const HrxBufferBinding& input,
+                                      const HrxBufferBinding& gamma,
+                                      const HrxBufferBinding& output) {
   if (rmsnorm_executable_ == nullptr) {
     return false;
   }
@@ -999,9 +1077,9 @@ bool QwenHrxExecutor::DispatchRMSNorm(
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
   const std::uint32_t elements = contract_.HiddenSize();
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), rmsnorm_executable_, 0, &config, &elements,
-      sizeof(elements), bindings, 3, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), rmsnorm_executable_, 0, &config,
+                          &elements, sizeof(elements), bindings, 3, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -1009,9 +1087,10 @@ bool QwenHrxExecutor::DispatchRMSNorm(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchResidualAdd(
-    const HrxBufferBinding& left, const HrxBufferBinding& right,
-    const HrxBufferBinding& output, std::uint32_t elements) {
+bool QwenHrxExecutor::DispatchResidualAdd(const HrxBufferBinding& left,
+                                          const HrxBufferBinding& right,
+                                          const HrxBufferBinding& output,
+                                          std::uint32_t elements) {
   if (residual_add_executable_ == nullptr || elements == 0 ||
       elements > contract_.FfnSize() || (elements % 32) != 0) {
     return false;
@@ -1031,9 +1110,9 @@ bool QwenHrxExecutor::DispatchResidualAdd(
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), residual_add_executable_, 0, &config, &elements,
-      sizeof(elements), bindings, 3, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), residual_add_executable_, 0,
+                          &config, &elements, sizeof(elements), bindings, 3, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -1041,9 +1120,10 @@ bool QwenHrxExecutor::DispatchResidualAdd(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchSwiGLUPointwise(
-    const HrxBufferBinding& gate, const HrxBufferBinding& up,
-    const HrxBufferBinding& output, std::uint32_t elements) {
+bool QwenHrxExecutor::DispatchSwiGLUPointwise(const HrxBufferBinding& gate,
+                                              const HrxBufferBinding& up,
+                                              const HrxBufferBinding& output,
+                                              std::uint32_t elements) {
   if (swiglu_pointwise_executable_ == nullptr || elements == 0 ||
       elements > contract_.FfnSize() || (elements % 32) != 0) {
     return false;
@@ -1063,9 +1143,9 @@ bool QwenHrxExecutor::DispatchSwiGLUPointwise(
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), swiglu_pointwise_executable_, 0, &config, &elements,
-      sizeof(elements), bindings, 3, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), swiglu_pointwise_executable_, 0,
+                          &config, &elements, sizeof(elements), bindings, 3, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -1073,9 +1153,9 @@ bool QwenHrxExecutor::DispatchSwiGLUPointwise(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchSplitQGate(
-    const HrxBufferBinding& q_gate, const HrxBufferBinding& query,
-    const HrxBufferBinding& gate) {
+bool QwenHrxExecutor::DispatchSplitQGate(const HrxBufferBinding& q_gate,
+                                         const HrxBufferBinding& query,
+                                         const HrxBufferBinding& gate) {
   if (split_q_gate_executable_ == nullptr) {
     return false;
   }
@@ -1098,9 +1178,9 @@ bool QwenHrxExecutor::DispatchSplitQGate(
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
   const std::uint32_t elements = contract_.FullAttentionQGateWidth();
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), split_q_gate_executable_, 0, &config, &elements,
-      sizeof(elements), bindings, 3, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), split_q_gate_executable_, 0,
+                          &config, &elements, sizeof(elements), bindings, 3, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -1108,17 +1188,17 @@ bool QwenHrxExecutor::DispatchSplitQGate(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchPerHeadRmsNorm(
-    const HrxBufferBinding& input, const HrxBufferBinding& gamma,
-    const HrxBufferBinding& output, std::uint32_t heads) {
+bool QwenHrxExecutor::DispatchPerHeadRmsNorm(const HrxBufferBinding& input,
+                                             const HrxBufferBinding& gamma,
+                                             const HrxBufferBinding& output,
+                                             std::uint32_t heads) {
   if (per_head_rmsnorm_executable_ == nullptr ||
       (heads != contract_.QHeadCount() && heads != contract_.KvHeadCount())) {
     return false;
   }
-  const auto vector_bytes = CheckedBytes(
-      {heads, contract_.HeadDim(), sizeof(float)});
-  const auto gamma_bytes =
-      CheckedBytes({contract_.HeadDim(), sizeof(float)});
+  const auto vector_bytes =
+      CheckedBytes({heads, contract_.HeadDim(), sizeof(float)});
+  const auto gamma_bytes = CheckedBytes({contract_.HeadDim(), sizeof(float)});
   hrx_buffer_ref_t bindings[3];
   if (!TryBindOperand(input, vector_bytes, &bindings[0]) ||
       !TryBindOperand(gamma, gamma_bytes, &bindings[1]) ||
@@ -1133,9 +1213,9 @@ bool QwenHrxExecutor::DispatchPerHeadRmsNorm(
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), per_head_rmsnorm_executable_, 0, &config, &heads,
-      sizeof(heads), bindings, 3, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), per_head_rmsnorm_executable_, 0,
+                          &config, &heads, sizeof(heads), bindings, 3, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -1150,11 +1230,10 @@ bool QwenHrxExecutor::DispatchAttentionDecode(
   if (attention_decode_executable_ == nullptr || position >= max_context_) {
     return false;
   }
-  const auto query_bytes = CheckedBytes(
-      {contract_.FullAttentionQueryWidth(), sizeof(float)});
-  const auto cache_bytes = CheckedBytes(
-      {contract_.KvHeadCount(), max_context_, contract_.HeadDim(),
-       sizeof(float)});
+  const auto query_bytes =
+      CheckedBytes({contract_.FullAttentionQueryWidth(), sizeof(float)});
+  const auto cache_bytes = CheckedBytes({contract_.KvHeadCount(), max_context_,
+                                         contract_.HeadDim(), sizeof(float)});
   hrx_buffer_ref_t bindings[5];
   if (!TryBindOperand(query, query_bytes, &bindings[0]) ||
       !TryBindOperand(gate, query_bytes, &bindings[1]) ||
@@ -1182,9 +1261,10 @@ bool QwenHrxExecutor::DispatchAttentionDecode(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchSsmConv(
-    const HrxBufferBinding& input, const HrxBufferBinding& weights,
-    const HrxBufferBinding& state, const HrxBufferBinding& output) {
+bool QwenHrxExecutor::DispatchSsmConv(const HrxBufferBinding& input,
+                                      const HrxBufferBinding& weights,
+                                      const HrxBufferBinding& state,
+                                      const HrxBufferBinding& output) {
   if (ssm_conv_executable_ == nullptr) {
     return false;
   }
@@ -1208,9 +1288,9 @@ bool QwenHrxExecutor::DispatchSsmConv(
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
   const auto elements = contract_.SsmQkvWidth();
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), ssm_conv_executable_, 0, &config, &elements,
-      sizeof(elements), bindings, 4, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), ssm_conv_executable_, 0, &config,
+                          &elements, sizeof(elements), bindings, 4, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -1218,9 +1298,10 @@ bool QwenHrxExecutor::DispatchSsmConv(
   return true;
 }
 
-bool QwenHrxExecutor::DispatchDeltaNetPrepare(
-    const HrxBufferBinding& alpha, const HrxBufferBinding& beta,
-    const HrxBufferBinding& a, const HrxBufferBinding& dt) {
+bool QwenHrxExecutor::DispatchDeltaNetPrepare(const HrxBufferBinding& alpha,
+                                              const HrxBufferBinding& beta,
+                                              const HrxBufferBinding& a,
+                                              const HrxBufferBinding& dt) {
   if (deltanet_prepare_executable_ == nullptr) {
     return false;
   }
@@ -1242,9 +1323,9 @@ bool QwenHrxExecutor::DispatchDeltaNetPrepare(
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
   const auto heads = contract_.SsmValueHeadCount();
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), deltanet_prepare_executable_, 0, &config, &heads,
-      sizeof(heads), bindings, 4, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), deltanet_prepare_executable_, 0,
+                          &config, &heads, sizeof(heads), bindings, 4, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -1268,9 +1349,9 @@ bool QwenHrxExecutor::DispatchDeltaNetPrepared(
       CheckedBytes({contract_.SsmValueDim(), sizeof(float)});
   const auto gate_bytes =
       CheckedBytes({contract_.SsmGateWidth(), sizeof(float)});
-  const auto state_bytes = CheckedBytes(
-      {contract_.SsmValueHeadCount(), contract_.SsmKeyDim(),
-       contract_.SsmValueDim(), sizeof(float)});
+  const auto state_bytes =
+      CheckedBytes({contract_.SsmValueHeadCount(), contract_.SsmKeyDim(),
+                    contract_.SsmValueDim(), sizeof(float)});
   hrx_buffer_ref_t bindings[7];
   if (!TryBindOperand(conv, conv_bytes, &bindings[0]) ||
       !TryBindOperand(alpha_decay, ab_bytes, &bindings[1]) ||
@@ -1290,9 +1371,9 @@ bool QwenHrxExecutor::DispatchDeltaNetPrepared(
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
   const auto heads = contract_.SsmValueHeadCount();
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), deltanet_recurrence_executable_, 0, &config, &heads,
-      sizeof(heads), bindings, 7, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), deltanet_recurrence_executable_, 0,
+                          &config, &heads, sizeof(heads), bindings, 7, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -1322,9 +1403,9 @@ bool QwenHrxExecutor::DispatchArgmax(const HrxBufferBinding& logits,
   config.workgroup_size[2] = 1;
   config.subgroup_size = 1;
   const auto elements = contract_.VocabSize();
-  auto status = hrx_stream_dispatch(
-      backend_.Stream(), argmax_executable_, 0, &config, &elements,
-      sizeof(elements), bindings, 2, 0);
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), argmax_executable_, 0, &config,
+                          &elements, sizeof(elements), bindings, 2, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;
@@ -1332,9 +1413,10 @@ bool QwenHrxExecutor::DispatchArgmax(const HrxBufferBinding& logits,
   return true;
 }
 
-bool QwenHrxExecutor::DispatchDownResidual(
-    const HrxBufferBinding& input, const HrxBufferBinding& down_weight,
-    const HrxBufferBinding& residual, const HrxBufferBinding& output) {
+bool QwenHrxExecutor::DispatchDownResidual(const HrxBufferBinding& input,
+                                           const HrxBufferBinding& down_weight,
+                                           const HrxBufferBinding& residual,
+                                           const HrxBufferBinding& output) {
   if (down_residual_executable_ == nullptr) {
     return false;
   }
@@ -1373,197 +1455,4 @@ bool QwenHrxExecutor::DispatchDownResidual(
   return true;
 }
 
-   const std::uint32_t vocab_size = contract_.VocabSize();
-   const std::uint32_t hidden_dim = contract_.HiddenSize();
-   hrx_dispatch_config_t config{};
-   config.workgroup_count[0] = (vocab_size + 1) / 2;
-   config.workgroup_count[1] = 1;
-   config.workgroup_count[2] = 1;
-   config.workgroup_size[0] = 160;
-   config.workgroup_size[1] = 1;
-   config.workgroup_size[2] = 1;
-   config.subgroup_size = 32;
- 
-   hrx_buffer_ref_t bindings[4];
-   bindings[0] = {input_buf, 0, hidden_dim * sizeof(float)};
-   bindings[1] = {gamma_buf, 0, hidden_dim * sizeof(float)};
-   bindings[2] = {lm_head_buf, 0, vocab_size * hidden_dim * sizeof(uint16_t)};
-   bindings[3] = {logits_buf, 0, vocab_size * sizeof(float)};
- 
-   uint32_t vocab_param = vocab_size;
-   hrx_status_t status = hrx_stream_dispatch(
-       backend_.Stream(), final_norm_head_executable_, 0, &config, &vocab_param,
-       sizeof(vocab_param), bindings, 4, 0);
- 
-   if (!hrx_status_is_ok(status)) {
-     hrx_status_ignore(status);
-     return false;
-   }
-   return true;
- }
- 
- bool QwenHrxExecutor::DispatchLayerAttention(
-     hrx_buffer_t input_buf, hrx_buffer_t gamma_buf, hrx_buffer_t w_qkv_buf,
-     hrx_buffer_t cos_buf, hrx_buffer_t sin_buf, hrx_buffer_t q_out_buf,
-     hrx_buffer_t k_cache_buf, hrx_buffer_t v_cache_buf) {
-   if (layer_attn_executable_ == nullptr) {
-     return false;
-   }
-   const std::uint32_t qkv_dim = contract_.QkvWidth();
-   const std::uint32_t hidden_dim = contract_.HiddenSize();
-   hrx_dispatch_config_t config{};
-   config.workgroup_count[0] = (qkv_dim + 1) / 2;
-   config.workgroup_count[1] = 1;
-   config.workgroup_count[2] = 1;
-   config.workgroup_size[0] = 160;
-   config.workgroup_size[1] = 1;
-   config.workgroup_size[2] = 1;
-   config.subgroup_size = 32;
- 
-   hrx_buffer_ref_t bindings[8];
-   bindings[0] = {input_buf, 0, hidden_dim * sizeof(float)};
-   bindings[1] = {gamma_buf, 0, hidden_dim * sizeof(float)};
-   bindings[2] = {w_qkv_buf, 0, qkv_dim * hidden_dim * sizeof(uint16_t)};
-   bindings[3] = {cos_buf, 0,
-                  (contract_.RotaryDim() / 2) * sizeof(float)};
-   bindings[4] = {sin_buf, 0,
-                  (contract_.RotaryDim() / 2) * sizeof(float)};
-   bindings[5] = {q_out_buf, 0, contract_.QWidth() * sizeof(float)};
-   bindings[6] = {k_cache_buf, 0, contract_.KWidth() * sizeof(float)};
-   bindings[7] = {v_cache_buf, 0, contract_.VWidth() * sizeof(float)};
- 
-   uint32_t qkv_param = qkv_dim;
-   hrx_status_t status =
-       hrx_stream_dispatch(backend_.Stream(), layer_attn_executable_, 0, &config,
-                           &qkv_param, sizeof(qkv_param), bindings, 8, 0);
- 
-   if (!hrx_status_is_ok(status)) {
-     hrx_status_ignore(status);
-     return false;
-   }
-   return true;
- }
- 
- bool QwenHrxExecutor::DispatchLayerFFN(
-     hrx_buffer_t input_buf, hrx_buffer_t gamma_buf, hrx_buffer_t w_down_buf,
-     hrx_buffer_t residual_buf, hrx_buffer_t out_buf) {
-   if (layer_ffn_executable_ == nullptr) {
-     return false;
-   }
-   const std::uint32_t hidden_dim = contract_.HiddenSize();
-   const std::uint32_t intermediate_dim = contract_.FfnSize();
-   hrx_dispatch_config_t config{};
-   config.workgroup_count[0] = (hidden_dim + 1) / 2;
-   config.workgroup_count[1] = 1;
-   config.workgroup_count[2] = 1;
-   config.workgroup_size[0] = 544;
-   config.workgroup_size[1] = 1;
-   config.workgroup_size[2] = 1;
-   config.subgroup_size = 32;
- 
-   hrx_buffer_ref_t bindings[5];
-   bindings[0] = {input_buf, 0, intermediate_dim * sizeof(float)};
-   bindings[1] = {gamma_buf, 0, intermediate_dim * sizeof(float)};
-   bindings[2] = {w_down_buf, 0,
-                  hidden_dim * intermediate_dim * sizeof(uint16_t)};
-   bindings[3] = {residual_buf, 0, hidden_dim * sizeof(float)};
-   bindings[4] = {out_buf, 0, hidden_dim * sizeof(float)};
- 
-   uint32_t hidden_param = hidden_dim;
-   hrx_status_t status =
-       hrx_stream_dispatch(backend_.Stream(), layer_ffn_executable_, 0, &config,
-                           &hidden_param, sizeof(hidden_param), bindings, 5, 0);
- 
-   if (!hrx_status_is_ok(status)) {
-     hrx_status_ignore(status);
-     return false;
-   }
-   return true;
- }
- 
- bool QwenHrxExecutor::BuildAndInstantiateDecodeGraph(
-     hrx_buffer_t hidden_buf, hrx_buffer_t attn_gamma, hrx_buffer_t w_qkv,
-     hrx_buffer_t cos_buf, hrx_buffer_t sin_buf, hrx_buffer_t q_out,
-     hrx_buffer_t k_cache, hrx_buffer_t v_cache, hrx_buffer_t ffn_gamma,
-     hrx_buffer_t w_down, hrx_buffer_t out_buf) {
-   if (layer_attn_executable_ == nullptr || layer_ffn_executable_ == nullptr) {
-     return false;
-   }
- 
-   HrxGraphCaptureKey key{1, 1};
-   if (!graph_executor_.InitializeGraph(backend_.Device(), key)) {
-     return false;
-   }
- 
-   const std::uint32_t hidden_dim = contract_.HiddenSize();
-   const std::uint32_t ffn_dim = contract_.FfnSize();
-   const std::uint32_t qkv_dim = contract_.QkvWidth();
- 
-   // 1. Attention Layer Node
-   hrx_dispatch_config_t attn_config{};
-   attn_config.workgroup_count[0] = (qkv_dim + 1) / 2;
-   attn_config.workgroup_count[1] = 1;
-   attn_config.workgroup_count[2] = 1;
-   attn_config.workgroup_size[0] = 160;
-   attn_config.workgroup_size[1] = 1;
-   attn_config.workgroup_size[2] = 1;
-   attn_config.subgroup_size = 32;
- 
-   hrx_buffer_ref_t attn_bindings[8];
-   attn_bindings[0] = {hidden_buf, 0, hidden_dim * sizeof(float)};
-   attn_bindings[1] = {attn_gamma, 0, hidden_dim * sizeof(float)};
-   attn_bindings[2] = {w_qkv, 0,
-                       qkv_dim * hidden_dim * sizeof(std::uint16_t)};
-   attn_bindings[3] = {cos_buf, 0,
-                       (contract_.RotaryDim() / 2) * sizeof(float)};
-   attn_bindings[4] = {sin_buf, 0,
-                       (contract_.RotaryDim() / 2) * sizeof(float)};
-   attn_bindings[5] = {q_out, 0, contract_.QWidth() * sizeof(float)};
-   attn_bindings[6] = {k_cache, 0, contract_.KWidth() * sizeof(float)};
-   attn_bindings[7] = {v_cache, 0, contract_.VWidth() * sizeof(float)};
- 
-   std::uint32_t qkv_rows = qkv_dim;
-   hrx_graph_node_t attn_node = nullptr;
-   if (!graph_executor_.AddKernelNode(
-           layer_attn_executable_, 0, attn_config, attn_bindings, 8, &qkv_rows,
-           sizeof(qkv_rows), nullptr, 0, &attn_node)) {
-     return false;
-   }
- 
-   // 2. FFN Layer Node (dependent on Attention Node)
-   hrx_dispatch_config_t ffn_config{};
-   ffn_config.workgroup_count[0] = (hidden_dim + 1) / 2;
-   ffn_config.workgroup_count[1] = 1;
-   ffn_config.workgroup_count[2] = 1;
-   ffn_config.workgroup_size[0] = 544;
-   ffn_config.workgroup_size[1] = 1;
-   ffn_config.workgroup_size[2] = 1;
-   ffn_config.subgroup_size = 32;
- 
-   hrx_buffer_ref_t ffn_bindings[5];
-   ffn_bindings[0] = {q_out, 0, ffn_dim * sizeof(float)};
-   ffn_bindings[1] = {ffn_gamma, 0, ffn_dim * sizeof(float)};
-   ffn_bindings[2] = {w_down, 0,
-                      hidden_dim * ffn_dim * sizeof(std::uint16_t)};
-   ffn_bindings[3] = {hidden_buf, 0, hidden_dim * sizeof(float)};
-   ffn_bindings[4] = {out_buf, 0, hidden_dim * sizeof(float)};
- 
-   std::uint32_t ffn_rows = hidden_dim;
-   hrx_graph_node_t ffn_node = nullptr;
-   if (!graph_executor_.AddKernelNode(
-           layer_ffn_executable_, 0, ffn_config, ffn_bindings, 5, &ffn_rows,
-           sizeof(ffn_rows), &attn_node, 1, &ffn_node)) {
-     return false;
-   }
- 
-   return graph_executor_.Instantiate();
- }
- 
- bool QwenHrxExecutor::ExecuteDecodeGraph() {
-   if (!graph_executor_.IsInstantiated()) {
-     return false;
-   }
-   return graph_executor_.Launch(backend_.Stream());
- }
- 
 }  // namespace gufo::hrx

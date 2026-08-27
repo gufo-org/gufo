@@ -19,8 +19,7 @@ bool Reject(const char* message, std::string* error_msg) {
 
 bool DispatchCopy(hrx_stream_t stream, hrx_executable_t executable,
                   const HrxBufferBinding& source,
-                  const HrxBufferBinding& destination,
-                  std::string* error_msg) {
+                  const HrxBufferBinding& destination, std::string* error_msg) {
   constexpr std::uint32_t kCopyCapacity = 50'331'648;
   constexpr std::uint32_t kWorkgroupSize = 256;
   if (stream == nullptr || executable == nullptr || !source.IsValid() ||
@@ -83,8 +82,7 @@ bool VerifyZeroEdges(hrx_device_t device, const HrxBufferBinding& binding,
          Reject("native HRX reset readback observed non-zero state", error_msg);
 }
 
-std::array<std::size_t,
-           static_cast<std::size_t>(QwenHrxArenaBuffer::kCount)>
+std::array<std::size_t, static_cast<std::size_t>(QwenHrxArenaBuffer::kCount)>
 BufferSizes(const QwenHrxArenaLayout& layout) {
   return {
       layout.hidden_bytes,
@@ -121,17 +119,35 @@ BufferSizes(const QwenHrxArenaLayout& layout) {
 constexpr std::array<const char*,
                      static_cast<std::size_t>(QwenHrxArenaBuffer::kCount)>
     kBufferNames = {
-        "hidden",          "normed",          "attention_q_gate",
-        "attention_q",     "attention_gate",  "attention_k",
-        "attention_v",     "attention_output", "rope_cos",
-        "rope_sin",        "ssm_qkv",         "ssm_gate",
-        "ssm_alpha",       "ssm_beta",
-        "ssm_conv_output", "ssm_recurrent_output", "ffn_gate",
-        "ffn_up",          "ffn_activation",  "ffn_output",
-        "logits",          "token",           "position",
-        "kv_cache",        "ssm_conv_state",  "ssm_recurrent_state",
-        "saved_ssm_conv_state", "saved_ssm_recurrent_state",
-    };
+        "hidden",
+        "normed",
+        "attention_q_gate",
+        "attention_q",
+        "attention_gate",
+        "attention_k",
+        "attention_v",
+        "attention_output",
+        "rope_cos",
+        "rope_sin",
+        "ssm_qkv",
+        "ssm_gate",
+        "ssm_alpha",
+        "ssm_beta",
+        "ssm_conv_output",
+        "ssm_recurrent_output",
+        "ffn_gate",
+        "ffn_up",
+        "ffn_activation",
+        "ffn_output",
+        "logits",
+        "token",
+        "position",
+        "kv_cache",
+        "ssm_conv_state",
+        "ssm_recurrent_state",
+        "saved_ssm_conv_state",
+        "saved_ssm_recurrent_state",
+};
 
 }  // namespace
 
@@ -173,8 +189,8 @@ std::optional<QwenHrxArena> QwenHrxArena::Create(
   return std::optional<QwenHrxArena>{std::move(arena)};
 }
 
-HrxBufferBinding QwenHrxArena::Binding(QwenHrxArenaBuffer buffer) const
-    noexcept {
+HrxBufferBinding QwenHrxArena::Binding(
+    QwenHrxArenaBuffer buffer) const noexcept {
   const std::size_t index = BufferIndex(buffer);
   if (index >= buffers_.size()) {
     return {};
@@ -211,10 +227,9 @@ bool QwenHrxArena::Reset(std::string* error_msg) {
 bool QwenHrxArena::SaveState(hrx_executable_t copy_executable,
                              std::string* error_msg) {
   static_assert(kHrxNativeDeviceCopyAvailable);
-  if (!DispatchCopy(stream_, copy_executable,
-                    Binding(QwenHrxArenaBuffer::kSsmConvState),
-                    Binding(QwenHrxArenaBuffer::kSavedSsmConvState),
-                    error_msg) ||
+  if (!DispatchCopy(
+          stream_, copy_executable, Binding(QwenHrxArenaBuffer::kSsmConvState),
+          Binding(QwenHrxArenaBuffer::kSavedSsmConvState), error_msg) ||
       !DispatchCopy(stream_, copy_executable,
                     Binding(QwenHrxArenaBuffer::kSsmRecurrentState),
                     Binding(QwenHrxArenaBuffer::kSavedSsmRecurrentState),

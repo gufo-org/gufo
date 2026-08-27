@@ -77,6 +77,9 @@ void PrintBenchHelp(std::string_view program_name) {
                    "Compare batched prefill logits against sequential "
                    "reference (TODO: deepseek)",
                    "Validation", &opt.model_path);
+  parser.AddOption("", "--validate-hrx", "N",
+                   "Compare native HRX logits and greedy decode against HIP",
+                   "Validation", &opt.model_path);
 
   parser.AddOption("", "--speculative", "MODE",
                    "Draft backend: dflash, dflash2, mtp, mtp-npu, npu, pld, "
@@ -228,6 +231,120 @@ bool ValidatePrefill(hip::QwenGpuExecutor& executor,
   return comparison.finite && comparison.top1_match &&
          sequential_token == batched_token;
 }
+
+#if defined(ENGINE_ENABLE_HRX)
+constexpr float kHrxParityMaxRmse = 1.0e-4F;
+constexpr float kHrxParityMinCosine = 0.999999F;
+constexpr std::size_t kHrxValidationPromptLength = 4;
+
+struct HrxParityStep {
+  tokenization::TokenId input{0};
+  tokenization::TokenId next_token{0};
+  std::vector<float> logits;
+};
+
+std::vector<HrxParityStep> CaptureHrxReference(hip::QwenGpuExecutor& reference,
+                                               std::size_t generation_length) {
+  const auto prompt = MakeBenchmarkTokens(kHrxValidationPromptLength);
+  std::vector<HrxParityStep> fixture;
+  fixture.reserve(prompt.size() + generation_length);
+  reference.Reset();
+
+  const auto capture = [&reference, &fixture](tokenization::TokenId input,
+                                              std::uint32_t position) {
+    const auto next_token = reference.ForwardToken(input, position, true);
+    const auto logits_view = reference.CopyLastLogits();
+    fixture.push_back(
+        {.input = input,
+         .next_token = next_token,
+         .logits = std::vector<float>(logits_view.begin(), logits_view.end())});
+    return next_token;
+  };
+
+  tokenization::TokenId next_token = 0;
+  for (std::size_t index = 0; index < prompt.size(); ++index) {
+    next_token = capture(prompt[index], static_cast<std::uint32_t>(index));
+  }
+  for (std::size_t step = 0; step < generation_length; ++step) {
+    const auto position = static_cast<std::uint32_t>(prompt.size() + step);
+    next_token = capture(next_token, position);
+  }
+  return fixture;
+}
+
+bool ValidateHrxStep(const HrxParityStep& reference,
+                     hrx::QwenHrxExecutor& candidate, std::uint32_t position,
+                     std::string_view phase, std::size_t step,
+                     std::string* error_msg) {
+  const auto candidate_token =
+      candidate.ForwardToken(reference.input, position, true, error_msg);
+
+  if (!candidate_token.has_value()) {
+    std::cerr << "Error: native HRX " << phase << " step " << step
+              << " failed: " << *error_msg << '\n';
+    return false;
+  }
+  const auto candidate_logits = candidate.CopyLastLogits(error_msg);
+  if (candidate_logits.empty()) {
+    std::cerr << "Error: native HRX " << phase << " step " << step
+              << " logit readback failed: " << *error_msg << '\n';
+    return false;
+  }
+
+  const auto comparison =
+      testing::CompareLogits(reference.logits, candidate_logits);
+  const bool token_match = reference.next_token == *candidate_token;
+  const bool within_envelope =
+      comparison.root_mean_square_error <= kHrxParityMaxRmse &&
+      comparison.cosine_similarity >= kHrxParityMinCosine;
+  std::cout << std::fixed << std::setprecision(8)
+            << "[HRX Validation] phase=" << phase << " step=" << step
+            << " position=" << position
+            << " reference_top1=" << reference.next_token
+            << " candidate_top1=" << *candidate_token
+            << " top1_match=" << (comparison.top1_match ? "yes" : "no")
+            << " finite=" << (comparison.finite ? "yes" : "no") << '\n'
+            << "  max_abs_diff=" << comparison.max_abs_diff
+            << " mean_abs_diff=" << comparison.mean_abs_diff
+            << " rmse=" << comparison.root_mean_square_error
+            << " cosine_similarity=" << comparison.cosine_similarity
+            << " envelope=" << (within_envelope ? "pass" : "fail") << '\n';
+
+  if (!comparison.finite || !comparison.top1_match || !token_match ||
+      !within_envelope) {
+    std::cerr << "Error: native HRX diverged from HIP during " << phase
+              << " step " << step << ".\n";
+    return false;
+  }
+  return true;
+}
+
+bool ValidateHrxParity(std::span<const HrxParityStep> reference,
+                       hrx::QwenHrxExecutor& candidate,
+                       std::string* error_msg) {
+  if (!candidate.Reset(error_msg)) {
+    std::cerr << "Error resetting native HRX executor: " << *error_msg << '\n';
+    return false;
+  }
+
+  for (std::size_t position = 0; position < reference.size(); ++position) {
+    const bool prompt = position < kHrxValidationPromptLength;
+    const std::size_t step =
+        prompt ? position : position - kHrxValidationPromptLength;
+    if (!ValidateHrxStep(reference[position], candidate,
+                         static_cast<std::uint32_t>(position),
+                         prompt ? "prompt" : "decode", step, error_msg)) {
+      return false;
+    }
+  }
+
+  std::cout << "[HRX Validation] PASS: position-zero, "
+            << kHrxValidationPromptLength << "-token prompt, and "
+            << reference.size() - kHrxValidationPromptLength
+            << " greedy decode steps match HIP.\n";
+  return true;
+}
+#endif
 
 bool IsDeepSeekV4Flash(const core::GgufReader& reader) {
   return reader.GetMetadataString("general.architecture") == "deepseek4";
@@ -554,6 +671,23 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
         opt.validate_prefill_tokens = num;
         return true;
       });
+  parser.AddCustomOption(
+      "", "--validate-hrx", "N",
+      "Compare native HRX logits and greedy decode against HIP", "Validation",
+      [&opt](std::string_view, std::string_view val, std::string* err) -> bool {
+        std::size_t num = 0;
+        const auto [ptr, ec] =
+            std::from_chars(val.data(), val.data() + val.size(), num);
+        if (ec != std::errc{} || ptr != val.data() + val.size() || num == 0 ||
+            num > std::numeric_limits<std::uint32_t>::max() - 4) {
+          if (err != nullptr) {
+            *err = "Invalid argument for --validate-hrx";
+          }
+          return false;
+        }
+        opt.validate_hrx_tokens = num;
+        return true;
+      });
 
   const auto parse_speculative_backend =
       [&opt](std::string_view, std::string_view value, std::string*) -> bool {
@@ -659,6 +793,12 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     }
     return std::nullopt;
   }
+  if (opt.validate_hrx_tokens > 0 && opt.qwen_backend != "hrx-native") {
+    if (error_msg != nullptr) {
+      *error_msg = "--validate-hrx requires --qwen-backend hrx-native";
+    }
+    return std::nullopt;
+  }
 
   return opt;
 }
@@ -692,8 +832,8 @@ int RunBench(std::span<const char* const> args) {
 
   if (opt.qwen_backend == "hrx-native") {
     if (!opt.speculative_backend.empty() || opt.validate_prefill_tokens != 0 ||
-        opt.n_depths != std::vector<std::size_t>{0} ||
-        opt.n_gpu_layers != 99 || opt.repetitions == 0) {
+        opt.n_depths != std::vector<std::size_t>{0} || opt.n_gpu_layers != 99 ||
+        opt.repetitions == 0) {
       std::cerr << "Error: the bare-minimum hrx-native backend supports only "
                    "depth 0, all layers, positive repetitions, greedy "
                    "sequential execution, and no prefill validation or "
@@ -707,25 +847,49 @@ int RunBench(std::span<const char* const> args) {
                             : *std::max_element(values.begin(), values.end());
     };
     constexpr std::size_t kGenerationPrimeTokens = 16;
+    constexpr std::size_t kValidationPromptTokens = 4;
     const std::size_t max_prompt = max_or_zero(opt.n_prompts);
     const std::size_t max_generation = max_or_zero(opt.n_gens);
-    if (max_generation > std::numeric_limits<std::uint32_t>::max() -
-                             kGenerationPrimeTokens) {
+    if (max_generation >
+        std::numeric_limits<std::uint32_t>::max() - kGenerationPrimeTokens) {
       std::cerr << "Error: requested native HRX context is too large.\n";
       PrintModelLoadTime(model_load_start, false);
       return 1;
     }
     const std::size_t required_context =
-        std::max(max_prompt, kGenerationPrimeTokens + max_generation);
+        std::max({max_prompt, kGenerationPrimeTokens + max_generation,
+                  kValidationPromptTokens + opt.validate_hrx_tokens});
     if (required_context == 0 ||
         required_context > std::numeric_limits<std::uint32_t>::max()) {
       std::cerr << "Error: native HRX benchmark requires a non-zero context.\n";
       PrintModelLoadTime(model_load_start, false);
       return 1;
     }
+
+#if defined(ENGINE_ENABLE_HIP)
+    std::vector<HrxParityStep> hrx_reference;
+    if (opt.validate_hrx_tokens > 0) {
+      std::cout << "[HRX Validation] Capturing HIP reference...\n"
+                << std::flush;
+      auto reference_executor = hip::QwenGpuExecutor::CreateFromGguf(
+          reader, &err, static_cast<std::uint32_t>(required_context));
+      if (reference_executor == nullptr) {
+        std::cerr << "Error creating HIP parity executor: " << err << '\n';
+        PrintModelLoadTime(model_load_start, false);
+        return 1;
+      }
+      hrx_reference =
+          CaptureHrxReference(*reference_executor, opt.validate_hrx_tokens);
+      reference_executor.reset();
+      std::cout << "[HRX Validation] HIP reference released; starting native "
+                   "HRX...\n"
+                << std::flush;
+    }
+#endif
+
     auto native_executor = hrx::QwenHrxExecutor::CreateFromGguf(
         reader, static_cast<std::uint32_t>(required_context),
-        STRIX_HRX_KERNEL_DIR, &err);
+        GUFO_HRX_KERNEL_DIR, &err);
     if (native_executor == nullptr) {
       std::cerr << "Error creating native HRX Qwen executor: " << err << '\n';
       PrintModelLoadTime(model_load_start, false);
@@ -744,6 +908,15 @@ int RunBench(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start);
     std::cout << "backend=HRX-native model="
               << native_executor->GetConfig().model_name << '\n';
+
+    if (opt.validate_hrx_tokens > 0) {
+#if defined(ENGINE_ENABLE_HIP)
+      return ValidateHrxParity(hrx_reference, *native_executor, &err) ? 0 : 1;
+#else
+      std::cerr << "Error: --validate-hrx requires ENGINE_ENABLE_HIP\n";
+      return 1;
+#endif
+    }
 
     const auto print_native_result = [](std::string_view name,
                                         const std::vector<double>& runs) {
@@ -765,14 +938,15 @@ int RunBench(std::span<const char* const> args) {
           return 1;
         }
         const auto begin = std::chrono::high_resolution_clock::now();
-        const auto next = native_executor->ForwardPromptBatch(
-            tokens, 0, true, &err);
+        const auto next =
+            native_executor->ForwardPromptBatch(tokens, 0, true, &err);
         const auto end = std::chrono::high_resolution_clock::now();
         if (!next.has_value()) {
           std::cerr << "Error in native HRX prompt execution: " << err << '\n';
           return 1;
         }
-        const double seconds = std::chrono::duration<double>(end - begin).count();
+        const double seconds =
+            std::chrono::duration<double>(end - begin).count();
         if (seconds > 0.0) {
           runs.push_back(static_cast<double>(prompt_length) / seconds);
         }
@@ -802,8 +976,8 @@ int RunBench(std::span<const char* const> args) {
         std::uint32_t position = kGenerationPrimeTokens;
         const auto begin = std::chrono::high_resolution_clock::now();
         for (std::size_t step = 0; step < generation_length; ++step) {
-          current = native_executor->ForwardToken(*current, position, true,
-                                                  &err);
+          current =
+              native_executor->ForwardToken(*current, position, true, &err);
           if (!current.has_value()) {
             std::cerr << "Error in native HRX generation: " << err << '\n';
             return 1;
@@ -811,7 +985,8 @@ int RunBench(std::span<const char* const> args) {
           ++position;
         }
         const auto end = std::chrono::high_resolution_clock::now();
-        const double seconds = std::chrono::duration<double>(end - begin).count();
+        const double seconds =
+            std::chrono::duration<double>(end - begin).count();
         if (seconds > 0.0) {
           runs.push_back(static_cast<double>(generation_length) / seconds);
         }

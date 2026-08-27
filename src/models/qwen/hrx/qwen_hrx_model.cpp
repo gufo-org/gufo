@@ -64,7 +64,7 @@ std::unique_ptr<QwenHrxModel> QwenHrxModel::CreateFromGguf(
   const hrx_buffer_params_t params{
       .type = HRX_MEMORY_TYPE_HOST_VISIBLE | HRX_MEMORY_TYPE_DEVICE_VISIBLE,
       .access = HRX_MEMORY_ACCESS_READ,
-      .usage = HRX_BUFFER_USAGE_STORAGE_READ,
+      .usage = HRX_BUFFER_USAGE_STORAGE,
       .queue_affinity = 0,
   };
   for (const auto& mapped_region : mapped_regions) {
@@ -74,6 +74,9 @@ std::unique_ptr<QwenHrxModel> QwenHrxModel::CreateFromGguf(
         const_cast<void*>(mapped_region.data), mapped_region.size, &buffer);
     if (!hrx_status_is_ok(status)) {
       hrx_status_ignore(status);
+      if (buffer != nullptr) {
+        hrx_buffer_release(buffer);
+      }
       for (auto& region : regions) {
         if (region.buffer != nullptr) {
           hrx_buffer_release(region.buffer);
@@ -119,8 +122,8 @@ std::optional<HrxBufferBinding> QwenHrxModel::BindTensor(
 }
 
 std::optional<HrxBufferBinding> QwenHrxModel::BindBf16Matrix(
-    const models::QwenTensorRef& tensor, std::size_t rows,
-    std::size_t columns, std::string* error_msg) const noexcept {
+    const models::QwenTensorRef& tensor, std::size_t rows, std::size_t columns,
+    std::string* error_msg) const noexcept {
   const auto elements = HrxMatrixElementCount(rows, columns);
   if (!elements.has_value()) {
     if (error_msg != nullptr) {
@@ -132,8 +135,8 @@ std::optional<HrxBufferBinding> QwenHrxModel::BindBf16Matrix(
 }
 
 std::optional<HrxBufferBinding> QwenHrxModel::BindQ8_0Matrix(
-    const models::QwenTensorRef& tensor, std::size_t rows,
-    std::size_t columns, std::string* error_msg) const noexcept {
+    const models::QwenTensorRef& tensor, std::size_t rows, std::size_t columns,
+    std::string* error_msg) const noexcept {
   const auto elements = HrxMatrixElementCount(rows, columns);
   if (!elements.has_value() || (columns % 32) != 0) {
     if (error_msg != nullptr) {
@@ -167,8 +170,7 @@ bool QwenHrxModel::BuildNativeQ8Bindings(std::string* error_msg) {
   const auto reject_binding = [error_msg](const std::string& name,
                                           const std::string& detail) {
     if (error_msg != nullptr) {
-      *error_msg = "native HRX Q8_0 binding rejected '" + name + "': " +
-                   detail;
+      *error_msg = "native HRX Q8_0 binding rejected '" + name + "': " + detail;
     }
     return false;
   };
@@ -234,8 +236,8 @@ bool QwenHrxModel::BuildNativeQ8Bindings(std::string* error_msg) {
                    &native.attn_k) ||
           !bind_q8(layer.attn_v, kv, hidden, prefix + "attn_v.weight",
                    &native.attn_v) ||
-          !bind_q8(layer.attn_output, hidden, q,
-                   prefix + "attn_output.weight", &native.attn_output) ||
+          !bind_q8(layer.attn_output, hidden, q, prefix + "attn_output.weight",
+                   &native.attn_output) ||
           !bind_f32(layer.attn_q_norm, config.head_dim,
                     prefix + "attn_q_norm.weight", &native.attn_q_norm) ||
           !bind_f32(layer.attn_k_norm, config.head_dim,
@@ -245,23 +247,22 @@ bool QwenHrxModel::BuildNativeQ8Bindings(std::string* error_msg) {
       continue;
     }
 
-    if (!bind_q8(layer.attn_qkv, ssm_qkv, hidden,
-                 prefix + "attn_qkv.weight", &native.attn_qkv) ||
+    if (!bind_q8(layer.attn_qkv, ssm_qkv, hidden, prefix + "attn_qkv.weight",
+                 &native.attn_qkv) ||
         !bind_q8(layer.attn_gate, ssm_inner, hidden,
                  prefix + "attn_gate.weight", &native.attn_gate) ||
         !bind_f32(layer.ssm_a, rank, prefix + "ssm_a", &native.ssm_a) ||
         !bind_f32(layer.ssm_conv1d, ssm_qkv * config.ssm_conv_kernel,
                   prefix + "ssm_conv1d.weight", &native.ssm_conv1d) ||
-        !bind_f32(layer.ssm_dt, rank, prefix + "ssm_dt.bias",
-                  &native.ssm_dt) ||
-        !bind_q8(layer.ssm_alpha, rank, hidden,
-                 prefix + "ssm_alpha.weight", &native.ssm_alpha) ||
+        !bind_f32(layer.ssm_dt, rank, prefix + "ssm_dt.bias", &native.ssm_dt) ||
+        !bind_q8(layer.ssm_alpha, rank, hidden, prefix + "ssm_alpha.weight",
+                 &native.ssm_alpha) ||
         !bind_q8(layer.ssm_beta, rank, hidden, prefix + "ssm_beta.weight",
                  &native.ssm_beta) ||
         !bind_f32(layer.ssm_norm, config.SsmValueSize(),
                   prefix + "ssm_norm.weight", &native.ssm_norm) ||
-        !bind_q8(layer.ssm_out, hidden, ssm_inner,
-                 prefix + "ssm_out.weight", &native.ssm_out)) {
+        !bind_q8(layer.ssm_out, hidden, ssm_inner, prefix + "ssm_out.weight",
+                 &native.ssm_out)) {
       return false;
     }
   }

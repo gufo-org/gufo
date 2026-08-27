@@ -459,7 +459,7 @@ include(CTest)
 if (BUILD_TESTING)
   if (ENGINE_ENABLE_HRX)
     add_executable(hrx_backend_test tests/core/hrx_backend_test.cpp)
-    target_link_libraries(hrx_backend_test PRIVATE strix_core)
+    target_link_libraries(hrx_backend_test PRIVATE gufo_core)
     add_test(NAME hrx_backend_test COMMAND hrx_backend_test)
     set_tests_properties(hrx_backend_test PROPERTIES
       LABELS "gpu;hrx;core;backend")
@@ -468,8 +468,8 @@ if (BUILD_TESTING)
       add_executable(qwen_hrx_executor_test
         tests/models/qwen/qwen_hrx_executor_test.cpp)
       target_compile_definitions(qwen_hrx_executor_test PRIVATE
-        STRIX_HRX_KERNEL_DIR=\"${STRIX_AOT_KERNELS_DIR}\")
-      target_link_libraries(qwen_hrx_executor_test PRIVATE strix_core)
+        GUFO_HRX_KERNEL_DIR=\"${GUFO_AOT_KERNELS_DIR}\")
+      target_link_libraries(qwen_hrx_executor_test PRIVATE gufo_core)
       add_test(NAME qwen_hrx_executor_test COMMAND qwen_hrx_executor_test)
       set_tests_properties(qwen_hrx_executor_test PROPERTIES
         LABELS "gpu;hrx;models;qwen")
@@ -480,7 +480,7 @@ if (BUILD_TESTING)
     tests/models/qwen/qwen_hrx_model_contract_test.cpp)
   target_include_directories(qwen_hrx_model_contract_test PRIVATE
     ${CMAKE_SOURCE_DIR})
-  target_link_libraries(qwen_hrx_model_contract_test PRIVATE strix_core)
+  target_link_libraries(qwen_hrx_model_contract_test PRIVATE gufo_core)
   add_test(NAME qwen_hrx_model_contract_test
     COMMAND qwen_hrx_model_contract_test)
   set_tests_properties(qwen_hrx_model_contract_test PROPERTIES
@@ -499,24 +499,24 @@ if (BUILD_TESTING)
   add_test(NAME gufo_probe COMMAND gufo probe)
   set_tests_properties(gufo_probe PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_diagnose_help COMMAND gufo diagnose --help)
-  set_tests_properties(strix_diagnose_help PROPERTIES LABELS "cpu")
+  add_test(NAME gufo_diagnose_help COMMAND gufo diagnose --help)
+  set_tests_properties(gufo_diagnose_help PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_diagnose_json COMMAND gufo diagnose --json --section platform)
-  set_tests_properties(strix_diagnose_json PROPERTIES LABELS "cpu")
+  add_test(NAME gufo_diagnose_json COMMAND gufo diagnose --json --section platform)
+  set_tests_properties(gufo_diagnose_json PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_prompt_help COMMAND gufo prompt --help)
-  set_tests_properties(strix_prompt_help PROPERTIES LABELS "cpu;server;cli")
+  add_test(NAME gufo_prompt_help COMMAND gufo prompt --help)
+  set_tests_properties(gufo_prompt_help PROPERTIES LABELS "cpu;server;cli")
 
-  add_test(NAME strix_video_help COMMAND gufo video --help)
-  set_tests_properties(strix_video_help PROPERTIES
+  add_test(NAME gufo_video_help COMMAND gufo video --help)
+  set_tests_properties(gufo_video_help PROPERTIES
     LABELS "cpu;server;cli;minimax-h3")
 
-  add_test(NAME strix_serve_help COMMAND gufo serve --help)
-  set_tests_properties(strix_serve_help PROPERTIES LABELS "cpu;server;cli")
+  add_test(NAME gufo_serve_help COMMAND gufo serve --help)
+  set_tests_properties(gufo_serve_help PROPERTIES LABELS "cpu;server;cli")
 
-  add_test(NAME strix_prompt_smoke COMMAND gufo prompt "Hello world")
-  set_tests_properties(strix_prompt_smoke PROPERTIES LABELS "cpu;server;cli")
+  add_test(NAME gufo_prompt_smoke COMMAND gufo prompt "Hello world")
+  set_tests_properties(gufo_prompt_smoke PROPERTIES LABELS "cpu;server;cli")
 
   add_executable(arg_parser_test
     tests/cli/arg_parser_test.cpp

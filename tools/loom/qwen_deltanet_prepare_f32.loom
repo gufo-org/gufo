@@ -25,14 +25,15 @@ kernel.def @qwen_deltanet_prepare_f32(%heads: index) {
   %biased = scalar.addf %alpha_raw, %dt_value : f32
   %threshold = scalar.constant 20.0 : f32
   %large = scalar.cmpf ogt, %biased, %threshold : f32
-  %biased_exp = scalar.expf %biased : f32
-  %softplus_regular = scalar.log1pf %biased_exp : f32
+  %biased_exp = scalar.expf<afn> %biased : f32
+  %one = scalar.constant 1.0 : f32
+  %softplus_argument = scalar.addf %one, %biased_exp : f32
+  %softplus_regular = scalar.logf<afn> %softplus_argument : f32
   %softplus = scf.select %large, %biased, %softplus_regular : f32
   %decay_exponent = scalar.mulf %softplus, %a_value : f32
-  %decay = scalar.expf %decay_exponent : f32
+  %decay = scalar.expf<afn> %decay_exponent : f32
   %negative_beta = scalar.negf %beta_raw : f32
-  %beta_exp = scalar.expf %negative_beta : f32
-  %one = scalar.constant 1.0 : f32
+  %beta_exp = scalar.expf<afn> %negative_beta : f32
   %beta_denominator = scalar.addf %one, %beta_exp : f32
   %beta_sigmoid = scalar.divf %one, %beta_denominator : f32
   view.store %decay, %alpha_view[%head] : f32, view<48xf32>

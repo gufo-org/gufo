@@ -24,13 +24,13 @@ kernel.def @qwen_residual_add_f32(%elements: index) {
     scf.if %element_in_bounds {
       %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %count)] : index
       %left_noalias, %right_noalias, %output_noalias = buffer.assume.noalias %left, %right, %output : buffer, buffer, buffer
-      %left_view = buffer.view %left_noalias[%base] : buffer -> view<[%count]xf32>
-      %right_view = buffer.view %right_noalias[%base] : buffer -> view<[%count]xf32>
-      %output_view = buffer.view %output_noalias[%base] : buffer -> view<[%count]xf32>
-      %a = vector.load %left_view[%element_base] : view<[%count]xf32> -> vector<32xf32>
-      %b = vector.load %right_view[%element_base] : view<[%count]xf32> -> vector<32xf32>
+      %left_view = buffer.view %left_noalias[%base] : buffer -> view<17408xf32>
+      %right_view = buffer.view %right_noalias[%base] : buffer -> view<17408xf32>
+      %output_view = buffer.view %output_noalias[%base] : buffer -> view<17408xf32>
+      %a = vector.load %left_view[%element_base] : view<17408xf32> -> vector<32xf32>
+      %b = vector.load %right_view[%element_base] : view<17408xf32> -> vector<32xf32>
       %sum = vector.addf<reassoc|nnan|ninf|nsz> %a, %b : vector<32xf32>
-      vector.store %sum, %output_view[%element_base] : vector<32xf32> -> view<[%count]xf32>
+      vector.store %sum, %output_view[%element_base] : vector<32xf32>, view<17408xf32>
     }
   }
   kernel.return

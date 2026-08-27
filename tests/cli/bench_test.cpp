@@ -61,10 +61,29 @@ void TestHybridMtpOptions() {
 
 void TestNativeHrxBackendOption() {
   const std::array<const char*, 2> args = {"--qwen-backend", "hrx-native"};
-  const auto options = strix::cli::ParseBenchOptions(args);
+  const auto options = gufo::cli::ParseBenchOptions(args);
   Expect(options.has_value(), "native HRX backend option parses");
   Expect(options->qwen_backend == "hrx-native",
          "native HRX backend option is retained");
+}
+
+void TestNativeHrxValidationOption() {
+  const std::array<const char*, 4> args = {"--qwen-backend", "hrx-native",
+                                           "--validate-hrx", "3"};
+  const auto options = gufo::cli::ParseBenchOptions(args);
+  Expect(options.has_value(), "native HRX validation option parses");
+  Expect(options->validate_hrx_tokens == 3,
+         "native HRX validation token count is retained");
+
+  std::string error;
+  const std::array<const char*, 2> missing_backend = {"--validate-hrx", "3"};
+  Expect(!gufo::cli::ParseBenchOptions(missing_backend, &error).has_value(),
+         "native HRX validation rejects the HIP-only package route");
+
+  const std::array<const char*, 4> zero_tokens = {
+      "--qwen-backend", "hrx-native", "--validate-hrx", "0"};
+  Expect(!gufo::cli::ParseBenchOptions(zero_tokens, &error).has_value(),
+         "native HRX validation rejects zero decode tokens");
 }
 
 void TestInvalidDepth() {
@@ -83,9 +102,8 @@ void TestInvalidDepth() {
   Expect(!gufo::cli::ParseBenchOptions(range_args, &error).has_value(),
          "invalid draft range rejected");
 
-  const std::array<const char*, 2> backend_args = {"--qwen-backend",
-                                                   "unknown"};
-  Expect(!strix::cli::ParseBenchOptions(backend_args, &error).has_value(),
+  const std::array<const char*, 2> backend_args = {"--qwen-backend", "unknown"};
+  Expect(!gufo::cli::ParseBenchOptions(backend_args, &error).has_value(),
          "invalid Qwen backend rejected");
 }
 
@@ -96,6 +114,7 @@ int main() {
   TestDepthOptions();
   TestHybridMtpOptions();
   TestNativeHrxBackendOption();
+  TestNativeHrxValidationOption();
   TestInvalidDepth();
   std::cout << "All benchmark CLI tests passed.\n";
   return 0;

@@ -24,8 +24,7 @@ public:
   HrxOwnedBuffer& operator=(HrxOwnedBuffer&& other) noexcept;
 
   [[nodiscard]] static std::optional<HrxOwnedBuffer> Allocate(
-      hrx_stream_t stream, std::size_t size,
-      std::string* error_msg = nullptr);
+      hrx_stream_t stream, std::size_t size, std::string* error_msg = nullptr);
 
   [[nodiscard]] hrx_buffer_t Get() const noexcept { return buffer_; }
   [[nodiscard]] std::size_t Size() const noexcept { return size_; }
