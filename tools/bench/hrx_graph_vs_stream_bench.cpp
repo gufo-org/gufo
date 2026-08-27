@@ -13,8 +13,29 @@ int main() {
   std::printf("  Target Silicon: AMD Radeon 8060S Graphics (gfx1151)\n");
   std::printf("======================================================================\n");
 
-  strix::hrx::QwenHrxExecutor executor(0);
-  bool ready = executor.InitializeAllKernels("build/hrx-test/share/strix/kernels");
+  strix::core::ModelConfig model_config;
+  model_config.num_layers = 64;
+  model_config.hidden_size = 5120;
+  model_config.intermediate_size = 17408;
+  model_config.num_attention_heads = 24;
+  model_config.num_key_value_heads = 4;
+  model_config.head_dim = 256;
+  model_config.rotary_dim = 64;
+  model_config.ssm_group_count = 16;
+  model_config.ssm_state_size = 128;
+  model_config.ssm_time_step_rank = 48;
+  model_config.ssm_inner_size = 6144;
+  model_config.vocab_size = 248320;
+  const auto contract =
+      strix::hrx::QwenHrxArtifactContract::FromConfig(model_config);
+  if (!contract.has_value()) {
+    std::fprintf(stderr, "Invalid Qwen3.8 HRX artifact contract!\n");
+    return 1;
+  }
+
+  strix::hrx::QwenHrxExecutor executor(*contract, 0);
+  bool ready =
+      executor.InitializeAllKernels("build/hrx-test/share/strix/kernels");
   if (!ready) {
     std::fprintf(stderr, "Failed to initialize HRX executor and Loom kernels!\n");
     return 1;
@@ -25,7 +46,6 @@ int main() {
 
   const uint32_t hidden_dim = 5120;
   const uint32_t intermediate_dim = 17408;
-  const uint32_t qkv_dim = 8192;
   const int warmups = 50;
   const int iters = 500;
 
@@ -37,12 +57,12 @@ int main() {
 
   HRX_CHECK(hrx_buffer_allocate(stream, hidden_dim * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_hidden));
   HRX_CHECK(hrx_buffer_allocate(stream, hidden_dim * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_attn_gamma));
-  HRX_CHECK(hrx_buffer_allocate(stream, qkv_dim * hidden_dim * sizeof(uint16_t), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_w_qkv));
+  HRX_CHECK(hrx_buffer_allocate(stream, contract->QkvWidth() * hidden_dim * sizeof(uint16_t), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_w_qkv));
   HRX_CHECK(hrx_buffer_allocate(stream, 64 * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_cos));
   HRX_CHECK(hrx_buffer_allocate(stream, 64 * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_sin));
   HRX_CHECK(hrx_buffer_allocate(stream, intermediate_dim * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_q_out));
-  HRX_CHECK(hrx_buffer_allocate(stream, qkv_dim * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_k_cache));
-  HRX_CHECK(hrx_buffer_allocate(stream, qkv_dim * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_v_cache));
+  HRX_CHECK(hrx_buffer_allocate(stream, contract->KWidth() * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_k_cache));
+  HRX_CHECK(hrx_buffer_allocate(stream, contract->VWidth() * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_v_cache));
   HRX_CHECK(hrx_buffer_allocate(stream, intermediate_dim * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_ffn_gamma));
   HRX_CHECK(hrx_buffer_allocate(stream, hidden_dim * intermediate_dim * sizeof(uint16_t), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_w_down));
   HRX_CHECK(hrx_buffer_allocate(stream, hidden_dim * sizeof(float), HRX_MEMORY_TYPE_DEVICE_LOCAL, HRX_BUFFER_USAGE_DEFAULT, &buf_out));
@@ -59,16 +79,16 @@ int main() {
 
   // Warmup sequential stream dispatches
   for (int i = 0; i < warmups; ++i) {
-    executor.DispatchLayerAttention(buf_hidden, buf_attn_gamma, buf_w_qkv, buf_cos, buf_sin, buf_q_out, buf_k_cache, buf_v_cache, qkv_dim, hidden_dim);
-    executor.DispatchLayerFFN(buf_q_out, buf_ffn_gamma, buf_w_down, buf_hidden, buf_out, hidden_dim, intermediate_dim);
+    executor.DispatchLayerAttention(buf_hidden, buf_attn_gamma, buf_w_qkv, buf_cos, buf_sin, buf_q_out, buf_k_cache, buf_v_cache);
+    executor.DispatchLayerFFN(buf_q_out, buf_ffn_gamma, buf_w_down, buf_hidden, buf_out);
   }
   HRX_CHECK(hrx_stream_synchronize(stream));
 
   // Benchmark sequential stream dispatches
   auto t0 = std::chrono::high_resolution_clock::now();
   for (int i = 0; i < iters; ++i) {
-    executor.DispatchLayerAttention(buf_hidden, buf_attn_gamma, buf_w_qkv, buf_cos, buf_sin, buf_q_out, buf_k_cache, buf_v_cache, qkv_dim, hidden_dim);
-    executor.DispatchLayerFFN(buf_q_out, buf_ffn_gamma, buf_w_down, buf_hidden, buf_out, hidden_dim, intermediate_dim);
+    executor.DispatchLayerAttention(buf_hidden, buf_attn_gamma, buf_w_qkv, buf_cos, buf_sin, buf_q_out, buf_k_cache, buf_v_cache);
+    executor.DispatchLayerFFN(buf_q_out, buf_ffn_gamma, buf_w_down, buf_hidden, buf_out);
   }
   HRX_CHECK(hrx_stream_synchronize(stream));
   auto t1 = std::chrono::high_resolution_clock::now();

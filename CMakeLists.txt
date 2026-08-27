@@ -306,10 +306,10 @@ if (ENGINE_ENABLE_HRX)
     )
     set(LOOM_CONFIG_qwen_fused_swiglu_bf16 "qwen_fused_swiglu_bf16.row_capacity=17408")
     set(LOOM_CONFIG_qwen_fused_rmsnorm_qkv_bf16 "qwen_fused_rmsnorm_qkv_bf16.row_capacity=10240")
-    set(LOOM_CONFIG_qwen_fused_deltanet_recurrence_bf16 "qwen_fused_deltanet_recurrence_bf16.head_capacity=64")
+    set(LOOM_CONFIG_qwen_fused_deltanet_recurrence_bf16 "qwen_fused_deltanet_recurrence_bf16.head_capacity=16")
     set(LOOM_CONFIG_qwen_fused_down_residual_bf16 "qwen_fused_down_residual_bf16.hidden_dim=5120")
-    set(LOOM_CONFIG_qwen_fused_rope_kv_cache_bf16 "qwen_fused_rope_kv_cache_bf16.max_heads=64")
-    set(LOOM_CONFIG_qwen_fused_final_norm_head_bf16 "qwen_fused_final_norm_head_bf16.vocab_capacity=152064")
+    set(LOOM_CONFIG_qwen_fused_rope_kv_cache_bf16 "qwen_fused_rope_kv_cache_bf16.max_heads=24")
+    set(LOOM_CONFIG_qwen_fused_final_norm_head_bf16 "qwen_fused_final_norm_head_bf16.vocab_capacity=248320")
     set(LOOM_CONFIG_qwen_fused_layer_attn_bf16 "qwen_fused_layer_attn_bf16.qkv_dim=8192")
     set(LOOM_CONFIG_qwen_fused_layer_ffn_bf16 "qwen_fused_layer_ffn_bf16.hidden_dim=5120")
 
@@ -359,11 +359,6 @@ if (ENGINE_ENABLE_HRX)
     add_test(NAME qwen_hrx_executor_test COMMAND qwen_hrx_executor_test)
     set_tests_properties(qwen_hrx_executor_test PROPERTIES LABELS "gpu;hrx;models;qwen")
 
-    add_executable(qwen_hrx_model_contract_test
-      tests/models/qwen/qwen_hrx_model_contract_test.cpp)
-    target_link_libraries(qwen_hrx_model_contract_test PRIVATE strix_core)
-    add_test(NAME qwen_hrx_model_contract_test COMMAND qwen_hrx_model_contract_test)
-    set_tests_properties(qwen_hrx_model_contract_test PROPERTIES LABELS "hrx;models;qwen")
   endif()
 endif()
 
@@ -452,6 +447,15 @@ endif()
 include(CTest)
 
 if (BUILD_TESTING)
+  add_executable(qwen_hrx_model_contract_test
+    tests/models/qwen/qwen_hrx_model_contract_test.cpp)
+  target_include_directories(qwen_hrx_model_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR})
+  add_test(NAME qwen_hrx_model_contract_test
+    COMMAND qwen_hrx_model_contract_test)
+  set_tests_properties(qwen_hrx_model_contract_test PROPERTIES
+    LABELS "host;hrx;models;qwen")
+
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
   add_subdirectory(tests/models/qwen)

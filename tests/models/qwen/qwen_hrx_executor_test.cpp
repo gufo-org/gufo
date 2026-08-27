@@ -3,7 +3,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <cmath>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -22,6 +21,25 @@ void Expect(bool condition, std::string_view message) {
     std::cerr << "Assertion failed: " << message << "\n";
     std::exit(1);
   }
+}
+
+gufo::hrx::QwenHrxArtifactContract Qwen38Contract() {
+  gufo::core::ModelConfig config;
+  config.num_layers = 64;
+  config.hidden_size = 5120;
+  config.intermediate_size = 17408;
+  config.num_attention_heads = 24;
+  config.num_key_value_heads = 4;
+  config.head_dim = 256;
+  config.rotary_dim = 64;
+  config.ssm_group_count = 16;
+  config.ssm_state_size = 128;
+  config.ssm_time_step_rank = 48;
+  config.ssm_inner_size = 6144;
+  config.vocab_size = 248320;
+  const auto contract = gufo::hrx::QwenHrxArtifactContract::FromConfig(config);
+  Expect(contract.has_value(), "test Qwen3.8 contract is valid");
+  return *contract;
 }
 
 static inline float Bf16ToFloat(uint16_t val) {
@@ -43,13 +61,17 @@ static inline uint16_t FloatToBf16(float val) {
 }
 
 void TestQwenHrxExecutorLifecycleAndDispatch() {
-  gufo::hrx::QwenHrxExecutor executor(0);
+  gufo::hrx::QwenHrxExecutor executor(Qwen38Contract(), 0);
   const std::string artifact =
       std::string(kHrxKernelDir) + "/qwen_fused_swiglu_bf16.fb";
   bool ready = executor.Initialize(artifact);
   Expect(ready, "QwenHrxExecutor loads the Nix-built SwiGLU artifact");
 
-  Expect(executor.IsReady(), "QwenHrxExecutor is ready");
+  Expect(executor.IsSwiGLUReady(), "SwiGLU capability is ready");
+  Expect(!executor.IsReady(),
+         "a single artifact does not mark the complete set ready");
+  Expect(executor.MissingKernelArtifacts().size() == 7,
+         "single-artifact initialization reports missing capabilities");
   auto& backend = executor.Backend();
   hrx_stream_t stream = backend.Stream();
   hrx_device_t device = backend.Device();
@@ -64,11 +86,14 @@ void TestQwenHrxExecutorLifecycleAndDispatch() {
   std::vector<float> h_out_hrx(M, 0.0F);
 
   for (std::size_t i = 0; i < K; ++i) {
-    h_x[i] = 0.01F * static_cast<float>((i % 7) - 3);
+    const auto sample = static_cast<int>(i % 7) - 3;
+    h_x[i] = 0.01F * static_cast<float>(sample);
   }
   for (std::size_t i = 0; i < M * K; ++i) {
-    h_gate[i] = FloatToBf16(0.001F * static_cast<float>((i % 11) - 5));
-    h_up[i] = FloatToBf16(0.001F * static_cast<float>((i % 13) - 6));
+    const auto gate_sample = static_cast<int>(i % 11) - 5;
+    const auto up_sample = static_cast<int>(i % 13) - 6;
+    h_gate[i] = FloatToBf16(0.001F * static_cast<float>(gate_sample));
+    h_up[i] = FloatToBf16(0.001F * static_cast<float>(up_sample));
   }
 
   // CPU Oracle
@@ -106,7 +131,7 @@ void TestQwenHrxExecutorLifecycleAndDispatch() {
   HRX_CHECK(hrx_synchronous_h2d(device, h_up.data(), buf_up, 0,
                                 M * K * sizeof(uint16_t)));
 
-  bool ok = executor.DispatchSwiGLU(buf_x, buf_gate, buf_up, buf_out, M, K);
+  bool ok = executor.DispatchSwiGLU(buf_x, buf_gate, buf_up, buf_out, M);
   Expect(ok, "DispatchSwiGLU executes successfully");
 
   HRX_CHECK(hrx_stream_synchronize(stream));
@@ -114,13 +139,21 @@ void TestQwenHrxExecutorLifecycleAndDispatch() {
                                 M * sizeof(float)));
 
   float max_diff = 0.0F;
+  bool outputs_are_finite = true;
   for (std::size_t i = 0; i < M; ++i) {
-    float diff = std::fabs(h_out_hrx[i] - h_out_ref[i]) /
-                 (std::fabs(h_out_ref[i]) + 1e-4F);
-    if (diff > max_diff)
+    if (!std::isfinite(h_out_ref[i]) || !std::isfinite(h_out_hrx[i])) {
+      outputs_are_finite = false;
+      continue;
+    }
+    const float diff = std::fabs(h_out_hrx[i] - h_out_ref[i]) /
+                       (std::fabs(h_out_ref[i]) + 1e-4F);
+    outputs_are_finite = outputs_are_finite && std::isfinite(diff);
+    if (diff > max_diff) {
       max_diff = diff;
+    }
   }
 
+  Expect(outputs_are_finite, "SwiGLU outputs are finite");
   Expect(max_diff < 1e-3F, "Numerical output matches CPU reference oracle");
 
   hrx_buffer_release(buf_x);
@@ -130,7 +163,7 @@ void TestQwenHrxExecutorLifecycleAndDispatch() {
 }
 
 void TestRMSNormQKVParity() {
-  strix::hrx::QwenHrxExecutor executor(0);
+  gufo::hrx::QwenHrxExecutor executor(Qwen38Contract(), 0);
   Expect(executor.InitializeAllKernels(std::string(kHrxKernelDir)),
          "QwenHrxExecutor loads the Qwen3.8 artifact set");
 
@@ -173,7 +206,7 @@ void TestRMSNormQKVParity() {
                                 weights.size() * sizeof(uint16_t)));
 
   Expect(executor.DispatchRMSNormQKV(input_buffer, gamma_buffer, weight_buffer,
-                                     output_buffer, kRows, kHiddenSize),
+                                     output_buffer, kRows),
          "native HRX RMSNorm+SSM-QKV dispatch succeeds");
   HRX_CHECK(hrx_stream_synchronize(backend.Stream()));
   HRX_CHECK(hrx_synchronous_d2h(backend.Device(), output_buffer, 0,
@@ -193,11 +226,12 @@ void TestRMSNormQKVParity() {
 }
 
 void TestQwenHrxExecutorMultiKernelAndGraph() {
-  gufo::hrx::QwenHrxExecutor executor(0);
+  gufo::hrx::QwenHrxExecutor executor(Qwen38Contract(), 0);
   bool ready = executor.InitializeAllKernels(std::string(kHrxKernelDir));
   Expect(ready, "InitializeAllKernels loads the Nix-built artifacts");
 
-  Expect(executor.IsReady(), "InitializeAllKernels marks executor ready");
+  Expect(executor.IsReady(),
+         "InitializeAllKernels marks the complete artifact set ready");
   auto& backend = executor.Backend();
   hrx_stream_t stream = backend.Stream();
 

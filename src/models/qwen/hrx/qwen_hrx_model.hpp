@@ -12,18 +12,11 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/model_config.hpp"
+#include "src/models/qwen/hrx/qwen_hrx_contract.hpp"
 #include "src/models/qwen/state.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
 namespace gufo::hrx {
-
-/// The native artifact ABI is deliberately fixed to the production Qwen3.8-27B
-/// text model. New model shapes require separately compiled artifacts.
-class QwenHrxModelContract {
-public:
-  [[nodiscard]] static bool Supports(const core::ModelConfig& config,
-                                     std::string* error_msg = nullptr);
-};
 
 struct HrxBufferBinding {
   hrx_buffer_t buffer{nullptr};
@@ -56,6 +49,10 @@ public:
   [[nodiscard]] const core::ModelConfig& GetConfig() const noexcept {
     return weights_.config;
   }
+  [[nodiscard]] const QwenHrxArtifactContract& GetArtifactContract()
+      const noexcept {
+    return contract_;
+  }
   [[nodiscard]] std::optional<HrxBufferBinding> Bind(
       const models::QwenTensorRef& tensor) const noexcept;
 
@@ -69,10 +66,12 @@ private:
   QwenHrxModel(std::shared_ptr<const core::GgufReader> reader,
                models::QwenModelWeights weights,
                std::shared_ptr<const tokenization::QwenTokenizer> tokenizer,
+               QwenHrxArtifactContract contract,
                std::vector<ImportedRegion> regions);
 
   std::shared_ptr<const core::GgufReader> reader_;
   models::QwenModelWeights weights_;
+  QwenHrxArtifactContract contract_;
   std::shared_ptr<const tokenization::QwenTokenizer> tokenizer_;
   std::vector<ImportedRegion> regions_;
 };

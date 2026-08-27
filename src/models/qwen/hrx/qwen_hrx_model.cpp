@@ -6,44 +6,15 @@
 #include "src/core/hrx/hrx_utils.hpp"
 
 namespace gufo::hrx {
-namespace {
-
-constexpr std::uint32_t kQwen38LayerCount{64};
-constexpr std::uint32_t kQwen38HiddenSize{5120};
-constexpr std::uint32_t kQwen38IntermediateSize{17408};
-constexpr std::uint32_t kQwen38AttentionHeads{24};
-constexpr std::uint32_t kQwen38KeyValueHeads{4};
-constexpr std::uint32_t kQwen38HeadDim{256};
-constexpr std::uint32_t kQwen38VocabSize{248320};
-
-}  // namespace
-
-bool QwenHrxModelContract::Supports(const core::ModelConfig& config,
-                                    std::string* error_msg) {
-  const bool supported = config.IsValidQwen() &&
-                         config.num_layers == kQwen38LayerCount &&
-                         config.hidden_size == kQwen38HiddenSize &&
-                         config.intermediate_size == kQwen38IntermediateSize &&
-                         config.num_attention_heads == kQwen38AttentionHeads &&
-                         config.num_key_value_heads == kQwen38KeyValueHeads &&
-                         config.head_dim == kQwen38HeadDim &&
-                         config.vocab_size == kQwen38VocabSize;
-  if (!supported && error_msg != nullptr) {
-    *error_msg =
-        "native HRX artifacts support only Qwen3.8-27B text "
-        "(64 layers, hidden=5120, FFN=17408, heads=24x256, "
-        "KV heads=4, vocab=248320)";
-  }
-  return supported;
-}
 
 QwenHrxModel::QwenHrxModel(
     std::shared_ptr<const core::GgufReader> reader,
     models::QwenModelWeights weights,
     std::shared_ptr<const tokenization::QwenTokenizer> tokenizer,
-    std::vector<ImportedRegion> regions)
+    QwenHrxArtifactContract contract, std::vector<ImportedRegion> regions)
     : reader_(std::move(reader)),
       weights_(std::move(weights)),
+      contract_(contract),
       tokenizer_(std::move(tokenizer)),
       regions_(std::move(regions)) {}
 
@@ -66,8 +37,12 @@ std::unique_ptr<QwenHrxModel> QwenHrxModel::CreateFromGguf(
   }
 
   auto weights = models::QwenModelWeights::LoadFromGguf(*reader, error_msg);
-  if (!weights.has_value() ||
-      !QwenHrxModelContract::Supports(weights->config, error_msg)) {
+  if (!weights.has_value()) {
+    return nullptr;
+  }
+  const auto contract =
+      QwenHrxArtifactContract::FromConfig(weights->config, error_msg);
+  if (!contract.has_value()) {
     return nullptr;
   }
   auto tokenizer =
@@ -116,7 +91,7 @@ std::unique_ptr<QwenHrxModel> QwenHrxModel::CreateFromGguf(
 
   return std::unique_ptr<QwenHrxModel>(
       new QwenHrxModel(std::move(reader), std::move(*weights),
-                       std::move(tokenizer), std::move(regions)));
+                       std::move(tokenizer), *contract, std::move(regions)));
 }
 
 std::optional<HrxBufferBinding> QwenHrxModel::Bind(

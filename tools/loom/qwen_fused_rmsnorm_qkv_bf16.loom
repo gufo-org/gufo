@@ -106,4 +106,4 @@ check.case public @qwen_fused_rmsnorm_qkv_case {
 
 check.benchmark<@qwen_fused_rmsnorm_qkv_case> @qwen_rmsnorm_qkv_decode {rows = 2}
 
-check.benchmark<@qwen_fused_rmsnorm_qkv_case> @qwen_rmsnorm_qkv_full {rows = 4096}
+check.benchmark<@qwen_fused_rmsnorm_qkv_case> @qwen_rmsnorm_qkv_full {rows = 10240}

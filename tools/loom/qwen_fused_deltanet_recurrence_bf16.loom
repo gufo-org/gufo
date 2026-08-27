@@ -12,7 +12,7 @@ func.def inline @bf16_dot32(%a: vector<32xf32>, %b: vector<32xbf16>) -> (f32) {
   func.return %sum : f32
 }
 
-config.decl @qwen_fused_deltanet_recurrence_bf16.head_capacity : %value: index where [range(%value, 1, 64)]
+config.decl @qwen_fused_deltanet_recurrence_bf16.head_capacity : %value: index where [range(%value, 1, 16)]
 
 kernel.def @qwen_fused_deltanet_recurrence_bf16(%heads: index) {
   %unit = index.constant 1 : index
@@ -22,7 +22,7 @@ kernel.def @qwen_fused_deltanet_recurrence_bf16(%heads: index) {
 } launch(%heads: index, %state: buffer, %q: buffer, %v: buffer, %beta: buffer, %out: buffer) {
   %base = index.constant 0 : offset
   %head_capacity = config.get @qwen_fused_deltanet_recurrence_bf16.head_capacity : index
-  %head_count = index.assume %heads [range(%heads, 1, 64), le(%heads, %head_capacity)] : index
+  %head_count = index.assume %heads [range(%heads, 1, 16), le(%heads, %head_capacity)] : index
   %head_idx = kernel.workgroup.id<x> : index
   %lane = kernel.workitem.id<x> : index
   %leader = index.constant 0 : index

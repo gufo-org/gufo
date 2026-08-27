@@ -3,7 +3,7 @@
 // Computes:
 //   x_norm = (x / sqrt(mean(x^2) + eps)) * gamma
 //   logits = lm_head @ x_norm
-// Vocab Size = 152064, Hidden Size = 5120
+// Vocab Size = 248320, Hidden Size = 5120
 // ============================================================================
 
 func.def inline @bf16_dot32(%act: vector<32xf32>, %weight: vector<32xbf16>) -> (f32) {
@@ -14,7 +14,7 @@ func.def inline @bf16_dot32(%act: vector<32xf32>, %weight: vector<32xbf16>) -> (
   func.return %sum : f32
 }
 
-config.decl @qwen_fused_final_norm_head_bf16.vocab_capacity : %value: index where [range(%value, 2, 152064), mul(%value, 2)]
+config.decl @qwen_fused_final_norm_head_bf16.vocab_capacity : %value: index where [range(%value, 2, 248320), mul(%value, 2)]
 
 kernel.def @qwen_fused_final_norm_head_bf16(%rows: index) {
   %row_block = index.constant 2 : index
@@ -26,7 +26,7 @@ kernel.def @qwen_fused_final_norm_head_bf16(%rows: index) {
 } launch(%rows: index, %input: buffer, %gamma: buffer, %head_weight: buffer, %logits: buffer) {
   %base = index.constant 0 : offset
   %vocab_cap = config.get @qwen_fused_final_norm_head_bf16.vocab_capacity : index
-  %row_count = index.assume %rows [range(%rows, 2, 152064), mul(%rows, 2), le(%rows, %vocab_cap)] : index
+  %row_count = index.assume %rows [range(%rows, 2, 248320), mul(%rows, 2), le(%rows, %vocab_cap)] : index
   %row_tile = kernel.workgroup.id<x> : index
   %lane = kernel.workitem.id<x> : index
   %row_block = index.constant 2 : index
@@ -75,7 +75,7 @@ kernel.def @qwen_fused_final_norm_head_bf16(%rows: index) {
 }
 
 check.case public @qwen_final_head_case {
-  %rows = check.param.choice values([2, 152064]) name("rows") : index
+  %rows = check.param.choice values([2, 248320]) name("rows") : index
   %input = check.generate.fill value(0.0) : tensor<5120xf32>
   %gamma = check.generate.fill value(1.0) : tensor<5120xf32>
   %head_weight = check.generate.fill value(0.0) : tensor<[%rows]x5120xbf16>

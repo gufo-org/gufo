@@ -50,11 +50,13 @@ kernel.def @qwen_fused_layer_attn_bf16(%rows: index) {
     %input_base0 = index.mul %lane, %vector_width : index
     %input_base = index.assume %input_base0 [mul(%input_base0, 32)] : index
 
-    %in_noalias, %gamma_noalias, %weight_noalias, %q_noalias = buffer.assume.noalias %input, %gamma, %w_qkv, %q_out : buffer, buffer, buffer, buffer
+    %in_noalias, %gamma_noalias, %weight_noalias, %q_noalias, %k_noalias, %v_noalias = buffer.assume.noalias %input, %gamma, %w_qkv, %q_out, %k_cache, %v_cache : buffer, buffer, buffer, buffer, buffer, buffer
     %in_view = buffer.view %in_noalias[%base] : buffer -> view<5120xf32>
     %gamma_view = buffer.view %gamma_noalias[%base] : buffer -> view<5120xf32>
     %weight_view = buffer.view %weight_noalias[%base] : buffer -> view<[%row_count]x5120xbf16>
-    %q_view = buffer.view %q_noalias[%base] : buffer -> view<[%row_count]xf32>
+    %q_view = buffer.view %q_noalias[%base] : buffer -> view<6144xf32>
+    %k_view = buffer.view %k_noalias[%base] : buffer -> view<1024xf32>
+    %v_view = buffer.view %v_noalias[%base] : buffer -> view<1024xf32>
 
     // 1. RMSNorm scaling in registers
     %x_raw = vector.load %in_view[%input_base] : view<5120xf32> -> vector<32xf32>
@@ -73,8 +75,50 @@ kernel.def @qwen_fused_layer_attn_bf16(%rows: index) {
 
     %is_leader = index.cmp eq, %lane, %leader : index
     scf.if %is_leader {
-      view.store %dot0, %q_view[%bounded_row0] : f32, view<[%row_count]xf32>
-      view.store %dot1, %q_view[%bounded_row1] : f32, view<[%row_count]xf32>
+      %q_end = index.constant 6144 : index
+      %k_end = index.constant 7168 : index
+
+      %row0_is_q = index.cmp ult, %bounded_row0, %q_end : index
+      scf.if %row0_is_q {
+        %q_idx0 = index.assume %bounded_row0 [range(%bounded_row0, 0, 6144)] : index
+        view.store %dot0, %q_view[%q_idx0] : f32, view<6144xf32>
+      }
+      %row0_after_q = index.cmp uge, %bounded_row0, %q_end : index
+      scf.if %row0_after_q {
+        %row0_is_k = index.cmp ult, %bounded_row0, %k_end : index
+        scf.if %row0_is_k {
+          %k_idx0_raw = index.sub %bounded_row0, %q_end : index
+          %k_idx0 = index.assume %k_idx0_raw [range(%k_idx0_raw, 0, 1024)] : index
+          view.store %dot0, %k_view[%k_idx0] : f32, view<1024xf32>
+        }
+        %row0_is_v = index.cmp uge, %bounded_row0, %k_end : index
+        scf.if %row0_is_v {
+          %v_idx0_raw = index.sub %bounded_row0, %k_end : index
+          %v_idx0 = index.assume %v_idx0_raw [range(%v_idx0_raw, 0, 1024)] : index
+          view.store %dot0, %v_view[%v_idx0] : f32, view<1024xf32>
+        }
+      }
+
+      %row1_is_q = index.cmp ult, %bounded_row1, %q_end : index
+      scf.if %row1_is_q {
+        %q_idx1 = index.assume %bounded_row1 [range(%bounded_row1, 0, 6144)] : index
+        view.store %dot1, %q_view[%q_idx1] : f32, view<6144xf32>
+      }
+      %row1_after_q = index.cmp uge, %bounded_row1, %q_end : index
+      scf.if %row1_after_q {
+        %row1_is_k = index.cmp ult, %bounded_row1, %k_end : index
+        scf.if %row1_is_k {
+          %k_idx1_raw = index.sub %bounded_row1, %q_end : index
+          %k_idx1 = index.assume %k_idx1_raw [range(%k_idx1_raw, 0, 1024)] : index
+          view.store %dot1, %k_view[%k_idx1] : f32, view<1024xf32>
+        }
+        %row1_is_v = index.cmp uge, %bounded_row1, %k_end : index
+        scf.if %row1_is_v {
+          %v_idx1_raw = index.sub %bounded_row1, %k_end : index
+          %v_idx1 = index.assume %v_idx1_raw [range(%v_idx1_raw, 0, 1024)] : index
+          view.store %dot1, %v_view[%v_idx1] : f32, view<1024xf32>
+        }
+      }
     }
   }
   kernel.return
@@ -87,13 +131,16 @@ check.case public @qwen_layer_attn_case {
   %w_qkv = check.generate.fill value(0.0) : tensor<[%rows]x5120xbf16>
   %cos = check.generate.fill value(1.0) : tensor<64xf32>
   %sin = check.generate.fill value(0.0) : tensor<64xf32>
-  %q_out = check.generate.fill value(0.0) : tensor<[%rows]xf32>
-  %k_cache = check.generate.fill value(0.0) : tensor<[%rows]xf32>
-  %v_cache = check.generate.fill value(0.0) : tensor<[%rows]xf32>
-  %expected = check.generate.fill value(0.0) : tensor<[%rows]xf32>
+  %q_out = check.generate.fill value(0.0) : tensor<6144xf32>
+  %k_cache = check.generate.fill value(0.0) : tensor<1024xf32>
+  %v_cache = check.generate.fill value(0.0) : tensor<1024xf32>
+  %expected_q = check.generate.fill value(0.0) : tensor<6144xf32>
+  %expected_kv = check.generate.fill value(0.0) : tensor<1024xf32>
 
-  kernel.launch @qwen_fused_layer_attn_bf16[%rows](%rows, %input, %gamma, %w_qkv, %cos, %sin, %q_out, %k_cache, %v_cache) : [index](index, tensor<5120xf32>, tensor<5120xf32>, tensor<[%rows]x5120xbf16>, tensor<64xf32>, tensor<64xf32>, tensor<[%rows]xf32>, tensor<[%rows]xf32>, tensor<[%rows]xf32>)
-  check.expect.close actual(%q_out) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<[%rows]xf32>
+  kernel.launch @qwen_fused_layer_attn_bf16[%rows](%rows, %input, %gamma, %w_qkv, %cos, %sin, %q_out, %k_cache, %v_cache) : [index](index, tensor<5120xf32>, tensor<5120xf32>, tensor<[%rows]x5120xbf16>, tensor<64xf32>, tensor<64xf32>, tensor<6144xf32>, tensor<1024xf32>, tensor<1024xf32>)
+  check.expect.close actual(%q_out) expected(%expected_q) atol(0.0001) rtol(0.0001) nan(same) : tensor<6144xf32>
+  check.expect.close actual(%k_cache) expected(%expected_kv) atol(0.0001) rtol(0.0001) nan(same) : tensor<1024xf32>
+  check.expect.close actual(%v_cache) expected(%expected_kv) atol(0.0001) rtol(0.0001) nan(same) : tensor<1024xf32>
   check.return
 }
 
