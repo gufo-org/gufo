@@ -5,11 +5,16 @@
 
 #include "src/cli/bench/bench.hpp"
 #include "src/cli/diagnose/diagnose.h"
+#include "src/cli/eval/eval.hpp"
 #include "src/cli/prompt/prompt.hpp"
 #include "src/cli/serve/serve.hpp"
 #include "src/cli/video/video.hpp"
 
-constexpr std::string_view kGufoVersion = "0.1.0";
+#ifndef GUFO_VERSION
+#define GUFO_VERSION "development"
+#endif
+
+constexpr std::string_view kGufoVersion = GUFO_VERSION;
 
 namespace {
 
@@ -27,6 +32,7 @@ void print_help(std::string_view program_name) {
       << "  prompt         Execute one prompt request and exit\n"
       << "  chat           Start an interactive terminal conversation\n"
       << "  bench          Benchmark prompt processing and token generation\n"
+      << "  eval           Evaluate an OpenAI-compatible text server\n"
       << "  video          Generate MiniMax H3 text-to-video\n"
       << "  diagnose       Inspect system hardware, memory, and drivers\n"
       << "  help           Print help for a specific command\n\n"
@@ -84,6 +90,9 @@ int run(std::span<const char* const> args) {
     if (sub == "bench") {
       return gufo::cli::RunBench(help_flag);
     }
+    if (sub == "eval") {
+      return gufo::cli::RunEval(help_flag);
+    }
     if (sub == "video") {
       return gufo::cli::RunVideo(help_flag);
     }
@@ -108,6 +117,10 @@ int run(std::span<const char* const> args) {
 
   if (first_arg == "bench") {
     return gufo::cli::RunBench(options.subspan(1));
+  }
+
+  if (first_arg == "eval") {
+    return gufo::cli::RunEval(options.subspan(1));
   }
 
   if (first_arg == "prompt") {

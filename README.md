@@ -18,6 +18,9 @@ Qwen3.8-27B BF16 and DeepSeek V4 Flash Q2-imatrix. Both models run through the
 terminal `gufo prompt` command, `gufo bench`, and `gufo serve`.
 DeepSeek uses its own graph, state, quantized layouts, and kernels under
 `src/models/deepseek_v4_flash`; it does not call Qwen compute code.
+`gufo eval` exercises any already running OpenAI-compatible text server with
+the pinned Antirez DS4 capability questions and writes a sanitized regression
+artifact.
 
 Qwen3.5-0.8B remains the rapid-iteration quantization model. Qwen3.8-27B is the
 primary dense text model, while DeepSeek V4 Flash is the first quantized MoE
@@ -29,6 +32,7 @@ See:
 - [Project status and decisions](docs/PROJECT_STATUS.md)
 - [Implementation roadmap](docs/ROADMAP.md)
 - [Performance engineering and profiling](docs/PERFORMANCE.md)
+- [Capability evaluation](docs/EVAL.md)
 - [Offline tools](tools/README.md)
 - [Qwen3.5-0.8B benchmark](benchmarks/qwen3.5-0.8b/README.md)
 - [Qwen3.8-27B benchmark](benchmarks/qwen3.8-27b/README.md)

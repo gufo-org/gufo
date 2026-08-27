@@ -22,12 +22,17 @@ contain a second inference path.
 gufo serve
 gufo chat
 gufo prompt
+gufo eval
+gufo bench
+gufo video
 gufo diagnose
 ```
 
 `serve` starts the OpenAI-compatible server. `chat` maintains an interactive
-conversation. `prompt` executes one request and exits. `diagnose` runs
-non-interactive system and hardware diagnostics.
+conversation. `prompt` executes one request and exits. `eval` grades the pinned
+DS4 capability questions through an already running OpenAI-compatible server.
+`bench` measures model execution, `video` runs MiniMax H3 generation, and
+`diagnose` runs non-interactive system and hardware diagnostics.
 
 All commands support `--help` and `--version`. Unknown options and invalid
 combinations return an error instead of being ignored.
@@ -177,6 +182,23 @@ Rules:
 
 The CLI does not execute model-generated tool calls. It may display their
 structured representation.
+
+## Capability Evaluation
+
+`gufo eval` is always an HTTP client; it never loads a model directly:
+
+```bash
+gufo eval --questions 4 --output /tmp/gufo-eval.json
+```
+
+It discovers the sole model from `/v1/models`, then sends the pinned DS4 cases
+sequentially to `/v1/chat/completions`. Every request uses
+`max_completion_tokens: 16000`. Temperature and thinking controls are omitted
+by default so the server policy applies; `--greedy` sends `temperature: 0`.
+
+The initial surface is `--base-url`, `--questions`, `--greedy`, and the
+required `--output`. See [EVAL.md](EVAL.md) for dataset provenance, grading,
+artifact fields, and sanitization.
 
 ## Output Modes
 

@@ -10,6 +10,7 @@ set(GUFO_VERSION "development" CACHE STRING "Gufo build revision")
 include_directories(${CMAKE_SOURCE_DIR})
 find_package(ICU REQUIRED COMPONENTS uc)
 find_package(Threads REQUIRED)
+find_package(CURL REQUIRED)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
@@ -216,6 +217,8 @@ add_library(gufo_core STATIC
   src/models/minimax_h3/tokenizer.cpp
   src/models/minimax_h3/video_vae.cpp
   src/testing/compare/logit_comparator.cpp
+  src/eval/dataset.cpp
+  src/eval/extract.cpp
   src/eval/regrade.cpp
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
@@ -267,6 +270,7 @@ endif()
 add_executable(gufo
   src/cli/main.cpp
   src/cli/bench/bench.cpp
+  src/cli/eval/eval.cpp
   src/cli/prompt/prompt.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
@@ -281,9 +285,13 @@ add_executable(gufo
   src/cli/serve/http_server.cpp
   src/cli/serve/logging.cpp
   src/cli/serve/openai_chat.cpp
+  src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core)
+target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core CURL::libcurl)
 target_compile_definitions(gufo PRIVATE
+  GUFO_VERSION="${GUFO_VERSION}"
+  GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/quality/antirez-ds4.json"
+  GUFO_EVAL_INSTALLED_DATA="${CMAKE_INSTALL_PREFIX}/share/gufo/eval/antirez-ds4.json"
   GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   GUFO_QWEN3_TTS_REFERENCE_RUNNER="${CMAKE_CURRENT_SOURCE_DIR}/src/models/qwen3_tts/reference/run_official.py"
@@ -340,6 +348,9 @@ install(FILES
 install(FILES
   src/models/qwen3_tts/reference/run_official.py
   DESTINATION share/gufo/models/qwen3_tts)
+install(FILES
+  tests/quality/antirez-ds4.json
+  DESTINATION share/gufo/eval)
 if (ENGINE_ENABLE_HIP)
   install(TARGETS gufo-kernel-bench tune_hipblaslt benchmark_ssm_replay
     DESTINATION bin)
@@ -668,6 +679,28 @@ if (BUILD_TESTING)
   target_link_libraries(eval_regrade_test PRIVATE gufo_core)
   add_test(NAME eval_regrade_test COMMAND eval_regrade_test)
   set_tests_properties(eval_regrade_test PROPERTIES LABELS "cpu;quality;eval")
+
+  add_executable(eval_dataset_test tests/quality/eval_dataset_test.cpp)
+  target_compile_definitions(eval_dataset_test PRIVATE
+    GUFO_EVAL_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/quality/antirez-ds4.json")
+  target_link_libraries(eval_dataset_test PRIVATE gufo_core)
+  add_test(NAME eval_dataset_test COMMAND eval_dataset_test)
+  set_tests_properties(eval_dataset_test PROPERTIES
+    LABELS "cpu;quality;eval;dataset;extractor")
+
+  add_test(NAME eval_dataset_audit_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_eval_dataset.py)
+  set_tests_properties(eval_dataset_audit_test PROPERTIES
+    LABELS "cpu;quality;eval;dataset;provenance;license")
+
+  add_test(NAME eval_http_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_eval_http.py
+      --gufo $<TARGET_FILE:gufo>
+      --data ${CMAKE_CURRENT_SOURCE_DIR}/tests/quality/antirez-ds4.json)
+  set_tests_properties(eval_http_test PROPERTIES
+    LABELS "cpu;quality;eval;http;cli;server")
 
   add_executable(kernel_bench_test tests/benchmarks/kernel_bench_test.cpp)
   target_link_libraries(kernel_bench_test PRIVATE gufo_kernel_bench_support)

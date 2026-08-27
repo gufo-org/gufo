@@ -313,6 +313,7 @@
               pkgsSys.python3
               pkgsSys.findutils
               pkgsSys.icu
+              pkgsSys.curl
             ];
             src = staticAnalysisSource;
           } ''
@@ -423,6 +424,7 @@
               pkgsSys.ninja
               (pkgsSys.python3.withPackages (ps: [ ps.numpy ]))
               pkgsSys.icu
+              pkgsSys.curl
             ];
             src = testSource;
           } ''

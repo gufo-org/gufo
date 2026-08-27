@@ -216,7 +216,8 @@ after generation.
 
 - Add model-owned thinking/reasoning mode and effort controls; the current chat
   template intentionally uses the no-thinking path.
-- Run the compact `gufo-eval` qualification suite when #153 is implemented.
+- Retain and compare the first four-case `gufo eval` HTTP regression baseline;
+  Pi/coding-agent evaluation remains deferred under #153.
 - Profile and optimize the model-owned gfx1151 kernels under #155.
 - Add DSpark speculative decoding under #156.
 - Add model-owned offline calibration/imatrix tooling only when a new
