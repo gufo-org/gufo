@@ -495,7 +495,7 @@
           prCheck = pkgsSys.runCommand "check-pr" { } ''
             mkdir -p $out/bin
             cp "${self.packages.${system}.default}/bin/gufo" $out/bin/gufo
-            ln -sf gufo $out/bin/gufo-server
+            test -x "${self.packages.${system}.hrx}/bin/gufo"
 
             cat "${formatCheck}/result.txt"
             cat "${staticAnalysisCheck}/result.txt"
@@ -525,7 +525,8 @@ Explicit Offline Gate (not in hosted PR closure):
   - MiniMax H3 Pinned Teacher & Offline LPIPS Validation
 Production Package Validation:
   - gfx1151 ROCm/HIP + XRT build
-  - Installed gufo-server version/help smoke
+  - gfx1151 HRX/Loom compile and package build
+  - Installed gufo version/help smoke
 EOF
           '';
         in
@@ -539,6 +540,7 @@ EOF
           h3-ml-quality = h3MlQualityCheck;
           tests = testCheck;
           mk-serve = mkServeCheck;
+          hrx-compile = self.packages.${system}.hrx;
           pr = prCheck;
         }
       );

@@ -1,0 +1,64 @@
+// Native Q8_0 GEMV for Qwen projections with K=5120.
+// block_q8_0 is exactly: f16 d followed by 32 signed i8 values (34 bytes).
+
+config.decl @qwen_q8_0_gemv_k5120.row_capacity : %value: index where [range(%value, 1, 17408)]
+
+kernel.def @qwen_q8_0_gemv_k5120(%rows: index) {
+  %capacity = config.get @qwen_q8_0_gemv_k5120.row_capacity : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 160 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%rows: index, %weight: buffer, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_q8_0_gemv_k5120.row_capacity : index
+  %row_count = index.assume %rows [range(%rows, 1, 17408), le(%rows, %capacity)] : index
+  %row = kernel.workgroup.id<x> : index
+  %block = kernel.workitem.id<x> : index
+  %row_in_bounds = index.cmp ult, %row, %row_count : index
+  scf.if %row_in_bounds {
+    %bounded_row = index.assume %row [lt(%row, %row_count)] : index
+    %blocks_per_row = index.constant 160 : index
+    %qk = index.constant 32 : index
+    %block_bytes = index.constant 34 : offset
+    %qs_offset = index.constant 2 : offset
+    %packed_bytes = index.constant 4 : offset
+    %packed_values = index.constant 4 : index
+    %quarter_count = index.constant 8 : index
+    %loop_begin = index.constant 0 : index
+    %loop_step = index.constant 1 : index
+    %packed_index = index.constant 0 : index
+    %leader = index.constant 0 : index
+    %linear_row_base = index.mul %bounded_row, %blocks_per_row : index
+    %linear_block = index.add %linear_row_base, %block : index
+    %block_byte_base = index.scale %linear_block, %block_bytes : index, offset -> offset
+    %scale_view = buffer.view %weight[%block_byte_base] : buffer -> view<1xf16>
+    %scale_f16 = view.load %scale_view[%packed_index] : view<1xf16> -> f16
+    %scale = scalar.extf %scale_f16 : f16 to f32
+    %scale_vec = vector.splat %scale : vector<4xf32>
+    %input_block_base = index.mul %block, %qk : index
+    %zero = scalar.constant 0.0 : f32
+    %sum = scf.for %quarter = [%loop_begin to %quarter_count step %loop_step](%acc = %zero : f32) -> (f32) unroll {
+      %quarter_byte = index.scale %quarter, %packed_bytes : index, offset -> offset
+      %payload_base = index.add %block_byte_base, %qs_offset : offset
+      %q_byte_offset = index.add %payload_base, %quarter_byte : offset
+      %q_word_view = buffer.view %weight[%q_byte_offset] : buffer -> view<1xi32>
+      %q_packed = vector.load %q_word_view[%packed_index] : view<1xi32> -> vector<1xi32>
+      %q_i32 = vector.bitunpacks<8> %q_packed : vector<1xi32> -> vector<4xi32>
+      %q_f32 = vector.sitofp %q_i32 : vector<4xi32> to vector<4xf32>
+      %q_scaled = vector.mulf<reassoc|nnan|ninf|nsz|contract> %q_f32, %scale_vec : vector<4xf32>
+      %quarter_values = index.mul %quarter, %packed_values : index
+      %input_index = index.add %input_block_base, %quarter_values : index
+      %input_view = buffer.view %input[%base] : buffer -> view<5120xf32>
+      %x = vector.load %input_view[%input_index] : view<5120xf32> -> vector<4xf32>
+      %next = vector.dotf %q_scaled, %x, %acc : vector<4xf32>, vector<4xf32>, f32
+      scf.yield %next : f32
+    }
+    %dot = kernel.workgroup.reduce<addf> %sum : f32
+    %is_leader = index.cmp eq, %block, %leader : index
+    scf.if %is_leader {
+      %output_view = buffer.view %output[%base] : buffer -> view<[%row_count]xf32>
+      view.store %dot, %output_view[%bounded_row] : f32, view<[%row_count]xf32>
+    }
+  }
+  kernel.return
+}

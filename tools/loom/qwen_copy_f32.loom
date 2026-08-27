@@ -1,0 +1,41 @@
+// Native device-to-device F32 copy used by recurrent-state snapshots.
+
+config.decl @qwen_copy_f32.element_capacity : %value: index where [range(%value, 256, 50331648), mul(%value, 256)]
+
+kernel.def @qwen_copy_f32(%elements: index) {
+  %workgroup_size = index.constant 256 : index
+  %capacity = config.get @qwen_copy_f32.element_capacity : index
+  %workgroups = index.div %capacity, %workgroup_size : index
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%workgroups, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%elements: index, %source: buffer, %destination: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_copy_f32.element_capacity : index
+  %count = index.assume %elements [range(%elements, 256, 50331648), mul(%elements, 256), le(%elements, %capacity)] : index
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %workgroup_size = index.constant 256 : index
+  %element0 = index.madd %group, %workgroup_size, %lane : index
+  %in_bounds = index.cmp ult, %element0, %count : index
+  scf.if %in_bounds {
+    %element = index.assume %element0 [lt(%element0, %count)] : index
+    %source_noalias, %destination_noalias = buffer.assume.noalias %source, %destination : buffer, buffer
+    %source_view = buffer.view %source_noalias[%base] : buffer -> view<[%count]xf32>
+    %destination_view = buffer.view %destination_noalias[%base] : buffer -> view<[%count]xf32>
+    %value = view.load %source_view[%element] : view<[%count]xf32> -> f32
+    view.store %value, %destination_view[%element] : f32, view<[%count]xf32>
+  }
+  kernel.return
+}
+
+check.case public @qwen_copy_f32_case {
+  %elements = check.param.choice values([256]) name("elements") : index
+  %source = check.generate.fill value(1.25) : tensor<[%elements]xf32>
+  %destination = check.generate.fill value(0.0) : tensor<[%elements]xf32>
+  %expected = check.generate.fill value(1.25) : tensor<[%elements]xf32>
+  kernel.launch @qwen_copy_f32[%elements](%elements, %source, %destination) : [index](index, tensor<[%elements]xf32>, tensor<[%elements]xf32>)
+  check.expect.close actual(%destination) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<[%elements]xf32>
+  check.return
+}
+
+check.benchmark<@qwen_copy_f32_case> @qwen_copy_f32_small {elements = 256}

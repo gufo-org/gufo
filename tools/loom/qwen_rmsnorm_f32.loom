@@ -1,0 +1,49 @@
+// Qwen3.8 native primitive: true F32 RMSNorm for one 5120-wide row.
+
+kernel.def @qwen_rmsnorm_f32(%elements: index) {
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 160 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%elements: index, %input: buffer, %gamma: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %count = index.assume %elements [range(%elements, 5120, 5120)] : index
+  %lane = kernel.workitem.id<x> : index
+  %vector_width = index.constant 32 : index
+  %element_base0 = index.mul %lane, %vector_width : index
+  %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %count)] : index
+
+  %input_noalias, %gamma_noalias, %output_noalias = buffer.assume.noalias %input, %gamma, %output : buffer, buffer, buffer
+  %input_view = buffer.view %input_noalias[%base] : buffer -> view<5120xf32>
+  %gamma_view = buffer.view %gamma_noalias[%base] : buffer -> view<5120xf32>
+  %output_view = buffer.view %output_noalias[%base] : buffer -> view<5120xf32>
+
+  %x = vector.load %input_view[%element_base] : view<5120xf32> -> vector<32xf32>
+  %g = vector.load %gamma_view[%element_base] : view<5120xf32> -> vector<32xf32>
+  %square = vector.mulf<reassoc|nnan|ninf|nsz> %x, %x : vector<32xf32>
+  %zero = scalar.constant 0.0 : f32
+  %local_sum = vector.reduce<addf, reassoc|nnan|ninf|nsz> %square, %zero : vector<32xf32>, f32
+  %sum = kernel.workgroup.reduce<addf> %local_sum : f32
+  %width = scalar.constant 5120.0 : f32
+  %epsilon = scalar.constant 0.000001 : f32
+  %mean = scalar.divf<reassoc|nnan|ninf|nsz> %sum, %width : f32
+  %variance = scalar.addf<reassoc|nnan|ninf|nsz> %mean, %epsilon : f32
+  %inverse_rms = scalar.rsqrtf<afn> %variance : f32
+  %scale = vector.splat %inverse_rms : vector<32xf32>
+  %normalized = vector.mulf<reassoc|nnan|ninf|nsz> %x, %scale : vector<32xf32>
+  %result = vector.mulf<reassoc|nnan|ninf|nsz> %normalized, %g : vector<32xf32>
+  vector.store %result, %output_view[%element_base] : vector<32xf32> -> view<5120xf32>
+  kernel.return
+}
+
+check.case public @qwen_rmsnorm_f32_case {
+  %elements = check.param.choice values([5120]) name("elements") : index
+  %input = check.generate.fill value(1.0) : tensor<5120xf32>
+  %gamma = check.generate.fill value(2.0) : tensor<5120xf32>
+  %output = check.generate.fill value(0.0) : tensor<5120xf32>
+  %expected = check.generate.fill value(1.999999) : tensor<5120xf32>
+  kernel.launch @qwen_rmsnorm_f32[%elements](%elements, %input, %gamma, %output) : [index](index, tensor<5120xf32>, tensor<5120xf32>, tensor<5120xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<5120xf32>
+  check.return
+}
+
+check.benchmark<@qwen_rmsnorm_f32_case> @qwen_rmsnorm_f32_decode {elements = 5120}

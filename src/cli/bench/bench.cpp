@@ -21,6 +21,10 @@
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/testing/compare/logit_comparator.hpp"
 
+#if defined(ENGINE_ENABLE_HRX)
+#include "src/models/qwen/hrx/qwen_hrx_executor.hpp"
+#endif
+
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
@@ -50,6 +54,9 @@ void PrintBenchHelp(std::string_view program_name) {
   parser.AddOption("-ngl", "--n-gpu-layers", "N",
                    "Number of layers offloaded to GPU (default: 99)", "Model",
                    &opt.n_gpu_layers);
+  parser.AddOption("", "--qwen-backend", "MODE",
+                   "Qwen backend: hip or hrx-native (default: hip)", "Model",
+                   &opt.qwen_backend);
 
   parser.AddOption("-p", "--n-prompt", "n,n,...",
                    "Prompt token lengths to benchmark (default: 64,128,512)",
@@ -473,6 +480,20 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   parser.AddOption("-ngl", "--n-gpu-layers", "N",
                    "Number of layers offloaded to GPU (default: 99)", "Model",
                    &opt.n_gpu_layers);
+  parser.AddCustomOption(
+      "", "--qwen-backend", "MODE",
+      "Qwen backend: hip or hrx-native (default: hip)", "Model",
+      [&opt](std::string_view, std::string_view value,
+             std::string* error) -> bool {
+        if (value != "hip" && value != "hrx-native") {
+          if (error != nullptr) {
+            *error = "Invalid Qwen backend: " + std::string(value);
+          }
+          return false;
+        }
+        opt.qwen_backend = value;
+        return true;
+      });
 
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
@@ -668,6 +689,144 @@ int RunBench(std::span<const char* const> args) {
   }
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
+
+  if (opt.qwen_backend == "hrx-native") {
+    if (!opt.speculative_backend.empty() || opt.validate_prefill_tokens != 0 ||
+        opt.n_depths != std::vector<std::size_t>{0} ||
+        opt.n_gpu_layers != 99 || opt.repetitions == 0) {
+      std::cerr << "Error: the bare-minimum hrx-native backend supports only "
+                   "depth 0, all layers, positive repetitions, greedy "
+                   "sequential execution, and no prefill validation or "
+                   "speculative decoding\n";
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+#if defined(ENGINE_ENABLE_HRX)
+    const auto max_or_zero = [](const std::vector<std::size_t>& values) {
+      return values.empty() ? std::size_t{0}
+                            : *std::max_element(values.begin(), values.end());
+    };
+    constexpr std::size_t kGenerationPrimeTokens = 16;
+    const std::size_t max_prompt = max_or_zero(opt.n_prompts);
+    const std::size_t max_generation = max_or_zero(opt.n_gens);
+    if (max_generation > std::numeric_limits<std::uint32_t>::max() -
+                             kGenerationPrimeTokens) {
+      std::cerr << "Error: requested native HRX context is too large.\n";
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    const std::size_t required_context =
+        std::max(max_prompt, kGenerationPrimeTokens + max_generation);
+    if (required_context == 0 ||
+        required_context > std::numeric_limits<std::uint32_t>::max()) {
+      std::cerr << "Error: native HRX benchmark requires a non-zero context.\n";
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    auto native_executor = hrx::QwenHrxExecutor::CreateFromGguf(
+        reader, static_cast<std::uint32_t>(required_context),
+        STRIX_HRX_KERNEL_DIR, &err);
+    if (native_executor == nullptr) {
+      std::cerr << "Error creating native HRX Qwen executor: " << err << '\n';
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    if (!native_executor->ModelExecutionReady()) {
+      std::cerr << "Error: native HRX Q8_0 execution is not complete. Missing "
+                   "capabilities:\n";
+      for (const auto& capability :
+           native_executor->MissingModelCapabilities()) {
+        std::cerr << "  - " << capability << '\n';
+      }
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    PrintModelLoadTime(model_load_start);
+    std::cout << "backend=HRX-native model="
+              << native_executor->GetConfig().model_name << '\n';
+
+    const auto print_native_result = [](std::string_view name,
+                                        const std::vector<double>& runs) {
+      const auto stats = ComputeStats(runs);
+      std::cout << name << ": " << std::fixed << std::setprecision(2)
+                << stats.mean << " +/- " << stats.stddev << " t/s\n";
+    };
+    for (const std::size_t prompt_length : opt.n_prompts) {
+      if (prompt_length == 0) {
+        std::cerr << "Error: native HRX prompt length must be non-zero.\n";
+        return 1;
+      }
+      const auto tokens = MakeBenchmarkTokens(prompt_length);
+      std::vector<double> runs;
+      for (std::size_t repetition = 0; repetition < opt.repetitions;
+           ++repetition) {
+        if (!native_executor->Reset(&err)) {
+          std::cerr << "Error resetting native HRX executor: " << err << '\n';
+          return 1;
+        }
+        const auto begin = std::chrono::high_resolution_clock::now();
+        const auto next = native_executor->ForwardPromptBatch(
+            tokens, 0, true, &err);
+        const auto end = std::chrono::high_resolution_clock::now();
+        if (!next.has_value()) {
+          std::cerr << "Error in native HRX prompt execution: " << err << '\n';
+          return 1;
+        }
+        const double seconds = std::chrono::duration<double>(end - begin).count();
+        if (seconds > 0.0) {
+          runs.push_back(static_cast<double>(prompt_length) / seconds);
+        }
+      }
+      print_native_result(MakeTestName("pp", prompt_length, 0), runs);
+    }
+
+    for (const std::size_t generation_length : opt.n_gens) {
+      if (generation_length == 0) {
+        std::cerr << "Error: native HRX generation length must be non-zero.\n";
+        return 1;
+      }
+      const auto prime = MakeBenchmarkTokens(kGenerationPrimeTokens);
+      std::vector<double> runs;
+      for (std::size_t repetition = 0; repetition < opt.repetitions;
+           ++repetition) {
+        if (!native_executor->Reset(&err)) {
+          std::cerr << "Error resetting native HRX executor: " << err << '\n';
+          return 1;
+        }
+        auto current =
+            native_executor->ForwardPromptBatch(prime, 0, true, &err);
+        if (!current.has_value()) {
+          std::cerr << "Error priming native HRX generation: " << err << '\n';
+          return 1;
+        }
+        std::uint32_t position = kGenerationPrimeTokens;
+        const auto begin = std::chrono::high_resolution_clock::now();
+        for (std::size_t step = 0; step < generation_length; ++step) {
+          current = native_executor->ForwardToken(*current, position, true,
+                                                  &err);
+          if (!current.has_value()) {
+            std::cerr << "Error in native HRX generation: " << err << '\n';
+            return 1;
+          }
+          ++position;
+        }
+        const auto end = std::chrono::high_resolution_clock::now();
+        const double seconds = std::chrono::duration<double>(end - begin).count();
+        if (seconds > 0.0) {
+          runs.push_back(static_cast<double>(generation_length) / seconds);
+        }
+      }
+      print_native_result(MakeTestName("tg", generation_length, 0), runs);
+    }
+    std::cout << '\n';
+    return 0;
+#else
+    std::cerr << "Error: --qwen-backend hrx-native requires "
+                 "ENGINE_ENABLE_HRX\n";
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+#endif
+  }
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsDeepSeekV4Flash(*reader)) {

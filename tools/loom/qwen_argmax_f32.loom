@@ -1,0 +1,35 @@
+// Deterministic first-wins greedy argmax over the Qwen3.8 vocabulary.
+// Serial by design for the correctness MVP; replace after end-to-end parity.
+
+kernel.def @qwen_argmax_f32(%elements: index) {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%elements: index, %logits: buffer, %token: buffer) {
+  %base = index.constant 0 : offset
+  %count = index.assume %elements [range(%elements, 248320, 248320)] : index
+  %logits_view = buffer.view %logits[%base] : buffer -> view<248320xf32>
+  %token_view = buffer.view %token[%base] : buffer -> view<1xi32>
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %first = view.load %logits_view[%zero] : view<248320xf32> -> f32
+  %best_score, %best_index = scf.for %i = [%one to %count step %one](%score = %first : f32, %index = %zero : index) -> (f32, index) {
+    %candidate = view.load %logits_view[%i] : view<248320xf32> -> f32
+    %better = scalar.cmpf olt, %score, %candidate : f32
+    %next_score = scf.select %better, %candidate, %score : f32
+    %next_index = scf.select %better, %i, %index : index
+    scf.yield %next_score, %next_index : f32, index
+  }
+  %token_i32 = index.cast %best_index : index to i32
+  view.store %token_i32, %token_view[0] : i32, view<1xi32>
+  kernel.return
+}
+
+check.case public @qwen_argmax_f32_case {
+  %elements = check.param.choice values([248320]) name("elements") : index
+  %logits = check.generate.fill value(0.0) : tensor<248320xf32>
+  %token = check.generate.fill value(-1) : tensor<1xi32>
+  %expected = check.generate.fill value(0) : tensor<1xi32>
+  kernel.launch @qwen_argmax_f32[%elements](%elements, %logits, %token) : [index](index, tensor<248320xf32>, tensor<1xi32>)
+  check.expect.equal actual(%token) expected(%expected) : tensor<1xi32>
+  check.return
+}

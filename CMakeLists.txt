@@ -271,6 +271,8 @@ if (ENGINE_ENABLE_HRX)
   target_sources(gufo_core PRIVATE
     src/core/hrx/hrx_backend.cpp
     src/core/hrx/hrx_module_loader.cpp
+    src/core/hrx/hrx_owned_buffer.cpp
+    src/models/qwen/hrx/qwen_hrx_arena.cpp
     src/models/qwen/hrx/qwen_hrx_model.cpp
     src/models/qwen/hrx/qwen_hrx_executor.cpp
   )
@@ -294,24 +296,44 @@ if (ENGINE_ENABLE_HRX)
     set(GUFO_AOT_KERNELS_DIR "${CMAKE_CURRENT_BINARY_DIR}/share/gufo/kernels")
     file(MAKE_DIRECTORY "${GUFO_AOT_KERNELS_DIR}")
 
+    # Package the explicit primitives used by the strict native Q8_0 path.
+    # Removed macro-layer sketches remain excluded from model capabilities.
     set(LOOM_KERNELS
       tools/loom/qwen_fused_swiglu_bf16.loom
       tools/loom/qwen_fused_rmsnorm_qkv_bf16.loom
-      tools/loom/qwen_fused_deltanet_recurrence_bf16.loom
       tools/loom/qwen_fused_down_residual_bf16.loom
       tools/loom/qwen_fused_rope_kv_cache_bf16.loom
-      tools/loom/qwen_fused_final_norm_head_bf16.loom
-      tools/loom/qwen_fused_layer_attn_bf16.loom
-      tools/loom/qwen_fused_layer_ffn_bf16.loom
+      tools/loom/qwen_rmsnorm_f32.loom
+      tools/loom/qwen_residual_add_f32.loom
+      tools/loom/qwen_swiglu_pointwise_f32.loom
+      tools/loom/qwen_split_q_gate_f32.loom
+      tools/loom/qwen_copy_f32.loom
+      tools/loom/qwen_q8_0_decode_oracle.loom
+      tools/loom/qwen_q8_0_embedding_k5120.loom
+      tools/loom/qwen_q8_0_gemv_k5120.loom
+      tools/loom/qwen_q8_0_gemv_k6144.loom
+      tools/loom/qwen_q8_0_gemv_k17408.loom
+      tools/loom/qwen_q8_0_vocab_gemv_k5120.loom
+      tools/loom/qwen_per_head_rmsnorm_f32.loom
+      tools/loom/qwen_attention_decode_f32.loom
+      tools/loom/qwen_ssm_conv_silu_f32.loom
+      tools/loom/qwen_deltanet_prepare_f32.loom
+      tools/loom/qwen_deltanet_recurrence_f32.loom
+      tools/loom/qwen_argmax_f32.loom
     )
     set(LOOM_CONFIG_qwen_fused_swiglu_bf16 "qwen_fused_swiglu_bf16.row_capacity=17408")
     set(LOOM_CONFIG_qwen_fused_rmsnorm_qkv_bf16 "qwen_fused_rmsnorm_qkv_bf16.row_capacity=10240")
-    set(LOOM_CONFIG_qwen_fused_deltanet_recurrence_bf16 "qwen_fused_deltanet_recurrence_bf16.head_capacity=16")
     set(LOOM_CONFIG_qwen_fused_down_residual_bf16 "qwen_fused_down_residual_bf16.hidden_dim=5120")
     set(LOOM_CONFIG_qwen_fused_rope_kv_cache_bf16 "qwen_fused_rope_kv_cache_bf16.max_heads=24")
-    set(LOOM_CONFIG_qwen_fused_final_norm_head_bf16 "qwen_fused_final_norm_head_bf16.vocab_capacity=248320")
-    set(LOOM_CONFIG_qwen_fused_layer_attn_bf16 "qwen_fused_layer_attn_bf16.qkv_dim=8192")
-    set(LOOM_CONFIG_qwen_fused_layer_ffn_bf16 "qwen_fused_layer_ffn_bf16.hidden_dim=5120")
+    set(LOOM_CONFIG_qwen_residual_add_f32 "qwen_residual_add_f32.element_capacity=17408")
+    set(LOOM_CONFIG_qwen_swiglu_pointwise_f32 "qwen_swiglu_pointwise_f32.element_capacity=17408")
+    set(LOOM_CONFIG_qwen_copy_f32 "qwen_copy_f32.element_capacity=50331648")
+    set(LOOM_CONFIG_qwen_q8_0_gemv_k5120 "qwen_q8_0_gemv_k5120.row_capacity=17408")
+    set(LOOM_CONFIG_qwen_q8_0_gemv_k6144 "qwen_q8_0_gemv_k6144.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemv_k17408 "qwen_q8_0_gemv_k17408.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_vocab_gemv_k5120 "qwen_q8_0_vocab_gemv_k5120.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_per_head_rmsnorm_f32 "qwen_per_head_rmsnorm_f32.max_heads=24")
+    set(LOOM_CONFIG_qwen_attention_decode_f32 "qwen_attention_decode_f32.max_context=131072")
 
     set(COMPILED_LOOM_ARTIFACTS "")
     foreach(LOOM_SRC IN LISTS LOOM_KERNELS)
@@ -346,20 +368,7 @@ if (ENGINE_ENABLE_HRX)
       DESTINATION share/gufo/kernels)
   endif()
 
-  if (BUILD_TESTING AND LOOM_COMPILE_EXECUTABLE)
-    add_executable(hrx_backend_test tests/core/hrx_backend_test.cpp)
-    target_link_libraries(hrx_backend_test PRIVATE gufo_core)
-    add_test(NAME hrx_backend_test COMMAND hrx_backend_test)
-    set_tests_properties(hrx_backend_test PROPERTIES LABELS "gpu;hrx;core;backend")
 
-    add_executable(qwen_hrx_executor_test tests/models/qwen/qwen_hrx_executor_test.cpp)
-    target_compile_definitions(qwen_hrx_executor_test PRIVATE
-      GUFO_HRX_KERNEL_DIR=\"${GUFO_AOT_KERNELS_DIR}\")
-    target_link_libraries(qwen_hrx_executor_test PRIVATE gufo_core)
-    add_test(NAME qwen_hrx_executor_test COMMAND qwen_hrx_executor_test)
-    set_tests_properties(qwen_hrx_executor_test PROPERTIES LABELS "gpu;hrx;models;qwen")
-
-  endif()
 endif()
 
 add_executable(gufo
@@ -384,6 +393,7 @@ target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core)
 target_compile_definitions(gufo PRIVATE
   GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+  GUFO_HRX_KERNEL_DIR="${CMAKE_INSTALL_PREFIX}/share/gufo/kernels"
   GUFO_QWEN3_TTS_REFERENCE_RUNNER="${CMAKE_CURRENT_SOURCE_DIR}/src/models/qwen3_tts/reference/run_official.py"
   GUFO_QWEN3_TTS_INSTALLED_REFERENCE_RUNNER="${CMAKE_INSTALL_PREFIX}/share/gufo/models/qwen3_tts/run_official.py")
 
@@ -447,10 +457,30 @@ endif()
 include(CTest)
 
 if (BUILD_TESTING)
+  if (ENGINE_ENABLE_HRX)
+    add_executable(hrx_backend_test tests/core/hrx_backend_test.cpp)
+    target_link_libraries(hrx_backend_test PRIVATE strix_core)
+    add_test(NAME hrx_backend_test COMMAND hrx_backend_test)
+    set_tests_properties(hrx_backend_test PROPERTIES
+      LABELS "gpu;hrx;core;backend")
+
+    if (LOOM_COMPILE_EXECUTABLE)
+      add_executable(qwen_hrx_executor_test
+        tests/models/qwen/qwen_hrx_executor_test.cpp)
+      target_compile_definitions(qwen_hrx_executor_test PRIVATE
+        STRIX_HRX_KERNEL_DIR=\"${STRIX_AOT_KERNELS_DIR}\")
+      target_link_libraries(qwen_hrx_executor_test PRIVATE strix_core)
+      add_test(NAME qwen_hrx_executor_test COMMAND qwen_hrx_executor_test)
+      set_tests_properties(qwen_hrx_executor_test PROPERTIES
+        LABELS "gpu;hrx;models;qwen")
+    endif()
+  endif()
+
   add_executable(qwen_hrx_model_contract_test
     tests/models/qwen/qwen_hrx_model_contract_test.cpp)
   target_include_directories(qwen_hrx_model_contract_test PRIVATE
     ${CMAKE_SOURCE_DIR})
+  target_link_libraries(qwen_hrx_model_contract_test PRIVATE strix_core)
   add_test(NAME qwen_hrx_model_contract_test
     COMMAND qwen_hrx_model_contract_test)
   set_tests_properties(qwen_hrx_model_contract_test PROPERTIES

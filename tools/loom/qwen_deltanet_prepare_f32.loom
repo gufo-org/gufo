@@ -1,0 +1,54 @@
+// Qwen3.8 per-head DeltaNet parameter preparation in place.
+// Matches the CPU/HIP oracle exactly:
+//   alpha = exp(a * ((alpha + dt > 20)
+//                        ? alpha + dt
+//                        : log1p(exp(alpha + dt))))
+//   beta = 1 / (1 + exp(-beta))
+
+kernel.def @qwen_deltanet_prepare_f32(%heads: index) {
+  %unit = index.constant 1 : index
+  %capacity = index.constant 48 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%capacity, %unit, %unit) : index
+} launch(%heads: index, %alpha: buffer, %beta: buffer, %a: buffer, %dt: buffer) {
+  %base = index.constant 0 : offset
+  %head_count = index.assume %heads [range(%heads, 48, 48)] : index
+  %head0 = kernel.workitem.id<x> : index
+  %head = index.assume %head0 [lt(%head0, %head_count)] : index
+  %alpha_view = buffer.view %alpha[%base] : buffer -> view<48xf32>
+  %beta_view = buffer.view %beta[%base] : buffer -> view<48xf32>
+  %a_view = buffer.view %a[%base] : buffer -> view<48xf32>
+  %dt_view = buffer.view %dt[%base] : buffer -> view<48xf32>
+  %alpha_raw = view.load %alpha_view[%head] : view<48xf32> -> f32
+  %beta_raw = view.load %beta_view[%head] : view<48xf32> -> f32
+  %a_value = view.load %a_view[%head] : view<48xf32> -> f32
+  %dt_value = view.load %dt_view[%head] : view<48xf32> -> f32
+  %biased = scalar.addf %alpha_raw, %dt_value : f32
+  %threshold = scalar.constant 20.0 : f32
+  %large = scalar.cmpf ogt, %biased, %threshold : f32
+  %biased_exp = scalar.expf %biased : f32
+  %softplus_regular = scalar.log1pf %biased_exp : f32
+  %softplus = scf.select %large, %biased, %softplus_regular : f32
+  %decay_exponent = scalar.mulf %softplus, %a_value : f32
+  %decay = scalar.expf %decay_exponent : f32
+  %negative_beta = scalar.negf %beta_raw : f32
+  %beta_exp = scalar.expf %negative_beta : f32
+  %one = scalar.constant 1.0 : f32
+  %beta_denominator = scalar.addf %one, %beta_exp : f32
+  %beta_sigmoid = scalar.divf %one, %beta_denominator : f32
+  view.store %decay, %alpha_view[%head] : f32, view<48xf32>
+  view.store %beta_sigmoid, %beta_view[%head] : f32, view<48xf32>
+  kernel.return
+}
+
+check.case public @qwen_deltanet_prepare_case {
+  %heads = check.param.choice values([48]) name("heads") : index
+  %alpha = check.generate.fill value(0.0) : tensor<48xf32>
+  %beta = check.generate.fill value(0.0) : tensor<48xf32>
+  %a = check.generate.fill value(-1.0) : tensor<48xf32>
+  %dt = check.generate.fill value(0.0) : tensor<48xf32>
+  %expected = check.generate.fill value(0.5) : tensor<48xf32>
+  kernel.launch @qwen_deltanet_prepare_f32[%heads](%heads, %alpha, %beta, %a, %dt) : [index](index, tensor<48xf32>, tensor<48xf32>, tensor<48xf32>, tensor<48xf32>)
+  check.expect.close actual(%alpha) expected(%expected) atol(0.000001) rtol(0.000001) nan(same) : tensor<48xf32>
+  check.expect.close actual(%beta) expected(%expected) atol(0.000001) rtol(0.000001) nan(same) : tensor<48xf32>
+  check.return
+}

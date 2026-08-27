@@ -25,6 +25,7 @@ void TestDefaultOptions() {
   Expect(options->draft_tokens == 7, "default draft ceiling is seven");
   Expect(options->draft_policy == "rolling", "default draft policy is rolling");
   Expect(options->min_draft_tokens == 1, "default minimum draft is one");
+  Expect(options->qwen_backend == "hip", "default Qwen backend is HIP");
 }
 
 void TestDepthOptions() {
@@ -58,6 +59,14 @@ void TestHybridMtpOptions() {
   Expect(options->min_draft_tokens == 2, "minimum draft count parsed");
 }
 
+void TestNativeHrxBackendOption() {
+  const std::array<const char*, 2> args = {"--qwen-backend", "hrx-native"};
+  const auto options = strix::cli::ParseBenchOptions(args);
+  Expect(options.has_value(), "native HRX backend option parses");
+  Expect(options->qwen_backend == "hrx-native",
+         "native HRX backend option is retained");
+}
+
 void TestInvalidDepth() {
   std::string error;
   const std::array<const char*, 2> args = {"--n-depth", "invalid"};
@@ -73,6 +82,11 @@ void TestInvalidDepth() {
                                                  "--min-draft-tokens", "4"};
   Expect(!gufo::cli::ParseBenchOptions(range_args, &error).has_value(),
          "invalid draft range rejected");
+
+  const std::array<const char*, 2> backend_args = {"--qwen-backend",
+                                                   "unknown"};
+  Expect(!strix::cli::ParseBenchOptions(backend_args, &error).has_value(),
+         "invalid Qwen backend rejected");
 }
 
 }  // namespace
@@ -81,6 +95,7 @@ int main() {
   TestDefaultOptions();
   TestDepthOptions();
   TestHybridMtpOptions();
+  TestNativeHrxBackendOption();
   TestInvalidDepth();
   std::cout << "All benchmark CLI tests passed.\n";
   return 0;

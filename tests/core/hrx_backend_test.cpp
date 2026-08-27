@@ -1,10 +1,14 @@
 #include "src/core/hrx/hrx_backend.hpp"
 
+#include <array>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include "src/core/hrx/hrx_graph_executor.hpp"
+#include "src/core/hrx/hrx_owned_buffer.hpp"
 #include "src/core/hrx/hrx_module_loader.hpp"
 #include "src/core/hrx/hrx_utils.hpp"
 
@@ -27,6 +31,61 @@ void TestHrxBackendLifecycle() {
 
   backend.Shutdown();
   Expect(!backend.IsInitialized(), "HrxBackend::Shutdown cleans up state");
+}
+
+void TestHrxOwnedBuffer() {
+  auto& backend = strix::hrx::HrxBackend::Instance();
+  Expect(backend.Initialize(0), "Backend initialize before owned buffer test");
+
+  std::string error;
+  Expect(!strix::hrx::HrxOwnedBuffer::Allocate(backend.Stream(), 0, &error)
+              .has_value(),
+         "zero-length HRX allocation is rejected");
+  Expect(!error.empty(), "rejected HRX allocation reports an error");
+
+  auto allocation =
+      strix::hrx::HrxOwnedBuffer::Allocate(backend.Stream(), 64, &error);
+  Expect(allocation.has_value(), "owned HRX allocation succeeds");
+  Expect(allocation->IsValid(), "owned HRX allocation is valid");
+  Expect(allocation->Size() == 64, "owned HRX allocation records size");
+  Expect(allocation->Slice(16, 32).has_value(),
+         "in-bounds HRX slice is accepted");
+  Expect(!allocation->Slice(48, 32).has_value(),
+         "out-of-bounds HRX slice is rejected");
+
+  const std::array<std::uint32_t, 4> input{1, 2, 3, 4};
+  std::array<std::uint32_t, 4> output{};
+  const auto slice = allocation->Slice(16, sizeof(input));
+  Expect(slice.has_value(), "copy test slice is valid");
+  Expect(strix::hrx::HrxCopyFromHost(backend.Device(), input.data(), *slice,
+                                     sizeof(input), &error),
+         "checked HRX H2D copy succeeds");
+  Expect(strix::hrx::HrxCopyToHost(backend.Device(), *slice, output.data(),
+                                   sizeof(output), &error),
+         "checked HRX D2H copy succeeds");
+  Expect(input == output, "checked HRX copy roundtrip preserves data");
+  Expect(setenv("STRIX_ENABLE_HRX_GRAPH", "0", 1) == 0,
+         "optional graph kill switch is set for mandatory fill test");
+  Expect(strix::hrx::HrxFillBuffer(backend.Device(), backend.Stream(), *slice,
+                                   0, &error),
+         "mandatory native HRX fill bypasses optional graph kill switch");
+  Expect(unsetenv("STRIX_ENABLE_HRX_GRAPH") == 0,
+         "optional graph kill switch is cleared after fill test");
+  Expect(strix::hrx::HrxCopyToHost(backend.Device(), *slice, output.data(),
+                                   sizeof(output), &error),
+         "filled HRX slice can be read back");
+  Expect(output == std::array<std::uint32_t, 4>{},
+         "native HRX graph fill zeroes the requested slice");
+
+  auto moved = std::move(*allocation);
+  Expect(moved.IsValid(), "moved HRX owner retains allocation");
+  Expect(!allocation->IsValid(), "moved-from HRX owner is empty");
+  Expect(strix::hrx::kHrxNativeDeviceCopyAvailable,
+         "artifact-backed native device copy is explicit");
+  Expect(strix::hrx::kHrxNativeDeviceFillAvailable,
+         "graph-backed native device fill is available");
+  moved.Reset();
+  backend.Shutdown();
 }
 
 void TestHrxModuleLoader() {
@@ -107,6 +166,7 @@ void TestHrxGraphExecutor() {
 int main() {
   std::cout << "Running hrx_backend_test...\n";
   TestHrxBackendLifecycle();
+  TestHrxOwnedBuffer();
   TestHrxModuleLoader();
   TestHrxGraphExecutor();
   std::cout << "All hrx_backend_test assertions passed!\n";

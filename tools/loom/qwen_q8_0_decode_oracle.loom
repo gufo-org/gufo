@@ -1,0 +1,38 @@
+// Deterministic non-zero oracle for the Q8_0 signed-byte/f16-scale decode
+// used by the production embedding and GEMV artifacts.
+
+kernel.def @qwen_q8_0_decode_oracle() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%packed_fields: buffer, %scale: buffer, %rhs: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %zero_index = index.constant 0 : index
+  %packed_view = buffer.view %packed_fields[%base] : buffer -> view<1xi32>
+  %scale_view = buffer.view %scale[%base] : buffer -> view<1xf16>
+  %rhs_view = buffer.view %rhs[%base] : buffer -> view<4xf32>
+  %output_view = buffer.view %output[%base] : buffer -> view<1xf32>
+  %packed = vector.load %packed_view[%zero_index] : view<1xi32> -> vector<1xi32>
+  %signed_i32 = vector.bitunpacks<8> %packed : vector<1xi32> -> vector<4xi32>
+  %signed_f32 = vector.sitofp %signed_i32 : vector<4xi32> to vector<4xf32>
+  %scale_f16 = view.load %scale_view[%zero_index] : view<1xf16> -> f16
+  %scale_f32 = scalar.extf %scale_f16 : f16 to f32
+  %scale_vector = vector.splat %scale_f32 : vector<4xf32>
+  %scaled = vector.mulf<reassoc|nnan|ninf|nsz|contract> %signed_f32, %scale_vector : vector<4xf32>
+  %rhs_values = vector.load %rhs_view[%zero_index] : view<4xf32> -> vector<4xf32>
+  %zero = scalar.constant 0.0 : f32
+  %dot = vector.dotf %scaled, %rhs_values, %zero : vector<4xf32>, vector<4xf32>, f32
+  view.store %dot, %output_view[%zero_index] : f32, view<1xf32>
+  kernel.return
+}
+
+check.case public @qwen_q8_0_decode_oracle_case {
+  // 117637117 = bytes [-3, -1, 2, 7] in little-endian order.
+  %packed = check.generate.fill value(117637117) : tensor<1xi32>
+  %scale = check.generate.fill value(0.5) : tensor<1xf16>
+  %rhs = check.generate.iota offset(1.0) step(1.0) : tensor<4xf32>
+  %output = check.generate.fill value(0.0) : tensor<1xf32>
+  %expected = check.generate.fill value(14.5) : tensor<1xf32>
+  kernel.launch @qwen_q8_0_decode_oracle(%packed, %scale, %rhs, %output) : (tensor<1xi32>, tensor<1xf16>, tensor<4xf32>, tensor<1xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<1xf32>
+  check.return
+}

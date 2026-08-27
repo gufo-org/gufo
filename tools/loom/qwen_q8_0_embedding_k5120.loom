@@ -1,0 +1,39 @@
+// Native Q8_0 token embedding lookup for Qwen hidden width 5120.
+// block_q8_0 is exactly: f16 d followed by 32 signed i8 values (34 bytes).
+
+kernel.def @qwen_q8_0_embedding_k5120(%token: index, %vocab: index) {
+  %blocks_per_row = index.constant 160 : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%blocks_per_row, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%token: index, %vocab: index, %embedding: buffer, %output: buffer) {
+  %bounded_vocab = index.assume %vocab [range(%vocab, 1, 248320)] : index
+  %bounded_token = index.assume %token [range(%token, 0, 248319), lt(%token, %bounded_vocab)] : index
+  %block = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %blocks_per_row = index.constant 160 : index
+  %block_bytes = index.constant 34 : offset
+  %qs_offset = index.constant 2 : offset
+  %one_byte = index.constant 1 : offset
+  %linear_row_base = index.mul %bounded_token, %blocks_per_row : index
+  %linear_block = index.add %linear_row_base, %block : index
+  %block_byte_base = index.scale %linear_block, %block_bytes : index, offset -> offset
+  %zero_index = index.constant 0 : index
+  %scale_view = buffer.view %embedding[%block_byte_base] : buffer -> view<1xf16>
+  %scale_f16 = view.load %scale_view[%zero_index] : view<1xf16> -> f16
+  %scale = scalar.extf %scale_f16 : f16 to f32
+  %lane_byte = index.scale %lane, %one_byte : index, offset -> offset
+  %payload_base = index.add %block_byte_base, %qs_offset : offset
+  %q_byte_offset = index.add %payload_base, %lane_byte : offset
+  %q_view = buffer.view %embedding[%q_byte_offset] : buffer -> view<1xi8>
+  %q = view.load %q_view[%zero_index] : view<1xi8> -> i8
+  %q_f32 = scalar.sitofp %q : i8 to f32
+  %value = scalar.mulf<reassoc|nnan|ninf|nsz> %q_f32, %scale : f32
+  %qk = index.constant 32 : index
+  %output_block = index.mul %block, %qk : index
+  %output_index = index.add %output_block, %lane : index
+  %base = index.constant 0 : offset
+  %output_view = buffer.view %output[%base] : buffer -> view<5120xf32>
+  view.store %value, %output_view[%output_index] : f32, view<5120xf32>
+  kernel.return
+}

@@ -21,7 +21,10 @@ struct HrxGraphCaptureKey {
 
 class HrxGraphDecodeExecutor {
 public:
-  HrxGraphDecodeExecutor() {
+  explicit HrxGraphDecodeExecutor(bool ignore_graph_kill_switch = false) {
+    if (ignore_graph_kill_switch) {
+      return;
+    }
     const char* env = std::getenv("GUFO_ENABLE_HRX_GRAPH");
     if (env != nullptr) {
       const std::string_view val(env);

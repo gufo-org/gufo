@@ -145,6 +145,8 @@ stdenv.mkDerivation (finalAttrs: {
     mkdir -p $out/bin
     cp gufo $out/bin/gufo
     if [ "${if hrxSupport then "1" else "0"}" = 1 ]; then
+      mkdir -p $out/share/gufo/kernels
+      cp -R share/gufo/kernels/. $out/share/gufo/kernels/
       mv $out/bin/gufo $out/bin/.gufo-hrx-real
       makeWrapper $out/bin/.gufo-hrx-real $out/bin/gufo \
         --prefix LD_PRELOAD : ${hrx-system}/lib/libamdhip64.so
