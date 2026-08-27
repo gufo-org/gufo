@@ -74,7 +74,8 @@ struct QwenHrxArenaLayout {
     const auto q = bytes({contract.FullAttentionQueryWidth(), sizeof(float)});
     const auto k = bytes({contract.FullAttentionKeyWidth(), sizeof(float)});
     const auto v = bytes({contract.FullAttentionValueWidth(), sizeof(float)});
-    const auto rope = bytes({contract.RotaryDim() / 2, sizeof(float)});
+    const auto rope =
+        bytes({max_context, contract.RotaryDim() / 2, sizeof(float)});
     const auto ssm_qkv = bytes({contract.SsmQkvWidth(), sizeof(float)});
     const auto ssm_gate = bytes({contract.SsmGateWidth(), sizeof(float)});
     const auto ssm_ab = bytes({contract.SsmAlphaBetaWidth(), sizeof(float)});

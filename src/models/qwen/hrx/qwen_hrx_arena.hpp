@@ -69,14 +69,20 @@ public:
   [[nodiscard]] const QwenHrxArenaLayout& Layout() const noexcept {
     return layout_;
   }
-  [[nodiscard]] HrxBufferBinding Binding(
-      QwenHrxArenaBuffer buffer) const noexcept;
+  [[nodiscard]] HrxBufferBinding Binding(QwenHrxArenaBuffer buffer,
+                                         std::size_t offset_bytes = 0,
+                                         std::size_t length = 0) const noexcept;
   void SetCurrentPosition(std::uint32_t position) noexcept {
     current_position_ = position;
   }
   [[nodiscard]] std::uint32_t CurrentPosition() const noexcept {
     return current_position_;
   }
+
+  /// Precomputes RoPE frequencies into device memory for all positions up to
+  /// max_context.
+  [[nodiscard]] bool PrecomputeRope(float rope_theta,
+                                    std::string* error_msg = nullptr);
 
   /// Zeros caches and recurrent state with native HRX graph fill nodes. No
   /// synchronous host roundtrip is used here.

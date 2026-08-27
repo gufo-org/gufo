@@ -1,7 +1,9 @@
 #include "src/models/qwen/hrx/qwen_hrx_arena.hpp"
 
 #include <array>
+#include <cmath>
 #include <utility>
+#include <vector>
 
 namespace gufo::hrx {
 namespace {
@@ -189,13 +191,57 @@ std::optional<QwenHrxArena> QwenHrxArena::Create(
   return std::optional<QwenHrxArena>{std::move(arena)};
 }
 
-HrxBufferBinding QwenHrxArena::Binding(
-    QwenHrxArenaBuffer buffer) const noexcept {
+HrxBufferBinding QwenHrxArena::Binding(QwenHrxArenaBuffer buffer,
+                                       std::size_t offset_bytes,
+                                       std::size_t length) const noexcept {
   const std::size_t index = BufferIndex(buffer);
   if (index >= buffers_.size()) {
     return {};
   }
-  return buffers_[index].Binding();
+  const auto base = buffers_[index].Binding();
+  if (offset_bytes > base.length) {
+    return {};
+  }
+  const std::size_t actual_length =
+      (length == 0) ? (base.length - offset_bytes) : length;
+  if (offset_bytes + actual_length > base.length) {
+    return {};
+  }
+  return HrxBufferBinding{
+      .buffer = base.buffer,
+      .offset = base.offset + offset_bytes,
+      .length = actual_length,
+  };
+}
+
+bool QwenHrxArena::PrecomputeRope(float rope_theta, std::string* error_msg) {
+  constexpr std::size_t kRotaryDim = 64;
+  constexpr std::size_t kHalfDim = kRotaryDim / 2;
+  const std::size_t total_elements = layout_.max_context * kHalfDim;
+  std::vector<float> cos_table(total_elements);
+  std::vector<float> sin_table(total_elements);
+
+  for (std::uint32_t pos = 0; pos < layout_.max_context; ++pos) {
+    for (std::size_t dim = 0; dim < kHalfDim; ++dim) {
+      const double exponent =
+          2.0 * static_cast<double>(dim) / static_cast<double>(kRotaryDim);
+      const double frequency =
+          1.0 / std::pow(static_cast<double>(rope_theta), exponent);
+      const double angle = static_cast<double>(pos) * frequency;
+      cos_table[pos * kHalfDim + dim] = static_cast<float>(std::cos(angle));
+      sin_table[pos * kHalfDim + dim] = static_cast<float>(std::sin(angle));
+    }
+  }
+
+  const auto cos_binding = Binding(QwenHrxArenaBuffer::kRopeCos);
+  const auto sin_binding = Binding(QwenHrxArenaBuffer::kRopeSin);
+  if (!HrxCopyFromHost(device_, cos_table.data(), cos_binding,
+                       cos_table.size() * sizeof(float), error_msg) ||
+      !HrxCopyFromHost(device_, sin_table.data(), sin_binding,
+                       sin_table.size() * sizeof(float), error_msg)) {
+    return false;
+  }
+  return true;
 }
 
 bool QwenHrxArena::Reset(std::string* error_msg) {
@@ -211,8 +257,7 @@ bool QwenHrxArena::Reset(std::string* error_msg) {
   };
   for (const auto buffer : state_buffers) {
     const auto binding = Binding(buffer);
-    if (!HrxFillBuffer(device_, stream_, binding, 0, error_msg) ||
-        !VerifyZeroEdges(device_, binding, error_msg)) {
+    if (!HrxFillBuffer(device_, stream_, binding, 0, error_msg)) {
       return false;
     }
   }

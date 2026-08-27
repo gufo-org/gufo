@@ -160,6 +160,12 @@ std::unique_ptr<QwenHrxExecutor> QwenHrxExecutor::CreateFromGguf(
   executor->arena_.emplace(std::move(*arena));
   executor->max_context_ = max_context;
 
+  if (!executor->arena_->PrecomputeRope(
+          executor->model_->GetConfig().rope_theta, error_msg)) {
+    Reject("failed to precompute RoPE tables in native HRX arena", error_msg);
+    return nullptr;
+  }
+
   // Capabilities stay explicit so the opt-in CLI cannot silently run an
   // incomplete model.
   if (!executor->Q8MathReady()) {
@@ -879,24 +885,14 @@ bool QwenHrxExecutor::DispatchAttentionQ8(std::size_t layer_index,
                   error_msg);
   }
 
-  std::array<float, 32> cosine{};
-  std::array<float, 32> sine{};
-  for (std::size_t index = 0; index < cosine.size(); ++index) {
-    const double exponent = 2.0 * static_cast<double>(index) /
-                            static_cast<double>(contract_.RotaryDim());
-    const double frequency =
-        1.0 / std::pow(static_cast<double>(config.rope_theta), exponent);
-    const double angle = static_cast<double>(position) * frequency;
-    cosine[index] = static_cast<float>(std::cos(angle));
-    sine[index] = static_cast<float>(std::sin(angle));
-  }
-  const auto cos_binding = arena_->Binding(QwenHrxArenaBuffer::kRopeCos);
-  const auto sin_binding = arena_->Binding(QwenHrxArenaBuffer::kRopeSin);
-  if (!HrxCopyFromHost(backend_.Device(), cosine.data(), cos_binding,
-                       cosine.size() * sizeof(float), error_msg) ||
-      !HrxCopyFromHost(backend_.Device(), sine.data(), sin_binding,
-                       sine.size() * sizeof(float), error_msg)) {
-    return false;
+  const std::size_t rotary_bytes =
+      (static_cast<std::size_t>(contract_.RotaryDim()) / 2) * sizeof(float);
+  const auto cos_binding = arena_->Binding(
+      QwenHrxArenaBuffer::kRopeCos, position * rotary_bytes, rotary_bytes);
+  const auto sin_binding = arena_->Binding(
+      QwenHrxArenaBuffer::kRopeSin, position * rotary_bytes, rotary_bytes);
+  if (!cos_binding.IsValid() || !sin_binding.IsValid()) {
+    return Reject("native HRX RoPE position is outside arena range", error_msg);
   }
 
   const std::size_t cache_row_bytes =
