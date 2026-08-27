@@ -11,6 +11,7 @@
 #include "src/models/qwen/hrx/qwen_hrx_capabilities.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_contract.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_manifest.hpp"
+#include "src/models/qwen/hrx/qwen_hrx_policy.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_tensor_binding.hpp"
 
 namespace {
@@ -390,6 +391,47 @@ void TestHrxCapabilityNegotiation() {
          "missing primitives list includes Argmax");
 }
 
+void TestHrxExecutionPolicyParsing() {
+  std::string error;
+
+  // Default / empty / none
+  auto p_none = gufo::hrx::QwenHrxExecutionPolicy::Parse("none", &error);
+  Expect(!p_none.fused_swiglu_bf16 && !p_none.fused_down_residual_bf16,
+         "none clears all fusions");
+  Expect(p_none.ToString() == "none", "none serializes as 'none'");
+
+  // All
+  auto p_all = gufo::hrx::QwenHrxExecutionPolicy::Parse("all", &error);
+  Expect(p_all.fused_swiglu_bf16 && p_all.fused_down_residual_bf16 &&
+             p_all.fused_rmsnorm_qkv_bf16 && p_all.fused_rope_kv_bf16,
+         "all enables all fusions");
+
+  // Specific fusions
+  auto p_swiglu = gufo::hrx::QwenHrxExecutionPolicy::Parse("swiglu", &error);
+  Expect(p_swiglu.fused_swiglu_bf16 && !p_swiglu.fused_down_residual_bf16,
+         "swiglu enables swiglu fusion only");
+
+  auto p_down =
+      gufo::hrx::QwenHrxExecutionPolicy::Parse("down-residual", &error);
+  Expect(p_down.fused_down_residual_bf16 && !p_down.fused_swiglu_bf16,
+         "down-residual enables down-residual fusion only");
+
+  auto p_combo = gufo::hrx::QwenHrxExecutionPolicy::Parse(
+      "swiglu,down-residual,rope-kv", &error);
+  Expect(p_combo.fused_swiglu_bf16 && p_combo.fused_down_residual_bf16 &&
+             p_combo.fused_rope_kv_bf16 && !p_combo.fused_rmsnorm_qkv_bf16,
+         "combo enables requested fusions");
+  Expect(p_combo.ToString() == "swiglu,down-residual,rope-kv",
+         "combo serializes correctly");
+
+  // Invalid flag
+  auto p_bad =
+      gufo::hrx::QwenHrxExecutionPolicy::Parse("invalid-flag-123", &error);
+  Expect(!error.empty() &&
+             error.find("Unknown HRX fusion flag") != std::string::npos,
+         "invalid fusion flag is reported");
+}
+
 }  // namespace
 
 int main() {
@@ -401,6 +443,7 @@ int main() {
   TestArenaLayout();
   TestManifestValidation();
   TestHrxCapabilityNegotiation();
+  TestHrxExecutionPolicyParsing();
   std::cout << "All qwen_hrx_model_contract_test assertions passed!\n";
   return 0;
 }

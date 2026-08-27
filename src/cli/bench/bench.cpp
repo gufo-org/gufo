@@ -58,6 +58,10 @@ void PrintBenchHelp(std::string_view program_name) {
   parser.AddOption("", "--qwen-backend", "MODE",
                    "Qwen backend: auto, hip, or hrx-native (default: hip)",
                    "Model", &opt.qwen_backend);
+  parser.AddOption(
+      "", "--hrx-fusions", "FLAGS",
+      "Native HRX fusions: none, all, swiglu, down-residual (default: none)",
+      "Model", &opt.hrx_fusions);
 
   parser.AddOption("-p", "--n-prompt", "n,n,...",
                    "Prompt token lengths to benchmark (default: 64,128,512)",
@@ -615,6 +619,23 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       });
 
   parser.AddCustomOption(
+      "", "--hrx-fusions", "FLAGS",
+      "Native HRX fusions: none, all, swiglu, down-residual (default: none)",
+      "Model",
+      [&opt](std::string_view, std::string_view value,
+             [[maybe_unused]] std::string* error) -> bool {
+#if defined(ENGINE_ENABLE_HRX)
+        const auto policy =
+            gufo::hrx::QwenHrxExecutionPolicy::Parse(value, error);
+        if (error != nullptr && !error->empty()) {
+          return false;
+        }
+#endif
+        opt.hrx_fusions = value;
+        return true;
+      });
+
+  parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
       "Prompt token lengths to benchmark (default: 64,128,512)", "Workload",
       [&opt, &explicit_p](std::string_view, std::string_view val,
@@ -958,8 +979,16 @@ int RunBench(std::span<const char* const> args) {
       return 1;
     }
     PrintModelLoadTime(model_load_start);
+    const auto policy =
+        gufo::hrx::QwenHrxExecutionPolicy::Parse(opt.hrx_fusions, &err);
+    if (!err.empty()) {
+      std::cerr << "Error parsing --hrx-fusions: " << err << '\n';
+      return 1;
+    }
+    native_executor->SetPolicy(policy);
     std::cout << "backend=HRX-native model="
-              << native_executor->GetConfig().model_name << '\n';
+              << native_executor->GetConfig().model_name
+              << " fusions=" << policy.ToString() << '\n';
 
     if (opt.validate_hrx_tokens > 0) {
 #if defined(ENGINE_ENABLE_HIP)

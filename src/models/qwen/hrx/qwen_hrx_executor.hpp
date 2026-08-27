@@ -17,6 +17,7 @@
 #include "src/models/qwen/hrx/qwen_hrx_contract.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_manifest.hpp"
 #include "src/models/qwen/hrx/qwen_hrx_model.hpp"
+#include "src/models/qwen/hrx/qwen_hrx_policy.hpp"
 
 namespace gufo::hrx {
 
@@ -125,6 +126,13 @@ public:
 
   void SetFaultInjection(FaultInjectionPoint point) noexcept {
     fault_injection_ = point;
+  }
+
+  void SetPolicy(const QwenHrxExecutionPolicy& policy) noexcept {
+    policy_ = policy;
+  }
+  [[nodiscard]] const QwenHrxExecutionPolicy& Policy() const noexcept {
+    return policy_;
   }
 
   [[nodiscard]] bool IsPoisoned() const noexcept { return poisoned_; }
@@ -295,6 +303,7 @@ private:
   bool poisoned_{false};
   std::string poison_reason_;
   FaultInjectionPoint fault_injection_{FaultInjectionPoint::kNone};
+  QwenHrxExecutionPolicy policy_{};
   bool prototype_artifacts_ready_{false};
   bool model_execution_ready_{false};
 };
