@@ -26,9 +26,11 @@ if [ "$native_backend" -eq 1 ]; then
   saved_ifs=$IFS
   IFS=': '
   for library in ${LD_PRELOAD-}; do
-    if [ "$library" = "@HRX_HIP_LIBRARY@" ]; then
-      continue
-    fi
+    case "$library" in
+      @HRX_HIP_LIBRARY@|*/libamdhip64.so|*/libamdhip64.so.*)
+        continue
+        ;;
+    esac
     if [ -z "$filtered_preload" ]; then
       filtered_preload=$library
     else

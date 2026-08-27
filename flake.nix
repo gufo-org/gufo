@@ -450,7 +450,7 @@
             fi
 
             mkdir -p build && cd build
-            cmake "$src" -GNinja $ccache_launcher -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DSTRIX_ENABLE_WARNINGS=ON -DSTRIX_ENABLE_SANITIZERS=OFF
+            cmake "$src" -GNinja $ccache_launcher -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DGUFO_ENABLE_WARNINGS=ON -DGUFO_ENABLE_SANITIZERS=OFF
             ninja
             ctest --output-on-failure
 
