@@ -407,6 +407,7 @@ void QwenHrxExecutor::ResetKernelState() {
   q8_gemv_k5120_executable_ = nullptr;
   q8_gemv_k6144_executable_ = nullptr;
   q8_gemv_k17408_executable_ = nullptr;
+  q8_gemv_k17408_wg256_executable_ = nullptr;
   q8_vocab_gemv_k5120_executable_ = nullptr;
   per_head_rmsnorm_executable_ = nullptr;
   attention_decode_executable_ = nullptr;
@@ -533,6 +534,22 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir) {
     }
   }
 
+  // Optimization candidates are optional so existing artifact directories
+  // retain feature parity with the required reference path.
+  const auto q8_k17408_wg256_path =
+      std::filesystem::path(kernels_dir) / "qwen_q8_0_gemv_k17408_wg256.fb";
+  if (std::filesystem::exists(q8_k17408_wg256_path)) {
+    hrx_status_t status = loader_.LoadFromFile(
+        backend_.Device(), "qwen_q8_gemv_k17408_wg256",
+        q8_k17408_wg256_path.string(), "amdgpu", "gfx1151");
+    if (hrx_status_is_ok(status)) {
+      q8_gemv_k17408_wg256_executable_ =
+          loader_.GetExecutable("qwen_q8_gemv_k17408_wg256");
+    } else {
+      hrx_status_ignore(status);
+    }
+  }
+
   prototype_artifacts_ready_ = missing_kernel_artifacts_.empty();
   return prototype_artifacts_ready_;
 }
@@ -596,8 +613,14 @@ bool QwenHrxExecutor::DispatchQ8Gemv(const HrxBufferBinding& weight,
       row_capacity = contract_.HiddenSize();
       break;
     case 17408:
-      executable = q8_gemv_k17408_executable_;
-      workgroup_size = 544;
+      if (std::getenv("GUFO_HRX_Q8_K17408_WG544") == nullptr &&
+          q8_gemv_k17408_wg256_executable_ != nullptr) {
+        executable = q8_gemv_k17408_wg256_executable_;
+        workgroup_size = 256;
+      } else {
+        executable = q8_gemv_k17408_executable_;
+        workgroup_size = 544;
+      }
       row_capacity = contract_.HiddenSize();
       break;
     default:

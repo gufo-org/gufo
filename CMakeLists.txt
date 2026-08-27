@@ -313,6 +313,7 @@ if (ENGINE_ENABLE_HRX)
       tools/loom/qwen_q8_0_gemv_k5120.loom
       tools/loom/qwen_q8_0_gemv_k6144.loom
       tools/loom/qwen_q8_0_gemv_k17408.loom
+      tools/loom/qwen_q8_0_gemv_k17408_wg256.loom
       tools/loom/qwen_q8_0_vocab_gemv_k5120.loom
       tools/loom/qwen_per_head_rmsnorm_f32.loom
       tools/loom/qwen_attention_decode_f32.loom
@@ -331,6 +332,7 @@ if (ENGINE_ENABLE_HRX)
     set(LOOM_CONFIG_qwen_q8_0_gemv_k5120 "qwen_q8_0_gemv_k5120.row_capacity=17408")
     set(LOOM_CONFIG_qwen_q8_0_gemv_k6144 "qwen_q8_0_gemv_k6144.row_capacity=5120")
     set(LOOM_CONFIG_qwen_q8_0_gemv_k17408 "qwen_q8_0_gemv_k17408.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemv_k17408_wg256 "qwen_q8_0_gemv_k17408_wg256.row_capacity=5120")
     set(LOOM_CONFIG_qwen_q8_0_vocab_gemv_k5120 "qwen_q8_0_vocab_gemv_k5120.row_capacity=248320")
     set(LOOM_CONFIG_qwen_per_head_rmsnorm_f32 "qwen_per_head_rmsnorm_f32.max_heads=24")
     set(LOOM_CONFIG_qwen_attention_decode_f32 "qwen_attention_decode_f32.max_context=131072")

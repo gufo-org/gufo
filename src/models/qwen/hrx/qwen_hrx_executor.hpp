@@ -38,8 +38,8 @@ public:
   bool InitializeAllKernels(
       const std::string& kernels_dir = "share/gufo/kernels");
 
-  /// True only when every retained prototype artifact has loaded. This is not
-  /// end-to-end model readiness.
+  /// True only when every required runtime artifact has loaded. Model-level
+  /// readiness additionally requires valid model bindings and arena state.
   [[nodiscard]] bool PrototypeArtifactsReady() const noexcept {
     return prototype_artifacts_ready_;
   }
@@ -98,8 +98,8 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }
-  /// Exposes stable arena operands for staged target parity only. Full model
-  /// callers should use ForwardToken once the model-level readiness gate opens.
+  /// Exposes stable arena operands for focused primitive and stage parity.
+  /// Full-model callers should use ForwardToken.
   [[nodiscard]] std::optional<HrxBufferBinding> GetArenaBinding(
       QwenHrxArenaBuffer buffer) const noexcept {
     if (!arena_.has_value()) {
@@ -215,6 +215,7 @@ private:
   hrx_executable_t q8_gemv_k5120_executable_{nullptr};
   hrx_executable_t q8_gemv_k6144_executable_{nullptr};
   hrx_executable_t q8_gemv_k17408_executable_{nullptr};
+  hrx_executable_t q8_gemv_k17408_wg256_executable_{nullptr};
   hrx_executable_t q8_vocab_gemv_k5120_executable_{nullptr};
   hrx_executable_t per_head_rmsnorm_executable_{nullptr};
   hrx_executable_t attention_decode_executable_{nullptr};
