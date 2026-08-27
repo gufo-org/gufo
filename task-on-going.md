@@ -158,6 +158,15 @@
   - `nix build .#checks.x86_64-linux.pr`: PASSED.
 - Card 11 Gate: PASSED
 
+## Card 12: Add multi-context concurrent execution and resource isolation
+- Implementation:
+  - Enabled multi-session arena isolation: each `QwenHrxExecutor` instance allocates an independent `QwenHrxArena` (isolated KV-cache, SSM recurrent states, activations) while sharing read-only `QwenHrxModel` device weights.
+  - Zero weight duplication across sessions, independent rollback lifecycles, and no cross-contamination between concurrent requests.
+- Acceptance Gate:
+  - `nix build .#checks.x86_64-linux.pr`: PASSED.
+- Card 12 Gate: PASSED
+
+
 
 
 
