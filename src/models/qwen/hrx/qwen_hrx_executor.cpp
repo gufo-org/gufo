@@ -2570,12 +2570,14 @@ bool QwenHrxExecutor::DispatchSsmQ8(std::size_t layer_index,
   if (!alpha_beta_half.has_value()) {
     return Reject("native HRX SSM alpha/beta width overflows", error_msg);
   }
+  // Beta always lands in the second half of the alpha buffer, which is
+  // allocated at twice the alpha/beta width for exactly this. Keeping the pair
+  // contiguous even when the two GEMVs stay separate is what lets the decode
+  // path reuse the batch-native recurrence, whose prepared operand is one
+  // [tokens][2][width] block.
   const auto alpha_slice = SliceBinding(alpha_beta, 0, *alpha_beta_half);
   const auto beta_slice =
-      fused_alpha_beta
-          ? SliceBinding(alpha_beta, *alpha_beta_half, *alpha_beta_half)
-          : std::optional<HrxBufferBinding>(
-                arena_->Binding(QwenHrxArenaBuffer::kSsmBeta));
+      SliceBinding(alpha_beta, *alpha_beta_half, *alpha_beta_half);
   if (!alpha_slice || !beta_slice) {
     return Reject("native HRX SSM alpha/beta bindings are invalid", error_msg);
   }
@@ -2611,6 +2613,21 @@ bool QwenHrxExecutor::DispatchSsmQ8(std::size_t layer_index,
                                   contract_.SsmAlphaBetaWidth(),
                                   contract_.HiddenSize()));
   };
+  // Single-token decode reuses the batch-native recurrence at tokens=1: its
+  // grid is 768 workgroups against the per-head kernel's 48, and it carries no
+  // barriers, so decode stops paying for a launch shape sized for one head.
+  const auto batch_readout =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchSsmReadout);
+  const auto dispatch_recurrence = [&]() {
+    if (!BatchedDeltaNetReady()) {
+      return DispatchDeltaNetPrepared(conv, alpha, beta, layer.ssm_norm, gate,
+                                      *recurrent_state, recurrent);
+    }
+    return DispatchDeltaNetRecurrenceBatch(conv, alpha_beta, *recurrent_state,
+                                           batch_readout, 1) &&
+           DispatchDeltaNetReadoutBatch(batch_readout, layer.ssm_norm, gate,
+                                        recurrent, 1);
+  };
   if (!conv_state || !recurrent_state ||
       !DispatchRMSNorm(hidden, layer.attn_norm, normed) ||
       !DispatchQ8Gemv(layer.attn_qkv, normed, qkv, contract_.SsmQkvWidth(),
@@ -2620,8 +2637,7 @@ bool QwenHrxExecutor::DispatchSsmQ8(std::size_t layer_index,
       !dispatch_alpha_beta() ||
       !DispatchDeltaNetPrepare(alpha, beta, layer.ssm_a, layer.ssm_dt) ||
       !DispatchSsmConv(qkv, layer.ssm_conv1d, *conv_state, conv) ||
-      !DispatchDeltaNetPrepared(conv, alpha, beta, layer.ssm_norm, gate,
-                                *recurrent_state, recurrent) ||
+      !dispatch_recurrence() ||
       !DispatchQ8Gemv(layer.ssm_out, recurrent, projected,
                       contract_.HiddenSize(), contract_.SsmGateWidth()) ||
       !DispatchResidualAdd(hidden, projected, normed, contract_.HiddenSize()) ||

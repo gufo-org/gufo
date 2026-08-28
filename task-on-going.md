@@ -128,6 +128,34 @@ final 18.5, total 149.4 ms against HIP's roughly 131 ms (88%). FFN moves
 18.2 GiB in 80.7 ms, which is 225 GB/s - at the DRAM roofline, so the remaining
 decode gap is in the SSM and final stages, not in the projections.
 
+### Decode: the recurrence routed through the batch-native kernel
+
+The batch-native DeltaNet recurrence written for prefill was never used by
+decode, which still ran the original per-head kernel: 48 workgroups, LDS
+reductions, barriers. The batch kernel is correct at any token count, so decode
+now calls it with `tokens = 1` and gets a 768-workgroup, barrier-free grid.
+
+Two things had to line up first. The batch kernel takes alpha and beta as one
+`[tokens][2][width]` block, so decode now always writes beta into the second
+half of the alpha buffer - which is already allocated at twice the alpha/beta
+width - rather than into a separate buffer when the fused alpha/beta GEMV is
+off. The readout then runs through `kBatchSsmReadout` at `tokens = 1`.
+
+| measure | before | after |
+|---|---:|---:|
+| decode SSM stage | 39.7 ms | **29.8 ms** |
+| decode token | 149.4 ms | **139.7 ms** |
+| tg16 | 6.74 t/s | **7.19 t/s** |
+
+`--hrx-fusions none --validate-hrx 4` is a full PASS, worst max-absolute error
+7.63e-6, cosine 1.00000000. PP512 is unchanged at 402.35 t/s, as expected: the
+change only touches the single-token route.
+
+Decode is now at 94% of HIP's 7.62 t/s. The stage split is embedding 1.8 ms,
+attention 8.8, SSM 29.8, FFN 80.8, final 18.5. FFN is at the DRAM roofline and
+SSM is now close, so the final stage - about 73 GB/s for the 1.35 GiB
+vocabulary projection - is the one remaining outlier.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,
