@@ -24,6 +24,53 @@ after model load; measured on its own the same binary gives 310-319 t/s.)
 The change is a launch-order change only: prefill logits are bit-identical to
 the previous build (max absolute error 0.27421856, cosine 0.99989367).
 
+### The blocked projection is bound by LDS fragment reads
+
+An ablation finally identified the limiter. Hoisting the two RHS fragment loads
+out of the token-tile loop, so the kernel issues 2 instead of 16 of them per K
+block (numerically wrong, timing only), takes rows=17408/K=5120/128 tokens from
+**1.347 ms to 0.658 ms**. Nothing else moved the kernel by more than a few
+percent, so LDS fragment reads are roughly half its runtime.
+
+The obvious fix - give each wave two row tiles and four token tiles so it issues
+4 LHS + 8 RHS loads instead of 2 + 16 for the same sixteen MMAs and the same
+eight accumulator banks - was implemented and passes its oracle, but measures
+1.428 ms. Register pressure rose from 192 to 200 VGPRs, which drops the wave
+count per SIMD from 8 to 7. Loading the activation scales per slot instead of
+hoisting them did not recover the registers (still 200 VGPRs, 1.448 ms).
+
+Raising occupancy the other way fails too: a 64-token span with four
+accumulator banks compiles at 128 VGPRs and 10 waves per SIMD, but measures
+1.454 ms because halving the token span doubles the weight stream.
+
+The kernel is therefore at a local optimum: it is limited by LDS fragment
+reads, every restructuring that reduces them costs registers, and every
+restructuring that buys registers costs memory traffic. Twelve variants have
+now been measured:
+
+| variant | device time |
+|---|---:|
+| retained: 8x1 waves, wide staging, register prefetch | 1.347 ms |
+| RHS fragment loads hoisted (invalid, timing only) | 0.658 ms |
+| BK=2 staging | no change |
+| LDS double buffering | 1.314 ms |
+| depth-2 prefetch | 1.487 ms |
+| 256 rows per workgroup | 1.414 ms |
+| coalesced weight-address probe | 1.386 ms |
+| epilogue scale multiplies removed | 1.362 ms |
+| two independent MMA accumulator chains | 1.469 ms |
+| 2x4 wave ownership | 1.428 ms |
+| 2x4 wave ownership, scales per slot | 1.448 ms |
+| 64-token span, 128 VGPRs, 10 waves/SIMD | 1.454 ms |
+| 32-row x 512-token span | 5.091 ms per 512 tokens (1.06x) |
+
+The next experiment worth running is a wider LDS read: load 32 bytes per lane
+with a plain `vector.load`, then attach the two K-half fragment roles with
+`vector.fragment<rhs>` and `vector.slice`. That halves the fragment-load
+instruction count without adding live registers, which is the one combination
+none of the twelve variants achieved. The fragment lane mapping needed for it
+was already derived during the rejected T8 WMMA work.
+
 ### Widening the token span per workgroup is not the answer
 
 The obvious follow-up - give each workgroup more tokens so the weight stream is
