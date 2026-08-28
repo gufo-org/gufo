@@ -258,6 +258,89 @@ CUs, exactly one per CU, so it measures a latency-bound regime with no
 cross-workgroup overlap. Deployed chunks launch hundreds. Isolated numbers rank
 variants; only the end-to-end sweep decides them.
 
+### What the emitted ISA says limits the blocked projection
+
+The AMDGPU counter path is unavailable on this part:
+`iree_hal_amdgpu_profile_counter_select_family` accepts gfx11 only when
+`minor == 0 && stepping <= 2`, and gfx1151 is 11.5.1, so every counter name
+returns `UNIMPLEMENTED ... not mapped for gfx11.5.1`. (It also needs
+`libhsa-amd-aqlprofile64.so`, which is absent from the rocm-runtime closure but
+present in the `aqlprofile-7.2.3` store path.) The compiler's own artifact
+bundle answers the same question without it: `--artifact-bundle-policy=full`
+writes the target assembly.
+
+The hot K-block loop emits, per wave per block:
+
+| instruction | count |
+|---|---:|
+| v_wmma_i32_16x16x16_iu8 | 16 |
+| v_mov_b32 | 75 |
+| v_cvt_f32_i32 | 64 |
+| v_dual_mul_f32 | 52 |
+| v_dual_add_f32 | 41 |
+| ds_read_b128 | 16 |
+
+Sixteen matrix instructions against roughly 260 others. Removing the MMAs and
+re-timing gives 0.1769 ms against 0.3274 ms for the whole kernel, so the matrix
+work is 0.150 ms and everything else is 0.177 ms - **perfectly additive**.
+That is expected: `v_wmma` issues on the vector ALU, so within a wave the
+dequantize epilogue cannot overlap the matrix math, and every instruction
+removed is time removed.
+
+The 75 moves are a register-allocation artifact. Each pair's first MMA is
+emitted in the literal-zero form into one shared scratch range `v[96:103]` and
+then copied out eight registers at a time, while the second correctly
+accumulates in place (`v[136:143], ..., v[136:143]`). Two attempts to steer it
+failed: hoisting the zero fragment out of the loop and carrying it as a loop
+value both compile back to the same literal-zero form, byte-identical ISA, and
+interleaving the two fragments' MMAs to force distinct destinations was worse
+at 0.3386 ms.
+
+### f16 WMMA is half the rate of int8 WMMA on gfx1151
+
+Dequantizing at staging and running f16 WMMA looks attractive on paper: the f16
+fragment accumulates natively in f32, so the entire per-block epilogue - 64
+converts, 128 multiplies, 64 adds, and the accumulator copies - disappears, and
+the cost moves to dequantizing 4096 weights and 4096 activations per block
+rather than rescaling 16384 outputs, four times less work per thread.
+
+A complete f16 kernel was written and is numerically exact on the oracle. It is
+**slower**: 0.4839 ms against 0.3274 ms. Timing it with the MMAs removed gives
+0.1883 ms, so its matrix work costs 0.296 ms against int8's 0.150 ms.
+**`v_wmma_f32_16x16x16_f16` runs at exactly half the rate of
+`v_wmma_i32_16x16x16_iu8` on this part.** The int8 route is correct and the f16
+route cannot win regardless of how cheap its epilogue becomes. The first f16
+attempt also showed how expensive branchy staging is: eight `scf.if` store
+pairs cost 0.5114 ms, and folding both stages into one 256-row view with a
+single wide unpack and store brought that to 0.4839 ms.
+
+### One fused multiply-add in the epilogue
+
+`vector.fmaf` exists. The epilogue was convert, multiply by the activation
+scale, multiply by the weight scale, add. Fusing the weight-scale multiply with
+the accumulate makes it convert, multiply, fma.
+
+Operand order matters and the slower order is the one to keep. Fusing the
+*activation* scale instead (multiplying by the weight scale first) is faster,
+0.3124 ms, but reorders the arithmetic and moves the logits: max abs 0.27422 to
+0.34487, cosine 0.99989367 to 0.99984801. Fusing the *weight* scale keeps the
+pre-fusion operand order and lands at 0.3235 ms while **improving** accuracy,
+because one rounding replaces two: max abs **0.26514006**, cosine
+**0.99990022**. The 0.3% of deployed throughput is not worth the numeric shift,
+so the weight-scale fusion is what shipped.
+
+| test | before | after |
+|---|---:|---:|
+| isolated | 0.3274 ms | 0.3235 ms |
+| pp512 | 404.17 t/s | 409.39 t/s |
+| pp2048 | 384.27 t/s | 390.11 t/s |
+| tg16 | 7.91 t/s | 7.89 t/s |
+
+The pp numbers above come from back-to-back runs of the two binaries; a single
+earlier reading of 413.53 t/s at pp512 was an outlier, and run-to-run spread on
+this bench is about 1%, so prefill variants need an A/B rather than a single
+measurement.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,

@@ -210,19 +210,20 @@ kernel.def target(@qwen_q8_blocked_k6144_target) @qwen_q8_0_gemm_i8_blocked_k614
     %partial_0_0 = vector.mma %lhs_low0, %rhs_low0, %zero_i32_0_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %product_0_0 = vector.mma %lhs_high0, %rhs_high0, %partial_0_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %raw_0_0 = vector.sitofp %product_0_0 : vector<8xi32> to vector<8xf32>
+    // One fused multiply-add replaces the weight-scale multiply and the
+    // accumulate. The activation scale keeps its own multiply so the operand
+    // order matches the pre-fusion kernel and the logits do not shift.
     %scaled_act_0_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_0_0, %act_scales0 : vector<8xf32>
-    %scaled_0_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %scaled_act_0_0, %weight_scales0 : vector<8xf32>
     %running_0 = vector.extract %bank[0] : vector<8x8xf32> -> vector<8xf32>
-    %sum_0 = vector.addf<reassoc|nnan|ninf|nsz> %running_0, %scaled_0_0 : vector<8xf32>
+    %sum_0 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_0_0, %weight_scales0, %running_0 : vector<8xf32>
     %bank_s0 = vector.insert %sum_0 into %bank[0] : vector<8xf32>, vector<8x8xf32>
     %zero_i32_0_1 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
     %partial_0_1 = vector.mma %lhs_low1, %rhs_low0, %zero_i32_0_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %product_0_1 = vector.mma %lhs_high1, %rhs_high0, %partial_0_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %raw_0_1 = vector.sitofp %product_0_1 : vector<8xi32> to vector<8xf32>
     %scaled_act_0_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_0_1, %act_scales0 : vector<8xf32>
-    %scaled_0_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %scaled_act_0_1, %weight_scales1 : vector<8xf32>
     %running_4 = vector.extract %bank_s0[4] : vector<8x8xf32> -> vector<8xf32>
-    %sum_4 = vector.addf<reassoc|nnan|ninf|nsz> %running_4, %scaled_0_1 : vector<8xf32>
+    %sum_4 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_0_1, %weight_scales1, %running_4 : vector<8xf32>
     %bank_s4 = vector.insert %sum_4 into %bank_s0[4] : vector<8xf32>, vector<8x8xf32>
     %tile_const1 = index.constant 1 : index
     %tt1 = index.add %wave_token_tile_base, %tile_const1 : index
@@ -241,18 +242,16 @@ kernel.def target(@qwen_q8_blocked_k6144_target) @qwen_q8_0_gemm_i8_blocked_k614
     %product_1_0 = vector.mma %lhs_high0, %rhs_high1, %partial_1_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %raw_1_0 = vector.sitofp %product_1_0 : vector<8xi32> to vector<8xf32>
     %scaled_act_1_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_1_0, %act_scales1 : vector<8xf32>
-    %scaled_1_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %scaled_act_1_0, %weight_scales0 : vector<8xf32>
     %running_1 = vector.extract %bank_s4[1] : vector<8x8xf32> -> vector<8xf32>
-    %sum_1 = vector.addf<reassoc|nnan|ninf|nsz> %running_1, %scaled_1_0 : vector<8xf32>
+    %sum_1 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_1_0, %weight_scales0, %running_1 : vector<8xf32>
     %bank_s1 = vector.insert %sum_1 into %bank_s4[1] : vector<8xf32>, vector<8x8xf32>
     %zero_i32_1_1 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
     %partial_1_1 = vector.mma %lhs_low1, %rhs_low1, %zero_i32_1_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %product_1_1 = vector.mma %lhs_high1, %rhs_high1, %partial_1_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %raw_1_1 = vector.sitofp %product_1_1 : vector<8xi32> to vector<8xf32>
     %scaled_act_1_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_1_1, %act_scales1 : vector<8xf32>
-    %scaled_1_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %scaled_act_1_1, %weight_scales1 : vector<8xf32>
     %running_5 = vector.extract %bank_s1[5] : vector<8x8xf32> -> vector<8xf32>
-    %sum_5 = vector.addf<reassoc|nnan|ninf|nsz> %running_5, %scaled_1_1 : vector<8xf32>
+    %sum_5 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_1_1, %weight_scales1, %running_5 : vector<8xf32>
     %bank_s5 = vector.insert %sum_5 into %bank_s1[5] : vector<8xf32>, vector<8x8xf32>
     %tile_const2 = index.constant 2 : index
     %tt2 = index.add %wave_token_tile_base, %tile_const2 : index
@@ -271,18 +270,16 @@ kernel.def target(@qwen_q8_blocked_k6144_target) @qwen_q8_0_gemm_i8_blocked_k614
     %product_2_0 = vector.mma %lhs_high0, %rhs_high2, %partial_2_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %raw_2_0 = vector.sitofp %product_2_0 : vector<8xi32> to vector<8xf32>
     %scaled_act_2_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_2_0, %act_scales2 : vector<8xf32>
-    %scaled_2_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %scaled_act_2_0, %weight_scales0 : vector<8xf32>
     %running_2 = vector.extract %bank_s5[2] : vector<8x8xf32> -> vector<8xf32>
-    %sum_2 = vector.addf<reassoc|nnan|ninf|nsz> %running_2, %scaled_2_0 : vector<8xf32>
+    %sum_2 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_2_0, %weight_scales0, %running_2 : vector<8xf32>
     %bank_s2 = vector.insert %sum_2 into %bank_s5[2] : vector<8xf32>, vector<8x8xf32>
     %zero_i32_2_1 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
     %partial_2_1 = vector.mma %lhs_low1, %rhs_low2, %zero_i32_2_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %product_2_1 = vector.mma %lhs_high1, %rhs_high2, %partial_2_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %raw_2_1 = vector.sitofp %product_2_1 : vector<8xi32> to vector<8xf32>
     %scaled_act_2_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_2_1, %act_scales2 : vector<8xf32>
-    %scaled_2_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %scaled_act_2_1, %weight_scales1 : vector<8xf32>
     %running_6 = vector.extract %bank_s2[6] : vector<8x8xf32> -> vector<8xf32>
-    %sum_6 = vector.addf<reassoc|nnan|ninf|nsz> %running_6, %scaled_2_1 : vector<8xf32>
+    %sum_6 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_2_1, %weight_scales1, %running_6 : vector<8xf32>
     %bank_s6 = vector.insert %sum_6 into %bank_s2[6] : vector<8xf32>, vector<8x8xf32>
     %tile_const3 = index.constant 3 : index
     %tt3 = index.add %wave_token_tile_base, %tile_const3 : index
@@ -301,18 +298,16 @@ kernel.def target(@qwen_q8_blocked_k6144_target) @qwen_q8_0_gemm_i8_blocked_k614
     %product_3_0 = vector.mma %lhs_high0, %rhs_high3, %partial_3_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %raw_3_0 = vector.sitofp %product_3_0 : vector<8xi32> to vector<8xf32>
     %scaled_act_3_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_3_0, %act_scales3 : vector<8xf32>
-    %scaled_3_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %scaled_act_3_0, %weight_scales0 : vector<8xf32>
     %running_3 = vector.extract %bank_s6[3] : vector<8x8xf32> -> vector<8xf32>
-    %sum_3 = vector.addf<reassoc|nnan|ninf|nsz> %running_3, %scaled_3_0 : vector<8xf32>
+    %sum_3 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_3_0, %weight_scales0, %running_3 : vector<8xf32>
     %bank_s3 = vector.insert %sum_3 into %bank_s6[3] : vector<8xf32>, vector<8x8xf32>
     %zero_i32_3_1 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
     %partial_3_1 = vector.mma %lhs_low1, %rhs_low3, %zero_i32_3_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %product_3_1 = vector.mma %lhs_high1, %rhs_high3, %partial_3_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
     %raw_3_1 = vector.sitofp %product_3_1 : vector<8xi32> to vector<8xf32>
     %scaled_act_3_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_3_1, %act_scales3 : vector<8xf32>
-    %scaled_3_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %scaled_act_3_1, %weight_scales1 : vector<8xf32>
     %running_7 = vector.extract %bank_s3[7] : vector<8x8xf32> -> vector<8xf32>
-    %sum_7 = vector.addf<reassoc|nnan|ninf|nsz> %running_7, %scaled_3_1 : vector<8xf32>
+    %sum_7 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_3_1, %weight_scales1, %running_7 : vector<8xf32>
     %next_bank = vector.insert %sum_7 into %bank_s3[7] : vector<8xf32>, vector<8x8xf32>
 
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
