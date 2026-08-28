@@ -79,6 +79,48 @@ The artifact compiles at 71 VGPRs with no spills and 100% reported occupancy.
 
 Prefill logits remain bit-identical (cosine 0.99989367).
 
+### GQA attention: share each KV head across its query heads
+
+At PP2048 the attention stage had grown to 1056 ms (19% of the run) because it
+scales with the prefix. Qwen3.8 has 24 query heads over 4 KV heads, but the
+kernel gave each query head its own workgroup, so six workgroups scanned
+exactly the same key/value rows.
+
+Giving one workgroup a (token, KV head) pair and running its six query heads
+together reads each cache row once. The artifact keeps six online-softmax
+accumulators (136 VGPRs, no spills, 62% occupancy) and loads the gate vectors
+only after the scan so they do not sit live through it.
+
+| stage/prompt | per-query-head | per-KV-head |
+|---|---:|---:|
+| attention, PP2048 (four chunks) | 123.6 + 205.1 + 308.4 + 418.5 = 1055.6 ms | 104.5 + 138.3 + 176.2 + 212.6 = 631.6 ms |
+| PP512 | 396.13 t/s | **400.37 t/s** |
+| PP1024 | 384.39 t/s | **395.85 t/s** |
+| PP2048 | 359.48 t/s | **386.30 t/s** |
+
+Prefill logits remain bit-identical (cosine 0.99989367).
+
+### Session result and what is left
+
+| prompt | start of session | now | HIP | HRX/HIP |
+|---:|---:|---:|---:|---:|
+| 512 | 319.59 | **400.37** | 559.49 | 72% |
+| 1024 | 316.95 | **395.85** | 562.70 | 70% |
+| 2048 | 306.76 | **386.30** | 548.55 | 70% |
+
+The PP512 chunk is now FFN 772 ms, SSM 381 ms, attention 104 ms. FFN is 61% of
+it and is exactly the blocked projection kernel's time multiplied by its
+dispatch count (three projections per layer, four token groups, 64 layers, at
+0.999 ms per 17408x5120x128 shape), so further prefill gains have to come from
+that kernel. Its ablation history now spans fifteen variants; the wide LDS read
+is the only structural change that has helped, and both tile dimensions and the
+eight-waves-per-SIMD occupancy point are pinned.
+
+Two attempts to reuse the wide read with a different wave shape both failed:
+2x4 wave ownership with wide reads measures 1.519 ms against 0.999 ms, and a
+16-row DeltaNet recurrence group measures PP512 389.61 t/s against 396.13 t/s
+for eight rows. In both cases the register cost crosses an occupancy tier.
+
 ### Two more traffic variants rejected end to end
 
 Both were measured in the deployed executor, not the isolated harness:

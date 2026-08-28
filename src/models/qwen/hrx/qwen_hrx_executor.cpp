@@ -1511,8 +1511,11 @@ bool QwenHrxExecutor::DispatchAttentionDecodeBatch(
       !TryBindOperand(output, chunk_bytes, &bindings[4])) {
     return false;
   }
+  // One workgroup per (token, KV head): the six query heads that share a KV
+  // head scan the prefix together, so each cache row is read once instead of
+  // six times.
   hrx_dispatch_config_t config{};
-  config.workgroup_count[0] = contract_.QHeadCount();
+  config.workgroup_count[0] = contract_.KvHeadCount();
   config.workgroup_count[1] = tokens;
   config.workgroup_count[2] = 1;
   config.workgroup_size[0] = 32;
