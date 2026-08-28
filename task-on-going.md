@@ -209,6 +209,55 @@ comparisons must come from the same sweep.
 Prefill is the only remaining front, and the next lever is idea 2: the
 attention prefix scan, 632 ms of the 5304 ms pp2048 pass.
 
+### Prefill: where PP2048 time actually goes, and a square wave tile
+
+Chunk profile for PP2048, four 512-token chunks, 5254 ms total: FFN 3085 ms
+(59%), SSM 1539 ms (29%), attention 630 ms (12%). Attention was the candidate
+in idea 2, but at 12% it cannot close a 38% gap, so the FFN projection is the
+target instead.
+
+The FFN regime changed with the 512-token chunk. It moves 18.2 GiB of weights
+per chunk in 761 ms, which is 24 GB/s - far off the 82 GB/s it reached with
+128-token chunks. It is no longer weight-bound; at 512 tokens it is compute
+bound at about 24 TOPS int8. HIP's 536 t/s at PP2048 implies roughly 33 TOPS,
+so the whole remaining prefill gap is FFN throughput.
+
+**Idea 3's wider-MMA hypothesis is dead.** The compile report's
+`target_capability_rows` for gfx1151 lists `matrix_feature_profile =
+wmma-gfx11` and `none` for every fp8, bf8, fp6, bf6 and fp4 native kind. There
+is no K=32 int8 matrix operation to move to; gfx11 WMMA iu8 is K=16.
+
+What did help: each wave owned a 16-row strip across all 128 tokens, a 1x8
+fragment arrangement costing one LHS and eight RHS LDS reads per K block for
+16 MMAs. Giving each wave 32 rows by 64 tokens - a square 2x4 arrangement -
+keeps the 16 MMAs but needs two LHS and four RHS reads, six instead of nine.
+
+| variant | isolated | TOPS |
+|---|---:|---:|
+| 1x8 strip | 0.3422 ms | 19.61 |
+| **2x4 square** | **0.3274 ms** | **20.50** |
+
+Prefill logits are bit-identical after the change (max abs 0.27421856, cosine
+0.99989367, the same W8A8 numbers as before), so the retiling is exact.
+
+| test | before | after |
+|---|---:|---:|
+| pp512 | 403.65 t/s | **413.53 t/s** |
+| pp2048 | 388.88 t/s | **396.65 t/s** |
+| tg16 | 7.90 t/s | 7.91 t/s |
+
+Two variants measured and rejected along the way. Folding the activation and
+weight scales into one combined vector before the multiply cost 0.3341 ms and
+pushed registers from 177 to 188 - the fold saves no instructions and only adds
+live values. Stripping the rescale entirely, which is incorrect but bounds the
+gain, reached only 0.3200 ms, so the f32 rescale is worth about 2% and is not
+what limits the kernel.
+
+Note on the isolated benchmark: at rows=5120 it launches 40 workgroups on 40
+CUs, exactly one per CU, so it measures a latency-bound regime with no
+cross-workgroup overlap. Deployed chunks launch hundreds. Isolated numbers rank
+variants; only the end-to-end sweep decides them.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,

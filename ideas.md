@@ -64,6 +64,10 @@ problems, so measure the split before changing any kernel.
 
 ## 2. Tile the attention prefix scan across tokens
 
+**Status:** deprioritized. Attention is 630 ms of the 5254 ms PP2048 pass, 12%.
+Even halving it cannot close a 38% gap to HIP; the FFN projection at 59% is
+where prefill is decided.
+
 Sharing each KV head across its six query heads cut attention 6x, but every
 token still rescans its whole prefix independently. Within one 512-token chunk
 all 512 tokens read the *same* shared prefix, so there is a large reuse factor
