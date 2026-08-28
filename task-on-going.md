@@ -185,6 +185,30 @@ predicate would need two conditions anded together.
 HIP reference of 7.62 t/s.** The stage split is embedding 1.8 ms, attention
 8.8, SSM 29.7, FFN 80.8, final 6.3.
 
+### Same-binary sweep against HIP, after the decode work
+
+Both routes measured from `result-hrx-argmax`, one model load each, HRX with
+device-local weights and `blocked-prefill`. HIP's tg16 reads 3.06 t/s on a cold
+first run; the 7.77 below is the warm figure from the sweep.
+
+| test | HRX native | HIP | ratio |
+|---|---:|---:|---:|
+| pp128 | 256.67 t/s | 449.11 t/s | 57% |
+| pp256 | 327.05 t/s | 520.26 t/s | 63% |
+| pp512 | 403.65 t/s | 551.49 t/s | 73% |
+| pp1024 | 399.38 t/s | 552.66 t/s | 72% |
+| pp2048 | 388.88 t/s | 536.25 t/s | 73% |
+| tg16 | **7.90 t/s** | 7.77 t/s | **102%** |
+
+Decode is finished: it now beats HIP. Prefill sits at about 73% from 512 tokens
+up, and lower at short prompts where the fixed per-pass cost is spread over
+fewer tokens. Note that the earlier reference of 399.59 t/s was HIP at pp128
+measured alone; in a sweep HIP itself reads 449.11 t/s there, so prefill
+comparisons must come from the same sweep.
+
+Prefill is the only remaining front, and the next lever is idea 2: the
+attention prefix scan, 632 ms of the 5304 ms pp2048 pass.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,
