@@ -156,6 +156,35 @@ attention 8.8, SSM 29.8, FFN 80.8, final 18.5. FFN is at the DRAM roofline and
 SSM is now close, so the final stage - about 73 GB/s for the 1.35 GiB
 vocabulary projection - is the one remaining outlier.
 
+### Decode: the greedy argmax made parallel
+
+`qwen_argmax_f32.loom` carried the note "Serial by design for the correctness
+MVP; replace after end-to-end parity" and dispatched one workgroup of **one
+thread** to scan all 248320 logits. Isolated, that kernel costs 10.807 ms - it,
+not the vocabulary projection, was almost all of the final stage. The
+projection was never the problem: benchmarked in isolation at rows=17408,
+K=5120 it runs 0.441 ms for 94.7 MiB, which is 215 GB/s, already the roofline.
+A 32-thread wave-per-row variant measured 0.439 ms, confirming the workgroup
+shape is not a factor, so that variant was dropped.
+
+The replacement uses one workgroup of 256 lanes striding the logits, then
+reduces through LDS. First-wins tie-breaking survives at both levels: a lane
+only accepts a strictly better candidate, and the leader takes the maximum
+score in one pass and the smallest index attaining it in a second, so lane
+order never decides a tie. The second pass exists because expressing it as one
+predicate would need two conditions anded together.
+
+| measure | before | after |
+|---|---:|---:|
+| argmax, isolated | 10.807 ms | **0.2355 ms** |
+| decode final stage | 18.5 ms | **6.31 ms** |
+| decode token | 139.7 ms | **127.4 ms** |
+| tg16 | 7.19 t/s | **7.84 t/s** |
+
+`--hrx-fusions none --validate-hrx 4` is a full PASS. **Decode now exceeds the
+HIP reference of 7.62 t/s.** The stage split is embedding 1.8 ms, attention
+8.8, SSM 29.7, FFN 80.8, final 6.3.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,

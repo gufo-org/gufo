@@ -45,6 +45,10 @@ final stage at about 73 GB/s, so a card 4 below now exists for them.
 
 ## 4. Decode's SSM and final stages lag the roofline
 
+**Status:** done. tg16 7.19 -> 7.84 t/s, past HIP's 7.62. The SSM fix was
+routing decode through the batch-native recurrence at `tokens = 1`; the final
+stage was a one-thread argmax, not the vocabulary projection.
+
 With FFN at 225 GB/s the remaining decode gap to HIP (149.4 ms per token
 against about 131 ms) sits in two places:
 

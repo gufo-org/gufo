@@ -3190,7 +3190,7 @@ bool QwenHrxExecutor::DispatchArgmax(const HrxBufferBinding& logits,
   config.workgroup_count[0] = 1;
   config.workgroup_count[1] = 1;
   config.workgroup_count[2] = 1;
-  config.workgroup_size[0] = 1;
+  config.workgroup_size[0] = 256;
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
   config.subgroup_size = 1;
