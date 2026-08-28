@@ -68,6 +68,8 @@ enum class QwenHrxArenaBuffer : std::size_t {
   /// DeltaNet readout for a whole chunk.
   kBatchSsmConvOutput,
   kBatchSsmReadout,
+  kBatchAttentionQ,
+  kBatchAttentionGate,
   kCount,
 };
 

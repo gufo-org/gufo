@@ -668,12 +668,48 @@ Stage profile for one 128-token chunk, device-local weights:
 | `int8-prefill` (dot4i `_t8`) | 20.27 t/s |
 | `blocked-prefill` | 211.72 t/s |
 | + batched SSM front end | 229.65 t/s |
-| + wave-level recurrence | **269.78 t/s** |
+| + wave-level recurrence | 269.78 t/s |
+| + batch-native attention | **318.56 t/s** |
 
 That is 43x the 6.25 t/s serial baseline and 68% of the 399.59 t/s HIP
 reference. Prefill parity holds throughout: top-1 matches HIP and cosine
 similarity is 0.9999 (the small changes between runs are float reassociation
 in the reduction order, not a correctness change).
+
+### Batch-native attention front end
+
+The attention stage was the last per-token dispatch cluster: split Q/gate, two
+per-head norms, RoPE plus KV write, and the attention decode ran once per token
+per layer, which is 10,240 dispatches for PP128. Four new artifacts replace
+them with one dispatch per stage per layer:
+
+- `qwen_split_q_gate_batch_f32`,
+- `qwen_per_head_rmsnorm_batch_f32` (two-dimensional grid over heads and
+  tokens, so no runtime division is needed to recover the indices),
+- `qwen_rope_kv_cache_batch_f32`, which reads the position-major rotary tables
+  and writes each token's own cache row,
+- `qwen_attention_decode_batch_f32`, where one workgroup owns one (token, head)
+  pair and attends over that token's own prefix.
+
+The first integration faulted the GPU at every prompt length while the same
+kernels passed standalone oracles. The cause was that the launch grid covers
+the artifact's physical 128-token capacity, so the four new kernels needed the
+same logical-token guard the other batch-native artifacts already had; without
+it the padding rows addressed memory past their bindings. Each kernel now takes
+the logical token count and guards on it.
+
+| route | pp128 | attention stage |
+|---|---:|---:|
+| per-token attention | 269.78 t/s | 93.1 ms |
+| batch-native attention | **318.56 t/s** | 31.4 ms |
+
+Prefill logits are bit-identical before and after the change (max absolute
+error 0.27421856, cosine 0.99989367 in both runs), which is the expected result
+for a pure dispatch reorganization.
+
+Stage profile for one 128-token chunk is now FFN 222.4 ms, SSM 128.4 ms,
+attention 31.4 ms, chunk 382.2 ms. PP128 is 51x the 6.25 t/s serial baseline
+and 80% of the 399.59 t/s HIP reference.
 
 ### Blocked-kernel ablations: what does not limit it
 

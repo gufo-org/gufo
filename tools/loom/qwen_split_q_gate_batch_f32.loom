@@ -1,0 +1,62 @@
+// Qwen3.8 native primitive: split the 12288-wide Q+gate projection for a whole
+// prefill tile. Workgroups cover token-major rows so a layer costs one dispatch
+// instead of one per token; the per-token arithmetic is unchanged.
+
+config.decl @qwen_split_q_gate_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+
+kernel.def @qwen_split_q_gate_batch_f32(%tokens: index) {
+  %workgroup_size = index.constant 32 : index
+  %query_width = index.constant 6144 : index
+  %groups_per_token = index.div %query_width, %workgroup_size : index
+  %capacity = config.get @qwen_split_q_gate_batch_f32.token_capacity : index
+  %workgroups = index.mul %capacity, %groups_per_token : index
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%workgroups, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%tokens: index, %q_gate: buffer, %query: buffer, %gate: buffer) {
+  %base = index.constant 0 : offset
+  %projection_width = index.constant 12288 : index
+  %query_width = index.constant 6144 : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 128)] : index
+  %workgroup = kernel.workgroup.id<x> : index
+  %groups_per_token = index.constant 192 : index
+  %token = index.div %workgroup, %groups_per_token : index
+  %group = index.rem %workgroup, %groups_per_token : index
+  %lane = kernel.workitem.id<x> : index
+  %workgroup_size = index.constant 32 : index
+  %element0 = index.madd %group, %workgroup_size, %lane : index
+  %element = index.assume %element0 [lt(%element0, %query_width)] : index
+  %head_width = index.constant 256 : index
+  %projection_head_width = index.constant 512 : index
+  %head = index.div %element, %head_width : index
+  %dimension = index.rem %element, %head_width : index
+  %projection_head_base = index.mul %head, %projection_head_width : index
+  %q_element0 = index.add %projection_head_base, %dimension : index
+  %q_element = index.assume %q_element0 [lt(%q_element0, %projection_width)] : index
+  %gate_head_base = index.add %projection_head_base, %head_width : index
+  %gate_element0 = index.add %gate_head_base, %dimension : index
+  %gate_element = index.assume %gate_element0 [lt(%gate_element0, %projection_width)] : index
+  // The launch grid covers the physical tile, so rows past the logical token
+  // count must do nothing.
+  %token_live = index.cmp ult, %token, %token_count : index
+  %input_noalias, %query_noalias, %gate_noalias = buffer.assume.noalias %q_gate, %query, %gate : buffer, buffer, buffer
+  scf.if %token_live {
+    %four = index.constant 4 : offset
+    %projection_token_elements = index.mul %token, %projection_width : index
+    %projection_token_bytes = index.scale %projection_token_elements, %four : index, offset -> offset
+    %query_token_elements = index.mul %token, %query_width : index
+    %query_token_bytes = index.scale %query_token_elements, %four : index, offset -> offset
+    %input_view = buffer.view %input_noalias[%projection_token_bytes] : buffer -> view<12288xf32>
+    %query_view = buffer.view %query_noalias[%query_token_bytes] : buffer -> view<6144xf32>
+    %gate_view = buffer.view %gate_noalias[%query_token_bytes] : buffer -> view<6144xf32>
+    %q = view.load %input_view[%q_element] : view<12288xf32> -> f32
+    %raw_gate = view.load %input_view[%gate_element] : view<12288xf32> -> f32
+    %negative = scalar.negf %raw_gate : f32
+    %exponent = scalar.expf<afn> %negative : f32
+    %one = scalar.constant 1.0 : f32
+    %denominator = scalar.addf<reassoc|nnan|ninf|nsz> %one, %exponent : f32
+    %sigmoid = scalar.divf<reassoc|nnan|ninf|nsz> %one, %denominator : f32
+    view.store %q, %query_view[%element] : f32, view<6144xf32>
+    view.store %sigmoid, %gate_view[%element] : f32, view<6144xf32>
+  }
+  kernel.return
+}

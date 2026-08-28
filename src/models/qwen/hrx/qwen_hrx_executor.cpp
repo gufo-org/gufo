@@ -663,6 +663,10 @@ void QwenHrxExecutor::ResetKernelState() {
   deltanet_readout_batch_executable_ = nullptr;
   deltanet_prepare_batch_executable_ = nullptr;
   ssm_conv_batch_executable_ = nullptr;
+  split_q_gate_batch_executable_ = nullptr;
+  per_head_rmsnorm_batch_executable_ = nullptr;
+  rope_kv_batch_executable_ = nullptr;
+  attention_decode_batch_executable_ = nullptr;
   missing_kernel_artifacts_.clear();
   prototype_artifacts_ready_ = false;
 }
@@ -835,6 +839,14 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
       deltanet_prepare_batch_executable_ = exec;
     } else if (entry.name == "qwen_ssm_conv_batch") {
       ssm_conv_batch_executable_ = exec;
+    } else if (entry.name == "qwen_split_q_gate_batch") {
+      split_q_gate_batch_executable_ = exec;
+    } else if (entry.name == "qwen_per_head_rmsnorm_batch") {
+      per_head_rmsnorm_batch_executable_ = exec;
+    } else if (entry.name == "qwen_rope_kv_batch") {
+      rope_kv_batch_executable_ = exec;
+    } else if (entry.name == "qwen_attention_decode_batch") {
+      attention_decode_batch_executable_ = exec;
     } else if (entry.name == "qwen_per_head_rmsnorm") {
       per_head_rmsnorm_executable_ = exec;
     } else if (entry.name == "qwen_attention_decode") {
@@ -1343,6 +1355,175 @@ bool QwenHrxExecutor::DispatchChunkProjection(const HrxBufferBinding& weight,
   return DispatchQ8GemmT8(weight, input, output, rows, input_elements, tokens);
 }
 
+bool QwenHrxExecutor::DispatchSplitQGateBatch(const HrxBufferBinding& q_gate,
+                                             const HrxBufferBinding& query,
+                                             const HrxBufferBinding& gate,
+                                             std::uint32_t tokens) {
+  if (split_q_gate_batch_executable_ == nullptr || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto projection_bytes = CheckedBytes(
+      {tokens, contract_.FullAttentionQGateWidth(), sizeof(float)});
+  const auto query_bytes = CheckedBytes(
+      {tokens, contract_.FullAttentionQueryWidth(), sizeof(float)});
+  hrx_buffer_ref_t bindings[3];
+  if (!TryBindOperand(q_gate, projection_bytes, &bindings[0]) ||
+      !TryBindOperand(query, query_bytes, &bindings[1]) ||
+      !TryBindOperand(gate, query_bytes, &bindings[2])) {
+    return false;
+  }
+  constexpr std::uint32_t kGroupsPerToken = 192;
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = tokens * kGroupsPerToken;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), split_q_gate_batch_executable_, 0,
+                          &config, &tokens, sizeof(tokens), bindings, 3, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchPerHeadRmsNormBatch(
+    const HrxBufferBinding& input, const HrxBufferBinding& gamma,
+    const HrxBufferBinding& output, std::uint32_t heads,
+    std::uint32_t tokens) {
+  if (per_head_rmsnorm_batch_executable_ == nullptr || heads == 0 ||
+      heads > contract_.QHeadCount() || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto chunk_bytes =
+      CheckedBytes({tokens, heads, contract_.HeadDim(), sizeof(float)});
+  const auto gamma_bytes = CheckedBytes({contract_.HeadDim(), sizeof(float)});
+  hrx_buffer_ref_t bindings[3];
+  if (!TryBindOperand(input, chunk_bytes, &bindings[0]) ||
+      !TryBindOperand(gamma, gamma_bytes, &bindings[1]) ||
+      !TryBindOperand(output, chunk_bytes, &bindings[2])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = heads;
+  config.workgroup_count[1] = tokens;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  const std::array<std::uint32_t, 2> constants{heads, tokens};
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), per_head_rmsnorm_batch_executable_, 0, &config,
+      constants.data(), constants.size() * sizeof(std::uint32_t), bindings, 3,
+      0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchRoPEKVCacheBatch(
+    const HrxBufferBinding& query, const HrxBufferBinding& key,
+    const HrxBufferBinding& value, const HrxBufferBinding& cos,
+    const HrxBufferBinding& sin, const HrxBufferBinding& key_cache,
+    const HrxBufferBinding& value_cache, std::uint32_t start_position,
+    std::uint32_t tokens) {
+  if (rope_kv_batch_executable_ == nullptr || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto query_bytes = CheckedBytes(
+      {tokens, contract_.FullAttentionQueryWidth(), sizeof(float)});
+  const auto kv_bytes =
+      CheckedBytes({tokens, contract_.FullAttentionKeyWidth(), sizeof(float)});
+  const auto rope_bytes = CheckedBytes(
+      {start_position + tokens, contract_.RotaryDim() / 2, sizeof(float)});
+  const auto cache_bytes = CheckedBytes({start_position + tokens,
+                                         contract_.FullAttentionKeyWidth(),
+                                         sizeof(float)});
+  hrx_buffer_ref_t bindings[7];
+  if (!TryBindOperand(query, query_bytes, &bindings[0]) ||
+      !TryBindOperand(key, kv_bytes, &bindings[1]) ||
+      !TryBindOperand(value, kv_bytes, &bindings[2]) ||
+      !TryBindOperand(cos, rope_bytes, &bindings[3]) ||
+      !TryBindOperand(sin, rope_bytes, &bindings[4]) ||
+      !TryBindOperand(key_cache, cache_bytes, &bindings[5]) ||
+      !TryBindOperand(value_cache, cache_bytes, &bindings[6])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = contract_.QHeadCount();
+  config.workgroup_count[1] = tokens;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  const std::array<std::uint32_t, 3> constants{contract_.QHeadCount(),
+                                               start_position, tokens};
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), rope_kv_batch_executable_, 0, &config,
+      constants.data(), constants.size() * sizeof(std::uint32_t), bindings, 7,
+      0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchAttentionDecodeBatch(
+    const HrxBufferBinding& query, const HrxBufferBinding& gate,
+    const HrxBufferBinding& key_cache, const HrxBufferBinding& value_cache,
+    const HrxBufferBinding& output, std::uint32_t start_position,
+    std::uint32_t tokens) {
+  if (attention_decode_batch_executable_ == nullptr || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens ||
+      start_position + tokens > max_context_) {
+    return false;
+  }
+  const auto chunk_bytes = CheckedBytes(
+      {tokens, contract_.FullAttentionQueryWidth(), sizeof(float)});
+  const auto cache_bytes = CheckedBytes({start_position + tokens,
+                                         contract_.FullAttentionKeyWidth(),
+                                         sizeof(float)});
+  hrx_buffer_ref_t bindings[5];
+  if (!TryBindOperand(query, chunk_bytes, &bindings[0]) ||
+      !TryBindOperand(gate, chunk_bytes, &bindings[1]) ||
+      !TryBindOperand(key_cache, cache_bytes, &bindings[2]) ||
+      !TryBindOperand(value_cache, cache_bytes, &bindings[3]) ||
+      !TryBindOperand(output, chunk_bytes, &bindings[4])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = contract_.QHeadCount();
+  config.workgroup_count[1] = tokens;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  const std::array<std::uint32_t, 3> constants{start_position, max_context_,
+                                               tokens};
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), attention_decode_batch_executable_, 0, &config,
+      constants.data(), constants.size() * sizeof(std::uint32_t), bindings, 5,
+      0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
 bool QwenHrxExecutor::DispatchDeltaNetPrepareBatch(
     const HrxBufferBinding& prepared, const HrxBufferBinding& a,
     const HrxBufferBinding& dt, std::uint32_t tokens) {
@@ -1570,6 +1751,37 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
     return Reject("batched attention cache slice is invalid", error_msg);
   }
 
+  // Temporary bisect control: GUFO_HRX_BATCH_ATTENTION selects how many of the
+  // batched attention stages to use (0 = none, 4 = all).
+  static const int kBatchedAttentionStages = [] {
+    const char* value = std::getenv("GUFO_HRX_BATCH_ATTENTION");
+    return value == nullptr ? 4 : std::atoi(value);
+  }();
+  if (BatchedAttentionReady() && kBatchedAttentionStages >= 4) {
+    // Whole-tile attention front end: one dispatch per stage for the chunk.
+    // The convolution of positions is handled inside the artifacts, which read
+    // the position-major rotary tables and cache rows directly.
+    const auto batch_query = arena_->Binding(QwenHrxArenaBuffer::kBatchAttentionQ);
+    const auto batch_gate =
+        arena_->Binding(QwenHrxArenaBuffer::kBatchAttentionGate);
+    const auto rope_cos = arena_->Binding(QwenHrxArenaBuffer::kRopeCos);
+    const auto rope_sin = arena_->Binding(QwenHrxArenaBuffer::kRopeSin);
+    if (!DispatchSplitQGateBatch(batch_q_gate, batch_query, batch_gate,
+                                 tokens) ||
+        !DispatchPerHeadRmsNormBatch(batch_query, layer.attn_q_norm,
+                                     batch_query, contract_.QHeadCount(),
+                                     tokens) ||
+        !DispatchPerHeadRmsNormBatch(batch_key, layer.attn_k_norm, batch_key,
+                                     contract_.KvHeadCount(), tokens) ||
+        !DispatchRoPEKVCacheBatch(batch_query, batch_key, batch_value, rope_cos,
+                                  rope_sin, *key_cache, *value_cache,
+                                  start_position, tokens) ||
+        !DispatchAttentionDecodeBatch(batch_query, batch_gate, *key_cache,
+                                      *value_cache, batch_context,
+                                      start_position, tokens)) {
+      return Reject("batched attention front end failed", error_msg);
+    }
+  } else
   for (std::uint32_t token = 0; token < tokens; ++token) {
     const std::uint32_t position = start_position + token;
     const auto q_gate_token =

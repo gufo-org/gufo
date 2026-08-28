@@ -321,6 +321,10 @@ if (ENGINE_ENABLE_HRX)
       tools/loom/qwen_rmsnorm_batch_f32.loom
       tools/loom/qwen_residual_add_batch_f32.loom
       tools/loom/qwen_swiglu_pointwise_batch_f32.loom
+      tools/loom/qwen_split_q_gate_batch_f32.loom
+      tools/loom/qwen_per_head_rmsnorm_batch_f32.loom
+      tools/loom/qwen_rope_kv_cache_batch_f32.loom
+      tools/loom/qwen_attention_decode_batch_f32.loom
       tools/loom/qwen_deltanet_prepare_batch_f32.loom
       tools/loom/qwen_ssm_conv_silu_batch_f32.loom
       tools/loom/qwen_deltanet_recurrence_batch_f32.loom
@@ -364,6 +368,10 @@ if (ENGINE_ENABLE_HRX)
     set(LOOM_CONFIG_qwen_rmsnorm_batch_f32 "qwen_rmsnorm_batch_f32.token_capacity=128")
     set(LOOM_CONFIG_qwen_residual_add_batch_f32 "qwen_residual_add_batch_f32.element_capacity=655360")
     set(LOOM_CONFIG_qwen_swiglu_pointwise_batch_f32 "qwen_swiglu_pointwise_batch_f32.element_capacity=2228224")
+    set(LOOM_CONFIG_qwen_split_q_gate_batch_f32 "qwen_split_q_gate_batch_f32.token_capacity=128")
+    set(LOOM_CONFIG_qwen_per_head_rmsnorm_batch_f32 "qwen_per_head_rmsnorm_batch_f32.max_heads=24;qwen_per_head_rmsnorm_batch_f32.token_capacity=128")
+    set(LOOM_CONFIG_qwen_rope_kv_cache_batch_f32 "qwen_rope_kv_cache_batch_f32.max_heads=24;qwen_rope_kv_cache_batch_f32.token_capacity=128")
+    set(LOOM_CONFIG_qwen_attention_decode_batch_f32 "qwen_attention_decode_batch_f32.max_context=131072;qwen_attention_decode_batch_f32.token_capacity=128")
     set(LOOM_CONFIG_qwen_deltanet_prepare_batch_f32 "qwen_deltanet_prepare_batch_f32.token_capacity=128")
     set(LOOM_CONFIG_qwen_ssm_conv_silu_batch_f32 "qwen_ssm_conv_silu_batch_f32.token_capacity=128")
     set(LOOM_CONFIG_qwen_deltanet_recurrence_batch_f32 "qwen_deltanet_recurrence_batch_f32.token_capacity=128")

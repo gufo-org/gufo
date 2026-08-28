@@ -290,6 +290,38 @@ public:
     return deltanet_prepare_batch_executable_ != nullptr &&
            ssm_conv_batch_executable_ != nullptr;
   }
+  /// Whole-tile attention front end: one dispatch per stage per layer instead
+  /// of one per token.
+  [[nodiscard]] bool BatchedAttentionReady() const noexcept {
+    return split_q_gate_batch_executable_ != nullptr &&
+           per_head_rmsnorm_batch_executable_ != nullptr &&
+           rope_kv_batch_executable_ != nullptr &&
+           attention_decode_batch_executable_ != nullptr;
+  }
+  bool DispatchSplitQGateBatch(const HrxBufferBinding& q_gate,
+                               const HrxBufferBinding& query,
+                               const HrxBufferBinding& gate,
+                               std::uint32_t tokens);
+  bool DispatchPerHeadRmsNormBatch(const HrxBufferBinding& input,
+                                   const HrxBufferBinding& gamma,
+                                   const HrxBufferBinding& output,
+                                   std::uint32_t heads, std::uint32_t tokens);
+  bool DispatchRoPEKVCacheBatch(const HrxBufferBinding& query,
+                                const HrxBufferBinding& key,
+                                const HrxBufferBinding& value,
+                                const HrxBufferBinding& cos,
+                                const HrxBufferBinding& sin,
+                                const HrxBufferBinding& key_cache,
+                                const HrxBufferBinding& value_cache,
+                                std::uint32_t start_position,
+                                std::uint32_t tokens);
+  bool DispatchAttentionDecodeBatch(const HrxBufferBinding& query,
+                                    const HrxBufferBinding& gate,
+                                    const HrxBufferBinding& key_cache,
+                                    const HrxBufferBinding& value_cache,
+                                    const HrxBufferBinding& output,
+                                    std::uint32_t start_position,
+                                    std::uint32_t tokens);
   bool DispatchDeltaNetPrepareBatch(const HrxBufferBinding& prepared,
                                     const HrxBufferBinding& a,
                                     const HrxBufferBinding& dt,
@@ -431,6 +463,10 @@ private:
   hrx_executable_t deltanet_readout_batch_executable_{nullptr};
   hrx_executable_t deltanet_prepare_batch_executable_{nullptr};
   hrx_executable_t ssm_conv_batch_executable_{nullptr};
+  hrx_executable_t split_q_gate_batch_executable_{nullptr};
+  hrx_executable_t per_head_rmsnorm_batch_executable_{nullptr};
+  hrx_executable_t rope_kv_batch_executable_{nullptr};
+  hrx_executable_t attention_decode_batch_executable_{nullptr};
   hrx_executable_t per_head_rmsnorm_executable_{nullptr};
   hrx_executable_t attention_decode_executable_{nullptr};
   hrx_executable_t ssm_conv_executable_{nullptr};

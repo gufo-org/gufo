@@ -1,0 +1,57 @@
+// Qwen3.8 per-head RMSNorm across a whole prefill tile: one workgroup per
+// (token, head) pair, so a layer costs one dispatch instead of one per token.
+// The head count is a runtime value because the query and key projections have
+// 24 and 4 heads respectively.
+
+config.decl @qwen_per_head_rmsnorm_batch_f32.max_heads : %value: index where [range(%value, 1, 24)]
+config.decl @qwen_per_head_rmsnorm_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+
+kernel.def @qwen_per_head_rmsnorm_batch_f32(%heads: index, %tokens: index) {
+  %capacity = config.get @qwen_per_head_rmsnorm_batch_f32.max_heads : index
+  %tokens_capacity = config.get @qwen_per_head_rmsnorm_batch_f32.token_capacity : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%capacity, %tokens_capacity, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%heads: index, %tokens: index, %input: buffer, %gamma: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_per_head_rmsnorm_batch_f32.max_heads : index
+  %head_count = index.assume %heads [range(%heads, 1, 24)] : index
+  // A two-dimensional grid keeps the head and token indices independent, so
+  // no runtime division is needed to recover them.
+  %head = kernel.workgroup.id<x> : index
+  %token = kernel.workgroup.id<y> : index
+  %lane = kernel.workitem.id<x> : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 128)] : index
+  // The x grid is launched with exactly %heads workgroups, so only the
+  // physical token dimension can exceed its logical bound.
+  %in_bounds = index.cmp ult, %token, %token_count : index
+  scf.if %in_bounds {
+    %bounded_head = index.assume %head [lt(%head, %head_count)] : index
+    %eight = index.constant 8 : index
+    %four = index.constant 4 : offset
+    %head_width = index.constant 256 : index
+    %row_width = index.mul %head_count, %head_width : index
+    %token_elements = index.mul %token, %row_width : index
+    %token_bytes = index.scale %token_elements, %four : index, offset -> offset
+    %element = index.mul %lane, %eight : index
+    %input_view = buffer.view %input[%token_bytes] : buffer -> view<[%head_count]x256xf32>
+    %gamma_view = buffer.view %gamma[%base] : buffer -> view<256xf32>
+    %output_view = buffer.view %output[%token_bytes] : buffer -> view<[%head_count]x256xf32>
+    %x = vector.load %input_view[%bounded_head, %element] : view<[%head_count]x256xf32> -> vector<8xf32>
+    %g = vector.load %gamma_view[%element] : view<256xf32> -> vector<8xf32>
+    %sq = vector.mulf<reassoc|nnan|ninf|nsz> %x, %x : vector<8xf32>
+    %zero = scalar.constant 0.0 : f32
+    %local = vector.reduce<addf, reassoc|nnan|ninf|nsz> %sq, %zero : vector<8xf32>, f32
+    %sum = kernel.workgroup.reduce<addf> %local : f32
+    %width = scalar.constant 256.0 : f32
+    %epsilon = scalar.constant 0.000001 : f32
+    %mean = scalar.divf<reassoc|nnan|ninf|nsz> %sum, %width : f32
+    %variance = scalar.addf<reassoc|nnan|ninf|nsz> %mean, %epsilon : f32
+    %inv = scalar.rsqrtf<afn> %variance : f32
+    %inv_vec = vector.splat %inv : vector<8xf32>
+    %normed = vector.mulf<reassoc|nnan|ninf|nsz> %x, %inv_vec : vector<8xf32>
+    %result = vector.mulf<reassoc|nnan|ninf|nsz> %normed, %g : vector<8xf32>
+    vector.store %result, %output_view[%bounded_head, %element] : vector<8xf32>, view<[%head_count]x256xf32>
+  }
+  kernel.return
+}

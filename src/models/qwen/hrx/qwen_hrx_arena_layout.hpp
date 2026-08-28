@@ -86,6 +86,8 @@ struct QwenHrxArenaLayout {
   std::size_t batch_quant_scales_bytes{0};
   std::size_t batch_ssm_conv_output_bytes{0};
   std::size_t batch_ssm_readout_bytes{0};
+  std::size_t batch_attention_query_bytes{0};
+  std::size_t batch_attention_gate_bytes{0};
 
   [[nodiscard]] static std::optional<QwenHrxArenaLayout> Create(
       const QwenHrxArtifactContract& contract, std::uint32_t max_context,
@@ -191,6 +193,8 @@ struct QwenHrxArenaLayout {
         .batch_ssm_conv_output_bytes = kHrxPrefillChunkTokens * *ssm_qkv,
         .batch_ssm_readout_bytes =
             kHrxPrefillChunkTokens * *ssm_recurrent_output,
+        .batch_attention_query_bytes = kHrxPrefillChunkTokens * *q,
+        .batch_attention_gate_bytes = kHrxPrefillChunkTokens * *q,
     };
   }
 };
