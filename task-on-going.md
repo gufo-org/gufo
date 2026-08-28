@@ -56,6 +56,42 @@ matters here because a uniform-fill oracle cannot see a fragment permutation.
 (*PP256 varies between 310 and 340 across runs depending on its position in the
 sweep; PP512 upward is stable.)
 
+### DeltaNet recurrence: amortize the query/key reads
+
+With projections at their local optimum the SSM stage was next: 427.9 ms of the
+1312.9 ms PP512 chunk, of which the substage trace attributes about 127 ms to
+the recurrence and 280 ms to its projections.
+
+The recurrence gave one workgroup to each (value row, key vector) pair, so all
+128 row workgroups of a head re-read that head's query and key vectors for
+every token - a 128-fold duplication served out of cache. Giving one workgroup
+eight value rows amortizes those reads eightfold while keeping the same number
+of cross-lane reductions (each workgroup now performs 8 x 2 per token instead
+of 2, but there are 8x fewer workgroups) and the same register-resident state.
+The artifact compiles at 71 VGPRs with no spills and 100% reported occupancy.
+
+| measure | one row per workgroup | eight rows per workgroup |
+|---|---:|---:|
+| SSM stage, PP512 | 427.9 ms | 377.9 ms |
+| PP512 | 376.74 t/s | **396.13 t/s** |
+| PP1024 | 369.18 t/s | **384.39 t/s** |
+| PP2048 | 346.20 t/s | **359.48 t/s** |
+
+Prefill logits remain bit-identical (cosine 0.99989367).
+
+### Two more traffic variants rejected end to end
+
+Both were measured in the deployed executor, not the isolated harness:
+
+- 128 rows x 256 tokens per workgroup halves weight traffic but needs a
+  16-tile accumulator bank: 256 VGPRs, 31% occupancy, PP512 259.71 t/s.
+- 256 rows x 128 tokens per 512-thread workgroup halves activation traffic at
+  identical registers and occupancy: PP512 354.04 t/s, because halving the
+  workgroup count costs more latency hiding than the traffic saves.
+
+Both tile dimensions are therefore pinned: 128x128 with 8 waves per SIMD is a
+sharp local optimum, and the occupancy cliff dominates every traffic argument.
+
 ### The isolated benchmark and the deployed kernel are bound differently
 
 The 1.35x kernel win produced only about 7% end to end (PP512 FFN 819.1 ->

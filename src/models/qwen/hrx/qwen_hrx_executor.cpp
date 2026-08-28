@@ -1630,13 +1630,17 @@ bool QwenHrxExecutor::DispatchDeltaNetRecurrenceBatch(
       !TryBindOperand(readout, readout_bytes, &bindings[3])) {
     return false;
   }
+  // One wave per (row group, key vector): each workgroup owns eight value rows
+  // so a head's query and key vectors are read once per group per token rather
+  // than once per row, and each lane still folds four key elements inside the
+  // wave.
+  constexpr std::uint32_t kRowsPerRecurrenceGroup = 8;
   hrx_dispatch_config_t config{};
-  config.workgroup_count[0] =
-      contract_.SsmValueHeadCount() * contract_.SsmValueDim();
+  config.workgroup_count[0] = contract_.SsmValueHeadCount() *
+                              (contract_.SsmValueDim() /
+                               kRowsPerRecurrenceGroup);
   config.workgroup_count[1] = 1;
   config.workgroup_count[2] = 1;
-  // One wave per (value row, key vector): each lane folds four key elements,
-  // so the per-token reductions stay inside the wave.
   config.workgroup_size[0] = contract_.SsmKeyDim() / 4;
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
