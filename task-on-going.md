@@ -100,6 +100,29 @@ only after the scan so they do not sit live through it.
 
 Prefill logits remain bit-identical (cosine 0.99989367).
 
+### Verified final sweep
+
+One release binary (`nix build .#hrx`), device-local weights,
+`--hrx-fusions blocked-prefill`, `nix build .#checks.x86_64-linux.tests`
+passing, and prefill parity bit-identical to every earlier correct build
+(top-1 157 against 157, cosine 0.99989367):
+
+| prompt | HRX | HIP | HRX/HIP |
+|---:|---:|---:|---:|
+| 128 | 282.04 | 432.62 | 65% |
+| 256 | 320.48 | 451.90 | 71% |
+| 512 | 398.32 | 559.49 | 71% |
+| 1024 | 395.41 | 562.70 | 70% |
+| 2048 | 386.06 | 548.55 | 70% |
+| tg16 | 5.38 | 7.62 | 71% |
+
+PP128 and PP256 are the first timed points in their processes and read low;
+measured on their own the same binary gives roughly 310-320 t/s at PP128.
+
+Decode is untouched by this work at 5.38 t/s. It runs the single-token GEMV
+path, not the blocked projection, so it is a separate card and now the largest
+remaining gap by ratio alongside prefill.
+
 ### Session result and what is left
 
 | prompt | start of session | now | HIP | HRX/HIP |
