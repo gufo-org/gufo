@@ -26,7 +26,8 @@ kernel.def target(@qwen_q8_blocked_k6144_target) @qwen_q8_0_gemm_i8_blocked_k614
   %row_groups = index.div %capacity, %rows_per_group : index
   %token_group_rounding = index.constant 127 : index
   %rounded_tokens = index.add %tokens, %token_group_rounding : index
-  %token_groups = index.div %rounded_tokens, %rows_per_group : index
+  %tokens_per_group_cfg = index.constant 128 : index
+  %token_groups = index.div %rounded_tokens, %tokens_per_group_cfg : index
   %one = index.constant 1 : index
   %workgroup_size = index.constant 256 : index
   kernel.launch.config workgroups(%token_groups, %row_groups, %one) workgroup_size(%workgroup_size, %one, %one) : index
@@ -166,14 +167,30 @@ kernel.def target(@qwen_q8_blocked_k6144_target) @qwen_q8_0_gemm_i8_blocked_k614
 
     %wave_row_origin = index.mul %wave, %token_tile_extent : index
     %scale_vector_origin = index.mul %row_parity, %token_tile_count : index
-    %lhs_low = vector.fragment.load<lhs> %weight_stage[%wave_row_origin, %loop_begin] shape [%token_tile_extent, %token_tile_extent] : view<128x32xi8, %lhs_storage> -> vector<4xi32>
-    %lhs_high = vector.fragment.load<lhs> %weight_stage[%wave_row_origin, %token_tile_extent] shape [%token_tile_extent, %token_tile_extent] : view<128x32xi8, %lhs_storage> -> vector<4xi32>
+    // Same wide read for the weight panel: one row is 32 contiguous bytes, so
+    // a single lane read yields both K-half LHS fragments.
+    %lhs_row = index.add %wave_row_origin, %lane_token : index
+    %lhs_pair_bytes = vector.load %weight_stage_store[%lhs_row, %loop_begin] : view<128x32xi8> -> vector<32xi8>
+    %lhs_pair = vector.bitcast %lhs_pair_bytes : vector<32xi8> to vector<8xi32>
+    %lhs_low_raw = vector.slice %lhs_pair[0] : vector<8xi32> -> vector<4xi32>
+    %lhs_high_raw = vector.slice %lhs_pair[4] : vector<8xi32> -> vector<4xi32>
+    %lhs_low = vector.fragment<lhs> %lhs_low_raw shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %lhs_high = vector.fragment<lhs> %lhs_high_raw shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
     %weight_scales = vector.load %weight_scale_stage[%wave, %scale_vector_origin] : view<8x16xf32> -> vector<8xf32>
 
     %next_bank = scf.for %token_tile = [%loop_begin to %token_tile_count step %loop_step](%tile_bank = %bank : vector<8x8xf32>) -> (vector<8x8xf32>) unroll {
       %rhs_token_origin = index.mul %token_tile, %token_tile_extent : index
-      %rhs_low = vector.fragment.load<rhs> %act_stage[%loop_begin, %rhs_token_origin] shape [%token_tile_extent, %token_tile_extent] : view<32x128xi8, %rhs_storage> -> vector<4xi32>
-      %rhs_high = vector.fragment.load<rhs> %act_stage[%token_tile_extent, %rhs_token_origin] shape [%token_tile_extent, %token_tile_extent] : view<32x128xi8, %rhs_storage> -> vector<4xi32>
+      // Both K-half RHS fragments come from one 32-byte lane read: the staged
+      // panel row for this lane's token holds k=0..31 contiguously, and the
+      // fragment lane mapping puts token n on lane n%16. Halving the fragment
+      // load count is worth 1.26x because the kernel is bound by LDS reads.
+      %rhs_token_row = index.add %rhs_token_origin, %lane_token : index
+      %rhs_pair_bytes = vector.load %act_stage_store[%rhs_token_row, %loop_begin] : view<128x32xi8> -> vector<32xi8>
+      %rhs_pair = vector.bitcast %rhs_pair_bytes : vector<32xi8> to vector<8xi32>
+      %rhs_low_raw = vector.slice %rhs_pair[0] : vector<8xi32> -> vector<4xi32>
+      %rhs_high_raw = vector.slice %rhs_pair[4] : vector<8xi32> -> vector<4xi32>
+      %rhs_low = vector.fragment<rhs> %rhs_low_raw shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+      %rhs_high = vector.fragment<rhs> %rhs_high_raw shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
       %zero_i32 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
       %partial = vector.mma %lhs_low, %rhs_low, %zero_i32 : vector<4xi32>, vector<4xi32>, vector<8xi32>
       %product = vector.mma %lhs_high, %rhs_high, %partial : vector<4xi32>, vector<4xi32>, vector<8xi32>

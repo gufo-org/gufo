@@ -24,6 +24,53 @@ after model load; measured on its own the same binary gives 310-319 t/s.)
 The change is a launch-order change only: prefill logits are bit-identical to
 the previous build (max absolute error 0.27421856, cosine 0.99989367).
 
+### Wide LDS reads: the fragment-load win, harvested
+
+The ablation above said fragment reads were half the kernel's runtime, and the
+way to cut them without spending registers turned out to be a plain wide read
+rather than a different wave shape. Both staged panels are row-major with 32
+contiguous K bytes per row, and the fragment lane mapping puts the tile's
+column on lane n%16, so **one 32-byte lane read yields both K-half fragments**:
+
+```
+%pair  = vector.load %act_stage_store[%token_row, 0] : view<128x32xi8> -> vector<32xi8>
+%low   = vector.slice %pair[0] ... ; %high = vector.slice %pair[4] ...
+%rhs   = vector.fragment<rhs> %low shape [16, 16] using {schema = %i8_schema ...}
+```
+
+Attaching the operand schema explicitly is what makes the raw vector acceptable
+to `vector.mma`. Applying it to the RHS took rows=17408/K=5120/128 tokens from
+1.347 ms to 1.071 ms; adding the same for the LHS reached **0.999 ms, a 1.35x
+kernel speedup**, with registers going *down* from 192 to 184 (and back to 192
+once both paths are wide). Prefill logits stayed bit-identical throughout
+(max absolute error 0.27421856, cosine 0.99989367), which is the check that
+matters here because a uniform-fill oracle cannot see a fragment permutation.
+
+| prompt | session start | grid swap | + wide reads | HIP | HRX/HIP |
+|---:|---:|---:|---:|---:|---:|
+| 256 | 322.80 | 339.84 | 310.43* | 451.90 | 69% |
+| 512 | 319.59 | 354.42 | **376.74** | 559.49 | 67% |
+| 1024 | 316.95 | 348.01 | **369.18** | 562.70 | 66% |
+| 2048 | 306.76 | 327.84 | **346.20** | 548.55 | 63% |
+
+(*PP256 varies between 310 and 340 across runs depending on its position in the
+sweep; PP512 upward is stable.)
+
+### The isolated benchmark and the deployed kernel are bound differently
+
+The 1.35x kernel win produced only about 7% end to end (PP512 FFN 819.1 ->
+763.6 ms). The isolated benchmark re-reads one hot 94 MiB weight matrix, so it
+is LDS-bound; the deployed FFN streams 26 GiB per pass and is DRAM-bound at
+roughly 95 GB/s. **Traffic-reducing variants must therefore be judged end to
+end, not in the standalone harness** - which is why the earlier isolated
+rejection of wider row spans was not the last word on them.
+
+Retesting that end to end: 256 output rows per 512-thread workgroup halves
+activation traffic at identical wave shape, registers and occupancy (192 VGPRs,
+50%), and still regressed - PP512 354.04 t/s against 376.74, FFN 827.5 ms
+against 763.6 ms. Halving the workgroup count costs more latency hiding than
+the traffic saves, so the 128-row span is retained.
+
 ### The blocked projection is bound by LDS fragment reads
 
 An ablation finally identified the limiter. Hoisting the two RHS fragment loads
