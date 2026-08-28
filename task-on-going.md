@@ -100,6 +100,34 @@ only after the scan so they do not sit live through it.
 
 Prefill logits remain bit-identical (cosine 0.99989367).
 
+### Decode: the wide-load transformation ported to the GEMV path
+
+Decode had received none of the prefill work and still read each 34-byte Q8_0
+block as eight four-byte loads plus a two-byte scale, with its activations read
+as eight separate `vector<4xf32>` loads. Both are contiguous, so both collapse
+to one wide read per block - the same transformation that was worth 1.35x on
+the blocked projection. `vector.slice` needs static indices, so the quarter
+loop is emitted unrolled.
+
+All five artifacts were widened: `qwen_q8_0_gemv_k{5120,6144,17408}`,
+`qwen_q8_0_gemv_k17408_wg256` (the default K=17408 route, and structurally
+different because it carries a per-block scale vector and an outer strided
+block loop), and `qwen_q8_0_vocab_gemv_k5120`.
+
+| measure | before | after |
+|---|---:|---:|
+| isolated GEMV, rows=17408, K=5120 | 1.353 ms | **0.610 ms** |
+| tg16 | 5.38 t/s | **6.74 t/s** |
+| PP512 | 398.32 t/s | 403.72 t/s |
+
+`--validate-hrx 4` returns a full PASS: decode is not W8A8, so unlike prefill
+it had to stay inside the original tight envelope, and it does.
+
+The decode token is now embedding 1.8 ms, attention 8.7, SSM 39.7, FFN 80.7,
+final 18.5, total 149.4 ms against HIP's roughly 131 ms (88%). FFN moves
+18.2 GiB in 80.7 ms, which is 225 GB/s - at the DRAM roofline, so the remaining
+decode gap is in the SSM and final stages, not in the projections.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,
