@@ -526,10 +526,14 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardPromptBatch(
   tokenization::TokenId next_token = 0;
 
   if (policy_.chunked_prefill && ChunkedPrefillReady()) {
+    // One tile per pass over the layers. With the blocked route the tile is
+    // 128 tokens, so a 128-token prompt streams the checkpoint once instead of
+    // sixteen times.
+    const std::size_t chunk_tokens = PrefillChunkTokens();
     for (std::size_t offset = 0; offset < tokens.size();
-         offset += kHrxPrefillChunkTokens) {
+         offset += chunk_tokens) {
       const auto chunk = tokens.subspan(
-          offset, std::min(kHrxPrefillChunkTokens, tokens.size() - offset));
+          offset, std::min(chunk_tokens, tokens.size() - offset));
       const auto chunk_position =
           start_position + static_cast<std::uint32_t>(offset);
       if (!ForwardPromptChunk(chunk, chunk_position, error_msg)) {
@@ -649,8 +653,16 @@ void QwenHrxExecutor::ResetKernelState() {
   activation_quantize_wmma_k5120_executable_ = nullptr;
   activation_quantize_k6144_executable_ = nullptr;
   activation_quantize_k17408_executable_ = nullptr;
+  q8_gemm_blocked_k5120_executable_ = nullptr;
+  q8_gemm_blocked_k6144_executable_ = nullptr;
+  q8_gemm_blocked_k17408_executable_ = nullptr;
+  activation_quantize_blocked_k5120_executable_ = nullptr;
+  activation_quantize_blocked_k6144_executable_ = nullptr;
+  activation_quantize_blocked_k17408_executable_ = nullptr;
   deltanet_recurrence_batch_executable_ = nullptr;
   deltanet_readout_batch_executable_ = nullptr;
+  deltanet_prepare_batch_executable_ = nullptr;
+  ssm_conv_batch_executable_ = nullptr;
   missing_kernel_artifacts_.clear();
   prototype_artifacts_ready_ = false;
 }
@@ -803,10 +815,26 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
       activation_quantize_k6144_executable_ = exec;
     } else if (entry.name == "qwen_activation_quantize_k17408") {
       activation_quantize_k17408_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_blocked_k5120_t128") {
+      q8_gemm_blocked_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_blocked_k6144_t128") {
+      q8_gemm_blocked_k6144_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_blocked_k17408_t128") {
+      q8_gemm_blocked_k17408_executable_ = exec;
+    } else if (entry.name == "qwen_activation_quantize_blocked_k5120") {
+      activation_quantize_blocked_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_activation_quantize_blocked_k6144") {
+      activation_quantize_blocked_k6144_executable_ = exec;
+    } else if (entry.name == "qwen_activation_quantize_blocked_k17408") {
+      activation_quantize_blocked_k17408_executable_ = exec;
     } else if (entry.name == "qwen_deltanet_recurrence_batch") {
       deltanet_recurrence_batch_executable_ = exec;
     } else if (entry.name == "qwen_deltanet_readout_batch") {
       deltanet_readout_batch_executable_ = exec;
+    } else if (entry.name == "qwen_deltanet_prepare_batch") {
+      deltanet_prepare_batch_executable_ = exec;
+    } else if (entry.name == "qwen_ssm_conv_batch") {
+      ssm_conv_batch_executable_ = exec;
     } else if (entry.name == "qwen_per_head_rmsnorm") {
       per_head_rmsnorm_executable_ = exec;
     } else if (entry.name == "qwen_attention_decode") {
@@ -1005,6 +1033,131 @@ namespace {
 
 }  // namespace
 
+bool QwenHrxExecutor::DispatchChunkQuantize(const HrxBufferBinding& input,
+                                            std::uint32_t input_elements,
+                                            std::uint32_t tokens) {
+  if (UsesBlockedPrefill()) {
+    return DispatchActivationQuantizeBlocked(input, input_elements, tokens);
+  }
+  return DispatchActivationQuantize(input, input_elements, tokens);
+}
+
+bool QwenHrxExecutor::DispatchActivationQuantizeBlocked(
+    const HrxBufferBinding& input, std::uint32_t input_elements,
+    std::uint32_t tokens) {
+  hrx_executable_t executable = nullptr;
+  switch (input_elements) {
+    case 5120:
+      executable = activation_quantize_blocked_k5120_executable_;
+      break;
+    case 6144:
+      executable = activation_quantize_blocked_k6144_executable_;
+      break;
+    case 17408:
+      executable = activation_quantize_blocked_k17408_executable_;
+      break;
+    default:
+      return false;
+  }
+  if (executable == nullptr || !arena_.has_value() || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto input_bytes =
+      CheckedBytes({tokens, input_elements, sizeof(float)});
+  // The artifact always writes the full physical tile so padded token columns
+  // hold zeroed payload and scales.
+  const auto payload_bytes =
+      CheckedBytes({kHrxPrefillChunkTokens, input_elements});
+  const auto scale_bytes = CheckedBytes(
+      {kHrxPrefillChunkTokens, input_elements / 32, sizeof(float)});
+  hrx_buffer_ref_t bindings[3];
+  if (!TryBindOperand(input, input_bytes, &bindings[0]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
+                      payload_bytes, &bindings[1]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
+                      scale_bytes, &bindings[2])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = kHrxPrefillChunkTokens;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = input_elements / 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status = hrx_stream_dispatch(backend_.Stream(), executable, 0, &config,
+                                    &tokens, sizeof(tokens), bindings, 3, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
+                                            const HrxBufferBinding& output,
+                                            std::uint32_t rows,
+                                            std::uint32_t input_elements,
+                                            std::uint32_t tokens) {
+  hrx_executable_t executable = nullptr;
+  std::uint32_t row_capacity = 0;
+  switch (input_elements) {
+    case 5120:
+      executable = q8_gemm_blocked_k5120_executable_;
+      row_capacity = contract_.VocabSize();
+      break;
+    case 6144:
+      executable = q8_gemm_blocked_k6144_executable_;
+      row_capacity = contract_.HiddenSize();
+      break;
+    case 17408:
+      executable = q8_gemm_blocked_k17408_executable_;
+      row_capacity = contract_.HiddenSize();
+      break;
+    default:
+      return false;
+  }
+  if (executable == nullptr || !arena_.has_value() || rows == 0 ||
+      rows > row_capacity || tokens == 0 || tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  constexpr std::uint32_t kRowsPerGroup = 128;
+  const auto weight_bytes = Q8_0MatrixBytes(rows, input_elements);
+  const auto payload_bytes =
+      CheckedBytes({kHrxPrefillChunkTokens, input_elements});
+  const auto scale_bytes = CheckedBytes(
+      {kHrxPrefillChunkTokens, input_elements / 32, sizeof(float)});
+  const auto output_bytes = CheckedBytes({tokens, rows, sizeof(float)});
+  hrx_buffer_ref_t bindings[4];
+  if (!TryBindOperand(weight, weight_bytes, &bindings[0]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
+                      payload_bytes, &bindings[1]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
+                      scale_bytes, &bindings[2]) ||
+      !TryBindOperand(output, output_bytes, &bindings[3])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = (rows + kRowsPerGroup - 1) / kRowsPerGroup;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 256;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  const std::array<std::uint32_t, 2> constants{rows, tokens};
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), executable, 0, &config, constants.data(),
+      constants.size() * sizeof(std::uint32_t), bindings, 4, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
 bool QwenHrxExecutor::DispatchActivationQuantize(const HrxBufferBinding& input,
                                                 std::uint32_t input_elements,
                                                 std::uint32_t tokens) {
@@ -1177,6 +1330,9 @@ bool QwenHrxExecutor::DispatchChunkProjection(const HrxBufferBinding& weight,
                                               std::uint32_t rows,
                                               std::uint32_t input_elements,
                                               std::uint32_t tokens) {
+  if (UsesBlockedPrefill()) {
+    return DispatchQ8GemmBlocked(weight, output, rows, input_elements, tokens);
+  }
   if (policy_.int8_prefill && Int8PrefillReady()) {
     if (policy_.wmma_prefill && input_elements == contract_.HiddenSize() &&
         WmmaPrefillReady()) {
@@ -1185,6 +1341,79 @@ bool QwenHrxExecutor::DispatchChunkProjection(const HrxBufferBinding& weight,
     return DispatchQ8GemmInt8(weight, output, rows, input_elements, tokens);
   }
   return DispatchQ8GemmT8(weight, input, output, rows, input_elements, tokens);
+}
+
+bool QwenHrxExecutor::DispatchDeltaNetPrepareBatch(
+    const HrxBufferBinding& prepared, const HrxBufferBinding& a,
+    const HrxBufferBinding& dt, std::uint32_t tokens) {
+  if (deltanet_prepare_batch_executable_ == nullptr || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto prepared_bytes =
+      CheckedBytes({tokens, 2, contract_.SsmAlphaBetaWidth(), sizeof(float)});
+  const auto head_bytes =
+      CheckedBytes({contract_.SsmAlphaBetaWidth(), sizeof(float)});
+  hrx_buffer_ref_t bindings[3];
+  if (!TryBindOperand(prepared, prepared_bytes, &bindings[0]) ||
+      !TryBindOperand(a, head_bytes, &bindings[1]) ||
+      !TryBindOperand(dt, head_bytes, &bindings[2])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = tokens;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = contract_.SsmAlphaBetaWidth();
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), deltanet_prepare_batch_executable_,
+                          0, &config, &tokens, sizeof(tokens), bindings, 3, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchSsmConvBatch(const HrxBufferBinding& input,
+                                           const HrxBufferBinding& weights,
+                                           const HrxBufferBinding& state,
+                                           const HrxBufferBinding& output,
+                                           std::uint32_t tokens) {
+  if (ssm_conv_batch_executable_ == nullptr || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto chunk_bytes =
+      CheckedBytes({tokens, contract_.SsmQkvWidth(), sizeof(float)});
+  const auto tap_bytes = CheckedBytes(
+      {contract_.SsmQkvWidth(), contract_.SsmConvKernel(), sizeof(float)});
+  hrx_buffer_ref_t bindings[4];
+  if (!TryBindOperand(input, chunk_bytes, &bindings[0]) ||
+      !TryBindOperand(weights, tap_bytes, &bindings[1]) ||
+      !TryBindOperand(state, tap_bytes, &bindings[2]) ||
+      !TryBindOperand(output, chunk_bytes, &bindings[3])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = contract_.SsmQkvWidth() / 32;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), ssm_conv_batch_executable_, 0,
+                          &config, &tokens, sizeof(tokens), bindings, 4, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
 }
 
 bool QwenHrxExecutor::DispatchDeltaNetRecurrenceBatch(
@@ -1217,7 +1446,9 @@ bool QwenHrxExecutor::DispatchDeltaNetRecurrenceBatch(
       contract_.SsmValueHeadCount() * contract_.SsmValueDim();
   config.workgroup_count[1] = 1;
   config.workgroup_count[2] = 1;
-  config.workgroup_size[0] = contract_.SsmKeyDim();
+  // One wave per (value row, key vector): each lane folds four key elements,
+  // so the per-token reductions stay inside the wave.
+  config.workgroup_size[0] = contract_.SsmKeyDim() / 4;
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
@@ -1301,9 +1532,10 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
                             tokens)) {
     return Reject("batched attention RMSNorm failed", error_msg);
   }
-  const bool int8_route = policy_.int8_prefill && Int8PrefillReady();
+  const bool int8_route =
+      UsesBlockedPrefill() || (policy_.int8_prefill && Int8PrefillReady());
   if (int8_route &&
-      !DispatchActivationQuantize(batch_normed,
+      !DispatchChunkQuantize(batch_normed,
                                   static_cast<std::uint32_t>(hidden), tokens)) {
     return Reject("batched attention activation quantization failed",
                   error_msg);
@@ -1374,7 +1606,7 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
   }
 
   if (int8_route &&
-      !DispatchActivationQuantize(batch_context,
+      !DispatchChunkQuantize(batch_context,
                                   contract_.FullAttentionQueryWidth(),
                                   tokens)) {
     return Reject("batched attention context quantization failed", error_msg);
@@ -1440,9 +1672,10 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
     return Reject("batched SSM requires adjacent alpha/beta weights",
                   error_msg);
   }
-  const bool int8_route = policy_.int8_prefill && Int8PrefillReady();
+  const bool int8_route =
+      UsesBlockedPrefill() || (policy_.int8_prefill && Int8PrefillReady());
   if (int8_route &&
-      !DispatchActivationQuantize(batch_normed,
+      !DispatchChunkQuantize(batch_normed,
                                   static_cast<std::uint32_t>(hidden), tokens)) {
     return Reject("batched SSM activation quantization failed", error_msg);
   }
@@ -1465,34 +1698,49 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
       arena_->Binding(QwenHrxArenaBuffer::kBatchSsmConvOutput);
   const auto batch_readout =
       arena_->Binding(QwenHrxArenaBuffer::kBatchSsmReadout);
-  for (std::uint32_t token = 0; token < tokens; ++token) {
-    const auto qkv_token = TokenSlice(batch_qkv, token, contract_.SsmQkvWidth());
-    const auto gate_token =
-        TokenSlice(batch_gate, token, contract_.SsmGateWidth());
-    const auto alpha_beta_token =
-        TokenSlice(batch_alpha_beta, token, 2 * alpha_beta_width);
-    const auto context_token = TokenSlice(batch_context, token, context_stride);
-    const auto conv_token =
-        TokenSlice(batch_conv, token, contract_.SsmQkvWidth());
-    if (!qkv_token || !gate_token || !alpha_beta_token || !context_token ||
-        !conv_token) {
-      return Reject("batched SSM token slice is invalid", error_msg);
+  const bool batched_front_end = batched_deltanet && BatchedSsmFrontEndReady();
+  if (batched_front_end) {
+    // One preparation and one convolution dispatch for the whole tile. The
+    // convolution keeps its four-tap window in registers across the tile, so
+    // the rolling state is still read and written exactly once per layer.
+    if (!DispatchDeltaNetPrepareBatch(batch_alpha_beta, layer.ssm_a,
+                                      layer.ssm_dt, tokens) ||
+        !DispatchSsmConvBatch(batch_qkv, layer.ssm_conv1d, *conv_state,
+                              batch_conv, tokens)) {
+      return Reject("batched SSM front end failed", error_msg);
     }
-    const auto alpha_bytes = CheckedBytes({alpha_beta_width, sizeof(float)});
-    const auto alpha = SliceBinding(*alpha_beta_token, 0, *alpha_bytes);
-    const auto beta = SliceBinding(*alpha_beta_token, *alpha_bytes,
-                                   *alpha_bytes);
-    if (!alpha || !beta ||
-        !DispatchDeltaNetPrepare(*alpha, *beta, layer.ssm_a, layer.ssm_dt) ||
-        !DispatchSsmConv(*qkv_token, layer.ssm_conv1d,
-                         *conv_state, batched_deltanet ? *conv_token : conv)) {
-      return Reject("batched SSM convolution failed", error_msg);
-    }
-    if (!batched_deltanet &&
-        !DispatchDeltaNetPrepared(conv, *alpha, *beta, layer.ssm_norm,
-                                  *gate_token, *recurrent_state,
-                                  *context_token)) {
-      return Reject("batched SSM per-token recurrence failed", error_msg);
+  } else {
+    for (std::uint32_t token = 0; token < tokens; ++token) {
+      const auto qkv_token =
+          TokenSlice(batch_qkv, token, contract_.SsmQkvWidth());
+      const auto gate_token =
+          TokenSlice(batch_gate, token, contract_.SsmGateWidth());
+      const auto alpha_beta_token =
+          TokenSlice(batch_alpha_beta, token, 2 * alpha_beta_width);
+      const auto context_token =
+          TokenSlice(batch_context, token, context_stride);
+      const auto conv_token =
+          TokenSlice(batch_conv, token, contract_.SsmQkvWidth());
+      if (!qkv_token || !gate_token || !alpha_beta_token || !context_token ||
+          !conv_token) {
+        return Reject("batched SSM token slice is invalid", error_msg);
+      }
+      const auto alpha_bytes = CheckedBytes({alpha_beta_width, sizeof(float)});
+      const auto alpha = SliceBinding(*alpha_beta_token, 0, *alpha_bytes);
+      const auto beta =
+          SliceBinding(*alpha_beta_token, *alpha_bytes, *alpha_bytes);
+      if (!alpha || !beta ||
+          !DispatchDeltaNetPrepare(*alpha, *beta, layer.ssm_a, layer.ssm_dt) ||
+          !DispatchSsmConv(*qkv_token, layer.ssm_conv1d, *conv_state,
+                           batched_deltanet ? *conv_token : conv)) {
+        return Reject("batched SSM convolution failed", error_msg);
+      }
+      if (!batched_deltanet &&
+          !DispatchDeltaNetPrepared(conv, *alpha, *beta, layer.ssm_norm,
+                                    *gate_token, *recurrent_state,
+                                    *context_token)) {
+        return Reject("batched SSM per-token recurrence failed", error_msg);
+      }
     }
   }
   if (batched_deltanet &&
@@ -1505,7 +1753,7 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
   }
 
   if (int8_route &&
-      !DispatchActivationQuantize(batch_context, contract_.SsmGateWidth(),
+      !DispatchChunkQuantize(batch_context, contract_.SsmGateWidth(),
                                   tokens)) {
     return Reject("batched SSM context quantization failed", error_msg);
   }
@@ -1552,9 +1800,10 @@ bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
                             tokens)) {
     return Reject("batched FFN RMSNorm failed", error_msg);
   }
-  const bool int8_route = policy_.int8_prefill && Int8PrefillReady();
+  const bool int8_route =
+      UsesBlockedPrefill() || (policy_.int8_prefill && Int8PrefillReady());
   if (int8_route &&
-      !DispatchActivationQuantize(batch_normed,
+      !DispatchChunkQuantize(batch_normed,
                                   static_cast<std::uint32_t>(hidden), tokens)) {
     return Reject("batched FFN activation quantization failed", error_msg);
   }
@@ -1569,7 +1818,7 @@ bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
     return Reject("batched FFN SwiGLU failed", error_msg);
   }
   if (int8_route &&
-      !DispatchActivationQuantize(batch_activation,
+      !DispatchChunkQuantize(batch_activation,
                                   static_cast<std::uint32_t>(ffn), tokens)) {
     return Reject("batched FFN activation payload quantization failed",
                   error_msg);
@@ -1795,14 +2044,14 @@ bool QwenHrxExecutor::DispatchQ8GemmT8(const HrxBufferBinding& weight,
       return false;
   }
   if (executable == nullptr || rows == 0 || rows > row_capacity ||
-      tokens == 0 || tokens > kHrxPrefillChunkTokens) {
+      tokens == 0 || tokens > kHrxDot4iChunkTokens) {
     return false;
   }
   const auto weight_bytes = Q8_0MatrixBytes(rows, input_elements);
-  // The artifact always reads kHrxPrefillChunkTokens token rows; the arena
-  // allocates that many so short chunks read zeroed padding.
+  // The artifact always reads kHrxDot4iChunkTokens token rows; the arena
+  // allocates at least that many so short chunks read zeroed padding.
   const auto input_bytes =
-      CheckedBytes({kHrxPrefillChunkTokens, input_elements, sizeof(float)});
+      CheckedBytes({kHrxDot4iChunkTokens, input_elements, sizeof(float)});
   const auto output_bytes = CheckedBytes({tokens, rows, sizeof(float)});
   hrx_buffer_ref_t bindings[3];
   if (!TryBindOperand(weight, weight_bytes, &bindings[0]) ||

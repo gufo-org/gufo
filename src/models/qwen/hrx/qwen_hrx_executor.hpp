@@ -225,6 +225,37 @@ public:
            activation_quantize_k6144_executable_ != nullptr &&
            activation_quantize_k17408_executable_ != nullptr;
   }
+  /// True when the blocked 128x128 route has every artifact it needs.
+  [[nodiscard]] bool BlockedPrefillReady() const noexcept {
+    return q8_gemm_blocked_k5120_executable_ != nullptr &&
+           q8_gemm_blocked_k6144_executable_ != nullptr &&
+           q8_gemm_blocked_k17408_executable_ != nullptr &&
+           activation_quantize_blocked_k5120_executable_ != nullptr &&
+           activation_quantize_blocked_k6144_executable_ != nullptr &&
+           activation_quantize_blocked_k17408_executable_ != nullptr;
+  }
+  /// True when the policy asks for the blocked route and it can run.
+  [[nodiscard]] bool UsesBlockedPrefill() const noexcept {
+    return policy_.blocked_prefill && BlockedPrefillReady();
+  }
+  /// Physical tokens per prefill tile for the currently selected route.
+  [[nodiscard]] std::size_t PrefillChunkTokens() const noexcept {
+    return UsesBlockedPrefill() ? kHrxPrefillChunkTokens : kHrxDot4iChunkTokens;
+  }
+  /// Quantizes one activation tile with whichever operand layout the active
+  /// projection route consumes.
+  bool DispatchChunkQuantize(const HrxBufferBinding& input,
+                             std::uint32_t input_elements,
+                             std::uint32_t tokens);
+  /// Fragment-ordered quantization for the blocked route.
+  bool DispatchActivationQuantizeBlocked(const HrxBufferBinding& input,
+                                         std::uint32_t input_elements,
+                                         std::uint32_t tokens);
+  /// Blocked 128 row x 128 token W8A8 projection.
+  bool DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
+                             const HrxBufferBinding& output,
+                             std::uint32_t rows, std::uint32_t input_elements,
+                             std::uint32_t tokens);
   /// True when the K=5120 WMMA specialization and its padded quantizer exist.
   [[nodiscard]] bool WmmaPrefillReady() const noexcept {
     return q8_gemm_i8_wmma_k5120_t8_executable_ != nullptr &&
@@ -253,6 +284,21 @@ public:
                                        const HrxBufferBinding& state,
                                        const HrxBufferBinding& readout,
                                        std::uint32_t tokens);
+  /// Whole-tile SSM front end: one preparation and one convolution dispatch
+  /// per layer instead of one of each per token.
+  [[nodiscard]] bool BatchedSsmFrontEndReady() const noexcept {
+    return deltanet_prepare_batch_executable_ != nullptr &&
+           ssm_conv_batch_executable_ != nullptr;
+  }
+  bool DispatchDeltaNetPrepareBatch(const HrxBufferBinding& prepared,
+                                    const HrxBufferBinding& a,
+                                    const HrxBufferBinding& dt,
+                                    std::uint32_t tokens);
+  bool DispatchSsmConvBatch(const HrxBufferBinding& input,
+                            const HrxBufferBinding& weights,
+                            const HrxBufferBinding& state,
+                            const HrxBufferBinding& output,
+                            std::uint32_t tokens);
   bool DispatchDeltaNetReadoutBatch(const HrxBufferBinding& readout,
                                     const HrxBufferBinding& norm,
                                     const HrxBufferBinding& gate,
@@ -375,8 +421,16 @@ private:
   hrx_executable_t activation_quantize_wmma_k5120_executable_{nullptr};
   hrx_executable_t activation_quantize_k6144_executable_{nullptr};
   hrx_executable_t activation_quantize_k17408_executable_{nullptr};
+  hrx_executable_t q8_gemm_blocked_k5120_executable_{nullptr};
+  hrx_executable_t q8_gemm_blocked_k6144_executable_{nullptr};
+  hrx_executable_t q8_gemm_blocked_k17408_executable_{nullptr};
+  hrx_executable_t activation_quantize_blocked_k5120_executable_{nullptr};
+  hrx_executable_t activation_quantize_blocked_k6144_executable_{nullptr};
+  hrx_executable_t activation_quantize_blocked_k17408_executable_{nullptr};
   hrx_executable_t deltanet_recurrence_batch_executable_{nullptr};
   hrx_executable_t deltanet_readout_batch_executable_{nullptr};
+  hrx_executable_t deltanet_prepare_batch_executable_{nullptr};
+  hrx_executable_t ssm_conv_batch_executable_{nullptr};
   hrx_executable_t per_head_rmsnorm_executable_{nullptr};
   hrx_executable_t attention_decode_executable_{nullptr};
   hrx_executable_t ssm_conv_executable_{nullptr};

@@ -1,0 +1,52 @@
+// Qwen3.8 per-head DeltaNet parameter preparation for a whole prefill tile.
+// One workgroup handles one token row of the interleaved alpha/beta chunk, so
+// a layer costs one dispatch instead of one per token. The arithmetic matches
+// qwen_deltanet_prepare_f32 exactly.
+
+config.decl @qwen_deltanet_prepare_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+
+kernel.def @qwen_deltanet_prepare_batch_f32(%tokens: index) {
+  %capacity = config.get @qwen_deltanet_prepare_batch_f32.token_capacity : index
+  %unit = index.constant 1 : index
+  %heads = index.constant 48 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%heads, %unit, %unit) : index
+} launch(%tokens: index, %prepared: buffer, %a: buffer, %dt: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_deltanet_prepare_batch_f32.token_capacity : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 128), le(%tokens, %capacity)] : index
+  %token = kernel.workgroup.id<x> : index
+  %head = kernel.workitem.id<x> : index
+  %token_live = index.cmp ult, %token, %token_count : index
+  scf.if %token_live {
+    %heads = index.constant 48 : index
+    %pair_width = index.constant 96 : index
+    %token_base = index.mul %token, %pair_width : index
+    %alpha_index = index.add %token_base, %head : index
+    %beta_head = index.add %head, %heads : index
+    %beta_index = index.add %token_base, %beta_head : index
+    %prepared_view = buffer.view %prepared[%base] : buffer -> view<12288xf32>
+    %a_view = buffer.view %a[%base] : buffer -> view<48xf32>
+    %dt_view = buffer.view %dt[%base] : buffer -> view<48xf32>
+    %alpha_raw = view.load %prepared_view[%alpha_index] : view<12288xf32> -> f32
+    %beta_raw = view.load %prepared_view[%beta_index] : view<12288xf32> -> f32
+    %a_value = view.load %a_view[%head] : view<48xf32> -> f32
+    %dt_value = view.load %dt_view[%head] : view<48xf32> -> f32
+    %biased = scalar.addf %alpha_raw, %dt_value : f32
+    %threshold = scalar.constant 20.0 : f32
+    %large = scalar.cmpf ogt, %biased, %threshold : f32
+    %biased_exp = scalar.expf<afn> %biased : f32
+    %one = scalar.constant 1.0 : f32
+    %softplus_argument = scalar.addf %one, %biased_exp : f32
+    %softplus_regular = scalar.logf<afn> %softplus_argument : f32
+    %softplus = scf.select %large, %biased, %softplus_regular : f32
+    %decay_exponent = scalar.mulf %softplus, %a_value : f32
+    %decay = scalar.expf<afn> %decay_exponent : f32
+    %negative_beta = scalar.negf %beta_raw : f32
+    %beta_exp = scalar.expf<afn> %negative_beta : f32
+    %beta_denominator = scalar.addf %one, %beta_exp : f32
+    %beta_sigmoid = scalar.divf %one, %beta_denominator : f32
+    view.store %decay, %prepared_view[%alpha_index] : f32, view<12288xf32>
+    view.store %beta_sigmoid, %prepared_view[%beta_index] : f32, view<12288xf32>
+  }
+  kernel.return
+}

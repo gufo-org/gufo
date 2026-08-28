@@ -2,7 +2,7 @@
 // gate and up halves are interleaved per token, which is the layout the fused
 // gate/up projection produces. One dispatch covers the whole chunk.
 
-config.decl @qwen_swiglu_pointwise_batch_f32.element_capacity : %value: index where [range(%value, 32, 557056), mul(%value, 32)]
+config.decl @qwen_swiglu_pointwise_batch_f32.element_capacity : %value: index where [range(%value, 32, 2228224), mul(%value, 32)]
 
 kernel.def @qwen_swiglu_pointwise_batch_f32(%elements: index) {
   %workgroup_size = index.constant 32 : index
@@ -13,7 +13,7 @@ kernel.def @qwen_swiglu_pointwise_batch_f32(%elements: index) {
 } launch(%elements: index, %pairs: buffer, %output: buffer) {
   %base = index.constant 0 : offset
   %capacity = config.get @qwen_swiglu_pointwise_batch_f32.element_capacity : index
-  %count = index.assume %elements [range(%elements, 32, 557056), mul(%elements, 32), le(%elements, %capacity)] : index
+  %count = index.assume %elements [range(%elements, 32, 2228224), mul(%elements, 32), le(%elements, %capacity)] : index
   %group = kernel.workgroup.id<x> : index
   %lane = kernel.workitem.id<x> : index
   %workgroup_size = index.constant 32 : index
@@ -30,17 +30,17 @@ kernel.def @qwen_swiglu_pointwise_batch_f32(%elements: index) {
     %gate_index = index.add %pair_base, %column : index
     %up_index = index.add %gate_index, %width : index
     %pairs_noalias, %output_noalias = buffer.assume.noalias %pairs, %output : buffer, buffer
-    %pairs_view = buffer.view %pairs_noalias[%base] : buffer -> view<557056xf32>
-    %output_view = buffer.view %output_noalias[%base] : buffer -> view<278528xf32>
-    %g = view.load %pairs_view[%gate_index] : view<557056xf32> -> f32
-    %u = view.load %pairs_view[%up_index] : view<557056xf32> -> f32
+    %pairs_view = buffer.view %pairs_noalias[%base] : buffer -> view<4456448xf32>
+    %output_view = buffer.view %output_noalias[%base] : buffer -> view<2228224xf32>
+    %g = view.load %pairs_view[%gate_index] : view<4456448xf32> -> f32
+    %u = view.load %pairs_view[%up_index] : view<4456448xf32> -> f32
     %negative = scalar.negf %g : f32
     %exponent = scalar.expf<afn> %negative : f32
     %one = scalar.constant 1.0 : f32
     %denominator = scalar.addf<reassoc|nnan|ninf|nsz> %one, %exponent : f32
     %silu = scalar.divf<reassoc|nnan|ninf|nsz> %g, %denominator : f32
     %result = scalar.mulf<reassoc|nnan|ninf|nsz> %silu, %u : f32
-    view.store %result, %output_view[%element] : f32, view<278528xf32>
+    view.store %result, %output_view[%element] : f32, view<2228224xf32>
   }
   kernel.return
 }

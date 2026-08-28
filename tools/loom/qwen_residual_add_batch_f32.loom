@@ -1,7 +1,7 @@
 // Qwen3.8 native primitive: elementwise F32 residual add over a token-major
 // chunk. The whole chunk is contiguous, so one dispatch covers every token.
 
-config.decl @qwen_residual_add_batch_f32.element_capacity : %value: index where [range(%value, 32, 163840), mul(%value, 32)]
+config.decl @qwen_residual_add_batch_f32.element_capacity : %value: index where [range(%value, 32, 655360), mul(%value, 32)]
 
 kernel.def @qwen_residual_add_batch_f32(%elements: index) {
   %vector_width = index.constant 32 : index
@@ -13,7 +13,7 @@ kernel.def @qwen_residual_add_batch_f32(%elements: index) {
 } launch(%elements: index, %left: buffer, %right: buffer, %output: buffer) {
   %base = index.constant 0 : offset
   %capacity = config.get @qwen_residual_add_batch_f32.element_capacity : index
-  %count = index.assume %elements [range(%elements, 32, 163840), mul(%elements, 32), le(%elements, %capacity)] : index
+  %count = index.assume %elements [range(%elements, 32, 655360), mul(%elements, 32), le(%elements, %capacity)] : index
   %group = kernel.workgroup.id<x> : index
   %lane = kernel.workitem.id<x> : index
   %leader = index.constant 0 : index
@@ -25,13 +25,13 @@ kernel.def @qwen_residual_add_batch_f32(%elements: index) {
     scf.if %element_in_bounds {
       %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %count)] : index
       %left_noalias, %right_noalias, %output_noalias = buffer.assume.noalias %left, %right, %output : buffer, buffer, buffer
-      %left_view = buffer.view %left_noalias[%base] : buffer -> view<163840xf32>
-      %right_view = buffer.view %right_noalias[%base] : buffer -> view<163840xf32>
-      %output_view = buffer.view %output_noalias[%base] : buffer -> view<163840xf32>
-      %a = vector.load %left_view[%element_base] : view<163840xf32> -> vector<32xf32>
-      %b = vector.load %right_view[%element_base] : view<163840xf32> -> vector<32xf32>
+      %left_view = buffer.view %left_noalias[%base] : buffer -> view<655360xf32>
+      %right_view = buffer.view %right_noalias[%base] : buffer -> view<655360xf32>
+      %output_view = buffer.view %output_noalias[%base] : buffer -> view<655360xf32>
+      %a = vector.load %left_view[%element_base] : view<655360xf32> -> vector<32xf32>
+      %b = vector.load %right_view[%element_base] : view<655360xf32> -> vector<32xf32>
       %sum = vector.addf<reassoc|nnan|ninf|nsz> %a, %b : vector<32xf32>
-      vector.store %sum, %output_view[%element_base] : vector<32xf32>, view<163840xf32>
+      vector.store %sum, %output_view[%element_base] : vector<32xf32>, view<655360xf32>
     }
   }
   kernel.return

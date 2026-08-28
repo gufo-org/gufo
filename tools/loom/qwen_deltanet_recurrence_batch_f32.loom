@@ -13,19 +13,25 @@
 // state   : 48 x 128 x 128 f32 recurrent state, updated in place
 // readout : token-major scratch, %tokens rows of 6144 f32
 
-config.decl @qwen_deltanet_recurrence_batch_f32.token_capacity : %value: index where [range(%value, 1, 32)]
+config.decl @qwen_deltanet_recurrence_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
 
 kernel.def @qwen_deltanet_recurrence_batch_f32(%tokens: index) {
   %pairs = index.constant 6144 : index
   %unit = index.constant 1 : index
-  %workgroup_size = index.constant 128 : index
+  %workgroup_size = index.constant 32 : index
   kernel.launch.config workgroups(%pairs, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
 } launch(%tokens: index, %conv: buffer, %prepared: buffer, %state: buffer, %readout: buffer) {
   %base = index.constant 0 : offset
   %capacity = config.get @qwen_deltanet_recurrence_batch_f32.token_capacity : index
-  %token_count = index.assume %tokens [range(%tokens, 1, 32), le(%tokens, %capacity)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 128), le(%tokens, %capacity)] : index
   %pair = kernel.workgroup.id<x> : index
   %lane = kernel.workitem.id<x> : index
+  %elements_per_lane = index.constant 4 : index
+  %lane_base = index.mul %lane, %elements_per_lane : index
+  %offset0 = index.constant 0 : index
+  %offset1 = index.constant 1 : index
+  %offset2 = index.constant 2 : index
+  %offset3 = index.constant 3 : index
   %dim = index.constant 128 : index
   %key_heads = index.constant 16 : index
   %k_offset = index.constant 2048 : index
@@ -39,16 +45,31 @@ kernel.def @qwen_deltanet_recurrence_batch_f32(%tokens: index) {
   %kh = index.rem %head, %key_heads : index
   %kh_base = index.mul %kh, %dim : index
   %head_base = index.mul %head, %dim : index
-  %q_index = index.add %kh_base, %lane : index
+  %q_index = index.add %kh_base, %lane_base : index
   %k_index_base = index.add %k_offset, %kh_base : index
-  %k_index = index.add %k_index_base, %lane : index
+  %k_index = index.add %k_index_base, %lane_base : index
   %v_head_base = index.add %v_offset, %head_base : index
   %v_index = index.add %v_head_base, %row : index
+  %lane_q0 = index.add %q_index, %offset0 : index
+  %lane_k0 = index.add %k_index, %offset0 : index
+  %lane_q1 = index.add %q_index, %offset1 : index
+  %lane_k1 = index.add %k_index, %offset1 : index
+  %lane_q2 = index.add %q_index, %offset2 : index
+  %lane_k2 = index.add %k_index, %offset2 : index
+  %lane_q3 = index.add %q_index, %offset3 : index
+  %lane_k3 = index.add %k_index, %offset3 : index
   %state_view = buffer.view %state[%base] : buffer -> view<48x128x128xf32>
-  %state_initial = view.load %state_view[%head, %row, %lane] : view<48x128x128xf32> -> f32
-  %conv_view = buffer.view %conv[%base] : buffer -> view<327680xf32>
-  %prepared_view = buffer.view %prepared[%base] : buffer -> view<3072xf32>
-  %readout_view = buffer.view %readout[%base] : buffer -> view<196608xf32>
+  %lane_element0 = index.add %lane_base, %offset0 : index
+  %lane_element1 = index.add %lane_base, %offset1 : index
+  %lane_element2 = index.add %lane_base, %offset2 : index
+  %lane_element3 = index.add %lane_base, %offset3 : index
+  %state_initial0 = view.load %state_view[%head, %row, %lane_element0] : view<48x128x128xf32> -> f32
+  %state_initial1 = view.load %state_view[%head, %row, %lane_element1] : view<48x128x128xf32> -> f32
+  %state_initial2 = view.load %state_view[%head, %row, %lane_element2] : view<48x128x128xf32> -> f32
+  %state_initial3 = view.load %state_view[%head, %row, %lane_element3] : view<48x128x128xf32> -> f32
+  %conv_view = buffer.view %conv[%base] : buffer -> view<1310720xf32>
+  %prepared_view = buffer.view %prepared[%base] : buffer -> view<12288xf32>
+  %readout_view = buffer.view %readout[%base] : buffer -> view<786432xf32>
   %loop_begin = index.constant 0 : index
   %loop_step = index.constant 1 : index
   %zero = scalar.constant 0.0 : f32
@@ -56,47 +77,101 @@ kernel.def @qwen_deltanet_recurrence_batch_f32(%tokens: index) {
   %q_dim_scale = scalar.constant 0.08838834764831845 : f32
   %leader = index.constant 0 : index
   %is_leader = index.cmp eq, %lane, %leader : index
-  %state_final = scf.for %token = [%loop_begin to %token_count step %loop_step](%state_value = %state_initial : f32) -> (f32) {
+  %state_final0, %state_final1, %state_final2, %state_final3 = scf.for %token = [%loop_begin to %token_count step %loop_step](%state0 = %state_initial0 : f32, %state1 = %state_initial1 : f32, %state2 = %state_initial2 : f32, %state3 = %state_initial3 : f32) -> (f32, f32, f32, f32) {
     %conv_token_base = index.mul %token, %conv_width : index
     %prepared_token_base = index.mul %token, %prepared_width : index
     %readout_token_base = index.mul %token, %readout_width : index
-    %q_token_index = index.add %conv_token_base, %q_index : index
-    %k_token_index = index.add %conv_token_base, %k_index : index
+    %q_token_index0 = index.add %conv_token_base, %lane_q0 : index
+    %k_token_index0 = index.add %conv_token_base, %lane_k0 : index
+    %q_token_index1 = index.add %conv_token_base, %lane_q1 : index
+    %k_token_index1 = index.add %conv_token_base, %lane_k1 : index
+    %q_token_index2 = index.add %conv_token_base, %lane_q2 : index
+    %k_token_index2 = index.add %conv_token_base, %lane_k2 : index
+    %q_token_index3 = index.add %conv_token_base, %lane_q3 : index
+    %k_token_index3 = index.add %conv_token_base, %lane_k3 : index
     %v_token_index = index.add %conv_token_base, %v_index : index
     %alpha_index = index.add %prepared_token_base, %head : index
     %beta_head = index.add %beta_offset, %head : index
     %beta_index = index.add %prepared_token_base, %beta_head : index
-    %q = view.load %conv_view[%q_token_index] : view<327680xf32> -> f32
-    %k = view.load %conv_view[%k_token_index] : view<327680xf32> -> f32
-    %v = view.load %conv_view[%v_token_index] : view<327680xf32> -> f32
-    %alpha = view.load %prepared_view[%alpha_index] : view<3072xf32> -> f32
-    %beta = view.load %prepared_view[%beta_index] : view<3072xf32> -> f32
-    %q_sq = scalar.mulf<reassoc|nnan|ninf|nsz> %q, %q : f32
-    %k_sq = scalar.mulf<reassoc|nnan|ninf|nsz> %k, %k : f32
-    %q_sum = kernel.workgroup.reduce<addf> %q_sq : f32
-    %k_sum = kernel.workgroup.reduce<addf> %k_sq : f32
+    %q0 = view.load %conv_view[%q_token_index0] : view<1310720xf32> -> f32
+    %k0 = view.load %conv_view[%k_token_index0] : view<1310720xf32> -> f32
+    %q1 = view.load %conv_view[%q_token_index1] : view<1310720xf32> -> f32
+    %k1 = view.load %conv_view[%k_token_index1] : view<1310720xf32> -> f32
+    %q2 = view.load %conv_view[%q_token_index2] : view<1310720xf32> -> f32
+    %k2 = view.load %conv_view[%k_token_index2] : view<1310720xf32> -> f32
+    %q3 = view.load %conv_view[%q_token_index3] : view<1310720xf32> -> f32
+    %k3 = view.load %conv_view[%k_token_index3] : view<1310720xf32> -> f32
+    %v = view.load %conv_view[%v_token_index] : view<1310720xf32> -> f32
+    %alpha = view.load %prepared_view[%alpha_index] : view<12288xf32> -> f32
+    %beta = view.load %prepared_view[%beta_index] : view<12288xf32> -> f32
+    %q_sq0 = scalar.mulf<reassoc|nnan|ninf|nsz> %q0, %q0 : f32
+    %k_sq0 = scalar.mulf<reassoc|nnan|ninf|nsz> %k0, %k0 : f32
+    %q_sq1 = scalar.mulf<reassoc|nnan|ninf|nsz> %q1, %q1 : f32
+    %k_sq1 = scalar.mulf<reassoc|nnan|ninf|nsz> %k1, %k1 : f32
+    %q_sq2 = scalar.mulf<reassoc|nnan|ninf|nsz> %q2, %q2 : f32
+    %k_sq2 = scalar.mulf<reassoc|nnan|ninf|nsz> %k2, %k2 : f32
+    %q_sq3 = scalar.mulf<reassoc|nnan|ninf|nsz> %q3, %q3 : f32
+    %k_sq3 = scalar.mulf<reassoc|nnan|ninf|nsz> %k3, %k3 : f32
+    %q_sq01 = scalar.addf<reassoc|nnan|ninf|nsz> %q_sq0, %q_sq1 : f32
+    %q_sq23 = scalar.addf<reassoc|nnan|ninf|nsz> %q_sq2, %q_sq3 : f32
+    %q_sq_lane = scalar.addf<reassoc|nnan|ninf|nsz> %q_sq01, %q_sq23 : f32
+    %k_sq01 = scalar.addf<reassoc|nnan|ninf|nsz> %k_sq0, %k_sq1 : f32
+    %k_sq23 = scalar.addf<reassoc|nnan|ninf|nsz> %k_sq2, %k_sq3 : f32
+    %k_sq_lane = scalar.addf<reassoc|nnan|ninf|nsz> %k_sq01, %k_sq23 : f32
+    %q_sum = kernel.workgroup.reduce<addf> %q_sq_lane : f32
+    %k_sum = kernel.workgroup.reduce<addf> %k_sq_lane : f32
     %q_var = scalar.addf<reassoc|nnan|ninf|nsz> %q_sum, %epsilon : f32
     %k_var = scalar.addf<reassoc|nnan|ninf|nsz> %k_sum, %epsilon : f32
     %q_inv = scalar.rsqrtf<afn> %q_var : f32
     %k_inv = scalar.rsqrtf<afn> %k_var : f32
     %q_scale = scalar.mulf<reassoc|nnan|ninf|nsz> %q_inv, %q_dim_scale : f32
-    %k_norm = scalar.mulf<reassoc|nnan|ninf|nsz> %k, %k_inv : f32
-    %q_norm = scalar.mulf<reassoc|nnan|ninf|nsz> %q, %q_scale : f32
-    %decayed = scalar.mulf<reassoc|nnan|ninf|nsz> %state_value, %alpha : f32
-    %retrieved_part = scalar.mulf<reassoc|nnan|ninf|nsz> %decayed, %k_norm : f32
-    %retrieved = kernel.workgroup.reduce<addf> %retrieved_part : f32
+    %k_norm0 = scalar.mulf<reassoc|nnan|ninf|nsz> %k0, %k_inv : f32
+    %q_norm0 = scalar.mulf<reassoc|nnan|ninf|nsz> %q0, %q_scale : f32
+    %decayed0 = scalar.mulf<reassoc|nnan|ninf|nsz> %state0, %alpha : f32
+    %retrieved_part0 = scalar.mulf<reassoc|nnan|ninf|nsz> %decayed0, %k_norm0 : f32
+    %k_norm1 = scalar.mulf<reassoc|nnan|ninf|nsz> %k1, %k_inv : f32
+    %q_norm1 = scalar.mulf<reassoc|nnan|ninf|nsz> %q1, %q_scale : f32
+    %decayed1 = scalar.mulf<reassoc|nnan|ninf|nsz> %state1, %alpha : f32
+    %retrieved_part1 = scalar.mulf<reassoc|nnan|ninf|nsz> %decayed1, %k_norm1 : f32
+    %k_norm2 = scalar.mulf<reassoc|nnan|ninf|nsz> %k2, %k_inv : f32
+    %q_norm2 = scalar.mulf<reassoc|nnan|ninf|nsz> %q2, %q_scale : f32
+    %decayed2 = scalar.mulf<reassoc|nnan|ninf|nsz> %state2, %alpha : f32
+    %retrieved_part2 = scalar.mulf<reassoc|nnan|ninf|nsz> %decayed2, %k_norm2 : f32
+    %k_norm3 = scalar.mulf<reassoc|nnan|ninf|nsz> %k3, %k_inv : f32
+    %q_norm3 = scalar.mulf<reassoc|nnan|ninf|nsz> %q3, %q_scale : f32
+    %decayed3 = scalar.mulf<reassoc|nnan|ninf|nsz> %state3, %alpha : f32
+    %retrieved_part3 = scalar.mulf<reassoc|nnan|ninf|nsz> %decayed3, %k_norm3 : f32
+    %retrieved01 = scalar.addf<reassoc|nnan|ninf|nsz> %retrieved_part0, %retrieved_part1 : f32
+    %retrieved23 = scalar.addf<reassoc|nnan|ninf|nsz> %retrieved_part2, %retrieved_part3 : f32
+    %retrieved_lane = scalar.addf<reassoc|nnan|ninf|nsz> %retrieved01, %retrieved23 : f32
+    %retrieved = kernel.workgroup.reduce<addf> %retrieved_lane : f32
     %delta0 = scalar.subf<reassoc|nnan|ninf|nsz> %v, %retrieved : f32
     %delta = scalar.mulf<reassoc|nnan|ninf|nsz> %delta0, %beta : f32
-    %update = scalar.mulf<reassoc|nnan|ninf|nsz> %delta, %k_norm : f32
-    %next_state = scalar.addf<reassoc|nnan|ninf|nsz> %decayed, %update : f32
-    %readout_part = scalar.mulf<reassoc|nnan|ninf|nsz> %next_state, %q_norm : f32
-    %readout_value = kernel.workgroup.reduce<addf> %readout_part : f32
+    %update0 = scalar.mulf<reassoc|nnan|ninf|nsz> %delta, %k_norm0 : f32
+    %next_state0 = scalar.addf<reassoc|nnan|ninf|nsz> %decayed0, %update0 : f32
+    %readout_part0 = scalar.mulf<reassoc|nnan|ninf|nsz> %next_state0, %q_norm0 : f32
+    %update1 = scalar.mulf<reassoc|nnan|ninf|nsz> %delta, %k_norm1 : f32
+    %next_state1 = scalar.addf<reassoc|nnan|ninf|nsz> %decayed1, %update1 : f32
+    %readout_part1 = scalar.mulf<reassoc|nnan|ninf|nsz> %next_state1, %q_norm1 : f32
+    %update2 = scalar.mulf<reassoc|nnan|ninf|nsz> %delta, %k_norm2 : f32
+    %next_state2 = scalar.addf<reassoc|nnan|ninf|nsz> %decayed2, %update2 : f32
+    %readout_part2 = scalar.mulf<reassoc|nnan|ninf|nsz> %next_state2, %q_norm2 : f32
+    %update3 = scalar.mulf<reassoc|nnan|ninf|nsz> %delta, %k_norm3 : f32
+    %next_state3 = scalar.addf<reassoc|nnan|ninf|nsz> %decayed3, %update3 : f32
+    %readout_part3 = scalar.mulf<reassoc|nnan|ninf|nsz> %next_state3, %q_norm3 : f32
+    %readout01 = scalar.addf<reassoc|nnan|ninf|nsz> %readout_part0, %readout_part1 : f32
+    %readout23 = scalar.addf<reassoc|nnan|ninf|nsz> %readout_part2, %readout_part3 : f32
+    %readout_lane = scalar.addf<reassoc|nnan|ninf|nsz> %readout01, %readout23 : f32
+    %readout_value = kernel.workgroup.reduce<addf> %readout_lane : f32
     scf.if %is_leader {
       %readout_index = index.add %readout_token_base, %pair : index
-      view.store %readout_value, %readout_view[%readout_index] : f32, view<196608xf32>
+      view.store %readout_value, %readout_view[%readout_index] : f32, view<786432xf32>
     }
-    scf.yield %next_state : f32
+    scf.yield %next_state0, %next_state1, %next_state2, %next_state3 : f32, f32, f32, f32
   }
-  view.store %state_final, %state_view[%head, %row, %lane] : f32, view<48x128x128xf32>
+  view.store %state_final0, %state_view[%head, %row, %lane_element0] : f32, view<48x128x128xf32>
+  view.store %state_final1, %state_view[%head, %row, %lane_element1] : f32, view<48x128x128xf32>
+  view.store %state_final2, %state_view[%head, %row, %lane_element2] : f32, view<48x128x128xf32>
+  view.store %state_final3, %state_view[%head, %row, %lane_element3] : f32, view<48x128x128xf32>
   kernel.return
 }

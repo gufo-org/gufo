@@ -13,8 +13,12 @@
 
 namespace gufo::hrx {
 
-/// Tokens per batched projection dispatch. Matches the `_t8` Loom artifacts.
-inline constexpr std::size_t kHrxPrefillChunkTokens = 8;
+/// Physical token capacity of the prefill tile. The blocked W8A8 artifacts
+/// compute 128 tokens per dispatch, so the arena is sized for that tile and
+/// the narrower `_t8` fallback routes simply use part of it.
+inline constexpr std::size_t kHrxPrefillChunkTokens = 128;
+/// Token capacity of the `_t8` dot4i fallback artifacts.
+inline constexpr std::size_t kHrxDot4iChunkTokens = 8;
 
 [[nodiscard]] inline std::optional<std::size_t> HrxCheckedProduct(
     std::initializer_list<std::size_t> factors) noexcept {

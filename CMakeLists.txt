@@ -321,8 +321,16 @@ if (ENGINE_ENABLE_HRX)
       tools/loom/qwen_rmsnorm_batch_f32.loom
       tools/loom/qwen_residual_add_batch_f32.loom
       tools/loom/qwen_swiglu_pointwise_batch_f32.loom
+      tools/loom/qwen_deltanet_prepare_batch_f32.loom
+      tools/loom/qwen_ssm_conv_silu_batch_f32.loom
       tools/loom/qwen_deltanet_recurrence_batch_f32.loom
       tools/loom/qwen_deltanet_readout_batch_f32.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k5120_t128.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k6144_t128.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k17408_t128.loom
+      tools/loom/qwen_activation_quantize_blocked_k5120.loom
+      tools/loom/qwen_activation_quantize_blocked_k6144.loom
+      tools/loom/qwen_activation_quantize_blocked_k17408.loom
       tools/loom/qwen_q8_0_gemm_i8_k5120_t8.loom
       tools/loom/qwen_q8_0_gemm_i8_wmma_k5120_t8.loom
       tools/loom/qwen_q8_0_gemm_i8_k6144_t8.loom
@@ -353,11 +361,19 @@ if (ENGINE_ENABLE_HRX)
     set(LOOM_CONFIG_qwen_q8_0_gemv_k6144 "qwen_q8_0_gemv_k6144.row_capacity=5120")
     set(LOOM_CONFIG_qwen_q8_0_gemv_k17408 "qwen_q8_0_gemv_k17408.row_capacity=5120")
     set(LOOM_CONFIG_qwen_q8_0_gemv_k17408_wg256 "qwen_q8_0_gemv_k17408_wg256.row_capacity=5120")
-    set(LOOM_CONFIG_qwen_rmsnorm_batch_f32 "qwen_rmsnorm_batch_f32.token_capacity=8")
-    set(LOOM_CONFIG_qwen_residual_add_batch_f32 "qwen_residual_add_batch_f32.element_capacity=163840")
-    set(LOOM_CONFIG_qwen_swiglu_pointwise_batch_f32 "qwen_swiglu_pointwise_batch_f32.element_capacity=139264")
-    set(LOOM_CONFIG_qwen_deltanet_recurrence_batch_f32 "qwen_deltanet_recurrence_batch_f32.token_capacity=8")
-    set(LOOM_CONFIG_qwen_deltanet_readout_batch_f32 "qwen_deltanet_readout_batch_f32.token_capacity=8")
+    set(LOOM_CONFIG_qwen_rmsnorm_batch_f32 "qwen_rmsnorm_batch_f32.token_capacity=128")
+    set(LOOM_CONFIG_qwen_residual_add_batch_f32 "qwen_residual_add_batch_f32.element_capacity=655360")
+    set(LOOM_CONFIG_qwen_swiglu_pointwise_batch_f32 "qwen_swiglu_pointwise_batch_f32.element_capacity=2228224")
+    set(LOOM_CONFIG_qwen_deltanet_prepare_batch_f32 "qwen_deltanet_prepare_batch_f32.token_capacity=128")
+    set(LOOM_CONFIG_qwen_ssm_conv_silu_batch_f32 "qwen_ssm_conv_silu_batch_f32.token_capacity=128")
+    set(LOOM_CONFIG_qwen_deltanet_recurrence_batch_f32 "qwen_deltanet_recurrence_batch_f32.token_capacity=128")
+    set(LOOM_CONFIG_qwen_deltanet_readout_batch_f32 "qwen_deltanet_readout_batch_f32.token_capacity=128")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k5120_t128 "qwen_q8_0_gemm_i8_blocked_k5120_t128.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k6144_t128 "qwen_q8_0_gemm_i8_blocked_k6144_t128.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k17408_t128 "qwen_q8_0_gemm_i8_blocked_k17408_t128.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_activation_quantize_blocked_k5120 "qwen_activation_quantize_blocked_k5120.token_capacity=128")
+    set(LOOM_CONFIG_qwen_activation_quantize_blocked_k6144 "qwen_activation_quantize_blocked_k6144.token_capacity=128")
+    set(LOOM_CONFIG_qwen_activation_quantize_blocked_k17408 "qwen_activation_quantize_blocked_k17408.token_capacity=128")
     set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k5120_t8 "qwen_q8_0_gemm_i8_k5120_t8.row_capacity=248320")
     set(LOOM_CONFIG_qwen_q8_0_gemm_i8_wmma_k5120_t8 "qwen_q8_0_gemm_i8_wmma_k5120_t8.row_capacity=248320")
     set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k6144_t8 "qwen_q8_0_gemm_i8_k6144_t8.row_capacity=5120")

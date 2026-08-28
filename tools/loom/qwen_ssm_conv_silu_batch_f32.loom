@@ -1,0 +1,77 @@
+// Qwen3.8 four-tap causal SSM convolution over a whole prefill tile.
+//
+// Each workitem owns one channel and slides its four-tap window through the
+// tile in registers, so the rolling state is read once at entry and written
+// once at exit and a layer costs one dispatch instead of one per token. The
+// per-token arithmetic is identical to qwen_ssm_conv_silu_f32: the window for
+// token t is (x[t-3], x[t-2], x[t-1], x[t]), with the leading taps supplied by
+// the incoming state.
+
+config.decl @qwen_ssm_conv_silu_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+
+kernel.def @qwen_ssm_conv_silu_batch_f32(%tokens: index) {
+  %workgroup_size = index.constant 32 : index
+  %channels = index.constant 10240 : index
+  %workgroups = index.div %channels, %workgroup_size : index
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%workgroups, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%tokens: index, %input: buffer, %weights: buffer, %state: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_ssm_conv_silu_batch_f32.token_capacity : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 128), le(%tokens, %capacity)] : index
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %workgroup_size = index.constant 32 : index
+  %channels = index.constant 10240 : index
+  %channel0 = index.madd %group, %workgroup_size, %lane : index
+  %channel = index.assume %channel0 [lt(%channel0, %channels)] : index
+  %four = index.constant 4 : index
+  %one = index.constant 1 : index
+  %two = index.constant 2 : index
+  %three = index.constant 3 : index
+  %loop_begin = index.constant 0 : index
+  %loop_step = index.constant 1 : index
+  %state_base = index.mul %channel, %four : index
+  %state1 = index.add %state_base, %one : index
+  %state2 = index.add %state_base, %two : index
+  %state3 = index.add %state_base, %three : index
+  %input_view = buffer.view %input[%base] : buffer -> view<1310720xf32>
+  %weight_view = buffer.view %weights[%base] : buffer -> view<40960xf32>
+  %state_view = buffer.view %state[%base] : buffer -> view<40960xf32>
+  %output_view = buffer.view %output[%base] : buffer -> view<1310720xf32>
+  %initial0 = view.load %state_view[%state_base] : view<40960xf32> -> f32
+  %initial1 = view.load %state_view[%state1] : view<40960xf32> -> f32
+  %initial2 = view.load %state_view[%state2] : view<40960xf32> -> f32
+  %initial3 = view.load %state_view[%state3] : view<40960xf32> -> f32
+  %w0 = view.load %weight_view[%state_base] : view<40960xf32> -> f32
+  %w1 = view.load %weight_view[%state1] : view<40960xf32> -> f32
+  %w2 = view.load %weight_view[%state2] : view<40960xf32> -> f32
+  %w3 = view.load %weight_view[%state3] : view<40960xf32> -> f32
+  %final0, %final1, %final2, %final3 = scf.for %token = [%loop_begin to %token_count step %loop_step](
+      %tap0 = %initial0 : f32, %tap1 = %initial1 : f32, %tap2 = %initial2 : f32, %tap3 = %initial3 : f32)
+      -> (f32, f32, f32, f32) {
+    %token_base = index.mul %token, %channels : index
+    %element = index.add %token_base, %channel : index
+    %x = view.load %input_view[%element] : view<1310720xf32> -> f32
+    %m0 = scalar.mulf<reassoc|nnan|ninf|nsz> %tap1, %w0 : f32
+    %m1 = scalar.mulf<reassoc|nnan|ninf|nsz> %tap2, %w1 : f32
+    %m2 = scalar.mulf<reassoc|nnan|ninf|nsz> %tap3, %w2 : f32
+    %m3 = scalar.mulf<reassoc|nnan|ninf|nsz> %x, %w3 : f32
+    %a0 = scalar.addf<reassoc|nnan|ninf|nsz> %m0, %m1 : f32
+    %a1 = scalar.addf<reassoc|nnan|ninf|nsz> %m2, %m3 : f32
+    %dot = scalar.addf<reassoc|nnan|ninf|nsz> %a0, %a1 : f32
+    %negative = scalar.negf %dot : f32
+    %exponent = scalar.expf<afn> %negative : f32
+    %fone = scalar.constant 1.0 : f32
+    %denominator = scalar.addf<reassoc|nnan|ninf|nsz> %fone, %exponent : f32
+    %sigmoid = scalar.divf<reassoc|nnan|ninf|nsz> %fone, %denominator : f32
+    %result = scalar.mulf<reassoc|nnan|ninf|nsz> %dot, %sigmoid : f32
+    view.store %result, %output_view[%element] : f32, view<1310720xf32>
+    scf.yield %tap1, %tap2, %tap3, %x : f32, f32, f32, f32
+  }
+  view.store %final0, %state_view[%state_base] : f32, view<40960xf32>
+  view.store %final1, %state_view[%state1] : f32, view<40960xf32>
+  view.store %final2, %state_view[%state2] : f32, view<40960xf32>
+  view.store %final3, %state_view[%state3] : f32, view<40960xf32>
+  kernel.return
+}

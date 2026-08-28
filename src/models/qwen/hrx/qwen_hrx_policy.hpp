@@ -19,6 +19,7 @@ struct QwenHrxExecutionPolicy {
   bool chunked_prefill{false};
   bool int8_prefill{false};
   bool wmma_prefill{false};
+  bool blocked_prefill{false};
 
   [[nodiscard]] static QwenHrxExecutionPolicy Parse(
       std::string_view spec, std::string* error_msg = nullptr);

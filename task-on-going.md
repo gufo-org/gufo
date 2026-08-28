@@ -611,6 +611,92 @@ activation quantizer that zero-pads the physical token tile to 16 and emits
 block-major scales, plus a default-off policy route; the existing dot4i layout
 must remain unchanged for its fallback path.
 
+## Structural fix landed: PP128 now makes one weight pass
+
+`kHrxPrefillChunkTokens` is 128 and the prefill tile size is chosen by the
+active route (`PrefillChunkTokens()`), so `--hrx-fusions blocked-prefill`
+takes a 128-token prompt through the layers once instead of sixteen
+eight-token passes. Every batch-native artifact was widened to the 128-token
+tile: `qwen_rmsnorm_batch_f32` (token capacity 128),
+`qwen_residual_add_batch_f32` (655360 elements),
+`qwen_swiglu_pointwise_batch_f32` (2228224 elements), and both DeltaNet batch
+kernels. The `_t8` dot4i artifacts keep their own eight-token bound and remain
+the fallback when the blocked artifacts are absent.
+
+Measured, device-local weights, release binary:
+
+| route | pp128 |
+|---|---:|
+| serial (`none`) | 6.25 t/s |
+| `chunked-prefill` (f32 `_t8`) | 5.53 t/s |
+| `int8-prefill` (dot4i `_t8`) | 20.27 t/s |
+| `blocked-prefill` (128x128 W8A8) | **211.72 t/s** |
+
+That is 34x the serial baseline, 10.4x the previous best, and 53% of the
+399.59 t/s HIP reference. PP128 now takes about 0.605 s, which is roughly
+43 GB/s of effective weight streaming against the isolated kernel rates of
+73-80 GB/s, so about 40% of the wall time is still outside the projections.
+
+### Batch-native SSM front end and wave-level recurrence
+
+With one weight pass in place the remaining prefill cost moved to the per-token
+stages. Two further changes, both numerically exact reorganizations:
+
+- `qwen_deltanet_prepare_batch_f32` and `qwen_ssm_conv_silu_batch_f32` replace
+  128 preparation and 128 convolution dispatches per layer with one each. The
+  convolution keeps its four-tap window in registers across the tile, so the
+  rolling state is still read and written exactly once per layer and the
+  per-token arithmetic is unchanged. Prefill logits were bit-identical before
+  and after (cosine 0.99992108 both times).
+- `qwen_deltanet_recurrence_batch_f32` now runs one wave per (value row, key
+  vector) with each lane folding four key elements, so its two per-token
+  reductions stay inside the wave. The artifact went from four waves with
+  LDS-backed workgroup reductions to **zero barriers**, 23 VGPRs and 100%
+  reported occupancy.
+
+Stage profile for one 128-token chunk, device-local weights:
+
+| stage | before batching | after SSM front end | after wave recurrence |
+|---|---:|---:|---:|
+| attention | 92.8 ms | 90.5 ms | 93.1 ms |
+| SSM | 274.4 ms | 225.7 ms | 133.7 ms |
+| FFN | 227.1 ms | 221.5 ms | 226.8 ms |
+| chunk | 594.4 ms | 537.7 ms | 453.7 ms |
+
+| route | pp128 |
+|---|---:|
+| `int8-prefill` (dot4i `_t8`) | 20.27 t/s |
+| `blocked-prefill` | 211.72 t/s |
+| + batched SSM front end | 229.65 t/s |
+| + wave-level recurrence | **269.78 t/s** |
+
+That is 43x the 6.25 t/s serial baseline and 68% of the 399.59 t/s HIP
+reference. Prefill parity holds throughout: top-1 matches HIP and cosine
+similarity is 0.9999 (the small changes between runs are float reassociation
+in the reduction order, not a correctness change).
+
+### Blocked-kernel ablations: what does not limit it
+
+The blocked projection sits at roughly 70 GB/s of weight traffic and 16.9 TOPS
+for rows=17408, K=5120, 128 tokens (1.347 ms device time). Five hypotheses were
+tested and rejected by measurement:
+
+| change | result |
+|---|---|
+| BK=2 staging (half the barriers) | 0.537 ms vs 0.536 ms - no effect |
+| LDS double buffering (one barrier per block) | 1.314 ms vs 1.347 ms - 2% |
+| 256 rows per workgroup (half the activation re-reads) | 1.414 ms - worse |
+| contiguous weight addresses (coalescing probe) | 1.386 ms - no effect |
+| epilogue scale multiplies removed | 1.362 ms - no effect |
+
+So the kernel is not barrier-bound, not bandwidth-bound, not limited by
+activation re-reads, not by weight-read coalescing, and not by epilogue VALU.
+It responds only to latency hiding (register prefetch was worth 23% and wide
+32-byte staging another 8%), which points at the LDS-to-fragment-to-MMA
+dependency chain with eight waves per SIMD. The next kernel experiment should
+increase independent MMA work in flight per wave rather than tune staging
+further.
+
 ### Blocked 128x128 W8A8 projection: isolated gate passed
 
 The blocked route from the macro card is implemented and validated in

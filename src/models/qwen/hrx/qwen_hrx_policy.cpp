@@ -81,6 +81,12 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
       policy.int8_prefill = true;
     } else if (token == "chunked-prefill") {
       policy.chunked_prefill = true;
+    } else if (token == "blocked-prefill") {
+      // The blocked route runs inside the chunked prefill stages and consumes
+      // int8 operands; it just uses a 128-token tile instead of eight.
+      policy.chunked_prefill = true;
+      policy.int8_prefill = true;
+      policy.blocked_prefill = true;
     } else if (token == "int8-prefill") {
       // The int8 route runs inside the chunked prefill stages.
       policy.chunked_prefill = true;
@@ -103,7 +109,7 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
                      " (supported: none, all, swiglu, down-residual, "
                      "rmsnorm-qkv, rope-kv, q8, ffn-gate-up, "
                      "ssm-alpha-beta, ping-pong, "
-                     "chunked-prefill, int8-prefill, wmma-prefill)";
+                     "chunked-prefill, int8-prefill, blocked-prefill, wmma-prefill)";
       }
       return policy;
     }
@@ -142,6 +148,9 @@ std::string QwenHrxExecutionPolicy::ToString() const {
   }
   if (wmma_prefill) {
     enabled.push_back("wmma-prefill");
+  }
+  if (blocked_prefill) {
+    enabled.push_back("blocked-prefill");
   }
   if (enabled.empty()) {
     return "none";
