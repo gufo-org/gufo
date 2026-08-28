@@ -248,6 +248,7 @@
               "src"
               "tests"
               "tools/gufo"
+              "tools/loom"
             ];
             files = [
               ".clang-format"
@@ -429,8 +430,10 @@
               pkgsSys.ninja
               (pkgsSys.python3.withPackages (ps: [ ps.numpy ]))
               pkgsSys.icu
+              gufoPackages.${system}.hrx-system
             ];
             src = testSource;
+            hrxRoot = "${gufoPackages.${system}.hrx-system}";
           } ''
             export HOME=$TMPDIR
             set -euo pipefail
@@ -450,16 +453,21 @@
             fi
 
             mkdir -p build && cd build
-            cmake "$src" -GNinja $ccache_launcher -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DGUFO_ENABLE_WARNINGS=ON -DGUFO_ENABLE_SANITIZERS=OFF
+            # ENGINE_ENABLE_HRX is required here so the HRX arena/executor
+            # tests are compiled by a hosted PR run. The shipped .#hrx package
+            # builds with BUILD_TESTING=OFF, so without this the HRX test
+            # bodies were never type-checked. The tests themselves need a
+            # gfx1151 device, so only the host-labelled tests are executed.
+            cmake "$src" -GNinja $ccache_launcher -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DGUFO_ENABLE_WARNINGS=ON -DGUFO_ENABLE_SANITIZERS=OFF -DENGINE_ENABLE_HRX=ON -DHRX_ROOT="$hrxRoot"
             ninja
-            ctest --output-on-failure
+            ctest --output-on-failure -LE gpu
 
             if [[ -n "$ccache_launcher" ]]; then
               ccache --show-stats
             fi
 
             mkdir -p $out
-            echo "PASS: CPU build and CTest suite passed" > $out/result.txt
+            echo "PASS: CPU build (HRX arena/executor compiled) and host CTest suite passed" > $out/result.txt
           '';
 
           mkServeCheck =
@@ -519,7 +527,7 @@ Composed Gates:
   4. Documentation & Local Link Validation (check-docs.py)
   5. MiniMax H3 Source-Manifest Validation
   6. MiniMax H3 Quality-Oracle Validation
-  7. CPU Build and Runtime/Unit Tests (CTest)
+  7. CPU Build (including HRX arena/executor compilation) and Host CTest
   8. Declarative Server Wrapper Generation (mkGufoServe)
 Explicit Offline Gate (not in hosted PR closure):
   - MiniMax H3 Pinned Teacher & Offline LPIPS Validation

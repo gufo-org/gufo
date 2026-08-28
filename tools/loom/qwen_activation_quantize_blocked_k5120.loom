@@ -1,0 +1,59 @@
+// Quantizes a token-major f32 activation tile into the fragment order the
+// blocked W8A8 projection stages: [token tile][K block][token in tile][32
+// int8], with one f32 scale per token and K block. One workgroup handles
+// one token row and each workitem owns one K block, so a physical token
+// beyond the logical count writes zeroed payload and scale and therefore
+// contributes nothing to the matrix product.
+
+config.decl @qwen_activation_quantize_blocked_k5120.token_capacity : %value: index where [range(%value, 1, 128)]
+
+kernel.def @qwen_activation_quantize_blocked_k5120(%tokens: index) {
+  %capacity = index.constant 128 : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 160 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%tokens: index, %input: buffer, %output: buffer, %scales: buffer) {
+  %base = index.constant 0 : offset
+  %token_count = index.assume %tokens [range(%tokens, 1, 128)] : index
+  %token = kernel.workgroup.id<x> : index
+  %block = kernel.workitem.id<x> : index
+  %width = index.constant 5120 : index
+  %vector_width = index.constant 32 : index
+  %token_tile_extent = index.constant 16 : index
+  %four = index.constant 4 : offset
+  %loop_begin = index.constant 0 : index
+  %tile = index.div %token, %token_tile_extent : index
+  %tile_lane = index.rem %token, %token_tile_extent : index
+  %payload = buffer.view %output[%base] : buffer -> view<8x160x16x32xi8>
+  %scale_view = buffer.view %scales[%base] : buffer -> view<8x160x16xf32>
+  %element_base0 = index.mul %block, %vector_width : index
+  %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %width)] : index
+  %token_live = index.cmp ult, %token, %token_count : index
+  scf.if %token_live {
+    %row_elements = index.mul %token, %width : index
+    %row_bytes = index.scale %row_elements, %four : index, offset -> offset
+    %input_view = buffer.view %input[%row_bytes] : buffer -> view<5120xf32>
+    %values = vector.load %input_view[%element_base] : view<5120xf32> -> vector<32xf32>
+    %magnitudes = vector.absf %values : vector<32xf32>
+    %zero = scalar.constant 0.0 : f32
+    %amax = vector.reduce<maxnumf, reassoc|nnan|ninf|nsz> %magnitudes, %zero : vector<32xf32>, f32
+    %levels = scalar.constant 127.0 : f32
+    %scale = scalar.divf<reassoc|nnan|ninf|nsz> %amax, %levels : f32
+    %tiny = scalar.constant 0.00000001 : f32
+    %safe_scale = scalar.maxnumf %scale, %tiny : f32
+    %one = scalar.constant 1.0 : f32
+    %inverse = scalar.divf<reassoc|nnan|ninf|nsz> %one, %safe_scale : f32
+    %inverse_vector = vector.splat %inverse : vector<32xf32>
+    %scaled = vector.mulf<reassoc|nnan|ninf|nsz> %values, %inverse_vector : vector<32xf32>
+    %rounded = vector.roundevenf %scaled : vector<32xf32>
+    %quantized = vector.fptosi %rounded : vector<32xf32> to vector<32xi8>
+    vector.store %quantized, %payload[%tile, %block, %tile_lane, %loop_begin] : vector<32xi8>, view<8x160x16x32xi8>
+    view.store %safe_scale, %scale_view[%tile, %block, %tile_lane] : f32, view<8x160x16xf32>
+  } else {
+    %zero_payload = vector.constant 0 : vector<32xi8>
+    %zero_scale = scalar.constant 0.0 : f32
+    vector.store %zero_payload, %payload[%tile, %block, %tile_lane, %loop_begin] : vector<32xi8>, view<8x160x16x32xi8>
+    view.store %zero_scale, %scale_view[%tile, %block, %tile_lane] : f32, view<8x160x16xf32>
+  }
+  kernel.return
+}

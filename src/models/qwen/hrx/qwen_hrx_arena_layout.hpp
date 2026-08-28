@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_QWEN_HRX_QWEN_HRX_ARENA_LAYOUT_HPP_
 #define GUFO_MODELS_QWEN_HRX_QWEN_HRX_ARENA_LAYOUT_HPP_
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -11,6 +12,9 @@
 #include "src/models/qwen/hrx/qwen_hrx_contract.hpp"
 
 namespace gufo::hrx {
+
+/// Tokens per batched projection dispatch. Matches the `_t8` Loom artifacts.
+inline constexpr std::size_t kHrxPrefillChunkTokens = 8;
 
 [[nodiscard]] inline std::optional<std::size_t> HrxCheckedProduct(
     std::initializer_list<std::size_t> factors) noexcept {
@@ -61,6 +65,23 @@ struct QwenHrxArenaLayout {
   std::size_t ssm_recurrent_state_bytes{0};
   std::size_t saved_ssm_conv_state_bytes{0};
   std::size_t saved_ssm_recurrent_state_bytes{0};
+
+  std::size_t batch_hidden_bytes{0};
+  std::size_t batch_normed_bytes{0};
+  std::size_t batch_attention_q_gate_bytes{0};
+  std::size_t batch_attention_k_bytes{0};
+  std::size_t batch_attention_v_bytes{0};
+  std::size_t batch_context_bytes{0};
+  std::size_t batch_ssm_qkv_bytes{0};
+  std::size_t batch_ssm_gate_bytes{0};
+  std::size_t batch_ssm_alpha_beta_bytes{0};
+  std::size_t batch_ffn_gate_up_bytes{0};
+  std::size_t batch_ffn_activation_bytes{0};
+  std::size_t batch_projected_bytes{0};
+  std::size_t batch_quantized_bytes{0};
+  std::size_t batch_quant_scales_bytes{0};
+  std::size_t batch_ssm_conv_output_bytes{0};
+  std::size_t batch_ssm_readout_bytes{0};
 
   [[nodiscard]] static std::optional<QwenHrxArenaLayout> Create(
       const QwenHrxArtifactContract& contract, std::uint32_t max_context,
@@ -121,11 +142,17 @@ struct QwenHrxArenaLayout {
         .rope_sin_bytes = *rope,
         .ssm_qkv_bytes = *ssm_qkv,
         .ssm_gate_bytes = *ssm_gate,
-        .ssm_alpha_bytes = *ssm_ab,
+        // Alpha is over-allocated so the fused alpha/beta GEMV route can
+        // write both halves contiguously. The unfused route uses only the
+        // first half plus the separate beta buffer.
+        .ssm_alpha_bytes = 2 * *ssm_ab,
         .ssm_beta_bytes = *ssm_ab,
         .ssm_conv_output_bytes = *ssm_qkv,
         .ssm_recurrent_output_bytes = *ssm_recurrent_output,
-        .ffn_gate_bytes = *ffn,
+        // Gate is over-allocated so the fused gate/up GEMV route can write
+        // both halves contiguously. The unfused route uses only the first
+        // half plus the separate up buffer.
+        .ffn_gate_bytes = 2 * *ffn,
         .ffn_up_bytes = *ffn,
         .ffn_activation_bytes = *ffn,
         .ffn_output_bytes = *hidden,
@@ -137,6 +164,29 @@ struct QwenHrxArenaLayout {
         .ssm_recurrent_state_bytes = *recurrent_state,
         .saved_ssm_conv_state_bytes = *conv_state,
         .saved_ssm_recurrent_state_bytes = *recurrent_state,
+        .batch_hidden_bytes = kHrxPrefillChunkTokens * *hidden,
+        .batch_normed_bytes = kHrxPrefillChunkTokens * *hidden,
+        .batch_attention_q_gate_bytes = kHrxPrefillChunkTokens * *q_gate,
+        .batch_attention_k_bytes = kHrxPrefillChunkTokens * *k,
+        .batch_attention_v_bytes = kHrxPrefillChunkTokens * *v,
+        // Shared by attention context (query width) and the SSM recurrent
+        // output, whichever is wider.
+        .batch_context_bytes =
+            kHrxPrefillChunkTokens * std::max(*q, *ssm_recurrent_output),
+        .batch_ssm_qkv_bytes = kHrxPrefillChunkTokens * *ssm_qkv,
+        .batch_ssm_gate_bytes = kHrxPrefillChunkTokens * *ssm_gate,
+        .batch_ssm_alpha_beta_bytes = kHrxPrefillChunkTokens * 2 * *ssm_ab,
+        .batch_ffn_gate_up_bytes = kHrxPrefillChunkTokens * 2 * *ffn,
+        .batch_ffn_activation_bytes = kHrxPrefillChunkTokens * *ffn,
+        .batch_projected_bytes = kHrxPrefillChunkTokens * *hidden,
+        // One int8 value per activation element and one f32 scale per 32
+        // values, sized for the widest projection input (the FFN width).
+        .batch_quantized_bytes = kHrxPrefillChunkTokens * contract.FfnSize(),
+        .batch_quant_scales_bytes =
+            kHrxPrefillChunkTokens * (contract.FfnSize() / 32) * sizeof(float),
+        .batch_ssm_conv_output_bytes = kHrxPrefillChunkTokens * *ssm_qkv,
+        .batch_ssm_readout_bytes =
+            kHrxPrefillChunkTokens * *ssm_recurrent_output,
     };
   }
 };

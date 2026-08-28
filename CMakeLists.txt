@@ -318,6 +318,22 @@ if (ENGINE_ENABLE_HRX)
       tools/loom/qwen_q8_0_gemv_k6144.loom
       tools/loom/qwen_q8_0_gemv_k17408.loom
       tools/loom/qwen_q8_0_gemv_k17408_wg256.loom
+      tools/loom/qwen_rmsnorm_batch_f32.loom
+      tools/loom/qwen_residual_add_batch_f32.loom
+      tools/loom/qwen_swiglu_pointwise_batch_f32.loom
+      tools/loom/qwen_deltanet_recurrence_batch_f32.loom
+      tools/loom/qwen_deltanet_readout_batch_f32.loom
+      tools/loom/qwen_q8_0_gemm_i8_k5120_t8.loom
+      tools/loom/qwen_q8_0_gemm_i8_wmma_k5120_t8.loom
+      tools/loom/qwen_q8_0_gemm_i8_k6144_t8.loom
+      tools/loom/qwen_q8_0_gemm_i8_k17408_t8.loom
+      tools/loom/qwen_activation_quantize_k5120.loom
+      tools/loom/qwen_activation_quantize_wmma_k5120.loom
+      tools/loom/qwen_activation_quantize_k6144.loom
+      tools/loom/qwen_activation_quantize_k17408.loom
+      tools/loom/qwen_q8_0_gemm_k5120_t8.loom
+      tools/loom/qwen_q8_0_gemm_k6144_t8.loom
+      tools/loom/qwen_q8_0_gemm_k17408_t8.loom
       tools/loom/qwen_q8_0_vocab_gemv_k5120.loom
       tools/loom/qwen_per_head_rmsnorm_f32.loom
       tools/loom/qwen_attention_decode_f32.loom
@@ -337,6 +353,22 @@ if (ENGINE_ENABLE_HRX)
     set(LOOM_CONFIG_qwen_q8_0_gemv_k6144 "qwen_q8_0_gemv_k6144.row_capacity=5120")
     set(LOOM_CONFIG_qwen_q8_0_gemv_k17408 "qwen_q8_0_gemv_k17408.row_capacity=5120")
     set(LOOM_CONFIG_qwen_q8_0_gemv_k17408_wg256 "qwen_q8_0_gemv_k17408_wg256.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_rmsnorm_batch_f32 "qwen_rmsnorm_batch_f32.token_capacity=8")
+    set(LOOM_CONFIG_qwen_residual_add_batch_f32 "qwen_residual_add_batch_f32.element_capacity=163840")
+    set(LOOM_CONFIG_qwen_swiglu_pointwise_batch_f32 "qwen_swiglu_pointwise_batch_f32.element_capacity=139264")
+    set(LOOM_CONFIG_qwen_deltanet_recurrence_batch_f32 "qwen_deltanet_recurrence_batch_f32.token_capacity=8")
+    set(LOOM_CONFIG_qwen_deltanet_readout_batch_f32 "qwen_deltanet_readout_batch_f32.token_capacity=8")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k5120_t8 "qwen_q8_0_gemm_i8_k5120_t8.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_wmma_k5120_t8 "qwen_q8_0_gemm_i8_wmma_k5120_t8.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k6144_t8 "qwen_q8_0_gemm_i8_k6144_t8.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k17408_t8 "qwen_q8_0_gemm_i8_k17408_t8.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_activation_quantize_k5120 "qwen_activation_quantize_k5120.token_capacity=8")
+    set(LOOM_CONFIG_qwen_activation_quantize_wmma_k5120 "qwen_activation_quantize_wmma_k5120.token_capacity=16")
+    set(LOOM_CONFIG_qwen_activation_quantize_k6144 "qwen_activation_quantize_k6144.token_capacity=8")
+    set(LOOM_CONFIG_qwen_activation_quantize_k17408 "qwen_activation_quantize_k17408.token_capacity=8")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_k5120_t8 "qwen_q8_0_gemm_k5120_t8.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_k6144_t8 "qwen_q8_0_gemm_k6144_t8.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_k17408_t8 "qwen_q8_0_gemm_k17408_t8.row_capacity=5120")
     set(LOOM_CONFIG_qwen_q8_0_vocab_gemv_k5120 "qwen_q8_0_vocab_gemv_k5120.row_capacity=248320")
     set(LOOM_CONFIG_qwen_per_head_rmsnorm_f32 "qwen_per_head_rmsnorm_f32.max_heads=24")
     set(LOOM_CONFIG_qwen_attention_decode_f32 "qwen_attention_decode_f32.max_context=131072")
@@ -599,6 +631,10 @@ if (BUILD_TESTING)
     src/cli/bench/bench.cpp
   )
   target_link_libraries(bench_cli_test PRIVATE gufo_core)
+  # bench.cpp reaches for the packaged kernels on the native HRX route, so the
+  # CLI test target needs the same definition as the gufo binary.
+  target_compile_definitions(bench_cli_test PRIVATE
+    GUFO_HRX_KERNEL_DIR="${CMAKE_INSTALL_PREFIX}/share/gufo/kernels")
   if (ENGINE_ENABLE_HIP)
     target_link_libraries(bench_cli_test PRIVATE gufo_deepseek_v4_flash)
   endif()

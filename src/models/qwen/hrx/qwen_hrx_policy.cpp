@@ -41,6 +41,12 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
     policy.fused_down_residual_bf16 = true;
     policy.fused_rmsnorm_qkv_bf16 = true;
     policy.fused_rope_kv_bf16 = true;
+    policy.fused_ffn_gate_up = true;
+    policy.fused_ssm_alpha_beta = true;
+    policy.residual_ping_pong = true;
+    policy.chunked_prefill = true;
+    policy.int8_prefill = true;
+    policy.wmma_prefill = true;
     return policy;
   }
 
@@ -53,6 +59,12 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
       policy.fused_down_residual_bf16 = true;
       policy.fused_rmsnorm_qkv_bf16 = true;
       policy.fused_rope_kv_bf16 = true;
+      policy.fused_ffn_gate_up = true;
+      policy.fused_ssm_alpha_beta = true;
+      policy.residual_ping_pong = true;
+      policy.chunked_prefill = true;
+      policy.int8_prefill = true;
+      policy.wmma_prefill = true;
     } else if (token == "swiglu") {
       policy.fused_swiglu_bf16 = true;
     } else if (token == "down-residual") {
@@ -61,11 +73,37 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
       policy.fused_rmsnorm_qkv_bf16 = true;
     } else if (token == "rope-kv") {
       policy.fused_rope_kv_bf16 = true;
+    } else if (token == "q8") {
+      policy.fused_ffn_gate_up = true;
+      policy.fused_ssm_alpha_beta = true;
+      policy.residual_ping_pong = true;
+      policy.chunked_prefill = true;
+      policy.int8_prefill = true;
+    } else if (token == "chunked-prefill") {
+      policy.chunked_prefill = true;
+    } else if (token == "int8-prefill") {
+      // The int8 route runs inside the chunked prefill stages.
+      policy.chunked_prefill = true;
+      policy.int8_prefill = true;
+    } else if (token == "wmma-prefill") {
+      // WMMA consumes the padded int8 activation representation and therefore
+      // runs only inside the int8 chunked-prefill route.
+      policy.chunked_prefill = true;
+      policy.int8_prefill = true;
+      policy.wmma_prefill = true;
+    } else if (token == "ffn-gate-up") {
+      policy.fused_ffn_gate_up = true;
+    } else if (token == "ssm-alpha-beta") {
+      policy.fused_ssm_alpha_beta = true;
+    } else if (token == "ping-pong") {
+      policy.residual_ping_pong = true;
     } else {
       if (error_msg != nullptr) {
         *error_msg = "Unknown HRX fusion flag: " + std::string(token) +
                      " (supported: none, all, swiglu, down-residual, "
-                     "rmsnorm-qkv, rope-kv)";
+                     "rmsnorm-qkv, rope-kv, q8, ffn-gate-up, "
+                     "ssm-alpha-beta, ping-pong, "
+                     "chunked-prefill, int8-prefill, wmma-prefill)";
       }
       return policy;
     }
@@ -86,6 +124,24 @@ std::string QwenHrxExecutionPolicy::ToString() const {
   }
   if (fused_rope_kv_bf16) {
     enabled.push_back("rope-kv");
+  }
+  if (fused_ffn_gate_up) {
+    enabled.push_back("ffn-gate-up");
+  }
+  if (fused_ssm_alpha_beta) {
+    enabled.push_back("ssm-alpha-beta");
+  }
+  if (residual_ping_pong) {
+    enabled.push_back("ping-pong");
+  }
+  if (chunked_prefill) {
+    enabled.push_back("chunked-prefill");
+  }
+  if (int8_prefill) {
+    enabled.push_back("int8-prefill");
+  }
+  if (wmma_prefill) {
+    enabled.push_back("wmma-prefill");
   }
   if (enabled.empty()) {
     return "none";

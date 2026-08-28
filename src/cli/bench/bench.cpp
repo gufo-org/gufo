@@ -153,7 +153,8 @@ std::vector<std::size_t> ParseCommaSeparatedSizes(std::string_view str,
   return result;
 }
 
-#if defined(ENGINE_ENABLE_HIP)
+// Shared by the HIP and native HRX benchmark routes. Keep these outside the
+// HIP guard so an HRX-only build still compiles.
 struct BenchStats {
   double mean{0.0};
   double stddev{0.0};
@@ -195,6 +196,7 @@ std::string MakeTestName(std::string_view prefix, std::size_t count,
   return result;
 }
 
+#if defined(ENGINE_ENABLE_HIP)
 bool ValidatePrefill(hip::QwenGpuExecutor& executor,
                      std::size_t prompt_length) {
   if (prompt_length == 0 || prompt_length > executor.GetMaxPromptBatch()) {
@@ -324,9 +326,66 @@ bool ValidateHrxStep(const HrxParityStep& reference,
   return true;
 }
 
+// Runs the whole prompt through ForwardPromptBatch so the chunked and int8
+// prefill routes are actually exercised. The per-token loop below cannot do
+// that: it drives ForwardToken, which never enters the batched stages.
+bool ValidateHrxPrefillBatch(std::span<const HrxParityStep> reference,
+                             hrx::QwenHrxExecutor& candidate,
+                             std::string* error_msg) {
+  if (!candidate.Reset(error_msg)) {
+    std::cerr << "Error resetting native HRX executor: " << *error_msg << '\n';
+    return false;
+  }
+  std::vector<tokenization::TokenId> prompt;
+  prompt.reserve(kHrxValidationPromptLength);
+  for (std::size_t index = 0; index < kHrxValidationPromptLength; ++index) {
+    prompt.push_back(reference[index].input);
+  }
+  const auto candidate_token =
+      candidate.ForwardPromptBatch(prompt, 0, true, error_msg);
+  if (!candidate_token.has_value()) {
+    std::cerr << "Error: native HRX batched prefill failed: " << *error_msg
+              << '\n';
+    return false;
+  }
+  const auto candidate_logits = candidate.CopyLastLogits(error_msg);
+  if (candidate_logits.empty()) {
+    std::cerr << "Error: native HRX batched prefill logit readback failed: "
+              << *error_msg << '\n';
+    return false;
+  }
+  const auto& last = reference[kHrxValidationPromptLength - 1];
+  const auto comparison =
+      testing::CompareLogits(last.logits, candidate_logits);
+  const bool within_envelope =
+      comparison.root_mean_square_error <= kHrxParityMaxRmse &&
+      comparison.cosine_similarity >= kHrxParityMinCosine;
+  std::cout << std::fixed << std::setprecision(8)
+            << "[HRX Validation] phase=prefill-batch tokens="
+            << kHrxValidationPromptLength
+            << " reference_top1=" << last.next_token
+            << " candidate_top1=" << *candidate_token
+            << " top1_match=" << (comparison.top1_match ? "yes" : "no")
+            << " finite=" << (comparison.finite ? "yes" : "no") << '\n'
+            << "  max_abs_diff=" << comparison.max_abs_diff
+            << " mean_abs_diff=" << comparison.mean_abs_diff
+            << " rmse=" << comparison.root_mean_square_error
+            << " cosine_similarity=" << comparison.cosine_similarity
+            << " envelope=" << (within_envelope ? "pass" : "fail") << '\n';
+  if (!comparison.finite || !comparison.top1_match ||
+      last.next_token != *candidate_token || !within_envelope) {
+    std::cerr << "Error: native HRX batched prefill diverged from HIP.\n";
+    return false;
+  }
+  return true;
+}
+
 bool ValidateHrxParity(std::span<const HrxParityStep> reference,
                        hrx::QwenHrxExecutor& candidate,
                        std::string* error_msg) {
+  if (!ValidateHrxPrefillBatch(reference, candidate, error_msg)) {
+    return false;
+  }
   if (!candidate.Reset(error_msg)) {
     std::cerr << "Error resetting native HRX executor: " << *error_msg << '\n';
     return false;
@@ -343,7 +402,7 @@ bool ValidateHrxParity(std::span<const HrxParityStep> reference,
     }
   }
 
-  std::cout << "[HRX Validation] PASS: position-zero, "
+  std::cout << "[HRX Validation] PASS: batched prefill, position-zero, "
             << kHrxValidationPromptLength << "-token prompt, and "
             << reference.size() - kHrxValidationPromptLength
             << " greedy decode steps match HIP.\n";

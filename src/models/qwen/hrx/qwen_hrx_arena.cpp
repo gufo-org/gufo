@@ -116,6 +116,22 @@ BufferSizes(const QwenHrxArenaLayout& layout) {
       layout.ssm_recurrent_state_bytes,
       layout.saved_ssm_conv_state_bytes,
       layout.saved_ssm_recurrent_state_bytes,
+      layout.batch_hidden_bytes,
+      layout.batch_normed_bytes,
+      layout.batch_attention_q_gate_bytes,
+      layout.batch_attention_k_bytes,
+      layout.batch_attention_v_bytes,
+      layout.batch_context_bytes,
+      layout.batch_ssm_qkv_bytes,
+      layout.batch_ssm_gate_bytes,
+      layout.batch_ssm_alpha_beta_bytes,
+      layout.batch_ffn_gate_up_bytes,
+      layout.batch_ffn_activation_bytes,
+      layout.batch_projected_bytes,
+      layout.batch_quantized_bytes,
+      layout.batch_quant_scales_bytes,
+      layout.batch_ssm_conv_output_bytes,
+      layout.batch_ssm_readout_bytes,
   };
 }
 

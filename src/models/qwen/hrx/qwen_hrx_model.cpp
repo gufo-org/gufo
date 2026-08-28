@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -43,6 +44,22 @@ void SetHrxError(hrx_status_t status, std::string_view operation,
   hrx_status_free_message(message);
   hrx_status_ignore(format_status);
   hrx_status_ignore(status);
+}
+
+/// Returns a single binding covering two weight tensors when they occupy one
+/// HRX buffer back to back. Fused GEMV routes require that exact layout.
+std::optional<HrxBufferBinding> MergeAdjacent(
+    const HrxBufferBinding& first, const HrxBufferBinding& second) noexcept {
+  if (!first.IsValid() || !second.IsValid() ||
+      first.buffer != second.buffer ||
+      first.offset > std::numeric_limits<std::size_t>::max() - first.length ||
+      first.offset + first.length != second.offset ||
+      first.length > std::numeric_limits<std::size_t>::max() - second.length) {
+    return std::nullopt;
+  }
+  return HrxBufferBinding{.buffer = first.buffer,
+                          .offset = first.offset,
+                          .length = first.length + second.length};
 }
 
 }  // namespace
@@ -313,6 +330,8 @@ bool QwenHrxModel::BuildNativeQ8Bindings(
                  &native.ffn_down)) {
       return false;
     }
+    native.ffn_gate_up =
+        MergeAdjacent(native.ffn_gate, native.ffn_up).value_or(HrxBufferBinding{});
 
     if (layer.is_full_attention) {
       if (!bind_q8(layer.attn_q, q_gate, hidden, prefix + "attn_q.weight",
@@ -350,6 +369,8 @@ bool QwenHrxModel::BuildNativeQ8Bindings(
                  &native.ssm_out)) {
       return false;
     }
+    native.ssm_alpha_beta =
+        MergeAdjacent(native.ssm_alpha, native.ssm_beta).value_or(HrxBufferBinding{});
   }
 
   native_bindings_ = std::move(bindings);

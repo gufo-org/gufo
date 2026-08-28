@@ -424,6 +424,15 @@ void TestHrxExecutionPolicyParsing() {
   Expect(p_combo.ToString() == "swiglu,down-residual,rope-kv",
          "combo serializes correctly");
 
+  auto p_wmma =
+      gufo::hrx::QwenHrxExecutionPolicy::Parse("wmma-prefill", &error);
+  Expect(p_wmma.wmma_prefill && p_wmma.int8_prefill &&
+             p_wmma.chunked_prefill,
+         "wmma-prefill enables its int8 and chunked prerequisites");
+  Expect(p_wmma.ToString() ==
+             "chunked-prefill,int8-prefill,wmma-prefill",
+         "wmma-prefill serializes with explicit prerequisites");
+
   // Invalid flag
   auto p_bad =
       gufo::hrx::QwenHrxExecutionPolicy::Parse("invalid-flag-123", &error);

@@ -28,6 +28,8 @@ struct QwenHrxLayerBindings {
   HrxBufferBinding ffn_norm;
   HrxBufferBinding ffn_gate;
   HrxBufferBinding ffn_up;
+  /// Valid only when ffn_gate and ffn_up are adjacent in one HRX buffer.
+  HrxBufferBinding ffn_gate_up;
   HrxBufferBinding ffn_down;
 
   HrxBufferBinding attn_q;
@@ -44,6 +46,8 @@ struct QwenHrxLayerBindings {
   HrxBufferBinding ssm_dt;
   HrxBufferBinding ssm_alpha;
   HrxBufferBinding ssm_beta;
+  /// Valid only when ssm_alpha and ssm_beta are adjacent in one HRX buffer.
+  HrxBufferBinding ssm_alpha_beta;
   HrxBufferBinding ssm_norm;
   HrxBufferBinding ssm_out;
 };

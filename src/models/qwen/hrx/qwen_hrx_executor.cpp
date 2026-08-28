@@ -261,6 +261,7 @@ bool QwenHrxExecutor::RollbackOperation(std::string* error_msg) {
 }
 
 bool QwenHrxExecutor::Reset(std::string* error_msg) {
+  hidden_primary_ = true;
   if (!arena_.has_value()) {
     return Reject("native HRX executor has no arena", error_msg);
   }
@@ -344,6 +345,7 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
     return std::nullopt;
   }
 
+  hidden_primary_ = true;
   if (!BeginOperationRollback(error_msg)) {
     return std::nullopt;
   }
@@ -386,8 +388,7 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardToken(
     }
     return true;
   };
-  if (!DispatchQ8Embedding(bindings.token_embedding, token,
-                           arena_->Binding(QwenHrxArenaBuffer::kHidden),
+  if (!DispatchQ8Embedding(bindings.token_embedding, token, CurrentHidden(),
                            error_msg)) {
     return rollback_and_fail("native HRX token embedding dispatch failed");
   }
@@ -505,6 +506,7 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardPromptBatch(
     return std::nullopt;
   }
 
+  hidden_primary_ = true;
   if (!BeginOperationRollback(error_msg)) {
     return std::nullopt;
   }
@@ -523,6 +525,30 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardPromptBatch(
   const auto& bindings = model_->GetNativeBindings();
   tokenization::TokenId next_token = 0;
 
+  if (policy_.chunked_prefill && ChunkedPrefillReady()) {
+    for (std::size_t offset = 0; offset < tokens.size();
+         offset += kHrxPrefillChunkTokens) {
+      const auto chunk = tokens.subspan(
+          offset, std::min(kHrxPrefillChunkTokens, tokens.size() - offset));
+      const auto chunk_position =
+          start_position + static_cast<std::uint32_t>(offset);
+      if (!ForwardPromptChunk(chunk, chunk_position, error_msg)) {
+        return rollback_and_fail("chunked prefill stage failed");
+      }
+    }
+    if (compute_logits && !DispatchFinalQ8(&next_token, error_msg)) {
+      return rollback_and_fail("final stage projection failed");
+    }
+    CommitOperation();
+    current_position_ =
+        start_position + static_cast<std::uint32_t>(tokens.size());
+    arena_->SetCurrentPosition(current_position_);
+    if (error_msg != nullptr) {
+      error_msg->clear();
+    }
+    return next_token;
+  }
+
   for (std::size_t index = 0; index < tokens.size(); ++index) {
     const auto token = tokens[index];
     const std::uint32_t position =
@@ -533,8 +559,7 @@ std::optional<tokenization::TokenId> QwenHrxExecutor::ForwardPromptBatch(
       return rollback_and_fail("native HRX input token is outside vocabulary");
     }
 
-    if (!DispatchQ8Embedding(bindings.token_embedding, token,
-                             arena_->Binding(QwenHrxArenaBuffer::kHidden),
+    if (!DispatchQ8Embedding(bindings.token_embedding, token, CurrentHidden(),
                              error_msg)) {
       return rollback_and_fail("native HRX token embedding dispatch failed");
     }
@@ -610,6 +635,22 @@ void QwenHrxExecutor::ResetKernelState() {
   deltanet_prepare_executable_ = nullptr;
   deltanet_recurrence_executable_ = nullptr;
   argmax_executable_ = nullptr;
+  q8_gemm_k5120_t8_executable_ = nullptr;
+  q8_gemm_k6144_t8_executable_ = nullptr;
+  q8_gemm_k17408_t8_executable_ = nullptr;
+  rmsnorm_batch_executable_ = nullptr;
+  residual_add_batch_executable_ = nullptr;
+  swiglu_pointwise_batch_executable_ = nullptr;
+  q8_gemm_i8_k5120_t8_executable_ = nullptr;
+  q8_gemm_i8_wmma_k5120_t8_executable_ = nullptr;
+  q8_gemm_i8_k6144_t8_executable_ = nullptr;
+  q8_gemm_i8_k17408_t8_executable_ = nullptr;
+  activation_quantize_k5120_executable_ = nullptr;
+  activation_quantize_wmma_k5120_executable_ = nullptr;
+  activation_quantize_k6144_executable_ = nullptr;
+  activation_quantize_k17408_executable_ = nullptr;
+  deltanet_recurrence_batch_executable_ = nullptr;
+  deltanet_readout_batch_executable_ = nullptr;
   missing_kernel_artifacts_.clear();
   prototype_artifacts_ready_ = false;
 }
@@ -734,6 +775,38 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
       q8_gemv_k17408_wg256_executable_ = exec;
     } else if (entry.name == "qwen_q8_vocab_gemv_k5120") {
       q8_vocab_gemv_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_k5120_t8") {
+      q8_gemm_k5120_t8_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_k6144_t8") {
+      q8_gemm_k6144_t8_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_k17408_t8") {
+      q8_gemm_k17408_t8_executable_ = exec;
+    } else if (entry.name == "qwen_rmsnorm_batch") {
+      rmsnorm_batch_executable_ = exec;
+    } else if (entry.name == "qwen_residual_add_batch") {
+      residual_add_batch_executable_ = exec;
+    } else if (entry.name == "qwen_swiglu_pointwise_batch") {
+      swiglu_pointwise_batch_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_k5120_t8") {
+      q8_gemm_i8_k5120_t8_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_wmma_k5120_t8") {
+      q8_gemm_i8_wmma_k5120_t8_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_k6144_t8") {
+      q8_gemm_i8_k6144_t8_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_k17408_t8") {
+      q8_gemm_i8_k17408_t8_executable_ = exec;
+    } else if (entry.name == "qwen_activation_quantize_k5120") {
+      activation_quantize_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_activation_quantize_wmma_k5120") {
+      activation_quantize_wmma_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_activation_quantize_k6144") {
+      activation_quantize_k6144_executable_ = exec;
+    } else if (entry.name == "qwen_activation_quantize_k17408") {
+      activation_quantize_k17408_executable_ = exec;
+    } else if (entry.name == "qwen_deltanet_recurrence_batch") {
+      deltanet_recurrence_batch_executable_ = exec;
+    } else if (entry.name == "qwen_deltanet_readout_batch") {
+      deltanet_readout_batch_executable_ = exec;
     } else if (entry.name == "qwen_per_head_rmsnorm") {
       per_head_rmsnorm_executable_ = exec;
     } else if (entry.name == "qwen_attention_decode") {
@@ -802,9 +875,18 @@ bool QwenHrxExecutor::DispatchQ8Gemv(const HrxBufferBinding& weight,
   std::uint32_t row_capacity = 0;
   switch (input_elements) {
     case 5120:
-      executable = q8_gemv_k5120_executable_;
+      // The vocabulary artifact is the same K=5120 Q8_0 GEMV with a larger row
+      // capacity, so fused multi-projection routes reuse it instead of
+      // requiring a second narrow-capacity artifact.
+      if (rows > contract_.FfnSize() &&
+          q8_vocab_gemv_k5120_executable_ != nullptr) {
+        executable = q8_vocab_gemv_k5120_executable_;
+        row_capacity = contract_.VocabSize();
+      } else {
+        executable = q8_gemv_k5120_executable_;
+        row_capacity = contract_.FfnSize();
+      }
       workgroup_size = 160;
-      row_capacity = contract_.FfnSize();
       break;
     case 6144:
       executable = q8_gemv_k6144_executable_;
@@ -884,6 +966,870 @@ bool QwenHrxExecutor::DispatchCopyF32(const HrxBufferBinding& source,
   return true;
 }
 
+HrxBufferBinding QwenHrxExecutor::CurrentHidden() const noexcept {
+  if (!arena_.has_value()) {
+    return HrxBufferBinding{};
+  }
+  return arena_->Binding(hidden_primary_ ? QwenHrxArenaBuffer::kHidden
+                                         : QwenHrxArenaBuffer::kNormed);
+}
+
+HrxBufferBinding QwenHrxExecutor::CurrentScratch() const noexcept {
+  if (!arena_.has_value()) {
+    return HrxBufferBinding{};
+  }
+  return arena_->Binding(hidden_primary_ ? QwenHrxArenaBuffer::kNormed
+                                         : QwenHrxArenaBuffer::kHidden);
+}
+
+bool QwenHrxExecutor::PublishStageResult() {
+  if (policy_.residual_ping_pong) {
+    hidden_primary_ = !hidden_primary_;
+    return true;
+  }
+  return DispatchCopyF32(CurrentScratch(), CurrentHidden(),
+                         contract_.HiddenSize());
+}
+
+namespace {
+
+/// Returns the byte range of one token inside a token-major batch buffer.
+[[nodiscard]] std::optional<HrxBufferBinding> TokenSlice(
+    const HrxBufferBinding& batch, std::size_t token, std::size_t width) {
+  const auto stride = CheckedBytes({width, sizeof(float)});
+  if (!stride.has_value()) {
+    return std::nullopt;
+  }
+  return SliceBinding(batch, token * *stride, *stride);
+}
+
+}  // namespace
+
+bool QwenHrxExecutor::DispatchActivationQuantize(const HrxBufferBinding& input,
+                                                std::uint32_t input_elements,
+                                                std::uint32_t tokens) {
+  hrx_executable_t executable = nullptr;
+  const bool use_wmma_layout = policy_.wmma_prefill &&
+                               input_elements == contract_.HiddenSize() &&
+                               WmmaPrefillReady();
+  switch (input_elements) {
+    case 5120:
+      executable = use_wmma_layout
+                       ? activation_quantize_wmma_k5120_executable_
+                       : activation_quantize_k5120_executable_;
+      break;
+    case 6144:
+      executable = activation_quantize_k6144_executable_;
+      break;
+    case 17408:
+      executable = activation_quantize_k17408_executable_;
+      break;
+    default:
+      return false;
+  }
+  if (executable == nullptr || !arena_.has_value() || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto input_bytes =
+      CheckedBytes({tokens, input_elements, sizeof(float)});
+  const std::size_t payload_tokens = use_wmma_layout ? 16 : tokens;
+  const std::size_t scale_tokens =
+      use_wmma_layout ? kHrxPrefillChunkTokens : tokens;
+  const auto payload_bytes = CheckedBytes({payload_tokens, input_elements});
+  const auto scale_bytes = CheckedBytes(
+      {scale_tokens, input_elements / 32, sizeof(float)});
+  hrx_buffer_ref_t bindings[3];
+  if (!TryBindOperand(input, input_bytes, &bindings[0]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
+                      payload_bytes, &bindings[1]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
+                      scale_bytes, &bindings[2])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = use_wmma_layout ? 16 : tokens;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = input_elements / 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status = hrx_stream_dispatch(backend_.Stream(), executable, 0, &config,
+                                    &tokens, sizeof(tokens), bindings, 3, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchQ8GemmInt8(const HrxBufferBinding& weight,
+                                         const HrxBufferBinding& output,
+                                         std::uint32_t rows,
+                                         std::uint32_t input_elements,
+                                         std::uint32_t tokens) {
+  hrx_executable_t executable = nullptr;
+  std::uint32_t row_capacity = 0;
+  switch (input_elements) {
+    case 5120:
+      executable = q8_gemm_i8_k5120_t8_executable_;
+      row_capacity = contract_.VocabSize();
+      break;
+    case 6144:
+      executable = q8_gemm_i8_k6144_t8_executable_;
+      row_capacity = contract_.HiddenSize();
+      break;
+    case 17408:
+      executable = q8_gemm_i8_k17408_t8_executable_;
+      row_capacity = contract_.HiddenSize();
+      break;
+    default:
+      return false;
+  }
+  if (executable == nullptr || !arena_.has_value() || rows == 0 ||
+      rows > row_capacity || tokens == 0 || tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto weight_bytes = Q8_0MatrixBytes(rows, input_elements);
+  // The artifact always reads kHrxPrefillChunkTokens payload rows; short
+  // chunks read the zeroed padding the arena provides.
+  const auto payload_bytes =
+      CheckedBytes({kHrxPrefillChunkTokens, input_elements});
+  const auto scale_bytes = CheckedBytes(
+      {kHrxPrefillChunkTokens, input_elements / 32, sizeof(float)});
+  const auto output_bytes = CheckedBytes({tokens, rows, sizeof(float)});
+  hrx_buffer_ref_t bindings[4];
+  if (!TryBindOperand(weight, weight_bytes, &bindings[0]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
+                      payload_bytes, &bindings[1]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
+                      scale_bytes, &bindings[2]) ||
+      !TryBindOperand(output, output_bytes, &bindings[3])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = rows;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = input_elements / 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  const std::array<std::uint32_t, 2> constants{rows, tokens};
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), executable, 0, &config, constants.data(),
+      constants.size() * sizeof(std::uint32_t), bindings, 4, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchQ8GemmWmmaK5120(
+    const HrxBufferBinding& weight, const HrxBufferBinding& output,
+    std::uint32_t rows, std::uint32_t tokens) {
+  constexpr std::uint32_t kPhysicalTokenTile = 16;
+  if (!WmmaPrefillReady() || !arena_.has_value() || rows == 0 ||
+      rows > contract_.VocabSize() || (rows % 16) != 0 || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto weight_bytes = Q8_0MatrixBytes(rows, contract_.HiddenSize());
+  const auto payload_bytes =
+      CheckedBytes({kPhysicalTokenTile, contract_.HiddenSize()});
+  const auto scale_bytes = CheckedBytes(
+      {kHrxPrefillChunkTokens, contract_.HiddenSize() / 32, sizeof(float)});
+  const auto output_bytes = CheckedBytes({tokens, rows, sizeof(float)});
+  hrx_buffer_ref_t bindings[4];
+  if (!TryBindOperand(weight, weight_bytes, &bindings[0]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
+                      payload_bytes, &bindings[1]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
+                      scale_bytes, &bindings[2]) ||
+      !TryBindOperand(output, output_bytes, &bindings[3])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = rows / 16;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  const std::array<std::uint32_t, 2> constants{rows, tokens};
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), q8_gemm_i8_wmma_k5120_t8_executable_, 0, &config,
+      constants.data(), constants.size() * sizeof(std::uint32_t), bindings, 4,
+      0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchChunkProjection(const HrxBufferBinding& weight,
+                                              const HrxBufferBinding& input,
+                                              const HrxBufferBinding& output,
+                                              std::uint32_t rows,
+                                              std::uint32_t input_elements,
+                                              std::uint32_t tokens) {
+  if (policy_.int8_prefill && Int8PrefillReady()) {
+    if (policy_.wmma_prefill && input_elements == contract_.HiddenSize() &&
+        WmmaPrefillReady()) {
+      return DispatchQ8GemmWmmaK5120(weight, output, rows, tokens);
+    }
+    return DispatchQ8GemmInt8(weight, output, rows, input_elements, tokens);
+  }
+  return DispatchQ8GemmT8(weight, input, output, rows, input_elements, tokens);
+}
+
+bool QwenHrxExecutor::DispatchDeltaNetRecurrenceBatch(
+    const HrxBufferBinding& conv, const HrxBufferBinding& prepared,
+    const HrxBufferBinding& state, const HrxBufferBinding& readout,
+    std::uint32_t tokens) {
+  if (deltanet_recurrence_batch_executable_ == nullptr || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto conv_bytes =
+      CheckedBytes({tokens, contract_.SsmQkvWidth(), sizeof(float)});
+  const auto prepared_bytes =
+      CheckedBytes({tokens, 2, contract_.SsmAlphaBetaWidth(), sizeof(float)});
+  const auto state_bytes =
+      CheckedBytes({contract_.SsmValueHeadCount(), contract_.SsmKeyDim(),
+                    contract_.SsmValueDim(), sizeof(float)});
+  const auto readout_bytes =
+      CheckedBytes({tokens, contract_.SsmValueHeadCount(),
+                    contract_.SsmValueDim(), sizeof(float)});
+  hrx_buffer_ref_t bindings[4];
+  if (!TryBindOperand(conv, conv_bytes, &bindings[0]) ||
+      !TryBindOperand(prepared, prepared_bytes, &bindings[1]) ||
+      !TryBindOperand(state, state_bytes, &bindings[2]) ||
+      !TryBindOperand(readout, readout_bytes, &bindings[3])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] =
+      contract_.SsmValueHeadCount() * contract_.SsmValueDim();
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = contract_.SsmKeyDim();
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), deltanet_recurrence_batch_executable_, 0, &config,
+      &tokens, sizeof(tokens), bindings, 4, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchDeltaNetReadoutBatch(
+    const HrxBufferBinding& readout, const HrxBufferBinding& norm,
+    const HrxBufferBinding& gate, const HrxBufferBinding& output,
+    std::uint32_t tokens) {
+  if (deltanet_readout_batch_executable_ == nullptr || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto chunk_bytes =
+      CheckedBytes({tokens, contract_.SsmValueHeadCount(),
+                    contract_.SsmValueDim(), sizeof(float)});
+  const auto norm_bytes =
+      CheckedBytes({contract_.SsmValueDim(), sizeof(float)});
+  hrx_buffer_ref_t bindings[4];
+  if (!TryBindOperand(readout, chunk_bytes, &bindings[0]) ||
+      !TryBindOperand(norm, norm_bytes, &bindings[1]) ||
+      !TryBindOperand(gate, chunk_bytes, &bindings[2]) ||
+      !TryBindOperand(output, chunk_bytes, &bindings[3])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = tokens * contract_.SsmValueHeadCount();
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = contract_.SsmValueDim();
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), deltanet_readout_batch_executable_, 0, &config,
+      &tokens, sizeof(tokens), bindings, 4, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
+                                                 std::uint32_t start_position,
+                                                 std::uint32_t tokens,
+                                                 std::string* error_msg) {
+  const auto& config = model_->GetConfig();
+  const auto& bindings = model_->GetNativeBindings();
+  const auto& layer = bindings.layers[layer_index];
+  const auto batch_hidden = arena_->Binding(batch_hidden_primary_
+                                                ? QwenHrxArenaBuffer::kBatchHidden
+                                                : QwenHrxArenaBuffer::kBatchNormed);
+  const auto batch_normed = arena_->Binding(batch_hidden_primary_
+                                                ? QwenHrxArenaBuffer::kBatchNormed
+                                                : QwenHrxArenaBuffer::kBatchHidden);
+  const auto batch_q_gate =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchAttentionQGate);
+  const auto batch_key = arena_->Binding(QwenHrxArenaBuffer::kBatchAttentionK);
+  const auto batch_value =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchAttentionV);
+  const auto batch_context = arena_->Binding(QwenHrxArenaBuffer::kBatchContext);
+  const auto batch_projected =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchProjected);
+  const auto query = arena_->Binding(QwenHrxArenaBuffer::kAttentionQ);
+  const auto gate = arena_->Binding(QwenHrxArenaBuffer::kAttentionGate);
+  const std::size_t hidden = contract_.HiddenSize();
+  const std::size_t context_stride =
+      arena_->Layout().batch_context_bytes / kHrxPrefillChunkTokens /
+      sizeof(float);
+
+  if (!DispatchRMSNormBatch(batch_hidden, layer.attn_norm, batch_normed,
+                            tokens)) {
+    return Reject("batched attention RMSNorm failed", error_msg);
+  }
+  const bool int8_route = policy_.int8_prefill && Int8PrefillReady();
+  if (int8_route &&
+      !DispatchActivationQuantize(batch_normed,
+                                  static_cast<std::uint32_t>(hidden), tokens)) {
+    return Reject("batched attention activation quantization failed",
+                  error_msg);
+  }
+  if (!DispatchChunkProjection(layer.attn_q, batch_normed, batch_q_gate,
+                               contract_.FullAttentionQGateWidth(), hidden,
+                               tokens) ||
+      !DispatchChunkProjection(layer.attn_k, batch_normed, batch_key,
+                               contract_.FullAttentionKeyWidth(), hidden,
+                               tokens) ||
+      !DispatchChunkProjection(layer.attn_v, batch_normed, batch_value,
+                               contract_.FullAttentionValueWidth(), hidden,
+                               tokens)) {
+    return Reject("batched attention projection failed", error_msg);
+  }
+
+  const std::size_t rotary_bytes =
+      (static_cast<std::size_t>(contract_.RotaryDim()) / 2) * sizeof(float);
+  const std::size_t cache_row_bytes =
+      static_cast<std::size_t>(contract_.KvHeadCount()) * contract_.HeadDim() *
+      sizeof(float);
+  const std::size_t cache_layer_bytes =
+      cache_row_bytes * static_cast<std::size_t>(max_context_);
+  const std::size_t cache_layer_index =
+      layer_index / config.full_attention_interval;
+  const auto cache = arena_->Binding(QwenHrxArenaBuffer::kKvCache);
+  const std::size_t layer_base = cache_layer_index * 2 * cache_layer_bytes;
+  const auto key_cache = SliceBinding(cache, layer_base, cache_layer_bytes);
+  const auto value_cache =
+      SliceBinding(cache, layer_base + cache_layer_bytes, cache_layer_bytes);
+  if (!key_cache || !value_cache) {
+    return Reject("batched attention cache slice is invalid", error_msg);
+  }
+
+  for (std::uint32_t token = 0; token < tokens; ++token) {
+    const std::uint32_t position = start_position + token;
+    const auto q_gate_token =
+        TokenSlice(batch_q_gate, token, contract_.FullAttentionQGateWidth());
+    const auto key_token =
+        TokenSlice(batch_key, token, contract_.FullAttentionKeyWidth());
+    const auto value_token =
+        TokenSlice(batch_value, token, contract_.FullAttentionValueWidth());
+    const auto context_token = TokenSlice(batch_context, token, context_stride);
+    const auto cos_binding = arena_->Binding(
+        QwenHrxArenaBuffer::kRopeCos, position * rotary_bytes, rotary_bytes);
+    const auto sin_binding = arena_->Binding(
+        QwenHrxArenaBuffer::kRopeSin, position * rotary_bytes, rotary_bytes);
+    const auto key_row = SliceBinding(
+        *key_cache, static_cast<std::size_t>(position) * cache_row_bytes,
+        cache_row_bytes);
+    const auto value_row = SliceBinding(
+        *value_cache, static_cast<std::size_t>(position) * cache_row_bytes,
+        cache_row_bytes);
+    if (!q_gate_token || !key_token || !value_token || !context_token ||
+        !key_row || !value_row || !cos_binding.IsValid() ||
+        !sin_binding.IsValid() ||
+        !DispatchSplitQGate(*q_gate_token, query, gate) ||
+        !DispatchPerHeadRmsNorm(query, layer.attn_q_norm, query,
+                                contract_.QHeadCount()) ||
+        !DispatchPerHeadRmsNorm(*key_token, layer.attn_k_norm, *key_token,
+                                contract_.KvHeadCount()) ||
+        !DispatchRoPEKVCache(query, *key_token, *value_token, cos_binding,
+                             sin_binding, *key_row, *value_row) ||
+        !DispatchAttentionDecode(query, gate, *key_cache, *value_cache,
+                                 *context_token, position)) {
+      return Reject("batched attention per-token stage failed", error_msg);
+    }
+  }
+
+  if (int8_route &&
+      !DispatchActivationQuantize(batch_context,
+                                  contract_.FullAttentionQueryWidth(),
+                                  tokens)) {
+    return Reject("batched attention context quantization failed", error_msg);
+  }
+  if (!DispatchChunkProjection(layer.attn_output, batch_context,
+                               batch_projected, hidden,
+                               contract_.FullAttentionQueryWidth(), tokens)) {
+    return Reject("batched attention output projection failed", error_msg);
+  }
+  if (!DispatchResidualAddBatch(batch_hidden, batch_projected, batch_normed,
+                                tokens * static_cast<std::uint32_t>(hidden))) {
+    return Reject("batched attention residual add failed", error_msg);
+  }
+  batch_hidden_primary_ = !batch_hidden_primary_;
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
+                                           std::uint32_t tokens,
+                                           std::string* error_msg) {
+  const auto& bindings = model_->GetNativeBindings();
+  const auto& layer = bindings.layers[layer_index];
+  const auto batch_hidden = arena_->Binding(batch_hidden_primary_
+                                                ? QwenHrxArenaBuffer::kBatchHidden
+                                                : QwenHrxArenaBuffer::kBatchNormed);
+  const auto batch_normed = arena_->Binding(batch_hidden_primary_
+                                                ? QwenHrxArenaBuffer::kBatchNormed
+                                                : QwenHrxArenaBuffer::kBatchHidden);
+  const auto batch_qkv = arena_->Binding(QwenHrxArenaBuffer::kBatchSsmQkv);
+  const auto batch_gate = arena_->Binding(QwenHrxArenaBuffer::kBatchSsmGate);
+  const auto batch_alpha_beta =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchSsmAlphaBeta);
+  const auto batch_context = arena_->Binding(QwenHrxArenaBuffer::kBatchContext);
+  const auto batch_projected =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchProjected);
+  const auto conv = arena_->Binding(QwenHrxArenaBuffer::kSsmConvOutput);
+  const std::size_t hidden = contract_.HiddenSize();
+  const std::size_t alpha_beta_width = contract_.SsmAlphaBetaWidth();
+  const std::size_t context_stride =
+      arena_->Layout().batch_context_bytes / kHrxPrefillChunkTokens /
+      sizeof(float);
+  const std::size_t conv_state_bytes =
+      static_cast<std::size_t>(contract_.SsmQkvWidth()) *
+      contract_.SsmConvKernel() * sizeof(float);
+  const std::size_t recurrent_state_bytes =
+      static_cast<std::size_t>(contract_.SsmValueHeadCount()) *
+      contract_.SsmKeyDim() * contract_.SsmValueDim() * sizeof(float);
+  const auto conv_state =
+      SliceBinding(arena_->Binding(QwenHrxArenaBuffer::kSsmConvState),
+                   layer_index * conv_state_bytes, conv_state_bytes);
+  const auto recurrent_state =
+      SliceBinding(arena_->Binding(QwenHrxArenaBuffer::kSsmRecurrentState),
+                   layer_index * recurrent_state_bytes, recurrent_state_bytes);
+  if (!conv_state || !recurrent_state) {
+    return Reject("batched SSM state slice is invalid", error_msg);
+  }
+
+  if (!DispatchRMSNormBatch(batch_hidden, layer.attn_norm, batch_normed,
+                            tokens)) {
+    return Reject("batched SSM RMSNorm failed", error_msg);
+  }
+  if (!layer.ssm_alpha_beta.IsValid()) {
+    return Reject("batched SSM requires adjacent alpha/beta weights",
+                  error_msg);
+  }
+  const bool int8_route = policy_.int8_prefill && Int8PrefillReady();
+  if (int8_route &&
+      !DispatchActivationQuantize(batch_normed,
+                                  static_cast<std::uint32_t>(hidden), tokens)) {
+    return Reject("batched SSM activation quantization failed", error_msg);
+  }
+  if (!DispatchChunkProjection(layer.attn_qkv, batch_normed, batch_qkv,
+                               contract_.SsmQkvWidth(), hidden, tokens) ||
+      !DispatchChunkProjection(layer.attn_gate, batch_normed, batch_gate,
+                               contract_.SsmGateWidth(), hidden, tokens) ||
+      !DispatchChunkProjection(layer.ssm_alpha_beta, batch_normed,
+                               batch_alpha_beta,
+                               static_cast<std::uint32_t>(2 * alpha_beta_width),
+                               hidden, tokens)) {
+    return Reject("batched SSM projection failed", error_msg);
+  }
+
+  // The convolution and the alpha/beta preparation stay per token because the
+  // convolution window carries state across tokens, but both are small. The
+  // recurrence, which dominates the stage, runs once for the whole chunk.
+  const bool batched_deltanet = BatchedDeltaNetReady();
+  const auto batch_conv =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchSsmConvOutput);
+  const auto batch_readout =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchSsmReadout);
+  for (std::uint32_t token = 0; token < tokens; ++token) {
+    const auto qkv_token = TokenSlice(batch_qkv, token, contract_.SsmQkvWidth());
+    const auto gate_token =
+        TokenSlice(batch_gate, token, contract_.SsmGateWidth());
+    const auto alpha_beta_token =
+        TokenSlice(batch_alpha_beta, token, 2 * alpha_beta_width);
+    const auto context_token = TokenSlice(batch_context, token, context_stride);
+    const auto conv_token =
+        TokenSlice(batch_conv, token, contract_.SsmQkvWidth());
+    if (!qkv_token || !gate_token || !alpha_beta_token || !context_token ||
+        !conv_token) {
+      return Reject("batched SSM token slice is invalid", error_msg);
+    }
+    const auto alpha_bytes = CheckedBytes({alpha_beta_width, sizeof(float)});
+    const auto alpha = SliceBinding(*alpha_beta_token, 0, *alpha_bytes);
+    const auto beta = SliceBinding(*alpha_beta_token, *alpha_bytes,
+                                   *alpha_bytes);
+    if (!alpha || !beta ||
+        !DispatchDeltaNetPrepare(*alpha, *beta, layer.ssm_a, layer.ssm_dt) ||
+        !DispatchSsmConv(*qkv_token, layer.ssm_conv1d,
+                         *conv_state, batched_deltanet ? *conv_token : conv)) {
+      return Reject("batched SSM convolution failed", error_msg);
+    }
+    if (!batched_deltanet &&
+        !DispatchDeltaNetPrepared(conv, *alpha, *beta, layer.ssm_norm,
+                                  *gate_token, *recurrent_state,
+                                  *context_token)) {
+      return Reject("batched SSM per-token recurrence failed", error_msg);
+    }
+  }
+  if (batched_deltanet &&
+      (!DispatchDeltaNetRecurrenceBatch(batch_conv, batch_alpha_beta,
+                                        *recurrent_state, batch_readout,
+                                        tokens) ||
+       !DispatchDeltaNetReadoutBatch(batch_readout, layer.ssm_norm, batch_gate,
+                                     batch_context, tokens))) {
+    return Reject("batch-native DeltaNet recurrence failed", error_msg);
+  }
+
+  if (int8_route &&
+      !DispatchActivationQuantize(batch_context, contract_.SsmGateWidth(),
+                                  tokens)) {
+    return Reject("batched SSM context quantization failed", error_msg);
+  }
+  if (!DispatchChunkProjection(layer.ssm_out, batch_context, batch_projected,
+                               hidden, contract_.SsmGateWidth(), tokens)) {
+    return Reject("batched SSM output projection failed", error_msg);
+  }
+  if (!DispatchResidualAddBatch(batch_hidden, batch_projected, batch_normed,
+                                tokens * static_cast<std::uint32_t>(hidden))) {
+    return Reject("batched SSM residual add failed", error_msg);
+  }
+  batch_hidden_primary_ = !batch_hidden_primary_;
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
+                                           std::uint32_t tokens,
+                                           std::string* error_msg) {
+  const auto& bindings = model_->GetNativeBindings();
+  const auto& layer = bindings.layers[layer_index];
+  if (!layer.ffn_gate_up.IsValid()) {
+    return Reject("batched FFN requires adjacent gate/up weights", error_msg);
+  }
+  const auto batch_hidden = arena_->Binding(batch_hidden_primary_
+                                                ? QwenHrxArenaBuffer::kBatchHidden
+                                                : QwenHrxArenaBuffer::kBatchNormed);
+  const auto batch_normed = arena_->Binding(batch_hidden_primary_
+                                                ? QwenHrxArenaBuffer::kBatchNormed
+                                                : QwenHrxArenaBuffer::kBatchHidden);
+  const auto batch_gate_up =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchFfnGateUp);
+  const auto batch_activation =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchFfnActivation);
+  const auto batch_projected =
+      arena_->Binding(QwenHrxArenaBuffer::kBatchProjected);
+  const std::size_t hidden = contract_.HiddenSize();
+  const std::size_t ffn = contract_.FfnSize();
+  const auto half_bytes = CheckedBytes({ffn, sizeof(float)});
+  if (!half_bytes.has_value()) {
+    return Reject("batched FFN width overflows", error_msg);
+  }
+
+  if (!DispatchRMSNormBatch(batch_hidden, layer.ffn_norm, batch_normed,
+                            tokens)) {
+    return Reject("batched FFN RMSNorm failed", error_msg);
+  }
+  const bool int8_route = policy_.int8_prefill && Int8PrefillReady();
+  if (int8_route &&
+      !DispatchActivationQuantize(batch_normed,
+                                  static_cast<std::uint32_t>(hidden), tokens)) {
+    return Reject("batched FFN activation quantization failed", error_msg);
+  }
+  if (!DispatchChunkProjection(layer.ffn_gate_up, batch_normed, batch_gate_up,
+                               static_cast<std::uint32_t>(2 * ffn), hidden,
+                               tokens)) {
+    return Reject("batched FFN gate/up projection failed", error_msg);
+  }
+  if (!DispatchSwiGLUPointwiseBatch(
+          batch_gate_up, batch_activation,
+          tokens * static_cast<std::uint32_t>(ffn))) {
+    return Reject("batched FFN SwiGLU failed", error_msg);
+  }
+  if (int8_route &&
+      !DispatchActivationQuantize(batch_activation,
+                                  static_cast<std::uint32_t>(ffn), tokens)) {
+    return Reject("batched FFN activation payload quantization failed",
+                  error_msg);
+  }
+  if (!DispatchChunkProjection(layer.ffn_down, batch_activation,
+                               batch_projected, hidden,
+                               static_cast<std::uint32_t>(ffn), tokens)) {
+    return Reject("batched FFN down projection failed", error_msg);
+  }
+  if (!DispatchResidualAddBatch(batch_hidden, batch_projected, batch_normed,
+                                tokens * static_cast<std::uint32_t>(hidden))) {
+    return Reject("batched FFN residual add failed", error_msg);
+  }
+  batch_hidden_primary_ = !batch_hidden_primary_;
+  return true;
+}
+
+bool QwenHrxExecutor::ForwardPromptChunk(
+    std::span<const tokenization::TokenId> tokens, std::uint32_t start_position,
+    std::string* error_msg) {
+  const auto& bindings = model_->GetNativeBindings();
+  const auto token_count = static_cast<std::uint32_t>(tokens.size());
+  const std::size_t hidden = contract_.HiddenSize();
+  const bool trace_stages = std::getenv("GUFO_HRX_TRACE_STAGES") != nullptr;
+  const auto chunk_start = std::chrono::steady_clock::now();
+  auto stage_start = chunk_start;
+  double attention_ms = 0.0;
+  double ssm_ms = 0.0;
+  double ffn_ms = 0.0;
+  const auto synchronize_stage = [&](double* elapsed_ms) {
+    if (!trace_stages) {
+      return true;
+    }
+    const auto status = hrx_stream_synchronize(backend_.Stream());
+    const auto now = std::chrono::steady_clock::now();
+    *elapsed_ms +=
+        std::chrono::duration<double, std::milli>(now - stage_start).count();
+    stage_start = now;
+    return hrx_status_is_ok(status);
+  };
+  batch_hidden_primary_ = true;
+  const auto batch_hidden = arena_->Binding(QwenHrxArenaBuffer::kBatchHidden);
+  for (std::uint32_t token = 0; token < token_count; ++token) {
+    const auto destination = TokenSlice(batch_hidden, token, hidden);
+    if (!destination ||
+        !DispatchQ8Embedding(bindings.token_embedding, tokens[token],
+                             *destination, error_msg)) {
+      return Reject("batched token embedding failed", error_msg);
+    }
+  }
+  for (std::size_t layer_index = 0; layer_index < bindings.layers.size();
+       ++layer_index) {
+    const bool expected_attention = ((layer_index + 1) % 4) == 0;
+    if (bindings.layers[layer_index].is_full_attention != expected_attention) {
+      return Reject("native HRX model layer ordering violates the contract",
+                    error_msg);
+    }
+    const bool stage_ok =
+        expected_attention
+            ? DispatchBatchedAttentionQ8(layer_index, start_position,
+                                         token_count, error_msg)
+            : DispatchBatchedSsmQ8(layer_index, token_count, error_msg);
+    if (!stage_ok ||
+        !synchronize_stage(expected_attention ? &attention_ms : &ssm_ms)) {
+      return false;
+    }
+    if (!DispatchBatchedFfnQ8(layer_index, token_count, error_msg) ||
+        !synchronize_stage(&ffn_ms)) {
+      return false;
+    }
+  }
+  // Hand the chunk's last residual back to the single-token buffers so the
+  // final projection and any following decode step keep their contract.
+  const auto final_batch =
+      arena_->Binding(batch_hidden_primary_ ? QwenHrxArenaBuffer::kBatchHidden
+                                            : QwenHrxArenaBuffer::kBatchNormed);
+  const auto last = TokenSlice(final_batch, token_count - 1, hidden);
+  hidden_primary_ = true;
+  if (!last || !DispatchCopyF32(*last, arena_->Binding(
+                                           QwenHrxArenaBuffer::kHidden),
+                                contract_.HiddenSize())) {
+    return Reject("chunk residual writeback failed", error_msg);
+  }
+  if (trace_stages) {
+    const auto chunk_end = std::chrono::steady_clock::now();
+    const double chunk_ms =
+        std::chrono::duration<double, std::milli>(chunk_end - chunk_start)
+            .count();
+    std::cerr << "[HRX chunk profile] tokens=" << token_count
+              << " start=" << start_position << " attention_ms="
+              << attention_ms << " ssm_ms=" << ssm_ms << " ffn_ms=" << ffn_ms
+              << " chunk_ms=" << chunk_ms << '\n';
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchRMSNormBatch(const HrxBufferBinding& input,
+                                          const HrxBufferBinding& gamma,
+                                          const HrxBufferBinding& output,
+                                          std::uint32_t tokens) {
+  if (rmsnorm_batch_executable_ == nullptr || tokens == 0 ||
+      tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto row_bytes = CheckedBytes({contract_.HiddenSize(), sizeof(float)});
+  const auto chunk_bytes = CheckedBytes({tokens, contract_.HiddenSize(),
+                                         sizeof(float)});
+  hrx_buffer_ref_t bindings[3];
+  if (!TryBindOperand(input, chunk_bytes, &bindings[0]) ||
+      !TryBindOperand(gamma, row_bytes, &bindings[1]) ||
+      !TryBindOperand(output, chunk_bytes, &bindings[2])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = tokens;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 160;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), rmsnorm_batch_executable_, 0,
+                          &config, &tokens, sizeof(tokens), bindings, 3, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchResidualAddBatch(const HrxBufferBinding& left,
+                                               const HrxBufferBinding& right,
+                                               const HrxBufferBinding& output,
+                                               std::uint32_t elements) {
+  if (residual_add_batch_executable_ == nullptr || elements == 0 ||
+      (elements % 32) != 0) {
+    return false;
+  }
+  const auto bytes = CheckedBytes({elements, sizeof(float)});
+  hrx_buffer_ref_t bindings[3];
+  if (!TryBindOperand(left, bytes, &bindings[0]) ||
+      !TryBindOperand(right, bytes, &bindings[1]) ||
+      !TryBindOperand(output, bytes, &bindings[2])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = elements / 32;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status = hrx_stream_dispatch(backend_.Stream(),
+                                    residual_add_batch_executable_, 0, &config,
+                                    &elements, sizeof(elements), bindings, 3, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchSwiGLUPointwiseBatch(
+    const HrxBufferBinding& pairs, const HrxBufferBinding& output,
+    std::uint32_t elements) {
+  if (swiglu_pointwise_batch_executable_ == nullptr || elements == 0 ||
+      (elements % 32) != 0) {
+    return false;
+  }
+  const auto pair_bytes = CheckedBytes({2, elements, sizeof(float)});
+  const auto output_bytes = CheckedBytes({elements, sizeof(float)});
+  hrx_buffer_ref_t bindings[2];
+  if (!TryBindOperand(pairs, pair_bytes, &bindings[0]) ||
+      !TryBindOperand(output, output_bytes, &bindings[1])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = (elements + 31) / 32;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), swiglu_pointwise_batch_executable_, 0, &config,
+      &elements, sizeof(elements), bindings, 2, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchQ8GemmT8(const HrxBufferBinding& weight,
+                                      const HrxBufferBinding& input,
+                                      const HrxBufferBinding& output,
+                                      std::uint32_t rows,
+                                      std::uint32_t input_elements,
+                                      std::uint32_t tokens) {
+  hrx_executable_t executable = nullptr;
+  std::uint32_t workgroup_size = 0;
+  std::uint32_t row_capacity = 0;
+  switch (input_elements) {
+    case 5120:
+      executable = q8_gemm_k5120_t8_executable_;
+      workgroup_size = 160;
+      row_capacity = contract_.VocabSize();
+      break;
+    case 6144:
+      executable = q8_gemm_k6144_t8_executable_;
+      workgroup_size = 192;
+      row_capacity = contract_.HiddenSize();
+      break;
+    case 17408:
+      executable = q8_gemm_k17408_t8_executable_;
+      workgroup_size = 544;
+      row_capacity = contract_.HiddenSize();
+      break;
+    default:
+      return false;
+  }
+  if (executable == nullptr || rows == 0 || rows > row_capacity ||
+      tokens == 0 || tokens > kHrxPrefillChunkTokens) {
+    return false;
+  }
+  const auto weight_bytes = Q8_0MatrixBytes(rows, input_elements);
+  // The artifact always reads kHrxPrefillChunkTokens token rows; the arena
+  // allocates that many so short chunks read zeroed padding.
+  const auto input_bytes =
+      CheckedBytes({kHrxPrefillChunkTokens, input_elements, sizeof(float)});
+  const auto output_bytes = CheckedBytes({tokens, rows, sizeof(float)});
+  hrx_buffer_ref_t bindings[3];
+  if (!TryBindOperand(weight, weight_bytes, &bindings[0]) ||
+      !TryBindOperand(input, input_bytes, &bindings[1]) ||
+      !TryBindOperand(output, output_bytes, &bindings[2])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = rows;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = workgroup_size;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  const std::array<std::uint32_t, 2> constants{rows, tokens};
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), executable, 0, &config,
+                          constants.data(),
+                          constants.size() * sizeof(std::uint32_t), bindings, 3, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  return true;
+}
+
 bool QwenHrxExecutor::DispatchFfnQ8(std::size_t layer_index,
                                     std::string* error_msg) {
   if (model_ == nullptr || !arena_.has_value() || !FfnStageReady()) {
@@ -894,22 +1840,39 @@ bool QwenHrxExecutor::DispatchFfnQ8(std::size_t layer_index,
     return Reject("native HRX FFN layer index is out of range", error_msg);
   }
   const auto& layer = bindings.layers[layer_index];
-  const auto hidden = arena_->Binding(QwenHrxArenaBuffer::kHidden);
-  const auto normed = arena_->Binding(QwenHrxArenaBuffer::kNormed);
-  const auto gate = arena_->Binding(QwenHrxArenaBuffer::kFfnGate);
-  const auto up = arena_->Binding(QwenHrxArenaBuffer::kFfnUp);
+  const auto hidden = CurrentHidden();
+  const auto normed = CurrentScratch();
+  const auto gate_up = arena_->Binding(QwenHrxArenaBuffer::kFfnGate);
   const auto activation = arena_->Binding(QwenHrxArenaBuffer::kFfnActivation);
   const auto projected = arena_->Binding(QwenHrxArenaBuffer::kFfnOutput);
-  if (!DispatchRMSNorm(hidden, layer.ffn_norm, normed) ||
-      !DispatchQ8Gemv(layer.ffn_gate, normed, gate, contract_.FfnSize(),
-                      contract_.HiddenSize()) ||
-      !DispatchQ8Gemv(layer.ffn_up, normed, up, contract_.FfnSize(),
-                      contract_.HiddenSize()) ||
-      !DispatchSwiGLUPointwise(gate, up, activation, contract_.FfnSize()) ||
+  const bool fused = policy_.fused_ffn_gate_up && layer.ffn_gate_up.IsValid();
+  const auto half_bytes = CheckedBytes({contract_.FfnSize(), sizeof(float)});
+  if (!half_bytes.has_value()) {
+    return Reject("native HRX FFN activation width overflows", error_msg);
+  }
+  const auto gate = SliceBinding(gate_up, 0, *half_bytes);
+  const auto up = fused ? SliceBinding(gate_up, *half_bytes, *half_bytes)
+                        : std::optional<HrxBufferBinding>(
+                              arena_->Binding(QwenHrxArenaBuffer::kFfnUp));
+  if (!gate || !up) {
+    return Reject("native HRX FFN activation bindings are invalid", error_msg);
+  }
+  if (!DispatchRMSNorm(hidden, layer.ffn_norm, normed)) {
+    return Reject("native HRX Q8_0 FFN dispatch failed", error_msg);
+  }
+  const bool projections_ok =
+      fused ? DispatchQ8Gemv(layer.ffn_gate_up, normed, gate_up,
+                             2 * contract_.FfnSize(), contract_.HiddenSize())
+            : (DispatchQ8Gemv(layer.ffn_gate, normed, *gate,
+                              contract_.FfnSize(), contract_.HiddenSize()) &&
+               DispatchQ8Gemv(layer.ffn_up, normed, *up, contract_.FfnSize(),
+                              contract_.HiddenSize()));
+  if (!projections_ok ||
+      !DispatchSwiGLUPointwise(*gate, *up, activation, contract_.FfnSize()) ||
       !DispatchQ8Gemv(layer.ffn_down, activation, projected,
                       contract_.HiddenSize(), contract_.FfnSize()) ||
       !DispatchResidualAdd(hidden, projected, normed, contract_.HiddenSize()) ||
-      !DispatchCopyF32(normed, hidden, contract_.HiddenSize())) {
+      !PublishStageResult()) {
     return Reject("native HRX Q8_0 FFN dispatch failed", error_msg);
   }
   if (error_msg != nullptr) {
@@ -933,8 +1896,8 @@ bool QwenHrxExecutor::DispatchAttentionQ8(std::size_t layer_index,
                   error_msg);
   }
   const auto& layer = bindings.layers[layer_index];
-  const auto hidden = arena_->Binding(QwenHrxArenaBuffer::kHidden);
-  const auto normed = arena_->Binding(QwenHrxArenaBuffer::kNormed);
+  const auto hidden = CurrentHidden();
+  const auto normed = CurrentScratch();
   const auto q_gate = arena_->Binding(QwenHrxArenaBuffer::kAttentionQGate);
   const auto query = arena_->Binding(QwenHrxArenaBuffer::kAttentionQ);
   const auto gate = arena_->Binding(QwenHrxArenaBuffer::kAttentionGate);
@@ -1002,7 +1965,7 @@ bool QwenHrxExecutor::DispatchAttentionQ8(std::size_t layer_index,
                       contract_.HiddenSize(),
                       contract_.FullAttentionQueryWidth()) ||
       !DispatchResidualAdd(hidden, projected, normed, contract_.HiddenSize()) ||
-      !DispatchCopyF32(normed, hidden, contract_.HiddenSize())) {
+      !PublishStageResult()) {
     return Reject("native HRX causal GQA attention dispatch failed", error_msg);
   }
   if (error_msg != nullptr) {
@@ -1022,12 +1985,29 @@ bool QwenHrxExecutor::DispatchSsmQ8(std::size_t layer_index,
     return Reject("native HRX SSM layer index is invalid", error_msg);
   }
   const auto& layer = bindings.layers[layer_index];
-  const auto hidden = arena_->Binding(QwenHrxArenaBuffer::kHidden);
-  const auto normed = arena_->Binding(QwenHrxArenaBuffer::kNormed);
+  const auto hidden = CurrentHidden();
+  const auto normed = CurrentScratch();
   const auto qkv = arena_->Binding(QwenHrxArenaBuffer::kSsmQkv);
   const auto gate = arena_->Binding(QwenHrxArenaBuffer::kSsmGate);
-  const auto alpha = arena_->Binding(QwenHrxArenaBuffer::kSsmAlpha);
-  const auto beta = arena_->Binding(QwenHrxArenaBuffer::kSsmBeta);
+  const auto alpha_beta = arena_->Binding(QwenHrxArenaBuffer::kSsmAlpha);
+  const bool fused_alpha_beta =
+      policy_.fused_ssm_alpha_beta && layer.ssm_alpha_beta.IsValid();
+  const auto alpha_beta_half =
+      CheckedBytes({contract_.SsmAlphaBetaWidth(), sizeof(float)});
+  if (!alpha_beta_half.has_value()) {
+    return Reject("native HRX SSM alpha/beta width overflows", error_msg);
+  }
+  const auto alpha_slice = SliceBinding(alpha_beta, 0, *alpha_beta_half);
+  const auto beta_slice =
+      fused_alpha_beta
+          ? SliceBinding(alpha_beta, *alpha_beta_half, *alpha_beta_half)
+          : std::optional<HrxBufferBinding>(
+                arena_->Binding(QwenHrxArenaBuffer::kSsmBeta));
+  if (!alpha_slice || !beta_slice) {
+    return Reject("native HRX SSM alpha/beta bindings are invalid", error_msg);
+  }
+  const auto alpha = *alpha_slice;
+  const auto beta = *beta_slice;
   const auto conv = arena_->Binding(QwenHrxArenaBuffer::kSsmConvOutput);
   const auto recurrent =
       arena_->Binding(QwenHrxArenaBuffer::kSsmRecurrentOutput);
@@ -1044,16 +2024,27 @@ bool QwenHrxExecutor::DispatchSsmQ8(std::size_t layer_index,
   const auto recurrent_state =
       SliceBinding(arena_->Binding(QwenHrxArenaBuffer::kSsmRecurrentState),
                    layer_index * recurrent_state_bytes, recurrent_state_bytes);
+  // Evaluated inside the dispatch chain: these GEMVs consume the normalized
+  // activation and must be enqueued after the RMSNorm that produces it.
+  const auto dispatch_alpha_beta = [&]() {
+    return fused_alpha_beta
+               ? DispatchQ8Gemv(layer.ssm_alpha_beta, normed, alpha_beta,
+                                2 * contract_.SsmAlphaBetaWidth(),
+                                contract_.HiddenSize())
+               : (DispatchQ8Gemv(layer.ssm_alpha, normed, alpha,
+                                 contract_.SsmAlphaBetaWidth(),
+                                 contract_.HiddenSize()) &&
+                  DispatchQ8Gemv(layer.ssm_beta, normed, beta,
+                                  contract_.SsmAlphaBetaWidth(),
+                                  contract_.HiddenSize()));
+  };
   if (!conv_state || !recurrent_state ||
       !DispatchRMSNorm(hidden, layer.attn_norm, normed) ||
       !DispatchQ8Gemv(layer.attn_qkv, normed, qkv, contract_.SsmQkvWidth(),
                       contract_.HiddenSize()) ||
       !DispatchQ8Gemv(layer.attn_gate, normed, gate, contract_.SsmGateWidth(),
                       contract_.HiddenSize()) ||
-      !DispatchQ8Gemv(layer.ssm_alpha, normed, alpha,
-                      contract_.SsmAlphaBetaWidth(), contract_.HiddenSize()) ||
-      !DispatchQ8Gemv(layer.ssm_beta, normed, beta,
-                      contract_.SsmAlphaBetaWidth(), contract_.HiddenSize()) ||
+      !dispatch_alpha_beta() ||
       !DispatchDeltaNetPrepare(alpha, beta, layer.ssm_a, layer.ssm_dt) ||
       !DispatchSsmConv(qkv, layer.ssm_conv1d, *conv_state, conv) ||
       !DispatchDeltaNetPrepared(conv, alpha, beta, layer.ssm_norm, gate,
@@ -1061,7 +2052,7 @@ bool QwenHrxExecutor::DispatchSsmQ8(std::size_t layer_index,
       !DispatchQ8Gemv(layer.ssm_out, recurrent, projected,
                       contract_.HiddenSize(), contract_.SsmGateWidth()) ||
       !DispatchResidualAdd(hidden, projected, normed, contract_.HiddenSize()) ||
-      !DispatchCopyF32(normed, hidden, contract_.HiddenSize())) {
+      !PublishStageResult()) {
     return Reject("native HRX SSM dispatch failed", error_msg);
   }
   if (error_msg != nullptr) {
@@ -1077,8 +2068,8 @@ bool QwenHrxExecutor::DispatchFinalQ8(tokenization::TokenId* token,
     return Reject("native HRX final stage is not initialized", error_msg);
   }
   const auto& bindings = model_->GetNativeBindings();
-  const auto hidden = arena_->Binding(QwenHrxArenaBuffer::kHidden);
-  const auto normed = arena_->Binding(QwenHrxArenaBuffer::kNormed);
+  const auto hidden = CurrentHidden();
+  const auto normed = CurrentScratch();
   const auto logits = arena_->Binding(QwenHrxArenaBuffer::kLogits);
   const auto token_binding = arena_->Binding(QwenHrxArenaBuffer::kToken);
   if (!DispatchRMSNorm(hidden, bindings.output_norm, normed)) {

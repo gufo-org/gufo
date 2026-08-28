@@ -45,6 +45,29 @@ enum class QwenHrxArenaBuffer : std::size_t {
   kSsmRecurrentState,
   kSavedSsmConvState,
   kSavedSsmRecurrentState,
+  // Chunked-prefill staging. Every buffer is token-major with room for
+  // kHrxPrefillChunkTokens tokens so one batched projection dispatch covers a
+  // whole chunk.
+  kBatchHidden,
+  kBatchNormed,
+  kBatchAttentionQGate,
+  kBatchAttentionK,
+  kBatchAttentionV,
+  kBatchContext,
+  kBatchSsmQkv,
+  kBatchSsmGate,
+  kBatchSsmAlphaBeta,
+  kBatchFfnGateUp,
+  kBatchFfnActivation,
+  kBatchProjected,
+  /// Int8 projection operands: the quantized activation payload and its
+  /// per-32-value block scales, sized for the widest projection input.
+  kBatchQuantized,
+  kBatchQuantScales,
+  /// Batch-native SSM staging: convolution output and the unnormalized
+  /// DeltaNet readout for a whole chunk.
+  kBatchSsmConvOutput,
+  kBatchSsmReadout,
   kCount,
 };
 

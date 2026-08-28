@@ -106,6 +106,11 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }
+  /// Next sequential position the executor accepts. Rolls back with a failed
+  /// operation, so tests and callers can observe transaction outcomes.
+  [[nodiscard]] std::uint32_t CurrentPosition() const noexcept {
+    return current_position_;
+  }
   /// Exposes stable arena operands for focused primitive and stage parity.
   /// Full-model callers should use ForwardToken.
   [[nodiscard]] std::optional<HrxBufferBinding> GetArenaBinding(
@@ -176,6 +181,102 @@ public:
 
   /// Executes one complete production FFN stage in arena storage:
   /// RMSNorm, gate/up Q8_0 GEMVs, SwiGLU, down Q8_0 GEMV, and residual.
+  /// Residual-stream accessors for the ping-pong route. CurrentHidden is the
+  /// buffer holding the live residual stream; CurrentScratch is the buffer a
+  /// stage may overwrite with its normalization output and residual result.
+  [[nodiscard]] HrxBufferBinding CurrentHidden() const noexcept;
+  [[nodiscard]] HrxBufferBinding CurrentScratch() const noexcept;
+  /// Publishes the stage result that was written into the scratch buffer,
+  /// either by swapping the roles or by copying it back into kHidden.
+  [[nodiscard]] bool PublishStageResult();
+
+  /// Batched Q8_0 projection over a prefill chunk. `input` and `output` are
+  /// token-major with `tokens` <= kHrxPrefillChunkTokens rows.
+  bool DispatchQ8GemmT8(const HrxBufferBinding& weight,
+                        const HrxBufferBinding& input,
+                        const HrxBufferBinding& output, std::uint32_t rows,
+                        std::uint32_t input_elements, std::uint32_t tokens);
+  [[nodiscard]] bool ChunkedPrefillReady() const noexcept {
+    return q8_gemm_k5120_t8_executable_ != nullptr &&
+           q8_gemm_k6144_t8_executable_ != nullptr &&
+           q8_gemm_k17408_t8_executable_ != nullptr &&
+           rmsnorm_batch_executable_ != nullptr &&
+           residual_add_batch_executable_ != nullptr &&
+           swiglu_pointwise_batch_executable_ != nullptr;
+  }
+  /// Chunk-wide elementwise stages. Each replaces one dispatch per token.
+  bool DispatchRMSNormBatch(const HrxBufferBinding& input,
+                            const HrxBufferBinding& gamma,
+                            const HrxBufferBinding& output,
+                            std::uint32_t tokens);
+  bool DispatchResidualAddBatch(const HrxBufferBinding& left,
+                                const HrxBufferBinding& right,
+                                const HrxBufferBinding& output,
+                                std::uint32_t elements);
+  bool DispatchSwiGLUPointwiseBatch(const HrxBufferBinding& pairs,
+                                    const HrxBufferBinding& output,
+                                    std::uint32_t elements);
+  /// True when the int8 projection route has every artifact it needs.
+  [[nodiscard]] bool Int8PrefillReady() const noexcept {
+    return q8_gemm_i8_k5120_t8_executable_ != nullptr &&
+           q8_gemm_i8_k6144_t8_executable_ != nullptr &&
+           q8_gemm_i8_k17408_t8_executable_ != nullptr &&
+           activation_quantize_k5120_executable_ != nullptr &&
+           activation_quantize_k6144_executable_ != nullptr &&
+           activation_quantize_k17408_executable_ != nullptr;
+  }
+  /// True when the K=5120 WMMA specialization and its padded quantizer exist.
+  [[nodiscard]] bool WmmaPrefillReady() const noexcept {
+    return q8_gemm_i8_wmma_k5120_t8_executable_ != nullptr &&
+           activation_quantize_wmma_k5120_executable_ != nullptr;
+  }
+  /// Quantizes one token-major activation chunk into the arena int8 operands.
+  bool DispatchActivationQuantize(const HrxBufferBinding& input,
+                                  std::uint32_t input_elements,
+                                  std::uint32_t tokens);
+  /// Batched Q8_0 x int8 projection reading the quantized arena operands.
+  bool DispatchQ8GemmInt8(const HrxBufferBinding& weight,
+                          const HrxBufferBinding& output, std::uint32_t rows,
+                          std::uint32_t input_elements, std::uint32_t tokens);
+  /// GFX11 WMMA K=5120 projection with a physical 16-token activation tile.
+  bool DispatchQ8GemmWmmaK5120(const HrxBufferBinding& weight,
+                               const HrxBufferBinding& output,
+                               std::uint32_t rows, std::uint32_t tokens);
+  /// Batch-native DeltaNet: one recurrence dispatch per layer for a whole
+  /// chunk, then one readout dispatch, instead of three dispatches per token.
+  [[nodiscard]] bool BatchedDeltaNetReady() const noexcept {
+    return deltanet_recurrence_batch_executable_ != nullptr &&
+           deltanet_readout_batch_executable_ != nullptr;
+  }
+  bool DispatchDeltaNetRecurrenceBatch(const HrxBufferBinding& conv,
+                                       const HrxBufferBinding& prepared,
+                                       const HrxBufferBinding& state,
+                                       const HrxBufferBinding& readout,
+                                       std::uint32_t tokens);
+  bool DispatchDeltaNetReadoutBatch(const HrxBufferBinding& readout,
+                                    const HrxBufferBinding& norm,
+                                    const HrxBufferBinding& gate,
+                                    const HrxBufferBinding& output,
+                                    std::uint32_t tokens);
+  /// Selects the int8 route when the policy and artifacts allow it, otherwise
+  /// the f32 route. `input` must already be quantized for the int8 case.
+  bool DispatchChunkProjection(const HrxBufferBinding& weight,
+                               const HrxBufferBinding& input,
+                               const HrxBufferBinding& output,
+                               std::uint32_t rows,
+                               std::uint32_t input_elements,
+                               std::uint32_t tokens);
+  [[nodiscard]] bool ForwardPromptChunk(
+      std::span<const tokenization::TokenId> tokens,
+      std::uint32_t start_position, std::string* error_msg);
+  bool DispatchBatchedAttentionQ8(std::size_t layer_index,
+                                  std::uint32_t start_position,
+                                  std::uint32_t tokens, std::string* error_msg);
+  bool DispatchBatchedSsmQ8(std::size_t layer_index, std::uint32_t tokens,
+                            std::string* error_msg);
+  bool DispatchBatchedFfnQ8(std::size_t layer_index, std::uint32_t tokens,
+                            std::string* error_msg);
+
   bool DispatchFfnQ8(std::size_t layer_index, std::string* error_msg = nullptr);
   bool DispatchAttentionQ8(std::size_t layer_index, std::uint32_t position,
                            std::string* error_msg = nullptr);
@@ -258,6 +359,24 @@ private:
   hrx_executable_t q8_gemv_k17408_executable_{nullptr};
   hrx_executable_t q8_gemv_k17408_wg256_executable_{nullptr};
   hrx_executable_t q8_vocab_gemv_k5120_executable_{nullptr};
+  // Chunked-prefill projections. Optional artifacts: when absent the executor
+  // keeps the sequential single-token prefill route.
+  hrx_executable_t q8_gemm_k5120_t8_executable_{nullptr};
+  hrx_executable_t q8_gemm_k6144_t8_executable_{nullptr};
+  hrx_executable_t q8_gemm_k17408_t8_executable_{nullptr};
+  hrx_executable_t rmsnorm_batch_executable_{nullptr};
+  hrx_executable_t residual_add_batch_executable_{nullptr};
+  hrx_executable_t swiglu_pointwise_batch_executable_{nullptr};
+  hrx_executable_t q8_gemm_i8_k5120_t8_executable_{nullptr};
+  hrx_executable_t q8_gemm_i8_wmma_k5120_t8_executable_{nullptr};
+  hrx_executable_t q8_gemm_i8_k6144_t8_executable_{nullptr};
+  hrx_executable_t q8_gemm_i8_k17408_t8_executable_{nullptr};
+  hrx_executable_t activation_quantize_k5120_executable_{nullptr};
+  hrx_executable_t activation_quantize_wmma_k5120_executable_{nullptr};
+  hrx_executable_t activation_quantize_k6144_executable_{nullptr};
+  hrx_executable_t activation_quantize_k17408_executable_{nullptr};
+  hrx_executable_t deltanet_recurrence_batch_executable_{nullptr};
+  hrx_executable_t deltanet_readout_batch_executable_{nullptr};
   hrx_executable_t per_head_rmsnorm_executable_{nullptr};
   hrx_executable_t attention_decode_executable_{nullptr};
   hrx_executable_t ssm_conv_executable_{nullptr};
@@ -305,6 +424,13 @@ private:
   std::string poison_reason_;
   FaultInjectionPoint fault_injection_{FaultInjectionPoint::kNone};
   QwenHrxExecutionPolicy policy_{};
+  /// False while the residual stream lives in the scratch buffer. The layer
+  /// stages ping-pong between kHidden and kNormed to avoid a copy per stage;
+  /// each layer performs two swaps, so kHidden owns the stream at layer
+  /// boundaries, at the final stage, and across transactions.
+  bool hidden_primary_{true};
+  /// Same ping-pong discipline for the chunked-prefill residual stream.
+  bool batch_hidden_primary_{true};
   bool prototype_artifacts_ready_{false};
   bool model_execution_ready_{false};
 };

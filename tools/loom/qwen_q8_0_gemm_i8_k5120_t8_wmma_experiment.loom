@@ -1,0 +1,122 @@
+// Standalone gfx11 WMMA experiment for the dominant K=5120/T=8 FFN
+// projection. The weight buffer uses the executor's exact Q8_0 layout: each
+// 34-byte block contains one f16 scale followed by 32 signed i8 values.
+
+amdgpu.target<gfx11-generic> @qwen_q8_wmma_k5120_target {subgroup_size = 32}
+
+kernel.def target(@qwen_q8_wmma_k5120_target) @qwen_q8_0_gemm_i8_k5120_t8_wmma_experiment() {
+  %one = index.constant 1 : index
+  %workgroups = index.constant 1088 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%workgroups, %one, %one) workgroup_size(%workgroup_size, %one, %one) : index
+} launch(%weight: buffer, %act: buffer, %act_scales: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %tile_id = kernel.workgroup.id<x> : index
+  %rows_per_tile = index.constant 16 : index
+  %row_base = index.mul %tile_id, %rows_per_tile : index
+  %k_extent = index.constant 5120 : index
+  %block_extent = index.constant 32 : index
+  %block_count = index.constant 160 : index
+  %row_bytes = index.constant 5440 : index
+  %block_bytes_index = index.constant 34 : index
+  %block_bytes = index.constant 34 : offset
+  %payload_offset = index.constant 2 : index
+  %token_tile = index.constant 16 : index
+  %fragment_k = index.constant 16 : index
+  %loop_begin = index.constant 0 : index
+  %loop_step = index.constant 1 : index
+  %one_byte = index.constant 1 : offset
+  %scratch_bytes = index.constant 1024 : offset
+  %zero_f32 = vector.constant 0.0 : vector<8xf32>
+  %zero_i32_elements = vector.constant 0 : vector<8xi32>
+  %lhs_layout = encoding.layout.strided [5440, 1] : encoding<layout>
+  %rhs_layout = encoding.layout.strided [1, 5120] : encoding<layout>
+  %i8_schema = encoding.define #encoding.operand<element_format=i8, payload_elements=16, payload_registers=4> : encoding<schema>
+  %lhs_storage = encoding.define #encoding.storage {layout = %lhs_layout : encoding<layout>, schema = %i8_schema : encoding<schema>} : encoding<storage>
+  %rhs_storage = encoding.define #encoding.storage {layout = %rhs_layout : encoding<layout>, schema = %i8_schema : encoding<schema>} : encoding<storage>
+  %rhs_view = buffer.view %act[%base] : buffer -> view<5120x16xi8, %rhs_storage>
+  %act_scale_view = buffer.view %act_scales[%base] : buffer -> view<160x8xf32>
+  %output_view = buffer.view %output[%base] : buffer -> view<8x17408xf32>
+  %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
+  %result_scratch_view = buffer.view %scratch[%base] : buffer -> view<16x16xi32>
+  %active_row = index.cmp ult, %lane, %rows_per_tile : index
+
+  %accumulator = scf.for %block = [%loop_begin to %block_count step %loop_step](%running = %zero_f32 : vector<8xf32>) -> (vector<8xf32>) {
+    %weight_tile_base = index.mul %row_base, %row_bytes : index
+    %weight_block_base = index.mul %block, %block_bytes_index : index
+    %weight_block_header = index.add %weight_tile_base, %weight_block_base : index
+    %weight_linear = index.add %weight_block_header, %payload_offset : index
+    %weight_offset = index.scale %weight_linear, %one_byte : index, offset -> offset
+    %weight_view = buffer.view %weight[%weight_offset] : buffer -> view<16x32xi8, %lhs_storage>
+    %lhs0 = vector.fragment.load<lhs> %weight_view[%loop_begin, %loop_begin] shape [%rows_per_tile, %fragment_k] : view<16x32xi8, %lhs_storage> -> vector<4xi32>
+    %lhs1 = vector.fragment.load<lhs> %weight_view[%loop_begin, %fragment_k] shape [%rows_per_tile, %fragment_k] : view<16x32xi8, %lhs_storage> -> vector<4xi32>
+    %rhs_block_base = index.mul %block, %block_extent : index
+    %rhs_second_half = index.add %rhs_block_base, %fragment_k : index
+    %rhs0 = vector.fragment.load<rhs> %rhs_view[%rhs_block_base, %loop_begin] shape [%fragment_k, %token_tile] : view<5120x16xi8, %rhs_storage> -> vector<4xi32>
+    %rhs1 = vector.fragment.load<rhs> %rhs_view[%rhs_second_half, %loop_begin] shape [%fragment_k, %token_tile] : view<5120x16xi8, %rhs_storage> -> vector<4xi32>
+    %zero_i32 = vector.fragment<init> %zero_i32_elements shape [%rows_per_tile, %token_tile] : vector<8xi32>
+    %partial = vector.mma %lhs0, %rhs0, %zero_i32 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %product = vector.mma %lhs1, %rhs1, %partial : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    vector.fragment.store<result> %product, %result_scratch_view[%loop_begin, %loop_begin] shape [%rows_per_tile, %token_tile] : vector<8xi32>, view<16x16xi32>
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+
+    %next = scf.if %active_row -> (vector<8xf32>) {
+      %raw = vector.load %result_scratch_view[%lane, %loop_begin] : view<16x16xi32> -> vector<8xi32>
+      %raw_f32 = vector.sitofp %raw : vector<8xi32> to vector<8xf32>
+      %activation_scales = vector.load %act_scale_view[%block, %loop_begin] : view<160x8xf32> -> vector<8xf32>
+      %row = index.add %row_base, %lane : index
+      %weight_scale_row = index.mul %row, %block_count : index
+      %weight_scale_index = index.add %weight_scale_row, %block : index
+      %weight_scale_offset = index.scale %weight_scale_index, %block_bytes : index, offset -> offset
+      %weight_scale_view = buffer.view %weight[%weight_scale_offset] : buffer -> view<1xf16>
+      %weight_scale_f16 = view.load %weight_scale_view[%loop_begin] : view<1xf16> -> f16
+      %weight_scale = scalar.extf %weight_scale_f16 : f16 to f32
+      %weight_scale_vector = vector.splat %weight_scale : vector<8xf32>
+      %block_scaled = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_f32, %activation_scales : vector<8xf32>
+      %scaled = vector.mulf<reassoc|nnan|ninf|nsz|contract> %block_scaled, %weight_scale_vector : vector<8xf32>
+      %sum = vector.addf<reassoc|nnan|ninf|nsz> %running, %scaled : vector<8xf32>
+      scf.yield %sum : vector<8xf32>
+    } else {
+      scf.yield %running : vector<8xf32>
+    }
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    scf.yield %next : vector<8xf32>
+  }
+
+  scf.if %active_row {
+    %row = index.add %row_base, %lane : index
+    %v0 = vector.extract %accumulator[0] : vector<8xf32> -> f32
+    %v1 = vector.extract %accumulator[1] : vector<8xf32> -> f32
+    %v2 = vector.extract %accumulator[2] : vector<8xf32> -> f32
+    %v3 = vector.extract %accumulator[3] : vector<8xf32> -> f32
+    %v4 = vector.extract %accumulator[4] : vector<8xf32> -> f32
+    %v5 = vector.extract %accumulator[5] : vector<8xf32> -> f32
+    %v6 = vector.extract %accumulator[6] : vector<8xf32> -> f32
+    %v7 = vector.extract %accumulator[7] : vector<8xf32> -> f32
+    view.store %v0, %output_view[0, %row] : f32, view<8x17408xf32>
+    view.store %v1, %output_view[1, %row] : f32, view<8x17408xf32>
+    view.store %v2, %output_view[2, %row] : f32, view<8x17408xf32>
+    view.store %v3, %output_view[3, %row] : f32, view<8x17408xf32>
+    view.store %v4, %output_view[4, %row] : f32, view<8x17408xf32>
+    view.store %v5, %output_view[5, %row] : f32, view<8x17408xf32>
+    view.store %v6, %output_view[6, %row] : f32, view<8x17408xf32>
+    view.store %v7, %output_view[7, %row] : f32, view<8x17408xf32>
+  }
+  kernel.return
+}
+
+check.case public @qwen_q8_0_gemm_i8_k5120_t8_wmma_experiment_case {
+  // f16(2.0) has little-endian bytes [0, 64], so filling the raw Q8 buffer
+  // makes every block scale 2.0 and its 32 payload values alternate 0 and 64.
+  %weight = check.generate.fill value(2.0) : tensor<17408x2720xf16>
+  %act = check.generate.fill value(2) : tensor<16x5120xi8>
+  %act_scales = check.generate.fill value(1.0) : tensor<160x8xf32>
+  %output = check.generate.fill value(0.0) : tensor<8x17408xf32>
+  %expected = check.generate.fill value(655360.0) : tensor<8x17408xf32>
+  kernel.launch @qwen_q8_0_gemm_i8_k5120_t8_wmma_experiment(%weight, %act, %act_scales, %output) : (tensor<17408x2720xf16>, tensor<16x5120xi8>, tensor<160x8xf32>, tensor<8x17408xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<8x17408xf32>
+  check.return
+}
+
+check.benchmark<@qwen_q8_0_gemm_i8_k5120_t8_wmma_experiment_case>

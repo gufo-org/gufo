@@ -766,15 +766,18 @@ void TestTransactionalRollbackLifecycle() {
 }
 
 void TestTransactionalMutationAndRollback() {
-  const auto model_path = GetTestModelPath();
-  if (model_path.empty()) {
-    std::cout
-        << "Skipping TestTransactionalMutationAndRollback (no test model)\n";
+  const char* model_path = std::getenv("GUFO_HRX_Q8_MODEL");
+  if (model_path == nullptr || *model_path == '\0') {
+    std::cout << "Skipping TestTransactionalMutationAndRollback; set "
+                 "GUFO_HRX_Q8_MODEL\n";
     return;
   }
   std::string error;
-  auto reader = gufo::core::GgufReader::Open(model_path, &error);
-  Expect(reader != nullptr, "model GGUF reader opens for transaction test");
+  auto reader_owner = gufo::core::GgufReader::OpenFile(model_path, &error);
+  Expect(reader_owner != nullptr, "model GGUF reader opens for transaction "
+                                  "test");
+  auto reader =
+      std::shared_ptr<const gufo::core::GgufReader>(std::move(reader_owner));
 
   auto executor = gufo::hrx::QwenHrxExecutor::CreateFromGguf(
       reader, 4, std::string(kHrxKernelDir), &error);

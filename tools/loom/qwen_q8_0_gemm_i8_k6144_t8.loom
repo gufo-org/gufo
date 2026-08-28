@@ -1,0 +1,219 @@
+// Q8_0 weights against Q8_0-quantized activations for up to 8 tokens per
+// dispatch with K=6144. Both operands stay in int8 and the products
+// accumulate through the hardware dot4i path; only the per-block scale
+// product happens in f32, so the weight stream is amortized across the
+// chunk and the inner loop issues one dot per four values.
+//
+// weight : row-major Q8_0 blocks (f16 scale followed by 32 i8), 34 bytes
+// act    : token-major i8 payload, 8 rows of 6144 values
+// scales : token-major f32 block scales, 8 rows of 192 values
+// output : token-major f32, %tokens rows of %rows values
+
+config.decl @qwen_q8_0_gemm_i8_k6144_t8.row_capacity : %value: index where [range(%value, 1, 5120)]
+
+kernel.def @qwen_q8_0_gemm_i8_k6144_t8(%rows: index, %tokens: index) {
+  %capacity = config.get @qwen_q8_0_gemm_i8_k6144_t8.row_capacity : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 192 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%rows: index, %tokens: index, %weight: buffer, %act: buffer, %scales: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_q8_0_gemm_i8_k6144_t8.row_capacity : index
+  %row_count = index.assume %rows [range(%rows, 1, 5120), le(%rows, %capacity)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 8)] : index
+  %row = kernel.workgroup.id<x> : index
+  %block = kernel.workitem.id<x> : index
+  %row_in_bounds = index.cmp ult, %row, %row_count : index
+  scf.if %row_in_bounds {
+    %bounded_row = index.assume %row [lt(%row, %row_count)] : index
+    %blocks_per_row = index.constant 192 : index
+    %act_stride = index.constant 1536 : index
+    %scale_stride = index.constant 192 : index
+    %block_bytes = index.constant 34 : offset
+    %qs_offset = index.constant 2 : offset
+    %quarter_count = index.constant 8 : index
+    %loop_begin = index.constant 0 : index
+    %loop_step = index.constant 1 : index
+    %packed_index = index.constant 0 : index
+    %leader = index.constant 0 : index
+    %zero_i32 = vector.constant 0 : vector<1xi32>
+    %linear_row_base = index.mul %bounded_row, %blocks_per_row : index
+    %linear_block = index.add %linear_row_base, %block : index
+    %block_byte_base = index.scale %linear_block, %block_bytes : index, offset -> offset
+    %scale_view = buffer.view %weight[%block_byte_base] : buffer -> view<1xf16>
+    %scale_f16 = view.load %scale_view[%packed_index] : view<1xf16> -> f16
+    %weight_scale = scalar.extf %scale_f16 : f16 to f32
+    %act_view = buffer.view %act[%base] : buffer -> view<12288xi32>
+    %scales_view = buffer.view %scales[%base] : buffer -> view<1536xf32>
+    %act_block_base = index.mul %block, %quarter_count : index
+    %acc0, %acc1, %acc2, %acc3, %acc4, %acc5, %acc6, %acc7 = scf.for %quarter = [%loop_begin to %quarter_count step %loop_step](
+        %a0 = %zero_i32 : vector<1xi32>, %a1 = %zero_i32 : vector<1xi32>, %a2 = %zero_i32 : vector<1xi32>, %a3 = %zero_i32 : vector<1xi32>, %a4 = %zero_i32 : vector<1xi32>, %a5 = %zero_i32 : vector<1xi32>, %a6 = %zero_i32 : vector<1xi32>, %a7 = %zero_i32 : vector<1xi32>)
+        -> (vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>) unroll {
+      %four = index.constant 4 : offset
+      %quarter_scaled = index.scale %quarter, %four : index, offset -> offset
+      %payload_base = index.add %block_byte_base, %qs_offset : offset
+      %q_byte_offset = index.add %payload_base, %quarter_scaled : offset
+      %q_word_view = buffer.view %weight[%q_byte_offset] : buffer -> view<1xi32>
+      %q_packed = vector.load %q_word_view[%packed_index] : view<1xi32> -> vector<1xi32>
+      %w_i8 = vector.bitcast %q_packed : vector<1xi32> to vector<4xi8>
+      %index0 = index.add %act_block_base, %quarter : index
+      %index1 = index.add %index0, %act_stride : index
+      %index2 = index.add %index1, %act_stride : index
+      %index3 = index.add %index2, %act_stride : index
+      %index4 = index.add %index3, %act_stride : index
+      %index5 = index.add %index4, %act_stride : index
+      %index6 = index.add %index5, %act_stride : index
+      %index7 = index.add %index6, %act_stride : index
+      %word0 = vector.load %act_view[%index0] : view<12288xi32> -> vector<1xi32>
+      %x0 = vector.bitcast %word0 : vector<1xi32> to vector<4xi8>
+      %word1 = vector.load %act_view[%index1] : view<12288xi32> -> vector<1xi32>
+      %x1 = vector.bitcast %word1 : vector<1xi32> to vector<4xi8>
+      %word2 = vector.load %act_view[%index2] : view<12288xi32> -> vector<1xi32>
+      %x2 = vector.bitcast %word2 : vector<1xi32> to vector<4xi8>
+      %word3 = vector.load %act_view[%index3] : view<12288xi32> -> vector<1xi32>
+      %x3 = vector.bitcast %word3 : vector<1xi32> to vector<4xi8>
+      %word4 = vector.load %act_view[%index4] : view<12288xi32> -> vector<1xi32>
+      %x4 = vector.bitcast %word4 : vector<1xi32> to vector<4xi8>
+      %word5 = vector.load %act_view[%index5] : view<12288xi32> -> vector<1xi32>
+      %x5 = vector.bitcast %word5 : vector<1xi32> to vector<4xi8>
+      %word6 = vector.load %act_view[%index6] : view<12288xi32> -> vector<1xi32>
+      %x6 = vector.bitcast %word6 : vector<1xi32> to vector<4xi8>
+      %word7 = vector.load %act_view[%index7] : view<12288xi32> -> vector<1xi32>
+      %x7 = vector.bitcast %word7 : vector<1xi32> to vector<4xi8>
+      %n0 = vector.dot4i<s8s8> %w_i8, %x0, %a0 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+      %n1 = vector.dot4i<s8s8> %w_i8, %x1, %a1 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+      %n2 = vector.dot4i<s8s8> %w_i8, %x2, %a2 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+      %n3 = vector.dot4i<s8s8> %w_i8, %x3, %a3 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+      %n4 = vector.dot4i<s8s8> %w_i8, %x4, %a4 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+      %n5 = vector.dot4i<s8s8> %w_i8, %x5, %a5 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+      %n6 = vector.dot4i<s8s8> %w_i8, %x6, %a6 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+      %n7 = vector.dot4i<s8s8> %w_i8, %x7, %a7 : vector<4xi8>, vector<4xi8>, vector<1xi32>
+      scf.yield %n0, %n1, %n2, %n3, %n4, %n5, %n6, %n7 : vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32>
+    }
+    %scale_index0 = index.add %block, %packed_index : index
+    %scale_index1 = index.add %scale_index0, %scale_stride : index
+    %scale_index2 = index.add %scale_index1, %scale_stride : index
+    %scale_index3 = index.add %scale_index2, %scale_stride : index
+    %scale_index4 = index.add %scale_index3, %scale_stride : index
+    %scale_index5 = index.add %scale_index4, %scale_stride : index
+    %scale_index6 = index.add %scale_index5, %scale_stride : index
+    %scale_index7 = index.add %scale_index6, %scale_stride : index
+    %act_scale0 = view.load %scales_view[%scale_index0] : view<1536xf32> -> f32
+    %int0 = vector.extract %acc0[0] : vector<1xi32> -> i32
+    %float0 = scalar.sitofp %int0 : i32 to f32
+    %scaled0 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %float0, %act_scale0 : f32
+    %sum0 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %scaled0, %weight_scale : f32
+    %act_scale1 = view.load %scales_view[%scale_index1] : view<1536xf32> -> f32
+    %int1 = vector.extract %acc1[0] : vector<1xi32> -> i32
+    %float1 = scalar.sitofp %int1 : i32 to f32
+    %scaled1 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %float1, %act_scale1 : f32
+    %sum1 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %scaled1, %weight_scale : f32
+    %act_scale2 = view.load %scales_view[%scale_index2] : view<1536xf32> -> f32
+    %int2 = vector.extract %acc2[0] : vector<1xi32> -> i32
+    %float2 = scalar.sitofp %int2 : i32 to f32
+    %scaled2 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %float2, %act_scale2 : f32
+    %sum2 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %scaled2, %weight_scale : f32
+    %act_scale3 = view.load %scales_view[%scale_index3] : view<1536xf32> -> f32
+    %int3 = vector.extract %acc3[0] : vector<1xi32> -> i32
+    %float3 = scalar.sitofp %int3 : i32 to f32
+    %scaled3 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %float3, %act_scale3 : f32
+    %sum3 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %scaled3, %weight_scale : f32
+    %act_scale4 = view.load %scales_view[%scale_index4] : view<1536xf32> -> f32
+    %int4 = vector.extract %acc4[0] : vector<1xi32> -> i32
+    %float4 = scalar.sitofp %int4 : i32 to f32
+    %scaled4 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %float4, %act_scale4 : f32
+    %sum4 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %scaled4, %weight_scale : f32
+    %act_scale5 = view.load %scales_view[%scale_index5] : view<1536xf32> -> f32
+    %int5 = vector.extract %acc5[0] : vector<1xi32> -> i32
+    %float5 = scalar.sitofp %int5 : i32 to f32
+    %scaled5 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %float5, %act_scale5 : f32
+    %sum5 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %scaled5, %weight_scale : f32
+    %act_scale6 = view.load %scales_view[%scale_index6] : view<1536xf32> -> f32
+    %int6 = vector.extract %acc6[0] : vector<1xi32> -> i32
+    %float6 = scalar.sitofp %int6 : i32 to f32
+    %scaled6 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %float6, %act_scale6 : f32
+    %sum6 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %scaled6, %weight_scale : f32
+    %act_scale7 = view.load %scales_view[%scale_index7] : view<1536xf32> -> f32
+    %int7 = vector.extract %acc7[0] : vector<1xi32> -> i32
+    %float7 = scalar.sitofp %int7 : i32 to f32
+    %scaled7 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %float7, %act_scale7 : f32
+    %sum7 = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %scaled7, %weight_scale : f32
+    %dot0 = kernel.workgroup.reduce<addf> %sum0 : f32
+    %dot1 = kernel.workgroup.reduce<addf> %sum1 : f32
+    %dot2 = kernel.workgroup.reduce<addf> %sum2 : f32
+    %dot3 = kernel.workgroup.reduce<addf> %sum3 : f32
+    %dot4 = kernel.workgroup.reduce<addf> %sum4 : f32
+    %dot5 = kernel.workgroup.reduce<addf> %sum5 : f32
+    %dot6 = kernel.workgroup.reduce<addf> %sum6 : f32
+    %dot7 = kernel.workgroup.reduce<addf> %sum7 : f32
+    %is_leader = index.cmp eq, %block, %leader : index
+    scf.if %is_leader {
+      %four_bytes = index.constant 4 : offset
+      %token0 = index.constant 0 : index
+      %store0 = index.cmp ult, %token0, %token_count : index
+      scf.if %store0 {
+        %elements0 = index.mul %token0, %row_count : index
+        %byte_offset0 = index.scale %elements0, %four_bytes : index, offset -> offset
+        %view0 = buffer.view %output[%byte_offset0] : buffer -> view<[%row_count]xf32>
+        view.store %dot0, %view0[%bounded_row] : f32, view<[%row_count]xf32>
+      }
+      %token1 = index.constant 1 : index
+      %store1 = index.cmp ult, %token1, %token_count : index
+      scf.if %store1 {
+        %elements1 = index.mul %token1, %row_count : index
+        %byte_offset1 = index.scale %elements1, %four_bytes : index, offset -> offset
+        %view1 = buffer.view %output[%byte_offset1] : buffer -> view<[%row_count]xf32>
+        view.store %dot1, %view1[%bounded_row] : f32, view<[%row_count]xf32>
+      }
+      %token2 = index.constant 2 : index
+      %store2 = index.cmp ult, %token2, %token_count : index
+      scf.if %store2 {
+        %elements2 = index.mul %token2, %row_count : index
+        %byte_offset2 = index.scale %elements2, %four_bytes : index, offset -> offset
+        %view2 = buffer.view %output[%byte_offset2] : buffer -> view<[%row_count]xf32>
+        view.store %dot2, %view2[%bounded_row] : f32, view<[%row_count]xf32>
+      }
+      %token3 = index.constant 3 : index
+      %store3 = index.cmp ult, %token3, %token_count : index
+      scf.if %store3 {
+        %elements3 = index.mul %token3, %row_count : index
+        %byte_offset3 = index.scale %elements3, %four_bytes : index, offset -> offset
+        %view3 = buffer.view %output[%byte_offset3] : buffer -> view<[%row_count]xf32>
+        view.store %dot3, %view3[%bounded_row] : f32, view<[%row_count]xf32>
+      }
+      %token4 = index.constant 4 : index
+      %store4 = index.cmp ult, %token4, %token_count : index
+      scf.if %store4 {
+        %elements4 = index.mul %token4, %row_count : index
+        %byte_offset4 = index.scale %elements4, %four_bytes : index, offset -> offset
+        %view4 = buffer.view %output[%byte_offset4] : buffer -> view<[%row_count]xf32>
+        view.store %dot4, %view4[%bounded_row] : f32, view<[%row_count]xf32>
+      }
+      %token5 = index.constant 5 : index
+      %store5 = index.cmp ult, %token5, %token_count : index
+      scf.if %store5 {
+        %elements5 = index.mul %token5, %row_count : index
+        %byte_offset5 = index.scale %elements5, %four_bytes : index, offset -> offset
+        %view5 = buffer.view %output[%byte_offset5] : buffer -> view<[%row_count]xf32>
+        view.store %dot5, %view5[%bounded_row] : f32, view<[%row_count]xf32>
+      }
+      %token6 = index.constant 6 : index
+      %store6 = index.cmp ult, %token6, %token_count : index
+      scf.if %store6 {
+        %elements6 = index.mul %token6, %row_count : index
+        %byte_offset6 = index.scale %elements6, %four_bytes : index, offset -> offset
+        %view6 = buffer.view %output[%byte_offset6] : buffer -> view<[%row_count]xf32>
+        view.store %dot6, %view6[%bounded_row] : f32, view<[%row_count]xf32>
+      }
+      %token7 = index.constant 7 : index
+      %store7 = index.cmp ult, %token7, %token_count : index
+      scf.if %store7 {
+        %elements7 = index.mul %token7, %row_count : index
+        %byte_offset7 = index.scale %elements7, %four_bytes : index, offset -> offset
+        %view7 = buffer.view %output[%byte_offset7] : buffer -> view<[%row_count]xf32>
+        view.store %dot7, %view7[%bounded_row] : f32, view<[%row_count]xf32>
+      }
+    }
+  }
+  kernel.return
+}
