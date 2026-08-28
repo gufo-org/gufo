@@ -102,6 +102,7 @@ public:
   }
   [[nodiscard]] const core::ModelConfig& GetConfig() const;
   [[nodiscard]] const tokenization::QwenTokenizer& GetTokenizer() const;
+  [[nodiscard]] bool UsesDeviceLocalWeights() const noexcept;
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }

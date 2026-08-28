@@ -213,6 +213,10 @@ const tokenization::QwenTokenizer& QwenHrxExecutor::GetTokenizer() const {
   return model_->GetTokenizer();
 }
 
+bool QwenHrxExecutor::UsesDeviceLocalWeights() const noexcept {
+  return model_ != nullptr && model_->UsesDeviceLocalWeights();
+}
+
 bool QwenHrxExecutor::BeginOperationRollback(std::string* error_msg) {
   if (poisoned_) {
     return Reject("native HRX executor is poisoned: " + poison_reason_,
@@ -223,7 +227,7 @@ bool QwenHrxExecutor::BeginOperationRollback(std::string* error_msg) {
   }
   saved_position_ = current_position_;
   arena_->SetCurrentPosition(current_position_);
-  if (!arena_->SaveState(copy_executable_, error_msg)) {
+  if (!arena_->EnqueueSaveState(copy_executable_, error_msg)) {
     Poison("failed to snapshot state before operation: " +
            (error_msg ? *error_msg : ""));
     return false;

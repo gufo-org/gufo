@@ -88,6 +88,12 @@ public:
   /// synchronous host roundtrip is used here.
   [[nodiscard]] bool Reset(std::string* error_msg = nullptr);
   /// Copies recurrent state with the packaged native F32 copy artifact.
+  /// The queued variant relies on stream ordering and returns before the copy
+  /// completes. It is intended for transactions whose following mutations and
+  /// possible restore are submitted to the same stream.
+  [[nodiscard]] bool EnqueueSaveState(
+      hrx_executable_t copy_executable, std::string* error_msg = nullptr);
+  /// Saves recurrent state and waits until the snapshot is complete.
   [[nodiscard]] bool SaveState(hrx_executable_t copy_executable,
                                std::string* error_msg = nullptr);
   [[nodiscard]] bool RestoreState(hrx_executable_t copy_executable,

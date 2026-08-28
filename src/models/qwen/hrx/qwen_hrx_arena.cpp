@@ -41,7 +41,8 @@ bool DispatchCopy(hrx_stream_t stream, hrx_executable_t executable,
     return Reject("native HRX state-copy binding is invalid", error_msg);
   }
   hrx_dispatch_config_t config{};
-  config.workgroup_count[0] = kCopyCapacity / kWorkgroupSize;
+  config.workgroup_count[0] =
+      static_cast<std::uint32_t>(element_count) / kWorkgroupSize;
   config.workgroup_count[1] = 1;
   config.workgroup_count[2] = 1;
   config.workgroup_size[0] = kWorkgroupSize;
@@ -269,8 +270,8 @@ bool QwenHrxArena::Reset(std::string* error_msg) {
   return true;
 }
 
-bool QwenHrxArena::SaveState(hrx_executable_t copy_executable,
-                             std::string* error_msg) {
+bool QwenHrxArena::EnqueueSaveState(hrx_executable_t copy_executable,
+                                    std::string* error_msg) {
   static_assert(kHrxNativeDeviceCopyAvailable);
   if (!DispatchCopy(
           stream_, copy_executable, Binding(QwenHrxArenaBuffer::kSsmConvState),
@@ -281,12 +282,23 @@ bool QwenHrxArena::SaveState(hrx_executable_t copy_executable,
                     error_msg)) {
     return false;
   }
+  saved_position_ = current_position_;
+  if (error_msg != nullptr) {
+    error_msg->clear();
+  }
+  return true;
+}
+
+bool QwenHrxArena::SaveState(hrx_executable_t copy_executable,
+                             std::string* error_msg) {
+  if (!EnqueueSaveState(copy_executable, error_msg)) {
+    return false;
+  }
   const auto status = hrx_stream_synchronize(stream_);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return Reject("native HRX snapshot synchronization failed", error_msg);
   }
-  saved_position_ = current_position_;
   if (error_msg != nullptr) {
     error_msg->clear();
   }

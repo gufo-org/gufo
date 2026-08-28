@@ -1,30 +1,93 @@
 #include "src/models/qwen/hrx/qwen_hrx_model.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <string_view>
 #include <utility>
 
 #include "src/core/hrx/hrx_utils.hpp"
 
 namespace gufo::hrx {
+namespace {
 
-QwenHrxModel::QwenHrxModel(
-    std::shared_ptr<const core::GgufReader> reader,
-    models::QwenModelWeights weights,
-    std::shared_ptr<const tokenization::QwenTokenizer> tokenizer,
-    QwenHrxArtifactContract contract, std::vector<ImportedRegion> regions)
-    : reader_(std::move(reader)),
-      weights_(std::move(weights)),
-      contract_(contract),
-      tokenizer_(std::move(tokenizer)),
-      regions_(std::move(regions)) {}
+enum class WeightPlacement { kMapped, kDeviceLocal };
 
-QwenHrxModel::~QwenHrxModel() {
-  for (auto& region : regions_) {
-    if (region.buffer != nullptr) {
-      hrx_buffer_release(region.buffer);
-    }
+constexpr std::size_t kWeightTransferChunkBytes = 64ULL * 1024ULL * 1024ULL;
+
+std::optional<WeightPlacement> ParseWeightPlacement(std::string* error_msg) {
+  const auto* value = std::getenv("GUFO_HRX_WEIGHT_MODE");
+  if (value == nullptr || std::string_view(value) == "device-local" ||
+      std::string_view(value) == "copy") {
+    return WeightPlacement::kDeviceLocal;
+  }
+  if (std::string_view(value) == "mapped") {
+    return WeightPlacement::kMapped;
+  }
+  if (error_msg != nullptr) {
+    *error_msg = "GUFO_HRX_WEIGHT_MODE must be device-local, copy, or mapped";
+  }
+  return std::nullopt;
+}
+
+void SetHrxError(hrx_status_t status, std::string_view operation,
+                 std::string* error_msg) {
+  char* message = nullptr;
+  std::size_t message_length = 0;
+  const auto format_status =
+      hrx_status_to_string(status, &message, &message_length);
+  if (error_msg != nullptr) {
+    *error_msg = std::string(operation) + ": " +
+                 (message != nullptr ? message : "unknown HRX error");
+  }
+  hrx_status_free_message(message);
+  hrx_status_ignore(format_status);
+  hrx_status_ignore(status);
+}
+
+}  // namespace
+
+QwenHrxModel::ImportedRegion::ImportedRegion(const void* data,
+                                             std::size_t byte_size,
+                                             hrx_buffer_t owned_buffer) noexcept
+    : host_data(data), size(byte_size), buffer(owned_buffer) {}
+
+QwenHrxModel::ImportedRegion::~ImportedRegion() {
+  if (buffer != nullptr) {
+    hrx_buffer_release(buffer);
   }
 }
+
+QwenHrxModel::ImportedRegion::ImportedRegion(ImportedRegion&& other) noexcept
+    : host_data(std::exchange(other.host_data, nullptr)),
+      size(std::exchange(other.size, 0)),
+      buffer(std::exchange(other.buffer, nullptr)) {}
+
+QwenHrxModel::ImportedRegion& QwenHrxModel::ImportedRegion::operator=(
+    ImportedRegion&& other) noexcept {
+  if (this != &other) {
+    if (buffer != nullptr) {
+      hrx_buffer_release(buffer);
+    }
+    host_data = std::exchange(other.host_data, nullptr);
+    size = std::exchange(other.size, 0);
+    buffer = std::exchange(other.buffer, nullptr);
+  }
+  return *this;
+}
+
+QwenHrxModel::QwenHrxModel(
+    core::ModelConfig config,
+    std::shared_ptr<const tokenization::QwenTokenizer> tokenizer,
+    QwenHrxArtifactContract contract, std::vector<ImportedRegion> regions,
+    bool uses_device_local_weights)
+    : config_(std::move(config)),
+      contract_(contract),
+      tokenizer_(std::move(tokenizer)),
+      regions_(std::move(regions)),
+      uses_device_local_weights_(uses_device_local_weights) {}
+
+QwenHrxModel::~QwenHrxModel() = default;
 
 std::unique_ptr<QwenHrxModel> QwenHrxModel::CreateFromGguf(
     std::shared_ptr<const core::GgufReader> reader, hrx_device_t device,
@@ -50,6 +113,11 @@ std::unique_ptr<QwenHrxModel> QwenHrxModel::CreateFromGguf(
   if (tokenizer == nullptr) {
     return nullptr;
   }
+  const auto placement = ParseWeightPlacement(error_msg);
+  if (!placement.has_value()) {
+    return nullptr;
+  }
+  const bool device_local = *placement == WeightPlacement::kDeviceLocal;
 
   const auto mapped_regions = reader->GetMappedRegions();
   if (mapped_regions.empty()) {
@@ -62,40 +130,56 @@ std::unique_ptr<QwenHrxModel> QwenHrxModel::CreateFromGguf(
   std::vector<ImportedRegion> regions;
   regions.reserve(mapped_regions.size());
   const hrx_buffer_params_t params{
-      .type = HRX_MEMORY_TYPE_HOST_VISIBLE | HRX_MEMORY_TYPE_DEVICE_VISIBLE,
-      .access = HRX_MEMORY_ACCESS_READ,
-      .usage = HRX_BUFFER_USAGE_STORAGE,
+      .type = device_local ? HRX_MEMORY_TYPE_DEVICE_LOCAL
+                           : HRX_MEMORY_TYPE_HOST_VISIBLE |
+                                 HRX_MEMORY_TYPE_DEVICE_VISIBLE,
+      .access = device_local ? HRX_MEMORY_ACCESS_ALL : HRX_MEMORY_ACCESS_READ,
+      .usage =
+          device_local ? HRX_BUFFER_USAGE_DEFAULT : HRX_BUFFER_USAGE_STORAGE,
       .queue_affinity = 0,
   };
   for (const auto& mapped_region : mapped_regions) {
     hrx_buffer_t buffer{nullptr};
-    const auto status = hrx_allocator_import_buffer(
-        hrx_device_allocator(device), params,
-        const_cast<void*>(mapped_region.data), mapped_region.size, &buffer);
+    std::string_view operation = device_local
+                                     ? "failed to allocate HRX device-local "
+                                       "GGUF shard storage"
+                                     : "failed to import a mapped GGUF shard "
+                                       "into HRX";
+    auto status =
+        device_local
+            ? hrx_allocator_allocate_buffer(hrx_device_allocator(device),
+                                            params, mapped_region.size, &buffer)
+            : hrx_allocator_import_buffer(hrx_device_allocator(device), params,
+                                          const_cast<void*>(mapped_region.data),
+                                          mapped_region.size, &buffer);
+    if (hrx_status_is_ok(status) && device_local) {
+      operation = "failed to copy a GGUF shard into HRX device-local storage";
+      const auto* source = static_cast<const std::byte*>(mapped_region.data);
+      for (std::size_t offset = 0; offset < mapped_region.size;
+           offset += kWeightTransferChunkBytes) {
+        const std::size_t chunk_size =
+            std::min(kWeightTransferChunkBytes, mapped_region.size - offset);
+        status = hrx_synchronous_h2d(device, source + offset, buffer, offset,
+                                     chunk_size);
+        if (!hrx_status_is_ok(status)) {
+          break;
+        }
+      }
+    }
     if (!hrx_status_is_ok(status)) {
-      hrx_status_ignore(status);
+      SetHrxError(status, operation, error_msg);
       if (buffer != nullptr) {
         hrx_buffer_release(buffer);
       }
-      for (auto& region : regions) {
-        if (region.buffer != nullptr) {
-          hrx_buffer_release(region.buffer);
-        }
-      }
-      if (error_msg != nullptr) {
-        *error_msg = "failed to import a mapped GGUF shard into HRX";
-      }
       return nullptr;
     }
-    regions.push_back({.host_data = mapped_region.data,
-                       .size = mapped_region.size,
-                       .buffer = buffer});
+    regions.emplace_back(mapped_region.data, mapped_region.size, buffer);
   }
 
   auto model = std::unique_ptr<QwenHrxModel>(
-      new QwenHrxModel(std::move(reader), std::move(*weights),
-                       std::move(tokenizer), *contract, std::move(regions)));
-  if (!model->BuildNativeQ8Bindings(error_msg)) {
+      new QwenHrxModel(weights->config, std::move(tokenizer), *contract,
+                       std::move(regions), device_local));
+  if (!model->BuildNativeQ8Bindings(*weights, error_msg)) {
     return nullptr;
   }
   return model;
@@ -155,8 +239,9 @@ std::optional<HrxBufferBinding> QwenHrxModel::BindF32Vector(
   return BindTensor(tensor, core::GgmlType::kF32, elements, error_msg);
 }
 
-bool QwenHrxModel::BuildNativeQ8Bindings(std::string* error_msg) {
-  const auto& config = weights_.config;
+bool QwenHrxModel::BuildNativeQ8Bindings(
+    const models::QwenModelWeights& weights, std::string* error_msg) {
+  const auto& config = weights.config;
   const std::size_t hidden = config.hidden_size;
   const std::size_t ffn = config.intermediate_size;
   const std::size_t q = config.AttentionSize();
@@ -201,18 +286,18 @@ bool QwenHrxModel::BuildNativeQ8Bindings(std::string* error_msg) {
   };
 
   QwenHrxWeightBindings bindings;
-  if (!bind_q8(weights_.token_embd, config.vocab_size, hidden,
+  if (!bind_q8(weights.token_embd, config.vocab_size, hidden,
                "token_embd.weight", &bindings.token_embedding) ||
-      !bind_f32(weights_.output_norm, hidden, "output_norm.weight",
+      !bind_f32(weights.output_norm, hidden, "output_norm.weight",
                 &bindings.output_norm) ||
-      !bind_q8(weights_.output, config.vocab_size, hidden, "output.weight",
+      !bind_q8(weights.output, config.vocab_size, hidden, "output.weight",
                &bindings.output)) {
     return false;
   }
 
-  bindings.layers.resize(weights_.layers.size());
-  for (std::size_t index = 0; index < weights_.layers.size(); ++index) {
-    const auto& layer = weights_.layers[index];
+  bindings.layers.resize(weights.layers.size());
+  for (std::size_t index = 0; index < weights.layers.size(); ++index) {
+    const auto& layer = weights.layers[index];
     auto& native = bindings.layers[index];
     native.is_full_attention = layer.is_full_attention;
     const std::string prefix = "blk." + std::to_string(index) + ".";

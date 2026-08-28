@@ -446,84 +446,84 @@ void TestFullFfnParityWhenModelIsProvided() {
   std::string error;
   auto reader_owner = gufo::core::GgufReader::OpenFile(model_path, &error);
   Expect(reader_owner != nullptr, "FFN parity model opens");
-
+  auto reader =
+      std::shared_ptr<const gufo::core::GgufReader>(std::move(reader_owner));
+  auto executor = gufo::hrx::QwenHrxExecutor::CreateFromGguf(
       reader, 1, std::string(kHrxKernelDir), &error);
-      Expect(executor != nullptr, "strict Q8_0 native model creates");
-      Expect(executor->FfnStageReady(), "complete FFN artifacts are ready");
+  Expect(executor != nullptr, "strict Q8_0 native model creates");
+  Expect(executor->FfnStageReady(), "complete FFN artifacts are ready");
 
-      constexpr std::size_t kHidden = 5120;
-      constexpr std::size_t kFfn = 17408;
-      std::vector<float> input(kHidden);
-      for (std::size_t index = 0; index < input.size(); ++index) {
-        input[index] =
-            0.01F * static_cast<float>(static_cast<int>(index % 17) - 8);
-      }
-      const auto hidden =
-          executor->GetArenaBinding(gufo::hrx::QwenHrxArenaBuffer::kHidden);
+  constexpr std::size_t kHidden = 5120;
+  constexpr std::size_t kFfn = 17408;
+  std::vector<float> input(kHidden);
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    input[index] = 0.01F * static_cast<float>(static_cast<int>(index % 17) - 8);
+  }
+  const auto hidden =
+      executor->GetArenaBinding(gufo::hrx::QwenHrxArenaBuffer::kHidden);
 
-      Expect(hidden.has_value(), "FFN parity exposes arena hidden binding");
-      Expect(gufo::hrx::HrxCopyFromHost(executor->Backend().Device(),
-                                        input.data(), *hidden,
-                                        input.size() * sizeof(float), &error),
+  Expect(hidden.has_value(), "FFN parity exposes arena hidden binding");
+  Expect(
+      gufo::hrx::HrxCopyFromHost(executor->Backend().Device(), input.data(),
+                                 *hidden, input.size() * sizeof(float), &error),
 
-             "FFN parity hidden input uploads");
-      Expect(executor->DispatchFfnQ8(0, &error),
-             "complete native Q8_0 FFN dispatches");
-      HRX_CHECK(hrx_stream_synchronize(executor->Backend().Stream()));
-      std::vector<float> actual(kHidden);
-      Expect(gufo::hrx::HrxCopyToHost(executor->Backend().Device(), *hidden,
-                                      actual.data(),
-                                      actual.size() * sizeof(float), &error),
-             "FFN parity hidden output downloads");
+      "FFN parity hidden input uploads");
+  Expect(executor->DispatchFfnQ8(0, &error),
+         "complete native Q8_0 FFN dispatches");
+  HRX_CHECK(hrx_stream_synchronize(executor->Backend().Stream()));
+  std::vector<float> actual(kHidden);
+  Expect(gufo::hrx::HrxCopyToHost(executor->Backend().Device(), *hidden,
+                                  actual.data(), actual.size() * sizeof(float),
+                                  &error),
+         "FFN parity hidden output downloads");
 
-      const auto weights =
-          gufo::models::QwenModelWeights::LoadFromGguf(*reader, &error);
+  const auto weights =
+      gufo::models::QwenModelWeights::LoadFromGguf(*reader, &error);
 
-      Expect(weights.has_value() && !weights->layers.empty(),
-             "FFN parity CPU weights load");
-      const auto& layer_weights = weights->layers[0];
-      float square_sum = 0.0F;
-      for (const float value : input) {
-        square_sum += value * value;
-      }
-      const float inverse_rms =
-          1.0F / std::sqrt(square_sum / static_cast<float>(kHidden) + 1e-6F);
-      std::vector<float> normed(kHidden);
-      for (std::size_t column = 0; column < kHidden; ++column) {
-        normed[column] =
-            input[column] * inverse_rms * layer_weights.ffn_norm.Get(column);
-      }
-      std::vector<float> activation(kFfn);
-      for (std::size_t row = 0; row < kFfn; ++row) {
-        float gate = 0.0F;
-        float up = 0.0F;
-        const std::size_t base = row * kHidden;
-        for (std::size_t column = 0; column < kHidden; ++column) {
-          gate += layer_weights.ffn_gate.Get(base + column) * normed[column];
-          up += layer_weights.ffn_up.Get(base + column) * normed[column];
-        }
-        activation[row] = (gate / (1.0F + std::exp(-gate))) * up;
-      }
-      std::vector<float> expected(kHidden);
-      for (std::size_t row = 0; row < kHidden; ++row) {
-        float projected = 0.0F;
-        const std::size_t base = row * kFfn;
-        for (std::size_t column = 0; column < kFfn; ++column) {
-          projected +=
-              layer_weights.ffn_down.Get(base + column) * activation[column];
-        }
-        expected[row] = input[row] + projected;
-      }
-      float max_relative_error = 0.0F;
-      for (std::size_t index = 0; index < kHidden; ++index) {
-        Expect(std::isfinite(actual[index]),
-               "native FFN output remains finite");
-        const float relative = std::fabs(actual[index] - expected[index]) /
-                               (std::fabs(expected[index]) + 1e-4F);
-        max_relative_error = std::max(max_relative_error, relative);
-      }
-      Expect(max_relative_error < 0.01F,
-             "complete native FFN matches the CPU Q8_0 oracle");
+  Expect(weights.has_value() && !weights->layers.empty(),
+         "FFN parity CPU weights load");
+  const auto& layer_weights = weights->layers[0];
+  float square_sum = 0.0F;
+  for (const float value : input) {
+    square_sum += value * value;
+  }
+  const float inverse_rms =
+      1.0F / std::sqrt(square_sum / static_cast<float>(kHidden) + 1e-6F);
+  std::vector<float> normed(kHidden);
+  for (std::size_t column = 0; column < kHidden; ++column) {
+    normed[column] =
+        input[column] * inverse_rms * layer_weights.ffn_norm.Get(column);
+  }
+  std::vector<float> activation(kFfn);
+  for (std::size_t row = 0; row < kFfn; ++row) {
+    float gate = 0.0F;
+    float up = 0.0F;
+    const std::size_t base = row * kHidden;
+    for (std::size_t column = 0; column < kHidden; ++column) {
+      gate += layer_weights.ffn_gate.Get(base + column) * normed[column];
+      up += layer_weights.ffn_up.Get(base + column) * normed[column];
+    }
+    activation[row] = (gate / (1.0F + std::exp(-gate))) * up;
+  }
+  std::vector<float> expected(kHidden);
+  for (std::size_t row = 0; row < kHidden; ++row) {
+    float projected = 0.0F;
+    const std::size_t base = row * kFfn;
+    for (std::size_t column = 0; column < kFfn; ++column) {
+      projected +=
+          layer_weights.ffn_down.Get(base + column) * activation[column];
+    }
+    expected[row] = input[row] + projected;
+  }
+  float max_relative_error = 0.0F;
+  for (std::size_t index = 0; index < kHidden; ++index) {
+    Expect(std::isfinite(actual[index]), "native FFN output remains finite");
+    const float relative = std::fabs(actual[index] - expected[index]) /
+                           (std::fabs(expected[index]) + 1e-4F);
+    max_relative_error = std::max(max_relative_error, relative);
+  }
+  Expect(max_relative_error < 0.01F,
+         "complete native FFN matches the CPU Q8_0 oracle");
 }
 
 void TestComposedNativeStagesWhenModelIsProvided() {
@@ -537,99 +537,99 @@ void TestComposedNativeStagesWhenModelIsProvided() {
   std::string error;
   auto reader_owner = gufo::core::GgufReader::OpenFile(model_path, &error);
   Expect(reader_owner != nullptr, "composed stage model opens");
-
+  auto reader =
+      std::shared_ptr<const gufo::core::GgufReader>(std::move(reader_owner));
+  auto executor = gufo::hrx::QwenHrxExecutor::CreateFromGguf(
       reader, 2, std::string(kHrxKernelDir), &error);
-      Expect(executor != nullptr, "composed native stage executor creates");
-      Expect(executor->ModelExecutionReady(),
-             "strict Q8_0 model is ready when every native artifact loads");
+  Expect(executor != nullptr, "composed native stage executor creates");
+  Expect(executor->ModelExecutionReady(),
+         "strict Q8_0 model is ready when every native artifact loads");
 
-      constexpr std::size_t kHidden = 5120;
-      std::vector<float> input(kHidden);
-      for (std::size_t index = 0; index < input.size(); ++index) {
-        input[index] =
-            0.002F * static_cast<float>(static_cast<int>(index % 31) - 15);
-      }
-      const auto hidden =
-          executor->GetArenaBinding(gufo::hrx::QwenHrxArenaBuffer::kHidden);
+  constexpr std::size_t kHidden = 5120;
+  std::vector<float> input(kHidden);
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    input[index] =
+        0.002F * static_cast<float>(static_cast<int>(index % 31) - 15);
+  }
+  const auto hidden =
+      executor->GetArenaBinding(gufo::hrx::QwenHrxArenaBuffer::kHidden);
 
-      Expect(hidden.has_value(), "composed stage hidden binding exists");
+  Expect(hidden.has_value(), "composed stage hidden binding exists");
 
-      const auto& weights = executor->GetConfig();
-      std::size_t attention_layer = weights.num_layers;
-      std::size_t ssm_layer = weights.num_layers;
-      const auto loaded =
-          gufo::models::QwenModelWeights::LoadFromGguf(*reader, &error);
+  const auto& weights = executor->GetConfig();
+  std::size_t attention_layer = weights.num_layers;
+  std::size_t ssm_layer = weights.num_layers;
+  const auto loaded =
+      gufo::models::QwenModelWeights::LoadFromGguf(*reader, &error);
 
-      Expect(loaded.has_value(), "composed stage CPU metadata loads");
-      for (std::size_t index = 0; index < loaded->layers.size(); ++index) {
-        if (loaded->layers[index].is_full_attention &&
-            attention_layer == weights.num_layers) {
-          attention_layer = index;
-        }
-        if (!loaded->layers[index].is_full_attention &&
-            ssm_layer == weights.num_layers) {
-          ssm_layer = index;
-        }
-      }
-      Expect(attention_layer < weights.num_layers &&
-                 ssm_layer < weights.num_layers,
-             "model exposes attention and SSM layers");
+  Expect(loaded.has_value(), "composed stage CPU metadata loads");
+  for (std::size_t index = 0; index < loaded->layers.size(); ++index) {
+    if (loaded->layers[index].is_full_attention &&
+        attention_layer == weights.num_layers) {
+      attention_layer = index;
+    }
+    if (!loaded->layers[index].is_full_attention &&
+        ssm_layer == weights.num_layers) {
+      ssm_layer = index;
+    }
+  }
+  Expect(attention_layer < weights.num_layers && ssm_layer < weights.num_layers,
+         "model exposes attention and SSM layers");
 
-      Expect(gufo::hrx::HrxCopyFromHost(executor->Backend().Device(),
-                                        input.data(), *hidden,
-                                        input.size() * sizeof(float), &error),
+  Expect(
+      gufo::hrx::HrxCopyFromHost(executor->Backend().Device(), input.data(),
+                                 *hidden, input.size() * sizeof(float), &error),
 
-             "attention stage hidden uploads");
-      Expect(executor->DispatchAttentionQ8(attention_layer, 0, &error),
-             "complete native attention stage dispatches at position zero");
-      HRX_CHECK(hrx_stream_synchronize(executor->Backend().Stream()));
-      std::vector<float> actual(kHidden);
-      Expect(gufo::hrx::HrxCopyToHost(executor->Backend().Device(), *hidden,
-                                      actual.data(),
-                                      actual.size() * sizeof(float), &error),
-             "attention stage output downloads");
-      Expect(std::ranges::all_of(
-                 actual, [](float value) { return std::isfinite(value); }),
-             "attention stage output is finite");
+      "attention stage hidden uploads");
+  Expect(executor->DispatchAttentionQ8(attention_layer, 0, &error),
+         "complete native attention stage dispatches at position zero");
+  HRX_CHECK(hrx_stream_synchronize(executor->Backend().Stream()));
+  std::vector<float> actual(kHidden);
+  Expect(gufo::hrx::HrxCopyToHost(executor->Backend().Device(), *hidden,
+                                  actual.data(), actual.size() * sizeof(float),
+                                  &error),
+         "attention stage output downloads");
+  Expect(std::ranges::all_of(actual,
+                             [](float value) { return std::isfinite(value); }),
+         "attention stage output is finite");
 
-      Expect(gufo::hrx::HrxCopyFromHost(executor->Backend().Device(),
-                                        input.data(), *hidden,
-                                        input.size() * sizeof(float), &error),
+  Expect(
+      gufo::hrx::HrxCopyFromHost(executor->Backend().Device(), input.data(),
+                                 *hidden, input.size() * sizeof(float), &error),
 
-             "DeltaNet input uploads");
-      Expect(executor->DispatchSsmQ8(ssm_layer, &error),
-             "complete native DeltaNet stage dispatches and mutates state");
-      HRX_CHECK(hrx_stream_synchronize(executor->Backend().Stream()));
-      Expect(gufo::hrx::HrxCopyToHost(executor->Backend().Device(), *hidden,
-                                      actual.data(),
-                                      actual.size() * sizeof(float), &error),
-             "DeltaNet output downloads");
-      Expect(std::ranges::all_of(
-                 actual, [](float value) { return std::isfinite(value); }),
-             "DeltaNet output is finite");
+      "DeltaNet input uploads");
+  Expect(executor->DispatchSsmQ8(ssm_layer, &error),
+         "complete native DeltaNet stage dispatches and mutates state");
+  HRX_CHECK(hrx_stream_synchronize(executor->Backend().Stream()));
+  Expect(gufo::hrx::HrxCopyToHost(executor->Backend().Device(), *hidden,
+                                  actual.data(), actual.size() * sizeof(float),
+                                  &error),
+         "DeltaNet output downloads");
+  Expect(std::ranges::all_of(actual,
+                             [](float value) { return std::isfinite(value); }),
+         "DeltaNet output is finite");
 
-      Expect(gufo::hrx::HrxCopyFromHost(executor->Backend().Device(),
-                                        input.data(), *hidden,
-                                        input.size() * sizeof(float), &error),
+  Expect(
+      gufo::hrx::HrxCopyFromHost(executor->Backend().Device(), input.data(),
+                                 *hidden, input.size() * sizeof(float), &error),
 
-             "final stage hidden uploads");
-      gufo::tokenization::TokenId token = weights.vocab_size;
-      Expect(executor->DispatchFinalQ8(&token, &error),
-             "native final norm, vocabulary GEMV, and argmax dispatch");
-      Expect(token < weights.vocab_size,
-             "native greedy argmax returns an in-vocabulary token");
+      "final stage hidden uploads");
+  gufo::tokenization::TokenId token = weights.vocab_size;
+  Expect(executor->DispatchFinalQ8(&token, &error),
+         "native final norm, vocabulary GEMV, and argmax dispatch");
+  Expect(token < weights.vocab_size,
+         "native greedy argmax returns an in-vocabulary token");
 
-      Expect(executor->Reset(&error), "native token sequencing reset succeeds");
-      const auto next = executor->ForwardToken(1, 0, true, &error);
-      Expect(next.has_value() && *next < weights.vocab_size,
-             "bare-minimum native path produces one greedy token");
-      const auto repeated = executor->ForwardToken(1, 0, false, &error);
-      Expect(!repeated.has_value(),
-             "native token path rejects a repeated sequence position");
-      const auto no_logits = executor->ForwardToken(1, 1, false, &error);
-      Expect(
-          no_logits.has_value() && *no_logits == 0,
-          "sequential native token without logits advances and returns zero");
+  Expect(executor->Reset(&error), "native token sequencing reset succeeds");
+  const auto next = executor->ForwardToken(1, 0, true, &error);
+  Expect(next.has_value() && *next < weights.vocab_size,
+         "bare-minimum native path produces one greedy token");
+  const auto repeated = executor->ForwardToken(1, 0, false, &error);
+  Expect(!repeated.has_value(),
+         "native token path rejects a repeated sequence position");
+  const auto no_logits = executor->ForwardToken(1, 1, false, &error);
+  Expect(no_logits.has_value() && *no_logits == 0,
+         "sequential native token without logits advances and returns zero");
 }
 
 void TestQwenHrxArenaLifecycle() {
@@ -649,50 +649,49 @@ void TestQwenHrxArenaLifecycle() {
   Expect(arena->Binding(gufo::hrx::QwenHrxArenaBuffer::kKvCache).length ==
              arena->Layout().kv_cache_bytes,
          "KV arena binding exposes requested-context allocation");
-
+  Expect(arena->Binding(gufo::hrx::QwenHrxArenaBuffer::kRopeCos).length ==
+                 32 * sizeof(float) &&
+             arena->Binding(gufo::hrx::QwenHrxArenaBuffer::kRopeSin).length ==
                  32 * sizeof(float),
          "arena allocates one rotary coefficient row");
-
+  Expect(arena->Binding(gufo::hrx::QwenHrxArenaBuffer::kSsmRecurrentState)
+                 .length == arena->Layout().ssm_recurrent_state_bytes,
          "arena allocates 48-head recurrent state");
-         Expect(arena->Reset(&error),
-                "arena reset uses native graph fill without a host roundtrip");
-         Expect(error.empty(), "successful arena reset clears the error");
+  Expect(arena->Reset(&error),
+         "arena reset uses native graph fill without a host roundtrip");
+  Expect(error.empty(), "successful arena reset clears the error");
 
-         gufo::hrx::HrxModuleLoader loader;
-         HRX_CHECK(loader.LoadFromFile(
-             backend.Device(), "qwen_copy",
-             std::string(kHrxKernelDir) + "/qwen_copy_f32.fb", "amdgpu",
-             "gfx1151"));
-         const auto copy_executable = loader.GetExecutable("qwen_copy");
-         Expect(copy_executable != nullptr, "native state-copy artifact loads");
-         Expect(arena->SaveState(copy_executable, &error),
-                "arena snapshot uses native device copy");
-         Expect(
-             gufo::hrx::HrxFillBuffer(
-                 backend.Device(), backend.Stream(),
-                 arena->Binding(gufo::hrx::QwenHrxArenaBuffer::kSsmConvState),
-                 0x3f800000U, &error),
-             "live convolution state can be changed after snapshot");
-         Expect(arena->RestoreState(copy_executable, &error),
-                "arena restore uses native device copy");
-         std::uint32_t restored_edge = 1;
-         const auto recurrent =
-             arena->Binding(gufo::hrx::QwenHrxArenaBuffer::kSsmConvState);
-         const gufo::hrx::HrxBufferBinding first_word{
-             .buffer = recurrent.buffer,
-             .offset = recurrent.offset,
-             .length = sizeof(restored_edge),
-         };
-         Expect(gufo::hrx::HrxCopyToHost(backend.Device(), first_word,
-                                         &restored_edge, sizeof(restored_edge),
-                                         &error),
+  gufo::hrx::HrxModuleLoader loader;
+  HRX_CHECK(loader.LoadFromFile(
+      backend.Device(), "qwen_copy",
+      std::string(kHrxKernelDir) + "/qwen_copy_f32.fb", "amdgpu", "gfx1151"));
+  const auto copy_executable = loader.GetExecutable("qwen_copy");
+  Expect(copy_executable != nullptr, "native state-copy artifact loads");
+  Expect(arena->EnqueueSaveState(copy_executable, &error),
+         "arena queues a native snapshot without host synchronization");
+  Expect(gufo::hrx::HrxFillBuffer(
+             backend.Device(), backend.Stream(),
+             arena->Binding(gufo::hrx::QwenHrxArenaBuffer::kSsmConvState),
+             0x3f800000U, &error),
+         "live convolution state can be changed after queued snapshot");
+  Expect(arena->RestoreState(copy_executable, &error),
+         "arena restore observes queued snapshot ordering");
+  std::uint32_t restored_edge = 1;
+  const auto recurrent =
+      arena->Binding(gufo::hrx::QwenHrxArenaBuffer::kSsmConvState);
+  const gufo::hrx::HrxBufferBinding first_word{
+      .buffer = recurrent.buffer,
+      .offset = recurrent.offset,
+      .length = sizeof(restored_edge),
+  };
+  Expect(gufo::hrx::HrxCopyToHost(backend.Device(), first_word, &restored_edge,
+                                  sizeof(restored_edge), &error),
+         "restored state edge can be read back");
+  Expect(restored_edge == 0, "restored state matches the zero snapshot");
 
-                "restored state edge can be read back");
-         Expect(restored_edge == 0, "restored state matches the zero snapshot");
-
-         loader.UnloadAll();
-         arena.reset();
-         backend.Shutdown();
+  loader.UnloadAll();
+  arena.reset();
+  backend.Shutdown();
 }
 
 void TestPrototypeArtifactReadiness() {

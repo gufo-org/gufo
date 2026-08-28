@@ -851,8 +851,7 @@ int RunBench(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  const std::shared_ptr<const gufo::core::GgufReader> reader(
-      std::move(reader_owner));
+  std::shared_ptr<const gufo::core::GgufReader> reader(std::move(reader_owner));
 
   bool use_hrx = false;
   if (opt.qwen_backend == "hrx-native") {
@@ -954,6 +953,13 @@ int RunBench(std::span<const char* const> args) {
       hrx_reference =
           CaptureHrxReference(*reference_executor, opt.validate_hrx_tokens);
       reference_executor.reset();
+      const auto reset_status = hipDeviceReset();
+      if (reset_status != hipSuccess) {
+        std::cerr << "Error releasing HIP validation resources: "
+                  << hipGetErrorString(reset_status) << '\n';
+        PrintModelLoadTime(model_load_start, false);
+        return 1;
+      }
       std::cout << "[HRX Validation] HIP reference released; starting native "
                    "HRX...\n"
                 << std::flush;
@@ -967,6 +973,12 @@ int RunBench(std::span<const char* const> args) {
       std::cerr << "Error creating native HRX Qwen executor: " << err << '\n';
       PrintModelLoadTime(model_load_start, false);
       return 1;
+    }
+    if (native_executor->UsesDeviceLocalWeights()) {
+      // Native HRX has copied all model data and metadata required after
+      // construction. Release the file mapping instead of retaining two
+      // checkpoint-sized address ranges for the benchmark lifetime.
+      reader.reset();
     }
     if (!native_executor->ModelExecutionReady()) {
       std::cerr << "Error: native HRX Q8_0 execution is not complete. Missing "
@@ -988,7 +1000,10 @@ int RunBench(std::span<const char* const> args) {
     native_executor->SetPolicy(policy);
     std::cout << "backend=HRX-native model="
               << native_executor->GetConfig().model_name
-              << " fusions=" << policy.ToString() << '\n';
+              << " fusions=" << policy.ToString() << " weights="
+              << (native_executor->UsesDeviceLocalWeights() ? "device-local"
+                                                            : "mapped")
+              << '\n';
 
     if (opt.validate_hrx_tokens > 0) {
 #if defined(ENGINE_ENABLE_HIP)

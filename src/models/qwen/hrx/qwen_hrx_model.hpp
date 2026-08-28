@@ -55,8 +55,8 @@ struct QwenHrxWeightBindings {
   std::vector<QwenHrxLayerBindings> layers;
 };
 
-/// Owns HRX imports of the read-only GGUF shards while retaining the reader
-/// that owns the mapped host memory. Tensor bindings remain bounds-checked.
+/// Owns read-only HRX buffers for the GGUF shards. Tensor bindings remain
+/// bounds-checked and do not depend on the GGUF mapping after construction.
 class QwenHrxModel {
 public:
   ~QwenHrxModel();
@@ -70,15 +70,15 @@ public:
       std::shared_ptr<const core::GgufReader> reader, hrx_device_t device,
       std::string* error_msg = nullptr);
 
-  [[nodiscard]] const models::QwenModelWeights& GetWeights() const noexcept {
-    return weights_;
-  }
   [[nodiscard]] const tokenization::QwenTokenizer& GetTokenizer()
       const noexcept {
     return *tokenizer_;
   }
   [[nodiscard]] const core::ModelConfig& GetConfig() const noexcept {
-    return weights_.config;
+    return config_;
+  }
+  [[nodiscard]] bool UsesDeviceLocalWeights() const noexcept {
+    return uses_device_local_weights_;
   }
   [[nodiscard]] const QwenHrxArtifactContract& GetArtifactContract()
       const noexcept {
@@ -113,25 +113,35 @@ private:
     const void* host_data{nullptr};
     std::size_t size{0};
     hrx_buffer_t buffer{nullptr};
+
+    ImportedRegion() = default;
+    ImportedRegion(const void* data, std::size_t byte_size,
+                   hrx_buffer_t owned_buffer) noexcept;
+    ~ImportedRegion();
+    ImportedRegion(const ImportedRegion&) = delete;
+    ImportedRegion& operator=(const ImportedRegion&) = delete;
+    ImportedRegion(ImportedRegion&& other) noexcept;
+    ImportedRegion& operator=(ImportedRegion&& other) noexcept;
   };
 
-  QwenHrxModel(std::shared_ptr<const core::GgufReader> reader,
-               models::QwenModelWeights weights,
+  QwenHrxModel(core::ModelConfig config,
                std::shared_ptr<const tokenization::QwenTokenizer> tokenizer,
                QwenHrxArtifactContract contract,
-               std::vector<ImportedRegion> regions);
+               std::vector<ImportedRegion> regions,
+               bool uses_device_local_weights);
 
   /// Low-level storage lookup after the typed payload contract is validated.
   [[nodiscard]] std::optional<HrxBufferBinding> BindStorage(
       const models::QwenTensorRef& tensor) const noexcept;
-  [[nodiscard]] bool BuildNativeQ8Bindings(std::string* error_msg);
+  [[nodiscard]] bool BuildNativeQ8Bindings(
+      const models::QwenModelWeights& weights, std::string* error_msg);
 
-  std::shared_ptr<const core::GgufReader> reader_;
-  models::QwenModelWeights weights_;
+  core::ModelConfig config_;
   QwenHrxArtifactContract contract_;
   std::shared_ptr<const tokenization::QwenTokenizer> tokenizer_;
   std::vector<ImportedRegion> regions_;
   QwenHrxWeightBindings native_bindings_;
+  bool uses_device_local_weights_{false};
 };
 
 }  // namespace gufo::hrx
