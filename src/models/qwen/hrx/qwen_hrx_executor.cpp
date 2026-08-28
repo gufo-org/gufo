@@ -1751,13 +1751,7 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
     return Reject("batched attention cache slice is invalid", error_msg);
   }
 
-  // Temporary bisect control: GUFO_HRX_BATCH_ATTENTION selects how many of the
-  // batched attention stages to use (0 = none, 4 = all).
-  static const int kBatchedAttentionStages = [] {
-    const char* value = std::getenv("GUFO_HRX_BATCH_ATTENTION");
-    return value == nullptr ? 4 : std::atoi(value);
-  }();
-  if (BatchedAttentionReady() && kBatchedAttentionStages >= 4) {
+  if (BatchedAttentionReady()) {
     // Whole-tile attention front end: one dispatch per stage for the chunk.
     // The convolution of positions is handled inside the artifacts, which read
     // the position-major rotary tables and cache rows directly.

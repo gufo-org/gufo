@@ -711,6 +711,45 @@ Stage profile for one 128-token chunk is now FFN 222.4 ms, SSM 128.4 ms,
 attention 31.4 ms, chunk 382.2 ms. PP128 is 51x the 6.25 t/s serial baseline
 and 80% of the 399.59 t/s HIP reference.
 
+### Where the remaining gap to HIP is
+
+Final same-binary measurement, device-local weights, `blocked-prefill`:
+
+| test | HRX native | HIP reference |
+|---|---:|---:|
+| pp128 | 310.48 - 318.56 t/s | 399.59 t/s |
+| tg16 | 5.38 t/s | 7.62 t/s |
+
+The prefill arithmetic is now easy to reason about. One prefill pass streams
+about 26 GiB of layer weights. HIP's 399.59 t/s means 320 ms for that pass,
+which is 81 GB/s of weight traffic. The HRX FFN stage moves 18.2 GiB in
+222.4 ms, which is 82 GB/s: **the blocked projection already matches HIP's
+effective rate per byte**. The remaining difference is the 160 ms of non-FFN
+work per chunk (SSM 128.4 ms, attention 31.4 ms) against a projection-only
+floor of about 317 ms for the whole pass.
+
+Both implementations therefore sit near 20 TOPS against the measured 55.07 TOPS
+matrix-core ceiling, so beating HIP requires making the projection itself
+faster rather than removing more dispatch overhead. Eight structural variants
+of the blocked kernel have now been measured and rejected:
+
+| variant | device time (rows=17408, K=5120, 128 tokens) |
+|---|---:|
+| retained: wide staging + register prefetch | 1.347 ms |
+| BK=2 staging | no change |
+| LDS double buffering | 1.314 ms (2%) |
+| 256 rows per workgroup | 1.414 ms |
+| coalesced weight-address probe | 1.386 ms |
+| epilogue scale multiplies removed | 1.362 ms |
+| two independent MMA accumulator chains | 1.469 ms |
+| 2x4 wave tiling (half the work per wave) | 3.135 ms |
+
+The kernel is insensitive to barriers, bandwidth, activation re-reads, weight
+coalescing, epilogue VALU, and MMA dependency depth, and it degrades whenever
+occupancy drops below eight waves per SIMD. That pattern says the limiter is
+wave-level latency hiding, and the next step should be hardware counters
+(`--profile-data=counter-ranges`) rather than another structural guess.
+
 ### Blocked-kernel ablations: what does not limit it
 
 The blocked projection sits at roughly 70 GB/s of weight traffic and 16.9 TOPS
