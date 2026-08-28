@@ -24,9 +24,12 @@ kernel.def target(@qwen_q8_blocked_k17408_target) @qwen_q8_0_gemm_i8_blocked_k17
   %capacity = config.get @qwen_q8_0_gemm_i8_blocked_k17408_t128.row_capacity : index
   %rows_per_group = index.constant 128 : index
   %row_groups = index.div %capacity, %rows_per_group : index
+  %token_group_rounding = index.constant 127 : index
+  %rounded_tokens = index.add %tokens, %token_group_rounding : index
+  %token_groups = index.div %rounded_tokens, %rows_per_group : index
   %one = index.constant 1 : index
   %workgroup_size = index.constant 256 : index
-  kernel.launch.config workgroups(%row_groups, %one, %one) workgroup_size(%workgroup_size, %one, %one) : index
+  kernel.launch.config workgroups(%token_groups, %row_groups, %one) workgroup_size(%workgroup_size, %one, %one) : index
 } launch(%rows: index, %tokens: index, %weight: buffer, %act: buffer, %scales: buffer, %output: buffer) {
   %capacity = config.get @qwen_q8_0_gemm_i8_blocked_k17408_t128.row_capacity : index
   // Rows need not fill the 128-row macro tile: staging clamps to the last
@@ -35,15 +38,23 @@ kernel.def target(@qwen_q8_blocked_k17408_target) @qwen_q8_0_gemm_i8_blocked_k17
   %row_count = index.assume %rows [range(%rows, 1, 248320), le(%rows, %capacity)] : index
   %row_step = index.constant 1 : index
   %last_row = index.sub %row_count, %row_step : index
-  %token_count = index.assume %tokens [range(%tokens, 1, 128)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
   %base = index.constant 0 : offset
   %tid = kernel.workitem.id<x> : index
-  %row_group = kernel.workgroup.id<x> : index
+  // The token-tile index is the fastest-varying grid dimension so the token
+  // tiles that share one row group's staged weights are co-resident and hit
+  // cache instead of each re-reading the panel from DRAM.
+  %token_group = kernel.workgroup.id<x> : index
+  %row_group = kernel.workgroup.id<y> : index
   %wave_width = index.constant 32 : index
   %wave = index.div %tid, %wave_width : index
   %lane = index.rem %tid, %wave_width : index
   %token_tile_extent = index.constant 16 : index
   %token_tile_count = index.constant 8 : index
+  %tokens_per_group = index.constant 128 : index
+  %token_tiles_per_group = index.constant 8 : index
+  %token_group_base = index.mul %token_group, %tokens_per_group : index
+  %token_tile_group_base = index.mul %token_group, %token_tiles_per_group : index
   %lane_token = index.rem %lane, %token_tile_extent : index
   %row_parity = index.div %lane, %token_tile_extent : index
   %rows_per_group = index.constant 128 : index
@@ -77,8 +88,8 @@ kernel.def target(@qwen_q8_blocked_k17408_target) @qwen_q8_0_gemm_i8_blocked_k17
   %act_stage = buffer.view %scratch[%act_scratch_offset] : buffer -> view<32x128xi8, %rhs_storage>
   %weight_scale_stage = buffer.view %scratch[%weight_scale_scratch_offset] : buffer -> view<8x16xf32>
   %act_scale_stage = buffer.view %scratch[%act_scale_scratch_offset] : buffer -> view<8x16xf32>
-  %act_payload = buffer.view %act[%base] : buffer -> view<8x544x16x32xi8>
-  %act_scale_input = buffer.view %scales[%base] : buffer -> view<8x544x16xf32>
+  %act_payload = buffer.view %act[%base] : buffer -> view<128x544x16x32xi8>
+  %act_scale_input = buffer.view %scales[%base] : buffer -> view<128x544x16xf32>
 
   // Staging identity: the low half of the workgroup owns weight rows and
   // the high half owns tokens.
@@ -88,7 +99,8 @@ kernel.def target(@qwen_q8_blocked_k17408_target) @qwen_q8_0_gemm_i8_blocked_k17
   %stage_row = index.min %stage_row0, %last_row : index
   %stage_row_bytes = index.mul %stage_row, %row_bytes : index
   %stage_payload_base = index.add %stage_row_bytes, %payload_header_bytes : index
-  %stage_act_tile = index.div %stage_slot, %token_tile_extent : index
+  %stage_act_tile_local = index.div %stage_slot, %token_tile_extent : index
+  %stage_act_tile = index.add %token_tile_group_base, %stage_act_tile_local : index
   %stage_act_lane = index.rem %stage_slot, %token_tile_extent : index
   %scale_row_tile = index.div %tid, %token_tile_extent : index
   %scale_row_lane = index.rem %tid, %token_tile_extent : index
@@ -105,7 +117,7 @@ kernel.def target(@qwen_q8_blocked_k17408_target) @qwen_q8_0_gemm_i8_blocked_k17
   %zero_i32_elements = vector.constant 0 : vector<8xi32>
 
   %preload = scf.if %stage_is_act -> (vector<32xi8>) {
-    %values = vector.load %act_payload[%stage_act_tile, %loop_begin, %stage_act_lane, %loop_begin] : view<8x544x16x32xi8> -> vector<32xi8>
+    %values = vector.load %act_payload[%stage_act_tile, %loop_begin, %stage_act_lane, %loop_begin] : view<128x544x16x32xi8> -> vector<32xi8>
     scf.yield %values : vector<32xi8>
   } else {
     %offset = index.scale %stage_payload_base, %one_byte : index, offset -> offset
@@ -129,7 +141,8 @@ kernel.def target(@qwen_q8_blocked_k17408_target) @qwen_q8_0_gemm_i8_blocked_k17
       %scale_f16 = view.load %scale_view[%loop_begin] : view<1xf16> -> f16
       %weight_scale = scalar.extf %scale_f16 : f16 to f32
       view.store %weight_scale, %weight_scale_stage[%scale_row_tile, %scale_physical] : f32, view<8x16xf32>
-      %activation_scale = view.load %act_scale_input[%scale_row_tile, %block, %scale_row_lane] : view<8x544x16xf32> -> f32
+      %activation_scale_tile = index.add %token_tile_group_base, %scale_row_tile : index
+      %activation_scale = view.load %act_scale_input[%activation_scale_tile, %block, %scale_row_lane] : view<128x544x16xf32> -> f32
       view.store %activation_scale, %act_scale_stage[%scale_row_tile, %scale_row_lane] : f32, view<8x16xf32>
     }
 
@@ -140,7 +153,7 @@ kernel.def target(@qwen_q8_blocked_k17408_target) @qwen_q8_0_gemm_i8_blocked_k17
     %next_block0 = index.add %block, %loop_step : index
     %next_block = index.min %next_block0, %last_block : index
     %next_staged = scf.if %stage_is_act -> (vector<32xi8>) {
-      %values = vector.load %act_payload[%stage_act_tile, %next_block, %stage_act_lane, %loop_begin] : view<8x544x16x32xi8> -> vector<32xi8>
+      %values = vector.load %act_payload[%stage_act_tile, %next_block, %stage_act_lane, %loop_begin] : view<128x544x16x32xi8> -> vector<32xi8>
       scf.yield %values : vector<32xi8>
     } else {
       %next_block_bytes = index.mul %next_block, %q8_block_bytes : index
@@ -184,7 +197,8 @@ kernel.def target(@qwen_q8_blocked_k17408_target) @qwen_q8_0_gemm_i8_blocked_k17
   scf.for %token_tile = [%loop_begin to %token_tile_count step %loop_step] unroll {
     %tile_accumulator = vector.extract %accumulators[%token_tile] : vector<8x8xf32> -> vector<8xf32>
     %token_tile_base = index.mul %token_tile, %token_tile_extent : index
-    %token = index.add %token_tile_base, %lane_token : index
+    %local_token = index.add %token_tile_base, %lane_token : index
+    %token = index.add %token_group_base, %local_token : index
     %token_live = index.cmp ult, %token, %token_count : index
     scf.if %token_live {
       %wave_row_offset = index.mul %wave, %token_tile_extent : index

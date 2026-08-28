@@ -13,7 +13,7 @@
 // state   : 48 x 128 x 128 f32 recurrent state, updated in place
 // readout : token-major scratch, %tokens rows of 6144 f32
 
-config.decl @qwen_deltanet_recurrence_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+config.decl @qwen_deltanet_recurrence_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
 
 kernel.def @qwen_deltanet_recurrence_batch_f32(%tokens: index) {
   %pairs = index.constant 6144 : index
@@ -23,7 +23,7 @@ kernel.def @qwen_deltanet_recurrence_batch_f32(%tokens: index) {
 } launch(%tokens: index, %conv: buffer, %prepared: buffer, %state: buffer, %readout: buffer) {
   %base = index.constant 0 : offset
   %capacity = config.get @qwen_deltanet_recurrence_batch_f32.token_capacity : index
-  %token_count = index.assume %tokens [range(%tokens, 1, 128), le(%tokens, %capacity)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048), le(%tokens, %capacity)] : index
   %pair = kernel.workgroup.id<x> : index
   %lane = kernel.workitem.id<x> : index
   %elements_per_lane = index.constant 4 : index
@@ -67,9 +67,9 @@ kernel.def @qwen_deltanet_recurrence_batch_f32(%tokens: index) {
   %state_initial1 = view.load %state_view[%head, %row, %lane_element1] : view<48x128x128xf32> -> f32
   %state_initial2 = view.load %state_view[%head, %row, %lane_element2] : view<48x128x128xf32> -> f32
   %state_initial3 = view.load %state_view[%head, %row, %lane_element3] : view<48x128x128xf32> -> f32
-  %conv_view = buffer.view %conv[%base] : buffer -> view<1310720xf32>
-  %prepared_view = buffer.view %prepared[%base] : buffer -> view<12288xf32>
-  %readout_view = buffer.view %readout[%base] : buffer -> view<786432xf32>
+  %conv_view = buffer.view %conv[%base] : buffer -> view<20971520xf32>
+  %prepared_view = buffer.view %prepared[%base] : buffer -> view<196608xf32>
+  %readout_view = buffer.view %readout[%base] : buffer -> view<12582912xf32>
   %loop_begin = index.constant 0 : index
   %loop_step = index.constant 1 : index
   %zero = scalar.constant 0.0 : f32
@@ -93,17 +93,17 @@ kernel.def @qwen_deltanet_recurrence_batch_f32(%tokens: index) {
     %alpha_index = index.add %prepared_token_base, %head : index
     %beta_head = index.add %beta_offset, %head : index
     %beta_index = index.add %prepared_token_base, %beta_head : index
-    %q0 = view.load %conv_view[%q_token_index0] : view<1310720xf32> -> f32
-    %k0 = view.load %conv_view[%k_token_index0] : view<1310720xf32> -> f32
-    %q1 = view.load %conv_view[%q_token_index1] : view<1310720xf32> -> f32
-    %k1 = view.load %conv_view[%k_token_index1] : view<1310720xf32> -> f32
-    %q2 = view.load %conv_view[%q_token_index2] : view<1310720xf32> -> f32
-    %k2 = view.load %conv_view[%k_token_index2] : view<1310720xf32> -> f32
-    %q3 = view.load %conv_view[%q_token_index3] : view<1310720xf32> -> f32
-    %k3 = view.load %conv_view[%k_token_index3] : view<1310720xf32> -> f32
-    %v = view.load %conv_view[%v_token_index] : view<1310720xf32> -> f32
-    %alpha = view.load %prepared_view[%alpha_index] : view<12288xf32> -> f32
-    %beta = view.load %prepared_view[%beta_index] : view<12288xf32> -> f32
+    %q0 = view.load %conv_view[%q_token_index0] : view<20971520xf32> -> f32
+    %k0 = view.load %conv_view[%k_token_index0] : view<20971520xf32> -> f32
+    %q1 = view.load %conv_view[%q_token_index1] : view<20971520xf32> -> f32
+    %k1 = view.load %conv_view[%k_token_index1] : view<20971520xf32> -> f32
+    %q2 = view.load %conv_view[%q_token_index2] : view<20971520xf32> -> f32
+    %k2 = view.load %conv_view[%k_token_index2] : view<20971520xf32> -> f32
+    %q3 = view.load %conv_view[%q_token_index3] : view<20971520xf32> -> f32
+    %k3 = view.load %conv_view[%k_token_index3] : view<20971520xf32> -> f32
+    %v = view.load %conv_view[%v_token_index] : view<20971520xf32> -> f32
+    %alpha = view.load %prepared_view[%alpha_index] : view<196608xf32> -> f32
+    %beta = view.load %prepared_view[%beta_index] : view<196608xf32> -> f32
     %q_sq0 = scalar.mulf<reassoc|nnan|ninf|nsz> %q0, %q0 : f32
     %k_sq0 = scalar.mulf<reassoc|nnan|ninf|nsz> %k0, %k0 : f32
     %q_sq1 = scalar.mulf<reassoc|nnan|ninf|nsz> %q1, %q1 : f32
@@ -165,7 +165,7 @@ kernel.def @qwen_deltanet_recurrence_batch_f32(%tokens: index) {
     %readout_value = kernel.workgroup.reduce<addf> %readout_lane : f32
     scf.if %is_leader {
       %readout_index = index.add %readout_token_base, %pair : index
-      view.store %readout_value, %readout_view[%readout_index] : f32, view<786432xf32>
+      view.store %readout_value, %readout_view[%readout_index] : f32, view<12582912xf32>
     }
     scf.yield %next_state0, %next_state1, %next_state2, %next_state3 : f32, f32, f32, f32
   }

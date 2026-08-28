@@ -2,7 +2,7 @@
 // prefill tile. Workgroups cover token-major rows so a layer costs one dispatch
 // instead of one per token; the per-token arithmetic is unchanged.
 
-config.decl @qwen_split_q_gate_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+config.decl @qwen_split_q_gate_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
 
 kernel.def @qwen_split_q_gate_batch_f32(%tokens: index) {
   %workgroup_size = index.constant 32 : index
@@ -16,7 +16,7 @@ kernel.def @qwen_split_q_gate_batch_f32(%tokens: index) {
   %base = index.constant 0 : offset
   %projection_width = index.constant 12288 : index
   %query_width = index.constant 6144 : index
-  %token_count = index.assume %tokens [range(%tokens, 1, 128)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
   %workgroup = kernel.workgroup.id<x> : index
   %groups_per_token = index.constant 192 : index
   %token = index.div %workgroup, %groups_per_token : index

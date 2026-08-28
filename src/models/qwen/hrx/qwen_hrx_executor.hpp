@@ -240,7 +240,8 @@ public:
   }
   /// Physical tokens per prefill tile for the currently selected route.
   [[nodiscard]] std::size_t PrefillChunkTokens() const noexcept {
-    return UsesBlockedPrefill() ? kHrxPrefillChunkTokens : kHrxDot4iChunkTokens;
+    return UsesBlockedPrefill() ? kHrxBlockedPrefillExecutionTokens
+                                : kHrxDot4iChunkTokens;
   }
   /// Quantizes one activation tile with whichever operand layout the active
   /// projection route consumes.

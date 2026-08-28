@@ -13,10 +13,15 @@
 
 namespace gufo::hrx {
 
-/// Physical token capacity of the prefill tile. The blocked W8A8 artifacts
-/// compute 128 tokens per dispatch, so the arena is sized for that tile and
-/// the narrower `_t8` fallback routes simply use part of it.
-inline constexpr std::size_t kHrxPrefillChunkTokens = 128;
+/// Physical token capacity of one layer-major prefill tile. Blocked W8A8
+/// workgroups still compute 128-token macro tiles, but up to sixteen tiles are
+/// launched concurrently so prompts through 2048 tokens traverse each layer
+/// only once.
+inline constexpr std::size_t kHrxPrefillChunkTokens = 2048;
+/// Preferred layer-major tile. Projection concurrency improves through 512,
+/// while the current causal-attention kernel regresses on 1024-2048-token
+/// single launches because too many prefix-scanning workgroups contend at once.
+inline constexpr std::size_t kHrxBlockedPrefillExecutionTokens = 512;
 /// Token capacity of the `_t8` dot4i fallback artifacts.
 inline constexpr std::size_t kHrxDot4iChunkTokens = 8;
 

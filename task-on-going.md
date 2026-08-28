@@ -2,6 +2,99 @@
 
 Last updated: 2026-08-28 (course-corrected to full-prompt blocked prefill)
 
+## Projection launch order: token tiles must vary fastest
+
+The blocked projection launched `workgroup_count[0] = row_groups` and
+`[1] = token_groups`, so the dispatch swept every row group for token tile 0,
+then every row group again for tile 1. Each token tile therefore re-read the
+whole weight matrix from DRAM. Swapping the two grid dimensions makes the
+token tiles that share one row group's weight panel co-resident, so they reuse
+it from cache:
+
+| prompt | before | after | HIP | HRX/HIP |
+|---:|---:|---:|---:|---:|
+| 256 | 322.80 | 339.84 | 451.90 | 75.2% |
+| 512 | 319.59 | 354.42 | 559.49 | 63.3% |
+| 1024 | 316.95 | 348.01 | 562.70 | 61.8% |
+| 2048 | 306.76 | 327.84 | 548.55 | 59.8% |
+
+(PP128 in the same sweep reads 223.97 t/s, but that is the first timed point
+after model load; measured on its own the same binary gives 310-319 t/s.)
+
+The change is a launch-order change only: prefill logits are bit-identical to
+the previous build (max absolute error 0.27421856, cosine 0.99989367).
+
+### Widening the token span per workgroup is not the answer
+
+The obvious follow-up - give each workgroup more tokens so the weight stream is
+divided further - was implemented as a 32-row x 512-token variant
+(`gen_w512`, two row tiles by four token groups, 184 VGPRs, no spills). It
+passed its oracle and measured 5.091 ms for rows=17408/K=5120/512 tokens
+against 5.388 ms for four 128-token launches: only 1.06x despite four times
+less weight traffic.
+
+The arithmetic explains it. Total DRAM traffic for one projection is
+
+    rows * K * (tokens / tokens_per_workgroup)
+  + tokens * K * (rows / rows_per_workgroup)
+
+so shrinking the row span to widen the token span trades weight traffic for
+activation traffic one-for-one. The sum is minimized when the two spans are
+equal, which means **the existing 128x128 macro tile is already the optimal
+shape for a 64-register accumulator budget**. A larger square tile would need
+four times the accumulator registers, which the 8-waves-per-SIMD occupancy
+target cannot afford.
+
+That result also settles the earlier ambiguity: cutting weight traffic four
+times moved the kernel by 6%, so the projection is not DRAM-bound. Combined
+with the eight previously rejected variants, the blocked kernel is bound by
+per-wave instruction issue and latency, not by any memory term.
+
+## Current optimization card: expose prompt-width concurrency
+
+The clean `fa7a11da` release baseline and matched HIP backend were measured in
+one process per backend with the same Q8_0 model:
+
+| prompt | HRX blocked baseline | HIP | HRX/HIP |
+|---:|---:|---:|---:|
+| 128 | 321.84 | 432.62 | 74.4% |
+| 256 | 322.80 | 451.90 | 71.4% |
+| 512 | 319.59 | 559.49 | 57.1% |
+| 1024 | 316.95 | 562.70 | 56.3% |
+| 2048 | 306.76 | 548.55 | 55.9% |
+
+The PP2048 stage trace totals approximately 3.65 s FFN, 2.11 s SSM, and
+0.93 s attention. Projection is still the largest component, but the flat HRX
+curve also showed that sixteen 128-token launches never expose the prompt-width
+concurrency that lifts HIP at PP512.
+
+Two projection retile experiments were rejected before widening the executor:
+
+- a combined two-K-block/4x2-wave staging rewrite passed the constant-fill
+  oracle at 0.279 ms versus the recorded 0.385 ms K5120/rows5120 result, but
+  failed the real model envelope (wrong top-1, cosine 0.693); the oracle did not
+  detect its nonuniform-operand permutation;
+- separating only the 4x2 wave ownership restored the established numerical
+  result (top-1 157, cosine 0.99989367), but the real 17408-row FFN shape was
+  slower at 1.420 ms versus 1.347 ms and the end-to-end result was noise.
+
+The current candidate raises artifact and arena capacity to 2048 while keeping
+128x128 projection macro tiles. The projection launch uses a second grid
+dimension, so as many as sixteen token tiles run concurrently, and quantization
+rounds only to the next 128 tokens so short prompts do not pay for the full
+arena. A single layer-major pass measured 312.88/329.68/337.51/319.13/285.52
+t/s at PP128/256/512/1024/2048. PP512 is a real +5.6%, but single-pass PP2048
+is rejected: its attention stage expands to 1597 ms versus about 930 ms for
+sixteen 128-token chunks. FFN changes only 3650 -> 3542 ms, SSM 2110 -> 2043
+ms, so 2048-way attention contention overwhelms the projection amortization.
+
+The retained direction is therefore an adaptive 512-token layer tile. It keeps
+the measured PP512 gain and processes longer prompts as 512-token passes. The
+next bottleneck is not executor launch count: at PP512 the wide trace is FFN
+888.6 ms, SSM 463.2 ms, attention 132.2 ms. Beating HIP's 915 ms PP512 pass
+requires both a faster DeltaNet path and a faster projection kernel; DeltaNet
+substage timing comes next.
+
 ## Baseline identity
 
 - Parent revision: `8895a092a718` (`fedeizzo/hrx-integration`)

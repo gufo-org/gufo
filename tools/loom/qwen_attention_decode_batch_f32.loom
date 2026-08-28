@@ -1,11 +1,11 @@
 // Prefill GQA attention for Qwen3.8 over a whole token tile: 24 Q heads, 4 KV
 // heads, head width 256. One workgroup handles one (token, head) pair and
 // attends over that token's own prefix, so a layer costs one dispatch instead
-// of one per token and the grid is 128x24 rather than 24. K/V cache bindings
+// of one per token and the grid is token-capacity x 24 rather than 24. K/V cache bindings
 // cover one full-attention layer; queries, gates and outputs are token-major.
 
 config.decl @qwen_attention_decode_batch_f32.max_context : %value: index where [range(%value, 1, 131072)]
-config.decl @qwen_attention_decode_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+config.decl @qwen_attention_decode_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
 
 kernel.def @qwen_attention_decode_batch_f32(%start_position: index, %max_context: index, %tokens: index) {
   %heads = index.constant 24 : index
@@ -21,7 +21,7 @@ kernel.def @qwen_attention_decode_batch_f32(%start_position: index, %max_context
   %head = kernel.workgroup.id<x> : index
   %token = kernel.workgroup.id<y> : index
   %lane = kernel.workitem.id<x> : index
-  %token_count = index.assume %tokens [range(%tokens, 1, 128)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
   %token_live = index.cmp ult, %token, %token_count : index
   %position0 = index.add %start, %token : index
   scf.if %token_live {

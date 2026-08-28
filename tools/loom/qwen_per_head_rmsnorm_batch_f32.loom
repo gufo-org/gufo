@@ -4,7 +4,7 @@
 // 24 and 4 heads respectively.
 
 config.decl @qwen_per_head_rmsnorm_batch_f32.max_heads : %value: index where [range(%value, 1, 24)]
-config.decl @qwen_per_head_rmsnorm_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+config.decl @qwen_per_head_rmsnorm_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
 
 kernel.def @qwen_per_head_rmsnorm_batch_f32(%heads: index, %tokens: index) {
   %capacity = config.get @qwen_per_head_rmsnorm_batch_f32.max_heads : index
@@ -21,7 +21,7 @@ kernel.def @qwen_per_head_rmsnorm_batch_f32(%heads: index, %tokens: index) {
   %head = kernel.workgroup.id<x> : index
   %token = kernel.workgroup.id<y> : index
   %lane = kernel.workitem.id<x> : index
-  %token_count = index.assume %tokens [range(%tokens, 1, 128)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
   // The x grid is launched with exactly %heads workgroups, so only the
   // physical token dimension can exceed its logical bound.
   %in_bounds = index.cmp ult, %token, %token_count : index

@@ -9,7 +9,7 @@
 // ============================================================================
 
 config.decl @qwen_rope_kv_cache_batch_f32.max_heads : %value: index where [range(%value, 1, 24)]
-config.decl @qwen_rope_kv_cache_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+config.decl @qwen_rope_kv_cache_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
 
 kernel.def @qwen_rope_kv_cache_batch_f32(%q_heads: index, %start_position: index, %tokens: index) {
   %unit = index.constant 1 : index
@@ -54,7 +54,7 @@ kernel.def @qwen_rope_kv_cache_batch_f32(%q_heads: index, %start_position: index
   %i192 = index.add %lane, %offset192 : index
   %i224 = index.add %lane, %offset224 : index
 
-  %token_count = index.assume %tokens [range(%tokens, 1, 128)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
   // The x grid is launched with exactly %q_heads workgroups, so only the
   // physical token dimension can exceed its logical bound.
   %q_in_bounds = index.cmp ult, %token, %token_count : index

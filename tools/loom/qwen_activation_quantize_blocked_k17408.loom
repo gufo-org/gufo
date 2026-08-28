@@ -5,16 +5,20 @@
 // beyond the logical count writes zeroed payload and scale and therefore
 // contributes nothing to the matrix product.
 
-config.decl @qwen_activation_quantize_blocked_k17408.token_capacity : %value: index where [range(%value, 1, 128)]
+config.decl @qwen_activation_quantize_blocked_k17408.token_capacity : %value: index where [range(%value, 1, 2048)]
 
 kernel.def @qwen_activation_quantize_blocked_k17408(%tokens: index) {
-  %capacity = index.constant 128 : index
+  %tile = index.constant 128 : index
+  %rounding = index.constant 127 : index
+  %rounded = index.add %tokens, %rounding : index
+  %groups = index.div %rounded, %tile : index
+  %capacity = index.mul %groups, %tile : index
   %unit = index.constant 1 : index
   %workgroup_size = index.constant 544 : index
   kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
 } launch(%tokens: index, %input: buffer, %output: buffer, %scales: buffer) {
   %base = index.constant 0 : offset
-  %token_count = index.assume %tokens [range(%tokens, 1, 128)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
   %token = kernel.workgroup.id<x> : index
   %block = kernel.workitem.id<x> : index
   %width = index.constant 17408 : index
@@ -24,8 +28,8 @@ kernel.def @qwen_activation_quantize_blocked_k17408(%tokens: index) {
   %loop_begin = index.constant 0 : index
   %tile = index.div %token, %token_tile_extent : index
   %tile_lane = index.rem %token, %token_tile_extent : index
-  %payload = buffer.view %output[%base] : buffer -> view<8x544x16x32xi8>
-  %scale_view = buffer.view %scales[%base] : buffer -> view<8x544x16xf32>
+  %payload = buffer.view %output[%base] : buffer -> view<128x544x16x32xi8>
+  %scale_view = buffer.view %scales[%base] : buffer -> view<128x544x16xf32>
   %element_base0 = index.mul %block, %vector_width : index
   %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %width)] : index
   %token_live = index.cmp ult, %token, %token_count : index
@@ -47,13 +51,13 @@ kernel.def @qwen_activation_quantize_blocked_k17408(%tokens: index) {
     %scaled = vector.mulf<reassoc|nnan|ninf|nsz> %values, %inverse_vector : vector<32xf32>
     %rounded = vector.roundevenf %scaled : vector<32xf32>
     %quantized = vector.fptosi %rounded : vector<32xf32> to vector<32xi8>
-    vector.store %quantized, %payload[%tile, %block, %tile_lane, %loop_begin] : vector<32xi8>, view<8x544x16x32xi8>
-    view.store %safe_scale, %scale_view[%tile, %block, %tile_lane] : f32, view<8x544x16xf32>
+    vector.store %quantized, %payload[%tile, %block, %tile_lane, %loop_begin] : vector<32xi8>, view<128x544x16x32xi8>
+    view.store %safe_scale, %scale_view[%tile, %block, %tile_lane] : f32, view<128x544x16xf32>
   } else {
     %zero_payload = vector.constant 0 : vector<32xi8>
     %zero_scale = scalar.constant 0.0 : f32
-    vector.store %zero_payload, %payload[%tile, %block, %tile_lane, %loop_begin] : vector<32xi8>, view<8x544x16x32xi8>
-    view.store %zero_scale, %scale_view[%tile, %block, %tile_lane] : f32, view<8x544x16xf32>
+    vector.store %zero_payload, %payload[%tile, %block, %tile_lane, %loop_begin] : vector<32xi8>, view<128x544x16x32xi8>
+    view.store %zero_scale, %scale_view[%tile, %block, %tile_lane] : f32, view<128x544x16xf32>
   }
   kernel.return
 }

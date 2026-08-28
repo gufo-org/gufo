@@ -2,7 +2,7 @@
 // One workgroup normalizes one 5120-wide token row, so a whole prefill chunk
 // costs a single dispatch instead of one dispatch per token.
 
-config.decl @qwen_rmsnorm_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+config.decl @qwen_rmsnorm_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
 
 kernel.def @qwen_rmsnorm_batch_f32(%tokens: index) {
   %capacity = config.get @qwen_rmsnorm_batch_f32.token_capacity : index
@@ -12,7 +12,7 @@ kernel.def @qwen_rmsnorm_batch_f32(%tokens: index) {
 } launch(%tokens: index, %input: buffer, %gamma: buffer, %output: buffer) {
   %base = index.constant 0 : offset
   %capacity = config.get @qwen_rmsnorm_batch_f32.token_capacity : index
-  %token_count = index.assume %tokens [range(%tokens, 1, 128), le(%tokens, %capacity)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048), le(%tokens, %capacity)] : index
   %token = kernel.workgroup.id<x> : index
   %token_in_bounds = index.cmp ult, %token, %token_count : index
   scf.if %token_in_bounds {

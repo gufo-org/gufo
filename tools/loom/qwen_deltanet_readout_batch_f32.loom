@@ -7,7 +7,7 @@
 // gate    : token-major gate projection, %tokens rows of 6144 f32
 // output  : token-major result, %tokens rows of 6144 f32
 
-config.decl @qwen_deltanet_readout_batch_f32.token_capacity : %value: index where [range(%value, 1, 128)]
+config.decl @qwen_deltanet_readout_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
 
 kernel.def @qwen_deltanet_readout_batch_f32(%tokens: index) {
   %capacity = config.get @qwen_deltanet_readout_batch_f32.token_capacity : index
@@ -19,7 +19,7 @@ kernel.def @qwen_deltanet_readout_batch_f32(%tokens: index) {
 } launch(%tokens: index, %readout: buffer, %norm: buffer, %gate: buffer, %output: buffer) {
   %base = index.constant 0 : offset
   %capacity = config.get @qwen_deltanet_readout_batch_f32.token_capacity : index
-  %token_count = index.assume %tokens [range(%tokens, 1, 128), le(%tokens, %capacity)] : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048), le(%tokens, %capacity)] : index
   %group = kernel.workgroup.id<x> : index
   %row = kernel.workitem.id<x> : index
   %heads = index.constant 48 : index
@@ -33,11 +33,11 @@ kernel.def @qwen_deltanet_readout_batch_f32(%tokens: index) {
     %head_base = index.mul %head, %dim : index
     %element_base = index.add %token_base, %head_base : index
     %element = index.add %element_base, %row : index
-    %readout_view = buffer.view %readout[%base] : buffer -> view<786432xf32>
+    %readout_view = buffer.view %readout[%base] : buffer -> view<12582912xf32>
     %norm_view = buffer.view %norm[%base] : buffer -> view<128xf32>
-    %gate_view = buffer.view %gate[%base] : buffer -> view<786432xf32>
-    %output_view = buffer.view %output[%base] : buffer -> view<786432xf32>
-    %value = view.load %readout_view[%element] : view<786432xf32> -> f32
+    %gate_view = buffer.view %gate[%base] : buffer -> view<12582912xf32>
+    %output_view = buffer.view %output[%base] : buffer -> view<12582912xf32>
+    %value = view.load %readout_view[%element] : view<12582912xf32> -> f32
     %value_sq = scalar.mulf<reassoc|nnan|ninf|nsz> %value, %value : f32
     %sum = kernel.workgroup.reduce<addf> %value_sq : f32
     %val_width = scalar.constant 128.0 : f32
@@ -46,7 +46,7 @@ kernel.def @qwen_deltanet_readout_batch_f32(%tokens: index) {
     %variance = scalar.addf<reassoc|nnan|ninf|nsz> %mean, %epsilon : f32
     %inverse = scalar.rsqrtf<afn> %variance : f32
     %norm_weight = view.load %norm_view[%row] : view<128xf32> -> f32
-    %gate_value = view.load %gate_view[%element] : view<786432xf32> -> f32
+    %gate_value = view.load %gate_view[%element] : view<12582912xf32> -> f32
     %negative_gate = scalar.negf %gate_value : f32
     %gate_exp = scalar.expf<afn> %negative_gate : f32
     %one = scalar.constant 1.0 : f32
@@ -56,7 +56,7 @@ kernel.def @qwen_deltanet_readout_batch_f32(%tokens: index) {
     %normed = scalar.mulf<reassoc|nnan|ninf|nsz> %value, %inverse : f32
     %weighted = scalar.mulf<reassoc|nnan|ninf|nsz> %normed, %norm_weight : f32
     %result = scalar.mulf<reassoc|nnan|ninf|nsz> %weighted, %silu_gate : f32
-    view.store %result, %output_view[%element] : f32, view<786432xf32>
+    view.store %result, %output_view[%element] : f32, view<12582912xf32>
   }
   kernel.return
 }

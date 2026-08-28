@@ -1077,12 +1077,15 @@ bool QwenHrxExecutor::DispatchActivationQuantizeBlocked(
   }
   const auto input_bytes =
       CheckedBytes({tokens, input_elements, sizeof(float)});
-  // The artifact always writes the full physical tile so padded token columns
-  // hold zeroed payload and scales.
-  const auto payload_bytes =
-      CheckedBytes({kHrxPrefillChunkTokens, input_elements});
+  constexpr std::uint32_t kTokensPerMacroTile = 128;
+  const std::uint32_t physical_tokens =
+      ((tokens + kTokensPerMacroTile - 1) / kTokensPerMacroTile) *
+      kTokensPerMacroTile;
+  // Quantize complete 128-token macro tiles. Only the final tile's padding is
+  // zeroed, so PP128 does not pay for the full 2048-token arena capacity.
+  const auto payload_bytes = CheckedBytes({physical_tokens, input_elements});
   const auto scale_bytes = CheckedBytes(
-      {kHrxPrefillChunkTokens, input_elements / 32, sizeof(float)});
+      {physical_tokens, input_elements / 32, sizeof(float)});
   hrx_buffer_ref_t bindings[3];
   if (!TryBindOperand(input, input_bytes, &bindings[0]) ||
       !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
@@ -1092,7 +1095,7 @@ bool QwenHrxExecutor::DispatchActivationQuantizeBlocked(
     return false;
   }
   hrx_dispatch_config_t config{};
-  config.workgroup_count[0] = kHrxPrefillChunkTokens;
+  config.workgroup_count[0] = physical_tokens;
   config.workgroup_count[1] = 1;
   config.workgroup_count[2] = 1;
   config.workgroup_size[0] = input_elements / 32;
@@ -1136,11 +1139,13 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
     return false;
   }
   constexpr std::uint32_t kRowsPerGroup = 128;
+  constexpr std::uint32_t kTokensPerGroup = 128;
+  const std::uint32_t physical_tokens =
+      ((tokens + kTokensPerGroup - 1) / kTokensPerGroup) * kTokensPerGroup;
   const auto weight_bytes = Q8_0MatrixBytes(rows, input_elements);
-  const auto payload_bytes =
-      CheckedBytes({kHrxPrefillChunkTokens, input_elements});
+  const auto payload_bytes = CheckedBytes({physical_tokens, input_elements});
   const auto scale_bytes = CheckedBytes(
-      {kHrxPrefillChunkTokens, input_elements / 32, sizeof(float)});
+      {physical_tokens, input_elements / 32, sizeof(float)});
   const auto output_bytes = CheckedBytes({tokens, rows, sizeof(float)});
   hrx_buffer_ref_t bindings[4];
   if (!TryBindOperand(weight, weight_bytes, &bindings[0]) ||
@@ -1152,8 +1157,11 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
     return false;
   }
   hrx_dispatch_config_t config{};
-  config.workgroup_count[0] = (rows + kRowsPerGroup - 1) / kRowsPerGroup;
-  config.workgroup_count[1] = 1;
+  // Token tiles are the fastest-varying dimension: the tiles that share a row
+  // group's weight panel then run together and reuse it from cache rather than
+  // each streaming the panel from DRAM.
+  config.workgroup_count[0] = physical_tokens / kTokensPerGroup;
+  config.workgroup_count[1] = (rows + kRowsPerGroup - 1) / kRowsPerGroup;
   config.workgroup_count[2] = 1;
   config.workgroup_size[0] = 256;
   config.workgroup_size[1] = 1;
@@ -1833,6 +1841,22 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
 bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
                                            std::uint32_t tokens,
                                            std::string* error_msg) {
+  const bool trace_ssm =
+      layer_index == 0 && std::getenv("GUFO_HRX_TRACE_SSM") != nullptr;
+  auto trace_start = std::chrono::steady_clock::now();
+  const auto trace_stage = [&](std::string_view stage) {
+    if (!trace_ssm) {
+      return true;
+    }
+    const auto status = hrx_stream_synchronize(backend_.Stream());
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed_ms =
+        std::chrono::duration<double, std::milli>(now - trace_start).count();
+    trace_start = now;
+    std::cerr << "[HRX SSM substage] tokens=" << tokens << " stage=" << stage
+              << " ms=" << elapsed_ms << '\n';
+    return hrx_status_is_ok(status);
+  };
   const auto& bindings = model_->GetNativeBindings();
   const auto& layer = bindings.layers[layer_index];
   const auto batch_hidden = arena_->Binding(batch_hidden_primary_
@@ -1874,6 +1898,9 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
                             tokens)) {
     return Reject("batched SSM RMSNorm failed", error_msg);
   }
+  if (!trace_stage("norm")) {
+    return Reject("batched SSM norm synchronization failed", error_msg);
+  }
   if (!layer.ssm_alpha_beta.IsValid()) {
     return Reject("batched SSM requires adjacent alpha/beta weights",
                   error_msg);
@@ -1885,15 +1912,34 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
                                   static_cast<std::uint32_t>(hidden), tokens)) {
     return Reject("batched SSM activation quantization failed", error_msg);
   }
+  if (!trace_stage("input-quant")) {
+    return Reject("batched SSM input quantization synchronization failed",
+                  error_msg);
+  }
   if (!DispatchChunkProjection(layer.attn_qkv, batch_normed, batch_qkv,
-                               contract_.SsmQkvWidth(), hidden, tokens) ||
-      !DispatchChunkProjection(layer.attn_gate, batch_normed, batch_gate,
-                               contract_.SsmGateWidth(), hidden, tokens) ||
-      !DispatchChunkProjection(layer.ssm_alpha_beta, batch_normed,
-                               batch_alpha_beta,
-                               static_cast<std::uint32_t>(2 * alpha_beta_width),
-                               hidden, tokens)) {
-    return Reject("batched SSM projection failed", error_msg);
+                               contract_.SsmQkvWidth(), hidden, tokens)) {
+    return Reject("batched SSM QKV projection failed", error_msg);
+  }
+  if (!trace_stage("qkv-projection")) {
+    return Reject("batched SSM QKV projection synchronization failed",
+                  error_msg);
+  }
+  if (!DispatchChunkProjection(layer.attn_gate, batch_normed, batch_gate,
+                               contract_.SsmGateWidth(), hidden, tokens)) {
+    return Reject("batched SSM gate projection failed", error_msg);
+  }
+  if (!trace_stage("gate-projection")) {
+    return Reject("batched SSM gate projection synchronization failed",
+                  error_msg);
+  }
+  if (!DispatchChunkProjection(
+          layer.ssm_alpha_beta, batch_normed, batch_alpha_beta,
+          static_cast<std::uint32_t>(2 * alpha_beta_width), hidden, tokens)) {
+    return Reject("batched SSM alpha/beta projection failed", error_msg);
+  }
+  if (!trace_stage("alpha-beta-projection")) {
+    return Reject("batched SSM alpha/beta projection synchronization failed",
+                  error_msg);
   }
 
   // The convolution and the alpha/beta preparation stay per token because the
@@ -1914,6 +1960,10 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
         !DispatchSsmConvBatch(batch_qkv, layer.ssm_conv1d, *conv_state,
                               batch_conv, tokens)) {
       return Reject("batched SSM front end failed", error_msg);
+    }
+    if (!trace_stage("prepare+conv")) {
+      return Reject("batched SSM front-end synchronization failed",
+                    error_msg);
     }
   } else {
     for (std::uint32_t token = 0; token < tokens; ++token) {
@@ -1949,13 +1999,24 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
       }
     }
   }
-  if (batched_deltanet &&
-      (!DispatchDeltaNetRecurrenceBatch(batch_conv, batch_alpha_beta,
-                                        *recurrent_state, batch_readout,
-                                        tokens) ||
-       !DispatchDeltaNetReadoutBatch(batch_readout, layer.ssm_norm, batch_gate,
-                                     batch_context, tokens))) {
-    return Reject("batch-native DeltaNet recurrence failed", error_msg);
+  if (batched_deltanet) {
+    if (!DispatchDeltaNetRecurrenceBatch(batch_conv, batch_alpha_beta,
+                                         *recurrent_state, batch_readout,
+                                         tokens)) {
+      return Reject("batch-native DeltaNet recurrence failed", error_msg);
+    }
+    if (!trace_stage("recurrence")) {
+      return Reject("batch-native DeltaNet recurrence synchronization failed",
+                    error_msg);
+    }
+    if (!DispatchDeltaNetReadoutBatch(batch_readout, layer.ssm_norm, batch_gate,
+                                      batch_context, tokens)) {
+      return Reject("batch-native DeltaNet readout failed", error_msg);
+    }
+    if (!trace_stage("readout")) {
+      return Reject("batch-native DeltaNet readout synchronization failed",
+                    error_msg);
+    }
   }
 
   if (int8_route &&
@@ -1963,13 +2024,24 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
                                   tokens)) {
     return Reject("batched SSM context quantization failed", error_msg);
   }
+  if (!trace_stage("context-quant")) {
+    return Reject("batched SSM context quantization synchronization failed",
+                  error_msg);
+  }
   if (!DispatchChunkProjection(layer.ssm_out, batch_context, batch_projected,
                                hidden, contract_.SsmGateWidth(), tokens)) {
     return Reject("batched SSM output projection failed", error_msg);
   }
+  if (!trace_stage("output-projection")) {
+    return Reject("batched SSM output projection synchronization failed",
+                  error_msg);
+  }
   if (!DispatchResidualAddBatch(batch_hidden, batch_projected, batch_normed,
                                 tokens * static_cast<std::uint32_t>(hidden))) {
     return Reject("batched SSM residual add failed", error_msg);
+  }
+  if (!trace_stage("residual")) {
+    return Reject("batched SSM residual synchronization failed", error_msg);
   }
   batch_hidden_primary_ = !batch_hidden_primary_;
   return true;
@@ -1978,6 +2050,22 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
 bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
                                            std::uint32_t tokens,
                                            std::string* error_msg) {
+  const bool trace_ffn =
+      layer_index == 0 && std::getenv("GUFO_HRX_TRACE_FFN") != nullptr;
+  auto trace_start = std::chrono::steady_clock::now();
+  const auto trace_stage = [&](std::string_view stage) {
+    if (!trace_ffn) {
+      return true;
+    }
+    const auto status = hrx_stream_synchronize(backend_.Stream());
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed_ms =
+        std::chrono::duration<double, std::milli>(now - trace_start).count();
+    trace_start = now;
+    std::cerr << "[HRX FFN substage] tokens=" << tokens << " stage=" << stage
+              << " ms=" << elapsed_ms << '\n';
+    return hrx_status_is_ok(status);
+  };
   const auto& bindings = model_->GetNativeBindings();
   const auto& layer = bindings.layers[layer_index];
   if (!layer.ffn_gate_up.IsValid()) {
@@ -2006,6 +2094,9 @@ bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
                             tokens)) {
     return Reject("batched FFN RMSNorm failed", error_msg);
   }
+  if (!trace_stage("norm")) {
+    return Reject("batched FFN norm synchronization failed", error_msg);
+  }
   const bool int8_route =
       UsesBlockedPrefill() || (policy_.int8_prefill && Int8PrefillReady());
   if (int8_route &&
@@ -2013,15 +2104,25 @@ bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
                                   static_cast<std::uint32_t>(hidden), tokens)) {
     return Reject("batched FFN activation quantization failed", error_msg);
   }
+  if (!trace_stage("input-quant")) {
+    return Reject("batched FFN input quantization synchronization failed",
+                  error_msg);
+  }
   if (!DispatchChunkProjection(layer.ffn_gate_up, batch_normed, batch_gate_up,
                                static_cast<std::uint32_t>(2 * ffn), hidden,
                                tokens)) {
     return Reject("batched FFN gate/up projection failed", error_msg);
   }
+  if (!trace_stage("gate-up-projection")) {
+    return Reject("batched FFN gate/up synchronization failed", error_msg);
+  }
   if (!DispatchSwiGLUPointwiseBatch(
           batch_gate_up, batch_activation,
           tokens * static_cast<std::uint32_t>(ffn))) {
     return Reject("batched FFN SwiGLU failed", error_msg);
+  }
+  if (!trace_stage("swiglu")) {
+    return Reject("batched FFN SwiGLU synchronization failed", error_msg);
   }
   if (int8_route &&
       !DispatchChunkQuantize(batch_activation,
@@ -2029,14 +2130,24 @@ bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
     return Reject("batched FFN activation payload quantization failed",
                   error_msg);
   }
+  if (!trace_stage("activation-quant")) {
+    return Reject("batched FFN activation quantization synchronization failed",
+                  error_msg);
+  }
   if (!DispatchChunkProjection(layer.ffn_down, batch_activation,
                                batch_projected, hidden,
                                static_cast<std::uint32_t>(ffn), tokens)) {
     return Reject("batched FFN down projection failed", error_msg);
   }
+  if (!trace_stage("down-projection")) {
+    return Reject("batched FFN down synchronization failed", error_msg);
+  }
   if (!DispatchResidualAddBatch(batch_hidden, batch_projected, batch_normed,
                                 tokens * static_cast<std::uint32_t>(hidden))) {
     return Reject("batched FFN residual add failed", error_msg);
+  }
+  if (!trace_stage("residual")) {
+    return Reject("batched FFN residual synchronization failed", error_msg);
   }
   batch_hidden_primary_ = !batch_hidden_primary_;
   return true;
