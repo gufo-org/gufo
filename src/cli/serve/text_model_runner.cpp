@@ -231,8 +231,13 @@ struct TextRunnerPool::Request::Impl {
         prefill_offset(lease.cached_tokens()),
         decode_ready(prefill_offset == prompt.size()),
         rng_state(MakeRngState()) {
-    dynamic_cast<TextRunnerState&>(lease.state())
-        .SetCancellationCheck(is_cancelled);
+    auto& state = dynamic_cast<TextRunnerState&>(lease.state());
+    state.SetCancellationCheck(is_cancelled);
+    if (lease.cache_hit()) {
+      runner->PreparePrefixReuse(
+          state,
+          std::span<const TextRunnerToken>(prompt).first(prefill_offset));
+    }
   }
 
   std::shared_ptr<TextModelRunner> runner;

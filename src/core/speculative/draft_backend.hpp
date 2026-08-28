@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -16,6 +18,9 @@ namespace gufo::speculative {
 /// Represents a speculative draft proposal block
 struct DraftProposal {
   std::vector<tokenization::TokenId> tokens;
+  std::vector<tokenization::TokenId> candidate_ids;
+  std::vector<float> candidate_probabilities;
+  std::size_t candidates_per_token{0};
   float confidence{1.0F};
   std::uint32_t start_pos{0};
 };
@@ -25,6 +30,19 @@ struct DraftTargetContext {
   std::span<const float> prompt_hidden_states;
   std::size_t hidden_size{0};
   tokenization::TokenId first_token{0};
+};
+
+class IDraftBackendSnapshot {
+public:
+  IDraftBackendSnapshot() = default;
+  virtual ~IDraftBackendSnapshot() = default;
+
+  IDraftBackendSnapshot(const IDraftBackendSnapshot&) = delete;
+  IDraftBackendSnapshot& operator=(const IDraftBackendSnapshot&) = delete;
+  IDraftBackendSnapshot(IDraftBackendSnapshot&&) = delete;
+  IDraftBackendSnapshot& operator=(IDraftBackendSnapshot&&) = delete;
+
+  [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
 };
 
 /// Provider-neutral interface for draft token generators (NPU, MTP heads, small
@@ -40,6 +58,21 @@ public:
   [[nodiscard]] virtual DraftProposal Propose(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens) = 0;
+
+  /// Samples proposals from the draft distribution and returns each sparse
+  /// proposal row needed by lossless speculative rejection sampling.
+  [[nodiscard]] virtual DraftProposal ProposeSampled(
+      std::span<const tokenization::TokenId> prompt_tokens,
+      std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+      std::uint64_t* rng_state) {
+    (void)prompt_tokens;
+    (void)current_pos;
+    (void)max_tokens;
+    (void)temperature;
+    (void)rng_state;
+    throw std::logic_error(
+        "draft backend does not support lossless sampled proposals");
+  }
 
   /// Returns true when the backend consumes target-model hidden states.
   [[nodiscard]] virtual bool RequiresTargetHiddenStates() const noexcept {
@@ -71,6 +104,15 @@ public:
                               tokenization::TokenId correction_token) {
     (void)accepted;
     (void)correction_token;
+  }
+
+  [[nodiscard]] virtual std::unique_ptr<IDraftBackendSnapshot> Snapshot()
+      const {
+    throw std::logic_error("draft backend does not support snapshots");
+  }
+
+  virtual void RestoreSnapshot(const IDraftBackendSnapshot&) {
+    throw std::logic_error("draft backend does not support snapshot restore");
   }
 
   /// Resets internal draft generator state

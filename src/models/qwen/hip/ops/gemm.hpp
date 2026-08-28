@@ -233,6 +233,13 @@ void LaunchBatchedGEMM(const void* A, bool is_bf16, const float* X, float* Y,
                        std::size_t batch_size, std::size_t M, std::size_t K,
                        hipStream_t stream = nullptr);
 
+/// Exact small-batch BF16-weight GEMM with FP32 activations. The per-output
+/// accumulation order matches the decode GEMV while activation tiles are
+/// shared across the batch.
+void LaunchExactBf16GEMMFp32Batch8(const void* A, const float* X, float* Y,
+                                   std::size_t M, std::size_t K,
+                                   hipStream_t stream = nullptr);
+
 /// Converts float buffer to bfloat16 buffer on GPU
 void LaunchFloatToBfloat16(const float* in, void* out, std::size_t num_elements,
                            hipStream_t stream = nullptr);

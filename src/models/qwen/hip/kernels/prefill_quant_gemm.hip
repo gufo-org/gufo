@@ -56,6 +56,30 @@ using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
   return enabled;
 }
 
+[[nodiscard]] bool UseExactSharedQ8PackedWeights() noexcept {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_Q8_SMALL_BATCH_EXACT_PACKED");
+    if (value == nullptr) {
+      return true;
+    }
+    const std::string_view setting{value};
+    return setting != "0" && setting != "false" && setting != "off";
+  }();
+  return enabled;
+}
+
+[[nodiscard]] bool UseExactSharedQ8Lds8() noexcept {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_Q8_SMALL_BATCH_EXACT_LDS8");
+    if (value == nullptr) {
+      return true;
+    }
+    const std::string_view setting{value};
+    return setting != "0" && setting != "false" && setting != "off";
+  }();
+  return enabled;
+}
+
 // Tiled Q8_1 activation layout (opt-c163-blocked-w8a8).
 //
 // Activations are written straight into WMMA B-fragment order so both the LDS
@@ -924,6 +948,167 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 }
 
+template<std::uint32_t WavesPerBlock>
+__launch_bounds__(WavesPerBlock * 32, 4) __global__
+    void SmallBatchQ8_0ExactFp32PackedFullGEMMKernel(
+        const void* __restrict__ w, const float* __restrict__ x,
+        float* __restrict__ y, std::size_t m, std::size_t k) {
+  constexpr std::size_t kTokensPerGroup = 4;
+  const std::size_t lane = threadIdx.x & 31u;
+  const std::size_t warp_id = threadIdx.x >> 5u;
+  const std::size_t row = (blockIdx.x * WavesPerBlock) + warp_id;
+  const std::size_t token_base = blockIdx.y * kTokensPerGroup;
+  if (row >= m) {
+    return;
+  }
+
+  const std::size_t num_blocks = k / kQ8_0BlockSize;
+  const auto* row_blocks =
+      static_cast<const Q8_0Block*>(w) + (row * num_blocks);
+  float sums[kTokensPerGroup] = {};
+
+  for (std::size_t block = lane; block < num_blocks; block += 32) {
+    const Q8_0Block& weights = row_blocks[block];
+    float block_dots[kTokensPerGroup] = {};
+#pragma unroll
+    for (std::size_t group = 0; group < kQ8_0BlockSize; group += 4) {
+      std::uint32_t packed = 0;
+      __builtin_memcpy(&packed, weights.qs + group, sizeof(packed));
+      const float q0 =
+          static_cast<float>(static_cast<std::int8_t>(packed & 0xFFU));
+      const float q1 =
+          static_cast<float>(static_cast<std::int8_t>((packed >> 8U) & 0xFFU));
+      const float q2 =
+          static_cast<float>(static_cast<std::int8_t>((packed >> 16U) & 0xFFU));
+      const float q3 =
+          static_cast<float>(static_cast<std::int8_t>((packed >> 24U) & 0xFFU));
+#pragma unroll
+      for (std::size_t token = 0; token < kTokensPerGroup; ++token) {
+        const float* input =
+            x + ((token_base + token) * k) + (block * kQ8_0BlockSize) + group;
+        const float4 values = *reinterpret_cast<const float4*>(input);
+        block_dots[token] += q0 * values.x;
+        block_dots[token] += q1 * values.y;
+        block_dots[token] += q2 * values.z;
+        block_dots[token] += q3 * values.w;
+      }
+    }
+    const float scale = __half2float(weights.d);
+#pragma unroll
+    for (std::size_t token = 0; token < kTokensPerGroup; ++token) {
+      sums[token] += scale * block_dots[token];
+    }
+  }
+
+#pragma unroll
+  for (std::size_t token = 0; token < kTokensPerGroup; ++token) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      sums[token] += __shfl_xor(sums[token], offset);
+    }
+  }
+
+  if (lane == 0) {
+#pragma unroll
+    for (std::size_t token = 0; token < kTokensPerGroup; ++token) {
+      y[((token_base + token) * m) + row] = sums[token];
+    }
+  }
+}
+
+template<std::uint32_t WavesPerBlock>
+__launch_bounds__(WavesPerBlock * 32, WavesPerBlock >= 32 ? 1 : 2) __global__
+    void SmallBatchQ8_0ExactFp32Lds8GEMMKernel(const void* __restrict__ w,
+                                               const float* __restrict__ x,
+                                               float* __restrict__ y,
+                                               std::size_t m, std::size_t k) {
+  constexpr std::size_t kTokensPerWave = 8;
+  constexpr std::size_t kStagedTokens = 4;
+  constexpr std::size_t kBlocksPerTile = 32;
+  constexpr std::size_t kPaddedBlockSize = kQ8_0BlockSize + 1;
+  constexpr std::size_t kTileStride = kBlocksPerTile * kPaddedBlockSize;
+  __shared__ float staged_x[kStagedTokens * kTileStride];
+
+  const std::size_t lane = threadIdx.x & 31u;
+  const std::size_t warp_id = threadIdx.x >> 5u;
+  const std::size_t row = (blockIdx.x * WavesPerBlock) + warp_id;
+  const std::size_t num_blocks = k / kQ8_0BlockSize;
+  const std::size_t safe_row = row < m ? row : m - 1;
+  const auto* row_blocks =
+      static_cast<const Q8_0Block*>(w) + (safe_row * num_blocks);
+  float sums[kTokensPerWave] = {};
+
+  for (std::size_t tile_base = 0; tile_base < num_blocks;
+       tile_base += kBlocksPerTile) {
+    for (std::size_t token_base = 0; token_base < kTokensPerWave;
+         token_base += kStagedTokens) {
+      constexpr std::size_t kTileElements =
+          kStagedTokens * kBlocksPerTile * kQ8_0BlockSize;
+      for (std::size_t flat = threadIdx.x; flat < kTileElements;
+           flat += blockDim.x) {
+        const std::size_t token = flat / (kBlocksPerTile * kQ8_0BlockSize);
+        const std::size_t within = flat % (kBlocksPerTile * kQ8_0BlockSize);
+        const std::size_t block = within / kQ8_0BlockSize;
+        const std::size_t element = within % kQ8_0BlockSize;
+        const std::size_t source_block = tile_base + block;
+        staged_x[(token * kTileStride) + (block * kPaddedBlockSize) + element] =
+            source_block < num_blocks
+                ? x[((token_base + token) * k) +
+                    (source_block * kQ8_0BlockSize) + element]
+                : 0.0F;
+      }
+      __syncthreads();
+
+      const std::size_t block = tile_base + lane;
+      if (row < m && block < num_blocks) {
+        const Q8_0Block& weights = row_blocks[block];
+        const float scale = __half2float(weights.d);
+        float block_dots[kStagedTokens] = {};
+#pragma unroll
+        for (std::size_t group = 0; group < kQ8_0BlockSize; group += 4) {
+          std::uint32_t packed = 0;
+          __builtin_memcpy(&packed, weights.qs + group, sizeof(packed));
+          const float q0 =
+              static_cast<float>(static_cast<std::int8_t>(packed & 0xFFU));
+          const float q1 = static_cast<float>(
+              static_cast<std::int8_t>((packed >> 8U) & 0xFFU));
+          const float q2 = static_cast<float>(
+              static_cast<std::int8_t>((packed >> 16U) & 0xFFU));
+          const float q3 = static_cast<float>(
+              static_cast<std::int8_t>((packed >> 24U) & 0xFFU));
+#pragma unroll
+          for (std::size_t token = 0; token < kStagedTokens; ++token) {
+            const float* input = staged_x + (token * kTileStride) +
+                                 (lane * kPaddedBlockSize) + group;
+            block_dots[token] += q0 * input[0];
+            block_dots[token] += q1 * input[1];
+            block_dots[token] += q2 * input[2];
+            block_dots[token] += q3 * input[3];
+          }
+        }
+#pragma unroll
+        for (std::size_t token = 0; token < kStagedTokens; ++token) {
+          sums[token_base + token] += scale * block_dots[token];
+        }
+      }
+      __syncthreads();
+    }
+  }
+
+#pragma unroll
+  for (std::size_t token = 0; token < kTokensPerWave; ++token) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      sums[token] += __shfl_xor(sums[token], offset);
+    }
+  }
+
+  if (lane == 0 && row < m) {
+#pragma unroll
+    for (std::size_t token = 0; token < kTokensPerWave; ++token) {
+      y[(token * m) + row] = sums[token];
+    }
+  }
+}
+
 template<std::uint32_t WavesPerBlock, std::size_t TokensPerWave>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
     void SmallBatchQ8KFp32GEMMKernel(const void* __restrict__ w,
@@ -1257,6 +1442,23 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
   if ((type == core::GgmlType::kQ8_0 || type == core::GgmlType::kQ8_K) &&
       batch > 1 && batch <= 8 && UseExactSharedQ8SmallBatchFp32()) {
     const dim3 block(static_cast<unsigned int>(kWarp * kWarpsPerBlock));
+    if (type == core::GgmlType::kQ8_0 && batch == 8 && UseExactSharedQ8Lds8()) {
+      constexpr std::size_t kLdsWarpsPerBlock = 32;
+      const unsigned int lds_blocks = static_cast<unsigned int>(
+          (m + kLdsWarpsPerBlock - 1) / kLdsWarpsPerBlock);
+      const dim3 lds_block(
+          static_cast<unsigned int>(kWarp * kLdsWarpsPerBlock));
+      SmallBatchQ8_0ExactFp32Lds8GEMMKernel<kLdsWarpsPerBlock>
+          <<<lds_blocks, lds_block, 0, stream>>>(w, fp32_x, y, m, k);
+      return;
+    }
+    if (type == core::GgmlType::kQ8_0 && batch == 4 &&
+        UseExactSharedQ8PackedWeights()) {
+      SmallBatchQ8_0ExactFp32PackedFullGEMMKernel<kWarpsPerBlock>
+          <<<static_cast<unsigned int>(num_blocks_x), block, 0, stream>>>(
+              w, fp32_x, y, m, k);
+      return;
+    }
     if (batch <= 2) {
       if (type == core::GgmlType::kQ8_0) {
         SmallBatchQ8_0ExactFp32GEMMKernel<kWarpsPerBlock, 2>

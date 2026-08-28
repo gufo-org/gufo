@@ -109,7 +109,7 @@ int main(int argc, const char* const* argv) {
     if (argc >= 3) {
       gufo::server::InferenceBackend speculative_backend;
       Expect(speculative_backend.load(
-                 model, &error, context, 1, {}, {},
+                 model, &error, context, 2, {}, {},
                  gufo::server::TextSpeculativeConfig{
                      .backend = gufo::server::TextSpeculativeBackend::kDFlash,
                      .draft_model_path = argv[2],
@@ -128,7 +128,81 @@ int main(int argc, const char* const* argv) {
       Expect(http_spec.draft_accepted_tokens <= http_spec.draft_tokens,
              "DFlash HTTP acceptance metrics are invalid");
       Expect(!http_spec.cache_hit,
-             "DFlash HTTP state must not use target-only prefix snapshots");
+             "first DFlash HTTP request must be a cache miss");
+
+      const auto sampled_spec = speculative_backend.complete(
+          "Choose an unusual English noun:", 8, 1.0F);
+      Expect(sampled_spec.completion_tokens > 0,
+             "sampled DFlash-enabled request produced no tokens");
+      Expect(sampled_spec.draft_tokens > 0,
+             "nonzero-temperature DFlash request bypassed drafting");
+      Expect(sampled_spec.draft_accepted_tokens <= sampled_spec.draft_tokens,
+             "sampled DFlash acceptance metrics are invalid");
+
+      const std::vector<gufo::tokenization::ChatMessage> spec_messages = {
+          {gufo::tokenization::ChatRole::kSystem,
+           "Answer with one short sentence.", "", ""},
+          {gufo::tokenization::ChatRole::kUser, "Name one primary color.", "",
+           ""},
+      };
+      const auto first_spec_chat =
+          speculative_backend.chat(spec_messages, 2, 0.0F);
+      Expect(!first_spec_chat.cache_hit,
+             "first DFlash chat request must be a cache miss");
+      Expect(first_spec_chat.cache_snapshot_bytes > 0,
+             "DFlash root must retain target and draft snapshots");
+
+      auto continued_spec_messages = spec_messages;
+      continued_spec_messages.emplace_back(
+          gufo::tokenization::ChatRole::kAssistant, first_spec_chat.text);
+      continued_spec_messages.emplace_back(gufo::tokenization::ChatRole::kUser,
+                                           "Name a different primary color.");
+      auto forked_spec_messages = spec_messages;
+      forked_spec_messages.emplace_back(
+          gufo::tokenization::ChatRole::kAssistant, first_spec_chat.text);
+      forked_spec_messages.emplace_back(gufo::tokenization::ChatRole::kUser,
+                                        "Name one warm primary color.");
+      const auto rendered_spec_continuation =
+          gufo::tokenization::QwenChatTemplate::Render(continued_spec_messages);
+      Expect(rendered_spec_continuation.has_value(),
+             "DFlash continuation prompt rendering");
+      const auto rendered_spec_fork =
+          gufo::tokenization::QwenChatTemplate::Render(forked_spec_messages);
+      Expect(rendered_spec_fork.has_value(), "DFlash fork prompt rendering");
+      const auto direct_spec_continuation = GenerateDirect(
+          *direct, model->GetTokenizer().Encode(*rendered_spec_continuation),
+          2);
+      const auto direct_spec_fork = GenerateDirect(
+          *direct, model->GetTokenizer().Encode(*rendered_spec_fork), 2);
+
+      gufo::server::ChatRequest continued_spec_request(continued_spec_messages);
+      continued_spec_request.client_id = "dflash-snapshot-branch-a";
+      gufo::server::ChatRequest forked_spec_request(forked_spec_messages);
+      forked_spec_request.client_id = "dflash-snapshot-branch-b";
+      auto pending_spec_continuation =
+          speculative_backend.start_chat(continued_spec_request, 2, 0.0F);
+      auto pending_spec_fork =
+          speculative_backend.start_chat(forked_spec_request, 2, 0.0F);
+      Expect(
+          pending_spec_continuation != nullptr && pending_spec_fork != nullptr,
+          "concurrent DFlash snapshot branches are admitted");
+      const auto cached_spec_continuation = pending_spec_continuation->Wait();
+      const auto cached_spec_fork = pending_spec_fork->Wait();
+      for (const auto* result :
+           {&cached_spec_continuation, &cached_spec_fork}) {
+        Expect(result->cache_hit,
+               "DFlash branch must restore the retained root");
+        Expect(result->cached_prompt_tokens > 0 &&
+                   result->cached_prompt_tokens < result->prompt_tokens,
+               "DFlash branch reports its reused prefix and cold suffix");
+        Expect(
+            result->cache_restore_bytes > 0 && result->cache_snapshot_bytes > 0,
+            "DFlash branch accounts immutable target and draft snapshots");
+      }
+      Expect(cached_spec_continuation.tokens == direct_spec_continuation,
+             "cached DFlash continuation differs from cold target execution");
+      Expect(cached_spec_fork.tokens == direct_spec_fork,
+             "forked DFlash continuation differs from cold target execution");
     }
 
     const std::vector<gufo::tokenization::ChatMessage> messages = {

@@ -102,7 +102,9 @@ void QwenGpuExecutor::Reset() noexcept {
   next_token_.reset();
   h_prompt_hidden_.clear();
   h_verification_hidden_.clear();
+  h_verification_logits_.clear();
   h_last_hidden_.clear();
+  last_verification_rows_ = 0;
   last_hidden_offset_ = 0;
   arena_.Reset();
   graph_executor_.Reset();
@@ -118,7 +120,9 @@ void QwenGpuExecutor::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
   next_token_.reset();
   h_prompt_hidden_.clear();
   h_verification_hidden_.clear();
+  h_verification_logits_.clear();
   h_last_hidden_.clear();
+  last_verification_rows_ = 0;
   last_hidden_offset_ = 0;
   arena_.RestoreSnapshot(snapshot);
   graph_executor_.Reset();
@@ -170,11 +174,25 @@ std::span<const float> QwenGpuExecutor::CopyLastLogits() {
   return h_logits_;
 }
 
+std::span<const float> QwenGpuExecutor::CopyVerificationLogits(
+    std::size_t row) {
+  if (row >= last_verification_rows_ || d_verification_logits_ == nullptr) {
+    throw std::out_of_range("Qwen verification logit row is unavailable");
+  }
+  HIP_CHECK(hipMemcpyAsync(
+      h_logits_.data(),
+      d_verification_logits_ + (row * weights_.config.vocab_size),
+      h_logits_.size() * sizeof(float), hipMemcpyDeviceToHost, arena_.stream));
+  HIP_CHECK(hipStreamSynchronize(arena_.stream));
+  return h_logits_;
+}
+
 void QwenGpuExecutor::SetPromptHiddenCapture(
     bool enabled, std::span<const std::uint32_t> target_layer_ids) {
   capture_prompt_hidden_ = enabled;
   h_prompt_hidden_.clear();
   h_verification_hidden_.clear();
+  h_verification_logits_.clear();
   arena_.SetTargetLayerCapture(enabled ? target_layer_ids
                                        : std::span<const std::uint32_t>{});
 }

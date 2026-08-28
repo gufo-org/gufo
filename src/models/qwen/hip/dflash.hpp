@@ -20,6 +20,37 @@
 
 namespace gufo::hip {
 
+class QwenDFlashGpuSnapshot final {
+public:
+  ~QwenDFlashGpuSnapshot();
+
+  QwenDFlashGpuSnapshot(const QwenDFlashGpuSnapshot&) = delete;
+  QwenDFlashGpuSnapshot& operator=(const QwenDFlashGpuSnapshot&) = delete;
+  QwenDFlashGpuSnapshot(QwenDFlashGpuSnapshot&&) = delete;
+  QwenDFlashGpuSnapshot& operator=(QwenDFlashGpuSnapshot&&) = delete;
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept {
+    return payload_bytes_;
+  }
+  [[nodiscard]] std::uint32_t ValidContext() const noexcept {
+    return valid_context_;
+  }
+
+private:
+  QwenDFlashGpuSnapshot() = default;
+
+  void* d_k_{nullptr};
+  void* d_v_{nullptr};
+  std::size_t elements_per_layer_{0};
+  std::uint32_t num_layers_{0};
+  std::uint32_t kv_width_{0};
+  std::uint32_t max_context_{0};
+  std::uint32_t valid_context_{0};
+  std::size_t payload_bytes_{0};
+
+  friend class QwenDFlashGpuExecutor;
+};
+
 /// Immutable GPU-visible DFlash / DFlash-2 model weights and topology.
 class QwenDFlashGpuModel final {
 public:
@@ -88,7 +119,15 @@ public:
   /// Executes non-causal parallel block diffusion drafting.
   [[nodiscard]] std::vector<tokenization::TokenId> ForwardBlock(
       tokenization::TokenId anchor_token, std::uint32_t current_pos,
-      std::uint32_t draft_count, std::vector<float>* out_confidences = nullptr);
+      std::uint32_t draft_count, float temperature = 0.0F,
+      std::span<const float> sample_uniforms = {},
+      std::vector<float>* out_confidences = nullptr,
+      std::vector<tokenization::TokenId>* out_candidate_ids = nullptr,
+      std::vector<float>* out_candidate_probabilities = nullptr);
+
+  [[nodiscard]] std::unique_ptr<QwenDFlashGpuSnapshot> SaveSnapshot() const;
+  void RestoreSnapshot(const QwenDFlashGpuSnapshot& snapshot);
+  [[nodiscard]] std::size_t StateBytes() const noexcept;
 
   [[nodiscard]] std::size_t GetHiddenSize() const noexcept {
     return model_->GetConfig().hidden_size;
@@ -143,6 +182,9 @@ private:
   float* d_selector_hidden_{nullptr};
   float* d_selector_partial_scores_{nullptr};
   std::uint32_t* d_selector_partial_ids_{nullptr};
+  std::uint32_t* d_selector_candidate_ids_{nullptr};
+  float* d_selector_candidate_probabilities_{nullptr};
+  float* d_selector_uniforms_{nullptr};
   float* d_confidences_{nullptr};
   std::uint32_t* d_out_token_{nullptr};
   hip_bfloat16* d_bf16_input_{nullptr};
@@ -194,15 +236,28 @@ public:
   [[nodiscard]] speculative::DraftProposal Propose(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens) override;
+  [[nodiscard]] speculative::DraftProposal ProposeSampled(
+      std::span<const tokenization::TokenId> prompt_tokens,
+      std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+      std::uint64_t* rng_state) override;
 
   void AcceptFeedback(std::span<const tokenization::TokenId> accepted,
                       tokenization::TokenId correction_token) override;
+
+  [[nodiscard]] std::unique_ptr<speculative::IDraftBackendSnapshot> Snapshot()
+      const override;
+  void RestoreSnapshot(
+      const speculative::IDraftBackendSnapshot& snapshot) override;
 
   void Reset() noexcept override;
 
 private:
   QwenDFlashGpuDraftBackend(std::unique_ptr<QwenDFlashGpuExecutor> executor,
                             QwenDFlashGpuDraftConfig config);
+  [[nodiscard]] speculative::DraftProposal ProposeImpl(
+      std::span<const tokenization::TokenId> prompt_tokens,
+      std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+      std::uint64_t* rng_state);
 
   std::unique_ptr<QwenDFlashGpuExecutor> executor_;
   QwenDFlashGpuDraftConfig config_;

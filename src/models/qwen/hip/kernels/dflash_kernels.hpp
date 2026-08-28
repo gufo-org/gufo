@@ -37,6 +37,8 @@ void LaunchDFlashSelectorStep(
     const void* predecessor_codebook_bf16, const void* successor_codebook_bf16,
     const std::uint32_t* predecessor_token, std::uint32_t* output_token,
     float* output_confidence, float* partial_scores, std::uint32_t* partial_ids,
+    float temperature, const float* sample_uniform,
+    std::uint32_t* candidate_ids, float* candidate_probabilities,
     std::uint32_t vocab_size, std::uint32_t selector_rank,
     std::uint32_t selector_top_k, hipStream_t stream);
 

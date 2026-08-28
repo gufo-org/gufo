@@ -119,6 +119,15 @@ void DebugDeviceTensor(std::string_view name, const float* device,
 
 }  // namespace
 
+QwenDFlashGpuSnapshot::~QwenDFlashGpuSnapshot() {
+  if (d_k_ != nullptr) {
+    (void)hipFree(d_k_);
+  }
+  if (d_v_ != nullptr) {
+    (void)hipFree(d_v_);
+  }
+}
+
 QwenDFlashGpuExecutor::QwenDFlashGpuExecutor(
     std::shared_ptr<const QwenDFlashGpuModel> model, std::uint32_t max_context)
     : model_(std::move(model)),
@@ -216,6 +225,10 @@ void QwenDFlashGpuExecutor::Allocate() {
       kernels::DFlashSelectorScratchElements(cfg.vocab_size);
   AllocateBuffer(d_selector_partial_scores_, selector_scratch_elements);
   AllocateBuffer(d_selector_partial_ids_, selector_scratch_elements);
+  AllocateBuffer(d_selector_candidate_ids_, block_size * df_cfg.selector_top_k);
+  AllocateBuffer(d_selector_candidate_probabilities_,
+                 block_size * df_cfg.selector_top_k);
+  AllocateBuffer(d_selector_uniforms_, block_size);
   AllocateBuffer(d_confidences_, block_size);
   AllocateBuffer(d_out_token_, block_size);
   AllocateBuffer(d_bf16_input_, block_size * intermediate_size);
@@ -375,6 +388,15 @@ void QwenDFlashGpuExecutor::Free() noexcept {
   if (d_selector_partial_ids_ != nullptr) {
     (void)hipFree(d_selector_partial_ids_);
   }
+  if (d_selector_candidate_ids_ != nullptr) {
+    (void)hipFree(d_selector_candidate_ids_);
+  }
+  if (d_selector_candidate_probabilities_ != nullptr) {
+    (void)hipFree(d_selector_candidate_probabilities_);
+  }
+  if (d_selector_uniforms_ != nullptr) {
+    (void)hipFree(d_selector_uniforms_);
+  }
   if (d_confidences_ != nullptr)
     (void)hipFree(d_confidences_);
   if (d_out_token_ != nullptr)
@@ -390,6 +412,91 @@ void QwenDFlashGpuExecutor::Free() noexcept {
     (void)hipStreamDestroy(stream_);
     stream_ = nullptr;
   }
+}
+
+std::size_t QwenDFlashGpuExecutor::StateBytes() const noexcept {
+  const std::size_t kv_width =
+      static_cast<std::size_t>(model_->GetConfig().num_key_value_heads) *
+      model_->GetConfig().head_dim;
+  return 2U * model_->GetDFlashConfig().num_layers * max_context_ * kv_width *
+         sizeof(float);
+}
+
+std::unique_ptr<QwenDFlashGpuSnapshot> QwenDFlashGpuExecutor::SaveSnapshot()
+    const {
+  const std::size_t kv_width =
+      static_cast<std::size_t>(model_->GetConfig().num_key_value_heads) *
+      model_->GetConfig().head_dim;
+  const std::size_t elements_per_layer =
+      static_cast<std::size_t>(injected_context_len_) * kv_width;
+  const std::size_t total_elements =
+      model_->GetDFlashConfig().num_layers * elements_per_layer;
+  const std::size_t bytes = total_elements * sizeof(float);
+
+  auto snapshot =
+      std::unique_ptr<QwenDFlashGpuSnapshot>(new QwenDFlashGpuSnapshot());
+  snapshot->elements_per_layer_ = elements_per_layer;
+  snapshot->num_layers_ = model_->GetDFlashConfig().num_layers;
+  snapshot->kv_width_ = static_cast<std::uint32_t>(kv_width);
+  snapshot->max_context_ = max_context_;
+  snapshot->valid_context_ = injected_context_len_;
+  snapshot->payload_bytes_ = 2U * bytes;
+
+  if (bytes == 0) {
+    return snapshot;
+  }
+  HIP_CHECK(hipMalloc(&snapshot->d_k_, bytes));
+  HIP_CHECK(hipMalloc(&snapshot->d_v_, bytes));
+  auto* snapshot_k = static_cast<float*>(snapshot->d_k_);
+  auto* snapshot_v = static_cast<float*>(snapshot->d_v_);
+  for (std::size_t layer = 0; layer < snapshot->num_layers_; ++layer) {
+    HIP_CHECK(hipMemcpyAsync(
+        snapshot_k + layer * elements_per_layer, d_injected_k_[layer],
+        elements_per_layer * sizeof(float), hipMemcpyDeviceToDevice, stream_));
+    HIP_CHECK(hipMemcpyAsync(
+        snapshot_v + layer * elements_per_layer, d_injected_v_[layer],
+        elements_per_layer * sizeof(float), hipMemcpyDeviceToDevice, stream_));
+  }
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  return snapshot;
+}
+
+void QwenDFlashGpuExecutor::RestoreSnapshot(
+    const QwenDFlashGpuSnapshot& snapshot) {
+  const std::size_t kv_width =
+      static_cast<std::size_t>(model_->GetConfig().num_key_value_heads) *
+      model_->GetConfig().head_dim;
+  const std::size_t expected_elements_per_layer =
+      static_cast<std::size_t>(snapshot.valid_context_) * kv_width;
+  if (snapshot.num_layers_ != model_->GetDFlashConfig().num_layers ||
+      snapshot.kv_width_ != kv_width || snapshot.max_context_ != max_context_ ||
+      snapshot.valid_context_ > max_context_ ||
+      snapshot.elements_per_layer_ != expected_elements_per_layer) {
+    throw std::invalid_argument(
+        "DFlash snapshot is incompatible with the executor");
+  }
+  const std::size_t bytes =
+      snapshot.elements_per_layer_ * snapshot.num_layers_ * sizeof(float);
+  if (bytes != 0 && (snapshot.d_k_ == nullptr || snapshot.d_v_ == nullptr)) {
+    throw std::invalid_argument("DFlash snapshot payload is incomplete");
+  }
+  const auto* snapshot_k = static_cast<const float*>(snapshot.d_k_);
+  const auto* snapshot_v = static_cast<const float*>(snapshot.d_v_);
+  for (std::size_t layer = 0; layer < snapshot.num_layers_; ++layer) {
+    if (snapshot.elements_per_layer_ == 0) {
+      continue;
+    }
+    HIP_CHECK(hipMemcpyAsync(d_injected_k_[layer],
+                             snapshot_k + layer * snapshot.elements_per_layer_,
+                             snapshot.elements_per_layer_ * sizeof(float),
+                             hipMemcpyDeviceToDevice, stream_));
+    HIP_CHECK(hipMemcpyAsync(d_injected_v_[layer],
+                             snapshot_v + layer * snapshot.elements_per_layer_,
+                             snapshot.elements_per_layer_ * sizeof(float),
+                             hipMemcpyDeviceToDevice, stream_));
+  }
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  injected_context_len_ = snapshot.valid_context_;
 }
 
 void QwenDFlashGpuExecutor::Reset() noexcept {
@@ -499,7 +606,10 @@ bool QwenDFlashGpuExecutor::InjectTargetContext(
 
 std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     tokenization::TokenId anchor_token, std::uint32_t current_pos,
-    std::uint32_t draft_count, std::vector<float>* out_confidences) {
+    std::uint32_t draft_count, float temperature,
+    std::span<const float> sample_uniforms, std::vector<float>* out_confidences,
+    std::vector<tokenization::TokenId>* out_candidate_ids,
+    std::vector<float>* out_candidate_probabilities) {
   const auto& weights = model_->GetWeights();
   const auto& cfg = model_->GetConfig();
   const auto& df_cfg = model_->GetDFlashConfig();
@@ -517,9 +627,23 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
 
   draft_count = std::min(draft_count,
                          df_cfg.block_size > 0 ? df_cfg.block_size - 1U : 0U);
+  if (!std::isfinite(temperature) || temperature < 0.0F) {
+    throw std::invalid_argument(
+        "DFlash sampling temperature must be finite and nonnegative");
+  }
+  if (temperature > 0.0F && sample_uniforms.size() < draft_count) {
+    throw std::invalid_argument(
+        "DFlash sampled drafting requires one random value per proposal");
+  }
   if (draft_count == 0) {
     if (out_confidences != nullptr) {
       out_confidences->clear();
+    }
+    if (out_candidate_ids != nullptr) {
+      out_candidate_ids->clear();
+    }
+    if (out_candidate_probabilities != nullptr) {
+      out_candidate_probabilities->clear();
     }
     return {};
   }
@@ -682,15 +806,30 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
   if (anchor_copy != hipSuccess) {
     throw std::runtime_error("DFlash GPU anchor upload failed");
   }
+  if (temperature > 0.0F) {
+    const auto uniform_copy = hipMemcpyAsync(
+        d_selector_uniforms_, sample_uniforms.data(),
+        draft_count * sizeof(float), hipMemcpyHostToDevice, stream_);
+    if (uniform_copy != hipSuccess) {
+      throw std::runtime_error("DFlash GPU sampling upload failed");
+    }
+  }
   for (std::size_t proposal = 0; proposal < draft_count; ++proposal) {
+    const std::size_t candidate_offset = proposal * df_cfg.selector_top_k;
     kernels::LaunchDFlashSelectorStep(
         d_logits_ + (proposal * vocab_size),
         d_selector_hidden_ + (proposal * df_cfg.selector_rank),
         weights.selector_predecessor.data, weights.selector_successor.data,
         d_out_token_ + proposal, d_out_token_ + proposal + 1U,
         d_confidences_ + proposal, d_selector_partial_scores_,
-        d_selector_partial_ids_, vocab_size, df_cfg.selector_rank,
-        df_cfg.selector_top_k, stream_);
+        d_selector_partial_ids_, temperature,
+        temperature > 0.0F ? d_selector_uniforms_ + proposal : nullptr,
+        temperature > 0.0F ? d_selector_candidate_ids_ + candidate_offset
+                           : nullptr,
+        temperature > 0.0F
+            ? d_selector_candidate_probabilities_ + candidate_offset
+            : nullptr,
+        vocab_size, df_cfg.selector_rank, df_cfg.selector_top_k, stream_);
   }
 
   const auto token_copy =
@@ -708,6 +847,29 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
         hipMemcpyDeviceToHost, stream_);
     if (confidence_copy != hipSuccess) {
       throw std::runtime_error("DFlash GPU confidence download failed");
+    }
+  }
+  const std::size_t candidate_count =
+      static_cast<std::size_t>(draft_count) * df_cfg.selector_top_k;
+  if (out_candidate_ids != nullptr) {
+    out_candidate_ids->resize(candidate_count);
+    const auto candidate_copy =
+        hipMemcpyAsync(out_candidate_ids->data(), d_selector_candidate_ids_,
+                       candidate_count * sizeof(tokenization::TokenId),
+                       hipMemcpyDeviceToHost, stream_);
+    if (candidate_copy != hipSuccess) {
+      throw std::runtime_error("DFlash GPU candidate download failed");
+    }
+  }
+  if (out_candidate_probabilities != nullptr) {
+    out_candidate_probabilities->resize(candidate_count);
+    const auto probability_copy = hipMemcpyAsync(
+        out_candidate_probabilities->data(),
+        d_selector_candidate_probabilities_, candidate_count * sizeof(float),
+        hipMemcpyDeviceToHost, stream_);
+    if (probability_copy != hipSuccess) {
+      throw std::runtime_error(
+          "DFlash GPU candidate probability download failed");
     }
   }
   if (hipStreamSynchronize(stream_) != hipSuccess) {

@@ -1,5 +1,6 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <ranges>
@@ -8,9 +9,33 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/sampling.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 
 namespace gufo::hip {
+namespace {
+
+class QwenDFlashDraftSnapshot final
+    : public speculative::IDraftBackendSnapshot {
+public:
+  QwenDFlashDraftSnapshot(std::unique_ptr<QwenDFlashGpuSnapshot> gpu_snapshot,
+                          std::vector<float> pending_target_features,
+                          bool primed)
+      : gpu_snapshot(std::move(gpu_snapshot)),
+        pending_target_features(std::move(pending_target_features)),
+        primed(primed) {}
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
+    return (gpu_snapshot != nullptr ? gpu_snapshot->PayloadBytes() : 0) +
+           pending_target_features.size() * sizeof(float);
+  }
+
+  std::unique_ptr<QwenDFlashGpuSnapshot> gpu_snapshot;
+  std::vector<float> pending_target_features;
+  bool primed{false};
+};
+
+}  // namespace
 
 QwenDFlashGpuDraftBackend::QwenDFlashGpuDraftBackend(
     std::unique_ptr<QwenDFlashGpuExecutor> executor,
@@ -98,6 +123,28 @@ bool QwenDFlashGpuDraftBackend::PrimeTargetContext(
 speculative::DraftProposal QwenDFlashGpuDraftBackend::Propose(
     std::span<const tokenization::TokenId> prompt_tokens,
     std::uint32_t current_pos, std::uint32_t max_tokens) {
+  return ProposeImpl(prompt_tokens, current_pos, max_tokens, 0.0F, nullptr);
+}
+
+speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeSampled(
+    std::span<const tokenization::TokenId> prompt_tokens,
+    std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+    std::uint64_t* rng_state) {
+  if (!std::isfinite(temperature) || temperature <= 0.0F) {
+    throw std::invalid_argument(
+        "DFlash sampled proposal temperature must be finite and positive");
+  }
+  if (rng_state == nullptr) {
+    throw std::invalid_argument("DFlash sampled proposal requires RNG state");
+  }
+  return ProposeImpl(prompt_tokens, current_pos, max_tokens, temperature,
+                     rng_state);
+}
+
+speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
+    std::span<const tokenization::TokenId> prompt_tokens,
+    std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+    std::uint64_t* rng_state) {
   if (!primed_ || prompt_tokens.empty() || current_pos == 0) {
     throw std::logic_error("DFlash GPU draft backend is not primed");
   }
@@ -137,8 +184,20 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::Propose(
   proposal_input_ = prompt_tokens.back();
   proposed_tokens_.clear();
 
-  proposed_tokens_ =
-      executor_->ForwardBlock(proposal_input_, current_pos, count);
+  std::vector<float> sample_uniforms;
+  if (temperature > 0.0F) {
+    sample_uniforms.reserve(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+      sample_uniforms.push_back(
+          static_cast<float>(sampling::Uniform(rng_state)));
+    }
+    proposal.candidates_per_token =
+        executor_->GetModel().GetDFlashConfig().selector_top_k;
+  }
+  proposed_tokens_ = executor_->ForwardBlock(
+      proposal_input_, current_pos, count, temperature, sample_uniforms,
+      nullptr, temperature > 0.0F ? &proposal.candidate_ids : nullptr,
+      temperature > 0.0F ? &proposal.candidate_probabilities : nullptr);
   proposal.tokens = proposed_tokens_;
   proposal_active_ = true;
   return proposal;
@@ -165,6 +224,42 @@ void QwenDFlashGpuDraftBackend::UpdateTargetHidden(
   }
   pending_target_features_.insert(pending_target_features_.end(),
                                   hidden.begin(), hidden.end());
+}
+
+std::unique_ptr<speculative::IDraftBackendSnapshot>
+QwenDFlashGpuDraftBackend::Snapshot() const {
+  if (proposal_active_) {
+    throw std::logic_error(
+        "DFlash snapshot requires a committed proposal boundary");
+  }
+  return std::make_unique<QwenDFlashDraftSnapshot>(
+      executor_->SaveSnapshot(), pending_target_features_, primed_);
+}
+
+void QwenDFlashGpuDraftBackend::RestoreSnapshot(
+    const speculative::IDraftBackendSnapshot& snapshot) {
+  const auto* dflash_snapshot =
+      dynamic_cast<const QwenDFlashDraftSnapshot*>(&snapshot);
+  if (dflash_snapshot == nullptr || dflash_snapshot->gpu_snapshot == nullptr) {
+    throw std::invalid_argument(
+        "DFlash draft snapshot is incompatible with the backend");
+  }
+  const std::size_t feature_width = executor_->GetTargetFeaturesSize();
+  if (feature_width == 0 ||
+      dflash_snapshot->pending_target_features.size() % feature_width != 0) {
+    throw std::invalid_argument(
+        "DFlash draft snapshot has malformed pending target features");
+  }
+  executor_->RestoreSnapshot(*dflash_snapshot->gpu_snapshot);
+  pending_target_features_ = dflash_snapshot->pending_target_features;
+  proposed_tokens_.clear();
+  proposal_checkpoint_ = executor_->GetInjectedContextLength() +
+                         static_cast<std::uint32_t>(
+                             pending_target_features_.size() / feature_width);
+  proposal_input_ = 0;
+  primed_ = dflash_snapshot->primed;
+  proposal_active_ = false;
+  last_error_.clear();
 }
 
 void QwenDFlashGpuDraftBackend::Reset() noexcept {

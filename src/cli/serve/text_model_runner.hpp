@@ -149,6 +149,13 @@ public:
 
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> CreateState()
       const = 0;
+  /// Reconciles model-private metadata after an exact mutable or restored
+  /// prefix is leased. The default runner state needs no additional work.
+  virtual void PreparePrefixReuse(
+      TextRunnerState& state, std::span<const TextRunnerToken> prefix) const {
+    (void)state;
+    (void)prefix;
+  }
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;

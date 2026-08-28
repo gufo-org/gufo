@@ -62,15 +62,6 @@ namespace {
   return start_layer;
 }
 
-[[nodiscard]] bool UseBatchedVerificationLmHead(bool fallback) noexcept {
-  const char* value = std::getenv("GUFO_SPEC_BATCH_LM_HEAD");
-  if (value == nullptr) {
-    return fallback;
-  }
-  const std::string_view setting{value};
-  return setting != "0" && setting != "false" && setting != "off";
-}
-
 }  // namespace
 
 tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
@@ -855,105 +846,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardVerificationChunk(
     std::span<const tokenization::TokenId> candidate_tokens,
-    std::uint32_t start_pos) {
-  const std::size_t batch_size = candidate_tokens.size();
-  if (batch_size == 0) {
-    h_verification_hidden_.clear();
-    return {};
-  }
-  const auto& config = weights_.config;
-  const std::size_t hidden_size = config.hidden_size;
-  const std::size_t vocab_size = config.vocab_size;
-  const float eps = 1e-6F;
-
-  replaying_ssm_state_ = false;
-  const std::size_t capture_offset = h_prompt_hidden_.size();
-
-  // 1. Run all 64 layers across all candidate tokens in a single parallel
-  // prefill chunk pass
-  verification_chunk_active_ = true;
-  try {
-    (void)ForwardPromptChunk(candidate_tokens, start_pos, false);
-  } catch (...) {
-    verification_chunk_active_ = false;
-    throw;
-  }
-  verification_chunk_active_ = false;
-  for (std::size_t row = 0; row < batch_size; ++row) {
-    arena_.MarkSsmReplayPosition(start_pos + static_cast<std::uint32_t>(row));
-  }
-  arena_.DisableSsmReplayCapture();
-  h_verification_hidden_.clear();
-  if (capture_prompt_hidden_) {
-    const std::size_t captured_layers =
-        std::max<std::size_t>(arena_.GetTargetLayerCapture().size(), 1U);
-    const std::size_t captured_elements =
-        batch_size * captured_layers * hidden_size;
-    if (h_prompt_hidden_.size() != capture_offset + captured_elements) {
-      throw std::runtime_error(
-          "verification target hidden-state capture is incomplete");
-    }
-    h_verification_hidden_.assign(
-        h_prompt_hidden_.begin() + static_cast<std::ptrdiff_t>(capture_offset),
-        h_prompt_hidden_.end());
-    h_prompt_hidden_.resize(capture_offset);
-  }
-
-  auto scratch = arena_.GetScratchView(batch_size);
-
-  // 2. Batched Output RMSNorm across all candidate tokens
-  LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
-                       static_cast<const float*>(weights_.output_norm.data),
-                       scratch.decode.normed.data(), arena_.d_scratch_bf16,
-                       batch_size, hidden_size, eps, arena_.stream);
-
-  // 3. Batched LM head GEMV & Argmax
-  auto* d_out_tokens = scratch.decode.sampled_token.data();
-  if (UseBatchedVerificationLmHead(verification_policy_.batched_lm_head)) {
-    EnsureVerificationLogits(batch_size);
-    if (weights_.output.type == core::GgmlType::kBF16) {
-      const bool used_lt = arena_.hipblaslt_gemm != nullptr &&
-                           arena_.hipblaslt_gemm->RunBf16(
-                               weights_.output.data, arena_.d_scratch_bf16,
-                               d_verification_logits_, batch_size, vocab_size,
-                               hidden_size, arena_.stream);
-      if (!used_lt) {
-        LaunchHipblasGEMMBF16(arena_.hipblas_handle, weights_.output.data,
-                              arena_.d_scratch_bf16, d_verification_logits_,
-                              batch_size, vocab_size, hidden_size,
-                              arena_.stream);
-      }
-    } else if (weights_.output.type == core::GgmlType::kF32) {
-      LaunchHipblasGEMM(arena_.hipblas_handle, weights_.output.data, false,
-                        scratch.decode.normed.data(), d_verification_logits_,
-                        batch_size, vocab_size, hidden_size,
-                        arena_.d_scratch_bf16, arena_.stream);
-    } else {
-      LaunchBatchedQuantGEMM(weights_.output.type, weights_.output.data,
-                             arena_.d_scratch_bf16, d_verification_logits_,
-                             batch_size, vocab_size, hidden_size,
-                             arena_.stream);
-    }
-    LaunchBatchedGPUArgmax(d_verification_logits_, d_out_tokens, batch_size,
-                           vocab_size, arena_.stream);
-  } else {
-    for (std::size_t b = 0; b < batch_size; ++b) {
-      LaunchGEMV(weights_.output.data, weights_.output.type,
-                 scratch.decode.normed.data() + (b * hidden_size),
-                 scratch.decode.logits.data(), vocab_size, hidden_size,
-                 arena_.stream, models::qwen::QwenGemmMode::kHipMtp);
-      LaunchGPUArgmax(scratch.decode.logits.data(), d_out_tokens + b,
-                      vocab_size, arena_.stream);
-    }
-  }
-
-  std::vector<tokenization::TokenId> predictions(batch_size, 0);
-  HIP_CHECK(hipMemcpyAsync(predictions.data(), d_out_tokens,
-                           batch_size * sizeof(tokenization::TokenId),
-                           hipMemcpyDeviceToHost, arena_.stream));
-  HIP_CHECK(hipStreamSynchronize(arena_.stream));
-
-  return predictions;
+    std::uint32_t start_pos, bool capture_logits) {
+  return ForwardDecodeEquivalentVerificationChunk(candidate_tokens, start_pos,
+                                                  capture_logits);
 }
 
 void QwenGpuExecutor::CommitVerificationChunk(

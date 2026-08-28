@@ -44,6 +44,7 @@ struct FakeStats {
   std::size_t snapshot_restores{0};
   std::size_t cancellation_bindings{0};
   std::size_t cancellation_clears{0};
+  std::vector<std::vector<TextRunnerToken>> prepared_prefixes;
   std::vector<std::size_t> prefill_spans;
   std::vector<TextRunnerToken> advanced_tokens;
   std::vector<std::vector<TextRunnerToken>> advanced_batches;
@@ -181,6 +182,16 @@ public:
     return std::make_unique<FakeState>(stats_, measured_bytes_);
   }
 
+  void PreparePrefixReuse(
+      TextRunnerState& state,
+      std::span<const TextRunnerToken> prefix) const override {
+    const auto& fake = RequireFakeState(state);
+    if (fake.position != prefix.size()) {
+      throw std::logic_error("fake retained prefix position mismatch");
+    }
+    stats_->prepared_prefixes.emplace_back(prefix.begin(), prefix.end());
+  }
+
   [[nodiscard]] TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
@@ -295,6 +306,10 @@ void TestBoundedPrefillDecodeAndPrefixReuse() {
     Expect(extension.cache_hit(), "exact extension reuses opaque state");
     Expect(extension.cached_prompt_tokens() == 6,
            "cache boundary includes advanced decode tokens");
+    Expect(
+        stats->prepared_prefixes ==
+            std::vector<std::vector<TextRunnerToken>>({{1, 2, 3, 4, 90, 91}}),
+        "runner prepares retained metadata before suffix prefill");
     const auto suffix = extension.Prefill(16);
     Expect(suffix.consumed_tokens == 2 && suffix.decode_ready,
            "only the uncached suffix is prefetched");

@@ -298,7 +298,10 @@ __global__ void dflash_selector_finalize_kernel(
     const hip_bfloat16* __restrict__ successor_codebook,
     const uint32_t* __restrict__ predecessor_token,
     uint32_t* __restrict__ output_token, float* __restrict__ output_confidence,
-    uint32_t partial_count, uint32_t selector_rank, uint32_t selector_top_k) {
+    float temperature, const float* __restrict__ sample_uniform,
+    uint32_t* __restrict__ candidate_ids,
+    float* __restrict__ candidate_probabilities, uint32_t partial_count,
+    uint32_t selector_rank, uint32_t selector_top_k) {
   __shared__ float shared_scores[kSelectorThreads * kMaxSelectorTopK];
   __shared__ uint32_t shared_ids[kSelectorThreads * kMaxSelectorTopK];
 
@@ -368,13 +371,51 @@ __global__ void dflash_selector_finalize_kernel(
     }
   }
 
-  *output_token = top_ids[best_index];
-  if (output_confidence != nullptr) {
+  if (candidate_ids != nullptr) {
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      candidate_ids[index] = top_ids[index];
+    }
+  }
+
+  if (temperature > 0.0F) {
+    float scaled_max = -INFINITY;
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      scaled_max = fmaxf(scaled_max, path_scores[index] / temperature);
+    }
     float denominator = 0.0F;
     for (uint32_t index = 0; index < selector_top_k; ++index) {
-      denominator += expf(path_scores[index] - best_score);
+      const float probability_weight =
+          expf((path_scores[index] / temperature) - scaled_max);
+      path_scores[index] = probability_weight;
+      denominator += probability_weight;
     }
-    *output_confidence = 1.0F / fmaxf(denominator, 1e-30F);
+    const float inverse_denominator = 1.0F / fmaxf(denominator, 1e-30F);
+    float threshold =
+        fminf(fmaxf(*sample_uniform, 0.0F), 0.99999994F) * denominator;
+    uint32_t sampled_index = selector_top_k - 1U;
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      const float probability = path_scores[index] * inverse_denominator;
+      if (candidate_probabilities != nullptr) {
+        candidate_probabilities[index] = probability;
+      }
+      threshold -= path_scores[index];
+      if (threshold <= 0.0F && sampled_index == selector_top_k - 1U) {
+        sampled_index = index;
+      }
+    }
+    *output_token = top_ids[sampled_index];
+    if (output_confidence != nullptr) {
+      *output_confidence = path_scores[sampled_index] * inverse_denominator;
+    }
+  } else {
+    *output_token = top_ids[best_index];
+    if (output_confidence != nullptr) {
+      float denominator = 0.0F;
+      for (uint32_t index = 0; index < selector_top_k; ++index) {
+        denominator += expf(path_scores[index] - best_score);
+      }
+      *output_confidence = 1.0F / fmaxf(denominator, 1e-30F);
+    }
   }
 }
 
@@ -385,7 +426,10 @@ __global__ void dflash_selector_step_kernel(
     const hip_bfloat16* __restrict__ successor_codebook,
     const uint32_t* __restrict__ predecessor_token,
     uint32_t* __restrict__ output_token, float* __restrict__ output_confidence,
-    uint32_t vocab_size, uint32_t selector_rank, uint32_t selector_top_k) {
+    float temperature, const float* __restrict__ sample_uniform,
+    uint32_t* __restrict__ candidate_ids,
+    float* __restrict__ candidate_probabilities, uint32_t vocab_size,
+    uint32_t selector_rank, uint32_t selector_top_k) {
   __shared__ float shared_scores[kSelectorThreads * kMaxSelectorTopK];
   __shared__ uint32_t shared_ids[kSelectorThreads * kMaxSelectorTopK];
 
@@ -471,13 +515,51 @@ __global__ void dflash_selector_step_kernel(
     }
   }
 
-  *output_token = top_ids[best_index];
-  if (output_confidence != nullptr) {
+  if (candidate_ids != nullptr) {
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      candidate_ids[index] = top_ids[index];
+    }
+  }
+
+  if (temperature > 0.0F) {
+    float scaled_max = -INFINITY;
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      scaled_max = fmaxf(scaled_max, path_scores[index] / temperature);
+    }
     float denominator = 0.0F;
     for (uint32_t index = 0; index < selector_top_k; ++index) {
-      denominator += expf(path_scores[index] - best_score);
+      const float probability_weight =
+          expf((path_scores[index] / temperature) - scaled_max);
+      path_scores[index] = probability_weight;
+      denominator += probability_weight;
     }
-    *output_confidence = 1.0F / fmaxf(denominator, 1e-30F);
+    const float inverse_denominator = 1.0F / fmaxf(denominator, 1e-30F);
+    float threshold =
+        fminf(fmaxf(*sample_uniform, 0.0F), 0.99999994F) * denominator;
+    uint32_t sampled_index = selector_top_k - 1U;
+    for (uint32_t index = 0; index < selector_top_k; ++index) {
+      const float probability = path_scores[index] * inverse_denominator;
+      if (candidate_probabilities != nullptr) {
+        candidate_probabilities[index] = probability;
+      }
+      threshold -= path_scores[index];
+      if (threshold <= 0.0F && sampled_index == selector_top_k - 1U) {
+        sampled_index = index;
+      }
+    }
+    *output_token = top_ids[sampled_index];
+    if (output_confidence != nullptr) {
+      *output_confidence = path_scores[sampled_index] * inverse_denominator;
+    }
+  } else {
+    *output_token = top_ids[best_index];
+    if (output_confidence != nullptr) {
+      float denominator = 0.0F;
+      for (uint32_t index = 0; index < selector_top_k; ++index) {
+        denominator += expf(path_scores[index] - best_score);
+      }
+      *output_confidence = 1.0F / fmaxf(denominator, 1e-30F);
+    }
   }
 }
 
@@ -537,6 +619,8 @@ void LaunchDFlashSelectorStep(
     const void* predecessor_codebook_bf16, const void* successor_codebook_bf16,
     const std::uint32_t* predecessor_token, std::uint32_t* output_token,
     float* output_confidence, float* partial_scores, std::uint32_t* partial_ids,
+    float temperature, const float* sample_uniform,
+    std::uint32_t* candidate_ids, float* candidate_probabilities,
     std::uint32_t vocab_size, std::uint32_t selector_rank,
     std::uint32_t selector_top_k, hipStream_t stream) {
   static const bool use_parallel = [] {
@@ -559,7 +643,8 @@ void LaunchDFlashSelectorStep(
         partial_scores, partial_ids, projected_hidden,
         static_cast<const hip_bfloat16*>(predecessor_codebook_bf16),
         static_cast<const hip_bfloat16*>(successor_codebook_bf16),
-        predecessor_token, output_token, output_confidence, partial_count,
+        predecessor_token, output_token, output_confidence, temperature,
+        sample_uniform, candidate_ids, candidate_probabilities, partial_count,
         selector_rank, selector_top_k);
     return;
   }
@@ -567,7 +652,8 @@ void LaunchDFlashSelectorStep(
       logits, projected_hidden,
       static_cast<const hip_bfloat16*>(predecessor_codebook_bf16),
       static_cast<const hip_bfloat16*>(successor_codebook_bf16),
-      predecessor_token, output_token, output_confidence, vocab_size,
+      predecessor_token, output_token, output_confidence, temperature,
+      sample_uniform, candidate_ids, candidate_probabilities, vocab_size,
       selector_rank, selector_top_k);
 }
 

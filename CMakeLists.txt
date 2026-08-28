@@ -425,6 +425,12 @@ if (BUILD_TESTING)
   set_tests_properties(text_model_runner_test PROPERTIES
     LABELS "cpu;server;runner;cache;state;lifecycle")
 
+  add_executable(logit_sampler_test tests/cli/logit_sampler_test.cpp)
+  target_link_libraries(logit_sampler_test PRIVATE gufo_core)
+  add_test(NAME logit_sampler_test COMMAND logit_sampler_test)
+  set_tests_properties(logit_sampler_test PROPERTIES
+    LABELS "cpu;server;sampling")
+
   add_executable(text_generation_scheduler_test
     tests/cli/text_generation_scheduler_test.cpp
     src/cli/serve/continuation_cache.cpp

@@ -36,6 +36,7 @@ struct SpeculativeOptions {
       AdaptiveDraftPolicy::kRollingAcceptanceRate};
   bool use_batched_verification{false};
   bool use_batched_lm_head{false};
+  bool retain_frontier_logits{false};
   int target_bf16_from_layer{-1};
   int target_fp32_from_layer{-1};
 };
@@ -58,7 +59,9 @@ struct SpeculativeStats {
 struct VerificationChunkResult {
   std::vector<tokenization::TokenId> predictions;
   std::vector<float> hidden_states;
+  std::vector<float> logits;
   std::size_t hidden_width{0};
+  std::size_t vocab_size{0};
 };
 
 class ISpeculativeTargetExecutor {
@@ -83,30 +86,50 @@ public:
     return {};
   }
   [[nodiscard]] virtual std::span<const float> CopyLastHidden() { return {}; }
+  [[nodiscard]] virtual std::span<const float> CopyLastLogits() { return {}; }
+  [[nodiscard]] virtual std::span<const float> CopyVerificationLogits(
+      std::size_t row) {
+    (void)row;
+    return {};
+  }
   [[nodiscard]] virtual VerificationChunkResult ForwardVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,
-      std::uint32_t start_pos, bool capture_hidden) {
+      std::uint32_t start_pos, bool capture_hidden, bool capture_logits) {
     VerificationChunkResult result;
     result.predictions.reserve(candidate_tokens.size());
     std::uint32_t pos = start_pos;
     for (auto tok : candidate_tokens) {
       result.predictions.push_back(ForwardToken(tok, pos++));
       if (!capture_hidden) {
-        continue;
+      } else {
+        const auto hidden = CopyLastHidden();
+        if (hidden.empty()) {
+          throw std::runtime_error(
+              "target executor did not capture a verification hidden state");
+        }
+        if (result.hidden_width == 0) {
+          result.hidden_width = hidden.size();
+        } else if (result.hidden_width != hidden.size()) {
+          throw std::runtime_error(
+              "verification hidden-state width changed within a chunk");
+        }
+        result.hidden_states.insert(result.hidden_states.end(), hidden.begin(),
+                                    hidden.end());
       }
-      const auto hidden = CopyLastHidden();
-      if (hidden.empty()) {
-        throw std::runtime_error(
-            "target executor did not capture a verification hidden state");
+      if (capture_logits) {
+        const auto logits = CopyLastLogits();
+        if (logits.empty()) {
+          throw std::runtime_error(
+              "target executor did not capture verification logits");
+        }
+        if (result.vocab_size == 0) {
+          result.vocab_size = logits.size();
+        } else if (result.vocab_size != logits.size()) {
+          throw std::runtime_error(
+              "verification vocabulary changed within a chunk");
+        }
+        result.logits.insert(result.logits.end(), logits.begin(), logits.end());
       }
-      if (result.hidden_width == 0) {
-        result.hidden_width = hidden.size();
-      } else if (result.hidden_width != hidden.size()) {
-        throw std::runtime_error(
-            "verification hidden-state width changed within a chunk");
-      }
-      result.hidden_states.insert(result.hidden_states.end(), hidden.begin(),
-                                  hidden.end());
     }
     return result;
   }
@@ -122,6 +145,30 @@ public:
       const noexcept = 0;
   [[nodiscard]] virtual std::string_view DecodeToken(
       tokenization::TokenId token_id) const noexcept = 0;
+};
+
+class SpeculativeVerifierSnapshot final {
+public:
+  SpeculativeVerifierSnapshot(const SpeculativeVerifierSnapshot&) = delete;
+  SpeculativeVerifierSnapshot& operator=(const SpeculativeVerifierSnapshot&) =
+      delete;
+  SpeculativeVerifierSnapshot(SpeculativeVerifierSnapshot&&) = delete;
+  SpeculativeVerifierSnapshot& operator=(SpeculativeVerifierSnapshot&&) =
+      delete;
+  ~SpeculativeVerifierSnapshot() = default;
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept;
+
+private:
+  SpeculativeVerifierSnapshot() = default;
+
+  std::unique_ptr<IDraftBackendSnapshot> draft_snapshot_;
+  SpeculativeStats stats_;
+  std::uint32_t current_draft_length_{0};
+  std::deque<float> rolling_acceptance_;
+  float accepted_token_ema_{0.0F};
+
+  friend class SpeculativeVerifier;
 };
 
 /// High-throughput speculative decoding verifier with transactional state
@@ -147,14 +194,24 @@ public:
   [[nodiscard]] tokenization::TokenId Prime(
       std::span<const tokenization::TokenId> prompt_tokens);
 
+  /// Commits one externally supplied continuation token through the target
+  /// model and updates draft-provider state with the matching target features.
+  [[nodiscard]] tokenization::TokenId AdvanceCommittedToken(
+      tokenization::TokenId token, std::uint32_t position);
+
   /// Performs a single speculative verification step
   struct StepResult {
     std::vector<tokenization::TokenId> emitted_tokens;
     std::size_t accepted_count{0};
     std::size_t draft_count{0};
     tokenization::TokenId next_token{0};
+    std::vector<float> next_token_logits;
     bool hit_eos{false};
   };
+
+  [[nodiscard]] std::span<const float> CopyLastTargetLogits() {
+    return target_executor_->CopyLastLogits();
+  }
 
   StepResult VerifyStep(std::vector<tokenization::TokenId>& current_sequence,
                         std::uint32_t cur_pos,
@@ -165,6 +222,15 @@ public:
                         tokenization::TokenId current_token,
                         tokenization::TokenId eos_id,
                         std::uint32_t max_emitted_tokens);
+  StepResult VerifyStep(std::vector<tokenization::TokenId>& current_sequence,
+                        std::uint32_t cur_pos,
+                        tokenization::TokenId current_token,
+                        tokenization::TokenId eos_id,
+                        std::uint32_t max_emitted_tokens, float temperature,
+                        std::uint64_t* rng_state);
+
+  [[nodiscard]] std::unique_ptr<SpeculativeVerifierSnapshot> Snapshot() const;
+  void RestoreSnapshot(const SpeculativeVerifierSnapshot& snapshot);
 
   [[nodiscard]] const SpeculativeStats& GetStats() const noexcept {
     return stats_;
@@ -181,6 +247,11 @@ private:
   void ResetAdaptiveDraftLength() noexcept;
   void UpdateDraftTargetHidden();
   void UpdateAdaptiveDraftLength(std::size_t accepted, std::size_t drafted);
+  [[nodiscard]] StepResult VerifySampledStep(
+      std::vector<tokenization::TokenId>& current_sequence,
+      std::uint32_t cur_pos, tokenization::TokenId current_token,
+      tokenization::TokenId eos_id, std::uint32_t max_emitted_tokens,
+      float temperature, std::uint64_t* rng_state);
 
   std::unique_ptr<ISpeculativeTargetExecutor> owned_target_executor_;
   ISpeculativeTargetExecutor* target_executor_;

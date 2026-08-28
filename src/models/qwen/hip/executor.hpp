@@ -396,7 +396,7 @@ public:
   /// parallel prefill forward pass on the GPU.
   [[nodiscard]] std::vector<tokenization::TokenId> ForwardVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,
-      std::uint32_t start_pos);
+      std::uint32_t start_pos, bool capture_logits = false);
   void CommitVerificationChunk(
       std::span<const tokenization::TokenId> committed_tokens,
       std::uint32_t start_pos);
@@ -404,6 +404,10 @@ public:
       const noexcept {
     return h_verification_hidden_;
   }
+  [[nodiscard]] std::span<const float> GetVerificationLogits() const noexcept {
+    return h_verification_logits_;
+  }
+  [[nodiscard]] std::span<const float> CopyVerificationLogits(std::size_t row);
 
   /// Copies the logits produced by the most recent forward pass to host memory.
   [[nodiscard]] std::span<const float> CopyLastLogits();
@@ -453,6 +457,10 @@ private:
   [[nodiscard]] tokenization::TokenId ForwardPromptChunk(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t start_pos, bool compute_logits);
+  [[nodiscard]] std::vector<tokenization::TokenId>
+  ForwardDecodeEquivalentVerificationChunk(
+      std::span<const tokenization::TokenId> candidate_tokens,
+      std::uint32_t start_pos, bool capture_logits);
 
   std::shared_ptr<const QwenGpuModel> model_;
   const models::QwenModelWeights& weights_;
@@ -464,9 +472,11 @@ private:
   std::vector<float> h_logits_;
   std::vector<float> h_prompt_hidden_;
   std::vector<float> h_verification_hidden_;
+  std::vector<float> h_verification_logits_;
   std::vector<float> h_last_hidden_;
   float* d_verification_logits_{nullptr};
   std::size_t verification_logits_capacity_{0};
+  std::size_t last_verification_rows_{0};
   std::size_t last_hidden_offset_{0};
   float* d_target_layer_features_{nullptr};
   QwenVerificationPolicy verification_policy_;
