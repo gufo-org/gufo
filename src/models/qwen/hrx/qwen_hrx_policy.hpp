@@ -23,6 +23,8 @@ struct QwenHrxExecutionPolicy {
   bool fused_swiglu_quantize{false};
   bool fused_norm_quantize{false};
   bool fused_readout_quantize{false};
+  /// Blocked projection stages two adjacent K blocks per global load pair.
+  bool paired_k_stage{false};
 
   [[nodiscard]] static QwenHrxExecutionPolicy Parse(
       std::string_view spec, std::string* error_msg = nullptr);

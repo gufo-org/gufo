@@ -656,6 +656,9 @@ void QwenHrxExecutor::ResetKernelState() {
   q8_gemm_blocked_k5120_executable_ = nullptr;
   q8_gemm_blocked_k6144_executable_ = nullptr;
   q8_gemm_blocked_k17408_executable_ = nullptr;
+  q8_gemm_blocked_bk2_k5120_executable_ = nullptr;
+  q8_gemm_blocked_bk2_k6144_executable_ = nullptr;
+  q8_gemm_blocked_bk2_k17408_executable_ = nullptr;
   activation_quantize_blocked_k5120_executable_ = nullptr;
   activation_quantize_blocked_k6144_executable_ = nullptr;
   activation_quantize_blocked_k17408_executable_ = nullptr;
@@ -829,6 +832,12 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
       q8_gemm_blocked_k6144_executable_ = exec;
     } else if (entry.name == "qwen_q8_gemm_i8_blocked_k17408_t128") {
       q8_gemm_blocked_k17408_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_blocked_bk2_k5120_t128") {
+      q8_gemm_blocked_bk2_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_blocked_bk2_k6144_t128") {
+      q8_gemm_blocked_bk2_k6144_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_blocked_bk2_k17408_t128") {
+      q8_gemm_blocked_bk2_k17408_executable_ = exec;
     } else if (entry.name == "qwen_activation_quantize_blocked_k5120") {
       activation_quantize_blocked_k5120_executable_ = exec;
     } else if (entry.name == "qwen_activation_quantize_blocked_k6144") {
@@ -1130,17 +1139,23 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
                                             std::uint32_t tokens) {
   hrx_executable_t executable = nullptr;
   std::uint32_t row_capacity = 0;
+  // The paired-K artifacts are the same kernel with the weight loads issued two
+  // adjacent K blocks at a time; grid, bindings and arithmetic are identical.
+  const bool paired = policy_.paired_k_stage && PairedKStageReady();
   switch (input_elements) {
     case 5120:
-      executable = q8_gemm_blocked_k5120_executable_;
+      executable = paired ? q8_gemm_blocked_bk2_k5120_executable_
+                          : q8_gemm_blocked_k5120_executable_;
       row_capacity = contract_.VocabSize();
       break;
     case 6144:
-      executable = q8_gemm_blocked_k6144_executable_;
+      executable = paired ? q8_gemm_blocked_bk2_k6144_executable_
+                          : q8_gemm_blocked_k6144_executable_;
       row_capacity = contract_.HiddenSize();
       break;
     case 17408:
-      executable = q8_gemm_blocked_k17408_executable_;
+      executable = paired ? q8_gemm_blocked_bk2_k17408_executable_
+                          : q8_gemm_blocked_k17408_executable_;
       row_capacity = contract_.HiddenSize();
       break;
     default:

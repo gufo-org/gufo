@@ -273,6 +273,12 @@ public:
            activation_quantize_blocked_k6144_executable_ != nullptr &&
            activation_quantize_blocked_k17408_executable_ != nullptr;
   }
+  /// True when the paired-K-staging projection artifacts are all present.
+  [[nodiscard]] bool PairedKStageReady() const noexcept {
+    return q8_gemm_blocked_bk2_k5120_executable_ != nullptr &&
+           q8_gemm_blocked_bk2_k6144_executable_ != nullptr &&
+           q8_gemm_blocked_bk2_k17408_executable_ != nullptr;
+  }
   /// True when the policy asks for the blocked route and it can run.
   [[nodiscard]] bool UsesBlockedPrefill() const noexcept {
     return policy_.blocked_prefill && BlockedPrefillReady();
@@ -496,6 +502,9 @@ private:
   hrx_executable_t q8_gemm_blocked_k5120_executable_{nullptr};
   hrx_executable_t q8_gemm_blocked_k6144_executable_{nullptr};
   hrx_executable_t q8_gemm_blocked_k17408_executable_{nullptr};
+  hrx_executable_t q8_gemm_blocked_bk2_k5120_executable_{nullptr};
+  hrx_executable_t q8_gemm_blocked_bk2_k6144_executable_{nullptr};
+  hrx_executable_t q8_gemm_blocked_bk2_k17408_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k5120_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k6144_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k17408_executable_{nullptr};

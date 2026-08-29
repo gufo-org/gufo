@@ -458,11 +458,21 @@ void TestHrxExecutionPolicyParsing() {
              p_quant_pair.fused_norm_quantize && p_quant_pair.blocked_prefill,
          "the quantizer fusions compose with the blocked route");
 
+  auto p_paired_k =
+      gufo::hrx::QwenHrxExecutionPolicy::Parse("paired-k", &error);
+  Expect(p_paired_k.paired_k_stage && p_paired_k.blocked_prefill &&
+             p_paired_k.int8_prefill && p_paired_k.chunked_prefill,
+         "paired-k enables the blocked prerequisites");
+  Expect(p_paired_k.ToString() ==
+             "chunked-prefill,int8-prefill,blocked-prefill,paired-k",
+         "paired-k serializes with explicit prerequisites");
+
   // The default blocked route must not turn either fusion on.
   auto p_blocked =
       gufo::hrx::QwenHrxExecutionPolicy::Parse("blocked-prefill", &error);
-  Expect(!p_blocked.fused_swiglu_quantize && !p_blocked.fused_norm_quantize,
-         "blocked-prefill leaves both quantizer fusions off");
+  Expect(!p_blocked.fused_swiglu_quantize && !p_blocked.fused_norm_quantize &&
+             !p_blocked.paired_k_stage,
+         "blocked-prefill leaves the quantizer fusions and paired-k off");
 
   // Invalid flag
   auto p_bad =
