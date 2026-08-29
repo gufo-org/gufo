@@ -1208,7 +1208,9 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
   hrx_dispatch_config_t config{};
   // Token tiles are the fastest-varying dimension: the tiles that share a row
   // group's weight panel then run together and reuse it from cache rather than
-  // each streaming the panel from DRAM.
+  // each streaming the panel from DRAM. Measured: swapping the two axes costs
+  // 5.4% at pp2048 and pp512 and exactly nothing at pp128, where there is only
+  // one token group to reuse.
   config.workgroup_count[0] = physical_tokens / kTokensPerGroup;
   config.workgroup_count[1] = (rows + kRowsPerGroup - 1) / kRowsPerGroup;
   config.workgroup_count[2] =
@@ -2092,6 +2094,12 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
               << " ms=" << elapsed_ms << '\n';
     return hrx_status_is_ok(status);
   };
+  // Drain the previous stage before the first timed substage. Without this the
+  // first one absorbs that drain and reads as tens of milliseconds, which is
+  // not a cost of the stage it is attributed to.
+  if (!trace_stage("enter")) {
+    return Reject("batched SSM trace drain failed", error_msg);
+  }
   const auto& bindings = model_->GetNativeBindings();
   const auto& layer = bindings.layers[layer_index];
   const auto batch_hidden = arena_->Binding(batch_hidden_primary_
@@ -2324,6 +2332,12 @@ bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
               << " ms=" << elapsed_ms << '\n';
     return hrx_status_is_ok(status);
   };
+  // Drain the previous stage before the first timed substage. Without this the
+  // first one absorbs that drain and reads as tens of milliseconds, which is
+  // not a cost of the stage it is attributed to.
+  if (!trace_stage("enter")) {
+    return Reject("batched FFN trace drain failed", error_msg);
+  }
   const auto& bindings = model_->GetNativeBindings();
   const auto& layer = bindings.layers[layer_index];
   if (!layer.ffn_gate_up.IsValid()) {
