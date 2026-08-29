@@ -55,7 +55,30 @@ which is a register-assignment question, not an instruction-selection one.
 The patch is not in tree. It is reconstructible from the README section, and
 anyone revisiting should attack the copies rather than the pairing.
 
-## 2. Chunkwise (matrix-form) DeltaNet recurrence
+## 2. The short-prompt projection penalty
+
+**New, measured, and unexplained.** `pp128` is 66% of HIP and `pp256` 73%,
+against 82% at 512 and above. The whole gap is the projection: the FFN gate/up
+costs 24.6 us per token at 128 tokens against 12.14 at 2048, a 2.03x penalty,
+and 128 tokens is exactly where a chunk holds a single token group so nothing
+reuses the weight stream.
+
+The parallelism explanation is **refuted**: a 64-row macro tile
+(112 VGPRs, 12 waves per SIMD against 184 and 8) is 2.9% slower end to end
+because it does 18% more VALU per output element. See the README section "The
+short-prompt gap, and one refuted explanation".
+
+Next suspect is the weight read's spatial locality -- 32 bytes per thread at a
+5440-byte stride, which only pays if consecutive K blocks hit the same cache
+line and there is no second token group to amortize a miss. A staging layout
+that reads a full cache line per thread per row, or a weight layout swizzled so
+one thread's K blocks are contiguous, would test it.
+
+**Acceptance:** `pp128` and `pp256` improve beyond noise with `pp2048`
+unchanged; bit-identical logits. Worth up to 20% on short prompts, which is
+what interactive serving actually runs.
+
+## 3. Chunkwise (matrix-form) DeltaNet recurrence
 
 322 ms, 7.0% of the pass, and the largest non-projection block. The kernel is
 sequential over the 2048 tokens of a chunk; its rows-per-workgroup was swept at
@@ -74,7 +97,7 @@ numerical decision up front. The parity gate is now route-aware and real, so it
 will catch a mistake. Halving it is +3.4% of the pass. Do not start this
 without deciding first what envelope the result is allowed to move.
 
-## 3. A masked WMMA prefill attention kernel
+## 4. A masked WMMA prefill attention kernel
 
 208 ms, 4.5%. The current kernel is f32 online softmax at roughly 3.5 TFLOPS
 against a 27 TFLOPS f32 VALU ceiling, so 13%. The cost is structural rather
@@ -99,7 +122,7 @@ here than the HIP note implies.
 beyond noise. Halving attention is +2.3% of the pass. Budget this as a port of
 a tuned kernel, not an afternoon.
 
-## 4. Fold the attention context quantize into the attention kernel
+## 5. Fold the attention context quantize into the attention kernel
 
 The SSM readout half of this card is **done** (+0.9%, bit-identical). One site
 is left: the attention context, 0.47 ms x 16 layers, about 0.16% of the pass.
@@ -112,7 +135,7 @@ reduce the readout could use.
 
 **Acceptance:** bit-identical logits. Low priority at 0.16%.
 
-## 5. Fuse the attention K and V projections
+## 6. Fuse the attention K and V projections
 
 They have identical shapes (1024 rows, K=5120) and each re-reads the same
 quantized activation tile: 1.14 + 1.09 ms per attention layer, 16 layers, about
@@ -131,7 +154,7 @@ workgroups against ~80 resident, so the second round is mostly empty. Merging
 recovers roughly 0.72 ms per attention layer, **0.25% of the pass**, not 0.7%.
 Not worth a layout change.
 
-## 6. Ride upstream Loom, and know what blocks it
+## 7. Ride upstream Loom, and know what blocks it
 
 The derivation now pins `bce2ba37` (2026-08-27), ten days and ~220 Loom commits
 newer than the previous pin. Performance-neutral and parity-identical, so this

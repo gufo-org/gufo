@@ -1236,6 +1236,73 @@ returns. Anyone revisiting this should attack the copies -- how the tie
 interacts with register assignment -- not the pairing, which is now known to
 work.
 
+### The short-prompt gap, and one refuted explanation
+
+Measured with the prompt lengths ordered so that none is the first timed point
+in its process (the first point always reads low, which is why earlier tables
+omitted `pp128`):
+
+| test | HRX | HIP | HRX/HIP |
+| :--- | ---: | ---: | ---: |
+| `pp128` | 278.45 | 418.83 | **66%** |
+| `pp256` | 375.58 | 517.24 | 73% |
+| `pp512` | 453.79 | 551.01 | 82% |
+| `pp1024` | 456.46 | 554.16 | 82% |
+
+**Short prompts are markedly worse than long ones**, and the whole of it is in
+the projection.
+
+They are also where this session's retained changes did the least. Interleaved,
+same binary, toggles on and off, with 128 measured second:
+
+| arm | `pp512` | `pp256` | `pp128` |
+| :--- | ---: | ---: | ---: |
+| `blocked-prefill` only | 446.50 | 367.61 | 277.91 |
+| + `swiglu-quant,norm-quant,readout-quant` | **457.50** | **374.05** | **279.82** |
+| | +2.5% | +1.8% | +0.7% |
+
+Nothing regressed, but `pp128` has moved about 0.7% across the whole session
+while `pp2048` moved 3.6%. Every retained change removes f32 round trips, and a
+128-token chunk has proportionally little of that traffic next to a projection
+that dominates it completely. **Session-total improvement figures quoted from
+`pp2048` do not carry to short prompts.**
+
+Beware `pp128` measured as the first timed point in a process: it reads
+anywhere from 274 to 310 t/s on process state alone, which is wide enough to
+invent or hide an effect of this size. Every short-prompt number here is
+measured second.
+
+Per-token cost of the FFN gate/up projection:
+
+| tokens | gate/up | per token | penalty |
+| ---: | ---: | ---: | ---: |
+| 2048 | 24.86 ms | 12.14 us | 1.00x |
+| 512 | 6.60 ms | 12.89 us | 1.06x |
+| 128 | 3.15 ms | **24.6 us** | **2.03x** |
+
+At 128 tokens a chunk holds a single token group, so no other workgroup shares a
+weight panel and nothing reuses the weight stream.
+
+**The obvious explanation is wrong.** If the cost were latency starvation from
+too few workgroups, halving the row tile would fix it: twice the workgroups,
+and four accumulator banks per wave instead of eight. That kernel was built
+(`qwen_q8_0_gemm_i8_blocked_k5120_r64`, 112 VGPRs against 184, **12 waves per
+SIMD against 8**, no spills, oracle passing) and it is slower at both scales --
+isolated 866-915 us against 484-489, and end to end `pp128` 270.6 / 270.6 /
+273.1 against 279.3 / 279.3 / 281.0, **-2.9%**. Gate/up goes 3.15 to 3.39 ms.
+
+The reason is arithmetic intensity: halving the row tile does not halve the
+activation reads, so the kernel does **18% more VALU per output element**
+(429 VALU for 64x128 against 726 for 128x128). Fifty percent more occupancy did
+not pay for it.
+
+So the 128-token penalty is *not* parallelism, and its actual cause is still
+open. The next suspect is the spatial locality of the weight read -- each
+staging thread takes 32 bytes at a 5440-byte stride, which is only efficient if
+consecutive K blocks reuse the same cache line, and at one token group there is
+no second consumer to amortize a miss. Confirming that needs hardware counters,
+which `rocprofv3` cannot collect on this part.
+
 ### Correctness
 
 `--validate-hrx 4` compares HRX logits against a HIP reference for a batched

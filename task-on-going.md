@@ -2165,3 +2165,45 @@ This retires the largest card and falsifies its arithmetic. The 32 "wasted"
 FMA issue slots are recoverable and recovering them loses. Whatever lets HIP
 run this shape without the copies is a register-assignment property, not an
 instruction-selection one.
+
+## Round eight: a new gap found, and its first explanation refuted
+
+Measured with prompt lengths ordered so none is the first timed point:
+pp128 278.45 (HIP 418.83, 66%), pp256 375.58 (517.24, 73%), pp512 453.79
+(551.01, 82%), pp1024 456.46 (554.16, 82%).
+
+Short prompts are much worse, and it is all projection. FFN gate/up per token:
+12.14 us at 2048, 12.89 at 512, 24.6 at 128 - a 2.03x penalty exactly where a
+chunk holds one token group and nothing reuses the weight stream.
+
+Refuted: latency starvation from too few workgroups. A 64-row macro tile
+(qwen_q8_0_gemm_i8_blocked_k5120_r64) compiles at 112 VGPR and 12 waves per
+SIMD against 184 and 8, passes its oracle, and is slower at both scales -
+isolated 866-915 us against 484-489, pp128 270.6/270.6/273.1 against
+279.3/279.3/281.0. It does 18% more VALU per output element (429 for 64x128
+against 726 for 128x128) because halving the rows does not halve the activation
+reads. Fifty percent more occupancy did not pay for that. Reverted.
+
+Remaining suspect: weight-read spatial locality. Each staging thread takes 32
+bytes at a 5440-byte stride; that only pays if consecutive K blocks hit the same
+line, and with one token group there is no second consumer to amortize a miss.
+Confirming needs hardware counters, unavailable on gfx1151 here.
+
+### Correction: short prompts barely moved this session
+
+Interleaved, same binary, 128 measured second, medians of three:
+
+| arm | pp512 | pp256 | pp128 |
+|---|---:|---:|---:|
+| blocked-prefill only | 446.50 | 367.61 | 277.91 |
+| + swiglu/norm/readout quant | 457.50 | 374.05 | 279.82 |
+| | +2.5% | +1.8% | +0.7% |
+
+Nothing regressed. But pp128 has moved ~0.7% across the session against
+pp2048's 3.6%, so the headline figure is a pp2048 figure and does not carry to
+short prompts.
+
+pp128 measured as a process's first timed point reads 274-310 t/s on process
+state alone - wide enough to invent or hide an effect this size. Earlier
+session-start pp128 readings (279.72, 274.26, 307.87, 310.37) were all first
+points and are not comparable to each other or to anything else.
