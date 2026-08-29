@@ -2034,3 +2034,20 @@ the eight tied `fmac`s on the aggregate's units rather than materializing
 per-lane slices and concatenating them back. Everything else is already in
 place. The patch and the reproducers are reconstructible from this file; the
 derivation is reverted so the tree builds stock.
+
+## Round four: rejected, fusing the attention accumulator rescale
+
+`acc*old_scale + v*value_scale` written as one multiply plus one FMA instead of
+two multiplies and an add. Compile report: VALU 2616 -> 2232 (-14.7%),
+unchanged 152 VGPR / 9 waves / no spills. Attention kernel 14.707 -> 12.98 ms
+per layer, 28 ms of the 4584 ms pass.
+
+End to end it is neutral: interleaved pp2048 450.46 / 449.10 / 449.83 against
+450.20 / 448.98 / 447.83. And it is the only change this session that is not
+bit-identical - an FMA rounds once where a multiply and an add round twice - so
+the prefill envelope moves from rmse 0.04735499 / cosine 0.99990022 to rmse
+0.06128938 / cosine 0.99984509, top-1 still 157.
+
+Rejected: measurable precision spent for no measurable throughput. At 5.1% of
+the pass, attention needs a structural change (a masked WMMA kernel, as HIP
+has) before arithmetic savings of this size can matter.

@@ -1021,6 +1021,29 @@ Two families explain it, and neither is reachable from Loom source:
 | `hrx-invariant-hoist` | Twenty-eight index computations in the blocked projection's K loop are loop invariant -- the wave's row and token tile origins and its six LDS row addresses do not depend on the block index -- yet the compiler recomputed or rematerialized them every iteration rather than keeping them live | Hoisted all 28 out of the loop in the three blocked shapes. Peak registers unchanged at 184, so no occupancy tier is at risk. Isolated (rows 5120, K 5120, 128 tokens) median **499.4 us against 512.4 us**; interleaved end-to-end `pp2048` 442.53 / 441.88 / 436.70 against 449.99 / 448.65 / 447.24, **+1.53%**. Logits bit-identical. The instruction mix barely moves (32 address VALU ops against 33), so the win is scheduling and rematerialization pressure, not instruction count | **Retained**, unconditional |
 | `hrx-loom-vopd-fmac` | The 64 `v_fma_f32` per K block are VOP3 and cannot enter a VOPD pair. Loom already models the `fmac_f32` VOPD component and ships the `amdgpu.v_fmac_f32` descriptor, but no lowering rule ever offers the tied VOP2 form. Added the rule through the existing `.devops/nix/hrx-system.nix` derivation, then chased the allocator refusal it exposed | The rule is correct: 54 of 57 production kernels compile with it, and a scalar carried accumulator now emits `v_fmac_f32` where stock emits `v_fma_f32`. The three blocked projections still fail, because a carried *vector* accumulator is scalarized into slices and concatenated back and the blocking interval is two hops from the tied result. Carrying the bank as 64 scalars instead does unlock the pairing -- 50 FMA issue slots against 64 -- but costs 56 extra moves per K block and measures **510.75 us against 496.31** | **Rejected** and reverted. Root cause fully characterized; see below |
 
+### Rejected: fusing the attention accumulator rescale
+
+The online-softmax accumulator is rescaled once per position and head as
+`acc*old_scale + v*value_scale`, three vector ops on `vector<8xf32>`. Written as
+one multiply and one FMA it is two, and the compile report confirms the saving:
+VALU 2616 to **2232** (-14.7%) at identical 152 VGPRs, 9 waves and no spills.
+The attention kernel itself does get faster, 14.707 to **12.98 ms** per layer,
+which is 28 ms of the 4584 ms pass.
+
+It does not show up end to end. Interleaved `pp2048` reads 450.46 / 449.10 /
+449.83 against 450.20 / 448.98 / 447.83 -- the candidate is very slightly
+behind, inside the noise band. And it is the only change tried this session
+that is *not* bit-identical, because an FMA rounds once where a multiply and an
+add round twice: the prefill envelope moves from `rmse 0.04735499` /
+`cosine 0.99990022` to `rmse 0.06128938` / `cosine 0.99984509` (top-1 still
+157).
+
+**Rejected**: it spends measurable precision for no measurable throughput. The
+attention kernel is only 5.1% of the pass, so even an 11.8% cut to it is 0.6%,
+which this host cannot resolve. Anything aimed at attention needs to be
+structural -- a masked WMMA kernel like the HIP path's -- not an arithmetic
+saving of this size.
+
 ### Why the projection's FMAs cannot dual-issue: a Loom finding
 
 This is the single largest remaining item in HRX prefill and it is not a kernel
