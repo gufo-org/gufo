@@ -216,6 +216,20 @@ public:
   bool DispatchSwiGLUPointwiseBatch(const HrxBufferBinding& pairs,
                                     const HrxBufferBinding& output,
                                     std::uint32_t elements);
+  /// SwiGLU folded into the blocked activation quantizer. The f32 activation
+  /// buffer is never written, so the FFN loses one full read/write of the
+  /// 17408-wide tile per layer.
+  bool DispatchSwiGLUQuantizeBlocked(const HrxBufferBinding& pairs,
+                                     std::uint32_t tokens);
+  /// True when the fused SwiGLU + quantize artifact is present and the route
+  /// that consumes its output (the blocked projection) is active.
+  [[nodiscard]] bool FusedSwiGLUQuantizeReady() const noexcept {
+    return swiglu_quantize_blocked_k17408_executable_ != nullptr;
+  }
+  [[nodiscard]] bool UsesFusedSwiGLUQuantize() const noexcept {
+    return policy_.fused_swiglu_quantize && UsesBlockedPrefill() &&
+           FusedSwiGLUQuantizeReady();
+  }
   /// True when the int8 projection route has every artifact it needs.
   [[nodiscard]] bool Int8PrefillReady() const noexcept {
     return q8_gemm_i8_k5120_t8_executable_ != nullptr &&
@@ -460,6 +474,7 @@ private:
   hrx_executable_t activation_quantize_blocked_k5120_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k6144_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k17408_executable_{nullptr};
+  hrx_executable_t swiglu_quantize_blocked_k17408_executable_{nullptr};
   hrx_executable_t deltanet_recurrence_batch_executable_{nullptr};
   hrx_executable_t deltanet_readout_batch_executable_{nullptr};
   hrx_executable_t deltanet_prepare_batch_executable_{nullptr};

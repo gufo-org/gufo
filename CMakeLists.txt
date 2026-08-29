@@ -336,6 +336,7 @@ if (ENGINE_ENABLE_HRX)
       tools/loom/qwen_activation_quantize_blocked_k5120.loom
       tools/loom/qwen_activation_quantize_blocked_k6144.loom
       tools/loom/qwen_activation_quantize_blocked_k17408.loom
+      tools/loom/qwen_swiglu_quantize_blocked_k17408.loom
       tools/loom/qwen_q8_0_gemm_i8_k5120_t8.loom
       tools/loom/qwen_q8_0_gemm_i8_wmma_k5120_t8.loom
       tools/loom/qwen_q8_0_gemm_i8_k6144_t8.loom
@@ -384,6 +385,7 @@ if (ENGINE_ENABLE_HRX)
     set(LOOM_CONFIG_qwen_activation_quantize_blocked_k5120 "qwen_activation_quantize_blocked_k5120.token_capacity=2048")
     set(LOOM_CONFIG_qwen_activation_quantize_blocked_k6144 "qwen_activation_quantize_blocked_k6144.token_capacity=2048")
     set(LOOM_CONFIG_qwen_activation_quantize_blocked_k17408 "qwen_activation_quantize_blocked_k17408.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_swiglu_quantize_blocked_k17408 "qwen_swiglu_quantize_blocked_k17408.token_capacity=2048")
     set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k5120_t8 "qwen_q8_0_gemm_i8_k5120_t8.row_capacity=248320")
     set(LOOM_CONFIG_qwen_q8_0_gemm_i8_wmma_k5120_t8 "qwen_q8_0_gemm_i8_wmma_k5120_t8.row_capacity=248320")
     set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k6144_t8 "qwen_q8_0_gemm_i8_k6144_t8.row_capacity=5120")

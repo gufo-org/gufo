@@ -433,6 +433,22 @@ void TestHrxExecutionPolicyParsing() {
              "chunked-prefill,int8-prefill,wmma-prefill",
          "wmma-prefill serializes with explicit prerequisites");
 
+  auto p_swiglu_quant =
+      gufo::hrx::QwenHrxExecutionPolicy::Parse("swiglu-quant", &error);
+  Expect(p_swiglu_quant.fused_swiglu_quantize &&
+             p_swiglu_quant.blocked_prefill && p_swiglu_quant.int8_prefill &&
+             p_swiglu_quant.chunked_prefill,
+         "swiglu-quant enables the blocked prerequisites");
+  Expect(p_swiglu_quant.ToString() ==
+             "chunked-prefill,int8-prefill,blocked-prefill,swiglu-quant",
+         "swiglu-quant serializes with explicit prerequisites");
+
+  // The default blocked route must not turn the fusion on.
+  auto p_blocked =
+      gufo::hrx::QwenHrxExecutionPolicy::Parse("blocked-prefill", &error);
+  Expect(!p_blocked.fused_swiglu_quantize,
+         "blocked-prefill leaves the SwiGLU quantizer fusion off");
+
   // Invalid flag
   auto p_bad =
       gufo::hrx::QwenHrxExecutionPolicy::Parse("invalid-flag-123", &error);
