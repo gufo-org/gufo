@@ -1711,6 +1711,22 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
                                                  std::uint32_t start_position,
                                                  std::uint32_t tokens,
                                                  std::string* error_msg) {
+  const bool trace_attention =
+      layer_index == 3 && std::getenv("GUFO_HRX_TRACE_ATTENTION") != nullptr;
+  auto trace_start = std::chrono::steady_clock::now();
+  const auto trace_stage = [&](std::string_view stage) {
+    if (!trace_attention) {
+      return true;
+    }
+    const auto status = hrx_stream_synchronize(backend_.Stream());
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed_ms =
+        std::chrono::duration<double, std::milli>(now - trace_start).count();
+    trace_start = now;
+    std::cerr << "[HRX attention substage] tokens=" << tokens
+              << " stage=" << stage << " ms=" << elapsed_ms << '\n';
+    return hrx_status_is_ok(status);
+  };
   const auto& config = model_->GetConfig();
   const auto& bindings = model_->GetNativeBindings();
   const auto& layer = bindings.layers[layer_index];
@@ -1735,9 +1751,22 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
       arena_->Layout().batch_context_bytes / kHrxPrefillChunkTokens /
       sizeof(float);
 
+  if (trace_attention) {
+    std::cerr << "[HRX attention widths] q_gate="
+              << contract_.FullAttentionQGateWidth()
+              << " query=" << contract_.FullAttentionQueryWidth()
+              << " key=" << contract_.FullAttentionKeyWidth()
+              << " value=" << contract_.FullAttentionValueWidth()
+              << " q_heads=" << contract_.QHeadCount()
+              << " kv_heads=" << contract_.KvHeadCount()
+              << " head_dim=" << contract_.HeadDim() << '\n';
+  }
   if (!DispatchRMSNormBatch(batch_hidden, layer.attn_norm, batch_normed,
                             tokens)) {
     return Reject("batched attention RMSNorm failed", error_msg);
+  }
+  if (!trace_stage("norm")) {
+    return Reject("batched attention norm synchronization failed", error_msg);
   }
   const bool int8_route =
       UsesBlockedPrefill() || (policy_.int8_prefill && Int8PrefillReady());
@@ -1747,16 +1776,33 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
     return Reject("batched attention activation quantization failed",
                   error_msg);
   }
+  if (!trace_stage("input-quant")) {
+    return Reject("batched attention input quantization synchronization failed",
+                  error_msg);
+  }
   if (!DispatchChunkProjection(layer.attn_q, batch_normed, batch_q_gate,
                                contract_.FullAttentionQGateWidth(), hidden,
-                               tokens) ||
-      !DispatchChunkProjection(layer.attn_k, batch_normed, batch_key,
+                               tokens)) {
+    return Reject("batched attention Q projection failed", error_msg);
+  }
+  if (!trace_stage("q-projection")) {
+    return Reject("batched attention Q synchronization failed", error_msg);
+  }
+  if (!DispatchChunkProjection(layer.attn_k, batch_normed, batch_key,
                                contract_.FullAttentionKeyWidth(), hidden,
-                               tokens) ||
-      !DispatchChunkProjection(layer.attn_v, batch_normed, batch_value,
+                               tokens)) {
+    return Reject("batched attention K projection failed", error_msg);
+  }
+  if (!trace_stage("k-projection")) {
+    return Reject("batched attention K synchronization failed", error_msg);
+  }
+  if (!DispatchChunkProjection(layer.attn_v, batch_normed, batch_value,
                                contract_.FullAttentionValueWidth(), hidden,
                                tokens)) {
-    return Reject("batched attention projection failed", error_msg);
+    return Reject("batched attention V projection failed", error_msg);
+  }
+  if (!trace_stage("v-projection")) {
+    return Reject("batched attention V synchronization failed", error_msg);
   }
 
   const std::size_t rotary_bytes =
@@ -1795,11 +1841,21 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
                                      contract_.KvHeadCount(), tokens) ||
         !DispatchRoPEKVCacheBatch(batch_query, batch_key, batch_value, rope_cos,
                                   rope_sin, *key_cache, *value_cache,
-                                  start_position, tokens) ||
-        !DispatchAttentionDecodeBatch(batch_query, batch_gate, *key_cache,
+                                  start_position, tokens)) {
+      return Reject("batched attention front end failed", error_msg);
+    }
+    if (!trace_stage("split+qknorm+rope")) {
+      return Reject("batched attention front-end synchronization failed",
+                    error_msg);
+    }
+    if (!DispatchAttentionDecodeBatch(batch_query, batch_gate, *key_cache,
                                       *value_cache, batch_context,
                                       start_position, tokens)) {
-      return Reject("batched attention front end failed", error_msg);
+      return Reject("batched attention kernel failed", error_msg);
+    }
+    if (!trace_stage("attention")) {
+      return Reject("batched attention kernel synchronization failed",
+                    error_msg);
     }
   } else
   for (std::uint32_t token = 0; token < tokens; ++token) {
@@ -1843,14 +1899,27 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
                                   tokens)) {
     return Reject("batched attention context quantization failed", error_msg);
   }
+  if (!trace_stage("context-quant")) {
+    return Reject(
+        "batched attention context quantization synchronization "
+        "failed",
+        error_msg);
+  }
   if (!DispatchChunkProjection(layer.attn_output, batch_context,
                                batch_projected, hidden,
                                contract_.FullAttentionQueryWidth(), tokens)) {
     return Reject("batched attention output projection failed", error_msg);
   }
+  if (!trace_stage("output-projection")) {
+    return Reject("batched attention output synchronization failed", error_msg);
+  }
   if (!DispatchResidualAddBatch(batch_hidden, batch_projected, batch_normed,
                                 tokens * static_cast<std::uint32_t>(hidden))) {
     return Reject("batched attention residual add failed", error_msg);
+  }
+  if (!trace_stage("residual")) {
+    return Reject("batched attention residual synchronization failed",
+                  error_msg);
   }
   batch_hidden_primary_ = !batch_hidden_primary_;
   return true;
