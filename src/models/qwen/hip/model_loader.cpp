@@ -1,7 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include <cstdlib>
 #include <limits>
-#include <string_view>
 #include <utility>
 
 #include "src/models/qwen/hip/detail/weight_regions.hpp"
@@ -31,27 +29,6 @@ using detail::ReleaseWeightRegions;
 
 namespace {
 
-enum class WeightMappingMode {
-  kAuto,
-  kMapped,
-  kCopy,
-};
-
-[[nodiscard]] WeightMappingMode GetWeightMappingMode() noexcept {
-  const char* value = std::getenv("GUFO_GPU_WEIGHT_MODE");
-  if (value == nullptr) {
-    return WeightMappingMode::kAuto;
-  }
-  const std::string_view mode{value};
-  if (mode == "mapped") {
-    return WeightMappingMode::kMapped;
-  }
-  if (mode == "copy") {
-    return WeightMappingMode::kCopy;
-  }
-  return WeightMappingMode::kAuto;
-}
-
 [[nodiscard]] hipError_t MapRegisteredRegion(
     const core::GgufMappedRegion& source,
     QwenGpuWeightRegion& destination) noexcept {
@@ -78,29 +55,6 @@ enum class WeightMappingMode {
   return hipSuccess;
 }
 
-[[nodiscard]] hipError_t CopyRegionToDevice(
-    const core::GgufMappedRegion& source,
-    QwenGpuWeightRegion& destination) noexcept {
-  void* device_data = nullptr;
-  const auto malloc_error = hipMalloc(&device_data, source.size);
-  if (malloc_error != hipSuccess) {
-    return malloc_error;
-  }
-  const auto copy_error =
-      hipMemcpy(device_data, source.data, source.size, hipMemcpyHostToDevice);
-  if (copy_error != hipSuccess) {
-    (void)hipFree(device_data);
-    return copy_error;
-  }
-
-  destination = {.host_data = source.data,
-                 .device_data = device_data,
-                 .size = source.size,
-                 .owns_device_memory = true,
-                 .host_registered = false};
-  return hipSuccess;
-}
-
 [[nodiscard]] bool CreateWeightRegions(
     const core::GgufReader& reader,
     std::vector<QwenGpuWeightRegion>& weight_regions, std::string* error_msg) {
@@ -112,43 +66,18 @@ enum class WeightMappingMode {
     return false;
   }
 
-  hipDeviceProp_t properties{};
-  const bool integrated =
-      hipGetDeviceProperties(&properties, 0) == hipSuccess &&
-      properties.integrated != 0;
-  const auto mode = GetWeightMappingMode();
-  const bool prefer_mapped = mode == WeightMappingMode::kMapped ||
-                             (mode == WeightMappingMode::kAuto && integrated);
-
   weight_regions.resize(source_regions.size());
   for (std::size_t i = 0; i < source_regions.size(); ++i) {
     const auto& source = source_regions[i];
     auto& destination = weight_regions[i];
-    hipError_t first_error = hipSuccess;
-    hipError_t second_error = hipSuccess;
-
-    if (prefer_mapped) {
-      first_error = MapRegisteredRegion(source, destination);
-      if (first_error != hipSuccess && mode == WeightMappingMode::kAuto) {
-        second_error = CopyRegionToDevice(source, destination);
-      }
-    } else {
-      first_error = CopyRegionToDevice(source, destination);
-      if (first_error != hipSuccess && mode == WeightMappingMode::kAuto) {
-        second_error = MapRegisteredRegion(source, destination);
-      }
-    }
+    const auto map_error = MapRegisteredRegion(source, destination);
 
     if (destination.device_data == nullptr) {
       ReleaseWeightRegions(weight_regions);
       if (error_msg != nullptr) {
-        const auto final_error =
-            second_error != hipSuccess ? second_error : first_error;
-        *error_msg =
-            "Failed to make GGUF shard " + std::to_string(i) +
-            " GPU-visible in " +
-            (prefer_mapped ? std::string("mapped") : std::string("copy")) +
-            " mode: " + hipGetErrorString(final_error);
+        *error_msg = "Failed to make GGUF shard " + std::to_string(i) +
+                     " GPU-visible through mapped registration: " +
+                     hipGetErrorString(map_error);
       }
       return false;
     }

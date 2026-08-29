@@ -220,6 +220,27 @@ ValidationResult ValidateArtifactContent(std::string_view content) {
       res.is_valid = false;
       res.errors.emplace_back("XRT smoke context was quarantined");
     }
+  } else if (artifact_type == "hipAllocation") {
+    if (!ExtractJsonBoolField(content, "allRequestedPathsReported", false)) {
+      res.is_valid = false;
+      res.errors.emplace_back(
+          "HIP allocation diagnostic omitted one or more requested paths");
+    }
+    if (!ExtractJsonBoolField(content, "checksumsVerified", false)) {
+      res.is_valid = false;
+      res.errors.emplace_back(
+          "HIP allocation diagnostic did not verify CPU/GPU checksums");
+    }
+    if (!ExtractJsonBoolField(content, "phasesSeparated", false)) {
+      res.is_valid = false;
+      res.errors.emplace_back(
+          "HIP allocation diagnostic did not keep benchmark phases separate");
+    }
+    if (ExtractJsonStringField(content, "status") != "completed") {
+      res.is_valid = false;
+      res.errors.emplace_back(
+          "HIP allocation diagnostic completion status is not successful");
+    }
   }
 
   // 5. Redaction and sensitive field checks

@@ -91,9 +91,10 @@ layer-64 graph, and feeds proposed tokens through the speculative backend.
 ### HIP target model
 
 - [`QwenGpuModel::CreateFromGguf`](hip/executor.hpp) owns the GGUF reader,
-  validated weights, tokenizer, and GPU-visible weight regions. On an integrated
-  GPU it prefers registered mapped storage; copy mode and automatic fallback are
-  also supported.
+  validated weights, tokenizer, and GPU-visible weight regions. It registers
+  mapped GGUF shards directly with HIP; this is the fixed gfx1151 production
+  policy selected by the Qwen3.8-27B study in
+  [`docs/HIP_ALLOCATION_PLACEMENT.md`](../../../docs/HIP_ALLOCATION_PLACEMENT.md).
 - [`QwenGpuExecutor::Generate`](hip/executor.hpp) first calls
   `ForwardPromptBatch` for batched prefill and then `ForwardToken` for
   autoregressive decode.
@@ -229,7 +230,6 @@ environment variables are read by the current source:
 | `GUFO_QWEN_RECURRENT_STATE` | `fp32`/`float` selects canonical production DeltaNet state (the default); `bf16`/`bfloat16` selects the rejected, validation-only compact-state experiment. |
 | `GUFO_PROFILE` | Presence enables prefill timing output. It is diagnostic output, not a stable benchmark harness. |
 | `GUFO_DISABLE_SSM_REPLAY` | Presence with a value other than `0`, `false`, or `off` disables SSM replay. |
-| `GUFO_GPU_WEIGHT_MODE` | `mapped`, `copy`, or automatic GPU visibility selection. |
 | `GUFO_HIPBLASLT_PLAN_CACHE` | Path used by hipBLASLt plan persistence when its caller has not supplied one. |
 
 Record the policy fingerprint, resolved route fingerprints/rejections, graph

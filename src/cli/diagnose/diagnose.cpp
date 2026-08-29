@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/diagnostics/allocation_benchmark.h"
 #include "src/core/diagnostics/artifact_validator.h"
 #include "src/core/diagnostics/bandwidth.h"
 #include "src/core/diagnostics/compatibility.h"
@@ -44,7 +45,8 @@ void PrintDiagnoseHelp(std::string_view program_name) {
          "and SHA-256 ID\n"
       << "  --validate-artifact <path>   Validate a diagnostic/benchmark "
          "artifact against schema & fingerprint\n"
-      << "  --benchmark <name>           Run benchmark suite: bandwidth\n"
+      << "  --benchmark <name>           Run benchmark suite: bandwidth, "
+         "allocation\n"
       << "  --smoke <name>               Run hardware smoke: xrt\n"
       << "  --iterations <n>             Smoke command cycles (default: 100)\n"
       << "  --timeout-ms <ms>            Per-command timeout (default: 30000)\n"
@@ -56,6 +58,8 @@ void PrintDiagnoseHelp(std::string_view program_name) {
          "(default: 10)\n"
       << "  --duration-ms <ms>           Target duration per benchmark in ms "
          "(default: 2000)\n"
+      << "  --working-set-mib <csv>      Allocation diagnostic sizes in MiB "
+         "(default: 64)\n"
       << "  --output <path>              Write command output to specified "
          "file\n"
       << "  --section <name>             Diagnostic section to run: all, "
@@ -235,6 +239,7 @@ int RunDiagnose(std::span<const char* const> args) {
   std::uint32_t warmup = 3;
   std::uint32_t repetitions = 10;
   std::uint32_t duration_ms = 2000;
+  std::string working_set_mib = "64";
   std::uint32_t smoke_iterations = 100;
   std::uint32_t timeout_ms = 30000;
   std::string output_file;
@@ -346,6 +351,16 @@ int RunDiagnose(std::span<const char* const> args) {
     } else if (arg.starts_with("--duration-ms=")) {
       duration_ms =
           static_cast<std::uint32_t>(std::stoul(std::string(arg.substr(14))));
+    } else if (arg == "--working-set-mib") {
+      if (i + 1 >= args.size()) {
+        std::cerr << "Error: --working-set-mib requires a comma-separated "
+                     "size list\n";
+        PrintDiagnoseHelp("gufo");
+        return 2;
+      }
+      working_set_mib = args[++i];
+    } else if (arg.starts_with("--working-set-mib=")) {
+      working_set_mib = std::string(arg.substr(18));
     } else if (arg == "--output") {
       if (i + 1 >= args.size()) {
         std::cerr << "Error: --output requires a file path argument\n";
@@ -404,27 +419,51 @@ int RunDiagnose(std::span<const char* const> args) {
 
   // Handle benchmark execution mode
   if (!benchmark_name.empty()) {
-    if (benchmark_name != "bandwidth") {
+    if (benchmark_name != "bandwidth" && benchmark_name != "allocation" &&
+        benchmark_name != "hip-allocation") {
       std::cerr << "Error: unsupported benchmark '" << benchmark_name
-                << "'. Supported: bandwidth\n";
+                << "'. Supported: bandwidth, allocation\n";
       return 2;
     }
-
-    diagnostics::BandwidthOptions bw_options;
-    bw_options.backends = SplitCommaSeparated(backends_csv);
-    bw_options.warmup = warmup;
-    bw_options.repetitions = repetitions;
-    bw_options.duration_ms = duration_ms;
 
     const auto inventory =
         diagnostics::CollectSystemInventory(diagnostics::LinuxSysfs());
     const auto fingerprint = diagnostics::GenerateMachineFingerprint(inventory);
 
-    const auto report =
-        diagnostics::RunBandwidthBenchmark(bw_options, fingerprint);
+    if (benchmark_name == "bandwidth") {
+      diagnostics::BandwidthOptions bw_options;
+      bw_options.backends = SplitCommaSeparated(backends_csv);
+      bw_options.warmup = warmup;
+      bw_options.repetitions = repetitions;
+      bw_options.duration_ms = duration_ms;
+      const auto report =
+          diagnostics::RunBandwidthBenchmark(bw_options, fingerprint);
+      const std::string content =
+          json_mode ? report.ToJson() : report.ToHuman();
+      OutputContent(content, output_file);
+      return 0;
+    }
+
+    diagnostics::AllocationBenchmarkOptions allocation_options;
+    allocation_options.warmup = warmup;
+    allocation_options.repetitions = repetitions;
+    if (allocation_options.repetitions == 0) {
+      std::cerr << "Error: --repetitions must be at least 1 for the allocation "
+                   "diagnostic\n";
+      return 2;
+    }
+    std::string size_error;
+    if (!diagnostics::ParseWorkingSetSizes(
+            working_set_mib, &allocation_options.working_set_bytes,
+            &size_error)) {
+      std::cerr << "Error: " << size_error << "\n";
+      return 2;
+    }
+    const auto report = diagnostics::RunHipAllocationBenchmark(
+        allocation_options, inventory, fingerprint);
     const std::string content = json_mode ? report.ToJson() : report.ToHuman();
     OutputContent(content, output_file);
-    return 0;
+    return report.Success() ? 0 : 1;
   }
 
   // Handle fingerprint mode

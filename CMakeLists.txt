@@ -178,6 +178,7 @@ add_library(gufo_diagnostics STATIC
   src/core/diagnostics/compatibility.cpp
   src/core/diagnostics/fingerprint.cpp
   src/core/diagnostics/artifact_validator.cpp
+  src/core/diagnostics/allocation_benchmark.cpp
   src/core/diagnostics/bandwidth.cpp
   src/core/hip/bandwidth.cpp
   src/core/xdna2/bandwidth.cpp
@@ -187,8 +188,12 @@ add_library(gufo_diagnostics STATIC
   src/cli/diagnose/diagnose.cpp
 )
 target_include_directories(gufo_diagnostics PUBLIC ${CMAKE_SOURCE_DIR})
+target_compile_definitions(gufo_diagnostics PRIVATE
+  GUFO_VERSION="${GUFO_VERSION}")
 
 if (ENGINE_ENABLE_HIP)
+  target_sources(gufo_diagnostics PRIVATE
+    src/core/hip/allocation_benchmark.hip)
   target_compile_definitions(gufo_diagnostics PRIVATE ENGINE_ENABLE_HIP=1)
   target_link_libraries(gufo_diagnostics PRIVATE hip::host roc::hipblas roc::rocblas)
 endif()
@@ -583,6 +588,15 @@ if (BUILD_TESTING)
 
   add_test(NAME bandwidth_test COMMAND bandwidth_test)
   set_tests_properties(bandwidth_test PROPERTIES LABELS "cpu;diagnostics;bandwidth;bandwidth_schema;bandwidth_correctness")
+
+  add_executable(allocation_benchmark_test
+    tests/diagnostics/allocation_benchmark_test.cpp)
+  target_compile_definitions(allocation_benchmark_test PRIVATE
+    TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diagnostics")
+  target_link_libraries(allocation_benchmark_test PRIVATE gufo_diagnostics)
+  add_test(NAME allocation_benchmark_test COMMAND allocation_benchmark_test)
+  set_tests_properties(allocation_benchmark_test PROPERTIES
+    LABELS "gpu;hip;gfx1151;diagnostics;allocation;opt-c091")
 
   if (ENGINE_ENABLE_XRT)
     add_executable(xdna2_xrt_program_test

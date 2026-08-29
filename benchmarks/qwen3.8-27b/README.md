@@ -554,9 +554,11 @@ they did not beat the unfused routes end-to-end on gfx1151.
   layer's hot projection tensors into pinned scratch via stream-ordered copy
   instead of a full-layer page-touch: the full-layer variant re-reads the whole
   ~1.06 GiB layer every token and its per-layer cross-stream join serializes
-  the non-graph (split-K) decode path (~4x at depth); a resident
-  `GUFO_GPU_WEIGHT_MODE=copy` comparison would show whether mapped-weight
-  re-reads cost anything in steady state at all.
+  the non-graph (split-K) decode path (~4x at depth). The Q8 placement study in
+  [`docs/HIP_ALLOCATION_PLACEMENT.md`](../../docs/HIP_ALLOCATION_PLACEMENT.md)
+  found that a resident device copy slightly improves decode but loses on
+  prefill, setup, complete-sweep time, and persistent memory, so mapped weights
+  remain the fixed production policy.
 
 ## Qwen3.8-27B Q8 Layer Breakdown and Execution Timings
 

@@ -210,6 +210,26 @@ written to the artifact. `gufo bench` remains the direct model-path
 microbenchmark; use this serving harness for TTFT, ITL, queueing, and
 concurrency decisions.
 
+### HIP allocation diagnostic
+
+Compare allocation, mapped-registration, first-touch, warm-access, copy,
+advice/prefetch, synchronization, teardown, fault, and checksum behavior:
+
+```sh
+./result/bin/gufo diagnose \
+  --benchmark allocation \
+  --working-set-mib 64,1024 \
+  --warmup 2 \
+  --repetitions 5 \
+  --json \
+  --output artifacts/diagnostics/hip-allocation.json
+```
+
+The command aborts before a requested size that cannot preserve its memory
+headroom; it never silently substitutes a smaller working set. See
+[`HIP_ALLOCATION_PLACEMENT.md`](HIP_ALLOCATION_PLACEMENT.md) for the gfx1151
+findings and the Qwen3.8-27B placement decision.
+
 ### Focused HIP benchmark
 
 List cases, then run the smallest relevant matrix:

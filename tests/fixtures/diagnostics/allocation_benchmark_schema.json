@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GufoHipAllocationBenchmark",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "artifactType",
+    "fingerprintId",
+    "engineRevision",
+    "timestamp",
+    "summary",
+    "options",
+    "machine",
+    "paths",
+    "limitations"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0.0" },
+    "artifactType": { "type": "string", "const": "hipAllocation" },
+    "fingerprintId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "allRequestedPathsReported",
+        "checksumsVerified",
+        "phasesSeparated",
+        "status"
+      ]
+    },
+    "machine": {
+      "type": "object",
+      "required": [
+        "kernelRelease",
+        "rocmVersion",
+        "gpuArchitecture",
+        "pageSizeBytes",
+        "hugePagesTotal",
+        "hugePageSizeBytes"
+      ]
+    },
+    "paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "pathName",
+          "allocationApi",
+          "workingSetBytes",
+          "status",
+          "reason",
+          "checksumVerified",
+          "phases"
+        ]
+      }
+    }
+  }
+}
