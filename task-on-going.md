@@ -1808,3 +1808,129 @@ steps: all top-1 tokens match, cosine similarity 1.0, worst max-absolute error
 
 Remaining acceptance for these routes: an interleaved pp128/tg16 A/B against
 `none` on the same binary.
+
+## Session 2026-08-29: profile-driven fusion of the activation quantizer
+
+### Fresh baseline and profile
+
+Same model (`models/Qwen3.8-27B-Q8_0.gguf`), device-local weights, one process
+per arm. `rocprofv3` still cannot attach to the HRX executable, so the profile
+is the executor's stream-synchronizing stage traces. A new
+`GUFO_HRX_TRACE_ATTENTION` trace was added (layer 3) to close the last
+unprofiled stage.
+
+PP2048 chunk: attention 540.5 ms, SSM 1388.2 ms, FFN 2821.1 ms, chunk 4749.9 ms.
+
+Substages at 2048 tokens (ms, layer 0 for SSM/FFN and layer 3 for attention;
+layer-0 `norm` absorbs the previous stage's drain and is not a real cost):
+
+| FFN | ms | SSM | ms | attention | ms |
+|---|---:|---|---:|---|---:|
+| norm | 0.507 | norm | 8.387* | norm | 230.3* |
+| input-quant | 0.316 | input-quant | 1.103* | input-quant | 0.371 |
+| gate-up projection | 25.603 | qkv projection | 7.670 | Q projection | 9.259 |
+| swiglu | 1.877 | gate projection | 4.963 | K projection | 1.135 |
+| activation-quant | 0.916 | alpha/beta projection | 0.222 | V projection | 1.087 |
+| down projection | 13.436 | prepare+conv | 1.719 | split+qknorm+rope | 2.045 |
+| residual | 0.658 | recurrence | 6.448 | attention kernel | 14.707 |
+| | | readout | 0.649 | context-quant | 0.469 |
+| | | context-quant | 0.355 | output projection | 5.169 |
+| | | output projection | 4.716 | residual | 0.706 |
+| | | residual | 0.699 | | |
+
+Attention widths: q_gate 12288, query 6144, key 1024, value 1024, 24 query
+heads, 4 KV heads, head dim 256.
+
+Scaled to the whole pass, the blocked projection in all its shapes is 3597 ms
+of 4750 (75.7%); the DeltaNet recurrence is 310 ms (6.5%); the attention kernel
+is 235 ms (5.0%); and everything else is 608 ms (12.8%).
+
+### The projection is at a code-generation ceiling, re-measured
+
+`loom-compile --compile-report=details` on the deployed
+`qwen_q8_0_gemm_i8_blocked_k5120_t128` artifact: 184 final VGPRs (168 scheduled
+peak), 36 SGPRs, zero spills, 8 waves per SIMD, 50% occupancy, limiting
+resource `amdgpu.vgpr`, 16 units from the 9-wave tier.
+
+Per K block the hot loop now emits 16 `v_wmma_i32_16x16x16_iu8`, 64
+`v_cvt_f32_i32`, 64 `v_fma_f32`, 31 `v_dual_mul_f32`, 46 `v_mov_b32`, 33
+address VALU ops, 16 `ds_load_b128` and 4 `ds_load_b32`. That is 238 VALU issue
+slots against 256 cycles of matrix work, so 256/494 = 52% of the int8 peak. The
+FFN measures 28.5 TOPS, 52% of the 55.07 TOPS ceiling; HIP reaches 58%.
+
+`move_causes` attributes the moves: `operand_bank_materialization` 72 units,
+`branch_edge` 95, `constant_materialization` 101, `low_slice` 28. The 64
+`v_fma_f32` are the accumulate-in-place form (`v_fma_f32 v4, v76, v144, v4`)
+but are emitted as VOP3, so the VOPD packer never turns them into
+`v_dual_fmac_f32`; the `v_dual_mul_f32` next to them shows the packer is
+otherwise working. Neither the VOP3-to-VOP2 shrink nor the operand-bank copies
+are reachable from the kernel source.
+
+### Rejected: fragment loads straight from LDS
+
+The 72 units of `operand_bank_materialization` are the copies that move a
+staged 32-byte LDS read into the register quad the WMMA operand needs.
+Replacing the wide `vector.load` + `vector.bitcast` + two `vector.slice`s with
+two direct `vector<4xi32>` loads over an i32 view of the same scratch removes
+24 of the 209 whole-kernel moves, but each load result becomes its own live
+range: 208 VGPRs instead of 184, which crosses the occupancy tier.
+
+| variant | isolated (rows=5120, K=5120, 128 tokens) | VGPR |
+|---|---:|---:|
+| retained: wide 32-byte read, bitcast, slice | **495.42 us** | 184 |
+| two direct `vector<4xi32>` fragment loads | 545.56 us | 208 |
+
+### Rejected: unrolling the K loop so the ping-pong parity is static
+
+The 33 address VALU ops per block exist because `%parity = block % 2` indexes
+both LDS stages, so no LDS access can fold into an immediate offset. Unrolling
+the loop by two and substituting the parity constants into each half makes
+every LDS offset static. It is numerically identical and passes its oracle, but
+both halves' prefetched staging registers are live at once: 256 VGPRs, which
+drops the residency tier from 8 waves to 6.
+
+| variant | isolated | VGPR |
+|---|---:|---:|
+| retained: one K block per iteration | **495.42 us** | 184 |
+| unrolled by two, static parity | 534.12 us | 256 |
+
+### Retained: SwiGLU folded into the blocked activation quantizer
+
+On the blocked route the f32 SwiGLU output has exactly one consumer, the
+activation quantizer, so the 2048x17408 f32 tile is written and read back for
+nothing: 143 MiB each way per layer. `qwen_swiglu_quantize_blocked_k17408.loom`
+computes SiLU(gate)*up in registers and writes only the int8 payload and its
+per-block scales. The op sequence and fast-math flags are the unfused ones in
+the same order, so the payload is bit-identical.
+
+FFN layer 0 at 2048 tokens: swiglu 1.877 + activation-quant 0.916 = 2.792 ms
+becomes 1.475 ms, a saving of 1.317 ms per layer over 64 layers.
+
+### Retained: RMSNorm folded into the blocked activation quantizer
+
+The same argument for the hidden row. The unfused norm already gives each
+workitem exactly 32 elements, which is one Q8 block, so
+`qwen_rmsnorm_quantize_blocked_k5120.loom` quantizes in place and never writes
+the f32 normed tile. It replaces the norm plus input-quant pair in all three
+stages (48 SSM, 64 FFN, 16 attention).
+
+FFN layer 0 at 2048 tokens: norm 0.507 + input-quant 0.316 = 0.823 ms becomes
+0.404 ms, a saving of 0.419 ms per stage over 128 stages.
+
+### Interleaved A/B, one binary, three rounds
+
+| arm | samples | median |
+|---|---|---:|
+| `blocked-prefill` | 428.75, 429.47, 428.20 | 428.75 |
+| `+swiglu-quant` | 436.38, 436.05, 436.43 | 436.38 (+1.78%) |
+| `+swiglu-quant,norm-quant` | 437.72, 437.02, 439.88 | 437.72 (+2.09%) |
+
+Chunk profile with both fusions on: attention 537.2, SSM 1376.9, FFN 2743.8,
+chunk 4657.9 ms against 4749.9 ms.
+
+Parity: `--validate-hrx 4` reports the *same* numbers on both arms to eight
+decimals (top-1 157, max_abs_diff 0.26514006, rmse 0.04735499, cosine
+0.99990022), which is the bit-identity claim confirmed end to end. Both arms
+report `envelope=fail` because the gate is the tight f32 envelope and the
+blocked W8A8 prefill route has always sat outside it; that is pre-existing and
+unchanged by these fusions.

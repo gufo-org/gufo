@@ -397,6 +397,7 @@ depth. Read the Q8 section for the current state of the engine.
 | RMSNorm + projection input | Decode RMSNorm kernel + fused QKV/SSM-input/SwiGLU projection GEMVs | Norm folded into the projection GEMVs: bit-exact but every block redundantly re-normalizes the row, +9-21% per projection launch and ~9% decode regression (`opt-c010-rmsnorm-projection`) |
 | Layer prefetch | Single-stream decode; no prefetch | Async next-layer page-touch on a side stream: tg128 -1.6%, and the per-layer cross-stream join serializes the non-graph (split-K) decode path, ~4x regression at depth 4K/8K/16K (`opt-c014-layer-prefetch`) |
 | Speculation | Official DFlash2 graph and selector, transactional batched target verification, and exact GPU MTP verification policies | W8A8-only verification where it changes greedy output; small-batch dual gate/up despite a faster isolated GEMM because it regresses end-to-end throughput |
+| HRX backend, prefill activation quantization (**HRX experiments**, see "## HRX native backend (Loom) experiments") | SwiGLU folded into the blocked activation quantizer (`swiglu-quant`) and RMSNorm folded into it (`norm-quant`): bit-identical logits, `pp2048` 428.75 to 437.72 together | Fragment loads taken straight from LDS into the WMMA operand bank (208 VGPRs against 184, loses an occupancy tier); unrolling the projection's K loop by two so the ping-pong parity is static (256 VGPRs, drops from 8 waves to 6) |
 
 ### Rejected C=1 Q8 decode experiments
 
@@ -481,6 +482,11 @@ they did not beat the unfused routes end-to-end on gfx1151.
   projection block.
 - Consider folding the decode output-norm into the LM-head GEMV only with a
   single-block pre-pass that stages the normed row, not a per-block reduction.
+- **HRX experiments only**, tracked in full under "## HRX native backend (Loom)
+  experiments": the remaining prefill gap to HIP is the blocked projection's
+  instruction count, and its two largest exact targets (64 non-dual-issued
+  `v_fma_f32` and 72 units of `operand_bank_materialization` per K block) are
+  Loom code-generation behaviours rather than kernel-source choices.
 - Re-evaluate `opt-c014-layer-prefetch` as a targeted prefetch of only the next
   layer's hot projection tensors into pinned scratch via stream-ordered copy
   instead of a full-layer page-touch: the full-layer variant re-reads the whole
@@ -848,3 +854,196 @@ Remaining ranked headroom, from the profile above:
 | DeltaNet recurrence beyond 2567 cycles/token | 3.0% | Now within 2.1x of the 1229-cycle FP32 VALU floor. The remaining gap is k/q cache traffic against register pressure, and the two obvious reformulations are both rejected above |
 | BF16 attention Q/K/V | 5.3% | hipBLASLt is already at 48-57% of peak here, so a hand-written blocked BF16 kernel reaching the W8A8 kernel's 60% is worth about 0.3-1.3% of prefill (`opt-c172-bf16-gemm-ceiling`) |
 | Folding the post-FFN residual into the next layer's pre-norm | 0.9% | Measured and rejected (`opt-c175-residual-defer`): inside noise, because it trades a fast streaming pass for an LDS-limited one |
+
+## HRX native backend (Loom) experiments
+
+**Everything above this line is the HIP backend. This section is the HRX
+native backend, and only the HRX backend.** These are HRX experiments: they run
+under `--qwen-backend hrx-native`, their kernels are Loom source in
+`tools/loom/*.loom` compiled ahead of time by the HRX toolchain in
+`hrx-system/`, and their executor is `src/models/qwen/hrx/`. HRX shares the
+GGUF reader, the tokenizer and the sampler with HIP and nothing else — separate
+kernels, separate arena, separate policy toggles (`--hrx-fusions`). Nothing in
+this section changes, or is measured on, the HIP path.
+
+**The HIP backend is the baseline every HRX number here is scored against.**
+
+### Running and profiling the HRX backend
+
+```sh
+nix build .#hrx
+MODEL=models/Qwen3.8-27B-Q8_0.gguf
+./result/bin/gufo bench --model "$MODEL" --qwen-backend hrx-native \
+  --hrx-fusions blocked-prefill,swiglu-quant,norm-quant -p 2048 -n 16
+./result/bin/gufo bench --model "$MODEL" --qwen-backend hip -p 2048 -n 16
+```
+
+`rocprofv3` **cannot** attach to the HRX executable: it aborts inside
+`hsa_executable_freeze` during IREE AMDGPU device initialization, before any
+model work runs. HRX profiling therefore uses three other instruments:
+
+| Instrument | What it gives |
+| :--- | :--- |
+| `GUFO_HRX_TRACE_STAGES=1` | per-chunk attention / SSM / FFN split, stream-synchronized |
+| `GUFO_HRX_TRACE_SSM=1`, `GUFO_HRX_TRACE_FFN=1` (layer 0), `GUFO_HRX_TRACE_ATTENTION=1` (layer 3) | per-substage split inside one layer |
+| `iree-benchmark-loom <kernel>.loom --device=amdgpu --benchmark=@<entry>_benchmark` | isolated correctness-gated kernel timing |
+| `loom-compile --compile-report=details` | final VGPR/SGPR, scheduled pressure, occupancy tier, spills, and `move_causes` |
+
+Every stage trace inserts a stream synchronization, so a traced run is slower
+than the headline run and layer 0's first stage absorbs the previous stage's
+drain. Read the *shape* from a traced run and the *throughput* from an
+untraced one.
+
+### HRX against HIP, 2026-08-29
+
+One process per arm, same `Qwen3.8-27B-Q8_0.gguf`, device-local HRX weights,
+single repetitions. `pp128` is the first timed point in each process and reads
+low in all three arms, so it is not comparable and is omitted.
+
+| test | HRX `blocked-prefill` | HRX `+swiglu-quant,norm-quant` | HIP | HRX/HIP |
+| :--- | ---: | ---: | ---: | ---: |
+| `pp512` | 429.34 | **438.85** | 538.08 | 81.6% |
+| `pp1024` | 434.21 | **444.30** | 545.97 | 81.4% |
+| `pp2048` | 428.82 | **439.02** | 535.49 | 82.0% |
+| `tg16` | 7.91 | 7.90 | 7.78 | 101.5% |
+
+HRX decode is ahead of HIP and HRX prefill is 18% behind it. The rest of this
+section is about where that 18% is.
+
+The retained arm was re-measured after the change was split into its per-
+experiment revisions, to confirm the split reproduces the result:
+`pp2048` 431.31 / 430.67 without the fusions against 441.21 / 440.43 with them,
+and the same parity numbers to eight decimals.
+
+### Where a 2048-token HRX prefill pass goes
+
+Stage split (`GUFO_HRX_TRACE_STAGES`, ms per pass): attention 540.5, SSM
+1388.2, FFN 2821.1, chunk 4749.9.
+
+Substage split at 2048 tokens (ms; SSM and FFN are layer 0, attention is layer
+3; the leading `norm` of each stage absorbs the previous stage's drain and is
+not a real cost):
+
+| FFN stage | ms | SSM stage | ms | Attention stage | ms |
+| :--- | ---: | :--- | ---: | :--- | ---: |
+| norm | 0.507 | norm | 8.387\* | norm | 230.3\* |
+| input-quant | 0.316 | input-quant | 1.103\* | input-quant | 0.371 |
+| gate/up projection | 25.603 | qkv projection | 7.670 | Q projection | 9.259 |
+| SwiGLU | 1.877 | gate projection | 4.963 | K projection | 1.135 |
+| activation-quant | 0.916 | alpha/beta projection | 0.222 | V projection | 1.087 |
+| down projection | 13.436 | prepare + conv | 1.719 | split + Q/K norm + RoPE | 2.045 |
+| residual | 0.658 | recurrence | 6.448 | attention kernel | 14.707 |
+| | | readout | 0.649 | context-quant | 0.469 |
+| | | context-quant | 0.355 | output projection | 5.169 |
+| | | output projection | 4.716 | residual | 0.706 |
+| | | residual | 0.699 | | |
+
+\* layer-0/first-dispatch warm-up, not a steady-state cost.
+
+Attention widths, printed by the same trace: q_gate 12288, query 6144, key
+1024, value 1024, 24 query heads, 4 KV heads, head dim 256.
+
+Scaled by layer count, the whole pass ranks:
+
+| Work | ms of 4750 | Share |
+| :--- | ---: | ---: |
+| Blocked W8A8 projection, all eight shapes | 3597 | 75.7% |
+| DeltaNet recurrence | 310 | 6.5% |
+| Attention kernel | 235 | 5.0% |
+| SwiGLU + activation quantize (fused below) | 179 | 3.8% |
+| RMSNorm + input quantize (fused below) | 106 | 2.2% |
+| Residual adds | 76 | 1.6% |
+| Everything else | 247 | 5.2% |
+
+**Prefill is the blocked projection.** Nothing outside it is large enough to
+close an 18% gap, which is why the two retained changes below are worth only
+2% together and why the rejected ones all target the projection.
+
+### The blocked projection's ceiling is code generation, not the kernel
+
+`loom-compile --compile-report=details` on the deployed
+`qwen_q8_0_gemm_i8_blocked_k5120_t128`: **184 final VGPRs** (168 scheduled
+peak), 36 SGPRs, **zero spills**, 8 waves per SIMD, 50% occupancy, limiting
+resource `amdgpu.vgpr`, 16 units short of the 9-wave tier.
+
+Per K block the hot loop emits:
+
+| Instruction | Count |
+| :--- | ---: |
+| `v_wmma_i32_16x16x16_iu8` | 16 |
+| `v_cvt_f32_i32` | 64 |
+| `v_fma_f32` | 64 |
+| `v_dual_mul_f32` | 31 |
+| `v_mov_b32` | 46 |
+| address VALU (`v_lshl*`, `v_mad_u32_u24`, …) | 33 |
+| `ds_load_b128` / `ds_load_b32` | 16 / 4 |
+
+WMMA issues on the same SIMD32 vector ALUs as everything else, so those add
+rather than overlap: 238 VALU issue slots against 256 cycles of matrix work is
+**52% of the 55.07 TOPS int8 ceiling**. The FFN measures 28.5 TOPS, which is
+that 52%. HIP's blocked kernel reaches 58% with the *same* Q8_0 weight scales
+and the *same* per-32-element activation scales, so no accuracy trade is
+available or needed here — the difference is instruction count.
+
+Two families explain it, and neither is reachable from Loom source:
+
+- The 64 `v_fma_f32` are already the accumulate-in-place form
+  (`v_fma_f32 v4, v76, v144, v4`) but are emitted as VOP3. The VOPD packer only
+  accepts the VOP2 `v_fmac_f32` spelling, so they never become
+  `v_dual_fmac_f32` — while the `v_dual_mul_f32` beside them shows the packer
+  is otherwise working. That is 32 wasted issue slots per K block.
+- `move_causes` attributes the moves: `operand_bank_materialization` 72 units,
+  `branch_edge` 95, `constant_materialization` 101, `low_slice` 28. The first
+  family is the copies that move a staged LDS read into the register quad a
+  WMMA operand needs.
+
+### HRX experiments, 2026-08-29
+
+| ID | Experiment | Result | Status |
+| :--- | :--- | :--- | :--- |
+| `hrx-swiglu-quant` | On the blocked route the f32 SwiGLU output has exactly one consumer, the activation quantizer, so the 2048x17408 f32 tile is written and read back for nothing. `qwen_swiglu_quantize_blocked_k17408.loom` computes SiLU(gate)\*up in registers and writes only the int8 payload and its per-block scales | FFN layer stage 2.792 ms (SwiGLU 1.877 + quant 0.916) becomes **1.475 ms**, saving 1.317 ms across 64 layers. Interleaved `pp2048` 428.75 to 436.38, **+1.78%**. Logits bit-identical | **Retained**, `--hrx-fusions swiglu-quant` |
+| `hrx-norm-quant` | The same argument for the hidden row. The unfused RMSNorm already gives each workitem exactly 32 elements, which is one Q8 block, so `qwen_rmsnorm_quantize_blocked_k5120.loom` quantizes in place and never writes the f32 normed tile. Replaces the norm + input-quant pair in all three stages (48 SSM, 64 FFN, 16 attention) | FFN layer stage 0.823 ms (norm 0.507 + quant 0.316) becomes **0.404 ms**, saving 0.419 ms across 128 stages. Interleaved `pp2048` 436.38 to 437.72 on top of `swiglu-quant`, **+0.31%**, small but outside the sample spread. Logits bit-identical | **Retained**, `--hrx-fusions norm-quant` |
+| `hrx-fragment-direct-load` | The 72 units of `operand_bank_materialization` are copies from the staged LDS read into the WMMA operand quad. Replace the wide 32-byte `vector.load` + `vector.bitcast` + two `vector.slice`s with two direct `vector<4xi32>` loads over an i32 view of the same scratch, so each fragment is loaded straight into its own bank | Removes 24 of the 209 whole-kernel moves, but every load result becomes its own live range: **208 VGPRs against 184**, which crosses the occupancy tier. Isolated (rows 5120, K 5120, 128 tokens) **545.56 us against 495.42 us** | **Rejected**: buys moves with registers, and registers are what the 8-wave tier is short of |
+| `hrx-static-parity-unroll` | The 33 address VALU ops per K block exist because `%parity = block % 2` indexes both LDS ping-pong halves, so no LDS access folds into an immediate offset. Unroll the K loop by two and substitute the parity constants into each half so every LDS offset is static | Numerically identical and passes its oracle, but both halves' prefetched staging registers are live at once: **256 VGPRs**, dropping the residency tier from 8 waves to 6. Isolated **534.12 us against 495.42 us** | **Rejected**: the address savings are smaller than the occupancy loss |
+| `hrx-attention-substage-trace` | The attention stage was the one stage with no substage instrumentation, so its 540 ms was unattributed | Added `GUFO_HRX_TRACE_ATTENTION`. The attention kernel is 14.707 ms of a 34.95 ms attention layer (42%), i.e. 235 ms of the 4750 ms pass, and the Q/K/V/output projections are another 16.65 ms | **Retained** as the instrument that produced the table above |
+
+### Correctness
+
+`--validate-hrx 4` compares HRX logits against a HIP reference for a batched
+prefill phase and then per token. With and without both fusions the run reports
+**the same numbers to eight decimals** — top-1 157 against 157,
+`max_abs_diff=0.26514006`, `mean_abs_diff=0.03731443`, `rmse=0.04735499`,
+`cosine_similarity=0.99990022` — which is the bit-identity claim confirmed end
+to end rather than argued from the source.
+
+Both arms, and the pre-change binary, report `envelope=fail` on that gate. The
+gate is the tight f32 envelope (`kHrxParityMaxRmse`), and the blocked W8A8
+prefill route has always sat outside it because it quantizes activations. That
+is pre-existing and unchanged by these fusions; it is recorded here so the
+failure is not mistaken for a regression, and closing it needs its own decision
+about what envelope a W8A8 prefill route should be held to.
+
+### HRX TODOs
+
+- Fold the remaining quantizer producers the same way: the SSM readout
+  (`context-quant`, 0.355 ms x 48) and the attention context (0.469 ms x 16)
+  are the last two f32 round trips before a blocked projection, worth about
+  0.5% of the pass together.
+- The 64 non-dual-issued `v_fma_f32` per K block are 32 wasted issue slots,
+  about 6.5% of the projection and therefore about 5% of prefill. This needs a
+  VOP3-to-VOP2 shrink in the Loom AMDGPU backend before the VOPD packer runs;
+  it is not reachable from `.loom` source, and four source-level attempts to
+  steer it are already recorded as rejected.
+- The DeltaNet recurrence is 310 ms (6.5%) and its rows-per-workgroup sweep is
+  already at its optimum, so the only remaining lever is the chunkwise
+  (matrix-form) DeltaNet algorithm — a math change, not a tuning change.
+- The HRX attention kernel is 235 ms (5.0%) of the pass and is an online-softmax
+  f32 kernel at roughly 3.5 TFLOPS; HIP runs a masked WMMA kernel for the same
+  work. Porting that shape is the largest single non-projection item left.
+- Fuse the attention K and V projections, which have identical shapes
+  (1024 rows, K 5120) and read the same quantized activation tile twice. Worth
+  about 0.7% and only if the two weight tensors are adjacent.
+- `rocprofv3` cannot attach to the HRX executable. Until the ROCr/rocprof/IREE
+  interaction is fixed, HRX has no kernel-level hardware counters, and
+  gfx1151's `iree_hal_amdgpu_profile_counter_select_family` path is also
+  unavailable (it accepts gfx11 only for `minor == 0 && stepping <= 2`).
