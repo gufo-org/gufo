@@ -101,6 +101,13 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
       policy.int8_prefill = true;
       policy.blocked_prefill = true;
       policy.fused_norm_quantize = true;
+    } else if (token == "readout-quant") {
+      // The DeltaNet readout writes the activation the blocked projection
+      // consumes, so folding the quantizer into it implies that route.
+      policy.chunked_prefill = true;
+      policy.int8_prefill = true;
+      policy.blocked_prefill = true;
+      policy.fused_readout_quantize = true;
     } else if (token == "int8-prefill") {
       // The int8 route runs inside the chunked prefill stages.
       policy.chunked_prefill = true;
@@ -124,7 +131,7 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
                      "rmsnorm-qkv, rope-kv, q8, ffn-gate-up, "
                      "ssm-alpha-beta, ping-pong, "
                      "chunked-prefill, int8-prefill, blocked-prefill, "
-                     "swiglu-quant, norm-quant, wmma-prefill)";
+                     "swiglu-quant, norm-quant, readout-quant, wmma-prefill)";
       }
       return policy;
     }
@@ -172,6 +179,9 @@ std::string QwenHrxExecutionPolicy::ToString() const {
   }
   if (fused_norm_quantize) {
     enabled.push_back("norm-quant");
+  }
+  if (fused_readout_quantize) {
+    enabled.push_back("readout-quant");
   }
   if (enabled.empty()) {
     return "none";

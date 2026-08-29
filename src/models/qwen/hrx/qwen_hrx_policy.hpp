@@ -22,6 +22,7 @@ struct QwenHrxExecutionPolicy {
   bool blocked_prefill{false};
   bool fused_swiglu_quantize{false};
   bool fused_norm_quantize{false};
+  bool fused_readout_quantize{false};
 
   [[nodiscard]] static QwenHrxExecutionPolicy Parse(
       std::string_view spec, std::string* error_msg = nullptr);

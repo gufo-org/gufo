@@ -1120,6 +1120,48 @@ RDNA3.5 has no packed f32 FMA either -- `v_pk_fma_f32` is CDNA-only in
 `descriptors/sets.py` -- so VOPD is the only path to two f32 FMAs per issue
 slot on this part.
 
+### Retained: the parity gate now gates
+
+`--validate-hrx` reported `envelope=fail` on the blocked route on every run,
+including before any of this work, because the gate was the tight f32 envelope
+(`kHrxParityMaxRmse` 1e-4 / `kHrxParityMinCosine` 0.999999) and the route
+quantizes activations. A gate that always fails checks nothing, and every
+change above had to be judged by hand-comparing rmse and cosine against a
+recorded baseline.
+
+The batched prefill phase now selects its envelope from the route that produced
+it: `w8a8` bounds (rmse <= 8e-2, cosine >= 0.9997, sized from the measured
+0.04735499 / 0.99990022 with headroom) when the policy enables the quantized
+prefill, and the original f32 bounds otherwise. The per-token phases always run
+the f32 GEMV path and keep the tight envelope. The phase line now prints which
+envelope it used.
+
+`--validate-hrx 4` passes end to end on `blocked-prefill,swiglu-quant,norm-quant`
+for the first time, and `--hrx-fusions none` still passes under the f32
+envelope at rmse 9.4e-7.
+
+### Retained: the blocked quantizer folded into the DeltaNet readout
+
+The third instance of the same pattern. The readout writes a 2048x6144 f32 tile
+per SSM layer whose only consumer on the blocked route is the activation
+quantizer. `qwen_deltanet_readout_quantize_batch_f32.loom` keeps the result in
+a register and writes only the int8 payload and its scales.
+
+The decomposition already fits: one workgroup per (token, head) with 128
+workitems, so a wave is 32 lanes and a Q8 block is 32 elements -- a wave is
+exactly one block, and the amax is a `kernel.subgroup.reduce<maxnumf>`. Head h
+owns blocks 4h..4h+3. 14 VGPRs, 16 waves per SIMD, no spills.
+
+Readout 0.651 + context-quant 0.340 = 0.991 ms per layer becomes **0.564 ms**,
+over 48 layers. SSM stage 1355.2 to 1339.6 ms, chunk 4579.8 to 4563.7 ms.
+Interleaved `pp2048` 450.58 / 443.34 / 446.36 against 452.51 / 450.31 / 450.31,
+**+0.9%**, and the logits are bit-identical: the same rmse 0.04735499 and
+cosine 0.99990022 to eight decimals.
+
+The same fold applies to the attention context (0.47 ms x 16 layers) but needs
+a clustered subgroup reduce, because there a Q8 block spans four lanes rather
+than one wave. At 0.16% of the pass it is not worth that yet.
+
 ### Correctness
 
 `--validate-hrx 4` compares HRX logits against a HIP reference for a batched

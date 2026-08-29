@@ -661,6 +661,7 @@ void QwenHrxExecutor::ResetKernelState() {
   activation_quantize_blocked_k17408_executable_ = nullptr;
   swiglu_quantize_blocked_k17408_executable_ = nullptr;
   rmsnorm_quantize_blocked_k5120_executable_ = nullptr;
+  deltanet_readout_quantize_batch_executable_ = nullptr;
   deltanet_recurrence_batch_executable_ = nullptr;
   deltanet_readout_batch_executable_ = nullptr;
   deltanet_prepare_batch_executable_ = nullptr;
@@ -838,6 +839,8 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
       swiglu_quantize_blocked_k17408_executable_ = exec;
     } else if (entry.name == "qwen_rmsnorm_quantize_blocked_k5120") {
       rmsnorm_quantize_blocked_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_deltanet_readout_quantize_batch_f32") {
+      deltanet_readout_quantize_batch_executable_ = exec;
     } else if (entry.name == "qwen_deltanet_recurrence_batch") {
       deltanet_recurrence_batch_executable_ = exec;
     } else if (entry.name == "qwen_deltanet_readout_batch") {
@@ -1713,6 +1716,57 @@ bool QwenHrxExecutor::DispatchDeltaNetReadoutBatch(
   return true;
 }
 
+bool QwenHrxExecutor::DispatchDeltaNetReadoutQuantizeBatch(
+    const HrxBufferBinding& readout, const HrxBufferBinding& norm,
+    const HrxBufferBinding& gate, std::uint32_t tokens) {
+  const std::uint32_t width = contract_.SsmGateWidth();
+  if (deltanet_readout_quantize_batch_executable_ == nullptr ||
+      !arena_.has_value() || tokens == 0 || tokens > kHrxPrefillChunkTokens ||
+      width != 6144) {
+    return false;
+  }
+  constexpr std::uint32_t kTokensPerMacroTile = 128;
+  const std::uint32_t physical_tokens =
+      ((tokens + kTokensPerMacroTile - 1) / kTokensPerMacroTile) *
+      kTokensPerMacroTile;
+  const auto chunk_bytes =
+      CheckedBytes({tokens, contract_.SsmValueHeadCount(),
+                    contract_.SsmValueDim(), sizeof(float)});
+  const auto norm_bytes =
+      CheckedBytes({contract_.SsmValueDim(), sizeof(float)});
+  const auto payload_bytes = CheckedBytes({physical_tokens, width});
+  const auto scale_bytes =
+      CheckedBytes({physical_tokens, width / 32, sizeof(float)});
+  hrx_buffer_ref_t bindings[5];
+  if (!TryBindOperand(readout, chunk_bytes, &bindings[0]) ||
+      !TryBindOperand(norm, norm_bytes, &bindings[1]) ||
+      !TryBindOperand(gate, chunk_bytes, &bindings[2]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
+                      payload_bytes, &bindings[3]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
+                      scale_bytes, &bindings[4])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  // Whole macro tiles, so the final tile's padding tokens zero their own
+  // payload and scale exactly as the standalone quantizer does.
+  config.workgroup_count[0] = physical_tokens * contract_.SsmValueHeadCount();
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = contract_.SsmValueDim();
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto quantize_status = hrx_stream_dispatch(
+      backend_.Stream(), deltanet_readout_quantize_batch_executable_, 0,
+      &config, &tokens, sizeof(tokens), bindings, 5, 0);
+  if (!hrx_status_is_ok(quantize_status)) {
+    hrx_status_ignore(quantize_status);
+    return false;
+  }
+  return true;
+}
+
 bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
                                                  std::uint32_t start_position,
                                                  std::uint32_t tokens,
@@ -2125,24 +2179,37 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
       return Reject("batch-native DeltaNet recurrence synchronization failed",
                     error_msg);
     }
-    if (!DispatchDeltaNetReadoutBatch(batch_readout, layer.ssm_norm, batch_gate,
-                                      batch_context, tokens)) {
-      return Reject("batch-native DeltaNet readout failed", error_msg);
+    if (UsesFusedReadoutQuantize()) {
+      // The readout result is quantized in a register; the f32 context tile is
+      // never written, and the standalone context quantizer disappears.
+      if (!DispatchDeltaNetReadoutQuantizeBatch(batch_readout, layer.ssm_norm,
+                                                batch_gate, tokens)) {
+        return Reject("batch-native DeltaNet fused readout failed", error_msg);
+      }
+      if (!trace_stage("readout-quant")) {
+        return Reject(
+            "batch-native DeltaNet fused readout synchronization "
+            "failed",
+            error_msg);
+      }
+    } else {
+      if (!DispatchDeltaNetReadoutBatch(batch_readout, layer.ssm_norm,
+                                        batch_gate, batch_context, tokens)) {
+        return Reject("batch-native DeltaNet readout failed", error_msg);
+      }
+      if (!trace_stage("readout")) {
+        return Reject("batch-native DeltaNet readout synchronization failed",
+                      error_msg);
+      }
+      if (int8_route && !DispatchChunkQuantize(
+                            batch_context, contract_.SsmGateWidth(), tokens)) {
+        return Reject("batched SSM context quantization failed", error_msg);
+      }
+      if (!trace_stage("context-quant")) {
+        return Reject("batched SSM context quantization synchronization failed",
+                      error_msg);
+      }
     }
-    if (!trace_stage("readout")) {
-      return Reject("batch-native DeltaNet readout synchronization failed",
-                    error_msg);
-    }
-  }
-
-  if (int8_route &&
-      !DispatchChunkQuantize(batch_context, contract_.SsmGateWidth(),
-                                  tokens)) {
-    return Reject("batched SSM context quantization failed", error_msg);
-  }
-  if (!trace_stage("context-quant")) {
-    return Reject("batched SSM context quantization synchronization failed",
-                  error_msg);
   }
   if (!DispatchChunkProjection(layer.ssm_out, batch_context, batch_projected,
                                hidden, contract_.SsmGateWidth(), tokens)) {

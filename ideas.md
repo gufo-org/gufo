@@ -68,12 +68,21 @@ directly, instead of materializing per-lane slices and a concat. Then the tie
 is one hop, no extract moves appear, and the existing VOPD planner does the
 rest.
 
+One more thing is known since: `sroa-vector-banks` already splits a carried
+`vector<8x8xf32>` bank into eight `vector<8xf32>` slots, so what blocks the tie
+is the *slot*, not the bank. Splitting a slot into lanes is exactly what the
+rejected source-level variant did at a cost of 56 moves; doing it inside the
+compiler avoids those moves only if the lane reads of the non-accumulator
+operands stay subregister reads rather than materialized values. That is the
+one unverified assumption, and it should be verified before the pass is
+written.
+
 **Acceptance:** the three blocked projections compile; `v_dual_fmac_f32`
 appears in the K-block loop; moves do not rise; prefill logits stay
 bit-identical (this is a pure encoding change); `pp2048` improves beyond noise.
-**Risk:** this is a miscompilation-class change in a vendored compiler with no
-upstream test suite available here. Fix the parity gate first (card 6) so a
-regression has something to trip.
+**Risk:** miscompilation-class change in a vendored compiler with no upstream
+test suite here. The parity gate is now real, so a regression has something to
+trip.
 
 ## 2. Chunkwise (matrix-form) DeltaNet recurrence
 
@@ -104,20 +113,18 @@ Only the structural rewrite is worth doing.
 **Acceptance:** prefill logits within a gated envelope; `pp2048` improves
 beyond noise. Halving attention is +2.3% of the pass.
 
-## 4. Fold the last two f32 round trips into their producers
+## 4. Fold the attention context quantize into the attention kernel
 
-The quantizer-fusion pattern that paid twice this session has two sites left,
-both feeding a blocked projection:
+The SSM readout half of this card is **done** (+0.9%, bit-identical). One site
+is left: the attention context, 0.47 ms x 16 layers, about 0.16% of the pass.
 
-- the SSM readout, whose `context-quant` is 0.34 ms x 48 layers
-- the attention context, 0.47 ms x 16 layers
+It is harder than the three folds already landed. In the attention kernel a
+lane holds eight contiguous f32 of a head, so a 32-element Q8 block spans four
+lanes and the amax needs a *clustered* subgroup reduce (`cluster_size = 4`,
+which `kernel.subgroup.reduce` does support) rather than the plain wave-wide
+reduce the readout could use.
 
-Together about 0.5% of the pass. Same shape as the retained
-`qwen_swiglu_quantize_blocked_k17408` and
-`qwen_rmsnorm_quantize_blocked_k5120`: compute in registers, write only the
-int8 payload and its per-block scales, never materialize the f32 tile.
-
-**Acceptance:** bit-identical logits, as both retained fusions were.
+**Acceptance:** bit-identical logits. Low priority at 0.16%.
 
 ## 5. Fuse the attention K and V projections
 
@@ -126,19 +133,6 @@ quantized activation tile: 1.14 + 1.09 ms per attention layer, 16 layers.
 Worth about 0.7% of the pass, and only if `attn_k` and `attn_v` turn out to be
 adjacent in the checkpoint the way `ssm_alpha_beta` already is. Cheap to check
 before committing to it.
-
-## 6. Make the prefill parity gate mean something
-
-`--validate-hrx` reports `envelope=fail` on the blocked W8A8 prefill route and
-has done so since before this session, because the gate is the tight f32
-envelope (`kHrxParityMaxRmse`) and this route quantizes activations. Every
-change is currently checked by hand-comparing rmse/cosine against a recorded
-baseline.
-
-This blocks cards 1, 2 and 3, all of which are either miscompilation-risk or
-deliberate numerical changes. Give the W8A8 prefill route its own envelope,
-sized from the measured `rmse 0.04735499` / `cosine 0.99990022` / top-1 157,
-so the gate passes today and fails on a real regression.
 
 ## 7. Ride upstream Loom, and know what blocks it
 

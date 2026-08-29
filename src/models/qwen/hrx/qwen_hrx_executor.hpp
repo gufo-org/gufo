@@ -242,6 +242,19 @@ public:
     return policy_.fused_norm_quantize && UsesBlockedPrefill() &&
            FusedNormQuantizeReady();
   }
+  /// DeltaNet readout with the blocked activation quantizer folded in. The
+  /// f32 context tile has no other consumer on the blocked route.
+  bool DispatchDeltaNetReadoutQuantizeBatch(const HrxBufferBinding& readout,
+                                            const HrxBufferBinding& norm,
+                                            const HrxBufferBinding& gate,
+                                            std::uint32_t tokens);
+  [[nodiscard]] bool FusedReadoutQuantizeReady() const noexcept {
+    return deltanet_readout_quantize_batch_executable_ != nullptr;
+  }
+  [[nodiscard]] bool UsesFusedReadoutQuantize() const noexcept {
+    return policy_.fused_readout_quantize && UsesBlockedPrefill() &&
+           FusedReadoutQuantizeReady();
+  }
   /// True when the int8 projection route has every artifact it needs.
   [[nodiscard]] bool Int8PrefillReady() const noexcept {
     return q8_gemm_i8_k5120_t8_executable_ != nullptr &&
@@ -488,6 +501,7 @@ private:
   hrx_executable_t activation_quantize_blocked_k17408_executable_{nullptr};
   hrx_executable_t swiglu_quantize_blocked_k17408_executable_{nullptr};
   hrx_executable_t rmsnorm_quantize_blocked_k5120_executable_{nullptr};
+  hrx_executable_t deltanet_readout_quantize_batch_executable_{nullptr};
   hrx_executable_t deltanet_recurrence_batch_executable_{nullptr};
   hrx_executable_t deltanet_readout_batch_executable_{nullptr};
   hrx_executable_t deltanet_prepare_batch_executable_{nullptr};

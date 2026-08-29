@@ -2051,3 +2051,44 @@ the prefill envelope moves from rmse 0.04735499 / cosine 0.99990022 to rmse
 Rejected: measurable precision spent for no measurable throughput. At 5.1% of
 the pass, attention needs a structural change (a masked WMMA kernel, as HIP
 has) before arithmetic savings of this size can matter.
+
+## Round five: the parity gate, and a third quantizer fold
+
+### Retained: route-aware parity envelope
+
+`--validate-hrx` had reported `envelope=fail` on the blocked route since before
+this work, because the gate was the tight f32 envelope and the route quantizes
+activations. The batched prefill phase now picks its envelope from the policy:
+w8a8 bounds (rmse <= 8e-2, cosine >= 0.9997) when the quantized prefill route
+is on, f32 bounds otherwise; per-token phases always keep the tight envelope.
+The phase line prints which envelope it used.
+
+First end-to-end pass of `--validate-hrx 4` on
+`blocked-prefill,swiglu-quant,norm-quant`. `--hrx-fusions none` still passes
+under the f32 envelope at rmse 9.4e-7. This is what unblocks the numerically
+risky cards.
+
+### Retained: quantizer folded into the DeltaNet readout
+
+Third instance of the pattern. The readout's decomposition already matched: one
+workgroup per (token, head), 128 workitems, so a wave is exactly one Q8 block
+and the amax is a subgroup reduce. 14 VGPR, 16 waves, no spills.
+
+0.991 -> 0.564 ms per layer over 48 layers; SSM 1355.2 -> 1339.6, chunk 4579.8
+-> 4563.7 ms; interleaved pp2048 446.36 -> 450.31 median, +0.9%; logits
+bit-identical.
+
+The attention context fold (0.47 ms x 16) needs a clustered subgroup reduce
+because a Q8 block spans four lanes there rather than one wave. 0.16% of the
+pass, deferred.
+
+### Card 1 re-examined and still open
+
+The vector-to-scalar route was read this round. `sroa-vector-banks` already
+splits a carried `vector<8x8xf32>` bank into eight `vector<8xf32>` slots; what
+blocks the tie is the *slot*, not the bank, and splitting a slot into lanes is
+exactly what the rejected source-level variant did at a cost of 56 moves. Doing
+it inside the compiler could avoid those moves only if the lane reads of the
+non-accumulator operands stay subregister reads rather than materialized
+values. That is unverified and needs a dedicated pass change, not another
+speculative build.
