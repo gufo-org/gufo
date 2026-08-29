@@ -2358,3 +2358,64 @@ An intermediate 4-deep/pair-2 arm (68 contiguous bytes, LDS 27648) measured
 +28.0% pp32 and +2.4% pp2048 in its own interleaved run, which is the span
 argument confirmed twice: doubling the contiguous run again is worth another
 ten points at pp32.
+
+## Round thirteen: rejected, skipping the padded token tiles
+
+A chunk shorter than 128 tokens is padded up to the macro tile, so a 32-token
+prompt spends three quarters of every MMA on columns the epilogue discards.
+Each wave owns four 16-token tiles; guarding each tile's fragment reads and its
+four MMAs on the tile's first absolute token makes a wave whose tiles are all
+padding issue no matrix work at all. Bit-identical by construction: a skipped
+tile leaves its accumulator slots alone and the epilogue already refuses to
+store a padded column.
+
+It compiles at 192 VGPRs and still eight waves per SIMD, but the four
+two-result `scf.if` regions cost **857 VALU against 730**, +17% on a loop whose
+matrix work shares the vector ALUs.
+
+Interleaved against `paired-k`, three rounds, medians:
+
+| length | paired-k | + tile-skip | delta |
+|---|---:|---:|---:|
+| pp32 | 107.64 | 114.71 | +6.6% |
+| pp64 | 203.75 | 185.74 | -8.8% |
+| pp128 | 368.60 | 333.39 | -9.6% |
+| pp512 | 474.31 | 438.24 | -7.6% |
+| pp2048 | 467.90 | 425.01 | -9.2% |
+
+Rejected and reverted. The -9% is the VALU tax, which is paid at every length;
+only pp32 skips enough work to outrun it.
+
+**The negative result is the useful part.** At 32 tokens this removes three
+quarters of the matrix work and buys about 16% gross. So the short-prompt
+projections are **not MMA-issue bound**, and the token-tile ladder HIP runs is
+not the lever here. That also explains the earlier 64-token-tile rejection
+without needing its parity bug as an excuse.
+
+## Where the short-prompt cost actually is now
+
+Per-projection, one token group, after `paired-k` (ms, from the 128-token
+traces which are the stable ones):
+
+| projection | at 128 tokens | marginal per extra 128-token group |
+|---|---:|---:|
+| FFN gate/up | 1.872 | 1.314 |
+| FFN down | 1.078 | 0.729 |
+| SSM qkv | 0.582 | 0.420 |
+| SSM gate | 0.386 | 0.239 |
+| SSM out | 0.385 | 0.231 |
+| SSM alpha/beta | 0.211 | ~0 |
+
+FFN gate/up now moves its 189 MB weight matrix at **195 GB/s of the 241 GB/s
+ceiling** (189 MB x 1.93 amplification / 1.872 ms), and FFN down at 176 GB/s.
+The first token group is at the memory bound, which is why removing matrix work
+does nothing and why the tile ladder cannot pay. **Further short-prompt gain
+needs the amplification itself**, and 136 contiguous bytes is the most this
+LDS budget buys. The next step there is a block-major weight layout, which
+makes the staging reads coalesce across threads instead of within one thread
+and takes the amplification to 1.0 -- but it is a load-time repack of every
+weight matrix and every other consumer of those tensors reads row-major.
+
+Alpha/beta is the exception and is untouched by all of this: 522 KB of weights
+in 0.2 ms is 2.6 GB/s, nowhere near any bound. It is one workgroup's K-loop
+latency, exactly as card 3 says.
