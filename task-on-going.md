@@ -2268,3 +2268,93 @@ Not built this round, and why: BK=2 needs the register work first; cards 6 and 7
 (0.16% and 0.25%) are below this host's ~0.5% resolution and would produce
 unmeasurable changes; cards 4 and 5 are multi-session rewrites that should not
 be started half-way.
+
+## Round eleven: fresh baseline (2026-08-29, session start)
+
+Same binary, one process per round, `-p 512,32,64,128,2048 -n 0` so no short
+length is the first timed point. Fusions
+`blocked-prefill,swiglu-quant,norm-quant,readout-quant`.
+
+| round | pp512 | pp32 | pp64 | pp128 | pp2048 |
+|---|---:|---:|---:|---:|---:|
+| 1 | 407.41 | 77.87 | 149.97 | 278.76 | 450.96 |
+| 2 | 459.21 | 77.22 | 149.62 | 276.75 | 448.61 |
+| 3 | 456.19 | 77.56 | 152.74 | 279.45 | 449.01 |
+| median | 456.19 | 77.56 | 149.97 | 278.76 | 449.01 |
+
+Round 1's pp512 is the process's first timed point in that round and is the
+usual cold reading; the other two agree to 0.7%. Everything reproduces the
+previous session's figures (pp2048 450.42, pp32 78.0, pp64 150.4), so the host
+has not drifted and the recorded decomposition still applies.
+
+## Round twelve: card 2 solved — paired weight staging, retained
+
+The short-prompt gap is weight-read spatial locality, and it is fixable without
+touching registers or the tile.
+
+**Mechanism.** A weight-staging thread owns one row of the macro tile. In the
+stock kernel it moves one 32-byte Q8 payload per K block, so it walks its row
+34 bytes at a time and between two visits the workgroup streams 127 other rows
+and runs a whole macro tile of matrix work. A 128-byte line is therefore
+consumed across four rounds and evicted between them. Reading L contiguous
+bytes at arbitrary alignment costs `(128 + L - 1)/L` bytes of line traffic per
+useful byte: 4.74x at L=34.
+
+**Fix.** Make the weight stage five K blocks deep instead of two and refill it
+four blocks at a time. On every fourth block a staging thread issues the scale
+and payload of blocks b+1..b+4 back to back — 136 contiguous bytes of its own
+row, one request window, amplification 1.93x — and stores them straight into
+LDS. Nothing is carried in registers. Depth five is the smallest that keeps the
+slot being read out of the refill set.
+
+The activation stage is untouched: its stride is 512 bytes, so consecutive
+rounds already share lines.
+
+**Why this and not BK=2 in registers.** Two register-carried variants were built
+first and both lost the occupancy tier:
+
+| variant | VGPR | waves/SIMD | LDS |
+|---|---:|---:|---:|
+| stock | 184 | 8 | 18432 |
+| unrolled by two, static parity | 256 | 5 | 18432 |
+| paired loads carried in registers | 216 | 7 | 18432 |
+| **5-deep stage, refilled 4 at a time** | **184** | **8** | **32256** |
+
+The register-carried arm measured +22.9% at pp32 and **-5.6% at pp2048**: the
+locality win is real but paying for it in registers gives it back at length.
+The LDS arm pays nothing in registers. LDS is the binding resource above
+32768 bytes per workgroup — depth 6 (36864) drops to 6 waves/SIMD and depth 8
+(46080) to 4 — so depth 5 with pair 4 is the largest span that keeps eight
+waves.
+
+**Interleaved A/B, one binary, three rounds, medians:**
+
+| length | stock | paired-k | delta |
+|---|---:|---:|---:|
+| pp32 | 77.81 | 107.60 | **+38.3%** |
+| pp64 | 150.01 | 204.10 | **+36.1%** |
+| pp128 | 279.50 | 369.66 | **+32.3%** |
+| pp256 | 374.30 | 458.28 | **+22.4%** |
+| pp512 | 455.63 | 478.31 | +5.0% |
+| pp1024 | 450.03 | 477.20 | +6.0% |
+| pp2048 | 445.99 | 465.58 | **+4.4%** |
+| tg16 | 7.90 | 7.90 | 0 |
+
+Raw samples for the three-round sweep (pp512 pp32 pp64 pp128 pp2048):
+
+```
+1 base 451.24 77.31 149.67 278.09 445.99
+1 d5p4 472.74 107.46 204.09 368.94 468.04
+2 base 457.81 77.81 150.01 279.63 446.97
+2 d5p4 479.46 107.60 204.10 369.66 465.58
+3 base 455.63 78.00 150.56 279.50 444.49
+3 d5p4 478.31 107.62 204.61 369.68 462.03
+```
+
+Logits bit-identical: top-1 157, rmse 0.04735499, cosine 0.99990022. Behind
+`--hrx-fusions paired-k`, default off.
+
+An intermediate 4-deep/pair-2 arm (68 contiguous bytes, LDS 27648) measured
++28.0% pp32 and +2.4% pp2048 in its own interleaved run, which is the span
+argument confirmed twice: doubling the contiguous run again is worth another
+ten points at pp32.

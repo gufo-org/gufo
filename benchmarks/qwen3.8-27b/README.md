@@ -1021,6 +1021,8 @@ Two families explain it, and neither is reachable from Loom source:
 | `hrx-invariant-hoist` | Twenty-eight index computations in the blocked projection's K loop are loop invariant -- the wave's row and token tile origins and its six LDS row addresses do not depend on the block index -- yet the compiler recomputed or rematerialized them every iteration rather than keeping them live | Hoisted all 28 out of the loop in the three blocked shapes. Peak registers unchanged at 184, so no occupancy tier is at risk. Isolated (rows 5120, K 5120, 128 tokens) median **499.4 us against 512.4 us**; interleaved end-to-end `pp2048` 442.53 / 441.88 / 436.70 against 449.99 / 448.65 / 447.24, **+1.53%**. Logits bit-identical. The instruction mix barely moves (32 address VALU ops against 33), so the win is scheduling and rematerialization pressure, not instruction count | **Retained**, unconditional |
 | `hrx-loom-vopd-fmac` | The 64 `v_fma_f32` per K block are VOP3 and cannot enter a VOPD pair. Loom models the `fmac_f32` VOPD component and ships `amdgpu.v_fmac_f32`, but no lowering rule offers the tied VOP2 form, and the tie-coalescer then refuses every loop-carried accumulator. Added the rule and a forward destination-reservation walk through the existing `.devops/nix/hrx-system.nix` derivation | **Solved.** All 57 kernels compile; the projection emits 64 `v_dual_fmac_f32` against 64 `v_fma_f32`, FMA issue slots 64 to 33. But the tie forces copies: moves 122 to 168, isolated 510.3 against 507.4 us, end-to-end `pp2048` **432.46 against 450.42, -4.0%**, logits bit-identical | **Rejected** and reverted. The premise that this gap was worth +9% is falsified; the pairing works and does not pay |
 
+| `hrx-paired-k-stage` | A weight-staging thread owns one row of the macro tile and moved one 32-byte Q8 payload per K block, so it walked its row 34 bytes at a time while 127 other rows and a whole macro tile of matrix work went past between visits; a 128-byte line was consumed across four rounds and evicted in between. Make the weight stage five K blocks deep instead of two and refill it four at a time, so a thread issues the scale and payload of blocks b+1..b+4 back to back -- 136 contiguous bytes, one request window -- straight into LDS | Registers and occupancy unchanged at **184 VGPRs and 8 waves/SIMD**; the cost is LDS, 32256 bytes against 18432. Interleaved medians: `pp32` 77.81 to **107.60 (+38.3%)**, `pp64` 150.01 to **204.10 (+36.1%)**, `pp128` 279.50 to **369.66 (+32.3%)**, `pp256` 374.30 to **458.28 (+22.4%)**, `pp512` 455.63 to 478.31 (+5.0%), `pp1024` 450.03 to 477.20 (+6.0%), `pp2048` 445.99 to **465.58 (+4.4%)**, `tg16` unchanged. Logits bit-identical | **Retained**, `--hrx-fusions paired-k` |
+
 ### Rejected: fusing the attention accumulator rescale
 
 The online-softmax accumulator is rescaled once per position and head as
@@ -1376,10 +1378,45 @@ one regime where the change is invisible, and it should be revisited. HIP's own
 comment says BK=2 is "only reachable with the register pressure the addressing
 rewrite and the one-token-tile-at-a-time compute loop freed up", and that
 without them it "needed 500 bytes/lane of scratch and ran 4.3x slower". This
-kernel sits at 184 of the 192 VGPRs an eight-wave tier allows, so the order is:
-free registers, then take BK=2, then measure end to end at 32-128 tokens.
-Single-buffering the LDS stage pays for BK=2's extra bytes exactly, so the LDS
-budget is already there.
+kernel sits at 184 of the 192 VGPRs an eight-wave tier allows.
+
+**Registers turned out to be the wrong currency; see the next section.**
+
+### Retained: paired weight staging, and why it is an LDS change
+
+The diagnosis above is right and the prescription was wrong. What matters is
+how many contiguous bytes of one row a staging thread takes per visit, not how
+many K blocks are live in registers. Reading L contiguous bytes at arbitrary
+alignment costs `(128 + L - 1)/L` bytes of line traffic per useful byte: 4.74x
+at the stock L=34, 2.87x at 68, 1.93x at 136.
+
+Two register-carried arms were built first, and both bought the span with the
+occupancy tier:
+
+| variant | VGPR | waves/SIMD | LDS | `pp32` | `pp2048` |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| stock, one block per round | 184 | 8 | 18432 | 78.40 | 445.86 |
+| unrolled by two, static parity | 256 | 5 | 18432 | not measured | not measured |
+| paired loads carried in registers | 216 | 7 | 18432 | 96.55 (+22.9%) | 424.03 (**-5.6%**) |
+| 4-deep stage, refilled 2 at a time | 184 | 8 | 27648 | 99.41 (+28.0%) | 456.60 (+2.4%) |
+| **5-deep stage, refilled 4 at a time** | **184** | **8** | **32256** | **107.60 (+38.3%)** | **465.58 (+4.4%)** |
+
+The register arm shows the locality win is real and shows it being handed back
+at length by the lost tier. The LDS arms pay nothing in registers: the staging
+thread loads its four blocks and stores them straight into LDS, so no payload
+is live across the matrix work. Depth must exceed the refill span so the slot
+being read is never a refill target, which makes depth five the smallest that
+supports a span of four.
+
+LDS is the binding resource past 32768 bytes per workgroup, which is
+131072/4 -- four resident workgroups is what eight waves per SIMD needs. Depth
+six (36864 bytes) drops to 6 waves/SIMD and depth eight (46080) to 4, both
+measured from the compile report. So depth 5 with span 4 is the largest
+contiguous run this tile can buy at full occupancy, and `pair < depth` is what
+forbids going further without giving the tier back.
+
+The activation stage is deliberately untouched: its stride is 512 bytes, so
+consecutive rounds already share lines and it has nothing to gain.
 
 ### The alpha/beta projection runs on one workgroup
 

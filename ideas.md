@@ -27,9 +27,10 @@ FFN 2692.
 | Residual adds | 75 | 1.6% |
 | Everything else | ~230 | 5.0% |
 
-`pp2048` is 450 t/s against HIP's 557 when HIP's page cache is warm, so 81%. `tg16` is 7.90 against 7.78, so decode is already ahead and is not a
-target. **Prefill parity requires the projection to improve; nothing else is
-large enough.**
+`pp2048` is 466 t/s against HIP's 557 when HIP's page cache is warm, so 84%
+(450 against 557 before card 2 landed). `tg16` is 7.90 against 7.78, so decode
+is already ahead and is not a target. **Prefill parity requires the projection
+to improve; nothing else is large enough.**
 
 ## 1. ~~VOPD `fmac` in the projection~~ SOLVED AND REJECTED
 
@@ -55,58 +56,34 @@ which is a register-assignment question, not an instruction-selection one.
 The patch is not in tree. It is reconstructible from the README section, and
 anyone revisiting should attack the copies rather than the pairing.
 
-## 2. Short prompts stream weights at 2.2x lower bandwidth than HIP
+## 2. ~~Short prompts stream weights at 2.2x lower bandwidth than HIP~~ SOLVED
 
-**The largest measured gap, correctly diagnosed, with the fix identified and
-blocked on register headroom.**
+**Done and retained.** The diagnosis was right, the prescribed fix was in the
+wrong currency. Full write-up in `benchmarks/qwen3.8-27b/README.md` under
+"Retained: paired weight staging, and why it is an LDS change".
 
-`pp32` and `pp64` are 44% and 43% of HIP, `pp128` 66%, 512 and above 82%.
+What mattered was how many contiguous bytes of one row a staging thread takes
+per visit, not how many K blocks are live in registers. The weight stage is now
+five K blocks deep and is refilled four at a time, so a thread issues 136
+contiguous bytes in one request window instead of 34. Registers and occupancy
+are unchanged at 184 VGPRs and 8 waves/SIMD; the cost is LDS, 32256 bytes
+against 18432.
 
-Per-projection timings decompose it exactly (ms):
+`pp32` +38.3%, `pp64` +36.1%, `pp128` +32.3%, `pp256` +22.4%, `pp2048` +4.4%,
+`tg16` unchanged, logits bit-identical. Behind `--hrx-fusions paired-k`.
 
-| projection | 32 tok | 128 tok | 512 tok |
-| :--- | ---: | ---: | ---: |
-| FFN gate/up | 3.081 | 3.268 | 6.232 |
-| FFN down | 1.042 | 1.088 | 3.404 |
-| SSM qkv | 1.354 | 1.389 | 3.627 |
-| SSM alpha/beta | 0.211 | 0.219 | 0.212 |
+Two register-carried arms were built first and both lost the occupancy tier
+(216 VGPRs / 7 waves and 256 / 5); the 216-VGPR one measured +22.9% at `pp32`
+and **-5.6%** at `pp2048`, which is the whole argument for paying in LDS.
 
-32 and 128 tokens are near-identical because both are one token group, and
-128 to 512 costs only 1.91x for 4x the tokens. So a projection call is **a fixed
-cost plus a cheap marginal one**: the first token group streams the whole weight
-matrix with no reuse (189 MiB in ~2.4 ms for gate/up, **79 GB/s**), and each
-additional group is ~1.5 ms of compute riding cache at ~30 TOPS. HIP streams
-that first pass at roughly **152 GB/s**.
-
-Two tile changes were built and both lost, which rules out padding waste and
-occupancy — see the README section "The sub-128 regime is weight-stream bound".
-
-**The structural difference from HIP is `BK`.** HIP stages two K blocks per LDS
-round, so threads `2r` and `2r+1` fetch *adjacent* 34-byte blocks of the same
-row — 68 contiguous bytes per thread pair. HRX stages one, so every staging
-thread sits on its own row, 5440 bytes from its neighbour, and a 128-byte line
-is consumed across four separate loop iterations with 127 other rows competing
-for cache in between. HIP's throughput config is literally
-`W8A8BlockedWmmaGEMMKernel<128, 128, 2, 4, 2>` — the `2` is BK.
-
-**Why this has not been done here, and what it needs.** BK=2 was tried twice in
-this repo and rejected at 236 VGPRs and 0.4072 ms, both times measured on the
-isolated harness — which re-reads one hot matrix and therefore cannot show a
-weight-streaming benefit at all. The rejection was made in the one regime where
-the change is invisible. HIP's own comment says BK=2 "is only reachable with the
-register pressure the addressing rewrite and the one-token-tile-at-a-time
-compute loop freed up", and notes that without them it "needed 500 bytes/lane of
-scratch and ran 4.3x slower". Our kernel is at 184 of the 192 VGPRs an
-eight-wave tier allows.
-
-So the order is: **free registers first, then take BK=2, then measure end to end
-at 32-128 tokens, not in the isolated harness.** Single-buffering the LDS stage
-pays for BK=2's extra stage bytes exactly (2x128x32 ping-pong equals 1x2x128x32),
-so the LDS budget is already there; it is the fragment and epilogue temporaries
-that need to shrink.
-
-**Acceptance:** `pp32`/`pp64`/`pp128` improve beyond noise, `pp2048` not worse,
-logits bit-identical. Worth up to 2x on short prompts.
+**What is left here.** LDS binds at 32768 bytes per workgroup (131072 over the
+four resident workgroups eight waves needs), and the refill span must stay
+below the stage depth, so 136 bytes is the largest contiguous run this tile can
+buy at full occupancy. Going further needs either a smaller activation stage --
+it is 8192 bytes of the budget and is two-deep for a stride that does not need
+it -- or a block-major weight layout, which would make the staging reads
+perfectly coalesced across threads and cost a load-time repack of every weight
+matrix.
 
 ## 3. The alpha/beta projection is a single workgroup
 

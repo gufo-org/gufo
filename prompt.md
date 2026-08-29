@@ -42,7 +42,7 @@ The model is `models/Qwen3.8-27B-Q8_0.gguf`. Hidden 5120, FFN 17408, 64 layers
 ```sh
 nix build .#hrx                       # release binary at ./result/bin/gufo
 MODEL=models/Qwen3.8-27B-Q8_0.gguf
-FUSIONS=blocked-prefill,swiglu-quant,norm-quant,readout-quant
+FUSIONS=blocked-prefill,swiglu-quant,norm-quant,readout-quant,paired-k
 
 ./result/bin/gufo bench --model "$MODEL" --qwen-backend hrx-native \
   --hrx-fusions "$FUSIONS" -p 2048 -n 0
@@ -181,10 +181,22 @@ The loop is currently 443 instructions: 16 `v_wmma`, 64 `v_cvt_f32_i32`,
 - **The 128x128 macro tile is a sharp local optimum.** Both dimensions are
   pinned. Traffic arguments lose to the occupancy cliff, and total DRAM traffic
   is minimized when the row and token spans are equal.
+- **LDS is the second occupancy currency, and it is often the cheaper one.**
+  Eight waves per SIMD needs four resident workgroups, so the budget is
+  131072/4 = **32768 bytes per workgroup**; the hard per-workgroup limit is
+  65536. The projection sits at 32256. Buying a kernel change with LDS instead
+  of registers is what made card 2 work: the same change carried in registers
+  cost 216 VGPRs, 7 waves and -5.6% at `pp2048`, and in LDS cost nothing and
+  gained +4.4%. Read `resident_subgroups_per_simd` from the compile report --
+  it accounts for both.
 - **WMMA issues on the same SIMD32 vector ALUs as ordinary VALU**, so matrix and
   vector work add rather than overlap. Every epilogue instruction is paid for in
   matrix throughput. The measured int8 WMMA ceiling is 55.07 TOPS; f16 WMMA runs
   at half the int8 rate on this part.
+- **Contiguity per thread per visit is what the weight stream costs.** Reading
+  L contiguous bytes at arbitrary alignment costs `(128 + L - 1)/L` bytes of
+  line traffic per useful byte. The projection's staging thread was at L=34
+  (4.74x) and is now at L=136 (1.93x). This is the whole of card 2.
 - **Fold the quantizer into whatever produces its input.** This pattern paid
   three times (SwiGLU, RMSNorm, DeltaNet readout) and is always bit-identical:
   on the blocked route the f32 tile has exactly one consumer, so writing it and
