@@ -4,6 +4,7 @@
   fetchFromGitHub,
   fetchzip,
   cmake,
+  git,
   ninja,
   pkg-config,
   python3,
@@ -40,15 +41,26 @@ stdenv.mkDerivation {
   pname = "hrx-system";
   version = "unstable-2026-08";
 
+  # Pinned to the last revision before "[HAL/AMDGPU] Model ROCr AQL queue
+  # execution modes" (0cc34d04, 2026-08-27), which queries
+  # HSA_AMD_AGENT_INFO_PM4_EMULATION. The ROCr in rocmPackages 7.2.3 rejects
+  # that attribute with HSA_STATUS_ERROR_INVALID_ARGUMENT, so the AMDGPU
+  # accelerator comes up unavailable and every HRX backend init fails. Revisit
+  # when the ROCm pin moves.
   src = fetchFromGitHub {
     owner = "ROCm";
     repo = "hrx-system";
-    rev = "8c274e544a9d411eb05e1eb5629101dd44d2379e";
-    hash = "sha256-ixzyD1tJ+sJxSU/8halBJrGsWZEq2EDKxMan5/SXDjs=";
+    rev = "bce2ba3789b3ac5e1843df99ab9ca25f2681f0a6";
+    hash = "sha256-ZfOXRTQwwVIpuJf0dSj/U1/PC1FeYcpni0lkJaJH/Bw=";
   };
 
   nativeBuildInputs = [
     cmake
+    # Upstream's locked-dependency helper hard-fails at configure time if any
+    # dependency declares patches and git is absent, even when the source dir
+    # is overridden and the patch step never runs. flatcc's only locked patch
+    # is an MSVC restrict-qualifier fix, which this platform never applies.
+    git
     ninja
     pkg-config
     python3
