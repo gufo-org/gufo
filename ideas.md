@@ -55,30 +55,76 @@ which is a register-assignment question, not an instruction-selection one.
 The patch is not in tree. It is reconstructible from the README section, and
 anyone revisiting should attack the copies rather than the pairing.
 
-## 2. The short-prompt projection penalty
+## 2. Short prompts stream weights at 2.2x lower bandwidth than HIP
 
-**New, measured, and unexplained.** `pp128` is 66% of HIP and `pp256` 73%,
-against 82% at 512 and above. The whole gap is the projection: the FFN gate/up
-costs 24.6 us per token at 128 tokens against 12.14 at 2048, a 2.03x penalty,
-and 128 tokens is exactly where a chunk holds a single token group so nothing
-reuses the weight stream.
+**The largest measured gap, correctly diagnosed, with the fix identified and
+blocked on register headroom.**
 
-The parallelism explanation is **refuted**: a 64-row macro tile
-(112 VGPRs, 12 waves per SIMD against 184 and 8) is 2.9% slower end to end
-because it does 18% more VALU per output element. See the README section "The
-short-prompt gap, and one refuted explanation".
+`pp32` and `pp64` are 44% and 43% of HIP, `pp128` 66%, 512 and above 82%.
 
-Next suspect is the weight read's spatial locality -- 32 bytes per thread at a
-5440-byte stride, which only pays if consecutive K blocks hit the same cache
-line and there is no second token group to amortize a miss. A staging layout
-that reads a full cache line per thread per row, or a weight layout swizzled so
-one thread's K blocks are contiguous, would test it.
+Per-projection timings decompose it exactly (ms):
 
-**Acceptance:** `pp128` and `pp256` improve beyond noise with `pp2048`
-unchanged; bit-identical logits. Worth up to 20% on short prompts, which is
-what interactive serving actually runs.
+| projection | 32 tok | 128 tok | 512 tok |
+| :--- | ---: | ---: | ---: |
+| FFN gate/up | 3.081 | 3.268 | 6.232 |
+| FFN down | 1.042 | 1.088 | 3.404 |
+| SSM qkv | 1.354 | 1.389 | 3.627 |
+| SSM alpha/beta | 0.211 | 0.219 | 0.212 |
 
-## 3. Chunkwise (matrix-form) DeltaNet recurrence
+32 and 128 tokens are near-identical because both are one token group, and
+128 to 512 costs only 1.91x for 4x the tokens. So a projection call is **a fixed
+cost plus a cheap marginal one**: the first token group streams the whole weight
+matrix with no reuse (189 MiB in ~2.4 ms for gate/up, **79 GB/s**), and each
+additional group is ~1.5 ms of compute riding cache at ~30 TOPS. HIP streams
+that first pass at roughly **152 GB/s**.
+
+Two tile changes were built and both lost, which rules out padding waste and
+occupancy — see the README section "The sub-128 regime is weight-stream bound".
+
+**The structural difference from HIP is `BK`.** HIP stages two K blocks per LDS
+round, so threads `2r` and `2r+1` fetch *adjacent* 34-byte blocks of the same
+row — 68 contiguous bytes per thread pair. HRX stages one, so every staging
+thread sits on its own row, 5440 bytes from its neighbour, and a 128-byte line
+is consumed across four separate loop iterations with 127 other rows competing
+for cache in between. HIP's throughput config is literally
+`W8A8BlockedWmmaGEMMKernel<128, 128, 2, 4, 2>` — the `2` is BK.
+
+**Why this has not been done here, and what it needs.** BK=2 was tried twice in
+this repo and rejected at 236 VGPRs and 0.4072 ms, both times measured on the
+isolated harness — which re-reads one hot matrix and therefore cannot show a
+weight-streaming benefit at all. The rejection was made in the one regime where
+the change is invisible. HIP's own comment says BK=2 "is only reachable with the
+register pressure the addressing rewrite and the one-token-tile-at-a-time
+compute loop freed up", and notes that without them it "needed 500 bytes/lane of
+scratch and ran 4.3x slower". Our kernel is at 184 of the 192 VGPRs an
+eight-wave tier allows.
+
+So the order is: **free registers first, then take BK=2, then measure end to end
+at 32-128 tokens, not in the isolated harness.** Single-buffering the LDS stage
+pays for BK=2's extra stage bytes exactly (2x128x32 ping-pong equals 1x2x128x32),
+so the LDS budget is already there; it is the fragment and epilogue temporaries
+that need to shrink.
+
+**Acceptance:** `pp32`/`pp64`/`pp128` improve beyond noise, `pp2048` not worse,
+logits bit-identical. Worth up to 2x on short prompts.
+
+## 3. The alpha/beta projection is a single workgroup
+
+`SsmAlphaBetaWidth` is 48, so the projection is 96 rows, and 96 rows on a
+128-row macro tile is **one workgroup** — one CU busy out of twenty, at every
+prompt length. It measures 0.211 / 0.219 / 0.212 ms at 32 / 128 / 512 tokens,
+flat, because the token count never enters. Times 48 layers that is **10.1 ms
+per chunk**: 0.22% at 2048 tokens but **2.5% at 32**.
+
+At 160 K iterations and 8 waves on one CU it is 2 waves per SIMD, which cannot
+hide latency; the measured 210 us against a ~49 us issue floor is 4.3x stalled.
+The fix is K-parallelism — split the 160 blocks across 8 workgroups and reduce —
+not a smaller row tile, which would still give only a handful of workgroups.
+
+**Acceptance:** bit-identical (the reduction is over the same terms in a fixed
+order); measurable at `pp32`, expect nothing at `pp2048`.
+
+## 4. Chunkwise (matrix-form) DeltaNet recurrence
 
 322 ms, 7.0% of the pass, and the largest non-projection block. The kernel is
 sequential over the 2048 tokens of a chunk; its rows-per-workgroup was swept at
@@ -97,7 +143,7 @@ numerical decision up front. The parity gate is now route-aware and real, so it
 will catch a mistake. Halving it is +3.4% of the pass. Do not start this
 without deciding first what envelope the result is allowed to move.
 
-## 4. A masked WMMA prefill attention kernel
+## 5. A masked WMMA prefill attention kernel
 
 208 ms, 4.5%. The current kernel is f32 online softmax at roughly 3.5 TFLOPS
 against a 27 TFLOPS f32 VALU ceiling, so 13%. The cost is structural rather
@@ -122,7 +168,7 @@ here than the HIP note implies.
 beyond noise. Halving attention is +2.3% of the pass. Budget this as a port of
 a tuned kernel, not an afternoon.
 
-## 5. Fold the attention context quantize into the attention kernel
+## 6. Fold the attention context quantize into the attention kernel
 
 The SSM readout half of this card is **done** (+0.9%, bit-identical). One site
 is left: the attention context, 0.47 ms x 16 layers, about 0.16% of the pass.
@@ -135,7 +181,7 @@ reduce the readout could use.
 
 **Acceptance:** bit-identical logits. Low priority at 0.16%.
 
-## 6. Fuse the attention K and V projections
+## 7. Fuse the attention K and V projections
 
 They have identical shapes (1024 rows, K=5120) and each re-reads the same
 quantized activation tile: 1.14 + 1.09 ms per attention layer, 16 layers, about
@@ -154,7 +200,7 @@ workgroups against ~80 resident, so the second round is mostly empty. Merging
 recovers roughly 0.72 ms per attention layer, **0.25% of the pass**, not 0.7%.
 Not worth a layout change.
 
-## 7. Ride upstream Loom, and know what blocks it
+## 8. Ride upstream Loom, and know what blocks it
 
 The derivation now pins `bce2ba37` (2026-08-27), ten days and ~220 Loom commits
 newer than the previous pin. Performance-neutral and parity-identical, so this
@@ -172,6 +218,20 @@ why `git` is in `nativeBuildInputs`.
 Several AMDGPU codegen commits landed in this window that are worth re-reading
 if the projection is revisited: "Narrow address arithmetic from facts", "Reuse
 issue-consumed fragment addresses", "Consume VMEM VGPR sources at issue".
+
+## A note on the remaining cards' size
+
+Cards 4 and 5 are multi-session rewrites, not afternoon work, and should not be
+started half-way. Card 4 has no reference implementation anywhere in this repo
+and needs the WY/UT chunkwise DeltaNet derived and a numerical decision taken
+up front. Card 5 is a port of a 575-line tuned HIP kernel that converts the
+query to FP16 and depends on a transposed-V LDS layout, onto a target where f16
+WMMA runs at half the int8 rate.
+
+Cards 6 and 7 are **below this host's measurement resolution** (0.16% and 0.25%
+against a ~0.5% noise floor on `pp2048`). They are correct and cheap, but
+building them would produce changes that cannot be shown to help. Take them only
+bundled with something measurable, or on a quieter host.
 
 ## Considered this round and not pursued
 

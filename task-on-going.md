@@ -2207,3 +2207,64 @@ pp128 measured as a process's first timed point reads 274-310 t/s on process
 state alone - wide enough to invent or hide an effect this size. Earlier
 session-start pp128 readings (279.72, 274.26, 307.87, 310.37) were all first
 points and are not comparable to each other or to anything else.
+
+## Round nine: the short-prompt gap correctly diagnosed
+
+Absolute chunk time barely moves below 128 tokens - 406.67 ms at 32 against
+454.23 at 128, +11.7% for 4x the tokens. HRX/HIP is 44% at 32, 43% at 64, 66%
+at 128, 82% at 512+.
+
+HIP has an explicit tile ladder here (prefill_quant_gemm.hip: 128x32 or 128x16
+at batch<=8, 128x64 below 96, 128x128 above) and HRX pads everything to 128, so
+padding waste is the obvious explanation. It is wrong.
+
+- hrx-small-prompt-rows (64-row tile): 112 VGPR, 12 waves/SIMD, oracle passes,
+  2.9% slower at 128 tokens. +18% VALU per output.
+- hrx-small-prompt-tile (64-token tile): 136 VGPR, 10 waves, oracle passes at
+  128 tokens. pp32 78.0 -> 56.1, pp64 150.4 -> 112.1. Also FAILS parity at 4
+  tokens (top-1 157 -> 103, rmse 1.646) - the isolated oracle only covers one
+  shape. Rejected twice over.
+
+At 32 tokens both tiles launch one token group, so t64 halves the computed
+columns and still loses. That is the signature of a cost that is not compute.
+
+Arithmetic: at 32 tokens the FFN moves 18.2 GiB of weights in 269 ms = 67.6
+GB/s against a 241 GB/s ceiling. HIP does it in ~120 ms = ~152 GB/s. The gap is
+weight-streaming bandwidth with no second token group to share a panel, and
+tile geometry cannot change it. Next: the staging pattern (128 threads x 32
+contiguous bytes at 5440-byte stride) against what the HIP kernel does.
+
+## Round ten: the fixed/marginal decomposition, and two identified fixes
+
+Per-projection timings at 32 / 128 / 512 tokens (ms):
+
+| projection | 32 | 128 | 512 |
+|---|---:|---:|---:|
+| FFN gate/up | 3.081 | 3.268 | 6.232 |
+| FFN down | 1.042 | 1.088 | 3.404 |
+| SSM qkv | 1.354 | 1.389 | 3.627 |
+| SSM alpha/beta | 0.211 | 0.219 | 0.212 |
+
+32 and 128 are near-identical (one token group each); 128 -> 512 is 1.91x for
+4x the tokens. A projection is a fixed cost (first token group streams the whole
+weight matrix, 189 MiB in ~2.4 ms for gate/up = 79 GB/s) plus a cheap marginal
+one (~1.5 ms per extra group, ~30 TOPS, riding cache). HIP streams the first
+pass at ~152 GB/s.
+
+Identified fix for the fixed cost: BK=2 staging, which is HIP's throughput
+configuration. It pairs threads on adjacent K blocks of one row (68 contiguous
+bytes) where BK=1 puts every thread on its own row 5440 bytes away. BK=2 was
+rejected twice in this repo at 236 VGPR - both times on the isolated harness,
+which cannot show a weight-streaming benefit. Prerequisite is register headroom;
+we are at 184 of 192. Single-buffering the LDS stage pays for BK=2's bytes
+exactly.
+
+New finding: the alpha/beta projection is 96 rows on a 128-row tile = ONE
+workgroup, flat 0.21 ms at every prompt length, 10.1 ms per chunk over 48
+layers. 2 waves/SIMD cannot hide latency (210 us against a ~49 us issue floor).
+Needs K-parallelism plus a reduction.
+
+Not built this round, and why: BK=2 needs the register work first; cards 6 and 7
+(0.16% and 0.25%) are below this host's ~0.5% resolution and would produce
+unmeasurable changes; cards 4 and 5 are multi-session rewrites that should not
+be started half-way.

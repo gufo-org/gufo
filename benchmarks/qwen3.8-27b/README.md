@@ -1303,6 +1303,95 @@ consecutive K blocks reuse the same cache line, and at one token group there is
 no second consumer to amortize a miss. Confirming that needs hardware counters,
 which `rocprofv3` cannot collect on this part.
 
+### The sub-128 regime is weight-stream bound, and two tile changes prove it
+
+Absolute chunk time barely moves below 128 tokens, which is the shape of a
+fixed cost rather than a per-token one:
+
+| tokens | chunk | FFN | HRX t/s | HIP t/s | HRX/HIP |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 406.67 ms | 268.98 | 77.46 | 175.25 | **44%** |
+| 64 | 420.52 ms | 273.80 | 149.88 | 346.95 | **43%** |
+| 96 | 438.35 ms | 281.13 | 215.83 | 318.34 | 68% |
+| 128 | 454.23 ms | 286.42 | 277.86 | 419.40 | 66% |
+
+Four times the tokens costs 11.7% more time. HIP has an explicit tile ladder for
+this regime (`prefill_quant_gemm.hip`: 128x32 or 128x16 at batch <= 8, 128x64
+below 96, 128x128 above, with the comment "short prompt chunks would leave most
+of it idle"), and HRX pads everything to a 128-token tile, so the obvious read
+is that a 32-token prompt does four times the projection work it needs.
+
+**That read is wrong, and two independent experiments say so.**
+
+`hrx-small-prompt-rows` halved the *row* tile: 112 VGPRs against 184 and **12
+waves per SIMD against 8**, oracle passing, and 2.9% slower end to end at 128
+tokens (270.6 / 270.6 / 273.1 against 279.3 / 279.3 / 281.0). It does 18% more
+VALU per output element because halving rows does not halve activation reads.
+
+`hrx-small-prompt-tile` halved the *token* tile to 64, matching HIP's ladder:
+136 VGPRs, 10 waves, oracle passing at 128 tokens. At 32 tokens both tiles
+launch exactly one token group, so this halves the computed columns outright --
+and it is **much slower**: `pp32` 78.0 to 56.1, `pp64` 150.4 to 112.1. It also
+**fails parity** (top-1 157 against 103, rmse 1.646, cosine 0.840): the isolated
+oracle passes at 128 tokens and the route is wrong at 4, which is a reminder
+that one shape is not a correctness test. Both reasons reject it.
+
+Halving the computed columns changing nothing is the signature of a cost that is
+not compute. The arithmetic agrees: at 32 tokens the FFN moves 18.2 GiB of
+weights in 269 ms, **67.6 GB/s**, against a measured 241 GB/s DRAM read ceiling.
+HIP does the same 18.2 GiB in roughly 120 ms, about **152 GB/s**.
+
+So the short-prompt gap is neither padding waste nor occupancy. It is
+**weight-streaming efficiency: HRX reads the weight matrix at 2.2x lower
+bandwidth than HIP when no second token group shares it**, and tile geometry
+cannot change that.
+
+Per-projection timings decompose the cost exactly (ms):
+
+| projection | 32 tok | 128 tok | 512 tok |
+| :--- | ---: | ---: | ---: |
+| FFN gate/up | 3.081 | 3.268 | 6.232 |
+| FFN down | 1.042 | 1.088 | 3.404 |
+| SSM qkv | 1.354 | 1.389 | 3.627 |
+| SSM alpha/beta | 0.211 | 0.219 | 0.212 |
+
+32 and 128 tokens are near-identical -- both are one token group -- and 128 to
+512 costs only 1.91x for 4x the tokens. A projection call is therefore **a fixed
+cost plus a cheap marginal one**: the first token group streams the whole weight
+matrix with no reuse, and each additional group is compute riding cache at about
+30 TOPS.
+
+**The structural difference from HIP is `BK`, the number of K blocks staged per
+LDS round.** HIP stages two, so threads `2r` and `2r+1` fetch adjacent 34-byte
+blocks of the same row -- 68 contiguous bytes per thread pair. HRX stages one,
+so every staging thread sits on its own row 5440 bytes from its neighbour, and a
+128-byte line is consumed across four separate iterations with 127 other rows
+competing for cache in between. HIP's throughput configuration is literally
+`W8A8BlockedWmmaGEMMKernel<128, 128, 2, 4, 2>`.
+
+BK=2 was tried twice here and rejected at 236 VGPRs and 0.4072 ms -- **both
+times on the isolated harness, which re-reads one hot matrix and therefore
+cannot show a weight-streaming benefit at all.** That rejection was made in the
+one regime where the change is invisible, and it should be revisited. HIP's own
+comment says BK=2 is "only reachable with the register pressure the addressing
+rewrite and the one-token-tile-at-a-time compute loop freed up", and that
+without them it "needed 500 bytes/lane of scratch and ran 4.3x slower". This
+kernel sits at 184 of the 192 VGPRs an eight-wave tier allows, so the order is:
+free registers, then take BK=2, then measure end to end at 32-128 tokens.
+Single-buffering the LDS stage pays for BK=2's extra bytes exactly, so the LDS
+budget is already there.
+
+### The alpha/beta projection runs on one workgroup
+
+`SsmAlphaBetaWidth` is 48, so that projection is 96 rows, and 96 rows on a
+128-row macro tile is a single workgroup -- one CU of twenty busy, at every
+prompt length. It measures 0.211 / 0.219 / 0.212 ms at 32 / 128 / 512 tokens,
+flat, because the token count never enters the grid. Over 48 layers that is
+**10.1 ms per chunk**, 0.22% at 2048 tokens and **2.5% at 32**. Eight waves on
+one CU is two per SIMD, which cannot hide latency: 210 us measured against a
+~49 us issue floor. The fix is K-parallelism with a reduction, not a smaller row
+tile.
+
 ### Correctness
 
 `--validate-hrx 4` compares HRX logits against a HIP reference for a batched
