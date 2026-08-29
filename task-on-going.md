@@ -448,6 +448,51 @@ is also why the trace shows the first stage of each layer - the RMSNorm -
 absorbing several milliseconds of the previous stage's drain while the same
 kernel benchmarks at 0.1461 ms in isolation.
 
+### Where prefill stands, and why the projection cannot go much further
+
+Same-binary sweep, device-local weights, `blocked-prefill`, against the HIP
+numbers from the earlier sweep:
+
+| test | HRX native | HIP | ratio |
+|---|---:|---:|---:|
+| pp128 | 305.31 t/s | 449.11 t/s | 68% |
+| pp256 | 366.50 t/s | 520.26 t/s | 70% |
+| pp512 | 416.75 t/s | 551.49 t/s | 76% |
+| pp1024 | 423.00 t/s | 552.66 t/s | 77% |
+| pp2048 | 418.17 t/s | 536.25 t/s | 78% |
+| tg16 | **7.90 t/s** | 7.77 t/s | **102%** |
+
+Separating the attention kernel from the projections that run in the attention
+stage puts the 4934 ms PP2048 pass at roughly: blocked projection 4181 ms
+(85%), attention kernel 219 ms (4.4%), SSM recurrence 286 ms (5.8%), everything
+else 250 ms (5%). **The projection is the whole of prefill**, and a flash-style
+attention rewrite would be chasing 4.4%.
+
+The projection's ceiling now has a number. Per K block a wave issues 16 matrix
+instructions at 16 cycles each, 256 cycles, against about 214 VALU
+instructions: 64 converts, 64 fmas, 31 dual multiplies, 43 moves and about a
+dozen address ops. `v_wmma` issues on the vector ALU, so those add rather than
+overlap:
+
+    256 / (256 + 214) = 54% of the int8 matrix peak, which is 44.6 TOPS
+    -> about 24 TOPS, and the deployed FFN measures 25 TOPS.
+
+The epilogue is three operations per output element per K block - convert,
+scale by the activation scale, and fma the weight scale into the accumulator -
+and it is irreducible for **Q8_0's 32-element scale blocks**, because every 32
+elements of K brings a new pair of scales. Two of the three would disappear
+under a different weight format:
+
+- **Per-token activation scales** remove the multiply: about 14% less VALU,
+  roughly 6% on the kernel and 5% on prefill.
+- **Per-channel weight scales** remove the convert and the fma too, leaving the
+  matrix instructions to accumulate in i32 across the whole K. That is roughly
+  51% on the kernel and would put prefill near 600 t/s, past HIP.
+
+Both change what the quantized model *is*, not just how it is computed, so
+neither is taken here. They are the only remaining prefill lever of any size,
+and the choice belongs to whoever owns the accuracy budget.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,
