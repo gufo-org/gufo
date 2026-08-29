@@ -105,3 +105,28 @@ Two things have never been tried:
 harness - that harness re-reads a hot 94 MiB matrix and is LDS-bound, while the
 deployed FFN streams 26 GiB and is bound differently. Several isolated results
 in this project did not survive end-to-end retesting.
+
+
+## 5. What is left, in order of size
+
+Prefill is 78% of HIP and decode is 102%. The pass is 85% blocked projection,
+and the projection is at a measured ceiling: 256 cycles of matrix work against
+214 VALU instructions per K block, which is 54% of the int8 matrix peak and
+matches the 25 TOPS the FFN measures.
+
+1. **Change the quantization granularity.** Per-channel weight scales plus
+   per-token activation scales let the matrix instructions accumulate in i32
+   across the whole K and delete the epilogue, worth roughly 51% on the kernel
+   and putting prefill near 600 t/s. Per-token activation scales alone are
+   worth about 5% of prefill. Both change what the quantized model is, so they
+   need an accuracy decision, not just a kernel.
+2. **The 43 accumulator copies per K block**, about 9% of the kernel. Caused by
+   register allocation around the zero-seeded first MMA of each pair. Four
+   attempts failed; see the rejected sections above.
+3. **The attention kernel**, 219 ms of 4934, 4.4%. Chunking the online softmax
+   so the accumulator is rescaled once per position block rather than per
+   position would cut its arithmetic meaningfully, at the cost of the
+   bit-identical property the current kernel has.
+4. **The DeltaNet recurrence**, 311 ms, 6.3%. Sequential over tokens; the
+   rows-per-workgroup sweep says the current shape is optimal, so this needs
+   the chunkwise (matrix-form) DeltaNet algorithm, a math change.

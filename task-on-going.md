@@ -520,6 +520,33 @@ The deployment-shaped isolated benchmark said +3.4% and the deployment said
 -15%. That is the sharpest example so far of the rule this file keeps
 re-learning: **only the end-to-end A/B decides.** Reverted.
 
+### SSM stages at 2048 tokens, and the recurrence is already tuned
+
+Traced at 2048 tokens, where the roughly half-millisecond sync floor stops
+dominating (layer 0, milliseconds): qkv 7.53, recurrence 6.48, gate 5.07,
+output projection 4.66, prepare+conv 1.78, residual 0.68, readout 0.65,
+context-quant 0.34, input-quant 0.33, alpha/beta 0.23. Excluding the norm,
+which still absorbs the previous stage's drain, that sums to 27.85 ms, and
+times 48 layers gives 1337 ms against the 1414 ms the chunk profile reports for
+SSM - so the split is trustworthy at this size.
+
+Projections are 63% of SSM and the recurrence 23%, about 311 ms or 6.3% of the
+pass. Everything else together is 181 ms, 3.7%, so there is no pool of waste
+left outside the projection.
+
+The recurrence's rows-per-workgroup was re-swept at the new 2048-token chunk,
+since the 8 chosen earlier was picked under 512-token chunks:
+
+| rows per workgroup | isolated, 2048 tokens | registers |
+|---:|---:|---:|
+| 2 | 12.1938 ms | 34 |
+| 4 | 10.6383 ms | 34 |
+| **8** | **9.0300 ms** | 49 |
+| 16 | 11.1797 ms | 81 |
+| 32 | 21.7368 ms | 145 |
+
+8 is still the optimum and nothing changed.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,
