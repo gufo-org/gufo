@@ -341,6 +341,32 @@ earlier reading of 413.53 t/s at pp512 was an outlier, and run-to-run spread on
 this bench is about 1%, so prefill variants need an A/B rather than a single
 measurement.
 
+### Ping-pong staging halves the barrier count
+
+The block loop staged into one LDS buffer, so it needed two workgroup barriers
+per K block: one after the stores and one at the end to keep the next round's
+stores from overtaking the current round's reads. With two buffers the second
+barrier is unnecessary - each round stages the next block into the half the
+current round is not reading, and the single end-of-round barrier already
+orders it.
+
+LDS goes from 9216 to 18432 bytes, which costs no occupancy here. Registers
+went **down**, 175 to 168, and the logits are bit-identical (max abs
+0.26514006, cosine 0.99990022), as they must be for a pure restructuring.
+
+| test | before | after |
+|---|---:|---:|
+| isolated, K=5120 | 0.3235 ms | **0.3020 ms** |
+| pp512 | 407.68 t/s | **420.48 t/s** |
+| pp2048 | 391.26 t/s | **399.74 t/s** |
+
+Two other ways to cut barriers were measured and rejected. Staging two K blocks
+per round and unrolling the matrix section twice is correct but needs 236
+registers against 168, losing an occupancy tier: 0.4072 ms. Splitting the
+`vector<8x8xf32>` accumulator into eight loop-carried `vector<8xf32>` values to
+remove the extract/insert pairs landed at 0.3218 ms against 0.3235, inside
+noise, and raised registers to 177.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,

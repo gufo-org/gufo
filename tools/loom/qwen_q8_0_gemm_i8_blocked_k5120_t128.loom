@@ -71,10 +71,10 @@ kernel.def target(@qwen_q8_blocked_k5120_target) @qwen_q8_0_gemm_i8_blocked_k512
   %two = index.constant 2 : index
   %one_byte = index.constant 1 : offset
   %four_bytes = index.constant 4 : offset
-  %scratch_bytes = index.constant 9216 : offset
-  %act_scratch_offset = index.constant 4096 : offset
-  %weight_scale_scratch_offset = index.constant 8192 : offset
-  %act_scale_scratch_offset = index.constant 8704 : offset
+  %scratch_bytes = index.constant 18432 : offset
+  %act_scratch_offset = index.constant 8192 : offset
+  %weight_scale_scratch_offset = index.constant 16384 : offset
+  %act_scale_scratch_offset = index.constant 17408 : offset
 
   %lhs_layout = encoding.layout.strided [32, 1] : encoding<layout>
   %rhs_layout = encoding.layout.strided [1, 32] : encoding<layout>
@@ -83,12 +83,10 @@ kernel.def target(@qwen_q8_blocked_k5120_target) @qwen_q8_0_gemm_i8_blocked_k512
   %rhs_storage = encoding.define #encoding.storage {layout = %rhs_layout : encoding<layout>, schema = %i8_schema : encoding<schema>} : encoding<storage>
 
   %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
-  %weight_stage_store = buffer.view %scratch[%base] : buffer -> view<128x32xi8>
-  %weight_stage = buffer.view %scratch[%base] : buffer -> view<128x32xi8, %lhs_storage>
-  %act_stage_store = buffer.view %scratch[%act_scratch_offset] : buffer -> view<128x32xi8>
-  %act_stage = buffer.view %scratch[%act_scratch_offset] : buffer -> view<32x128xi8, %rhs_storage>
-  %weight_scale_stage = buffer.view %scratch[%weight_scale_scratch_offset] : buffer -> view<8x16xf32>
-  %act_scale_stage = buffer.view %scratch[%act_scale_scratch_offset] : buffer -> view<8x16xf32>
+  %weight_stage_store = buffer.view %scratch[%base] : buffer -> view<2x128x32xi8>
+  %act_stage_store = buffer.view %scratch[%act_scratch_offset] : buffer -> view<2x128x32xi8>
+  %weight_scale_stage = buffer.view %scratch[%weight_scale_scratch_offset] : buffer -> view<2x8x16xf32>
+  %act_scale_stage = buffer.view %scratch[%act_scale_scratch_offset] : buffer -> view<2x8x16xf32>
   %act_payload = buffer.view %act[%base] : buffer -> view<128x160x16x32xi8>
   %act_scale_input = buffer.view %scales[%base] : buffer -> view<128x160x16xf32>
 
@@ -127,27 +125,32 @@ kernel.def target(@qwen_q8_blocked_k5120_target) @qwen_q8_0_gemm_i8_blocked_k512
     scf.yield %values : vector<32xi8>
   }
 
+  %scale_loader_preload = index.cmp ult, %tid, %rows_per_group : index
+  %half_zero = index.constant 0 : index
+  %half_one = index.constant 1 : index
+  scf.if %stage_is_act {
+    vector.store %preload, %act_stage_store[%half_zero, %stage_slot, %loop_begin] : vector<32xi8>, view<2x128x32xi8>
+  } else {
+    vector.store %preload, %weight_stage_store[%half_zero, %stage_slot, %loop_begin] : vector<32xi8>, view<2x128x32xi8>
+  }
+  scf.if %scale_loader_preload {
+    %sbb_preload = index.mul %loop_begin, %q8_block_bytes : index
+    %sbi_preload = index.add %scale_weight_row_bytes, %sbb_preload : index
+    %sbo_preload = index.scale %sbi_preload, %one_byte : index, offset -> offset
+    %sv_preload = buffer.view %weight[%sbo_preload] : buffer -> view<1xf16>
+    %sf_preload = view.load %sv_preload[%loop_begin] : view<1xf16> -> f16
+    %ws_preload = scalar.extf %sf_preload : f16 to f32
+    view.store %ws_preload, %weight_scale_stage[%half_zero, %scale_row_tile, %scale_physical] : f32, view<2x8x16xf32>
+    %ast_preload = index.add %token_tile_group_base, %scale_row_tile : index
+    %as_preload = view.load %act_scale_input[%ast_preload, %loop_begin, %scale_row_lane] : view<128x160x16xf32> -> f32
+    view.store %as_preload, %act_scale_stage[%half_zero, %scale_row_tile, %scale_row_lane] : f32, view<2x8x16xf32>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %accumulators, %tail = scf.for %block = [%loop_begin to %block_count step %loop_step](%bank = %initial_bank : vector<8x8xf32>, %staged = %preload : vector<32xi8>) -> (vector<8x8xf32>, vector<32xi8>) {
-    scf.if %stage_is_act {
-      vector.store %staged, %act_stage_store[%stage_slot, %loop_begin] : vector<32xi8>, view<128x32xi8>
-    } else {
-      vector.store %staged, %weight_stage_store[%stage_slot, %loop_begin] : vector<32xi8>, view<128x32xi8>
-    }
-    %scale_loader = index.cmp ult, %tid, %rows_per_group : index
-    scf.if %scale_loader {
-      %scale_block_bytes = index.mul %block, %q8_block_bytes : index
-      %scale_byte_index = index.add %scale_weight_row_bytes, %scale_block_bytes : index
-      %scale_byte_offset = index.scale %scale_byte_index, %one_byte : index, offset -> offset
-      %scale_view = buffer.view %weight[%scale_byte_offset] : buffer -> view<1xf16>
-      %scale_f16 = view.load %scale_view[%loop_begin] : view<1xf16> -> f16
-      %weight_scale = scalar.extf %scale_f16 : f16 to f32
-      view.store %weight_scale, %weight_scale_stage[%scale_row_tile, %scale_physical] : f32, view<8x16xf32>
-      %activation_scale_tile = index.add %token_tile_group_base, %scale_row_tile : index
-      %activation_scale = view.load %act_scale_input[%activation_scale_tile, %block, %scale_row_lane] : view<128x160x16xf32> -> f32
-      view.store %activation_scale, %act_scale_stage[%scale_row_tile, %scale_row_lane] : f32, view<8x16xf32>
-    }
 
-    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    %parity = index.rem %block, %two : index
+    %parity_next = index.sub %loop_step, %parity : index
+    %scale_loader_next = index.cmp ult, %tid, %rows_per_group : index
 
     // Issue the next round's wide load before the matrix work. The index is
     // clamped so the final iteration re-reads its own block harmlessly.
@@ -165,6 +168,23 @@ kernel.def target(@qwen_q8_blocked_k5120_target) @qwen_q8_0_gemm_i8_blocked_k512
       scf.yield %values : vector<32xi8>
     }
 
+    scf.if %stage_is_act {
+      vector.store %next_staged, %act_stage_store[%parity_next, %stage_slot, %loop_begin] : vector<32xi8>, view<2x128x32xi8>
+    } else {
+      vector.store %next_staged, %weight_stage_store[%parity_next, %stage_slot, %loop_begin] : vector<32xi8>, view<2x128x32xi8>
+    }
+    scf.if %scale_loader_next {
+      %sbb_next = index.mul %next_block, %q8_block_bytes : index
+      %sbi_next = index.add %scale_weight_row_bytes, %sbb_next : index
+      %sbo_next = index.scale %sbi_next, %one_byte : index, offset -> offset
+      %sv_next = buffer.view %weight[%sbo_next] : buffer -> view<1xf16>
+      %sf_next = view.load %sv_next[%loop_begin] : view<1xf16> -> f16
+      %ws_next = scalar.extf %sf_next : f16 to f32
+      view.store %ws_next, %weight_scale_stage[%parity_next, %scale_row_tile, %scale_physical] : f32, view<2x8x16xf32>
+      %ast_next = index.add %token_tile_group_base, %scale_row_tile : index
+      %as_next = view.load %act_scale_input[%ast_next, %next_block, %scale_row_lane] : view<128x160x16xf32> -> f32
+      view.store %as_next, %act_scale_stage[%parity_next, %scale_row_tile, %scale_row_lane] : f32, view<2x8x16xf32>
+    }
     %wave_row_group = index.div %wave, %two : index
     %wave_token_half = index.rem %wave, %two : index
     %row_frag0 = index.mul %wave_row_group, %two : index
@@ -178,33 +198,33 @@ kernel.def target(@qwen_q8_blocked_k5120_target) @qwen_q8_0_gemm_i8_blocked_k512
     // costs six LDS reads rather than nine.
     %lhs_row_origin0 = index.mul %row_frag0, %token_tile_extent : index
     %lhs_row0 = index.add %lhs_row_origin0, %lane_token : index
-    %lhs_pair_bytes0 = vector.load %weight_stage_store[%lhs_row0, %loop_begin] : view<128x32xi8> -> vector<32xi8>
+    %lhs_pair_bytes0 = vector.load %weight_stage_store[%parity, %lhs_row0, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
     %lhs_pair0 = vector.bitcast %lhs_pair_bytes0 : vector<32xi8> to vector<8xi32>
     %lhs_low_raw0 = vector.slice %lhs_pair0[0] : vector<8xi32> -> vector<4xi32>
     %lhs_high_raw0 = vector.slice %lhs_pair0[4] : vector<8xi32> -> vector<4xi32>
     %lhs_low0 = vector.fragment<lhs> %lhs_low_raw0 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
     %lhs_high0 = vector.fragment<lhs> %lhs_high_raw0 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
-    %weight_scales0 = vector.load %weight_scale_stage[%row_frag0, %scale_vector_origin] : view<8x16xf32> -> vector<8xf32>
+    %weight_scales0 = vector.load %weight_scale_stage[%parity, %row_frag0, %scale_vector_origin] : view<2x8x16xf32> -> vector<8xf32>
     %lhs_row_origin1 = index.mul %row_frag1, %token_tile_extent : index
     %lhs_row1 = index.add %lhs_row_origin1, %lane_token : index
-    %lhs_pair_bytes1 = vector.load %weight_stage_store[%lhs_row1, %loop_begin] : view<128x32xi8> -> vector<32xi8>
+    %lhs_pair_bytes1 = vector.load %weight_stage_store[%parity, %lhs_row1, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
     %lhs_pair1 = vector.bitcast %lhs_pair_bytes1 : vector<32xi8> to vector<8xi32>
     %lhs_low_raw1 = vector.slice %lhs_pair1[0] : vector<8xi32> -> vector<4xi32>
     %lhs_high_raw1 = vector.slice %lhs_pair1[4] : vector<8xi32> -> vector<4xi32>
     %lhs_low1 = vector.fragment<lhs> %lhs_low_raw1 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
     %lhs_high1 = vector.fragment<lhs> %lhs_high_raw1 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
-    %weight_scales1 = vector.load %weight_scale_stage[%row_frag1, %scale_vector_origin] : view<8x16xf32> -> vector<8xf32>
+    %weight_scales1 = vector.load %weight_scale_stage[%parity, %row_frag1, %scale_vector_origin] : view<2x8x16xf32> -> vector<8xf32>
     %tile_const0 = index.constant 0 : index
     %tt0 = index.add %wave_token_tile_base, %tile_const0 : index
     %rhs_origin0 = index.mul %tt0, %token_tile_extent : index
     %rhs_row0 = index.add %rhs_origin0, %lane_token : index
-    %rhs_pair_bytes0 = vector.load %act_stage_store[%rhs_row0, %loop_begin] : view<128x32xi8> -> vector<32xi8>
+    %rhs_pair_bytes0 = vector.load %act_stage_store[%parity, %rhs_row0, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
     %rhs_pair0 = vector.bitcast %rhs_pair_bytes0 : vector<32xi8> to vector<8xi32>
     %rhs_low_raw0 = vector.slice %rhs_pair0[0] : vector<8xi32> -> vector<4xi32>
     %rhs_high_raw0 = vector.slice %rhs_pair0[4] : vector<8xi32> -> vector<4xi32>
     %rhs_low0 = vector.fragment<rhs> %rhs_low_raw0 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
     %rhs_high0 = vector.fragment<rhs> %rhs_high_raw0 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
-    %act_scale0 = view.load %act_scale_stage[%tt0, %lane_token] : view<8x16xf32> -> f32
+    %act_scale0 = view.load %act_scale_stage[%parity, %tt0, %lane_token] : view<2x8x16xf32> -> f32
     %act_scales0 = vector.splat %act_scale0 : vector<8xf32>
     %zero_i32_0_0 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
     %partial_0_0 = vector.mma %lhs_low0, %rhs_low0, %zero_i32_0_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
@@ -229,13 +249,13 @@ kernel.def target(@qwen_q8_blocked_k5120_target) @qwen_q8_0_gemm_i8_blocked_k512
     %tt1 = index.add %wave_token_tile_base, %tile_const1 : index
     %rhs_origin1 = index.mul %tt1, %token_tile_extent : index
     %rhs_row1 = index.add %rhs_origin1, %lane_token : index
-    %rhs_pair_bytes1 = vector.load %act_stage_store[%rhs_row1, %loop_begin] : view<128x32xi8> -> vector<32xi8>
+    %rhs_pair_bytes1 = vector.load %act_stage_store[%parity, %rhs_row1, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
     %rhs_pair1 = vector.bitcast %rhs_pair_bytes1 : vector<32xi8> to vector<8xi32>
     %rhs_low_raw1 = vector.slice %rhs_pair1[0] : vector<8xi32> -> vector<4xi32>
     %rhs_high_raw1 = vector.slice %rhs_pair1[4] : vector<8xi32> -> vector<4xi32>
     %rhs_low1 = vector.fragment<rhs> %rhs_low_raw1 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
     %rhs_high1 = vector.fragment<rhs> %rhs_high_raw1 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
-    %act_scale1 = view.load %act_scale_stage[%tt1, %lane_token] : view<8x16xf32> -> f32
+    %act_scale1 = view.load %act_scale_stage[%parity, %tt1, %lane_token] : view<2x8x16xf32> -> f32
     %act_scales1 = vector.splat %act_scale1 : vector<8xf32>
     %zero_i32_1_0 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
     %partial_1_0 = vector.mma %lhs_low0, %rhs_low1, %zero_i32_1_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
@@ -257,13 +277,13 @@ kernel.def target(@qwen_q8_blocked_k5120_target) @qwen_q8_0_gemm_i8_blocked_k512
     %tt2 = index.add %wave_token_tile_base, %tile_const2 : index
     %rhs_origin2 = index.mul %tt2, %token_tile_extent : index
     %rhs_row2 = index.add %rhs_origin2, %lane_token : index
-    %rhs_pair_bytes2 = vector.load %act_stage_store[%rhs_row2, %loop_begin] : view<128x32xi8> -> vector<32xi8>
+    %rhs_pair_bytes2 = vector.load %act_stage_store[%parity, %rhs_row2, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
     %rhs_pair2 = vector.bitcast %rhs_pair_bytes2 : vector<32xi8> to vector<8xi32>
     %rhs_low_raw2 = vector.slice %rhs_pair2[0] : vector<8xi32> -> vector<4xi32>
     %rhs_high_raw2 = vector.slice %rhs_pair2[4] : vector<8xi32> -> vector<4xi32>
     %rhs_low2 = vector.fragment<rhs> %rhs_low_raw2 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
     %rhs_high2 = vector.fragment<rhs> %rhs_high_raw2 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
-    %act_scale2 = view.load %act_scale_stage[%tt2, %lane_token] : view<8x16xf32> -> f32
+    %act_scale2 = view.load %act_scale_stage[%parity, %tt2, %lane_token] : view<2x8x16xf32> -> f32
     %act_scales2 = vector.splat %act_scale2 : vector<8xf32>
     %zero_i32_2_0 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
     %partial_2_0 = vector.mma %lhs_low0, %rhs_low2, %zero_i32_2_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
@@ -285,13 +305,13 @@ kernel.def target(@qwen_q8_blocked_k5120_target) @qwen_q8_0_gemm_i8_blocked_k512
     %tt3 = index.add %wave_token_tile_base, %tile_const3 : index
     %rhs_origin3 = index.mul %tt3, %token_tile_extent : index
     %rhs_row3 = index.add %rhs_origin3, %lane_token : index
-    %rhs_pair_bytes3 = vector.load %act_stage_store[%rhs_row3, %loop_begin] : view<128x32xi8> -> vector<32xi8>
+    %rhs_pair_bytes3 = vector.load %act_stage_store[%parity, %rhs_row3, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
     %rhs_pair3 = vector.bitcast %rhs_pair_bytes3 : vector<32xi8> to vector<8xi32>
     %rhs_low_raw3 = vector.slice %rhs_pair3[0] : vector<8xi32> -> vector<4xi32>
     %rhs_high_raw3 = vector.slice %rhs_pair3[4] : vector<8xi32> -> vector<4xi32>
     %rhs_low3 = vector.fragment<rhs> %rhs_low_raw3 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
     %rhs_high3 = vector.fragment<rhs> %rhs_high_raw3 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
-    %act_scale3 = view.load %act_scale_stage[%tt3, %lane_token] : view<8x16xf32> -> f32
+    %act_scale3 = view.load %act_scale_stage[%parity, %tt3, %lane_token] : view<2x8x16xf32> -> f32
     %act_scales3 = vector.splat %act_scale3 : vector<8xf32>
     %zero_i32_3_0 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
     %partial_3_0 = vector.mma %lhs_low0, %rhs_low3, %zero_i32_3_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
