@@ -1045,6 +1045,9 @@ Two families explain it, and neither is reachable from Loom source:
 | `hrx-tile-skip` | A chunk shorter than 128 tokens is padded up to the macro tile, so a 32-token prompt spends three quarters of every MMA on columns the epilogue discards. Guard each of a wave's four 16-token tiles on its first absolute token, so a wave whose tiles are all padding issues no matrix work. Bit-identical by construction | 192 VGPRs and still 8 waves/SIMD, but the four two-result `scf.if` regions cost **857 VALU against 730**. Interleaved medians: `pp32` 107.64 to 114.71 (+6.6%), `pp64` 203.75 to 185.74 (-8.8%), `pp128` 368.60 to 333.39 (-9.6%), `pp512` 474.31 to 438.24 (-7.6%), `pp2048` 467.90 to **425.01 (-9.2%)** | **Rejected** and reverted. The +17% VALU is paid at every length and only `pp32` skips enough work to outrun it |
 | `hrx-split-k` | A projection whose rows fit one 128-row macro tile launches one workgroup per token group -- one compute unit of twenty, with the whole K loop on the critical path. The SSM alpha/beta projection is 96 rows and costs a flat 0.21 ms at every prompt length. Split K eight ways across the grid's third dimension, write a partial per split, and sum the splits in split order with `qwen_split_reduce_f32` | Works, 184 VGPRs and 8 waves/SIMD unchanged. Interleaved medians: `pp32` 107.61 to **111.57 (+3.7%)**, `pp64` +2.6%, `pp128` +2.4%, `pp512` +0.7%, `pp2048` 467.46 to 466.81 (**-0.14%, neutral**). But the regrouped K sum feeds the DeltaNet recurrence, which amplifies it: rmse **0.04735499 to 0.05673100**, cosine 0.99990022 to 0.99985063, top-1 still 157 | **Rejected** against the card's acceptance, which required bit-identical logits. Left in tree behind `--hrx-fusions split-k`, default off; a 20% wider envelope for nothing at `pp2048` is a trade for the operator to make |
 
+| `hrx-trace-drain` | `GUFO_HRX_TRACE_FFN` / `GUFO_HRX_TRACE_SSM` charged the previous stage's drain to whichever substage ran first, so FFN `norm-quant` read as 33.76 ms and SSM `norm-quant` as 8.54 ms. Add a `trace_stage("enter")` at the top of each function so the drain is attributed to itself | The traced FFN layer now sums to 38.60 ms against a 39.42 ms untraced per-layer figure. FFN `norm-quant` is **0.442 ms**, not 33.76; the SSM one is 0.443 against 8.54 | **Retained** as the instrument. Every substage number below this line is post-fix |
+| `hrx-grid-swap` | The blocked projection launches token groups on the fastest-varying grid axis so the tiles sharing a row group's weight panel are co-resident. That was an assertion in a comment and had never been measured. Swap the axes so row groups vary fastest | `pp2048` 461.39 to **436.58 (-5.4%)**, `pp512` 476.40 to 450.56 (-5.4%), `pp128` 369.27 to 369.84 (+0.2%). `pp128` is the control: one token group, so the swap cannot matter, and it does not | **Rejected** and reverted. The shipped order is correct; 5.4% is the size of the guard, not of a remaining prize |
+
 ### Rejected: fusing the attention accumulator rescale
 
 The online-softmax accumulator is rescaled once per position and head as
@@ -1439,6 +1442,59 @@ forbids going further without giving the tier back.
 
 The activation stage is deliberately untouched: its stride is 512 bytes, so
 consecutive rounds already share lines and it has nothing to gain.
+
+### Where a 2048-token pass goes, measured with the fixed traces
+
+Per layer, ms, `blocked-prefill,swiglu-quant,norm-quant,readout-quant,paired-k`:
+
+| FFN stage | ms | SSM stage | ms |
+| :--- | ---: | :--- | ---: |
+| norm-quant | 0.442 | norm-quant | 0.443 |
+| gate/up projection | **24.151** | qkv projection | 6.998 |
+| swiglu-quant | 1.486 | gate projection | 4.337 |
+| down projection | 11.806 | alpha/beta projection | 0.204 |
+| residual | 0.718 | prepare+conv | 1.773 |
+| | | recurrence | **7.003** |
+| | | readout-quant | 0.618 |
+| | | output projection | 4.271 |
+| | | residual | 0.727 |
+
+### The projection at 2048 tokens is issue bound, and the epilogue is why
+
+Two independent negatives agree on one model.
+
+The grid-order swap says traffic is not the limit: with all sixteen token
+groups of a row group co-resident, each weight panel is read once per layer, so
+a gate/up layer moves 189 MB of weights, 10 MB of activations and 285 MB of
+output writes -- 484 MB, **2.0 ms at the ceiling against 24.151 ms measured**,
+or 8% of the stage.
+
+The instruction mix says what the other 92% is. Per K block the loop issues 16
+WMMA and about 242 VALU. A wave32 i8 `v_wmma` occupies roughly 16 issue cycles
+on the same vector ALUs, so 256 matrix cycles sit against 242 VALU cycles and
+matrix occupancy is 51%. Measured, gate/up runs 730.2 GOP in 24.151 ms =
+**30.2 TOPS, 55% of the 55.07 TOPS ceiling**. Model and measurement agree.
+
+**192 of those 242 VALU are the dequant epilogue**: eight accumulator slots by
+eight elements by (`v_cvt_f32_i32`, activation-scale multiply, weight-scale
+FMA). Q8_0's per-32 scales make it unavoidable per K block, and the two obvious
+reformulations do not help -- folding the two scales into one product still
+costs eight element-multiplies per slot, because there are exactly eight
+(token tile, row fragment) combinations. Every 5 VALU removed from this loop is
+worth roughly 1% of `pp2048`, which is the exchange rate any future projection
+work is scored against.
+
+### Refuted: RMSNorm+quantize is not hidden headroom
+
+It costs **0.442 ms** per stage, moving ~52 MiB at 118 GB/s. Perfect would save
+0.22 ms across 128 stages, 28 ms, **0.65% of the pass** -- below this host's
+resolution. The earlier ~1.66 ms figure was a subtraction artifact of the
+unfixed traces.
+
+Note also that `iree-benchmark-loom` cannot answer this class of question:
+it reports `measure = case_end_to_end` and read **7.03 ms** for the same
+kernel, because the case restages a 40 MiB input tensor every iteration. Use it
+for registers, occupancy and relative filtering, never for absolute stage cost.
 
 ### The short-prompt projections are memory bound, not MMA bound
 

@@ -106,7 +106,36 @@ on is an operator decision**: a 20% wider batched-prefill envelope for 3.7% of
 a 32-token prompt and nothing at the headline length. If the answer is yes, the
 same machinery extends to any shape that fits one row group.
 
-## 4. Chunkwise (matrix-form) DeltaNet recurrence
+## 4. Fold SwiGLU + quantize into the gate/up projection's epilogue
+
+**The largest measured lever left, ~3.5% of `pp2048`, and it is the pattern
+that has already paid three times.**
+
+At 2048 tokens the gate/up projection writes a 2048x34816 f32 tile, **285 MB
+per layer**, and `swiglu-quant` reads it straight back: 1.486 ms per layer
+moving 356 MB, which is 239 GB/s, at the ceiling. That round trip is pure
+traffic and has exactly one consumer. Folding it removes the f32 write (the
+projection writes 71 MB of int8 and its scales instead) and the whole
+`swiglu-quant` dispatch: about 2.37 ms per layer over 64 layers, **152 ms of
+4334**.
+
+**What makes it harder than the three folds already landed.** SiLU(gate[i])*up[i]
+needs rows `i` and `i+17408`, which today live in different row groups. The
+macro tile has to take 64 gate rows plus their 64 matching up rows instead of
+128 contiguous rows. That keeps 128 rows x 128 tokens, so it does not reopen the
+pinned tile shape, and paired-K staging is unchanged -- each thread still walks
+its own row's 136 contiguous bytes, just from two panels.
+
+In the GFX11 result carrier a lane holds eight rows for one fixed token, so the
+gate slot and the up slot land in the same lane and the multiply is lane-local.
+The quantizer is the hard part: a Q8 block is 32 contiguous rows and a lane's
+eight rows are stride-2, so the amax needs a clustered
+`kernel.subgroup.reduce`, the same mechanism card 6 needs.
+
+**Acceptance:** bit-identical (the projection's f32 values are unchanged; only
+their trip through memory disappears). `pp2048` improves beyond noise.
+
+## 5. Chunkwise (matrix-form) DeltaNet recurrence
 
 322 ms, 7.0% of the pass, and the largest non-projection block. The kernel is
 sequential over the 2048 tokens of a chunk; its rows-per-workgroup was swept at
@@ -125,7 +154,7 @@ numerical decision up front. The parity gate is now route-aware and real, so it
 will catch a mistake. Halving it is +3.4% of the pass. Do not start this
 without deciding first what envelope the result is allowed to move.
 
-## 5. A masked WMMA prefill attention kernel
+## 6. A masked WMMA prefill attention kernel
 
 208 ms, 4.5%. The current kernel is f32 online softmax at roughly 3.5 TFLOPS
 against a 27 TFLOPS f32 VALU ceiling, so 13%. The cost is structural rather
@@ -150,7 +179,7 @@ here than the HIP note implies.
 beyond noise. Halving attention is +2.3% of the pass. Budget this as a port of
 a tuned kernel, not an afternoon.
 
-## 6. Fold the attention context quantize into the attention kernel
+## 7. Fold the attention context quantize into the attention kernel
 
 The SSM readout half of this card is **done** (+0.9%, bit-identical). One site
 is left: the attention context, 0.47 ms x 16 layers, about 0.16% of the pass.
@@ -163,7 +192,7 @@ reduce the readout could use.
 
 **Acceptance:** bit-identical logits. Low priority at 0.16%.
 
-## 7. Fuse the attention K and V projections
+## 8. Fuse the attention K and V projections
 
 They have identical shapes (1024 rows, K=5120) and each re-reads the same
 quantized activation tile: 1.14 + 1.09 ms per attention layer, 16 layers, about
@@ -182,7 +211,7 @@ workgroups against ~80 resident, so the second round is mostly empty. Merging
 recovers roughly 0.72 ms per attention layer, **0.25% of the pass**, not 0.7%.
 Not worth a layout change.
 
-## 8. Ride upstream Loom, and know what blocks it
+## 9. Ride upstream Loom, and know what blocks it
 
 The derivation now pins `bce2ba37` (2026-08-27), ten days and ~220 Loom commits
 newer than the previous pin. Performance-neutral and parity-identical, so this
@@ -203,14 +232,14 @@ issue-consumed fragment addresses", "Consume VMEM VGPR sources at issue".
 
 ## A note on the remaining cards' size
 
-Cards 4 and 5 are multi-session rewrites, not afternoon work, and should not be
-started half-way. Card 4 has no reference implementation anywhere in this repo
+Cards 5 and 6 are multi-session rewrites, not afternoon work, and should not be
+started half-way. Card 5 has no reference implementation anywhere in this repo
 and needs the WY/UT chunkwise DeltaNet derived and a numerical decision taken
-up front. Card 5 is a port of a 575-line tuned HIP kernel that converts the
+up front. Card 6 is a port of a 575-line tuned HIP kernel that converts the
 query to FP16 and depends on a transposed-V LDS layout, onto a target where f16
 WMMA runs at half the int8 rate.
 
-Cards 6 and 7 are **below this host's measurement resolution** (0.16% and 0.25%
+Cards 7 and 8 are **below this host's measurement resolution** (0.16% and 0.25%
 against a ~0.5% noise floor on `pp2048`). They are correct and cheap, but
 building them would produce changes that cannot be shown to help. Take them only
 bundled with something measurable, or on a quieter host.
@@ -238,6 +267,24 @@ Removing three quarters of the matrix work at 32 tokens is worth about 16%
 gross, which is the measurement that says these shapes are not MMA-issue bound.
 See `hrx-tile-skip` in the README.
 
+## Measured and closed this round, so do not re-open
+
+- **The projection's grid order.** Swapping the axes so row groups vary fastest
+  costs 5.4% at `pp2048` and `pp512` and nothing at `pp128` (one token group,
+  the control). The shipped order is right and there is no prize left in a
+  smarter swizzle: with the sixteen token groups co-resident each weight panel
+  is already read once per layer, and a gate/up layer's whole traffic is 2.0 ms
+  of a 24.151 ms stage.
+- **RMSNorm+quantize.** 0.442 ms per stage at 118 GB/s. Perfect is worth 0.65%
+  of the pass. The 1.66 ms that made it look interesting was an artifact of the
+  substage traces charging the previous stage's drain to whichever ran first;
+  that instrument is now fixed.
+- **The dequant epilogue's two obvious reformulations.** Folding the activation
+  and weight scales into one product still costs eight element-multiplies per
+  slot, because there are exactly eight (token tile, row fragment) pairs.
+  Accumulating int32 across K blocks is impossible with Q8_0's per-32 scales
+  without requantizing, which is a precision reduction and out of bounds.
+
 ## Considered this round and not pursued
 
 - **Fold the residual add into the following norm+quantize.** The same pattern
@@ -245,7 +292,7 @@ See `hrx-tile-skip` in the README.
   it defers a stage-N residual into stage N+1's norm, and HIP measured exactly
   this as `opt-c175-residual-defer` and rejected it as inside noise. 0.5% is at
   this host's resolution, so it would not be distinguishable either.
-- **Fold the attention context quantize** (card 4's remaining half) at 0.16%,
+- **Fold the attention context quantize** (card 7) at 0.16%,
   into the most intricate kernel in the set. Poor expected value.
 
 ## What is closed, and must not be retried without new information

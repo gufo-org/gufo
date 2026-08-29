@@ -2496,3 +2496,73 @@ One process per arm, `-p 512,32,128,512,2048 -n 16`, retained set
 
 HIP's page cache moves its numbers between runs, so the ratio column is a
 position, not a measurement.
+
+## Round fifteen: two discriminators run, both negative, and one instrument fixed
+
+### Retained: the substage traces now drain before their first stage
+
+`GUFO_HRX_TRACE_FFN` / `GUFO_HRX_TRACE_SSM` charged the previous stage's drain
+to whichever substage came first, which is why FFN `norm-quant` read as 33.76 ms
+and SSM `norm-quant` as 8.54. A `trace_stage("enter")` at the top of each
+function attributes the drain to itself. The traced FFN layer now sums to
+38.60 ms against a 39.42 ms untraced per-layer figure, so the split is finally
+closed.
+
+Clean per-layer substages at 2048 tokens (ms):
+
+| FFN | | SSM | |
+|---|---:|---|---:|
+| enter (drain) | 0.000 | enter (drain) | 8.075 |
+| norm-quant | 0.442 | norm-quant | 0.443 |
+| gate-up projection | **24.151** | qkv projection | 6.998 |
+| swiglu-quant | 1.486 | gate projection | 4.337 |
+| down projection | 11.806 | alpha/beta projection | 0.204 |
+| residual | 0.718 | prepare+conv | 1.773 |
+| | | recurrence | **7.003** |
+| | | readout-quant | 0.618 |
+| | | output projection | 4.271 |
+| | | residual | 0.727 |
+
+### Refuted: norm-quant is not hidden headroom
+
+The earlier ~1.66 ms estimate was a subtraction artifact. The real cost is
+**0.442 ms**, moving ~52 MiB at 118 GB/s -- half the ceiling, not a seventh of
+it. Perfect would save 0.22 ms x 128 stages = 28 ms, **0.65% of the pass**,
+below this host's resolution. Closed.
+
+The isolated harness cannot answer this question at all: `iree-benchmark-loom`
+reports `measure = case_end_to_end` and read **7.03 ms** for the same kernel,
+because the case restages a 40 MiB input tensor every iteration. Use it for
+registers and occupancy, not for absolute stage cost.
+
+### Refuted: there is no headroom in the projection's grid order
+
+Swapping the two grid axes so row groups vary fastest, interleaved, three
+rounds, medians:
+
+| length | token-major (shipped) | row-major | delta |
+|---|---:|---:|---:|
+| pp128 | 369.27 | 369.84 | +0.2% |
+| pp512 | 476.40 | 450.56 | **-5.4%** |
+| pp2048 | 461.39 | 436.58 | **-5.4%** |
+
+pp128 is the control: one token group, so the swap cannot change anything, and
+it does not. So the shipped order is load-bearing and worth 5.4% -- but that is
+the size of the *guard*, not of any remaining prize. With all 16 token groups of
+a row group co-resident, each weight panel is already read once per layer: 189 MB
+of weights + 10 MB of activations + 285 MB of output writes is 484 MB per
+gate/up layer, 2.0 ms at the ceiling against 24.15 ms measured. Traffic is 8% of
+that stage. Reverted; the executor comment now carries the measurement.
+
+### What this leaves: the projection is issue bound, and the epilogue is why
+
+The two negatives agree on one model. Per K block the loop issues 16 WMMA and
+about 242 VALU. At 16 issue cycles per wave32 i8 WMMA that is 256 matrix cycles
+against 242 VALU cycles on the same port, so matrix occupancy is 51% -- and
+gate/up measures 730.2 GOP in 24.151 ms = 30.2 TOPS, **55% of the 55.07 TOPS
+ceiling**. The model and the measurement agree.
+
+**192 of those 242 VALU are the dequant epilogue**: 8 accumulator slots x 8
+elements x (`v_cvt_f32_i32`, activation-scale multiply, weight-scale FMA). That
+is the binding cost of a 2048-token prefill, and every 5 VALU removed from the
+K-block loop is worth roughly 1% of `pp2048`.
