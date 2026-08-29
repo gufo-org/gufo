@@ -1116,6 +1116,30 @@ existing VOPD planner does the rest. The lowering rule this section opens with
 is still a prerequisite, and it is correct as written -- 54 of the 57
 production kernels compile with it unchanged.
 
+A later round instrumented the failing conflict test and mapped the chain
+exactly:
+
+    tied operand 93  <-CONCAT-  92  <-COPY-  37
+
+`93` is the tied operand (one unit at base 16), `92` the per-iteration
+aggregate, `37` the loop-carried accumulator (eight units at base 16, live
+[10,80]) and the only interval that occupies the location the tie wants. Both
+`LOW_CONCAT` and `LOW_COPY` are already whitelisted alias causes -- the walk in
+`collect_tied_storage_aliases` is simply **one hop**, so it finds `92`, which is
+dead at the tie and correctly ignorable, and never reaches `37`.
+
+Making that walk transitive (depth-capped, visited set, unit-granular liveness)
+was built and still fails: `37`'s units are reported live at the tied
+definition, because a loop-carried value is modeled live across the whole body
+through the back edge. **No alias-chasing legalizes this tie.** The remaining
+fix is live-range splitting around the back edge -- teaching the allocator that
+a carried unit dies at its redefinition in the body and is reborn on the edge --
+which is a much larger allocator change than anything attempted here.
+
+One assumption did check out: the compiler already lowers `vector.mulf` on
+`vector<8xf32>` lanewise into 31 `v_dual_mul_f32` with no extract moves, so
+internal lanewise lowering is free. It is only the accumulator that cannot tie.
+
 RDNA3.5 has no packed f32 FMA either -- `v_pk_fma_f32` is CDNA-only in
 `descriptors/sets.py` -- so VOPD is the only path to two f32 FMAs per issue
 slot on this part.

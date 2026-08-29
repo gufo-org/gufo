@@ -2092,3 +2092,42 @@ it inside the compiler could avoid those moves only if the lane reads of the
 non-accumulator operands stay subregister reads rather than materialized
 values. That is unverified and needs a dedicated pass change, not another
 speculative build.
+
+## Round six: card 1 closed with a root cause
+
+Two more instrumented builds. The tie-coalescer's alias chain from the tied
+operand is:
+
+    93  <-CONCAT-  92  <-COPY-  37
+
+93 is the tied operand (1 unit at base 16), 92 the per-iteration aggregate, 37
+the loop-carried accumulator (8 units at base 16, live [10,80]) and the only
+interval occupying the location. Both causes are already whitelisted; the walk
+is one hop, finds 92 (dead at the tie, ignorable) and never reaches 37.
+
+A transitive walk - depth-capped, visited set, unit-granular liveness query -
+was built and still fails. 37's units are live at the tied definition because a
+loop-carried value is modeled live across the whole body through the back edge.
+So the fix is live-range splitting around the back edge, not alias chasing.
+Card 1 is now closed with a root cause rather than a hypothesis.
+
+The one open assumption resolved positively: the compiler already lowers
+`vector.mulf` on vector<8xf32> lanewise into 31 v_dual_mul_f32 with no extract
+moves, so internal lanewise lowering is free. Only the accumulator cannot tie.
+
+## Remaining cards, and why none of them was implemented this round
+
+- Card 2 (chunkwise DeltaNet): no reference to port. HIP's batched_ssm.hip is
+  also a sequential per-token scan and its README records that both obvious
+  reformulations were rejected. Original derivation plus a numerical decision.
+- Card 3 (WMMA attention): reference exists (attention_wmma.hip, 575 lines) but
+  it converts the query to FP16, needs a transposed V in LDS to dodge a 32-way
+  bank conflict, and f16 WMMA is half the int8 rate on this part.
+- Card 4 remaining half (attention context quantize): 0.16%, clustered subgroup
+  reduce, most intricate kernel in the set.
+- Card 5 (K/V projection fusion): re-costed at 0.25%, not 0.7% - the loss is
+  grid tail (128 workgroups against ~80 resident), not activation traffic - and
+  it needs an arena and RoPE-kernel layout change.
+- Residual-into-next-norm fold: 0.5% and bit-identical, but HIP measured the
+  same change as opt-c175-residual-defer and rejected it as inside noise; 0.5%
+  is at this host's resolution anyway.
