@@ -367,6 +367,42 @@ registers against 168, losing an occupancy tier: 0.4072 ms. Splitting the
 remove the extract/insert pairs landed at 0.3218 ms against 0.3235, inside
 noise, and raised registers to 177.
 
+### Attention: eight tokens share one cache read through LDS
+
+The chunk profile shows attention scaling with prefix length - 101.9 ms for the
+first 512-token chunk against 215.2 ms for the fourth. The fourth chunk reads
+117 GiB in 215.2 ms, which is 545 GB/s, far above DRAM, so it was being served
+by cache: each cache row was re-read once per token.
+
+`qwen_attention_tile_batch_f32.loom` gives one workgroup eight waves, one token
+each, and walks the prefix in eight-position chunks staged cooperatively into
+LDS, so one read serves eight tokens. Two details matter:
+
+- The chunk bound is uniform across the workgroup, and per-wave causality is a
+  score guard instead: positions past a wave's own token score as -inf, which
+  the online softmax drops without a branch. A per-wave loop bound would put
+  waves at different barriers.
+- **`kernel.workgroup.reduce` had to become `kernel.subgroup.reduce`.** The old
+  kernel's workgroup was one 32-lane wave, so a workgroup reduction *was* a
+  wave reduction. At 256 threads it silently began summing all eight tokens'
+  dot products together: max abs 2.20349860, cosine 0.99229616. With the
+  subgroup reduction the logits are bit-identical to the untiled kernel.
+
+| chunk (start) | before | after |
+|---|---:|---:|
+| 0 | 101.9 ms | 98.4 ms |
+| 512 | 137.1 ms | 127.2 ms |
+| 1024 | 176.2 ms | 158.0 ms |
+| 1536 | 215.2 ms | 188.4 ms |
+| **total** | **630.4 ms** | **572.0 ms** |
+
+pp2048 goes 399.74 to 405.09 t/s. The gain is smaller than the eight-fold
+traffic cut suggests, and the reason is worth recording: one layer's KV cache
+at 2048 positions is 16 MiB and fits the 32 MiB MALL, so the re-reads were
+already cache hits. Staging moves them from L2 to LDS rather than eliminating
+them, and what remains is the per-position arithmetic, which tiling does not
+change.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,

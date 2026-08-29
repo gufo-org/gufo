@@ -667,6 +667,7 @@ void QwenHrxExecutor::ResetKernelState() {
   per_head_rmsnorm_batch_executable_ = nullptr;
   rope_kv_batch_executable_ = nullptr;
   attention_decode_batch_executable_ = nullptr;
+  attention_tile_batch_executable_ = nullptr;
   missing_kernel_artifacts_.clear();
   prototype_artifacts_ready_ = false;
 }
@@ -847,6 +848,8 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
       rope_kv_batch_executable_ = exec;
     } else if (entry.name == "qwen_attention_decode_batch") {
       attention_decode_batch_executable_ = exec;
+    } else if (entry.name == "qwen_attention_tile_batch") {
+      attention_tile_batch_executable_ = exec;
     } else if (entry.name == "qwen_per_head_rmsnorm") {
       per_head_rmsnorm_executable_ = exec;
     } else if (entry.name == "qwen_attention_decode") {
@@ -1511,23 +1514,31 @@ bool QwenHrxExecutor::DispatchAttentionDecodeBatch(
       !TryBindOperand(output, chunk_bytes, &bindings[4])) {
     return false;
   }
-  // One workgroup per (token, KV head): the six query heads that share a KV
-  // head scan the prefix together, so each cache row is read once instead of
-  // six times.
+  // The six query heads sharing a KV head always scan the prefix together, so
+  // a cache row is read once instead of six times. The tile artifact widens
+  // that to eight tokens per workgroup, staging each chunk of the prefix in
+  // LDS so one memory read serves eight waves; long prefixes are bound by
+  // cache bandwidth, so that is where it pays.
+  constexpr std::uint32_t kTokensPerAttentionTile = 8;
+  const bool tiled = attention_tile_batch_executable_ != nullptr;
   hrx_dispatch_config_t config{};
   config.workgroup_count[0] = contract_.KvHeadCount();
-  config.workgroup_count[1] = tokens;
+  config.workgroup_count[1] =
+      tiled ? (tokens + kTokensPerAttentionTile - 1) / kTokensPerAttentionTile
+            : tokens;
   config.workgroup_count[2] = 1;
-  config.workgroup_size[0] = 32;
+  config.workgroup_size[0] = tiled ? 32 * kTokensPerAttentionTile : 32;
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
   config.subgroup_size = 32;
   const std::array<std::uint32_t, 3> constants{start_position, max_context_,
                                                tokens};
   auto status = hrx_stream_dispatch(
-      backend_.Stream(), attention_decode_batch_executable_, 0, &config,
-      constants.data(), constants.size() * sizeof(std::uint32_t), bindings, 5,
-      0);
+      backend_.Stream(),
+      tiled ? attention_tile_batch_executable_
+            : attention_decode_batch_executable_,
+      0, &config, constants.data(), constants.size() * sizeof(std::uint32_t),
+      bindings, 5, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;

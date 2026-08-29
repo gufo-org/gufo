@@ -468,6 +468,7 @@ private:
   hrx_executable_t per_head_rmsnorm_batch_executable_{nullptr};
   hrx_executable_t rope_kv_batch_executable_{nullptr};
   hrx_executable_t attention_decode_batch_executable_{nullptr};
+  hrx_executable_t attention_tile_batch_executable_{nullptr};
   hrx_executable_t per_head_rmsnorm_executable_{nullptr};
   hrx_executable_t attention_decode_executable_{nullptr};
   hrx_executable_t ssm_conv_executable_{nullptr};

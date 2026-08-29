@@ -64,7 +64,9 @@ problems, so measure the split before changing any kernel.
 
 ## 2. Tile the attention prefix scan across tokens
 
-**Status:** deprioritized. Attention is 630 ms of the 5254 ms PP2048 pass, 12%.
+**Status:** done, in a different form than proposed (LDS sharing across eight
+tokens rather than a flash-style prefix-tile decomposition). Attention 630.4 ->
+572.0 ms. Originally deprioritized because: Attention is 630 ms of the 5254 ms PP2048 pass, 12%.
 Even halving it cannot close a 38% gap to HIP; the FFN projection at 59% is
 where prefill is decided.
 
