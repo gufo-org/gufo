@@ -425,6 +425,29 @@ supported context. At 1024 the stage split was FFN 2946 ms (from 2972), SSM
 `--hrx-fusions none --validate-hrx 4` still passes, worst max-absolute error
 7.63e-6.
 
+### Rejected: an LDS transpose in the activation quantizer
+
+The SSM substage trace reports input-quant at 0.576 ms for 512 tokens, which
+would be 23 GB/s for 13.4 MiB - eight times off. The quantizer's writes looked
+like the reason: the staged layout is `[token tile][K block][token in tile][32]`
+and consecutive threads vary the K block, a 512-byte stride. A version that
+takes sixteen tokens by sixteen K blocks per workgroup and transposes through
+LDS makes both the read and the write coalesced, and is numerically identical.
+
+It is **slower**: benchmarked in isolation at 512 tokens, 0.1457 ms against the
+existing kernel's 0.1058 ms. Each thread already writes 32 contiguous bytes,
+which the coalescer handles as one transaction, so the stride never cost what
+it appeared to; the added LDS round trip and barrier cost more. Reverted.
+
+The episode calibrates the substage trace, which is worth recording: each
+traced stage synchronizes, and the chunk profile shows SSM unchanged at
+1414.51 ms against 1412.44 ms across the two builds even though the traced
+stage fell from 0.576 ms to 0.049 ms. **Substage numbers below roughly half a
+millisecond are dominated by that synchronization, not by kernel time**, which
+is also why the trace shows the first stage of each layer - the RMSNorm -
+absorbing several milliseconds of the previous stage's drain while the same
+kernel benchmarks at 0.1461 ms in isolation.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,
