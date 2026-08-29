@@ -70,6 +70,9 @@ enum class QwenHrxArenaBuffer : std::size_t {
   kBatchSsmReadout,
   kBatchAttentionQ,
   kBatchAttentionGate,
+  /// Per-split partial results of a K-split blocked projection, eight slices
+  /// one split stride apart, summed by `qwen_split_reduce_f32`.
+  kBatchSplitPartials,
   kCount,
 };
 

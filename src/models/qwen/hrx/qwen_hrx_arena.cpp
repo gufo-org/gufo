@@ -134,6 +134,7 @@ BufferSizes(const QwenHrxArenaLayout& layout) {
       layout.batch_ssm_readout_bytes,
       layout.batch_attention_query_bytes,
       layout.batch_attention_gate_bytes,
+      layout.batch_split_partials_bytes,
   };
 }
 

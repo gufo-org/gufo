@@ -24,6 +24,11 @@ inline constexpr std::size_t kHrxPrefillChunkTokens = 2048;
 inline constexpr std::size_t kHrxBlockedPrefillExecutionTokens = 2048;
 /// Token capacity of the `_t8` dot4i fallback artifacts.
 inline constexpr std::size_t kHrxDot4iChunkTokens = 8;
+/// K-split fan-out for projections that would otherwise run one workgroup, and
+/// the element stride between two splits' partial results. The stride is a
+/// compile-time constant in `qwen_split_reduce_f32`, so the two must agree.
+inline constexpr std::size_t kHrxSplitKWays = 8;
+inline constexpr std::size_t kHrxSplitStrideElements = 262144;
 
 [[nodiscard]] inline std::optional<std::size_t> HrxCheckedProduct(
     std::initializer_list<std::size_t> factors) noexcept {
@@ -93,6 +98,7 @@ struct QwenHrxArenaLayout {
   std::size_t batch_ssm_readout_bytes{0};
   std::size_t batch_attention_query_bytes{0};
   std::size_t batch_attention_gate_bytes{0};
+  std::size_t batch_split_partials_bytes{0};
 
   [[nodiscard]] static std::optional<QwenHrxArenaLayout> Create(
       const QwenHrxArtifactContract& contract, std::uint32_t max_context,
@@ -200,6 +206,10 @@ struct QwenHrxArenaLayout {
             kHrxPrefillChunkTokens * *ssm_recurrent_output,
         .batch_attention_query_bytes = kHrxPrefillChunkTokens * *q,
         .batch_attention_gate_bytes = kHrxPrefillChunkTokens * *q,
+        // Eight K-split slices, each one split stride of f32 values. Only
+        // projections that fit a single row group take this route.
+        .batch_split_partials_bytes =
+            kHrxSplitKWays * kHrxSplitStrideElements * sizeof(float),
     };
   }
 };

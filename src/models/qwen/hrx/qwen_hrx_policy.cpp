@@ -114,6 +114,13 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
       policy.int8_prefill = true;
       policy.blocked_prefill = true;
       policy.paired_k_stage = true;
+    } else if (token == "split-k") {
+      // The K-split artifacts are built on the paired-K staging ones.
+      policy.chunked_prefill = true;
+      policy.int8_prefill = true;
+      policy.blocked_prefill = true;
+      policy.paired_k_stage = true;
+      policy.split_k_narrow_rows = true;
     } else if (token == "int8-prefill") {
       // The int8 route runs inside the chunked prefill stages.
       policy.chunked_prefill = true;
@@ -138,6 +145,7 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
                      "ssm-alpha-beta, ping-pong, "
                      "chunked-prefill, int8-prefill, blocked-prefill, "
                      "swiglu-quant, norm-quant, readout-quant, paired-k, "
+                     "split-k, "
                      "wmma-prefill)";
       }
       return policy;
@@ -192,6 +200,9 @@ std::string QwenHrxExecutionPolicy::ToString() const {
   }
   if (paired_k_stage) {
     enabled.push_back("paired-k");
+  }
+  if (split_k_narrow_rows) {
+    enabled.push_back("split-k");
   }
   if (enabled.empty()) {
     return "none";

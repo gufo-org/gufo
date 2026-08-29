@@ -467,6 +467,15 @@ void TestHrxExecutionPolicyParsing() {
              "chunked-prefill,int8-prefill,blocked-prefill,paired-k",
          "paired-k serializes with explicit prerequisites");
 
+  auto p_split_k = gufo::hrx::QwenHrxExecutionPolicy::Parse("split-k", &error);
+  Expect(p_split_k.split_k_narrow_rows && p_split_k.paired_k_stage &&
+             p_split_k.blocked_prefill,
+         "split-k implies the paired-K staging it is built on");
+  Expect(p_split_k.ToString() ==
+             "chunked-prefill,int8-prefill,blocked-prefill,paired-k,split-k",
+         "split-k serializes with explicit prerequisites");
+  Expect(!p_paired_k.split_k_narrow_rows, "paired-k alone leaves split-k off");
+
   // The default blocked route must not turn either fusion on.
   auto p_blocked =
       gufo::hrx::QwenHrxExecutionPolicy::Parse("blocked-prefill", &error);

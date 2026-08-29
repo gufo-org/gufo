@@ -25,6 +25,8 @@ struct QwenHrxExecutionPolicy {
   bool fused_readout_quantize{false};
   /// Blocked projection stages two adjacent K blocks per global load pair.
   bool paired_k_stage{false};
+  /// Split K across workgroups for projections that fit one row group.
+  bool split_k_narrow_rows{false};
 
   [[nodiscard]] static QwenHrxExecutionPolicy Parse(
       std::string_view spec, std::string* error_msg = nullptr);

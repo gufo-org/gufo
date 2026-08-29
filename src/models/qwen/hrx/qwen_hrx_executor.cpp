@@ -659,6 +659,8 @@ void QwenHrxExecutor::ResetKernelState() {
   q8_gemm_blocked_bk2_k5120_executable_ = nullptr;
   q8_gemm_blocked_bk2_k6144_executable_ = nullptr;
   q8_gemm_blocked_bk2_k17408_executable_ = nullptr;
+  q8_gemm_blocked_bk2_splitk_k5120_executable_ = nullptr;
+  split_reduce_executable_ = nullptr;
   activation_quantize_blocked_k5120_executable_ = nullptr;
   activation_quantize_blocked_k6144_executable_ = nullptr;
   activation_quantize_blocked_k17408_executable_ = nullptr;
@@ -838,6 +840,10 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
       q8_gemm_blocked_bk2_k6144_executable_ = exec;
     } else if (entry.name == "qwen_q8_gemm_i8_blocked_bk2_k17408_t128") {
       q8_gemm_blocked_bk2_k17408_executable_ = exec;
+    } else if (entry.name == "qwen_q8_gemm_i8_blocked_bk2_splitk_k5120_t128") {
+      q8_gemm_blocked_bk2_splitk_k5120_executable_ = exec;
+    } else if (entry.name == "qwen_split_reduce_f32") {
+      split_reduce_executable_ = exec;
     } else if (entry.name == "qwen_activation_quantize_blocked_k5120") {
       activation_quantize_blocked_k5120_executable_ = exec;
     } else if (entry.name == "qwen_activation_quantize_blocked_k6144") {
@@ -1167,6 +1173,16 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
   }
   constexpr std::uint32_t kRowsPerGroup = 128;
   constexpr std::uint32_t kTokensPerGroup = 128;
+  // A projection that fits one row group launches a single workgroup per token
+  // group -- one compute unit of twenty, with the whole K loop on the critical
+  // path. Splitting K across workgroups regroups the sum over K, so the route
+  // is opt-in and its reduction runs in split order.
+  const bool split_k = policy_.split_k_narrow_rows && paired &&
+                       input_elements == 5120 && rows <= kRowsPerGroup &&
+                       SplitKReady();
+  if (split_k) {
+    executable = q8_gemm_blocked_bk2_splitk_k5120_executable_;
+  }
   const std::uint32_t physical_tokens =
       ((tokens + kTokensPerGroup - 1) / kTokensPerGroup) * kTokensPerGroup;
   const auto weight_bytes = Q8_0MatrixBytes(rows, input_elements);
@@ -1174,13 +1190,19 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
   const auto scale_bytes = CheckedBytes(
       {physical_tokens, input_elements / 32, sizeof(float)});
   const auto output_bytes = CheckedBytes({tokens, rows, sizeof(float)});
+  const auto partial_bytes =
+      CheckedBytes({kHrxSplitKWays, kHrxSplitStrideElements, sizeof(float)});
+  const auto projection_target =
+      split_k ? arena_->Binding(QwenHrxArenaBuffer::kBatchSplitPartials)
+              : output;
+  const auto projection_bytes = split_k ? partial_bytes : output_bytes;
   hrx_buffer_ref_t bindings[4];
   if (!TryBindOperand(weight, weight_bytes, &bindings[0]) ||
       !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
                       payload_bytes, &bindings[1]) ||
       !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
                       scale_bytes, &bindings[2]) ||
-      !TryBindOperand(output, output_bytes, &bindings[3])) {
+      !TryBindOperand(projection_target, projection_bytes, &bindings[3])) {
     return false;
   }
   hrx_dispatch_config_t config{};
@@ -1189,7 +1211,8 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
   // each streaming the panel from DRAM.
   config.workgroup_count[0] = physical_tokens / kTokensPerGroup;
   config.workgroup_count[1] = (rows + kRowsPerGroup - 1) / kRowsPerGroup;
-  config.workgroup_count[2] = 1;
+  config.workgroup_count[2] =
+      split_k ? static_cast<std::uint32_t>(kHrxSplitKWays) : 1;
   config.workgroup_size[0] = 256;
   config.workgroup_size[1] = 1;
   config.workgroup_size[2] = 1;
@@ -1198,6 +1221,43 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
   auto status = hrx_stream_dispatch(
       backend_.Stream(), executable, 0, &config, constants.data(),
       constants.size() * sizeof(std::uint32_t), bindings, 4, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
+    return false;
+  }
+  if (split_k) {
+    return DispatchSplitReduce(output, tokens * rows);
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchSplitReduce(const HrxBufferBinding& output,
+                                          std::uint32_t elements) {
+  if (split_reduce_executable_ == nullptr || !arena_.has_value() ||
+      elements == 0 || (elements % 32) != 0 ||
+      elements > kHrxSplitStrideElements) {
+    return false;
+  }
+  const auto partial_bytes =
+      CheckedBytes({kHrxSplitKWays, kHrxSplitStrideElements, sizeof(float)});
+  const auto output_bytes = CheckedBytes({elements, sizeof(float)});
+  hrx_buffer_ref_t bindings[2];
+  if (!TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchSplitPartials),
+                      partial_bytes, &bindings[0]) ||
+      !TryBindOperand(output, output_bytes, &bindings[1])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = elements / 32;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status =
+      hrx_stream_dispatch(backend_.Stream(), split_reduce_executable_, 0,
+                          &config, &elements, sizeof(elements), bindings, 2, 0);
   if (!hrx_status_is_ok(status)) {
     hrx_status_ignore(status);
     return false;

@@ -279,6 +279,11 @@ public:
            q8_gemm_blocked_bk2_k6144_executable_ != nullptr &&
            q8_gemm_blocked_bk2_k17408_executable_ != nullptr;
   }
+  /// True when the K-split projection and its reduction are both present.
+  [[nodiscard]] bool SplitKReady() const noexcept {
+    return q8_gemm_blocked_bk2_splitk_k5120_executable_ != nullptr &&
+           split_reduce_executable_ != nullptr;
+  }
   /// True when the policy asks for the blocked route and it can run.
   [[nodiscard]] bool UsesBlockedPrefill() const noexcept {
     return policy_.blocked_prefill && BlockedPrefillReady();
@@ -298,6 +303,8 @@ public:
                                          std::uint32_t input_elements,
                                          std::uint32_t tokens);
   /// Blocked 128 row x 128 token W8A8 projection.
+  bool DispatchSplitReduce(const HrxBufferBinding& output,
+                           std::uint32_t elements);
   bool DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
                              const HrxBufferBinding& output,
                              std::uint32_t rows, std::uint32_t input_elements,
@@ -505,6 +512,8 @@ private:
   hrx_executable_t q8_gemm_blocked_bk2_k5120_executable_{nullptr};
   hrx_executable_t q8_gemm_blocked_bk2_k6144_executable_{nullptr};
   hrx_executable_t q8_gemm_blocked_bk2_k17408_executable_{nullptr};
+  hrx_executable_t q8_gemm_blocked_bk2_splitk_k5120_executable_{nullptr};
+  hrx_executable_t split_reduce_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k5120_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k6144_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k17408_executable_{nullptr};
