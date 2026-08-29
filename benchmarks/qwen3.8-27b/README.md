@@ -894,7 +894,26 @@ than the headline run and layer 0's first stage absorbs the previous stage's
 drain. Read the *shape* from a traced run and the *throughput* from an
 untraced one.
 
-### HRX against HIP, 2026-08-29
+### HRX against HIP after the staging work, 2026-08-29
+
+One process per arm, `-p 512,32,128,512,2048 -n 16`, with a throwaway `pp512`
+in front so no short length is a process's first timed point. HRX runs the
+retained set `blocked-prefill,swiglu-quant,norm-quant,readout-quant,paired-k`.
+
+| test | HRX before `paired-k` | HRX now | HIP | HRX/HIP |
+| :--- | ---: | ---: | ---: | ---: |
+| `pp32` | 77.8 | **108.45** | 178.54 | 61% (was 44%) |
+| `pp128` | 279.5 | **368.15** | 419.38 | 88% (was 66%) |
+| `pp512` | 455.6 | **475.66** | 541.53 | 88% |
+| `pp2048` | 446.0 | **468.89** | 529.43 | 89% |
+| `tg16` | 7.90 | 7.91 | 7.79 | 102% |
+
+HIP's numbers move with its page cache -- its `pp2048` has read anywhere from
+484 to 557 across sessions -- so read the ratio column as a position and not as
+a measurement. The attributable numbers are the interleaved same-binary A/B
+rows in the experiment table.
+
+### HRX against HIP, 2026-08-29 (before the staging work)
 
 One process per arm, same `Qwen3.8-27B-Q8_0.gguf`, device-local HRX weights,
 single repetitions. `pp128` is the first timed point in each process and reads
@@ -1022,6 +1041,9 @@ Two families explain it, and neither is reachable from Loom source:
 | `hrx-loom-vopd-fmac` | The 64 `v_fma_f32` per K block are VOP3 and cannot enter a VOPD pair. Loom models the `fmac_f32` VOPD component and ships `amdgpu.v_fmac_f32`, but no lowering rule offers the tied VOP2 form, and the tie-coalescer then refuses every loop-carried accumulator. Added the rule and a forward destination-reservation walk through the existing `.devops/nix/hrx-system.nix` derivation | **Solved.** All 57 kernels compile; the projection emits 64 `v_dual_fmac_f32` against 64 `v_fma_f32`, FMA issue slots 64 to 33. But the tie forces copies: moves 122 to 168, isolated 510.3 against 507.4 us, end-to-end `pp2048` **432.46 against 450.42, -4.0%**, logits bit-identical | **Rejected** and reverted. The premise that this gap was worth +9% is falsified; the pairing works and does not pay |
 
 | `hrx-paired-k-stage` | A weight-staging thread owns one row of the macro tile and moved one 32-byte Q8 payload per K block, so it walked its row 34 bytes at a time while 127 other rows and a whole macro tile of matrix work went past between visits; a 128-byte line was consumed across four rounds and evicted in between. Make the weight stage five K blocks deep instead of two and refill it four at a time, so a thread issues the scale and payload of blocks b+1..b+4 back to back -- 136 contiguous bytes, one request window -- straight into LDS | Registers and occupancy unchanged at **184 VGPRs and 8 waves/SIMD**; the cost is LDS, 32256 bytes against 18432. Interleaved medians: `pp32` 77.81 to **107.60 (+38.3%)**, `pp64` 150.01 to **204.10 (+36.1%)**, `pp128` 279.50 to **369.66 (+32.3%)**, `pp256` 374.30 to **458.28 (+22.4%)**, `pp512` 455.63 to 478.31 (+5.0%), `pp1024` 450.03 to 477.20 (+6.0%), `pp2048` 445.99 to **465.58 (+4.4%)**, `tg16` unchanged. Logits bit-identical | **Retained**, `--hrx-fusions paired-k` |
+
+| `hrx-tile-skip` | A chunk shorter than 128 tokens is padded up to the macro tile, so a 32-token prompt spends three quarters of every MMA on columns the epilogue discards. Guard each of a wave's four 16-token tiles on its first absolute token, so a wave whose tiles are all padding issues no matrix work. Bit-identical by construction | 192 VGPRs and still 8 waves/SIMD, but the four two-result `scf.if` regions cost **857 VALU against 730**. Interleaved medians: `pp32` 107.64 to 114.71 (+6.6%), `pp64` 203.75 to 185.74 (-8.8%), `pp128` 368.60 to 333.39 (-9.6%), `pp512` 474.31 to 438.24 (-7.6%), `pp2048` 467.90 to **425.01 (-9.2%)** | **Rejected** and reverted. The +17% VALU is paid at every length and only `pp32` skips enough work to outrun it |
+| `hrx-split-k` | A projection whose rows fit one 128-row macro tile launches one workgroup per token group -- one compute unit of twenty, with the whole K loop on the critical path. The SSM alpha/beta projection is 96 rows and costs a flat 0.21 ms at every prompt length. Split K eight ways across the grid's third dimension, write a partial per split, and sum the splits in split order with `qwen_split_reduce_f32` | Works, 184 VGPRs and 8 waves/SIMD unchanged. Interleaved medians: `pp32` 107.61 to **111.57 (+3.7%)**, `pp64` +2.6%, `pp128` +2.4%, `pp512` +0.7%, `pp2048` 467.46 to 466.81 (**-0.14%, neutral**). But the regrouped K sum feeds the DeltaNet recurrence, which amplifies it: rmse **0.04735499 to 0.05673100**, cosine 0.99990022 to 0.99985063, top-1 still 157 | **Rejected** against the card's acceptance, which required bit-identical logits. Left in tree behind `--hrx-fusions split-k`, default off; a 20% wider envelope for nothing at `pp2048` is a trade for the operator to make |
 
 ### Rejected: fusing the attention accumulator rescale
 
@@ -1417,6 +1439,49 @@ forbids going further without giving the tier back.
 
 The activation stage is deliberately untouched: its stride is 512 bytes, so
 consecutive rounds already share lines and it has nothing to gain.
+
+### The short-prompt projections are memory bound, not MMA bound
+
+Two experiments bracket this. `paired-k` cut the weight-stream amplification
+from 4.74x to 1.93x and bought 38% at `pp32`. `hrx-tile-skip` then removed
+three quarters of the matrix work at 32 tokens and bought about 16% gross --
+and lost 9% everywhere else to the guards. So after the staging fix the first
+token group runs at the memory bound:
+
+| projection | at 128 tokens | marginal per extra 128-token group | first-pass bandwidth |
+| :--- | ---: | ---: | ---: |
+| FFN gate/up | 1.872 ms | 1.314 ms | 195 GB/s of 241 |
+| FFN down | 1.078 ms | 0.729 ms | 176 GB/s of 241 |
+| SSM qkv | 0.582 ms | 0.420 ms | |
+| SSM gate | 0.386 ms | 0.239 ms | |
+| SSM out | 0.385 ms | 0.231 ms | |
+| SSM alpha/beta | 0.211 ms | ~0 | 2.6 GB/s -- not a bandwidth story |
+
+This retires the token-tile ladder as a candidate: HIP runs one, but HIP is
+solving a different problem at this point in the curve. **The remaining
+short-prompt lever is the amplification itself**, and 136 contiguous bytes is
+the most the LDS budget buys. Past that the layout has to change: block-major
+weights would coalesce the staging reads across threads instead of within one
+thread and take the amplification to 1.0, at the cost of a load-time repack and
+of every other consumer of those tensors, which all read row-major.
+
+### A large constant buffer offset folds into the memory packet and wraps
+
+A Loom codegen note, found building the K-split reduction and worth knowing
+before writing any kernel that indexes a buffer in slices. With a compile-time
+`%split_stride = index.constant 262144 : index`, an eight-way reduction faults
+on the *second* slice (`Memory access fault ... Page not present`); a
+single-slice copy passes and two slices fault. The same kernel with the stride
+taken from the runtime element count passes with all eight. The constant is
+folded into the load's static byte-offset field -- the compile log names this
+as `selected load memory packet ... static offset N byte(s)` -- and 1 MiB does
+not fit there.
+
+The related trap is the other direction: once the offset is a runtime product,
+`index.scale ... : index, offset -> offset` is rejected with
+`constraint 'amdgpu.byte_offset.u32' is not satisfied`, because the declared
+row-count range no longer proves the byte offset fits u32. An `index.assume`
+carrying the route's real precondition restores the proof.
 
 ### The alpha/beta projection runs on one workgroup
 

@@ -85,21 +85,26 @@ it -- or a block-major weight layout, which would make the staging reads
 perfectly coalesced across threads and cost a load-time repack of every weight
 matrix.
 
-## 3. The alpha/beta projection is a single workgroup
+## 3. ~~The alpha/beta projection is a single workgroup~~ BUILT, REJECTED ON ENVELOPE
 
-`SsmAlphaBetaWidth` is 48, so the projection is 96 rows, and 96 rows on a
-128-row macro tile is **one workgroup** — one CU busy out of twenty, at every
-prompt length. It measures 0.211 / 0.219 / 0.212 ms at 32 / 128 / 512 tokens,
-flat, because the token count never enters. Times 48 layers that is **10.1 ms
-per chunk**: 0.22% at 2048 tokens but **2.5% at 32**.
+**Done, and it works; the card's acceptance is what it fails.** Full write-up
+in `benchmarks/qwen3.8-27b/README.md` under `hrx-split-k`.
 
-At 160 K iterations and 8 waves on one CU it is 2 waves per SIMD, which cannot
-hide latency; the measured 210 us against a ~49 us issue floor is 4.3x stalled.
-The fix is K-parallelism — split the 160 blocks across 8 workgroups and reduce —
-not a smaller row tile, which would still give only a handful of workgroups.
+Splitting K eight ways across the grid's third dimension, with a partial per
+split and `qwen_split_reduce_f32` summing them in split order, is worth
+**+3.7% at `pp32`**, +2.4% at `pp128` and **nothing at `pp2048`** (-0.14%,
+inside noise). Registers and occupancy unchanged.
 
-**Acceptance:** bit-identical (the reduction is over the same terms in a fixed
-order); measurable at `pp32`, expect nothing at `pp2048`.
+The card asked for bit-identical logits on the grounds that the reduction is
+over the same terms in a fixed order. That was wrong: regrouping 160 terms into
+eight slices of twenty is a reassociation, and alpha/beta feeds the DeltaNet
+recurrence, which amplifies it. rmse 0.04735499 to 0.05673100, cosine
+0.99990022 to 0.99985063, top-1 unchanged at 157.
+
+The route is in tree behind `--hrx-fusions split-k`, default off. **Turning it
+on is an operator decision**: a 20% wider batched-prefill envelope for 3.7% of
+a 32-token prompt and nothing at the headline length. If the answer is yes, the
+same machinery extends to any shape that fits one row group.
 
 ## 4. Chunkwise (matrix-form) DeltaNet recurrence
 
@@ -209,6 +214,29 @@ Cards 6 and 7 are **below this host's measurement resolution** (0.16% and 0.25%
 against a ~0.5% noise floor on `pp2048`). They are correct and cheap, but
 building them would produce changes that cannot be shown to help. Take them only
 bundled with something measurable, or on a quieter host.
+
+## The successor to card 2: a block-major weight layout
+
+After `paired-k` the first token group of each projection runs at the memory
+bound -- FFN gate/up at 195 GB/s of a 241 GB/s ceiling, FFN down at 176 -- with
+a 1.93x line amplification left, because a staging thread's 136 contiguous
+bytes still straddle lines. Perfect coalescing needs the reads to be contiguous
+*across* threads, not within one, which means storing each weight matrix
+block-major: all 128 rows' block *k* adjacent, then block *k+1*.
+
+That takes the amplification to 1.0 and is worth up to another 1.9x on the
+first token group, so roughly a third of a short prompt. It is worth nothing at
+`pp2048`, where the projection is issue bound rather than traffic bound.
+
+The cost is the reason it is not card 3: it is a load-time repack of every
+weight matrix, and every other consumer of those tensors -- the decode GEMV
+kernels above all -- reads row-major. Either they all move, or the model
+carries two layouts.
+
+**Also closed by measurement, so do not re-open it:** the token-tile ladder.
+Removing three quarters of the matrix work at 32 tokens is worth about 16%
+gross, which is the measurement that says these shapes are not MMA-issue bound.
+See `hrx-tile-skip` in the README.
 
 ## Considered this round and not pursued
 

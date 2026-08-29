@@ -2419,3 +2419,80 @@ weight matrix and every other consumer of those tensors reads row-major.
 Alpha/beta is the exception and is untouched by all of this: 522 KB of weights
 in 0.2 ms is 2.6 GB/s, nowhere near any bound. It is one workgroup's K-loop
 latency, exactly as card 3 says.
+
+## Round fourteen: card 3 built and measured — K-split for one-workgroup shapes
+
+`qwen_q8_0_gemm_i8_blocked_k5120_t128_bk2_splitk.loom` adds the split as the
+third grid dimension: each workgroup walks 20 of the 160 K blocks and writes a
+partial one slice into an arena buffer, and `qwen_split_reduce_f32.loom` sums
+the eight slices in split order. It is dispatched only for `input_elements ==
+5120` with `rows <= 128`, which is the SSM alpha/beta projection and nothing
+else. 184 VGPRs, 8 waves per SIMD, unchanged.
+
+Interleaved against `paired-k`, three rounds, medians:
+
+| length | paired-k | + split-k | delta |
+|---|---:|---:|---:|
+| pp32 | 107.61 | 111.57 | **+3.7%** |
+| pp64 | 203.99 | 209.21 | +2.6% |
+| pp128 | 368.41 | 377.40 | +2.4% |
+| pp512 | 479.75 | 483.32 | +0.7% |
+| pp2048 | 467.46 | 466.81 | -0.14% |
+
+The mechanism works and the size matches the card's estimate. **Rejected on the
+card's own acceptance criterion**, which was bit-identical logits.
+
+Splitting the K sum into eight slices regroups it, and alpha/beta feeds the
+DeltaNet recurrence, so the perturbation is amplified rather than absorbed:
+
+| | paired-k | + split-k |
+|---|---|---|
+| top-1 | 157 | 157 |
+| rmse | 0.04735499 | 0.05673100 |
+| cosine | 0.99990022 | 0.99985063 |
+| max_abs_diff | 0.26514006 | 0.35484064 |
+
+A 20% wider rmse buys nothing at `pp2048` and 3.7% at `pp32`. The code stays in
+tree behind `--hrx-fusions split-k`, default off.
+
+**Open question for the user, since it is a trade and not a bug:** is a 20%
+rmse widening on the batched-prefill envelope acceptable for +3.7% at `pp32`
+and nothing at `pp2048`? If yes, flip `split-k` on and consider widening the
+route to the other single-row-group shapes. Everything that does not depend on
+that answer is done.
+
+### Loom finding: a large constant offset folds into the memory packet and wraps
+
+Worth knowing before writing any kernel that indexes a buffer in slices. The
+first version of the reduction used a compile-time
+`%split_stride = index.constant 262144 : index` and faulted on the *second*
+slice with `Memory access fault ... Reason: Page not present`. A single-slice
+copy passed; two slices faulted. The same kernel with the stride taken from the
+runtime element count passes with all eight. The constant is folded into the
+load's static byte-offset field -- the compile log reports exactly this as
+`selected load memory packet ... static offset N byte(s)` -- and 1 MiB does not
+fit there.
+
+Second, related: once the split base became a runtime product, the epilogue's
+`index.scale ... : index, offset -> offset` was rejected with
+`constraint 'amdgpu.byte_offset.u32' is not satisfied`, because `%row_count`'s
+declared range (up to 248320) times the token count no longer proves to fit
+u32. An `index.assume ... [range(..., 1, 262144)]` on the slice length -- which
+is a real precondition of the route, since it only runs for one row group --
+restores the proof.
+
+## Session close: cross-backend position
+
+One process per arm, `-p 512,32,128,512,2048 -n 16`, retained set
+`blocked-prefill,swiglu-quant,norm-quant,readout-quant,paired-k`.
+
+| test | HRX at session start | HRX now | HIP this run | HRX/HIP |
+|---|---:|---:|---:|---:|
+| pp32 | 77.6 | 108.45 | 178.54 | 61% (was 44%) |
+| pp128 | 278.8 | 368.15 | 419.38 | 88% (was 66%) |
+| pp512 | 456.2 | 475.66 | 541.53 | 88% |
+| pp2048 | 449.0 | 468.89 | 529.43 | 89% |
+| tg16 | 7.90 | 7.91 | 7.79 | 102% |
+
+HIP's page cache moves its numbers between runs, so the ratio column is a
+position, not a measurement.
