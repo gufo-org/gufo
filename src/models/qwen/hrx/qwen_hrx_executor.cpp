@@ -660,6 +660,7 @@ void QwenHrxExecutor::ResetKernelState() {
   activation_quantize_blocked_k6144_executable_ = nullptr;
   activation_quantize_blocked_k17408_executable_ = nullptr;
   swiglu_quantize_blocked_k17408_executable_ = nullptr;
+  rmsnorm_quantize_blocked_k5120_executable_ = nullptr;
   deltanet_recurrence_batch_executable_ = nullptr;
   deltanet_readout_batch_executable_ = nullptr;
   deltanet_prepare_batch_executable_ = nullptr;
@@ -835,6 +836,8 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
       activation_quantize_blocked_k17408_executable_ = exec;
     } else if (entry.name == "qwen_swiglu_quantize_blocked_k17408") {
       swiglu_quantize_blocked_k17408_executable_ = exec;
+    } else if (entry.name == "qwen_rmsnorm_quantize_blocked_k5120") {
+      rmsnorm_quantize_blocked_k5120_executable_ = exec;
     } else if (entry.name == "qwen_deltanet_recurrence_batch") {
       deltanet_recurrence_batch_executable_ = exec;
     } else if (entry.name == "qwen_deltanet_readout_batch") {
@@ -1764,24 +1767,37 @@ bool QwenHrxExecutor::DispatchBatchedAttentionQ8(std::size_t layer_index,
               << " kv_heads=" << contract_.KvHeadCount()
               << " head_dim=" << contract_.HeadDim() << '\n';
   }
-  if (!DispatchRMSNormBatch(batch_hidden, layer.attn_norm, batch_normed,
-                            tokens)) {
-    return Reject("batched attention RMSNorm failed", error_msg);
-  }
-  if (!trace_stage("norm")) {
-    return Reject("batched attention norm synchronization failed", error_msg);
-  }
   const bool int8_route =
       UsesBlockedPrefill() || (policy_.int8_prefill && Int8PrefillReady());
-  if (int8_route &&
-      !DispatchChunkQuantize(batch_normed,
-                                  static_cast<std::uint32_t>(hidden), tokens)) {
-    return Reject("batched attention activation quantization failed",
-                  error_msg);
-  }
-  if (!trace_stage("input-quant")) {
-    return Reject("batched attention input quantization synchronization failed",
-                  error_msg);
+  if (UsesFusedNormQuantize()) {
+    if (!DispatchRMSNormQuantizeBlocked(batch_hidden, layer.attn_norm,
+                                        tokens)) {
+      return Reject("batched attention fused norm quantization failed",
+                    error_msg);
+    }
+    if (!trace_stage("norm-quant")) {
+      return Reject("batched attention fused norm synchronization failed",
+                    error_msg);
+    }
+  } else {
+    if (!DispatchRMSNormBatch(batch_hidden, layer.attn_norm, batch_normed,
+                              tokens)) {
+      return Reject("batched attention RMSNorm failed", error_msg);
+    }
+    if (!trace_stage("norm")) {
+      return Reject("batched attention norm synchronization failed", error_msg);
+    }
+    if (int8_route &&
+        !DispatchChunkQuantize(batch_normed, static_cast<std::uint32_t>(hidden),
+                               tokens)) {
+      return Reject("batched attention activation quantization failed",
+                    error_msg);
+    }
+    if (!trace_stage("input-quant")) {
+      return Reject(
+          "batched attention input quantization synchronization failed",
+          error_msg);
+    }
   }
   if (!DispatchChunkProjection(layer.attn_q, batch_normed, batch_q_gate,
                                contract_.FullAttentionQGateWidth(), hidden,
@@ -1984,27 +2000,37 @@ bool QwenHrxExecutor::DispatchBatchedSsmQ8(std::size_t layer_index,
     return Reject("batched SSM state slice is invalid", error_msg);
   }
 
-  if (!DispatchRMSNormBatch(batch_hidden, layer.attn_norm, batch_normed,
-                            tokens)) {
-    return Reject("batched SSM RMSNorm failed", error_msg);
-  }
-  if (!trace_stage("norm")) {
-    return Reject("batched SSM norm synchronization failed", error_msg);
-  }
   if (!layer.ssm_alpha_beta.IsValid()) {
     return Reject("batched SSM requires adjacent alpha/beta weights",
                   error_msg);
   }
   const bool int8_route =
       UsesBlockedPrefill() || (policy_.int8_prefill && Int8PrefillReady());
-  if (int8_route &&
-      !DispatchChunkQuantize(batch_normed,
-                                  static_cast<std::uint32_t>(hidden), tokens)) {
-    return Reject("batched SSM activation quantization failed", error_msg);
-  }
-  if (!trace_stage("input-quant")) {
-    return Reject("batched SSM input quantization synchronization failed",
-                  error_msg);
+  if (UsesFusedNormQuantize()) {
+    if (!DispatchRMSNormQuantizeBlocked(batch_hidden, layer.attn_norm,
+                                        tokens)) {
+      return Reject("batched SSM fused norm quantization failed", error_msg);
+    }
+    if (!trace_stage("norm-quant")) {
+      return Reject("batched SSM fused norm synchronization failed", error_msg);
+    }
+  } else {
+    if (!DispatchRMSNormBatch(batch_hidden, layer.attn_norm, batch_normed,
+                              tokens)) {
+      return Reject("batched SSM RMSNorm failed", error_msg);
+    }
+    if (!trace_stage("norm")) {
+      return Reject("batched SSM norm synchronization failed", error_msg);
+    }
+    if (int8_route &&
+        !DispatchChunkQuantize(batch_normed, static_cast<std::uint32_t>(hidden),
+                               tokens)) {
+      return Reject("batched SSM activation quantization failed", error_msg);
+    }
+    if (!trace_stage("input-quant")) {
+      return Reject("batched SSM input quantization synchronization failed",
+                    error_msg);
+    }
   }
   if (!DispatchChunkProjection(layer.attn_qkv, batch_normed, batch_qkv,
                                contract_.SsmQkvWidth(), hidden, tokens)) {
@@ -2180,23 +2206,32 @@ bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
     return Reject("batched FFN width overflows", error_msg);
   }
 
-  if (!DispatchRMSNormBatch(batch_hidden, layer.ffn_norm, batch_normed,
-                            tokens)) {
-    return Reject("batched FFN RMSNorm failed", error_msg);
-  }
-  if (!trace_stage("norm")) {
-    return Reject("batched FFN norm synchronization failed", error_msg);
-  }
   const bool int8_route =
       UsesBlockedPrefill() || (policy_.int8_prefill && Int8PrefillReady());
-  if (int8_route &&
-      !DispatchChunkQuantize(batch_normed,
-                                  static_cast<std::uint32_t>(hidden), tokens)) {
-    return Reject("batched FFN activation quantization failed", error_msg);
-  }
-  if (!trace_stage("input-quant")) {
-    return Reject("batched FFN input quantization synchronization failed",
-                  error_msg);
+  if (UsesFusedNormQuantize()) {
+    if (!DispatchRMSNormQuantizeBlocked(batch_hidden, layer.ffn_norm, tokens)) {
+      return Reject("batched FFN fused norm quantization failed", error_msg);
+    }
+    if (!trace_stage("norm-quant")) {
+      return Reject("batched FFN fused norm synchronization failed", error_msg);
+    }
+  } else {
+    if (!DispatchRMSNormBatch(batch_hidden, layer.ffn_norm, batch_normed,
+                              tokens)) {
+      return Reject("batched FFN RMSNorm failed", error_msg);
+    }
+    if (!trace_stage("norm")) {
+      return Reject("batched FFN norm synchronization failed", error_msg);
+    }
+    if (int8_route &&
+        !DispatchChunkQuantize(batch_normed, static_cast<std::uint32_t>(hidden),
+                               tokens)) {
+      return Reject("batched FFN activation quantization failed", error_msg);
+    }
+    if (!trace_stage("input-quant")) {
+      return Reject("batched FFN input quantization synchronization failed",
+                    error_msg);
+    }
   }
   if (!DispatchChunkProjection(layer.ffn_gate_up, batch_normed, batch_gate_up,
                                static_cast<std::uint32_t>(2 * ffn), hidden,
@@ -2473,6 +2508,51 @@ bool QwenHrxExecutor::DispatchSwiGLUQuantizeBlocked(
       &tokens, sizeof(tokens), bindings, 3, 0);
   if (!hrx_status_is_ok(quantize_status)) {
     hrx_status_ignore(quantize_status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchRMSNormQuantizeBlocked(
+    const HrxBufferBinding& input, const HrxBufferBinding& gamma,
+    std::uint32_t tokens) {
+  const std::uint32_t hidden = contract_.HiddenSize();
+  if (rmsnorm_quantize_blocked_k5120_executable_ == nullptr ||
+      !arena_.has_value() || tokens == 0 || tokens > kHrxPrefillChunkTokens ||
+      hidden != 5120) {
+    return false;
+  }
+  constexpr std::uint32_t kTokensPerMacroTile = 128;
+  const std::uint32_t physical_tokens =
+      ((tokens + kTokensPerMacroTile - 1) / kTokensPerMacroTile) *
+      kTokensPerMacroTile;
+  const auto input_bytes = CheckedBytes({tokens, hidden, sizeof(float)});
+  const auto gamma_bytes = CheckedBytes({hidden, sizeof(float)});
+  const auto payload_bytes = CheckedBytes({physical_tokens, hidden});
+  const auto scale_bytes =
+      CheckedBytes({physical_tokens, hidden / 32, sizeof(float)});
+  hrx_buffer_ref_t bindings[4];
+  if (!TryBindOperand(input, input_bytes, &bindings[0]) ||
+      !TryBindOperand(gamma, gamma_bytes, &bindings[1]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
+                      payload_bytes, &bindings[2]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
+                      scale_bytes, &bindings[3])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = physical_tokens;
+  config.workgroup_count[1] = 1;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = hidden / 32;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), rmsnorm_quantize_blocked_k5120_executable_, 0, &config,
+      &tokens, sizeof(tokens), bindings, 4, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
     return false;
   }
   return true;

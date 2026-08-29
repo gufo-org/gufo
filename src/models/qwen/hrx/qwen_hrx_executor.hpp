@@ -230,6 +230,18 @@ public:
     return policy_.fused_swiglu_quantize && UsesBlockedPrefill() &&
            FusedSwiGLUQuantizeReady();
   }
+  /// RMSNorm folded into the blocked activation quantizer. The f32 normed
+  /// tile has no other consumer on the blocked route.
+  bool DispatchRMSNormQuantizeBlocked(const HrxBufferBinding& input,
+                                      const HrxBufferBinding& gamma,
+                                      std::uint32_t tokens);
+  [[nodiscard]] bool FusedNormQuantizeReady() const noexcept {
+    return rmsnorm_quantize_blocked_k5120_executable_ != nullptr;
+  }
+  [[nodiscard]] bool UsesFusedNormQuantize() const noexcept {
+    return policy_.fused_norm_quantize && UsesBlockedPrefill() &&
+           FusedNormQuantizeReady();
+  }
   /// True when the int8 projection route has every artifact it needs.
   [[nodiscard]] bool Int8PrefillReady() const noexcept {
     return q8_gemm_i8_k5120_t8_executable_ != nullptr &&
@@ -475,6 +487,7 @@ private:
   hrx_executable_t activation_quantize_blocked_k6144_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k17408_executable_{nullptr};
   hrx_executable_t swiglu_quantize_blocked_k17408_executable_{nullptr};
+  hrx_executable_t rmsnorm_quantize_blocked_k5120_executable_{nullptr};
   hrx_executable_t deltanet_recurrence_batch_executable_{nullptr};
   hrx_executable_t deltanet_readout_batch_executable_{nullptr};
   hrx_executable_t deltanet_prepare_batch_executable_{nullptr};

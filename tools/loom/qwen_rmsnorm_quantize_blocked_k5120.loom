@@ -1,0 +1,89 @@
+// Fused RMSNorm + blocked activation quantization for the Qwen3.8 hidden row.
+//
+// On the blocked W8A8 route the f32 normed tile has exactly one consumer, the
+// activation quantizer, so writing it out and reading it back is pure traffic:
+// 2048 x 5120 f32 is 42 MiB written and 42 MiB read for every normalized
+// stage, and there are 128 of them in a 2048-token pass. One workitem already
+// owns exactly 32 elements in the unfused norm, which is one Q8 block, so the
+// quantizer folds in without changing the decomposition.
+//
+// The arithmetic is the unfused sequence op for op, in the same order and with
+// the same fast-math flags, so the quantized payload is bit-identical.
+//
+// input  : [token][5120] f32
+// gamma  : [5120] f32
+// output : [token tile][K block][token in tile][32 int8]
+// scales : [token tile][K block][token in tile] f32
+
+config.decl @qwen_rmsnorm_quantize_blocked_k5120.token_capacity : %value: index where [range(%value, 1, 2048)]
+
+kernel.def @qwen_rmsnorm_quantize_blocked_k5120(%tokens: index) {
+  %tile = index.constant 128 : index
+  %rounding = index.constant 127 : index
+  %rounded = index.add %tokens, %rounding : index
+  %groups = index.div %rounded, %tile : index
+  %capacity = index.mul %groups, %tile : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 160 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%tokens: index, %input: buffer, %gamma: buffer, %output: buffer, %scales: buffer) {
+  %base = index.constant 0 : offset
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
+  %token = kernel.workgroup.id<x> : index
+  %hidden = index.constant 5120 : index
+  %four = index.constant 4 : offset
+  %vector_width = index.constant 32 : index
+  %token_tile_extent = index.constant 16 : index
+  %loop_begin = index.constant 0 : index
+  %lane = kernel.workitem.id<x> : index
+  %tile = index.div %token, %token_tile_extent : index
+  %tile_lane = index.rem %token, %token_tile_extent : index
+  %payload = buffer.view %output[%base] : buffer -> view<128x160x16x32xi8>
+  %scale_view = buffer.view %scales[%base] : buffer -> view<128x160x16xf32>
+  %element_base0 = index.mul %lane, %vector_width : index
+  %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %hidden)] : index
+  %token_in_bounds = index.cmp ult, %token, %token_count : index
+  scf.if %token_in_bounds {
+    %row_elements = index.mul %token, %hidden : index
+    %row_bytes = index.scale %row_elements, %four : index, offset -> offset
+    %input_noalias, %gamma_noalias = buffer.assume.noalias %input, %gamma : buffer, buffer
+    %input_view = buffer.view %input_noalias[%row_bytes] : buffer -> view<5120xf32>
+    %gamma_view = buffer.view %gamma_noalias[%base] : buffer -> view<5120xf32>
+
+    %x = vector.load %input_view[%element_base] : view<5120xf32> -> vector<32xf32>
+    %g = vector.load %gamma_view[%element_base] : view<5120xf32> -> vector<32xf32>
+    %square = vector.mulf<reassoc|nnan|ninf|nsz> %x, %x : vector<32xf32>
+    %zero = scalar.constant 0.0 : f32
+    %local_sum = vector.reduce<addf, reassoc|nnan|ninf|nsz> %square, %zero : vector<32xf32>, f32
+    %sum = kernel.workgroup.reduce<addf> %local_sum : f32
+    %width = scalar.constant 5120.0 : f32
+    %epsilon = scalar.constant 0.000001 : f32
+    %mean = scalar.divf<reassoc|nnan|ninf|nsz> %sum, %width : f32
+    %variance = scalar.addf<reassoc|nnan|ninf|nsz> %mean, %epsilon : f32
+    %inverse_rms = scalar.rsqrtf<afn> %variance : f32
+    %scale_vector = vector.splat %inverse_rms : vector<32xf32>
+    %normalized = vector.mulf<reassoc|nnan|ninf|nsz> %x, %scale_vector : vector<32xf32>
+    %values = vector.mulf<reassoc|nnan|ninf|nsz> %normalized, %g : vector<32xf32>
+
+    %magnitudes = vector.absf %values : vector<32xf32>
+    %amax = vector.reduce<maxnumf, reassoc|nnan|ninf|nsz> %magnitudes, %zero : vector<32xf32>, f32
+    %levels = scalar.constant 127.0 : f32
+    %quant_scale = scalar.divf<reassoc|nnan|ninf|nsz> %amax, %levels : f32
+    %tiny = scalar.constant 0.00000001 : f32
+    %safe_scale = scalar.maxnumf %quant_scale, %tiny : f32
+    %one = scalar.constant 1.0 : f32
+    %inverse = scalar.divf<reassoc|nnan|ninf|nsz> %one, %safe_scale : f32
+    %inverse_vector = vector.splat %inverse : vector<32xf32>
+    %scaled = vector.mulf<reassoc|nnan|ninf|nsz> %values, %inverse_vector : vector<32xf32>
+    %quantized_f = vector.roundevenf %scaled : vector<32xf32>
+    %quantized = vector.fptosi %quantized_f : vector<32xf32> to vector<32xi8>
+    vector.store %quantized, %payload[%tile, %lane, %tile_lane, %loop_begin] : vector<32xi8>, view<128x160x16x32xi8>
+    view.store %safe_scale, %scale_view[%tile, %lane, %tile_lane] : f32, view<128x160x16xf32>
+  } else {
+    %zero_payload = vector.constant 0 : vector<32xi8>
+    %zero_scale = scalar.constant 0.0 : f32
+    vector.store %zero_payload, %payload[%tile, %lane, %tile_lane, %loop_begin] : vector<32xi8>, view<128x160x16x32xi8>
+    view.store %zero_scale, %scale_view[%tile, %lane, %tile_lane] : f32, view<128x160x16xf32>
+  }
+  kernel.return
+}
