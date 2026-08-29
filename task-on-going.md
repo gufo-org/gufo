@@ -2131,3 +2131,37 @@ moves, so internal lanewise lowering is free. Only the accumulator cannot tie.
 - Residual-into-next-norm fold: 0.5% and bit-identical, but HIP measured the
   same change as opt-c175-residual-defer and rejected it as inside noise; 0.5%
   is at this host's resolution anyway.
+
+## Round seven: card 1 solved, measured, and rejected
+
+The forward walk was the missing mechanism. The backward walk from the tied
+operand can never succeed - the carried value it reaches is live at the tied
+definition by construction, which is why three backward variants all failed.
+But the tied result is *destined* for those registers: it flows concat -> yield
+-> carried value. Walking forward from the result, composing unit offsets, and
+ignoring any destination whose assignment contains the tied operand's location
+at the composed offset is sound, and it works.
+
+Result: reproducer emits 8 v_dual_fmac_f32 (was 8 v_fma_f32); all 57 production
+kernels compile; the blocked projection emits 64 v_dual_fmac_f32 and its loop
+FMA issue slots drop 64 -> 33.
+
+And it is slower:
+
+| | stock | VOPD fmac |
+|---|---:|---:|
+| FMA issue slots | 64 | 33 |
+| v_mov_b32 | 122 | 168 |
+| s_delay_alu | 94 | 72 |
+| isolated median | 507.4 us | 510.3 us |
+| pp2048 median | 450.42 | 432.46 |
+
+-4.0% end to end, logits bit-identical. The tie pins the accumulator and the
+allocator compensates with copies, across every kernel with an f32 accumulate
+chain. Reverted; patch archived in the scratchpad and reconstructible from the
+README.
+
+This retires the largest card and falsifies its arithmetic. The 32 "wasted"
+FMA issue slots are recoverable and recovering them loses. Whatever lets HIP
+run this shape without the copies is a register-assignment property, not an
+instruction-selection one.

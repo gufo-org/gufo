@@ -1019,7 +1019,7 @@ Two families explain it, and neither is reachable from Loom source:
 | `hrx-static-parity-unroll` | The 33 address VALU ops per K block exist because `%parity = block % 2` indexes both LDS ping-pong halves, so no LDS access folds into an immediate offset. Unroll the K loop by two and substitute the parity constants into each half so every LDS offset is static | Numerically identical and passes its oracle, but both halves' prefetched staging registers are live at once: **256 VGPRs**, dropping the residency tier from 8 waves to 6. Isolated **534.12 us against 495.42 us** | **Rejected**: the address savings are smaller than the occupancy loss |
 | `hrx-attention-substage-trace` | The attention stage was the one stage with no substage instrumentation, so its 540 ms was unattributed | Added `GUFO_HRX_TRACE_ATTENTION`. The attention kernel is 14.707 ms of a 34.95 ms attention layer (42%), i.e. 235 ms of the 4750 ms pass, and the Q/K/V/output projections are another 16.65 ms | **Retained** as the instrument that produced the table above |
 | `hrx-invariant-hoist` | Twenty-eight index computations in the blocked projection's K loop are loop invariant -- the wave's row and token tile origins and its six LDS row addresses do not depend on the block index -- yet the compiler recomputed or rematerialized them every iteration rather than keeping them live | Hoisted all 28 out of the loop in the three blocked shapes. Peak registers unchanged at 184, so no occupancy tier is at risk. Isolated (rows 5120, K 5120, 128 tokens) median **499.4 us against 512.4 us**; interleaved end-to-end `pp2048` 442.53 / 441.88 / 436.70 against 449.99 / 448.65 / 447.24, **+1.53%**. Logits bit-identical. The instruction mix barely moves (32 address VALU ops against 33), so the win is scheduling and rematerialization pressure, not instruction count | **Retained**, unconditional |
-| `hrx-loom-vopd-fmac` | The 64 `v_fma_f32` per K block are VOP3 and cannot enter a VOPD pair. Loom already models the `fmac_f32` VOPD component and ships the `amdgpu.v_fmac_f32` descriptor, but no lowering rule ever offers the tied VOP2 form. Added the rule through the existing `.devops/nix/hrx-system.nix` derivation, then chased the allocator refusal it exposed | The rule is correct: 54 of 57 production kernels compile with it, and a scalar carried accumulator now emits `v_fmac_f32` where stock emits `v_fma_f32`. The three blocked projections still fail, because a carried *vector* accumulator is scalarized into slices and concatenated back and the blocking interval is two hops from the tied result. Carrying the bank as 64 scalars instead does unlock the pairing -- 50 FMA issue slots against 64 -- but costs 56 extra moves per K block and measures **510.75 us against 496.31** | **Rejected** and reverted. Root cause fully characterized; see below |
+| `hrx-loom-vopd-fmac` | The 64 `v_fma_f32` per K block are VOP3 and cannot enter a VOPD pair. Loom models the `fmac_f32` VOPD component and ships `amdgpu.v_fmac_f32`, but no lowering rule offers the tied VOP2 form, and the tie-coalescer then refuses every loop-carried accumulator. Added the rule and a forward destination-reservation walk through the existing `.devops/nix/hrx-system.nix` derivation | **Solved.** All 57 kernels compile; the projection emits 64 `v_dual_fmac_f32` against 64 `v_fma_f32`, FMA issue slots 64 to 33. But the tie forces copies: moves 122 to 168, isolated 510.3 against 507.4 us, end-to-end `pp2048` **432.46 against 450.42, -4.0%**, logits bit-identical | **Rejected** and reverted. The premise that this gap was worth +9% is falsified; the pairing works and does not pay |
 
 ### Rejected: fusing the attention accumulator rescale
 
@@ -1116,6 +1116,11 @@ existing VOPD planner does the rest. The lowering rule this section opens with
 is still a prerequisite, and it is correct as written -- 54 of the 57
 production kernels compile with it unchanged.
 
+**This was subsequently solved, and then measured negative. The premise of the
+whole card -- that closing the VOPD gap is worth roughly +9% -- is falsified.**
+See "Solved and rejected: VOPD `fmac` in the projection" below. The diagnosis
+that follows is still the correct account of *why* it took a compiler change.
+
 A later round instrumented the failing conflict test and mapped the chain
 exactly:
 
@@ -1185,6 +1190,51 @@ cosine 0.99990022 to eight decimals.
 The same fold applies to the attention context (0.47 ms x 16 layers) but needs
 a clustered subgroup reduce, because there a Q8 block spans four lanes rather
 than one wave. At 0.16% of the pass it is not worth that yet.
+
+### Solved and rejected: VOPD `fmac` in the projection
+
+The compiler change works. Two pieces, both through
+`.devops/nix/hrx-system.nix`:
+
+1. A `_f32_fmac_rule` beside `_f32_fma_rule` offering `amdgpu.v_fmac_f32`, plus
+   that descriptor key in the `amdgpu.arithmetic` set.
+2. A **forward** walk in the tie-coalescer. The backward walk from the tied
+   operand can never succeed, because the carried value it reaches is live at
+   the tied definition by construction. But the tied result is *destined* for
+   those exact registers -- it flows through concat into the per-iteration
+   aggregate and then through the yield/back edge into the carried value -- so
+   the value sitting there is precisely the one this definition replaces.
+   Walking forward from the result, composing unit offsets, and ignoring any
+   destination already assigned to a location that *contains* the tied
+   operand's location at the composed offset is sound and sufficient.
+
+With both, the 25-line reproducer compiles and emits **8 `v_dual_fmac_f32`**
+where stock emits 8 unpaired `v_fma_f32`, and all 57 production kernels compile.
+The blocked projection emits **64 `v_dual_fmac_f32`** against 64 `v_fma_f32`.
+
+And it is slower. The tie forces the accumulator into fixed registers and the
+allocator compensates with copies:
+
+| | stock | VOPD `fmac` |
+| :--- | ---: | ---: |
+| FMA issue slots in the loop | 64 | **33** |
+| `v_mov_b32` | 122 | **168** |
+| `s_delay_alu` | 94 | 72 |
+| VGPR / waves | 184 / 8 | 184 / 8 |
+| isolated, median of 3 | **507.4 us** | 510.3 us |
+| end-to-end `pp2048`, median of 3 | **450.42** | 432.46 |
+
+End to end that is **-4.0%** (451.72 / 450.42 / 449.22 against 434.30 / 432.46 /
+428.91). Logits are bit-identical, as a pure encoding change must be, so the
+regression is purely the extra copies -- and they cost across every kernel with
+an f32 accumulate chain, not just this one.
+
+**Rejected** and reverted. The lasting result is that the "32 wasted issue
+slots" framing was wrong: the slots are recoverable, and recovering them does
+not pay, because Loom's allocator spends more on satisfying the tie than VOPD
+returns. Anyone revisiting this should attack the copies -- how the tie
+interacts with register assignment -- not the pairing, which is now known to
+work.
 
 ### Correctness
 

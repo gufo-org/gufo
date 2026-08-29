@@ -31,76 +31,29 @@ FFN 2692.
 target. **Prefill parity requires the projection to improve; nothing else is
 large enough.**
 
-## 1. Teach Loom to lower a vector FMA to tied `fmac`s on the aggregate
+## 1. ~~VOPD `fmac` in the projection~~ SOLVED AND REJECTED
 
-**The single largest item, and the only one that can close the projection gap.**
-Worth roughly +9% on the pass on its own.
+**Done, and the premise was wrong.** The compiler change works and is recorded
+in `benchmarks/qwen3.8-27b/README.md` under "Solved and rejected: VOPD `fmac`
+in the projection". Two pieces: the missing `_f32_fmac_rule`, and a *forward*
+destination-reservation walk in the tie-coalescer (the backward walk can never
+succeed -- the carried value it reaches is live by construction; the forward
+walk works because the tied result is destined for those exact registers).
 
-Per K block the projection issues 64 `v_fma_f32`. They are VOP3, so RDNA3's
-VOPD packer cannot pair them; HIP's equivalent packs into 32
-`v_dual_fmac_f32`. That is 32 of the ~55 issue slots between the two kernels.
+All 57 kernels compile, the projection emits 64 `v_dual_fmac_f32` against 64
+`v_fma_f32`, and FMA issue slots in the loop drop 64 to 33. It is **4.0% slower
+end to end** (`pp2048` 450.42 to 432.46), because the tie forces the
+accumulator into fixed registers and the allocator pays 46 more `v_mov_b32` per
+loop than the pairing saves. Logits bit-identical.
 
-What is already known, from five instrumented compiler builds this session:
+**This retires the largest card on the list and invalidates the arithmetic that
+made it largest.** The projection's ~55-issue-slot gap to HIP is not closed by
+recovering the 32 FMA slots; those are recoverable and recovering them loses.
+The remaining difference must be in how HIP's accumulators avoid copies at all,
+which is a register-assignment question, not an instruction-selection one.
 
-- Loom ships the `fmac_f32` VOPD component and the `amdgpu.v_fmac_f32`
-  descriptor with TIED/DESTRUCTIVE constraints, but **no lowering rule offers
-  the tied VOP2 form** for `vector.fmaf`/`scalar.fmaf`. Adding one
-  (`_f32_fmac_rule` beside `_f32_fma_rule` in
-  `loom/py/loom/target/arch/amdgpu/contracts/arithmetic.py`, plus the
-  descriptor key in the `amdgpu.arithmetic` set) is correct: 54 of 57
-  production kernels compile with it untouched.
-- **A scalar loop-carried accumulator ties fine** and emits `v_fmac_f32`. A
-  carried `vector<8xf32>` does not, because it is scalarized into per-lane
-  slices and concatenated back, and the blocking interval is the carried
-  aggregate two hops away (concat, then edge) from the tied result.
-- It is the active set, not storage leases: the conflict reproduces under all
-  three `LOOM_LOW_ALLOCATION_STORAGE_RELEASE_*` policies.
-- Two allocator fixes were tried and rejected (widening
-  `storage_alias_relation` to the edge causes; unit-granular liveness in
-  `collect_tied_storage_aliases`). The kernel-side workaround (carry 64
-  scalars) *does* unlock pairing but costs 56 extra moves per K block and
-  measures 510.75 us against 496.31.
-
-**So the change belongs in `loom/src/loom/transforms/vector/to_scalar*.c`:**
-lower a vector `fmaf` to eight tied `fmac`s addressing the aggregate's units
-directly, instead of materializing per-lane slices and a concat. Then the tie
-is one hop, no extract moves appear, and the existing VOPD planner does the
-rest.
-
-**The alias chain is now fully mapped and the blocker is definitively the
-liveness model, not the alias walk.** An instrumented build dumps it:
-
-    tied operand 93  <-CONCAT-  92  <-COPY-  37
-
-`93` is the tied operand (1 unit at base 16), `92` the per-iteration aggregate,
-`37` the loop-carried accumulator (8 units at base 16, live [10,80]) and the
-only interval that actually occupies the location. Both `LOW_CONCAT` and
-`LOW_COPY` are already whitelisted alias causes; the walk in
-`collect_tied_storage_aliases` is simply **one hop**, so it finds `92` --
-correctly ignorable, it is dead at the tie -- and never reaches `37`.
-
-Making the walk transitive (depth-capped, visited set, unit-granular liveness
-query) was built and **still fails**: `37`'s units are reported live at the
-tied definition because a loop-carried value is modeled live across the whole
-body through the back edge. So no amount of alias chasing legalizes the tie.
-
-The remaining fix is therefore **live-range splitting around the back edge** --
-teaching the allocator that a carried unit dies at its redefinition inside the
-body and is reborn on the edge. That is a substantially larger allocator change
-than anything attempted here, and it is the *only* thing standing between this
-kernel and HIP's issue count.
-
-The verification this card previously asked for came back positive, for what it
-is worth: the compiler already lowers `vector.mulf` on `vector<8xf32>` lanewise
-into 31 `v_dual_mul_f32` with no extract moves, so internal lanewise lowering is
-free. It is only the accumulator that cannot tie.
-
-**Acceptance:** the three blocked projections compile; `v_dual_fmac_f32`
-appears in the K-block loop; moves do not rise; prefill logits stay
-bit-identical (a pure encoding change); `pp2048` improves beyond noise.
-**Risk:** miscompilation-class change in a vendored compiler with no upstream
-test suite here. The parity gate is now real, so a regression has something to
-trip.
+The patch is not in tree. It is reconstructible from the README section, and
+anyone revisiting should attack the copies rather than the pairing.
 
 ## 2. Chunkwise (matrix-form) DeltaNet recurrence
 
