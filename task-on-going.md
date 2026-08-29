@@ -403,6 +403,28 @@ already cache hits. Staging moves them from L2 to LDS rather than eliminating
 them, and what remains is the per-position arithmetic, which tiling does not
 change.
 
+### Prefill chunk raised from 512 to 2048 tokens
+
+The FFN cost per chunk fits a straight line: 222.4 ms at 128 tokens and 739 ms
+at 512 give 50.2 ms fixed per chunk plus 1.345 ms per token. The fixed part is
+the weight pass, so fewer, larger chunks amortize it better.
+`kHrxBlockedPrefillExecutionTokens` was 512 while the arena was already sized
+for `kHrxPrefillChunkTokens = 2048`, so raising it costs no memory.
+
+| chunk size | pp2048 |
+|---|---:|
+| 512 | 405.09 t/s |
+| 1024 | 414.48 t/s |
+| **2048** | **414.88 t/s** |
+
+1024 captures nearly all of it and 2048 is within noise of 1024; 2048 is kept
+because it matches the arena capacity and needs no chunk loop at all up to the
+supported context. At 1024 the stage split was FFN 2946 ms (from 2972), SSM
+1428 ms (from 1505) and attention 559.6 ms (from 572.0).
+
+`--hrx-fusions none --validate-hrx 4` still passes, worst max-absolute error
+7.63e-6.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,

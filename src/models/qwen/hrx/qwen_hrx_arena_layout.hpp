@@ -21,7 +21,7 @@ inline constexpr std::size_t kHrxPrefillChunkTokens = 2048;
 /// Preferred layer-major tile. Projection concurrency improves through 512,
 /// while the current causal-attention kernel regresses on 1024-2048-token
 /// single launches because too many prefix-scanning workgroups contend at once.
-inline constexpr std::size_t kHrxBlockedPrefillExecutionTokens = 512;
+inline constexpr std::size_t kHrxBlockedPrefillExecutionTokens = 2048;
 /// Token capacity of the `_t8` dot4i fallback artifacts.
 inline constexpr std::size_t kHrxDot4iChunkTokens = 8;
 
