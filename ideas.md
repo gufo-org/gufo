@@ -1,134 +1,178 @@
 # HRX optimization ideas
 
-Ranked by expected value over effort. Each card states the evidence it rests
-on, so a later reader can tell a measured claim from a hypothesis.
+Refreshed 2026-08-29 after a full panoramic over the kernels
+(`tools/loom/*.loom`), the executor (`src/models/qwen/hrx/`) and the vendored
+Loom compiler (`hrx-system/`, local clone now checked out at the same revision
+the Nix derivation pins). Every card states the evidence it rests on, so a
+later reader can tell a measured claim from a hypothesis. Everything that was
+closed out is deleted rather than archived; the retained and rejected results
+live in `benchmarks/qwen3.8-27b/README.md` under
+"## HRX native backend (Loom) experiments".
 
-## 1. Port the wide-load transformation to the decode GEMV path
+## Where the time is
 
-**Status:** done. tg16 5.38 -> 6.74 t/s (+25%), 88% of HIP's 7.62.
+Measured with the executor's stage traces (`GUFO_HRX_TRACE_STAGES`,
+`GUFO_HRX_TRACE_SSM`, `GUFO_HRX_TRACE_FFN`, `GUFO_HRX_TRACE_ATTENTION`), 2048
+tokens, all retained fusions on. Total chunk 4580 ms; attention 532, SSM 1355,
+FFN 2692.
 
-Decode has had none of the prefill work and is the largest remaining gap by
-ratio: tg16 5.38 t/s against HIP's 7.62 (71%). It runs the single-token GEMV
-artifacts, not the blocked projection, so nothing from the prefill effort
-reached it.
+| Work | ms of 4580 | Share |
+| :--- | ---: | ---: |
+| Blocked W8A8 projection, all shapes | ~3500 | 76% |
+| DeltaNet recurrence | 322 | 7.0% |
+| Attention kernel | 208 | 4.5% |
+| SwiGLU + quantize (fused) | 95 | 2.1% |
+| RMSNorm + quantize (fused) | 52 | 1.1% |
+| SSM prepare + conv | 80 | 1.7% |
+| Residual adds | 75 | 1.6% |
+| Everything else | ~250 | 5.5% |
 
-Those artifacts have exactly the defect that the prefill kernel had. In
-`qwen_q8_0_gemv_k5120` each workitem owns one 34-byte Q8_0 block but reads it
-as **eight separate four-byte loads** (`buffer.view ... view<1xi32>` per
-quarter) plus a two-byte scale, and reads its activations as eight separate
-`vector<4xf32>` loads. The payload is 32 contiguous bytes and the activations
-are 32 contiguous floats, so both collapse to one wide load each: 2 loads per
-block instead of 16.
+`pp2048` is 446-450 t/s against HIP's 557 when HIP's page cache is warm, so
+80%. `tg16` is 7.90 against 7.78, so decode is already ahead and is not a
+target. **Prefill parity requires the projection to improve; nothing else is
+large enough.**
 
-The same change on the prefill projection was worth 1.35x
-(1.347 ms to 0.999 ms). Decode is weight-bandwidth bound - 28 GiB per token,
-which at 5.38 t/s is about 150 GB/s against the roughly 213 GB/s HIP sustains -
-so fewer, wider requests attack the gap directly.
+## 1. Teach Loom to lower a vector FMA to tied `fmac`s on the aggregate
 
-Artifacts to change: `qwen_q8_0_gemv_k{5120,6144,17408}`,
-`qwen_q8_0_gemv_k17408_wg256`, `qwen_q8_0_vocab_gemv_k5120`.
+**The single largest item, and the only one that can close the projection gap.**
+Worth roughly +9% on the pass on its own.
 
-**Acceptance:** decode parity keeps its tight f32 envelope (RMSE <= 1e-4,
-cosine >= 0.999999 - decode is not W8A8, so unlike prefill it must stay inside
-the original envelope), and tg16 improves by more than run-to-run noise.
+Per K block the projection issues 64 `v_fma_f32`. They are VOP3, so RDNA3's
+VOPD packer cannot pair them; HIP's equivalent packs into 32
+`v_dual_fmac_f32`. That is 32 of the ~55 issue slots between the two kernels.
 
-**Result.** All five artifacts were widened. Isolated, rows=17408/K=5120 went
-from 1.353 ms to 0.610 ms (2.2x). End to end tg16 went 5.38 -> 6.74 t/s and
-PP512 403.72 t/s (the vocabulary projection is shared with prefill's final
-stage). `--validate-hrx 4` reports a full PASS, including the per-token decode
-phases against the untouched f32 envelope.
+What is already known, from five instrumented compiler builds this session:
 
-The decode token profile is now embedding 1.8 ms, attention 8.7, SSM 39.7,
-FFN 80.7, final 18.5, total 149.4 ms. FFN moves 18.2 GiB in 80.7 ms, which is
-225 GB/s - at the DRAM roofline. The laggards are SSM at about 149 GB/s and the
-final stage at about 73 GB/s, so a card 4 below now exists for them.
+- Loom ships the `fmac_f32` VOPD component and the `amdgpu.v_fmac_f32`
+  descriptor with TIED/DESTRUCTIVE constraints, but **no lowering rule offers
+  the tied VOP2 form** for `vector.fmaf`/`scalar.fmaf`. Adding one
+  (`_f32_fmac_rule` beside `_f32_fma_rule` in
+  `loom/py/loom/target/arch/amdgpu/contracts/arithmetic.py`, plus the
+  descriptor key in the `amdgpu.arithmetic` set) is correct: 54 of 57
+  production kernels compile with it untouched.
+- **A scalar loop-carried accumulator ties fine** and emits `v_fmac_f32`. A
+  carried `vector<8xf32>` does not, because it is scalarized into per-lane
+  slices and concatenated back, and the blocking interval is the carried
+  aggregate two hops away (concat, then edge) from the tied result.
+- It is the active set, not storage leases: the conflict reproduces under all
+  three `LOOM_LOW_ALLOCATION_STORAGE_RELEASE_*` policies.
+- Two allocator fixes were tried and rejected (widening
+  `storage_alias_relation` to the edge causes; unit-granular liveness in
+  `collect_tied_storage_aliases`). The kernel-side workaround (carry 64
+  scalars) *does* unlock pairing but costs 56 extra moves per K block and
+  measures 510.75 us against 496.31.
 
-## 4. Decode's SSM and final stages lag the roofline
+**So the change belongs in `loom/src/loom/transforms/vector/to_scalar*.c`:**
+lower a vector `fmaf` to eight tied `fmac`s addressing the aggregate's units
+directly, instead of materializing per-lane slices and a concat. Then the tie
+is one hop, no extract moves appear, and the existing VOPD planner does the
+rest.
 
-**Status:** done. tg16 7.19 -> 7.84 t/s, past HIP's 7.62. The SSM fix was
-routing decode through the batch-native recurrence at `tokens = 1`; the final
-stage was a one-thread argmax, not the vocabulary projection.
+**Acceptance:** the three blocked projections compile; `v_dual_fmac_f32`
+appears in the K-block loop; moves do not rise; prefill logits stay
+bit-identical (this is a pure encoding change); `pp2048` improves beyond noise.
+**Risk:** this is a miscompilation-class change in a vendored compiler with no
+upstream test suite available here. Fix the parity gate first (card 6) so a
+regression has something to trip.
 
-With FFN at 225 GB/s the remaining decode gap to HIP (149.4 ms per token
-against about 131 ms) sits in two places:
+## 2. Chunkwise (matrix-form) DeltaNet recurrence
 
-- **SSM, 39.7 ms** at roughly 149 GB/s. It includes the 96-row alpha/beta
-  projection, whose grid is only 96 workgroups, plus the per-token convolution
-  and DeltaNet kernels that also run tiny grids in single-token mode.
-- **Final stage, 18.5 ms** at roughly 73 GB/s for the 1.35 GiB vocabulary
-  projection, plus argmax and the synchronizing readback that `DispatchFinalQ8`
-  performs.
+322 ms, 7.0% of the pass, and the largest non-projection block. The kernel is
+sequential over the 2048 tokens of a chunk; its rows-per-workgroup was swept at
+the current chunk size and 8 is the optimum, so the shape is not the lever. The
+remaining lever is the algorithm: the chunkwise DeltaNet formulation replaces
+the per-token scan with a matrix product over a token block, which is what
+turns this into WMMA-shaped work.
 
-Both are small-grid or serialization problems rather than kernel-arithmetic
-problems, so measure the split before changing any kernel.
+**Acceptance:** this is a math change, not a reassociation, so it needs an
+explicit numerical decision and a parity envelope that actually gates (card 6).
+Halving it is +3.4% of the pass.
 
-## 2. Tile the attention prefix scan across tokens
+## 3. A masked WMMA prefill attention kernel
 
-**Status:** done, in a different form than proposed (LDS sharing across eight
-tokens rather than a flash-style prefix-tile decomposition). Attention 630.4 ->
-572.0 ms. Originally deprioritized because: Attention is 630 ms of the 5254 ms PP2048 pass, 12%.
-Even halving it cannot close a 38% gap to HIP; the FFN projection at 59% is
-where prefill is decided.
+208 ms, 4.5%. The current kernel is f32 online softmax at roughly 3.5 TFLOPS
+against a 27 TFLOPS f32 VALU ceiling, so 13%. The cost is structural rather
+than arithmetic: each `(position, head)` does a `vector.dotf` of 8 FMAs
+followed by a `kernel.subgroup.reduce<addf>` whose DPP chain costs about as
+much as the dot it reduces. HIP runs a masked WMMA kernel for the same work.
 
-Sharing each KV head across its six query heads cut attention 6x, but every
-token still rescans its whole prefix independently. Within one 512-token chunk
-all 512 tokens read the *same* shared prefix, so there is a large reuse factor
-that the current (token, KV head) decomposition cannot capture.
+Arithmetic savings at this scale are *not* worth taking on their own: fusing
+the accumulator rescale into an FMA cut the kernel 14.7 to 12.98 ms per layer
+and was invisible end to end while costing precision (rejected this session).
+Only the structural rewrite is worth doing.
 
-A flash-style decomposition - workgroup per (KV head, prefix tile), carrying
-partial softmax state for all tokens of the chunk - would read each cache row
-once per chunk instead of once per token.
+**Acceptance:** prefill logits within a gated envelope; `pp2048` improves
+beyond noise. Halving attention is +2.3% of the pass.
 
-Attention is 632 ms of the PP2048 run and grows with context: 104 ms in the
-first chunk against 213 ms in the fourth. This is the only remaining prefill
-lever with a large structural factor rather than a few percent.
+## 4. Fold the last two f32 round trips into their producers
 
-**Acceptance:** prefill logits stay bit-identical (this is a reassociation of
-the same online softmax, so exactness is achievable), and PP2048 improves.
+The quantizer-fusion pattern that paid twice this session has two sites left,
+both feeding a blocked projection:
 
-## 3. Instrument the blocked projection instead of guessing at it
+- the SSM readout, whose `context-quant` is 0.34 ms x 48 layers
+- the attention context, 0.47 ms x 16 layers
 
-The blocked projection is 61% of the PP512 chunk and is a sharp local optimum:
-fifteen structural variants have been measured, only the wide LDS read helped,
-and every variant that touches register pressure loses an occupancy tier.
+Together about 0.5% of the pass. Same shape as the retained
+`qwen_swiglu_quantize_blocked_k17408` and
+`qwen_rmsnorm_quantize_blocked_k5120`: compute in registers, write only the
+int8 payload and its per-block scales, never materialize the f32 tile.
 
-Two things have never been tried:
+**Acceptance:** bit-identical logits, as both retained fusions were.
 
-- **Hardware counters.** `--profile-data=counter-ranges --profile-counter=...`
-  in `iree-benchmark-loom` would identify the stall directly rather than by
-  inference from ablations.
-- **A wider MMA.** Check `compile_report.target_capability_rows` for an int8
-  matrix operation with K=32. The current path issues two K=16 MMAs per Q8
-  block; one K=32 operation would halve the MMA instruction count.
+## 5. Fuse the attention K and V projections
 
-**Acceptance:** any change here must be judged end to end, not in the isolated
-harness - that harness re-reads a hot 94 MiB matrix and is LDS-bound, while the
-deployed FFN streams 26 GiB and is bound differently. Several isolated results
-in this project did not survive end-to-end retesting.
+They have identical shapes (1024 rows, K=5120) and each re-reads the same
+quantized activation tile: 1.14 + 1.09 ms per attention layer, 16 layers.
+Worth about 0.7% of the pass, and only if `attn_k` and `attn_v` turn out to be
+adjacent in the checkpoint the way `ssm_alpha_beta` already is. Cheap to check
+before committing to it.
 
+## 6. Make the prefill parity gate mean something
 
-## 5. What is left, in order of size
+`--validate-hrx` reports `envelope=fail` on the blocked W8A8 prefill route and
+has done so since before this session, because the gate is the tight f32
+envelope (`kHrxParityMaxRmse`) and this route quantizes activations. Every
+change is currently checked by hand-comparing rmse/cosine against a recorded
+baseline.
 
-Prefill is 78% of HIP and decode is 102%. The pass is 85% blocked projection,
-and the projection is at a measured ceiling: 256 cycles of matrix work against
-214 VALU instructions per K block, which is 54% of the int8 matrix peak and
-matches the 25 TOPS the FFN measures.
+This blocks cards 1, 2 and 3, all of which are either miscompilation-risk or
+deliberate numerical changes. Give the W8A8 prefill route its own envelope,
+sized from the measured `rmse 0.04735499` / `cosine 0.99990022` / top-1 157,
+so the gate passes today and fails on a real regression.
 
-1. **Loom code generation for this kernel.** HIP reaches 58% of the 55.07 TOPS
-   int8 ceiling with the *same* quantization and the same instruction; this
-   kernel reaches 45%. Per K block it emits ~324 non-matrix instructions
-   against HIP's ~185, of which 43 are accumulator copies around the
-   zero-seeded MMA and 32 are the fmas that HIP dual-issues and Loom does not.
-   Neither is reachable from kernel source. **No accuracy trade is involved** -
-   the quantization-granularity idea previously listed here was based on a
-   ceiling this file measured wrong, and is withdrawn.
-2. **The 43 accumulator copies per K block**, about 9% of the kernel. Caused by
-   register allocation around the zero-seeded first MMA of each pair. Four
-   attempts failed; see the rejected sections above.
-3. **The attention kernel**, 219 ms of 4934, 4.4%. Chunking the online softmax
-   so the accumulator is rescaled once per position block rather than per
-   position would cut its arithmetic meaningfully, at the cost of the
-   bit-identical property the current kernel has.
-4. **The DeltaNet recurrence**, 311 ms, 6.3%. Sequential over tokens; the
-   rows-per-workgroup sweep says the current shape is optimal, so this needs
-   the chunkwise (matrix-form) DeltaNet algorithm, a math change.
+## 7. Ride upstream Loom, and know what blocks it
+
+The derivation now pins `bce2ba37` (2026-08-27), ten days and ~220 Loom commits
+newer than the previous pin. Performance-neutral and parity-identical, so this
+is maintenance, not a win.
+
+**Main is not usable yet.** `0cc34d04` ("[HAL/AMDGPU] Model ROCr AQL queue
+execution modes", 2026-08-27) queries `HSA_AMD_AGENT_INFO_PM4_EMULATION`, which
+the ROCr in `rocmPackages` 7.2.3 rejects with
+`HSA_STATUS_ERROR_INVALID_ARGUMENT`; the AMDGPU accelerator then reports
+unavailable and every HRX backend init fails. Re-try the bump when the ROCm pin
+moves. Note also that upstream's locked-dependency helper now hard-fails at
+configure time if any dependency declares patches and `git` is absent, which is
+why `git` is in `nativeBuildInputs`.
+
+Several AMDGPU codegen commits landed in this window that are worth re-reading
+if the projection is revisited: "Narrow address arithmetic from facts", "Reuse
+issue-consumed fragment addresses", "Consume VMEM VGPR sources at issue".
+
+## What is closed, and must not be retried without new information
+
+All measured, all in the README with numbers:
+
+- The blocked projection's tile shape. 128x128 with 8 waves per SIMD is a sharp
+  local optimum; both dimensions are pinned, and every traffic argument loses
+  to the occupancy cliff.
+- Fragment loads taken straight from LDS into the WMMA operand bank: 208 VGPRs
+  against 184, loses a tier.
+- Unrolling the K loop for a static ping-pong parity: 256 VGPRs, 8 waves to 6.
+- Carrying the accumulator bank as 64 scalars: unlocks VOPD, costs 56 moves.
+- Fusing the attention accumulator rescale into an FMA: neutral end to end,
+  costs precision.
+- Per-token activation scales. This would remove the epilogue's activation
+  multiply, worth about 5% of prefill, but it is a systematic precision
+  reduction rather than a reassociation, and HIP explicitly declined the same
+  trade. Beating HIP by quantizing more coarsely than HIP is not parity.
