@@ -493,6 +493,33 @@ Both change what the quantized model *is*, not just how it is computed, so
 neither is taken here. They are the only remaining prefill lever of any size,
 and the choice belongs to whoever owns the accuracy budget.
 
+### Rejected: a 2x2 wave tile to remove the accumulator copies
+
+The 43 `v_mov_b32` per K block are the largest remaining exact target, about 9%
+of the kernel. Their cause is now understood: with eight MMA pairs per wave the
+first result of each pair would need 64 live registers, over the 192 an
+eight-wave tier allows, so the compiler routes them all through one scratch
+range and copies each out. Four pairs per wave would fit.
+
+The variant gives each wave 32 rows by 32 tokens - sixteen waves of 512 threads
+covering the same 128x128 macro tile, so weight re-reads do not change - and
+splits each staged 32-byte row across two threads so no thread idles. It is
+numerically identical and **peak registers fall from 168 to 119**, exactly as
+predicted.
+
+It is still slower, and how badly depends entirely on the shape:
+
+| measurement | 2x4, 8 waves | 2x2, 16 waves |
+|---|---:|---:|
+| isolated, rows=5120 | 0.3020 ms | 0.3195 ms |
+| isolated, rows=17408 | 1.3881 ms | **1.3421 ms** |
+| pp512 | 416.64 t/s | 376.12 t/s |
+| pp2048 | 415.89 t/s | 354.77 t/s |
+
+The deployment-shaped isolated benchmark said +3.4% and the deployment said
+-15%. That is the sharpest example so far of the rule this file keeps
+re-learning: **only the end-to-end A/B decides.** Reverted.
+
 ### Verified final sweep
 
 One release binary (`nix build .#hrx`), device-local weights,
