@@ -900,20 +900,32 @@ One process per arm, same `Qwen3.8-27B-Q8_0.gguf`, device-local HRX weights,
 single repetitions. `pp128` is the first timed point in each process and reads
 low in all three arms, so it is not comparable and is omitted.
 
-| test | HRX `blocked-prefill` | HRX `+swiglu-quant,norm-quant` | HIP | HRX/HIP |
+| test | HRX at session start | HRX after this session | HIP | HRX/HIP |
 | :--- | ---: | ---: | ---: | ---: |
-| `pp512` | 429.34 | **438.85** | 538.08 | 81.6% |
-| `pp1024` | 434.21 | **444.30** | 545.97 | 81.4% |
-| `pp2048` | 428.82 | **439.02** | 535.49 | 82.0% |
-| `tg16` | 7.91 | 7.90 | 7.78 | 101.5% |
+| `pp512` | 441.59 | **450.06** | 559.42 | 80.5% |
+| `pp1024` | 442.29 | **454.19** | 559.28 | 81.2% |
+| `pp2048` | 434.68 | **447.32** | 557.32 | 80.3% |
+| `tg16` | 7.90 | 7.89 | 7.78 | 101.4% |
+
+Read the ratios with care: HIP maps its weights and gets faster as the page
+cache warms, so its `pp2048` moved between 484 and 559 t/s across this
+session's runs on an otherwise idle machine while HRX (device-local weights)
+stayed inside 1%. **Only the interleaved same-binary A/B numbers in the
+experiment table below are safe to attribute to a change**; the cross-backend
+column is a rough position, not a measurement. Against the warmest HIP the
+three retained changes moved HRX prefill from 78.0% to 80.3% of HIP.
 
 HRX decode is ahead of HIP and HRX prefill is 18% behind it. The rest of this
 section is about where that 18% is.
 
-The retained arm was re-measured after the change was split into its per-
-experiment revisions, to confirm the split reproduces the result:
+The quantizer-fusion arm was re-measured after the change was split into its
+per-experiment revisions, to confirm the split reproduces the result:
 `pp2048` 431.31 / 430.67 without the fusions against 441.21 / 440.43 with them,
 and the same parity numbers to eight decimals.
+
+The 2048-token chunk profile moved from attention 540.5 / SSM 1388.2 / FFN
+2821.1 / total 4749.9 ms at session start to attention 531.6 / SSM 1355.2 /
+FFN 2697.4 / total 4584.3 ms.
 
 ### Where a 2048-token HRX prefill pass goes
 
@@ -1006,6 +1018,84 @@ Two families explain it, and neither is reachable from Loom source:
 | `hrx-fragment-direct-load` | The 72 units of `operand_bank_materialization` are copies from the staged LDS read into the WMMA operand quad. Replace the wide 32-byte `vector.load` + `vector.bitcast` + two `vector.slice`s with two direct `vector<4xi32>` loads over an i32 view of the same scratch, so each fragment is loaded straight into its own bank | Removes 24 of the 209 whole-kernel moves, but every load result becomes its own live range: **208 VGPRs against 184**, which crosses the occupancy tier. Isolated (rows 5120, K 5120, 128 tokens) **545.56 us against 495.42 us** | **Rejected**: buys moves with registers, and registers are what the 8-wave tier is short of |
 | `hrx-static-parity-unroll` | The 33 address VALU ops per K block exist because `%parity = block % 2` indexes both LDS ping-pong halves, so no LDS access folds into an immediate offset. Unroll the K loop by two and substitute the parity constants into each half so every LDS offset is static | Numerically identical and passes its oracle, but both halves' prefetched staging registers are live at once: **256 VGPRs**, dropping the residency tier from 8 waves to 6. Isolated **534.12 us against 495.42 us** | **Rejected**: the address savings are smaller than the occupancy loss |
 | `hrx-attention-substage-trace` | The attention stage was the one stage with no substage instrumentation, so its 540 ms was unattributed | Added `GUFO_HRX_TRACE_ATTENTION`. The attention kernel is 14.707 ms of a 34.95 ms attention layer (42%), i.e. 235 ms of the 4750 ms pass, and the Q/K/V/output projections are another 16.65 ms | **Retained** as the instrument that produced the table above |
+| `hrx-invariant-hoist` | Twenty-eight index computations in the blocked projection's K loop are loop invariant -- the wave's row and token tile origins and its six LDS row addresses do not depend on the block index -- yet the compiler recomputed or rematerialized them every iteration rather than keeping them live | Hoisted all 28 out of the loop in the three blocked shapes. Peak registers unchanged at 184, so no occupancy tier is at risk. Isolated (rows 5120, K 5120, 128 tokens) median **499.4 us against 512.4 us**; interleaved end-to-end `pp2048` 442.53 / 441.88 / 436.70 against 449.99 / 448.65 / 447.24, **+1.53%**. Logits bit-identical. The instruction mix barely moves (32 address VALU ops against 33), so the win is scheduling and rematerialization pressure, not instruction count | **Retained**, unconditional |
+| `hrx-loom-vopd-fmac` | The 64 `v_fma_f32` per K block are VOP3 and cannot enter a VOPD pair. Loom already models the `fmac_f32` VOPD component and ships the `amdgpu.v_fmac_f32` descriptor, but no lowering rule ever offers the tied VOP2 form. Added the rule through the existing `.devops/nix/hrx-system.nix` derivation, then chased the allocator refusal it exposed | The rule is correct: 54 of 57 production kernels compile with it, and a scalar carried accumulator now emits `v_fmac_f32` where stock emits `v_fma_f32`. The three blocked projections still fail, because a carried *vector* accumulator is scalarized into slices and concatenated back and the blocking interval is two hops from the tied result. Carrying the bank as 64 scalars instead does unlock the pairing -- 50 FMA issue slots against 64 -- but costs 56 extra moves per K block and measures **510.75 us against 496.31** | **Rejected** and reverted. Root cause fully characterized; see below |
+
+### Why the projection's FMAs cannot dual-issue: a Loom finding
+
+This is the single largest remaining item in HRX prefill and it is not a kernel
+problem, so it is recorded in full.
+
+Per K block the blocked projection issues 64 `v_fma_f32`. They are already the
+accumulate-in-place form -- the disassembly reads `v_fma_f32 v4, v76, v144, v4`
+-- but they are encoded VOP3, and RDNA3's VOPD packer only accepts the VOP2
+`v_fmac_f32` spelling. HIP's equivalent packs into 32 `v_dual_fmac_f32`, which
+is 32 of the ~55 issue slots that separate the two kernels.
+
+Everything needed is already in Loom: `amdgpu_vopd_component_tables.py` defines
+the `fmac_f32` component with `_FORM_TIED_ACCUMULATE`, `descriptors/alu.py`
+defines `amdgpu.v_fmac_f32` with `TIED`/`DESTRUCTIVE` constraints, and the
+`v_pk_fmac_f16` rules show the exact `operands={"acc": ValueRef.operand("c"), ...}`
+shape a tied rule uses. Adding the f32 rule makes it selected. It then fails in
+the register allocator.
+
+The compiler is explicit that the tied form works when the accumulator is
+loop-*local*: compiling the attention kernel emits
+`AMDGPU/028 ... selected dot accumulation descriptor 'amdgpu.v_fmac_f32' for
+'vector.dotf' ... reason key 'dot_local_accumulator'`. Every f32 accumulate in
+this model's kernels is loop-*carried* instead, and that is what fails.
+
+Minimal reproducer -- one loop-carried `vector<8xf32>` accumulator, no tiles, no
+LDS. With the rule added this fails allocation; without it, it emits eight VOP3
+`v_fma_f32`:
+
+```
+%acc_final = scf.for %i = [%zero to %count step %step](%acc = %zerof : vector<8xf32>) -> (vector<8xf32>) {
+  %row = index.mul %i, %eight : index
+  %x = vector.load %av[%row] : view<262144xf32> -> vector<8xf32>
+  %y = vector.load %bv[%row] : view<262144xf32> -> vector<8xf32>
+  %next = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %x, %y, %acc : vector<8xf32>
+  scf.yield %next : vector<8xf32>
+}
+```
+
+It is **not the loop** that blocks the tie -- it is the *vector* accumulator.
+Changing the reproducer's carried value from `vector<8xf32>` to two carried
+`f32` values makes the tie succeed immediately and Loom emits `v_fmac_f32`
+where stock emits `v_fma_f32`. A carried vector is scalarized into per-lane
+slices and concatenated back every iteration, and instrumenting the failing
+conflict test shows exactly what that costs: the tied operand is one unit at
+base 16, its only incoming relation is a `LOW_SLICE` from the per-iteration
+aggregate, and the interval that actually blocks the location is a *different*
+eight-unit value spanning the whole loop -- the carried aggregate -- reachable
+from the tied result only through a concat and then an edge. The one-hop ignore
+lists the coalescer builds (`collect_tied_storage_aliases`,
+`collect_tied_concat_reservations`) cannot see it. Two narrower fixes were
+built and both fail: widening the storage-alias causes to `LOW_SCF_FOR`/
+`LOW_SCF_YIELD`, and asking unit-granular rather than whole-value liveness of
+the aliased aggregate. Re-running the conflict test under all three storage
+release policies rules out the lease path, so it is the active set.
+
+**The kernel-side workaround was built, and it is rejected on measurement.**
+Carrying the bank as 64 individual `f32` values instead of one
+`vector<8x8xf32>` does unlock the pairing -- 19 `v_dual_fmac_f32` plus 31
+`v_fmac_f32` against 64 unpaired `v_fma_f32`, so 50 issue slots instead of 64 --
+but the per-lane `vector.extract`s do not fold away, and moves go from 53 to
+**109** per K block. Isolated it measures 510.75 / 504.87 / 513.79 us against
+496.31 / 502.24 / 495.88 for production, at identical 184 VGPRs and 8 waves.
+Fourteen slots bought for fifty-six.
+
+That points the fix at a third place, and the narrowest one: **Loom's
+vector-to-scalar lowering should emit the eight tied `fmac`s directly on the
+aggregate's units instead of materializing per-lane slices and concatenating
+them back.** Then the tie is one hop, no extract moves are created, and the
+existing VOPD planner does the rest. The lowering rule this section opens with
+is still a prerequisite, and it is correct as written -- 54 of the 57
+production kernels compile with it unchanged.
+
+RDNA3.5 has no packed f32 FMA either -- `v_pk_fma_f32` is CDNA-only in
+`descriptors/sets.py` -- so VOPD is the only path to two f32 FMAs per issue
+slot on this part.
 
 ### Correctness
 
@@ -1029,11 +1119,13 @@ about what envelope a W8A8 prefill route should be held to.
   (`context-quant`, 0.355 ms x 48) and the attention context (0.469 ms x 16)
   are the last two f32 round trips before a blocked projection, worth about
   0.5% of the pass together.
-- The 64 non-dual-issued `v_fma_f32` per K block are 32 wasted issue slots,
-  about 6.5% of the projection and therefore about 5% of prefill. This needs a
-  VOP3-to-VOP2 shrink in the Loom AMDGPU backend before the VOPD packer runs;
-  it is not reachable from `.loom` source, and four source-level attempts to
-  steer it are already recorded as rejected.
+- Lower a vector `fmaf` to tied `fmac`s on the aggregate's units in Loom's
+  vector-to-scalar pass, instead of per-lane slices plus a concat, then
+  re-apply the `v_fmac_f32` lowering rule. This is the largest single item left
+  in HRX prefill and the investigation above narrows it to that one pass: the
+  rule works, scalar carried accumulators already tie, and the only thing that
+  makes the vector case unprofitable is the extract moves. It is a Loom change
+  made through `.devops/nix/hrx-system.nix`, not a kernel change.
 - The DeltaNet recurrence is 310 ms (6.5%) and its rows-per-workgroup sweep is
   already at its optimum, so the only remaining lever is the chunkwise
   (matrix-form) DeltaNet algorithm — a math change, not a tuning change.

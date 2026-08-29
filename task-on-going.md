@@ -1934,3 +1934,103 @@ decimals (top-1 157, max_abs_diff 0.26514006, rmse 0.04735499, cosine
 report `envelope=fail` because the gate is the tight f32 envelope and the
 blocked W8A8 prefill route has always sat outside it; that is pre-existing and
 unchanged by these fusions.
+
+## Session 2026-08-29, round two: the projection's index math and the VOPD gap
+
+### Retained: hoisting the projection's loop-invariant index math
+
+Twenty-eight index computations inside the K loop do not depend on the block:
+the wave's row group and token-tile base, both LHS LDS row addresses, all four
+RHS row addresses, and the four token-tile constants. Hoisting them keeps peak
+registers at 184, so no occupancy tier is at risk.
+
+| measurement | before | after |
+|---|---:|---:|
+| isolated, rows=5120/K=5120/128 tokens (median of 4) | 512.4 us | **499.4 us** |
+| interleaved pp2048, three rounds | 442.53 / 441.88 / 436.70 | **449.99 / 448.65 / 447.24** |
+
++1.53% end to end, logits bit-identical. The emitted instruction mix barely
+moves (32 address VALU ops against 33, moves 53 against 46), so the win is in
+scheduling and rematerialization pressure rather than instruction count - the
+compiler had been rematerializing the addresses instead of keeping them live.
+
+### Rejected: adding a v_fmac_f32 lowering rule to Loom
+
+Root cause of the largest remaining gap, and the reason it cannot be closed
+from a kernel. Full write-up is in the model README under "Why the projection's
+FMAs cannot dual-issue: a Loom finding". Summary:
+
+- Loom already models the VOPD `fmac_f32` component and ships the
+  `amdgpu.v_fmac_f32` descriptor with TIED/DESTRUCTIVE constraints, but no
+  lowering rule offers it for `vector.fmaf`/`scalar.fmaf`, so the packer never
+  sees a candidate and every f32 FMA stays VOP3.
+- Adding the rule (plus the descriptor to the `amdgpu.arithmetic` set) through
+  `.devops/nix/hrx-system.nix` makes it selected. The allocator then fails:
+  `low tied result cannot share the operand location without overlapping
+  another live interval`.
+- It reproduces in 25 lines with one loop-carried `vector<8xf32>` accumulator.
+  Loom's own diagnostic confirms the boundary: `AMDGPU/028` reports
+  `selected ... 'amdgpu.v_fmac_f32' ... reason key 'dot_local_accumulator'` for
+  `vector.dotf`, i.e. the tie works for a loop-local accumulator and only fails
+  for a carried one.
+- Adding `LOW_SCF_FOR`/`LOW_SCF_YIELD` to the tie-coalescer's storage-alias
+  causes in `coalescing.c` does not fix it: the carried value's live range wraps
+  the back edge rather than ending at the tied definition, so the conflict is in
+  the liveness model.
+- 54 of 57 production kernels still compile with the rule; the three blocked
+  projections hard-fail. Reverted.
+
+RDNA3.5 has no packed f32 FMA (`v_pk_fma_f32` is CDNA-only in
+`descriptors/sets.py`), so VOPD is the only route to two f32 FMAs per slot.
+
+### Where the pass stands after this session
+
+Chunk profile at 2048 tokens: attention 531.6, SSM 1355.2, FFN 2697.4, total
+4584.3 ms, against 540.5 / 1388.2 / 2821.1 / 4749.9 at session start.
+
+| test | session start | now | HIP (warm) |
+|---|---:|---:|---:|
+| pp512 | 441.59 | 450.06 | 559.42 |
+| pp1024 | 442.29 | 454.19 | 559.28 |
+| pp2048 | 434.68 | 447.32 | 557.32 |
+| tg16 | 7.90 | 7.89 | 7.78 |
+
+HIP's own pp2048 moved between 484 and 559 t/s across this session as its
+mapped weights warmed, so the cross-backend ratio is a position, not a
+measurement. Only the interleaved same-binary A/Bs above are attributable.
+
+## Round three: the VOPD fmac chase, completed and closed
+
+Five compiler builds narrowed this to one pass. Ordered findings:
+
+1. The lowering rule is correct. Adding `_f32_fmac_rule` to `_f32_fma_rules`
+   plus `amdgpu.v_fmac_f32` to the `amdgpu.arithmetic` descriptor set makes the
+   tied VOP2 form selectable; 54 of 57 production kernels compile unchanged.
+2. **The loop is not the problem, the vector is.** A reproducer carrying two
+   `f32` accumulators through `scf.for` emits `v_fmac_f32` with the rule and
+   `v_fma_f32` without it. The same reproducer carrying one `vector<8xf32>`
+   fails allocation.
+3. Instrumenting the failing conflict test: tied result is one unit at base 16,
+   interval [62,74]; the tied operand (also one unit, ignored correctly) has a
+   single incoming `LOW_SLICE` relation from the per-iteration aggregate; the
+   interval that blocks the location is a *different* eight-unit value spanning
+   [10,80], the carried aggregate, which is two hops from the tied result
+   (concat, then edge). The one-hop ignore lists cannot reach it.
+4. Re-running the conflict test under all three storage release policies still
+   conflicts, so it is the active set and not the storage-lease path.
+5. Two narrower allocator fixes were built and both fail: adding
+   `LOW_SCF_FOR`/`LOW_SCF_YIELD` to `storage_alias_relation`, and making
+   `collect_tied_storage_aliases` ask unit-granular rather than whole-value
+   liveness of the aliased aggregate.
+6. The kernel-side workaround was built and measured. Carrying the bank as 64
+   `f32` values unlocks the pairing - 19 `v_dual_fmac_f32` + 31 `v_fmac_f32`,
+   50 FMA issue slots against 64 - but per-lane `vector.extract` does not fold,
+   moves go 53 -> 109 per K block, and it measures 510.75 / 504.87 / 513.79 us
+   against 496.31 / 502.24 / 495.88 for production at identical registers and
+   occupancy. Fourteen slots bought for fifty-six. Rejected.
+
+Conclusion: the fix is in Loom's vector-to-scalar lowering, which should emit
+the eight tied `fmac`s on the aggregate's units rather than materializing
+per-lane slices and concatenating them back. Everything else is already in
+place. The patch and the reproducers are reconstructible from this file; the
+derivation is reverted so the tree builds stock.
