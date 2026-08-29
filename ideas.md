@@ -114,12 +114,14 @@ and the projection is at a measured ceiling: 256 cycles of matrix work against
 214 VALU instructions per K block, which is 54% of the int8 matrix peak and
 matches the 25 TOPS the FFN measures.
 
-1. **Change the quantization granularity.** Per-channel weight scales plus
-   per-token activation scales let the matrix instructions accumulate in i32
-   across the whole K and delete the epilogue, worth roughly 51% on the kernel
-   and putting prefill near 600 t/s. Per-token activation scales alone are
-   worth about 5% of prefill. Both change what the quantized model is, so they
-   need an accuracy decision, not just a kernel.
+1. **Loom code generation for this kernel.** HIP reaches 58% of the 55.07 TOPS
+   int8 ceiling with the *same* quantization and the same instruction; this
+   kernel reaches 45%. Per K block it emits ~324 non-matrix instructions
+   against HIP's ~185, of which 43 are accumulator copies around the
+   zero-seeded MMA and 32 are the fmas that HIP dual-issues and Loom does not.
+   Neither is reachable from kernel source. **No accuracy trade is involved** -
+   the quantization-granularity idea previously listed here was based on a
+   ceiling this file measured wrong, and is withdrawn.
 2. **The 43 accumulator copies per K block**, about 9% of the kernel. Caused by
    register allocation around the zero-seeded first MMA of each pair. Four
    attempts failed; see the rejected sections above.

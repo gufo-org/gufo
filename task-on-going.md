@@ -490,8 +490,12 @@ under a different weight format:
   51% on the kernel and would put prefill near 600 t/s, past HIP.
 
 Both change what the quantized model *is*, not just how it is computed, so
-neither is taken here. They are the only remaining prefill lever of any size,
-and the choice belongs to whoever owns the accuracy budget.
+neither is taken here.
+
+**This conclusion was wrong, and the next section corrects it.** The 44.6 TOPS
+"peak" above is this kernel's own MMA-only probe, not the hardware's, and the
+HIP path reaches 58% of a 55.07 TOPS ceiling using exactly the same
+quantization. Nothing here needs an accuracy trade.
 
 ### Rejected: a 2x2 wave tile to remove the accumulator copies
 
@@ -546,6 +550,60 @@ since the 8 chosen earlier was picked under 512-token chunks:
 | 32 | 21.7368 ms | 145 |
 
 8 is still the optimum and nothing changed.
+
+### The HIP path uses the same quantization, and is simply better tuned
+
+`src/models/qwen/hip/kernels/prefill_quant_gemm.hip` answers the question that
+matters: **HIP is not trading quality for its prefill throughput.** It calls
+`__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32` on per-block Q8_0 weight scales
+with per-block quantized activations - the same W8A8 scheme, the same
+instruction, and the same 128x128 macro tile over 8 waves with a 2x4 wave tile
+that this kernel uses. Its own comment states the ceiling:
+
+> "Blocking both dimensions at 128 cuts that to m/128 and lifts the kernel from
+> 35% to 58% of the measured 55.07 TOPS WMMA int8 ceiling."
+
+So the hardware ceiling is **55.07 TOPS**, not the 44.6 measured earlier from
+this kernel's MMA-only probe, which was never a hardware number. HIP sits at
+58% of it, about 31.9 TOPS; the FFN here measures 25 TOPS, about 45%. The ratio
+is 1.28, and PP2048 is 536.25 / 418.17 = 1.28. Everything reconciles, and the
+gap is **kernel tuning, not quantization and not quality**.
+
+The one structural difference is `BK`, the number of K blocks staged per LDS
+round: HIP's throughput configuration is `<128, 128, 2, 4, 2>`, so BK=2 where
+this kernel stages one. Their note is explicit that it only pays with a
+particular shape of body:
+
+> "at BK=2 the previous body needed 500 bytes/lane of scratch and ran 4.3x
+> slower"
+
+Both ways of expressing BK=2 in Loom hit exactly that wall:
+
+| variant | isolated | registers |
+|---|---:|---:|
+| BK=1, ping-pong (current) | **0.3020 ms** | 168 |
+| BK=2, compute unrolled twice | 0.4072 ms | 236 |
+| BK=2, compute in an `scf.for` over the pair | 0.8816 ms | 225 |
+
+The loop form is worse still because the carried accumulator cannot stay an
+aggregate across a nested loop - `sroa-vector-banks cannot scalarize carried
+slot 0 of scf.yield` - so it must be eight separate values, and the dynamic
+`%kb` then defeats the LDS addressing.
+
+What is left of the gap is code generation. Per K block this kernel emits about
+324 non-matrix instructions against HIP's implied ~185, and two families
+account for most of the difference:
+
+- **43 accumulator copies**, because the compiler funnels every pair's
+  zero-seeded first MMA through one scratch register range.
+- **64 `v_fma_f32` that are not dual-issued.** HIP's equivalent packs into
+  `v_dual_fmac_f32`. Expanding the 8-wide `vector.fmaf` into eight
+  `scalar.fmaf` to invite VOPD pairing does not help either: 0.3056 ms against
+  0.3020, same 168 registers.
+
+Neither is reachable from the kernel source; they are Loom register-allocation
+and instruction-selection behaviours. That is the honest description of the
+remaining 22-32% on prefill.
 
 ### Verified final sweep
 
