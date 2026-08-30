@@ -1,6 +1,6 @@
 # DeepSeek V4 Flash Q2-imatrix on Strix Halo
 
-Status: 2026-08-26. This page is the current functional and performance
+Status: 2026-08-30. This page is the current functional and performance
 snapshot, not an optimization history.
 
 ## Model
@@ -90,6 +90,28 @@ The 2K decode value was confirmed by two paired candidate samples; the 8K-32K
 rows come from one sparse-depth sweep. The 64K
 prompt row was not rerun because the retained prompt-kernel gain was already
 stable through 32K.
+
+### Weight placement
+
+DS4 keeps the copied device-arena policy. A source-selected candidate instead
+registered the full read-only GGUF mapping with HIP and addressed weights
+through its device alias. Separate release packages used the same artifact,
+kernel routes, 2K prepared depth, 2K prompt, and 128 generated tokens.
+
+| Policy | Cache state | Load | `pp2048` | `tg128` | Max RSS |
+| --- | --- | ---: | ---: | ---: | ---: |
+| HIP-mapped GGUF | cold | 23.19 s | 64.70 tok/s | 14.15 tok/s | 81.20 GiB |
+| HIP-mapped GGUF | warm | 2.49 s | 153.63 tok/s | 8.93 tok/s | 81.23 GiB |
+| Copied device arenas | interleaved repeat | 23.11 s | 205.64 tok/s | 15.47 tok/s | 0.72 GiB |
+
+Even with the file cache warm, direct mapping regressed prompt throughput by
+25.3% and generation throughput by 42.3%. It also added about 80.5 GiB of
+process RSS and roughly 21.25 million minor faults because registration
+first-touched the complete mapping. The mapped candidate passed the unchanged
+quality envelope exactly: pinned trajectory 116/128 top-1, rank sum 142,
+worst rank 3; batched-prefill RMSE 0.478146, cosine 0.99617, maximum error
+2.39995, and sequential choice rank 1. The candidate was therefore rejected
+for placement performance and memory behavior, not numerical quality.
 
 A separate full-prompt comparison isolates the retained prompt kernels:
 
@@ -215,6 +237,9 @@ after generation.
 - Native MMQ, device expert queues, cached hipBLASLt projection routing, and
   dense-Q8 32/128-token tile variants either failed the quality envelope or
   regressed the 4K prompt and were removed.
+- Direct HIP registration of the full GGUF mapping was numerically valid but,
+  even warm, regressed 2K prompt/decode throughput by 25.3%/42.3% and added
+  about 80.5 GiB of process RSS, so copied device arenas remain authoritative.
 
 ## To Do
 
