@@ -1,0 +1,104 @@
+// Qwen3.8 DeltaNet state mutation/readout after alpha/beta preparation.
+// alpha_decay already equals exp(a * softplus(alpha + dt)); beta_correction
+// already equals sigmoid(beta). This split keeps the recurrent state ABI
+// independently testable while the missing softplus primitive remains explicit.
+
+kernel.def @qwen_deltanet_recurrence_f32(%heads: index) {
+  %capacity = index.constant 48 : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 128 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%heads: index, %conv: buffer, %alpha_decay: buffer, %beta_correction: buffer, %norm: buffer, %gate: buffer, %state: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %head_count = index.assume %heads [range(%heads, 48, 48)] : index
+  %head = kernel.workgroup.id<x> : index
+  %row = kernel.workitem.id<x> : index
+  %key_heads = index.constant 16 : index
+  %dim = index.constant 128 : index
+  %q_width = index.constant 2048 : index
+  %k_offset = index.constant 2048 : index
+  %v_offset = index.constant 4096 : index
+  %kh = index.rem %head, %key_heads : index
+  %kh_base = index.mul %kh, %dim : index
+  %q_index = index.add %kh_base, %row : index
+  %k_base = index.add %k_offset, %kh_base : index
+  %k_index = index.add %k_base, %row : index
+  %head_base = index.mul %head, %dim : index
+  %v_base = index.add %v_offset, %head_base : index
+  %v_index = index.add %v_base, %row : index
+  %conv_view = buffer.view %conv[%base] : buffer -> view<10240xf32>
+  %alpha_view = buffer.view %alpha_decay[%base] : buffer -> view<48xf32>
+  %beta_view = buffer.view %beta_correction[%base] : buffer -> view<48xf32>
+  %norm_view = buffer.view %norm[%base] : buffer -> view<128xf32>
+  %gate_view = buffer.view %gate[%base] : buffer -> view<48x128xf32>
+  %state_view = buffer.view %state[%base] : buffer -> view<48x128x128xf32>
+  %output_view = buffer.view %output[%base] : buffer -> view<48x128xf32>
+  %q = view.load %conv_view[%q_index] : view<10240xf32> -> f32
+  %k = view.load %conv_view[%k_index] : view<10240xf32> -> f32
+  %q_sq = scalar.mulf<reassoc|nnan|ninf|nsz> %q, %q : f32
+  %k_sq = scalar.mulf<reassoc|nnan|ninf|nsz> %k, %k : f32
+  %q_sum = kernel.workgroup.reduce<addf> %q_sq : f32
+  %k_sum = kernel.workgroup.reduce<addf> %k_sq : f32
+  %epsilon = scalar.constant 0.000001 : f32
+  %q_var = scalar.addf<reassoc|nnan|ninf|nsz> %q_sum, %epsilon : f32
+  %k_var = scalar.addf<reassoc|nnan|ninf|nsz> %k_sum, %epsilon : f32
+  %q_inv = scalar.rsqrtf<afn> %q_var : f32
+  %k_inv = scalar.rsqrtf<afn> %k_var : f32
+  %q_dim_scale = scalar.constant 0.08838834764831845 : f32
+  %q_scale = scalar.mulf<reassoc|nnan|ninf|nsz> %q_inv, %q_dim_scale : f32
+  %alpha = view.load %alpha_view[%head] : view<48xf32> -> f32
+  %beta = view.load %beta_view[%head] : view<48xf32> -> f32
+  %v = view.load %conv_view[%v_index] : view<10240xf32> -> f32
+  %zero = scalar.constant 0.0 : f32
+  %loop_begin = index.constant 0 : index
+  %loop_step = index.constant 1 : index
+  %retrieved = scf.for %i = [%loop_begin to %dim step %loop_step](%sum = %zero : f32) -> (f32) {
+    %ki_base = index.add %k_offset, %kh_base : index
+    %ki = index.add %ki_base, %i : index
+    %raw_k = view.load %conv_view[%ki] : view<10240xf32> -> f32
+    %normalized_k = scalar.mulf<reassoc|nnan|ninf|nsz> %raw_k, %k_inv : f32
+    %state_value = view.load %state_view[%head, %row, %i] : view<48x128x128xf32> -> f32
+    %decayed = scalar.mulf<reassoc|nnan|ninf|nsz> %state_value, %alpha : f32
+    %product = scalar.mulf<reassoc|nnan|ninf|nsz> %decayed, %normalized_k : f32
+    %next = scalar.addf<reassoc|nnan|ninf|nsz> %sum, %product : f32
+    scf.yield %next : f32
+  }
+  %delta0 = scalar.subf<reassoc|nnan|ninf|nsz> %v, %retrieved : f32
+  %delta = scalar.mulf<reassoc|nnan|ninf|nsz> %delta0, %beta : f32
+  %readout = scf.for %i = [%loop_begin to %dim step %loop_step](%sum = %zero : f32) -> (f32) {
+    %ki_base = index.add %k_offset, %kh_base : index
+    %ki = index.add %ki_base, %i : index
+    %qi = index.add %kh_base, %i : index
+    %raw_k = view.load %conv_view[%ki] : view<10240xf32> -> f32
+    %raw_q = view.load %conv_view[%qi] : view<10240xf32> -> f32
+    %normalized_k = scalar.mulf<reassoc|nnan|ninf|nsz> %raw_k, %k_inv : f32
+    %normalized_q = scalar.mulf<reassoc|nnan|ninf|nsz> %raw_q, %q_scale : f32
+    %old_state = view.load %state_view[%head, %row, %i] : view<48x128x128xf32> -> f32
+    %decayed = scalar.mulf<reassoc|nnan|ninf|nsz> %old_state, %alpha : f32
+    %update = scalar.mulf<reassoc|nnan|ninf|nsz> %delta, %normalized_k : f32
+    %new_state = scalar.addf<reassoc|nnan|ninf|nsz> %decayed, %update : f32
+    view.store %new_state, %state_view[%head, %row, %i] : f32, view<48x128x128xf32>
+    %product = scalar.mulf<reassoc|nnan|ninf|nsz> %new_state, %normalized_q : f32
+    %next = scalar.addf<reassoc|nnan|ninf|nsz> %sum, %product : f32
+    scf.yield %next : f32
+  }
+  %readout_sq = scalar.mulf<reassoc|nnan|ninf|nsz> %readout, %readout : f32
+  %readout_sum = kernel.workgroup.reduce<addf> %readout_sq : f32
+  %val_width = scalar.constant 128.0 : f32
+  %readout_mean = scalar.divf<reassoc|nnan|ninf|nsz> %readout_sum, %val_width : f32
+  %readout_var = scalar.addf<reassoc|nnan|ninf|nsz> %readout_mean, %epsilon : f32
+  %readout_inv = scalar.rsqrtf<afn> %readout_var : f32
+  %norm_weight = view.load %norm_view[%row] : view<128xf32> -> f32
+  %gate_value = view.load %gate_view[%head, %row] : view<48x128xf32> -> f32
+  %negative_gate = scalar.negf %gate_value : f32
+  %gate_exp = scalar.expf<afn> %negative_gate : f32
+  %fone = scalar.constant 1.0 : f32
+  %gate_denominator = scalar.addf<reassoc|nnan|ninf|nsz> %fone, %gate_exp : f32
+  %gate_sigmoid = scalar.divf<reassoc|nnan|ninf|nsz> %fone, %gate_denominator : f32
+  %silu_gate = scalar.mulf<reassoc|nnan|ninf|nsz> %gate_value, %gate_sigmoid : f32
+  %normed = scalar.mulf<reassoc|nnan|ninf|nsz> %readout, %readout_inv : f32
+  %weighted = scalar.mulf<reassoc|nnan|ninf|nsz> %normed, %norm_weight : f32
+  %result = scalar.mulf<reassoc|nnan|ninf|nsz> %weighted, %silu_gate : f32
+  view.store %result, %output_view[%head, %row] : f32, view<48x128xf32>
+  kernel.return
+}

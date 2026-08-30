@@ -15,6 +15,7 @@
   aie-smoke,
   xrt,
   xrt-plugin-amdxdna,
+  hrx-system,
   config,
   version,
 
@@ -23,6 +24,9 @@
   rocmGpuTargets ? (lib.optionals rocmSupport rocmPackages.clr.gpuTargets),
   # Wire the XRT NPU shim + amdxdna plugin into the build.
   xrtSupport ? true,
+  # Build the native HRX/Loom runtime variant. The default package stays on
+  # the established ROCm/HIP route.
+  hrxSupport ? false,
 }:
 
 let
@@ -55,7 +59,10 @@ let
       || relativePath == "tools/quant/gguf_dump_types.cpp"
       || relativePath == "tools/gufo"
       || relativePath == "tools/gufo/compile_h3_attention.py"
-      || relativePath == "tools/gufo/h3_attention_kernel.py";
+      || relativePath == "tools/gufo/h3_attention_kernel.py"
+      || relativePath == "tools/loom"
+      || lib.hasPrefix "tools/loom/" relativePath
+      || relativePath == "tools/gufo/hrx-wrapper.sh";
   };
 in
 stdenv.mkDerivation (finalAttrs: {
@@ -98,7 +105,8 @@ stdenv.mkDerivation (finalAttrs: {
     xrt
     xrt-plugin-amdxdna
     libuuid
-  ];
+  ]
+  ++ lib.optional hrxSupport hrx-system;
 
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
@@ -113,6 +121,9 @@ stdenv.mkDerivation (finalAttrs: {
   ++ lib.optional rocmSupport "-DHIPCUB_INCLUDE_DIR=${rocmPackages.hipcub}/include"
   ++ lib.optional rocmSupport "-DROCPRIM_INCLUDE_DIR=${rocmPackages.rocprim}/include"
   ++ lib.optional rocmSupport "-DROCWMMA_INCLUDE_DIR=${rocmPackages.rocwmma}/include"
+  ++ lib.optional xrtSupport "-DENGINE_ENABLE_XRT=ON"
+  ++ lib.optional hrxSupport "-DENGINE_ENABLE_HRX=ON"
+  ++ lib.optional hrxSupport "-DHRX_ROOT=${hrx-system}"
   ++ lib.optional xrtSupport "-DENGINE_ENABLE_XRT=ON"
   ++ lib.optional xrtSupport "-DGUFO_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR=${placeholder "out"}/share/gufo/aie/qwen-mtp-eh-proj"
   ++ lib.optional xrtSupport "-DGUFO_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR=${placeholder "out"}/share/gufo/aie/qwen-mtp-rmsnorm"
@@ -138,7 +149,14 @@ stdenv.mkDerivation (finalAttrs: {
 
     mkdir -p $out/bin
     cp gufo $out/bin/gufo
-    ln -sf gufo $out/bin/gufo-server
+    if [ "${if hrxSupport then "1" else "0"}" = 1 ]; then
+      mkdir -p $out/share/gufo/kernels
+      cp -R share/gufo/kernels/. $out/share/gufo/kernels/
+      mv $out/bin/gufo $out/bin/.gufo-hrx-real
+      cp $src/tools/gufo/hrx-wrapper.sh $out/bin/gufo
+      substituteInPlace $out/bin/gufo \
+        --replace-fail '@HRX_HIP_LIBRARY@' '${hrx-system}/lib/libamdhip64.so'
+    fi
     mkdir -p $out/share/gufo/models/qwen3_tts
     cp $src/src/models/qwen3_tts/reference/run_official.py \
       $out/share/gufo/models/qwen3_tts/
@@ -197,8 +215,7 @@ stdenv.mkDerivation (finalAttrs: {
 
     $out/bin/gufo --version
     $out/bin/gufo --help >/dev/null
-    $out/bin/gufo-server --version
-    $out/bin/gufo-server --help >/dev/null
+    $out/bin/gufo serve --help >/dev/null
     if [ -x $out/bin/gufo-kernel-bench ]; then
       $out/bin/gufo-kernel-bench --help >/dev/null
     fi

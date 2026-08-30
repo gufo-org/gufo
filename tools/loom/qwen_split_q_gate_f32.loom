@@ -1,0 +1,57 @@
+// Qwen3.8 native primitive: split 12288-wide Q+gate projection and sigmoid gate.
+
+kernel.def @qwen_split_q_gate_f32(%elements: index) {
+  %workgroup_size = index.constant 32 : index
+  %query_width = index.constant 6144 : index
+  %workgroups = index.div %query_width, %workgroup_size : index
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%workgroups, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%elements: index, %q_gate: buffer, %query: buffer, %gate: buffer) {
+  %base = index.constant 0 : offset
+  %projection_width = index.assume %elements [range(%elements, 12288, 12288)] : index
+  %query_width = index.constant 6144 : index
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %workgroup_size = index.constant 32 : index
+  %element0 = index.madd %group, %workgroup_size, %lane : index
+  %element = index.assume %element0 [lt(%element0, %query_width)] : index
+  %head_width = index.constant 256 : index
+  %projection_head_width = index.constant 512 : index
+  %head = index.div %element, %head_width : index
+  %dimension = index.rem %element, %head_width : index
+  %projection_head_base = index.mul %head, %projection_head_width : index
+  %q_element0 = index.add %projection_head_base, %dimension : index
+  %q_element = index.assume %q_element0 [lt(%q_element0, %projection_width)] : index
+  %gate_head_base = index.add %projection_head_base, %head_width : index
+  %gate_element0 = index.add %gate_head_base, %dimension : index
+  %gate_element = index.assume %gate_element0 [lt(%gate_element0, %projection_width)] : index
+  %input_noalias, %query_noalias, %gate_noalias = buffer.assume.noalias %q_gate, %query, %gate : buffer, buffer, buffer
+  %input_view = buffer.view %input_noalias[%base] : buffer -> view<12288xf32>
+  %query_view = buffer.view %query_noalias[%base] : buffer -> view<6144xf32>
+  %gate_view = buffer.view %gate_noalias[%base] : buffer -> view<6144xf32>
+  %q = view.load %input_view[%q_element] : view<12288xf32> -> f32
+  %raw_gate = view.load %input_view[%gate_element] : view<12288xf32> -> f32
+  %negative = scalar.negf %raw_gate : f32
+  %exponent = scalar.expf<afn> %negative : f32
+  %one = scalar.constant 1.0 : f32
+  %denominator = scalar.addf<reassoc|nnan|ninf|nsz> %one, %exponent : f32
+  %sigmoid = scalar.divf<reassoc|nnan|ninf|nsz> %one, %denominator : f32
+  view.store %q, %query_view[%element] : f32, view<6144xf32>
+  view.store %sigmoid, %gate_view[%element] : f32, view<6144xf32>
+  kernel.return
+}
+
+check.case public @qwen_split_q_gate_f32_case {
+  %elements = check.param.choice values([12288]) name("elements") : index
+  %input = check.generate.fill value(0.0) : tensor<12288xf32>
+  %query = check.generate.fill value(1.0) : tensor<6144xf32>
+  %gate = check.generate.fill value(1.0) : tensor<6144xf32>
+  %expected_query = check.generate.fill value(0.0) : tensor<6144xf32>
+  %expected_gate = check.generate.fill value(0.5) : tensor<6144xf32>
+  kernel.launch @qwen_split_q_gate_f32[%elements](%elements, %input, %query, %gate) : [index](index, tensor<12288xf32>, tensor<6144xf32>, tensor<6144xf32>)
+  check.expect.close actual(%query) expected(%expected_query) atol(0.0001) rtol(0.0001) nan(same) : tensor<6144xf32>
+  check.expect.close actual(%gate) expected(%expected_gate) atol(0.0001) rtol(0.0001) nan(same) : tensor<6144xf32>
+  check.return
+}
+
+check.benchmark<@qwen_split_q_gate_f32_case> @qwen_split_q_gate_f32_decode {elements = 12288}

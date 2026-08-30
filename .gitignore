@@ -94,6 +94,7 @@ __pycache__/
 # Temporary DS4 source trees and downloads
 ds4*
 llama.cpp*
+hrx-system*
 !src/models/deepseek_v4_flash/
 !src/models/deepseek_v4_flash/**
 

@@ -1,0 +1,50 @@
+// Qwen3.8 native primitive: elementwise F32 residual add.
+
+config.decl @qwen_residual_add_f32.element_capacity : %value: index where [range(%value, 32, 17408), mul(%value, 32)]
+
+kernel.def @qwen_residual_add_f32(%elements: index) {
+  %vector_width = index.constant 32 : index
+  %capacity = config.get @qwen_residual_add_f32.element_capacity : index
+  %workgroups = index.div %capacity, %vector_width : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%workgroups, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%elements: index, %left: buffer, %right: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_residual_add_f32.element_capacity : index
+  %count = index.assume %elements [range(%elements, 32, 17408), mul(%elements, 32), le(%elements, %capacity)] : index
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %leader = index.constant 0 : index
+  %vector_width = index.constant 32 : index
+  %element_base0 = index.mul %group, %vector_width : index
+  %element_in_bounds = index.cmp ult, %element_base0, %count : index
+  %is_leader = index.cmp eq, %lane, %leader : index
+  scf.if %is_leader {
+    scf.if %element_in_bounds {
+      %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %count)] : index
+      %left_noalias, %right_noalias, %output_noalias = buffer.assume.noalias %left, %right, %output : buffer, buffer, buffer
+      %left_view = buffer.view %left_noalias[%base] : buffer -> view<17408xf32>
+      %right_view = buffer.view %right_noalias[%base] : buffer -> view<17408xf32>
+      %output_view = buffer.view %output_noalias[%base] : buffer -> view<17408xf32>
+      %a = vector.load %left_view[%element_base] : view<17408xf32> -> vector<32xf32>
+      %b = vector.load %right_view[%element_base] : view<17408xf32> -> vector<32xf32>
+      %sum = vector.addf<reassoc|nnan|ninf|nsz> %a, %b : vector<32xf32>
+      vector.store %sum, %output_view[%element_base] : vector<32xf32>, view<17408xf32>
+    }
+  }
+  kernel.return
+}
+
+check.case public @qwen_residual_add_f32_case {
+  %elements = check.param.choice values([5120, 17408]) name("elements") : index
+  %left = check.generate.fill value(1.25) : tensor<[%elements]xf32>
+  %right = check.generate.fill value(-0.5) : tensor<[%elements]xf32>
+  %output = check.generate.fill value(0.0) : tensor<[%elements]xf32>
+  %expected = check.generate.fill value(0.75) : tensor<[%elements]xf32>
+  kernel.launch @qwen_residual_add_f32[%elements](%elements, %left, %right, %output) : [index](index, tensor<[%elements]xf32>, tensor<[%elements]xf32>, tensor<[%elements]xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<[%elements]xf32>
+  check.return
+}
+
+check.benchmark<@qwen_residual_add_f32_case> @qwen_residual_add_f32_hidden {elements = 5120}

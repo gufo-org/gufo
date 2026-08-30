@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0.0",
+  "target_platform": "x86_64-linux",
+  "target_gpu": "gfx1151",
+  "target_npu": "xdna2",
+  "models": {
+    "qwen3.8_27b_q8_0": {
+      "filename": "Qwen3.8-27B-Q8_0.gguf",
+      "sha256": "f5c702d8820d36fb55985bb238fc83ee3a313e920f4b752a437c3a6a9e14e4c8"
+    },
+    "qwen3.8_27b_ud_q8_k_xl": {
+      "filename": "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+      "sha256": "2a13bba36d2efa213f9275abc430c40e4d914b145bfde976f30f1bb5b7e23ac2"
+    },
+    "qwen3.8_27b_dflash2_q8_0": {
+      "filename": "Qwen3.8-27B-DFlash2-Q8_0.gguf",
+      "sha256": "c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e"
+    }
+  },
+  "corpus_hashes": {
+    "dflash2_10_prompt_suite": "59321d75dbd1",
+    "dflash2_300_token_stress_suite": "baea40559c61"
+  },
+  "deterministic_parity_prompt": {
+    "tokens": [1, 151644, 872, 198],
+    "expected_prompt_top1": [220, 198, 157, 157],
+    "expected_decode_top1": [101, 102, 157, 101],
+    "metrics_envelope": {
+      "min_cosine_similarity": 0.999999,
+      "max_rmse": 0.0001,
+      "max_abs_diff": 0.001
+    }
+  },
+  "baselines": {
+    "hip_q8_0": {
+      "pp128_tps": 411.44,
+      "pp512_tps": 551.04,
+      "pp2048_tps": 548.84,
+      "tg128_tps": 7.62
+    },
+    "hip_q8_k_xl": {
+      "pp128_tps": 354.01,
+      "tg16_tps": 6.90
+    },
+    "hrx_native_q8_0": {
+      "pp128_tps": 4.02,
+      "tg16_tps": 3.69
+    }
+  }
+}

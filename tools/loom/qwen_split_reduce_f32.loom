@@ -1,0 +1,74 @@
+// Sums the eight K-split partials of a blocked W8A8 projection into its
+// output. Partials are token-major and one split stride apart, and the sum
+// runs in split order, so a given shape reduces the same way every run.
+//
+// The split stride is the runtime element count and not a constant on purpose.
+// A constant stride this large folds into the load's static offset field and
+// the resulting address wraps: an eight-way reduction with a
+// `index.constant 262144` stride faults on the second slice, while the same
+// kernel with the stride taken from the element count passes.
+
+config.decl @qwen_split_reduce_f32.element_capacity : %value: index where [range(%value, 32, 262144), mul(%value, 32)]
+
+kernel.def @qwen_split_reduce_f32(%elements: index) {
+  %vector_width = index.constant 32 : index
+  %capacity = config.get @qwen_split_reduce_f32.element_capacity : index
+  %workgroups = index.div %capacity, %vector_width : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%workgroups, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%elements: index, %partials: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_split_reduce_f32.element_capacity : index
+  %count = index.assume %elements [range(%elements, 32, 262144), mul(%elements, 32), le(%elements, %capacity)] : index
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %leader = index.constant 0 : index
+  %vector_width = index.constant 32 : index
+  %element_base0 = index.mul %group, %vector_width : index
+  %element_in_bounds = index.cmp ult, %element_base0, %count : index
+  %is_leader = index.cmp eq, %lane, %leader : index
+  scf.if %is_leader {
+    scf.if %element_in_bounds {
+      %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %count)] : index
+      %partials_noalias, %output_noalias = buffer.assume.noalias %partials, %output : buffer, buffer
+      %partial_view = buffer.view %partials_noalias[%base] : buffer -> view<2097152xf32>
+      %output_view = buffer.view %output_noalias[%base] : buffer -> view<262144xf32>
+      %split_stride = index.assume %count [range(%count, 32, 262144)] : index
+      %offset1 = index.add %element_base, %split_stride : index
+      %offset2 = index.add %offset1, %split_stride : index
+      %offset3 = index.add %offset2, %split_stride : index
+      %offset4 = index.add %offset3, %split_stride : index
+      %offset5 = index.add %offset4, %split_stride : index
+      %offset6 = index.add %offset5, %split_stride : index
+      %offset7 = index.add %offset6, %split_stride : index
+      %a0 = vector.load %partial_view[%element_base] : view<2097152xf32> -> vector<32xf32>
+      %a1 = vector.load %partial_view[%offset1] : view<2097152xf32> -> vector<32xf32>
+      %a2 = vector.load %partial_view[%offset2] : view<2097152xf32> -> vector<32xf32>
+      %a3 = vector.load %partial_view[%offset3] : view<2097152xf32> -> vector<32xf32>
+      %a4 = vector.load %partial_view[%offset4] : view<2097152xf32> -> vector<32xf32>
+      %a5 = vector.load %partial_view[%offset5] : view<2097152xf32> -> vector<32xf32>
+      %a6 = vector.load %partial_view[%offset6] : view<2097152xf32> -> vector<32xf32>
+      %a7 = vector.load %partial_view[%offset7] : view<2097152xf32> -> vector<32xf32>
+      %s1 = vector.addf<reassoc|nnan|ninf|nsz> %a0, %a1 : vector<32xf32>
+      %s2 = vector.addf<reassoc|nnan|ninf|nsz> %s1, %a2 : vector<32xf32>
+      %s3 = vector.addf<reassoc|nnan|ninf|nsz> %s2, %a3 : vector<32xf32>
+      %s4 = vector.addf<reassoc|nnan|ninf|nsz> %s3, %a4 : vector<32xf32>
+      %s5 = vector.addf<reassoc|nnan|ninf|nsz> %s4, %a5 : vector<32xf32>
+      %s6 = vector.addf<reassoc|nnan|ninf|nsz> %s5, %a6 : vector<32xf32>
+      %s7 = vector.addf<reassoc|nnan|ninf|nsz> %s6, %a7 : vector<32xf32>
+      vector.store %s7, %output_view[%element_base] : vector<32xf32>, view<262144xf32>
+    }
+  }
+  kernel.return
+}
+
+check.case public @qwen_split_reduce_f32_case {
+  %elements = check.param.choice values([262144]) name("elements") : index
+  %partials = check.generate.fill value(1.5) : tensor<2097152xf32>
+  %output = check.generate.fill value(0.0) : tensor<262144xf32>
+  %expected = check.generate.fill value(12.0) : tensor<262144xf32>
+  kernel.launch @qwen_split_reduce_f32[%elements](%elements, %partials, %output) : [index](index, tensor<2097152xf32>, tensor<262144xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<262144xf32>
+  check.return
+}

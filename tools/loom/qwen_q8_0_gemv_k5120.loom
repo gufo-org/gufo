@@ -1,0 +1,97 @@
+// Native Q8_0 GEMV for Qwen projections with K=5120.
+// block_q8_0 is exactly: f16 d followed by 32 signed i8 values (34 bytes).
+
+config.decl @qwen_q8_0_gemv_k5120.row_capacity : %value: index where [range(%value, 1, 17408)]
+
+kernel.def @qwen_q8_0_gemv_k5120(%rows: index) {
+  %capacity = config.get @qwen_q8_0_gemv_k5120.row_capacity : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 160 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%rows: index, %weight: buffer, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_q8_0_gemv_k5120.row_capacity : index
+  %row_count = index.assume %rows [range(%rows, 1, 17408), le(%rows, %capacity)] : index
+  %row = kernel.workgroup.id<x> : index
+  %block = kernel.workitem.id<x> : index
+  %row_in_bounds = index.cmp ult, %row, %row_count : index
+  scf.if %row_in_bounds {
+    %bounded_row = index.assume %row [lt(%row, %row_count)] : index
+    %blocks_per_row = index.constant 160 : index
+    %qk = index.constant 32 : index
+    %block_bytes = index.constant 34 : offset
+    %qs_offset = index.constant 2 : offset
+    %packed_bytes = index.constant 4 : offset
+    %packed_values = index.constant 4 : index
+    %quarter_count = index.constant 8 : index
+    %loop_begin = index.constant 0 : index
+    %loop_step = index.constant 1 : index
+    %packed_index = index.constant 0 : index
+    %leader = index.constant 0 : index
+    %linear_row_base = index.mul %bounded_row, %blocks_per_row : index
+    %linear_block = index.add %linear_row_base, %block : index
+    %block_byte_base = index.scale %linear_block, %block_bytes : index, offset -> offset
+    %scale_view = buffer.view %weight[%block_byte_base] : buffer -> view<1xf16>
+    %scale_f16 = view.load %scale_view[%packed_index] : view<1xf16> -> f16
+    %scale = scalar.extf %scale_f16 : f16 to f32
+    %input_block_base = index.mul %block, %qk : index
+    %input_view = buffer.view %input[%base] : buffer -> view<5120xf32>
+    // One wide read each instead of eight narrow ones: the block's 32 payload
+    // bytes and its 32 activations are both contiguous.
+    %payload_offset = index.add %block_byte_base, %qs_offset : offset
+    %payload_view = buffer.view %weight[%payload_offset] : buffer -> view<32xi8>
+    %payload_bytes = vector.load %payload_view[%packed_index] : view<32xi8> -> vector<32xi8>
+    %payload_words = vector.bitcast %payload_bytes : vector<32xi8> to vector<8xi32>
+    %input_block = vector.load %input_view[%input_block_base] : view<5120xf32> -> vector<32xf32>
+    %zero = scalar.constant 0.0 : f32
+    %q_packed0 = vector.slice %payload_words[0] : vector<8xi32> -> vector<1xi32>
+    %q_i32_0 = vector.bitunpacks<8> %q_packed0 : vector<1xi32> -> vector<4xi32>
+    %q_f32_0 = vector.sitofp %q_i32_0 : vector<4xi32> to vector<4xf32>
+    %x0 = vector.slice %input_block[0] : vector<32xf32> -> vector<4xf32>
+    %acc0 = vector.dotf %q_f32_0, %x0, %zero : vector<4xf32>, vector<4xf32>, f32
+    %q_packed1 = vector.slice %payload_words[1] : vector<8xi32> -> vector<1xi32>
+    %q_i32_1 = vector.bitunpacks<8> %q_packed1 : vector<1xi32> -> vector<4xi32>
+    %q_f32_1 = vector.sitofp %q_i32_1 : vector<4xi32> to vector<4xf32>
+    %x1 = vector.slice %input_block[4] : vector<32xf32> -> vector<4xf32>
+    %acc1 = vector.dotf %q_f32_1, %x1, %acc0 : vector<4xf32>, vector<4xf32>, f32
+    %q_packed2 = vector.slice %payload_words[2] : vector<8xi32> -> vector<1xi32>
+    %q_i32_2 = vector.bitunpacks<8> %q_packed2 : vector<1xi32> -> vector<4xi32>
+    %q_f32_2 = vector.sitofp %q_i32_2 : vector<4xi32> to vector<4xf32>
+    %x2 = vector.slice %input_block[8] : vector<32xf32> -> vector<4xf32>
+    %acc2 = vector.dotf %q_f32_2, %x2, %acc1 : vector<4xf32>, vector<4xf32>, f32
+    %q_packed3 = vector.slice %payload_words[3] : vector<8xi32> -> vector<1xi32>
+    %q_i32_3 = vector.bitunpacks<8> %q_packed3 : vector<1xi32> -> vector<4xi32>
+    %q_f32_3 = vector.sitofp %q_i32_3 : vector<4xi32> to vector<4xf32>
+    %x3 = vector.slice %input_block[12] : vector<32xf32> -> vector<4xf32>
+    %acc3 = vector.dotf %q_f32_3, %x3, %acc2 : vector<4xf32>, vector<4xf32>, f32
+    %q_packed4 = vector.slice %payload_words[4] : vector<8xi32> -> vector<1xi32>
+    %q_i32_4 = vector.bitunpacks<8> %q_packed4 : vector<1xi32> -> vector<4xi32>
+    %q_f32_4 = vector.sitofp %q_i32_4 : vector<4xi32> to vector<4xf32>
+    %x4 = vector.slice %input_block[16] : vector<32xf32> -> vector<4xf32>
+    %acc4 = vector.dotf %q_f32_4, %x4, %acc3 : vector<4xf32>, vector<4xf32>, f32
+    %q_packed5 = vector.slice %payload_words[5] : vector<8xi32> -> vector<1xi32>
+    %q_i32_5 = vector.bitunpacks<8> %q_packed5 : vector<1xi32> -> vector<4xi32>
+    %q_f32_5 = vector.sitofp %q_i32_5 : vector<4xi32> to vector<4xf32>
+    %x5 = vector.slice %input_block[20] : vector<32xf32> -> vector<4xf32>
+    %acc5 = vector.dotf %q_f32_5, %x5, %acc4 : vector<4xf32>, vector<4xf32>, f32
+    %q_packed6 = vector.slice %payload_words[6] : vector<8xi32> -> vector<1xi32>
+    %q_i32_6 = vector.bitunpacks<8> %q_packed6 : vector<1xi32> -> vector<4xi32>
+    %q_f32_6 = vector.sitofp %q_i32_6 : vector<4xi32> to vector<4xf32>
+    %x6 = vector.slice %input_block[24] : vector<32xf32> -> vector<4xf32>
+    %acc6 = vector.dotf %q_f32_6, %x6, %acc5 : vector<4xf32>, vector<4xf32>, f32
+    %q_packed7 = vector.slice %payload_words[7] : vector<8xi32> -> vector<1xi32>
+    %q_i32_7 = vector.bitunpacks<8> %q_packed7 : vector<1xi32> -> vector<4xi32>
+    %q_f32_7 = vector.sitofp %q_i32_7 : vector<4xi32> to vector<4xf32>
+    %x7 = vector.slice %input_block[28] : vector<32xf32> -> vector<4xf32>
+    %acc7 = vector.dotf %q_f32_7, %x7, %acc6 : vector<4xf32>, vector<4xf32>, f32
+    %unscaled_sum = scalar.addf<reassoc|nnan|ninf|nsz> %acc7, %zero : f32
+    %sum = scalar.mulf<reassoc|nnan|ninf|nsz|contract> %unscaled_sum, %scale : f32
+    %dot = kernel.workgroup.reduce<addf> %sum : f32
+    %is_leader = index.cmp eq, %block, %leader : index
+    scf.if %is_leader {
+      %output_view = buffer.view %output[%base] : buffer -> view<[%row_count]xf32>
+      view.store %dot, %output_view[%bounded_row] : f32, view<[%row_count]xf32>
+    }
+  }
+  kernel.return
+}

@@ -19,6 +19,9 @@ set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
 # ROCm/HIP GPU backend — compiled natively for the Strix Halo gfx1151 target.
 option(ENGINE_ENABLE_HIP "Build gufo with ROCm/HIP GPU backend" OFF)
 
+# HRX GPU backend — compiled natively for the Strix Halo gfx1151 target.
+option(ENGINE_ENABLE_HRX "Build gufo with native HRX GPU backend" OFF)
+
 # ROCm/HIP GPU discovery — compiled natively for the Strix Halo gfx1151 target.
 # Dependencies are supplied by the Nix environment via $ROCM_PATH.
 # Host ambient /usr fallbacks are rejected.
@@ -234,6 +237,9 @@ add_library(gufo_core STATIC
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
+  src/models/qwen/hrx/qwen_hrx_manifest.cpp
+  src/models/qwen/hrx/qwen_hrx_capabilities.cpp
+  src/models/qwen/hrx/qwen_hrx_policy.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_definitions(gufo_core PRIVATE
@@ -281,6 +287,203 @@ if (ENGINE_ENABLE_HIP)
     roc::hipblaslt roc::rocblas aotriton_v2)
 endif()
 
+if (ENGINE_ENABLE_HRX)
+  target_sources(gufo_core PRIVATE
+    src/core/hrx/hrx_backend.cpp
+    src/core/hrx/hrx_module_loader.cpp
+    src/core/hrx/hrx_owned_buffer.cpp
+    src/models/qwen/hrx/qwen_hrx_arena.cpp
+    src/models/qwen/hrx/qwen_hrx_model.cpp
+    src/models/qwen/hrx/qwen_hrx_executor.cpp
+  )
+  target_compile_definitions(gufo_core PUBLIC ENGINE_ENABLE_HRX=1)
+  set(HRX_ROOT "" CACHE PATH "Prefix containing the native HRX runtime")
+  find_path(HRX_INCLUDE_DIR NAMES hrx/hrx_runtime.h
+    HINTS "${HRX_ROOT}/include" "${HRX_ROOT}/libhrx/include"
+    REQUIRED)
+  # Public HRX wrapper headers include <hrx/hrx_runtime.h>, so consumers of
+  # gufo_core need the installed HRX include directory as well.
+  target_include_directories(gufo_core PUBLIC "${HRX_INCLUDE_DIR}")
+  target_include_directories(gufo_core PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/include")
+  find_library(HRX_LIBRARY NAMES hrx
+    HINTS "${HRX_ROOT}/lib" "$ENV{HRX_PATH}/lib"
+    REQUIRED)
+  target_link_libraries(gufo_core PUBLIC "${HRX_LIBRARY}")
+  # Ahead-of-Time (AOT) Loom Kernel Packaging
+  find_program(LOOM_COMPILE_EXECUTABLE loom-compile
+    HINTS "${HRX_ROOT}/bin" "$ENV{HRX_PATH}/bin")
+
+  if (LOOM_COMPILE_EXECUTABLE)
+    set(GUFO_AOT_KERNELS_DIR "${CMAKE_CURRENT_BINARY_DIR}/share/gufo/kernels")
+    file(MAKE_DIRECTORY "${GUFO_AOT_KERNELS_DIR}")
+
+    # Package the explicit primitives used by the strict native Q8_0 path.
+    # Removed macro-layer sketches remain excluded from model capabilities.
+    set(LOOM_KERNELS
+      tools/loom/qwen_fused_swiglu_bf16.loom
+      tools/loom/qwen_fused_rmsnorm_qkv_bf16.loom
+      tools/loom/qwen_fused_down_residual_bf16.loom
+      tools/loom/qwen_fused_rope_kv_cache_bf16.loom
+      tools/loom/qwen_rmsnorm_f32.loom
+      tools/loom/qwen_residual_add_f32.loom
+      tools/loom/qwen_swiglu_pointwise_f32.loom
+      tools/loom/qwen_split_q_gate_f32.loom
+      tools/loom/qwen_copy_f32.loom
+      tools/loom/qwen_q8_0_decode_oracle.loom
+      tools/loom/qwen_q8_0_embedding_k5120.loom
+      tools/loom/qwen_q8_0_gemv_k5120.loom
+      tools/loom/qwen_q8_0_gemv_k6144.loom
+      tools/loom/qwen_q8_0_gemv_k17408.loom
+      tools/loom/qwen_q8_0_gemv_k17408_wg256.loom
+      tools/loom/qwen_rmsnorm_batch_f32.loom
+      tools/loom/qwen_residual_add_batch_f32.loom
+      tools/loom/qwen_swiglu_pointwise_batch_f32.loom
+      tools/loom/qwen_split_q_gate_batch_f32.loom
+      tools/loom/qwen_per_head_rmsnorm_batch_f32.loom
+      tools/loom/qwen_rope_kv_cache_batch_f32.loom
+      tools/loom/qwen_attention_decode_batch_f32.loom
+      tools/loom/qwen_attention_tile_batch_f32.loom
+      tools/loom/qwen_deltanet_prepare_batch_f32.loom
+      tools/loom/qwen_ssm_conv_silu_batch_f32.loom
+      tools/loom/qwen_deltanet_recurrence_batch_f32.loom
+      tools/loom/qwen_deltanet_readout_batch_f32.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k5120_t128.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k6144_t128.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k17408_t128.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k5120_t128_bk2.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k6144_t128_bk2.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k17408_t128_bk2.loom
+      tools/loom/qwen_q8_0_gate_up_swiglu_quantize_k5120_t128_bk2.loom
+      tools/loom/qwen_q8_0_gemm_i8_blocked_k5120_t128_bk2_splitk.loom
+      tools/loom/qwen_split_reduce_f32.loom
+      tools/loom/qwen_activation_quantize_blocked_k5120.loom
+      tools/loom/qwen_activation_quantize_blocked_k6144.loom
+      tools/loom/qwen_activation_quantize_blocked_k17408.loom
+      tools/loom/qwen_swiglu_quantize_blocked_k17408.loom
+      tools/loom/qwen_rmsnorm_quantize_blocked_k5120.loom
+      tools/loom/qwen_deltanet_readout_quantize_batch_f32.loom
+      tools/loom/qwen_q8_0_gemm_i8_k5120_t8.loom
+      tools/loom/qwen_q8_0_gemm_i8_wmma_k5120_t8.loom
+      tools/loom/qwen_q8_0_gemm_i8_k6144_t8.loom
+      tools/loom/qwen_q8_0_gemm_i8_k17408_t8.loom
+      tools/loom/qwen_activation_quantize_k5120.loom
+      tools/loom/qwen_activation_quantize_wmma_k5120.loom
+      tools/loom/qwen_activation_quantize_k6144.loom
+      tools/loom/qwen_activation_quantize_k17408.loom
+      tools/loom/qwen_q8_0_gemm_k5120_t8.loom
+      tools/loom/qwen_q8_0_gemm_k6144_t8.loom
+      tools/loom/qwen_q8_0_gemm_k17408_t8.loom
+      tools/loom/qwen_q8_0_vocab_gemv_k5120.loom
+      tools/loom/qwen_per_head_rmsnorm_f32.loom
+      tools/loom/qwen_attention_decode_f32.loom
+      tools/loom/qwen_ssm_conv_silu_f32.loom
+      tools/loom/qwen_deltanet_prepare_f32.loom
+      tools/loom/qwen_deltanet_recurrence_f32.loom
+      tools/loom/qwen_argmax_f32.loom
+    )
+    set(LOOM_CONFIG_qwen_fused_swiglu_bf16 "qwen_fused_swiglu_bf16.row_capacity=17408")
+    set(LOOM_CONFIG_qwen_fused_rmsnorm_qkv_bf16 "qwen_fused_rmsnorm_qkv_bf16.row_capacity=10240")
+    set(LOOM_CONFIG_qwen_fused_down_residual_bf16 "qwen_fused_down_residual_bf16.hidden_dim=5120")
+    set(LOOM_CONFIG_qwen_fused_rope_kv_cache_bf16 "qwen_fused_rope_kv_cache_bf16.max_heads=24")
+    set(LOOM_CONFIG_qwen_residual_add_f32 "qwen_residual_add_f32.element_capacity=17408")
+    set(LOOM_CONFIG_qwen_swiglu_pointwise_f32 "qwen_swiglu_pointwise_f32.element_capacity=17408")
+    set(LOOM_CONFIG_qwen_copy_f32 "qwen_copy_f32.element_capacity=50331648")
+    set(LOOM_CONFIG_qwen_q8_0_gemv_k5120 "qwen_q8_0_gemv_k5120.row_capacity=17408")
+    set(LOOM_CONFIG_qwen_q8_0_gemv_k6144 "qwen_q8_0_gemv_k6144.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemv_k17408 "qwen_q8_0_gemv_k17408.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemv_k17408_wg256 "qwen_q8_0_gemv_k17408_wg256.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_rmsnorm_batch_f32 "qwen_rmsnorm_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_residual_add_batch_f32 "qwen_residual_add_batch_f32.element_capacity=10485760")
+    set(LOOM_CONFIG_qwen_swiglu_pointwise_batch_f32 "qwen_swiglu_pointwise_batch_f32.element_capacity=35651584")
+    set(LOOM_CONFIG_qwen_split_q_gate_batch_f32 "qwen_split_q_gate_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_per_head_rmsnorm_batch_f32 "qwen_per_head_rmsnorm_batch_f32.max_heads=24;qwen_per_head_rmsnorm_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_rope_kv_cache_batch_f32 "qwen_rope_kv_cache_batch_f32.max_heads=24;qwen_rope_kv_cache_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_attention_decode_batch_f32 "qwen_attention_decode_batch_f32.max_context=131072;qwen_attention_decode_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_attention_tile_batch_f32 "qwen_attention_tile_batch_f32.max_context=131072;qwen_attention_tile_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_deltanet_prepare_batch_f32 "qwen_deltanet_prepare_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_ssm_conv_silu_batch_f32 "qwen_ssm_conv_silu_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_deltanet_recurrence_batch_f32 "qwen_deltanet_recurrence_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_deltanet_readout_batch_f32 "qwen_deltanet_readout_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k5120_t128 "qwen_q8_0_gemm_i8_blocked_k5120_t128.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k6144_t128 "qwen_q8_0_gemm_i8_blocked_k6144_t128.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k17408_t128 "qwen_q8_0_gemm_i8_blocked_k17408_t128.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k5120_t128_bk2 "qwen_q8_0_gemm_i8_blocked_k5120_t128_bk2.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k6144_t128_bk2 "qwen_q8_0_gemm_i8_blocked_k6144_t128_bk2.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k17408_t128_bk2 "qwen_q8_0_gemm_i8_blocked_k17408_t128_bk2.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gate_up_swiglu_quantize_k5120_t128_bk2 "qwen_q8_0_gate_up_swiglu_quantize_k5120_t128_bk2.row_capacity=17408")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_blocked_k5120_t128_bk2_splitk "qwen_q8_0_gemm_i8_blocked_k5120_t128_bk2_splitk.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_split_reduce_f32 "qwen_split_reduce_f32.element_capacity=262144")
+    set(LOOM_CONFIG_qwen_activation_quantize_blocked_k5120 "qwen_activation_quantize_blocked_k5120.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_activation_quantize_blocked_k6144 "qwen_activation_quantize_blocked_k6144.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_activation_quantize_blocked_k17408 "qwen_activation_quantize_blocked_k17408.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_swiglu_quantize_blocked_k17408 "qwen_swiglu_quantize_blocked_k17408.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_rmsnorm_quantize_blocked_k5120 "qwen_rmsnorm_quantize_blocked_k5120.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_deltanet_readout_quantize_batch_f32 "qwen_deltanet_readout_quantize_batch_f32.token_capacity=2048")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k5120_t8 "qwen_q8_0_gemm_i8_k5120_t8.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_wmma_k5120_t8 "qwen_q8_0_gemm_i8_wmma_k5120_t8.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k6144_t8 "qwen_q8_0_gemm_i8_k6144_t8.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_i8_k17408_t8 "qwen_q8_0_gemm_i8_k17408_t8.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_activation_quantize_k5120 "qwen_activation_quantize_k5120.token_capacity=8")
+    set(LOOM_CONFIG_qwen_activation_quantize_wmma_k5120 "qwen_activation_quantize_wmma_k5120.token_capacity=16")
+    set(LOOM_CONFIG_qwen_activation_quantize_k6144 "qwen_activation_quantize_k6144.token_capacity=8")
+    set(LOOM_CONFIG_qwen_activation_quantize_k17408 "qwen_activation_quantize_k17408.token_capacity=8")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_k5120_t8 "qwen_q8_0_gemm_k5120_t8.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_k6144_t8 "qwen_q8_0_gemm_k6144_t8.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_gemm_k17408_t8 "qwen_q8_0_gemm_k17408_t8.row_capacity=5120")
+    set(LOOM_CONFIG_qwen_q8_0_vocab_gemv_k5120 "qwen_q8_0_vocab_gemv_k5120.row_capacity=248320")
+    set(LOOM_CONFIG_qwen_per_head_rmsnorm_f32 "qwen_per_head_rmsnorm_f32.max_heads=24")
+    set(LOOM_CONFIG_qwen_attention_decode_f32 "qwen_attention_decode_f32.max_context=131072")
+
+    set(COMPILED_LOOM_ARTIFACTS "")
+    foreach(LOOM_SRC IN LISTS LOOM_KERNELS)
+      get_filename_component(KERNEL_NAME "${LOOM_SRC}" NAME_WE)
+      set(OUTPUT_FB "${GUFO_AOT_KERNELS_DIR}/${KERNEL_NAME}.fb")
+      list(APPEND COMPILED_LOOM_ARTIFACTS "${OUTPUT_FB}")
+
+      set(CONFIG_FLAGS "")
+      if (DEFINED LOOM_CONFIG_${KERNEL_NAME})
+        foreach(CFG_ITEM IN LISTS LOOM_CONFIG_${KERNEL_NAME})
+          list(APPEND CONFIG_FLAGS "--config=${CFG_ITEM}")
+        endforeach()
+      endif()
+
+      add_custom_command(
+        OUTPUT "${OUTPUT_FB}"
+        COMMAND "${LOOM_COMPILE_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/${LOOM_SRC}"
+          --target=gfx1151 --backend=amdgpu-hal
+          ${CONFIG_FLAGS}
+          --output="${OUTPUT_FB}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${LOOM_SRC}"
+        COMMENT "Compiling AOT Loom kernel ${KERNEL_NAME} for gfx1151"
+        VERBATIM
+      )
+    endforeach()
+
+    add_custom_target(gufo_loom_kernels ALL DEPENDS ${COMPILED_LOOM_ARTIFACTS})
+
+    set(MANIFEST_JSON "${GUFO_AOT_KERNELS_DIR}/hrx_manifest.json")
+    set(MANIFEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/include/gufo/generated/hrx_manifest.hpp")
+    add_custom_command(
+      OUTPUT "${MANIFEST_JSON}" "${MANIFEST_HEADER}"
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/loom/generate_hrx_manifest.py"
+        --kernels-dir=${GUFO_AOT_KERNELS_DIR}
+        --output-json=${MANIFEST_JSON}
+        --output-header=${MANIFEST_HEADER}
+      DEPENDS ${COMPILED_LOOM_ARTIFACTS} "${CMAKE_CURRENT_SOURCE_DIR}/tools/loom/generate_hrx_manifest.py"
+      COMMENT "Generating HRX artifact manifest and header"
+      VERBATIM
+    )
+    add_custom_target(gufo_loom_manifest ALL DEPENDS "${MANIFEST_JSON}" "${MANIFEST_HEADER}")
+    add_dependencies(gufo_loom_manifest gufo_loom_kernels)
+    add_dependencies(gufo_core gufo_loom_manifest)
+
+    install(DIRECTORY "${GUFO_AOT_KERNELS_DIR}/"
+      DESTINATION share/gufo/kernels)
+  endif()
+endif()
+
 add_executable(gufo
   src/cli/main.cpp
   src/cli/bench/bench.cpp
@@ -312,6 +515,7 @@ target_compile_definitions(gufo PRIVATE
   GUFO_EVAL_INSTALLED_DATA="${CMAKE_INSTALL_PREFIX}/share/gufo/eval/antirez-ds4.json"
   GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
+  GUFO_HRX_KERNEL_DIR="${CMAKE_INSTALL_PREFIX}/share/gufo/kernels"
   GUFO_QWEN3_TTS_REFERENCE_RUNNER="${CMAKE_CURRENT_SOURCE_DIR}/src/models/qwen3_tts/reference/run_official.py"
   GUFO_QWEN3_TTS_INSTALLED_REFERENCE_RUNNER="${CMAKE_INSTALL_PREFIX}/share/gufo/models/qwen3_tts/run_official.py")
 
@@ -382,6 +586,35 @@ endif()
 include(CTest)
 
 if (BUILD_TESTING)
+  if (ENGINE_ENABLE_HRX)
+    add_executable(hrx_backend_test tests/core/hrx_backend_test.cpp)
+    target_link_libraries(hrx_backend_test PRIVATE gufo_core)
+    add_test(NAME hrx_backend_test COMMAND hrx_backend_test)
+    set_tests_properties(hrx_backend_test PROPERTIES
+      LABELS "gpu;hrx;core;backend")
+
+    if (LOOM_COMPILE_EXECUTABLE)
+      add_executable(qwen_hrx_executor_test
+        tests/models/qwen/qwen_hrx_executor_test.cpp)
+      target_compile_definitions(qwen_hrx_executor_test PRIVATE
+        GUFO_HRX_KERNEL_DIR=\"${GUFO_AOT_KERNELS_DIR}\")
+      target_link_libraries(qwen_hrx_executor_test PRIVATE gufo_core)
+      add_test(NAME qwen_hrx_executor_test COMMAND qwen_hrx_executor_test)
+      set_tests_properties(qwen_hrx_executor_test PROPERTIES
+        LABELS "gpu;hrx;models;qwen")
+    endif()
+  endif()
+
+  add_executable(qwen_hrx_model_contract_test
+    tests/models/qwen/qwen_hrx_model_contract_test.cpp)
+  target_include_directories(qwen_hrx_model_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR})
+  target_link_libraries(qwen_hrx_model_contract_test PRIVATE gufo_core)
+  add_test(NAME qwen_hrx_model_contract_test
+    COMMAND qwen_hrx_model_contract_test)
+  set_tests_properties(qwen_hrx_model_contract_test PROPERTIES
+    LABELS "host;hrx;models;qwen")
+
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
   add_subdirectory(tests/models/qwen)
@@ -396,17 +629,17 @@ if (BUILD_TESTING)
   add_test(NAME gufo_probe COMMAND gufo probe)
   set_tests_properties(gufo_probe PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_diagnose_help COMMAND gufo diagnose --help)
-  set_tests_properties(strix_diagnose_help PROPERTIES LABELS "cpu")
+  add_test(NAME gufo_diagnose_help COMMAND gufo diagnose --help)
+  set_tests_properties(gufo_diagnose_help PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_diagnose_json COMMAND gufo diagnose --json --section platform)
-  set_tests_properties(strix_diagnose_json PROPERTIES LABELS "cpu")
+  add_test(NAME gufo_diagnose_json COMMAND gufo diagnose --json --section platform)
+  set_tests_properties(gufo_diagnose_json PROPERTIES LABELS "cpu")
 
-  add_test(NAME strix_prompt_help COMMAND gufo prompt --help)
-  set_tests_properties(strix_prompt_help PROPERTIES LABELS "cpu;server;cli")
+  add_test(NAME gufo_prompt_help COMMAND gufo prompt --help)
+  set_tests_properties(gufo_prompt_help PROPERTIES LABELS "cpu;server;cli")
 
-  add_test(NAME strix_video_help COMMAND gufo video --help)
-  set_tests_properties(strix_video_help PROPERTIES
+  add_test(NAME gufo_video_help COMMAND gufo video --help)
+  set_tests_properties(gufo_video_help PROPERTIES
     LABELS "cpu;server;cli;minimax-h3")
 
   add_test(NAME gufo_transcribe_help COMMAND gufo transcribe --help)
@@ -417,11 +650,11 @@ if (BUILD_TESTING)
   set_tests_properties(gufo_serve_asr_help PROPERTIES
     LABELS "cpu;server;cli;qwen3-asr")
 
-  add_test(NAME strix_serve_help COMMAND gufo serve --help)
-  set_tests_properties(strix_serve_help PROPERTIES LABELS "cpu;server;cli")
+  add_test(NAME gufo_serve_help COMMAND gufo serve --help)
+  set_tests_properties(gufo_serve_help PROPERTIES LABELS "cpu;server;cli")
 
-  add_test(NAME strix_prompt_smoke COMMAND gufo prompt "Hello world")
-  set_tests_properties(strix_prompt_smoke PROPERTIES LABELS "cpu;server;cli")
+  add_test(NAME gufo_prompt_smoke COMMAND gufo prompt "Hello world")
+  set_tests_properties(gufo_prompt_smoke PROPERTIES LABELS "cpu;server;cli")
 
   add_executable(arg_parser_test
     tests/cli/arg_parser_test.cpp
@@ -503,6 +736,10 @@ if (BUILD_TESTING)
     src/cli/bench/bench.cpp
   )
   target_link_libraries(bench_cli_test PRIVATE gufo_core)
+  # bench.cpp reaches for the packaged kernels on the native HRX route, so the
+  # CLI test target needs the same definition as the gufo binary.
+  target_compile_definitions(bench_cli_test PRIVATE
+    GUFO_HRX_KERNEL_DIR="${CMAKE_INSTALL_PREFIX}/share/gufo/kernels")
   if (ENGINE_ENABLE_HIP)
     target_link_libraries(bench_cli_test PRIVATE gufo_deepseek_v4_flash)
   endif()

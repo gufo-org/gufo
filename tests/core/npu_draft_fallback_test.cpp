@@ -6,15 +6,17 @@
 
 void TestNpuDraftFallback() {
   gufo::heterogeneous::NpuDrafterConfig config;
+  config.mode = gufo::heterogeneous::NpuDraftMode::kMTP;
   config.mtp_model_path.clear();
+  config.dflash_model_path.clear();
   config.enable_xrt = false;
   config.max_draft_tokens = 4;
   config.vocab_size = 152064;
 
   gufo::heterogeneous::NpuDraftBackend drafter(config);
-  assert(drafter.Name() == "NpuXdna2DraftBackend");
+  assert(drafter.Name() == "NpuXdna2MtpDraftBackend");
   assert(!drafter.IsNpuActive());
-  assert(!drafter.HasMtpModel());
+  assert(!drafter.HasModel());
   assert(!drafter.GetStatusMessage().empty());
 
   std::cout << "NPU draft fallback status: " << drafter.GetStatusMessage()

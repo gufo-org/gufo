@@ -545,7 +545,12 @@ int RunPrompt(std::span<const char* const> args) {
 
       if (opt.verbose) {
         const auto& config = gpu_exec->GetConfig();
-        std::cout << "[Engine]: AMD Strix Halo gfx1151 GPU Executor\n"
+        std::cout << "[Engine]: AMD Strix Halo gfx1151 "
+#if defined(ENGINE_ENABLE_HRX)
+                  << "HRX (HIP compatibility) Executor\n"
+#else
+                  << "GPU Executor\n"
+#endif
                   << "Model: " << config.architecture << " ("
                   << config.num_layers
                   << " layers, hidden=" << config.hidden_size
@@ -593,8 +598,19 @@ int RunPrompt(std::span<const char* const> args) {
             std::cerr << "Failed to initialize DFlash backend: " << err << '\n';
             return 1;
           }
-        } else if (opt.speculative_backend == "npu") {
+        } else if (opt.speculative_backend == "npu" ||
+                   opt.speculative_backend == "dflash-npu") {
           heterogeneous::NpuDrafterConfig cfg;
+          cfg.mode = (opt.speculative_backend == "dflash-npu" ||
+                      !opt.dflash_model_path.empty())
+                         ? heterogeneous::NpuDraftMode::kDFlash2
+                         : heterogeneous::NpuDraftMode::kMTP;
+          if (!opt.dflash_model_path.empty()) {
+            cfg.dflash_model_path = opt.dflash_model_path;
+          }
+          if (!opt.mtp_model_path.empty()) {
+            cfg.mtp_model_path = opt.mtp_model_path;
+          }
           cfg.max_draft_tokens = opt.draft_tokens;
           cfg.vocab_size = config.vocab_size;
           draft_backend = std::make_unique<heterogeneous::NpuDraftBackend>(cfg);

@@ -1,0 +1,50 @@
+// Qwen3.8 native primitive: pointwise SiLU(gate) * up over FFN rows.
+
+config.decl @qwen_swiglu_pointwise_f32.element_capacity : %value: index where [range(%value, 32, 17408), mul(%value, 32)]
+
+kernel.def @qwen_swiglu_pointwise_f32(%elements: index) {
+  %workgroup_size = index.constant 32 : index
+  %capacity = config.get @qwen_swiglu_pointwise_f32.element_capacity : index
+  %workgroups = index.div %capacity, %workgroup_size : index
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%workgroups, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%elements: index, %gate: buffer, %up: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_swiglu_pointwise_f32.element_capacity : index
+  %count = index.assume %elements [range(%elements, 32, 17408), mul(%elements, 32), le(%elements, %capacity)] : index
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %workgroup_size = index.constant 32 : index
+  %element0 = index.madd %group, %workgroup_size, %lane : index
+  %in_bounds = index.cmp ult, %element0, %count : index
+  scf.if %in_bounds {
+    %element = index.assume %element0 [lt(%element0, %count)] : index
+    %gate_noalias, %up_noalias, %output_noalias = buffer.assume.noalias %gate, %up, %output : buffer, buffer, buffer
+    %gate_view = buffer.view %gate_noalias[%base] : buffer -> view<[%count]xf32>
+    %up_view = buffer.view %up_noalias[%base] : buffer -> view<[%count]xf32>
+    %output_view = buffer.view %output_noalias[%base] : buffer -> view<[%count]xf32>
+    %g = view.load %gate_view[%element] : view<[%count]xf32> -> f32
+    %u = view.load %up_view[%element] : view<[%count]xf32> -> f32
+    %negative = scalar.negf %g : f32
+    %exponent = scalar.expf<afn> %negative : f32
+    %one = scalar.constant 1.0 : f32
+    %denominator = scalar.addf<reassoc|nnan|ninf|nsz> %one, %exponent : f32
+    %silu = scalar.divf<reassoc|nnan|ninf|nsz> %g, %denominator : f32
+    %result = scalar.mulf<reassoc|nnan|ninf|nsz> %silu, %u : f32
+    view.store %result, %output_view[%element] : f32, view<[%count]xf32>
+  }
+  kernel.return
+}
+
+check.case public @qwen_swiglu_pointwise_f32_case {
+  %elements = check.param.choice values([17408]) name("elements") : index
+  %gate = check.generate.fill value(0.0) : tensor<[%elements]xf32>
+  %up = check.generate.fill value(3.0) : tensor<[%elements]xf32>
+  %output = check.generate.fill value(7.0) : tensor<[%elements]xf32>
+  %expected = check.generate.fill value(0.0) : tensor<[%elements]xf32>
+  kernel.launch @qwen_swiglu_pointwise_f32[%elements](%elements, %gate, %up, %output) : [index](index, tensor<[%elements]xf32>, tensor<[%elements]xf32>, tensor<[%elements]xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<[%elements]xf32>
+  check.return
+}
+
+check.benchmark<@qwen_swiglu_pointwise_f32_case> @qwen_swiglu_pointwise_f32_decode {elements = 17408}

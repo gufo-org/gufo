@@ -1,0 +1,52 @@
+// Qwen3.8 per-head RMSNorm for up to 24 heads of width 256.
+
+config.decl @qwen_per_head_rmsnorm_f32.max_heads : %value: index where [range(%value, 1, 24)]
+
+kernel.def @qwen_per_head_rmsnorm_f32(%heads: index) {
+  %capacity = config.get @qwen_per_head_rmsnorm_f32.max_heads : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%heads: index, %input: buffer, %gamma: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_per_head_rmsnorm_f32.max_heads : index
+  %head_count = index.assume %heads [range(%heads, 1, 24), le(%heads, %capacity)] : index
+  %head = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %in_bounds = index.cmp ult, %head, %head_count : index
+  scf.if %in_bounds {
+    %bounded_head = index.assume %head [lt(%head, %head_count)] : index
+    %eight = index.constant 8 : index
+    %element = index.mul %lane, %eight : index
+    %input_view = buffer.view %input[%base] : buffer -> view<[%head_count]x256xf32>
+    %gamma_view = buffer.view %gamma[%base] : buffer -> view<256xf32>
+    %output_view = buffer.view %output[%base] : buffer -> view<[%head_count]x256xf32>
+    %x = vector.load %input_view[%bounded_head, %element] : view<[%head_count]x256xf32> -> vector<8xf32>
+    %g = vector.load %gamma_view[%element] : view<256xf32> -> vector<8xf32>
+    %sq = vector.mulf<reassoc|nnan|ninf|nsz> %x, %x : vector<8xf32>
+    %zero = scalar.constant 0.0 : f32
+    %local = vector.reduce<addf, reassoc|nnan|ninf|nsz> %sq, %zero : vector<8xf32>, f32
+    %sum = kernel.workgroup.reduce<addf> %local : f32
+    %width = scalar.constant 256.0 : f32
+    %epsilon = scalar.constant 0.000001 : f32
+    %mean = scalar.divf<reassoc|nnan|ninf|nsz> %sum, %width : f32
+    %variance = scalar.addf<reassoc|nnan|ninf|nsz> %mean, %epsilon : f32
+    %inv = scalar.rsqrtf<afn> %variance : f32
+    %inv_vec = vector.splat %inv : vector<8xf32>
+    %normed = vector.mulf<reassoc|nnan|ninf|nsz> %x, %inv_vec : vector<8xf32>
+    %result = vector.mulf<reassoc|nnan|ninf|nsz> %normed, %g : vector<8xf32>
+    vector.store %result, %output_view[%bounded_head, %element] : vector<8xf32>, view<[%head_count]x256xf32>
+  }
+  kernel.return
+}
+
+check.case public @qwen_per_head_rmsnorm_f32_case {
+  %heads = check.param.choice values([4, 24]) name("heads") : index
+  %input = check.generate.fill value(1.0) : tensor<[%heads]x256xf32>
+  %gamma = check.generate.fill value(2.0) : tensor<256xf32>
+  %output = check.generate.fill value(0.0) : tensor<[%heads]x256xf32>
+  %expected = check.generate.fill value(1.999999) : tensor<[%heads]x256xf32>
+  kernel.launch @qwen_per_head_rmsnorm_f32[%heads](%heads, %input, %gamma, %output) : [index](index, tensor<[%heads]x256xf32>, tensor<256xf32>, tensor<[%heads]x256xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0001) rtol(0.0001) nan(same) : tensor<[%heads]x256xf32>
+  check.return
+}

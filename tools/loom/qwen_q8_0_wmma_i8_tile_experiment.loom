@@ -1,0 +1,33 @@
+// Isolated gfx11 WMMA mapping experiment for the int8-prefill projection.
+// This is not an executor artifact: it first proves that signed int8 LHS and
+// RHS storage load into the physical GFX11 fragments with the expected layout.
+
+amdgpu.target<gfx1151> @qwen_wmma_i8_tile_target {subgroup_size = 32}
+
+kernel.def target(@qwen_wmma_i8_tile_target) @qwen_wmma_i8_tile_experiment() {
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%lhs: buffer, %rhs: buffer, %output: buffer, %carrier: buffer) {
+  %base = index.constant 0 : offset
+  %origin = index.constant 0 : index
+  %tile = index.constant 16 : index
+  %lhs_layout = encoding.layout.dense : encoding<layout>
+  %rhs_layout = encoding.layout.strided [1, 16] : encoding<layout>
+  %schema = encoding.define #encoding.operand<element_format=i8, payload_elements=16, payload_registers=4> : encoding<schema>
+  %lhs_storage = encoding.define #encoding.storage {layout = %lhs_layout : encoding<layout>, schema = %schema : encoding<schema>} : encoding<storage>
+  %rhs_storage = encoding.define #encoding.storage {layout = %rhs_layout : encoding<layout>, schema = %schema : encoding<schema>} : encoding<storage>
+  %lhs_view = buffer.view %lhs[%base] : buffer -> view<16x16xi8, %lhs_storage>
+  %rhs_view = buffer.view %rhs[%base] : buffer -> view<16x16xi8, %rhs_storage>
+  %output_view = buffer.view %output[%base] : buffer -> view<16x16xi32>
+  %carrier_view = buffer.view %carrier[%base] : buffer -> view<32x8xi32>
+  %lane = kernel.workitem.id<x> : index
+  %lhs_fragment = vector.fragment.load<lhs> %lhs_view[%origin, %origin] shape [%tile, %tile] : view<16x16xi8, %lhs_storage> -> vector<4xi32>
+  %rhs_fragment = vector.fragment.load<rhs> %rhs_view[%origin, %origin] shape [%tile, %tile] : view<16x16xi8, %rhs_storage> -> vector<4xi32>
+  %zero_elements = vector.constant 0 : vector<8xi32>
+  %zero = vector.fragment<init> %zero_elements shape [%tile, %tile] : vector<8xi32>
+  %product = vector.mma %lhs_fragment, %rhs_fragment, %zero : vector<4xi32>, vector<4xi32>, vector<8xi32>
+  vector.store %product, %carrier_view[%lane, %origin] : vector<8xi32>, view<32x8xi32>
+  vector.fragment.store<result> %product, %output_view[%origin, %origin] shape [%tile, %tile] : vector<8xi32>, view<16x16xi32>
+  kernel.return
+}

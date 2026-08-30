@@ -292,6 +292,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        errors="replace",
     )
     db = os.path.join(out_dir, f"{tag}_results.db")
     if not os.path.exists(db):

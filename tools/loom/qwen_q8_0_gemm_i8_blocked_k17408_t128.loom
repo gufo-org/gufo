@@ -1,0 +1,884 @@
+// Production-shaped blocked W8A8 prefill projection for gfx1151.
+//
+// One 256-thread workgroup computes 128 output rows x 128 tokens. Eight
+// wave32 subgroups each own one 16-row tile and all eight 16-token tiles,
+// so a staged K panel is reused across the whole macro tile and PP128
+// traverses each weight matrix once instead of once per token chunk.
+//
+// Staging is one wide load per thread per round: threads 0-127 each move
+// one 32-byte Q8 weight payload and threads 128-255 each move one token's
+// 32 quantized activation bytes. The next round's payloads are loaded into
+// registers before the current round's matrix work, so global latency
+// overlaps the WMMA instructions rather than stalling at the barrier.
+//
+// weight : row-major Q8_0, 34 bytes per block (f16 scale then 32 i8)
+// act    : [token tile][K block][token in tile][32 i8]
+// scales : [token tile][K block][token in tile] f32
+// output : token-major f32, %tokens rows of %rows values
+
+amdgpu.target<gfx11-generic> @qwen_q8_blocked_k17408_target {subgroup_size = 32}
+
+config.decl @qwen_q8_0_gemm_i8_blocked_k17408_t128.row_capacity : %value: index where [range(%value, 128, 248320), mul(%value, 128)]
+
+kernel.def target(@qwen_q8_blocked_k17408_target) @qwen_q8_0_gemm_i8_blocked_k17408_t128(%rows: index, %tokens: index) {
+  %capacity = config.get @qwen_q8_0_gemm_i8_blocked_k17408_t128.row_capacity : index
+  %rows_per_group = index.constant 128 : index
+  %row_groups = index.div %capacity, %rows_per_group : index
+  %token_group_rounding = index.constant 127 : index
+  %rounded_tokens = index.add %tokens, %token_group_rounding : index
+  %tokens_per_group_cfg = index.constant 128 : index
+  %token_groups = index.div %rounded_tokens, %tokens_per_group_cfg : index
+  %one = index.constant 1 : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%token_groups, %row_groups, %one) workgroup_size(%workgroup_size, %one, %one) : index
+} launch(%rows: index, %tokens: index, %weight: buffer, %act: buffer, %scales: buffer, %output: buffer) {
+  %capacity = config.get @qwen_q8_0_gemm_i8_blocked_k17408_t128.row_capacity : index
+  // Rows need not fill the 128-row macro tile: staging clamps to the last
+  // live row and the epilogue guards every store, so shapes such as the
+  // 96-row SSM alpha/beta projection use the same artifact.
+  %row_count = index.assume %rows [range(%rows, 1, 248320), le(%rows, %capacity)] : index
+  %row_step = index.constant 1 : index
+  %last_row = index.sub %row_count, %row_step : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
+  %base = index.constant 0 : offset
+  %tid = kernel.workitem.id<x> : index
+  // The token-tile index is the fastest-varying grid dimension so the token
+  // tiles that share one row group's staged weights are co-resident and hit
+  // cache instead of each re-reading the panel from DRAM.
+  %token_group = kernel.workgroup.id<x> : index
+  %row_group = kernel.workgroup.id<y> : index
+  %wave_width = index.constant 32 : index
+  %wave = index.div %tid, %wave_width : index
+  %lane = index.rem %tid, %wave_width : index
+  %token_tile_extent = index.constant 16 : index
+  %token_tile_count = index.constant 8 : index
+  %tokens_per_group = index.constant 128 : index
+  %token_tiles_per_group = index.constant 8 : index
+  %token_group_base = index.mul %token_group, %tokens_per_group : index
+  %token_tile_group_base = index.mul %token_group, %token_tiles_per_group : index
+  %lane_token = index.rem %lane, %token_tile_extent : index
+  %row_parity = index.div %lane, %token_tile_extent : index
+  %rows_per_group = index.constant 128 : index
+  %row_base = index.mul %row_group, %rows_per_group : index
+  %block_count = index.constant 544 : index
+  %last_block = index.constant 543 : index
+  %row_bytes = index.constant 18496 : index
+  %q8_block_bytes = index.constant 34 : index
+  %payload_header_bytes = index.constant 2 : index
+  %block_payload = index.constant 32 : index
+  %loop_begin = index.constant 0 : index
+  %loop_step = index.constant 1 : index
+  %two = index.constant 2 : index
+  %one_byte = index.constant 1 : offset
+  %four_bytes = index.constant 4 : offset
+  %scratch_bytes = index.constant 18432 : offset
+  %act_scratch_offset = index.constant 8192 : offset
+  %weight_scale_scratch_offset = index.constant 16384 : offset
+  %act_scale_scratch_offset = index.constant 17408 : offset
+
+  %lhs_layout = encoding.layout.strided [32, 1] : encoding<layout>
+  %rhs_layout = encoding.layout.strided [1, 32] : encoding<layout>
+  %i8_schema = encoding.define #encoding.operand<element_format=i8, payload_elements=16, payload_registers=4> : encoding<schema>
+  %lhs_storage = encoding.define #encoding.storage {layout = %lhs_layout : encoding<layout>, schema = %i8_schema : encoding<schema>} : encoding<storage>
+  %rhs_storage = encoding.define #encoding.storage {layout = %rhs_layout : encoding<layout>, schema = %i8_schema : encoding<schema>} : encoding<storage>
+
+  %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
+  %weight_stage_store = buffer.view %scratch[%base] : buffer -> view<2x128x32xi8>
+  %act_stage_store = buffer.view %scratch[%act_scratch_offset] : buffer -> view<2x128x32xi8>
+  %weight_scale_stage = buffer.view %scratch[%weight_scale_scratch_offset] : buffer -> view<2x8x16xf32>
+  %act_scale_stage = buffer.view %scratch[%act_scale_scratch_offset] : buffer -> view<2x8x16xf32>
+  %act_payload = buffer.view %act[%base] : buffer -> view<128x544x16x32xi8>
+  %act_scale_input = buffer.view %scales[%base] : buffer -> view<128x544x16xf32>
+
+  // Staging identity: the low half of the workgroup owns weight rows and
+  // the high half owns tokens.
+  %stage_is_act = index.cmp uge, %tid, %rows_per_group : index
+  %stage_slot = index.rem %tid, %rows_per_group : index
+  %stage_row0 = index.add %row_base, %stage_slot : index
+  %stage_row = index.min %stage_row0, %last_row : index
+  %stage_row_bytes = index.mul %stage_row, %row_bytes : index
+  %stage_payload_base = index.add %stage_row_bytes, %payload_header_bytes : index
+  %stage_act_tile_local = index.div %stage_slot, %token_tile_extent : index
+  %stage_act_tile = index.add %token_tile_group_base, %stage_act_tile_local : index
+  %stage_act_lane = index.rem %stage_slot, %token_tile_extent : index
+  %scale_row_tile = index.div %tid, %token_tile_extent : index
+  %scale_row_lane = index.rem %tid, %token_tile_extent : index
+  %scale_parity = index.rem %scale_row_lane, %two : index
+  %scale_pair = index.div %scale_row_lane, %two : index
+  %scale_parity_base = index.mul %scale_parity, %token_tile_count : index
+  %scale_physical = index.add %scale_parity_base, %scale_pair : index
+  %scale_weight_row0 = index.add %row_base, %tid : index
+  %scale_weight_row = index.min %scale_weight_row0, %last_row : index
+  %scale_weight_row_bytes = index.mul %scale_weight_row, %row_bytes : index
+
+  %zero_accumulator = vector.constant 0.0 : vector<8xf32>
+  %initial_bank = vector.broadcast %zero_accumulator : vector<8xf32> -> vector<8x8xf32>
+  %zero_i32_elements = vector.constant 0 : vector<8xi32>
+
+  %preload = scf.if %stage_is_act -> (vector<32xi8>) {
+    %values = vector.load %act_payload[%stage_act_tile, %loop_begin, %stage_act_lane, %loop_begin] : view<128x544x16x32xi8> -> vector<32xi8>
+    scf.yield %values : vector<32xi8>
+  } else {
+    %offset = index.scale %stage_payload_base, %one_byte : index, offset -> offset
+    %view = buffer.view %weight[%offset] : buffer -> view<32xi8>
+    %values = vector.load %view[%loop_begin] : view<32xi8> -> vector<32xi8>
+    scf.yield %values : vector<32xi8>
+  }
+
+  %scale_loader_preload = index.cmp ult, %tid, %rows_per_group : index
+  %half_zero = index.constant 0 : index
+  %half_one = index.constant 1 : index
+  scf.if %stage_is_act {
+    vector.store %preload, %act_stage_store[%half_zero, %stage_slot, %loop_begin] : vector<32xi8>, view<2x128x32xi8>
+  } else {
+    vector.store %preload, %weight_stage_store[%half_zero, %stage_slot, %loop_begin] : vector<32xi8>, view<2x128x32xi8>
+  }
+  scf.if %scale_loader_preload {
+    %sbb_preload = index.mul %loop_begin, %q8_block_bytes : index
+    %sbi_preload = index.add %scale_weight_row_bytes, %sbb_preload : index
+    %sbo_preload = index.scale %sbi_preload, %one_byte : index, offset -> offset
+    %sv_preload = buffer.view %weight[%sbo_preload] : buffer -> view<1xf16>
+    %sf_preload = view.load %sv_preload[%loop_begin] : view<1xf16> -> f16
+    %ws_preload = scalar.extf %sf_preload : f16 to f32
+    view.store %ws_preload, %weight_scale_stage[%half_zero, %scale_row_tile, %scale_physical] : f32, view<2x8x16xf32>
+    %ast_preload = index.add %token_tile_group_base, %scale_row_tile : index
+    %as_preload = view.load %act_scale_input[%ast_preload, %loop_begin, %scale_row_lane] : view<128x544x16xf32> -> f32
+    view.store %as_preload, %act_scale_stage[%half_zero, %scale_row_tile, %scale_row_lane] : f32, view<2x8x16xf32>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  // Hoisted out of the K loop. The wave's row and token tile origins and
+  // its LDS row addresses do not depend on the block index, but recomputing
+  // them per iteration cost 33 address VALU ops per K block against 238
+  // total, and the compiler kept rematerializing them rather than keeping
+  // them live. Hoisting is free: peak registers stay at 184.
+  %scale_loader_next = index.cmp ult, %tid, %rows_per_group : index
+  %wave_row_group = index.div %wave, %two : index
+  %wave_token_half = index.rem %wave, %two : index
+  %row_frag0 = index.mul %wave_row_group, %two : index
+  %row_frag1 = index.add %row_frag0, %loop_step : index
+  %token_tiles_per_wave = index.constant 4 : index
+  %wave_token_tile_base = index.mul %wave_token_half, %token_tiles_per_wave : index
+  %scale_vector_origin = index.mul %row_parity, %token_tile_count : index
+  %lhs_row_origin0 = index.mul %row_frag0, %token_tile_extent : index
+  %lhs_row0 = index.add %lhs_row_origin0, %lane_token : index
+  %lhs_row_origin1 = index.mul %row_frag1, %token_tile_extent : index
+  %lhs_row1 = index.add %lhs_row_origin1, %lane_token : index
+  %tile_const0 = index.constant 0 : index
+  %tt0 = index.add %wave_token_tile_base, %tile_const0 : index
+  %rhs_origin0 = index.mul %tt0, %token_tile_extent : index
+  %rhs_row0 = index.add %rhs_origin0, %lane_token : index
+  %tile_const1 = index.constant 1 : index
+  %tt1 = index.add %wave_token_tile_base, %tile_const1 : index
+  %rhs_origin1 = index.mul %tt1, %token_tile_extent : index
+  %rhs_row1 = index.add %rhs_origin1, %lane_token : index
+  %tile_const2 = index.constant 2 : index
+  %tt2 = index.add %wave_token_tile_base, %tile_const2 : index
+  %rhs_origin2 = index.mul %tt2, %token_tile_extent : index
+  %rhs_row2 = index.add %rhs_origin2, %lane_token : index
+  %tile_const3 = index.constant 3 : index
+  %tt3 = index.add %wave_token_tile_base, %tile_const3 : index
+  %rhs_origin3 = index.mul %tt3, %token_tile_extent : index
+  %rhs_row3 = index.add %rhs_origin3, %lane_token : index
+  %accumulators, %tail = scf.for %block = [%loop_begin to %block_count step %loop_step](%bank = %initial_bank : vector<8x8xf32>, %staged = %preload : vector<32xi8>) -> (vector<8x8xf32>, vector<32xi8>) {
+
+    %parity = index.rem %block, %two : index
+    %parity_next = index.sub %loop_step, %parity : index
+
+    // Issue the next round's wide load before the matrix work. The index is
+    // clamped so the final iteration re-reads its own block harmlessly.
+    %next_block0 = index.add %block, %loop_step : index
+    %next_block = index.min %next_block0, %last_block : index
+    %next_staged = scf.if %stage_is_act -> (vector<32xi8>) {
+      %values = vector.load %act_payload[%stage_act_tile, %next_block, %stage_act_lane, %loop_begin] : view<128x544x16x32xi8> -> vector<32xi8>
+      scf.yield %values : vector<32xi8>
+    } else {
+      %next_block_bytes = index.mul %next_block, %q8_block_bytes : index
+      %next_index = index.add %stage_payload_base, %next_block_bytes : index
+      %next_offset = index.scale %next_index, %one_byte : index, offset -> offset
+      %next_view = buffer.view %weight[%next_offset] : buffer -> view<32xi8>
+      %values = vector.load %next_view[%loop_begin] : view<32xi8> -> vector<32xi8>
+      scf.yield %values : vector<32xi8>
+    }
+
+    scf.if %stage_is_act {
+      vector.store %next_staged, %act_stage_store[%parity_next, %stage_slot, %loop_begin] : vector<32xi8>, view<2x128x32xi8>
+    } else {
+      vector.store %next_staged, %weight_stage_store[%parity_next, %stage_slot, %loop_begin] : vector<32xi8>, view<2x128x32xi8>
+    }
+    scf.if %scale_loader_next {
+      %sbb_next = index.mul %next_block, %q8_block_bytes : index
+      %sbi_next = index.add %scale_weight_row_bytes, %sbb_next : index
+      %sbo_next = index.scale %sbi_next, %one_byte : index, offset -> offset
+      %sv_next = buffer.view %weight[%sbo_next] : buffer -> view<1xf16>
+      %sf_next = view.load %sv_next[%loop_begin] : view<1xf16> -> f16
+      %ws_next = scalar.extf %sf_next : f16 to f32
+      view.store %ws_next, %weight_scale_stage[%parity_next, %scale_row_tile, %scale_physical] : f32, view<2x8x16xf32>
+      %ast_next = index.add %token_tile_group_base, %scale_row_tile : index
+      %as_next = view.load %act_scale_input[%ast_next, %next_block, %scale_row_lane] : view<128x544x16xf32> -> f32
+      view.store %as_next, %act_scale_stage[%parity_next, %scale_row_tile, %scale_row_lane] : f32, view<2x8x16xf32>
+    }
+    // Each wave owns 32 rows by 64 tokens instead of a 16-row strip across
+    // all 128. The math is unchanged at 16 MMAs per K block, but the two
+    // LHS fragments below are reused by all four RHS reads, so the block
+    // costs six LDS reads rather than nine.
+    %lhs_pair_bytes0 = vector.load %weight_stage_store[%parity, %lhs_row0, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
+    %lhs_pair0 = vector.bitcast %lhs_pair_bytes0 : vector<32xi8> to vector<8xi32>
+    %lhs_low_raw0 = vector.slice %lhs_pair0[0] : vector<8xi32> -> vector<4xi32>
+    %lhs_high_raw0 = vector.slice %lhs_pair0[4] : vector<8xi32> -> vector<4xi32>
+    %lhs_low0 = vector.fragment<lhs> %lhs_low_raw0 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %lhs_high0 = vector.fragment<lhs> %lhs_high_raw0 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %weight_scales0 = vector.load %weight_scale_stage[%parity, %row_frag0, %scale_vector_origin] : view<2x8x16xf32> -> vector<8xf32>
+    %lhs_pair_bytes1 = vector.load %weight_stage_store[%parity, %lhs_row1, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
+    %lhs_pair1 = vector.bitcast %lhs_pair_bytes1 : vector<32xi8> to vector<8xi32>
+    %lhs_low_raw1 = vector.slice %lhs_pair1[0] : vector<8xi32> -> vector<4xi32>
+    %lhs_high_raw1 = vector.slice %lhs_pair1[4] : vector<8xi32> -> vector<4xi32>
+    %lhs_low1 = vector.fragment<lhs> %lhs_low_raw1 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %lhs_high1 = vector.fragment<lhs> %lhs_high_raw1 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %weight_scales1 = vector.load %weight_scale_stage[%parity, %row_frag1, %scale_vector_origin] : view<2x8x16xf32> -> vector<8xf32>
+    %rhs_pair_bytes0 = vector.load %act_stage_store[%parity, %rhs_row0, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
+    %rhs_pair0 = vector.bitcast %rhs_pair_bytes0 : vector<32xi8> to vector<8xi32>
+    %rhs_low_raw0 = vector.slice %rhs_pair0[0] : vector<8xi32> -> vector<4xi32>
+    %rhs_high_raw0 = vector.slice %rhs_pair0[4] : vector<8xi32> -> vector<4xi32>
+    %rhs_low0 = vector.fragment<rhs> %rhs_low_raw0 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %rhs_high0 = vector.fragment<rhs> %rhs_high_raw0 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %act_scale0 = view.load %act_scale_stage[%parity, %tt0, %lane_token] : view<2x8x16xf32> -> f32
+    %act_scales0 = vector.splat %act_scale0 : vector<8xf32>
+    %zero_i32_0_0 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
+    %partial_0_0 = vector.mma %lhs_low0, %rhs_low0, %zero_i32_0_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %product_0_0 = vector.mma %lhs_high0, %rhs_high0, %partial_0_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %raw_0_0 = vector.sitofp %product_0_0 : vector<8xi32> to vector<8xf32>
+    // One fused multiply-add replaces the weight-scale multiply and the
+    // accumulate. The activation scale keeps its own multiply so the operand
+    // order matches the pre-fusion kernel and the logits do not shift.
+    %scaled_act_0_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_0_0, %act_scales0 : vector<8xf32>
+    %running_0 = vector.extract %bank[0] : vector<8x8xf32> -> vector<8xf32>
+    %sum_0 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_0_0, %weight_scales0, %running_0 : vector<8xf32>
+    %bank_s0 = vector.insert %sum_0 into %bank[0] : vector<8xf32>, vector<8x8xf32>
+    %zero_i32_0_1 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
+    %partial_0_1 = vector.mma %lhs_low1, %rhs_low0, %zero_i32_0_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %product_0_1 = vector.mma %lhs_high1, %rhs_high0, %partial_0_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %raw_0_1 = vector.sitofp %product_0_1 : vector<8xi32> to vector<8xf32>
+    %scaled_act_0_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_0_1, %act_scales0 : vector<8xf32>
+    %running_4 = vector.extract %bank_s0[4] : vector<8x8xf32> -> vector<8xf32>
+    %sum_4 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_0_1, %weight_scales1, %running_4 : vector<8xf32>
+    %bank_s4 = vector.insert %sum_4 into %bank_s0[4] : vector<8xf32>, vector<8x8xf32>
+    %rhs_pair_bytes1 = vector.load %act_stage_store[%parity, %rhs_row1, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
+    %rhs_pair1 = vector.bitcast %rhs_pair_bytes1 : vector<32xi8> to vector<8xi32>
+    %rhs_low_raw1 = vector.slice %rhs_pair1[0] : vector<8xi32> -> vector<4xi32>
+    %rhs_high_raw1 = vector.slice %rhs_pair1[4] : vector<8xi32> -> vector<4xi32>
+    %rhs_low1 = vector.fragment<rhs> %rhs_low_raw1 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %rhs_high1 = vector.fragment<rhs> %rhs_high_raw1 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %act_scale1 = view.load %act_scale_stage[%parity, %tt1, %lane_token] : view<2x8x16xf32> -> f32
+    %act_scales1 = vector.splat %act_scale1 : vector<8xf32>
+    %zero_i32_1_0 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
+    %partial_1_0 = vector.mma %lhs_low0, %rhs_low1, %zero_i32_1_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %product_1_0 = vector.mma %lhs_high0, %rhs_high1, %partial_1_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %raw_1_0 = vector.sitofp %product_1_0 : vector<8xi32> to vector<8xf32>
+    %scaled_act_1_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_1_0, %act_scales1 : vector<8xf32>
+    %running_1 = vector.extract %bank_s4[1] : vector<8x8xf32> -> vector<8xf32>
+    %sum_1 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_1_0, %weight_scales0, %running_1 : vector<8xf32>
+    %bank_s1 = vector.insert %sum_1 into %bank_s4[1] : vector<8xf32>, vector<8x8xf32>
+    %zero_i32_1_1 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
+    %partial_1_1 = vector.mma %lhs_low1, %rhs_low1, %zero_i32_1_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %product_1_1 = vector.mma %lhs_high1, %rhs_high1, %partial_1_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %raw_1_1 = vector.sitofp %product_1_1 : vector<8xi32> to vector<8xf32>
+    %scaled_act_1_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_1_1, %act_scales1 : vector<8xf32>
+    %running_5 = vector.extract %bank_s1[5] : vector<8x8xf32> -> vector<8xf32>
+    %sum_5 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_1_1, %weight_scales1, %running_5 : vector<8xf32>
+    %bank_s5 = vector.insert %sum_5 into %bank_s1[5] : vector<8xf32>, vector<8x8xf32>
+    %rhs_pair_bytes2 = vector.load %act_stage_store[%parity, %rhs_row2, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
+    %rhs_pair2 = vector.bitcast %rhs_pair_bytes2 : vector<32xi8> to vector<8xi32>
+    %rhs_low_raw2 = vector.slice %rhs_pair2[0] : vector<8xi32> -> vector<4xi32>
+    %rhs_high_raw2 = vector.slice %rhs_pair2[4] : vector<8xi32> -> vector<4xi32>
+    %rhs_low2 = vector.fragment<rhs> %rhs_low_raw2 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %rhs_high2 = vector.fragment<rhs> %rhs_high_raw2 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %act_scale2 = view.load %act_scale_stage[%parity, %tt2, %lane_token] : view<2x8x16xf32> -> f32
+    %act_scales2 = vector.splat %act_scale2 : vector<8xf32>
+    %zero_i32_2_0 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
+    %partial_2_0 = vector.mma %lhs_low0, %rhs_low2, %zero_i32_2_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %product_2_0 = vector.mma %lhs_high0, %rhs_high2, %partial_2_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %raw_2_0 = vector.sitofp %product_2_0 : vector<8xi32> to vector<8xf32>
+    %scaled_act_2_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_2_0, %act_scales2 : vector<8xf32>
+    %running_2 = vector.extract %bank_s5[2] : vector<8x8xf32> -> vector<8xf32>
+    %sum_2 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_2_0, %weight_scales0, %running_2 : vector<8xf32>
+    %bank_s2 = vector.insert %sum_2 into %bank_s5[2] : vector<8xf32>, vector<8x8xf32>
+    %zero_i32_2_1 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
+    %partial_2_1 = vector.mma %lhs_low1, %rhs_low2, %zero_i32_2_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %product_2_1 = vector.mma %lhs_high1, %rhs_high2, %partial_2_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %raw_2_1 = vector.sitofp %product_2_1 : vector<8xi32> to vector<8xf32>
+    %scaled_act_2_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_2_1, %act_scales2 : vector<8xf32>
+    %running_6 = vector.extract %bank_s2[6] : vector<8x8xf32> -> vector<8xf32>
+    %sum_6 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_2_1, %weight_scales1, %running_6 : vector<8xf32>
+    %bank_s6 = vector.insert %sum_6 into %bank_s2[6] : vector<8xf32>, vector<8x8xf32>
+    %rhs_pair_bytes3 = vector.load %act_stage_store[%parity, %rhs_row3, %loop_begin] : view<2x128x32xi8> -> vector<32xi8>
+    %rhs_pair3 = vector.bitcast %rhs_pair_bytes3 : vector<32xi8> to vector<8xi32>
+    %rhs_low_raw3 = vector.slice %rhs_pair3[0] : vector<8xi32> -> vector<4xi32>
+    %rhs_high_raw3 = vector.slice %rhs_pair3[4] : vector<8xi32> -> vector<4xi32>
+    %rhs_low3 = vector.fragment<rhs> %rhs_low_raw3 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %rhs_high3 = vector.fragment<rhs> %rhs_high_raw3 shape [%token_tile_extent, %token_tile_extent] using {schema = %i8_schema : encoding<schema>} : vector<4xi32>
+    %act_scale3 = view.load %act_scale_stage[%parity, %tt3, %lane_token] : view<2x8x16xf32> -> f32
+    %act_scales3 = vector.splat %act_scale3 : vector<8xf32>
+    %zero_i32_3_0 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
+    %partial_3_0 = vector.mma %lhs_low0, %rhs_low3, %zero_i32_3_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %product_3_0 = vector.mma %lhs_high0, %rhs_high3, %partial_3_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %raw_3_0 = vector.sitofp %product_3_0 : vector<8xi32> to vector<8xf32>
+    %scaled_act_3_0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_3_0, %act_scales3 : vector<8xf32>
+    %running_3 = vector.extract %bank_s6[3] : vector<8x8xf32> -> vector<8xf32>
+    %sum_3 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_3_0, %weight_scales0, %running_3 : vector<8xf32>
+    %bank_s3 = vector.insert %sum_3 into %bank_s6[3] : vector<8xf32>, vector<8x8xf32>
+    %zero_i32_3_1 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
+    %partial_3_1 = vector.mma %lhs_low1, %rhs_low3, %zero_i32_3_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %product_3_1 = vector.mma %lhs_high1, %rhs_high3, %partial_3_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    %raw_3_1 = vector.sitofp %product_3_1 : vector<8xi32> to vector<8xf32>
+    %scaled_act_3_1 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_3_1, %act_scales3 : vector<8xf32>
+    %running_7 = vector.extract %bank_s3[7] : vector<8x8xf32> -> vector<8xf32>
+    %sum_7 = vector.fmaf<reassoc|nnan|ninf|nsz|contract> %scaled_act_3_1, %weight_scales1, %running_7 : vector<8xf32>
+    %next_bank = vector.insert %sum_7 into %bank_s3[7] : vector<8xf32>, vector<8x8xf32>
+
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    scf.yield %next_bank, %next_staged : vector<8x8xf32>, vector<32xi8>
+  }
+
+  // The GFX11 result carrier maps lane%16 to the token column, lane/16 to
+  // output-row parity, and the eight vector elements to every other row.
+  %ep_row_group = index.div %wave, %two : index
+  %ep_token_half = index.rem %wave, %two : index
+  %ep_tiles_per_wave = index.constant 4 : index
+  %ep_tile_base = index.mul %ep_token_half, %ep_tiles_per_wave : index
+  %ep_frag0 = index.mul %ep_row_group, %two : index
+  %ep_frag1 = index.add %ep_frag0, %loop_step : index
+  %ep_tile_const0 = index.constant 0 : index
+  %ep_tt0 = index.add %ep_tile_base, %ep_tile_const0 : index
+  %ep_token_base0 = index.mul %ep_tt0, %token_tile_extent : index
+  %ep_local_token0 = index.add %ep_token_base0, %lane_token : index
+  %ep_token0 = index.add %token_group_base, %ep_local_token0 : index
+  %ep_token_live0 = index.cmp ult, %ep_token0, %token_count : index
+  scf.if %ep_token_live0 {
+    %ep_token_output_base0 = index.mul %ep_token0, %row_count : index
+    %ep_token_output_offset0 = index.scale %ep_token_output_base0, %four_bytes : index, offset -> offset
+    %ep_output_view0 = buffer.view %output[%ep_token_output_offset0] : buffer -> view<[%row_count]xf32>
+    %ep_acc_0_0 = vector.extract %accumulators[0] : vector<8x8xf32> -> vector<8xf32>
+    %ep_row_offset_0_0 = index.mul %ep_frag0, %token_tile_extent : index
+    %ep_first_row_a_0_0 = index.add %row_base, %ep_row_offset_0_0 : index
+    %ep_row_0_0_0 = index.add %ep_first_row_a_0_0, %row_parity : index
+    %ep_row_0_0_1 = index.add %ep_row_0_0_0, %two : index
+    %ep_row_0_0_2 = index.add %ep_row_0_0_1, %two : index
+    %ep_row_0_0_3 = index.add %ep_row_0_0_2, %two : index
+    %ep_row_0_0_4 = index.add %ep_row_0_0_3, %two : index
+    %ep_row_0_0_5 = index.add %ep_row_0_0_4, %two : index
+    %ep_row_0_0_6 = index.add %ep_row_0_0_5, %two : index
+    %ep_row_0_0_7 = index.add %ep_row_0_0_6, %two : index
+    %ep_v_0_0_0 = vector.extract %ep_acc_0_0[0] : vector<8xf32> -> f32
+    %ep_live_0_0_0 = index.cmp ult, %ep_row_0_0_0, %row_count : index
+    scf.if %ep_live_0_0_0 {
+      %ep_bounded_0_0_0 = index.assume %ep_row_0_0_0 [lt(%ep_row_0_0_0, %row_count)] : index
+      view.store %ep_v_0_0_0, %ep_output_view0[%ep_bounded_0_0_0] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_0_1 = vector.extract %ep_acc_0_0[1] : vector<8xf32> -> f32
+    %ep_live_0_0_1 = index.cmp ult, %ep_row_0_0_1, %row_count : index
+    scf.if %ep_live_0_0_1 {
+      %ep_bounded_0_0_1 = index.assume %ep_row_0_0_1 [lt(%ep_row_0_0_1, %row_count)] : index
+      view.store %ep_v_0_0_1, %ep_output_view0[%ep_bounded_0_0_1] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_0_2 = vector.extract %ep_acc_0_0[2] : vector<8xf32> -> f32
+    %ep_live_0_0_2 = index.cmp ult, %ep_row_0_0_2, %row_count : index
+    scf.if %ep_live_0_0_2 {
+      %ep_bounded_0_0_2 = index.assume %ep_row_0_0_2 [lt(%ep_row_0_0_2, %row_count)] : index
+      view.store %ep_v_0_0_2, %ep_output_view0[%ep_bounded_0_0_2] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_0_3 = vector.extract %ep_acc_0_0[3] : vector<8xf32> -> f32
+    %ep_live_0_0_3 = index.cmp ult, %ep_row_0_0_3, %row_count : index
+    scf.if %ep_live_0_0_3 {
+      %ep_bounded_0_0_3 = index.assume %ep_row_0_0_3 [lt(%ep_row_0_0_3, %row_count)] : index
+      view.store %ep_v_0_0_3, %ep_output_view0[%ep_bounded_0_0_3] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_0_4 = vector.extract %ep_acc_0_0[4] : vector<8xf32> -> f32
+    %ep_live_0_0_4 = index.cmp ult, %ep_row_0_0_4, %row_count : index
+    scf.if %ep_live_0_0_4 {
+      %ep_bounded_0_0_4 = index.assume %ep_row_0_0_4 [lt(%ep_row_0_0_4, %row_count)] : index
+      view.store %ep_v_0_0_4, %ep_output_view0[%ep_bounded_0_0_4] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_0_5 = vector.extract %ep_acc_0_0[5] : vector<8xf32> -> f32
+    %ep_live_0_0_5 = index.cmp ult, %ep_row_0_0_5, %row_count : index
+    scf.if %ep_live_0_0_5 {
+      %ep_bounded_0_0_5 = index.assume %ep_row_0_0_5 [lt(%ep_row_0_0_5, %row_count)] : index
+      view.store %ep_v_0_0_5, %ep_output_view0[%ep_bounded_0_0_5] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_0_6 = vector.extract %ep_acc_0_0[6] : vector<8xf32> -> f32
+    %ep_live_0_0_6 = index.cmp ult, %ep_row_0_0_6, %row_count : index
+    scf.if %ep_live_0_0_6 {
+      %ep_bounded_0_0_6 = index.assume %ep_row_0_0_6 [lt(%ep_row_0_0_6, %row_count)] : index
+      view.store %ep_v_0_0_6, %ep_output_view0[%ep_bounded_0_0_6] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_0_7 = vector.extract %ep_acc_0_0[7] : vector<8xf32> -> f32
+    %ep_live_0_0_7 = index.cmp ult, %ep_row_0_0_7, %row_count : index
+    scf.if %ep_live_0_0_7 {
+      %ep_bounded_0_0_7 = index.assume %ep_row_0_0_7 [lt(%ep_row_0_0_7, %row_count)] : index
+      view.store %ep_v_0_0_7, %ep_output_view0[%ep_bounded_0_0_7] : f32, view<[%row_count]xf32>
+    }
+    %ep_acc_0_1 = vector.extract %accumulators[4] : vector<8x8xf32> -> vector<8xf32>
+    %ep_row_offset_0_1 = index.mul %ep_frag1, %token_tile_extent : index
+    %ep_first_row_a_0_1 = index.add %row_base, %ep_row_offset_0_1 : index
+    %ep_row_0_1_0 = index.add %ep_first_row_a_0_1, %row_parity : index
+    %ep_row_0_1_1 = index.add %ep_row_0_1_0, %two : index
+    %ep_row_0_1_2 = index.add %ep_row_0_1_1, %two : index
+    %ep_row_0_1_3 = index.add %ep_row_0_1_2, %two : index
+    %ep_row_0_1_4 = index.add %ep_row_0_1_3, %two : index
+    %ep_row_0_1_5 = index.add %ep_row_0_1_4, %two : index
+    %ep_row_0_1_6 = index.add %ep_row_0_1_5, %two : index
+    %ep_row_0_1_7 = index.add %ep_row_0_1_6, %two : index
+    %ep_v_0_1_0 = vector.extract %ep_acc_0_1[0] : vector<8xf32> -> f32
+    %ep_live_0_1_0 = index.cmp ult, %ep_row_0_1_0, %row_count : index
+    scf.if %ep_live_0_1_0 {
+      %ep_bounded_0_1_0 = index.assume %ep_row_0_1_0 [lt(%ep_row_0_1_0, %row_count)] : index
+      view.store %ep_v_0_1_0, %ep_output_view0[%ep_bounded_0_1_0] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_1_1 = vector.extract %ep_acc_0_1[1] : vector<8xf32> -> f32
+    %ep_live_0_1_1 = index.cmp ult, %ep_row_0_1_1, %row_count : index
+    scf.if %ep_live_0_1_1 {
+      %ep_bounded_0_1_1 = index.assume %ep_row_0_1_1 [lt(%ep_row_0_1_1, %row_count)] : index
+      view.store %ep_v_0_1_1, %ep_output_view0[%ep_bounded_0_1_1] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_1_2 = vector.extract %ep_acc_0_1[2] : vector<8xf32> -> f32
+    %ep_live_0_1_2 = index.cmp ult, %ep_row_0_1_2, %row_count : index
+    scf.if %ep_live_0_1_2 {
+      %ep_bounded_0_1_2 = index.assume %ep_row_0_1_2 [lt(%ep_row_0_1_2, %row_count)] : index
+      view.store %ep_v_0_1_2, %ep_output_view0[%ep_bounded_0_1_2] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_1_3 = vector.extract %ep_acc_0_1[3] : vector<8xf32> -> f32
+    %ep_live_0_1_3 = index.cmp ult, %ep_row_0_1_3, %row_count : index
+    scf.if %ep_live_0_1_3 {
+      %ep_bounded_0_1_3 = index.assume %ep_row_0_1_3 [lt(%ep_row_0_1_3, %row_count)] : index
+      view.store %ep_v_0_1_3, %ep_output_view0[%ep_bounded_0_1_3] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_1_4 = vector.extract %ep_acc_0_1[4] : vector<8xf32> -> f32
+    %ep_live_0_1_4 = index.cmp ult, %ep_row_0_1_4, %row_count : index
+    scf.if %ep_live_0_1_4 {
+      %ep_bounded_0_1_4 = index.assume %ep_row_0_1_4 [lt(%ep_row_0_1_4, %row_count)] : index
+      view.store %ep_v_0_1_4, %ep_output_view0[%ep_bounded_0_1_4] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_1_5 = vector.extract %ep_acc_0_1[5] : vector<8xf32> -> f32
+    %ep_live_0_1_5 = index.cmp ult, %ep_row_0_1_5, %row_count : index
+    scf.if %ep_live_0_1_5 {
+      %ep_bounded_0_1_5 = index.assume %ep_row_0_1_5 [lt(%ep_row_0_1_5, %row_count)] : index
+      view.store %ep_v_0_1_5, %ep_output_view0[%ep_bounded_0_1_5] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_1_6 = vector.extract %ep_acc_0_1[6] : vector<8xf32> -> f32
+    %ep_live_0_1_6 = index.cmp ult, %ep_row_0_1_6, %row_count : index
+    scf.if %ep_live_0_1_6 {
+      %ep_bounded_0_1_6 = index.assume %ep_row_0_1_6 [lt(%ep_row_0_1_6, %row_count)] : index
+      view.store %ep_v_0_1_6, %ep_output_view0[%ep_bounded_0_1_6] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_0_1_7 = vector.extract %ep_acc_0_1[7] : vector<8xf32> -> f32
+    %ep_live_0_1_7 = index.cmp ult, %ep_row_0_1_7, %row_count : index
+    scf.if %ep_live_0_1_7 {
+      %ep_bounded_0_1_7 = index.assume %ep_row_0_1_7 [lt(%ep_row_0_1_7, %row_count)] : index
+      view.store %ep_v_0_1_7, %ep_output_view0[%ep_bounded_0_1_7] : f32, view<[%row_count]xf32>
+    }
+  }
+  %ep_tile_const1 = index.constant 1 : index
+  %ep_tt1 = index.add %ep_tile_base, %ep_tile_const1 : index
+  %ep_token_base1 = index.mul %ep_tt1, %token_tile_extent : index
+  %ep_local_token1 = index.add %ep_token_base1, %lane_token : index
+  %ep_token1 = index.add %token_group_base, %ep_local_token1 : index
+  %ep_token_live1 = index.cmp ult, %ep_token1, %token_count : index
+  scf.if %ep_token_live1 {
+    %ep_token_output_base1 = index.mul %ep_token1, %row_count : index
+    %ep_token_output_offset1 = index.scale %ep_token_output_base1, %four_bytes : index, offset -> offset
+    %ep_output_view1 = buffer.view %output[%ep_token_output_offset1] : buffer -> view<[%row_count]xf32>
+    %ep_acc_1_0 = vector.extract %accumulators[1] : vector<8x8xf32> -> vector<8xf32>
+    %ep_row_offset_1_0 = index.mul %ep_frag0, %token_tile_extent : index
+    %ep_first_row_a_1_0 = index.add %row_base, %ep_row_offset_1_0 : index
+    %ep_row_1_0_0 = index.add %ep_first_row_a_1_0, %row_parity : index
+    %ep_row_1_0_1 = index.add %ep_row_1_0_0, %two : index
+    %ep_row_1_0_2 = index.add %ep_row_1_0_1, %two : index
+    %ep_row_1_0_3 = index.add %ep_row_1_0_2, %two : index
+    %ep_row_1_0_4 = index.add %ep_row_1_0_3, %two : index
+    %ep_row_1_0_5 = index.add %ep_row_1_0_4, %two : index
+    %ep_row_1_0_6 = index.add %ep_row_1_0_5, %two : index
+    %ep_row_1_0_7 = index.add %ep_row_1_0_6, %two : index
+    %ep_v_1_0_0 = vector.extract %ep_acc_1_0[0] : vector<8xf32> -> f32
+    %ep_live_1_0_0 = index.cmp ult, %ep_row_1_0_0, %row_count : index
+    scf.if %ep_live_1_0_0 {
+      %ep_bounded_1_0_0 = index.assume %ep_row_1_0_0 [lt(%ep_row_1_0_0, %row_count)] : index
+      view.store %ep_v_1_0_0, %ep_output_view1[%ep_bounded_1_0_0] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_0_1 = vector.extract %ep_acc_1_0[1] : vector<8xf32> -> f32
+    %ep_live_1_0_1 = index.cmp ult, %ep_row_1_0_1, %row_count : index
+    scf.if %ep_live_1_0_1 {
+      %ep_bounded_1_0_1 = index.assume %ep_row_1_0_1 [lt(%ep_row_1_0_1, %row_count)] : index
+      view.store %ep_v_1_0_1, %ep_output_view1[%ep_bounded_1_0_1] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_0_2 = vector.extract %ep_acc_1_0[2] : vector<8xf32> -> f32
+    %ep_live_1_0_2 = index.cmp ult, %ep_row_1_0_2, %row_count : index
+    scf.if %ep_live_1_0_2 {
+      %ep_bounded_1_0_2 = index.assume %ep_row_1_0_2 [lt(%ep_row_1_0_2, %row_count)] : index
+      view.store %ep_v_1_0_2, %ep_output_view1[%ep_bounded_1_0_2] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_0_3 = vector.extract %ep_acc_1_0[3] : vector<8xf32> -> f32
+    %ep_live_1_0_3 = index.cmp ult, %ep_row_1_0_3, %row_count : index
+    scf.if %ep_live_1_0_3 {
+      %ep_bounded_1_0_3 = index.assume %ep_row_1_0_3 [lt(%ep_row_1_0_3, %row_count)] : index
+      view.store %ep_v_1_0_3, %ep_output_view1[%ep_bounded_1_0_3] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_0_4 = vector.extract %ep_acc_1_0[4] : vector<8xf32> -> f32
+    %ep_live_1_0_4 = index.cmp ult, %ep_row_1_0_4, %row_count : index
+    scf.if %ep_live_1_0_4 {
+      %ep_bounded_1_0_4 = index.assume %ep_row_1_0_4 [lt(%ep_row_1_0_4, %row_count)] : index
+      view.store %ep_v_1_0_4, %ep_output_view1[%ep_bounded_1_0_4] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_0_5 = vector.extract %ep_acc_1_0[5] : vector<8xf32> -> f32
+    %ep_live_1_0_5 = index.cmp ult, %ep_row_1_0_5, %row_count : index
+    scf.if %ep_live_1_0_5 {
+      %ep_bounded_1_0_5 = index.assume %ep_row_1_0_5 [lt(%ep_row_1_0_5, %row_count)] : index
+      view.store %ep_v_1_0_5, %ep_output_view1[%ep_bounded_1_0_5] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_0_6 = vector.extract %ep_acc_1_0[6] : vector<8xf32> -> f32
+    %ep_live_1_0_6 = index.cmp ult, %ep_row_1_0_6, %row_count : index
+    scf.if %ep_live_1_0_6 {
+      %ep_bounded_1_0_6 = index.assume %ep_row_1_0_6 [lt(%ep_row_1_0_6, %row_count)] : index
+      view.store %ep_v_1_0_6, %ep_output_view1[%ep_bounded_1_0_6] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_0_7 = vector.extract %ep_acc_1_0[7] : vector<8xf32> -> f32
+    %ep_live_1_0_7 = index.cmp ult, %ep_row_1_0_7, %row_count : index
+    scf.if %ep_live_1_0_7 {
+      %ep_bounded_1_0_7 = index.assume %ep_row_1_0_7 [lt(%ep_row_1_0_7, %row_count)] : index
+      view.store %ep_v_1_0_7, %ep_output_view1[%ep_bounded_1_0_7] : f32, view<[%row_count]xf32>
+    }
+    %ep_acc_1_1 = vector.extract %accumulators[5] : vector<8x8xf32> -> vector<8xf32>
+    %ep_row_offset_1_1 = index.mul %ep_frag1, %token_tile_extent : index
+    %ep_first_row_a_1_1 = index.add %row_base, %ep_row_offset_1_1 : index
+    %ep_row_1_1_0 = index.add %ep_first_row_a_1_1, %row_parity : index
+    %ep_row_1_1_1 = index.add %ep_row_1_1_0, %two : index
+    %ep_row_1_1_2 = index.add %ep_row_1_1_1, %two : index
+    %ep_row_1_1_3 = index.add %ep_row_1_1_2, %two : index
+    %ep_row_1_1_4 = index.add %ep_row_1_1_3, %two : index
+    %ep_row_1_1_5 = index.add %ep_row_1_1_4, %two : index
+    %ep_row_1_1_6 = index.add %ep_row_1_1_5, %two : index
+    %ep_row_1_1_7 = index.add %ep_row_1_1_6, %two : index
+    %ep_v_1_1_0 = vector.extract %ep_acc_1_1[0] : vector<8xf32> -> f32
+    %ep_live_1_1_0 = index.cmp ult, %ep_row_1_1_0, %row_count : index
+    scf.if %ep_live_1_1_0 {
+      %ep_bounded_1_1_0 = index.assume %ep_row_1_1_0 [lt(%ep_row_1_1_0, %row_count)] : index
+      view.store %ep_v_1_1_0, %ep_output_view1[%ep_bounded_1_1_0] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_1_1 = vector.extract %ep_acc_1_1[1] : vector<8xf32> -> f32
+    %ep_live_1_1_1 = index.cmp ult, %ep_row_1_1_1, %row_count : index
+    scf.if %ep_live_1_1_1 {
+      %ep_bounded_1_1_1 = index.assume %ep_row_1_1_1 [lt(%ep_row_1_1_1, %row_count)] : index
+      view.store %ep_v_1_1_1, %ep_output_view1[%ep_bounded_1_1_1] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_1_2 = vector.extract %ep_acc_1_1[2] : vector<8xf32> -> f32
+    %ep_live_1_1_2 = index.cmp ult, %ep_row_1_1_2, %row_count : index
+    scf.if %ep_live_1_1_2 {
+      %ep_bounded_1_1_2 = index.assume %ep_row_1_1_2 [lt(%ep_row_1_1_2, %row_count)] : index
+      view.store %ep_v_1_1_2, %ep_output_view1[%ep_bounded_1_1_2] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_1_3 = vector.extract %ep_acc_1_1[3] : vector<8xf32> -> f32
+    %ep_live_1_1_3 = index.cmp ult, %ep_row_1_1_3, %row_count : index
+    scf.if %ep_live_1_1_3 {
+      %ep_bounded_1_1_3 = index.assume %ep_row_1_1_3 [lt(%ep_row_1_1_3, %row_count)] : index
+      view.store %ep_v_1_1_3, %ep_output_view1[%ep_bounded_1_1_3] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_1_4 = vector.extract %ep_acc_1_1[4] : vector<8xf32> -> f32
+    %ep_live_1_1_4 = index.cmp ult, %ep_row_1_1_4, %row_count : index
+    scf.if %ep_live_1_1_4 {
+      %ep_bounded_1_1_4 = index.assume %ep_row_1_1_4 [lt(%ep_row_1_1_4, %row_count)] : index
+      view.store %ep_v_1_1_4, %ep_output_view1[%ep_bounded_1_1_4] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_1_5 = vector.extract %ep_acc_1_1[5] : vector<8xf32> -> f32
+    %ep_live_1_1_5 = index.cmp ult, %ep_row_1_1_5, %row_count : index
+    scf.if %ep_live_1_1_5 {
+      %ep_bounded_1_1_5 = index.assume %ep_row_1_1_5 [lt(%ep_row_1_1_5, %row_count)] : index
+      view.store %ep_v_1_1_5, %ep_output_view1[%ep_bounded_1_1_5] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_1_6 = vector.extract %ep_acc_1_1[6] : vector<8xf32> -> f32
+    %ep_live_1_1_6 = index.cmp ult, %ep_row_1_1_6, %row_count : index
+    scf.if %ep_live_1_1_6 {
+      %ep_bounded_1_1_6 = index.assume %ep_row_1_1_6 [lt(%ep_row_1_1_6, %row_count)] : index
+      view.store %ep_v_1_1_6, %ep_output_view1[%ep_bounded_1_1_6] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_1_1_7 = vector.extract %ep_acc_1_1[7] : vector<8xf32> -> f32
+    %ep_live_1_1_7 = index.cmp ult, %ep_row_1_1_7, %row_count : index
+    scf.if %ep_live_1_1_7 {
+      %ep_bounded_1_1_7 = index.assume %ep_row_1_1_7 [lt(%ep_row_1_1_7, %row_count)] : index
+      view.store %ep_v_1_1_7, %ep_output_view1[%ep_bounded_1_1_7] : f32, view<[%row_count]xf32>
+    }
+  }
+  %ep_tile_const2 = index.constant 2 : index
+  %ep_tt2 = index.add %ep_tile_base, %ep_tile_const2 : index
+  %ep_token_base2 = index.mul %ep_tt2, %token_tile_extent : index
+  %ep_local_token2 = index.add %ep_token_base2, %lane_token : index
+  %ep_token2 = index.add %token_group_base, %ep_local_token2 : index
+  %ep_token_live2 = index.cmp ult, %ep_token2, %token_count : index
+  scf.if %ep_token_live2 {
+    %ep_token_output_base2 = index.mul %ep_token2, %row_count : index
+    %ep_token_output_offset2 = index.scale %ep_token_output_base2, %four_bytes : index, offset -> offset
+    %ep_output_view2 = buffer.view %output[%ep_token_output_offset2] : buffer -> view<[%row_count]xf32>
+    %ep_acc_2_0 = vector.extract %accumulators[2] : vector<8x8xf32> -> vector<8xf32>
+    %ep_row_offset_2_0 = index.mul %ep_frag0, %token_tile_extent : index
+    %ep_first_row_a_2_0 = index.add %row_base, %ep_row_offset_2_0 : index
+    %ep_row_2_0_0 = index.add %ep_first_row_a_2_0, %row_parity : index
+    %ep_row_2_0_1 = index.add %ep_row_2_0_0, %two : index
+    %ep_row_2_0_2 = index.add %ep_row_2_0_1, %two : index
+    %ep_row_2_0_3 = index.add %ep_row_2_0_2, %two : index
+    %ep_row_2_0_4 = index.add %ep_row_2_0_3, %two : index
+    %ep_row_2_0_5 = index.add %ep_row_2_0_4, %two : index
+    %ep_row_2_0_6 = index.add %ep_row_2_0_5, %two : index
+    %ep_row_2_0_7 = index.add %ep_row_2_0_6, %two : index
+    %ep_v_2_0_0 = vector.extract %ep_acc_2_0[0] : vector<8xf32> -> f32
+    %ep_live_2_0_0 = index.cmp ult, %ep_row_2_0_0, %row_count : index
+    scf.if %ep_live_2_0_0 {
+      %ep_bounded_2_0_0 = index.assume %ep_row_2_0_0 [lt(%ep_row_2_0_0, %row_count)] : index
+      view.store %ep_v_2_0_0, %ep_output_view2[%ep_bounded_2_0_0] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_0_1 = vector.extract %ep_acc_2_0[1] : vector<8xf32> -> f32
+    %ep_live_2_0_1 = index.cmp ult, %ep_row_2_0_1, %row_count : index
+    scf.if %ep_live_2_0_1 {
+      %ep_bounded_2_0_1 = index.assume %ep_row_2_0_1 [lt(%ep_row_2_0_1, %row_count)] : index
+      view.store %ep_v_2_0_1, %ep_output_view2[%ep_bounded_2_0_1] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_0_2 = vector.extract %ep_acc_2_0[2] : vector<8xf32> -> f32
+    %ep_live_2_0_2 = index.cmp ult, %ep_row_2_0_2, %row_count : index
+    scf.if %ep_live_2_0_2 {
+      %ep_bounded_2_0_2 = index.assume %ep_row_2_0_2 [lt(%ep_row_2_0_2, %row_count)] : index
+      view.store %ep_v_2_0_2, %ep_output_view2[%ep_bounded_2_0_2] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_0_3 = vector.extract %ep_acc_2_0[3] : vector<8xf32> -> f32
+    %ep_live_2_0_3 = index.cmp ult, %ep_row_2_0_3, %row_count : index
+    scf.if %ep_live_2_0_3 {
+      %ep_bounded_2_0_3 = index.assume %ep_row_2_0_3 [lt(%ep_row_2_0_3, %row_count)] : index
+      view.store %ep_v_2_0_3, %ep_output_view2[%ep_bounded_2_0_3] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_0_4 = vector.extract %ep_acc_2_0[4] : vector<8xf32> -> f32
+    %ep_live_2_0_4 = index.cmp ult, %ep_row_2_0_4, %row_count : index
+    scf.if %ep_live_2_0_4 {
+      %ep_bounded_2_0_4 = index.assume %ep_row_2_0_4 [lt(%ep_row_2_0_4, %row_count)] : index
+      view.store %ep_v_2_0_4, %ep_output_view2[%ep_bounded_2_0_4] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_0_5 = vector.extract %ep_acc_2_0[5] : vector<8xf32> -> f32
+    %ep_live_2_0_5 = index.cmp ult, %ep_row_2_0_5, %row_count : index
+    scf.if %ep_live_2_0_5 {
+      %ep_bounded_2_0_5 = index.assume %ep_row_2_0_5 [lt(%ep_row_2_0_5, %row_count)] : index
+      view.store %ep_v_2_0_5, %ep_output_view2[%ep_bounded_2_0_5] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_0_6 = vector.extract %ep_acc_2_0[6] : vector<8xf32> -> f32
+    %ep_live_2_0_6 = index.cmp ult, %ep_row_2_0_6, %row_count : index
+    scf.if %ep_live_2_0_6 {
+      %ep_bounded_2_0_6 = index.assume %ep_row_2_0_6 [lt(%ep_row_2_0_6, %row_count)] : index
+      view.store %ep_v_2_0_6, %ep_output_view2[%ep_bounded_2_0_6] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_0_7 = vector.extract %ep_acc_2_0[7] : vector<8xf32> -> f32
+    %ep_live_2_0_7 = index.cmp ult, %ep_row_2_0_7, %row_count : index
+    scf.if %ep_live_2_0_7 {
+      %ep_bounded_2_0_7 = index.assume %ep_row_2_0_7 [lt(%ep_row_2_0_7, %row_count)] : index
+      view.store %ep_v_2_0_7, %ep_output_view2[%ep_bounded_2_0_7] : f32, view<[%row_count]xf32>
+    }
+    %ep_acc_2_1 = vector.extract %accumulators[6] : vector<8x8xf32> -> vector<8xf32>
+    %ep_row_offset_2_1 = index.mul %ep_frag1, %token_tile_extent : index
+    %ep_first_row_a_2_1 = index.add %row_base, %ep_row_offset_2_1 : index
+    %ep_row_2_1_0 = index.add %ep_first_row_a_2_1, %row_parity : index
+    %ep_row_2_1_1 = index.add %ep_row_2_1_0, %two : index
+    %ep_row_2_1_2 = index.add %ep_row_2_1_1, %two : index
+    %ep_row_2_1_3 = index.add %ep_row_2_1_2, %two : index
+    %ep_row_2_1_4 = index.add %ep_row_2_1_3, %two : index
+    %ep_row_2_1_5 = index.add %ep_row_2_1_4, %two : index
+    %ep_row_2_1_6 = index.add %ep_row_2_1_5, %two : index
+    %ep_row_2_1_7 = index.add %ep_row_2_1_6, %two : index
+    %ep_v_2_1_0 = vector.extract %ep_acc_2_1[0] : vector<8xf32> -> f32
+    %ep_live_2_1_0 = index.cmp ult, %ep_row_2_1_0, %row_count : index
+    scf.if %ep_live_2_1_0 {
+      %ep_bounded_2_1_0 = index.assume %ep_row_2_1_0 [lt(%ep_row_2_1_0, %row_count)] : index
+      view.store %ep_v_2_1_0, %ep_output_view2[%ep_bounded_2_1_0] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_1_1 = vector.extract %ep_acc_2_1[1] : vector<8xf32> -> f32
+    %ep_live_2_1_1 = index.cmp ult, %ep_row_2_1_1, %row_count : index
+    scf.if %ep_live_2_1_1 {
+      %ep_bounded_2_1_1 = index.assume %ep_row_2_1_1 [lt(%ep_row_2_1_1, %row_count)] : index
+      view.store %ep_v_2_1_1, %ep_output_view2[%ep_bounded_2_1_1] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_1_2 = vector.extract %ep_acc_2_1[2] : vector<8xf32> -> f32
+    %ep_live_2_1_2 = index.cmp ult, %ep_row_2_1_2, %row_count : index
+    scf.if %ep_live_2_1_2 {
+      %ep_bounded_2_1_2 = index.assume %ep_row_2_1_2 [lt(%ep_row_2_1_2, %row_count)] : index
+      view.store %ep_v_2_1_2, %ep_output_view2[%ep_bounded_2_1_2] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_1_3 = vector.extract %ep_acc_2_1[3] : vector<8xf32> -> f32
+    %ep_live_2_1_3 = index.cmp ult, %ep_row_2_1_3, %row_count : index
+    scf.if %ep_live_2_1_3 {
+      %ep_bounded_2_1_3 = index.assume %ep_row_2_1_3 [lt(%ep_row_2_1_3, %row_count)] : index
+      view.store %ep_v_2_1_3, %ep_output_view2[%ep_bounded_2_1_3] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_1_4 = vector.extract %ep_acc_2_1[4] : vector<8xf32> -> f32
+    %ep_live_2_1_4 = index.cmp ult, %ep_row_2_1_4, %row_count : index
+    scf.if %ep_live_2_1_4 {
+      %ep_bounded_2_1_4 = index.assume %ep_row_2_1_4 [lt(%ep_row_2_1_4, %row_count)] : index
+      view.store %ep_v_2_1_4, %ep_output_view2[%ep_bounded_2_1_4] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_1_5 = vector.extract %ep_acc_2_1[5] : vector<8xf32> -> f32
+    %ep_live_2_1_5 = index.cmp ult, %ep_row_2_1_5, %row_count : index
+    scf.if %ep_live_2_1_5 {
+      %ep_bounded_2_1_5 = index.assume %ep_row_2_1_5 [lt(%ep_row_2_1_5, %row_count)] : index
+      view.store %ep_v_2_1_5, %ep_output_view2[%ep_bounded_2_1_5] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_1_6 = vector.extract %ep_acc_2_1[6] : vector<8xf32> -> f32
+    %ep_live_2_1_6 = index.cmp ult, %ep_row_2_1_6, %row_count : index
+    scf.if %ep_live_2_1_6 {
+      %ep_bounded_2_1_6 = index.assume %ep_row_2_1_6 [lt(%ep_row_2_1_6, %row_count)] : index
+      view.store %ep_v_2_1_6, %ep_output_view2[%ep_bounded_2_1_6] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_2_1_7 = vector.extract %ep_acc_2_1[7] : vector<8xf32> -> f32
+    %ep_live_2_1_7 = index.cmp ult, %ep_row_2_1_7, %row_count : index
+    scf.if %ep_live_2_1_7 {
+      %ep_bounded_2_1_7 = index.assume %ep_row_2_1_7 [lt(%ep_row_2_1_7, %row_count)] : index
+      view.store %ep_v_2_1_7, %ep_output_view2[%ep_bounded_2_1_7] : f32, view<[%row_count]xf32>
+    }
+  }
+  %ep_tile_const3 = index.constant 3 : index
+  %ep_tt3 = index.add %ep_tile_base, %ep_tile_const3 : index
+  %ep_token_base3 = index.mul %ep_tt3, %token_tile_extent : index
+  %ep_local_token3 = index.add %ep_token_base3, %lane_token : index
+  %ep_token3 = index.add %token_group_base, %ep_local_token3 : index
+  %ep_token_live3 = index.cmp ult, %ep_token3, %token_count : index
+  scf.if %ep_token_live3 {
+    %ep_token_output_base3 = index.mul %ep_token3, %row_count : index
+    %ep_token_output_offset3 = index.scale %ep_token_output_base3, %four_bytes : index, offset -> offset
+    %ep_output_view3 = buffer.view %output[%ep_token_output_offset3] : buffer -> view<[%row_count]xf32>
+    %ep_acc_3_0 = vector.extract %accumulators[3] : vector<8x8xf32> -> vector<8xf32>
+    %ep_row_offset_3_0 = index.mul %ep_frag0, %token_tile_extent : index
+    %ep_first_row_a_3_0 = index.add %row_base, %ep_row_offset_3_0 : index
+    %ep_row_3_0_0 = index.add %ep_first_row_a_3_0, %row_parity : index
+    %ep_row_3_0_1 = index.add %ep_row_3_0_0, %two : index
+    %ep_row_3_0_2 = index.add %ep_row_3_0_1, %two : index
+    %ep_row_3_0_3 = index.add %ep_row_3_0_2, %two : index
+    %ep_row_3_0_4 = index.add %ep_row_3_0_3, %two : index
+    %ep_row_3_0_5 = index.add %ep_row_3_0_4, %two : index
+    %ep_row_3_0_6 = index.add %ep_row_3_0_5, %two : index
+    %ep_row_3_0_7 = index.add %ep_row_3_0_6, %two : index
+    %ep_v_3_0_0 = vector.extract %ep_acc_3_0[0] : vector<8xf32> -> f32
+    %ep_live_3_0_0 = index.cmp ult, %ep_row_3_0_0, %row_count : index
+    scf.if %ep_live_3_0_0 {
+      %ep_bounded_3_0_0 = index.assume %ep_row_3_0_0 [lt(%ep_row_3_0_0, %row_count)] : index
+      view.store %ep_v_3_0_0, %ep_output_view3[%ep_bounded_3_0_0] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_0_1 = vector.extract %ep_acc_3_0[1] : vector<8xf32> -> f32
+    %ep_live_3_0_1 = index.cmp ult, %ep_row_3_0_1, %row_count : index
+    scf.if %ep_live_3_0_1 {
+      %ep_bounded_3_0_1 = index.assume %ep_row_3_0_1 [lt(%ep_row_3_0_1, %row_count)] : index
+      view.store %ep_v_3_0_1, %ep_output_view3[%ep_bounded_3_0_1] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_0_2 = vector.extract %ep_acc_3_0[2] : vector<8xf32> -> f32
+    %ep_live_3_0_2 = index.cmp ult, %ep_row_3_0_2, %row_count : index
+    scf.if %ep_live_3_0_2 {
+      %ep_bounded_3_0_2 = index.assume %ep_row_3_0_2 [lt(%ep_row_3_0_2, %row_count)] : index
+      view.store %ep_v_3_0_2, %ep_output_view3[%ep_bounded_3_0_2] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_0_3 = vector.extract %ep_acc_3_0[3] : vector<8xf32> -> f32
+    %ep_live_3_0_3 = index.cmp ult, %ep_row_3_0_3, %row_count : index
+    scf.if %ep_live_3_0_3 {
+      %ep_bounded_3_0_3 = index.assume %ep_row_3_0_3 [lt(%ep_row_3_0_3, %row_count)] : index
+      view.store %ep_v_3_0_3, %ep_output_view3[%ep_bounded_3_0_3] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_0_4 = vector.extract %ep_acc_3_0[4] : vector<8xf32> -> f32
+    %ep_live_3_0_4 = index.cmp ult, %ep_row_3_0_4, %row_count : index
+    scf.if %ep_live_3_0_4 {
+      %ep_bounded_3_0_4 = index.assume %ep_row_3_0_4 [lt(%ep_row_3_0_4, %row_count)] : index
+      view.store %ep_v_3_0_4, %ep_output_view3[%ep_bounded_3_0_4] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_0_5 = vector.extract %ep_acc_3_0[5] : vector<8xf32> -> f32
+    %ep_live_3_0_5 = index.cmp ult, %ep_row_3_0_5, %row_count : index
+    scf.if %ep_live_3_0_5 {
+      %ep_bounded_3_0_5 = index.assume %ep_row_3_0_5 [lt(%ep_row_3_0_5, %row_count)] : index
+      view.store %ep_v_3_0_5, %ep_output_view3[%ep_bounded_3_0_5] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_0_6 = vector.extract %ep_acc_3_0[6] : vector<8xf32> -> f32
+    %ep_live_3_0_6 = index.cmp ult, %ep_row_3_0_6, %row_count : index
+    scf.if %ep_live_3_0_6 {
+      %ep_bounded_3_0_6 = index.assume %ep_row_3_0_6 [lt(%ep_row_3_0_6, %row_count)] : index
+      view.store %ep_v_3_0_6, %ep_output_view3[%ep_bounded_3_0_6] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_0_7 = vector.extract %ep_acc_3_0[7] : vector<8xf32> -> f32
+    %ep_live_3_0_7 = index.cmp ult, %ep_row_3_0_7, %row_count : index
+    scf.if %ep_live_3_0_7 {
+      %ep_bounded_3_0_7 = index.assume %ep_row_3_0_7 [lt(%ep_row_3_0_7, %row_count)] : index
+      view.store %ep_v_3_0_7, %ep_output_view3[%ep_bounded_3_0_7] : f32, view<[%row_count]xf32>
+    }
+    %ep_acc_3_1 = vector.extract %accumulators[7] : vector<8x8xf32> -> vector<8xf32>
+    %ep_row_offset_3_1 = index.mul %ep_frag1, %token_tile_extent : index
+    %ep_first_row_a_3_1 = index.add %row_base, %ep_row_offset_3_1 : index
+    %ep_row_3_1_0 = index.add %ep_first_row_a_3_1, %row_parity : index
+    %ep_row_3_1_1 = index.add %ep_row_3_1_0, %two : index
+    %ep_row_3_1_2 = index.add %ep_row_3_1_1, %two : index
+    %ep_row_3_1_3 = index.add %ep_row_3_1_2, %two : index
+    %ep_row_3_1_4 = index.add %ep_row_3_1_3, %two : index
+    %ep_row_3_1_5 = index.add %ep_row_3_1_4, %two : index
+    %ep_row_3_1_6 = index.add %ep_row_3_1_5, %two : index
+    %ep_row_3_1_7 = index.add %ep_row_3_1_6, %two : index
+    %ep_v_3_1_0 = vector.extract %ep_acc_3_1[0] : vector<8xf32> -> f32
+    %ep_live_3_1_0 = index.cmp ult, %ep_row_3_1_0, %row_count : index
+    scf.if %ep_live_3_1_0 {
+      %ep_bounded_3_1_0 = index.assume %ep_row_3_1_0 [lt(%ep_row_3_1_0, %row_count)] : index
+      view.store %ep_v_3_1_0, %ep_output_view3[%ep_bounded_3_1_0] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_1_1 = vector.extract %ep_acc_3_1[1] : vector<8xf32> -> f32
+    %ep_live_3_1_1 = index.cmp ult, %ep_row_3_1_1, %row_count : index
+    scf.if %ep_live_3_1_1 {
+      %ep_bounded_3_1_1 = index.assume %ep_row_3_1_1 [lt(%ep_row_3_1_1, %row_count)] : index
+      view.store %ep_v_3_1_1, %ep_output_view3[%ep_bounded_3_1_1] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_1_2 = vector.extract %ep_acc_3_1[2] : vector<8xf32> -> f32
+    %ep_live_3_1_2 = index.cmp ult, %ep_row_3_1_2, %row_count : index
+    scf.if %ep_live_3_1_2 {
+      %ep_bounded_3_1_2 = index.assume %ep_row_3_1_2 [lt(%ep_row_3_1_2, %row_count)] : index
+      view.store %ep_v_3_1_2, %ep_output_view3[%ep_bounded_3_1_2] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_1_3 = vector.extract %ep_acc_3_1[3] : vector<8xf32> -> f32
+    %ep_live_3_1_3 = index.cmp ult, %ep_row_3_1_3, %row_count : index
+    scf.if %ep_live_3_1_3 {
+      %ep_bounded_3_1_3 = index.assume %ep_row_3_1_3 [lt(%ep_row_3_1_3, %row_count)] : index
+      view.store %ep_v_3_1_3, %ep_output_view3[%ep_bounded_3_1_3] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_1_4 = vector.extract %ep_acc_3_1[4] : vector<8xf32> -> f32
+    %ep_live_3_1_4 = index.cmp ult, %ep_row_3_1_4, %row_count : index
+    scf.if %ep_live_3_1_4 {
+      %ep_bounded_3_1_4 = index.assume %ep_row_3_1_4 [lt(%ep_row_3_1_4, %row_count)] : index
+      view.store %ep_v_3_1_4, %ep_output_view3[%ep_bounded_3_1_4] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_1_5 = vector.extract %ep_acc_3_1[5] : vector<8xf32> -> f32
+    %ep_live_3_1_5 = index.cmp ult, %ep_row_3_1_5, %row_count : index
+    scf.if %ep_live_3_1_5 {
+      %ep_bounded_3_1_5 = index.assume %ep_row_3_1_5 [lt(%ep_row_3_1_5, %row_count)] : index
+      view.store %ep_v_3_1_5, %ep_output_view3[%ep_bounded_3_1_5] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_1_6 = vector.extract %ep_acc_3_1[6] : vector<8xf32> -> f32
+    %ep_live_3_1_6 = index.cmp ult, %ep_row_3_1_6, %row_count : index
+    scf.if %ep_live_3_1_6 {
+      %ep_bounded_3_1_6 = index.assume %ep_row_3_1_6 [lt(%ep_row_3_1_6, %row_count)] : index
+      view.store %ep_v_3_1_6, %ep_output_view3[%ep_bounded_3_1_6] : f32, view<[%row_count]xf32>
+    }
+    %ep_v_3_1_7 = vector.extract %ep_acc_3_1[7] : vector<8xf32> -> f32
+    %ep_live_3_1_7 = index.cmp ult, %ep_row_3_1_7, %row_count : index
+    scf.if %ep_live_3_1_7 {
+      %ep_bounded_3_1_7 = index.assume %ep_row_3_1_7 [lt(%ep_row_3_1_7, %row_count)] : index
+      view.store %ep_v_3_1_7, %ep_output_view3[%ep_bounded_3_1_7] : f32, view<[%row_count]xf32>
+    }
+  }
+  kernel.return
+}
+
+check.case public @qwen_q8_0_gemm_i8_blocked_k17408_t128_case {
+  %rows = check.param.choice values([5120]) name("rows") : index
+  %tokens = check.param.choice values([128]) name("tokens") : index
+  // f16(2.0) is [0, 64] little-endian, so each Q8 block has scale 2.0 and
+  // payload bytes alternating 0 and 64.
+  %weight = check.generate.fill value(2.0) : tensor<[%rows]x9248xf16>
+  %act = check.generate.fill value(2) : tensor<8x544x16x32xi8>
+  %scales = check.generate.fill value(1.0) : tensor<8x544x16xf32>
+  %output = check.generate.fill value(0.0) : tensor<128x[%rows]xf32>
+  %expected = check.generate.fill value(2228224.0) : tensor<128x[%rows]xf32>
+  kernel.launch @qwen_q8_0_gemm_i8_blocked_k17408_t128[%rows, %tokens](%rows, %tokens, %weight, %act, %scales, %output) : [index, index](index, index, tensor<[%rows]x9248xf16>, tensor<8x544x16x32xi8>, tensor<8x544x16xf32>, tensor<128x[%rows]xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<128x[%rows]xf32>
+  check.return
+}
+
+check.benchmark<@qwen_q8_0_gemm_i8_blocked_k17408_t128_case> @qwen_q8_0_gemm_i8_blocked_k17408_t128_benchmark

@@ -27,6 +27,7 @@ void TestDefaultOptions() {
   Expect(options->min_draft_tokens == 1, "default minimum draft is one");
   Expect(options->draft_p_min == 0.0F,
          "default draft confidence threshold is disabled");
+  Expect(options->qwen_backend == "hip", "default Qwen backend is HIP");
 }
 
 void TestDepthOptions() {
@@ -72,6 +73,33 @@ void TestHybridMtpOptions() {
          "draft confidence threshold parsed");
 }
 
+void TestNativeHrxBackendOption() {
+  const std::array<const char*, 2> args = {"--qwen-backend", "hrx-native"};
+  const auto options = gufo::cli::ParseBenchOptions(args);
+  Expect(options.has_value(), "native HRX backend option parses");
+  Expect(options->qwen_backend == "hrx-native",
+         "native HRX backend option is retained");
+}
+
+void TestNativeHrxValidationOption() {
+  const std::array<const char*, 4> args = {"--qwen-backend", "hrx-native",
+                                           "--validate-hrx", "3"};
+  const auto options = gufo::cli::ParseBenchOptions(args);
+  Expect(options.has_value(), "native HRX validation option parses");
+  Expect(options->validate_hrx_tokens == 3,
+         "native HRX validation token count is retained");
+
+  std::string error;
+  const std::array<const char*, 2> missing_backend = {"--validate-hrx", "3"};
+  Expect(!gufo::cli::ParseBenchOptions(missing_backend, &error).has_value(),
+         "native HRX validation rejects the HIP-only package route");
+
+  const std::array<const char*, 4> zero_tokens = {
+      "--qwen-backend", "hrx-native", "--validate-hrx", "0"};
+  Expect(!gufo::cli::ParseBenchOptions(zero_tokens, &error).has_value(),
+         "native HRX validation rejects zero decode tokens");
+}
+
 void TestInvalidDepth() {
   std::string error;
   const std::array<const char*, 2> args = {"--n-depth", "invalid"};
@@ -92,6 +120,10 @@ void TestInvalidDepth() {
                                                        "1.1"};
   Expect(!gufo::cli::ParseBenchOptions(probability_args, &error).has_value(),
          "invalid draft confidence threshold rejected");
+
+  const std::array<const char*, 2> backend_args = {"--qwen-backend", "unknown"};
+  Expect(!gufo::cli::ParseBenchOptions(backend_args, &error).has_value(),
+         "invalid Qwen backend rejected");
 }
 
 }  // namespace
@@ -100,6 +132,8 @@ int main() {
   TestDefaultOptions();
   TestDepthOptions();
   TestHybridMtpOptions();
+  TestNativeHrxBackendOption();
+  TestNativeHrxValidationOption();
   TestInvalidDepth();
   std::cout << "All benchmark CLI tests passed.\n";
   return 0;

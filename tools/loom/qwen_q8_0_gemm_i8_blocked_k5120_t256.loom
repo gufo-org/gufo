@@ -1,0 +1,285 @@
+// Production-shaped blocked W8A8 prefill projection for gfx1151.
+//
+// One 256-thread workgroup computes 64 output rows x 256 tokens. The eight
+// wave32 subgroups form a 4-row x 2-token grid; each wave owns one 16-row
+// tile and eight 16-token tiles. This preserves the 64-result accumulator
+// footprint of the 128x128 kernel while reusing every weight block across
+// twice as many tokens.
+//
+// Every thread stages one token's 32-byte activation payload. Threads 0-63
+// also stage one output row's weight payload. The next round is prefetched
+// into registers before the current matrix work.
+//
+// weight : row-major Q8_0, 34 bytes per block (f16 scale then 32 i8)
+// act    : [token tile][K block][token in tile][32 i8]
+// scales : [token tile][K block][token in tile] f32
+// output : token-major f32, %tokens rows of %rows values
+
+amdgpu.target<gfx11-generic> @qwen_q8_blocked_k5120_t256_target {subgroup_size = 32}
+
+config.decl @qwen_q8_0_gemm_i8_blocked_k5120_t256.row_capacity : %value: index where [range(%value, 128, 248320), mul(%value, 128)]
+
+kernel.def target(@qwen_q8_blocked_k5120_t256_target) @qwen_q8_0_gemm_i8_blocked_k5120_t256(%rows: index, %tokens: index) {
+  %capacity = config.get @qwen_q8_0_gemm_i8_blocked_k5120_t256.row_capacity : index
+  %rows_per_group = index.constant 64 : index
+  %row_groups = index.div %capacity, %rows_per_group : index
+  %tokens_per_group = index.constant 256 : index
+  %token_group_rounding = index.constant 255 : index
+  %rounded_tokens = index.add %tokens, %token_group_rounding : index
+  %token_groups = index.div %rounded_tokens, %tokens_per_group : index
+  %one = index.constant 1 : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%token_groups, %row_groups, %one) workgroup_size(%workgroup_size, %one, %one) : index
+} launch(%rows: index, %tokens: index, %weight: buffer, %act: buffer, %scales: buffer, %output: buffer) {
+  %capacity = config.get @qwen_q8_0_gemm_i8_blocked_k5120_t256.row_capacity : index
+  // Rows need not fill the 128-row macro tile: staging clamps to the last
+  // live row and the epilogue guards every store, so shapes such as the
+  // 96-row SSM alpha/beta projection use the same artifact.
+  %row_count = index.assume %rows [range(%rows, 1, 248320), le(%rows, %capacity)] : index
+  %row_step = index.constant 1 : index
+  %last_row = index.sub %row_count, %row_step : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
+  %base = index.constant 0 : offset
+  %tid = kernel.workitem.id<x> : index
+  // The token-tile index is the fastest-varying grid dimension so the token
+  // tiles that share one row group's staged weights are co-resident and hit
+  // cache instead of each re-reading the panel from DRAM.
+  %token_group = kernel.workgroup.id<x> : index
+  %row_group = kernel.workgroup.id<y> : index
+  %wave_width = index.constant 32 : index
+  %wave = index.div %tid, %wave_width : index
+  %lane = index.rem %tid, %wave_width : index
+  %wave_token_groups = index.constant 2 : index
+  %wave_row = index.div %wave, %wave_token_groups : index
+  %wave_token = index.rem %wave, %wave_token_groups : index
+  %token_tile_extent = index.constant 16 : index
+  %token_tile_count = index.constant 16 : index
+  %token_tiles_per_wave = index.constant 8 : index
+  %tokens_per_group = index.constant 256 : index
+  %token_tiles_per_group = index.constant 16 : index
+  %token_group_base = index.mul %token_group, %tokens_per_group : index
+  %token_tile_group_base = index.mul %token_group, %token_tiles_per_group : index
+  %lane_token = index.rem %lane, %token_tile_extent : index
+  %row_parity = index.div %lane, %token_tile_extent : index
+  %rows_per_group = index.constant 64 : index
+  %row_base = index.mul %row_group, %rows_per_group : index
+  %block_count = index.constant 160 : index
+  %last_block = index.constant 159 : index
+  %row_bytes = index.constant 5440 : index
+  %q8_block_bytes = index.constant 34 : index
+  %payload_header_bytes = index.constant 2 : index
+  %block_payload = index.constant 32 : index
+  %loop_begin = index.constant 0 : index
+  %loop_step = index.constant 1 : index
+  %two = index.constant 2 : index
+  %one_byte = index.constant 1 : offset
+  %four_bytes = index.constant 4 : offset
+  %scratch_bytes = index.constant 11520 : offset
+  %act_scratch_offset = index.constant 2048 : offset
+  %weight_scale_scratch_offset = index.constant 10240 : offset
+  %act_scale_scratch_offset = index.constant 10496 : offset
+
+  %lhs_layout = encoding.layout.strided [32, 1] : encoding<layout>
+  %rhs_layout = encoding.layout.strided [1, 32] : encoding<layout>
+  %i8_schema = encoding.define #encoding.operand<element_format=i8, payload_elements=16, payload_registers=4> : encoding<schema>
+  %lhs_storage = encoding.define #encoding.storage {layout = %lhs_layout : encoding<layout>, schema = %i8_schema : encoding<schema>} : encoding<storage>
+  %rhs_storage = encoding.define #encoding.storage {layout = %rhs_layout : encoding<layout>, schema = %i8_schema : encoding<schema>} : encoding<storage>
+
+  %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
+  %weight_stage_store = buffer.view %scratch[%base] : buffer -> view<64x32xi8>
+  %weight_stage = buffer.view %scratch[%base] : buffer -> view<64x32xi8, %lhs_storage>
+  %act_stage_store = buffer.view %scratch[%act_scratch_offset] : buffer -> view<256x32xi8>
+  %act_stage = buffer.view %scratch[%act_scratch_offset] : buffer -> view<32x256xi8, %rhs_storage>
+  %weight_scale_stage = buffer.view %scratch[%weight_scale_scratch_offset] : buffer -> view<4x16xf32>
+  %act_scale_stage = buffer.view %scratch[%act_scale_scratch_offset] : buffer -> view<16x16xf32>
+  %act_payload = buffer.view %act[%base] : buffer -> view<128x160x16x32xi8>
+  %act_scale_input = buffer.view %scales[%base] : buffer -> view<128x160x16xf32>
+
+  // Every lane owns one activation token. The first 64 lanes also own one
+  // weight row; inactive lanes carry a zero prefetch value but never store it.
+  %stage_is_weight = index.cmp ult, %tid, %rows_per_group : index
+  %stage_row0 = index.add %row_base, %tid : index
+  %stage_row = index.min %stage_row0, %last_row : index
+  %stage_row_bytes = index.mul %stage_row, %row_bytes : index
+  %stage_payload_base = index.add %stage_row_bytes, %payload_header_bytes : index
+  %stage_act_tile_local = index.div %tid, %token_tile_extent : index
+  %stage_act_tile = index.add %token_tile_group_base, %stage_act_tile_local : index
+  %stage_act_lane = index.rem %tid, %token_tile_extent : index
+  %scale_row_tile = index.div %tid, %token_tile_extent : index
+  %scale_row_lane = index.rem %tid, %token_tile_extent : index
+  %scale_parity = index.rem %scale_row_lane, %two : index
+  %scale_pair = index.div %scale_row_lane, %two : index
+  %scale_parity_base = index.mul %scale_parity, %token_tiles_per_wave : index
+  %scale_physical = index.add %scale_parity_base, %scale_pair : index
+
+  %zero_accumulator = vector.constant 0.0 : vector<8xf32>
+  %initial_bank = vector.broadcast %zero_accumulator : vector<8xf32> -> vector<8x8xf32>
+  %zero_i32_elements = vector.constant 0 : vector<8xi32>
+
+  %zero_payload = vector.constant 0 : vector<32xi8>
+  %preload_weight = scf.if %stage_is_weight -> (vector<32xi8>) {
+    %offset = index.scale %stage_payload_base, %one_byte : index, offset -> offset
+    %view = buffer.view %weight[%offset] : buffer -> view<32xi8>
+    %values = vector.load %view[%loop_begin] : view<32xi8> -> vector<32xi8>
+    scf.yield %values : vector<32xi8>
+  } else {
+    scf.yield %zero_payload : vector<32xi8>
+  }
+  %preload_act = vector.load %act_payload[%stage_act_tile, %loop_begin, %stage_act_lane, %loop_begin] : view<128x160x16x32xi8> -> vector<32xi8>
+
+  %accumulators, %weight_tail, %act_tail = scf.for %block = [%loop_begin to %block_count step %loop_step](%bank = %initial_bank : vector<8x8xf32>, %staged_weight = %preload_weight : vector<32xi8>, %staged_act = %preload_act : vector<32xi8>) -> (vector<8x8xf32>, vector<32xi8>, vector<32xi8>) {
+    scf.if %stage_is_weight {
+      vector.store %staged_weight, %weight_stage_store[%tid, %loop_begin] : vector<32xi8>, view<64x32xi8>
+      %scale_block_bytes = index.mul %block, %q8_block_bytes : index
+      %scale_byte_index = index.add %stage_row_bytes, %scale_block_bytes : index
+      %scale_byte_offset = index.scale %scale_byte_index, %one_byte : index, offset -> offset
+      %scale_view = buffer.view %weight[%scale_byte_offset] : buffer -> view<1xf16>
+      %scale_f16 = view.load %scale_view[%loop_begin] : view<1xf16> -> f16
+      %weight_scale = scalar.extf %scale_f16 : f16 to f32
+      view.store %weight_scale, %weight_scale_stage[%scale_row_tile, %scale_physical] : f32, view<4x16xf32>
+    }
+    vector.store %staged_act, %act_stage_store[%tid, %loop_begin] : vector<32xi8>, view<256x32xi8>
+    %activation_scale = view.load %act_scale_input[%stage_act_tile, %block, %stage_act_lane] : view<128x160x16xf32> -> f32
+    view.store %activation_scale, %act_scale_stage[%stage_act_tile_local, %stage_act_lane] : f32, view<16x16xf32>
+
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+
+    %next_block0 = index.add %block, %loop_step : index
+    %next_block = index.min %next_block0, %last_block : index
+    %next_weight = scf.if %stage_is_weight -> (vector<32xi8>) {
+      %next_block_bytes = index.mul %next_block, %q8_block_bytes : index
+      %next_index = index.add %stage_payload_base, %next_block_bytes : index
+      %next_offset = index.scale %next_index, %one_byte : index, offset -> offset
+      %next_view = buffer.view %weight[%next_offset] : buffer -> view<32xi8>
+      %values = vector.load %next_view[%loop_begin] : view<32xi8> -> vector<32xi8>
+      scf.yield %values : vector<32xi8>
+    } else {
+      scf.yield %zero_payload : vector<32xi8>
+    }
+    %next_act = vector.load %act_payload[%stage_act_tile, %next_block, %stage_act_lane, %loop_begin] : view<128x160x16x32xi8> -> vector<32xi8>
+
+    %wave_row_origin = index.mul %wave_row, %token_tile_extent : index
+    %scale_vector_origin = index.mul %row_parity, %token_tiles_per_wave : index
+    %lhs_low = vector.fragment.load<lhs> %weight_stage[%wave_row_origin, %loop_begin] shape [%token_tile_extent, %token_tile_extent] : view<64x32xi8, %lhs_storage> -> vector<4xi32>
+    %lhs_high = vector.fragment.load<lhs> %weight_stage[%wave_row_origin, %token_tile_extent] shape [%token_tile_extent, %token_tile_extent] : view<64x32xi8, %lhs_storage> -> vector<4xi32>
+    %weight_scales = vector.load %weight_scale_stage[%wave_row, %scale_vector_origin] : view<4x16xf32> -> vector<8xf32>
+
+    %next_bank = scf.for %token_tile = [%loop_begin to %token_tiles_per_wave step %loop_step](%tile_bank = %bank : vector<8x8xf32>) -> (vector<8x8xf32>) unroll {
+      %wave_token_base = index.mul %wave_token, %token_tiles_per_wave : index
+      %physical_token_tile = index.add %wave_token_base, %token_tile : index
+      %rhs_token_origin = index.mul %physical_token_tile, %token_tile_extent : index
+      %rhs_low = vector.fragment.load<rhs> %act_stage[%loop_begin, %rhs_token_origin] shape [%token_tile_extent, %token_tile_extent] : view<32x256xi8, %rhs_storage> -> vector<4xi32>
+      %rhs_high = vector.fragment.load<rhs> %act_stage[%token_tile_extent, %rhs_token_origin] shape [%token_tile_extent, %token_tile_extent] : view<32x256xi8, %rhs_storage> -> vector<4xi32>
+      %zero_i32 = vector.fragment<init> %zero_i32_elements shape [%token_tile_extent, %token_tile_extent] : vector<8xi32>
+      %partial = vector.mma %lhs_low, %rhs_low, %zero_i32 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %product = vector.mma %lhs_high, %rhs_high, %partial : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %raw_f32 = vector.sitofp %product : vector<8xi32> to vector<8xf32>
+      %activation_scale = view.load %act_scale_stage[%physical_token_tile, %lane_token] : view<16x16xf32> -> f32
+      %activation_scales = vector.splat %activation_scale : vector<8xf32>
+      %scaled0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_f32, %activation_scales : vector<8xf32>
+      %scaled = vector.mulf<reassoc|nnan|ninf|nsz|contract> %scaled0, %weight_scales : vector<8xf32>
+      %running = vector.extract %tile_bank[%token_tile] : vector<8x8xf32> -> vector<8xf32>
+      %sum = vector.addf<reassoc|nnan|ninf|nsz> %running, %scaled : vector<8xf32>
+      %updated = vector.insert %sum into %tile_bank[%token_tile] : vector<8xf32>, vector<8x8xf32>
+      scf.yield %updated : vector<8x8xf32>
+    }
+
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    scf.yield %next_bank, %next_weight, %next_act : vector<8x8xf32>, vector<32xi8>, vector<32xi8>
+  }
+
+  // The GFX11 result carrier maps lane%16 to the token column, lane/16 to
+  // output-row parity, and the eight vector elements to every other row.
+  scf.for %token_tile = [%loop_begin to %token_tiles_per_wave step %loop_step] unroll {
+    %tile_accumulator = vector.extract %accumulators[%token_tile] : vector<8x8xf32> -> vector<8xf32>
+    %wave_token_base = index.mul %wave_token, %token_tiles_per_wave : index
+    %physical_token_tile = index.add %wave_token_base, %token_tile : index
+    %token_tile_base = index.mul %physical_token_tile, %token_tile_extent : index
+    %local_token = index.add %token_tile_base, %lane_token : index
+    %token = index.add %token_group_base, %local_token : index
+    %token_live = index.cmp ult, %token, %token_count : index
+    scf.if %token_live {
+      %wave_row_offset = index.mul %wave_row, %token_tile_extent : index
+      %first_row0 = index.add %row_base, %wave_row_offset : index
+      %first_row = index.add %first_row0, %row_parity : index
+      %row1 = index.add %first_row, %two : index
+      %row2 = index.add %row1, %two : index
+      %row3 = index.add %row2, %two : index
+      %row4 = index.add %row3, %two : index
+      %row5 = index.add %row4, %two : index
+      %row6 = index.add %row5, %two : index
+      %row7 = index.add %row6, %two : index
+      %row_live0 = index.cmp ult, %first_row, %row_count : index
+      %row_live1 = index.cmp ult, %row1, %row_count : index
+      %row_live2 = index.cmp ult, %row2, %row_count : index
+      %row_live3 = index.cmp ult, %row3, %row_count : index
+      %row_live4 = index.cmp ult, %row4, %row_count : index
+      %row_live5 = index.cmp ult, %row5, %row_count : index
+      %row_live6 = index.cmp ult, %row6, %row_count : index
+      %row_live7 = index.cmp ult, %row7, %row_count : index
+      %token_output_base = index.mul %token, %row_count : index
+      %token_output_offset = index.scale %token_output_base, %four_bytes : index, offset -> offset
+      %output_view = buffer.view %output[%token_output_offset] : buffer -> view<[%row_count]xf32>
+      %v0 = vector.extract %tile_accumulator[0] : vector<8xf32> -> f32
+      %v1 = vector.extract %tile_accumulator[1] : vector<8xf32> -> f32
+      %v2 = vector.extract %tile_accumulator[2] : vector<8xf32> -> f32
+      %v3 = vector.extract %tile_accumulator[3] : vector<8xf32> -> f32
+      %v4 = vector.extract %tile_accumulator[4] : vector<8xf32> -> f32
+      %v5 = vector.extract %tile_accumulator[5] : vector<8xf32> -> f32
+      %v6 = vector.extract %tile_accumulator[6] : vector<8xf32> -> f32
+      %v7 = vector.extract %tile_accumulator[7] : vector<8xf32> -> f32
+      scf.if %row_live0 {
+        %bounded_row0 = index.assume %first_row [lt(%first_row, %row_count)] : index
+        view.store %v0, %output_view[%bounded_row0] : f32, view<[%row_count]xf32>
+      }
+      scf.if %row_live1 {
+        %bounded_row1 = index.assume %row1 [lt(%row1, %row_count)] : index
+        view.store %v1, %output_view[%bounded_row1] : f32, view<[%row_count]xf32>
+      }
+      scf.if %row_live2 {
+        %bounded_row2 = index.assume %row2 [lt(%row2, %row_count)] : index
+        view.store %v2, %output_view[%bounded_row2] : f32, view<[%row_count]xf32>
+      }
+      scf.if %row_live3 {
+        %bounded_row3 = index.assume %row3 [lt(%row3, %row_count)] : index
+        view.store %v3, %output_view[%bounded_row3] : f32, view<[%row_count]xf32>
+      }
+      scf.if %row_live4 {
+        %bounded_row4 = index.assume %row4 [lt(%row4, %row_count)] : index
+        view.store %v4, %output_view[%bounded_row4] : f32, view<[%row_count]xf32>
+      }
+      scf.if %row_live5 {
+        %bounded_row5 = index.assume %row5 [lt(%row5, %row_count)] : index
+        view.store %v5, %output_view[%bounded_row5] : f32, view<[%row_count]xf32>
+      }
+      scf.if %row_live6 {
+        %bounded_row6 = index.assume %row6 [lt(%row6, %row_count)] : index
+        view.store %v6, %output_view[%bounded_row6] : f32, view<[%row_count]xf32>
+      }
+      scf.if %row_live7 {
+        %bounded_row7 = index.assume %row7 [lt(%row7, %row_count)] : index
+        view.store %v7, %output_view[%bounded_row7] : f32, view<[%row_count]xf32>
+      }
+    }
+  }
+  kernel.return
+}
+
+check.case public @qwen_q8_0_gemm_i8_blocked_k5120_t256_case {
+  %rows = check.param.choice values([5120]) name("rows") : index
+  %tokens = check.param.choice values([256]) name("tokens") : index
+  // f16(2.0) is [0, 64] little-endian, so each Q8 block has scale 2.0 and
+  // payload bytes alternating 0 and 64.
+  %weight = check.generate.fill value(2.0) : tensor<[%rows]x2720xf16>
+  %act = check.generate.fill value(2) : tensor<16x160x16x32xi8>
+  %scales = check.generate.fill value(1.0) : tensor<16x160x16xf32>
+  %output = check.generate.fill value(0.0) : tensor<256x[%rows]xf32>
+  %expected = check.generate.fill value(655360.0) : tensor<256x[%rows]xf32>
+  kernel.launch @qwen_q8_0_gemm_i8_blocked_k5120_t256[%rows, %tokens](%rows, %tokens, %weight, %act, %scales, %output) : [index, index](index, index, tensor<[%rows]x2720xf16>, tensor<16x160x16x32xi8>, tensor<16x160x16xf32>, tensor<256x[%rows]xf32>)
+  check.expect.close actual(%output) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<256x[%rows]xf32>
+  check.return
+}
+
+check.benchmark<@qwen_q8_0_gemm_i8_blocked_k5120_t256_case> @qwen_q8_0_gemm_i8_blocked_k5120_t256_benchmark
+
+

@@ -1,0 +1,53 @@
+// Quantizes a token-major f32 activation chunk into Q8_0-style int8 with
+// one f32 scale per 32-value block, which is the operand layout the int8
+// projection kernels consume. One workgroup handles one token row and
+// each workitem owns one block.
+
+config.decl @qwen_activation_quantize_k6144.token_capacity : %value: index where [range(%value, 1, 32)]
+
+kernel.def @qwen_activation_quantize_k6144(%tokens: index) {
+  %capacity = config.get @qwen_activation_quantize_k6144.token_capacity : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 192 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%tokens: index, %input: buffer, %output: buffer, %scales: buffer) {
+  %capacity = config.get @qwen_activation_quantize_k6144.token_capacity : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 32), le(%tokens, %capacity)] : index
+  %token = kernel.workgroup.id<x> : index
+  %block = kernel.workitem.id<x> : index
+  %token_in_bounds = index.cmp ult, %token, %token_count : index
+  scf.if %token_in_bounds {
+    %width = index.constant 6144 : index
+    %blocks_per_row = index.constant 192 : index
+    %vector_width = index.constant 32 : index
+    %four = index.constant 4 : offset
+    %one_byte = index.constant 1 : offset
+    %row_elements = index.mul %token, %width : index
+    %row_input_bytes = index.scale %row_elements, %four : index, offset -> offset
+    %row_output_bytes = index.scale %row_elements, %one_byte : index, offset -> offset
+    %row_scale_elements = index.mul %token, %blocks_per_row : index
+    %row_scale_bytes = index.scale %row_scale_elements, %four : index, offset -> offset
+    %input_view = buffer.view %input[%row_input_bytes] : buffer -> view<6144xf32>
+    %output_view = buffer.view %output[%row_output_bytes] : buffer -> view<6144xi8>
+    %scales_view = buffer.view %scales[%row_scale_bytes] : buffer -> view<192xf32>
+    %element_base0 = index.mul %block, %vector_width : index
+    %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %width)] : index
+    %values = vector.load %input_view[%element_base] : view<6144xf32> -> vector<32xf32>
+    %magnitudes = vector.absf %values : vector<32xf32>
+    %zero = scalar.constant 0.0 : f32
+    %amax = vector.reduce<maxnumf, reassoc|nnan|ninf|nsz> %magnitudes, %zero : vector<32xf32>, f32
+    %levels = scalar.constant 127.0 : f32
+    %scale = scalar.divf<reassoc|nnan|ninf|nsz> %amax, %levels : f32
+    %tiny = scalar.constant 0.00000001 : f32
+    %safe_scale = scalar.maxnumf %scale, %tiny : f32
+    %one = scalar.constant 1.0 : f32
+    %safe_inverse = scalar.divf<reassoc|nnan|ninf|nsz> %one, %safe_scale : f32
+    %inverse_vector = vector.splat %safe_inverse : vector<32xf32>
+    %scaled = vector.mulf<reassoc|nnan|ninf|nsz> %values, %inverse_vector : vector<32xf32>
+    %rounded = vector.roundevenf %scaled : vector<32xf32>
+    %quantized = vector.fptosi %rounded : vector<32xf32> to vector<32xi8>
+    vector.store %quantized, %output_view[%element_base] : vector<32xi8>, view<6144xi8>
+    view.store %safe_scale, %scales_view[%block] : f32, view<192xf32>
+  }
+  kernel.return
+}

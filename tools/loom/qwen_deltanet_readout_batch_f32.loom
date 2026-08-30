@@ -1,0 +1,62 @@
+// Finishes a batched DeltaNet chunk: RMS-normalizes each head's readout row
+// vector, applies the per-value-dimension norm weight, and multiplies by the
+// SiLU gate. One workgroup handles one (token, head) pair.
+//
+// readout : token-major scratch from qwen_deltanet_recurrence_batch_f32
+// norm    : 128 f32 per-value-dimension weights
+// gate    : token-major gate projection, %tokens rows of 6144 f32
+// output  : token-major result, %tokens rows of 6144 f32
+
+config.decl @qwen_deltanet_readout_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
+
+kernel.def @qwen_deltanet_readout_batch_f32(%tokens: index) {
+  %capacity = config.get @qwen_deltanet_readout_batch_f32.token_capacity : index
+  %heads = index.constant 48 : index
+  %groups = index.mul %capacity, %heads : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 128 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%tokens: index, %readout: buffer, %norm: buffer, %gate: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_deltanet_readout_batch_f32.token_capacity : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048), le(%tokens, %capacity)] : index
+  %group = kernel.workgroup.id<x> : index
+  %row = kernel.workitem.id<x> : index
+  %heads = index.constant 48 : index
+  %dim = index.constant 128 : index
+  %width = index.constant 6144 : index
+  %token = index.div %group, %heads : index
+  %token_in_bounds = index.cmp ult, %token, %token_count : index
+  scf.if %token_in_bounds {
+    %head = index.rem %group, %heads : index
+    %token_base = index.mul %token, %width : index
+    %head_base = index.mul %head, %dim : index
+    %element_base = index.add %token_base, %head_base : index
+    %element = index.add %element_base, %row : index
+    %readout_view = buffer.view %readout[%base] : buffer -> view<12582912xf32>
+    %norm_view = buffer.view %norm[%base] : buffer -> view<128xf32>
+    %gate_view = buffer.view %gate[%base] : buffer -> view<12582912xf32>
+    %output_view = buffer.view %output[%base] : buffer -> view<12582912xf32>
+    %value = view.load %readout_view[%element] : view<12582912xf32> -> f32
+    %value_sq = scalar.mulf<reassoc|nnan|ninf|nsz> %value, %value : f32
+    %sum = kernel.workgroup.reduce<addf> %value_sq : f32
+    %val_width = scalar.constant 128.0 : f32
+    %epsilon = scalar.constant 0.000001 : f32
+    %mean = scalar.divf<reassoc|nnan|ninf|nsz> %sum, %val_width : f32
+    %variance = scalar.addf<reassoc|nnan|ninf|nsz> %mean, %epsilon : f32
+    %inverse = scalar.rsqrtf<afn> %variance : f32
+    %norm_weight = view.load %norm_view[%row] : view<128xf32> -> f32
+    %gate_value = view.load %gate_view[%element] : view<12582912xf32> -> f32
+    %negative_gate = scalar.negf %gate_value : f32
+    %gate_exp = scalar.expf<afn> %negative_gate : f32
+    %one = scalar.constant 1.0 : f32
+    %denominator = scalar.addf<reassoc|nnan|ninf|nsz> %one, %gate_exp : f32
+    %sigmoid = scalar.divf<reassoc|nnan|ninf|nsz> %one, %denominator : f32
+    %silu_gate = scalar.mulf<reassoc|nnan|ninf|nsz> %gate_value, %sigmoid : f32
+    %normed = scalar.mulf<reassoc|nnan|ninf|nsz> %value, %inverse : f32
+    %weighted = scalar.mulf<reassoc|nnan|ninf|nsz> %normed, %norm_weight : f32
+    %result = scalar.mulf<reassoc|nnan|ninf|nsz> %weighted, %silu_gate : f32
+    view.store %result, %output_view[%element] : f32, view<12582912xf32>
+  }
+  kernel.return
+}

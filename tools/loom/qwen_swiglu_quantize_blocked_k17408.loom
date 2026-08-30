@@ -1,0 +1,80 @@
+// Fused SwiGLU + blocked activation quantization for the Qwen3.8 FFN.
+//
+// The unfused route writes SiLU(gate)*up as f32 (2048 x 17408 = 143 MiB per
+// layer) and the blocked quantizer immediately reads it back. Nothing else
+// consumes that buffer on the blocked W8A8 route, so the round trip is pure
+// traffic. This kernel reads the interleaved gate/up projection output once
+// and writes only the int8 payload and its per-block scales.
+//
+// The arithmetic is the unfused sequence op for op, in the same order and
+// with the same fast-math flags, so the quantized payload is bit-identical.
+//
+// pairs  : [token][2 x 17408] f32, gate half first
+// output : [token tile][K block][token in tile][32 int8]
+// scales : [token tile][K block][token in tile] f32
+
+config.decl @qwen_swiglu_quantize_blocked_k17408.token_capacity : %value: index where [range(%value, 1, 2048)]
+
+kernel.def @qwen_swiglu_quantize_blocked_k17408(%tokens: index) {
+  %tile = index.constant 128 : index
+  %rounding = index.constant 127 : index
+  %rounded = index.add %tokens, %rounding : index
+  %groups = index.div %rounded, %tile : index
+  %capacity = index.mul %groups, %tile : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 544 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%tokens: index, %pairs: buffer, %output: buffer, %scales: buffer) {
+  %base = index.constant 0 : offset
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
+  %token = kernel.workgroup.id<x> : index
+  %block = kernel.workitem.id<x> : index
+  %width = index.constant 17408 : index
+  %pair_width = index.constant 34816 : index
+  %vector_width = index.constant 32 : index
+  %token_tile_extent = index.constant 16 : index
+  %four = index.constant 4 : offset
+  %loop_begin = index.constant 0 : index
+  %tile = index.div %token, %token_tile_extent : index
+  %tile_lane = index.rem %token, %token_tile_extent : index
+  %payload = buffer.view %output[%base] : buffer -> view<128x544x16x32xi8>
+  %scale_view = buffer.view %scales[%base] : buffer -> view<128x544x16xf32>
+  %element_base0 = index.mul %block, %vector_width : index
+  %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %width)] : index
+  %token_live = index.cmp ult, %token, %token_count : index
+  scf.if %token_live {
+    %row_elements = index.mul %token, %pair_width : index
+    %row_bytes = index.scale %row_elements, %four : index, offset -> offset
+    %pairs_view = buffer.view %pairs[%row_bytes] : buffer -> view<34816xf32>
+    %up_base = index.add %element_base, %width : index
+    %gate = vector.load %pairs_view[%element_base] : view<34816xf32> -> vector<32xf32>
+    %up = vector.load %pairs_view[%up_base] : view<34816xf32> -> vector<32xf32>
+    %negative = vector.negf %gate : vector<32xf32>
+    %exponent = vector.expf<afn> %negative : vector<32xf32>
+    %ones = vector.constant 1.0 : vector<32xf32>
+    %denominator = vector.addf<reassoc|nnan|ninf|nsz> %ones, %exponent : vector<32xf32>
+    %silu = vector.divf<reassoc|nnan|ninf|nsz> %gate, %denominator : vector<32xf32>
+    %values = vector.mulf<reassoc|nnan|ninf|nsz> %silu, %up : vector<32xf32>
+    %magnitudes = vector.absf %values : vector<32xf32>
+    %zero = scalar.constant 0.0 : f32
+    %amax = vector.reduce<maxnumf, reassoc|nnan|ninf|nsz> %magnitudes, %zero : vector<32xf32>, f32
+    %levels = scalar.constant 127.0 : f32
+    %scale = scalar.divf<reassoc|nnan|ninf|nsz> %amax, %levels : f32
+    %tiny = scalar.constant 0.00000001 : f32
+    %safe_scale = scalar.maxnumf %scale, %tiny : f32
+    %one = scalar.constant 1.0 : f32
+    %inverse = scalar.divf<reassoc|nnan|ninf|nsz> %one, %safe_scale : f32
+    %inverse_vector = vector.splat %inverse : vector<32xf32>
+    %scaled = vector.mulf<reassoc|nnan|ninf|nsz> %values, %inverse_vector : vector<32xf32>
+    %quantized_f = vector.roundevenf %scaled : vector<32xf32>
+    %quantized = vector.fptosi %quantized_f : vector<32xf32> to vector<32xi8>
+    vector.store %quantized, %payload[%tile, %block, %tile_lane, %loop_begin] : vector<32xi8>, view<128x544x16x32xi8>
+    view.store %safe_scale, %scale_view[%tile, %block, %tile_lane] : f32, view<128x544x16xf32>
+  } else {
+    %zero_payload = vector.constant 0 : vector<32xi8>
+    %zero_scale = scalar.constant 0.0 : f32
+    vector.store %zero_payload, %payload[%tile, %block, %tile_lane, %loop_begin] : vector<32xi8>, view<128x544x16x32xi8>
+    view.store %zero_scale, %scale_view[%tile, %block, %tile_lane] : f32, view<128x544x16xf32>
+  }
+  kernel.return
+}

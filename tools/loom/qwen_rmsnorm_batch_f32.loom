@@ -1,0 +1,50 @@
+// Qwen3.8 native primitive: F32 RMSNorm over a token-major chunk.
+// One workgroup normalizes one 5120-wide token row, so a whole prefill chunk
+// costs a single dispatch instead of one dispatch per token.
+
+config.decl @qwen_rmsnorm_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
+
+kernel.def @qwen_rmsnorm_batch_f32(%tokens: index) {
+  %capacity = config.get @qwen_rmsnorm_batch_f32.token_capacity : index
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 160 : index
+  kernel.launch.config workgroups(%capacity, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%tokens: index, %input: buffer, %gamma: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = config.get @qwen_rmsnorm_batch_f32.token_capacity : index
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048), le(%tokens, %capacity)] : index
+  %token = kernel.workgroup.id<x> : index
+  %token_in_bounds = index.cmp ult, %token, %token_count : index
+  scf.if %token_in_bounds {
+    %hidden = index.constant 5120 : index
+    %four = index.constant 4 : offset
+    %row_elements = index.mul %token, %hidden : index
+    %row_bytes = index.scale %row_elements, %four : index, offset -> offset
+    %lane = kernel.workitem.id<x> : index
+    %vector_width = index.constant 32 : index
+    %element_base0 = index.mul %lane, %vector_width : index
+    %element_base = index.assume %element_base0 [mul(%element_base0, 32), lt(%element_base0, %hidden)] : index
+
+    %input_noalias, %gamma_noalias, %output_noalias = buffer.assume.noalias %input, %gamma, %output : buffer, buffer, buffer
+    %input_view = buffer.view %input_noalias[%row_bytes] : buffer -> view<5120xf32>
+    %gamma_view = buffer.view %gamma_noalias[%base] : buffer -> view<5120xf32>
+    %output_view = buffer.view %output_noalias[%row_bytes] : buffer -> view<5120xf32>
+
+    %x = vector.load %input_view[%element_base] : view<5120xf32> -> vector<32xf32>
+    %g = vector.load %gamma_view[%element_base] : view<5120xf32> -> vector<32xf32>
+    %square = vector.mulf<reassoc|nnan|ninf|nsz> %x, %x : vector<32xf32>
+    %zero = scalar.constant 0.0 : f32
+    %local_sum = vector.reduce<addf, reassoc|nnan|ninf|nsz> %square, %zero : vector<32xf32>, f32
+    %sum = kernel.workgroup.reduce<addf> %local_sum : f32
+    %width = scalar.constant 5120.0 : f32
+    %epsilon = scalar.constant 0.000001 : f32
+    %mean = scalar.divf<reassoc|nnan|ninf|nsz> %sum, %width : f32
+    %variance = scalar.addf<reassoc|nnan|ninf|nsz> %mean, %epsilon : f32
+    %inverse_rms = scalar.rsqrtf<afn> %variance : f32
+    %scale = vector.splat %inverse_rms : vector<32xf32>
+    %normalized = vector.mulf<reassoc|nnan|ninf|nsz> %x, %scale : vector<32xf32>
+    %result = vector.mulf<reassoc|nnan|ninf|nsz> %normalized, %g : vector<32xf32>
+    vector.store %result, %output_view[%element_base] : vector<32xf32>, view<5120xf32>
+  }
+  kernel.return
+}

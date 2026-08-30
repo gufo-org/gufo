@@ -1,0 +1,77 @@
+// Deterministic first-wins greedy argmax over the Qwen3.8 vocabulary.
+// One workgroup of 256 lanes strides the logits, then reduces through LDS.
+// Ties resolve to the lowest index at both levels: each lane keeps a strictly
+// better candidate only, and the final pass takes the max score first and the
+// smallest index attaining it second, so lane order never decides a tie.
+
+kernel.def @qwen_argmax_f32(%elements: index) {
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 256 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%elements: index, %logits: buffer, %token: buffer) {
+  %base = index.constant 0 : offset
+  %count = index.assume %elements [range(%elements, 248320, 248320)] : index
+  %logits_view = buffer.view %logits[%base] : buffer -> view<248320xf32>
+  %token_view = buffer.view %token[%base] : buffer -> view<1xi32>
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %lanes = index.constant 256 : index
+  %lane = kernel.workitem.id<x> : index
+
+  %scratch_bytes = index.constant 2048 : offset
+  %index_scratch_offset = index.constant 1024 : offset
+  %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
+  %score_store = buffer.view %scratch[%base] : buffer -> view<256xf32>
+  %index_store = buffer.view %scratch[%index_scratch_offset] : buffer -> view<256xi32>
+
+  %lane_first = view.load %logits_view[%lane] : view<248320xf32> -> f32
+  %lane_start = index.add %lane, %lanes : index
+  %lane_score, %lane_index = scf.for %i = [%lane_start to %count step %lanes](%score = %lane_first : f32, %index = %lane : index) -> (f32, index) {
+    %candidate = view.load %logits_view[%i] : view<248320xf32> -> f32
+    %better = scalar.cmpf olt, %score, %candidate : f32
+    %next_score = scf.select %better, %candidate, %score : f32
+    %next_index = scf.select %better, %i, %index : index
+    scf.yield %next_score, %next_index : f32, index
+  }
+  %lane_index_i32 = index.cast %lane_index : index to i32
+  view.store %lane_score, %score_store[%lane] : f32, view<256xf32>
+  view.store %lane_index_i32, %index_store[%lane] : i32, view<256xi32>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+
+  %is_leader = index.cmp eq, %lane, %zero : index
+  scf.if %is_leader {
+    %head_score = view.load %score_store[%zero] : view<256xf32> -> f32
+    %best_score = scf.for %j = [%one to %lanes step %one](%score = %head_score : f32) -> (f32) {
+      %candidate = view.load %score_store[%j] : view<256xf32> -> f32
+      %better = scalar.cmpf olt, %score, %candidate : f32
+      %next_score = scf.select %better, %candidate, %score : f32
+      scf.yield %next_score : f32
+    }
+    // Second pass rather than a combined predicate: taking the smallest index
+    // among the lanes that hold the winning score keeps first-wins without
+    // needing to and two conditions together.
+    %best_index = scf.for %j = [%zero to %lanes step %one](%index = %count : index) -> (index) {
+      %candidate_score = view.load %score_store[%j] : view<256xf32> -> f32
+      %matches = scalar.cmpf oeq, %candidate_score, %best_score : f32
+      %candidate_i32 = view.load %index_store[%j] : view<256xi32> -> i32
+      %candidate_index = index.cast %candidate_i32 : i32 to index
+      %eligible = scf.select %matches, %candidate_index, %count : index
+      %smaller = index.cmp ult, %eligible, %index : index
+      %next_index = scf.select %smaller, %eligible, %index : index
+      scf.yield %next_index : index
+    }
+    %token_i32 = index.cast %best_index : index to i32
+    view.store %token_i32, %token_view[0] : i32, view<1xi32>
+  }
+  kernel.return
+}
+
+check.case public @qwen_argmax_f32_case {
+  %elements = check.param.choice values([248320]) name("elements") : index
+  %logits = check.generate.fill value(0.0) : tensor<248320xf32>
+  %token = check.generate.fill value(-1) : tensor<1xi32>
+  %expected = check.generate.fill value(0) : tensor<1xi32>
+  kernel.launch @qwen_argmax_f32[%elements](%elements, %logits, %token) : [index](index, tensor<248320xf32>, tensor<1xi32>)
+  check.expect.equal actual(%token) expected(%expected) : tensor<1xi32>
+  check.return
+}

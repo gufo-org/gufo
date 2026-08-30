@@ -91,9 +91,21 @@ differently.
 | Large dense batched verification | NPU or split |
 | Small speculative verification | GPU |
 | Batched draft/MTP heads | NPU candidate |
+| **DFlash-2 Block Diffusion Drafter** | **NPU (XDNA2 via XRT unified DMA)** |
 | MoE populated expert groups | Expert parallel |
 | Sampling and grammar | GPU/CPU contract |
 | Disk persistence | Background CPU and copy queue |
+
+### Heterogeneous Speculative Drafting: DFlash-2 on XDNA2 NPU
+
+In standard speculative decoding on Strix Halo, running both the target model (e.g. Qwen3.8-27B) and the draft model on the GPU causes contention for the unified 270 GB/s DRAM bus. Offloading the **DFlash-2 non-causal block diffusion drafter to the 50 TOPS XDNA2 NPU** resolves this bottleneck:
+
+1. **Zero-Copy Feature Priming**:
+   The GPU writes multi-layer feature representations (e.g., hidden states tapped at layers 16, 32, 48, 64) directly into an `xrt::bo` unified DMA buffer accessible by the NPU.
+2. **Concurrent Block Prediction**:
+   While the GPU processes prompt prefill or verifies prior tokens, the XDNA2 NPU executes parallel diffusion iterations on its dedicated compute array, generating a $K$-token draft proposal block (typically 5–7 tokens) in a single non-causal forward pass.
+3. **Parallel Verification**:
+   The GPU ingests the proposed draft block from the shared DMA buffer and verifies all $K$ tokens in parallel in a single matrix-vector pass.
 
 ## Tensor Parallel Routes
 

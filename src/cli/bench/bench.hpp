@@ -18,7 +18,10 @@ struct BenchOptions {
   std::vector<std::size_t> n_depths{0};
   std::size_t repetitions{1};
   std::size_t validate_prefill_tokens{0};
+  std::size_t validate_hrx_tokens{0};
   int n_gpu_layers{99};
+  std::string qwen_backend{"hip"};
+  std::string hrx_fusions{"none"};
   std::string speculative_backend{""};
   std::string mtp_model_path;
   std::string dflash_model_path;

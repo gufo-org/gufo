@@ -1,0 +1,140 @@
+// ============================================================================
+// Qwen3.8-27B RoPE + GQA KV-cache store across a whole prefill tile.
+// One workgroup handles one (token, head) pair and writes the cache row for
+// that token's absolute position, so a layer costs one dispatch instead of one
+// per token. Queries, keys and values are token-major; the cosine/sine tables
+// and both caches are position-major.
+// Q: 24 heads x 256, K/V: 4 heads x 256, rotary dimension: 64
+// Q is rotated in place. Rotated K and unchanged V are written to the cache.
+// ============================================================================
+
+config.decl @qwen_rope_kv_cache_batch_f32.max_heads : %value: index where [range(%value, 1, 24)]
+config.decl @qwen_rope_kv_cache_batch_f32.token_capacity : %value: index where [range(%value, 1, 2048)]
+
+kernel.def @qwen_rope_kv_cache_batch_f32(%q_heads: index, %start_position: index, %tokens: index) {
+  %unit = index.constant 1 : index
+  %max_heads = config.get @qwen_rope_kv_cache_batch_f32.max_heads : index
+  %tokens_capacity = config.get @qwen_rope_kv_cache_batch_f32.token_capacity : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%max_heads, %tokens_capacity, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%q_heads: index, %start_position: index, %tokens: index, %q: buffer, %k: buffer, %v: buffer, %cos: buffer, %sin: buffer, %k_cache: buffer, %v_cache: buffer) {
+  %base = index.constant 0 : offset
+  %max_heads = config.get @qwen_rope_kv_cache_batch_f32.max_heads : index
+  %q_head_count = index.assume %q_heads [range(%q_heads, 1, 24), le(%q_heads, %max_heads)] : index
+  %kv_head_count = index.constant 4 : index
+  %head_idx = kernel.workgroup.id<x> : index
+  %token = kernel.workgroup.id<y> : index
+  %lane = kernel.workitem.id<x> : index
+  %start = index.assume %start_position [range(%start_position, 0, 131071)] : index
+  %position = index.add %start, %token : index
+  %four_bytes = index.constant 4 : offset
+  %query_width = index.constant 6144 : index
+  %kv_width = index.constant 1024 : index
+  %rotary_half = index.constant 32 : index
+  %query_token_elements = index.mul %token, %query_width : index
+  %query_token_bytes = index.scale %query_token_elements, %four_bytes : index, offset -> offset
+  %kv_token_elements = index.mul %token, %kv_width : index
+  %kv_token_bytes = index.scale %kv_token_elements, %four_bytes : index, offset -> offset
+  %rope_elements = index.mul %position, %rotary_half : index
+  %rope_bytes = index.scale %rope_elements, %four_bytes : index, offset -> offset
+  %cache_elements = index.mul %position, %kv_width : index
+  %cache_bytes = index.scale %cache_elements, %four_bytes : index, offset -> offset
+  %half_rotary = index.constant 32 : index
+  %i32 = index.add %lane, %half_rotary : index
+  %offset64 = index.constant 64 : index
+  %offset96 = index.constant 96 : index
+  %offset128 = index.constant 128 : index
+  %offset160 = index.constant 160 : index
+  %offset192 = index.constant 192 : index
+  %offset224 = index.constant 224 : index
+  %i64 = index.add %lane, %offset64 : index
+  %i96 = index.add %lane, %offset96 : index
+  %i128 = index.add %lane, %offset128 : index
+  %i160 = index.add %lane, %offset160 : index
+  %i192 = index.add %lane, %offset192 : index
+  %i224 = index.add %lane, %offset224 : index
+
+  %token_count = index.assume %tokens [range(%tokens, 1, 2048)] : index
+  // The x grid is launched with exactly %q_heads workgroups, so only the
+  // physical token dimension can exceed its logical bound.
+  %q_in_bounds = index.cmp ult, %token, %token_count : index
+  scf.if %q_in_bounds {
+    %bounded_q_head = index.assume %head_idx [lt(%head_idx, %q_head_count)] : index
+    %bounded_i = index.assume %lane [range(%lane, 0, 32)] : index
+    %bounded_i32 = index.assume %i32 [range(%i32, 32, 64)] : index
+    %bounded_i64 = index.assume %i64 [range(%i64, 64, 96)] : index
+    %bounded_i96 = index.assume %i96 [range(%i96, 96, 128)] : index
+    %bounded_i128 = index.assume %i128 [range(%i128, 128, 160)] : index
+    %bounded_i160 = index.assume %i160 [range(%i160, 160, 192)] : index
+    %bounded_i192 = index.assume %i192 [range(%i192, 192, 224)] : index
+    %bounded_i224 = index.assume %i224 [range(%i224, 224, 256)] : index
+
+    %q_noalias, %k_noalias, %v_noalias, %cos_noalias, %sin_noalias, %kc_noalias, %vc_noalias = buffer.assume.noalias %q, %k, %v, %cos, %sin, %k_cache, %v_cache : buffer, buffer, buffer, buffer, buffer, buffer, buffer
+    %q_view = buffer.view %q_noalias[%query_token_bytes] : buffer -> view<[%q_head_count]x256xf32>
+    %k_view = buffer.view %k_noalias[%kv_token_bytes] : buffer -> view<[%kv_head_count]x256xf32>
+    %v_view = buffer.view %v_noalias[%kv_token_bytes] : buffer -> view<[%kv_head_count]x256xf32>
+    %cos_view = buffer.view %cos_noalias[%rope_bytes] : buffer -> view<32xf32>
+    %sin_view = buffer.view %sin_noalias[%rope_bytes] : buffer -> view<32xf32>
+    %kc_view = buffer.view %kc_noalias[%cache_bytes] : buffer -> view<[%kv_head_count]x256xf32>
+    %vc_view = buffer.view %vc_noalias[%cache_bytes] : buffer -> view<[%kv_head_count]x256xf32>
+
+    %c = view.load %cos_view[%bounded_i] : view<32xf32> -> f32
+    %s = view.load %sin_view[%bounded_i] : view<32xf32> -> f32
+    %q0 = view.load %q_view[%bounded_q_head, %bounded_i] : view<[%q_head_count]x256xf32> -> f32
+    %q1 = view.load %q_view[%bounded_q_head, %bounded_i32] : view<[%q_head_count]x256xf32> -> f32
+    %q0c = scalar.mulf<reassoc|nnan|ninf|nsz> %q0, %c : f32
+    %q1s = scalar.mulf<reassoc|nnan|ninf|nsz> %q1, %s : f32
+    %q1c = scalar.mulf<reassoc|nnan|ninf|nsz> %q1, %c : f32
+    %q0s = scalar.mulf<reassoc|nnan|ninf|nsz> %q0, %s : f32
+    %q_rot0 = scalar.subf<reassoc|nnan|ninf|nsz> %q0c, %q1s : f32
+    %q_rot1 = scalar.addf<reassoc|nnan|ninf|nsz> %q1c, %q0s : f32
+    view.store %q_rot0, %q_view[%bounded_q_head, %bounded_i] : f32, view<[%q_head_count]x256xf32>
+    view.store %q_rot1, %q_view[%bounded_q_head, %bounded_i32] : f32, view<[%q_head_count]x256xf32>
+
+    %kv_in_bounds = index.cmp ult, %head_idx, %kv_head_count : index
+    scf.if %kv_in_bounds {
+      %bounded_kv_head = index.assume %head_idx [lt(%head_idx, %kv_head_count)] : index
+      %k0 = view.load %k_view[%bounded_kv_head, %bounded_i] : view<[%kv_head_count]x256xf32> -> f32
+      %k1 = view.load %k_view[%bounded_kv_head, %bounded_i32] : view<[%kv_head_count]x256xf32> -> f32
+      %k0c = scalar.mulf<reassoc|nnan|ninf|nsz> %k0, %c : f32
+      %k1s = scalar.mulf<reassoc|nnan|ninf|nsz> %k1, %s : f32
+      %k1c = scalar.mulf<reassoc|nnan|ninf|nsz> %k1, %c : f32
+      %k0s = scalar.mulf<reassoc|nnan|ninf|nsz> %k0, %s : f32
+      %k_rot0 = scalar.subf<reassoc|nnan|ninf|nsz> %k0c, %k1s : f32
+      %k_rot1 = scalar.addf<reassoc|nnan|ninf|nsz> %k1c, %k0s : f32
+      view.store %k_rot0, %kc_view[%bounded_kv_head, %bounded_i] : f32, view<[%kv_head_count]x256xf32>
+      view.store %k_rot1, %kc_view[%bounded_kv_head, %bounded_i32] : f32, view<[%kv_head_count]x256xf32>
+
+      %k64 = view.load %k_view[%bounded_kv_head, %bounded_i64] : view<[%kv_head_count]x256xf32> -> f32
+      %k96 = view.load %k_view[%bounded_kv_head, %bounded_i96] : view<[%kv_head_count]x256xf32> -> f32
+      %k128 = view.load %k_view[%bounded_kv_head, %bounded_i128] : view<[%kv_head_count]x256xf32> -> f32
+      %k160 = view.load %k_view[%bounded_kv_head, %bounded_i160] : view<[%kv_head_count]x256xf32> -> f32
+      %k192 = view.load %k_view[%bounded_kv_head, %bounded_i192] : view<[%kv_head_count]x256xf32> -> f32
+      %k224 = view.load %k_view[%bounded_kv_head, %bounded_i224] : view<[%kv_head_count]x256xf32> -> f32
+      view.store %k64, %kc_view[%bounded_kv_head, %bounded_i64] : f32, view<[%kv_head_count]x256xf32>
+      view.store %k96, %kc_view[%bounded_kv_head, %bounded_i96] : f32, view<[%kv_head_count]x256xf32>
+      view.store %k128, %kc_view[%bounded_kv_head, %bounded_i128] : f32, view<[%kv_head_count]x256xf32>
+      view.store %k160, %kc_view[%bounded_kv_head, %bounded_i160] : f32, view<[%kv_head_count]x256xf32>
+      view.store %k192, %kc_view[%bounded_kv_head, %bounded_i192] : f32, view<[%kv_head_count]x256xf32>
+      view.store %k224, %kc_view[%bounded_kv_head, %bounded_i224] : f32, view<[%kv_head_count]x256xf32>
+
+      %v0 = view.load %v_view[%bounded_kv_head, %bounded_i] : view<[%kv_head_count]x256xf32> -> f32
+      %v32 = view.load %v_view[%bounded_kv_head, %bounded_i32] : view<[%kv_head_count]x256xf32> -> f32
+      %v64 = view.load %v_view[%bounded_kv_head, %bounded_i64] : view<[%kv_head_count]x256xf32> -> f32
+      %v96 = view.load %v_view[%bounded_kv_head, %bounded_i96] : view<[%kv_head_count]x256xf32> -> f32
+      %v128 = view.load %v_view[%bounded_kv_head, %bounded_i128] : view<[%kv_head_count]x256xf32> -> f32
+      %v160 = view.load %v_view[%bounded_kv_head, %bounded_i160] : view<[%kv_head_count]x256xf32> -> f32
+      %v192 = view.load %v_view[%bounded_kv_head, %bounded_i192] : view<[%kv_head_count]x256xf32> -> f32
+      %v224 = view.load %v_view[%bounded_kv_head, %bounded_i224] : view<[%kv_head_count]x256xf32> -> f32
+      view.store %v0, %vc_view[%bounded_kv_head, %bounded_i] : f32, view<[%kv_head_count]x256xf32>
+      view.store %v32, %vc_view[%bounded_kv_head, %bounded_i32] : f32, view<[%kv_head_count]x256xf32>
+      view.store %v64, %vc_view[%bounded_kv_head, %bounded_i64] : f32, view<[%kv_head_count]x256xf32>
+      view.store %v96, %vc_view[%bounded_kv_head, %bounded_i96] : f32, view<[%kv_head_count]x256xf32>
+      view.store %v128, %vc_view[%bounded_kv_head, %bounded_i128] : f32, view<[%kv_head_count]x256xf32>
+      view.store %v160, %vc_view[%bounded_kv_head, %bounded_i160] : f32, view<[%kv_head_count]x256xf32>
+      view.store %v192, %vc_view[%bounded_kv_head, %bounded_i192] : f32, view<[%kv_head_count]x256xf32>
+      view.store %v224, %vc_view[%bounded_kv_head, %bounded_i224] : f32, view<[%kv_head_count]x256xf32>
+    }
+  }
+  kernel.return
+}
