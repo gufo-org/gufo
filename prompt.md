@@ -240,9 +240,18 @@ revisions:
 jj new -m "perf(hrx): <change> (#200)"
 jj squash --from <rev> --into <rev> <paths>   # to split a mixed revision
 jj bookmark set main --revision <rev>
+jj bookmark set fedeizzo/hrx-integration --revision <rev>
 ```
 
-Do not push. Append findings to `task-on-going.md` as you get them — it is the
+**Move both bookmarks, not just `main`.** `fedeizzo/hrx-integration` is the
+branch this work is actually delivered on, and leaving it behind on an older
+revision is easy to miss because everything else looks finished. It has tracked
+`main` exactly so far, so the move is a fast-forward; check that before moving
+it, and if `jj log -r 'main..fedeizzo/hrx-integration'` is not empty, stop and
+ask rather than stranding whatever is only on that branch.
+
+Do not push. Both bookmarks track `@origin` and both are deliberately left
+behind it. Append findings to `task-on-going.md` as you get them — it is the
 only artifact that survives a context reset mid-session.
 
 **Rejection with evidence is a completed experiment**, and this codebase is
