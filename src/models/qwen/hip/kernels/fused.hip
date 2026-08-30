@@ -133,8 +133,10 @@ __launch_bounds__(256, 4) __global__ void FusedQKNormRoPEKvWriteKernel(
     const float k1_rot = (k0 * sin_val) + (k1 * cos_val);
     k_out[head_base + p] = k0_rot;
     k_out[head_base + p + half_rot] = k1_rot;
-    k_cache[kv_offset + p] = k0_rot;
-    k_cache[kv_offset + p + half_rot] = k1_rot;
+    if (k_cache != nullptr) {
+      k_cache[kv_offset + p] = k0_rot;
+      k_cache[kv_offset + p + half_rot] = k1_rot;
+    }
     if (k_cache_f16 != nullptr) {
       k_cache_f16[f16_offset + p] = __float2half_rn(k0_rot);
       k_cache_f16[f16_offset + p + half_rot] = __float2half_rn(k1_rot);
@@ -143,7 +145,9 @@ __launch_bounds__(256, 4) __global__ void FusedQKNormRoPEKvWriteKernel(
   for (std::size_t i = rotary_dim + tid; i < head_dim; i += blockDim.x) {
     const float key = s_norm[i];
     k_out[head_base + i] = key;
-    k_cache[kv_offset + i] = key;
+    if (k_cache != nullptr) {
+      k_cache[kv_offset + i] = key;
+    }
     if (k_cache_f16 != nullptr) {
       k_cache_f16[f16_offset + i] = __float2half_rn(key);
     }
@@ -151,7 +155,9 @@ __launch_bounds__(256, 4) __global__ void FusedQKNormRoPEKvWriteKernel(
 
   for (std::size_t i = tid; i < head_dim; i += blockDim.x) {
     const float val = v[head_base + i];
-    v_cache[kv_offset + i] = val;
+    if (v_cache != nullptr) {
+      v_cache[kv_offset + i] = val;
+    }
     if (v_cache_f16 != nullptr) {
       v_cache_f16[f16_offset + i] = __float2half_rn(val);
     }

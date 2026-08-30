@@ -9,8 +9,10 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
+#include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 
 namespace gufo::hip {
@@ -167,6 +169,30 @@ models::QwenTensorRef PackBlockMatrix(const models::QwenTensorRef& source,
   };
 }
 
+/// Builds the draft-private Q8_0 LM head. Halves the largest read in the draft
+/// graph; cannot affect an emitted token because the verifier keeps the BF16
+/// head.
+[[nodiscard]] models::QwenTensorRef QuantizeDraftHead(
+    const models::QwenTensorRef& source, std::vector<void*>& allocations,
+    std::size_t& packed_bytes) {
+  const std::size_t block_elements =
+      quant::QuantizedBlockElements(core::GgmlType::kQ8_0);
+  const std::size_t blocks = source.num_elements / block_elements;
+  const std::size_t total_bytes =
+      blocks * quant::QuantizedRowBytes(core::GgmlType::kQ8_0, block_elements);
+  void* device = detail::AllocateDevice(total_bytes);
+  allocations.push_back(device);
+  kernels::LaunchDFlashQuantizeBf16ToQ8_0(source.data, device,
+                                          source.num_elements, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  packed_bytes += total_bytes;
+  return {
+      .data = device,
+      .type = core::GgmlType::kQ8_0,
+      .num_elements = source.num_elements,
+  };
+}
+
 void PackDFlashWeights(speculative::QwenDFlashWeights& weights,
                        std::vector<void*>& allocations,
                        std::size_t& packed_bytes) {
@@ -318,6 +344,13 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     weights.output = target_model->GetWeights().output;
     if (weights.output_norm.empty()) {
       weights.output_norm = target_model->GetWeights().output_norm;
+    }
+    if (weights.output.type == core::GgmlType::kBF16 &&
+        weights.output.num_elements %
+                quant::QuantizedBlockElements(core::GgmlType::kQ8_0) ==
+            0) {
+      weights.output =
+          QuantizeDraftHead(weights.output, allocations, packed_bytes);
     }
 
     return std::shared_ptr<const QwenDFlashGpuModel>(new QwenDFlashGpuModel(

@@ -24,6 +24,7 @@ SPECULATIVE_RE = re.compile(
     r"\s+verification_steps=(?P<steps>\d+)"
 )
 CONTROLLED_ENV = {
+    "GUFO_BF16_SMALL_BATCH_EXACT_LDS8",
     "GUFO_DFLASH_GEMM",
     "GUFO_DFLASH_PREWARM",
     "GUFO_DFLASH_SELECTOR",
@@ -232,8 +233,8 @@ def main() -> int:
     parser.add_argument("--draft-tokens", type=int, default=7)
     parser.add_argument(
         "--draft-policy",
-        choices=("fixed", "rolling", "accepted-ema"),
-        default="rolling",
+        choices=("auto", "fixed", "rolling", "accepted-ema"),
+        default="auto",
     )
     parser.add_argument("--min-draft-tokens", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=1)

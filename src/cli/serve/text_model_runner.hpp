@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -13,10 +14,17 @@
 
 #include "src/cli/serve/continuation_cache.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
+#include "src/core/sampling.hpp"
 
 namespace gufo::server {
 
 using TextRunnerToken = ContinuationToken;
+
+struct TextRunnerDiskCacheOptions {
+  std::filesystem::path directory;
+  std::size_t capacity_bytes{0};
+  std::size_t staging_capacity_bytes{0};
+};
 
 enum class TextExecutionPlanKind : std::uint8_t {
   kSerial,
@@ -36,6 +44,21 @@ struct TextRunnerCapabilities {
   bool fork{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
+  bool multi_token_decode{false};
+  bool prefix_reuse{true};
+};
+
+/// Model-owned compatibility identity for restart-safe snapshots.
+///
+/// The bytes are canonical and opaque to serving code. They must cover every
+/// model, tokenizer, template, layout, precision, context-policy, and adapter
+/// property that can change restored continuation semantics. Executable
+/// revisions are intentionally excluded when they retain the same state ABI.
+struct TextRunnerPersistenceDescriptor {
+  std::vector<std::uint8_t> compatibility_identity;
+  std::uint32_t payload_version{0};
+
+  bool operator==(const TextRunnerPersistenceDescriptor&) const = default;
 };
 
 struct TextRunnerDescriptor {
@@ -43,6 +66,7 @@ struct TextRunnerDescriptor {
   std::string state_abi;
   std::uint32_t max_context{0};
   TextRunnerCapabilities capabilities;
+  std::optional<TextRunnerPersistenceDescriptor> persistence;
 };
 
 /// Optional byte claims made before state allocation.
@@ -55,6 +79,10 @@ struct TextRunnerResourceClaim {
   std::optional<std::size_t> state_capacity_bytes;
   std::optional<std::size_t> per_request_state_bytes;
   std::optional<std::size_t> temporary_scratch_bytes;
+  /// Aggregate bytes currently available for immutable retained snapshots.
+  ///
+  /// The pool queries this again after creating all mutable request states.
+  std::optional<std::size_t> retained_snapshot_capacity_bytes;
   bool requires_device_runtime_lock{false};
 };
 
@@ -72,6 +100,13 @@ struct TextDecodeSelection {
   bool stop{false};
   TextRunnerToken token{0};
   std::string piece;
+};
+
+struct TextDecodeStep {
+  std::vector<TextDecodeSelection> selections;
+  std::size_t draft_tokens{0};
+  std::size_t draft_accepted_tokens{0};
+  bool stop{false};
 };
 
 /// Model-private state driven only through TextModelRunner work units.
@@ -95,17 +130,15 @@ public:
 ///
 /// Common serving code may account for the payload but must not inspect or
 /// reinterpret its bytes.
-class TextRunnerSnapshot {
+class TextRunnerSnapshot : public ContinuationSnapshot {
 public:
   TextRunnerSnapshot() = default;
-  virtual ~TextRunnerSnapshot() = default;
+  ~TextRunnerSnapshot() override = default;
 
   TextRunnerSnapshot(const TextRunnerSnapshot&) = delete;
   TextRunnerSnapshot& operator=(const TextRunnerSnapshot&) = delete;
   TextRunnerSnapshot(TextRunnerSnapshot&&) = delete;
   TextRunnerSnapshot& operator=(TextRunnerSnapshot&&) = delete;
-
-  [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
 };
 
 struct TextRunnerAdvance {
@@ -142,13 +175,22 @@ public:
 
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> CreateState()
       const = 0;
+  /// Reconciles model-private metadata after an exact mutable or restored
+  /// prefix is leased. The default runner state needs no additional work.
+  virtual void PreparePrefixReuse(
+      TextRunnerState& state, std::span<const TextRunnerToken> prefix) const {
+    (void)state;
+    (void)prefix;
+  }
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;
   [[nodiscard]] virtual TextDecodeSelection SelectNext(
-      TextRunnerState& state, float temperature,
-      std::uint64_t* rng_state) const = 0;
+      TextRunnerState& state, sampling::SamplerState& sampler) const = 0;
   virtual void Advance(TextRunnerState& state, TextRunnerToken token) const = 0;
+  [[nodiscard]] virtual TextDecodeStep DecodeStep(
+      TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const;
   virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
@@ -157,10 +199,32 @@ public:
   ///
   /// The default implementations fail explicitly for runners that do not
   /// advertise the corresponding capabilities.
+  [[nodiscard]] virtual std::size_t SnapshotPayloadBytes(
+      const TextRunnerState& state) const;
   [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
       const TextRunnerState& state) const;
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> RestoreOrFork(
+  virtual void RestoreOrFork(TextRunnerState& state,
+                             const TextRunnerSnapshot& snapshot) const;
+
+  /// Returns the exact serialized bytes required by a persistent snapshot.
+  ///
+  /// Persistent serialization is separate from the in-memory snapshot layout:
+  /// a provider may retain GPU-private state in RAM while exposing a compact,
+  /// versioned disk representation.
+  [[nodiscard]] virtual std::size_t PersistentSnapshotPayloadBytes(
       const TextRunnerSnapshot& snapshot) const;
+
+  /// Serializes one immutable snapshot into exactly-sized common-store staging.
+  ///
+  /// Returns the number of initialized bytes. It must equal
+  /// PersistentSnapshotPayloadBytes(snapshot).
+  [[nodiscard]] virtual std::size_t SerializePersistentSnapshot(
+      const TextRunnerSnapshot& snapshot,
+      std::span<std::uint8_t> destination) const;
+
+  /// Restores a version-compatible serialized payload into an existing state.
+  virtual void RestorePersistentSnapshot(
+      TextRunnerState& state, std::span<const std::uint8_t> payload) const;
 };
 
 /// Bounded pool of opaque runner states with exact-prefix continuation reuse.
@@ -170,6 +234,13 @@ public:
 
   class Request {
   public:
+    struct CommitMetrics {
+      std::size_t snapshot_bytes{0};
+      double snapshot_ms{0.0};
+      std::size_t disk_write_bytes{0};
+      double disk_write_ms{0.0};
+    };
+
     Request();
     ~Request();
 
@@ -181,15 +252,19 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept;
     [[nodiscard]] bool cache_hit() const noexcept;
     [[nodiscard]] std::size_t cached_prompt_tokens() const noexcept;
+    [[nodiscard]] std::size_t cache_restore_bytes() const noexcept;
+    [[nodiscard]] double cache_restore_ms() const noexcept;
+    [[nodiscard]] bool cache_disk_hit() const noexcept;
     [[nodiscard]] std::size_t prompt_tokens() const noexcept;
     [[nodiscard]] bool prefill_complete() const noexcept;
 
     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
-    [[nodiscard]] TextDecodeSelection SelectNext(float temperature);
+    [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();
+    [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);
 
     /// Publishes the model state at its reported checkpoint boundary.
-    void Commit();
+    CommitMetrics Commit();
     void Invalidate() noexcept;
 
   private:
@@ -200,8 +275,9 @@ public:
     std::unique_ptr<Impl> impl_;
   };
 
-  TextRunnerPool(std::shared_ptr<TextModelRunner> runner,
-                 std::size_t state_count);
+  TextRunnerPool(
+      std::shared_ptr<TextModelRunner> runner, std::size_t state_count,
+      std::optional<TextRunnerDiskCacheOptions> disk_cache = std::nullopt);
   ~TextRunnerPool();
 
   TextRunnerPool(const TextRunnerPool&) = delete;
@@ -215,6 +291,9 @@ public:
       std::size_t ready_requests) const;
   void AdvanceBatch(std::span<Request*> requests,
                     const TextExecutionPlan& plan);
+  [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
+                                const sampling::SamplingConfig& sampling,
+                                const CancellationCheck& is_cancelled = {});
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
 

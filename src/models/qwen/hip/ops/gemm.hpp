@@ -204,6 +204,11 @@ void LaunchQuantizeActivationQ8_1FromFp32(const float* fp32_x, void* q8_1_out,
                                           std::size_t batch, std::size_t k,
                                           hipStream_t stream = nullptr);
 
+/// Byte size of the tiled Q8_1 activation buffer a [batch, k] activation needs
+/// before LaunchBatchedQuantGEMMPreQuantized can consume it.
+[[nodiscard]] std::size_t QuantizedActivationBytes(std::size_t batch,
+                                                   std::size_t k);
+
 /// Fuses SwiGLU activation (SiLU(gate) * up) with Q8_1 quantization into one
 /// kernel
 void LaunchBatchedFusedSwiGLUQuantizeQ8_1(const float* gate, const float* up,
@@ -232,6 +237,20 @@ void LaunchBatchedDualQuantGEMMPreQuantized(
 void LaunchBatchedGEMM(const void* A, bool is_bf16, const float* X, float* Y,
                        std::size_t batch_size, std::size_t M, std::size_t K,
                        hipStream_t stream = nullptr);
+
+/// Exact small-batch BF16-weight GEMM with FP32 activations for any width in
+/// 1..8. The per-output accumulation order matches the decode GEMV and does not
+/// depend on the batch width, so narrow batches stay bit-identical to wide ones
+/// while the weight stream is still read exactly once.
+void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
+                                       std::size_t batch_size, std::size_t M,
+                                       std::size_t K,
+                                       hipStream_t stream = nullptr);
+
+/// Fixed width-8 alias of LaunchExactBf16GEMMFp32SmallBatch.
+void LaunchExactBf16GEMMFp32Batch8(const void* A, const float* X, float* Y,
+                                   std::size_t M, std::size_t K,
+                                   hipStream_t stream = nullptr);
 
 /// Converts float buffer to bfloat16 buffer on GPU
 void LaunchFloatToBfloat16(const float* in, void* out, std::size_t num_elements,

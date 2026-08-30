@@ -260,81 +260,146 @@ exactly.
 
 | Backend | Exact prompts | AR | Speculative | Speedup | Median speedup | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| DFlash2 Q8_0 | 10/10 | 6.66 tok/s | 12.48 tok/s | 1.87x | 1.93x | 52.8% |
+| DFlash2 Q8_0 | 10/10 | 6.68 tok/s | 18.22 tok/s | 2.73x | 2.74x | 45.0% |
 | MTP Q4_0 | 10/10 | 6.67 tok/s | 9.88 tok/s | 1.48x | 1.48x | 47.9% |
 
-DFlash2 spans 1.29-3.26x by corpus category. The three-case rapid suite is
-13.66 tok/s, or 2.05x AR. Low-acceptance prompts remain below 2x; explanatory,
-code, Italian, creative, and repetitive cases reach 2.03-3.26x.
-At 64 generated tokens the rapid suite remains exact 3/3 and reaches
-14.49 tok/s, 2.10x AR. The matching MTP run remains exact 3/3 at
-10.01 tok/s, 1.45x AR.
+All rows use the production `--draft-policy auto`, which resolves to fixed width
+7 for DFlash-2 (see `opt-c191-fixed-width`).
 
-The accepted-token EMA controller from LaurentZuijdwijk's llama.cpp fork is
-available as an experimental policy. It starts at 2 accepted tokens, probes
-upward by one after a fully accepted block, and otherwise updates a 0.25 EMA of
-the accepted count. `--min-draft-tokens 3` applies the floor recommended by
-that implementation:
-
-```sh
-nix develop -c python3 tools/quant/speculative-corpus.py \
-  --binary ./result/bin/gufo \
-  --model "$TARGET" \
-  --draft-model "$DFLASH" \
-  --backend dflash2 \
-  --suite benchmarks/qwen3.8-27b/speculative-adaptive-corpus.json \
-  --max-tokens 300 \
-  --draft-tokens 7 \
-  --draft-policy accepted-ema \
-  --min-draft-tokens 3
-```
-
-The `baea40559c61` stress suite generates 300 tokens each for C++20 code,
-structured JSON, and continuous prose. The fixed policies use widths 3 and 7;
-rolling is the production controller; accepted EMA uses the 3-to-7 range.
-Exact greedy output is a validity gate:
-
-| Policy | Exact | Speculative | Speedup | Median | Acceptance | Average draft |
+| Suite | Tokens | Exact | AR | Speculative | Speedup | Median |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Fixed 3 | 2/3 | 13.84 tok/s | 1.97x | 2.07x | 68.0% | 3.00 |
-| Fixed 7 | 1/3 | 16.47 tok/s | 2.34x | 2.60x | 42.8% | 7.00 |
-| Rolling 1-7 | 3/3 | 15.62 tok/s | 2.22x | 2.36x | 58.4% | 4.55 |
-| Accepted EMA 3-7 | 1/3 | 16.33 tok/s | 2.32x | 2.33x | 65.6% | 4.23 |
+| rapid (3 cases) | 128 | 3/3 | 7.00 | **21.20** | **3.03x** | 3.19x |
+| stress (3 cases) | 300 | 3/3 | 7.03 | **21.28** | **3.03x** | 3.29x |
+| full corpus (10 cases) | 32 | 10/10 | 6.68 | 18.22 | 2.73x | 2.74x |
+| full corpus (10 cases) | 128 | 10/10 | 7.00 | 18.64 | 2.66x | 2.67x |
 
-Only the rolling controller remained exact across all three long-form tasks,
-so it stays the default. The EMA controller remains behind
-`--draft-policy accepted-ema` for further verifier-quality work; its higher
-aggregate throughput is not a valid production win while code and prose
-diverge. Use `--draft-policy fixed` for an explicit fixed-width comparison.
-Fixed widths also diverged, which makes the remaining issue
-verification-trajectory dependent rather than specific to the EMA formula.
+Per category, tok/s against a 6.68 (32-token) / 7.00 (128-token) autoregressive
+baseline:
 
-The production DFlash verifier batches the target block and LM head, uses the
-AR-compatible W8A8 route through layer 47, and switches to BF16-activation
-Q8-weight GEMMs from layer 48. The MTP verifier uses BF16-activation GEMMs for
-all target layers and FP32 only in the final layer; the final FP32 tail is
-required for exact structured-output parity. Rejected blocks restore the
-target checkpoint and replay captured SSM inputs only for the committed
-prefix.
+| Category | 32-tok | 128-tok | Speedup 32 / 128 | Accept @128 |
+| --- | ---: | ---: | ---: | ---: |
+| repetitive | 27.47 | **38.58** | 4.11x / **5.50x** | 96.6% |
+| reasoning | 16.45 | **26.25** | 2.47x / **3.75x** | 60.0% |
+| code | 20.51 | **22.34** | 3.08x / **3.19x** | 48.3% |
+| multilingual (Italian) | 23.43 | 19.46 | **3.51x** / 2.78x | 39.1% |
+| summarization | 18.30 | 19.19 | 2.74x / 2.85x | 44.4% |
+| structured | 16.82 | 17.95 | 2.52x / 2.56x | 36.3% |
+| expository | 20.63 | 17.04 | **3.09x** / 2.43x | 33.7% |
+| multilingual (Chinese) | 16.76 | 15.96 | 2.51x / 2.28x | 29.3% |
+| creative | 18.28 | 15.90 | 2.74x / 2.27x | 28.9% |
+| instruction | 12.08 | 12.02 | 1.81x / 1.72x | 18.4% |
+| **aggregate** | **18.22** | **18.64** | **2.73x / 2.66x** | 37.6% |
 
-The layer-48 DFlash precision boundary is quality-driven. Moving the BF16
-transition later made the 32-token corpus slightly faster but changed greedy
-output, so none of those settings is retained:
+The spread is now entirely acceptance, not engine speed. A verification chunk
+costs **151.7 ms against a 143 ms autoregressive token -- 1.06x** -- so the
+verifier is within 6% of the floor set by reading the weights once, and speedup
+is just how many drafted tokens survive. Every category beats autoregressive
+decode, and the slowest one is the one that accepts 18% of its drafts. Per-prompt
+speedup at the two lengths moves in opposite directions (reasoning 2.47x ->
+3.75x, expository 3.09x -> 2.43x) because acceptance is a property of the text
+being generated, so a short window only samples its opening; neither column alone
+is representative.
 
-| BF16 starts at layer | Exact prompts | Speculative | Speedup |
-| ---: | ---: | ---: | ---: |
-| 48 (production) | 10/10 | 12.48 tok/s | 1.87x |
-| 49 | 9/10 | 12.94 tok/s | 1.94x |
-| 50 | 9/10 | 12.85 tok/s | 1.93x |
-| 52 | 9/10 | 12.86 tok/s | 1.93x |
-| 56 | 9/10 | 12.92 tok/s | 1.94x |
-| 60 | 8/10 | 13.65 tok/s | 2.05x |
+Step budget at width 8, from `GUFO_SPEC_TIMING`: 177.8 ms total, of which
+verification 151.7, drafting 21.1, checkpoint 2.9, and rollback 2.1.
 
-Small verifier batches use shape-specific W8A8 tiles: 32 tokens for FFN
-expansion and 16 for contractions and SSM projections. The corresponding
-microbenchmark is bit-exact and improves the batch-8 production shapes by
-about 7% for expansion, 16% for FFN down, 47% for SSM QKV, and 53% for SSM
-out. The BF16-activation/Q8-weight path similarly selects 2/4/8-token tiles.
+Draft-length controllers, rapid suite at 128 tokens, all exact 3/3:
+
+| Policy | Speculative | Speedup | Median | Acceptance | Average draft | Accepted per step |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **fixed 7** (`auto`) | **20.40 tok/s** | **2.91x** | **3.08x** | 45.3% | 7.00 | **4.17** |
+| rolling 1-7 | 19.52 tok/s | 2.79x | 2.86x | 54.7% | 5.11 | 3.79 |
+| rolling 3-7 | 19.52 tok/s | 2.79x | 2.86x | 54.7% | 5.11 | 3.79 |
+| accepted-EMA 3-7 | 18.72 tok/s | 2.67x | 2.71x | 64.8% | 4.04 | 3.62 |
+
+Read the last two columns together: the adaptive controllers win on acceptance
+*rate* and lose on throughput, because what a step emits is `draft x acceptance`
+and they shrink the draft faster than they raise the rate. They were the right
+answer when a wider batch cost proportionally more to verify; now that it does
+not, always drafting the block maximum wins. Both the 300-token stress suite and
+the 10-case corpus agree (corpus at 128 tokens: 18.64 tok/s fixed against 16.40
+rolling).
+
+#### Draft width and policy on DFlash-2
+
+The controller table above says which policy wins but not why, so the underlying
+width curve is measured directly here. `json_schedule` at 128 tokens, greedy,
+exact against autoregressive in every arm, widths run interleaved so thermal
+drift is spread across them rather than biasing the last arm:
+
+| Fixed width | Acceptance | Accepted per step | Emitted per step | Speculative |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 69.8% | 1.40 | 2.40 | 14.08 tok/s |
+| 3 | 65.9% | 1.98 | 2.98 | 16.94 tok/s |
+| 4 | 57.7% | 2.31 | 3.31 | **18.36 tok/s** |
+| 5 | 46.7% | 2.34 | 3.34 | 17.73 tok/s |
+| 6 | 40.8% | 2.45 | 3.45 | 17.75 tok/s |
+| 7 | 36.3% | 2.54 | 3.54 | 17.95 tok/s |
+
+Two properties of this drafter follow, and together they decide the default.
+Accepted tokens per step increase monotonically with width -- the block drafter
+never degrades enough that a narrower block accepts *more* -- so no controller
+can find a width that emits more than the ceiling does. And throughput over
+widths 4..7 is a plateau inside the 2% run-to-run band, so the reward for
+picking width correctly is smaller than the measurement noise while the penalty
+for picking low is not: below width 4 the drafter's fixed per-step cost stops
+being amortized and width 2 gives up 22%.
+
+Ported the upstream `--spec-draft-adaptive` controller (`LaurentZuijdwijk/llama.cpp`
+`ca26169`) to check the reported ~32% structured-output gain. Full corpus at 128
+tokens, 10/10 exact in both arms:
+
+| Policy | Aggregate | Speedup | Acceptance | Average draft |
+| --- | ---: | ---: | ---: | ---: |
+| **fixed 7** (`auto`) | **18.63 tok/s** | **2.66x** | 37.6% | 7.00 |
+| accepted-EMA + headroom | 17.85 tok/s | 2.55x | 50.7% | 4.53 |
+
+The gain does not reproduce, and the per-case split shows why: structured
+`+2.4%` and repetitive `+0.6%` against code `-10.6%` and reasoning `-10.5%`.
+Prompts that accept deeply are exactly the ones a controller trimming toward the
+mean accepted count hurts most. Upstream's own fixed-width arms agree with ours
+within noise (their width 3 and width 7 land at 2.61x and 2.56x against our
+2.42x and 2.56x); only their adaptive arm diverges, and it is inconsistent with
+their own fixed-arm acceptance data, since choosing a width cannot raise
+acceptance at that width above what the fixed arm measures there. Their README
+also records the same configuration moving 65.6 to 55.0 tok/s on power state
+alone, a 19% swing wider than the effect claimed.
+
+Because the accepted-token EMA targets the *mean* acceptance depth, it
+systematically under-drafts a nearly free batch tail; `draft_headroom_tokens`
+(default 2) offsets the width above that mean so the upper tail of the
+acceptance distribution stays covered. On structured output this moves the
+opt-in `accepted-ema` policy from 16.78 to 18.38 tok/s, and it removes the
+regression on repetitive text by letting the EMA saturate at the ceiling, where
+the policy degenerates to fixed width. It is not enough to overtake `fixed`, so
+`auto` still resolves to fixed width 7 for DFlash-2.
+
+Extending past one block was considered and rejected. Only `repetition_sequence`
+is clipped by the drafter's `block_size - 1` ceiling of 7, accepting 96.6% of
+seven drafted tokens and 100% once a controller narrows it. It is a synthetic
+pattern-continuation prompt and no representative class approaches it -- the
+next deepest, reasoning, accepts 4.2 of 7 and has ceiling to spare. Chaining a
+second DFlash block would need the draft path to build K/V for unverified draft
+tokens from draft hidden states rather than target features, and would pay a
+second draft pass on every step to benefit one unrepresentative prompt.
+
+Neither direction moves the aggregate, so DFlash-2 throughput is not left in the
+draft width. The step budget above locates it instead: verification is 151.7 ms
+of a 177.8 ms step, so the remaining wins are in the target verification chunk
+and, at depth, in the draft attention and injection costs noted below.
+
+Two measured follow-ups remain, both in the draft graph and both only visible at
+depth. At a 4,096-token context the draft's non-causal attention is **16.26 ms
+per block**, against 0.34 ms at a 128-token context, which makes it the largest
+draft stage at depth: it reads an FP32 draft K/V cache with one thread walking `head_dim`
+contiguous floats, so consecutive lanes are `kv_dim` apart and every 4-byte read
+pulls a full line, and all 32 query heads re-read the same 8 K/V heads. An FP16
+cache with a coalesced mapping addresses both. Separately, priming a
+4,096-token context costs 850 ms of injection because the injection GEMM feeds
+the shared small-batch kernels in chunks of 8 tokens and therefore streams the
+encoder and K/V matrices once per chunk; a tiled route for wide injection would
+remove it. Neither affects the corpus numbers above, and both are far better
+than the per-token weight re-read they replaced.
 
 Synthetic context-depth results are listed separately because their repeated
 token stream can drive acceptance to 100% and is not representative of the
@@ -452,6 +517,10 @@ they did not beat the unfused routes end-to-end on gfx1151.
 
 ## TODOs
 
+- Revisit BF16 DeltaNet state only with a different update/storage formulation
+  that preserves the promoted FP32 full-logit envelope and exact long greedy
+  trajectories; the direct load/FP32-update/BF16-store route saves 96 MiB per
+  state but fails both quality signals.
 - Revisit a runtime physical-plan cost table only when a new native or composed
   route beats the measured smallest-covering W=2/W=4/W=8 policy. Capped W=4
   and native W=6 both lost under real C=5/C=6 server traffic, so encoding their
@@ -643,6 +712,17 @@ same effect at ambient scale.
 
 | ID | Experiment | Result | Status |
 | :--- | :--- | :--- | :--- |
+| `opt-c191-ssm-rows` | Chase the same launch-bound suspicion into the verifier's recurrent stage. A width-8 verification chunk issued `2 x 8` dispatches per SSM layer -- `SSMConvKernel` and `DeltaNetRecurrenceKernel` once per row -- so 768 of a chunk's ~1150 dispatches came from 48 SSM layers. Each kernel is row-separable by construction: the conv gives every thread sole ownership of one channel's four state slots, and the recurrence gives every block sole ownership of one head's state matrix, so walking rows *inside* the kernel performs the same updates in the same order | The stage fell from **46.17 to 7.76 ms** per chunk, and the whole chunk from 231.7 to **144.1 ms** -- every other stage dropped too (FFN 108.7 -> 85.3, attention 14.9 -> 4.78, projections 48.3 -> 34.8), because the chunk was globally launch-queue bound and not merely slow in the SSM stage. Unperturbed, a verification chunk is now **151.7 ms against a 143 ms autoregressive token, 1.06x**. Bit-exact by construction and asserted: the AR prefill envelope is byte-identical at RMSE/cosine 0.11256284/0.99925625, AR `tg32` is unchanged, and per-prompt acceptance is identical. `rows = 1` keeps single-token decode and multi-session batched decode on the original path | **Retained** |
+| `opt-c191-fixed-width` | Re-ask which draft-length controller is right, because the adaptive ones exist to protect a verifier whose cost grew steeply with width -- exactly the premise `opt-c190` removed | The controllers are now **harmful**, and acceptance *rate* is inversely correlated with throughput. Quick suite at 128 tokens: fixed 7 **20.40 tok/s / 2.91x** at 45.3% acceptance, rolling 19.52 / 2.79x at 54.7%, accepted-EMA 19.52 -> 18.72 / 2.67x at 64.8%. EMA has the best acceptance and the worst throughput because what pays is accepted tokens per step (fixed 4.17, rolling 3.79, EMA 3.62), not the ratio. `rolling 3-7` is identical to `rolling 1-7`, so the floor never binds. Critically, fixed 7 is now **3/3 exact on the 300-token stress suite** that previously rejected it at 1/3 -- that divergence was a verifier bug closed by `5dea0df`, not a property of the width -- and it wins there too, 20.00 vs 18.79 tok/s | **Retained**; `--draft-policy auto` resolves to fixed for DFlash-2 and keeps rolling elsewhere |
+| `opt-c191-q8-draft-head` | Retry the draft-private Q8_0 LM head that `opt-c190-q8-draft-head` rejected. That rejection was measured while the pipeline was launch-starved, so the draft's saving was being spent on contention rather than showing up | Now a clear win: draft head stage 13.48 -> **5.96 ms** per block, draft block total 27.1 -> **18.8 ms**, and end to end **20.41 -> 21.22 tok/s (2.91x -> 3.03x)** on the quick suite with acceptance bit-identical, since the top-16 candidate set is insensitive to Q8_0 on this head. The verifier keeps the target's BF16 head, so no emitted token can change. Costs 1.35 GiB resident | **Retained**, replacing the earlier rejection -- a reminder that a change measured under a different bottleneck has to be re-measured once that bottleneck moves |
+| `opt-c190-verify-width` | Ask why DFlash2 speculation was worth only 1.04x when the drafter is a 2 GB model in front of a 31 GB target. Instrumented the verifier per phase (`GUFO_SPEC_TIMING`) and swept the draft width | The verification batch, not the drafter, was 87% of a step, and its cost was wildly non-monotonic in width: 235 ms at batch 2, **448 ms at 4, 476 ms at 6**, 272 ms at 8. Only width exactly 8 had a batched route. `LaunchProjection` gated the exact BF16 kernel on `batch_size == 8` and `LaunchBatchedQuantGEMMFp32` gated its LDS-staged Q8_0 kernel on `batch == 8`, so every other width fell back to one GEMV per row and re-read 4.9 GB of BF16 plus 26.3 GB of Q8_0 once *per token*. The production `rolling` controller uses widths 1-7, so it lived entirely on that cliff | **Retained** as the diagnosis behind the three entries below |
+| `opt-c190-exact-any-width` | Template both exact small-batch kernels on the batch width and dispatch 1..8, instead of special-casing 8. Safe by construction: neither kernel's per-output accumulation order depends on the width, so a narrow batch is bit-identical to width 8, which is already the validated decode-equivalent route | Verify cost became almost flat in width -- batch 2 235 -> 141 ms, 4 448 -> 178, 6 476 -> 181, 8 272 -> 216 -- against a 139 ms autoregressive token. Same-session A/B alternating the two builds on the rapid suite: **1.04x -> 2.10x**. Acceptance is bit-identical per prompt in both arms, which is the check that the drafts and the verification decisions did not move | **Retained** |
+| `opt-c190-q8-vec-smallbatch` | Find why the width-8 exact Q8_0 kernel still read only 134 GB/s when the same kernel reads 228 GB/s at width 2 and batch-1 decode reads 225 GB/s. New harness `tools/bench/q8_small_batch_gemm_bench.hip` requires every candidate to be bit-exact against the decode GEMV | Not DRAM bound, LDS-instruction bound. The 33-float activation stride is not 16-byte aligned, so each group of four activations cost four `ds_read_b32`, and with one output row per warp those 128 reads per weight block were amortized over 34 bytes. Padding the stride to 36 floats makes each group one `ds_read_b128`, two output rows per warp halves the reads per weight byte again, and staging the whole batch at once halves the barriers. Width 8: `attn_qkv` 129 -> 217, `ffn_gate` 134 -> 220, `ffn_down` 134 -> 212 GB/s, i.e. the same bandwidth the kernel reaches at width 2. Rebuilding the GEMV-shaped alternative (no LDS, high occupancy) instead measured 43-79 GB/s, so the LDS staging is right and only its layout was wrong. End to end **2.15x -> 2.39x**. The kernel it replaces, and the two narrower per-width Q8_0 kernels the width fix had already made unreachable, are deleted rather than left behind a toggle | **Retained** as the only exact Q8_0 small-batch route |
+| `opt-c190-bf16-vec-smallbatch` | Apply the same finding to the exact BF16 small-batch kernel, whose 9-float stride has the same misalignment and whose one-row-per-warp shape amortizes eight `ds_read_b32` over 16 bytes of weight | Pad to 12 floats, two rows per warp, whole batch staged. End to end **2.39x -> 2.50x** on the rapid suite with acceptance bit-identical per prompt. Together with the entry above this is what takes a width-8 verification batch from 2.06x the cost of a single decode step to about 1.0-1.4x | **Retained** as the only exact BF16 small-batch route; the kernel it replaces is deleted |
+| `opt-c190-draft-graph` | Reduce the draft graph itself, which was 34 ms per block against a 13 ms weight-bandwidth floor. Three parts: the injection GEMM carried the batch on the grid's y axis and therefore re-read the encoder and K/V matrices once per token; the block projections took a BF16 round trip; the selector folded 128 partial top-k lists and 16x256 transition products entirely on thread zero | Injection chunked through the shared small-batch kernels 72 -> 50 ms over 16 calls; block projections on the FP32 route 15.3 -> 11.3 ms per block; selector tree-merge plus parallel transition scoring 2.93 -> **0.68** ms per block. Draft block total 34.0 -> 19.5 ms with the optional Q8 head, 27.1 ms without. The draft graph needs no exactness contract at all -- it only chooses which tokens the target verifies -- so it is free to take the fastest route | **Retained** |
+| `opt-c190-q8-draft-head` | Give the draft a private Q8_0 copy of the target's 2.54 GB BF16 LM head. The head is the largest single read in the draft graph, and quantizing it cannot affect an emitted token because the verifier keeps using the BF16 head | Draft head stage 13.48 -> **5.96 ms** per block and acceptance stayed bit-identical on every corpus prompt, so the top-16 candidate set is insensitive to Q8_0 here. But the extra 1.35 GiB resident copy costs the target's own 31 GiB weight stream more than the draft saves: interleaved end-to-end was neutral on one prompt and 5% slower on another, with the regression landing in the *verification* phase the change cannot touch | **Rejected at the time**, then retried and retained as `opt-c191-q8-draft-head` once `opt-c191-ssm-rows` removed the launch bottleneck that was masking it |
+| `opt-c138-bf16-recurrent` | Store only the carried DeltaNet matrix in BF16 while preserving FP32 update arithmetic, reductions, and an independently selectable FP32 route | Request state at context 4096 falls from 480,247,808 to 379,584,512 bytes, saving 96 MiB per resident state and 384 MiB at C=4. Kernel oracles remain finite and bounded (decode output/state max error 0.001089/0.000135; row-split prefill relative error at most 0.001221/0.003405), and direct/HTTP snapshot, rollback, cancellation, reset/reuse, and DFlash integration tests pass. The promoted FP32 full-vocabulary envelope is reproduced exactly at RMSE/cosine 0.11256284/0.99925625; BF16 widens it to 0.13964030/0.99885517. Both remain finite with top-1 198, but a 200-token greedy completion diverges after 824 identical output bytes | **Rejected**; production recurrent state remains FP32 and `GUFO_QWEN_RECURRENT_STATE=bf16` stays validation-only |
+| `opt-c133-fp16-kv` | Retire the duplicate live FP32 attention KV plane and make FP16 the canonical production representation, while preserving an explicit FP32 validation route | At context 4096, request state falls from 748,683,264 to 480,247,808 bytes: 256 MiB saved per resident state and 1 GiB at C=4. Full-vocabulary validation remains finite with top-1 198 and improves from RMSE/cosine 0.11933312/0.99916333 to 0.11256284/0.99925625. Exact greedy, reset/reuse, snapshot fork, concurrent W=2, cancellation, and cleanup tests pass. Interleaved medians: `pp2048` -0.10%, graph `tg128` -0.14%, split-K +0.99% at 4K, +1.59% at 8K, +3.14% at 16K; forced non-graph shallow decode is unchanged at 7.17 tok/s. FP16 graph and split-K kernels use 48 VGPR, zero LDS/private/scratch; split-K measures about 55% occupancy against a 16-wave/SIMD maximum. Graph telemetry reports `decode_online_fp16_graph`, `miss_captured`, then `hit`. The runner binds precision once and uses precision-specific v2/v3 state ABIs | **Retained**; FP16 is the default, `GUFO_QWEN_KV_CACHE=fp32` remains the independent oracle |
 | `opt-c178-attn-latency` | Find what the *WMMA* attention kernel is limited by, now that it has replaced the `v_dot2` one, by re-ablating each phase at depth | Exposed latency, not work or bandwidth. At batch 2048 depth 8192 the K/V global loads price at 33% of a 27.25 ms call and V's LDS transpose at 23%, but neither is a capacity limit: the kernel issues one WMMA per SIMD every 223 cycles against a ~64-cycle issue cost, so the SIMD is **idle 71% of the time**. 23 KB of LDS fits only two blocks per CU, which gives four waves per SIMD to cover a per-key-tile dependency chain (global load, barrier, stage K, barrier, S, barrier, softmax, barrier, transpose V, barrier, PV) that all eight waves of a block walk in lockstep, and whose head is a global load | **Retained** as the diagnosis that produced `opt-c178-attn-prefetch` |
 | `opt-c178-attn-prefetch` | Move the head of that chain off it: load tile i+1's K and V into a second register set immediately after tile i's staging barrier, so the latency is covered by tile i's S, softmax and PV phases | One layer call at batch 2048, each variant interleaved with the baseline to cancel APU throttling: depth 0 3.250 -> 2.500 ms (**1.30x**), 4096 15.082 -> 13.022 (1.16x), 8192 27.026 -> 23.955 (1.13x), 16384 51.595 -> 46.107 (1.12x). 15.9 -> 20.6 TFLOPS at depth 0 and 17.2 -> 19.4 at 8192, so 35-37% of the WMMA ceiling. Costs 16 VGPRs of second buffer and 16 `v_mov` per tile; VGPRs 222 -> 220, LDS and occupancy unchanged. End to end, same-session A/B alternating the two builds twice: `pp2048 @ d4096` 512.96 -> 517.78 (+0.94%), `@ d8192` 484.57 -> 491.70 (**+1.47%**), `@ d16384` 436.01 -> 443.37 (**+1.69%**), `pp512` 530.07 -> 532.73 (+0.5%), `pp2048` at depth 0 inside noise. The gain rises monotonically with depth because that is where the stage is, which takes the depth-0-to-16K slope from 19.5% to **18.1%**. Bit-identical by construction -- the staged bytes, their order and the WMMA sequence are untouched -- and the oracle asserts it, replaying every case and requiring byte-identical output | **Retained** |
 | `opt-c178-attn-coalesced-v` | Remap V's global read so four lanes cover 32 contiguous dims of one key. Each instruction's eight key pairs then land on eight fully-used 64-byte lines instead of 16 half-used ones, and because a thread then holds the same dims of two *adjacent* keys -- adjacent columns of V^T -- the transpose can write 8 packed dwords instead of 16 halves, with a 16-half pad every 8 dims to keep them across all 32 banks | Faster at depth 0 (2.425 vs 2.500 ms, 3%) and **slower at depth**, decisively: 24.5 vs 24.2 ms at 8192 and 67-78 vs 46-52 ms at 16384 across three interleaved rounds. Same bytes and same line count either way, so the regression is not traffic; the plausible mechanism is that halving the requests per instruction also halves the number of independent key rows in flight per instruction, which matters once the reads miss the MALL. Depth is the axis that matters, so the shipped one-key-per-lane mapping stays | **Rejected** |

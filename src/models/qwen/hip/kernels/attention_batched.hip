@@ -53,8 +53,12 @@ __global__ void WriteBatchedKVCacheKernel(
   for (std::size_t i = tid; i < head_dim; i += blockDim.x) {
     const float key = k[k_src_offset + i];
     const float val = v[k_src_offset + i];
-    k_cache[cache_offset + i] = key;
-    v_cache[cache_offset + i] = val;
+    if (k_cache != nullptr) {
+      k_cache[cache_offset + i] = key;
+    }
+    if (v_cache != nullptr) {
+      v_cache[cache_offset + i] = val;
+    }
     if (k_cache_f16 != nullptr) {
       k_cache_f16[f16_cache_offset + i] = __float2half_rn(key);
     }
@@ -64,10 +68,18 @@ __global__ void WriteBatchedKVCacheKernel(
   }
 }
 
+__device__ __forceinline__ float4 LoadBatchedHalf4(const __half* source) {
+  const auto* pairs = reinterpret_cast<const __half2*>(source);
+  const float2 lower = __half22float2(pairs[0]);
+  const float2 upper = __half22float2(pairs[1]);
+  return make_float4(lower.x, lower.y, upper.x, upper.y);
+}
+
 __global__ void BatchedAttentionKernel(
     const float* __restrict__ q, const float* __restrict__ gate,
     const float* __restrict__ k_cache, const float* __restrict__ v_cache,
-    float* __restrict__ out_context,
+    const __half* __restrict__ k_cache_f16,
+    const __half* __restrict__ v_cache_f16, float* __restrict__ out_context,
     hip_bfloat16* __restrict__ out_context_bf16, std::uint32_t layer_idx,
     std::uint32_t start_pos, std::size_t batch_size, std::uint32_t max_context,
     std::uint32_t num_heads, std::uint32_t num_kv_heads,
@@ -81,6 +93,9 @@ __global__ void BatchedAttentionKernel(
   const std::size_t tid = threadIdx.x;
   const std::uint32_t kv_h = h / (num_heads / num_kv_heads);
   const float scale = 1.0F / sqrtf(static_cast<float>(head_dim));
+  const bool use_f16_cache = k_cache == nullptr;
+  const std::size_t kv_width =
+      static_cast<std::size_t>(num_kv_heads) * head_dim;
 
   __shared__ float s_scratch[256];
   extern __shared__ float s_scores[];
@@ -103,12 +118,20 @@ __global__ void BatchedAttentionKernel(
                 max_context +
             p) *
            head_dim);
-      const auto* k_p_vec = reinterpret_cast<const float4*>(k_cache + p_offset);
+      const std::size_t p_offset_f16 =
+          ((static_cast<std::size_t>(layer_idx) * max_context + p) * kv_width) +
+          (static_cast<std::size_t>(kv_h) * head_dim);
+      const auto* k_p_vec =
+          use_f16_cache ? nullptr
+                        : reinterpret_cast<const float4*>(k_cache + p_offset);
+      const __half* k_p_f16 =
+          use_f16_cache ? k_cache_f16 + p_offset_f16 : nullptr;
 
       float dot = 0.0F;
       for (std::size_t d = lane_id; d < num_vec; d += 32) {
         const float4 qv = q_h_vec[d];
-        const float4 kv = k_p_vec[d];
+        const float4 kv =
+            use_f16_cache ? LoadBatchedHalf4(k_p_f16 + (d * 4)) : k_p_vec[d];
         dot += (qv.x * kv.x) + (qv.y * kv.y) + (qv.z * kv.z) + (qv.w * kv.w);
       }
       for (int offset = 16; offset > 0; offset >>= 1) {
@@ -125,12 +148,20 @@ __global__ void BatchedAttentionKernel(
                 max_context +
             p) *
            head_dim);
-      const auto* k_p_vec = reinterpret_cast<const float4*>(k_cache + p_offset);
+      const std::size_t p_offset_f16 =
+          ((static_cast<std::size_t>(layer_idx) * max_context + p) * kv_width) +
+          (static_cast<std::size_t>(kv_h) * head_dim);
+      const auto* k_p_vec =
+          use_f16_cache ? nullptr
+                        : reinterpret_cast<const float4*>(k_cache + p_offset);
+      const __half* k_p_f16 =
+          use_f16_cache ? k_cache_f16 + p_offset_f16 : nullptr;
 
       float dot = 0.0F;
       for (std::size_t d = 0; d < num_vec; ++d) {
         const float4 qv = q_h_vec[d];
-        const float4 kv = k_p_vec[d];
+        const float4 kv =
+            use_f16_cache ? LoadBatchedHalf4(k_p_f16 + (d * 4)) : k_p_vec[d];
         dot += (qv.x * kv.x) + (qv.y * kv.y) + (qv.z * kv.z) + (qv.w * kv.w);
       }
       s_scores[p] = dot * scale;
@@ -185,8 +216,15 @@ __global__ void BatchedAttentionKernel(
                 max_context +
             p) *
            head_dim);
-      const float* v_p = v_cache + p_offset;
-      ctx += s_scores[p] * v_p[tid];
+      if (use_f16_cache) {
+        const std::size_t p_offset_f16 =
+            ((static_cast<std::size_t>(layer_idx) * max_context + p) *
+             kv_width) +
+            (static_cast<std::size_t>(kv_h) * head_dim);
+        ctx += s_scores[p] * __half2float(v_cache_f16[p_offset_f16 + tid]);
+      } else {
+        ctx += s_scores[p] * v_cache[p_offset + tid];
+      }
     }
 
     if (gate != nullptr) {
@@ -228,7 +266,8 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
       static_cast<std::size_t>(start_pos) + batch_size;
   const std::size_t shared_scores_bytes = max_seq_len * sizeof(float);
   BatchedAttentionKernel<<<attn_grid, 256, shared_scores_bytes, stream>>>(
-      q, gate, k_cache, v_cache, out_context,
+      q, gate, k_cache, v_cache, static_cast<const __half*>(k_cache_f16),
+      static_cast<const __half*>(v_cache_f16), out_context,
       static_cast<hip_bfloat16*>(out_context_bf16), layer_idx, start_pos,
       batch_size, max_context, num_heads, num_kv_heads, head_dim);
 }

@@ -1,9 +1,52 @@
 #ifndef GUFO_MODELS_QWEN_HIP_EXECUTION_POLICY_HPP_
 #define GUFO_MODELS_QWEN_HIP_EXECUTION_POLICY_HPP_
 
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <string_view>
 
 namespace gufo::hip {
+
+enum class QwenKvCacheStorage : std::uint8_t {
+  kFp32,
+  kFp16,
+};
+
+enum class QwenRecurrentStateStorage : std::uint8_t {
+  kFp32,
+  kBf16,
+};
+
+[[nodiscard]] constexpr std::size_t QwenRecurrentStateElementBytes(
+    QwenRecurrentStateStorage storage) noexcept {
+  return storage == QwenRecurrentStateStorage::kBf16 ? sizeof(std::uint16_t)
+                                                     : sizeof(float);
+}
+
+[[nodiscard]] inline QwenKvCacheStorage ResolveQwenKvCacheStorage(
+    const char* value) noexcept {
+  if (value == nullptr) {
+    return QwenKvCacheStorage::kFp16;
+  }
+  const std::string_view storage{value};
+  if (storage == "fp32" || storage == "float") {
+    return QwenKvCacheStorage::kFp32;
+  }
+  return QwenKvCacheStorage::kFp16;
+}
+
+[[nodiscard]] inline QwenRecurrentStateStorage ResolveQwenRecurrentStateStorage(
+    const char* value) noexcept {
+  if (value == nullptr) {
+    return QwenRecurrentStateStorage::kFp32;
+  }
+  const std::string_view storage{value};
+  if (storage == "bf16" || storage == "bfloat16") {
+    return QwenRecurrentStateStorage::kBf16;
+  }
+  return QwenRecurrentStateStorage::kFp32;
+}
 
 /// Immutable route policy for one Qwen GPU executor. Resolve this before HIP
 /// graph capture and create a separate executor for each A/B candidate.
@@ -21,9 +64,29 @@ struct QwenExecutionPolicy {
   bool fuse_prefill_ssm_post_norm_gate{false};
   bool fuse_decode_rmsnorm_projection{false};
   bool prefetch_next_layer{false};
+  QwenKvCacheStorage kv_cache_storage{QwenKvCacheStorage::kFp16};
+  QwenRecurrentStateStorage recurrent_state_storage{
+      QwenRecurrentStateStorage::kFp32};
 
   [[nodiscard]] static constexpr QwenExecutionPolicy Production() noexcept {
     return {};
+  }
+
+  [[nodiscard]] static QwenExecutionPolicy Runtime() noexcept {
+    auto policy = Production();
+    policy.kv_cache_storage =
+        ResolveQwenKvCacheStorage(std::getenv("GUFO_QWEN_KV_CACHE"));
+    policy.recurrent_state_storage = ResolveQwenRecurrentStateStorage(
+        std::getenv("GUFO_QWEN_RECURRENT_STATE"));
+    return policy;
+  }
+
+  [[nodiscard]] constexpr bool UsesFp16AttentionKv() const noexcept {
+    return kv_cache_storage == QwenKvCacheStorage::kFp16;
+  }
+
+  [[nodiscard]] constexpr bool UsesBf16RecurrentState() const noexcept {
+    return recurrent_state_storage == QwenRecurrentStateStorage::kBf16;
   }
 
   /// Stable bit fingerprint suitable for telemetry and graph-cache identity.
@@ -35,7 +98,9 @@ struct QwenExecutionPolicy {
            (static_cast<std::uint64_t>(fuse_decode_ssm_output_residual) << 4U) |
            (static_cast<std::uint64_t>(fuse_prefill_ssm_post_norm_gate) << 5U) |
            (static_cast<std::uint64_t>(fuse_decode_rmsnorm_projection) << 6U) |
-           (static_cast<std::uint64_t>(prefetch_next_layer) << 7U);
+           (static_cast<std::uint64_t>(prefetch_next_layer) << 7U) |
+           (static_cast<std::uint64_t>(UsesFp16AttentionKv()) << 8U) |
+           (static_cast<std::uint64_t>(UsesBf16RecurrentState()) << 9U);
   }
 };
 

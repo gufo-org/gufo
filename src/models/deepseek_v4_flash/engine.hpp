@@ -89,6 +89,8 @@ public:
       std::string* error_msg = nullptr) const;
   [[nodiscard]] bool RestoreSnapshot(const SessionSnapshot& snapshot,
                                      std::string* error_msg = nullptr);
+  [[nodiscard]] bool RestoreSnapshot(std::span<const std::uint8_t> payload,
+                                     std::string* error_msg = nullptr);
   void SetCancellationCheck(CancellationCheck is_cancelled);
   void Invalidate() noexcept;
 
@@ -116,6 +118,7 @@ public:
   SessionSnapshot& operator=(SessionSnapshot&&) = delete;
 
   [[nodiscard]] std::uint64_t SizeBytes() const noexcept;
+  [[nodiscard]] bool CopyTo(std::span<std::uint8_t> destination) const noexcept;
 
 private:
   explicit SessionSnapshot(ds4_session_snapshot snapshot);

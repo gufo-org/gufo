@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -94,6 +95,13 @@ public:
     return find(key) != nullptr;
   }
   const Object& members() const noexcept { return obj_; }
+  void append_member(std::string key, Value value) {
+    if (type_ != Type::kObject) {
+      type_ = Type::kObject;
+      obj_.clear();
+    }
+    obj_.emplace_back(std::move(key), std::move(value));
+  }
   /// String value of member `key` (or `def` if missing / not a string).
   std::string member_str(const std::string& key,
                          const std::string& def = "") const {
@@ -298,6 +306,7 @@ struct Parser {
   // NOLINTNEXTLINE(misc-no-recursion)
   Value parse_object() {
     Value v = Value::object();
+    std::unordered_set<std::string> keys;
     ++i;  // {
     skip_ws();
     if (i < s.size() && s[i] == '}') {
@@ -313,9 +322,9 @@ struct Parser {
       if (i >= s.size() || s[i] != ':')
         fail("expected ':' after key");
       ++i;
-      if (v.contains(key))
+      if (!keys.emplace(key).second)
         fail("duplicate object key");
-      v[key] = parse_value();
+      v.append_member(key, parse_value());
       skip_ws();
       if (i >= s.size())
         fail("unterminated object");

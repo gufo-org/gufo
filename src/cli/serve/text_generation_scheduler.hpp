@@ -107,6 +107,19 @@ public:
   [[nodiscard]] std::size_t max_buffered_output_bytes() const noexcept;
 
   [[nodiscard]] Request Submit(std::vector<TextRunnerToken> prompt,
+                               std::size_t max_tokens,
+                               const sampling::SamplingConfig& sampling,
+                               const CancellationCheck& is_cancelled = {},
+                               bool publish_token_pieces = false);
+
+  [[nodiscard]] Request Submit(std::vector<TextRunnerToken> prompt,
+                               std::size_t max_tokens,
+                               const sampling::SamplingConfig& sampling,
+                               const CancellationCheck& is_cancelled,
+                               bool publish_token_pieces,
+                               RequestMetadata metadata);
+
+  [[nodiscard]] Request Submit(std::vector<TextRunnerToken> prompt,
                                std::size_t max_tokens, float temperature,
                                const CancellationCheck& is_cancelled = {},
                                bool publish_token_pieces = false);

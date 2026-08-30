@@ -20,15 +20,16 @@ The quality route keeps upstream sampling enabled; fully greedy generation is
 reserved for the short bounded exactness artifact.
 
 For sampled implementations with a different RNG stream, waveform identity is
-not a meaningful quality gate. Compare intelligibility using the same local ASR
-model for the upstream and native waveforms:
+not a meaningful quality gate. Compare intelligibility using the same native
+Qwen3-ASR-1.7B runtime for the upstream and native waveforms:
 
 ```sh
 nix develop --command python3 \
   tests/models/qwen3_tts/quality/compare_intelligibility.py \
   --reference-npy artifacts/qwen3_tts/rocm/waveform.npy \
   --candidate-wav /tmp/qwen3-tts-native.wav \
-  --asr-model /path/to/whisper-tiny.en
+  --asr-model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision> \
+  --gufo result/bin/gufo
 ```
 
 For native optimization A/B tests, pass the retained baseline directly with

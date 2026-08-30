@@ -128,8 +128,8 @@ docs/
 8. Define the versioned logit artifact and matched-token comparison runner.
 9. Add the initial SHQ4-T16, SHQ6-T16, and SHQ8-T16 byte-exact conformance
    vectors.
-10. Commit the capability evaluation suite with provenance and extraction
-    fixtures (EVAL.md).
+10. Maintain the pinned Antirez DS4 capability suite, provenance audit, and
+    pure extraction fixtures (EVAL.md).
 
 ### Exit criteria
 
@@ -205,8 +205,8 @@ complete model.
 3. Implement the initial contiguous KV cache.
 4. Implement deterministic greedy sampling.
 5. Implement request-owned model and sampling state.
-6. Implement the capability evaluation drift gate, trace format, and offline
-   regrade (EVAL.md).
+6. Retain capability-evaluation baselines through the OpenAI-compatible route
+   and use offline regrade fixtures to audit extractor changes (EVAL.md).
 7. Implement `gufo prompt` in direct greedy mode.
 8. Add exact-token fixtures comparing the native CLI with the pinned reference.
 9. Add sampling and `gufo chat` only after the greedy slice passes.

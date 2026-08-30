@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/sampling.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/state.hpp"
 #include "src/models/qwen/tokenizer.hpp"
@@ -20,13 +21,7 @@ namespace gufo::models {
 /// Generation parameters for controlling the auto-regressive decode loop.
 struct GenerationOptions {
   std::size_t max_new_tokens = 128;
-  float temperature = 0.0F;  ///< 0.0 for greedy argmax
-  float top_p = 1.0F;
-  std::int32_t top_k = 0;
-  float min_p = 0.0F;
-  std::int64_t seed = -1;
-  float repeat_penalty = 1.0F;
-  std::size_t repeat_last_n = 64;
+  sampling::SamplingConfig sampling;
   std::uint32_t eos_token_id = tokenization::kDefaultQwenEosTokenId;
   std::uint32_t endoftext_token_id = tokenization::kDefaultQwenEndoftextId;
 };

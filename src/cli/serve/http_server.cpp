@@ -24,10 +24,13 @@
 #include <thread>
 #include <utility>
 
+#include "src/cli/serve/asr_service.hpp"
+#include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/json.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/openai_chat.hpp"
+#include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_api.hpp"
 #include "src/cli/serve/video_jobs.hpp"
@@ -239,6 +242,8 @@ json::Value TimingsJson(const TextGenerationBackend::Result& result) {
   timings["predicted_per_token_ms"] = predicted_per_token_ms;
   timings["predicted_per_second"] = predicted_per_second;
   timings["cache_n"] = result.cached_prompt_tokens;
+  timings["cache_restore_ms"] = result.cache_restore_ms;
+  timings["cache_snapshot_ms"] = result.cache_snapshot_ms;
   timings["draft_n"] = result.draft_tokens;
   timings["draft_n_accepted"] = result.draft_accepted_tokens;
   return timings;
@@ -281,6 +286,11 @@ json::Value MetricsJson(const TextGenerationBackend::Result& result) {
   metrics["prompt_tokens"] = result.prompt_tokens;
   metrics["completion_tokens"] = result.completion_tokens;
   metrics["cached_tokens"] = result.cached_prompt_tokens;
+  metrics["cache_restore_bytes"] = result.cache_restore_bytes;
+  metrics["cache_snapshot_bytes"] = result.cache_snapshot_bytes;
+  metrics["cache_shared_bytes"] = result.cache_shared_bytes;
+  metrics["cache_restore_ms"] = result.cache_restore_ms;
+  metrics["cache_snapshot_ms"] = result.cache_snapshot_ms;
   return metrics;
 }
 
@@ -385,7 +395,7 @@ std::string ContentToString(const json::Value* content) {
 
 HttpResponse ListModels(TextGenerationBackend* backend,
                         const VideoJobService* video_jobs,
-                        const TtsService* tts) {
+                        const TtsService* tts, const AsrService* asr) {
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   json::Value data = json::Value::array();
@@ -427,6 +437,15 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     model["capability"] = "audio_tts";
     data.push_back(std::move(model));
   }
+  if (asr != nullptr && asr->ready()) {
+    json::Value model = json::Value::object();
+    model["id"] = asr->model_id();
+    model["object"] = "model";
+    model["created"] = Now();
+    model["owned_by"] = "operator-supplied-qwen";
+    model["capability"] = "audio_asr";
+    data.push_back(std::move(model));
+  }
   resp["data"] = std::move(data);
   return Ok(resp);
 }
@@ -458,11 +477,15 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   const auto defaults = b.sampling_defaults();
   const std::size_t max_tokens =
       body.member_size("max_tokens", defaults.max_tokens);
-  const float temperature = static_cast<float>(
-      body.member_double("temperature", defaults.temperature));
+  sampling::SamplingConfig sampling_config;
+  if (const auto error =
+          ParseSamplingConfig(body, defaults.sampling, &sampling_config)) {
+    return Err(400, "Bad Request", error->message.c_str(),
+               "invalid_request_error", error->code.c_str());
+  }
 
   const auto res =
-      b.complete(prompt, max_tokens, temperature, req.is_cancelled);
+      b.complete(prompt, max_tokens, sampling_config, req.is_cancelled);
 
   json::Value resp = json::Value::object();
   resp["id"] = "cmpl-" + RandomId();
@@ -515,11 +538,15 @@ HttpResponse OpenAiResponses(const HttpRequest& req, TextGenerationBackend& b) {
   } else if (body.contains("max_tokens")) {
     max_tokens = body.member_size("max_tokens", defaults.max_tokens);
   }
-  const float temperature = static_cast<float>(
-      body.member_double("temperature", defaults.temperature));
+  sampling::SamplingConfig sampling_config;
+  if (const auto error =
+          ParseSamplingConfig(body, defaults.sampling, &sampling_config)) {
+    return Err(400, "Bad Request", error->message.c_str(),
+               "invalid_request_error", error->code.c_str());
+  }
 
   const auto res = b.chat(ChatRequest{std::move(messages)}, max_tokens,
-                          temperature, req.is_cancelled);
+                          sampling_config, req.is_cancelled);
 
   json::Value resp = json::Value::object();
   resp["id"] = "resp_" + RandomId();
@@ -582,11 +609,15 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   const auto defaults = b.sampling_defaults();
   const std::size_t max_tokens =
       body.member_size("max_tokens", defaults.max_tokens);
-  const float temperature = static_cast<float>(
-      body.member_double("temperature", defaults.temperature));
+  sampling::SamplingConfig sampling_config;
+  if (const auto error =
+          ParseSamplingConfig(body, defaults.sampling, &sampling_config)) {
+    return Err(400, "Bad Request", error->message.c_str(),
+               "invalid_request_error", error->code.c_str());
+  }
 
   const auto res = b.chat(ChatRequest{std::move(messages)}, max_tokens,
-                          temperature, req.is_cancelled);
+                          sampling_config, req.is_cancelled);
 
   json::Value resp = json::Value::object();
   resp["id"] = "msg_" + RandomId();
@@ -658,11 +689,15 @@ HttpResponse LlamaCompletion(const HttpRequest& req, TextGenerationBackend& b) {
   const auto defaults = b.sampling_defaults();
   const std::size_t max_tokens =
       body.member_size("n_predict", defaults.max_tokens);
-  const float temperature = static_cast<float>(
-      body.member_double("temperature", defaults.temperature));
+  sampling::SamplingConfig sampling_config;
+  if (const auto error =
+          ParseSamplingConfig(body, defaults.sampling, &sampling_config)) {
+    return Err(400, "Bad Request", error->message.c_str(),
+               "invalid_request_error", error->code.c_str());
+  }
 
   const auto res =
-      b.complete(prompt, max_tokens, temperature, req.is_cancelled);
+      b.complete(prompt, max_tokens, sampling_config, req.is_cancelled);
 
   json::Value resp = json::Value::object();
   resp["content"] = res.text;
@@ -694,11 +729,15 @@ HttpResponse LlamaInfill(const HttpRequest& req, TextGenerationBackend& b) {
   const auto defaults = b.sampling_defaults();
   const std::size_t max_tokens =
       body.member_size("n_predict", defaults.max_tokens);
-  const float temperature = static_cast<float>(
-      body.member_double("temperature", defaults.temperature));
+  sampling::SamplingConfig sampling_config;
+  if (const auto error =
+          ParseSamplingConfig(body, defaults.sampling, &sampling_config)) {
+    return Err(400, "Bad Request", error->message.c_str(),
+               "invalid_request_error", error->code.c_str());
+  }
 
   const auto res =
-      b.complete(prompt, max_tokens, temperature, req.is_cancelled);
+      b.complete(prompt, max_tokens, sampling_config, req.is_cancelled);
 
   json::Value resp = json::Value::object();
   resp["content"] = res.text;
@@ -797,12 +836,14 @@ struct HttpServer::ConnectionWorker {
 HttpServer::HttpServer(std::string host, int port,
                        std::shared_ptr<TextGenerationBackend> backend,
                        std::shared_ptr<VideoJobService> video_jobs,
-                       std::shared_ptr<TtsService> tts, HttpServerLimits limits)
+                       std::shared_ptr<TtsService> tts,
+                       std::shared_ptr<AsrService> asr, HttpServerLimits limits)
     : host_(std::move(host)),
       port_(port),
       backend_(std::move(backend)),
       video_jobs_(std::move(video_jobs)),
       tts_(std::move(tts)),
+      asr_(std::move(asr)),
       limits_(limits) {
   if (limits_.max_request_body_bytes == 0 || limits_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
@@ -828,7 +869,6 @@ void HttpServer::register_routes() {
   add("POST", "/v1/chat/completions", HandleOpenAiChat);
   add("POST", "/v1/responses", OpenAiResponses);
   add("POST", "/v1/embeddings", NotImplemented);
-  add("POST", "/v1/audio/transcriptions", NotImplemented);
   add("POST", "/v1/images/generations", NotImplemented);
   add("POST", "/v1/images/edits", NotImplemented);
 
@@ -916,6 +956,9 @@ void HttpServer::run() {
   }
   if (tts_ != nullptr && tts_->ready()) {
     Logger::Info("audio", "Qwen3-TTS audio API enabled");
+  }
+  if (asr_ != nullptr && asr_->ready()) {
+    Logger::Info("audio", "Qwen3-ASR transcription API enabled");
   }
   while (!stopped_.load(std::memory_order_acquire)) {
     const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
@@ -1006,18 +1049,31 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     return Ok(body);
   }
   if (req.method == "GET" && req.path == "/ready") {
-    if (backend_ == nullptr || !backend_->ready()) {
-      return Err(503, "Service Unavailable", "text model is not ready",
+    const bool ready = (backend_ != nullptr && backend_->ready()) ||
+                       (video_jobs_ != nullptr && video_jobs_->ready()) ||
+                       (tts_ != nullptr && tts_->ready()) ||
+                       (asr_ != nullptr && asr_->ready());
+    if (!ready) {
+      return Err(503, "Service Unavailable", "model service is not ready",
                  "server_error", "not_ready");
     }
     json::Value body = json::Value::object();
     body["status"] = "ready";
-    body["model"] = backend_->model_id();
+    if (backend_ != nullptr && backend_->ready()) {
+      body["model"] = backend_->model_id();
+    } else if (asr_ != nullptr && asr_->ready()) {
+      body["model"] = asr_->model_id();
+    } else if (tts_ != nullptr && tts_->ready()) {
+      body["model"] = tts_->model_id();
+    } else {
+      body["model"] = "minimax-h3";
+    }
     return Ok(body);
   }
   if (req.method == "GET" &&
       (req.path == "/v1/models" || req.path == "/models")) {
-    return ListModels(backend_.get(), video_jobs_.get(), tts_.get());
+    return ListModels(backend_.get(), video_jobs_.get(), tts_.get(),
+                      asr_.get());
   }
   if (IsVideoApiPath(req.path)) {
     if (video_jobs_ == nullptr || !video_jobs_->ready()) {
@@ -1034,6 +1090,14 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                  "tts_service_unavailable");
     }
     return HandleAudioTtsApiRequest(req, *tts_);
+  }
+  if (IsAudioAsrApiPath(req.path)) {
+    if (asr_ == nullptr || !asr_->ready()) {
+      return Err(503, "Service Unavailable",
+                 "Qwen3-ASR service is not configured", "server_error",
+                 "asr_service_unavailable");
+    }
+    return HandleAudioAsrApiRequest(req, *asr_);
   }
   for (const auto& entry : routes_) {
     if (entry.first.first == req.method && entry.first.second == req.path) {

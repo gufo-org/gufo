@@ -202,8 +202,7 @@ std::optional<std::string> QwenChatTemplate::Render(
       continue;
     }
 
-    if (msg.role == ChatRole::kAssistant && options.enable_thinking &&
-        !msg.thought.empty()) {
+    if (msg.role == ChatRole::kAssistant && !msg.thought.empty()) {
       output.append("<think>\n");
       output.append(msg.thought);
       output.append("\n</think>\n");

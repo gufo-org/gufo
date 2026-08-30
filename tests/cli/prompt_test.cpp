@@ -12,12 +12,13 @@ void TestDefaultOptions() {
   assert(opt.has_value());
   assert(opt->prompt_text == "Hello world");
   assert(opt->max_tokens == 128);
-  assert(opt->temperature == 0.0F);
+  assert(opt->sampling.temperature == 0.0F);
   assert(opt->use_chat_template);
   assert(!opt->verbose);
   assert(opt->draft_tokens == 7);
-  assert(opt->draft_policy == "rolling");
+  assert(opt->draft_policy == "auto");
   assert(opt->min_draft_tokens == 1);
+  assert(opt->draft_p_min == 0.0F);
 }
 
 void TestExplicitFlags() {
@@ -28,17 +29,27 @@ void TestExplicitFlags() {
   assert(opt.has_value());
   assert(opt->model_path == "model.gguf");
   assert(opt->max_tokens == 256);
-  assert(opt->temperature > 0.69F && opt->temperature < 0.71F);
+  assert(opt->sampling.temperature > 0.69F &&
+         opt->sampling.temperature < 0.71F);
   assert(!opt->use_chat_template);
   assert(opt->verbose);
   assert(opt->prompt_text == "Test prompt");
 }
 
 void TestHybridMtpFlags() {
-  const std::array<const char*, 11> args = {
-      "--speculative",      "mtp-npu", "--mtp-model",    "mtp.gguf",
-      "--draft-tokens",     "2",       "--draft-policy", "fixed",
-      "--min-draft-tokens", "2",       "Prompt"};
+  const std::array<const char*, 13> args = {"--speculative",
+                                            "mtp-npu",
+                                            "--mtp-model",
+                                            "mtp.gguf",
+                                            "--spec-draft-n-max",
+                                            "2",
+                                            "--draft-policy",
+                                            "fixed",
+                                            "--spec-draft-n-min",
+                                            "2",
+                                            "--spec-draft-p-min",
+                                            "0.75",
+                                            "Prompt"};
   const auto opt = gufo::cli::ParsePromptOptions(args);
   assert(opt.has_value());
   assert(opt->speculative_backend == "mtp-npu");
@@ -46,6 +57,7 @@ void TestHybridMtpFlags() {
   assert(opt->draft_tokens == 2);
   assert(opt->draft_policy == "fixed");
   assert(opt->min_draft_tokens == 2);
+  assert(opt->draft_p_min > 0.74F && opt->draft_p_min < 0.76F);
 }
 
 void TestInvalidFlags() {
@@ -66,10 +78,16 @@ void TestInvalidFlags() {
   const std::array<const char*, 4> args5 = {"--draft-tokens", "3",
                                             "--min-draft-tokens", "4"};
   assert(!gufo::cli::ParsePromptOptions(args5, &err).has_value());
+
+  const std::array<const char*, 2> args6 = {"--top-p", "0"};
+  assert(!gufo::cli::ParsePromptOptions(args6, &err).has_value());
+
+  const std::array<const char*, 2> args7 = {"--spec-draft-p-min", "-0.1"};
+  assert(!gufo::cli::ParsePromptOptions(args7, &err).has_value());
 }
 
 void TestSamplingAndReasoningFlags() {
-  const std::array<const char*, 23> args = {"--model",
+  const std::array<const char*, 29> args = {"--model",
                                             "model.gguf",
                                             "--top-p",
                                             "0.9",
@@ -77,12 +95,18 @@ void TestSamplingAndReasoningFlags() {
                                             "50",
                                             "--min-p",
                                             "0.05",
+                                            "--min-keep",
+                                            "3",
                                             "-s",
                                             "42",
                                             "--repeat-penalty",
                                             "1.15",
                                             "--repeat-last-n",
                                             "128",
+                                            "--frequency-penalty",
+                                            "0.25",
+                                            "--presence-penalty",
+                                            "0.5",
                                             "--think",
                                             "on",
                                             "--reasoning-budget",
@@ -95,12 +119,18 @@ void TestSamplingAndReasoningFlags() {
   const auto opt = gufo::cli::ParsePromptOptions(args);
   assert(opt.has_value());
   assert(opt->model_path == "model.gguf");
-  assert(opt->top_p > 0.89F && opt->top_p < 0.91F);
-  assert(opt->top_k == 50);
-  assert(opt->min_p > 0.04F && opt->min_p < 0.06F);
-  assert(opt->seed == 42);
-  assert(opt->repeat_penalty > 1.14F && opt->repeat_penalty < 1.16F);
-  assert(opt->repeat_last_n == 128);
+  assert(opt->sampling.top_p > 0.89F && opt->sampling.top_p < 0.91F);
+  assert(opt->sampling.top_k == 50);
+  assert(opt->sampling.min_p > 0.04F && opt->sampling.min_p < 0.06F);
+  assert(opt->sampling.min_keep == 3);
+  assert(opt->sampling.seed == 42);
+  assert(opt->sampling.repeat_penalty > 1.14F &&
+         opt->sampling.repeat_penalty < 1.16F);
+  assert(opt->sampling.repeat_last_n == 128);
+  assert(opt->sampling.frequency_penalty > 0.24F &&
+         opt->sampling.frequency_penalty < 0.26F);
+  assert(opt->sampling.presence_penalty > 0.49F &&
+         opt->sampling.presence_penalty < 0.51F);
   assert(opt->reasoning_mode == "on");
   assert(opt->reasoning_budget == 1024);
   assert(opt->chat_template == "qwen");

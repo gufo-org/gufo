@@ -102,23 +102,64 @@ int main() {
                                     http_chat.text);
     continued_messages.emplace_back(gufo::tokenization::ChatRole::kUser,
                                     "Name a different primary color.");
+    auto forked_messages = messages;
+    forked_messages.emplace_back(gufo::tokenization::ChatRole::kAssistant,
+                                 http_chat.text);
+    forked_messages.emplace_back(gufo::tokenization::ChatRole::kUser,
+                                 "Name one warm primary color.");
     auto continued_direct_messages = direct_messages;
     continued_direct_messages.push_back(
         {.role = "assistant", .content = http_chat.text});
     continued_direct_messages.push_back(
         {.role = "user", .content = "Name a different primary color."});
+    auto forked_direct_messages = direct_messages;
+    forked_direct_messages.push_back(
+        {.role = "assistant", .content = http_chat.text});
+    forked_direct_messages.push_back(
+        {.role = "user", .content = "Name one warm primary color."});
     const auto direct_continuation =
         GenerateDirect(model, model->EncodeChat(continued_direct_messages), 2);
-    const auto http_continuation = backend.chat(continued_messages, 2, 0.0F);
-    Expect(http_continuation.cache_hit,
-           "continued chat reuses the retained DeepSeek state");
-    Expect(http_continuation.cached_prompt_tokens > 0,
-           "DeepSeek cache reports reused tokens");
+    const auto direct_fork =
+        GenerateDirect(model, model->EncodeChat(forked_direct_messages), 2);
+
+    gufo::server::ChatRequest continuation_request(continued_messages);
+    continuation_request.client_id = "deepseek-snapshot-branch-a";
+    gufo::server::ChatRequest fork_request(forked_messages);
+    fork_request.client_id = "deepseek-snapshot-branch-b";
+    auto pending_continuation =
+        backend.start_chat(continuation_request, 2, 0.0F, {}, true);
+    auto pending_fork = backend.start_chat(fork_request, 2, 0.0F, {}, true);
+    Expect(pending_continuation != nullptr && pending_fork != nullptr,
+           "concurrent DeepSeek snapshot branches are admitted");
+    const auto http_continuation = pending_continuation->Wait();
+    const auto http_fork = pending_fork->Wait();
+
+    Expect(http_continuation.cache_hit && http_fork.cache_hit,
+           "concurrent DeepSeek branches restore the retained root");
+    Expect(http_continuation.cached_prompt_tokens > 0 &&
+               http_continuation.cached_prompt_tokens ==
+                   http_fork.cached_prompt_tokens,
+           "DeepSeek branches report the same shared root");
     Expect(http_continuation.cached_prompt_tokens <
-               http_continuation.prompt_tokens,
-           "continued DeepSeek chat prefills only a suffix");
+                   http_continuation.prompt_tokens &&
+               http_fork.cached_prompt_tokens < http_fork.prompt_tokens,
+           "DeepSeek branches prefill only their suffixes");
+    for (const auto* result : {&http_continuation, &http_fork}) {
+      Expect(
+          result->cache_restore_bytes > 0 && result->cache_snapshot_bytes > 0,
+          "DeepSeek branches account snapshot copy bytes");
+      Expect(result->cache_restore_ms > 0.0 && result->cache_snapshot_ms > 0.0,
+             "DeepSeek branches account snapshot copy time");
+      Expect(result->cache_shared_bytes == 0,
+             "full-copy DeepSeek snapshots do not claim shared bytes");
+    }
+    Expect(
+        http_continuation.cache_restore_bytes == http_fork.cache_restore_bytes,
+        "DeepSeek branches restore the same root payload");
     Expect(http_continuation.tokens == direct_continuation,
            "cached DeepSeek continuation differs from cold full prefill");
+    Expect(http_fork.tokens == direct_fork,
+           "forked DeepSeek continuation differs from cold full prefill");
 
     gufo::server::ChatRequest concurrent_a({
         {gufo::tokenization::ChatRole::kUser,

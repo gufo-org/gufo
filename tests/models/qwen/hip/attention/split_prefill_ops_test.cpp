@@ -152,8 +152,9 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size) {
   auto* v_cache = b.kv_cache + total_kv;
   auto* kv_f16_v = static_cast<std::uint16_t*>(b.kv_f16) + total_kv;
 
-  // Reference: the unsplit tiled kernel over the whole visible range. This also
-  // packs the new K/V into both caches and refreshes the FP16 prefix mirror.
+  // Reference: the unsplit tiled kernel over the whole visible range. This
+  // test supplies both representations, so the call packs both and refreshes
+  // the FP16 prefix.
   HIP_CHECK(hipMemset(b.out, 0, q_elements * sizeof(float)));
   if (!gufo::hip::LaunchBatchedAttentionTile(
           b.q, b.k, b.v, b.gate, b.kv_cache, v_cache, b.kv_f16, kv_f16_v, b.out,
@@ -168,8 +169,9 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size) {
                       hipMemcpyDeviceToHost));
 
   // Candidate: diagonal through the tiled kernel with its partial statistics,
-  // prefix through AOTriton, merged by log-sum-exp. The KV caches are already
-  // packed by the reference call above, so suppress the write.
+  // prefix through AOTriton, merged by log-sum-exp. Both supplied KV
+  // representations are already packed by the reference call above, so
+  // suppress the write.
   gufo::hip::LaunchConvertQueriesToHalf(b.q, b.q_f16, q_elements);
   HIP_CHECK(hipMemset(b.diag_out, 0, q_elements * sizeof(float)));
   if (!gufo::hip::LaunchBatchedAttentionTile(

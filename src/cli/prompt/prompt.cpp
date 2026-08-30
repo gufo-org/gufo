@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/sampling_options.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/qwen/chat_template.hpp"
@@ -59,34 +61,7 @@ void PrintPromptHelp(std::string_view program_name) {
   parser.AddOption("-n", "--max-tokens", "N",
                    "Maximum number of new tokens to generate (default: 128)",
                    "Sampling", &opt.max_tokens);
-  parser.AddOption("-t", "--temperature", "T",
-                   "Randomness scale; 0.0 for greedy argmax, higher for more "
-                   "creative output (default: 0.0)",
-                   "Sampling", &opt.temperature);
-  parser.AddOption("", "--top-p", "P",
-                   "Nucleus sampling; keeps tokens within top cumulative "
-                   "probability P (default: 1.0) (TODO: qwen)",
-                   "Sampling", &opt.top_p);
-  parser.AddOption("", "--top-k", "K",
-                   "Top-K sampling; limits selection pool to K highest "
-                   "probability tokens (default: 0 = disabled) (TODO: qwen)",
-                   "Sampling", &opt.top_k);
-  parser.AddOption("", "--min-p", "P",
-                   "Min-P sampling; discards tokens with probability < P * top "
-                   "token probability (default: 0.0) (TODO: qwen)",
-                   "Sampling", &opt.min_p);
-  parser.AddOption("-s", "--seed", "N",
-                   "RNG seed for reproducible and deterministic generation "
-                   "(default: -1 = random)",
-                   "Sampling", &opt.seed);
-  parser.AddOption("", "--repeat-penalty", "N",
-                   "Multiplier penalizing tokens already present in context "
-                   "(default: 1.0 = off) (TODO: qwen, deepseek)",
-                   "Sampling", &opt.repeat_penalty);
-  parser.AddOption("", "--repeat-last-n", "N",
-                   "Number of trailing tokens scanned for repetition penalty "
-                   "(default: 64) (TODO: qwen, deepseek)",
-                   "Sampling", &opt.repeat_last_n);
+  RegisterSamplingOptions(parser, &opt.sampling);
   parser.AddOption("", "--think", "MODE",
                    "Reasoning trace mode for thinking models: on, off, or auto "
                    "(default: auto) (TODO: qwen, deepseek)",
@@ -109,13 +84,26 @@ void PrintPromptHelp(std::string_view program_name) {
                    "Maximum speculative draft tokens evaluated per step "
                    "(default: 7)",
                    "Speculative", &opt.draft_tokens);
+  parser.AddOption("", "--spec-draft-n-max", "N",
+                   "llama.cpp-compatible alias for --draft-tokens",
+                   "Speculative", &opt.draft_tokens);
   parser.AddOption("", "--draft-policy", "MODE",
-                   "Draft sizing: fixed, rolling, or accepted-ema (default: "
-                   "rolling)",
+                   "Draft sizing: auto, fixed, rolling, or accepted-ema "
+                   "(default: auto, fixed for DFlash-2)",
                    "Speculative", &opt.draft_policy);
   parser.AddOption("", "--min-draft-tokens", "N",
                    "Adaptive draft floor (default: 1)", "Speculative",
                    &opt.min_draft_tokens);
+  parser.AddOption("", "--spec-draft-n-min", "N",
+                   "llama.cpp-compatible alias for --min-draft-tokens",
+                   "Speculative", &opt.min_draft_tokens);
+  parser.AddOption(
+      "", "--spec-draft-p-min", "P",
+      "Stop at the first draft token below confidence P; 0 disables "
+      "(default: 0)",
+      "Speculative", &opt.draft_p_min);
+  parser.AddOption("", "--draft-p-min", "P", "Alias for --spec-draft-p-min",
+                   "Speculative", &opt.draft_p_min);
   parser.AddFlag("", "--cpu",
                  "Force CPU OpenMP execution fallback instead of GPU ROCm",
                  "Hardware", &opt.force_cpu);
@@ -142,34 +130,7 @@ void PrintChatHelp(std::string_view program_name) {
   parser.AddOption("-n", "--max-tokens", "N",
                    "Maximum tokens generated per turn (default: 256)",
                    "Sampling", &opt.max_tokens);
-  parser.AddOption("-t", "--temperature", "T",
-                   "Randomness scale; 0.0 for greedy argmax, higher for more "
-                   "creative output (default: 0.0)",
-                   "Sampling", &opt.temperature);
-  parser.AddOption("", "--top-p", "P",
-                   "Nucleus sampling; keeps tokens within top cumulative "
-                   "probability P (default: 1.0) (TODO: qwen)",
-                   "Sampling", &opt.top_p);
-  parser.AddOption("", "--top-k", "K",
-                   "Top-K sampling; limits selection pool to K highest "
-                   "probability tokens (default: 0 = disabled) (TODO: qwen)",
-                   "Sampling", &opt.top_k);
-  parser.AddOption("", "--min-p", "P",
-                   "Min-P sampling; discards tokens with probability < P * top "
-                   "token probability (default: 0.0) (TODO: qwen)",
-                   "Sampling", &opt.min_p);
-  parser.AddOption("-s", "--seed", "N",
-                   "RNG seed for reproducible and deterministic generation "
-                   "(default: -1 = random)",
-                   "Sampling", &opt.seed);
-  parser.AddOption("", "--repeat-penalty", "N",
-                   "Multiplier penalizing tokens already present in context "
-                   "(default: 1.0 = off) (TODO: qwen, deepseek)",
-                   "Sampling", &opt.repeat_penalty);
-  parser.AddOption("", "--repeat-last-n", "N",
-                   "Number of trailing tokens scanned for repetition penalty "
-                   "(default: 64) (TODO: qwen, deepseek)",
-                   "Sampling", &opt.repeat_last_n);
+  RegisterSamplingOptions(parser, &opt.sampling);
   parser.AddOption("", "--think", "MODE",
                    "Reasoning trace mode for thinking models: on, off, or auto "
                    "(default: auto) (TODO: qwen, deepseek)",
@@ -265,21 +226,31 @@ int RunDeepSeekPrompt(const PromptOptions& opt,
               << "--- Generation Output ---\n";
   }
 
-  const auto generation_start = std::chrono::steady_clock::now();
-  std::uint64_t rng_state = (opt.seed >= 0)
-                                ? static_cast<std::uint64_t>(opt.seed)
-                                : 0x5354524958445334ULL;
-  std::size_t generated = 0;
-  for (; generated < opt.max_tokens; ++generated) {
-    const int token = session->SelectNext(opt.temperature, &rng_state,
-                                          opt.top_k, opt.top_p, opt.min_p);
+  std::vector<sampling::TokenId> sampling_history;
+  sampling_history.reserve(prompt_tokens.size());
+  for (const int token : prompt_tokens) {
     if (token < 0) {
-      std::cerr << "\nDeepSeek V4 Flash token selection failed\n";
+      std::cerr << "DeepSeek V4 Flash produced an invalid prompt token\n";
       return 1;
     }
+    sampling_history.push_back(static_cast<sampling::TokenId>(token));
+  }
+  sampling::SamplerState sampler(opt.sampling, sampling_history);
+
+  const auto generation_start = std::chrono::steady_clock::now();
+  std::size_t generated = 0;
+  for (; generated < opt.max_tokens; ++generated) {
+    const auto logits = session->CopyLogits(&error);
+    if (logits.empty()) {
+      std::cerr << "\nDeepSeek V4 Flash token selection failed: " << error
+                << '\n';
+      return 1;
+    }
+    const int token = static_cast<int>(sampler.Sample(logits));
     if (model->IsStopToken(token)) {
       break;
     }
+    sampler.Accept(static_cast<sampling::TokenId>(token));
     std::cout << model->DecodeToken(token) << std::flush;
     if (generated + 1 < opt.max_tokens && !session->Evaluate(token, &error)) {
       std::cerr << "\nDeepSeek V4 Flash decode failed: " << error << '\n';
@@ -336,34 +307,7 @@ std::optional<PromptOptions> ParsePromptOptions(
   parser.AddOption("-n", "--max-tokens", "N",
                    "Maximum number of new tokens to generate (default: 128)",
                    "Sampling", &opt.max_tokens);
-  parser.AddOption("-t", "--temperature", "T",
-                   "Randomness scale; 0.0 for greedy argmax, higher for more "
-                   "creative output (default: 0.0)",
-                   "Sampling", &opt.temperature);
-  parser.AddOption("", "--top-p", "P",
-                   "Nucleus sampling; keeps tokens within top cumulative "
-                   "probability P (default: 1.0) (TODO: qwen)",
-                   "Sampling", &opt.top_p);
-  parser.AddOption("", "--top-k", "K",
-                   "Top-K sampling; limits selection pool to K highest "
-                   "probability tokens (default: 0 = disabled) (TODO: qwen)",
-                   "Sampling", &opt.top_k);
-  parser.AddOption("", "--min-p", "P",
-                   "Min-P sampling; discards tokens with probability < P * top "
-                   "token probability (default: 0.0) (TODO: qwen)",
-                   "Sampling", &opt.min_p);
-  parser.AddOption("-s", "--seed", "N",
-                   "RNG seed for reproducible and deterministic generation "
-                   "(default: -1 = random)",
-                   "Sampling", &opt.seed);
-  parser.AddOption("", "--repeat-penalty", "N",
-                   "Multiplier penalizing tokens already present in context "
-                   "(default: 1.0 = off) (TODO: qwen, deepseek)",
-                   "Sampling", &opt.repeat_penalty);
-  parser.AddOption("", "--repeat-last-n", "N",
-                   "Number of trailing tokens scanned for repetition penalty "
-                   "(default: 64) (TODO: qwen, deepseek)",
-                   "Sampling", &opt.repeat_last_n);
+  RegisterSamplingOptions(parser, &opt.sampling);
 
   // Reasoning
   parser.AddOption("", "--think", "MODE",
@@ -420,11 +364,13 @@ std::optional<PromptOptions> ParsePromptOptions(
       });
   parser.AddCustomOption(
       "", "--draft-policy", "MODE",
-      "Draft sizing: fixed, rolling, or accepted-ema (default: rolling)",
+      "Draft sizing: auto, fixed, rolling, or accepted-ema (default: auto, "
+      "which is fixed for DFlash-2 and rolling otherwise)",
       "Speculative",
       [&opt](std::string_view, std::string_view value,
              std::string* error) -> bool {
-        if (value != "fixed" && value != "rolling" && value != "accepted-ema") {
+        if (value != "auto" && value != "fixed" && value != "rolling" &&
+            value != "accepted-ema") {
           if (error != nullptr) {
             *error = "Invalid draft policy: " + std::string(value);
           }
@@ -452,6 +398,19 @@ std::optional<PromptOptions> ParsePromptOptions(
         opt.min_draft_tokens = count;
         return true;
       });
+  parser.AddOption("", "--spec-draft-n-max", "N",
+                   "llama.cpp-compatible alias for --draft-tokens",
+                   "Speculative", &opt.draft_tokens);
+  parser.AddOption("", "--spec-draft-n-min", "N",
+                   "llama.cpp-compatible alias for --min-draft-tokens",
+                   "Speculative", &opt.min_draft_tokens);
+  parser.AddOption(
+      "", "--spec-draft-p-min", "P",
+      "Stop at the first draft token below confidence P; 0 disables "
+      "(default: 0)",
+      "Speculative", &opt.draft_p_min);
+  parser.AddOption("", "--draft-p-min", "P", "Alias for --spec-draft-p-min",
+                   "Speculative", &opt.draft_p_min);
   parser.AddFlag("", "--cpu",
                  "Force CPU OpenMP execution fallback instead of GPU ROCm",
                  "Hardware", &opt.force_cpu);
@@ -467,9 +426,25 @@ std::optional<PromptOptions> ParsePromptOptions(
   if (parser.IsHelpRequested()) {
     return std::nullopt;
   }
-  if (opt.min_draft_tokens > opt.draft_tokens) {
+  try {
+    opt.sampling.Validate();
+  } catch (const std::invalid_argument& exception) {
+    if (error_msg != nullptr) {
+      *error_msg = exception.what();
+    }
+    return std::nullopt;
+  }
+  if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0 ||
+      opt.min_draft_tokens > opt.draft_tokens) {
     if (error_msg != nullptr) {
       *error_msg = "min-draft-tokens cannot exceed draft-tokens";
+    }
+    return std::nullopt;
+  }
+  if (!std::isfinite(opt.draft_p_min) || opt.draft_p_min < 0.0F ||
+      opt.draft_p_min > 1.0F) {
+    if (error_msg != nullptr) {
+      *error_msg = "spec-draft-p-min must be in [0, 1]";
     }
     return std::nullopt;
   }
@@ -591,13 +566,7 @@ int RunPrompt(std::span<const char* const> args) {
 
       models::GenerationOptions gen_opts;
       gen_opts.max_new_tokens = opt.max_tokens;
-      gen_opts.temperature = opt.temperature;
-      gen_opts.top_p = opt.top_p;
-      gen_opts.top_k = opt.top_k;
-      gen_opts.min_p = opt.min_p;
-      gen_opts.seed = opt.seed;
-      gen_opts.repeat_penalty = opt.repeat_penalty;
-      gen_opts.repeat_last_n = opt.repeat_last_n;
+      gen_opts.sampling = opt.sampling;
 
       auto start_time = std::chrono::steady_clock::now();
       std::size_t generated_count = 0;
@@ -621,6 +590,7 @@ int RunPrompt(std::span<const char* const> args) {
           hip::QwenDFlashGpuDraftConfig cfg{
               .max_context = gpu_exec->GetMaxContext(),
               .max_draft_tokens = static_cast<std::uint32_t>(opt.draft_tokens),
+              .draft_p_min = opt.draft_p_min,
           };
           draft_backend = hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
               dflash_path, gpu_exec->GetSharedModel(), cfg, &err);
@@ -691,9 +661,15 @@ int RunPrompt(std::span<const char* const> args) {
           s_opts.max_draft_tokens = opt.draft_tokens;
           s_opts.min_draft_tokens = opt.min_draft_tokens;
           s_opts.initial_draft_tokens = opt.draft_tokens;
-          if (opt.draft_policy == "fixed") {
+          const bool block_diffusion_draft =
+              opt.speculative_backend == "dflash" ||
+              opt.speculative_backend == "dflash2" ||
+              opt.speculative_backend == "dflash-2";
+          const auto resolved_policy = speculative::ResolveDraftPolicy(
+              opt.draft_policy, block_diffusion_draft);
+          if (resolved_policy == "fixed") {
             s_opts.enable_adaptive_draft_length = false;
-          } else if (opt.draft_policy == "accepted-ema") {
+          } else if (resolved_policy == "accepted-ema") {
             s_opts.adaptive_draft_policy =
                 speculative::AdaptiveDraftPolicy::kAcceptedTokenEma;
           }
@@ -777,19 +753,13 @@ int RunPrompt(std::span<const char* const> args) {
               << ", heads=" << config.num_attention_heads << ")\n"
               << "Prompt tokens: " << prompt_tokens.size() << "\n"
               << "Max tokens: " << opt.max_tokens << "\n"
-              << "Temperature: " << opt.temperature << "\n"
+              << "Temperature: " << opt.sampling.temperature << "\n"
               << "--- Generation Output ---\n";
   }
 
   models::GenerationOptions gen_opts;
   gen_opts.max_new_tokens = opt.max_tokens;
-  gen_opts.temperature = opt.temperature;
-  gen_opts.top_p = opt.top_p;
-  gen_opts.top_k = opt.top_k;
-  gen_opts.min_p = opt.min_p;
-  gen_opts.seed = opt.seed;
-  gen_opts.repeat_penalty = opt.repeat_penalty;
-  gen_opts.repeat_last_n = opt.repeat_last_n;
+  gen_opts.sampling = opt.sampling;
 
   const auto start_time = std::chrono::steady_clock::now();
   std::size_t generated_count = 0;
@@ -894,13 +864,7 @@ int RunChat(std::span<const char* const> args) {
 
     models::GenerationOptions gen_opts;
     gen_opts.max_new_tokens = opt.max_tokens > 0 ? opt.max_tokens : 256;
-    gen_opts.temperature = opt.temperature;
-    gen_opts.top_p = opt.top_p;
-    gen_opts.top_k = opt.top_k;
-    gen_opts.min_p = opt.min_p;
-    gen_opts.seed = opt.seed;
-    gen_opts.repeat_penalty = opt.repeat_penalty;
-    gen_opts.repeat_last_n = opt.repeat_last_n;
+    gen_opts.sampling = opt.sampling;
 
     const auto reply_tokens = generator->Generate(
         prompt_tokens, gen_opts,

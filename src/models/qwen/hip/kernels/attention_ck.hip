@@ -93,8 +93,12 @@ __global__ void PackCkAttentionInputsKernel(
     const float value = v[source_offset];
     k_cache_f16[f16_cache_offset] = __float2half_rn(key);
     v_cache_f16[f16_cache_offset] = __float2half_rn(value);
-    k_cache[f32_cache_offset] = key;
-    v_cache[f32_cache_offset] = value;
+    if (k_cache != nullptr) {
+      k_cache[f32_cache_offset] = key;
+    }
+    if (v_cache != nullptr) {
+      v_cache[f32_cache_offset] = value;
+    }
   }
 }
 

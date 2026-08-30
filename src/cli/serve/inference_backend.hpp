@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -22,10 +23,44 @@ class Model;
 
 namespace gufo::server {
 
+enum class TextSpeculativeBackend : std::uint8_t {
+  kDisabled,
+  kDFlash,
+};
+
+enum class TextDraftPolicy : std::uint8_t {
+  kFixed,
+  kRollingAcceptance,
+  kAcceptedTokenEma,
+};
+
+struct TextSpeculativeConfig {
+  TextSpeculativeBackend backend{TextSpeculativeBackend::kDisabled};
+  std::string draft_model_path;
+  std::uint32_t max_draft_tokens{7};
+  std::uint32_t min_draft_tokens{1};
+  float draft_p_min{0.0F};
+  TextDraftPolicy draft_policy{TextDraftPolicy::kRollingAcceptance};
+};
+
+struct TextDiskCacheConfig {
+  std::filesystem::path directory;
+  std::size_t capacity_bytes{static_cast<std::size_t>(4) * 1024U * 1024U *
+                             1024U};
+  std::size_t staging_capacity_bytes{static_cast<std::size_t>(512) * 1024U *
+                                     1024U};
+  std::string model_artifact_fingerprint;
+  std::string draft_model_artifact_fingerprint;
+};
+
 /// Thread-safe HTTP inference facade over shared immutable GPU model resources
 /// and a bounded pool of request-owned executor sessions.
 class InferenceBackend final : public TextGenerationBackend {
 public:
+  using TextGenerationBackend::chat;
+  using TextGenerationBackend::complete;
+  using TextGenerationBackend::start_chat;
+
   InferenceBackend();
   ~InferenceBackend() override;
 
@@ -38,21 +73,26 @@ public:
   bool load(const std::string& model_path, std::string* error,
             std::uint32_t max_context = 4096, std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
-            TextSchedulerPolicy scheduler_policy = {});
+            TextSchedulerPolicy scheduler_policy = {},
+            const TextSpeculativeConfig& speculative_config = {},
+            const TextDiskCacheConfig& disk_cache_config = {});
 
 #if defined(ENGINE_ENABLE_HIP)
   /// Installs a previously loaded model without duplicating mapped weights.
   bool load(std::shared_ptr<const hip::QwenGpuModel> model, std::string* error,
             std::uint32_t max_context = 4096, std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
-            TextSchedulerPolicy scheduler_policy = {});
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {});
 
   /// Installs a previously loaded DeepSeek model with request-owned sessions.
   bool load(std::shared_ptr<models::deepseek_v4_flash::Model> model,
             std::string* error, std::uint32_t max_context = 4096,
             std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
-            TextSchedulerPolicy scheduler_policy = {});
+            TextSchedulerPolicy scheduler_policy = {},
+            TextDiskCacheConfig disk_cache_config = {});
 #endif
 
   /// Stable model identifier used in API responses.
@@ -60,25 +100,29 @@ public:
   [[nodiscard]] bool ready() const override;
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   void set_model_id(const std::string& model_id);
-  void set_sampling_defaults(std::size_t max_tokens, float temperature);
+  void set_sampling_defaults(std::size_t max_tokens,
+                             const sampling::SamplingConfig& sampling);
 
   /// Plain text completion (no chat framing).
   Result complete(std::string_view prompt, std::size_t max_tokens,
-                  float temperature, const CancellationCheck& is_cancelled = {},
+                  const sampling::SamplingConfig& sampling,
+                  const CancellationCheck& is_cancelled = {},
                   const TokenCallback& on_token = {}) override;
 
   /// Framed chat conversation; returns the assistant reply.
   Result chat(const ChatRequest& request, std::size_t max_tokens,
-              float temperature, const CancellationCheck& is_cancelled = {},
+              const sampling::SamplingConfig& sampling,
+              const CancellationCheck& is_cancelled = {},
               const TokenCallback& on_token = {}) override;
 
   std::shared_ptr<GenerationRequest> start_chat(
-      const ChatRequest& request, std::size_t max_tokens, float temperature,
+      const ChatRequest& request, std::size_t max_tokens,
+      const sampling::SamplingConfig& sampling,
       const CancellationCheck& is_cancelled = {},
       bool stream_output = false) override;
 
   Result chat(const std::vector<tokenization::ChatMessage>& messages,
-              std::size_t max_tokens, float temperature,
+              std::size_t max_tokens, const sampling::SamplingConfig& sampling,
               const CancellationCheck& is_cancelled = {});
 
   /// Token count of raw text (no generation).

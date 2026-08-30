@@ -186,6 +186,60 @@ void TestBatchedGEMM() {
   HIP_CHECK(hipFree(d_Y));
 }
 
+void TestExactBf16Batch8GEMM() {
+  constexpr std::size_t batch = 8;
+  constexpr std::size_t M = 65;
+  constexpr std::size_t K = 264;
+
+  std::vector<std::uint16_t> h_A(M * K);
+  std::vector<float> h_X(batch * K);
+  for (std::size_t index = 0; index < h_A.size(); ++index) {
+    const float value =
+        0.03125F * static_cast<float>(static_cast<int>(index % 29) - 14);
+    h_A[index] = gufo::test::FloatToBf16Bits(value);
+  }
+  for (std::size_t index = 0; index < h_X.size(); ++index) {
+    h_X[index] =
+        0.015625F * static_cast<float>(static_cast<int>(index % 37) - 18);
+  }
+
+  void* d_A = nullptr;
+  float* d_X = nullptr;
+  float* d_batched = nullptr;
+  float* d_sequential = nullptr;
+  HIP_CHECK(hipMalloc(&d_A, h_A.size() * sizeof(std::uint16_t)));
+  HIP_CHECK(hipMalloc(&d_X, h_X.size() * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_batched, batch * M * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_sequential, batch * M * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_A, h_A.data(), h_A.size() * sizeof(std::uint16_t),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_X, h_X.data(), h_X.size() * sizeof(float),
+                      hipMemcpyHostToDevice));
+
+  gufo::hip::LaunchExactBf16GEMMFp32Batch8(d_A, d_X, d_batched, M, K);
+  for (std::size_t token = 0; token < batch; ++token) {
+    gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kBF16, d_X + (token * K),
+                          d_sequential + (token * M), M, K);
+  }
+  HIP_CHECK(hipDeviceSynchronize());
+
+  std::vector<float> h_batched(batch * M);
+  std::vector<float> h_sequential(batch * M);
+  HIP_CHECK(hipMemcpy(h_batched.data(), d_batched,
+                      h_batched.size() * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(h_sequential.data(), d_sequential,
+                      h_sequential.size() * sizeof(float),
+                      hipMemcpyDeviceToHost));
+  gufo::test::Expect(std::memcmp(h_batched.data(), h_sequential.data(),
+                                 h_batched.size() * sizeof(float)) == 0,
+                     "exact BF16 batch-8 GEMM differs from sequential decode");
+
+  HIP_CHECK(hipFree(d_sequential));
+  HIP_CHECK(hipFree(d_batched));
+  HIP_CHECK(hipFree(d_X));
+  HIP_CHECK(hipFree(d_A));
+}
+
 void TestHipblasGEMM() {
   hipblasHandle_t handle = nullptr;
   HIPBLAS_CHECK(hipblasCreate(&handle));
@@ -361,6 +415,7 @@ int main() {
 
   TestGpuGEMV();
   TestBatchedGEMM();
+  TestExactBf16Batch8GEMM();
   TestHipblasGEMM();
   TestHipblasLtGEMM();
   std::cout << "Qwen dense GEMM and BLAS ops test passed on gfx1151.\n";

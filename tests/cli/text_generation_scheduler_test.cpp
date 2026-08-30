@@ -21,6 +21,7 @@ namespace {
 
 using gufo::server::ChatRequest;
 using gufo::server::TextDecodeSelection;
+using gufo::server::TextDecodeStep;
 using gufo::server::TextExecutionPlan;
 using gufo::server::TextExecutionPlanKind;
 using gufo::server::TextGenerationError;
@@ -144,6 +145,8 @@ struct FakeControl {
   bool supports_batched_advance{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
+  bool multi_token_decode{false};
+  bool prefix_reuse{true};
 };
 
 class FakeState final : public TextRunnerState {
@@ -199,7 +202,10 @@ public:
                     control_->final_token_advance_required,
                 .incremental_text_is_exact =
                     control_->incremental_text_is_exact,
+                .multi_token_decode = control_->multi_token_decode,
+                .prefix_reuse = control_->prefix_reuse,
             },
+        .persistence = std::nullopt,
     };
   }
 
@@ -209,6 +215,7 @@ public:
         .state_capacity_bytes = 8 * 64,
         .per_request_state_bytes = 64,
         .temporary_scratch_bytes = 0,
+        .retained_snapshot_capacity_bytes = 0,
         .requires_device_runtime_lock = true,
     };
   }
@@ -302,8 +309,8 @@ public:
     };
   }
 
-  [[nodiscard]] TextDecodeSelection SelectNext(TextRunnerState& state, float,
-                                               std::uint64_t*) const override {
+  [[nodiscard]] TextDecodeSelection SelectNext(
+      TextRunnerState& state, gufo::sampling::SamplerState&) const override {
     const auto& fake = RequireFakeState(state);
     if (!fake.frontier.has_value()) {
       throw std::logic_error("scheduler fake has no frontier");
@@ -348,6 +355,36 @@ public:
     ++fake.position;
     ++fake.decode_count;
     fake.frontier = token + 1;
+  }
+
+  [[nodiscard]] TextDecodeStep DecodeStep(
+      TextRunnerState& state, std::size_t max_tokens,
+      gufo::sampling::SamplerState& sampler) const override {
+    if (!control_->multi_token_decode) {
+      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    }
+    auto& fake = RequireFakeState(state);
+    if (!fake.frontier.has_value()) {
+      throw std::logic_error("scheduler fake has no multi-token frontier");
+    }
+    const std::size_t count = std::min<std::size_t>(max_tokens, 3);
+    TextDecodeStep step;
+    step.selections.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      const TextRunnerToken token =
+          *fake.frontier + static_cast<TextRunnerToken>(index);
+      step.selections.push_back({
+          .stop = false,
+          .token = token,
+          .piece = std::to_string(token),
+      });
+    }
+    step.draft_tokens = count + 1;
+    step.draft_accepted_tokens = count;
+    fake.position += count;
+    fake.decode_count += count;
+    fake.frontier = *fake.frontier + static_cast<TextRunnerToken>(count);
+    return step;
   }
 
   void AdvanceBatch(
@@ -466,6 +503,27 @@ void TestRunnerCanReuseExactIncrementalText() {
          "exact incremental pieces form the final response text");
   Expect(control->decode_calls.load(std::memory_order_relaxed) == 0,
          "exact incremental text avoids duplicate final decoding");
+}
+
+void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
+  auto control = std::make_shared<FakeControl>();
+  control->incremental_prefill = false;
+  control->multi_token_decode = true;
+  control->prefix_reuse = false;
+  auto scheduler = MakeScheduler(control, 1);
+
+  const auto first = scheduler->Submit({7}, 5, 0.0F).Wait();
+  Expect(first.tokens == ExpectedTokens(7, 5),
+         "multi-token decode preserves the generated trajectory");
+  Expect(first.draft_tokens == 7 && first.draft_accepted_tokens == 5,
+         "multi-token decode reports accumulated draft statistics");
+  Expect(!first.cache_hit,
+         "multi-token state starts without continuation reuse");
+  control->WaitForInvalidations(1);
+
+  const auto second = scheduler->Submit({7, 70}, 2, 0.0F).Wait();
+  Expect(!second.cache_hit,
+         "runner-disabled prefix reuse cannot retain speculative state");
 }
 
 void TestMultiResidentPrefillUsesBoundedWorkUnits() {
@@ -926,13 +984,15 @@ void TestDecodeCancellationAndStateReclamation() {
   auto scheduler = MakeScheduler(control, 1);
 
   auto cancelled = scheduler->Submit({5, 50}, 5, 0.0F, {}, true);
+  std::size_t delivered_pieces = 0;
   const auto cancelled_result = cancelled.Wait([&](std::string_view) {
+    ++delivered_pieces;
     control->ReleaseAdvance();
     return false;
   });
   Expect(cancelled_result.cancelled,
          "callback cancellation reaches the scheduler");
-  Expect(cancelled_result.tokens.size() == 1,
+  Expect(delivered_pieces == 1,
          "no token is published after callback cancellation");
 
   auto replacement = scheduler->Submit({6, 60}, 2, 0.0F);
@@ -990,6 +1050,7 @@ int main() {
   TestIdlePrefillUsesBulkWorkUnit();
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRunnerCanReuseExactIncrementalText();
+  TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
   TestMultiResidentPrefillUsesBoundedWorkUnits();
   TestDecodeActivePrefillIsBounded();
   TestPrefillYieldsToEveryDueDecoder();

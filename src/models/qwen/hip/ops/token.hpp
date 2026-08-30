@@ -11,6 +11,67 @@
 
 namespace gufo::hip {
 
+struct GpuSamplingWorkspace {
+  float* adjusted_logits{nullptr};
+  float* sorted_logits{nullptr};
+  std::uint32_t* token_ids{nullptr};
+  std::uint32_t* sorted_token_ids{nullptr};
+  std::uint32_t* penalty_tokens{nullptr};
+  std::uint32_t* penalty_counts{nullptr};
+  std::uint32_t* draft_candidate_ids{nullptr};
+  float* draft_candidate_probabilities{nullptr};
+  std::uint32_t* speculative_accepted{nullptr};
+  void* sort_temp_storage{nullptr};
+  std::size_t sort_temp_storage_bytes{0};
+  std::size_t vocab_size{0};
+  std::size_t penalty_capacity{0};
+};
+
+struct GpuSamplingParameters {
+  float temperature{0.0F};
+  std::int32_t top_k{0};
+  float top_p{1.0F};
+  float min_p{0.0F};
+  std::size_t min_keep{0};
+  float repeat_penalty{1.0F};
+  float frequency_penalty{0.0F};
+  float presence_penalty{0.0F};
+  float uniform{0.0F};
+};
+
+void AllocateGpuSamplingWorkspace(GpuSamplingWorkspace* workspace,
+                                  std::size_t vocab_size,
+                                  std::size_t penalty_capacity);
+void FreeGpuSamplingWorkspace(GpuSamplingWorkspace* workspace) noexcept;
+
+/// Samples one device-resident logit row and writes a single device token.
+///
+/// Penalty token/count spans are host-resident compact unique-token arrays.
+void LaunchGPUSampling(const float* logits, std::uint32_t* out_token,
+                       std::size_t vocab_size,
+                       const GpuSamplingParameters& parameters,
+                       const std::uint32_t* penalty_tokens,
+                       const std::uint32_t* penalty_counts,
+                       std::size_t penalty_count,
+                       GpuSamplingWorkspace* workspace,
+                       hipStream_t stream = nullptr);
+
+/// Applies the target sampling policy to one device-resident verification row,
+/// accepts `draft_token` with the lossless speculative ratio, or samples the
+/// residual target-minus-draft distribution after rejection.
+///
+/// Draft candidate spans and penalty spans are host-resident compact arrays.
+void LaunchGPUSpeculativeSampling(
+    const float* logits, std::uint32_t* out_token, std::uint32_t* out_accepted,
+    std::size_t vocab_size, const GpuSamplingParameters& parameters,
+    std::uint32_t draft_token, float draft_token_probability,
+    const std::uint32_t* draft_candidate_ids,
+    const float* draft_candidate_probabilities,
+    std::size_t draft_candidate_count, float acceptance_uniform,
+    float residual_uniform, const std::uint32_t* penalty_tokens,
+    const std::uint32_t* penalty_counts, std::size_t penalty_count,
+    GpuSamplingWorkspace* workspace, hipStream_t stream = nullptr);
+
 /// Asynchronously copies embedding row for token_id into out_hidden
 void LaunchEmbeddingLookup(const void* table, core::GgmlType type,
                            std::uint32_t token_id, float* out_hidden,

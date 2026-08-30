@@ -32,9 +32,10 @@ void LaunchFusedRMSNormQKVProjections(
     std::size_t kv_dim, std::size_t hidden_size, hipStream_t stream = nullptr);
 
 /// Computes Grouped-Query Softmax Attention with KV-cache and optional gating
-/// on GPU (maintaining both FP32 and FP16 cache representations). When
-/// skip_kv_write is true the KV cache is assumed already written (e.g. by the
-/// fused QK norm+RoPE kernel, opt-c010-qk-rope-kv).
+/// on GPU. Production supplies canonical FP16 K/V; the independent validation
+/// fallback supplies FP32 K/V. Tests may supply both representations. When
+/// skip_kv_write is true the selected KV cache is assumed already written
+/// (e.g. by the fused QK norm+RoPE kernel, opt-c010-qk-rope-kv).
 void LaunchAttention(const float* q, const float* k, const float* v,
                      const float* gate, float* k_cache, float* v_cache,
                      void* k_cache_f16, void* v_cache_f16, float* out_context,
@@ -56,7 +57,8 @@ void LaunchAttention(const float* q, const float* k, const float* v,
 
 /// Fuses per-head Q/K RMSNorm, RoPE, and the KV-cache write for a single decode
 /// token into one launch (opt-c010-qk-rope-kv). Writes the normed+roped Q into
-/// q_out and the normed+roped K into k_out, K/V into the FP32+FP16 caches.
+/// q_out and the normed+roped K into k_out, and K/V into every non-null cache
+/// representation supplied by the caller.
 void LaunchFusedQKNormRoPEKvWrite(
     const float* q, const float* k, const float* v, const float* q_weight,
     const float* k_weight, float* q_out, float* k_out, float* k_cache,
@@ -85,7 +87,8 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
 
 /// Batched fuse of per-head Q/K RMSNorm, RoPE, and the KV-cache write across B
 /// tokens into one launch (opt-c010-qk-rope-kv). Writes the normed+roped Q into
-/// q_out and the normed+roped K into k_out, K/V into the FP32+FP16 caches.
+/// q_out and the normed+roped K into k_out, and K/V into every non-null cache
+/// representation supplied by the caller.
 void LaunchBatchedFusedQKNormRoPEKvWrite(
     const float* q, const float* k, const float* v, const float* q_weight,
     const float* k_weight, float* q_out, float* k_out, float* k_cache,

@@ -67,6 +67,40 @@ static_assert(
 
 // --- 1. Fusion-toggle routing values (gufo::hip::detail, host constexpr) ---
 void TestFusionToggleValues() {
+  Check(gufo::hip::QwenExecutionPolicy::Production().kv_cache_storage ==
+        gufo::hip::QwenKvCacheStorage::kFp16);
+  Check(gufo::hip::ResolveQwenKvCacheStorage(nullptr) ==
+        gufo::hip::QwenKvCacheStorage::kFp16);
+  Check(gufo::hip::ResolveQwenKvCacheStorage("fp16") ==
+        gufo::hip::QwenKvCacheStorage::kFp16);
+  Check(gufo::hip::ResolveQwenKvCacheStorage("half") ==
+        gufo::hip::QwenKvCacheStorage::kFp16);
+  Check(gufo::hip::ResolveQwenKvCacheStorage("fp32") ==
+        gufo::hip::QwenKvCacheStorage::kFp32);
+  Check(gufo::hip::ResolveQwenKvCacheStorage("float") ==
+        gufo::hip::QwenKvCacheStorage::kFp32);
+  Check(gufo::hip::ResolveQwenKvCacheStorage("invalid") ==
+        gufo::hip::QwenKvCacheStorage::kFp16);
+  Check(gufo::hip::QwenExecutionPolicy::Production().recurrent_state_storage ==
+        gufo::hip::QwenRecurrentStateStorage::kFp32);
+  Check(gufo::hip::ResolveQwenRecurrentStateStorage(nullptr) ==
+        gufo::hip::QwenRecurrentStateStorage::kFp32);
+  Check(gufo::hip::ResolveQwenRecurrentStateStorage("fp32") ==
+        gufo::hip::QwenRecurrentStateStorage::kFp32);
+  Check(gufo::hip::ResolveQwenRecurrentStateStorage("float") ==
+        gufo::hip::QwenRecurrentStateStorage::kFp32);
+  Check(gufo::hip::ResolveQwenRecurrentStateStorage("bf16") ==
+        gufo::hip::QwenRecurrentStateStorage::kBf16);
+  Check(gufo::hip::ResolveQwenRecurrentStateStorage("bfloat16") ==
+        gufo::hip::QwenRecurrentStateStorage::kBf16);
+  Check(gufo::hip::ResolveQwenRecurrentStateStorage("invalid") ==
+        gufo::hip::QwenRecurrentStateStorage::kFp32);
+  Check(gufo::hip::QwenRecurrentStateElementBytes(
+            gufo::hip::QwenRecurrentStateStorage::kFp32) == sizeof(float));
+  Check(gufo::hip::QwenRecurrentStateElementBytes(
+            gufo::hip::QwenRecurrentStateStorage::kBf16) ==
+        sizeof(std::uint16_t));
+
   // Q/K norm + RoPE + KV write: ENABLED -> decode uses the fused kernel.
   Check(gufo::hip::detail::ShouldFuseQKNormRoPEKvWrite() == true);
 
@@ -85,7 +119,20 @@ void TestFusionToggleValues() {
   Check(gufo::hip::detail::ShouldFuseDecodeSSMOutputResidual(candidate));
   Check(gufo::hip::detail::ShouldPrefetchNextLayer(candidate));
   Check(candidate.Fingerprint() ==
-        ((1ULL << 0U) | (1ULL << 4U) | (1ULL << 7U)));
+        ((1ULL << 0U) | (1ULL << 4U) | (1ULL << 7U) | (1ULL << 8U)));
+
+  auto fp32_fallback = candidate;
+  fp32_fallback.kv_cache_storage = gufo::hip::QwenKvCacheStorage::kFp32;
+  Check(!fp32_fallback.UsesFp16AttentionKv());
+  Check(fp32_fallback.Fingerprint() ==
+        (candidate.Fingerprint() & ~(1ULL << 8U)));
+
+  auto bf16_recurrent = candidate;
+  bf16_recurrent.recurrent_state_storage =
+      gufo::hip::QwenRecurrentStateStorage::kBf16;
+  Check(bf16_recurrent.UsesBf16RecurrentState());
+  Check(bf16_recurrent.Fingerprint() ==
+        (candidate.Fingerprint() | (1ULL << 9U)));
 
   const auto decode_plan = gufo::hip::ResolveQwenLayerRoute(
       candidate, gufo::hip::QwenExecutionMode::kDecode, false);

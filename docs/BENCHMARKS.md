@@ -5,7 +5,7 @@ file documents the method; per-model results live in `benchmarks/<model>/`
 (readmes), never as raw committed artifacts (`artifacts/` is gitignored).
 This method is teacher-forced and matched-token; it is not free-running
 evaluation. Capability evaluation (free-running, answer-graded) is defined
-in EVAL.md.
+in [EVAL.md](EVAL.md) and runs through the OpenAI-compatible serving route.
 
 ## Pipeline (tools/)
 

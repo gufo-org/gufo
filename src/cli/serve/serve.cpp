@@ -6,17 +6,21 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/sampling_options.hpp"
+#include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_jobs.hpp"
 #include "src/cli/video/video.hpp"
+#include "src/core/speculative/draft_policy.hpp"
 
 namespace gufo::cli {
 
@@ -65,6 +69,23 @@ void PrintServeHelp(std::string_view program_name,
     return;
   }
 
+  if (subcommand == "asr" || subcommand == "stt") {
+    std::filesystem::path asr_model;
+    std::size_t asr_context_tokens = 1024;
+
+    gufo::cli::ArgParser parser(
+        std::string(program_name) + " serve asr",
+        "Start the Qwen3-ASR speech-to-text HTTP transcription server.");
+    parser.AddOption("-m", "--model", "DIR", "Qwen3-ASR-1.7B model directory",
+                     "Model", &asr_model);
+    parser.AddOption(
+        "-c", "--context", "N",
+        "Native prompt+generation context capacity (default: 1024)", "Model",
+        &asr_context_tokens);
+    parser.PrintHelp();
+    return;
+  }
+
   if (subcommand == "llm") {
     std::string model = "models/Qwen3.5-4B-BF16.gguf";
     std::string served_model_name;
@@ -74,21 +95,16 @@ void PrintServeHelp(std::string_view program_name,
     std::string chat_template;
     bool use_chat_template = true;
     std::size_t max_tokens = 128;
-    float temperature = 0.0F;
-    float top_p = 1.0F;
-    std::int32_t top_k = 0;
-    float min_p = 0.0F;
-    std::int64_t seed = -1;
-    float repeat_penalty = 1.0F;
-    std::size_t repeat_last_n = 64;
+    sampling::SamplingConfig sampling_config;
     std::string reasoning_mode = "auto";
     std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string mtp_model_path;
     std::size_t draft_tokens = 7;
-    std::string draft_policy = "rolling";
+    std::string draft_policy = "auto";
     std::size_t min_draft_tokens = 1;
+    float draft_p_min = 0.0F;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
@@ -99,6 +115,11 @@ void PrintServeHelp(std::string_view program_name,
         server::kDefaultMaxBufferedOutputBytes;
     std::size_t max_buffered_output_bytes_total =
         server::kDefaultMaxBufferedOutputBytesTotal;
+    std::filesystem::path cache_disk_directory;
+    std::size_t cache_disk_bytes =
+        static_cast<std::size_t>(4) * 1024U * 1024U * 1024U;
+    std::size_t cache_disk_staging_bytes =
+        static_cast<std::size_t>(512) * 1024U * 1024U;
     bool force_cpu = false;
 
     gufo::cli::ArgParser parser(
@@ -121,35 +142,7 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("-n", "--max-tokens", "N",
                      "Default maximum new tokens per response (default: 128)",
                      "Sampling Defaults", &max_tokens);
-    parser.AddOption("-t", "--temperature", "T",
-                     "Default sampling temperature (default: 0.0 = greedy)",
-                     "Sampling Defaults", &temperature);
-    parser.AddOption(
-        "", "--top-p", "P",
-        "Default nucleus sampling probability cutoff (default: 1.0) "
-        "(TODO: qwen)",
-        "Sampling Defaults", &top_p);
-    parser.AddOption(
-        "", "--top-k", "K",
-        "Default Top-K token cutoff (default: 0 = disabled) (TODO: "
-        "qwen)",
-        "Sampling Defaults", &top_k);
-    parser.AddOption("", "--min-p", "P",
-                     "Default Min-P threshold relative to top token (default: "
-                     "0.0) (TODO: qwen)",
-                     "Sampling Defaults", &min_p);
-    parser.AddOption("-s", "--seed", "N",
-                     "Default RNG seed for generation (default: -1 = random)",
-                     "Sampling Defaults", &seed);
-    parser.AddOption(
-        "", "--repeat-penalty", "N",
-        "Default repetition penalty multiplier (default: 1.0 = off) "
-        "(TODO: qwen, deepseek)",
-        "Sampling Defaults", &repeat_penalty);
-    parser.AddOption("", "--repeat-last-n", "N",
-                     "Default lookback window for repetition penalty (default: "
-                     "64) (TODO: qwen, deepseek)",
-                     "Sampling Defaults", &repeat_last_n);
+    RegisterSamplingOptions(parser, &sampling_config, "Sampling Defaults");
 
     // Prompt Defaults
     parser.AddOption("", "--system", "PROMPT",
@@ -174,10 +167,9 @@ void PrintServeHelp(std::string_view program_name,
                      "Reasoning Defaults", &reasoning_budget);
 
     // Speculative & Hardware
-    parser.AddOption(
-        "", "--speculative", "MODE",
-        "Draft backend: dflash, dflash2, mtp, mtp-npu, npu, pld, self, or off",
-        "Speculative", &speculative_backend);
+    parser.AddOption("", "--speculative", "MODE",
+                     "HTTP draft backend: dflash, dflash2, or off",
+                     "Speculative", &speculative_backend);
     parser.AddOption("", "--dflash-model", "PATH",
                      "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
                      "Speculative", &dflash_model_path);
@@ -188,13 +180,27 @@ void PrintServeHelp(std::string_view program_name,
         "-d", "--draft-tokens", "N",
         "Maximum speculative draft tokens evaluated per step (default: 7)",
         "Speculative", &draft_tokens);
+    parser.AddOption("", "--spec-draft-n-max", "N",
+                     "llama.cpp-compatible alias for --draft-tokens",
+                     "Speculative", &draft_tokens);
     parser.AddOption(
         "", "--draft-policy", "MODE",
-        "Draft sizing: fixed, rolling, or accepted-ema (default: rolling)",
+        "Draft sizing: auto, fixed, rolling, or accepted-ema (default: auto, "
+        "which is fixed for DFlash-2 and rolling otherwise)",
         "Speculative", &draft_policy);
     parser.AddOption("", "--min-draft-tokens", "N",
                      "Adaptive draft floor (default: 1)", "Speculative",
                      &min_draft_tokens);
+    parser.AddOption("", "--spec-draft-n-min", "N",
+                     "llama.cpp-compatible alias for --min-draft-tokens",
+                     "Speculative", &min_draft_tokens);
+    parser.AddOption(
+        "", "--spec-draft-p-min", "P",
+        "Stop at the first draft token below confidence P; 0 disables "
+        "(default: 0)",
+        "Speculative", &draft_p_min);
+    parser.AddOption("", "--draft-p-min", "P", "Alias for --spec-draft-p-min",
+                     "Speculative", &draft_p_min);
     parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
@@ -219,6 +225,17 @@ void PrintServeHelp(std::string_view program_name,
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
+    parser.AddOption("", "--cache-disk", "DIR",
+                     "Opt-in restart-safe continuation cache directory",
+                     "Cache", &cache_disk_directory);
+    parser.AddOption(
+        "", "--cache-disk-bytes", "N",
+        "Total retained disk-cache byte budget (default: 4294967296)", "Cache",
+        &cache_disk_bytes);
+    parser.AddOption(
+        "", "--cache-disk-staging-bytes", "N",
+        "Single-operation RAM staging byte limit (default: 536870912)", "Cache",
+        &cache_disk_staging_bytes);
     parser.AddFlag("", "--cpu",
                    "Force CPU OpenMP execution fallback instead of GPU ROCm",
                    "Hardware", &force_cpu);
@@ -238,6 +255,8 @@ void PrintServeHelp(std::string_view program_name,
          "(/v1/video/generations)\n"
       << "  audio     Serve Qwen3-TTS text-to-speech endpoint "
          "(/v1/audio/speech)\n\n"
+      << "  asr       Serve Qwen3-ASR speech-to-text endpoint "
+         "(/v1/audio/transcriptions)\n\n"
       << "Server Options:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
       << "  -p, --port <N>         Port to listen on (default: 8080)\n"
@@ -308,7 +327,8 @@ int RunServe(std::span<const char* const> args) {
   for (std::size_t i = 0; i < args.size(); ++i) {
     const std::string_view arg = args[i];
     if (subcommand.empty()) {
-      if (arg == "llm" || arg == "video" || arg == "audio" || arg == "tts") {
+      if (arg == "llm" || arg == "video" || arg == "audio" || arg == "tts" ||
+          arg == "asr" || arg == "stt") {
         subcommand = arg;
         continue;
       }
@@ -396,6 +416,7 @@ int RunServe(std::span<const char* const> args) {
   std::shared_ptr<server::InferenceBackend> backend;
   std::shared_ptr<server::VideoJobService> video_jobs;
   std::shared_ptr<server::TtsService> tts;
+  std::shared_ptr<server::AsrService> asr;
 
   if (subcommand == "video") {
     std::filesystem::path video_model;
@@ -502,6 +523,48 @@ int RunServe(std::span<const char* const> args) {
                 << tts->initialization_error() << '\n';
       return 1;
     }
+  } else if (subcommand == "asr" || subcommand == "stt") {
+    std::filesystem::path asr_model;
+    std::size_t asr_context_tokens = 1024;
+
+    gufo::cli::ArgParser asr_parser(
+        "gufo serve asr",
+        "Start the Qwen3-ASR speech-to-text transcription server.");
+    asr_parser.AddOption("-m", "--model", "DIR",
+                         "Qwen3-ASR-1.7B model directory", "Model", &asr_model);
+    asr_parser.AddOption(
+        "-c", "--context", "N",
+        "Native prompt+generation context capacity (default: 1024)", "Model",
+        &asr_context_tokens);
+
+    if (!asr_parser.Parse(sub_args, &parse_err)) {
+      std::cerr << "Error: " << parse_err << "\n";
+      PrintServeHelp("gufo", "asr");
+      return 2;
+    }
+    if (asr_parser.IsHelpRequested()) {
+      PrintServeHelp("gufo", "asr");
+      return 0;
+    }
+    if (asr_model.empty() || asr_context_tokens < 32U) {
+      std::cerr << "Error: --model <DIR> and a context of at least 32 are "
+                   "required for ASR server\n";
+      PrintServeHelp("gufo", "asr");
+      return 2;
+    }
+
+    asr = std::make_shared<server::AsrService>(server::AsrServiceOptions{
+        .model_root = asr_model,
+        .native_context_tokens = asr_context_tokens,
+        .validate_model = true,
+        .model_id = {},
+        .runner = {},
+    });
+    if (!asr->ready()) {
+      std::cerr << "Error enabling Qwen3-ASR service: "
+                << asr->initialization_error() << '\n';
+      return 1;
+    }
   } else {
     // Default to LLM server
     std::string model = "models/Qwen3.5-4B-BF16.gguf";
@@ -512,21 +575,16 @@ int RunServe(std::span<const char* const> args) {
     std::string chat_template;
     bool use_chat_template = true;
     std::size_t max_tokens = 128;
-    float temperature = 0.0F;
-    float top_p = 1.0F;
-    std::int32_t top_k = 0;
-    float min_p = 0.0F;
-    std::int64_t seed = -1;
-    float repeat_penalty = 1.0F;
-    std::size_t repeat_last_n = 64;
+    sampling::SamplingConfig sampling_config;
     std::string reasoning_mode = "auto";
     std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string mtp_model_path;
     std::size_t draft_tokens = 7;
-    std::string draft_policy = "rolling";
+    std::string draft_policy = "auto";
     std::size_t min_draft_tokens = 1;
+    float draft_p_min = 0.0F;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
@@ -537,6 +595,11 @@ int RunServe(std::span<const char* const> args) {
         server::kDefaultMaxBufferedOutputBytes;
     std::size_t max_buffered_output_bytes_total =
         server::kDefaultMaxBufferedOutputBytesTotal;
+    std::filesystem::path cache_disk_directory;
+    std::size_t cache_disk_bytes =
+        static_cast<std::size_t>(4) * 1024U * 1024U * 1024U;
+    std::size_t cache_disk_staging_bytes =
+        static_cast<std::size_t>(512) * 1024U * 1024U;
     bool force_cpu = false;
 
     gufo::cli::ArgParser llm_parser(
@@ -556,37 +619,7 @@ int RunServe(std::span<const char* const> args) {
         "-n", "--max-tokens", "N",
         "Default maximum new tokens per response (default: 128)",
         "Sampling Defaults", &max_tokens);
-    llm_parser.AddOption("-t", "--temperature", "T",
-                         "Default sampling temperature (default: 0.0 = greedy)",
-                         "Sampling Defaults", &temperature);
-    llm_parser.AddOption(
-        "", "--top-p", "P",
-        "Default nucleus sampling probability cutoff (default: 1.0) "
-        "(TODO: qwen)",
-        "Sampling Defaults", &top_p);
-    llm_parser.AddOption(
-        "", "--top-k", "K",
-        "Default Top-K token cutoff (default: 0 = disabled) (TODO: qwen)",
-        "Sampling Defaults", &top_k);
-    llm_parser.AddOption(
-        "", "--min-p", "P",
-        "Default Min-P threshold relative to top token (default: 0.0) (TODO: "
-        "qwen)",
-        "Sampling Defaults", &min_p);
-    llm_parser.AddOption(
-        "-s", "--seed", "N",
-        "Default RNG seed for generation (default: -1 = random)",
-        "Sampling Defaults", &seed);
-    llm_parser.AddOption(
-        "", "--repeat-penalty", "N",
-        "Default repetition penalty multiplier (default: 1.0 = off) (TODO: "
-        "qwen, deepseek)",
-        "Sampling Defaults", &repeat_penalty);
-    llm_parser.AddOption(
-        "", "--repeat-last-n", "N",
-        "Default lookback window for repetition penalty (default: 64) (TODO: "
-        "qwen, deepseek)",
-        "Sampling Defaults", &repeat_last_n);
+    RegisterSamplingOptions(llm_parser, &sampling_config, "Sampling Defaults");
     llm_parser.AddOption(
         "", "--system", "PROMPT",
         "Default system instructions (default: helpful assistant)",
@@ -608,10 +641,9 @@ int RunServe(std::span<const char* const> args) {
         "Default token cap for thinking traces (default: -1 = unlimited) "
         "(TODO: qwen, deepseek)",
         "Reasoning Defaults", &reasoning_budget);
-    llm_parser.AddOption(
-        "", "--speculative", "MODE",
-        "Draft backend: dflash, dflash2, mtp, mtp-npu, npu, pld, self, or off",
-        "Speculative", &speculative_backend);
+    llm_parser.AddOption("", "--speculative", "MODE",
+                         "HTTP draft backend: dflash, dflash2, or off",
+                         "Speculative", &speculative_backend);
     llm_parser.AddOption("", "--dflash-model", "PATH",
                          "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
                          "Speculative", &dflash_model_path);
@@ -622,13 +654,28 @@ int RunServe(std::span<const char* const> args) {
         "-d", "--draft-tokens", "N",
         "Maximum speculative draft tokens evaluated per step (default: 7)",
         "Speculative", &draft_tokens);
+    llm_parser.AddOption("", "--spec-draft-n-max", "N",
+                         "llama.cpp-compatible alias for --draft-tokens",
+                         "Speculative", &draft_tokens);
     llm_parser.AddOption(
         "", "--draft-policy", "MODE",
-        "Draft sizing: fixed, rolling, or accepted-ema (default: rolling)",
+        "Draft sizing: auto, fixed, rolling, or accepted-ema (default: auto, "
+        "which is fixed for DFlash-2 and rolling otherwise)",
         "Speculative", &draft_policy);
     llm_parser.AddOption("", "--min-draft-tokens", "N",
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
+    llm_parser.AddOption("", "--spec-draft-n-min", "N",
+                         "llama.cpp-compatible alias for --min-draft-tokens",
+                         "Speculative", &min_draft_tokens);
+    llm_parser.AddOption(
+        "", "--spec-draft-p-min", "P",
+        "Stop at the first draft token below confidence P; 0 disables "
+        "(default: 0)",
+        "Speculative", &draft_p_min);
+    llm_parser.AddOption("", "--draft-p-min", "P",
+                         "Alias for --spec-draft-p-min", "Speculative",
+                         &draft_p_min);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
@@ -655,6 +702,17 @@ int RunServe(std::span<const char* const> args) {
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
+    llm_parser.AddOption("", "--cache-disk", "DIR",
+                         "Opt-in restart-safe continuation cache directory",
+                         "Cache", &cache_disk_directory);
+    llm_parser.AddOption(
+        "", "--cache-disk-bytes", "N",
+        "Total retained disk-cache byte budget (default: 4294967296)", "Cache",
+        &cache_disk_bytes);
+    llm_parser.AddOption(
+        "", "--cache-disk-staging-bytes", "N",
+        "Single-operation RAM staging byte limit (default: 536870912)", "Cache",
+        &cache_disk_staging_bytes);
     llm_parser.AddFlag(
         "", "--cpu", "Force CPU OpenMP execution fallback instead of GPU ROCm",
         "Hardware", &force_cpu);
@@ -668,16 +726,66 @@ int RunServe(std::span<const char* const> args) {
       PrintServeHelp("gufo", "llm");
       return 0;
     }
+    bool sampling_valid = true;
+    try {
+      sampling_config.Validate();
+    } catch (const std::invalid_argument&) {
+      sampling_valid = false;
+    }
     if (max_tokens == 0 || prefill_chunk_tokens == 0 ||
         max_pending_requests == 0 || max_pending_requests_per_client == 0 ||
         max_pending_requests_per_client > max_pending_requests ||
         max_output_bytes == 0 || max_buffered_output_bytes == 0 ||
         max_buffered_output_bytes_total == 0 ||
+        (!cache_disk_directory.empty() &&
+         (cache_disk_bytes == 0 || cache_disk_staging_bytes == 0)) ||
         request_timeout_ms > static_cast<std::uint64_t>(
                                  std::chrono::milliseconds::max().count()) ||
-        !std::isfinite(temperature) || temperature < 0.0F ||
-        temperature > 2.0F) {
+        !sampling_valid || sampling_config.temperature > 2.0F) {
       std::cerr << "Error: sampling and scheduling limits are invalid\n";
+      return 2;
+    }
+    if (draft_tokens == 0 || min_draft_tokens == 0 ||
+        min_draft_tokens > draft_tokens ||
+        draft_tokens > std::numeric_limits<std::uint32_t>::max() ||
+        !std::isfinite(draft_p_min) || draft_p_min < 0.0F ||
+        draft_p_min > 1.0F) {
+      std::cerr << "Error: speculative draft limits are invalid\n";
+      return 2;
+    }
+
+    server::TextSpeculativeConfig speculative_config;
+    if (speculative_backend.empty() || speculative_backend == "off") {
+      speculative_config.backend = server::TextSpeculativeBackend::kDisabled;
+    } else if (speculative_backend == "dflash" ||
+               speculative_backend == "dflash2" ||
+               speculative_backend == "dflash-2") {
+      speculative_config.backend = server::TextSpeculativeBackend::kDFlash;
+    } else {
+      std::cerr << "Error: speculative backend '" << speculative_backend
+                << "' is not supported by the HTTP server\n";
+      return 2;
+    }
+    speculative_config.draft_model_path = dflash_model_path;
+    speculative_config.max_draft_tokens =
+        static_cast<std::uint32_t>(draft_tokens);
+    speculative_config.min_draft_tokens =
+        static_cast<std::uint32_t>(min_draft_tokens);
+    speculative_config.draft_p_min = draft_p_min;
+    // `auto` follows the measured best per backend; see ResolveDraftPolicy.
+    const std::string_view resolved_draft_policy =
+        speculative::ResolveDraftPolicy(draft_policy, true);
+    if (resolved_draft_policy == "fixed") {
+      speculative_config.draft_policy = server::TextDraftPolicy::kFixed;
+    } else if (resolved_draft_policy == "rolling") {
+      speculative_config.draft_policy =
+          server::TextDraftPolicy::kRollingAcceptance;
+    } else if (resolved_draft_policy == "accepted-ema") {
+      speculative_config.draft_policy =
+          server::TextDraftPolicy::kAcceptedTokenEma;
+    } else {
+      std::cerr << "Error: unknown speculative draft policy '" << draft_policy
+                << "'\n";
       return 2;
     }
 
@@ -700,16 +808,29 @@ int RunServe(std::span<const char* const> args) {
                                std::chrono::milliseconds{
                                    static_cast<std::chrono::milliseconds::rep>(
                                        request_timeout_ms)},
+                       },
+                       speculative_config,
+                       server::TextDiskCacheConfig{
+                           .directory = cache_disk_directory,
+                           .capacity_bytes = cache_disk_bytes,
+                           .staging_capacity_bytes = cache_disk_staging_bytes,
+                           .model_artifact_fingerprint = {},
                        })) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
       return 1;
     }
+    if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash) {
+      std::cout << "[Speculative]: DFlash enabled (max_draft_tokens="
+                << speculative_config.max_draft_tokens
+                << ", min_draft_tokens=" << speculative_config.min_draft_tokens
+                << ", draft_p_min=" << speculative_config.draft_p_min << ")\n";
+    }
     backend->set_model_id(served_model_name);
-    backend->set_sampling_defaults(max_tokens, temperature);
+    backend->set_sampling_defaults(max_tokens, sampling_config);
   }
 
   server::HttpServer server(
-      host, port, backend, video_jobs, tts,
+      host, port, backend, video_jobs, tts, asr,
       server::HttpServerLimits{
           .max_request_body_bytes = max_request_body_bytes,
           .max_connections = max_connections,

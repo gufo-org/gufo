@@ -33,18 +33,21 @@ public:
     return defaults;
   }
 
-  Result complete(std::string_view, std::size_t, float,
+  Result complete(std::string_view, std::size_t,
+                  const gufo::sampling::SamplingConfig&,
                   const CancellationCheck&, const TokenCallback&) override {
     return {};
   }
 
   Result chat(const gufo::server::ChatRequest& request, std::size_t max_tokens,
-              float temperature, const CancellationCheck& is_cancelled,
+              const gufo::sampling::SamplingConfig& sampling,
+              const CancellationCheck& is_cancelled,
               const TokenCallback& on_token) override {
     ++chat_calls;
     last_request = request;
     last_max_tokens = max_tokens;
-    last_temperature = temperature;
+    last_temperature = sampling.temperature;
+    last_sampling = sampling;
 
     Result result;
     result.prompt_tokens = 7;
@@ -92,13 +95,13 @@ public:
 
   std::shared_ptr<GenerationRequest> start_chat(
       const gufo::server::ChatRequest& request, std::size_t max_tokens,
-      float temperature, const CancellationCheck& is_cancelled,
-      bool stream_output) override {
+      const gufo::sampling::SamplingConfig& sampling,
+      const CancellationCheck& is_cancelled, bool stream_output) override {
     if (reject_on_start.has_value()) {
       throw gufo::server::TextGenerationError(*reject_on_start,
                                               "injected admission rejection");
     }
-    return TextGenerationBackend::start_chat(request, max_tokens, temperature,
+    return TextGenerationBackend::start_chat(request, max_tokens, sampling,
                                              is_cancelled, stream_output);
   }
 
@@ -128,6 +131,7 @@ public:
   SamplingDefaults defaults;
   std::size_t last_max_tokens{0};
   float last_temperature{0.0F};
+  gufo::sampling::SamplingConfig last_sampling;
   std::optional<gufo::server::TextGenerationErrorCode> reject_on_start;
 
 private:
@@ -308,7 +312,7 @@ void TestBackendSamplingDefaults() {
   FakeBackend backend;
   backend.defaults = {
       .max_tokens = 37,
-      .temperature = 0.25F,
+      .sampling = {.temperature = 0.25F},
   };
 
   const auto default_response = gufo::server::HandleOpenAiChat(Request(R"({
@@ -334,6 +338,73 @@ void TestBackendSamplingDefaults() {
          "Explicit max tokens override the backend default");
   Expect(backend.last_temperature == 0.0F,
          "Explicit temperature overrides the backend default");
+}
+
+void TestAllSamplingControlsReachBackend() {
+  FakeBackend backend;
+  const auto response = gufo::server::HandleOpenAiChat(Request(R"({
+        "model":"test-model",
+        "messages":[{"role":"user","content":"hello"}],
+        "temperature":0.8,
+        "top_k":40,
+        "top_p":0.9,
+        "min_p":0.05,
+        "min_keep":3,
+        "seed":123,
+        "repeat_penalty":1.1,
+        "repeat_last_n":32,
+        "frequency_penalty":0.25,
+        "presence_penalty":0.5
+      })"),
+                                                       backend);
+
+  Expect(response.status == 200, "Complete sampling request is accepted");
+  const auto& sampling = backend.last_sampling;
+  Expect(sampling.temperature > 0.79F && sampling.temperature < 0.81F,
+         "temperature reaches backend");
+  Expect(sampling.top_k == 40, "top-k reaches backend");
+  Expect(sampling.top_p > 0.89F && sampling.top_p < 0.91F,
+         "top-p reaches backend");
+  Expect(sampling.min_p > 0.04F && sampling.min_p < 0.06F,
+         "min-p reaches backend");
+  Expect(sampling.min_keep == 3, "min-keep reaches backend");
+  Expect(sampling.seed == 123, "seed reaches backend");
+  Expect(sampling.repeat_penalty > 1.09F && sampling.repeat_penalty < 1.11F,
+         "repeat penalty reaches backend");
+  Expect(sampling.repeat_last_n == 32, "repeat window reaches backend");
+  Expect(
+      sampling.frequency_penalty > 0.24F && sampling.frequency_penalty < 0.26F,
+      "frequency penalty reaches backend");
+  Expect(sampling.presence_penalty > 0.49F && sampling.presence_penalty < 0.51F,
+         "presence penalty reaches backend");
+}
+
+void TestAssistantReasoningContentReachesBackend() {
+  FakeBackend backend;
+  backend.pieces = {"Blue"};
+  const auto response = gufo::server::HandleOpenAiChat(Request(R"({
+        "model":"test-model",
+        "messages":[
+          {"role":"user","content":"Name one color."},
+          {
+            "role":"assistant",
+            "reasoning_content":"I should answer concisely.",
+            "content":"Red"
+          },
+          {"role":"user","content":"Name another."}
+        ],
+        "max_tokens":1
+      })"),
+                                                       backend);
+
+  Expect(response.status == 200, "Assistant reasoning history is accepted");
+  Expect(backend.last_request.messages.size() == 3,
+         "Complete reasoning history reaches the backend");
+  Expect(
+      backend.last_request.messages[1].thought == "I should answer concisely.",
+      "Assistant reasoning_content reaches the model template");
+  Expect(backend.last_request.messages[1].content == "Red",
+         "Assistant visible content remains separate from reasoning");
 }
 
 void TestWrongModelIsRejected() {
@@ -412,6 +483,8 @@ void TestStreamingOverloadIsRejectedBeforeHeaders() {
 int main() {
   TestStreamingIsLive();
   TestBackendSamplingDefaults();
+  TestAllSamplingControlsReachBackend();
+  TestAssistantReasoningContentReachesBackend();
   TestToolCallsAreStructured();
   TestDeepSeekToolCallsAreStructured();
   TestWrongModelIsRejected();

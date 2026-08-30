@@ -1,5 +1,6 @@
 #include "src/models/deepseek_v4_flash/engine.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <limits>
@@ -273,6 +274,28 @@ bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
   return true;
 }
 
+bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
+                              std::string* error_msg) {
+  if (payload.empty()) {
+    AssignError(error_msg, "DeepSeek session snapshot payload is empty");
+    return false;
+  }
+  ds4_session_snapshot snapshot{
+      .ptr = const_cast<std::uint8_t*>(payload.data()),
+      .len = payload.size(),
+      .cap = payload.size(),
+  };
+  std::array<char, kErrorCapacity> error{};
+  if (ds4_session_load_snapshot(session_, &snapshot, error.data(),
+                                error.size()) != 0) {
+    AssignError(error_msg, error[0] != '\0'
+                               ? error.data()
+                               : "failed to restore DeepSeek session");
+    return false;
+  }
+  return true;
+}
+
 void Session::SetCancellationCheck(CancellationCheck is_cancelled) {
   is_cancelled_ = std::move(is_cancelled);
   ds4_session_cancel_fn callback = nullptr;
@@ -308,6 +331,15 @@ SessionSnapshot::~SessionSnapshot() {
 
 std::uint64_t SessionSnapshot::SizeBytes() const noexcept {
   return snapshot_.len;
+}
+
+bool SessionSnapshot::CopyTo(
+    std::span<std::uint8_t> destination) const noexcept {
+  if (snapshot_.ptr == nullptr || snapshot_.len != destination.size()) {
+    return false;
+  }
+  std::copy_n(snapshot_.ptr, destination.size(), destination.data());
+  return true;
 }
 
 }  // namespace gufo::models::deepseek_v4_flash

@@ -126,6 +126,29 @@ void TestThinkingFraming() {
          "Rendered output includes thinking blocks and prompt");
 }
 
+void TestHistoricalThinkingDoesNotEnableNewThinking() {
+  auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  const std::vector<gufo::tokenization::ChatMessage> messages = {
+      {gufo::tokenization::ChatRole::kUser, "Name one color.", "", ""},
+      {gufo::tokenization::ChatRole::kAssistant, "\nRed", "",
+       "I should answer with one color."},
+      {gufo::tokenization::ChatRole::kUser, "Name another.", "", ""},
+  };
+
+  gufo::tokenization::ChatTemplateOptions opts;
+  opts.add_generation_prompt = true;
+  opts.enable_thinking = false;
+  const auto rendered = tpl->Render(messages, opts);
+  Expect(rendered.has_value(), "Historical thinking renders");
+  Expect(*rendered ==
+             "<|im_start|>user\nName one color.<|im_end|>\n"
+             "<|im_start|>assistant\n<think>\nI should answer with one "
+             "color.\n</think>\n\nRed<|im_end|>\n"
+             "<|im_start|>user\nName another.<|im_end|>\n"
+             "<|im_start|>assistant\n",
+         "Historical reasoning round-trips without changing the next prompt");
+}
+
 void TestBoundedOutputLimit() {
   auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
 
@@ -349,6 +372,7 @@ int main() {
   std::cout << "Running QwenChatTemplate unit tests...\n";
   TestBasicChatRendering();
   TestThinkingFraming();
+  TestHistoricalThinkingDoesNotEnableNewThinking();
   TestBoundedOutputLimit();
   TestGgufTemplateExtraction();
   TestRenderAndTokenize();

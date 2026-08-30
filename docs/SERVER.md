@@ -52,11 +52,14 @@ gufo serve
 gufo chat
 gufo prompt
 gufo video
+gufo transcribe
 ```
 
 `chat` and `prompt` are transport adapters over the same scheduler and may
 either load the runtime directly or connect to a running server. `video`
 executes the direct MiniMax H3 route used by the asynchronous video worker.
+`transcribe` executes the native Qwen3-ASR-1.7B route used by the synchronous
+audio transcription endpoint.
 Their detailed contracts are defined in [Command-Line Interface](CLI.md) and
 [MiniMax H3 Integration Boundary](MINIMAX_H3.md).
 
@@ -192,6 +195,19 @@ state. I/O threads never wait synchronously for device completion.
 | `GET` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
 | `DELETE` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
+
+Qwen3-ASR serving is enabled with a dedicated model process:
+
+```sh
+./result/bin/gufo serve asr \
+  --model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision>
+```
+
+`POST /v1/audio/transcriptions` accepts OpenAI-compatible multipart fields
+`file`, `model`, `language`, `prompt`, `response_format`, `temperature`, and
+`max_tokens`. The native route is deterministic (`temperature=0`) and supports
+`json`, `text`, and `verbose_json`; streaming and timestamp granularities are
+rejected explicitly.
 
 The MiniMax H3 subset follows the asynchronous OpenAI-style video resource
 shape and is versioned independently as `gufo.video-api.v1`. Its supported

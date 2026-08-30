@@ -137,6 +137,9 @@ if (ENGINE_ENABLE_HIP)
   add_qwen_hip_test(qwen_attention_long_context_ops_test
     tests/models/qwen/hip/attention/long_context_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;decode;long-context")
+  add_qwen_hip_test(qwen_attention_kv_storage_ops_test
+    tests/models/qwen/hip/attention/kv_storage_ops_test.cpp
+    "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;decode;long-context;snapshot;opt-c0133-fp16-kv")
   add_qwen_hip_test(qwen_attention_fusion_ops_test
     tests/models/qwen/hip/attention/qk_rope_kv_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;fusion;opt-c010-qk-rope-kv")
@@ -155,7 +158,7 @@ if (ENGINE_ENABLE_HIP)
 
   add_qwen_hip_test(qwen_ssm_ops_test
     tests/models/qwen/hip/ssm_ops_test.cpp
-    "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;ssm;opt-c010-ssm-gate-residual;opt-c010-rmsnorm-projection")
+    "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;ssm;opt-c010-ssm-gate-residual;opt-c010-rmsnorm-projection;opt-c0138-bf16-recurrent")
   add_qwen_hip_test(qwen_ffn_fusion_ops_test
     tests/models/qwen/hip/ffn/swiglu_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;ffn;fusion;opt-c010-ffn-swiglu")

@@ -26,6 +26,7 @@
 #include "src/models/qwen/hip/execution_policy.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
+#include "src/models/qwen/hip/ops/token.hpp"
 
 namespace gufo::hip {
 
@@ -42,6 +43,11 @@ struct QwenVerificationPolicy {
   bool batched_lm_head{false};
   int bf16_from_layer{-1};
   int fp32_from_layer{-1};
+};
+
+struct QwenSampledVerificationResult {
+  tokenization::TokenId token{0};
+  bool accepted{false};
 };
 
 struct QwenGpuWeightRegion {
@@ -118,6 +124,16 @@ public:
   [[nodiscard]] std::uint32_t ValidContext() const noexcept {
     return valid_context_;
   }
+  [[nodiscard]] QwenKvCacheStorage KvStorage() const noexcept {
+    return kv_storage_;
+  }
+  [[nodiscard]] QwenRecurrentStateStorage RecurrentStateStorage()
+      const noexcept {
+    return recurrent_state_storage_;
+  }
+  [[nodiscard]] std::size_t CompactPayloadBytes() const;
+  [[nodiscard]] std::size_t SerializeCompact(
+      std::span<std::uint8_t> destination) const;
 
 private:
   QwenGpuSnapshot() = default;
@@ -129,10 +145,18 @@ private:
   std::size_t kv_elements_per_plane_{0};
   std::size_t conv_elements_{0};
   std::size_t deltanet_elements_{0};
+  std::size_t conv_elements_per_layer_{0};
+  std::size_t deltanet_elements_per_layer_{0};
+  std::uint32_t num_layers_{0};
   std::uint32_t attention_layers_{0};
+  std::uint32_t full_attention_interval_{0};
   std::uint32_t kv_width_{0};
+  std::uint32_t max_context_{0};
   std::uint32_t valid_context_{0};
   std::size_t payload_bytes_{0};
+  QwenKvCacheStorage kv_storage_{QwenKvCacheStorage::kFp32};
+  QwenRecurrentStateStorage recurrent_state_storage_{
+      QwenRecurrentStateStorage::kFp32};
 
   friend class QwenGpuArena;
 };
@@ -193,11 +217,18 @@ static_assert(std::is_trivially_copyable_v<QwenGpuScratchView>);
 static_assert(std::is_same_v<decltype(QwenDecodeScratch::sampled_token),
                              std::span<std::uint32_t>>);
 
+template<typename T>
+[[nodiscard]] constexpr T* OffsetIfPresent(T* pointer,
+                                           std::size_t offset) noexcept {
+  return pointer == nullptr ? nullptr : pointer + offset;
+}
+
 /// Preallocated, zero-allocation GPU execution arena on gfx1151.
 class QwenGpuArena {
 public:
-  explicit QwenGpuArena(const core::ModelConfig& config,
-                        std::uint32_t max_context = 4096);
+  explicit QwenGpuArena(
+      const core::ModelConfig& config, std::uint32_t max_context = 4096,
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
   ~QwenGpuArena();
 
   QwenGpuArena(const QwenGpuArena&) = delete;
@@ -249,7 +280,7 @@ public:
   void* d_attention_kv_f16{nullptr};
   float* d_kv_cache{nullptr};
   float* d_ssm_conv_state{nullptr};
-  float* d_ssm_deltanet_state{nullptr};
+  void* d_ssm_deltanet_state{nullptr};
   std::uint32_t* d_prompt_tokens{nullptr};
   float* d_target_layer_features{nullptr};
 
@@ -277,12 +308,19 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }
+  [[nodiscard]] QwenRecurrentStateStorage GetRecurrentStateStorage()
+      const noexcept {
+    return policy_.recurrent_state_storage;
+  }
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
-      const core::ModelConfig& config, std::uint32_t max_context);
+      const core::ModelConfig& config, std::uint32_t max_context,
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   [[nodiscard]] std::unique_ptr<QwenGpuSnapshot> SaveSnapshot(
       std::uint32_t valid_context);
   void RestoreSnapshot(const QwenGpuSnapshot& snapshot);
+  void RestoreCompactSnapshot(std::span<const std::uint8_t> payload,
+                              std::uint32_t expected_valid_context);
   [[nodiscard]] QwenGpuScratchView GetScratchView(
       std::size_t batch_size = 1) noexcept;
   void SetTargetLayerCapture(std::span<const std::uint32_t> target_layer_ids);
@@ -301,9 +339,10 @@ private:
   core::ModelConfig config_;
   std::uint32_t max_context_;
   std::uint32_t max_batch_;
+  QwenExecutionPolicy policy_;
   std::vector<std::uint32_t> target_layer_ids_;
   float* d_saved_ssm_conv_state_{nullptr};
-  float* d_saved_ssm_deltanet_state_{nullptr};
+  void* d_saved_ssm_deltanet_state_{nullptr};
   float* d_ssm_replay_qkv_{nullptr};
   float* d_ssm_replay_alpha_{nullptr};
   float* d_ssm_replay_beta_{nullptr};
@@ -321,18 +360,18 @@ public:
   explicit QwenGpuExecutor(
       std::shared_ptr<const QwenGpuModel> model,
       std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
   ~QwenGpuExecutor();
 
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> Create(
       std::shared_ptr<const QwenGpuModel> model,
       std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
 
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
 
   /// Generates tokens auto-regressively on GPU with streaming callback.
   std::vector<tokenization::TokenId> Generate(
@@ -395,7 +434,7 @@ public:
   /// parallel prefill forward pass on the GPU.
   [[nodiscard]] std::vector<tokenization::TokenId> ForwardVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,
-      std::uint32_t start_pos);
+      std::uint32_t start_pos, bool capture_logits = false);
   void CommitVerificationChunk(
       std::span<const tokenization::TokenId> committed_tokens,
       std::uint32_t start_pos);
@@ -403,9 +442,30 @@ public:
       const noexcept {
     return h_verification_hidden_;
   }
+  [[nodiscard]] std::span<const float> GetVerificationLogits() const noexcept {
+    return h_verification_logits_;
+  }
+  [[nodiscard]] std::span<const float> CopyVerificationLogits(std::size_t row);
 
   /// Copies the logits produced by the most recent forward pass to host memory.
   [[nodiscard]] std::span<const float> CopyLastLogits();
+
+  /// Samples the most recent device-resident logit row and transfers one token.
+  [[nodiscard]] tokenization::TokenId SampleLastLogits(
+      sampling::SamplerState& sampler);
+
+  /// Samples one row from the most recent verification batch without copying
+  /// its vocabulary-sized logits to the host.
+  [[nodiscard]] tokenization::TokenId SampleVerificationLogits(
+      std::size_t row, sampling::SamplerState& sampler);
+
+  /// Performs one exact sampled-speculation accept/residual decision on the
+  /// GPU, returning only the decision and selected token.
+  [[nodiscard]] QwenSampledVerificationResult VerifySampledToken(
+      std::size_t row, tokenization::TokenId draft_token,
+      std::span<const tokenization::TokenId> draft_candidate_ids,
+      std::span<const float> draft_candidate_probabilities,
+      double draft_token_probability, sampling::SamplerState& sampler);
 
   /// Enables host capture of every final-layer prompt hidden state. Disabled
   /// by default so ordinary prefill does not incur device-to-host copies.
@@ -430,8 +490,9 @@ public:
     return arena_.GetMaxContext();
   }
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
-      const core::ModelConfig& config, std::uint32_t max_context) {
-    return QwenGpuArena::EstimateMemoryUsage(config, max_context);
+      const core::ModelConfig& config, std::uint32_t max_context,
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime()) {
+    return QwenGpuArena::EstimateMemoryUsage(config, max_context, policy);
   }
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const {
     return arena_.GetMemoryUsage();
@@ -439,6 +500,8 @@ public:
   [[nodiscard]] std::unique_ptr<QwenGpuSnapshot> SaveSnapshot(
       std::uint32_t valid_context);
   void RestoreSnapshot(const QwenGpuSnapshot& snapshot);
+  void RestoreCompactSnapshot(std::span<const std::uint8_t> payload,
+                              std::uint32_t expected_valid_context);
 
   /// Resets GPU cache and recurrent states in the arena.
   void Reset() noexcept;
@@ -448,10 +511,16 @@ public:
 private:
   void ReplaySsmState(std::uint32_t position);
   void EnsureVerificationLogits(std::size_t batch_size);
+  [[nodiscard]] GpuSamplingParameters PrepareGpuSamplingParameters(
+      const sampling::SamplerState& sampler);
 
   [[nodiscard]] tokenization::TokenId ForwardPromptChunk(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t start_pos, bool compute_logits);
+  [[nodiscard]] std::vector<tokenization::TokenId>
+  ForwardDecodeEquivalentVerificationChunk(
+      std::span<const tokenization::TokenId> candidate_tokens,
+      std::uint32_t start_pos, bool capture_logits);
 
   std::shared_ptr<const QwenGpuModel> model_;
   const models::QwenModelWeights& weights_;
@@ -463,11 +532,16 @@ private:
   std::vector<float> h_logits_;
   std::vector<float> h_prompt_hidden_;
   std::vector<float> h_verification_hidden_;
+  std::vector<float> h_verification_logits_;
   std::vector<float> h_last_hidden_;
   float* d_verification_logits_{nullptr};
   std::size_t verification_logits_capacity_{0};
+  std::size_t last_verification_rows_{0};
   std::size_t last_hidden_offset_{0};
   float* d_target_layer_features_{nullptr};
+  GpuSamplingWorkspace sampling_workspace_;
+  std::vector<std::uint32_t> h_penalty_tokens_;
+  std::vector<std::uint32_t> h_penalty_counts_;
   QwenVerificationPolicy verification_policy_;
   std::optional<tokenization::TokenId> next_token_;
   bool capture_prompt_hidden_{false};

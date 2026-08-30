@@ -65,6 +65,10 @@ completion and chat endpoints:
   --model "$MODEL"
 ```
 
+The retained first-four Antirez DS4 HTTP capability run and independent repeat
+are documented in [eval/README.md](eval/README.md). They are Gufo regression
+baselines, not official dataset scores.
+
 ## Current Results
 
 The Gufo rows use the release package, one repetition, a 2K prompt suffix, and
@@ -216,7 +220,8 @@ after generation.
 
 - Add model-owned thinking/reasoning mode and effort controls; the current chat
   template intentionally uses the no-thinking path.
-- Run the compact `gufo-eval` qualification suite when #153 is implemented.
+- Retain and compare the first four-case `gufo eval` HTTP regression baseline;
+  Pi/coding-agent evaluation remains deferred under #153.
 - Profile and optimize the model-owned gfx1151 kernels under #155.
 - Add DSpark speculative decoding under #156.
 - Add model-owned offline calibration/imatrix tooling only when a new

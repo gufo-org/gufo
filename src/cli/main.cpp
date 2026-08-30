@@ -5,11 +5,17 @@
 
 #include "src/cli/bench/bench.hpp"
 #include "src/cli/diagnose/diagnose.h"
+#include "src/cli/eval/eval.hpp"
 #include "src/cli/prompt/prompt.hpp"
 #include "src/cli/serve/serve.hpp"
+#include "src/cli/transcribe/transcribe.hpp"
 #include "src/cli/video/video.hpp"
 
-constexpr std::string_view kGufoVersion = "0.1.0";
+#ifndef GUFO_VERSION
+#define GUFO_VERSION "development"
+#endif
+
+constexpr std::string_view kGufoVersion = GUFO_VERSION;
 
 namespace {
 
@@ -27,7 +33,9 @@ void print_help(std::string_view program_name) {
       << "  prompt         Execute one prompt request and exit\n"
       << "  chat           Start an interactive terminal conversation\n"
       << "  bench          Benchmark prompt processing and token generation\n"
+      << "  eval           Evaluate an OpenAI-compatible text server\n"
       << "  video          Generate MiniMax H3 text-to-video\n"
+      << "  transcribe     Transcribe WAV audio with Qwen3-ASR-1.7B\n"
       << "  diagnose       Inspect system hardware, memory, and drivers\n"
       << "  help           Print help for a specific command\n\n"
       << "Run '" << program_name << " help <COMMAND>' or '" << program_name
@@ -84,8 +92,14 @@ int run(std::span<const char* const> args) {
     if (sub == "bench") {
       return gufo::cli::RunBench(help_flag);
     }
+    if (sub == "eval") {
+      return gufo::cli::RunEval(help_flag);
+    }
     if (sub == "video") {
       return gufo::cli::RunVideo(help_flag);
+    }
+    if (sub == "transcribe" || sub == "asr") {
+      return gufo::cli::RunTranscribe(help_flag);
     }
     if (sub == "chat") {
       return gufo::cli::RunChat(help_flag);
@@ -110,12 +124,20 @@ int run(std::span<const char* const> args) {
     return gufo::cli::RunBench(options.subspan(1));
   }
 
+  if (first_arg == "eval") {
+    return gufo::cli::RunEval(options.subspan(1));
+  }
+
   if (first_arg == "prompt") {
     return gufo::cli::RunPrompt(options.subspan(1));
   }
 
   if (first_arg == "video") {
     return gufo::cli::RunVideo(options.subspan(1));
+  }
+
+  if (first_arg == "transcribe" || first_arg == "asr") {
+    return gufo::cli::RunTranscribe(options.subspan(1));
   }
 
   if (first_arg == "chat") {

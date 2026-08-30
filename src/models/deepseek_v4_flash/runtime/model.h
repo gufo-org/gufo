@@ -29,6 +29,7 @@ struct ds4_session_snapshot {
 };
 
 inline constexpr int DS4_SESSION_SYNC_INTERRUPTED = 2;
+inline constexpr std::uint32_t DS4_SESSION_PAYLOAD_VERSION = 2;
 
 int ds4_engine_open(ds4_engine **out, const ds4_engine_options *options);
 void ds4_engine_close(ds4_engine *engine);

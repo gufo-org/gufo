@@ -30,6 +30,7 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "LLVM-AIE",
     "AIEBU",
     "ICU",
+    "curl",
     "FFmpeg",
 }
 
@@ -100,6 +101,7 @@ def verify_dependencies(
             "xrt-plugin-amdxdna",
             "libuuid",
             "icu",
+            "curl",
             "ffmpeg-headless",
         ]:
             if dep not in pkg_content:

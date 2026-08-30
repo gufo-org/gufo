@@ -288,7 +288,7 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
 std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromVocabulary(
     std::span<const std::string> tokens, std::span<const std::string> merges,
     const std::unordered_map<std::string, TokenId>& special_tokens,
-    std::string* error_msg) {
+    std::string* error_msg, VocabularyLoadOptions load_options) {
   if (tokens.empty()) {
     if (error_msg != nullptr) {
       *error_msg = "Vocabulary cannot be empty";
@@ -334,27 +334,30 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromVocabulary(
     }
   }
 
-  tokenizer->InitializeByteTokens();
+  tokenizer->InitializeByteTokens(load_options.eager_decoded_tokens);
   return tokenizer;
 }
 
-void QwenTokenizer::InitializeByteTokens() {
-  id_to_decoded_token_.resize(id_to_token_.size());
-  for (std::size_t i = 0; i < id_to_token_.size(); ++i) {
-    if (is_special_token_.contains(static_cast<TokenId>(i))) {
-      id_to_decoded_token_[i] = id_to_token_[i];
-    } else {
-      const auto& tok = id_to_token_[i];
-      if (tok.size() == 6 && tok.starts_with("<0x") && tok.ends_with('>')) {
-        const int h1 = HexCharToInt(tok[3]);
-        const int h2 = HexCharToInt(tok[4]);
-        if (h1 >= 0 && h2 >= 0) {
-          const auto byte_val = static_cast<std::uint8_t>((h1 << 4) | h2);
-          id_to_decoded_token_[i] = std::string(1, static_cast<char>(byte_val));
-          continue;
+void QwenTokenizer::InitializeByteTokens(bool eager_decoded_tokens) {
+  if (eager_decoded_tokens) {
+    id_to_decoded_token_.resize(id_to_token_.size());
+    for (std::size_t i = 0; i < id_to_token_.size(); ++i) {
+      if (is_special_token_.contains(static_cast<TokenId>(i))) {
+        id_to_decoded_token_[i] = id_to_token_[i];
+      } else {
+        const auto& tok = id_to_token_[i];
+        if (tok.size() == 6 && tok.starts_with("<0x") && tok.ends_with('>')) {
+          const int h1 = HexCharToInt(tok[3]);
+          const int h2 = HexCharToInt(tok[4]);
+          if (h1 >= 0 && h2 >= 0) {
+            const auto byte_val = static_cast<std::uint8_t>((h1 << 4) | h2);
+            id_to_decoded_token_[i] =
+                std::string(1, static_cast<char>(byte_val));
+            continue;
+          }
         }
+        id_to_decoded_token_[i] = UnescapeGpt2Bytes(tok);
       }
-      id_to_decoded_token_[i] = UnescapeGpt2Bytes(tok);
     }
   }
 
@@ -506,7 +509,7 @@ std::vector<TokenId> QwenTokenizer::Encode(
 std::string QwenTokenizer::Decode(std::span<const TokenId> tokens) const {
   std::string result;
   for (const TokenId id : tokens) {
-    result.append(DecodeToken(id));
+    result.append(DecodeTokenCopy(id));
   }
   return result;
 }
@@ -519,6 +522,28 @@ std::string_view QwenTokenizer::DecodeToken(TokenId token_id) const noexcept {
     return id_to_token_[token_id];
   }
   return "";
+}
+
+std::string QwenTokenizer::DecodeTokenCopy(TokenId token_id) const {
+  if (token_id >= id_to_token_.size()) {
+    return {};
+  }
+  if (!id_to_decoded_token_.empty()) {
+    return id_to_decoded_token_[token_id];
+  }
+  if (is_special_token_.contains(token_id)) {
+    return id_to_token_[token_id];
+  }
+  const std::string& token = id_to_token_[token_id];
+  if (token.size() == 6 && token.starts_with("<0x") && token.ends_with('>')) {
+    const int high = HexCharToInt(token[3]);
+    const int low = HexCharToInt(token[4]);
+    if (high >= 0 && low >= 0) {
+      return std::string(
+          1, static_cast<char>(static_cast<std::uint8_t>((high << 4) | low)));
+    }
+  }
+  return UnescapeGpt2Bytes(token);
 }
 
 std::optional<TokenId> QwenTokenizer::FindSpecialToken(

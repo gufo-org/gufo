@@ -17,8 +17,8 @@ namespace gufo::hip {
 // opt-c010-qk-rope-kv: batched variant of FusedQKNormRoPEKvWriteKernel.
 // Block (h, b) handles token b; blocks [0, num_heads) process Q heads in place,
 // blocks [num_heads, num_heads + num_kv_heads) process K heads, write K/V into
-// the FP32+FP16 KV caches, and store the normed+roped K back for downstream
-// consumers (tiled/CK packing reads the K buffer).
+// every non-null selected KV representation, and store the normed+roped K back
+// for downstream consumers (tiled/CK packing reads the K buffer).
 __launch_bounds__(256, 4) __global__ void BatchedFusedQKNormRoPEKvWriteKernel(
     const float* __restrict__ q, const float* __restrict__ k,
     const float* __restrict__ v, const float* __restrict__ q_weight,
@@ -145,8 +145,10 @@ __launch_bounds__(256, 4) __global__ void BatchedFusedQKNormRoPEKvWriteKernel(
     const float k1_rot = (k0 * sin_val) + (k1 * cos_val);
     k_out[head_base + p] = k0_rot;
     k_out[head_base + p + half_rot] = k1_rot;
-    k_cache[cache_offset + p] = k0_rot;
-    k_cache[cache_offset + p + half_rot] = k1_rot;
+    if (k_cache != nullptr) {
+      k_cache[cache_offset + p] = k0_rot;
+      k_cache[cache_offset + p + half_rot] = k1_rot;
+    }
     if (k_cache_f16 != nullptr) {
       k_cache_f16[f16_offset + p] = __float2half_rn(k0_rot);
       k_cache_f16[f16_offset + p + half_rot] = __float2half_rn(k1_rot);
@@ -155,7 +157,9 @@ __launch_bounds__(256, 4) __global__ void BatchedFusedQKNormRoPEKvWriteKernel(
   for (std::size_t i = rotary_dim + tid; i < head_dim; i += blockDim.x) {
     const float key = s_norm[i];
     k_out[head_base + i] = key;
-    k_cache[cache_offset + i] = key;
+    if (k_cache != nullptr) {
+      k_cache[cache_offset + i] = key;
+    }
     if (k_cache_f16 != nullptr) {
       k_cache_f16[f16_offset + i] = __float2half_rn(key);
     }
@@ -163,7 +167,9 @@ __launch_bounds__(256, 4) __global__ void BatchedFusedQKNormRoPEKvWriteKernel(
 
   for (std::size_t i = tid; i < head_dim; i += blockDim.x) {
     const float val = v[head_base + i];
-    v_cache[cache_offset + i] = val;
+    if (v_cache != nullptr) {
+      v_cache[cache_offset + i] = val;
+    }
     if (v_cache_f16 != nullptr) {
       v_cache_f16[f16_offset + i] = __float2half_rn(val);
     }

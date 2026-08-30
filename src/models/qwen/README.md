@@ -199,6 +199,24 @@ fingerprint, and a bitmask explaining requested routes that were masked by mode
 or layer kind. Shape/format launch eligibility is still checked at the launch
 boundary, so policy intent cannot force an unsupported kernel.
 
+Production Qwen sessions use one canonical FP16 attention KV plane. Attention
+scores, online softmax, and output reduction remain FP32. The independent FP32
+state route is retained for validation and can be selected with
+`GUFO_QWEN_KV_CACHE=fp32`; it allocates only FP32 KV and may use slower fallback
+prefill routes that require that representation. A server runner resolves this
+choice once, then uses it for every state, its resource claim, graph identity,
+and the precision-specific continuation ABI. Plain Qwen FP16 state is
+`qwen-gfx1151-state-v2-fp16-kv`; DFlash target state is
+`qwen-gfx1151-dflash-state-v3-fp16-kv`.
+
+DeltaNet's carried recurrent matrix remains FP32 in production. The
+`GUFO_QWEN_RECURRENT_STATE=bf16` experiment stores only that matrix in BF16
+while keeping updates and reductions in FP32, and uses distinct
+`bf16-recurrent` continuation ABIs. It materially reduces resident-state
+memory but is not production-safe: full-logit agreement widens and a
+200-token greedy completion diverges from the FP32 route. Explicit `fp32` or
+`float` selects the canonical route.
+
 The telemetry implementation is in
 [`dispatch_telemetry.hpp`](../../core/hip/detail/dispatch_telemetry.hpp). These
 environment variables are read by the current source:
@@ -207,6 +225,8 @@ environment variables are read by the current source:
 |---|---|
 | `GUFO_DISPATCH_TELEMETRY` | Enables JSON-line dispatch events unless set to `0`, `false`, `OFF`, or `off`. Events include Qwen policy, per-layer route/rejection mask, graph eligibility, graph cache identity, attention, GEMV, and hipBLASLt data. |
 | `GUFO_ENABLE_HIP_GRAPH` | Graph capture is enabled by default; the same false spellings disable it. |
+| `GUFO_QWEN_KV_CACHE` | `fp16`/`half` selects canonical production KV (the default); `fp32`/`float` selects the independent validation fallback. |
+| `GUFO_QWEN_RECURRENT_STATE` | `fp32`/`float` selects canonical production DeltaNet state (the default); `bf16`/`bfloat16` selects the rejected, validation-only compact-state experiment. |
 | `GUFO_PROFILE` | Presence enables prefill timing output. It is diagnostic output, not a stable benchmark harness. |
 | `GUFO_DISABLE_SSM_REPLAY` | Presence with a value other than `0`, `false`, or `off` disables SSM replay. |
 | `GUFO_GPU_WEIGHT_MODE` | `mapped`, `copy`, or automatic GPU visibility selection. |

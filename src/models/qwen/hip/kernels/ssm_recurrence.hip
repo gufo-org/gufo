@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "src/models/qwen/hip/detail/recurrent_state.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
 namespace gufo::hip {
@@ -66,8 +67,9 @@ __global__ void BatchedSSMConvKernel(const float* __restrict__ qkv_in,
   }
 }
 
+template<detail::QwenRecurrentStateElement StateT>
 __global__ void BatchedDeltaNetRecurrenceKernel(
-    const float* __restrict__ conv_out, float* __restrict__ deltanet_state,
+    const float* __restrict__ conv_out, StateT* __restrict__ deltanet_state,
     const float* __restrict__ alpha_buf, const float* __restrict__ beta_buf,
     const float* __restrict__ ssm_a, const float* __restrict__ ssm_dt,
     float* __restrict__ raw_out, std::uint32_t layer_idx,
@@ -83,7 +85,7 @@ __global__ void BatchedDeltaNetRecurrenceKernel(
   const std::size_t warp_id = tid >> 5u;
   const std::uint32_t kh_idx = h % num_key_heads;
 
-  float* s_matrix =
+  StateT* s_matrix =
       deltanet_state + ((static_cast<std::size_t>(layer_idx) * num_heads + h) *
                         key_dim * val_dim);
 
@@ -108,11 +110,10 @@ __global__ void BatchedDeltaNetRecurrenceKernel(
 
   float4 s_reg[row_vectors_per_thread];
   if (j < val_dim) {
-    const float* s_row = s_matrix + (j * key_dim) + row_offset;
-    const auto* s_row_vec = reinterpret_cast<const float4*>(s_row);
+    const StateT* s_row = s_matrix + (j * key_dim) + row_offset;
 #pragma unroll
     for (std::size_t vi = 0; vi < row_vectors_per_thread; ++vi) {
-      s_reg[vi] = s_row_vec[vi];
+      s_reg[vi] = detail::LoadRecurrentState4(s_row, vi);
     }
   }
 
@@ -246,23 +247,23 @@ __global__ void BatchedDeltaNetRecurrenceKernel(
 
   // Write final row state back to global memory ONCE
   if (j < val_dim) {
-    float* s_row = s_matrix + (j * key_dim) + row_offset;
-    auto* s_row_vec = reinterpret_cast<float4*>(s_row);
+    StateT* s_row = s_matrix + (j * key_dim) + row_offset;
 #pragma unroll
     for (std::size_t vi = 0; vi < row_vectors_per_thread; ++vi) {
-      s_row_vec[vi] = s_reg[vi];
+      detail::StoreRecurrentState4(s_row, vi, s_reg[vi]);
     }
   }
 }
 
 void LaunchBatchedSSMConvRecurrence(
     const float* qkv_in, const float* conv_weights, float* conv_state,
-    float* conv_out, float* deltanet_state, const float* alpha_buf,
+    float* conv_out, void* deltanet_state, const float* alpha_buf,
     const float* beta_buf, const float* ssm_a, const float* ssm_dt,
     const float* ssm_norm, const float* gate, float* out_buf,
     std::uint32_t layer_idx, std::size_t batch_size, std::size_t qkv_size,
     std::uint32_t num_key_heads, std::uint32_t num_heads, std::uint32_t key_dim,
-    std::uint32_t val_dim, hipStream_t stream) {
+    std::uint32_t val_dim, hipStream_t stream,
+    QwenRecurrentStateStorage state_storage) {
   const std::size_t block_size = 256;
   const std::size_t grid_x = (qkv_size + block_size - 1) / block_size;
   const dim3 conv_grid(static_cast<unsigned int>(grid_x),
@@ -274,10 +275,17 @@ void LaunchBatchedSSMConvRecurrence(
                          stream>>>(qkv_in, conv_weights, conv_layer_state,
                                    conv_out, batch_size, qkv_size);
 
-  BatchedDeltaNetRecurrenceKernel<<<num_heads, 256, 0, stream>>>(
-      conv_out, deltanet_state, alpha_buf, beta_buf, ssm_a, ssm_dt, out_buf,
-      layer_idx, batch_size, qkv_size, num_key_heads, num_heads, key_dim,
-      val_dim);
+  if (state_storage == QwenRecurrentStateStorage::kBf16) {
+    BatchedDeltaNetRecurrenceKernel<<<num_heads, 256, 0, stream>>>(
+        conv_out, static_cast<hip_bfloat16*>(deltanet_state), alpha_buf,
+        beta_buf, ssm_a, ssm_dt, out_buf, layer_idx, batch_size, qkv_size,
+        num_key_heads, num_heads, key_dim, val_dim);
+  } else {
+    BatchedDeltaNetRecurrenceKernel<<<num_heads, 256, 0, stream>>>(
+        conv_out, static_cast<float*>(deltanet_state), alpha_buf, beta_buf,
+        ssm_a, ssm_dt, out_buf, layer_idx, batch_size, qkv_size, num_key_heads,
+        num_heads, key_dim, val_dim);
+  }
 
   const dim3 post_grid(num_heads, static_cast<unsigned int>(batch_size));
   const std::size_t inner_size = static_cast<std::size_t>(num_heads) * val_dim;

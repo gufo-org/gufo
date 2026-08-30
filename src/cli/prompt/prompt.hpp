@@ -8,6 +8,8 @@
 #include <string>
 #include <string_view>
 
+#include "src/core/sampling.hpp"
+
 namespace gufo::cli {
 
 /// Options for `gufo prompt` and `gufo chat` execution.
@@ -18,13 +20,7 @@ struct PromptOptions {
   std::string system_prompt =
       "You are a helpful, respectful, and honest assistant.";
   std::size_t max_tokens = 128;
-  float temperature = 0.0F;
-  float top_p = 1.0F;
-  std::int32_t top_k = 0;
-  float min_p = 0.0F;
-  std::int64_t seed = -1;
-  float repeat_penalty = 1.0F;
-  std::size_t repeat_last_n = 64;
+  sampling::SamplingConfig sampling;
   std::string chat_template;
   std::string reasoning_mode = "auto";
   std::int64_t reasoning_budget = -1;
@@ -36,8 +32,9 @@ struct PromptOptions {
   std::string mtp_model_path;
   std::string dflash_model_path;
   std::size_t draft_tokens = 7;
-  std::string draft_policy = "rolling";
+  std::string draft_policy = "auto";
   std::size_t min_draft_tokens = 1;
+  float draft_p_min = 0.0F;
 };
 
 /// Prints help for `gufo prompt`.

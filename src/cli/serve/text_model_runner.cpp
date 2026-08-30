@@ -1,10 +1,15 @@
 #include "src/cli/serve/text_model_runner.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <iostream>
 #include <limits>
-#include <random>
+#include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
+
+#include "src/cli/serve/continuation_disk_store.hpp"
 
 namespace gufo::server {
 namespace {
@@ -54,6 +59,20 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
   if (descriptor.capabilities.fork && !descriptor.capabilities.snapshot) {
     throw std::invalid_argument(
         "text runner fork capability requires snapshot support");
+  }
+  if (descriptor.persistence.has_value()) {
+    if (!descriptor.capabilities.snapshot || !descriptor.capabilities.fork) {
+      throw std::invalid_argument(
+          "text runner persistence requires snapshot and fork support");
+    }
+    if (descriptor.persistence->compatibility_identity.empty()) {
+      throw std::invalid_argument(
+          "text runner persistence identity must not be empty");
+    }
+    if (descriptor.persistence->payload_version == 0) {
+      throw std::invalid_argument(
+          "text runner persistence payload version must be nonzero");
+    }
   }
 
   auto resources = runner->ResourceClaim();
@@ -127,10 +146,150 @@ void ReconcileStateBytes(const TextRunnerResourceClaim& resources,
   }
 }
 
-std::uint64_t MakeRngState() {
-  std::random_device random_device;
-  return (static_cast<std::uint64_t>(random_device()) << 32U) ^
-         static_cast<std::uint64_t>(random_device());
+std::string_view SnapshotEventActionName(SnapshotEventAction action) noexcept {
+  switch (action) {
+    case SnapshotEventAction::kRemoved:
+      return "removed";
+    case SnapshotEventAction::kSkipped:
+      return "skipped";
+  }
+  return "unknown";
+}
+
+std::string_view SnapshotEventReasonName(SnapshotEventReason reason) noexcept {
+  switch (reason) {
+    case SnapshotEventReason::kByteCapacity:
+      return "byte_capacity";
+    case SnapshotEventReason::kEntryCapacity:
+      return "entry_capacity";
+    case SnapshotEventReason::kExactReplacement:
+      return "exact_replacement";
+    case SnapshotEventReason::kCaptureFailure:
+      return "capture_failure";
+    case SnapshotEventReason::kReservationMismatch:
+      return "reservation_mismatch";
+  }
+  return "unknown";
+}
+
+void EmitSnapshotEvent(const SnapshotEvent& event) noexcept {
+  try {
+    std::ostringstream line;
+    line << "{\"event\":\"continuation_snapshot\",\"action\":\""
+         << SnapshotEventActionName(event.action) << "\",\"reason\":\""
+         << SnapshotEventReasonName(event.reason)
+         << "\",\"bytes\":" << event.snapshot_bytes
+         << ",\"token_count\":" << event.token_count
+         << ",\"retained_bytes\":" << event.retained_snapshot_bytes
+         << ",\"reserved_bytes\":" << event.reserved_snapshot_bytes
+         << ",\"capacity_bytes\":" << event.capacity_bytes << "}";
+    static std::mutex output_mutex;
+    const std::lock_guard<std::mutex> lock(output_mutex);
+    std::clog << line.str() << '\n';
+  } catch (...) {
+    // Optional cache logging must not affect request execution.
+    return;
+  }
+}
+
+std::string_view DiskEventActionName(
+    ContinuationDiskEventAction action) noexcept {
+  switch (action) {
+    case ContinuationDiskEventAction::kStored:
+      return "stored";
+    case ContinuationDiskEventAction::kRestored:
+      return "restored";
+    case ContinuationDiskEventAction::kMiss:
+      return "miss";
+    case ContinuationDiskEventAction::kRemoved:
+      return "removed";
+    case ContinuationDiskEventAction::kSkipped:
+      return "skipped";
+  }
+  return "unknown";
+}
+
+std::string_view DiskEventReasonName(
+    ContinuationDiskEventReason reason) noexcept {
+  switch (reason) {
+    case ContinuationDiskEventReason::kSaved:
+      return "saved";
+    case ContinuationDiskEventReason::kHit:
+      return "hit";
+    case ContinuationDiskEventReason::kNotFound:
+      return "not_found";
+    case ContinuationDiskEventReason::kUnsupported:
+      return "unsupported";
+    case ContinuationDiskEventReason::kByteCapacity:
+      return "byte_capacity";
+    case ContinuationDiskEventReason::kStagingCapacity:
+      return "staging_capacity";
+    case ContinuationDiskEventReason::kLru:
+      return "lru";
+    case ContinuationDiskEventReason::kExactReplacement:
+      return "exact_replacement";
+    case ContinuationDiskEventReason::kCorrupt:
+      return "corrupt";
+    case ContinuationDiskEventReason::kChecksumMismatch:
+      return "checksum_mismatch";
+    case ContinuationDiskEventReason::kUnsafeFile:
+      return "unsafe_file";
+    case ContinuationDiskEventReason::kIoFailure:
+      return "io_failure";
+    case ContinuationDiskEventReason::kSerializationFailure:
+      return "serialization_failure";
+    case ContinuationDiskEventReason::kRestoreFailure:
+      return "restore_failure";
+  }
+  return "unknown";
+}
+
+void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
+  try {
+    std::ostringstream line;
+    line << "{\"event\":\"continuation_disk_cache\",\"action\":\""
+         << DiskEventActionName(event.action) << "\",\"reason\":\""
+         << DiskEventReasonName(event.reason)
+         << "\",\"file_bytes\":" << event.file_bytes
+         << ",\"payload_bytes\":" << event.payload_bytes
+         << ",\"token_count\":" << event.token_count
+         << ",\"retained_bytes\":" << event.retained_bytes
+         << ",\"capacity_bytes\":" << event.capacity_bytes << "}";
+    static std::mutex output_mutex;
+    const std::lock_guard<std::mutex> lock(output_mutex);
+    std::clog << line.str() << '\n';
+  } catch (...) {
+    return;
+  }
+}
+
+ContinuationCache::SnapshotSupport MakeSnapshotSupport(
+    ValidatedRunner* validated) {
+  if (validated == nullptr || !validated->descriptor.capabilities.snapshot ||
+      !validated->descriptor.capabilities.fork) {
+    return {};
+  }
+  return {
+      .restore =
+          [validated](ContinuationState& state,
+                      const ContinuationSnapshot& snapshot) {
+            auto* text_snapshot =
+                dynamic_cast<const TextRunnerSnapshot*>(&snapshot);
+            if (text_snapshot == nullptr) {
+              throw std::invalid_argument(
+                  "continuation snapshot is not a text runner snapshot");
+            }
+            auto& text_state = dynamic_cast<TextRunnerState&>(state);
+            validated->runner->RestoreOrFork(text_state, *text_snapshot);
+            ReconcileStateBytes(validated->resources, text_state);
+          },
+      .capacity_bytes =
+          [validated] {
+            const auto resources = validated->runner->ResourceClaim();
+            return resources.retained_snapshot_capacity_bytes.value_or(0);
+          },
+      .on_event = EmitSnapshotEvent,
+  };
 }
 
 }  // namespace
@@ -142,48 +301,121 @@ void TextModelRunner::AdvanceBatch(
   }
 }
 
+TextDecodeStep TextModelRunner::DecodeStep(
+    TextRunnerState& state, std::size_t max_tokens,
+    sampling::SamplerState& sampler) const {
+  if (max_tokens == 0) {
+    throw std::invalid_argument(
+        "text runner decode step budget must be at least one token");
+  }
+  auto selection = SelectNext(state, sampler);
+  if (selection.stop) {
+    return {
+        .selections = {},
+        .draft_tokens = 0,
+        .draft_accepted_tokens = 0,
+        .stop = true,
+    };
+  }
+  const TextRunnerToken token = selection.token;
+  Advance(state, token);
+  return {
+      .selections = {std::move(selection)},
+  };
+}
+
 std::unique_ptr<TextRunnerSnapshot> TextModelRunner::Snapshot(
     const TextRunnerState&) const {
   throw std::logic_error("text runner does not support snapshots");
 }
 
-std::unique_ptr<TextRunnerState> TextModelRunner::RestoreOrFork(
-    const TextRunnerSnapshot&) const {
+std::size_t TextModelRunner::SnapshotPayloadBytes(
+    const TextRunnerState&) const {
+  throw std::logic_error("text runner does not support snapshot sizing");
+}
+
+void TextModelRunner::RestoreOrFork(TextRunnerState&,
+                                    const TextRunnerSnapshot&) const {
   throw std::logic_error("text runner does not support snapshot restore/fork");
 }
 
+std::size_t TextModelRunner::PersistentSnapshotPayloadBytes(
+    const TextRunnerSnapshot&) const {
+  throw std::logic_error("text runner does not support persistent snapshots");
+}
+
+std::size_t TextModelRunner::SerializePersistentSnapshot(
+    const TextRunnerSnapshot&, std::span<std::uint8_t>) const {
+  throw std::logic_error("text runner does not support persistent snapshots");
+}
+
+void TextModelRunner::RestorePersistentSnapshot(
+    TextRunnerState&, std::span<const std::uint8_t>) const {
+  throw std::logic_error("text runner does not support persistent snapshots");
+}
+
 struct TextRunnerPool::Impl {
-  Impl(std::shared_ptr<TextModelRunner> model_runner, std::size_t state_count)
+  Impl(std::shared_ptr<TextModelRunner> model_runner, std::size_t state_count,
+       std::optional<TextRunnerDiskCacheOptions> disk_cache_options)
       : validated(ValidateRunner(std::move(model_runner), state_count)),
-        cache(state_count, [this] {
-          auto state = validated.runner->CreateState();
-          if (state == nullptr) {
-            throw std::runtime_error("text runner state factory returned null");
-          }
-          ReconcileStateBytes(validated.resources, *state);
-          return state;
-        }) {}
+        cache(
+            state_count,
+            [this] {
+              auto state = validated.runner->CreateState();
+              if (state == nullptr) {
+                throw std::runtime_error(
+                    "text runner state factory returned null");
+              }
+              ReconcileStateBytes(validated.resources, *state);
+              return state;
+            },
+            MakeSnapshotSupport(&validated)) {
+    if (disk_cache_options.has_value()) {
+      if (!validated.descriptor.persistence.has_value()) {
+        throw std::invalid_argument(
+            "text runner does not support persistent snapshots");
+      }
+      disk_store = std::make_shared<ContinuationDiskStore>(
+          ContinuationDiskStoreOptions{
+              .directory = std::move(disk_cache_options->directory),
+              .capacity_bytes = disk_cache_options->capacity_bytes,
+              .staging_capacity_bytes =
+                  disk_cache_options->staging_capacity_bytes,
+          },
+          EmitDiskEvent);
+    }
+  }
 
   ValidatedRunner validated;
   ContinuationCache cache;
+  std::shared_ptr<ContinuationDiskStore> disk_store;
 };
 
 struct TextRunnerPool::Request::Impl {
   Impl(std::shared_ptr<TextModelRunner> model_runner,
+       std::shared_ptr<ContinuationDiskStore> persistent_store,
        ContinuationCache::Lease state_lease,
        std::vector<TextRunnerToken> prompt_tokens,
+       const sampling::SamplingConfig& sampling_config,
        const CancellationCheck& is_cancelled)
       : runner(std::move(model_runner)),
+        disk_store(std::move(persistent_store)),
         lease(std::move(state_lease)),
         prompt(std::move(prompt_tokens)),
         prefill_offset(lease.cached_tokens()),
         decode_ready(prefill_offset == prompt.size()),
-        rng_state(MakeRngState()) {
-    dynamic_cast<TextRunnerState&>(lease.state())
-        .SetCancellationCheck(is_cancelled);
+        sampler(sampling_config, prompt) {
+    auto& state = dynamic_cast<TextRunnerState&>(lease.state());
+    state.SetCancellationCheck(is_cancelled);
+    if (lease.cache_hit()) {
+      runner->PreparePrefixReuse(
+          state,
+          std::span<const TextRunnerToken>(prompt).first(prefill_offset));
+    }
   }
 
   std::shared_ptr<TextModelRunner> runner;
+  std::shared_ptr<ContinuationDiskStore> disk_store;
   ContinuationCache::Lease lease;
   std::vector<TextRunnerToken> prompt;
   std::vector<TextRunnerToken> generated;
@@ -191,7 +423,7 @@ struct TextRunnerPool::Request::Impl {
   bool decode_ready{false};
   bool stopped{false};
   std::optional<TextDecodeSelection> pending_selection;
-  std::uint64_t rng_state{0};
+  sampling::SamplerState sampler;
 };
 
 TextRunnerPool::Request::Request() = default;
@@ -216,6 +448,18 @@ bool TextRunnerPool::Request::cache_hit() const noexcept {
 
 std::size_t TextRunnerPool::Request::cached_prompt_tokens() const noexcept {
   return impl_ != nullptr ? impl_->lease.cached_tokens() : 0;
+}
+
+std::size_t TextRunnerPool::Request::cache_restore_bytes() const noexcept {
+  return impl_ != nullptr ? impl_->lease.restored_snapshot_bytes() : 0;
+}
+
+double TextRunnerPool::Request::cache_restore_ms() const noexcept {
+  return impl_ != nullptr ? impl_->lease.restore_ms() : 0.0;
+}
+
+bool TextRunnerPool::Request::cache_disk_hit() const noexcept {
+  return impl_ != nullptr && impl_->lease.restored_from_disk();
 }
 
 std::size_t TextRunnerPool::Request::prompt_tokens() const noexcept {
@@ -268,7 +512,7 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   return step;
 }
 
-TextDecodeSelection TextRunnerPool::Request::SelectNext(float temperature) {
+TextDecodeSelection TextRunnerPool::Request::SelectNext() {
   if (!*this) {
     throw std::logic_error("text runner request is empty");
   }
@@ -285,12 +529,12 @@ TextDecodeSelection TextRunnerPool::Request::SelectNext(float temperature) {
   }
 
   auto selection = impl_->runner->SelectNext(
-      dynamic_cast<TextRunnerState&>(impl_->lease.state()), temperature,
-      &impl_->rng_state);
+      dynamic_cast<TextRunnerState&>(impl_->lease.state()), impl_->sampler);
   if (selection.stop) {
     impl_->stopped = true;
     return selection;
   }
+  impl_->sampler.Accept(selection.token);
   impl_->generated.push_back(selection.token);
   impl_->pending_selection = selection;
   return selection;
@@ -309,7 +553,46 @@ void TextRunnerPool::Request::Advance() {
   impl_->pending_selection.reset();
 }
 
-void TextRunnerPool::Request::Commit() {
+TextDecodeStep TextRunnerPool::Request::DecodeStep(std::size_t max_tokens) {
+  if (!*this) {
+    throw std::logic_error("text runner request is empty");
+  }
+  if (!impl_->decode_ready) {
+    throw std::logic_error(
+        "text runner cannot decode before prefill completes");
+  }
+  if (impl_->pending_selection.has_value()) {
+    throw std::logic_error(
+        "text runner cannot decode a step with a pending token");
+  }
+  if (impl_->stopped) {
+    throw std::logic_error("text runner request already stopped");
+  }
+  if (max_tokens == 0) {
+    throw std::invalid_argument(
+        "text runner decode step budget must be at least one token");
+  }
+
+  auto step = impl_->runner->DecodeStep(
+      dynamic_cast<TextRunnerState&>(impl_->lease.state()), max_tokens,
+      impl_->sampler);
+  if (step.selections.size() > max_tokens ||
+      (step.selections.empty() && !step.stop)) {
+    throw std::runtime_error("text runner returned an invalid decode step");
+  }
+  for (const auto& selection : step.selections) {
+    if (selection.stop) {
+      throw std::runtime_error(
+          "text runner decode step contains an embedded stop selection");
+    }
+    impl_->sampler.Accept(selection.token);
+    impl_->generated.push_back(selection.token);
+  }
+  impl_->stopped = step.stop;
+  return step;
+}
+
+TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
   if (!*this) {
     throw std::logic_error("text runner request is empty");
   }
@@ -327,6 +610,11 @@ void TextRunnerPool::Request::Commit() {
 
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
   state.SetCancellationCheck({});
+  if (!impl_->runner->Descriptor().capabilities.prefix_reuse) {
+    impl_->lease.Invalidate();
+    impl_.reset();
+    return {};
+  }
   std::vector<ContinuationToken> checkpoint = impl_->prompt;
   checkpoint.insert(checkpoint.end(), impl_->generated.begin(),
                     impl_->generated.end());
@@ -336,8 +624,78 @@ void TextRunnerPool::Request::Commit() {
         "text runner checkpoint is outside executed token history");
   }
   checkpoint.resize(position);
-  impl_->lease.Commit(std::move(checkpoint));
+  std::unique_ptr<TextRunnerSnapshot> snapshot;
+  CommitMetrics metrics;
+  const auto capabilities = impl_->runner->Descriptor().capabilities;
+  if (capabilities.snapshot && capabilities.fork) {
+    std::size_t snapshot_bytes = 0;
+    try {
+      snapshot_bytes = impl_->runner->SnapshotPayloadBytes(state);
+    } catch (...) {
+      impl_->lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure, 0,
+                                checkpoint.size());
+      impl_->lease.Commit(std::move(checkpoint));
+      impl_.reset();
+      return metrics;
+    }
+    const bool retain_snapshot =
+        impl_->lease.TryReserveSnapshot(snapshot_bytes, checkpoint.size());
+    if (!retain_snapshot && impl_->disk_store == nullptr) {
+      impl_->lease.Commit(std::move(checkpoint));
+      impl_.reset();
+      return metrics;
+    }
+
+    const auto snapshot_start = std::chrono::steady_clock::now();
+    try {
+      snapshot = impl_->runner->Snapshot(state);
+      metrics.snapshot_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - snapshot_start)
+              .count();
+    } catch (...) {
+      metrics.snapshot_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - snapshot_start)
+              .count();
+      if (retain_snapshot) {
+        impl_->lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure,
+                                  snapshot_bytes, checkpoint.size());
+      }
+      impl_->lease.Commit(std::move(checkpoint));
+      impl_.reset();
+      return metrics;
+    }
+    if (snapshot == nullptr) {
+      if (retain_snapshot) {
+        impl_->lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure,
+                                  snapshot_bytes, checkpoint.size());
+      }
+      impl_->lease.Commit(std::move(checkpoint));
+      impl_.reset();
+      return metrics;
+    }
+    if (impl_->disk_store != nullptr) {
+      const auto disk_start = std::chrono::steady_clock::now();
+      try {
+        const auto saved =
+            impl_->disk_store->Save(*impl_->runner, checkpoint, *snapshot);
+        metrics.disk_write_bytes = saved.file_bytes;
+      } catch (...) {
+        metrics.disk_write_bytes = 0;
+      }
+      metrics.disk_write_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - disk_start)
+                                  .count();
+    }
+    if (!retain_snapshot) {
+      snapshot.reset();
+    }
+  }
+  metrics.snapshot_bytes =
+      impl_->lease.Commit(std::move(checkpoint), std::move(snapshot));
   impl_.reset();
+  return metrics;
 }
 
 void TextRunnerPool::Request::Invalidate() noexcept {
@@ -349,9 +707,11 @@ void TextRunnerPool::Request::Invalidate() noexcept {
   }
 }
 
-TextRunnerPool::TextRunnerPool(std::shared_ptr<TextModelRunner> runner,
-                               std::size_t state_count)
-    : impl_(std::make_unique<Impl>(std::move(runner), state_count)) {}
+TextRunnerPool::TextRunnerPool(
+    std::shared_ptr<TextModelRunner> runner, std::size_t state_count,
+    std::optional<TextRunnerDiskCacheOptions> disk_cache)
+    : impl_(std::make_unique<Impl>(std::move(runner), state_count,
+                                   std::move(disk_cache))) {}
 
 TextRunnerPool::~TextRunnerPool() = default;
 
@@ -446,7 +806,9 @@ void TextRunnerPool::AdvanceBatch(std::span<Request*> requests,
 
 TextRunnerPool::Request TextRunnerPool::Acquire(
     std::vector<TextRunnerToken> prompt,
+    const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled) {
+  sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
   }
@@ -458,9 +820,33 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   if (!lease) {
     return {};
   }
-  return Request(
-      std::make_unique<Request::Impl>(impl_->validated.runner, std::move(lease),
-                                      std::move(prompt), is_cancelled));
+  if (!lease.cache_hit() && impl_->disk_store != nullptr &&
+      !(is_cancelled && is_cancelled())) {
+    const auto restore_start = std::chrono::steady_clock::now();
+    try {
+      const auto restored = impl_->disk_store->RestoreLongestPrefix(
+          *impl_->validated.runner,
+          dynamic_cast<TextRunnerState&>(lease.state()), prompt);
+      if (restored.restored) {
+        lease.AdoptRestoredPrefix(
+            restored.token_count, restored.file_bytes,
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - restore_start)
+                .count());
+      }
+    } catch (...) {
+      lease.state().Invalidate();
+    }
+  }
+  return Request(std::make_unique<Request::Impl>(
+      impl_->validated.runner, impl_->disk_store, std::move(lease),
+      std::move(prompt), sampling_config, is_cancelled));
+}
+
+TextRunnerPool::Request TextRunnerPool::Acquire(
+    std::vector<TextRunnerToken> prompt,
+    const CancellationCheck& is_cancelled) {
+  return Acquire(std::move(prompt), sampling::SamplingConfig{}, is_cancelled);
 }
 
 }  // namespace gufo::server

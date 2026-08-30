@@ -151,7 +151,18 @@ source metadata. See THIRD_PARTY_NOTICES.md for the exact relationship and
 enabled-license inventory.
 
 --------------------------------------------------------------------------------
-4. Evaluation-Only Python Quality Toolchain
+4. curl / libcurl - OpenAI-Compatible Evaluation Client
+--------------------------------------------------------------------------------
+Version: 8.21.0 from pinned Nixpkgs
+Upstream Repository: https://github.com/curl/curl
+
+The gufo eval command links libcurl for HTTP and HTTPS model discovery and
+chat-completion requests. The pinned Nix closure supplies curl's license text
+and corresponding-source metadata. See THIRD_PARTY_NOTICES.md for the exact
+relationship.
+
+--------------------------------------------------------------------------------
+5. Evaluation-Only Python Quality Toolchain
 --------------------------------------------------------------------------------
 Pinned development environments include PyTorch ROCm 2.12.0, Torchvision
 0.27.0, and LPIPS 0.1.4 for independent teacher execution and perceptual

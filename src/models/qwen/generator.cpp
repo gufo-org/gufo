@@ -67,8 +67,10 @@ std::vector<tokenization::TokenId> QwenGenerator::Generate(
                  kv_cache_, ssm_cache_, arena_, arena_.logits);
   }
 
+  sampling::SamplerState sampler(options.sampling, prompt_tokens);
+
   // 2. Decode first generated token
-  auto next_token = GreedyArgmax(arena_.logits);
+  auto next_token = sampler.Sample(arena_.logits);
   std::size_t cur_pos = prompt_tokens.size();
 
   // 3. Auto-regressive decode loop
@@ -79,6 +81,7 @@ std::vector<tokenization::TokenId> QwenGenerator::Generate(
     }
 
     output_tokens.push_back(next_token);
+    sampler.Accept(next_token);
 
     if (on_token != nullptr) {
       const std::array<tokenization::TokenId, 1> single_tok = {next_token};
@@ -91,7 +94,7 @@ std::vector<tokenization::TokenId> QwenGenerator::Generate(
 
     ForwardModel(next_token, static_cast<std::uint32_t>(cur_pos), weights_,
                  kv_cache_, ssm_cache_, arena_, arena_.logits);
-    next_token = GreedyArgmax(arena_.logits);
+    next_token = sampler.Sample(arena_.logits);
     ++cur_pos;
   }
 

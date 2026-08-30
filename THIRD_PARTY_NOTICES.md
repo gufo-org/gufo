@@ -28,6 +28,7 @@ For design policy details regarding licensing boundaries, see [docs/LICENSING.md
 | **llama.cpp** | Source-derived algorithm | `MIT` | `e9fa0781f1c25fc4fe8c86be1edc6970661ad6f0` | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) |
 | **libuuid** | Linked | `BSD-3-Clause` / `LGPL-2.1-or-later` | Nixpkgs `2fcb964de67fcf60b43471c55d5d99e61a9ccb5a` | [util-linux](https://git.kernel.org/pub/scm/utils/util-linux/util-linux.git) |
 | **ICU** | Linked | `Unicode-3.0` | Nixpkgs `2fcb964de67fcf60b43471c55d5d99e61a9ccb5a` | [unicode-org/icu](https://github.com/unicode-org/icu) |
+| **curl / libcurl** | Linked HTTP client | `curl` | `8.21.0`, Nixpkgs `2fcb964de67fcf60b43471c55d5d99e61a9ccb5a` | [curl/curl](https://github.com/curl/curl) |
 | **FFmpeg** | Spawned runtime executable | `LGPL-2.1-or-later AND GPL-2.0-or-later` (enabled components may also be `LGPL-3.0-or-later` / `GPL-3.0-or-later`) | `8.1.2`, Nixpkgs `2fcb964de67fcf60b43471c55d5d99e61a9ccb5a` | [FFmpeg/FFmpeg](https://github.com/FFmpeg/FFmpeg) |
 | **PyTorch ROCm** | Evaluation/offline-teacher tool only; not shipped | `BSD-3-Clause` | `2.12.0`, Nixpkgs `2fcb964de67fcf60b43471c55d5d99e61a9ccb5a` | [pytorch/pytorch](https://github.com/pytorch/pytorch) |
 | **Torchvision** | Evaluation/LPIPS tool only; not shipped | `BSD-3-Clause` | `0.27.0`, Nixpkgs `2fcb964de67fcf60b43471c55d5d99e61a9ccb5a` | [pytorch/vision](https://github.com/pytorch/vision) |
@@ -255,6 +256,18 @@ adapted from ccv's `NAMatMulKernel` and `NAInt8MatMulKernel`, licensed
 BSD-3-Clause with copyright (c) 2010, Liu Liu. Any adapted expression or design
 retains that notice. See
 [`src/models/minimax_h3/UPSTREAM.md`](src/models/minimax_h3/UPSTREAM.md).
+
+### 1.18 curl / libcurl
+
+- **Component Name**: curl / libcurl
+- **Upstream URL**: https://github.com/curl/curl
+- **Pinned Revision**: Version `8.21.0` from Nixpkgs lock revision
+  `2fcb964de67fcf60b43471c55d5d99e61a9ccb5a`
+- **Component Used**: HTTPS-capable client library used only by `gufo eval`
+  for OpenAI-compatible model discovery and chat-completion requests
+- **SPDX License Identifier**: `curl`
+- **Relationship**: Linked dynamic runtime dependency
+- **Corresponding-Source Location**: https://github.com/curl/curl
 
 ---
 

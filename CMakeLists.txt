@@ -10,6 +10,7 @@ set(GUFO_VERSION "development" CACHE STRING "Gufo build revision")
 include_directories(${CMAKE_SOURCE_DIR})
 find_package(ICU REQUIRED COMPONENTS uc)
 find_package(Threads REQUIRED)
+find_package(CURL REQUIRED)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
@@ -48,6 +49,7 @@ if (ENGINE_ENABLE_HIP)
   find_package(hipblas REQUIRED)
   find_package(hipblaslt REQUIRED)
   find_package(rocblas REQUIRED)
+  find_package(miopen REQUIRED)
   find_package(aotriton CONFIG REQUIRED)
   find_path(HIPCUB_INCLUDE_DIR hipcub/hipcub.hpp
     HINTS "$ENV{GUFO_HIPCUB_ROOT}/include"
@@ -92,6 +94,9 @@ endif()
 
 # Qwen3-TTS — CPU reference + HIP kernels (CustomVoice 12Hz).
 add_subdirectory(src/models/qwen3_tts)
+
+# Qwen3-ASR — model-private 1.7B speech recognition runtime.
+add_subdirectory(src/models/qwen3_asr)
 
 # XRT NPU shim — AMD XDNA2 userspace runtime over the amdxdna kernel driver.
 option(ENGINE_ENABLE_XRT "Build gufo with the XRT NPU shim" OFF)
@@ -204,8 +209,10 @@ if (ENGINE_ENABLE_XRT)
 endif()
 
 add_library(gufo_core STATIC
+  src/core/crypto/sha256.cpp
   src/core/model_registry.cpp
   src/core/gguf_reader.cpp
+  src/core/sampling.cpp
   src/models/minimax_h3/audio_vae.cpp
   src/models/minimax_h3/denoiser.cpp
   src/models/minimax_h3/dit.cpp
@@ -219,6 +226,8 @@ add_library(gufo_core STATIC
   src/models/minimax_h3/tokenizer.cpp
   src/models/minimax_h3/video_vae.cpp
   src/testing/compare/logit_comparator.cpp
+  src/eval/dataset.cpp
+  src/eval/extract.cpp
   src/eval/regrade.cpp
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
@@ -236,6 +245,7 @@ target_link_libraries(gufo_core PUBLIC ICU::uc Threads::Threads)
 add_subdirectory(src/models/qwen)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
+target_link_libraries(gufo_qwen3_asr PUBLIC gufo_core)
 
 find_package(OpenMP)
 if (OpenMP_CXX_FOUND)
@@ -263,7 +273,9 @@ if (ENGINE_ENABLE_HIP)
   target_compile_definitions(gufo_core PUBLIC ENGINE_ENABLE_HIP=1)
   target_compile_definitions(gufo_core PRIVATE CK_ENABLE_BF16=1)
   target_include_directories(gufo_core SYSTEM PRIVATE
-    ${COMPOSABLE_KERNEL_INCLUDE_DIR})
+    ${COMPOSABLE_KERNEL_INCLUDE_DIR}
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR})
   target_include_directories(gufo_core PRIVATE
     "${GUFO_H3_ATTENTION_GENERATED_DIR}")
   target_link_libraries(gufo_core PUBLIC hip::host roc::hipblas
@@ -470,23 +482,32 @@ endif()
 add_executable(gufo
   src/cli/main.cpp
   src/cli/bench/bench.cpp
+  src/cli/eval/eval.cpp
   src/cli/prompt/prompt.cpp
+  src/cli/transcribe/transcribe.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
+  src/cli/serve/audio_asr_api.cpp
+  src/cli/serve/asr_service.cpp
   src/cli/serve/audio_tts_api.cpp
   src/cli/serve/tts_service.cpp
   src/cli/serve/video_api.cpp
   src/cli/serve/video_jobs.cpp
   src/cli/serve/continuation_cache.cpp
+  src/cli/serve/continuation_disk_store.cpp
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
   src/cli/serve/inference_backend.cpp
   src/cli/serve/http_server.cpp
   src/cli/serve/logging.cpp
   src/cli/serve/openai_chat.cpp
+  src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core)
+target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core CURL::libcurl)
 target_compile_definitions(gufo PRIVATE
+  GUFO_VERSION="${GUFO_VERSION}"
+  GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/quality/antirez-ds4.json"
+  GUFO_EVAL_INSTALLED_DATA="${CMAKE_INSTALL_PREFIX}/share/gufo/eval/antirez-ds4.json"
   GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   GUFO_HRX_KERNEL_DIR="${CMAKE_INSTALL_PREFIX}/share/gufo/kernels"
@@ -496,7 +517,7 @@ target_compile_definitions(gufo PRIVATE
 if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo PRIVATE gufo_deepseek_v4_flash)
 endif()
-target_link_libraries(gufo PRIVATE gufo_qwen3_tts)
+target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr)
 
 add_custom_target(gufo-server ALL
   COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server
@@ -544,6 +565,13 @@ install(FILES
 install(FILES
   src/models/qwen3_tts/reference/run_official.py
   DESTINATION share/gufo/models/qwen3_tts)
+install(FILES
+  src/models/qwen3_asr/reference/run_official.py
+  src/models/qwen3_asr/tools/benchmark.py
+  DESTINATION share/gufo/models/qwen3_asr)
+install(FILES
+  tests/quality/antirez-ds4.json
+  DESTINATION share/gufo/eval)
 if (ENGINE_ENABLE_HIP)
   install(TARGETS gufo-kernel-bench tune_hipblaslt benchmark_ssm_replay
     DESTINATION bin)
@@ -585,6 +613,7 @@ if (BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
   add_subdirectory(tests/models/qwen)
+  gufo_qwen3_asr_register_tests()
 
   add_test(NAME gufo_version COMMAND gufo --version)
   set_tests_properties(gufo_version PROPERTIES LABELS "cpu")
@@ -607,6 +636,14 @@ if (BUILD_TESTING)
   add_test(NAME gufo_video_help COMMAND gufo video --help)
   set_tests_properties(gufo_video_help PROPERTIES
     LABELS "cpu;server;cli;minimax-h3")
+
+  add_test(NAME gufo_transcribe_help COMMAND gufo transcribe --help)
+  set_tests_properties(gufo_transcribe_help PROPERTIES
+    LABELS "cpu;server;cli;qwen3-asr")
+
+  add_test(NAME gufo_serve_asr_help COMMAND gufo serve asr --help)
+  set_tests_properties(gufo_serve_asr_help PROPERTIES
+    LABELS "cpu;server;cli;qwen3-asr")
 
   add_test(NAME gufo_serve_help COMMAND gufo serve --help)
   set_tests_properties(gufo_serve_help PROPERTIES LABELS "cpu;server;cli")
@@ -641,15 +678,34 @@ if (BUILD_TESTING)
   add_executable(text_model_runner_test
     tests/cli/text_model_runner_test.cpp
     src/cli/serve/continuation_cache.cpp
+    src/cli/serve/continuation_disk_store.cpp
     src/cli/serve/text_model_runner.cpp)
   target_link_libraries(text_model_runner_test PRIVATE gufo_core)
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
   set_tests_properties(text_model_runner_test PROPERTIES
     LABELS "cpu;server;runner;cache;state;lifecycle")
 
+  add_executable(continuation_disk_store_test
+    tests/cli/continuation_disk_store_test.cpp
+    src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/text_model_runner.cpp
+    src/cli/serve/continuation_cache.cpp)
+  target_link_libraries(continuation_disk_store_test PRIVATE gufo_core)
+  add_test(NAME continuation_disk_store_test
+    COMMAND continuation_disk_store_test)
+  set_tests_properties(continuation_disk_store_test PROPERTIES
+    LABELS "cpu;server;cache;disk;state;lifecycle")
+
+  add_executable(logit_sampler_test tests/cli/logit_sampler_test.cpp)
+  target_link_libraries(logit_sampler_test PRIVATE gufo_core)
+  add_test(NAME logit_sampler_test COMMAND logit_sampler_test)
+  set_tests_properties(logit_sampler_test PROPERTIES
+    LABELS "cpu;server;sampling")
+
   add_executable(text_generation_scheduler_test
     tests/cli/text_generation_scheduler_test.cpp
     src/cli/serve/continuation_cache.cpp
+    src/cli/serve/continuation_disk_store.cpp
     src/cli/serve/text_model_runner.cpp
     src/cli/serve/text_generation_scheduler.cpp)
   target_link_libraries(text_generation_scheduler_test PRIVATE gufo_core)
@@ -906,6 +962,28 @@ if (BUILD_TESTING)
   add_test(NAME eval_regrade_test COMMAND eval_regrade_test)
   set_tests_properties(eval_regrade_test PROPERTIES LABELS "cpu;quality;eval")
 
+  add_executable(eval_dataset_test tests/quality/eval_dataset_test.cpp)
+  target_compile_definitions(eval_dataset_test PRIVATE
+    GUFO_EVAL_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/quality/antirez-ds4.json")
+  target_link_libraries(eval_dataset_test PRIVATE gufo_core)
+  add_test(NAME eval_dataset_test COMMAND eval_dataset_test)
+  set_tests_properties(eval_dataset_test PROPERTIES
+    LABELS "cpu;quality;eval;dataset;extractor")
+
+  add_test(NAME eval_dataset_audit_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_eval_dataset.py)
+  set_tests_properties(eval_dataset_audit_test PROPERTIES
+    LABELS "cpu;quality;eval;dataset;provenance;license")
+
+  add_test(NAME eval_http_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_eval_http.py
+      --gufo $<TARGET_FILE:gufo>
+      --data ${CMAKE_CURRENT_SOURCE_DIR}/tests/quality/antirez-ds4.json)
+  set_tests_properties(eval_http_test PROPERTIES
+    LABELS "cpu;quality;eval;http;cli;server")
+
   add_executable(kernel_bench_test tests/benchmarks/kernel_bench_test.cpp)
   target_link_libraries(kernel_bench_test PRIVATE gufo_kernel_bench_support)
   add_test(NAME kernel_bench_test COMMAND kernel_bench_test)
@@ -1101,6 +1179,14 @@ if (BUILD_TESTING)
     set_tests_properties(hipblaslt_runtime_cache_test PROPERTIES
       LABELS "hip;gpu;hipblaslt;cache")
 
+    add_executable(qwen_sampling_hip_test
+      tests/kernels/qwen_sampling_hip_test.hip)
+    target_link_libraries(qwen_sampling_hip_test PRIVATE gufo_core hip::host)
+    add_test(NAME qwen_sampling_hip_test COMMAND qwen_sampling_hip_test)
+    set_tests_properties(qwen_sampling_hip_test PROPERTIES
+      LABELS "hip;gpu;qwen;sampling;correctness"
+      SKIP_RETURN_CODE 77)
+
     add_executable(persistent_deltanet_test
       tests/kernels/persistent_deltanet_test.cpp)
     target_link_libraries(persistent_deltanet_test PRIVATE gufo_core hip::host)
@@ -1111,6 +1197,7 @@ if (BUILD_TESTING)
     add_executable(inference_backend_gpu_test
       tests/cli/inference_backend_gpu_test.cpp
       src/cli/serve/continuation_cache.cpp
+      src/cli/serve/continuation_disk_store.cpp
       src/cli/serve/text_model_runner.cpp
       src/cli/serve/text_generation_scheduler.cpp
       src/cli/serve/inference_backend.cpp)
@@ -1124,6 +1211,7 @@ if (BUILD_TESTING)
     add_executable(deepseek_v4_flash_backend_test
       tests/cli/deepseek_v4_flash_backend_test.cpp
       src/cli/serve/continuation_cache.cpp
+      src/cli/serve/continuation_disk_store.cpp
       src/cli/serve/text_model_runner.cpp
       src/cli/serve/text_generation_scheduler.cpp
       src/cli/serve/inference_backend.cpp)

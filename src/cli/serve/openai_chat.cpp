@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "src/cli/serve/json.hpp"
+#include "src/cli/serve/sampling_request.hpp"
 
 namespace gufo::server {
 namespace {
@@ -30,7 +31,7 @@ struct ParsedChatRequest {
   ChatRequest chat;
   std::string model;
   std::size_t max_tokens{0};
-  float temperature{0.0F};
+  sampling::SamplingConfig sampling;
   bool stream{false};
   bool include_usage{false};
 };
@@ -220,6 +221,17 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
   message->tool_call_id = value.member_str("tool_call_id");
   if (!ParseContent(value.find("content"), &message->content, error)) {
     return false;
+  }
+  if (const json::Value* reasoning = value.find("reasoning_content");
+      reasoning != nullptr && !reasoning->is_null()) {
+    if (message->role != tokenization::ChatRole::kAssistant ||
+        !reasoning->is_string()) {
+      *error =
+          "'reasoning_content' is only valid as a string on assistant "
+          "messages";
+      return false;
+    }
+    message->thought = reasoning->get_str();
   }
 
   const json::Value* tool_calls = value.find("tool_calls");
@@ -419,24 +431,21 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     output->max_tokens = max_tokens->as_size();
   }
 
-  if (const json::Value* temperature = body.find("temperature")) {
-    if (!temperature->is_number() || temperature->as_double() < 0.0 ||
-        temperature->as_double() > 2.0) {
-      return Error(400, "Bad Request", "'temperature' must be between 0 and 2",
-                   "invalid_temperature");
-    }
-    output->temperature = static_cast<float>(temperature->as_double());
+  sampling::SamplingConfig parsed_sampling;
+  if (const auto sampling_error =
+          ParseSamplingConfig(body, output->sampling, &parsed_sampling)) {
+    return Error(400, "Bad Request", sampling_error->message,
+                 sampling_error->code.c_str());
   }
+  if (parsed_sampling.temperature > 2.0F) {
+    return Error(400, "Bad Request", "'temperature' must be between 0 and 2",
+                 "invalid_temperature");
+  }
+  output->sampling = parsed_sampling;
 
   if (const json::Value* choices = body.find("n");
       choices != nullptr && (!choices->is_number() || choices->as_int() != 1)) {
     return Error(400, "Bad Request", "only n=1 is supported", "unsupported_n");
-  }
-  if (const json::Value* top_p = body.find("top_p");
-      top_p != nullptr &&
-      (!top_p->is_number() || std::fabs(top_p->as_double() - 1.0) > 1e-9)) {
-    return Error(400, "Bad Request", "non-default 'top_p' is not implemented",
-                 "unsupported_top_p");
   }
   for (const std::string_view unsupported :
        {"logprobs", "top_logprobs", "logit_bias", "stop", "response_format",
@@ -801,6 +810,9 @@ json::Value Timings(const TextGenerationBackend::Result& result) {
   timings["predicted_per_token_ms"] = predicted_per_token_ms;
   timings["predicted_per_second"] = predicted_per_second;
   timings["cache_n"] = result.cached_prompt_tokens;
+  timings["cache_restore_ms"] = result.cache_restore_ms;
+  timings["cache_snapshot_ms"] = result.cache_snapshot_ms;
+  timings["cache_disk_write_ms"] = result.cache_disk_write_ms;
   timings["draft_n"] = result.draft_tokens;
   timings["draft_n_accepted"] = result.draft_accepted_tokens;
   return timings;
@@ -815,6 +827,14 @@ json::Value Metrics(const TextGenerationBackend::Result& result) {
   metrics["prompt_tokens"] = result.prompt_tokens;
   metrics["completion_tokens"] = result.completion_tokens;
   metrics["cached_tokens"] = result.cached_prompt_tokens;
+  metrics["cache_restore_bytes"] = result.cache_restore_bytes;
+  metrics["cache_snapshot_bytes"] = result.cache_snapshot_bytes;
+  metrics["cache_disk_write_bytes"] = result.cache_disk_write_bytes;
+  metrics["cache_shared_bytes"] = result.cache_shared_bytes;
+  metrics["cache_restore_ms"] = result.cache_restore_ms;
+  metrics["cache_snapshot_ms"] = result.cache_snapshot_ms;
+  metrics["cache_disk_write_ms"] = result.cache_disk_write_ms;
+  metrics["cache_disk_hit"] = result.cache_disk_hit;
   return metrics;
 }
 
@@ -846,6 +866,14 @@ json::Value Usage(const TextGenerationBackend::Result& result) {
 
   json::Value metrics = json::Value::object();
   metrics["cache_hit"] = result.cache_hit;
+  metrics["cache_restore_bytes"] = result.cache_restore_bytes;
+  metrics["cache_snapshot_bytes"] = result.cache_snapshot_bytes;
+  metrics["cache_disk_write_bytes"] = result.cache_disk_write_bytes;
+  metrics["cache_shared_bytes"] = result.cache_shared_bytes;
+  metrics["cache_restore_ms"] = result.cache_restore_ms;
+  metrics["cache_snapshot_ms"] = result.cache_snapshot_ms;
+  metrics["cache_disk_write_ms"] = result.cache_disk_write_ms;
+  metrics["cache_disk_hit"] = result.cache_disk_hit;
   metrics["prefill_tokens"] = result.prefill_tokens;
   metrics["prefill_chunks"] = result.prefill_chunks;
   metrics["active_decode_prefill_chunks"] = result.active_decode_prefill_chunks;
@@ -1253,13 +1281,13 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
   ParsedChatRequest parsed;
   const auto defaults = backend.sampling_defaults();
   parsed.max_tokens = defaults.max_tokens;
-  parsed.temperature = defaults.temperature;
+  parsed.sampling = defaults.sampling;
   if (auto error = ParseRequest(request, backend, &parsed); error.has_value()) {
     return std::move(*error);
   }
   try {
     auto generation =
-        backend.start_chat(parsed.chat, parsed.max_tokens, parsed.temperature,
+        backend.start_chat(parsed.chat, parsed.max_tokens, parsed.sampling,
                            request.is_cancelled, parsed.stream);
     if (parsed.stream) {
       return StreamingResponse(parsed, backend, std::move(generation));

@@ -111,23 +111,17 @@ therefore judged from exact tokens, tensor and logit metrics, near-exact decoder
 waveform comparison, and an end-to-end intelligibility gate.
 
 The intelligibility gate transcribes the native and official waveforms with the
-same local Whisper tiny.en and scores both against the requested text, so it
-reports the official implementation's word error rate alongside the native one.
-Native audio is at least as intelligible as the official output on every variant,
-and clearly better on CustomVoice, where the official ROCm waveform transcribes
-"Privitt Drive" and "because distied didn't hold":
+same native HIP Qwen3-ASR-1.7B runtime and scores both against the requested
+text. The migration was rerun on CustomVoice: native output matches the
+requested text exactly, while the official ROCm waveform has a `3.92%` WER.
 
 | Variant | Native WER | Official WER | Transcript LCS |
 |---|---|---|---|
-| CustomVoice | `1.96%` | `7.84%` | `96.83%` |
-| VoiceDesign | `0%` | `0%` | `100%` |
-| Base ICL | `6.67%` | `6.67%` | `100%` |
+| CustomVoice | `0%` | `3.92%` | `97.29%` |
 
-Base ICL's residual `6.67%` is Whisper contracting "I am" to "I'm"; the official
-output scores identically. Earlier revisions of this file recorded `20%` there,
-measured before the speaker-encoder fix in
-[appendix D](#speaker-encoder-residual-aliasing-fixed) — Base ICL is the one
-variant that depends on that embedding.
+VoiceDesign and Base ICL retain their tensor, code, and waveform gates below;
+their long-form intelligibility fixtures have not yet been rerun with the new
+ASR backend.
 
 ### Gate metrics
 
@@ -139,15 +133,13 @@ variant that depends on that embedding.
 | All | Greedy argmax boundaries | match | exact |
 | All | Predictor-logit cosine | `0.999539` | `> 0.95` |
 | All | Decoder waveform MAE / max | `1.33e-7` / `1.28e-6` | `< 1e-5` / `< 1e-4` |
-| CustomVoice | Whisper tiny.en WER / transcript LCS | `1.96%` / `96.83%` | `< 30%` / `> 75%` |
+| CustomVoice | Qwen3-ASR WER / transcript LCS | `0%` / `97.29%` | `< 30%` / `> 75%` |
 | VoiceDesign | Prompt cosine, semantic greedy tokens | `1.0`, 5/5 | `> 0.9999`, exact |
-| VoiceDesign | Whisper tiny.en WER / transcript LCS | `0%` / `100%` | `< 30%` / `> 75%` |
 | Base | Prompt cosine, bounded greedy codes | `1.0`, 80/80 | `> 0.999`, exact |
 | Base | Speaker-embedding cosine | `0.999997` | `> 0.9999` |
 | Base | Speech-code agreement, aggregate | `0.577351` | `> 0.55` |
 | Base | Speech-code agreement, groups 0 / 1 | `0.970` / `0.950` | `> 0.95` / `> 0.90` |
 | Base | Speech reconstruction cosine / MAE | `0.939502` / `0.00827` | `> 0.93` / `< 0.02` |
-| Base ICL | Whisper tiny.en WER / transcript LCS | `6.67%` / `100%` | `< 30%` / `> 75%` |
 
 ### Known limitations
 
@@ -199,14 +191,15 @@ nix build .#checks.x86_64-linux.pr        # canonical PR gate
 nix develop -c ctest --preset hardware-full -R qwen3_tts
 ```
 
-The intelligibility gate needs a local Whisper tiny.en checkout, which lives at
-`/home/fbozzo/projects/whisper-tiny.en` on the development host:
+The intelligibility gate uses the native Qwen3-ASR-1.7B model under the
+Hugging Face cache on the development host:
 
 ```sh
 nix develop -c python3 tests/models/qwen3_tts/quality/compare_intelligibility.py \
   --reference-npy artifacts/qwen3_tts/rocm/waveform.npy \
   --candidate-wav <native.wav> \
-  --asr-model /home/fbozzo/projects/whisper-tiny.en --device cpu
+  --asr-model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision> \
+  --gufo result/bin/gufo
 ```
 
 Pass `--contract` with a `{"text": ...}` JSON file to score a variant against its

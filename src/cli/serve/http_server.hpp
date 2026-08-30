@@ -17,6 +17,7 @@ namespace gufo::server {
 
 class VideoJobService;
 class TtsService;
+class AsrService;
 
 struct HttpRequest {
   std::string method;  // "GET" / "POST" / ...
@@ -79,6 +80,7 @@ public:
              std::shared_ptr<TextGenerationBackend> backend,
              std::shared_ptr<VideoJobService> video_jobs = nullptr,
              std::shared_ptr<TtsService> tts = nullptr,
+             std::shared_ptr<AsrService> asr = nullptr,
              HttpServerLimits limits = {});
   ~HttpServer();
 
@@ -112,6 +114,7 @@ private:
   std::shared_ptr<TextGenerationBackend> backend_;
   std::shared_ptr<VideoJobService> video_jobs_;
   std::shared_ptr<TtsService> tts_;
+  std::shared_ptr<AsrService> asr_;
   HttpServerLimits limits_;
   int listen_fd_ = -1;
   std::atomic<bool> stopped_{false};

@@ -5,15 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
+import subprocess
+import tempfile
 import wave
 from pathlib import Path
 
 import numpy as np
-import torch
-from scipy.signal import resample_poly
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,11 +22,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-wav", type=Path, required=True)
     parser.add_argument("--asr-model", type=Path, required=True)
     parser.add_argument(
+        "--gufo",
+        type=Path,
+        default=Path("result/bin/gufo"),
+        help="release gufo binary containing native Qwen3-ASR",
+    )
+    parser.add_argument(
         "--contract",
         type=Path,
         default=Path("tests/models/qwen3_tts/reference_contract.json"),
     )
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--max-wer", type=float, default=0.30)
     parser.add_argument("--max-wer-regression", type=float, default=0.15)
     parser.add_argument("--min-transcript-lcs", type=float, default=0.75)
@@ -92,29 +95,42 @@ def compact_lcs_ratio(left: str, right: str) -> float:
     return previous[-1] / max(len(left_chars), len(right_chars))
 
 
-def resample(audio: np.ndarray, source_rate: int) -> np.ndarray:
-    if source_rate == 16000:
-        return audio
-    divisor = math.gcd(source_rate, 16000)
-    return resample_poly(audio, 16000 // divisor, source_rate // divisor).astype(
-        np.float32
-    )
+def write_pcm16_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
+    pcm = np.rint(np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(pcm.tobytes())
 
 
-def transcribe(
-    audio: np.ndarray,
-    sample_rate: int,
-    processor: AutoProcessor,
-    model: AutoModelForSpeechSeq2Seq,
-    device: torch.device,
-) -> str:
-    inputs = processor(
-        resample(audio, sample_rate), sampling_rate=16000, return_tensors="pt"
-    )
-    features = inputs.input_features.to(device=device, dtype=model.dtype)
-    with torch.inference_mode():
-        generated = model.generate(features)
-    return processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
+def transcribe(path: Path, gufo: Path, model: Path) -> str:
+    command = [
+        str(gufo),
+        "transcribe",
+        "--model",
+        str(model),
+        "--audio",
+        str(path),
+        "--format",
+        "json",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.strip() or error.stdout.strip()
+        raise RuntimeError(f"native Qwen3-ASR failed: {detail}") from error
+    report = json.loads(completed.stdout)
+    text = report.get("text")
+    if not isinstance(text, str):
+        raise ValueError("native Qwen3-ASR returned an invalid JSON report")
+    return text.strip()
 
 
 def main() -> int:
@@ -130,20 +146,18 @@ def main() -> int:
     if not np.isfinite(reference).all() or not np.isfinite(candidate).all():
         raise ValueError("audio contains non-finite samples")
 
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
-    processor = AutoProcessor.from_pretrained(args.asr_model, local_files_only=True)
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        args.asr_model, dtype=dtype, local_files_only=True
-    ).to(device)
-
-    reference_text = transcribe(
-        reference, reference_rate, processor, model, device
-    )
-    candidate_text = transcribe(candidate, candidate_rate, processor, model, device)
+    if not args.gufo.is_file():
+        raise FileNotFoundError(f"native gufo binary is missing: {args.gufo}")
+    with tempfile.TemporaryDirectory(prefix="gufo-qwen3-tts-asr-") as temporary:
+        reference_path = Path(temporary) / "reference.wav"
+        if args.reference_npy is not None:
+            write_pcm16_wav(reference_path, reference, reference_rate)
+        else:
+            reference_path = args.reference_wav
+        reference_text = transcribe(reference_path, args.gufo, args.asr_model)
+        candidate_text = transcribe(
+            args.candidate_wav, args.gufo, args.asr_model
+        )
     reference_wer = word_error_rate(reference_text, expected_text)
     candidate_wer = word_error_rate(candidate_text, expected_text)
     transcript_lcs = compact_lcs_ratio(reference_text, candidate_text)
@@ -165,7 +179,7 @@ def main() -> int:
     report = {
         "ok": not failures,
         "failures": failures,
-        "device": str(device),
+        "asr_backend": "qwen3-asr-1.7b-native-hip",
         "reference_transcript": reference_text,
         "candidate_transcript": candidate_text,
         "reference_wer": reference_wer,

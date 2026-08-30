@@ -26,9 +26,11 @@
   topP ? null,
   topK ? null,
   minP ? null,
+  minKeep ? null,
   seed ? null,
   repeatPenalty ? null,
   repeatLastN ? null,
+  frequencyPenalty ? null,
   presencePenalty ? null,
   system ? null,
   raw ? false,
@@ -177,6 +179,10 @@ let
         "--min-p"
         (toString minP)
       ]
+      ++ lib.optionals (minKeep != null) [
+        "--min-keep"
+        (toString minKeep)
+      ]
       ++ lib.optionals (seed != null) [
         "--seed"
         (toString seed)
@@ -188,6 +194,14 @@ let
       ++ lib.optionals (repeatLastN != null) [
         "--repeat-last-n"
         (toString repeatLastN)
+      ]
+      ++ lib.optionals (frequencyPenalty != null) [
+        "--frequency-penalty"
+        (toString frequencyPenalty)
+      ]
+      ++ lib.optionals (presencePenalty != null) [
+        "--presence-penalty"
+        (toString presencePenalty)
       ]
       ++ lib.optionals (system != null) [
         "--system"
@@ -229,6 +243,10 @@ let
       ++ lib.optionals (minDraftTokens != null) [
         "--min-draft-tokens"
         (toString minDraftTokens)
+      ]
+      ++ lib.optionals (specDraftPMin != null) [
+        "--spec-draft-p-min"
+        (toString specDraftPMin)
       ]
       ++ lib.optionals (finalPrefillChunk != null) [
         "--prefill-chunk"

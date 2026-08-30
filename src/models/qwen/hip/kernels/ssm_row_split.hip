@@ -51,7 +51,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
+#include "src/models/qwen/hip/detail/recurrent_state.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
@@ -184,10 +186,11 @@ __device__ __forceinline__ void RowReduce2(float& u, float& p) {
 // block-uniform and advances by one scalar add per token, and every
 // lane-dependent index is loop-invariant, which keeps the token loop free of
 // 64-bit address arithmetic.
-template<int kKeysPerLane, int kRowsPerLane, bool kPrefetch>
+template<detail::QwenRecurrentStateElement StateT, int kKeysPerLane,
+         int kRowsPerLane, bool kPrefetch>
 __launch_bounds__(256) __global__ void BatchedDeltaNetRowSplitKernel(
     const float* __restrict__ conv_out, const float* __restrict__ kq_scales,
-    const float* __restrict__ ab, float* __restrict__ deltanet_state,
+    const float* __restrict__ ab, StateT* __restrict__ deltanet_state,
     float* __restrict__ raw_out, std::uint32_t layer_idx, int batch_size,
     int qkv_size, int inner_size, int num_key_heads, int num_heads) {
   constexpr int kLanesPerRow = kRowSplitDim / kKeysPerLane;
@@ -209,19 +212,19 @@ __launch_bounds__(256) __global__ void BatchedDeltaNetRowSplitKernel(
   const int kh = h % num_key_heads;
   const int kq_idx = seg * kVec;
 
-  float* s_head = deltanet_state +
-                  ((((static_cast<std::size_t>(layer_idx) * num_heads) + h)) *
-                   kRowSplitDim * kRowSplitDim);
+  StateT* s_head = deltanet_state +
+                   ((((static_cast<std::size_t>(layer_idx) * num_heads) + h)) *
+                    kRowSplitDim * kRowSplitDim);
 
   float4 s_reg[kRowsPerLane][kVec];
 #pragma unroll
   for (int r = 0; r < kRowsPerLane; ++r) {
-    const auto* src = reinterpret_cast<const float4*>(
+    const StateT* src =
         s_head +
-        (static_cast<std::size_t>(row0 + (r * kRowGroups)) * kRowSplitDim));
+        (static_cast<std::size_t>(row0 + (r * kRowGroups)) * kRowSplitDim);
 #pragma unroll
     for (int vi = 0; vi < kVec; ++vi) {
-      s_reg[r][vi] = src[kq_idx + vi];
+      s_reg[r][vi] = detail::LoadRecurrentState4(src, kq_idx + vi);
     }
   }
 
@@ -326,12 +329,11 @@ __launch_bounds__(256) __global__ void BatchedDeltaNetRowSplitKernel(
 
 #pragma unroll
   for (int r = 0; r < kRowsPerLane; ++r) {
-    auto* dst = reinterpret_cast<float4*>(
-        s_head +
-        (static_cast<std::size_t>(row0 + (r * kRowGroups)) * kRowSplitDim));
+    StateT* dst = s_head + (static_cast<std::size_t>(row0 + (r * kRowGroups)) *
+                            kRowSplitDim);
 #pragma unroll
     for (int vi = 0; vi < kVec; ++vi) {
-      dst[kq_idx + vi] = s_reg[r][vi];
+      detail::StoreRecurrentState4(dst, kq_idx + vi, s_reg[r][vi]);
     }
   }
 }
@@ -351,13 +353,17 @@ bool IsDeltaNetRowSplitSupported(std::uint32_t key_dim,
 
 void LaunchBatchedSSMConvRecurrenceRowSplit(
     const float* qkv_in, const float* conv_weights, float* conv_state,
-    float* conv_out, float* deltanet_state, const float* alpha_buf,
+    float* conv_out, void* deltanet_state, const float* alpha_buf,
     const float* beta_buf, const float* ssm_a, const float* ssm_dt,
     const float* ssm_norm, const float* gate, float* out_buf, void* q8_out,
     float* kq_scales, float* alpha_beta, std::uint32_t layer_idx,
     std::size_t batch_size, std::size_t qkv_size, std::uint32_t num_key_heads,
     std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim,
-    hipStream_t stream) {
+    hipStream_t stream, QwenRecurrentStateStorage state_storage) {
+  if (!IsDeltaNetRowSplitSupported(key_dim, val_dim)) {
+    throw std::invalid_argument(
+        "row-split Qwen recurrent state requires 128x128 matrices");
+  }
   const std::size_t block_size = 256;
   const std::size_t grid_x = (qkv_size + block_size - 1) / block_size;
   const dim3 conv_grid(static_cast<unsigned int>(grid_x),
@@ -392,14 +398,34 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
   // matters more than the extra registers.
   if (batch_size <= kRowSplitSmallBatch) {
     const dim3 grid(val_dim / RowSplitRowsPerBlock<32, 1>(), num_heads);
-    BatchedDeltaNetRowSplitKernel<32, 1, false><<<grid, 256, 0, stream>>>(
-        conv_out, kq_scales, alpha_beta, deltanet_state, out_buf, layer_idx,
-        batch_i, qkv_i, inner_i, kh_i, h_i);
+    if (state_storage == QwenRecurrentStateStorage::kBf16) {
+      BatchedDeltaNetRowSplitKernel<hip_bfloat16, 32, 1, false>
+          <<<grid, 256, 0, stream>>>(conv_out, kq_scales, alpha_beta,
+                                     static_cast<hip_bfloat16*>(deltanet_state),
+                                     out_buf, layer_idx, batch_i, qkv_i,
+                                     inner_i, kh_i, h_i);
+    } else {
+      BatchedDeltaNetRowSplitKernel<float, 32, 1, false>
+          <<<grid, 256, 0, stream>>>(conv_out, kq_scales, alpha_beta,
+                                     static_cast<float*>(deltanet_state),
+                                     out_buf, layer_idx, batch_i, qkv_i,
+                                     inner_i, kh_i, h_i);
+    }
   } else {
     const dim3 grid(val_dim / RowSplitRowsPerBlock<32, 2>(), num_heads);
-    BatchedDeltaNetRowSplitKernel<32, 2, true><<<grid, 256, 0, stream>>>(
-        conv_out, kq_scales, alpha_beta, deltanet_state, out_buf, layer_idx,
-        batch_i, qkv_i, inner_i, kh_i, h_i);
+    if (state_storage == QwenRecurrentStateStorage::kBf16) {
+      BatchedDeltaNetRowSplitKernel<hip_bfloat16, 32, 2, true>
+          <<<grid, 256, 0, stream>>>(conv_out, kq_scales, alpha_beta,
+                                     static_cast<hip_bfloat16*>(deltanet_state),
+                                     out_buf, layer_idx, batch_i, qkv_i,
+                                     inner_i, kh_i, h_i);
+    } else {
+      BatchedDeltaNetRowSplitKernel<float, 32, 2, true>
+          <<<grid, 256, 0, stream>>>(conv_out, kq_scales, alpha_beta,
+                                     static_cast<float*>(deltanet_state),
+                                     out_buf, layer_idx, batch_i, qkv_i,
+                                     inner_i, kh_i, h_i);
+    }
   }
 
   // opt-c174-ssm-epilogue-quant: when the gated row's only consumer is the Q8_0

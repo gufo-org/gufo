@@ -320,6 +320,7 @@
               pkgsSys.python3
               pkgsSys.findutils
               pkgsSys.icu
+              pkgsSys.curl
             ];
             src = staticAnalysisSource;
           } ''
@@ -431,6 +432,7 @@
               (pkgsSys.python3.withPackages (ps: [ ps.numpy ]))
               pkgsSys.icu
               gufoPackages.${system}.hrx-system
+              pkgsSys.curl
             ];
             src = testSource;
             hrxRoot = "${gufoPackages.${system}.hrx-system}";
@@ -479,6 +481,17 @@
                 speculative = "dflash2";
                 draftModel = "/var/models/qwen-draft.gguf";
                 port = 9000;
+                temperature = 0.8;
+                topK = 40;
+                topP = 0.9;
+                minP = 0.05;
+                minKeep = 3;
+                seed = 123;
+                repeatPenalty = 1.1;
+                repeatLastN = 32;
+                frequencyPenalty = 0.25;
+                presencePenalty = 0.5;
+                specDraftPMin = 0.75;
               };
             in
             pkgsSys.runCommand "check-mk-serve" { } ''
@@ -491,6 +504,17 @@
               echo "$cmd_str" | grep -F -- "--speculative dflash2"
               echo "$cmd_str" | grep -F -- "--dflash-model /var/models/qwen-draft.gguf"
               echo "$cmd_str" | grep -F -- "--port 9000"
+              echo "$cmd_str" | grep -F -- "--temperature 0.800000"
+              echo "$cmd_str" | grep -F -- "--top-k 40"
+              echo "$cmd_str" | grep -F -- "--top-p 0.900000"
+              echo "$cmd_str" | grep -F -- "--min-p 0.050000"
+              echo "$cmd_str" | grep -F -- "--min-keep 3"
+              echo "$cmd_str" | grep -F -- "--seed 123"
+              echo "$cmd_str" | grep -F -- "--repeat-penalty 1.100000"
+              echo "$cmd_str" | grep -F -- "--repeat-last-n 32"
+              echo "$cmd_str" | grep -F -- "--frequency-penalty 0.250000"
+              echo "$cmd_str" | grep -F -- "--presence-penalty 0.500000"
+              echo "$cmd_str" | grep -F -- "--spec-draft-p-min 0.750000"
               mkdir -p $out
               echo "PASS: mkGufoServe CLI string check passed" > $out/result.txt
             '';

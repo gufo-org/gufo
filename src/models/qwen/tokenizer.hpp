@@ -32,6 +32,10 @@ struct TokenizerOptions {
   bool parse_special_tokens{true};
 };
 
+struct VocabularyLoadOptions {
+  bool eager_decoded_tokens{true};
+};
+
 /// Deterministic, zero-allocation-on-query Qwen BPE Tokenizer.
 class QwenTokenizer {
 public:
@@ -56,7 +60,8 @@ public:
   [[nodiscard]] static std::unique_ptr<QwenTokenizer> CreateFromVocabulary(
       std::span<const std::string> tokens, std::span<const std::string> merges,
       const std::unordered_map<std::string, TokenId>& special_tokens = {},
-      std::string* error_msg = nullptr);
+      std::string* error_msg = nullptr,
+      VocabularyLoadOptions load_options = {});
 
   /// Encodes a UTF-8 text string into token IDs.
   [[nodiscard]] std::vector<TokenId> Encode(
@@ -67,6 +72,9 @@ public:
 
   /// Decodes a single token ID into its string representation.
   [[nodiscard]] std::string_view DecodeToken(TokenId token_id) const noexcept;
+  /// Decodes a single token by value. This remains exact when eager decoded
+  /// token construction was disabled at load time.
+  [[nodiscard]] std::string DecodeTokenCopy(TokenId token_id) const;
 
   [[nodiscard]] std::size_t GetVocabSize() const noexcept {
     return id_to_token_.size();
@@ -91,7 +99,7 @@ private:
 
   QwenTokenizer() = default;
 
-  void InitializeByteTokens();
+  void InitializeByteTokens(bool eager_decoded_tokens = true);
   std::vector<TokenId> BpeMergeChunk(std::string_view chunk) const;
 
   std::vector<std::string> id_to_token_;

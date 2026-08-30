@@ -21,8 +21,9 @@ void QwenGpuArena::AllocateRecurrentSnapshot() {
       config_.SsmValueSize();
 
   HIP_CHECK(hipMalloc(&d_saved_ssm_conv_state_, total_conv * sizeof(float)));
-  HIP_CHECK(
-      hipMalloc(&d_saved_ssm_deltanet_state_, total_deltanet * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_saved_ssm_deltanet_state_,
+                      total_deltanet * QwenRecurrentStateElementBytes(
+                                           policy_.recurrent_state_storage)));
 }
 
 void QwenGpuArena::SaveState(std::uint32_t valid_context) {
@@ -43,9 +44,11 @@ void QwenGpuArena::SaveState(std::uint32_t valid_context) {
   HIP_CHECK(hipMemcpyAsync(d_saved_ssm_conv_state_, d_ssm_conv_state,
                            total_conv * sizeof(float), hipMemcpyDeviceToDevice,
                            stream));
-  HIP_CHECK(hipMemcpyAsync(d_saved_ssm_deltanet_state_, d_ssm_deltanet_state,
-                           total_deltanet * sizeof(float),
-                           hipMemcpyDeviceToDevice, stream));
+  HIP_CHECK(hipMemcpyAsync(
+      d_saved_ssm_deltanet_state_, d_ssm_deltanet_state,
+      total_deltanet *
+          QwenRecurrentStateElementBytes(policy_.recurrent_state_storage),
+      hipMemcpyDeviceToDevice, stream));
   HIP_CHECK(hipStreamSynchronize(stream));
   saved_context_ = valid_context;
   replay_last_position_ = valid_context;
@@ -67,9 +70,11 @@ void QwenGpuArena::RestoreState() {
   HIP_CHECK(hipMemcpyAsync(d_ssm_conv_state, d_saved_ssm_conv_state_,
                            total_conv * sizeof(float), hipMemcpyDeviceToDevice,
                            stream));
-  HIP_CHECK(hipMemcpyAsync(d_ssm_deltanet_state, d_saved_ssm_deltanet_state_,
-                           total_deltanet * sizeof(float),
-                           hipMemcpyDeviceToDevice, stream));
+  HIP_CHECK(hipMemcpyAsync(
+      d_ssm_deltanet_state, d_saved_ssm_deltanet_state_,
+      total_deltanet *
+          QwenRecurrentStateElementBytes(policy_.recurrent_state_storage),
+      hipMemcpyDeviceToDevice, stream));
   HIP_CHECK(hipStreamSynchronize(stream));
 }
 

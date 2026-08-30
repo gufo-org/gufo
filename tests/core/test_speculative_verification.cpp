@@ -1,3 +1,4 @@
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -9,7 +10,9 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/sampling.hpp"
 #include "src/core/speculative/draft_backend.hpp"
+#include "src/core/speculative/draft_policy.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -252,6 +255,219 @@ private:
   std::vector<std::uint32_t> requested_lengths_;
 };
 
+class SampledTargetExecutor final
+    : public gufo::speculative::ISpeculativeTargetExecutor {
+public:
+  explicit SampledTargetExecutor(std::vector<float> target_logits)
+      : target_logits_(std::move(target_logits)) {}
+
+  void Reset() noexcept override {
+    state_.clear();
+    saved_state_.clear();
+    last_logits_ = {0.0F, -INFINITY, -INFINITY};
+  }
+
+  TokenId ForwardPromptBatch(std::span<const TokenId> prompt_tokens) override {
+    state_.assign(prompt_tokens.begin(), prompt_tokens.end());
+    last_logits_ = {0.0F, -INFINITY, -INFINITY};
+    return 0;
+  }
+
+  TokenId ForwardToken(TokenId token_id, std::uint32_t pos,
+                       bool compute_logits) override {
+    (void)compute_logits;
+    Expect(pos == state_.size(), "sampled target position");
+    state_.push_back(token_id);
+    last_logits_ = state_.size() == 2
+                       ? target_logits_
+                       : std::vector<float>{0.0F, -INFINITY, -INFINITY};
+    return gufo::sampling::SampleLogits(last_logits_, 0.0F, nullptr);
+  }
+
+  void SaveState(std::uint32_t valid_context) override {
+    Expect(valid_context == state_.size(), "sampled target snapshot boundary");
+    saved_state_ = state_;
+  }
+
+  void RestoreState() override { state_ = saved_state_; }
+
+  std::span<const float> CopyLastLogits() override { return last_logits_; }
+
+  TokenId GetEosTokenId() const noexcept override { return 99; }
+
+  std::string_view DecodeToken(TokenId) const noexcept override {
+    return "token";
+  }
+
+private:
+  std::vector<float> target_logits_;
+  std::vector<float> last_logits_;
+  std::vector<TokenId> state_;
+  std::vector<TokenId> saved_state_;
+};
+
+class BinarySampledDraftBackend final
+    : public gufo::speculative::IDraftBackend {
+public:
+  BinarySampledDraftBackend(float first_probability, float second_probability)
+      : probabilities_{first_probability, second_probability} {}
+
+  std::string_view Name() const noexcept override {
+    return "BinarySampledDraftBackend";
+  }
+
+  gufo::speculative::DraftProposal Propose(std::span<const TokenId>,
+                                           std::uint32_t current_pos,
+                                           std::uint32_t max_tokens) override {
+    gufo::speculative::DraftProposal proposal;
+    proposal.start_pos = current_pos;
+    if (max_tokens > 0) {
+      proposal.tokens.push_back(probabilities_[0] >= probabilities_[1] ? 1 : 2);
+    }
+    return proposal;
+  }
+
+  gufo::speculative::DraftProposal ProposeSampled(
+      std::span<const TokenId>, std::uint32_t current_pos,
+      std::uint32_t max_tokens, float, std::uint64_t* rng_state) override {
+    gufo::speculative::DraftProposal proposal;
+    proposal.start_pos = current_pos;
+    if (max_tokens == 0) {
+      return proposal;
+    }
+    proposal.candidates_per_token = 2;
+    proposal.candidate_ids = {1, 2};
+    proposal.candidate_probabilities.assign(probabilities_.begin(),
+                                            probabilities_.end());
+    proposal.tokens.push_back(
+        gufo::sampling::Uniform(rng_state) < probabilities_[0] ? 1 : 2);
+    return proposal;
+  }
+
+  bool SupportsSampledProposals() const noexcept override { return true; }
+
+private:
+  std::array<float, 2> probabilities_;
+};
+
+class PersistentDraftSnapshot final
+    : public gufo::speculative::IDraftBackendSnapshot {
+public:
+  explicit PersistentDraftSnapshot(std::uint32_t marker) : marker_(marker) {}
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
+    return sizeof(marker_);
+  }
+
+  [[nodiscard]] std::size_t PersistentPayloadBytes() const override {
+    return sizeof(marker_);
+  }
+
+  [[nodiscard]] std::size_t SerializePersistent(
+      std::span<std::uint8_t> destination) const override {
+    if (destination.size() != sizeof(marker_)) {
+      throw std::invalid_argument(
+          "persistent draft test destination size is invalid");
+    }
+    for (std::size_t byte = 0; byte < sizeof(marker_); ++byte) {
+      destination[byte] = static_cast<std::uint8_t>(marker_ >> (byte * 8U));
+    }
+    return destination.size();
+  }
+
+  [[nodiscard]] std::uint32_t Marker() const noexcept { return marker_; }
+
+private:
+  std::uint32_t marker_;
+};
+
+class PersistentDraftBackend final : public gufo::speculative::IDraftBackend {
+public:
+  PersistentDraftBackend(std::vector<TokenId> target_tokens,
+                         std::size_t prompt_size)
+      : target_tokens_(std::move(target_tokens)), prompt_size_(prompt_size) {}
+
+  [[nodiscard]] std::string_view Name() const noexcept override {
+    return "PersistentDraftBackend";
+  }
+
+  [[nodiscard]] bool RequiresTargetHiddenStates() const noexcept override {
+    return true;
+  }
+
+  [[nodiscard]] std::span<const std::uint32_t> TargetHiddenLayerIds()
+      const noexcept override {
+    static constexpr std::array<std::uint32_t, 1> target_layers = {7};
+    return target_layers;
+  }
+
+  [[nodiscard]] gufo::speculative::DraftProposal Propose(
+      std::span<const TokenId>, std::uint32_t current_pos,
+      std::uint32_t max_tokens) override {
+    Expect(current_pos >= prompt_size_, "persistent draft position");
+    ++marker_;
+    gufo::speculative::DraftProposal proposal;
+    proposal.start_pos = current_pos;
+    const std::size_t target_start =
+        static_cast<std::size_t>(current_pos) - prompt_size_ + 1U;
+    if (target_start >= target_tokens_.size()) {
+      return proposal;
+    }
+    const std::size_t count =
+        std::min<std::size_t>(max_tokens, target_tokens_.size() - target_start);
+    proposal.tokens.insert(
+        proposal.tokens.end(),
+        target_tokens_.begin() + static_cast<std::ptrdiff_t>(target_start),
+        target_tokens_.begin() +
+            static_cast<std::ptrdiff_t>(target_start + count));
+    return proposal;
+  }
+
+  void AcceptFeedback(std::span<const TokenId> accepted,
+                      TokenId correction_token) override {
+    marker_ += static_cast<std::uint32_t>(accepted.size());
+    marker_ ^= correction_token;
+  }
+
+  [[nodiscard]] std::size_t SnapshotPayloadBytes() const override {
+    return sizeof(marker_);
+  }
+
+  [[nodiscard]] std::unique_ptr<gufo::speculative::IDraftBackendSnapshot>
+  Snapshot() const override {
+    return std::make_unique<PersistentDraftSnapshot>(marker_);
+  }
+
+  void RestoreSnapshot(
+      const gufo::speculative::IDraftBackendSnapshot& snapshot) override {
+    const auto* persistent =
+        dynamic_cast<const PersistentDraftSnapshot*>(&snapshot);
+    if (persistent == nullptr) {
+      throw std::invalid_argument("persistent draft test snapshot type");
+    }
+    marker_ = persistent->Marker();
+  }
+
+  void RestorePersistentSnapshot(
+      std::span<const std::uint8_t> payload) override {
+    if (payload.size() != sizeof(marker_)) {
+      throw std::invalid_argument("persistent draft test payload size");
+    }
+    std::uint32_t restored = 0;
+    for (std::size_t byte = 0; byte < sizeof(restored); ++byte) {
+      restored |= static_cast<std::uint32_t>(payload[byte]) << (byte * 8U);
+    }
+    marker_ = restored;
+  }
+
+  [[nodiscard]] std::uint32_t Marker() const noexcept { return marker_; }
+
+private:
+  std::vector<TokenId> target_tokens_;
+  std::size_t prompt_size_;
+  std::uint32_t marker_{0};
+};
+
 gufo::models::GenerationOptions GenerationOptions(std::size_t max_tokens,
                                                   TokenId eos_id) {
   gufo::models::GenerationOptions options;
@@ -338,6 +554,25 @@ void TestHiddenAwareBackendReceivesCommittedTargetState() {
          "hidden-aware backend receives latest committed target hidden");
 }
 
+void TestRetainedPrefixAdvanceUpdatesTargetAndDraftState() {
+  constexpr TokenId eos_id = 900;
+  ScriptedTargetExecutor target({10, 11}, eos_id);
+  auto backend = std::make_unique<HiddenAwareDraftBackend>();
+  auto* backend_view = backend.get();
+  gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend));
+  const std::vector<TokenId> prompt = {1, 2, 3};
+
+  Expect(verifier.Prime(prompt) == 10,
+         "retained-prefix test primes the target frontier");
+  const auto next = verifier.AdvanceCommittedToken(42, 3);
+
+  Expect(next == 11, "retained-prefix advance returns the next target token");
+  Expect(target.State() == std::vector<TokenId>({1, 2, 3, 42}),
+         "retained-prefix advance commits the supplied suffix token");
+  Expect(backend_view->UpdatedHidden() == std::vector<float>({42.0F, 3.0F}),
+         "retained-prefix advance updates DFlash target features");
+}
+
 void TestPartialRejectionRestoresAndReplaysState() {
   constexpr TokenId eos_id = 900;
   ScriptedTargetExecutor target({10, 11, 12}, eos_id);
@@ -392,6 +627,7 @@ void TestAcceptedTokenEmaDraftPolicy() {
   options.initial_draft_tokens = 7;
   options.adaptive_draft_policy =
       gufo::speculative::AdaptiveDraftPolicy::kAcceptedTokenEma;
+  options.draft_headroom_tokens = 0;
   gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend),
                                                   options);
 
@@ -404,6 +640,46 @@ void TestAcceptedTokenEmaDraftPolicy() {
              std::vector<std::uint32_t>({3, 3, 4, 3}),
          "EMA policy must probe after full acceptance and back off after a "
          "partial block");
+}
+
+void TestAcceptedTokenEmaHeadroomDraftsAboveTheMean() {
+  constexpr TokenId eos_id = 900;
+  const std::vector<TokenId> prompt = {1, 2, 3};
+  std::vector<TokenId> generated_tokens;
+  generated_tokens.reserve(48);
+  for (TokenId token = 10; token < 58; ++token) {
+    generated_tokens.push_back(token);
+  }
+
+  ScriptedTargetExecutor target(generated_tokens, eos_id);
+  auto backend = std::make_unique<ScriptedAcceptanceDraftBackend>(
+      generated_tokens, prompt.size(), std::vector<std::size_t>{4, 1, 1, 1});
+  auto* backend_view = backend.get();
+
+  gufo::speculative::SpeculativeOptions options;
+  options.max_draft_tokens = 7;
+  options.min_draft_tokens = 1;
+  options.initial_draft_tokens = 7;
+  options.adaptive_draft_policy =
+      gufo::speculative::AdaptiveDraftPolicy::kAcceptedTokenEma;
+  options.draft_headroom_tokens = 2;
+  gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend),
+                                                  options);
+
+  const auto output = verifier.Generate(prompt, GenerationOptions(20, eos_id));
+  const std::vector<TokenId> expected(generated_tokens.begin(),
+                                      generated_tokens.begin() + 20);
+  Expect(output == expected, "EMA headroom must preserve target output");
+
+  // A mean-tracking controller would settle on the accepted count itself (1
+  // here, floored at min_draft_tokens); headroom keeps the width two tokens
+  // above it so the nearly free tail of the verification batch stays covered.
+  const auto& requested = backend_view->RequestedLengths();
+  Expect(requested.size() >= 4, "EMA headroom must issue four drafts");
+  Expect(std::vector<std::uint32_t>(requested.begin(), requested.begin() + 4) ==
+             std::vector<std::uint32_t>({4, 5, 5, 4}),
+         "EMA headroom must start above the mean, probe on full acceptance, "
+         "and decay toward the mean plus headroom");
 }
 
 void TestFirstPrefillTokenHonorsBudgetAndCallback() {
@@ -449,7 +725,187 @@ void TestFirstPrefillEosIsNotEmitted() {
   Expect(target.State() == prompt, "prefill EOS target state");
 }
 
+void TestSampledSpeculationMatchesTargetDistribution() {
+  constexpr std::size_t trials = 4096;
+  constexpr double expected_second_probability = 0.75;
+  std::size_t second_token_count = 0;
+  std::size_t drafted_count = 0;
+
+  for (std::uint64_t seed = 1; seed <= trials; ++seed) {
+    SampledTargetExecutor target({-INFINITY, std::log(0.25F), std::log(0.75F)});
+    auto backend = std::make_unique<BinarySampledDraftBackend>(0.80F, 0.20F);
+    gufo::speculative::SpeculativeOptions options;
+    options.max_draft_tokens = 1;
+    options.min_draft_tokens = 1;
+    options.initial_draft_tokens = 1;
+    options.enable_adaptive_draft_length = false;
+    gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend),
+                                                    options);
+    const std::vector<TokenId> prompt = {0};
+    const TokenId current = verifier.Prime(prompt);
+    std::vector<TokenId> sequence = {prompt.front(), current};
+    std::uint64_t rng_state = seed;
+    const auto result =
+        verifier.VerifyStep(sequence, 1, current, 99, 2, 1.0F, &rng_state);
+    Expect(!result.emitted_tokens.empty(),
+           "sampled speculation emits a target-distributed token");
+    second_token_count += result.emitted_tokens.front() == 2 ? 1 : 0;
+    drafted_count += result.draft_count;
+  }
+
+  const double observed = static_cast<double>(second_token_count) / trials;
+  Expect(std::abs(observed - expected_second_probability) < 0.035,
+         "lossless rejection sampling preserves the target distribution");
+  Expect(drafted_count == trials,
+         "positive-temperature verification continues to use drafts");
+}
+
+void TestFilteredSampledSpeculationMatchesTargetDistribution() {
+  constexpr std::size_t trials = 4096;
+  const std::vector<float> target_logits = {-INFINITY, std::log(0.40F),
+                                            std::log(0.60F)};
+  gufo::sampling::SamplingConfig config;
+  config.temperature = 0.8F;
+  config.top_k = 2;
+  config.top_p = 0.95F;
+  config.min_p = 0.05F;
+  config.min_keep = 1;
+  config.repeat_penalty = 1.2F;
+  config.repeat_last_n = 2;
+  config.frequency_penalty = 0.1F;
+  config.presence_penalty = 0.05F;
+
+  const std::vector<TokenId> initial_sequence = {1, 0};
+  const double expected_second_probability =
+      gufo::sampling::BuildDistribution(target_logits, config, initial_sequence)
+          .probability(2);
+  std::size_t second_token_count = 0;
+  std::size_t drafted_count = 0;
+
+  for (std::uint64_t seed = 1; seed <= trials; ++seed) {
+    SampledTargetExecutor target(target_logits);
+    auto backend = std::make_unique<BinarySampledDraftBackend>(0.80F, 0.20F);
+    gufo::speculative::SpeculativeOptions options;
+    options.max_draft_tokens = 1;
+    options.min_draft_tokens = 1;
+    options.initial_draft_tokens = 1;
+    options.enable_adaptive_draft_length = false;
+    gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend),
+                                                    options);
+    const std::vector<TokenId> prompt = {1};
+    const TokenId current = verifier.Prime(prompt);
+    std::vector<TokenId> sequence = {prompt.front(), current};
+    config.seed = static_cast<std::int64_t>(seed);
+    gufo::sampling::SamplerState sampler(config, sequence);
+    const auto result =
+        verifier.VerifyStep(sequence, 1, current, 99, 2, sampler);
+    Expect(!result.emitted_tokens.empty(),
+           "filtered speculation emits a target-distributed token");
+    second_token_count += result.emitted_tokens.front() == 2 ? 1 : 0;
+    drafted_count += result.draft_count;
+  }
+
+  const double observed = static_cast<double>(second_token_count) / trials;
+  Expect(std::abs(observed - expected_second_probability) < 0.035,
+         "filtered rejection sampling preserves the target distribution");
+  Expect(drafted_count == trials,
+         "top-k/top-p/min-p/penalty requests continue to use drafts");
+}
+
+void TestPersistentVerifierSnapshotRoundTrip() {
+  constexpr TokenId eos_id = 900;
+  const std::vector<TokenId> prompt = {1, 2, 3};
+  const std::vector<TokenId> generated = {10, 11, 12, 13, 14, 15, 16};
+  ScriptedTargetExecutor source_target(generated, eos_id);
+  auto source_backend =
+      std::make_unique<PersistentDraftBackend>(generated, prompt.size());
+  auto* source_backend_view = source_backend.get();
+  gufo::speculative::SpeculativeOptions options;
+  options.max_draft_tokens = 4;
+  options.min_draft_tokens = 1;
+  options.initial_draft_tokens = 2;
+  options.rolling_window = 4;
+  gufo::speculative::SpeculativeVerifier source(
+      source_target, std::move(source_backend), options);
+
+  const auto generated_tokens =
+      source.Generate(prompt, GenerationOptions(6, eos_id));
+  Expect(generated_tokens ==
+             std::vector<TokenId>(generated.begin(), generated.begin() + 6),
+         "persistent verifier source output");
+  const auto source_stats = source.GetStats();
+  const auto source_draft_length = source.GetCurrentDraftLength();
+  const auto source_marker = source_backend_view->Marker();
+  auto snapshot = source.Snapshot();
+  std::vector<std::uint8_t> payload(snapshot->PersistentPayloadBytes());
+  Expect(snapshot->SerializePersistent(payload) == payload.size(),
+         "persistent verifier byte count");
+
+  ScriptedTargetExecutor restored_target(generated, eos_id);
+  auto restored_backend =
+      std::make_unique<PersistentDraftBackend>(generated, prompt.size());
+  auto* restored_backend_view = restored_backend.get();
+  gufo::speculative::SpeculativeVerifier restored(
+      restored_target, std::move(restored_backend), options);
+
+  auto corrupt = payload;
+  corrupt.front() ^= 0xFFU;
+  bool rejected_corruption = false;
+  try {
+    restored.RestorePersistentSnapshot(corrupt);
+  } catch (const std::invalid_argument&) {
+    rejected_corruption = true;
+  }
+  Expect(rejected_corruption, "persistent verifier rejects a malformed header");
+  Expect(restored_backend_view->Marker() == 0,
+         "malformed verifier payload does not mutate draft state");
+
+  restored.RestorePersistentSnapshot(payload);
+  const auto restored_stats = restored.GetStats();
+  Expect(restored_target.HiddenCaptureEnabled(),
+         "persistent verifier restore re-enables target hidden capture");
+  Expect(restored_stats.total_draft_tokens == source_stats.total_draft_tokens &&
+             restored_stats.total_accepted_tokens ==
+                 source_stats.total_accepted_tokens &&
+             restored_stats.total_verification_steps ==
+                 source_stats.total_verification_steps &&
+             restored_stats.total_emitted_tokens ==
+                 source_stats.total_emitted_tokens,
+         "persistent verifier restores exact counters");
+  Expect(restored.GetCurrentDraftLength() == source_draft_length,
+         "persistent verifier restores adaptive draft length");
+  Expect(restored_backend_view->Marker() == source_marker,
+         "persistent verifier restores provider state");
+
+  auto restored_snapshot = restored.Snapshot();
+  std::vector<std::uint8_t> restored_payload(
+      restored_snapshot->PersistentPayloadBytes());
+  Expect(restored_snapshot->SerializePersistent(restored_payload) ==
+             restored_payload.size(),
+         "restored persistent verifier byte count");
+  Expect(restored_payload == payload,
+         "persistent verifier round trip is byte exact");
+}
+
 }  // namespace
+
+void TestDraftPolicyResolution() {
+  using gufo::speculative::ResolveDraftPolicy;
+  // `auto` follows the measured best per backend: DFlash-2 verification batches
+  // cost about one decode step at every width, so the block maximum wins, while
+  // other backends keep the rolling controller.
+  Expect(ResolveDraftPolicy("auto", true) == "fixed",
+         "auto resolves to fixed for a block-diffusion draft");
+  Expect(ResolveDraftPolicy("auto", false) == "rolling",
+         "auto resolves to rolling for other backends");
+  // An explicit request always wins over the default.
+  Expect(ResolveDraftPolicy("rolling", true) == "rolling",
+         "explicit rolling survives resolution");
+  Expect(ResolveDraftPolicy("accepted-ema", true) == "accepted-ema",
+         "explicit accepted-ema survives resolution");
+  Expect(ResolveDraftPolicy("fixed", false) == "fixed",
+         "explicit fixed survives resolution");
+}
 
 int main() {
   TestSpeculativeDraftBackendInterface();
@@ -458,9 +914,15 @@ int main() {
   TestPartialRejectionRestoresAndReplaysState();
   TestImmediateRejectionRestoresGreedyState();
   TestAcceptedTokenEmaDraftPolicy();
+  TestAcceptedTokenEmaHeadroomDraftsAboveTheMean();
   TestHiddenAwareBackendReceivesCommittedTargetState();
+  TestRetainedPrefixAdvanceUpdatesTargetAndDraftState();
   TestFirstPrefillTokenHonorsBudgetAndCallback();
   TestFirstPrefillEosIsNotEmitted();
+  TestSampledSpeculationMatchesTargetDistribution();
+  TestFilteredSampledSpeculationMatchesTargetDistribution();
+  TestPersistentVerifierSnapshotRoundTrip();
+  TestDraftPolicyResolution();
   std::cout << "All speculative verification tests passed.\n";
   return 0;
 }
