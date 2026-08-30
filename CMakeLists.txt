@@ -160,11 +160,26 @@ if (ENGINE_ENABLE_XRT)
   endif()
   set(GUFO_AIE_QWEN_MTP_EH_PROJ_INCLUDE_DIR
     "$ENV{GUFO_AIE_QWEN_MTP_EH_PROJ_ROOT}/include")
+  if (DEFINED ENV{GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR}
+      AND NOT "$ENV{GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR}" STREQUAL "")
+    set(GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR
+      "$ENV{GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR}"
+      CACHE PATH "Directory containing the DS4 Q2_K XDNA2 experiment"
+      FORCE)
+  else()
+    set(GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR
+      "${GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR}"
+      CACHE PATH "Directory containing the DS4 Q2_K XDNA2 experiment")
+  endif()
+  set(GUFO_AIE_DS4_Q2K_DOWN_INCLUDE_DIR
+    "$ENV{GUFO_AIE_DS4_Q2K_DOWN_ROOT}/include")
   if (NOT GUFO_AIE_SMOKE_PROGRAM_DIR OR NOT GUFO_AIE_SMOKE_INCLUDE_DIR
       OR NOT GUFO_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR
       OR NOT GUFO_AIE_QWEN_MTP_RMSNORM_INCLUDE_DIR
       OR NOT GUFO_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR
-      OR NOT GUFO_AIE_QWEN_MTP_EH_PROJ_INCLUDE_DIR)
+      OR NOT GUFO_AIE_QWEN_MTP_EH_PROJ_INCLUDE_DIR
+      OR NOT GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR
+      OR NOT GUFO_AIE_DS4_Q2K_DOWN_INCLUDE_DIR)
     message(FATAL_ERROR "XDNA2 program artifacts not found. Use the Nix development environment")
   endif()
   message(STATUS "gufo: XRT NPU shim enabled, include=${XRT_INCLUDE_DIR}")
@@ -372,6 +387,21 @@ if (ENGINE_ENABLE_HIP)
   endif()
 endif()
 
+if (ENGINE_ENABLE_XRT)
+  add_executable(ds4_q2k_down_xdna2_bench
+    tools/bench/ds4_q2k_down_xdna2.cpp)
+  target_compile_definitions(ds4_q2k_down_xdna2_bench PRIVATE
+    GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR="${GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR}")
+  target_include_directories(ds4_q2k_down_xdna2_bench PRIVATE
+    ${CMAKE_SOURCE_DIR})
+  target_include_directories(ds4_q2k_down_xdna2_bench SYSTEM PRIVATE
+    ${XRT_INCLUDE_DIR}
+    ${GUFO_AIE_DS4_Q2K_DOWN_INCLUDE_DIR})
+  target_link_libraries(ds4_q2k_down_xdna2_bench PRIVATE
+    ${XRT_COREUTIL_LIB}
+    ${UUID_LIBRARY})
+endif()
+
 install(TARGETS gufo DESTINATION bin)
 install(FILES
   src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
@@ -389,6 +419,9 @@ install(FILES
 if (ENGINE_ENABLE_HIP)
   install(TARGETS gufo-kernel-bench tune_hipblaslt benchmark_ssm_replay
     DESTINATION bin)
+endif()
+if (ENGINE_ENABLE_XRT)
+  install(TARGETS ds4_q2k_down_xdna2_bench DESTINATION bin)
 endif()
 
 # CTest integration
@@ -655,6 +688,15 @@ if (BUILD_TESTING)
   add_test(NAME model_registry_test COMMAND model_registry_test)
   set_tests_properties(model_registry_test PROPERTIES
     LABELS "cpu;core;model_registry;minimax-h3")
+
+  add_executable(deepseek_v4_flash_q2k_down_contract_test
+    tests/models/deepseek_v4_flash_q2k_down_contract_test.cpp)
+  target_include_directories(deepseek_v4_flash_q2k_down_contract_test PRIVATE
+    ${CMAKE_SOURCE_DIR})
+  add_test(NAME deepseek_v4_flash_q2k_down_contract_test
+    COMMAND deepseek_v4_flash_q2k_down_contract_test)
+  set_tests_properties(deepseek_v4_flash_q2k_down_contract_test PROPERTIES
+    LABELS "cpu;npu;xdna2;deepseek-v4-flash;moe;q2k;expert-parallel")
 
   add_executable(minimax_h3_runtime_test
     tests/models/minimax_h3_runtime_test.cpp)

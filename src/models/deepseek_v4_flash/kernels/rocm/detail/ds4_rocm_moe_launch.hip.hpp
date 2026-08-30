@@ -20,6 +20,101 @@ static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
     return ab > c ? ab : c;
 }
 
+static int routed_moe_occupancy_telemetry_enabled(void) {
+    const char *value = getenv("GUFO_DEEPSEEK_MOE_OCCUPANCY");
+    return value && value[0] != '\0' && strcmp(value, "0") != 0 &&
+           strcasecmp(value, "false") != 0 &&
+           strcasecmp(value, "off") != 0;
+}
+
+static void routed_moe_report_occupancy(
+        uint32_t layer_index,
+        uint32_t n_tokens,
+        const uint32_t counts[DS4_ROCM_N_EXPERT]) {
+    if (!routed_moe_occupancy_telemetry_enabled()) return;
+
+    uint32_t buckets[8] = {0};
+    uint32_t experts_ge8 = 0;
+    uint32_t experts_ge16 = 0;
+    uint32_t experts_ge32 = 0;
+    uint32_t experts_ge64 = 0;
+    uint64_t rows_ge8 = 0;
+    uint64_t rows_ge16 = 0;
+    uint64_t rows_ge32 = 0;
+    uint64_t rows_ge64 = 0;
+    uint32_t active = 0;
+    uint32_t maximum = 0;
+    uint64_t assignments = 0;
+    for (uint32_t expert = 0; expert < DS4_ROCM_N_EXPERT; expert++) {
+        const uint32_t count = counts[expert];
+        assignments += count;
+        if (count != 0u) active++;
+        if (count > maximum) maximum = count;
+        if (count >= 8u) {
+            experts_ge8++;
+            rows_ge8 += count;
+        }
+        if (count >= 16u) {
+            experts_ge16++;
+            rows_ge16 += count;
+        }
+        if (count >= 32u) {
+            experts_ge32++;
+            rows_ge32 += count;
+        }
+        if (count >= 64u) {
+            experts_ge64++;
+            rows_ge64 += count;
+        }
+        const uint32_t bucket =
+            count == 0u ? 0u :
+            count < 4u ? 1u :
+            count < 8u ? 2u :
+            count < 16u ? 3u :
+            count < 32u ? 4u :
+            count < 64u ? 5u :
+            count < 128u ? 6u : 7u;
+        buckets[bucket]++;
+    }
+    fprintf(stderr,
+            "ds4: routed-moe occupancy layer=%u tokens=%u assignments=%llu"
+            " active=%u max=%u zero=%u b1_3=%u b4_7=%u b8_15=%u"
+            " b16_31=%u b32_63=%u b64_127=%u b128_plus=%u"
+            " e_ge8=%u rows_ge8=%llu e_ge16=%u rows_ge16=%llu"
+            " e_ge32=%u rows_ge32=%llu e_ge64=%u rows_ge64=%llu\n",
+            layer_index,
+            n_tokens,
+            static_cast<unsigned long long>(assignments),
+            active,
+            maximum,
+            buckets[0],
+            buckets[1],
+            buckets[2],
+            buckets[3],
+            buckets[4],
+            buckets[5],
+            buckets[6],
+            buckets[7],
+            experts_ge8,
+            static_cast<unsigned long long>(rows_ge8),
+            experts_ge16,
+            static_cast<unsigned long long>(rows_ge16),
+            experts_ge32,
+            static_cast<unsigned long long>(rows_ge32),
+            experts_ge64,
+            static_cast<unsigned long long>(rows_ge64));
+
+    const char *mode = getenv("GUFO_DEEPSEEK_MOE_OCCUPANCY");
+    if (mode && strcasecmp(mode, "full") == 0) {
+        fprintf(stderr, "ds4: routed-moe counts layer=%u tokens=%u values=",
+                layer_index, n_tokens);
+        for (uint32_t expert = 0; expert < DS4_ROCM_N_EXPERT; expert++) {
+            fprintf(stderr, "%s%u", expert == 0u ? "" : ",", counts[expert]);
+        }
+        fputc('\n', stderr);
+    }
+}
+
 /* Mixed IQ2_XXS-gate/Q2_K-down models already compute routed mid activations
  * as float.  Reuse the newer Q2_K expert-batch/WMMA down kernels instead of
  * re-quantizing mid to Q8_K and taking the older qwarp down path.  This keeps
@@ -36,6 +131,7 @@ static int routed_moe_q2_float_down_launch(
         const uint32_t *offsets,
         const uint32_t *sorted_pairs,
         uint32_t *hot_experts_dev,
+        uint32_t layer_index,
         uint32_t n_tokens,
         uint32_t n_expert,
         uint32_t expert_mid_dim,
@@ -56,6 +152,7 @@ static int routed_moe_q2_float_down_launch(
                  "routed_moe iq2/q2 float-down counts copy")) {
         return 0;
     }
+    routed_moe_report_occupancy(layer_index, n_tokens, h_counts);
 
     const uint32_t down_tile = 4u;
     const uint32_t down_rpb = 16u;
@@ -371,6 +468,7 @@ static int routed_moe_launch(
         uint32_t n_expert,
         float clamp,
         const ds4_gpu_tensor *x,
+        uint32_t layer_index,
         uint32_t n_tokens) {
     routed_moe_launch_plan plan;
     if (!routed_moe_build_plan(out, gate, up, mid, down, model_map, model_size,
@@ -819,7 +917,7 @@ static int routed_moe_launch(
                 ok = routed_moe_q2_float_down_launch(
                         out, down, mid, iq2_hot_mid_h, use_iq2_hot_f16_mid, down_w,
                         sorted_counts, sorted_offsets, sorted_pairs, tile_experts,
-                        n_tokens, n_expert, expert_mid_dim, out_dim,
+                        layer_index, n_tokens, n_expert, expert_mid_dim, out_dim,
                         down_expert_bytes, down_row_bytes);
             } else {
             dim3 dgrid((out_dim + 31u) / 32u, n_tokens * n_expert, 1);
@@ -1383,7 +1481,6 @@ static int routed_moe_launch(
 
 extern "C" int ds4_gpu_routed_moe_one_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_total_expert, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, const ds4_gpu_tensor *add_in, uint32_t layer_index, bool force_resident) {
     (void)add_in;
-    (void)layer_index;
     (void)force_resident;
     return routed_moe_launch(out, gate, up, mid, down, model_map, model_size,
                              gate_offset, up_offset, down_offset,
@@ -1391,10 +1488,10 @@ extern "C" int ds4_gpu_routed_moe_one_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor
                              gate_expert_bytes, gate_row_bytes,
                              down_expert_bytes, down_row_bytes,
                              expert_in_dim, expert_mid_dim, out_dim,
-                             selected, weights, n_total_expert, n_expert, clamp, x, 1);
+                             selected, weights, n_total_expert, n_expert, clamp,
+                             x, layer_index, 1);
 }
 extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_total_expert, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t layer_index, uint32_t n_tokens, bool *mid_is_f16, bool force_resident) {
-    (void)layer_index;
     (void)force_resident;
     if (mid_is_f16) *mid_is_f16 = false;
     return routed_moe_launch(out, gate, up, mid, down, model_map, model_size,
@@ -1403,5 +1500,6 @@ extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tens
                              gate_expert_bytes, gate_row_bytes,
                              down_expert_bytes, down_row_bytes,
                              expert_in_dim, expert_mid_dim, out_dim,
-                             selected, weights, n_total_expert, n_expert, clamp, x, n_tokens);
+                             selected, weights, n_total_expert, n_expert, clamp,
+                             x, layer_index, n_tokens);
 }

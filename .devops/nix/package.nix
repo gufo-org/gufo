@@ -10,6 +10,7 @@
   ffmpeg-headless,
   libuuid,
   rocmPackages,
+  aie-ds4-q2k-down,
   aie-qwen-mtp-eh-proj,
   aie-qwen-mtp-rmsnorm,
   aie-smoke,
@@ -48,6 +49,7 @@ let
       || relativePath == "tests/quality/antirez-ds4.json"
       || relativePath == "tools"
       || relativePath == "tools/bench"
+      || relativePath == "tools/bench/ds4_q2k_down_xdna2.cpp"
       || relativePath == "tools/bench/tune_hipblaslt.cpp"
       || relativePath == "tools/bench/benchmark_ssm_replay.cpp"
       || relativePath == "tools/bench/wmma_layout_test.hip"
@@ -92,6 +94,7 @@ stdenv.mkDerivation (finalAttrs: {
     rocmPackages.rocprofiler-sdk
   ]
   ++ lib.optionals xrtSupport [
+    aie-ds4-q2k-down
     aie-qwen-mtp-eh-proj
     aie-qwen-mtp-rmsnorm
     aie-smoke
@@ -114,6 +117,7 @@ stdenv.mkDerivation (finalAttrs: {
   ++ lib.optional rocmSupport "-DROCPRIM_INCLUDE_DIR=${rocmPackages.rocprim}/include"
   ++ lib.optional rocmSupport "-DROCWMMA_INCLUDE_DIR=${rocmPackages.rocwmma}/include"
   ++ lib.optional xrtSupport "-DENGINE_ENABLE_XRT=ON"
+  ++ lib.optional xrtSupport "-DGUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR=${placeholder "out"}/share/gufo/aie/ds4-q2k-down"
   ++ lib.optional xrtSupport "-DGUFO_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR=${placeholder "out"}/share/gufo/aie/qwen-mtp-eh-proj"
   ++ lib.optional xrtSupport "-DGUFO_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR=${placeholder "out"}/share/gufo/aie/qwen-mtp-rmsnorm"
   ++ lib.optional xrtSupport "-DGUFO_AIE_SMOKE_PROGRAM_DIR=${placeholder "out"}/share/gufo/aie/smoke";
@@ -125,6 +129,7 @@ stdenv.mkDerivation (finalAttrs: {
     GUFO_ROCWMMA_ROOT = "${rocmPackages.rocwmma}";
   }
   // lib.optionalAttrs xrtSupport {
+    GUFO_AIE_DS4_Q2K_DOWN_ROOT = "${aie-ds4-q2k-down}";
     GUFO_AIE_QWEN_MTP_EH_PROJ_ROOT = "${aie-qwen-mtp-eh-proj}";
     GUFO_AIE_QWEN_MTP_RMSNORM_ROOT = "${aie-qwen-mtp-rmsnorm}";
     GUFO_AIE_SMOKE_ROOT = "${aie-smoke}";
@@ -155,6 +160,20 @@ stdenv.mkDerivation (finalAttrs: {
     fi
     if [ -f benchmark_ssm_replay ]; then
       cp benchmark_ssm_replay $out/bin/benchmark_ssm_replay
+    fi
+    if [ -f ds4_q2k_down_xdna2_bench ]; then
+      cp ds4_q2k_down_xdna2_bench $out/bin/
+    fi
+    if [ -d ${aie-ds4-q2k-down} ]; then
+      mkdir -p $out/share/gufo/aie/ds4-q2k-down
+      cp ${aie-ds4-q2k-down}/ds4_q2k_down.xclbin \
+        ${aie-ds4-q2k-down}/ds4_q2k_down.insts.elf \
+        ${aie-ds4-q2k-down}/ds4_q2k_down_insts.bin \
+        ${aie-ds4-q2k-down}/ds4_q2k_down.pdi \
+        ${aie-ds4-q2k-down}/ds4_q2k_down.aie-partition.json \
+        ${aie-ds4-q2k-down}/manifest.json \
+        ${aie-ds4-q2k-down}/SHA256SUMS \
+        $out/share/gufo/aie/ds4-q2k-down/
     fi
     if [ -d ${aie-smoke} ]; then
       mkdir -p $out/share/gufo/aie/smoke

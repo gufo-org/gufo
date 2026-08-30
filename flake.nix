@@ -112,6 +112,8 @@
             rocmSupport = true;
             rocmGpuTargets = [ "gfx1151" ];
           };
+          aie-ds4-q2k-down =
+            gufoPackages.${system}.aie-ds4-q2k-down;
           aie-qwen-dflash-head =
             gufoPackages.${system}.aie-qwen-dflash-head;
           aie-qwen-mtp-eh-proj =
@@ -142,6 +144,10 @@
               GUFO_HIPCUB_ROOT = "${pkgs.${system}.rocmPackages.hipcub}";
               GUFO_ROCPRIM_ROOT = "${pkgs.${system}.rocmPackages.rocprim}";
               GUFO_ROCWMMA_ROOT = "${pkgs.${system}.rocmPackages.rocwmma}";
+              GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR =
+                "${gufoPackages.${system}.aie-ds4-q2k-down}";
+              GUFO_AIE_DS4_Q2K_DOWN_ROOT =
+                "${gufoPackages.${system}.aie-ds4-q2k-down}";
               GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR =
                 "${gufoPackages.${system}.aie-qwen-dflash-head}";
               GUFO_AIE_QWEN_DFLASH_HEAD_ROOT =
@@ -176,6 +182,10 @@
             env = {
               MLIR_AIE_INSTALL_DIR = "${gufoPackages.${system}.mlir-aie}/${pkgs.${system}.python312.sitePackages}/mlir_aie";
               PEANO_INSTALL_DIR = "${gufoPackages.${system}.llvm-aie}/${pkgs.${system}.python312.sitePackages}/llvm-aie";
+              GUFO_AIE_DS4_Q2K_DOWN_PROGRAM_DIR =
+                "${gufoPackages.${system}.aie-ds4-q2k-down}";
+              GUFO_AIE_DS4_Q2K_DOWN_ROOT =
+                "${gufoPackages.${system}.aie-ds4-q2k-down}";
               GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR =
                 "${gufoPackages.${system}.aie-qwen-dflash-head}";
               GUFO_AIE_QWEN_DFLASH_HEAD_ROOT =

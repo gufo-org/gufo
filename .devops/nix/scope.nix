@@ -5,6 +5,14 @@
 }:
 
 lib.makeScope newScope (self: {
+  aie-ds4-q2k-down = self.callPackage ./aie-ds4-q2k-down.nix {
+    inherit (self)
+      aiebu
+      llvm-aie
+      mlir-aie
+      xrt
+      ;
+  };
   aie-qwen-dflash-head = self.callPackage ./aie-qwen-dflash-head.nix {
     inherit (self)
       aiebu
@@ -40,7 +48,12 @@ lib.makeScope newScope (self: {
   aiebu = self.callPackage ./aiebu.nix { };
   gufo = self.callPackage ./package.nix {
     inherit version;
-    inherit (self) aie-qwen-mtp-eh-proj aie-qwen-mtp-rmsnorm aie-smoke;
+    inherit (self)
+      aie-ds4-q2k-down
+      aie-qwen-mtp-eh-proj
+      aie-qwen-mtp-rmsnorm
+      aie-smoke
+      ;
   };
   xrt = self.callPackage ./xrt.nix { };
   xrt-plugin-amdxdna = self.callPackage ./xrt-plugin-amdxdna.nix {
