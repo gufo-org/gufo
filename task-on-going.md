@@ -1,5 +1,55 @@
 # HRX integration: current status and recovery plan
 
+## 2026-08-30 fresh session: fused projection epilogue (card 4)
+
+Baseline revision: `e874537dd062c7e54a89b7db440e75c871f70042`.
+Machine fingerprint: `bb565d5eff3a9f23b4ac3f1ff03f66bebef651e57093cd558c4cded823358849`
+(`gfx1151`, 20 CUs, ROCm 7.2.3). Release artifact:
+`/nix/store/vk3qr2fjv9a7f442z1xszs30i0jvjcp3-gufo-e874537`.
+
+Fresh interleaved same-binary position baseline at `pp2048`, retained HRX
+fusions `blocked-prefill,swiglu-quant,norm-quant,readout-quant,paired-k`:
+
+| round | HRX native (t/s) | HIP (t/s) |
+| ---: | ---: | ---: |
+| 1 | 470.61 | 540.96 |
+| 2 | 469.29 | 542.77 |
+| 3 | 468.08 | 539.69 |
+| median | **469.29** | **540.96** |
+
+Selected card 4, folding SwiGLU and blocked quantization into the gate/up
+projection epilogue. Its measured ceiling is about 152 ms of a 4334 ms pass,
+or **3.5%**, comfortably above this host's approximately 0.5% resolution.
+Acceptance is bit-identical logits and an interleaved `pp2048` improvement
+beyond noise.
+
+The fused Loom oracle passes exact Q8 payload and scale checks across two
+128-token macro groups. At matched PP128 projection work (5,120 physical
+weight rows), the current projection measured 283.545 us p50 / 306.365 us
+mean and the fused candidate measured 272.223 us p50 / 307.215 us mean. The
+candidate therefore warranted an end-to-end test despite increasing VGPRs
+from 184 to 232 and reducing residency from eight to six waves/SIMD (no
+spills).
+
+The route is retained. `--validate-hrx 4` passes the W8A8 prefill envelope
+(top-1 match, max absolute error 0.26514006, cosine 0.99990022) and all prompt
+and decode comparisons. Fresh same-binary PP2048 samples alternated
+baseline/candidate order as `A B / B A / A B`:
+
+| round | retained baseline (t/s) | + gate-up-quant (t/s) |
+| ---: | ---: | ---: |
+| 1 | 469.51 | 478.88 |
+| 2 | 472.15 | 478.96 |
+| 3 | 471.63 | 477.60 |
+| median | **471.63** | **478.88** |
+
+That is **+1.54% throughput** (about 66 ms removed from PP2048), above the
+0.5% host noise floor in every round. Against the fresh HIP median of 540.96
+t/s, the retained HRX route moves from 87.2% to 88.5%. The gain survives the
+232-VGPR/six-wave occupancy tradeoff because it also removes the full f32
+gate/up write plus the separate SwiGLU-quantize dispatch and read. The route
+is selected by the default-off `gate-up-quant` policy flag.
+
 Last updated: 2026-08-28 (course-corrected to full-prompt blocked prefill)
 
 ## Projection launch order: token tiles must vary fastest
