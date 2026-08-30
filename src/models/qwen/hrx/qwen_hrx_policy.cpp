@@ -108,6 +108,14 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
       policy.int8_prefill = true;
       policy.blocked_prefill = true;
       policy.fused_readout_quantize = true;
+    } else if (token == "gate-up-quant") {
+      // This projection epilogue is built on the paired-K blocked route and
+      // writes the quantized down-projection operand directly.
+      policy.chunked_prefill = true;
+      policy.int8_prefill = true;
+      policy.blocked_prefill = true;
+      policy.paired_k_stage = true;
+      policy.fused_gate_up_swiglu_quantize = true;
     } else if (token == "paired-k") {
       // Paired K staging only exists for the blocked projection artifacts.
       policy.chunked_prefill = true;
@@ -144,7 +152,8 @@ QwenHrxExecutionPolicy QwenHrxExecutionPolicy::Parse(std::string_view spec,
                      "rmsnorm-qkv, rope-kv, q8, ffn-gate-up, "
                      "ssm-alpha-beta, ping-pong, "
                      "chunked-prefill, int8-prefill, blocked-prefill, "
-                     "swiglu-quant, norm-quant, readout-quant, paired-k, "
+                     "swiglu-quant, norm-quant, readout-quant, "
+                     "gate-up-quant, paired-k, "
                      "split-k, "
                      "wmma-prefill)";
       }
@@ -197,6 +206,9 @@ std::string QwenHrxExecutionPolicy::ToString() const {
   }
   if (fused_readout_quantize) {
     enabled.push_back("readout-quant");
+  }
+  if (fused_gate_up_swiglu_quantize) {
+    enabled.push_back("gate-up-quant");
   }
   if (paired_k_stage) {
     enabled.push_back("paired-k");

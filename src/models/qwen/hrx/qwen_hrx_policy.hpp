@@ -23,6 +23,8 @@ struct QwenHrxExecutionPolicy {
   bool fused_swiglu_quantize{false};
   bool fused_norm_quantize{false};
   bool fused_readout_quantize{false};
+  /// Gate/up projection writes the post-SwiGLU blocked Q8 operand directly.
+  bool fused_gate_up_swiglu_quantize{false};
   /// Blocked projection stages two adjacent K blocks per global load pair.
   bool paired_k_stage{false};
   /// Split K across workgroups for projections that fit one row group.

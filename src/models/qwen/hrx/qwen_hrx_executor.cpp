@@ -665,6 +665,7 @@ void QwenHrxExecutor::ResetKernelState() {
   activation_quantize_blocked_k6144_executable_ = nullptr;
   activation_quantize_blocked_k17408_executable_ = nullptr;
   swiglu_quantize_blocked_k17408_executable_ = nullptr;
+  gate_up_swiglu_quantize_blocked_executable_ = nullptr;
   rmsnorm_quantize_blocked_k5120_executable_ = nullptr;
   deltanet_readout_quantize_batch_executable_ = nullptr;
   deltanet_recurrence_batch_executable_ = nullptr;
@@ -852,6 +853,9 @@ bool QwenHrxExecutor::InitializeAllKernels(const std::string& kernels_dir,
       activation_quantize_blocked_k17408_executable_ = exec;
     } else if (entry.name == "qwen_swiglu_quantize_blocked_k17408") {
       swiglu_quantize_blocked_k17408_executable_ = exec;
+    } else if (entry.name ==
+               "qwen_q8_gate_up_swiglu_quantize_blocked_bk2_k5120_t128") {
+      gate_up_swiglu_quantize_blocked_executable_ = exec;
     } else if (entry.name == "qwen_rmsnorm_quantize_blocked_k5120") {
       rmsnorm_quantize_blocked_k5120_executable_ = exec;
     } else if (entry.name == "qwen_deltanet_readout_quantize_batch_f32") {
@@ -1143,6 +1147,19 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
                                             std::uint32_t rows,
                                             std::uint32_t input_elements,
                                             std::uint32_t tokens) {
+  if (!arena_.has_value()) {
+    return false;
+  }
+  return DispatchQ8GemmBlockedFromQuantized(
+      weight, arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
+      arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales), output, rows,
+      input_elements, tokens);
+}
+
+bool QwenHrxExecutor::DispatchQ8GemmBlockedFromQuantized(
+    const HrxBufferBinding& weight, const HrxBufferBinding& quantized,
+    const HrxBufferBinding& quant_scales, const HrxBufferBinding& output,
+    std::uint32_t rows, std::uint32_t input_elements, std::uint32_t tokens) {
   hrx_executable_t executable = nullptr;
   std::uint32_t row_capacity = 0;
   // The paired-K artifacts are the same kernel with the weight loads issued two
@@ -1198,10 +1215,8 @@ bool QwenHrxExecutor::DispatchQ8GemmBlocked(const HrxBufferBinding& weight,
   const auto projection_bytes = split_k ? partial_bytes : output_bytes;
   hrx_buffer_ref_t bindings[4];
   if (!TryBindOperand(weight, weight_bytes, &bindings[0]) ||
-      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
-                      payload_bytes, &bindings[1]) ||
-      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
-                      scale_bytes, &bindings[2]) ||
+      !TryBindOperand(quantized, payload_bytes, &bindings[1]) ||
+      !TryBindOperand(quant_scales, scale_bytes, &bindings[2]) ||
       !TryBindOperand(projection_target, projection_bytes, &bindings[3])) {
     return false;
   }
@@ -2389,49 +2404,72 @@ bool QwenHrxExecutor::DispatchBatchedFfnQ8(std::size_t layer_index,
                     error_msg);
     }
   }
-  if (!DispatchChunkProjection(layer.ffn_gate_up, batch_normed, batch_gate_up,
-                               static_cast<std::uint32_t>(2 * ffn), hidden,
-                               tokens)) {
-    return Reject("batched FFN gate/up projection failed", error_msg);
-  }
-  if (!trace_stage("gate-up-projection")) {
-    return Reject("batched FFN gate/up synchronization failed", error_msg);
-  }
-  if (UsesFusedSwiGLUQuantize()) {
-    // One pass over the gate/up tile: SiLU(gate)*up is quantized in registers
-    // and only the int8 payload reaches memory. The f32 activation buffer has
-    // no other consumer on this route.
-    if (!DispatchSwiGLUQuantizeBlocked(batch_gate_up, tokens)) {
-      return Reject("batched FFN fused SwiGLU quantization failed", error_msg);
+  const bool fused_gate_up = UsesFusedGateUpSwiGLUQuantize();
+  if (fused_gate_up) {
+    // Reuse the otherwise-dead f32 intermediates as non-aliasing payload and
+    // scale storage. The projection input remains in the arena quant buffers.
+    if (!DispatchGateUpSwiGLUQuantizeBlocked(layer.ffn_gate_up, batch_gate_up,
+                                             batch_activation, tokens)) {
+      return Reject("batched FFN fused gate/up epilogue failed", error_msg);
     }
-    if (!trace_stage("swiglu-quant")) {
-      return Reject("batched FFN fused SwiGLU synchronization failed",
+    if (!trace_stage("gate-up-swiglu-quant")) {
+      return Reject("batched FFN fused gate/up synchronization failed",
                     error_msg);
     }
   } else {
-    if (!DispatchSwiGLUPointwiseBatch(
-            batch_gate_up, batch_activation,
-            tokens * static_cast<std::uint32_t>(ffn))) {
-      return Reject("batched FFN SwiGLU failed", error_msg);
+    if (!DispatchChunkProjection(layer.ffn_gate_up, batch_normed, batch_gate_up,
+                                 static_cast<std::uint32_t>(2 * ffn), hidden,
+                                 tokens)) {
+      return Reject("batched FFN gate/up projection failed", error_msg);
     }
-    if (!trace_stage("swiglu")) {
-      return Reject("batched FFN SwiGLU synchronization failed", error_msg);
+    if (!trace_stage("gate-up-projection")) {
+      return Reject("batched FFN gate/up synchronization failed", error_msg);
     }
-    if (int8_route &&
-        !DispatchChunkQuantize(batch_activation,
-                               static_cast<std::uint32_t>(ffn), tokens)) {
-      return Reject("batched FFN activation payload quantization failed",
-                    error_msg);
-    }
-    if (!trace_stage("activation-quant")) {
-      return Reject(
-          "batched FFN activation quantization synchronization failed",
-          error_msg);
+    if (UsesFusedSwiGLUQuantize()) {
+      // One pass over the gate/up tile: SiLU(gate)*up is quantized in registers
+      // and only the int8 payload reaches memory. The f32 activation buffer has
+      // no other consumer on this route.
+      if (!DispatchSwiGLUQuantizeBlocked(batch_gate_up, tokens)) {
+        return Reject("batched FFN fused SwiGLU quantization failed",
+                      error_msg);
+      }
+      if (!trace_stage("swiglu-quant")) {
+        return Reject("batched FFN fused SwiGLU synchronization failed",
+                      error_msg);
+      }
+    } else {
+      if (!DispatchSwiGLUPointwiseBatch(
+              batch_gate_up, batch_activation,
+              tokens * static_cast<std::uint32_t>(ffn))) {
+        return Reject("batched FFN SwiGLU failed", error_msg);
+      }
+      if (!trace_stage("swiglu")) {
+        return Reject("batched FFN SwiGLU synchronization failed", error_msg);
+      }
+      if (int8_route &&
+          !DispatchChunkQuantize(batch_activation,
+                                 static_cast<std::uint32_t>(ffn), tokens)) {
+        return Reject("batched FFN activation payload quantization failed",
+                      error_msg);
+      }
+      if (!trace_stage("activation-quant")) {
+        return Reject(
+            "batched FFN activation quantization synchronization failed",
+            error_msg);
+      }
     }
   }
-  if (!DispatchChunkProjection(layer.ffn_down, batch_activation,
-                               batch_projected, hidden,
-                               static_cast<std::uint32_t>(ffn), tokens)) {
+  const bool down_ok =
+      fused_gate_up
+          ? DispatchQ8GemmBlockedFromQuantized(
+                layer.ffn_down, batch_gate_up, batch_activation,
+                batch_projected, static_cast<std::uint32_t>(hidden),
+                static_cast<std::uint32_t>(ffn), tokens)
+          : DispatchChunkProjection(layer.ffn_down, batch_activation,
+                                    batch_projected,
+                                    static_cast<std::uint32_t>(hidden),
+                                    static_cast<std::uint32_t>(ffn), tokens);
+  if (!down_ok) {
     return Reject("batched FFN down projection failed", error_msg);
   }
   if (!trace_stage("down-projection")) {
@@ -2664,6 +2702,58 @@ bool QwenHrxExecutor::DispatchSwiGLUQuantizeBlocked(
       &tokens, sizeof(tokens), bindings, 3, 0);
   if (!hrx_status_is_ok(quantize_status)) {
     hrx_status_ignore(quantize_status);
+    return false;
+  }
+  return true;
+}
+
+bool QwenHrxExecutor::DispatchGateUpSwiGLUQuantizeBlocked(
+    const HrxBufferBinding& weight, const HrxBufferBinding& output,
+    const HrxBufferBinding& output_scales, std::uint32_t tokens) {
+  constexpr std::uint32_t kHidden = 5120;
+  constexpr std::uint32_t kFfnWidth = 17408;
+  constexpr std::uint32_t kTokensPerMacroTile = 128;
+  constexpr std::uint32_t kRowsPerGroup = 64;
+  if (gate_up_swiglu_quantize_blocked_executable_ == nullptr ||
+      !arena_.has_value() || tokens == 0 || tokens > kHrxPrefillChunkTokens ||
+      contract_.HiddenSize() != kHidden || contract_.FfnSize() != kFfnWidth) {
+    return false;
+  }
+  const std::uint32_t physical_tokens =
+      ((tokens + kTokensPerMacroTile - 1) / kTokensPerMacroTile) *
+      kTokensPerMacroTile;
+  const auto weight_bytes = Q8_0MatrixBytes(2 * kFfnWidth, kHidden);
+  const auto input_payload_bytes = CheckedBytes({physical_tokens, kHidden});
+  const auto input_scale_bytes =
+      CheckedBytes({physical_tokens, kHidden / 32, sizeof(float)});
+  const auto output_payload_bytes = CheckedBytes({physical_tokens, kFfnWidth});
+  const auto output_scale_bytes =
+      CheckedBytes({physical_tokens, kFfnWidth / 32, sizeof(float)});
+  hrx_buffer_ref_t bindings[5];
+  if (!TryBindOperand(weight, weight_bytes, &bindings[0]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantized),
+                      input_payload_bytes, &bindings[1]) ||
+      !TryBindOperand(arena_->Binding(QwenHrxArenaBuffer::kBatchQuantScales),
+                      input_scale_bytes, &bindings[2]) ||
+      !TryBindOperand(output, output_payload_bytes, &bindings[3]) ||
+      !TryBindOperand(output_scales, output_scale_bytes, &bindings[4])) {
+    return false;
+  }
+  hrx_dispatch_config_t config{};
+  config.workgroup_count[0] = physical_tokens / kTokensPerMacroTile;
+  config.workgroup_count[1] = kFfnWidth / kRowsPerGroup;
+  config.workgroup_count[2] = 1;
+  config.workgroup_size[0] = 256;
+  config.workgroup_size[1] = 1;
+  config.workgroup_size[2] = 1;
+  config.subgroup_size = 32;
+  const std::array<std::uint32_t, 2> constants{kFfnWidth, tokens};
+  auto status = hrx_stream_dispatch(
+      backend_.Stream(), gate_up_swiglu_quantize_blocked_executable_, 0,
+      &config, constants.data(), constants.size() * sizeof(std::uint32_t),
+      bindings, 5, 0);
+  if (!hrx_status_is_ok(status)) {
+    hrx_status_ignore(status);
     return false;
   }
   return true;

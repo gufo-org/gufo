@@ -221,6 +221,12 @@ public:
   /// 17408-wide tile per layer.
   bool DispatchSwiGLUQuantizeBlocked(const HrxBufferBinding& pairs,
                                      std::uint32_t tokens);
+  /// Gate/up blocked projection with SwiGLU and output quantization in its
+  /// epilogue. Quantized output uses caller-provided scratch bindings so it
+  /// cannot alias the quantized projection input.
+  bool DispatchGateUpSwiGLUQuantizeBlocked(
+      const HrxBufferBinding& weight, const HrxBufferBinding& output,
+      const HrxBufferBinding& output_scales, std::uint32_t tokens);
   /// True when the fused SwiGLU + quantize artifact is present and the route
   /// that consumes its output (the blocked projection) is active.
   [[nodiscard]] bool FusedSwiGLUQuantizeReady() const noexcept {
@@ -229,6 +235,13 @@ public:
   [[nodiscard]] bool UsesFusedSwiGLUQuantize() const noexcept {
     return policy_.fused_swiglu_quantize && UsesBlockedPrefill() &&
            FusedSwiGLUQuantizeReady();
+  }
+  [[nodiscard]] bool FusedGateUpSwiGLUQuantizeReady() const noexcept {
+    return gate_up_swiglu_quantize_blocked_executable_ != nullptr;
+  }
+  [[nodiscard]] bool UsesFusedGateUpSwiGLUQuantize() const noexcept {
+    return policy_.fused_gate_up_swiglu_quantize && UsesBlockedPrefill() &&
+           FusedGateUpSwiGLUQuantizeReady();
   }
   /// RMSNorm folded into the blocked activation quantizer. The f32 normed
   /// tile has no other consumer on the blocked route.
@@ -309,6 +322,11 @@ public:
                              const HrxBufferBinding& output,
                              std::uint32_t rows, std::uint32_t input_elements,
                              std::uint32_t tokens);
+  bool DispatchQ8GemmBlockedFromQuantized(
+      const HrxBufferBinding& weight, const HrxBufferBinding& quantized,
+      const HrxBufferBinding& quant_scales, const HrxBufferBinding& output,
+      std::uint32_t rows, std::uint32_t input_elements,
+      std::uint32_t tokens);
   /// True when the K=5120 WMMA specialization and its padded quantizer exist.
   [[nodiscard]] bool WmmaPrefillReady() const noexcept {
     return q8_gemm_i8_wmma_k5120_t8_executable_ != nullptr &&
@@ -518,6 +536,7 @@ private:
   hrx_executable_t activation_quantize_blocked_k6144_executable_{nullptr};
   hrx_executable_t activation_quantize_blocked_k17408_executable_{nullptr};
   hrx_executable_t swiglu_quantize_blocked_k17408_executable_{nullptr};
+  hrx_executable_t gate_up_swiglu_quantize_blocked_executable_{nullptr};
   hrx_executable_t rmsnorm_quantize_blocked_k5120_executable_{nullptr};
   hrx_executable_t deltanet_readout_quantize_batch_executable_{nullptr};
   hrx_executable_t deltanet_recurrence_batch_executable_{nullptr};

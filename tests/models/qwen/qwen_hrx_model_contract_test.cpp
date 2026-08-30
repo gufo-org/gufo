@@ -458,6 +458,17 @@ void TestHrxExecutionPolicyParsing() {
              p_quant_pair.fused_norm_quantize && p_quant_pair.blocked_prefill,
          "the quantizer fusions compose with the blocked route");
 
+  auto p_gate_up_quant =
+      gufo::hrx::QwenHrxExecutionPolicy::Parse("gate-up-quant", &error);
+  Expect(p_gate_up_quant.fused_gate_up_swiglu_quantize &&
+             p_gate_up_quant.paired_k_stage &&
+             p_gate_up_quant.blocked_prefill && p_gate_up_quant.int8_prefill &&
+             p_gate_up_quant.chunked_prefill,
+         "gate-up-quant enables its paired blocked prerequisites");
+  Expect(p_gate_up_quant.ToString() ==
+             "chunked-prefill,int8-prefill,blocked-prefill,gate-up-quant,paired-k",
+         "gate-up-quant serializes with explicit prerequisites");
+
   auto p_paired_k =
       gufo::hrx::QwenHrxExecutionPolicy::Parse("paired-k", &error);
   Expect(p_paired_k.paired_k_stage && p_paired_k.blocked_prefill &&
