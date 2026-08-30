@@ -5,6 +5,14 @@
 }:
 
 lib.makeScope newScope (self: {
+  aie-qwen-dflash-head = self.callPackage ./aie-qwen-dflash-head.nix {
+    inherit (self)
+      aiebu
+      llvm-aie
+      mlir-aie
+      xrt
+      ;
+  };
   aie-qwen-mtp-eh-proj = self.callPackage ./aie-qwen-mtp-eh-proj.nix {
     inherit (self)
       aiebu

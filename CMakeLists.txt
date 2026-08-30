@@ -121,6 +121,19 @@ if (ENGINE_ENABLE_XRT)
       CACHE PATH "Directory containing the reviewed XDNA2 smoke artifacts")
   endif()
   set(GUFO_AIE_SMOKE_INCLUDE_DIR "$ENV{GUFO_AIE_SMOKE_ROOT}/include")
+  if (DEFINED ENV{GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR}
+      AND NOT "$ENV{GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR}" STREQUAL "")
+    set(GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR
+      "$ENV{GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR}"
+      CACHE PATH "Directory containing the reviewed Qwen DFlash head artifacts"
+      FORCE)
+  else()
+    set(GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR
+      "${GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR}"
+      CACHE PATH "Directory containing the reviewed Qwen DFlash head artifacts")
+  endif()
+  set(GUFO_AIE_QWEN_DFLASH_HEAD_INCLUDE_DIR
+    "$ENV{GUFO_AIE_QWEN_DFLASH_HEAD_ROOT}/include")
   if (DEFINED ENV{GUFO_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR}
       AND NOT "$ENV{GUFO_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR}" STREQUAL "")
     set(GUFO_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR
@@ -608,6 +621,26 @@ if (BUILD_TESTING)
     set_tests_properties(xdna2_xrt_program_test PROPERTIES
       LABELS "npu;xdna2;xrt;xrt-hardware")
 
+    if (NOT EXISTS
+        "${GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR}/qwen_dflash_head.xclbin"
+        OR NOT EXISTS
+        "${GUFO_AIE_QWEN_DFLASH_HEAD_INCLUDE_DIR}/gufo/aie_qwen_dflash_head_manifest.h")
+      message(FATAL_ERROR
+        "Qwen DFlash head test artifacts not found. Use the Nix development environment")
+    endif()
+    add_executable(qwen_dflash_head_test
+      tests/models/qwen/xdna2/dflash_head_test.cpp
+      src/models/qwen/xdna2/dflash_head.cpp)
+    target_compile_definitions(qwen_dflash_head_test PRIVATE
+      ENGINE_ENABLE_XRT=1
+      GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR="${GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR}")
+    target_include_directories(qwen_dflash_head_test SYSTEM PRIVATE
+      ${XRT_INCLUDE_DIR}
+      ${GUFO_AIE_QWEN_DFLASH_HEAD_INCLUDE_DIR})
+    target_link_libraries(qwen_dflash_head_test PRIVATE gufo_core)
+    add_test(NAME qwen_dflash_head_test COMMAND qwen_dflash_head_test)
+    set_tests_properties(qwen_dflash_head_test PROPERTIES
+      LABELS "npu;xdna2;xrt;xrt-hardware;models;qwen;dflash2;quality")
   endif()
 
   add_executable(gguf_reader_test tests/core/gguf_reader_test.cpp)

@@ -112,6 +112,8 @@
             rocmSupport = true;
             rocmGpuTargets = [ "gfx1151" ];
           };
+          aie-qwen-dflash-head =
+            gufoPackages.${system}.aie-qwen-dflash-head;
           aie-qwen-mtp-eh-proj =
             gufoPackages.${system}.aie-qwen-mtp-eh-proj;
           aie-qwen-mtp-rmsnorm =
@@ -140,6 +142,10 @@
               GUFO_HIPCUB_ROOT = "${pkgs.${system}.rocmPackages.hipcub}";
               GUFO_ROCPRIM_ROOT = "${pkgs.${system}.rocmPackages.rocprim}";
               GUFO_ROCWMMA_ROOT = "${pkgs.${system}.rocmPackages.rocwmma}";
+              GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR =
+                "${gufoPackages.${system}.aie-qwen-dflash-head}";
+              GUFO_AIE_QWEN_DFLASH_HEAD_ROOT =
+                "${gufoPackages.${system}.aie-qwen-dflash-head}";
               GUFO_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR =
                 "${gufoPackages.${system}.aie-qwen-mtp-eh-proj}";
               GUFO_AIE_QWEN_MTP_EH_PROJ_ROOT =
@@ -170,6 +176,10 @@
             env = {
               MLIR_AIE_INSTALL_DIR = "${gufoPackages.${system}.mlir-aie}/${pkgs.${system}.python312.sitePackages}/mlir_aie";
               PEANO_INSTALL_DIR = "${gufoPackages.${system}.llvm-aie}/${pkgs.${system}.python312.sitePackages}/llvm-aie";
+              GUFO_AIE_QWEN_DFLASH_HEAD_PROGRAM_DIR =
+                "${gufoPackages.${system}.aie-qwen-dflash-head}";
+              GUFO_AIE_QWEN_DFLASH_HEAD_ROOT =
+                "${gufoPackages.${system}.aie-qwen-dflash-head}";
               GUFO_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR =
                 "${gufoPackages.${system}.aie-qwen-mtp-eh-proj}";
               GUFO_AIE_QWEN_MTP_EH_PROJ_ROOT =
