@@ -23,7 +23,24 @@ added to files created during the port. Do not remove it.
 | `tests/test.sh` | `tests/verifier.nix` | The upstream bootstrap apt-installs curl and pipes `astral.sh` into a shell, which needs network at verify time. |
 | `allow_internet = true` | `network = "none"` | Dependencies move from image-build time to Nix build time. |
 
-Postfix and Mailman run under an init system upstream. The jail has no init, so this task is expected to need a rewrite rather than a port; it is included so the gap is visible.
+## Blocked
+
+Upstream installs `postfix`, `mailutils` and `mailman3` from apt and expects
+them to run as managed services. The jail unshares the pid namespace and runs
+the agent as pid 1 with no init, so nothing supervises daemons, and Postfix
+in particular expects a running master process, a spool directory it owns,
+and privilege separation across several uids.
+
+The verifier compounds this. Upstream installs `mailman==3.3.8` from PyPI as
+an importable library. nixpkgs carries `mailman` 3.3.10, but as a top-level
+application rather than a member of the Python package set, so it is not
+importable by the verifier's interpreter as written, and the version differs
+from the pin.
+
+Making this work means either running an init inside the jail or rewriting the
+task to check configuration rather than a live mail flow. Both are task
+changes, not ports, so the task is excluded from the `known-good` tier and
+kept in `full` only to keep the gap visible.
 
 The verifier contract is unchanged: CTRF at `/logs/verifier/ctrf.json`, reward
 at `/logs/verifier/reward.txt`, pass only when reward is exactly 1.

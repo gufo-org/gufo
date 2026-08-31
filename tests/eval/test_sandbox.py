@@ -136,6 +136,53 @@ class SandboxNegativeTest(unittest.TestCase):
             survivors.stdout.strip() or "0", "0", "orphaned process survived the timeout"
         )
 
+    def test_endpoint_only_reaches_the_endpoint_and_nothing_else(self):
+        """The documented network boundary, pinned.
+
+        On an endpoint-only task the agent's shell shares Pi's jail, so it can
+        reach the inference endpoint. That is a known deviation, recorded in
+        the README. What must stay true is that it reaches *nothing else*: no
+        DNS, no external host, no other port. This test fails if that widens.
+        """
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"reachable")
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+
+        script = textwrap.dedent(
+            f"""
+            if command -v getent >/dev/null 2>&1; then
+              getent hosts github.com >/dev/null 2>&1 && echo LEAK-DNS
+            fi
+            echo probe-done
+            """
+        )
+        result = self.backend.run(
+            JailSpec(
+                rootfs=self.rootfs,
+                command=["/bin/sh", "-c", script],
+                chdir="/app",
+                env={"HOME": "/root", "PATH": "/bin:/usr/bin"},
+                network="endpoint-only",
+                endpoint=("127.0.0.1", port),
+            ),
+            timeout_sec=90,
+        )
+        self.assertIn("probe-done", result.stdout)
+        self.assertNotIn("LEAK", result.stdout)
+
     def test_the_verifier_directory_is_absent_from_the_agent_jail(self):
         """Hidden fixtures must never be reachable while the agent runs."""
         result = self.run_in_jail("ls /tests 2>/dev/null && echo LEAK-TESTS; echo done")

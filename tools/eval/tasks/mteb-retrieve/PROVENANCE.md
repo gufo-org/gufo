@@ -23,7 +23,26 @@ added to files created during the port. Do not remove it.
 | `tests/test.sh` | `tests/verifier.nix` | The upstream bootstrap apt-installs curl and pipes `astral.sh` into a shell, which needs network at verify time. |
 | `allow_internet = true` | `network = "none"` | Dependencies move from image-build time to Nix build time. |
 
-Upstream downloads an embedding model at run time, which the offline sandbox does not allow; the model is not yet vendored as a fixed-output derivation, so this task cannot pass offline. mteb itself is not in nixpkgs and is omitted.
+## Blocked
+
+This task cannot pass, and the blocker is a dependency conflict rather than
+missing effort.
+
+The instruction requires the agent to use `mteb` version 1.36.8. That release
+requires `datasets<3.0.0,>=2.19.0`, while nixpkgs ships `datasets 4.5.0` --
+a major version beyond what mteb accepts. Pinning an older `datasets` would
+cascade through `transformers` and `sentence-transformers`, which nixpkgs also
+carries at newer versions. `mteb` additionally requires
+`pytrec-eval-terrier`, a C++ extension not packaged in nixpkgs.
+
+Separately, the task downloads the `bge-small-zh-v1.5` model at revision
+`7999e1d3359715c523056ef9478215996d62a620` at run time. The offline sandbox
+does not allow that, so the model would need vendoring as a fixed-output
+derivation. That part is tractable; the dependency conflict is not, without
+building a separate pinned Python set for this one task.
+
+The task is therefore excluded from the `known-good` tier, so a harness
+limitation is not scored as a model failure.
 
 The verifier contract is unchanged: CTRF at `/logs/verifier/ctrf.json`, reward
 at `/logs/verifier/reward.txt`, pass only when reward is exactly 1.

@@ -1,71 +1,68 @@
 # gufo-agent-eval — what is missing
 
-Against [plan.md](../../plan.md) and issue #153. Ordered by what blocks the
-most.
+Against [plan.md](../../plan.md) and issue #153.
 
-## Blocking a meaningful run
+## Blocked on work outside this harness
 
-- [ ] **Result file.** `run` prints to the terminal and discards everything.
-      #153's CLI is `run --output result.json`. Needs `result.py`: versioned
-      schema, per-task and aggregate, written to `--output`.
-- [ ] **Sanitizer.** No credentials, endpoint addresses, secrets, or user
-      paths in any emitted artifact. Acceptance criterion; nothing enforces it.
-- [ ] **Suites / tiers.** `--suite coding-smoke` is in the spec; `run` takes
-      one task name only. Needs `suite.py`, a smoke tier, and a full tier.
-- [ ] **`compare`.** Paired task-level diff between two result files. The
-      whole point is comparing `gufo serve` against llama.cpp.
-- [ ] **Timeout policy.** `agent.timeout_sec = 900` is below the *median*
-      task duration of the comparable reference run, so a full run would
-      measure timeouts, not capability. Reference runs used 3 h.
+- [ ] **`mteb-retrieve` cannot pass.** `mteb` 1.36.8 requires
+      `datasets<3.0.0`; nixpkgs ships `datasets 4.5.0`, and pinning an older
+      one cascades through transformers and sentence-transformers. It also
+      needs `pytrec-eval-terrier`, a C++ extension absent from nixpkgs. The
+      model would additionally need vendoring as a fixed-output derivation.
+      Excluded from the `known-good` tier.
+- [ ] **`mailman` cannot pass.** Postfix and Mailman expect an init system;
+      the jail runs the agent as pid 1 with nothing supervising daemons. The
+      verifier also needs an importable `mailman` library, and nixpkgs
+      carries it only as a top-level application. Needs a task rewrite, not a
+      port. Excluded from the `known-good` tier.
+- [ ] **Endpoint preflight convergence.** A minimal preflight exists,
+      covering what Pi actually exercises. #153 specifies the #203 fixture,
+      which does not exist; converge when it lands.
 
-## Correctness and safety
+## Needs a long run to answer
 
-- [ ] **Sandbox negative tests.** Host file read, credential read, write
-      outside the workspace, external network, orphaned process survival.
-      None written.
-- [ ] **cgroup v2 resource limits.** `cpus`, `memory_mb`, `storage_mb` are
-      recorded in manifests but not enforced. A runaway agent shell is
-      bounded only by wall-clock.
-- [ ] **Token accounting.** Usage reads `in=0` on most tasks. Pi reports
-      cumulative usage only at completion, so truncated runs lose it. Verify
-      on a full run before trusting the numbers.
-- [ ] **Tests in the PR gate.** `tests/eval/` runs in no flake check, so the
-      manifest guard can rot silently.
+- [ ] **Token accounting.** Usage reads zero on truncated runs, because Pi
+      reports cumulative usage only at completion. Confirm it is correct on a
+      full attempt before trusting the aggregate figures.
+- [ ] **Repeat-run stability and tolerance.** Requires several full runs
+      (12-26h each on this hardware) before a tolerance can be declared.
 
-## Fidelity to #153
+## Deliberately not done
 
-- [ ] **Endpoint preflight.** Blocked: the #203 fixtures do not exist. Decide
-      between a minimal preflight here and reopening #203.
-- [ ] **Attempt budget.** One attempt, no retry. Upstream defaults to two and
-      reports pass@2.
-- [ ] **Repeat-run stability.** Measure, then declare a tolerance.
-- [ ] **Split jails.** Pi and the workspace share one jail, so the agent
-      shell can reach the endpoint. Needs an exec bridge to close.
+- [ ] **Split jails.** Pi and the workspace share one jail, so on an
+      `endpoint-only` task the agent's shell can also reach the endpoint. A
+      real split needs a Pi extension proxying every tool -- bash, read,
+      write, edit -- through a bridge, since those run in-process. A shell
+      wrapper alone would look like a boundary without being one. The current
+      boundary is pinned by a test: the shell reaches the endpoint and
+      nothing else.
 
-## Tasks that start but cannot pass
+## Decisions for a human
 
-- [ ] **`fix-ocaml-gc`** — vendor the broken OCaml checkout as a fixed-output
-      derivation.
-- [ ] **`mteb-retrieve`** — vendor the embedding model; `mteb` is not in
-      nixpkgs.
-- [ ] **`mailman`** — expects an init system the jail does not provide.
-      Likely a task rewrite rather than a port.
-
-## Housekeeping
-
-- [ ] Decide whether `plan.md` stays at the repo root, moves under `docs/`,
-      or is dropped now that the README carries the durable reasoning.
-- [ ] Update the PR description; it still lists as absent several things that
-      have since landed.
-- [ ] Decide whether the suite eventually moves to its own repository.
+- [ ] Whether `plan.md` stays at the repo root, moves under `docs/`, or is
+      dropped now that the README carries the durable reasoning.
+- [ ] Whether the task suite eventually moves to its own repository.
+- [ ] Whether publishing `solution/` and hidden fixtures in a public repo is
+      acceptable. Apache-2.0 permits it; the canary string signals upstream
+      would rather it did not spread.
 
 ## Done
 
 - [x] Sandbox: bubblewrap, copied rootfs, namespace isolation
 - [x] `endpoint-only` networking via a unix-socket bridge
 - [x] Pi packaging, per-run config generation, trajectory parsing
-- [x] All 20 tasks ported; 20/20 rootfs and verifier closures build
-- [x] 20/20 tasks start the agent against a live server
+- [x] All 20 tasks ported; rootfs and verifier closures build; all start
+- [x] `fix-ocaml-gc` unblocked by vendoring its broken checkout
 - [x] Apache-2.0 compliance for the redistributed suite
+- [x] Versioned result documents, written by `run --output`
+- [x] Sanitizer over every artifact, with tests
+- [x] Suite tiers: smoke, known-good, full
+- [x] `compare`, with comparability checked rather than assumed
+- [x] Minimal endpoint preflight; unsupported endpoints abort
+- [x] cgroup v2 resource limits, recorded as unenforced where unavailable
+- [x] Attempt budget via `--attempts`, reported as pass@N
+- [x] Three-hour default timeout, matching the reference runs
+- [x] Sandbox negative tests: 16 cases, all passing
+- [x] PR gate: `nix build .#checks.x86_64-linux.eval-agent`
 - [x] `nix run .#eval-agent`, `nix develop`, help and task listings
 - [x] Cleanup on kill: PDEATHSIG on the forwarder, stale scratch sweep
