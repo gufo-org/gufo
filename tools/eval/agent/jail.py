@@ -34,6 +34,17 @@ _FORWARDED_ENV = ("TERM",)
 _ENDPOINT_SOCKET = "/run/gufo-endpoint.sock"
 
 
+def _die_with_parent() -> None:
+    """Ask the kernel to SIGKILL this child when its parent dies.
+
+    Runs in the child between fork and exec.
+    """
+    import ctypes
+
+    PR_SET_PDEATHSIG = 1
+    ctypes.CDLL("libc.so.6", use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+
+
 def _socat() -> str:
     found = os.environ.get("GUFO_EVAL_SOCAT") or shutil.which("socat")
     if not found:
@@ -68,7 +79,10 @@ def endpoint_bridge(host: str, port: int):
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        # The kernel kills the forwarder when this process dies. Without it a
+        # SIGKILL to the runner -- which no `finally` can intercept -- leaves
+        # the forwarder holding a route to the endpoint.
+        preexec_fn=_die_with_parent,
     )
 
     # socat creates the socket asynchronously; the jail cannot bind-mount a
@@ -299,6 +313,39 @@ class BwrapBackend(SandboxBackend):
             stderr=stderr or "",
             timed_out=timed_out,
         )
+
+
+SCRATCH_PREFIX = "gufo-agent-eval-"
+
+
+def sweep_stale_scratch(older_than_sec: float = 86400) -> int:
+    """Remove scratch directories left by runs that were killed.
+
+    A SIGKILL cannot be intercepted, so `TemporaryDirectory` cleanup does not
+    run and the staged workspace survives. Normal exits, exceptions, and
+    Ctrl-C all clean up on their own; this only catches the killed case.
+    """
+    removed = 0
+    root = Path(tempfile.gettempdir())
+    now = time.time()
+
+    for path in root.glob(f"{SCRATCH_PREFIX}*"):
+        if not path.is_dir():
+            continue
+        try:
+            if now - path.stat().st_mtime < older_than_sec:
+                continue
+            # Staged rootfs trees contain read-only files copied from the
+            # store; make them removable before unlinking.
+            for child in path.rglob("*"):
+                if not child.is_symlink() and child.is_dir():
+                    child.chmod(child.stat().st_mode | 0o700)
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+        except OSError:
+            continue
+
+    return removed
 
 
 def stage_rootfs(built_rootfs: Path, destination: Path) -> Path:
