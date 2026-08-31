@@ -1,0 +1,13 @@
+{
+  "_comment": [
+    "Pi settings for gufo-agent-eval, copied verbatim into the per-run config",
+    "directory. Versioned, and hashes into the suite identity.",
+    "",
+    "#153 requires unrelated extensions, skills, saved sessions, telemetry,",
+    "and implicit providers to be disabled. The environment variables the",
+    "runner sets (PI_OFFLINE, PI_SKIP_VERSION_CHECK, PI_TELEMETRY) cover the",
+    "network side; this file covers what Pi would otherwise load from disk."
+  ],
+  "enableInstallTelemetry": false,
+  "defaultProjectTrust": "never"
+}

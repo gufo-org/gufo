@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "Pi provider template for gufo-agent-eval. The runner substitutes the",
+    "@PLACEHOLDER@ fields and writes the result into a per-run tmpfs config",
+    "directory; this template is what is versioned, and it hashes into the",
+    "suite identity. The concrete file is never persisted, so the API key",
+    "cannot reach a result artifact.",
+    "",
+    "compat flags are #153's 'compatibility flags': they are declared here",
+    "rather than probed, so two endpoints are always driven identically."
+  ],
+  "providers": {
+    "gufo-eval": {
+      "baseUrl": "@BASE_URL@",
+      "api": "openai-completions",
+      "apiKey": "@API_KEY@",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "@MODEL_ID@",
+          "name": "@MODEL_ID@",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": @CONTEXT_WINDOW@,
+          "maxTokens": @MAX_TOKENS@,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    }
+  }
+}
