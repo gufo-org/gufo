@@ -317,7 +317,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     with _scratch(args.keep) as scratch:
         result = runner.run_attempt(
-            backend, task, config, scratch, pi_binary
+            backend, task, config, scratch, pi_binary,
+            agent_timeout_sec=args.agent_timeout,
         )
 
         print(f"task:        {result.task}")
@@ -559,6 +560,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=8192,
         metavar="N",
         help="maximum tokens the agent may request per response (default: %(default)s)",
+    )
+    run.add_argument(
+        "--agent-timeout",
+        type=float,
+        metavar="SEC",
+        help=(
+            "override the task's agent timeout. useful for checking a task "
+            "starts without waiting for a full attempt"
+        ),
     )
     run.add_argument(
         "--keep",

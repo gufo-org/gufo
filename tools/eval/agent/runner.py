@@ -47,6 +47,7 @@ def run_attempt(
     config: pi_mod.PiConfig,
     scratch: Path,
     pi_binary: Path,
+    agent_timeout_sec: float | None = None,
 ) -> AttemptResult:
     """Run one agent attempt at one task, then verify it."""
     scratch.mkdir(parents=True, exist_ok=True)
@@ -86,7 +87,9 @@ def run_attempt(
     )
 
     started = time.monotonic()
-    agent = backend.run(spec, timeout_sec=task.agent_timeout_sec)
+    agent = backend.run(
+        spec, timeout_sec=agent_timeout_sec or task.agent_timeout_sec
+    )
     duration_ms = int((time.monotonic() - started) * 1000)
 
     # Retained whole; the metrics below are a reduction of it.

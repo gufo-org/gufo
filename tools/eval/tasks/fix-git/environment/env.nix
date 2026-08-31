@@ -20,7 +20,7 @@ let
   personalSite = pkgs.fetchgit {
     url = "https://github.com/TheMikeMerrill/personal-site.git";
     rev = "19b5d101aa7083ae47a3a033ccadac79b0693488";
-    hash = "sha256-GKzDShvNGLxVmvQUQTIxihummeRWSIGDO1tSqbI0Lj0=";
+    hash = "sha256-jpC3QbtthGMGWKXVLRJDHoT793IY13b+N9CxC1M4SeY=";
     leaveDotGit = true;
     # setup.sh does `git reset --hard d7d3e4b`, `git checkout HEAD~1`, and
     # `git checkout master`, so the full history and branch refs are required.
@@ -57,6 +57,13 @@ mkTaskRootfs {
     mkdir -p "$HOME"
     cp -r ${personalSite} "$TMPDIR/personal-site-src"
     chmod -R u+w "$TMPDIR/personal-site-src"
+    # fetchgit leaves the checkout on a branch called `fetchgit`; setup.sh
+    # ends with `git checkout master`, so restore that branch name in the
+    # vendored source before cloning from it.
+    git -C "$TMPDIR/personal-site-src" branch -f master \
+      19b5d101aa7083ae47a3a033ccadac79b0693488
+    git -C "$TMPDIR/personal-site-src" symbolic-ref HEAD refs/heads/master
+
     git config --global protocol.file.allow always
     git config --global \
       url."file://$TMPDIR/personal-site-src".insteadOf \
