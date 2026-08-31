@@ -38,6 +38,14 @@ from .jail import (
 
 SUITE = "gufo-agent-eval"
 
+# Shown in every subcommand epilog. `nix run` consumes everything before `--`,
+# so flags reach nix instead of this tool and fail as `unrecognised flag`.
+NIX_NOTE = (
+    "through nix, flags must come after `--`:\n"
+    "  nix run .#eval-agent -- {example}\n"
+    "without it nix reads the flags as its own."
+)
+
 
 def _tasks_root(args: argparse.Namespace) -> Path:
     if args.tasks_root:
@@ -99,6 +107,12 @@ def _require_task(args: argparse.Namespace, verb: str) -> int | None:
     print(_task_menu(root), file=sys.stderr)
     print(f"\nusage: eval-agent {verb} <task> [options]", file=sys.stderr)
     print(f"       eval-agent {verb} --help", file=sys.stderr)
+    example = task_mod.available(root)
+    print(
+        f"\nthrough nix, flags go after `--`:"
+        f"\n  nix run .#eval-agent -- {verb} {example[0] if example else '<task>'}",
+        file=sys.stderr,
+    )
     return 2
 
 
@@ -402,7 +416,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "the Pi it reports is part of what the numbers mean. a Pi found on\n"
             "PATH is labelled not reproducible: use `nix develop` or set\n"
-            "GUFO_EVAL_PI to pin it."
+            "GUFO_EVAL_PI to pin it.\n"
+            "\n"
+            + NIX_NOTE.format(example="doctor")
         ),
     )
     doctor.set_defaults(func=cmd_doctor)
@@ -415,7 +431,11 @@ def build_parser() -> argparse.ArgumentParser:
             "List the tasks in the suite, with difficulty, category, network\n"
             "policy, working directory, and timeouts."
         ),
-        epilog="pass --tasks-root to list a suite other than the packaged one.",
+        epilog=(
+            "pass --tasks-root to list a suite other than the packaged one.\n"
+            "\n"
+            + NIX_NOTE.format(example="list --tasks-root ./other-suite")
+        ),
     )
     listing.set_defaults(func=cmd_list)
 
@@ -434,7 +454,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "the two cases that must both hold:\n"
             "  eval-agent verify sparql-university --solution   # reward 1.0\n"
-            "  eval-agent verify sparql-university              # reward 0.0"
+            "  eval-agent verify sparql-university              # reward 0.0\n"
+            "\n"
+            + NIX_NOTE.format(example="verify sparql-university --solution")
         ),
     )
     verifier.add_argument(
@@ -487,7 +509,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  eval-agent run sparql-university --model qwen3.8-27b --keep -v\n"
             "\n"
             "the model is discovered from /models when the endpoint serves\n"
-            "exactly one; pass --model otherwise."
+            "exactly one; pass --model otherwise.\n"
+            "\n"
+            + NIX_NOTE.format(example="run sparql-university --keep -v")
         ),
     )
     run.add_argument(
