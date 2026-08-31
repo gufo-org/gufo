@@ -22,6 +22,10 @@ nix run .#eval-agent -- doctor
 nix run .#eval-agent -- run sparql-university --base-url http://127.0.0.1:8080/v1
 ```
 
+Note the `--`: everything before it belongs to `nix`, so without it `nix run`
+tries to interpret flags like `--solution` as its own and fails with
+`unrecognised flag`. Bare subcommands happen to pass through, flags do not.
+
 The app pins its own `NIX_PATH`, so the task rootfs and verifier derivations
 it realizes at run time do not depend on the caller's channels.
 
