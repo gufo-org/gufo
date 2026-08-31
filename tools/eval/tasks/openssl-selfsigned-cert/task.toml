@@ -4,7 +4,7 @@ schema_version = "gufo-agent-eval/1"
 
 [task]
 name = "openssl-selfsigned-cert"
-description = "Evaluates an agent"s ability to generate self-signed TLS certificates using OpenSSL, manage cryptographic keys with proper permissions, and create verification scripts."
+description = "Evaluates an agent's ability to generate self-signed TLS certificates using OpenSSL, manage cryptographic keys with proper permissions, and create verification scripts."
 
 [metadata]
 difficulty = "medium"

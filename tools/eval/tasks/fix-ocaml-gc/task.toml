@@ -4,7 +4,7 @@ schema_version = "gufo-agent-eval/1"
 
 [task]
 name = "fix-ocaml-gc"
-description = "Evaluates ability to debug and fix a runtime crash in the OCaml garbage collector"s C implementation, requiring low-level debugging skills and understanding of compiler internals."
+description = "Evaluates ability to debug and fix a runtime crash in the OCaml garbage collector's C implementation, requiring low-level debugging skills and understanding of compiler internals."
 
 [metadata]
 difficulty = "hard"

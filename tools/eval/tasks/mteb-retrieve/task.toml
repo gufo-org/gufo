@@ -4,7 +4,7 @@ schema_version = "gufo-agent-eval/1"
 
 [task]
 name = "mteb-retrieve"
-description = "Evaluates the agent"s ability to perform semantic text retrieval using MTEB embeddings, computing cosine similarities and correctly ranking documents to find the 5th most similar match to a query."
+description = "Evaluates the agent's ability to perform semantic text retrieval using MTEB embeddings, computing cosine similarities and correctly ranking documents to find the 5th most similar match to a query."
 
 [metadata]
 difficulty = "medium"

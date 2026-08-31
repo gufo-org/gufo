@@ -4,7 +4,7 @@ schema_version = "gufo-agent-eval/1"
 
 [task]
 name = "cobol-modernization"
-description = "Evaluates the ability to reverse-engineer and reimplement a COBOL program"s business logic in Python with exact output reproduction."
+description = "Evaluates the ability to reverse-engineer and reimplement a COBOL program's business logic in Python with exact output reproduction."
 
 [metadata]
 difficulty = "easy"
