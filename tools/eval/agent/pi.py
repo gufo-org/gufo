@@ -141,9 +141,9 @@ def environment(config: PiConfig) -> dict[str, str]:
         "HOME": "/root",
         "PATH": "/bin:/usr/bin",
         "PI_CODING_AGENT_DIR": JAIL_CONFIG_DIR,
-        # Documented by Pi as the Nix escape hatch: store paths tokenize
-        # poorly, so package discovery is pointed somewhere inert.
-        "PI_PACKAGE_DIR": f"{JAIL_CONFIG_DIR}/packages",
+        # PI_PACKAGE_DIR is deliberately not set. Pi resolves its own bundled
+        # assets relative to it -- builtin themes among them -- so pointing it
+        # at a scratch directory makes Pi exit before its first request.
     }
     env.update(OFFLINE_ENV)
     return env

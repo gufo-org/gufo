@@ -39,6 +39,7 @@ For design policy details regarding licensing boundaries, see [docs/LICENSING.md
 | **AMD NPU Firmware** | System (Firmware) | Proprietary Binary (`LICENSE.amdnpu`) | System Firmware (`linux-firmware`) | Host OS Distribution / AMD |
 | **MiniMax H3 FL2VA checkpoint** | External operator-supplied model; not distributed | `LicenseRef-MiniMax-H3-Community-2026-08-02` or operator-specific authorization | `42ed227ee7df40d41602854ae760620d6eb651fe` | [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) |
 | **Qwen3-VL-32B encoder weights used by H3** | External operator-supplied model component; not distributed | `Apache-2.0` | Included by the pinned H3 FL2VA checkpoint | [QwenLM/Qwen3-VL](https://github.com/QwenLM/Qwen3-VL) |
+| **Terminal-Bench 2.1 task definitions** | Redistributed (derived, modified) under `tools/eval/tasks/` | `Apache-2.0` | `5c8eadf1f393183288fa08b8f73ca9a469cc5e00` | [harbor-framework/terminal-bench-2-1](https://github.com/harbor-framework/terminal-bench-2-1) via [kyuz0/terminal-bench-mini](https://github.com/kyuz0/terminal-bench-mini) |
 
 ---
 

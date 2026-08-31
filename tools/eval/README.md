@@ -199,9 +199,29 @@ grader, an HTTP client with no sandbox or task corpus.
   processes) are not written
 - 1 of 20 seeded tasks ported
 
+## Licensing
+
+**The task suite is Apache-2.0, not MIT.** The rest of this repository is MIT;
+`tools/eval/tasks/` is derived from Terminal-Bench 2.1 and stays under the
+Apache License 2.0. Its full text is at `tools/eval/tasks/LICENSE`, and the
+required attribution and statement of changes are at
+`tools/eval/tasks/NOTICE`.
+
+The tasks are **modified**, not redistributed verbatim: Dockerfiles became Nix
+derivations, the verifier bootstrap was replaced, and `task.toml` was
+restructured. Apache-2.0 section 4b requires that modified files say so, which
+each `task.toml` and `PROVENANCE.md` does.
+
+When adding a task, carry all four across: the canary string, upstream
+authorship, a per-task `PROVENANCE.md` stating what changed, and an entry
+under `[provenance]` in `task.toml`.
+
 ## Provenance
 
-Tasks are seeded from Terminal-Bench 2.1 via terminal-bench-mini at revision
+Tasks are seeded from Terminal-Bench 2.1
+([harbor-framework/terminal-bench-2-1](https://github.com/harbor-framework/terminal-bench-2-1),
+Apache-2.0) via
+[terminal-bench-mini](https://github.com/kyuz0/terminal-bench-mini) at revision
 `5c8eadf1f393183288fa08b8f73ca9a469cc5e00`.
 
 Upstream files carry a canary string

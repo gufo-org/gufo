@@ -36,4 +36,8 @@ upstream_suite = "Terminal-Bench 2.1 via terminal-bench-mini"
 upstream_revision = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00"
 upstream_authors = ["Orfeas Menis Mastromichalakis <menisorfeas@gmail.com>"]
 license = "Apache-2.0"
+# Apache-2.0 section 4b: this file is modified from the upstream task.toml.
+# docker_image removed, resource/provenance keys restructured, and
+# allow_internet replaced by an explicit network policy.
+modified_from_upstream = true
 port_notes = "Dockerfile (ubuntu:24.04 + COPY ttl) replaced by environment/env.nix. Verifier bootstrap (apt-get + curl astral.sh + uvx) replaced by tests/verifier.nix. Instruction, fixtures, hidden test graph, and reference solution are byte-identical to upstream."

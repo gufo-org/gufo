@@ -268,9 +268,13 @@ class BwrapBackend(SandboxBackend):
                 f"TCP-LISTEN:{port},bind=127.0.0.1,fork,reuseaddr "
                 f"UNIX-CONNECT:{_ENDPOINT_SOCKET} & "
                 # socat binds asynchronously; the agent must not race it.
+                # Probe with a real request: an empty connection reaches the
+                # server through the bridge and is logged there as a malformed
+                # 400, which is noise in someone else's logs.
                 f"for _ in $(seq 100); do "
-                f"{shlex.quote(_socat())} -u OPEN:/dev/null "
-                f"TCP:127.0.0.1:{port} 2>/dev/null && break; sleep 0.1; done; "
+                f"printf 'GET /v1/models HTTP/1.0\\r\\n\\r\\n' | "
+                f"{shlex.quote(_socat())} - TCP:127.0.0.1:{port} "
+                f">/dev/null 2>&1 && break; sleep 0.1; done; "
                 f"exec {inner}",
             ]
 

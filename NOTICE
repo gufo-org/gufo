@@ -170,3 +170,20 @@ quality evaluation. These BSD-licensed packages are not linked into or
 distributed with the production Gufo binaries. Their upstream license texts
 and source metadata are supplied by the pinned Nix packages; exact
 relationships are recorded in THIRD_PARTY_NOTICES.md.
+
+--------------------------------------------------------------------------------
+Terminal-Bench 2.1 task definitions - Upstream NOTICE
+--------------------------------------------------------------------------------
+Source Revision: 5c8eadf1f393183288fa08b8f73ca9a469cc5e00
+Source: https://github.com/harbor-framework/terminal-bench-2-1
+Obtained via: https://github.com/kyuz0/terminal-bench-mini
+
+The task definitions under tools/eval/tasks/ are derived from Terminal-Bench
+2.1 and remain licensed under the Apache License, Version 2.0 -- not under the
+MIT license covering the rest of this repository. They are modified: task
+environments were reimplemented as Nix derivations and the verifier bootstrap
+was replaced. Per-task change statements, upstream authorship, and the full
+Apache-2.0 license text are in tools/eval/tasks/ (NOTICE, LICENSE, and each
+task's PROVENANCE.md).
+
+Results produced by that suite are not an official Terminal-Bench score.

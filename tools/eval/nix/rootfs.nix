@@ -67,6 +67,9 @@ in
 
 pkgs.runCommand "gufo-agent-eval-rootfs-${name}"
   {
+    # Some tasks expressed setup as a Dockerfile RUN step; that becomes
+    # `postBuild` here and needs the task's own tools on PATH.
+    nativeBuildInputs = packages;
     passthru = { inherit name workdir userland; };
   }
   ''
