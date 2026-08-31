@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import shutil
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,11 +46,26 @@ PROVIDER = "gufo-eval"
 class PiConfig:
     """Resolved Pi configuration for one run."""
 
+    # The endpoint as seen from the host. Inside the jail it is republished on
+    # loopback, so `jail_base_url` is what reaches models.json.
     base_url: str
     model_id: str
     api_key: str
     context_window: int
     max_tokens: int
+
+    @property
+    def jail_base_url(self) -> str:
+        """The endpoint's address from inside the jail.
+
+        The jail has no route anywhere; the endpoint is bridged onto its
+        loopback on the same port, so only the host part changes.
+        """
+        parsed = urllib.parse.urlparse(self.base_url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return parsed._replace(
+            scheme="http", netloc=f"127.0.0.1:{port}"
+        ).geturl()
 
     def identity(self) -> str:
         """Hash of the versioned configuration.
@@ -75,7 +91,7 @@ def materialize(config: PiConfig, destination: Path) -> Path:
 
     template = (CONFIG_ASSETS / "models.json.template").read_text()
     rendered = (
-        template.replace("@BASE_URL@", config.base_url)
+        template.replace("@BASE_URL@", config.jail_base_url)
         .replace("@MODEL_ID@", config.model_id)
         .replace("@API_KEY@", config.api_key)
         .replace("@CONTEXT_WINDOW@", str(config.context_window))

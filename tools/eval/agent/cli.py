@@ -13,11 +13,16 @@ Or packaged:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
+from . import pi as pi_mod
+from . import runner
 from . import task as task_mod
 from . import verify
 from .jail import BwrapBackend, JailSpec, SandboxUnavailable, stage_rootfs
@@ -110,6 +115,81 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if outcome.passed or not args.expect_pass else 1
 
 
+def discover_model(base_url: str, api_key: str) -> tuple[str, int]:
+    """Ask the endpoint which model it serves.
+
+    #153 requires explicit model selection, so exactly one model must be
+    returned: zero or several is ambiguous and fails before any generation.
+    """
+    url = base_url.rstrip("/") + "/models"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise task_mod.TaskError(f"cannot reach {url}: {exc}") from exc
+
+    entries = payload.get("data") or []
+    if len(entries) != 1:
+        served = ", ".join(sorted(e.get("id", "?") for e in entries)) or "none"
+        raise task_mod.TaskError(
+            f"{url} serves {len(entries)} models ({served}); exactly one is required. "
+            "Pass --model to select explicitly."
+        )
+
+    entry = entries[0]
+    context = int(entry.get("context_length") or 32768)
+    return entry["id"], context
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    root = _tasks_root(args)
+    task = task_mod.load(args.task, root)
+    backend = BwrapBackend()
+
+    api_key = os.environ.get(args.api_key_env, "local")
+
+    model_id, context_window = (args.model, args.context_window) if args.model else (
+        discover_model(args.base_url, api_key)
+    )
+
+    config = pi_mod.PiConfig(
+        base_url=args.base_url,
+        model_id=model_id,
+        api_key=api_key,
+        context_window=context_window,
+        max_tokens=args.max_tokens,
+    )
+
+    pi_binary = pi_mod.resolve_binary()
+
+    with tempfile.TemporaryDirectory(prefix="gufo-agent-eval-") as tmp:
+        result = runner.run_attempt(
+            backend, task, config, Path(tmp), pi_binary
+        )
+
+        print(f"task:        {result.task}")
+        print(f"model:       {model_id}")
+        print(f"reward:      {result.reward}")
+        print(f"passed:      {result.passed}")
+        print(f"duration:    {result.duration_ms} ms")
+        print(f"turns:       {result.trajectory.turns}")
+        print(f"tool calls:  {result.trajectory.tool_calls} "
+              f"({result.trajectory.tool_failures} failed)")
+        print(f"tokens:      in={result.trajectory.usage.input} "
+              f"out={result.trajectory.usage.output} "
+              f"cached={result.trajectory.usage.cache_read}")
+        if result.agent_timed_out:
+            print("agent timed out")
+        if result.verifier_crashed:
+            print("verifier crashed (no reward file produced)")
+        if args.verbose:
+            print(f"\n{result.verifier_output}")
+
+    return 0 if result.passed else 1
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eval-agent",
@@ -144,6 +224,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verifier.add_argument("-v", "--verbose", action="store_true")
     verifier.set_defaults(func=cmd_verify)
+
+    run = sub.add_parser("run", help="run one task with the Pi agent")
+    run.add_argument("task")
+    run.add_argument(
+        "--base-url",
+        default="http://127.0.0.1:8080/v1",
+        help="OpenAI-compatible endpoint (default: %(default)s)",
+    )
+    run.add_argument(
+        "--model",
+        help="served model ID; discovered from /models when the endpoint serves exactly one",
+    )
+    run.add_argument(
+        "--api-key-env",
+        default="GUFO_EVAL_API_KEY",
+        help="environment variable holding the credential (default: %(default)s)",
+    )
+    run.add_argument("--context-window", type=int, default=32768)
+    run.add_argument("--max-tokens", type=int, default=8192)
+    run.add_argument("-v", "--verbose", action="store_true")
+    run.set_defaults(func=cmd_run)
 
     return parser
 

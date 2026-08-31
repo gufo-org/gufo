@@ -12,9 +12,13 @@ separate concern; see `limits.py` when it lands.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,6 +29,68 @@ _UNSHARED = ("user", "ipc", "pid", "net", "uts", "cgroup")
 # The only host environment variables ever forwarded. Everything else is
 # cleared so host credentials cannot reach the agent.
 _FORWARDED_ENV = ("TERM",)
+
+# Where the host-side endpoint socket is bound inside the jail.
+_ENDPOINT_SOCKET = "/run/gufo-endpoint.sock"
+
+
+def _socat() -> str:
+    found = os.environ.get("GUFO_EVAL_SOCAT") or shutil.which("socat")
+    if not found:
+        raise SandboxUnavailable(
+            "socat not found; it bridges the jail to the inference endpoint. "
+            "Install it or set GUFO_EVAL_SOCAT."
+        )
+    return found
+
+
+@contextmanager
+def endpoint_bridge(host: str, port: int):
+    """Expose one TCP endpoint to a network-isolated jail.
+
+    The jail keeps `--unshare-net`, so it has a fresh network namespace with
+    only loopback and no route anywhere. The single path out is a unix socket
+    bind-mounted in, forwarded on the host to exactly this address. A second
+    forwarder inside the jail republishes it on `127.0.0.1:<port>`, so the
+    agent sees an ordinary HTTP endpoint and nothing else is reachable.
+
+    This is stricter than sharing a network namespace and needs no pasta or
+    slirp: there is no interface to filter, because there is no interface.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="gufo-agent-eval-endpoint-"))
+    socket_path = directory / "endpoint.sock"
+
+    forwarder = subprocess.Popen(
+        [
+            _socat(),
+            f"UNIX-LISTEN:{socket_path},fork,mode=600",
+            f"TCP:{host}:{port}",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    # socat creates the socket asynchronously; the jail cannot bind-mount a
+    # path that does not exist yet.
+    deadline = time.monotonic() + 10
+    while not socket_path.exists():
+        if forwarder.poll() is not None:
+            raise SandboxUnavailable(
+                f"endpoint forwarder exited before binding {host}:{port}"
+            )
+        if time.monotonic() > deadline:
+            forwarder.kill()
+            raise SandboxUnavailable(f"endpoint forwarder did not bind {host}:{port}")
+        time.sleep(0.05)
+
+    try:
+        yield socket_path
+    finally:
+        forwarder.kill()
+        forwarder.wait(timeout=5)
+        shutil.rmtree(directory, ignore_errors=True)
+
 
 
 class SandboxUnavailable(RuntimeError):
@@ -45,8 +111,10 @@ class JailSpec:
         rw_binds: Host path -> jail path, mounted read-write.
         tmpfs: Jail paths backed by a fresh tmpfs.
         network: ``"none"`` for no connectivity, or ``"endpoint-only"`` to
-            reach exactly one inference endpoint. ``"endpoint-only"`` is not
-            implemented yet and raises.
+            reach exactly one inference endpoint and nothing else.
+        endpoint: ``(host, port)`` the jail may reach. Required when
+            ``network`` is ``"endpoint-only"``; inside the jail the endpoint
+            appears at ``127.0.0.1:<port>``.
         hostname: Hostname inside the jail. Fixed by default so it cannot
             leak the host's name into a trajectory.
     """
@@ -59,6 +127,7 @@ class JailSpec:
     rw_binds: dict[Path, str] = field(default_factory=dict)
     tmpfs: tuple[str, ...] = ("/tmp", "/root", "/run")
     network: str = "none"
+    endpoint: tuple[str, int] | None = None
     hostname: str = "gufo-agent-eval"
 
 
@@ -119,14 +188,11 @@ class BwrapBackend(SandboxBackend):
 
         return problems
 
-    def _argv(self, spec: JailSpec) -> list[str]:
-        if spec.network == "endpoint-only":
-            raise NotImplementedError(
-                "endpoint-only networking is not implemented; it needs a pasta "
-                "net namespace with a single mapped port"
-            )
-        if spec.network != "none":
+    def _argv(self, spec: JailSpec, endpoint_socket: Path | None) -> list[str]:
+        if spec.network not in ("none", "endpoint-only"):
             raise ValueError(f"unknown network policy: {spec.network!r}")
+        if spec.network == "endpoint-only" and endpoint_socket is None:
+            raise ValueError("endpoint-only requires an endpoint socket")
 
         argv = [self._bwrap]
 
@@ -149,14 +215,20 @@ class BwrapBackend(SandboxBackend):
         # cannot mutate the Nix runtime.
         argv += ["--ro-bind", "/nix/store", "/nix/store"]
 
+        argv += ["--proc", "/proc", "--dev", "/dev"]
+
+        # tmpfs before the binds: mounting a tmpfs over /run after binding
+        # something beneath it would silently shadow the bind.
+        for path in spec.tmpfs:
+            argv += ["--tmpfs", path]
+
+        if endpoint_socket is not None:
+            argv += ["--ro-bind", str(endpoint_socket), _ENDPOINT_SOCKET]
+
         for host, dest in spec.ro_binds.items():
             argv += ["--ro-bind", str(host), dest]
         for host, dest in spec.rw_binds.items():
             argv += ["--bind", str(host), dest]
-
-        argv += ["--proc", "/proc", "--dev", "/dev"]
-        for path in spec.tmpfs:
-            argv += ["--tmpfs", path]
 
         argv += ["--clearenv"]
         for key, value in spec.env.items():
@@ -166,7 +238,28 @@ class BwrapBackend(SandboxBackend):
                 argv += ["--setenv", key, os.environ[key]]
 
         argv += ["--chdir", spec.chdir, "--"]
-        argv += spec.command
+
+        if endpoint_socket is None:
+            argv += spec.command
+        else:
+            # Republish the bridged socket on loopback, then hand the jail
+            # over to the real command. `exec` keeps the command as the
+            # process the timeout path signals.
+            _, port = spec.endpoint
+            inner = " ".join(shlex.quote(part) for part in spec.command)
+            argv += [
+                "/bin/sh",
+                "-c",
+                f"{shlex.quote(_socat())} "
+                f"TCP-LISTEN:{port},bind=127.0.0.1,fork,reuseaddr "
+                f"UNIX-CONNECT:{_ENDPOINT_SOCKET} & "
+                # socat binds asynchronously; the agent must not race it.
+                f"for _ in $(seq 100); do "
+                f"{shlex.quote(_socat())} -u OPEN:/dev/null "
+                f"TCP:127.0.0.1:{port} 2>/dev/null && break; sleep 0.1; done; "
+                f"exec {inner}",
+            ]
+
         return argv
 
     def run(self, spec: JailSpec, timeout_sec: float) -> JailResult:
@@ -174,8 +267,16 @@ class BwrapBackend(SandboxBackend):
         if problems:
             raise SandboxUnavailable("; ".join(problems))
 
+        if spec.network == "endpoint-only":
+            with endpoint_bridge(*spec.endpoint) as socket_path:
+                return self._spawn(spec, socket_path, timeout_sec)
+        return self._spawn(spec, None, timeout_sec)
+
+    def _spawn(
+        self, spec: JailSpec, endpoint_socket: Path | None, timeout_sec: float
+    ) -> JailResult:
         proc = subprocess.Popen(
-            self._argv(spec),
+            self._argv(spec, endpoint_socket),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
