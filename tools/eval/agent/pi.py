@@ -1,13 +1,17 @@
 """Pi agent configuration and invocation for gufo-agent-eval.
 
-Three tiers, deliberately separated:
+Pi itself is not packaged here. Install it however you like -- ``npm i -g
+@earendil-works/pi-coding-agent``, ``npx``, or a Nix package -- and the runner
+finds it on ``PATH`` or via ``GUFO_EVAL_PI``.
 
-* **Built by Nix, at build time.** The Pi package itself, pinned in
-  ``tools/eval/nix/pi.nix``. Nothing is fetched at run time; the jail has no
-  network and Pi is additionally started offline.
-* **Versioned in this repository.** ``pi_config/`` holds the provider
-  template and settings. These define what is being measured, so they hash
-  into the suite identity.
+Install it *before* the run, though. The jail runs with ``--unshare-net``, so
+Pi cannot fetch anything once it is inside; the runner binds the resolved
+installation in read-only.
+
+What this repository does define is the configuration:
+
+* **Versioned in ``pi_config/``.** The provider template and settings. These
+  define what is being measured, so they hash into the suite identity.
 * **Generated per run, into a tmpfs.** The concrete ``models.json`` carrying
   the endpoint URL, model ID, and credential. Never written to the repository
   and never persisted, so it cannot reach a result artifact.
@@ -18,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -132,15 +137,20 @@ def environment(config: PiConfig) -> dict[str, str]:
 
 
 def resolve_binary() -> Path:
-    """Locate the pinned Pi binary.
+    """Locate the Pi executable.
 
-    Set identically by the flake wrapper and by the dev shell, so the
-    packaged and development paths run the same agent.
+    `GUFO_EVAL_PI` wins so a run can pin a specific installation; otherwise
+    whatever is on `PATH`.
     """
     override = os.environ.get("GUFO_EVAL_PI")
     if override:
-        return Path(override)
+        return Path(override).resolve()
+
+    found = shutil.which("pi")
+    if found:
+        return Path(found).resolve()
+
     raise RuntimeError(
-        "GUFO_EVAL_PI is unset. Enter the dev shell, or build it with "
-        "`nix-build tools/eval/nix/pi.nix` and export the resulting bin/pi."
+        "pi not found. Install it (npm i -g @earendil-works/pi-coding-agent) "
+        "or set GUFO_EVAL_PI to its path."
     )
