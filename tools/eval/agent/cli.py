@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 import urllib.error
@@ -44,8 +45,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"tasks root: {_tasks_root(args)}")
     print(f"tasks:      {len(task_mod.available(_tasks_root(args)))}")
 
+    # Pi is the evaluated agent, so which one is used is part of what the
+    # numbers mean.
+    try:
+        pi_binary = pi_mod.resolve_binary()
+        source = "GUFO_EVAL_PI" if os.environ.get("GUFO_EVAL_PI") else "PATH (not reproducible)"
+        print(f"pi:         {pi_binary} [{source}]")
+    except RuntimeError as exc:
+        problems.append(str(exc))
+
+    # socat bridges the jail to the inference endpoint; without it no agent
+    # can reach a model.
+    socat = os.environ.get("GUFO_EVAL_SOCAT") or shutil.which("socat")
+    if socat:
+        print(f"socat:      {socat}")
+    else:
+        problems.append(
+            "socat not found; it bridges the jail to the inference endpoint"
+        )
+
     if problems:
-        print("\nsandbox unusable:")
+        print("\nnot ready:")
         for problem in problems:
             print(f"  - {problem}")
         return 1
