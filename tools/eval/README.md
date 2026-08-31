@@ -15,11 +15,33 @@ anywhere in the pipeline.
 
 ## Use
 
+`nix develop` provides bubblewrap, socat, and Pi, and exports
+`GUFO_EVAL_BWRAP`, `GUFO_EVAL_SOCAT`, and `GUFO_EVAL_PI` so the dev shell and
+the packaged app run identical code against identical inputs.
+
 ```sh
-nix develop
-python -m tools.eval.agent.cli doctor        # host prerequisites
+nix develop .#eval-agent                     # or `nix develop` for the full shell
+python -m tools.eval.agent.cli doctor        # prerequisites, and which Pi
 python -m tools.eval.agent.cli list          # tasks in the suite
 ```
+
+`.#eval-agent` omits the ROCm toolchain. The harness is an HTTP client and a
+sandbox -- it never loads a model -- so it needs neither torch, XRT, nor a
+GPU.
+
+Run a task against a live endpoint:
+
+```sh
+python -m tools.eval.agent.cli run sparql-university \
+  --base-url http://127.0.0.1:8080/v1
+```
+
+The model ID is discovered from `/models` when the endpoint serves exactly
+one; pass `--model` otherwise. `--api-key-env` names the variable holding the
+credential, default `GUFO_EVAL_API_KEY`.
+
+Pi's revision is part of the benchmark identity, so prefer the pinned one.
+`doctor` labels a `PATH` fallback as not reproducible.
 
 Verify a task without running an agent. The reference solution must score 1
 and an untouched workspace must score 0; that pair is the endpoint-independent

@@ -37,6 +37,26 @@
       # Unified python313 + torchWithRocm: every Strix Halo box ships ROCm, so
       # the single toolchain serves CPU flows and the --device cuda
       # calibration forward alike. gfx1151 verified on this host.
+      # gufo-agent-eval runtime dependencies. The runner resolves each of
+      # these through an environment variable so the dev shell and the
+      # packaged app run identical code against identical inputs; see
+      # tools/eval/README.md.
+      evalAgentPackages =
+        system: with pkgs.${system}; [
+          bubblewrap # the sandbox
+          socat # bridges the jail to the inference endpoint
+          pi-coding-agent # the evaluated agent
+        ];
+
+      evalAgentEnv = system: {
+        GUFO_EVAL_BWRAP = "${pkgs.${system}.bubblewrap}/bin/bwrap";
+        GUFO_EVAL_SOCAT = "${pkgs.${system}.socat}/bin/socat";
+        # Pinned by the flake lock. Pi's revision is part of the benchmark
+        # identity, so pinning it here is what makes a run reproducible;
+        # falling back to whatever `pi` is on PATH is not.
+        GUFO_EVAL_PI = "${pkgs.${system}.pi-coding-agent}/bin/pi";
+      };
+
       pythonTools = system:
         let pt = pkgs.${system}.python313; in
         pt.withPackages (
@@ -134,7 +154,7 @@
               pkgs.${system}.sox
               pkgs.${system}.rocmPackages.rocprofiler-sdk
               pkgs.${system}.sqlite
-            ];
+            ] ++ evalAgentPackages system;
             env = {
               ROCM_PATH = "${pkgs.${system}.rocmPackages.clr}";
               GUFO_HIPCUB_ROOT = "${pkgs.${system}.rocmPackages.hipcub}";
@@ -156,7 +176,16 @@
                 pkgs.${system}.stdenv.cc.cc.lib
                 pkgs.${system}.zlib
               ];
-            };
+            } // evalAgentEnv system;
+          };
+
+          # gufo-agent-eval without the ROCm toolchain. The harness is an HTTP
+          # client and a sandbox: it never loads a model, so it does not need
+          # torch, XRT, or a GPU. Useful for working on the runner, and for
+          # hosts that cannot build the full default shell.
+          eval-agent = pkgs.${system}.mkShell {
+            packages = [ pkgs.${system}.python313 ] ++ evalAgentPackages system;
+            env = evalAgentEnv system;
           };
 
           # Isolated Python 3.12 AIE compiler shell. Keeping this separate
