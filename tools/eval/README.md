@@ -15,9 +15,20 @@ anywhere in the pipeline.
 
 ## Use
 
-`nix develop` provides bubblewrap, socat, and Pi, and exports
-`GUFO_EVAL_BWRAP`, `GUFO_EVAL_SOCAT`, and `GUFO_EVAL_PI` so the dev shell and
-the packaged app run identical code against identical inputs.
+Packaged, from anywhere -- no checkout needed:
+
+```sh
+nix run .#eval-agent -- doctor
+nix run .#eval-agent -- run sparql-university --base-url http://127.0.0.1:8080/v1
+```
+
+The app pins its own `NIX_PATH`, so the task rootfs and verifier derivations
+it realizes at run time do not depend on the caller's channels.
+
+For development, `nix develop` provides bubblewrap, socat, and Pi, and exports
+`GUFO_EVAL_BWRAP`, `GUFO_EVAL_SOCAT`, and `GUFO_EVAL_PI`. The app is a thin
+wrapper over the same `tools/eval` tree the dev shell imports directly, so the
+two paths never diverge.
 
 ```sh
 nix develop .#eval-agent                     # or `nix develop` for the full shell

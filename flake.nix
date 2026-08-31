@@ -37,6 +37,41 @@
       # Unified python313 + torchWithRocm: every Strix Halo box ships ROCm, so
       # the single toolchain serves CPU flows and the --device cuda
       # calibration forward alike. gfx1151 verified on this host.
+      # The runner as a store path, so `nix run` works outside a checkout.
+      # It is the same tools/eval tree the dev shell imports directly: the
+      # packaged and development paths must never diverge.
+      evalAgentSource =
+        system:
+        pkgs.${system}.runCommand "gufo-agent-eval-src" { } ''
+          mkdir -p "$out/eval"
+          cp -r ${./tools/eval}/. "$out/eval/"
+          touch "$out/eval/__init__.py"
+        '';
+
+      evalAgentApp =
+        system:
+        pkgs.${system}.writeShellApplication {
+          name = "eval-agent";
+          runtimeInputs = [ pkgs.${system}.python313 ] ++ evalAgentPackages system;
+          text = ''
+            export PYTHONPATH="${evalAgentSource system}''${PYTHONPATH:+:$PYTHONPATH}"
+
+            # Task rootfs and verifier derivations are realized at run time
+            # with nix-build. Pin the nixpkgs they resolve against, so a run
+            # does not depend on the caller's channels.
+            export NIX_PATH="nixpkgs=${pkgs.${system}.path}"
+
+            export GUFO_EVAL_TASKS="''${GUFO_EVAL_TASKS:-${evalAgentSource system}/eval/tasks}"
+            ${
+              builtins.concatStringsSep "\n"
+                (pkgs.${system}.lib.mapAttrsToList (k: v: ''export ${k}="''${${k}:-${v}}"'')
+                  (evalAgentEnv system))
+            }
+
+            exec python3 -m eval.agent.cli "$@"
+          '';
+        };
+
       # gufo-agent-eval runtime dependencies. The runner resolves each of
       # these through an environment variable so the dev shell and the
       # packaged app run identical code against identical inputs; see
@@ -139,6 +174,13 @@
           aie-smoke = gufoPackages.${system}.aie-smoke;
         }
       );
+
+      apps = forAllSystems (system: {
+        eval-agent = {
+          type = "app";
+          program = pkgs.${system}.lib.getExe (evalAgentApp system);
+        };
+      });
 
       devShells = forAllSystems (
         system:
