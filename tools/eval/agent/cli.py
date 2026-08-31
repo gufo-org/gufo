@@ -205,15 +205,49 @@ def cmd_verify(args: argparse.Namespace) -> int:
         verifier_bin = task_mod.nix_build(task.verifier_nix)
         outcome = verify.run(backend, task, rootfs, scratch / "verify", verifier_bin)
 
-        print(f"task:   {task.name}")
-        print(f"reward: {outcome.reward}")
-        print(f"passed: {outcome.passed}")
+        expected = 1.0 if args.solution else 0.0
+        as_expected = outcome.reward == expected
+
+        print(f"task:     {task.name}")
+        print(
+            "mode:     reference solution applied"
+            if args.solution
+            else "mode:     untouched workspace, no agent"
+        )
+        print(f"reward:   {outcome.reward}  (expected {expected})")
+
         if outcome.crashed:
-            print("verifier crashed (no reward file produced)")
+            print("\nverifier crashed: it produced no reward file at all.")
+            print("this is a harness fault, not a task failure.")
+        elif as_expected:
+            print(
+                "\nverdict:  harness OK -- "
+                + (
+                    "the verifier accepts a correct answer."
+                    if args.solution
+                    else "the verifier rejects a non-answer."
+                )
+            )
+            if not args.solution:
+                print("          now check the other half: --solution must give 1.0")
+            else:
+                print("          now check the other half: without --solution, 0.0")
+        else:
+            print("\nverdict:  HARNESS BROKEN")
+            if args.solution:
+                print("          the reference solution should score 1.0.")
+                print("          the verifier rejects a known-correct answer.")
+            else:
+                print("          an untouched workspace should score 0.0.")
+                print("          the verifier passes without any work being done.")
+            print("          `run` results would be meaningless until this is fixed.")
+
         if args.verbose and outcome.output:
             print(f"\n{outcome.output}")
 
-    return 0 if outcome.passed or not args.expect_pass else 1
+    if args.expect_pass:
+        return 0 if outcome.passed else 1
+    return 0 if as_expected and not outcome.crashed else 1
 
 
 def discover_model(base_url: str, api_key: str) -> tuple[str, int]:
