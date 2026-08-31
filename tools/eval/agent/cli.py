@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import tempfile
+import textwrap
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -65,6 +66,43 @@ def _scratch(keep: bool):
 
 
 
+def _task_menu(root: Path) -> str:
+    """A listing of selectable tasks, for when none was named."""
+    names = task_mod.available(root)
+    if not names:
+        return f"no tasks found under {root}"
+
+    lines = ["available tasks:", ""]
+    for name in names:
+        try:
+            task = task_mod.load(name, root)
+        except task_mod.TaskError:
+            lines.append(f"  {name}   (unreadable manifest)")
+            continue
+        lines.append(f"  {name}")
+        lines.append(f"      {task.difficulty} | {task.category}")
+        if task.description:
+            lines.append(f"      {textwrap.shorten(task.description, 68)}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _require_task(args: argparse.Namespace, verb: str) -> int | None:
+    """Print a task menu instead of a bare argparse error.
+
+    Returns an exit code when no task was named, otherwise None.
+    """
+    if args.task:
+        return None
+    root = _tasks_root(args)
+    print(f"eval-agent {verb}: no task named.\n", file=sys.stderr)
+    print(_task_menu(root), file=sys.stderr)
+    print(f"\nusage: eval-agent {verb} <task> [options]", file=sys.stderr)
+    print(f"       eval-agent {verb} --help", file=sys.stderr)
+    return 2
+
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     backend = BwrapBackend()
     problems = backend.preflight()
@@ -108,9 +146,22 @@ def cmd_list(args: argparse.Namespace) -> int:
     if not names:
         print(f"no tasks under {root}", file=sys.stderr)
         return 1
+
     for name in names:
         task = task_mod.load(name, root)
-        print(f"{name:36s} network={task.network:14s} workdir={task.workdir}")
+        print(name)
+        print(f"    difficulty  {task.difficulty}")
+        print(f"    category    {task.category}")
+        print(f"    network     {task.network}")
+        print(f"    workdir     {task.workdir}")
+        print(f"    timeout     {task.agent_timeout_sec:.0f}s agent, "
+              f"{task.verifier_timeout_sec:.0f}s verifier")
+        if task.description:
+            for line in textwrap.wrap(task.description, 68):
+                print(f"    {line}")
+        print()
+
+    print(f"{len(names)} task(s) in {root}")
     return 0
 
 
@@ -124,6 +175,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
     #153 requires -- correct and intentionally broken fixtures scoring
     independently of any endpoint.
     """
+    if (code := _require_task(args, "verify")) is not None:
+        return code
+
     root = _tasks_root(args)
     task = task_mod.load(args.task, root)
     backend = BwrapBackend()
@@ -190,6 +244,9 @@ def discover_model(base_url: str, api_key: str) -> tuple[str, int]:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    if (code := _require_task(args, "run")) is not None:
+        return code
+
     root = _tasks_root(args)
     task = task_mod.load(args.task, root)
     backend = BwrapBackend()
@@ -285,7 +342,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--tasks-root",
         metavar="DIR",
         default=os.environ.get("GUFO_EVAL_TASKS"),
-        help="task suite directory (default: the packaged suite)",
+        help=(
+            "task suite directory. defaults to the packaged suite, or "
+            "$GUFO_EVAL_TASKS when set"
+        ),
     )
 
     sub = parser.add_subparsers(dest="command", metavar="<command>")
@@ -293,9 +353,18 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser(
         "doctor",
         help="check the host can run sandboxed evaluations",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Check prerequisites and report which Pi, socat, and sandbox will "
-            "be used. Contacts no inference server and runs no model."
+            "Check that this host can run sandboxed evaluations.\n"
+            "\n"
+            "Reports which Pi, socat, and bubblewrap will be used, and checks\n"
+            "that unprivileged user namespaces are permitted. Contacts no\n"
+            "inference server and runs no model."
+        ),
+        epilog=(
+            "the Pi it reports is part of what the numbers mean. a Pi found on\n"
+            "PATH is labelled not reproducible: use `nix develop` or set\n"
+            "GUFO_EVAL_PI to pin it."
         ),
     )
     doctor.set_defaults(func=cmd_doctor)
@@ -303,7 +372,12 @@ def build_parser() -> argparse.ArgumentParser:
     listing = sub.add_parser(
         "list",
         help="list the tasks in the suite",
-        description="List available tasks with their network policy and workdir.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "List the tasks in the suite, with difficulty, category, network\n"
+            "policy, working directory, and timeouts."
+        ),
+        epilog="pass --tasks-root to list a suite other than the packaged one.",
     )
     listing.set_defaults(func=cmd_list)
 
@@ -325,21 +399,37 @@ def build_parser() -> argparse.ArgumentParser:
             "  eval-agent verify sparql-university              # reward 0.0"
         ),
     )
-    verifier.add_argument("task", help="task name, as shown by `list`")
+    verifier.add_argument(
+        "task", nargs="?", help="task to verify; omit to list what is available"
+    )
     verifier.add_argument(
         "--solution",
         action="store_true",
-        help="apply the task's reference solution first; it must score 1",
+        help=(
+            "apply the task's reference solution before verifying. "
+            "a correct harness scores 1; without this flag the workspace is "
+            "untouched and must score 0"
+        ),
     )
     verifier.add_argument(
         "--expect-pass",
         action="store_true",
-        help="exit non-zero unless the task passes",
+        help="exit non-zero unless the task passes, for use in scripts",
     )
     verifier.add_argument(
-        "--keep", action="store_true", help="retain the workspace and print its path"
+        "--keep",
+        action="store_true",
+        help=(
+            "retain the workspace instead of deleting it, and print its path. "
+            "the scratch directory holds the staged rootfs and verifier logs"
+        ),
     )
-    verifier.add_argument("-v", "--verbose", action="store_true", help="print verifier output")
+    verifier.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="print the verifier's full pytest output, including failures",
+    )
     verifier.set_defaults(func=cmd_verify)
 
     run = sub.add_parser(
@@ -362,44 +452,67 @@ def build_parser() -> argparse.ArgumentParser:
             "exactly one; pass --model otherwise."
         ),
     )
-    run.add_argument("task", help="task name, as shown by `list`")
+    run.add_argument(
+        "task", nargs="?", help="task to run; omit to list what is available"
+    )
     run.add_argument(
         "--base-url",
         metavar="URL",
         default="http://127.0.0.1:8080/v1",
-        help="OpenAI-compatible endpoint (default: %(default)s)",
+        help=(
+            "OpenAI-compatible endpoint, reachable from this host. "
+            "the agent reaches it and nothing else (default: %(default)s)"
+        ),
     )
     run.add_argument(
         "--model",
         metavar="ID",
-        help="served model ID (default: discovered from /models)",
+        help=(
+            "served model ID. discovered from /models when the endpoint "
+            "serves exactly one; required when it serves several"
+        ),
     )
     run.add_argument(
         "--api-key-env",
         metavar="VAR",
         default="GUFO_EVAL_API_KEY",
-        help="environment variable holding the credential (default: %(default)s)",
+        help=(
+            "name of the environment variable holding the API key. the key "
+            "itself never reaches a result artifact (default: %(default)s)"
+        ),
     )
     run.add_argument(
         "--context-window",
         type=int,
         default=32768,
         metavar="N",
-        help="context to advertise to the agent (default: %(default)s)",
+        help=(
+            "context window advertised to the agent. must not exceed what the "
+            "server was started with (default: %(default)s)"
+        ),
     )
     run.add_argument(
         "--max-tokens",
         type=int,
         default=8192,
         metavar="N",
-        help="max tokens per response (default: %(default)s)",
+        help="maximum tokens the agent may request per response (default: %(default)s)",
     )
     run.add_argument(
         "--keep",
         action="store_true",
-        help="retain the workspace and trajectory, and print the path",
+        help=(
+            "retain the workspace and print its path. the scratch directory "
+            "holds trajectory.jsonl, the agent's stderr, and the workspace it "
+            "left behind. use this to debug a failed run"
+        ),
     )
-    run.add_argument("-v", "--verbose", action="store_true", help="print verifier output")
+    run.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="print the verifier's full pytest output, including failures",
+    )
     run.set_defaults(func=cmd_run)
 
     return parser

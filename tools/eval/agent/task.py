@@ -25,6 +25,18 @@ class Task:
     manifest: dict
 
     @property
+    def description(self) -> str:
+        return self.manifest.get("task", {}).get("description", "")
+
+    @property
+    def difficulty(self) -> str:
+        return self.manifest.get("metadata", {}).get("difficulty", "?")
+
+    @property
+    def category(self) -> str:
+        return self.manifest.get("metadata", {}).get("category", "?")
+
+    @property
     def env_nix(self) -> Path:
         return self.directory / "environment" / "env.nix"
 
