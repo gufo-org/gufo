@@ -1,14 +1,11 @@
 """Pi agent configuration and invocation for gufo-agent-eval.
 
-Pi itself is not packaged here. Install it however you like -- ``npm i -g
-@earendil-works/pi-coding-agent``, ``npx``, or a Nix package -- and the runner
-finds it on ``PATH`` or via ``GUFO_EVAL_PI``.
+Pi has to exist before the jail starts: the jail runs with ``--unshare-net``,
+so nothing can be fetched once it is inside. ``tools/eval/nix/pi.nix`` builds
+it, and the flake app and dev shell export ``GUFO_EVAL_PI``; the runner binds
+the resolved installation into the jail read-only.
 
-Install it *before* the run, though. The jail runs with ``--unshare-net``, so
-Pi cannot fetch anything once it is inside; the runner binds the resolved
-installation in read-only.
-
-What this repository does define is the configuration:
+The configuration is what this repository defines:
 
 * **Versioned in ``pi_config/``.** The provider template and settings. These
   define what is being measured, so they hash into the suite identity.
@@ -139,8 +136,10 @@ def environment(config: PiConfig) -> dict[str, str]:
 def resolve_binary() -> Path:
     """Locate the Pi executable.
 
-    `GUFO_EVAL_PI` wins so a run can pin a specific installation; otherwise
-    whatever is on `PATH`.
+    `GUFO_EVAL_PI` is what the flake app and the dev shell set, from
+    `tools/eval/nix/pi.nix`. `PATH` is a development convenience; a run that
+    falls back to it is not reproducible, since the host's Pi is whatever
+    happens to be installed.
     """
     override = os.environ.get("GUFO_EVAL_PI")
     if override:
@@ -151,6 +150,6 @@ def resolve_binary() -> Path:
         return Path(found).resolve()
 
     raise RuntimeError(
-        "pi not found. Install it (npm i -g @earendil-works/pi-coding-agent) "
-        "or set GUFO_EVAL_PI to its path."
+        "pi not found. Build it with `nix-build tools/eval/nix/pi.nix` and "
+        "export GUFO_EVAL_PI=<result>/bin/pi, or enter the dev shell."
     )
