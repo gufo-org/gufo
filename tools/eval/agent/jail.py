@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -151,6 +152,10 @@ class JailResult:
     stdout: str
     stderr: str
     timed_out: bool
+    # Seconds from launch to the first byte on stdout. For an agent jail that
+    # approximates time to first model response, which #153 asks for; it
+    # includes the agent's own startup, so it is an upper bound.
+    first_output_sec: float | None = None
 
 
 class SandboxBackend:
@@ -293,6 +298,7 @@ class BwrapBackend(SandboxBackend):
     def _spawn(
         self, spec: JailSpec, endpoint_socket: Path | None, timeout_sec: float
     ) -> JailResult:
+        started = time.monotonic()
         proc = subprocess.Popen(
             self._argv(spec, endpoint_socket),
             stdout=subprocess.PIPE,
@@ -303,19 +309,43 @@ class BwrapBackend(SandboxBackend):
             start_new_session=True,
         )
 
+        # stdout is read on a thread so the first byte can be timed without
+        # giving up communicate()'s deadlock-free draining of both pipes.
+        first_output: list[float] = []
+        chunks: list[str] = []
+
+        def drain() -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if not first_output:
+                    first_output.append(time.monotonic() - started)
+                chunks.append(line)
+
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+
         timed_out = False
         try:
-            stdout, stderr = proc.communicate(timeout=timeout_sec)
+            proc.wait(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
             timed_out = True
             os.killpg(proc.pid, signal.SIGKILL)
-            stdout, stderr = proc.communicate()
+            proc.wait()
+
+        reader.join(timeout=10)
+        stderr = proc.stderr.read() if proc.stderr else ""
+
+        # Popen does not close these for us outside communicate().
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
 
         return JailResult(
             exit_code=proc.returncode,
-            stdout=stdout or "",
+            stdout="".join(chunks),
             stderr=stderr or "",
             timed_out=timed_out,
+            first_output_sec=first_output[0] if first_output else None,
         )
 
 

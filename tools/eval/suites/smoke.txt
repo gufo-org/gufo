@@ -1,0 +1,9 @@
+# gufo-agent-eval smoke tier.
+#
+# Fast, self-contained tasks used to validate that a harness and an endpoint
+# work together. Not a capability measurement: too few tasks, and chosen for
+# speed rather than coverage.
+regex-log
+openssl-selfsigned-cert
+fix-git
+git-leak-recovery

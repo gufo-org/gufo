@@ -320,6 +320,20 @@
             ];
           };
 
+          # The eval-agent checks are offline: manifest and sanitizer tests
+          # only. The sandbox negative tests need bubblewrap and unprivileged
+          # user namespaces, which a Nix builder does not provide, so they run
+          # from a dev shell rather than in the PR gate.
+          evalAgentSource = mkFilteredSource {
+            directories = [
+              "tools/eval"
+            ];
+            files = [
+              "tests/eval/test_task_manifests.py"
+              "tests/eval/test_sandbox.py"
+            ];
+          };
+
           h3ManifestSource = mkFilteredSource {
             directories = [
               "tools/gufo"
@@ -445,6 +459,21 @@
             mkdir -p $out
             python3 tools/ci/check-docs.py --root "$src"
             echo "PASS: Documentation check clean" > $out/result.txt
+          '';
+
+          evalAgentCheck = pkgsSys.runCommand "check-eval-agent" {
+            nativeBuildInputs = [ pkgsSys.python3 ];
+            src = evalAgentSource;
+          } ''
+            cd "$src"
+            python3 tests/eval/test_task_manifests.py
+
+            # Sanitizer only: the sandbox cases need namespaces the builder
+            # cannot grant, and skip themselves there.
+            python3 -m unittest tests.eval.test_sandbox.SanitizerTest -v
+
+            mkdir -p $out
+            echo "PASS: gufo-agent-eval manifests and sanitizer clean" > $out/result.txt
           '';
 
           h3ManifestCheck = pkgsSys.runCommand "check-h3-manifest" {
@@ -590,6 +619,7 @@
             cat "${staticAnalysisCheck}/result.txt"
             cat "${dependencyInventoryCheck}/result.txt"
             cat "${docsCheck}/result.txt"
+            cat "${evalAgentCheck}/result.txt"
             cat "${h3ManifestCheck}/result.txt"
             cat "${h3QualityCheck}/result.txt"
             cat "${testCheck}/result.txt"
@@ -623,6 +653,7 @@ EOF
           static-analysis = staticAnalysisCheck;
           dependency-inventory = dependencyInventoryCheck;
           docs = docsCheck;
+          eval-agent = evalAgentCheck;
           h3-manifest = h3ManifestCheck;
           h3-quality = h3QualityCheck;
           h3-ml-quality = h3MlQualityCheck;

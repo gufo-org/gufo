@@ -1,0 +1,24 @@
+# gufo-agent-eval full tier: all 20 seeded tasks.
+#
+# Reference runs of the equivalent upstream suite on this hardware took
+# 12-26 hours. Three tasks are known not to pass yet; see their PROVENANCE.md.
+break-filter-js-from-html
+build-cython-ext
+build-pov-ray
+cobol-modernization
+configure-git-webserver
+extract-elf
+fix-git
+fix-ocaml-gc
+git-leak-recovery
+headless-terminal
+llm-inference-batching-scheduler
+mailman
+mteb-retrieve
+nginx-request-logging
+openssl-selfsigned-cert
+overfull-hbox
+pypi-server
+regex-log
+sparql-university
+sqlite-with-gcov

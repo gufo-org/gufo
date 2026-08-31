@@ -55,6 +55,10 @@ class Trajectory:
     stop_reasons: list[str] = field(default_factory=list)
     completed: bool = False
     malformed_lines: int = 0
+    # Requests the endpoint refused or failed to serve.
+    endpoint_errors: int = 0
+    # Turns that ended because the context window was exhausted.
+    context_failures: int = 0
 
     @property
     def requests(self) -> int:
@@ -116,6 +120,12 @@ def parse(stream: str) -> Trajectory:
             stop = message.get("stopReason")
             if stop:
                 trajectory.stop_reasons.append(stop)
+                if stop == "error":
+                    trajectory.endpoint_errors += 1
+                elif stop == "length":
+                    # The model ran out of room rather than finishing, which
+                    # is a context failure, not a wrong answer.
+                    trajectory.context_failures += 1
 
         elif kind == "tool_execution_start":
             trajectory.tool_calls += 1

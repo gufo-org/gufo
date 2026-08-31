@@ -21,7 +21,9 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import limits as limits_mod
 from . import pi as pi_mod
+from . import result as result_mod
 from . import task as task_mod
 from . import trajectory as trajectory_mod
 from . import verify
@@ -34,11 +36,46 @@ class AttemptResult:
     passed: bool
     reward: float
     duration_ms: int
+    first_response_ms: int | None
     agent_timed_out: bool
     agent_exit_code: int
     verifier_crashed: bool
+    verifier_timed_out: bool
     trajectory: trajectory_mod.Trajectory
     verifier_output: str
+    workspace_hash: str | None
+    limits: limits_mod.LimitStatus
+
+    def to_result(self) -> result_mod.TaskResult:
+        t = self.trajectory
+        return result_mod.TaskResult(
+            task=self.task,
+            completed=t.completed,
+            passed=self.passed,
+            reward=self.reward,
+            duration_ms=self.duration_ms,
+            first_response_ms=self.first_response_ms,
+            requests=t.requests,
+            tokens={
+                "input": t.usage.input,
+                "output": t.usage.output,
+                "cache_read": t.usage.cache_read,
+                "cache_write": t.usage.cache_write,
+                "total": t.usage.total,
+            },
+            context_failures=t.context_failures,
+            agent_steps=t.turns,
+            tool_calls=t.tool_calls,
+            tool_failures=t.tool_failures,
+            tool_names=dict(t.tool_names),
+            agent_timed_out=self.agent_timed_out,
+            agent_exit_code=self.agent_exit_code,
+            endpoint_errors=t.endpoint_errors,
+            verifier_crashed=self.verifier_crashed,
+            verifier_timed_out=self.verifier_timed_out,
+            workspace_hash=self.workspace_hash,
+            verifier_output=self.verifier_output,
+        )
 
 
 def run_attempt(
@@ -86,10 +123,18 @@ def run_attempt(
         endpoint=endpoint,
     )
 
-    started = time.monotonic()
-    agent = backend.run(
-        spec, timeout_sec=agent_timeout_sec or task.agent_timeout_sec
+    # Resource caps are a separate kernel feature from the sandbox, and are
+    # best-effort: a host without a delegated cgroup runs unbounded, and the
+    # result records that rather than implying limits were enforced.
+    task_limits = limits_mod.Limits.from_manifest(
+        task.manifest.get("environment", {})
     )
+
+    started = time.monotonic()
+    with limits_mod.applied(task.name, task_limits) as (limit_status, _group):
+        agent = backend.run(
+            spec, timeout_sec=agent_timeout_sec or task.agent_timeout_sec
+        )
     duration_ms = int((time.monotonic() - started) * 1000)
 
     # Retained whole; the metrics below are a reduction of it.
@@ -110,9 +155,17 @@ def run_attempt(
         passed=outcome.passed,
         reward=outcome.reward,
         duration_ms=duration_ms,
+        first_response_ms=(
+            int(agent.first_output_sec * 1000)
+            if agent.first_output_sec is not None
+            else None
+        ),
         agent_timed_out=agent.timed_out,
         agent_exit_code=agent.exit_code,
         verifier_crashed=outcome.crashed,
+        verifier_timed_out=outcome.timed_out,
         trajectory=trajectory,
         verifier_output=outcome.output,
+        workspace_hash=result_mod.workspace_hash(workspace, task.workdir),
+        limits=limit_status,
     )

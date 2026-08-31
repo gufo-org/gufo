@@ -1,0 +1,22 @@
+# Tasks that are fully ported and expected to be solvable.
+#
+# Excludes fix-ocaml-gc, mteb-retrieve and mailman, which start but cannot
+# pass yet for reasons recorded in their PROVENANCE.md. Use this tier when
+# measuring a model, so known harness gaps are not scored as model failures.
+break-filter-js-from-html
+build-cython-ext
+build-pov-ray
+cobol-modernization
+configure-git-webserver
+extract-elf
+fix-git
+git-leak-recovery
+headless-terminal
+llm-inference-batching-scheduler
+nginx-request-logging
+openssl-selfsigned-cert
+overfull-hbox
+pypi-server
+regex-log
+sparql-university
+sqlite-with-gcov

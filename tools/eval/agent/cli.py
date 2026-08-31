@@ -24,8 +24,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from . import compare as compare_mod
+from . import limits as limits_mod
 from . import pi as pi_mod
+from . import preflight as preflight_mod
+from . import result as result_mod
 from . import runner
+from . import suite as suite_mod
 from . import task as task_mod
 from . import verify
 from .jail import (
@@ -291,19 +296,32 @@ def discover_model(base_url: str, api_key: str) -> tuple[str, int]:
     return entry["id"], context
 
 
+def _resolve_tasks(args: argparse.Namespace, root: Path) -> tuple[str, list[str]]:
+    """Which tasks to run, and under what tier name."""
+    if args.task:
+        return f"ad-hoc:{args.task}", [args.task]
+    tier = suite_mod.load(args.suite)
+    return tier.name, tier.tasks
+
+
 def cmd_run(args: argparse.Namespace) -> int:
-    if (code := _require_task(args, "run")) is not None:
-        return code
-
     root = _tasks_root(args)
-    task = task_mod.load(args.task, root)
-    backend = BwrapBackend()
 
+    if not args.task and not args.suite:
+        print("eval-agent run: no task or --suite named.\n", file=sys.stderr)
+        print(_task_menu(root), file=sys.stderr)
+        print(f"\ntiers: {', '.join(suite_mod.available())}", file=sys.stderr)
+        print("\nusage: eval-agent run <task> [options]", file=sys.stderr)
+        print("       eval-agent run --suite smoke [options]", file=sys.stderr)
+        return 2
+
+    backend = BwrapBackend()
     api_key = os.environ.get(args.api_key_env, "local")
 
-    model_id, context_window = (args.model, args.context_window) if args.model else (
-        discover_model(args.base_url, api_key)
-    )
+    if args.model:
+        model_id, context_window = args.model, args.context_window
+    else:
+        model_id, context_window = discover_model(args.base_url, api_key)
 
     config = pi_mod.PiConfig(
         base_url=args.base_url,
@@ -312,35 +330,138 @@ def cmd_run(args: argparse.Namespace) -> int:
         context_window=context_window,
         max_tokens=args.max_tokens,
     )
-
     pi_binary = pi_mod.resolve_binary()
 
-    with _scratch(args.keep) as scratch:
-        result = runner.run_attempt(
-            backend, task, config, scratch, pi_binary,
-            agent_timeout_sec=args.agent_timeout,
+    # #153: a missing capability marks the endpoint unsupported and aborts.
+    # Missing behaviour is never emulated.
+    if not args.skip_preflight:
+        print(f"preflight {args.base_url} ...", file=sys.stderr)
+        pre = preflight_mod.run(args.base_url, model_id, api_key)
+        for check in pre.checks:
+            state = "ok  " if check.ok else "FAIL"
+            print(f"  {state} {check.name:<14} {check.detail}", file=sys.stderr)
+        if not pre.supported:
+            print("\nendpoint unsupported; aborting without running.", file=sys.stderr)
+            print("pass --skip-preflight to override.", file=sys.stderr)
+            return 3
+        print("", file=sys.stderr)
+
+    tier_name, task_names = _resolve_tasks(args, root)
+
+    limits_ok, limits_reason = limits_mod.available()
+    if not limits_ok:
+        print(f"note: resource limits unavailable ({limits_reason}); "
+              f"tasks run unbounded except by timeout.\n", file=sys.stderr)
+
+    run_result = result_mod.RunResult(
+        suite=suite_mod.SUITE_NAME,
+        tier=tier_name,
+        machine=result_mod.machine_fingerprint(),
+    )
+
+    task_hashes = {}
+    failures = 0
+
+    for index, name in enumerate(task_names, start=1):
+        task = task_mod.load(name, root)
+        task_hashes[name] = suite_mod.task_identity(task.directory)
+
+        timeout = args.agent_timeout or suite_mod.DEFAULT_AGENT_TIMEOUT_SEC
+        print(f"[{index}/{len(task_names)}] {name} "
+              f"(timeout {timeout / 60:.0f}min)", file=sys.stderr)
+
+        best = None
+        for attempt in range(1, args.attempts + 1):
+            with _scratch(args.keep) as scratch:
+                outcome = runner.run_attempt(
+                    backend, task, config, scratch, pi_binary,
+                    agent_timeout_sec=timeout,
+                )
+            if best is None or outcome.passed:
+                best = outcome
+            if outcome.passed:
+                break
+            if attempt < args.attempts:
+                print(f"      attempt {attempt} failed, retrying", file=sys.stderr)
+
+        assert best is not None
+        run_result.add(best.to_result())
+        if not best.passed:
+            failures += 1
+
+        flags = []
+        if best.agent_timed_out:
+            flags.append("timed out")
+        if best.verifier_crashed:
+            flags.append("verifier crashed")
+        print(f"      reward {best.reward}  {best.duration_ms / 1000:.0f}s  "
+              f"turns {best.trajectory.turns}  "
+              f"tools {best.trajectory.tool_calls}"
+              f"{'  [' + ', '.join(flags) + ']' if flags else ''}",
+              file=sys.stderr)
+
+    run_result.identity = {
+        **suite_mod.benchmark_identity(
+            suite_mod.load(args.suite) if not args.task
+            else suite_mod.Tier(tier_name, task_names, Path(".")),
+            config.identity(),
+            task_hashes,
+        ),
+        "model": model_id,
+        "endpoint_label": result_mod.endpoint_label(args.base_url),
+        "agent": "pi",
+        "agent_version": _pi_version(pi_binary),
+        "attempts_per_task": args.attempts,
+        "agent_timeout_sec": args.agent_timeout or suite_mod.DEFAULT_AGENT_TIMEOUT_SEC,
+        "limits_enforced": limits_ok,
+    }
+    run_result.finalize()
+
+    aggregate = run_result.aggregate
+    print(f"\n{aggregate['passed_tasks']}/{aggregate['total_tasks']} passed "
+          f"(pass@{args.attempts})  "
+          f"{aggregate['total_duration_ms'] / 3600000:.2f}h")
+
+    if args.output:
+        written = run_result.write(Path(args.output))
+        print(f"result: {written}")
+    else:
+        print("note: no --output given, so this run was not recorded.",
+              file=sys.stderr)
+
+    return 0 if failures == 0 else 1
+
+
+def _pi_version(pi_binary: Path) -> str:
+    import subprocess
+    try:
+        out = subprocess.run([str(pi_binary), "--version"],
+                             capture_output=True, text=True, timeout=60)
+        return out.stdout.strip().splitlines()[-1] if out.stdout.strip() else "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    try:
+        report, code = compare_mod.render(
+            Path(args.left), Path(args.right), strict=args.strict
         )
+    except compare_mod.CompareError as exc:
+        print(f"compare: {exc}", file=sys.stderr)
+        return 1
+    print(report)
+    return code
 
-        print(f"task:        {result.task}")
-        print(f"model:       {model_id}")
-        print(f"reward:      {result.reward}")
-        print(f"passed:      {result.passed}")
-        print(f"duration:    {result.duration_ms} ms")
-        print(f"turns:       {result.trajectory.turns}")
-        print(f"tool calls:  {result.trajectory.tool_calls} "
-              f"({result.trajectory.tool_failures} failed)")
-        print(f"tokens:      in={result.trajectory.usage.input} "
-              f"out={result.trajectory.usage.output} "
-              f"cached={result.trajectory.usage.cache_read}")
-        if result.agent_timed_out:
-            print("agent timed out")
-        if result.verifier_crashed:
-            print("verifier crashed (no reward file produced)")
-        if args.verbose:
-            print(f"\n{result.verifier_output}")
 
-    return 0 if result.passed else 1
-
+def cmd_suites(args: argparse.Namespace) -> int:
+    for name in suite_mod.available():
+        tier = suite_mod.load(name)
+        print(f"{name}  ({len(tier.tasks)} tasks, hash {tier.identity()})")
+        for task in tier.tasks:
+            print(f"    {task}")
+        print()
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -562,12 +683,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum tokens the agent may request per response (default: %(default)s)",
     )
     run.add_argument(
+        "--suite",
+        metavar="TIER",
+        help=f"run a tier instead of one task ({', '.join(suite_mod.available())})",
+    )
+    run.add_argument(
+        "--output",
+        metavar="PATH",
+        help=(
+            "write the sanitized result JSON here. without it the run is not "
+            "recorded and cannot be compared"
+        ),
+    )
+    run.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "attempts per task; a second is only run if the first fails. "
+            "reported as pass@N (default: %(default)s)"
+        ),
+    )
+    run.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="run even if the endpoint fails capability checks",
+    )
+    run.add_argument(
         "--agent-timeout",
         type=float,
         metavar="SEC",
         help=(
-            "override the task's agent timeout. useful for checking a task "
-            "starts without waiting for a full attempt"
+            "seconds per attempt. defaults to "
+            f"{suite_mod.DEFAULT_AGENT_TIMEOUT_SEC // 3600}h, matching the "
+            "reference runs; the 900s in task manifests is upstream's own "
+            "default and is below the median task duration"
         ),
     )
     run.add_argument(
@@ -586,6 +737,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the verifier's full pytest output, including failures",
     )
     run.set_defaults(func=cmd_run)
+
+    suites = sub.add_parser(
+        "suites",
+        help="list the suite tiers",
+        description="List the available tiers and the tasks each contains.",
+    )
+    suites.set_defaults(func=cmd_suites)
+
+    comparison = sub.add_parser(
+        "compare",
+        help="compare two result files task by task",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Compare two result files produced by `run --output`.\n"
+            "\n"
+            "Comparability is checked, not assumed: two runs of different\n"
+            "tiers, agents, or task revisions are not comparable, and saying\n"
+            "so is more useful than a difference that means nothing."
+        ),
+        epilog=(
+            "examples:\n"
+            "  eval-agent compare gufo.json llama.json\n"
+            "  eval-agent compare gufo.json llama.json --strict\n"
+            "\n"
+            + NIX_NOTE.format(example="compare a.json b.json")
+        ),
+    )
+    comparison.add_argument("left", metavar="A", help="first result file")
+    comparison.add_argument("right", metavar="B", help="second result file")
+    comparison.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit non-zero when the two runs are not comparable",
+    )
+    comparison.set_defaults(func=cmd_compare)
 
     return parser
 
