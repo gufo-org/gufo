@@ -1,0 +1,74 @@
+{
+  "schema_version": "gufo-agent-eval/1",
+  "generated_at": "2026-09-01T09:38:38.056280+00:00",
+  "suite": "gufo-agent-eval",
+  "tier": "ad-hoc:openssl-selfsigned-cert",
+  "identity": {
+    "suite": "gufo-agent-eval",
+    "tier": "ad-hoc:openssl-selfsigned-cert",
+    "tier_hash": "37ca7935c5b7b372",
+    "agent_config_hash": "4c7b8d94e6a57f21",
+    "benchmark_hash": "85f9141f657d1b03",
+    "model": "qwen3.8-27b",
+    "endpoint_label": "endpoint-00035c329258",
+    "agent": "pi",
+    "agent_version": "0.84.2",
+    "attempts_per_task": 1,
+    "agent_timeout_sec": 1800.0,
+    "limits_enforced": true
+  },
+  "machine": {
+    "os": "Linux",
+    "kernel": "7.1.8",
+    "arch": "x86_64",
+    "cpu_count": 32,
+    "host_hash": "8be0b5445fca"
+  },
+  "tasks": [
+    {
+      "task": "openssl-selfsigned-cert",
+      "completed": true,
+      "passed": true,
+      "reward": 1.0,
+      "duration_ms": 299077,
+      "first_response_ms": 262,
+      "requests": 8,
+      "tokens": {
+        "input": 4537,
+        "output": 364,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 4901
+      },
+      "context_failures": 0,
+      "agent_steps": 8,
+      "tool_calls": 7,
+      "tool_failures": 0,
+      "tool_names": {
+        "bash": 6,
+        "write": 1
+      },
+      "agent_timed_out": false,
+      "agent_exit_code": 0,
+      "endpoint_errors": 0,
+      "verifier_crashed": false,
+      "verifier_timed_out": false,
+      "workspace_hash": "d30db7875f86db7e",
+      "verifier_output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-9.0.3, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 6 items\n\n../tests/test_outputs.py ......                                          [100%]\n\n=============================== warnings summary ===============================\n../nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-u9ayxhry'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n==================================== PASSES ====================================\n=========================== short test summary info ============================\nPASSED ../tests/test_outputs.py::test_directory_structure\nPASSED ../tests/test_outputs.py::test_key_file\nPASSED ../tests/test_outputs.py::test_certificate_file\nPASSED ../tests/test_outputs.py::test_combined_pem_file\nPASSED ../tests/test_outputs.py::test_verification_file\nPASSED ../tests/test_outputs.py::test_python_verification_script\n========================= 6 passed, 1 warning in 0.06s ========================="
+    }
+  ],
+  "aggregate": {
+    "total_tasks": 1,
+    "passed_tasks": 1,
+    "pass_at_1": 1.0,
+    "total_duration_ms": 299077,
+    "timed_out_tasks": 0,
+    "verifier_crashes": 0,
+    "tokens": {
+      "input": 4537,
+      "output": 364,
+      "cache_read": 0,
+      "total": 4901
+    }
+  }
+}

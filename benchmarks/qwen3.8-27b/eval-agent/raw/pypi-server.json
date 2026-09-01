@@ -1,0 +1,74 @@
+{
+  "schema_version": "gufo-agent-eval/1",
+  "generated_at": "2026-09-01T09:58:33.545880+00:00",
+  "suite": "gufo-agent-eval",
+  "tier": "ad-hoc:pypi-server",
+  "identity": {
+    "suite": "gufo-agent-eval",
+    "tier": "ad-hoc:pypi-server",
+    "tier_hash": "fc8dba1f3242b303",
+    "agent_config_hash": "4c7b8d94e6a57f21",
+    "benchmark_hash": "b84d270f1e604ab5",
+    "model": "qwen3.8-27b",
+    "endpoint_label": "endpoint-00035c329258",
+    "agent": "pi",
+    "agent_version": "0.84.2",
+    "attempts_per_task": 1,
+    "agent_timeout_sec": 1800.0,
+    "limits_enforced": true
+  },
+  "machine": {
+    "os": "Linux",
+    "kernel": "7.1.8",
+    "arch": "x86_64",
+    "cpu_count": 32,
+    "host_hash": "8be0b5445fca"
+  },
+  "tasks": [
+    {
+      "task": "pypi-server",
+      "completed": true,
+      "passed": false,
+      "reward": 0.0,
+      "duration_ms": 1172982,
+      "first_response_ms": 268,
+      "requests": 21,
+      "tokens": {
+        "input": 14056,
+        "output": 383,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 14439
+      },
+      "context_failures": 0,
+      "agent_steps": 21,
+      "tool_calls": 21,
+      "tool_failures": 6,
+      "tool_names": {
+        "bash": 18,
+        "write": 3
+      },
+      "agent_timed_out": false,
+      "agent_exit_code": 0,
+      "endpoint_errors": 0,
+      "verifier_crashed": false,
+      "verifier_timed_out": false,
+      "workspace_hash": "0bb7b6cbf8807b4b",
+      "verifier_output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-9.0.3, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 1 item\n\n../tests/test_outputs.py F                                               [100%]\n\n=================================== FAILURES ===================================\n___________________________________ test_api ___________________________________\n\n    def test_api():\n        \"\"\"Test the vectorops package API functionality.\n    \n        This function imports the vectorops package and tests its dotproduct function\n        with various input vectors to ensure it calculates dot products correctly.\n    \n        Tests include:\n        - 2D vectors: [1,1] \u00b7 [0,1] = 1\n        - 3D vectors: [1,1,0] \u00b7 [1,1,0] = 2\n        - 4D vectors with zeros: [1,1,0,0] \u00b7 [1,0,0,21.2] = 1\n        - 4D vectors with negative and decimal values: [1,-1,0,0.01] \u00b7 [0,0,10,0] = 0\n    \n        Raises:\n            AssertionError: If any dot product calculation doesn't match expected result.\n            ImportError: If vectorops package cannot be imported.\n        \"\"\"\n>       install()\n\n/tests/test_outputs.py:82: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n/tests/test_outputs.py:36: in install\n    result = subprocess.run(\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\ninput = None, capture_output = True, timeout = None, check = True\npopenargs = (['python', '-m', 'pip', 'uninstall', '-y', 'vectorops'],)\nkwargs = {'stderr': -1, 'stdout': -1, 'text': True}\nprocess = <Popen: returncode: 1 args: ['python', '-m', 'pip', 'uninstall', '-y', 'vect...>\nstdout = ''\nstderr = '/nix/store/kxdkzc079hlg9ifg4lhjvyi2w7qwpshx-python3-3.13.14/bin/python: No module named pip\\n'\nretcode = 1\n\n    def run(*popenargs,\n            input=None, capture_output=False, timeout=None, check=False, **kwargs):\n        \"\"\"Run command with arguments and return a CompletedProcess instance.\n    \n        The returned instance will have attributes args, returncode, stdout and\n        stderr. By default, stdout and stderr are not captured, and those attributes\n        will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them,\n        or pass capture_output=True to capture both.\n    \n        If check is True and the exit code was non-zero, it raises a\n        CalledProcessError. The CalledProcessError object will have the return code\n        in the returncode attribute, and output & stderr attributes if those streams\n        were captured.\n    \n        If timeout (seconds) is given and the process takes too long,\n         a TimeoutExpired exception will be raised.\n    \n        There is an optional argument \"input\", allowing you to\n        pass bytes or a string to the subprocess's stdin.  If you use this argument\n        you may not also use the Popen constructor's \"stdin\" argument, as\n        it will be used internally.\n    \n        By default, all communication is in bytes, and therefore any \"input\" should\n        be bytes, and the stdout and stderr will be bytes. If in text mode, any\n        \"input\" should be a string, and stdout and stderr will be strings decoded\n        according to locale encoding, or by \"encoding\" if set. Text mode is\n        triggered by setting any of text, encoding, errors or universal_newlines.\n    \n        The other arguments are the same as for the Popen constructor.\n        \"\"\"\n        if input is not None:\n            if kwargs.get('stdin') is not None:\n                raise ValueError('stdin and input arguments may not both be used.')\n            kwargs['stdin'] = PIPE\n    \n        if capture_output:\n            if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:\n                raise ValueError('stdout and stderr arguments may not be used '\n                                 'with capture_output.')\n            kwargs['stdout'] = PIPE\n            kwargs['stderr'] = PIPE\n    \n        with Popen(*popenargs, **kwargs) as process:\n            try:\n                stdout, stderr = process.communicate(input, timeout=timeout)\n            except TimeoutExpired as exc:\n                process.kill()\n                if _mswindows:\n                    # Windows accumulates the output in a single blocking\n                    # read() call run on child threads, with the timeout\n                    # being done in a join() on those threads.  communicate()\n                    # _after_ kill() is required to collect that and add it\n                    # to the exception.\n                    exc.stdout, exc.stderr = process.communicate()\n                else:\n                    # POSIX _communicate already populated the output so\n                    # far into the TimeoutExpired exception.\n                    process.wait()\n                raise\n            except:  # Including KeyboardInterrupt, communicate handled that.\n                process.kill()\n                # We don't call process.wait() as .__exit__ does that for us.\n                raise\n            retcode = process.poll()\n            if check and retcode:\n>               raise CalledProcessError(retcode, process.args,\n                                         output=stdout, stderr=stderr)\nE               subprocess.CalledProcessError: Command '['python', '-m', 'pip', 'uninstall', '-y', 'vectorops']' returned non-zero exit status 1.\n\n/nix/store/kxdkzc079hlg9ifg4lhjvyi2w7qwpshx-python3-3.13.14/lib/python3.13/subprocess.py:577: CalledProcessError\n----------------------------- Captured stdout call -----------------------------\nUninstalling any existing vectorops package...\nUninstall failed with error: /nix/store/kxdkzc079hlg9ifg4lhjvyi2w7qwpshx-python3-3.13.14/bin/python: No module named pip\n\n=============================== warnings summary ===============================\n../nix/store/j74x4938pni4lmvqw59a0arw1xz7aagj-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /nix/store/j74x4938pni4lmvqw59a0arw1xz7aagj-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-o0n3424q'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../nix/store/j74x4938pni4lmvqw59a0arw1xz7aagj-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429\n  /nix/store/j74x4938pni4lmvqw59a0arw1xz7aagj-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/lastfailed: [Errno 30] Read-only file system: '/tests/pytest-cache-files-nsshd7fv'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED ../tests/test_outputs.py::test_api - subprocess.CalledProcessError: Co...\n======================== 1 failed, 2 warnings in 0.04s ========================="
+    }
+  ],
+  "aggregate": {
+    "total_tasks": 1,
+    "passed_tasks": 0,
+    "pass_at_1": 0.0,
+    "total_duration_ms": 1172982,
+    "timed_out_tasks": 0,
+    "verifier_crashes": 0,
+    "tokens": {
+      "input": 14056,
+      "output": 383,
+      "cache_read": 0,
+      "total": 14439
+    }
+  }
+}
