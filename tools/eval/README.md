@@ -275,6 +275,24 @@ not remove it.
 Each task's `PROVENANCE.md` records upstream name, revision, authors,
 licence, what the port changed, and what is byte-identical to upstream.
 
+## Recorded results
+
+Results produced with this harness live under `benchmarks/<model>/eval-agent/`:
+
+| Path | Contents |
+| --- | --- |
+| `eval-agent-results.md` | Write-up: setup, per-task table, caveats |
+| `raw/<task>.json` | Sanitized result document, as written by `run --output` |
+| `raw/<task>.log` | Full runner output, including the verifier's pytest output |
+
+The JSON goes through the sanitizer and carries no credentials, endpoint
+addresses, or user paths. The `.log` files are raw runner output kept verbatim
+for inspection and are **not** sanitized; check them before publishing
+anywhere.
+
+See [benchmarks/qwen3.8-27b/eval-agent](../../benchmarks/qwen3.8-27b/eval-agent/eval-agent-results.md)
+for the current Qwen3.8-27B numbers.
+
 ## Layout
 
 ```

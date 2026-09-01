@@ -1,0 +1,71 @@
+{
+  "schema_version": "gufo-agent-eval/1",
+  "generated_at": "2026-09-01T14:05:51.827014+00:00",
+  "suite": "gufo-agent-eval",
+  "tier": "ad-hoc:cobol-modernization",
+  "identity": {
+    "suite": "gufo-agent-eval",
+    "tier": "ad-hoc:cobol-modernization",
+    "tier_hash": "5e3ee315dd09b59d",
+    "agent_config_hash": "4c7b8d94e6a57f21",
+    "benchmark_hash": "5783c25eb7d3a788",
+    "model": "qwen3.8-27b",
+    "endpoint_label": "endpoint-00035c329258",
+    "agent": "pi",
+    "agent_version": "0.84.2",
+    "attempts_per_task": 1,
+    "agent_timeout_sec": 1800.0,
+    "limits_enforced": true
+  },
+  "machine": {
+    "os": "Linux",
+    "kernel": "7.1.8",
+    "arch": "x86_64",
+    "cpu_count": 32,
+    "host_hash": "8be0b5445fca"
+  },
+  "tasks": [
+    {
+      "task": "cobol-modernization",
+      "completed": false,
+      "passed": false,
+      "reward": 0.0,
+      "duration_ms": 1800065,
+      "first_response_ms": null,
+      "requests": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 0
+      },
+      "context_failures": 0,
+      "agent_steps": 0,
+      "tool_calls": 0,
+      "tool_failures": 0,
+      "tool_names": {},
+      "agent_timed_out": true,
+      "agent_exit_code": -9,
+      "endpoint_errors": 0,
+      "verifier_crashed": false,
+      "verifier_timed_out": false,
+      "workspace_hash": "845fef74c6055d28",
+      "verifier_output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-9.0.3, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 3 items\n\n../tests/test_outputs.py F.F                                             [100%]\n\n=================================== FAILURES ===================================\n__________________________ test_required_files_exist ___________________________\n\n    def test_required_files_exist():\n        \"\"\"Test that all required Python files exist\"\"\"\n        required_files = [\n            \"/app/program.py\",\n        ]\n    \n        for file_path in required_files:\n>           assert Path(file_path).exists(), f\"Required file {file_path} does not exist\"\nE           AssertionError: Required file /app/program.py does not exist\nE           assert False\nE            +  where False = exists()\nE            +    where exists = PosixPath('/app/program.py').exists\nE            +      where PosixPath('/app/program.py') = Path('/app/program.py')\n\n/tests/test_outputs.py:18: AssertionError\n_____________________________ test_program_output ______________________________\n\n    def test_program_output():\n        \"\"\"Test that the program produces the expected output and file contents\"\"\"\n        initial_accounts = (\n            \"U001John Doe            0000001000U002Jane Smith\"\n            \"          0000002000U003Bob Wilson          0000001500\"\n        )\n    \n        initial_books = (\n            \"B001Python Basics       U001B002COBOL Guide         \"\n            \"U002B003Java Tutorial       U003\"\n        )\n    \n        initial_transactions = \"\"\n    \n        data_dir = Path(\"/app/data\")\n    \n        (data_dir / \"ACCOUNTS.DAT\").write_text(initial_accounts)\n        (data_dir / \"BOOKS.DAT\").write_text(initial_books)\n        (data_dir / \"TRANSACTIONS.DAT\").write_text(initial_transactions)\n    \n        Path(\"/app/src/INPUT.DAT\").write_text(\"U001U003B0030000000020\")\n        result = subprocess.run(\n            [\"python\", \"/app/program.py\"], capture_output=True, text=True\n        )\n>       assert result.returncode == 0, \"Command failed\"\nE       AssertionError: Command failed\nE       assert 2 == 0\nE        +  where 2 = CompletedProcess(args=['python', '/app/program.py'], returncode=2, stdout='', stderr=\"python: can't open file '/app/program.py': [Errno 2] No such file or directory\\n\").returncode\n\n/tests/test_outputs.py:58: AssertionError\n=============================== warnings summary ===============================\n../nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-6j74pol8'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429\n  /nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/lastfailed: [Errno 30] Read-only file system: '/tests/pytest-cache-files-fwy_1iso'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n==================================== PASSES ====================================\n=========================== short test summary info ============================\nPASSED ../tests/test_outputs.py::test_data_files_exist\nFAILED ../tests/test_outputs.py::test_required_files_exist - AssertionError: ...\nFAILED ../tests/test_outputs.py::test_program_output - AssertionError: Comman...\n=================== 2 failed, 1 passed, 2 warnings in 0.03s ===================="
+    }
+  ],
+  "aggregate": {
+    "total_tasks": 1,
+    "passed_tasks": 0,
+    "pass_at_1": 0.0,
+    "total_duration_ms": 1800065,
+    "timed_out_tasks": 1,
+    "verifier_crashes": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "total": 0
+    }
+  }
+}

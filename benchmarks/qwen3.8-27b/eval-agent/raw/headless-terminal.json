@@ -1,0 +1,74 @@
+{
+  "schema_version": "gufo-agent-eval/1",
+  "generated_at": "2026-09-01T12:08:13.213541+00:00",
+  "suite": "gufo-agent-eval",
+  "tier": "ad-hoc:headless-terminal",
+  "identity": {
+    "suite": "gufo-agent-eval",
+    "tier": "ad-hoc:headless-terminal",
+    "tier_hash": "23bfdd7692f6ef43",
+    "agent_config_hash": "4c7b8d94e6a57f21",
+    "benchmark_hash": "e7ca6cd26de25dc1",
+    "model": "qwen3.8-27b",
+    "endpoint_label": "endpoint-00035c329258",
+    "agent": "pi",
+    "agent_version": "0.84.2",
+    "attempts_per_task": 1,
+    "agent_timeout_sec": 1800.0,
+    "limits_enforced": true
+  },
+  "machine": {
+    "os": "Linux",
+    "kernel": "7.1.8",
+    "arch": "x86_64",
+    "cpu_count": 32,
+    "host_hash": "8be0b5445fca"
+  },
+  "tasks": [
+    {
+      "task": "headless-terminal",
+      "completed": true,
+      "passed": false,
+      "reward": 0.0,
+      "duration_ms": 1268319,
+      "first_response_ms": 280,
+      "requests": 12,
+      "tokens": {
+        "input": 9112,
+        "output": 8192,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 17304
+      },
+      "context_failures": 1,
+      "agent_steps": 12,
+      "tool_calls": 11,
+      "tool_failures": 4,
+      "tool_names": {
+        "bash": 10,
+        "read": 1
+      },
+      "agent_timed_out": false,
+      "agent_exit_code": 0,
+      "endpoint_errors": 0,
+      "verifier_crashed": false,
+      "verifier_timed_out": false,
+      "workspace_hash": "817b41e3c2695338",
+      "verifier_output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-9.0.3, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 7 items\n\n../tests/test_outputs.py FFFFFFF                                         [100%]\n\n=================================== FAILURES ===================================\n_________________________________ test_import __________________________________\n\n    def test_import():\n        \"\"\"Test that the headless terminal can be imported.\"\"\"\n>       from headless_terminal import HeadlessTerminal  # noqa: F401\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       ModuleNotFoundError: No module named 'headless_terminal'\n\n/tests/test_outputs.py:13: ModuleNotFoundError\n______________________ test_send_non_interactive_command _______________________\n\n    def test_send_non_interactive_command():\n        \"\"\"Test that the headless terminal can send a non-interactive command.\"\"\"\n>       from headless_terminal import HeadlessTerminal\nE       ModuleNotFoundError: No module named 'headless_terminal'\n\n/tests/test_outputs.py:18: ModuleNotFoundError\n________________________ test_send_interactive_command _________________________\n\n    def test_send_interactive_command():\n        \"\"\"Test that the headless terminal can interact with interactive programs.\"\"\"\n>       from headless_terminal import HeadlessTerminal\nE       ModuleNotFoundError: No module named 'headless_terminal'\n\n/tests/test_outputs.py:32: ModuleNotFoundError\n_____________________________ test_cancel_command ______________________________\n\n    def test_cancel_command():\n        \"\"\"Test that the headless terminal can cancel a command using a modifier key.\"\"\"\n>       from headless_terminal import HeadlessTerminal\nE       ModuleNotFoundError: No module named 'headless_terminal'\n\n/tests/test_outputs.py:57: ModuleNotFoundError\n______________________________ test_startup_files ______________________________\n\n    def test_startup_files():\n        \"\"\"\n        Test that the headless terminal uses an interactive bash shell and executes startup\n        files.\n        \"\"\"\n        subprocess.run(\n            [\n                f\"echo {shlex.quote('export SPECIAL_FILE=/app/special_file.txt')} >> $HOME/.bashrc\"\n            ],\n            check=True,\n            shell=True,\n        )\n    \n>       from headless_terminal import HeadlessTerminal\nE       ModuleNotFoundError: No module named 'headless_terminal'\n\n/tests/test_outputs.py:84: ModuleNotFoundError\n__________________ test_shell_state_persists_between_commands __________________\n\n    def test_shell_state_persists_between_commands():\n        \"\"\"Test that the shell state persists between commands.\"\"\"\n>       from headless_terminal import HeadlessTerminal\nE       ModuleNotFoundError: No module named 'headless_terminal'\n\n/tests/test_outputs.py:99: ModuleNotFoundError\n___________________________ test_background_commands ___________________________\n\n    def test_background_commands():\n        \"\"\"Test that the headless terminal can run background commands.\"\"\"\n        subprocess.run([\"mkdir\", \"/server\"], check=True)\n        subprocess.run(\"echo 'Hello, world!' > /server/index.html\", check=True, shell=True)\n    \n>       from headless_terminal import HeadlessTerminal\nE       ModuleNotFoundError: No module named 'headless_terminal'\n\n/tests/test_outputs.py:120: ModuleNotFoundError\n=============================== warnings summary ===============================\n../nix/store/wn1r0x1skmygyaplhrj1s1fy3r0xhc68-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /nix/store/wn1r0x1skmygyaplhrj1s1fy3r0xhc68-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-_b0yd_kd'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../nix/store/wn1r0x1skmygyaplhrj1s1fy3r0xhc68-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429\n  /nix/store/wn1r0x1skmygyaplhrj1s1fy3r0xhc68-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/lastfailed: [Errno 30] Read-only file system: '/tests/pytest-cache-files-xc2bbbfu'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED ../tests/test_outputs.py::test_import - ModuleNotFoundError: No module...\nFAILED ../tests/test_outputs.py::test_send_non_interactive_command - ModuleNo...\nFAILED ../tests/test_outputs.py::test_send_interactive_command - ModuleNotFou...\nFAILED ../tests/test_outputs.py::test_cancel_command - ModuleNotFoundError: N...\nFAILED ../tests/test_outputs.py::test_startup_files - ModuleNotFoundError: No...\nFAILED ../tests/test_outputs.py::test_shell_state_persists_between_commands\nFAILED ../tests/test_outputs.py::test_background_commands - ModuleNotFoundErr...\n======================== 7 failed, 2 warnings in 0.07s ========================="
+    }
+  ],
+  "aggregate": {
+    "total_tasks": 1,
+    "passed_tasks": 0,
+    "pass_at_1": 0.0,
+    "total_duration_ms": 1268319,
+    "timed_out_tasks": 0,
+    "verifier_crashes": 0,
+    "tokens": {
+      "input": 9112,
+      "output": 8192,
+      "cache_read": 0,
+      "total": 17304
+    }
+  }
+}

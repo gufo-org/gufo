@@ -1,0 +1,74 @@
+{
+  "schema_version": "gufo-agent-eval/1",
+  "generated_at": "2026-09-01T11:37:22.232430+00:00",
+  "suite": "gufo-agent-eval",
+  "tier": "ad-hoc:git-leak-recovery",
+  "identity": {
+    "suite": "gufo-agent-eval",
+    "tier": "ad-hoc:git-leak-recovery",
+    "tier_hash": "757e4de26f3f35f8",
+    "agent_config_hash": "4c7b8d94e6a57f21",
+    "benchmark_hash": "99a4f3d24268bf85",
+    "model": "qwen3.8-27b",
+    "endpoint_label": "endpoint-00035c329258",
+    "agent": "pi",
+    "agent_version": "0.84.2",
+    "attempts_per_task": 1,
+    "agent_timeout_sec": 1800.0,
+    "limits_enforced": true
+  },
+  "machine": {
+    "os": "Linux",
+    "kernel": "7.1.8",
+    "arch": "x86_64",
+    "cpu_count": 32,
+    "host_hash": "8be0b5445fca"
+  },
+  "tasks": [
+    {
+      "task": "git-leak-recovery",
+      "completed": true,
+      "passed": true,
+      "reward": 1.0,
+      "duration_ms": 226759,
+      "first_response_ms": 264,
+      "requests": 9,
+      "tokens": {
+        "input": 5015,
+        "output": 262,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 5277
+      },
+      "context_failures": 0,
+      "agent_steps": 9,
+      "tool_calls": 8,
+      "tool_failures": 0,
+      "tool_names": {
+        "bash": 7,
+        "write": 1
+      },
+      "agent_timed_out": false,
+      "agent_exit_code": 0,
+      "endpoint_errors": 0,
+      "verifier_crashed": false,
+      "verifier_timed_out": false,
+      "workspace_hash": "c89fa5714c14a8fc",
+      "verifier_output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-9.0.3, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 5 items\n\n../tests/test_outputs.py .....                                           [100%]\n\n=============================== warnings summary ===============================\n../tests/test_outputs.py:101\n  /tests/test_outputs.py:101: SyntaxWarning: invalid escape sequence '\\.'\n    \"find /app/repo -type f -not -path '*/\\.*' \"\n\n../nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-v3a25hcx'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n==================================== PASSES ====================================\n=========================== short test summary info ============================\nPASSED ../tests/test_outputs.py::test_flag_file_exists_and_correct\nPASSED ../tests/test_outputs.py::test_no_secrets_in_commits\nPASSED ../tests/test_outputs.py::test_good_commits_preserved\nPASSED ../tests/test_outputs.py::test_no_secrets_in_unreachable_objects\nPASSED ../tests/test_outputs.py::test_repository_contents_checksum\n======================== 5 passed, 2 warnings in 0.03s ========================="
+    }
+  ],
+  "aggregate": {
+    "total_tasks": 1,
+    "passed_tasks": 1,
+    "pass_at_1": 1.0,
+    "total_duration_ms": 226759,
+    "timed_out_tasks": 0,
+    "verifier_crashes": 0,
+    "tokens": {
+      "input": 5015,
+      "output": 262,
+      "cache_read": 0,
+      "total": 5277
+    }
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "schema_version": "gufo-agent-eval/1",
+  "generated_at": "2026-09-01T12:44:11.025878+00:00",
+  "suite": "gufo-agent-eval",
+  "tier": "ad-hoc:sparql-university",
+  "identity": {
+    "suite": "gufo-agent-eval",
+    "tier": "ad-hoc:sparql-university",
+    "tier_hash": "3f9a0f2a5be39f9c",
+    "agent_config_hash": "4c7b8d94e6a57f21",
+    "benchmark_hash": "ec91632fb69c63c3",
+    "model": "qwen3.8-27b",
+    "endpoint_label": "endpoint-00035c329258",
+    "agent": "pi",
+    "agent_version": "0.84.2",
+    "attempts_per_task": 1,
+    "agent_timeout_sec": 1800.0,
+    "limits_enforced": true
+  },
+  "machine": {
+    "os": "Linux",
+    "kernel": "7.1.8",
+    "arch": "x86_64",
+    "cpu_count": 32,
+    "host_hash": "8be0b5445fca"
+  },
+  "tasks": [
+    {
+      "task": "sparql-university",
+      "completed": true,
+      "passed": false,
+      "reward": 0.0,
+      "duration_ms": 785563,
+      "first_response_ms": 270,
+      "requests": 3,
+      "tokens": {
+        "input": 6481,
+        "output": 8192,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 14673
+      },
+      "context_failures": 1,
+      "agent_steps": 3,
+      "tool_calls": 2,
+      "tool_failures": 0,
+      "tool_names": {
+        "bash": 1,
+        "read": 1
+      },
+      "agent_timed_out": false,
+      "agent_exit_code": 0,
+      "endpoint_errors": 0,
+      "verifier_crashed": false,
+      "verifier_timed_out": false,
+      "workspace_hash": "50560e1f852b8e25",
+      "verifier_output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-9.0.3, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 3 items\n\n../tests/test_outputs.py FFF                                             [100%]\n\n=================================== FAILURES ===================================\n___________________________ test_sparql_file_exists ____________________________\n\n    def test_sparql_file_exists():\n        \"\"\"\n        Test that the SPARQL query file exists in the expected location.\n        \"\"\"\n>       assert SPARQL_PATH.exists(), f\"SPARQL query file {SPARQL_PATH} does not exist\"\nE       AssertionError: SPARQL query file /app/solution.sparql does not exist\nE       assert False\nE        +  where False = exists()\nE        +    where exists = PosixPath('/app/solution.sparql').exists\n\n/tests/test_outputs.py:26: AssertionError\n________________________ test_sparql_runs_without_error ________________________\n\n    def test_sparql_runs_without_error():\n        \"\"\"\n        Test that the SPARQL query in the file is valid and can be executed\n        on the RDF dataset without raising an exception.\n        \"\"\"\n        # Load query\n>       query_text = SPARQL_PATH.read_text()\n                     ^^^^^^^^^^^^^^^^^^^^^^^\n\n/tests/test_outputs.py:35: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n/nix/store/kxdkzc079hlg9ifg4lhjvyi2w7qwpshx-python3-3.13.14/lib/python3.13/pathlib/_local.py:546: in read_text\n    return PathBase.read_text(self, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n/nix/store/kxdkzc079hlg9ifg4lhjvyi2w7qwpshx-python3-3.13.14/lib/python3.13/pathlib/_abc.py:632: in read_text\n    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = PosixPath('/app/solution.sparql'), mode = 'r', buffering = -1\nencoding = 'utf-8', errors = None, newline = None\n\n    def open(self, mode='r', buffering=-1, encoding=None,\n             errors=None, newline=None):\n        \"\"\"\n        Open the file pointed to by this path and return a file object, as\n        the built-in open() function does.\n        \"\"\"\n        if \"b\" not in mode:\n            encoding = io.text_encoding(encoding)\n>       return io.open(self, mode, buffering, encoding, errors, newline)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       FileNotFoundError: [Errno 2] No such file or directory: '/app/solution.sparql'\n\n/nix/store/kxdkzc079hlg9ifg4lhjvyi2w7qwpshx-python3-3.13.14/lib/python3.13/pathlib/_local.py:537: FileNotFoundError\n__________________________ test_sparql_query_results ___________________________\n\n    def test_sparql_query_results():\n        \"\"\"\n        Test that the SPARQL query returns the expected professor names and countries.\n        The order of professors and the order of countries\n        within the country string are ignored.\n        \"\"\"\n        # Load query\n>       query_text = SPARQL_PATH.read_text()\n                     ^^^^^^^^^^^^^^^^^^^^^^^\n\n/tests/test_outputs.py:55: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n/nix/store/kxdkzc079hlg9ifg4lhjvyi2w7qwpshx-python3-3.13.14/lib/python3.13/pathlib/_local.py:546: in read_text\n    return PathBase.read_text(self, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n/nix/store/kxdkzc079hlg9ifg4lhjvyi2w7qwpshx-python3-3.13.14/lib/python3.13/pathlib/_abc.py:632: in read_text\n    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = PosixPath('/app/solution.sparql'), mode = 'r', buffering = -1\nencoding = 'utf-8', errors = None, newline = None\n\n    def open(self, mode='r', buffering=-1, encoding=None,\n             errors=None, newline=None):\n        \"\"\"\n        Open the file pointed to by this path and return a file object, as\n        the built-in open() function does.\n        \"\"\"\n        if \"b\" not in mode:\n            encoding = io.text_encoding(encoding)\n>       return io.open(self, mode, buffering, encoding, errors, newline)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       FileNotFoundError: [Errno 2] No such file or directory: '/app/solution.sparql'\n\n/nix/store/kxdkzc079hlg9ifg4lhjvyi2w7qwpshx-python3-3.13.14/lib/python3.13/pathlib/_local.py:537: FileNotFoundError\n=============================== warnings summary ===============================\n../nix/store/nyzw5spl9bz4n3iw4cs4xqz1x8k51b9m-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /nix/store/nyzw5spl9bz4n3iw4cs4xqz1x8k51b9m-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-9ok6r56i'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../nix/store/nyzw5spl9bz4n3iw4cs4xqz1x8k51b9m-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429\n  /nix/store/nyzw5spl9bz4n3iw4cs4xqz1x8k51b9m-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/lastfailed: [Errno 30] Read-only file system: '/tests/pytest-cache-files-424i6ceo'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED ../tests/test_outputs.py::test_sparql_file_exists - AssertionError: SP...\nFAILED ../tests/test_outputs.py::test_sparql_runs_without_error - FileNotFoun...\nFAILED ../tests/test_outputs.py::test_sparql_query_results - FileNotFoundErro...\n======================== 3 failed, 2 warnings in 0.07s ========================="
+    }
+  ],
+  "aggregate": {
+    "total_tasks": 1,
+    "passed_tasks": 0,
+    "pass_at_1": 0.0,
+    "total_duration_ms": 785563,
+    "timed_out_tasks": 0,
+    "verifier_crashes": 0,
+    "tokens": {
+      "input": 6481,
+      "output": 8192,
+      "cache_read": 0,
+      "total": 14673
+    }
+  }
+}

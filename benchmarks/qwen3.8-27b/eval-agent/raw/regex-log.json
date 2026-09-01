@@ -1,0 +1,71 @@
+{
+  "schema_version": "gufo-agent-eval/1",
+  "generated_at": "2026-09-01T12:21:52.496303+00:00",
+  "suite": "gufo-agent-eval",
+  "tier": "ad-hoc:regex-log",
+  "identity": {
+    "suite": "gufo-agent-eval",
+    "tier": "ad-hoc:regex-log",
+    "tier_hash": "7e333bbf5b185269",
+    "agent_config_hash": "4c7b8d94e6a57f21",
+    "benchmark_hash": "90de5cee37529c97",
+    "model": "qwen3.8-27b",
+    "endpoint_label": "endpoint-00035c329258",
+    "agent": "pi",
+    "agent_version": "0.84.2",
+    "attempts_per_task": 1,
+    "agent_timeout_sec": 1800.0,
+    "limits_enforced": true
+  },
+  "machine": {
+    "os": "Linux",
+    "kernel": "7.1.8",
+    "arch": "x86_64",
+    "cpu_count": 32,
+    "host_hash": "8be0b5445fca"
+  },
+  "tasks": [
+    {
+      "task": "regex-log",
+      "completed": true,
+      "passed": false,
+      "reward": 0.0,
+      "duration_ms": 797325,
+      "first_response_ms": 267,
+      "requests": 1,
+      "tokens": {
+        "input": 1603,
+        "output": 8192,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 9795
+      },
+      "context_failures": 1,
+      "agent_steps": 1,
+      "tool_calls": 0,
+      "tool_failures": 0,
+      "tool_names": {},
+      "agent_timed_out": false,
+      "agent_exit_code": 0,
+      "endpoint_errors": 0,
+      "verifier_crashed": false,
+      "verifier_timed_out": false,
+      "workspace_hash": "e3b0c44298fc1c14",
+      "verifier_output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-9.0.3, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 1 item\n\n../tests/test_outputs.py F                                               [100%]\n\n=================================== FAILURES ===================================\n___________________________ test_regex_matches_dates ___________________________\n\n    def test_regex_matches_dates():\n        \"\"\"\n        Test that the agent created a file with a regex, that the regex is valid,\n        and that it correctly matches (the last) dates in log lines containing at least one\n        valid IPv4 address.\n    \n        Checks:\n        1. The regex file exists.\n        2. The regex can be compiled (i.e., is valid).\n        3. Correct matching of dates in various scenarios.\n        \"\"\"\n    \n        # Ensure the regex file exists\n        regex_file = Path(\"/app/regex.txt\")\n>       assert regex_file.exists(), f\"Regex file {regex_file} does not exist\"\nE       AssertionError: Regex file /app/regex.txt does not exist\nE       assert False\nE        +  where False = exists()\nE        +    where exists = PosixPath('/app/regex.txt').exists\n\n/tests/test_outputs.py:22: AssertionError\n=============================== warnings summary ===============================\n../nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-rr4piy5w'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429\n  /nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/lastfailed: [Errno 30] Read-only file system: '/tests/pytest-cache-files-f07gs7ec'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED ../tests/test_outputs.py::test_regex_matches_dates - AssertionError: R...\n======================== 1 failed, 2 warnings in 0.01s ========================="
+    }
+  ],
+  "aggregate": {
+    "total_tasks": 1,
+    "passed_tasks": 0,
+    "pass_at_1": 0.0,
+    "total_duration_ms": 797325,
+    "timed_out_tasks": 0,
+    "verifier_crashes": 0,
+    "tokens": {
+      "input": 1603,
+      "output": 8192,
+      "cache_read": 0,
+      "total": 9795
+    }
+  }
+}

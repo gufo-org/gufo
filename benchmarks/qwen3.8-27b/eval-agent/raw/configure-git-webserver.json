@@ -1,0 +1,74 @@
+{
+  "schema_version": "gufo-agent-eval/1",
+  "generated_at": "2026-09-01T13:04:12.704953+00:00",
+  "suite": "gufo-agent-eval",
+  "tier": "ad-hoc:configure-git-webserver",
+  "identity": {
+    "suite": "gufo-agent-eval",
+    "tier": "ad-hoc:configure-git-webserver",
+    "tier_hash": "d0bc670c15ec67bc",
+    "agent_config_hash": "4c7b8d94e6a57f21",
+    "benchmark_hash": "2cb8729773854f34",
+    "model": "qwen3.8-27b",
+    "endpoint_label": "endpoint-00035c329258",
+    "agent": "pi",
+    "agent_version": "0.84.2",
+    "attempts_per_task": 1,
+    "agent_timeout_sec": 1800.0,
+    "limits_enforced": true
+  },
+  "machine": {
+    "os": "Linux",
+    "kernel": "7.1.8",
+    "arch": "x86_64",
+    "cpu_count": 32,
+    "host_hash": "8be0b5445fca"
+  },
+  "tasks": [
+    {
+      "task": "configure-git-webserver",
+      "completed": true,
+      "passed": false,
+      "reward": 0.0,
+      "duration_ms": 1178444,
+      "first_response_ms": 268,
+      "requests": 20,
+      "tokens": {
+        "input": 12125,
+        "output": 563,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 12688
+      },
+      "context_failures": 0,
+      "agent_steps": 20,
+      "tool_calls": 19,
+      "tool_failures": 3,
+      "tool_names": {
+        "bash": 13,
+        "write": 6
+      },
+      "agent_timed_out": false,
+      "agent_exit_code": 0,
+      "endpoint_errors": 0,
+      "verifier_crashed": false,
+      "verifier_timed_out": false,
+      "workspace_hash": "3c941b8df96cea4a",
+      "verifier_output": "============================= test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-9.0.3, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 1 item\n\n../tests/test_outputs.py F                                               [100%]\n\n=================================== FAILURES ===================================\n____________________________ test_hello_html_exists ____________________________\n\n    def test_hello_html_exists():\n        \"\"\"Test that the hello.html file exists and contains the correct content.\"\"\"\n        result = subprocess.run([\"bash\", \"/tests/verify.sh\"], capture_output=True, text=True)\n    \n>       assert \"TEST PASSED\" in result.stdout, \"Did not pass test\"\nE       AssertionError: Did not pass test\nE       assert 'TEST PASSED' in 'Testing web server...\\nUsing curl to test web server...\\n\u274c TEST FAILED: Web server returned HTTP 000\\nTest completed\\n'\nE        +  where 'Testing web server...\\nUsing curl to test web server...\\n\u274c TEST FAILED: Web server returned HTTP 000\\nTest completed\\n' = CompletedProcess(args=['bash', '/tests/verify.sh'], returncode=0, stdout='Testing web server...\\nUsing curl to test we...tory (or any of the parent directories): .git\\nfatal: not a git repository (or any of the parent directories): .git\\n\").stdout\n\n/tests/test_outputs.py:13: AssertionError\n=============================== warnings summary ===============================\n../nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-uxypb1f8'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429\n  /nix/store/hvanig25nq4gccccrakdczbvsq5pfg5n-python3-3.13.14-env/lib/python3.13/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/lastfailed: [Errno 30] Read-only file system: '/tests/pytest-cache-files-5v5881m7'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED ../tests/test_outputs.py::test_hello_html_exists - AssertionError: Did...\n======================== 1 failed, 2 warnings in 2.04s ========================="
+    }
+  ],
+  "aggregate": {
+    "total_tasks": 1,
+    "passed_tasks": 0,
+    "pass_at_1": 0.0,
+    "total_duration_ms": 1178444,
+    "timed_out_tasks": 0,
+    "verifier_crashes": 0,
+    "tokens": {
+      "input": 12125,
+      "output": 563,
+      "cache_read": 0,
+      "total": 12688
+    }
+  }
+}

@@ -19,6 +19,22 @@ Against [plan.md](../../plan.md) and issue #153.
       covering what Pi actually exercises. #153 specifies the #203 fixture,
       which does not exist; converge when it lands.
 
+## Bugs found while recording results
+
+- [ ] **A timed-out run can record zero activity.** `build-cython-ext` and
+      `cobol-modernization` both reported 0 turns, 0 tool calls and 0 tokens
+      after hitting a 1800 s cap, while the server log showed requests
+      arriving throughout and a 120 s reproduction of the same task recorded
+      5 turns and 6 tool calls normally. The agent was working and the result
+      failed to record it. Cause not isolated; suspect the trajectory is lost
+      or unparsed on long kills. Until fixed, a timed-out row cannot be told
+      apart from a genuine no-op.
+- [ ] **The output budget is not separable from reasoning.** With thinking
+      enabled, reasoning and answer share `--max-tokens`. Three tasks stopped
+      on `length` having spent the whole 8,192-token budget, one of them
+      without a single tool call. Consider defaulting higher, and surfacing
+      `context_failures` in the run summary rather than only in the JSON.
+
 ## Long runs are not survivable
 
 Found while recording the first results. A full tier takes 12-26 hours on
