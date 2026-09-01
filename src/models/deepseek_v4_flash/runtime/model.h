@@ -17,6 +17,9 @@ using ds4_session_cancel_fn = bool (*)(void *user_data);
 
 struct ds4_engine_options {
     const char *model_path;
+    /* Optional DSpark support model. NULL leaves speculative decoding off and
+     * the engine byte-for-byte identical to a non-speculative build. */
+    const char *dspark_model_path;
     int context_size;
     uint32_t prefill_chunk;
     int power_percent;
@@ -75,6 +78,40 @@ int ds4_session_eval(ds4_session *session,
                      int token,
                      char *error,
                      size_t error_capacity);
+/* Measures whether batched DSpark verification reproduces one-token decode's
+ * greedy continuation, and how much cheaper a verification block is than the
+ * tokens it replaces. Returns 0 when the suffix agrees exactly. */
+int ds4_session_dspark_selftest(ds4_session *session,
+                                int rows,
+                                char *error,
+                                size_t error_capacity);
+/* Proposes one DSpark block, verifies it against the target, and reports how
+ * many tokens the target accepted. Returns 0 when a block was proposed. */
+int ds4_session_dspark_draft_selftest(ds4_session *session,
+                                     int cycles,
+                                     char *error,
+                                     size_t error_capacity);
+bool ds4_engine_has_dspark(const ds4_engine *engine);
+/* Runs one greedy DSpark speculative cycle, emitting the accepted prefix plus the
+ * target's correction. Falls back to a single ordinary token when a block cannot
+ * be drafted or verified. */
+int ds4_session_dspark_step(ds4_session *session,
+                           int *emitted,
+                           int emitted_cap,
+                           int *n_emitted,
+                           char *error,
+                           size_t error_capacity);
+void ds4_session_dspark_stats(const ds4_session *session,
+                              uint64_t *drafted,
+                              uint64_t *accepted,
+                              uint64_t *support_drafted,
+                              uint64_t *support_accepted,
+                              uint64_t *positional_accepted,
+                              uint64_t *anchors,
+                              uint64_t *full_blocks,
+                              uint64_t *steps,
+                              uint64_t *skipped,
+                              uint32_t *context_tokens);
 int ds4_session_copy_logits(const ds4_session *session,
                             float *out,
                             int capacity);

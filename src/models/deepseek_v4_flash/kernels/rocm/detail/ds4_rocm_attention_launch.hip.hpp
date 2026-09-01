@@ -927,12 +927,24 @@ extern "C" int ds4_gpu_attention_output_q8_batch_tensor(
             hip_model_range_ptr(model_map, out_b_offset, out_b_bytes, "attn_out_b"));
     if (!out_a || !out_b) return 0;
 
+    /*
+     * The hipBLAS output route packs heads to F16 and runs a batched GEMM whose
+     * macro tile is far wider than a DSpark verification block, so at these
+     * widths the grouped Q8 kernels win outright.
+     */
+    const uint32_t attn_small_batch_rows = ds4_rocm_dense_small_batch_rows();
     const int attn_output_hipblas =
-        hip_runtime_config()->attention_output_hipblas_all;
+        hip_runtime_config()->attention_output_hipblas_all &&
+        !(n_tokens > 1u && n_tokens <= attn_small_batch_rows);
     if (!attn_output_hipblas) {
         if ((group_dim & 31u) == 0u && rank <= UINT32_MAX && n_tokens <= UINT32_MAX) {
             const uint32_t rows_per_block = 32u;
-            const uint32_t tile = 32u;
+            /* Token tile matched to the rows present, as in the dense Q8 path. */
+            const uint32_t tile = n_tokens >= 32u ? 32u
+                                : n_tokens > 8u   ? 16u
+                                : n_tokens > 4u   ? 8u
+                                : n_tokens > 2u   ? 4u
+                                                  : 2u;
             const uint32_t block_tile = 16u;
             hip_launch_grouped_q8_a_sharedx((float *)low->ptr,
                                              out_a,
@@ -1311,4 +1323,55 @@ extern "C" int ds4_gpu_attention_output_low_q8_tensor(
             use_dp4a);
     return hip_ok(hipGetLastError(),
                    "attention_output_low_q8 launch");
+}
+
+/* Non-causal block attention for the DSpark drafter.
+ *
+ * The drafted block is produced in one pass, so every block row must see the
+ * injected target KV *and* every other block row. That is the opposite of the
+ * target's causal window, hence a dedicated launcher rather than a mask
+ * variation on the causal kernels. */
+extern "C" int ds4_gpu_attention_noncausal_raw_batch_heads_tensor(
+        ds4_gpu_tensor       *heads,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                sinks_offset,
+        const ds4_gpu_tensor *q,
+        const ds4_gpu_tensor *raw_kv,
+        uint32_t                n_tokens,
+        uint32_t                n_raw,
+        uint32_t                raw_cap,
+        uint32_t                raw_start,
+        uint32_t                n_head,
+        uint32_t                head_dim) {
+    if (!heads || !q || !raw_kv || !model_map ||
+        n_tokens == 0u || n_head == 0u || head_dim == 0u ||
+        n_raw == 0u || raw_cap == 0u || n_raw > raw_cap ||
+        raw_start >= raw_cap ||
+        !hip_model_range_fits(model_size, sinks_offset,
+                              (uint64_t)n_head * sizeof(float)) ||
+        !hip_tensor_has_elems3(heads, n_tokens, n_head, head_dim, sizeof(float)) ||
+        !hip_tensor_has_elems3(q, n_tokens, n_head, head_dim, sizeof(float)) ||
+        !hip_tensor_has_elems2(raw_kv, raw_cap, head_dim, sizeof(float))) {
+        return 0;
+    }
+    /* The kernel stages one score per visible key in shared memory. */
+    const uint64_t shared_bytes = (uint64_t)n_raw * sizeof(float);
+    if (shared_bytes > 32768u) return 0;
+    const float *sinks = (const float *)hip_model_range_ptr(
+            model_map, sinks_offset, (uint64_t)n_head * sizeof(float), "dspark_attn_sinks");
+    if (!sinks) return 0;
+    dim3 grid(n_tokens, n_head, 1);
+    attention_noncausal_raw_batch_heads_kernel<<<grid, 256, (size_t)shared_bytes>>>(
+            (float *)heads->ptr,
+            sinks,
+            (const float *)q->ptr,
+            (const float *)raw_kv->ptr,
+            n_tokens,
+            n_raw,
+            raw_cap,
+            raw_start,
+            n_head,
+            head_dim);
+    return hip_ok(hipGetLastError(), "dspark noncausal attention launch");
 }

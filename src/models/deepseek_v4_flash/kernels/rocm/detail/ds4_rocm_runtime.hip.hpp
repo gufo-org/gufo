@@ -54,6 +54,47 @@ struct hip_q8_f16_transpose_range {
 static std::vector<hip_model_range> g_model_ranges;
 static std::vector<hip_model_arena> g_model_arenas;
 static std::unordered_map<uint64_t, size_t> g_model_range_by_offset;
+
+/*
+ * Optional DSpark support-model mapping.
+ *
+ * The primary 80 GiB target GGUF owns g_model_host_base and the staged
+ * O_DIRECT copier. The DSpark draft model is a second, much smaller file whose
+ * tensors are addressed by the same (host_base, absolute offset) pair, so it
+ * gets its own registered base and managed arena instead of displacing the
+ * target's ranges. On Strix Halo this keeps the 5.58 GiB support copy out of
+ * the fixed local-memory headroom used by prompt processing while preserving
+ * ordinary GPU pointers and warm device bandwidth for drafting.
+ */
+/*
+ * Verification-block dispatch mode.
+ *
+ * Prefill, decode, and resumed prefill all keep the kernel selection they were
+ * tuned and baselined with. The small-batch routes are enabled only while a
+ * DSpark verification block is being encoded, so enabling speculative decoding
+ * cannot change any retained path's output, kernel choice, or throughput.
+ */
+static int g_small_batch_mode;
+
+static uint32_t ds4_rocm_small_batch_limit(uint32_t configured) {
+    return g_small_batch_mode ? configured : 0u;
+}
+
+static bool ds4_rocm_verifier_batch_mode() {
+    return g_small_batch_mode == 1;
+}
+
+static bool ds4_rocm_support_batch_mode() {
+    return g_small_batch_mode == 2;
+}
+
+static const void *g_support_host_base;
+static uint64_t g_support_registered_size;
+static char *g_support_arena;
+static uint64_t g_support_arena_bytes;
+static uint64_t g_support_arena_used;
+static bool g_support_managed;
+static std::vector<hip_model_range> g_support_ranges;
 static std::vector<hip_q8_f16_range> g_q8_f16_ranges;
 static std::unordered_map<uint64_t, size_t> g_q8_f16_by_offset;
 static std::vector<hip_q8_f16_transpose_range> g_q8_f16_transpose_ranges;
@@ -180,8 +221,31 @@ static int hip_attention_score_buffer_fits(uint32_t n_comp) {
     return n_comp <= DS4_ROCM_ATTENTION_SCORE_CAP - DS4_ROCM_ATTENTION_RAW_SCORE_CAP;
 }
 
+static const char *hip_support_range_ptr(const void *support_map, uint64_t offset, uint64_t bytes) {
+    const uint64_t end = offset + bytes;
+    if (end < offset) return NULL;
+    for (const hip_model_range &r : g_support_ranges) {
+        if (r.host_base == support_map && offset >= r.offset && end <= r.offset + r.bytes) {
+            return r.device_ptr + (offset - r.offset);
+        }
+    }
+    return NULL;
+}
+
 static const char *hip_model_range_ptr(const void *model_map, uint64_t offset, uint64_t bytes, const char *what) {
     if (bytes == 0) return (const char *)model_map + offset;
+
+    if (g_support_host_base != NULL && model_map == g_support_host_base) {
+        const char *support = hip_support_range_ptr(model_map, offset, bytes);
+        if (support) return support;
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "support range rejected for %s: offset %llu "
+                "(%llu bytes) is not resident\n",
+                what ? what : "weights",
+                (unsigned long long)offset,
+                (unsigned long long)bytes);
+        return NULL;
+    }
 
     if (model_map != g_model_host_base) {
         fprintf(stderr, DS4_GPU_LOG_PREFIX "model range rejected for %s: unregistered model mapping\n",
@@ -921,8 +985,11 @@ extern "C" int ds4_gpu_init(void) {
     return 1;
 }
 
+extern "C" void ds4_gpu_release_support_map(void);
+
 extern "C" void ds4_gpu_cleanup(void) {
     (void)hipDeviceSynchronize();
+    ds4_gpu_release_support_map();
     hip_shared_gate_up_async_cleanup();
 #ifdef __HIP_PLATFORM_AMD__
     hipblaslt_gemm_plan_clear();
@@ -1172,4 +1239,91 @@ extern "C" int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_s
     if (offset > model_size || bytes > model_size - offset) return 0;
     if (!hip_model_range_ptr(model_map, offset, bytes, label ? label : "model_tensor")) return 0;
     return hip_model_range_is_cached(model_map, offset, bytes);
+}
+
+/*
+ * Reserve one contiguous arena for the DSpark support model and copy the
+ * requested tensor spans into it. Managed storage is the Strix Halo default:
+ * a device-only 5.58 GiB duplicate reduces prompt-processing headroom, while
+ * read-only host registration makes support kernels bandwidth-bound.
+ */
+extern "C" int ds4_gpu_reserve_support_map(const void *support_map,
+                                           uint64_t support_size,
+                                           uint64_t arena_bytes) {
+    if (!support_map || support_size == 0 || arena_bytes == 0) return 0;
+    if (g_support_host_base != NULL && g_support_host_base != support_map) {
+        fprintf(stderr, DS4_GPU_LOG_PREFIX "a different support model is already registered\n");
+        return 0;
+    }
+    if (g_support_arena != NULL) {
+        return g_support_arena_bytes >= arena_bytes ? 1 : 0;
+    }
+
+    void *device = NULL;
+    const hipError_t alloc_err = hipMallocManaged(
+        &device, (size_t)arena_bytes, hipMemAttachGlobal);
+    if (!hip_ok(alloc_err, "managed support arena alloc")) {
+        return 0;
+    }
+    g_support_arena = (char *)device;
+    g_support_arena_bytes = arena_bytes;
+    g_support_arena_used = 0;
+    g_support_managed = true;
+    g_support_host_base = support_map;
+    g_support_registered_size = support_size;
+    g_support_ranges.clear();
+    return 1;
+}
+
+extern "C" int ds4_gpu_cache_support_range(const void *support_map,
+                                           uint64_t support_size,
+                                           uint64_t offset,
+                                           uint64_t bytes,
+                                           const char *label) {
+    if (!support_map || bytes == 0) return 1;
+    if (support_map != g_support_host_base || !g_support_arena) return 0;
+    if (offset > support_size || bytes > support_size - offset) return 0;
+    if (hip_support_range_ptr(support_map, offset, bytes) != NULL) return 1;
+    /* Align each span so quantized block loads stay naturally aligned. */
+    const uint64_t aligned_used = hip_round_up(g_support_arena_used, 256u);
+    if (aligned_used > g_support_arena_bytes ||
+        bytes > g_support_arena_bytes - aligned_used) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "support arena exhausted for %s (%.2f MiB requested, "
+                "%.2f MiB free)\n",
+                label ? label : "support_tensor",
+                (double)bytes / 1048576.0,
+                (double)(g_support_arena_bytes - aligned_used) / 1048576.0);
+        return 0;
+    }
+    char *device = g_support_arena + aligned_used;
+    if (g_support_managed) {
+        memcpy(device, (const char *)support_map + offset, (size_t)bytes);
+    } else {
+        if (!hip_ok(hipMemcpy(device,
+                              (const char *)support_map + offset,
+                              (size_t)bytes,
+                              hipMemcpyHostToDevice),
+                    "support range copy")) {
+            return 0;
+        }
+    }
+    g_support_arena_used = aligned_used + bytes;
+    g_support_ranges.push_back({support_map, offset, bytes, device});
+    return 1;
+}
+
+extern "C" void ds4_gpu_set_small_batch_mode(int mode) {
+    g_small_batch_mode = mode >= 0 && mode <= 2 ? mode : 0;
+}
+
+extern "C" void ds4_gpu_release_support_map(void) {
+    if (g_support_arena) (void)hipFree(g_support_arena);
+    g_support_arena = NULL;
+    g_support_arena_bytes = 0;
+    g_support_arena_used = 0;
+    g_support_host_base = NULL;
+    g_support_registered_size = 0;
+    g_support_managed = false;
+    g_support_ranges.clear();
 }

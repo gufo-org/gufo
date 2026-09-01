@@ -1,3 +1,28 @@
+__global__ static void matmul_f16_tiny_batch_wave_kernel(
+        float *out,
+        const __half *w,
+        const float *x,
+        uint32_t in_dim,
+        uint32_t out_dim,
+        uint32_t n_tok) {
+    const uint32_t row = blockIdx.x;
+    const uint32_t tok = blockIdx.y;
+    const uint32_t lane = threadIdx.x;
+    if (row >= out_dim || tok >= n_tok) return;
+
+    const __half *wr = w + (uint64_t)row * in_dim;
+    const float *xr = x + (uint64_t)tok * in_dim;
+    float sum = 0.0f;
+    for (uint32_t i = lane; i < in_dim; i += 32u) {
+        const float xv = __half2float(__float2half(xr[i]));
+        sum += __half2float(wr[i]) * xv;
+    }
+    sum = warp_sum_f32(sum);
+    if (lane == 0u) {
+        out[(uint64_t)tok * out_dim + row] = sum;
+    }
+}
+
 template <uint32_t BT>
 static void hip_launch_q8_batch_sharedx_bt(
         float *out,
@@ -180,6 +205,83 @@ static void hip_launch_grouped_q8_a_sharedx_strided(
     }
 }
 
+
+static int hip_launch_q8_batch_reuse(
+        float *out,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks,
+        uint32_t n_tok,
+        uint32_t rows_per_block,
+        int use_dp4a) {
+    const unsigned grid =
+        (unsigned)((out_dim + rows_per_block - 1u) / rows_per_block);
+    const unsigned threads = rows_per_block * 32u;
+    if (n_tok <= 2u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<2><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block, use_dp4a);
+    } else if (n_tok == 3u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<3><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block, use_dp4a);
+    } else if (n_tok <= 4u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<4><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block, use_dp4a);
+    } else if (n_tok == 5u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<5><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block, use_dp4a);
+    } else if (n_tok == 6u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<6><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block, use_dp4a);
+    } else if (n_tok <= 8u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<8><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block, use_dp4a);
+    } else {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<16><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block, use_dp4a);
+    }
+    return hip_ok(hipGetLastError(), "matmul_q8_0 batch reuse launch");
+}
+
+/*
+ * Row count below which dense projections take the per-row decode kernels
+ * instead of a batched GEMM.
+ *
+ * Prompt chunks are hundreds to thousands of rows and amortize hipBLAS macro
+ * tiles; a DSpark verification block is a handful of rows and does not. Zero
+ * disables the small-batch route entirely, which is how an A/B run isolates it.
+ */
+static uint32_t ds4_rocm_dense_small_batch_rows(void) {
+    static int parsed = -1;
+    static uint32_t cached = 24u;
+    if (parsed < 0) {
+        parsed = 1;
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_DENSE_SMALL_BATCH_ROWS");
+        if (env && env[0]) {
+            char *end = NULL;
+            const unsigned long value = strtoul(env, &end, 10);
+            if (end != env && end && *end == '\0' && value <= 256ul) {
+                cached = (uint32_t)value;
+            } else {
+                fprintf(stderr,
+                        DS4_GPU_LOG_PREFIX "invalid GUFO_DEEPSEEK_ROCM_DENSE_SMALL_BATCH_ROWS=%s; "
+                        "expected 0..256\n",
+                        env);
+            }
+        }
+    }
+    return ds4_rocm_small_batch_limit(cached);
+}
+
 static int hip_matmul_q8_0_tensor_f16_gemm(
         ds4_gpu_tensor *out,
         const void *model_map,
@@ -307,7 +409,9 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
         !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
         !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
         x->bytes < x_bytes || out->bytes < out_bytes) return 0;
-    if (n_tok > 1 &&
+    /* The shared-expert hipBLAS route wins for prompt chunks and loses badly for
+     * verification blocks, for the same macro-tile padding reason. */
+    if (n_tok > ds4_rocm_dense_small_batch_rows() &&
         hip_runtime_config()->shared_down_hipblas && in_dim == 2048u && out_dim == 4096u &&
         hip_matmul_q8_0_tensor_f16_gemm(out, model_map, model_size, weight_offset,
                                          in_dim, out_dim, x, n_tok, label ? label : "shared_expert")) {
@@ -392,9 +496,55 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
             return hip_ok(hipGetLastError(), "matmul_q8_0 f32 batch wmma 4w launch");
         }
 #endif
+        const uint32_t small_batch_rows = ds4_rocm_dense_small_batch_rows();
+        if ((in_dim & 31u) == 0u && n_tok <= small_batch_rows && n_tok <= 16u) {
+            /*
+             * Verification-block width: quantize the activations once and reuse
+             * each weight block across the batch, in the decode kernel's access
+             * order. This both moves the weights once and keeps the result
+             * bitwise equal to ordinary decode.
+             */
+            const uint64_t xq_bytes = (uint64_t)n_tok * blocks * 32u;
+            const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
+            const uint64_t tmp_bytes =
+                scale_offset + (uint64_t)n_tok * blocks * sizeof(float);
+            void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 narrow batch prequant");
+            if (tmp) {
+                int8_t *xq = (int8_t *)tmp;
+                float *xscale = (float *)((char *)tmp + scale_offset);
+                dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1);
+                quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
+                        xq, xscale, (const float *)x->ptr, in_dim, blocks);
+                if (hip_ok(hipGetLastError(),
+                           "matmul_q8_0 narrow batch quantize launch")) {
+                    return hip_launch_q8_batch_reuse(
+                            (float *)out->ptr,
+                            reinterpret_cast<const unsigned char *>(wptr),
+                            xq,
+                            xscale,
+                            in_dim,
+                            out_dim,
+                            blocks,
+                            (uint32_t)n_tok,
+                            hip_runtime_config()->q8_decode_rpb,
+                            1);
+                }
+            }
+        }
         if ((in_dim & 31u) == 0u && out_dim <= UINT32_MAX && n_tok <= UINT32_MAX) {
             const uint32_t rows_per_block = 32u;
-            const uint32_t tile = 32u;
+            /*
+             * Match the token tile to the rows actually present. The tile is the
+             * unit of shared-activation staging and of the token loop inside the
+             * kernel, so a 32-wide tile on a six-row verification block does
+             * more than five times the necessary work. Prompt chunks are far
+             * wider than any tile and keep the 32-wide choice.
+             */
+            const uint32_t tile = n_tok >= 32u ? 32u
+                                : n_tok > 8u   ? 16u
+                                : n_tok > 4u   ? 8u
+                                : n_tok > 2u   ? 4u
+                                               : 2u;
             const uint32_t block_tile = 16u;
             hip_launch_q8_batch_sharedx((float *)out->ptr,
                                          reinterpret_cast<const unsigned char *>(wptr),
@@ -748,6 +898,56 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
     if (!wptr) return 0;
     const __half *w = (const __half *)wptr;
     const int ordered_decode = n_tok == 1u;
+    if (ds4_rocm_support_batch_mode() &&
+        n_tok > 1u && n_tok <= 8u &&
+        in_dim == 16384u && out_dim == 24u) {
+        const dim3 grid((uint32_t)out_dim, (uint32_t)n_tok, 1u);
+        matmul_f16_tiny_batch_wave_kernel<<<grid, 32u>>>(
+            (float *)out->ptr,
+            w,
+            (const float *)x->ptr,
+            (uint32_t)in_dim,
+            (uint32_t)out_dim,
+            (uint32_t)n_tok);
+        return hip_ok(
+            hipGetLastError(),
+            "f16 DSpark support tiny-batch wave launch");
+    }
+    /*
+     * A speculative verification block has a handful of rows. hipBLAS pads M to
+     * its macro-tile, so a six-row projection costs about what a 128-row one
+     * would; replaying the single-row warp kernel per row is both far cheaper at
+     * this width and bitwise identical to ordinary decode, which is what lets a
+     * verified row's greedy choice match autoregressive decode.
+     */
+    if (n_tok > 1u && n_tok <= ds4_rocm_dense_small_batch_rows()) {
+        /*
+         * Replay the single-row decode kernel per row rather than widening the
+         * reduction across a token grid.
+         *
+         * Widening is about 10 ms/pass cheaper, but it changes the accumulation
+         * order of the 16384-wide hyper-connection projection, and that alone
+         * flips the target's greedy choice at the very first verified row. The
+         * first row is the one position speculative decoding cannot afford to get
+         * wrong, so this path keeps decode's order exactly.
+         */
+        for (uint64_t t = 0; t < n_tok; t++) {
+            ds4_gpu_tensor x_row = {
+                (void *)((char *)x->ptr + t * in_dim * sizeof(float)),
+                in_dim * sizeof(float),
+                0};
+            ds4_gpu_tensor out_row = {
+                (void *)((char *)out->ptr + t * out_dim * sizeof(float)),
+                out_dim * sizeof(float),
+                0};
+            if (!ds4_gpu_matmul_f16_tensor(&out_row, model_map, model_size,
+                                           weight_offset, in_dim, out_dim,
+                                           &x_row, 1u)) {
+                return 0;
+            }
+        }
+        return 1;
+    }
     if (g_hipblas_ready && n_tok > 1) {
         const uint64_t xh_count = n_tok * in_dim;
         __half *xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "f16 gemm activations");

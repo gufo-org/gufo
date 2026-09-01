@@ -20,6 +20,41 @@ static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
     return ab > c ? ab : c;
 }
 
+/*
+ * Row count below which a routed-MoE call is treated as a speculative
+ * verification block rather than a prompt chunk.
+ *
+ * The expert-tile routes size their grids by the 256-entry expert table, so a
+ * six-row block launches two orders of magnitude more blocks than it needs. The
+ * decode routes are indexed by (row, expert) pair instead, which both matches
+ * the work and reproduces one-token decode's per-row arithmetic.
+ */
+static uint32_t ds4_rocm_moe_small_batch_rows(void) {
+    static int parsed = -1;
+    static uint32_t cached = 16u;
+    if (parsed < 0) {
+        parsed = 1;
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_MOE_SMALL_BATCH_ROWS");
+        if (env && env[0]) {
+            char *end = NULL;
+            const unsigned long value = strtoul(env, &end, 10);
+            if (end != env && end && *end == '\0' && value <= 64ul) {
+                cached = (uint32_t)value;
+            } else {
+                fprintf(stderr,
+                        DS4_GPU_LOG_PREFIX "invalid GUFO_DEEPSEEK_ROCM_MOE_SMALL_BATCH_ROWS=%s; "
+                        "expected 0..64\n",
+                        env);
+            }
+        }
+    }
+    return ds4_rocm_small_batch_limit(cached);
+}
+
+static uint32_t ds4_rocm_compact_down_rows_per_block(void) {
+    return 32u;
+}
+
 /* Mixed IQ2_XXS-gate/Q2_K-down models already compute routed mid activations
  * as float.  Reuse the newer Q2_K expert-batch/WMMA down kernels instead of
  * re-quantizing mid to Q8_K and taking the older qwarp down path.  This keeps
@@ -52,9 +87,31 @@ static int routed_moe_q2_float_down_launch(
     }
 
     uint32_t h_counts[DS4_ROCM_N_EXPERT] = {0};
-    if (!hip_ok(hipMemcpy(h_counts, counts, sizeof(h_counts), hipMemcpyDeviceToHost),
-                 "routed_moe iq2/q2 float-down counts copy")) {
+    const bool report_expert_spread =
+        getenv("GUFO_DEEPSEEK_ROCM_MOE_EXPERT_SPREAD") != NULL;
+    if (!hip_ok(hipMemcpy(
+                    h_counts,
+                    counts,
+                    sizeof(h_counts),
+                    hipMemcpyDeviceToHost),
+                "routed_moe iq2/q2 float-down counts copy")) {
         return 0;
+    }
+    /*
+     * How many distinct experts a batch actually touches decides whether grouping
+     * rows by expert is worth anything: the per-(row, expert) route reloads an
+     * expert once per row, so the saving available is exactly the overlap.
+     */
+    if (report_expert_spread) {
+        uint32_t distinct = 0;
+        for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
+            if (h_counts[e] != 0u) distinct++;
+        }
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "moe expert spread rows=%u pairs=%u distinct=%u\n",
+                n_tokens,
+                n_tokens * n_expert,
+                distinct);
     }
 
     const uint32_t down_tile = 4u;
@@ -401,22 +458,49 @@ static int routed_moe_launch(
         hip_block_q8_K *xq = (hip_block_q8_K *)down->ptr;
         hip_block_q8_K *midq = (hip_block_q8_K *)gate->ptr;
         const uint32_t pair_count = n_tokens * n_expert;
-        const uint32_t use_sorted_pairs = n_tokens > 1u &&
-            (!q4k_path || n_tokens >= 32u);
+        /*
+         * A DSpark verification block is a handful of rows, not a prompt chunk.
+         * The sorted-pair expert-tile route pays a grid sized by the expert
+         * table rather than by the work, so at these widths it costs far more
+         * than running each (row, expert) pair through the decode route. The
+         * decode route also computes each row independently, which is what
+         * makes a verified row's logits match ordinary one-token decode.
+         */
+        const uint32_t small_batch = n_tokens > 1u &&
+            n_tokens <= ds4_rocm_moe_small_batch_rows();
+        const uint32_t grouped_gate =
+            (ds4_rocm_verifier_batch_mode() ||
+             ds4_rocm_support_batch_mode()) &&
+            iq2_path && !q4k_path && n_expert == 6u &&
+            n_tokens > 1u && n_tokens <= 6u;
+        /*
+         * DSpark rows share enough routed experts to amortize sorting and load
+         * each selected gate/up matrix once. The verifier's Q2 down projection
+         * is compacted separately over the live (row, slot) pairs below.
+         */
+        const uint32_t use_sorted_pairs =
+            grouped_gate ||
+            (n_tokens > 1u && !small_batch &&
+             (!q4k_path || n_tokens >= 32u));
         const uint32_t use_expert_tiles = use_sorted_pairs;
-        const uint32_t expert_tile_m = 8u;
+        const uint32_t expert_tile_m = grouped_gate ? 4u : 8u;
         const uint32_t write_gate_up = 0u;
         const uint32_t use_p2_sorted = 0u;
         const uint32_t use_atomic_down = use_expert_tiles && n_tokens >= 128u;
         const uint32_t use_gate_row2048 = !q4k_path && use_expert_tiles && n_tokens >= 128u;
         const uint32_t use_down_tile16 = !q4k_path && use_atomic_down && n_tokens >= 128u;
         const uint32_t use_decode_lut_gate =
-            n_tokens == 1u && xq_blocks <= 16u;
+            (n_tokens == 1u || (small_batch && !grouped_gate)) &&
+            xq_blocks <= 16u;
         const uint32_t gate_row_span = 1024u;
         const uint32_t down_row_span = 2048u;
         const uint32_t use_down_row2048 = !q4k_path && use_atomic_down && use_down_tile16;
+        const uint32_t use_compact_float_down =
+            ds4_rocm_verifier_batch_mode() &&
+            grouped_gate && n_expert == DS4_ROCM_N_EXPERT_USED &&
+            n_tokens > 1u && n_tokens <= 6u;
         const uint32_t use_direct_down_sum6 =
-            n_tokens == 1u && n_expert == 6u;
+            n_expert == 6u && n_tokens == 1u;
         uint32_t *sorted_pairs = NULL;
         uint32_t *sorted_offsets = NULL;
         uint32_t *sorted_counts = NULL;
@@ -437,7 +521,16 @@ static int routed_moe_launch(
             const uint64_t offsets_bytes = 257ull * sizeof(uint32_t);
             const uint64_t cursors_bytes = 256ull * sizeof(uint32_t);
             const uint64_t sorted_bytes = (uint64_t)pair_count * sizeof(uint32_t);
-            tile_capacity = (pair_count + expert_tile_m - 1u) / expert_tile_m + 256u;
+            /*
+             * One tile per full group plus at most one partial tile per distinct
+             * expert. A batch cannot touch more experts than it has pairs, so the
+             * old flat +256 slack made a narrow batch launch two orders of
+             * magnitude more tiles than it could ever fill.
+             */
+            const uint32_t tile_slack =
+                pair_count < DS4_ROCM_N_EXPERT ? pair_count : DS4_ROCM_N_EXPERT;
+            tile_capacity =
+                (pair_count + expert_tile_m - 1u) / expert_tile_m + tile_slack;
             tile16_capacity = use_down_tile16 ? ((pair_count + 15u) / 16u + 256u) : 0u;
             const uint64_t tile_offsets_bytes = 257ull * sizeof(uint32_t);
             const uint64_t tile_total_bytes = sizeof(uint32_t);
@@ -522,7 +615,8 @@ static int routed_moe_launch(
         const uint32_t iq2_down_hot_threshold = 8u;
         uint32_t h_iq2_gate_hot[256] = {0};
         const uint32_t use_iq2_gate_wmma =
-            ok && iq2_path && n_tokens > 1u && n_expert == 6u && !write_gate_up &&
+            ok && iq2_path && n_tokens >= iq2_gate_hot_threshold &&
+            n_expert == 6u && !write_gate_up &&
             sorted_pairs && sorted_offsets && sorted_counts && tile_experts && iq2_gate_hot_dev && use_expert_tiles &&
             (expert_in_dim % 16u) == 0u && (expert_mid_dim % 16u) == 0u;
         if (use_iq2_gate_wmma) {
@@ -808,14 +902,50 @@ static int routed_moe_launch(
         }
         const uint32_t use_iq2_q2_float_down =
             ok && iq2_path && n_tokens > 1u && n_expert == 6u &&
+            !use_direct_down_sum6 && !use_compact_float_down &&
             sorted_pairs && sorted_offsets && sorted_counts && tile_experts;
-        if (ok && !use_iq2_q2_float_down) {
+        if (ok && !use_iq2_q2_float_down && !use_compact_float_down) {
             dim3 midq_grid(midq_blocks, n_tokens * n_expert, 1);
             q8_K_quantize_kernel<<<midq_grid, 256>>>(midq, (const float *)mid->ptr, expert_mid_dim, n_tokens * n_expert);
             ok = hip_ok(hipGetLastError(), "routed_moe mid quantize launch");
         }
         if (ok) {
-            if (use_iq2_q2_float_down) {
+            if (use_compact_float_down) {
+                const uint32_t rows_per_block =
+                    ds4_rocm_compact_down_rows_per_block();
+                const uint32_t pair_count = n_tokens * n_expert;
+                dim3 compact_grid(
+                    (out_dim + rows_per_block - 1u) / rows_per_block,
+                    pair_count,
+                    1u);
+                moe_down_q2K_pair_float_batch_warp32_kernel
+                    <<<compact_grid, rows_per_block * 32u>>>(
+                        (__half *)down->ptr,
+                        down_w,
+                        (const float *)mid->ptr,
+                        (const int32_t *)selected->ptr,
+                        down_expert_bytes,
+                        down_row_bytes,
+                        expert_mid_dim,
+                        out_dim,
+                        pair_count);
+                ok = hip_ok(
+                    hipGetLastError(),
+                    "routed_moe compact float down launch");
+                if (ok) {
+                    const uint64_t n2 =
+                        (uint64_t)n_tokens * (out_dim >> 1u);
+                    moe_sum_f16x2_kernel<<<(n2 + 255u) / 256u, 256>>>(
+                        (float *)out->ptr,
+                        (const __half *)down->ptr,
+                        out_dim,
+                        n_expert,
+                        n_tokens);
+                    ok = hip_ok(
+                        hipGetLastError(),
+                        "routed_moe compact float down sum launch");
+                }
+            } else if (use_iq2_q2_float_down) {
                 ok = routed_moe_q2_float_down_launch(
                         out, down, mid, iq2_hot_mid_h, use_iq2_hot_f16_mid, down_w,
                         sorted_counts, sorted_offsets, sorted_pairs, tile_experts,
@@ -834,7 +964,7 @@ static int routed_moe_launch(
                 down_tile_capacity = tile16_capacity;
             }
             if (use_direct_down_sum6) {
-                dim3 sgrid((out_dim + 31u) / 32u, 1, 1);
+                dim3 sgrid((out_dim + 31u) / 32u, n_tokens, 1);
                 if (q4k_path) {
                     moe_down_q4K_sum6_qwarp32_kernel<<<sgrid, 256>>>(
                         (float *)out->ptr,
@@ -993,7 +1123,8 @@ static int routed_moe_launch(
             ok = hip_ok(hipGetLastError(), "routed_moe down launch");
             }
         }
-        if (ok && !use_atomic_down && !use_direct_down_sum6 && !use_iq2_q2_float_down) {
+        if (ok && !use_atomic_down && !use_direct_down_sum6 &&
+            !use_compact_float_down && !use_iq2_q2_float_down) {
             uint64_t n = (uint64_t)n_tokens * out_dim;
             moe_sum_kernel<<<(n + 255) / 256, 256>>>((float *)out->ptr, (const float *)down->ptr, out_dim, n_expert, n_tokens);
             ok = hip_ok(hipGetLastError(), "routed_moe sum launch");
@@ -1393,6 +1524,7 @@ extern "C" int ds4_gpu_routed_moe_one_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor
                              expert_in_dim, expert_mid_dim, out_dim,
                              selected, weights, n_total_expert, n_expert, clamp, x, 1);
 }
+
 extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_total_expert, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t layer_index, uint32_t n_tokens, bool *mid_is_f16, bool force_resident) {
     (void)layer_index;
     (void)force_resident;

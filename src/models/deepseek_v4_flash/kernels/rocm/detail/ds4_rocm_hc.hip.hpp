@@ -371,3 +371,52 @@ __global__ static void hc_split_weighted_sum_norm_fused_kernel(
         norm_out[(uint64_t)t * n_embd + col] = v * norm_scale * norm_w[col];
     }
 }
+
+/* Collapse one layer's hyper-connection streams into the plain hidden state the
+ * DSpark drafter consumes, writing into a strided slot of the fused feature
+ * row.
+ *
+ * The drafter's main_proj expects each row's sampled layers concatenated, so
+ * capture writes directly at the slot offset rather than building per-layer
+ * buffers and gathering them later. The collapse is the unweighted mean over
+ * streams: this is a feature extractor for the drafter, not the target's output
+ * head, so it deliberately does not use the learned output HC weights. */
+__global__ static void dspark_capture_features_kernel(
+        float       *out,
+        const float *hc,
+        uint32_t     out_row_stride,
+        uint32_t     n_embd,
+        uint32_t     n_hc,
+        uint32_t     n_rows) {
+    const uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t n = (uint64_t)n_embd * n_rows;
+    if (gid >= n) return;
+    const uint32_t d = (uint32_t)(gid % n_embd);
+    const uint32_t t = (uint32_t)(gid / n_embd);
+    float acc = 0.0f;
+    for (uint32_t h = 0; h < n_hc; h++) {
+        acc += hc[(uint64_t)t * n_hc * n_embd + (uint64_t)h * n_embd + d];
+    }
+    out[(uint64_t)t * out_row_stride + d] = acc / (float)n_hc;
+}
+
+/* Broadcast a plain hidden row into all hyper-connection streams.
+ *
+ * The DSpark drafter's fused target feature is a single 4096-wide vector, but a
+ * stage's attention pre-path consumes hyper-connection form. Replicating the
+ * vector across the streams is what lets the injected context row take the same
+ * route through the stage as an ordinary token. */
+__global__ static void dspark_repeat_hc_kernel(
+        float       *out_hc,
+        const float *x,
+        uint32_t     n_embd,
+        uint32_t     n_hc,
+        uint32_t     n_rows) {
+    const uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t n = (uint64_t)n_embd * n_hc * n_rows;
+    if (gid >= n) return;
+    const uint32_t d = (uint32_t)(gid % n_embd);
+    const uint64_t rest = gid / n_embd;
+    const uint32_t row = (uint32_t)(rest / n_hc);
+    out_hc[gid] = x[(uint64_t)row * n_embd + d];
+}

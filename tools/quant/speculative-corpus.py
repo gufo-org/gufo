@@ -15,14 +15,15 @@ import sys
 
 
 GENERATED_RE = re.compile(
-    r"Generated\s+(?P<tokens>\d+)\s+tokens on GPU in\s+"
+    # Qwen reports "on GPU"; DeepSeek V4 Flash reports "on ROCm".
+    r"Generated\s+(?P<tokens>\d+)\s+tokens on (?:GPU|ROCm) in\s+"
     r"(?P<seconds>[0-9.]+)s\s+\((?P<tps>[0-9.]+)\s+tok/s\)"
 )
-SPECULATIVE_RE = re.compile(
-    r"\[Speculative\]: acceptance=(?P<acceptance>[0-9.eE+-]+)"
-    r"\s+drafted=(?P<drafted>\d+)\s+accepted=(?P<accepted>\d+)"
-    r"\s+verification_steps=(?P<steps>\d+)"
+SPECULATIVE_LINE_RE = re.compile(r"^\[Speculative\]:\s+(?P<body>.+)$", re.MULTILINE)
+SPECULATIVE_FIELD_RE = re.compile(
+    r"(?P<key>[a-z_]+)=(?P<value>[0-9.eE+-]+)"
 )
+DSPARK_REFERENCE_SYSTEM_PROMPT = "You are a helpful assistant"
 CONTROLLED_ENV = {
     "GUFO_BF16_SMALL_BATCH_EXACT_LDS8",
     "GUFO_DFLASH_GEMM",
@@ -39,9 +40,97 @@ CONTROLLED_ENV = {
 }
 
 
+def parse_speculative_stats(stderr: str) -> dict[str, int | float]:
+    line = SPECULATIVE_LINE_RE.search(stderr)
+    if line is None:
+        raise ValueError("speculative statistics line is missing")
+    fields = {
+        match.group("key"): match.group("value")
+        for match in SPECULATIVE_FIELD_RE.finditer(line.group("body"))
+    }
+    required = ("acceptance", "drafted", "accepted", "verification_steps")
+    missing = [field for field in required if field not in fields]
+    if missing:
+        raise ValueError(
+            f"speculative statistics missing field(s): {', '.join(missing)}"
+        )
+
+    result: dict[str, int | float] = {
+        "acceptance": float(fields["acceptance"]),
+        "drafted": int(fields["drafted"]),
+        "accepted": int(fields["accepted"]),
+        "steps": int(fields["verification_steps"]),
+    }
+    integer_fields = (
+        "skipped",
+        "positional_accepted",
+        "full_blocks",
+        "anchors",
+        "verifier_rows",
+    )
+    float_fields = ("positional_acceptance", "full_block_rate")
+    for field in integer_fields:
+        if field in fields:
+            result[field] = int(fields[field])
+    for field in float_fields:
+        if field in fields:
+            result[field] = float(fields[field])
+    return result
+
+
+def build_prompt_command(
+    args: argparse.Namespace, prompt: str, speculative: bool
+) -> list[str]:
+    prompt_mode = args.prompt_mode
+    if prompt_mode == "auto":
+        prompt_mode = "chat" if args.backend == "dspark" else "raw"
+
+    command = [
+        args.binary,
+        "prompt",
+        "--verbose",
+        "--model",
+        args.model,
+        "--max-tokens",
+        str(args.max_tokens),
+    ]
+    if prompt_mode == "raw":
+        command.append("--raw")
+    else:
+        system_prompt = args.system_prompt
+        if system_prompt is None and args.backend == "dspark":
+            system_prompt = DSPARK_REFERENCE_SYSTEM_PROMPT
+        if system_prompt is not None:
+            command.extend(["--system", system_prompt])
+
+    if speculative:
+        command.extend(["--speculative", args.backend])
+        if args.backend != "dspark":
+            # DSpark's block length is fixed by its checkpoint metadata.
+            command.extend(
+                [
+                    "--draft-tokens",
+                    str(args.draft_tokens),
+                    "--draft-policy",
+                    args.draft_policy,
+                    "--min-draft-tokens",
+                    str(args.min_draft_tokens),
+                ]
+            )
+        if args.backend == "dspark":
+            option = "--dspark-model"
+        elif args.backend.startswith("dflash"):
+            option = "--dflash-model"
+        else:
+            option = "--mtp-model"
+        command.extend([option, args.draft_model])
+    command.append(prompt)
+    return command
+
+
 def verification_environment(profile: str, backend: str) -> dict[str, str]:
     result: dict[str, str] = {}
-    if profile == "production":
+    if profile == "production" or backend == "dspark":
         return result
     if backend.startswith("dflash"):
         result["GUFO_DFLASH_GEMM"] = "hipblaslt"
@@ -90,36 +179,7 @@ def run_prompt(
     speculative: bool,
     extra_environment: dict[str, str],
 ) -> dict[str, object]:
-    command = [
-        args.binary,
-        "prompt",
-        "--raw",
-        "--verbose",
-        "--model",
-        args.model,
-        "--max-tokens",
-        str(args.max_tokens),
-    ]
-    if speculative:
-        command.extend(
-            [
-                "--speculative",
-                args.backend,
-                "--draft-tokens",
-                str(args.draft_tokens),
-                "--draft-policy",
-                args.draft_policy,
-                "--min-draft-tokens",
-                str(args.min_draft_tokens),
-            ]
-        )
-        option = (
-            "--dflash-model"
-            if args.backend.startswith("dflash")
-            else "--mtp-model"
-        )
-        command.extend([option, args.draft_model])
-    command.append(prompt)
+    command = build_prompt_command(args, prompt, speculative)
 
     environment = os.environ.copy()
     for key in CONTROLLED_ENV:
@@ -151,19 +211,14 @@ def run_prompt(
         "tps": float(generated.group("tps")),
     }
     if speculative:
-        stats = SPECULATIVE_RE.search(process.stderr)
-        if stats is None:
+        try:
+            stats = parse_speculative_stats(process.stderr)
+        except ValueError as error:
             raise RuntimeError(
-                f"could not parse speculative statistics:\n{process.stderr}"
-            )
-        result.update(
-            {
-                "acceptance": float(stats.group("acceptance")),
-                "drafted": int(stats.group("drafted")),
-                "accepted": int(stats.group("accepted")),
-                "steps": int(stats.group("steps")),
-            }
-        )
+                f"could not parse speculative statistics ({error}):\n"
+                f"{process.stderr}"
+            ) from error
+        result.update(stats)
     return result
 
 
@@ -211,7 +266,8 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--draft-model", required=True)
     parser.add_argument(
-        "--backend", choices=("dflash2", "mtp"), default="dflash2"
+        # dspark is DeepSeek V4 Flash's own drafter; dflash/mtp are Qwen's.
+        "--backend", choices=("dflash2", "mtp", "dspark"), default="dflash2"
     )
     parser.add_argument(
         "--profile",
@@ -230,6 +286,16 @@ def main() -> int:
         default="benchmarks/qwen3.8-27b/speculative-corpus.json",
     )
     parser.add_argument("--max-tokens", type=int, default=32)
+    parser.add_argument(
+        "--prompt-mode",
+        choices=("auto", "raw", "chat"),
+        default="auto",
+        help="auto uses chat framing for DSpark and raw framing for Qwen",
+    )
+    parser.add_argument(
+        "--system-prompt",
+        help="chat-mode system prompt; DSpark auto mode uses the upstream default",
+    )
     parser.add_argument("--draft-tokens", type=int, default=7)
     parser.add_argument(
         "--draft-policy",
@@ -243,6 +309,13 @@ def main() -> int:
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--allow-mismatch", action="store_true")
+    parser.add_argument(
+        "--min-verification-steps",
+        type=int,
+        default=0,
+        help="reject sparse per-prompt samples (DSpark defaults to 8)",
+    )
+    parser.add_argument("--allow-sparse", action="store_true")
     parser.add_argument("--env", action="append", default=[])
     args = parser.parse_args()
 
@@ -252,6 +325,7 @@ def main() -> int:
         or args.min_draft_tokens <= 0
         or args.min_draft_tokens > args.draft_tokens
         or args.repetitions <= 0
+        or args.min_verification_steps < 0
     ):
         parser.error("token counts and repetitions must be positive")
 
@@ -263,18 +337,31 @@ def main() -> int:
         parser.error(str(error))
     print(
         "| prompt | category | exact | AR tok/s | speculative tok/s | "
-        "speedup | acceptance | avg draft |"
+        "speedup | support acceptance | positional | full blocks | attempts | "
+        "skipped | avg support |"
     )
-    print("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print(
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
+        "---: | ---: | ---: |"
+    )
 
     mismatches: list[str] = []
+    sparse_samples: list[str] = []
     total_tokens = 0
     total_ar_seconds = 0.0
     total_spec_seconds = 0.0
     total_drafted = 0
     total_accepted = 0
     total_steps = 0
+    total_skipped = 0
+    total_positional_accepted = 0
+    total_full_blocks = 0
+    have_positional = True
+    have_full_blocks = True
     speedups: list[float] = []
+    minimum_steps = args.min_verification_steps
+    if minimum_steps == 0 and args.backend == "dspark":
+        minimum_steps = 8
 
     for case in prompts:
         autoregressive = run_prompt(args, case["text"], False, {})
@@ -299,6 +386,23 @@ def main() -> int:
             int(run["drafted"]) / max(int(run["steps"]), 1)
             for run in speculative_runs
         )
+        attempts = int(speculative_runs[0]["steps"])
+        skipped = int(speculative_runs[0].get("skipped", 0))
+        positional = (
+            statistics.median(
+                float(run["positional_acceptance"])
+                for run in speculative_runs
+            )
+            if all("positional_acceptance" in run for run in speculative_runs)
+            else None
+        )
+        full_block_rate = (
+            statistics.median(
+                float(run["full_block_rate"]) for run in speculative_runs
+            )
+            if all("full_block_rate" in run for run in speculative_runs)
+            else None
+        )
         ar_seconds = float(autoregressive["seconds"])
         ar_tps = float(autoregressive["tps"])
         speedup = spec_tps / ar_tps if ar_tps > 0.0 else 0.0
@@ -311,13 +415,37 @@ def main() -> int:
         total_drafted += int(representative["drafted"])
         total_accepted += int(representative["accepted"])
         total_steps += int(representative["steps"])
+        total_skipped += int(representative.get("skipped", 0))
+        if "positional_accepted" in representative:
+            total_positional_accepted += int(
+                representative["positional_accepted"]
+            )
+        else:
+            have_positional = False
+        if "full_blocks" in representative:
+            total_full_blocks += int(representative["full_blocks"])
+        else:
+            have_full_blocks = False
 
+        positional_cell = (
+            f"{positional * 100.0:.1f}%" if positional is not None else "-"
+        )
+        full_block_cell = (
+            f"{full_block_rate * 100.0:.1f}%"
+            if full_block_rate is not None
+            else "-"
+        )
         print(
             f"| {case['id']} | {case['category']} | "
             f"{'yes' if exact else 'NO'} | {ar_tps:.2f} | {spec_tps:.2f} | "
             f"{speedup:.2f}x | {acceptance * 100.0:.1f}% | "
+            f"{positional_cell} | {full_block_cell} | {attempts} | {skipped} | "
             f"{average_draft:.2f} |"
         )
+        if minimum_steps > 0 and attempts < minimum_steps:
+            sparse_samples.append(
+                f"{case['id']}: {attempts} attempted blocks, need {minimum_steps}"
+            )
         if not exact:
             detail = mismatch_summary(
                 str(autoregressive["completion"]),
@@ -330,9 +458,29 @@ def main() -> int:
     aggregate_acceptance = (
         total_accepted / total_drafted if total_drafted else 0.0
     )
+    aggregate_positional = (
+        total_positional_accepted / total_drafted
+        if have_positional and total_drafted
+        else None
+    )
+    aggregate_full_rate = (
+        total_full_blocks / total_steps
+        if have_full_blocks and total_steps
+        else None
+    )
     suite_hash = hashlib.sha256(
         Path(args.suite).read_bytes()
     ).hexdigest()[:12]
+    positional_summary = (
+        f"positional={aggregate_positional * 100.0:.1f}% "
+        if aggregate_positional is not None
+        else ""
+    )
+    full_block_summary = (
+        f"full_blocks={aggregate_full_rate * 100.0:.1f}% "
+        if aggregate_full_rate is not None
+        else ""
+    )
     print()
     print(
         f"aggregate: prompts={len(prompts)} suite={suite_hash} "
@@ -341,12 +489,18 @@ def main() -> int:
         f"speedup={aggregate_spec / aggregate_ar:.2f}x "
         f"median_speedup={statistics.median(speedups):.2f}x "
         f"acceptance={aggregate_acceptance * 100.0:.1f}% "
-        f"avg_draft={total_drafted / max(total_steps, 1):.2f}"
+        f"{positional_summary}{full_block_summary}"
+        f"attempts={total_steps} skipped={total_skipped} "
+        f"avg_support={total_drafted / max(total_steps, 1):.2f}"
     )
     for mismatch in mismatches:
         print(f"mismatch: {mismatch}", file=sys.stderr)
+    for sparse in sparse_samples:
+        print(f"sparse: {sparse}", file=sys.stderr)
 
-    return 0 if args.allow_mismatch or not mismatches else 1
+    mismatch_failed = bool(mismatches) and not args.allow_mismatch
+    sparse_failed = bool(sparse_samples) and not args.allow_sparse
+    return 1 if mismatch_failed or sparse_failed else 0
 
 
 if __name__ == "__main__":

@@ -70,13 +70,17 @@ void PrintPromptHelp(std::string_view program_name) {
                    "Maximum token cap for thinking traces before forcing final "
                    "answer (default: -1 = unlimited) (TODO: qwen, deepseek)",
                    "Reasoning", &opt.reasoning_budget);
-  parser.AddOption("", "--speculative", "MODE",
-                   "Draft backend: dflash, dflash2, mtp, mtp-npu, npu, pld, "
-                   "self, or off",
-                   "Speculative", &opt.speculative_backend);
+  parser.AddOption(
+      "", "--speculative", "MODE",
+      "Draft backend: dspark (DeepSeek V4 Flash), dflash, dflash2, "
+      "mtp, mtp-npu, npu, pld, self, or off",
+      "Speculative", &opt.speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
                    "Speculative", &opt.dflash_model_path);
+  parser.AddOption("", "--dspark-model", "PATH",
+                   "Path to the DeepSeek V4 Flash DSpark support GGUF file",
+                   "Speculative", &opt.dspark_model_path);
   parser.AddOption("", "--mtp-model", "PATH",
                    "Path to quantized Qwen MTP draft head GGUF file",
                    "Speculative", &opt.mtp_model_path);
@@ -175,8 +179,15 @@ int RunDeepSeekPrompt(const PromptOptions& opt,
     PrintModelLoadTime(load_start, false);
     return 1;
   }
-  if (!opt.speculative_backend.empty()) {
-    std::cerr << "DeepSeek V4 Flash speculative decoding is not implemented\n";
+  const bool dspark_requested =
+      opt.speculative_backend == "dspark" || !opt.dspark_model_path.empty();
+  if (!opt.speculative_backend.empty() && !dspark_requested) {
+    std::cerr << "DeepSeek V4 Flash supports only --speculative dspark\n";
+    PrintModelLoadTime(load_start, false);
+    return 1;
+  }
+  if (opt.speculative_backend == "dspark" && opt.dspark_model_path.empty()) {
+    std::cerr << "--speculative dspark requires --dspark-model\n";
     PrintModelLoadTime(load_start, false);
     return 1;
   }
@@ -189,6 +200,7 @@ int RunDeepSeekPrompt(const PromptOptions& opt,
           .max_context = kDefaultContext,
           .prefill_chunk = 2048,
           .power_percent = 100,
+          .dspark_model_path = opt.dspark_model_path,
       },
       &error);
   if (model == nullptr) {
@@ -218,6 +230,27 @@ int RunDeepSeekPrompt(const PromptOptions& opt,
     return 1;
   }
 
+  if (const char* draft_test =
+          std::getenv("GUFO_DEEPSEEK_DSPARK_DRAFT_SELFTEST");
+      draft_test != nullptr && draft_test[0] != '\0') {
+    const int cycles = std::atoi(draft_test);
+    if (!session->DsparkDraftSelfTest(cycles > 0 ? cycles : 4, &error)) {
+      std::cerr << "DSpark draft self-test reported a problem: " << error
+                << '\n';
+    }
+    return 0;
+  }
+
+  if (const char* selftest = std::getenv("GUFO_DEEPSEEK_DSPARK_SELFTEST");
+      selftest != nullptr && selftest[0] != '\0') {
+    const int rows = std::atoi(selftest);
+    if (!session->DsparkSelfTest(rows > 1 ? rows : 6, &error)) {
+      std::cerr << "DSpark verifier self-test reported a problem: " << error
+                << '\n';
+    }
+    return 0;
+  }
+
   if (opt.verbose) {
     std::cout << "[Engine]: DeepSeek V4 Flash ROCm (gfx1151)\n"
               << "Model: " << model->ModelName() << '\n'
@@ -237,27 +270,92 @@ int RunDeepSeekPrompt(const PromptOptions& opt,
   }
   sampling::SamplerState sampler(opt.sampling, sampling_history);
 
+  /*
+   * DSpark drives generation only for greedy decoding. Its verification rule is
+   * a greedy prefix match, so a sampled request keeps the ordinary decode path
+   * rather than silently changing the distribution.
+   */
+  const bool use_dspark = opt.speculative_backend == "dspark" &&
+                          session->HasDspark() &&
+                          opt.sampling.can_use_unmodified_argmax();
+  if (opt.speculative_backend == "dspark" && !use_dspark) {
+    std::cerr << "[Speculative]: dspark needs greedy sampling; using "
+                 "autoregressive decode\n";
+  }
+
   const auto generation_start = std::chrono::steady_clock::now();
   std::size_t generated = 0;
-  for (; generated < opt.max_tokens; ++generated) {
-    const auto logits = session->CopyLogits(&error);
-    if (logits.empty()) {
-      std::cerr << "\nDeepSeek V4 Flash token selection failed: " << error
-                << '\n';
-      return 1;
+  if (use_dspark) {
+    std::vector<int> emitted;
+    bool stop = false;
+    while (generated < opt.max_tokens && !stop) {
+      if (!session->DsparkStep(&emitted, &error)) {
+        std::cerr << "\nDeepSeek V4 Flash speculative decode failed: " << error
+                  << '\n';
+        return 1;
+      }
+      if (emitted.empty())
+        break;
+      for (const int token : emitted) {
+        if (model->IsStopToken(token) || generated >= opt.max_tokens) {
+          stop = true;
+          break;
+        }
+        sampler.Accept(static_cast<sampling::TokenId>(token));
+        std::cout << model->DecodeToken(token) << std::flush;
+        ++generated;
+      }
     }
-    const int token = static_cast<int>(sampler.Sample(logits));
-    if (model->IsStopToken(token)) {
-      break;
-    }
-    sampler.Accept(static_cast<sampling::TokenId>(token));
-    std::cout << model->DecodeToken(token) << std::flush;
-    if (generated + 1 < opt.max_tokens && !session->Evaluate(token, &error)) {
-      std::cerr << "\nDeepSeek V4 Flash decode failed: " << error << '\n';
-      return 1;
+  } else {
+    for (; generated < opt.max_tokens; ++generated) {
+      const auto logits = session->CopyLogits(&error);
+      if (logits.empty()) {
+        std::cerr << "\nDeepSeek V4 Flash token selection failed: " << error
+                  << '\n';
+        return 1;
+      }
+      const int token = static_cast<int>(sampler.Sample(logits));
+      if (model->IsStopToken(token)) {
+        break;
+      }
+      sampler.Accept(static_cast<sampling::TokenId>(token));
+      std::cout << model->DecodeToken(token) << std::flush;
+      if (generated + 1 < opt.max_tokens && !session->Evaluate(token, &error)) {
+        std::cerr << "\nDeepSeek V4 Flash decode failed: " << error << '\n';
+        return 1;
+      }
     }
   }
   std::cout << '\n';
+
+  if (use_dspark) {
+    const auto stats = session->DsparkStatistics();
+    const double support_acceptance =
+        stats.support_drafted != 0
+            ? static_cast<double>(stats.support_accepted) /
+                  static_cast<double>(stats.support_drafted)
+            : 0.0;
+    const double positional_acceptance =
+        stats.support_drafted != 0
+            ? static_cast<double>(stats.positional_accepted) /
+                  static_cast<double>(stats.support_drafted)
+            : 0.0;
+    const double full_block_rate =
+        stats.steps != 0 ? static_cast<double>(stats.full_blocks) /
+                               static_cast<double>(stats.steps)
+                         : 0.0;
+    std::cerr << "[Speculative]: acceptance=" << support_acceptance
+              << " drafted=" << stats.support_drafted
+              << " accepted=" << stats.support_accepted
+              << " verification_steps=" << stats.steps
+              << " skipped=" << stats.skipped
+              << " positional_acceptance=" << positional_acceptance
+              << " positional_accepted=" << stats.positional_accepted
+              << " full_block_rate=" << full_block_rate
+              << " full_blocks=" << stats.full_blocks
+              << " anchors=" << stats.anchors
+              << " verifier_rows=" << stats.verifier_rows << '\n';
+  }
 
   if (opt.verbose && generated > 0) {
     const double seconds =
@@ -332,7 +430,8 @@ std::optional<PromptOptions> ParsePromptOptions(
   };
   parser.AddCustomOption(
       "", "--speculative", "MODE",
-      "Draft backend: dflash, dflash2, mtp, mtp-npu, npu, pld, self, or off",
+      "Draft backend: dspark (DeepSeek V4 Flash), dflash, dflash2, mtp, "
+      "mtp-npu, npu, pld, self, or off",
       "Speculative", parse_speculative_backend);
   parser.AddCustomOption("", "--speculative-decoding", "MODE",
                          "Alias for --speculative", "Speculative",
@@ -340,6 +439,9 @@ std::optional<PromptOptions> ParsePromptOptions(
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
                    "Speculative", &opt.dflash_model_path);
+  parser.AddOption("", "--dspark-model", "PATH",
+                   "Path to the DeepSeek V4 Flash DSpark support GGUF file",
+                   "Speculative", &opt.dspark_model_path);
   parser.AddOption("", "--mtp-model", "PATH",
                    "Path to quantized Qwen MTP draft head GGUF file",
                    "Speculative", &opt.mtp_model_path);

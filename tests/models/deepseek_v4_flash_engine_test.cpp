@@ -47,7 +47,7 @@ void CheckPinnedTrajectory(
   const auto prompt = model->Tokenize(kTrajectoryPrompt);
   Expect(!prompt.empty(), "trajectory prompt tokenization");
 
-  auto session = model->CreateSession(4096, &error);
+  auto session = model->CreateSession(512, &error);
   Expect(session != nullptr, error.c_str());
   Expect(session->Sync(prompt, &error), error.c_str());
 
@@ -169,6 +169,69 @@ void CheckBatchedPrefill(
   Expect(sequential_choice_rank <= 3, "prefill sequential choice rank");
 }
 
+void CheckDsparkPromptSeed(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  std::string error;
+  const auto prompt = model->EncodeChat(
+      "You are a helpful assistant",
+      "The quick brown fox jumps over the lazy dog. Explain why.");
+  Expect(!prompt.empty(), "DSpark seed prompt tokenization");
+
+  auto session = model->CreateSession(512, &error);
+  Expect(session != nullptr, error.c_str());
+  Expect(session->Sync(prompt, &error), error.c_str());
+  auto stats = session->DsparkStatistics();
+  Expect(stats.context_tokens == 0,
+         "DSpark prompt cache is lazy during target prefill");
+
+  std::vector<int> emitted;
+  Expect(session->DsparkStep(&emitted, &error), error.c_str());
+  Expect(!emitted.empty(), "DSpark first step emitted tokens");
+  stats = session->DsparkStatistics();
+  Expect(stats.context_tokens >= prompt.size(),
+         "first DSpark cycle seeds the complete prompt");
+  Expect(stats.steps == 1, "DSpark drafts on the first generation cycle");
+  Expect(stats.anchors == 1, "DSpark records one target-known anchor");
+  Expect(stats.support_drafted == 5, "DSpark records five support rows");
+  Expect(stats.verifier_rows == 6, "DSpark verifies anchor plus support rows");
+
+  auto short_extension = prompt;
+  short_extension.push_back(emitted.front());
+  short_extension.push_back(session->SelectNext(0.0F, nullptr));
+  session.reset();
+
+  auto extended = model->CreateSession(512, &error);
+  Expect(extended != nullptr, error.c_str());
+  Expect(extended->Sync(prompt, &error), error.c_str());
+  Expect(extended->Sync(short_extension, &error), error.c_str());
+  Expect(extended->DsparkStatistics().context_tokens == short_extension.size(),
+         "short checkpoint extension seeds and extends DSpark context");
+  emitted.clear();
+  Expect(extended->DsparkStep(&emitted, &error), error.c_str());
+  Expect(extended->DsparkStatistics().context_tokens >= short_extension.size(),
+         "first draft after extension seeds the captured suffix");
+  extended.reset();
+
+  auto snapshot_source = model->CreateSession(512, &error);
+  Expect(snapshot_source != nullptr, error.c_str());
+  Expect(snapshot_source->Sync(prompt, &error), error.c_str());
+  auto snapshot = snapshot_source->SaveSnapshot(&error);
+  Expect(snapshot != nullptr, error.c_str());
+  snapshot_source.reset();
+
+  auto restored = model->CreateSession(512, &error);
+  Expect(restored != nullptr, error.c_str());
+  Expect(restored->RestoreSnapshot(*snapshot, &error), error.c_str());
+  Expect(restored->DsparkStatistics().context_tokens == 0,
+         "snapshot restore does not claim absent DSpark context");
+  emitted.clear();
+  Expect(restored->DsparkStep(&emitted, &error), error.c_str());
+  Expect(emitted.size() == 1,
+         "snapshot restore safely falls back to one token");
+  Expect(restored->DsparkStatistics().steps == 0,
+         "snapshot restore does not draft across a support-cache gap");
+}
+
 }  // namespace
 
 int main() {
@@ -181,14 +244,19 @@ int main() {
   using gufo::models::deepseek_v4_flash::Model;
   using gufo::models::deepseek_v4_flash::ModelOptions;
 
+  const char* dspark_model_path =
+      std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL");
   std::string error;
-  const auto model = Model::Load(model_path,
-                                 ModelOptions{
-                                     .max_context = 4096,
-                                     .prefill_chunk = 2048,
-                                     .power_percent = 100,
-                                 },
-                                 &error);
+  const auto model =
+      Model::Load(model_path,
+                  ModelOptions{
+                      .max_context = 4096,
+                      .prefill_chunk = 2048,
+                      .power_percent = 100,
+                      .dspark_model_path =
+                          dspark_model_path != nullptr ? dspark_model_path : "",
+                  },
+                  &error);
   Expect(model != nullptr, error.c_str());
   Expect(model->VocabSize() > 0, "vocabulary size");
   Expect(!model->ModelName().empty(), "model name");
@@ -232,6 +300,9 @@ int main() {
 
   CheckPinnedTrajectory(model);
   CheckBatchedPrefill(model);
+  if (dspark_model_path != nullptr && dspark_model_path[0] != '\0') {
+    CheckDsparkPromptSeed(model);
+  }
 
   std::cout << "DeepSeek V4 Flash model/session test passed\n";
   return 0;

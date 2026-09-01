@@ -61,6 +61,9 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
 
   ds4_engine_options engine_options{};
   engine_options.model_path = model_path.c_str();
+  engine_options.dspark_model_path = options.dspark_model_path.empty()
+                                         ? nullptr
+                                         : options.dspark_model_path.c_str();
   engine_options.context_size = static_cast<int>(options.max_context);
   engine_options.prefill_chunk = options.prefill_chunk;
   engine_options.power_percent = options.power_percent;
@@ -227,6 +230,66 @@ bool Session::Evaluate(int token, std::string* error_msg) {
     AssignError(error_msg, error[0] != '\0'
                                ? error.data()
                                : "DeepSeek V4 Flash decode failed");
+    return false;
+  }
+  return true;
+}
+
+bool Session::HasDspark() const {
+  return ds4_engine_has_dspark(model_->engine_);
+}
+
+bool Session::DsparkStep(std::vector<int>* emitted, std::string* error_msg) {
+  if (emitted == nullptr) {
+    AssignError(error_msg, "DSpark step needs an output buffer");
+    return false;
+  }
+  std::array<int, 32> block{};
+  int produced = 0;
+  std::array<char, kErrorCapacity> error{};
+  if (ds4_session_dspark_step(session_, block.data(),
+                              static_cast<int>(block.size()), &produced,
+                              error.data(), error.size()) != 0) {
+    AssignError(error_msg, error[0] != '\0'
+                               ? error.data()
+                               : "DeepSeek V4 Flash speculative step failed");
+    return false;
+  }
+  emitted->assign(block.begin(), block.begin() + produced);
+  return true;
+}
+
+Session::DsparkStats Session::DsparkStatistics() const {
+  DsparkStats stats;
+  ds4_session_dspark_stats(session_, &stats.verifier_rows,
+                           &stats.verifier_accepted, &stats.support_drafted,
+                           &stats.support_accepted, &stats.positional_accepted,
+                           &stats.anchors, &stats.full_blocks, &stats.steps,
+                           &stats.skipped, &stats.context_tokens);
+  return stats;
+}
+
+bool Session::DsparkDraftSelfTest(int cycles, std::string* error_msg) {
+  std::array<char, kErrorCapacity> error{};
+  if (ds4_session_dspark_draft_selftest(session_, cycles, error.data(),
+                                        error.size()) != 0) {
+    AssignError(error_msg,
+                error[0] != '\0'
+                    ? error.data()
+                    : "DeepSeek V4 Flash DSpark draft self-test failed");
+    return false;
+  }
+  return true;
+}
+
+bool Session::DsparkSelfTest(int rows, std::string* error_msg) {
+  std::array<char, kErrorCapacity> error{};
+  if (ds4_session_dspark_selftest(session_, rows, error.data(), error.size()) !=
+      0) {
+    AssignError(error_msg,
+                error[0] != '\0'
+                    ? error.data()
+                    : "DeepSeek V4 Flash DSpark verifier self-test failed");
     return false;
   }
   return true;

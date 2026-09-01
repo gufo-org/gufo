@@ -22,6 +22,7 @@
 #include <array>
 #include <vector>
 
+#include "dspark_internal.h"
 #include "model.h"
 #include "model_data_internal.h"
 #include "native_internal.h"
@@ -1372,6 +1373,314 @@ static void weights_free(ds4_weights *w) {
 }
 
 /* =========================================================================
+ * DSpark Support Model.
+ * =========================================================================
+ *
+ * The DSpark drafter lives in its own GGUF. Its blocks reuse the DS4 block
+ * layout, so binding produces ordinary ds4_layer_weights and the existing
+ * batched block kernels drive it without a parallel implementation. Validation
+ * is as strict as the target's: a support model that does not match this
+ * checkpoint's shape must fail at load, not silently draft garbage.
+ */
+
+static ds4_tensor *dspark_required_tensor_stage(const ds4_model *m,
+                                               const char *suffix,
+                                               uint32_t stage) {
+    char name[128];
+    snprintf(name, sizeof(name), "mtp.%u.%s", stage, suffix);
+    ds4_tensor *t = model_find_tensor(m, name);
+    if (!t) {
+        fprintf(stderr, "ds4: DSpark support model is missing tensor %s\n", name);
+        exit(1);
+    }
+    return t;
+}
+
+static ds4_tensor *dspark_optional_tensor_stage(const ds4_model *m,
+                                               const char *suffix,
+                                               uint32_t stage) {
+    char name[128];
+    snprintf(name, sizeof(name), "mtp.%u.%s", stage, suffix);
+    return model_find_tensor(m, name);
+}
+
+static uint32_t dspark_required_u32(const ds4_model *m, const char *key) {
+    uint32_t value = 0;
+    if (!model_get_u32(m, key, &value)) {
+        fprintf(stderr, "ds4: DSpark support model is missing metadata key %s\n", key);
+        exit(1);
+    }
+    return value;
+}
+
+uint32_t ds4_dspark_feature_width(const ds4_dspark_model *dspark) {
+    if (!dspark) return 0;
+    return dspark->n_target_layers * DS4_N_EMBD;
+}
+
+static void dspark_validate_metadata(ds4_dspark_model *d) {
+    const ds4_model *m = d->model;
+    ds4_str architecture = {};
+    ds4_kv *kv = model_find_kv(m, "general.architecture");
+    if (kv && kv->type == GGUF_VALUE_STRING) {
+        ds4_cursor c = cursor_at(m, kv->value_pos);
+        (void)cursor_string(&c, &architecture);
+    }
+    if (!ds4_streq(architecture, "deepseek4-dspark")) {
+        fprintf(stderr,
+                "ds4: expected general.architecture=deepseek4-dspark for the "
+                "DSpark support model, got '%.*s'\n",
+                (int)architecture.len,
+                architecture.ptr ? architecture.ptr : "");
+        exit(1);
+    }
+
+    d->n_stages = dspark_required_u32(m, "dspark.stage_count");
+    d->block_size = dspark_required_u32(m, "dspark.block_size");
+    d->markov_rank = dspark_required_u32(m, "dspark.markov_rank");
+    d->noise_token_id = dspark_required_u32(m, "dspark.noise_token_id");
+
+    if (d->n_stages == 0 || d->n_stages > DS4_DSPARK_MAX_STAGES) {
+        fprintf(stderr, "ds4: DSpark stage_count=%u is outside 1..%u\n",
+                d->n_stages, DS4_DSPARK_MAX_STAGES);
+        exit(1);
+    }
+    if (d->block_size < 2 || d->block_size > DS4_DSPARK_MAX_BLOCK) {
+        fprintf(stderr, "ds4: DSpark block_size=%u is outside 2..%u\n",
+                d->block_size, DS4_DSPARK_MAX_BLOCK);
+        exit(1);
+    }
+    if (d->markov_rank == 0 || d->markov_rank % 32u != 0) {
+        fprintf(stderr,
+                "ds4: DSpark markov_rank=%u must be a non-zero multiple of the "
+                "32-element Q8_0 block\n",
+                d->markov_rank);
+        exit(1);
+    }
+    if (d->noise_token_id >= DS4_N_VOCAB) {
+        fprintf(stderr, "ds4: DSpark noise_token_id=%u is outside the vocabulary\n",
+                d->noise_token_id);
+        exit(1);
+    }
+
+    const uint32_t layer_count = dspark_required_u32(m, "dspark.n_layers");
+    if (layer_count != d->n_stages) {
+        fprintf(stderr, "ds4: DSpark n_layers=%u disagrees with stage_count=%u\n",
+                layer_count, d->n_stages);
+        exit(1);
+    }
+
+    ds4_array_ref layers = {};
+    if (!model_get_array(m, "dspark.target_layer_ids", &layers) ||
+        layers.type != GGUF_VALUE_UINT32 ||
+        layers.len == 0 || layers.len > DS4_DSPARK_MAX_TARGET_LAYERS) {
+        fprintf(stderr,
+                "ds4: DSpark target_layer_ids must list 1..%u uint32 target layers\n",
+                DS4_DSPARK_MAX_TARGET_LAYERS);
+        exit(1);
+    }
+    d->n_target_layers = (uint32_t)layers.len;
+    ds4_cursor c = cursor_at(m, layers.data_pos);
+    for (uint32_t i = 0; i < d->n_target_layers; i++) {
+        uint32_t value = 0;
+        if (!cursor_u32(&c, &value) || value >= DS4_N_LAYER) {
+            fprintf(stderr,
+                    "ds4: DSpark target_layer_ids[%u] is not a valid target layer\n",
+                    i);
+            exit(1);
+        }
+        if (i > 0 && value <= d->target_layer_ids[i - 1]) {
+            fprintf(stderr,
+                    "ds4: DSpark target_layer_ids must be strictly increasing\n");
+            exit(1);
+        }
+        d->target_layer_ids[i] = value;
+    }
+}
+
+static void dspark_bind_stage_block(ds4_layer_weights *l,
+                                    const ds4_model *m,
+                                    uint32_t stage) {
+    memset(l, 0, sizeof(*l));
+    l->hc_attn_fn      = dspark_required_tensor_stage(m, "hc_attn_fn.weight", stage);
+    l->hc_attn_scale   = dspark_required_tensor_stage(m, "hc_attn_scale.weight", stage);
+    l->hc_attn_base    = dspark_required_tensor_stage(m, "hc_attn_base.weight", stage);
+    l->attn_norm       = dspark_required_tensor_stage(m, "attn_norm.weight", stage);
+    l->attn_q_a        = dspark_required_tensor_stage(m, "attn_q_a.weight", stage);
+    l->attn_q_a_norm   = dspark_required_tensor_stage(m, "attn_q_a_norm.weight", stage);
+    l->attn_q_b        = dspark_required_tensor_stage(m, "attn_q_b.weight", stage);
+    l->attn_kv         = dspark_required_tensor_stage(m, "attn_kv.weight", stage);
+    l->attn_kv_a_norm  = dspark_required_tensor_stage(m, "attn_kv_a_norm.weight", stage);
+    l->attn_sinks      = dspark_required_tensor_stage(m, "attn_sinks.weight", stage);
+    l->attn_output_a   = dspark_required_tensor_stage(m, "attn_output_a.weight", stage);
+    l->attn_output_b   = dspark_required_tensor_stage(m, "attn_output_b.weight", stage);
+    l->hc_ffn_fn       = dspark_required_tensor_stage(m, "hc_ffn_fn.weight", stage);
+    l->hc_ffn_scale    = dspark_required_tensor_stage(m, "hc_ffn_scale.weight", stage);
+    l->hc_ffn_base     = dspark_required_tensor_stage(m, "hc_ffn_base.weight", stage);
+    l->ffn_norm        = dspark_required_tensor_stage(m, "ffn_norm.weight", stage);
+    l->ffn_gate_inp    = dspark_required_tensor_stage(m, "ffn_gate_inp.weight", stage);
+    l->ffn_exp_probs_b = dspark_optional_tensor_stage(m, "exp_probs_b.bias", stage);
+    l->ffn_gate_exps   = dspark_required_tensor_stage(m, "ffn_gate_exps.weight", stage);
+    l->ffn_up_exps     = dspark_required_tensor_stage(m, "ffn_up_exps.weight", stage);
+    l->ffn_down_exps   = dspark_required_tensor_stage(m, "ffn_down_exps.weight", stage);
+    l->ffn_gate_shexp  = dspark_required_tensor_stage(m, "ffn_gate_shexp.weight", stage);
+    l->ffn_up_shexp    = dspark_required_tensor_stage(m, "ffn_up_shexp.weight", stage);
+    l->ffn_down_shexp  = dspark_required_tensor_stage(m, "ffn_down_shexp.weight", stage);
+}
+
+static void dspark_validate_stage_block(const ds4_layer_weights *l, uint32_t stage) {
+    const uint64_t hc_dim = (uint64_t)DS4_N_EMBD * DS4_N_HC;
+    const uint64_t hc_mix_dim = 2u * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
+    const uint64_t q_dim = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
+    const uint64_t out_low_dim = (uint64_t)DS4_N_OUT_GROUP * DS4_N_LORA_O;
+    (void)stage;
+
+    tensor_expect_layout(l->hc_attn_fn,     DS4_TENSOR_F16,  2, hc_dim, hc_mix_dim, 0);
+    tensor_expect_layout(l->hc_attn_scale,  DS4_TENSOR_F32,  1, 3, 0, 0);
+    tensor_expect_layout(l->hc_attn_base,   DS4_TENSOR_F32,  1, hc_mix_dim, 0, 0);
+    tensor_expect_layout(l->attn_norm,      DS4_TENSOR_F32,  1, DS4_N_EMBD, 0, 0);
+    tensor_expect_layout(l->attn_q_a,       DS4_TENSOR_Q8_0, 2, DS4_N_EMBD, DS4_N_LORA_Q, 0);
+    tensor_expect_layout(l->attn_q_a_norm,  DS4_TENSOR_F32,  1, DS4_N_LORA_Q, 0, 0);
+    tensor_expect_layout(l->attn_q_b,       DS4_TENSOR_Q8_0, 2, DS4_N_LORA_Q, q_dim, 0);
+    tensor_expect_layout(l->attn_kv,        DS4_TENSOR_Q8_0, 2, DS4_N_EMBD, DS4_N_HEAD_DIM, 0);
+    tensor_expect_layout(l->attn_kv_a_norm, DS4_TENSOR_F32,  1, DS4_N_HEAD_DIM, 0, 0);
+    tensor_expect_layout(l->attn_sinks,     DS4_TENSOR_F32,  1, DS4_N_HEAD, 0, 0);
+    tensor_expect_layout(l->attn_output_a,  DS4_TENSOR_Q8_0, 2,
+                         DS4_N_HEAD_DIM * (DS4_N_HEAD / DS4_N_OUT_GROUP), out_low_dim, 0);
+    tensor_expect_layout(l->attn_output_b,  DS4_TENSOR_Q8_0, 2, out_low_dim, DS4_N_EMBD, 0);
+    tensor_expect_layout(l->hc_ffn_fn,      DS4_TENSOR_F16,  2, hc_dim, hc_mix_dim, 0);
+    tensor_expect_layout(l->hc_ffn_scale,   DS4_TENSOR_F32,  1, 3, 0, 0);
+    tensor_expect_layout(l->hc_ffn_base,    DS4_TENSOR_F32,  1, hc_mix_dim, 0, 0);
+    tensor_expect_layout(l->ffn_norm,       DS4_TENSOR_F32,  1, DS4_N_EMBD, 0, 0);
+    /* The support model ships a Q8_0 router projection where the target ships
+     * F16; both are dense and the router kernel consumes logits, not weights. */
+    tensor_expect_layout(l->ffn_gate_inp,   DS4_TENSOR_Q8_0, 2, DS4_N_EMBD, DS4_N_EXPERT, 0);
+    tensor_expect_optional(l->ffn_exp_probs_b, DS4_TENSOR_F32, 1, DS4_N_EXPERT, 0, 0);
+    tensor_expect_routed_expert(l->ffn_gate_exps, 3, DS4_N_EMBD, DS4_N_FF_EXP, DS4_N_EXPERT);
+    tensor_expect_routed_expert(l->ffn_up_exps,   3, DS4_N_EMBD, DS4_N_FF_EXP, DS4_N_EXPERT);
+    tensor_expect_routed_expert(l->ffn_down_exps, 3, DS4_N_FF_EXP, DS4_N_EMBD, DS4_N_EXPERT);
+    if (l->ffn_gate_exps->type != l->ffn_up_exps->type) {
+        fprintf(stderr, "ds4: DSpark stage %u routed gate/up experts use different quant types\n",
+                stage);
+        exit(1);
+    }
+    tensor_expect_layout(l->ffn_gate_shexp, DS4_TENSOR_Q8_0, 2, DS4_N_EMBD, DS4_N_FF_EXP, 0);
+    tensor_expect_layout(l->ffn_up_shexp,   DS4_TENSOR_Q8_0, 2, DS4_N_EMBD, DS4_N_FF_EXP, 0);
+    tensor_expect_layout(l->ffn_down_shexp, DS4_TENSOR_Q8_0, 2, DS4_N_FF_EXP, DS4_N_EMBD, 0);
+}
+
+static void dspark_bind(ds4_dspark_model *d) {
+    const ds4_model *m = d->model;
+    const uint32_t last = d->n_stages - 1u;
+    const uint64_t hc_dim = (uint64_t)DS4_N_EMBD * DS4_N_HC;
+
+    for (uint32_t stage = 0; stage < d->n_stages; stage++) {
+        ds4_dspark_stage_weights *s = &d->stage[stage];
+        dspark_bind_stage_block(&s->block, m, stage);
+        dspark_validate_stage_block(&s->block, stage);
+    }
+
+    ds4_dspark_stage_weights *first = &d->stage[0];
+    first->main_proj = dspark_required_tensor_stage(m, "main_proj.weight", 0);
+    first->main_norm = dspark_required_tensor_stage(m, "main_norm.weight", 0);
+    tensor_expect_layout(first->main_proj, DS4_TENSOR_Q8_0, 2,
+                         ds4_dspark_feature_width(d), DS4_N_EMBD, 0);
+    tensor_expect_layout(first->main_norm, DS4_TENSOR_F32, 1, DS4_N_EMBD, 0, 0);
+
+    ds4_dspark_stage_weights *final_stage = &d->stage[last];
+    final_stage->norm = dspark_required_tensor_stage(m, "norm.weight", last);
+    final_stage->hc_head_base = dspark_required_tensor_stage(m, "hc_head_base.weight", last);
+    final_stage->hc_head_fn = dspark_required_tensor_stage(m, "hc_head_fn.weight", last);
+    final_stage->hc_head_scale = dspark_required_tensor_stage(m, "hc_head_scale.weight", last);
+    final_stage->markov_w1 =
+        dspark_required_tensor_stage(m, "markov_head.markov_w1.weight", last);
+    final_stage->markov_w2 =
+        dspark_required_tensor_stage(m, "markov_head.markov_w2.weight", last);
+    final_stage->confidence_proj =
+        dspark_required_tensor_stage(m, "confidence_head.proj.weight", last);
+
+    tensor_expect_layout(final_stage->norm, DS4_TENSOR_F32, 1, DS4_N_EMBD, 0, 0);
+    tensor_expect_layout(final_stage->hc_head_base, DS4_TENSOR_F32, 1, DS4_N_HC, 0, 0);
+    tensor_expect_layout(final_stage->hc_head_fn, DS4_TENSOR_F16, 2, hc_dim, DS4_N_HC, 0);
+    tensor_expect_layout(final_stage->hc_head_scale, DS4_TENSOR_F32, 1, 1, 0, 0);
+    tensor_expect_layout(final_stage->markov_w1, DS4_TENSOR_Q8_0, 2,
+                         d->markov_rank, DS4_N_VOCAB, 0);
+    tensor_expect_layout(final_stage->markov_w2, DS4_TENSOR_Q8_0, 2,
+                         d->markov_rank, DS4_N_VOCAB, 0);
+    tensor_expect_layout(final_stage->confidence_proj, DS4_TENSOR_Q8_0, 2,
+                         (uint64_t)DS4_N_EMBD + d->markov_rank, 1, 0);
+}
+
+/* Copy every bound DSpark tensor into the support arena. The residency policy
+ * is selected by the ROCm runtime; Strix Halo defaults to managed storage so
+ * prompt processing retains its device-memory headroom. */
+static bool dspark_cache_tensors(const ds4_dspark_model *d) {
+    const ds4_model *m = d->model;
+    uint64_t total = 0;
+    for (uint64_t i = 0; i < m->n_tensors; i++) {
+        /* 256-byte span alignment matches ds4_gpu_cache_support_range. */
+        total = ds4_align_up(total, 256u) + m->tensors[i].bytes;
+    }
+    if (!ds4_gpu_reserve_support_map(m->map, m->size, total)) {
+        fprintf(stderr, "ds4: failed to reserve %.2f GiB for the DSpark support model\n",
+                (double)total / 1073741824.0);
+        return false;
+    }
+    for (uint64_t i = 0; i < m->n_tensors; i++) {
+        const ds4_tensor *t = &m->tensors[i];
+        if (!ds4_gpu_cache_support_range(m->map,
+                                        m->size,
+                                        t->abs_offset,
+                                        t->bytes,
+                                        "dspark_tensor")) {
+            fprintf(stderr, "ds4: failed to cache DSpark tensor %.*s\n",
+                    (int)t->name.len, t->name.ptr);
+            return false;
+        }
+    }
+    fprintf(stderr, "ds4: DSpark support model cached %.2f GiB of tensor spans\n",
+            (double)total / 1073741824.0);
+    return true;
+}
+
+int ds4_dspark_open(ds4_dspark_model **out, const char *path) {
+    if (!out || !path || !path[0]) return 1;
+    *out = NULL;
+
+    auto *d = static_cast<ds4_dspark_model *>(
+        ds4_xcalloc(1, sizeof(ds4_dspark_model)));
+    d->model = static_cast<ds4_model *>(ds4_xcalloc(1, sizeof(ds4_model)));
+    d->model->fd = -1;
+
+    model_open(d->model, path);
+    dspark_validate_metadata(d);
+    dspark_bind(d);
+    if (!dspark_cache_tensors(d)) {
+        ds4_dspark_close(d);
+        return 1;
+    }
+
+    fprintf(stderr,
+            "ds4: DSpark support model loaded stages=%u block=%u markov_rank=%u "
+            "noise_token=%u target_layers=%u\n",
+            d->n_stages,
+            d->block_size,
+            d->markov_rank,
+            d->noise_token_id,
+            d->n_target_layers);
+    *out = d;
+    return 0;
+}
+
+void ds4_dspark_close(ds4_dspark_model *d) {
+    if (!d) return;
+    ds4_gpu_release_support_map();
+    model_close(d->model);
+    free(d->model);
+    free(d);
+}
+
+/* =========================================================================
  * Engine API and Process Lock.
  * =========================================================================
  *
@@ -1479,8 +1788,24 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
         return 1;
     }
 
+    /* The DSpark drafter is loaded last so a failure here cannot leave the
+     * target model half-initialized. */
+    if (opt->dspark_model_path && opt->dspark_model_path[0]) {
+        if (ds4_dspark_open(&e->dspark, opt->dspark_model_path) != 0) {
+            fprintf(stderr, "ds4: failed to load DSpark support model %s\n",
+                    opt->dspark_model_path);
+            ds4_engine_close(e);
+            *out = NULL;
+            return 1;
+        }
+    }
+
     *out = e;
     return 0;
+}
+
+bool ds4_engine_has_dspark(const ds4_engine *e) {
+    return e != NULL && e->dspark != NULL;
 }
 
 int ds4_engine_vocab_size(const ds4_engine *e) {
@@ -1498,6 +1823,8 @@ const char *ds4_engine_model_name(const ds4_engine *e) {
 
 void ds4_engine_close(ds4_engine *e) {
     if (!e) return;
+    ds4_dspark_close(e->dspark);
+    e->dspark = NULL;
     weights_free(e->weights);
     ds4_vocab_destroy(e->vocab);
     model_close(e->model);

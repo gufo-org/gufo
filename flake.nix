@@ -246,6 +246,8 @@
             files = [
               ".clang-format"
               "CMakeLists.txt"
+              "tools/prof/prof.py"
+              "tools/quant/speculative-corpus.py"
             ];
           };
 

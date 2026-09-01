@@ -248,8 +248,322 @@ after generation.
 - Retain and compare the first four-case `gufo eval` HTTP regression baseline;
   Pi/coding-agent evaluation remains deferred under #153.
 - Profile and optimize the model-owned gfx1151 kernels under #155.
-- Add DSpark speculative decoding under #156.
+- Continue improving general-workload DSpark acceptance and verifier cost under
+  #156 and #222. The retained fast route exceeds the 24--25 tok/s target on
+  sustained high-acceptance decoding; see "DSpark speculative decoding" below.
 - Add model-owned offline calibration/imatrix tooling only when a new
   quantization recipe requires it.
 - Add native concurrent decode batching and restart-safe SSD state reuse
   through the serving milestones.
+
+## DSpark speculative decoding (September 1, 2026)
+
+Status: retained as an opt-in DS4-only backend under #156. Qwen continues to use
+DFlash2; DSpark is not a replacement for the Qwen backend.
+
+The optimized route seeds each five-token support-model block with the target's
+already-known first token and verifies six rows. Four verifier-prefix snapshots
+allow partial accepts to commit without replay. If five rows are accepted before
+the sixth rejects, the runtime restores prefix four and evaluates only row five.
+If a prefix snapshot cannot be committed, the runtime automatically restores the
+frontier and replays the accepted tokens through one-token decode.
+
+The retained gfx1151 implementation adds:
+
+- lazy prompt-to-support KV seeding with contiguous cache-coverage tracking;
+- verifier-prefix snapshots for accepted lengths one through four;
+- grouped tile-4 execution for the six selected IQ2 gate/up experts;
+- compact exact Q2 down-pair accumulation and narrow exact Q8 shapes for 3, 5,
+  and 6 rows;
+- a support-only 16384-to-24 FP16 kernel;
+- managed support-weight residency;
+- an acceptance scheduler that rejects clearly weak text after four probes,
+  evaluates marginal text after eight, and backs off for 64 tokens below the
+  measured 48% break-even point.
+
+All production choices are enabled by default once
+`--speculative dspark --dspark-model` is selected. There are no user-facing
+policy knobs to tune.
+
+The implementation follows the upstream DSpark quality contract: every
+committed token is target-verified, but retaining batched verifier state is not
+byte-identical to sequential decode. Sequential replay remains an internal
+safety fallback and self-test, not a separate user policy.
+
+### Quality and throughput by task type
+
+Greedy generation, 128 tokens per prompt, chat-v2 framing, using the shared
+ten-category corpus:
+
+| Category | Exact vs AR | AR tok/s | DSpark tok/s | Speedup | Support accept | Attempts/skipped |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| expository | no | 16.50 | 16.27 | 0.99x | 43.8% | 16/77 |
+| code | no | 16.63 | 17.68 | 1.06x | 53.1% | 35/0 |
+| reasoning | yes | 16.27 | 23.60 | 1.45x | 78.5% | 26/0 |
+| summarization | no | 15.67 | 16.01 | 1.02x | 47.5% | 8/15 |
+| Italian | no | 16.43 | 16.05 | 0.98x | 40.0% | 9/101 |
+| Chinese | no | 16.42 | 15.57 | 0.95x | 23.3% | 6/115 |
+| structured | yes | 15.95 | 21.30 | 1.33x | 69.0% | 29/0 |
+| creative | no | 16.32 | 15.73 | 0.96x | 20.0% | 5/118 |
+| repetitive | yes | 16.26 | **27.56** | **1.69x** | 94.8% | 23/0 |
+| instruction | no | 16.44 | 15.65 | 0.95x | 23.3% | 6/115 |
+
+Aggregate: AR 16.32 tok/s, DSpark 18.00 tok/s, 1.10x mean and 1.00x
+median speedup. The scheduler attempted 163 blocks and skipped 541. Its observed
+60.7% acceptance is selection-biased because it stops sampling weak requests.
+
+A pre-retention characterization with backoff suppressed attempted 379 blocks
+and measured 43.4% true support-token acceptance, 60.9% independent positional
+agreement, and 21.4% full blocks. The earlier 39.9% report was not comparable:
+it used raw prompts, included the target-known anchor in acceptance, and sampled
+only a handful of blocks. The corresponding anchor-free number was 27.9%.
+
+The raw repetitive corpus case is the stable throughput target:
+
+| Workload | Exact vs AR | AR tok/s | DSpark tok/s | Speedup | Support accept |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `red, blue, blue` sequence | yes | 15.66 | **29.05** | **1.85x** | 100.0% |
+
+This exceeds the requested 24--25 tok/s regime and is over 3x the original
+8.78 tok/s DSpark route.
+
+The internal sequential-replay check is byte-identical on all ten categories at
+64 generated tokens. It is retained as a correctness test, not exposed as a
+production policy.
+
+### Prompt processing and verifier checks
+
+Three interleaved 252-token prompt runs measured median prefill of 5,358.8 ms
+autoregressive and 4,967.6 ms with DSpark attached, a 7.3% improvement within
+run-to-run variance. Prompt processing does not regress.
+
+The exact verifier and rollback checks passed at every production width:
+
+| Rows | Exact | AR replay | Verify best |
+| ---: | ---: | ---: | ---: |
+| 2 | 2/2 | 119.19 ms | 96.71 ms |
+| 5 | 5/5 | 296.59 ms | 159.74 ms |
+| 6 | 6/6 | 358.04 ms | 173.44 ms |
+
+Issue #222's 75 ms verifier target is not met. The six-row route is retained
+because seed-plus-five changes the amount of target work avoided, not because
+the verifier itself reached that issue's projection target.
+
+### Profile and retained/rejected decisions
+
+Matched 64-token `rocprofv3` runs show total GPU kernel time falling from
+7,471.87 ms autoregressive to 5,478.87 ms with DSpark, a 26.7% reduction. One
+malformed ROCm dispatch with `end < start` was ignored; `tools/prof/prof.py`
+now validates this and reports the count.
+
+The one-time target Q8 transpose accounts for 2,454.51 ms and is not a
+steady-state DSpark bottleneck. The principal repeated DSpark kernels were:
+
+| Kernel family | Aggregate GPU time |
+| --- | ---: |
+| selected-expert IQ2 gate/up, tile 4 | 493.67 ms |
+| compact Q2 down-pair accumulation | 381.71 ms |
+| six-row prequantized Q8 projections | 375.18 ms |
+| grouped verifier activation projection | 254.86 ms |
+
+Routed MoE remains the repeated verifier bottleneck for #222. Prefix snapshots
+were retained because they remove partial-accept replay and raise the production
+corpus from 15.37 to 18.00 tok/s once paired with acceptance scheduling.
+
+### Reproduction
+
+```sh
+TARGET=/var/llms/huggingface/hub/models--antirez--deepseek-v4-gguf/snapshots/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf
+DSPARK=/var/llms/huggingface/hub/models--antirez--deepseek-v4-gguf/snapshots/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf
+
+tools/quant/speculative-corpus.py \
+  --binary ./result/bin/gufo \
+  --model "$TARGET" \
+  --backend dspark \
+  --draft-model "$DSPARK" \
+  --max-tokens 128 \
+  --allow-mismatch \
+  --allow-sparse
+
+tools/quant/speculative-corpus.py \
+  --binary ./result/bin/gufo \
+  --model "$TARGET" \
+  --backend dspark \
+  --draft-model "$DSPARK" \
+  --case repetition_sequence \
+  --prompt-mode raw \
+  --max-tokens 128
+```
+
+## Historical DSpark baseline (superseded)
+
+Status: in progress under #156. The path is opt-in and is not wired into
+generation, so nothing here affects the numbers above. DSpark is DeepSeek's own
+drafter; it is unrelated to the Qwen DFlash and DFlash-2 paths.
+
+| Field | Value |
+| --- | --- |
+| Support artifact | `DeepSeek-V4-Flash-DSpark-support-0731.gguf` (5.58 GiB resident) |
+| Repository | `antirez/deepseek-v4-gguf` |
+| Architecture | `deepseek4-dspark`, 3 stages, `block_size` 5, `markov_rank` 256 |
+| Target features | layers 40, 41, 42, fused by `main_proj` (12288 -> 4096) |
+
+### Measured
+
+Greedy, 4K context, `--speculative dspark --dspark-model`.
+
+| Stage | Cost |
+| --- | ---: |
+| Draft block (3 stages, 5 + 1 encoder rows) | 21 ms |
+| Verification block, 5 rows | 152 ms |
+| Autoregressive token | 60-65 ms |
+
+Verification costs `59 ms + 18 ms/row` and is exact against autoregressive decode
+at 2, 5, and 6 rows. Rollback restores the compressor frontier and reproduces the
+pre-block continuation.
+
+### Per task type
+
+Ten prompts from the shared speculative corpus
+(`benchmarks/qwen3.8-27b/speculative-corpus.json`), greedy, 32 tokens each,
+through `tools/quant/speculative-corpus.py --backend dspark`:
+
+| Prompt | Category | Exact | AR tok/s | DSpark tok/s | Speedup | Acceptance |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| expository_pangram | expository | yes | 13.42 | 11.30 | 0.84x | 24.0% |
+| cpp_ring_buffer | code | yes | 15.45 | 11.31 | 0.73x | 24.0% |
+| reasoning_train | reasoning | yes | 16.10 | 11.42 | 0.71x | 32.0% |
+| summary_gpu | summarization | yes | 14.51 | 11.46 | 0.79x | 24.0% |
+| italian_explanation | multilingual | yes | 15.55 | 11.55 | 0.74x | 20.0% |
+| chinese_explanation | multilingual | yes | 16.71 | 11.31 | 0.68x | 28.0% |
+| json_schedule | structured | yes | 16.71 | 11.32 | 0.68x | 24.0% |
+| creative_station | creative | yes | 14.68 | 11.43 | 0.78x | 28.0% |
+| repetition_sequence | repetitive | yes | 16.14 | 8.82 | 0.55x | 46.0% |
+| instruction_debug | instruction | yes | 16.28 | 11.35 | 0.70x | 20.0% |
+
+Aggregate: exact 10/10, AR 15.49 tok/s, DSpark 11.06 tok/s, speedup 0.71x,
+median 0.72x, acceptance 28.7%.
+
+**Quality is preserved exactly**: every category reproduces autoregressive
+decode's completion byte for byte. **Throughput is not.** The path is opt-in
+behind `--speculative dspark`, off by default, and on this hardware with this
+drafter it should stay off.
+
+### Why: exactness and speed are mutually exclusive here
+
+The only saving speculative decoding can offer is *not running* a decode step for
+an accepted token. Taking that saving means keeping the key/value rows the batched
+verification pass wrote. Those rows are not the bytes one-token decode would have
+written, and the difference compounds: a 48-token generation with fully accepted
+blocks diverged from autoregressive decode at the tail even though every accepted
+token was individually correct.
+
+So there are two regimes, both measured:
+
+| Commit policy | Byte-exact vs decode | Aggregate |
+| --- | --- | ---: |
+| Replay accepted prefix through decode (historical default) | yes | 0.71x |
+| Keep verifier cache state | no | 0.54x |
+
+Direct commit does not currently help because it only applies when *every* drafted
+row is accepted, and at a mean accepted length of 1.35 out of 5 that is rare. The
+replay path therefore dominates either way, at one full decode step per accepted
+token.
+
+**In the exact regime the theoretical maximum is 1.0x**, reached by never drafting:
+every emitted token still costs a decode step, plus the draft and verification on
+top. The break-even controller exists to approach that bound rather than to win;
+the residual 0.71x is the cost of its periodic probes on short requests.
+
+### What would actually make this faster
+
+A cycle costs `21 ms draft + 152 ms verify`. Measured per-position draft accuracy
+is 0.62, so prefix matching yields a mean accepted length of `sum p^k` = 1.47 over
+five positions, against a break-even of about 1.9 accepted.
+
+| Change | Expected |
+| --- | --- |
+| Per-row prefix snapshots (`DS4_SPEC_PREFIX_SLOTS` upstream) so partial accepts restore rather than replay | ~1.3x, and only in the non-byte-exact regime |
+| Narrower verification cost (#222) | another 20-30 ms per block |
+| Tree or multi-candidate verification | the only route to ~2x |
+
+Lengthening the block does not help: at `p = 0.62`, five positions give 1.47 and
+eight give 1.56. The binding constraint is the prefix-matching topology combined
+with this checkpoint's per-position accuracy, not kernel cost or dispatch.
+
+### The bound, as an inequality
+
+For a block of `r` verified rows with mean accepted length `a`:
+
+```
+speedup <= decode_ms * (1 + a) / (draft_ms + fixed_ms + marginal_ms * r)
+```
+
+Floors for the cost terms on this checkpoint, from weight traffic at the 242 GB/s
+DRAM ceiling rather than from the current kernels:
+
+Routed-expert traffic is the term that decides this, and it depends on how much
+the rows of a block share experts. Measured with
+`GUFO_DEEPSEEK_ROCM_MOE_EXPERT_SPREAD=1` over 45 five-row blocks: a block issues
+30 `(row, expert)` pairs but touches a **median of 19 distinct experts** (mean
+17.7, range 14-26). About 40% of expert traffic is therefore the same weights
+reloaded for a different row, and the small-batch route currently pays all of it
+because it is indexed per `(row, expert)` pair.
+
+| Term | Floor | Why |
+| --- | ---: | --- |
+| `fixed_ms` | ~33 ms | 6 GiB dense Q8 weights plus the first row's 6 experts, once per block |
+| `marginal_ms` | ~6 ms | about 3 newly touched experts per additional row, plus its LM head row |
+| `draft_ms` | ~20 ms | measured; the three DSpark stages are small |
+| `decode_ms` | ~65 ms | measured autoregressive step |
+
+At `r = 5` and the measured `a = 1.44` that gives
+`65 * 2.44 / (20 + 33 + 30) = 1.91x` as the ceiling **with perfect kernels and
+expert deduplication**. So "almost 2x" is reachable with this drafter; the gap is
+kernel efficiency, not drafter accuracy.
+
+An earlier revision of this section put the ceiling at 1.67x by charging every
+`(row, expert)` pair a full expert load. That was wrong: it ignored the overlap
+measured above.
+
+### The ladder to get there
+
+Each step is measured or derived from the terms above; verification is 152 ms today
+against a 63 ms floor.
+
+| Step | Verify | Aggregate |
+| --- | ---: | ---: |
+| Today, replaying accepted prefixes through decode | 152 ms | 0.71x |
+| Per-row prefix snapshots, so no accept ever replays | 152 ms | ~0.92x |
+| Expert deduplication for narrow batches | ~132 ms | ~1.03x |
+| Dense projections at the bandwidth floor (#222) | ~90 ms | ~1.4x |
+| All terms at their floors | ~63 ms | ~1.9x |
+
+Two constraints on that ladder. First, every step past the first requires the
+non-byte-exact commit regime, because the saving *is* not re-running decode for an
+accepted token. Second, prefix snapshots are the prerequisite: without them a
+partial accept replays about 86 ms per cycle, which is more than the entire
+verification budget at the floor.
+
+### Ablations
+
+Conventions a support checkpoint does not record, each settled by measured
+acceptance rather than assumption (12 cycles, first prompt above):
+
+| Variant | First-token hits | Acceptance |
+| --- | ---: | ---: |
+| **Block at L, Markov on, forward slots, non-causal, direct KV** | **5/12** | **11.7%** |
+| Hyper-connection-form KV injection | 4/12 | 10.0% |
+| Causal block attention | 5/12 | 8.3% |
+| Markov off (per-position argmax) | 3/12 | 5.0% |
+| Reversed slot order | 3/12 | 5.0% |
+| Block at L-1 | 2/12 | 5.0% |
+
+Every structural choice in the retained configuration wins its comparison, which
+is why the remaining gap is being treated as numerical. The losing A/B paths
+were removed rather than exposed as user configuration.
+
+Acceptance is one scalar at the end of a ten-stage chain and cannot localize the
+fault; the next step is a numerical oracle that compares the fused feature, each
+stage's hidden state, and the base logits against the upstream DSpark path for a
+fixed input.

@@ -106,6 +106,7 @@ class Profile:
     busy_ns: float
     wall_ns: float
     gaps: list[tuple[float, str, str]]  # (ns, before, after)
+    invalid_dispatches: int = 0
 
     @property
     def total_ns(self) -> float:
@@ -134,7 +135,11 @@ def load(db_path: str) -> Profile:
 
     kernels: dict[str, KernelStat] = defaultdict(KernelStat)
     intervals: list[tuple[float, float, str]] = []
+    invalid_dispatches = 0
     for name, start, end, gx, gy, gz, wx, wy, wz in rows:
+        if end <= start:
+            invalid_dispatches += 1
+            continue
         key = short(name)
         dur = float(end - start)
         st = kernels[key]
@@ -147,6 +152,9 @@ def load(db_path: str) -> Profile:
             st.max_ns = dur
             st.shape = f"blocks={blocks[0]}x{blocks[1]}x{blocks[2]} wg={wg}"
         intervals.append((float(start), float(end), key))
+
+    if not intervals:
+        raise SystemExit(f"{db_path}: no valid kernel dispatches recorded")
 
     # Union of busy intervals plus the biggest idle gaps between them.
     intervals.sort()
@@ -165,7 +173,7 @@ def load(db_path: str) -> Profile:
     busy += cur_end - cur_start
     wall = intervals[-1][1] - intervals[0][0]
     gaps.sort(reverse=True)
-    return Profile(dict(kernels), busy, wall, gaps)
+    return Profile(dict(kernels), busy, wall, gaps, invalid_dispatches)
 
 
 def rollup(prof: Profile, stages: list[tuple[str, str]]) -> dict[str, tuple[int, float]]:
@@ -190,6 +198,7 @@ def cmd_show(args: argparse.Namespace) -> int:
                     "busy_ms": prof.busy_ns / 1e6,
                     "wall_ms": prof.wall_ns / 1e6,
                     "dispatches": prof.dispatches,
+                    "invalid_dispatches": prof.invalid_dispatches,
                     "kernels": {
                         n: {"calls": s.calls, "ms": s.ns / 1e6, "shape": s.shape}
                         for n, s in prof.kernels.items()
@@ -203,6 +212,8 @@ def cmd_show(args: argparse.Namespace) -> int:
 
     idle = prof.wall_ns - prof.busy_ns
     print(f"dispatches      : {prof.dispatches}")
+    if prof.invalid_dispatches:
+        print(f"invalid records : {prof.invalid_dispatches} (ignored)")
     print(f"kernel time sum : {total / 1e6:10.2f} ms")
     print(f"gpu busy (union): {prof.busy_ns / 1e6:10.2f} ms")
     print(f"wall span       : {prof.wall_ns / 1e6:10.2f} ms")
@@ -243,6 +254,11 @@ def cmd_diff(args: argparse.Namespace) -> int:
     a = load(args.before)
     b = load(args.after)
     stages = STAGE_MAPS.get(args.stages, [])
+    if a.invalid_dispatches or b.invalid_dispatches:
+        print(
+            "invalid records ignored: "
+            f"before={a.invalid_dispatches} after={b.invalid_dispatches}"
+        )
     print(
         f"kernel time  {a.total_ns / 1e6:.2f} ms -> {b.total_ns / 1e6:.2f} ms "
         f"({100.0 * (b.total_ns - a.total_ns) / a.total_ns:+.1f}%)"

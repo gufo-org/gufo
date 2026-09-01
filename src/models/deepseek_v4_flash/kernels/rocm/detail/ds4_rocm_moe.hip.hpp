@@ -1058,10 +1058,22 @@ __global__ static void moe_gate_up_mid_expert_tile4_row32_kernel(
     float gate[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float up[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     for (uint32_t b = lane; b < xq_blocks; b += 8u) {
-        dev_dot_iq2_xxs_q8_K_block4(gr + b, xqb[0] ? xqb[0] + b : NULL, xqb[1] ? xqb[1] + b : NULL,
-                                    xqb[2] ? xqb[2] + b : NULL, xqb[3] ? xqb[3] + b : NULL, np, gate);
-        dev_dot_iq2_xxs_q8_K_block4(ur + b, xqb[0] ? xqb[0] + b : NULL, xqb[1] ? xqb[1] + b : NULL,
-                                    xqb[2] ? xqb[2] + b : NULL, xqb[3] ? xqb[3] + b : NULL, np, up);
+        dev_dot_iq2_xxs_q8_K_block4(
+            gr + b,
+            xqb[0] ? xqb[0] + b : NULL,
+            xqb[1] ? xqb[1] + b : NULL,
+            xqb[2] ? xqb[2] + b : NULL,
+            xqb[3] ? xqb[3] + b : NULL,
+            np,
+            gate);
+        dev_dot_iq2_xxs_q8_K_block4(
+            ur + b,
+            xqb[0] ? xqb[0] + b : NULL,
+            xqb[1] ? xqb[1] + b : NULL,
+            xqb[2] ? xqb[2] + b : NULL,
+            xqb[3] ? xqb[3] + b : NULL,
+            np,
+            up);
     }
     for (uint32_t p = 0; p < np; p++) {
         gate[p] = quarter_warp_sum_f32(gate[p], lane);
@@ -3262,6 +3274,62 @@ __global__ static void moe_down_q2K_expert_batch_sharedmid_kernel(
                 }
             }
         }
+    }
+}
+
+/*
+ * Compact exact verifier down projection.
+ *
+ * This keeps the retained path's arithmetic and storage boundary intact: one
+ * wave accumulates one (token, routing-slot, output-row) dot in the same K
+ * order as moe_down_q2K_expert_batch_sharedmid_kernel, rounds it through F16,
+ * and leaves the existing moe_sum_f16x2_kernel to add slots in routing order.
+ * Indexing the grid by the live pairs avoids launching against all 256 experts.
+ */
+__global__ static void moe_down_q2K_pair_float_batch_warp32_kernel(
+        __half *down_out_h,
+        const char *down_base,
+        const float *mid,
+        const int32_t *selected,
+        uint64_t down_expert_bytes,
+        uint64_t down_row_bytes,
+        uint32_t expert_mid_dim,
+        uint32_t out_dim,
+        uint32_t pair_count) {
+    const uint32_t pair = blockIdx.y;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t rows_per_block = blockDim.x >> 5u;
+    const uint32_t row =
+        blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    if (pair >= pair_count || row >= out_dim) return;
+
+    int32_t expert_i = selected[pair];
+    if (expert_i < 0) expert_i = 0;
+    const unsigned char *down_row =
+        (const unsigned char *)down_base +
+        (uint64_t)(uint32_t)expert_i * down_expert_bytes +
+        (uint64_t)row * down_row_bytes;
+    const float *mid_row = mid + (uint64_t)pair * expert_mid_dim;
+
+    const uint32_t n_blocks = expert_mid_dim >> 8u;
+    float acc = 0.0f;
+    for (uint32_t b = 0; b < n_blocks; b++) {
+        const unsigned char *weight_block =
+            down_row + (uint64_t)b * 84u;
+        float d = 0.0f;
+        float dmin = 0.0f;
+        q2_K_scale_broadcast_w32(weight_block, &d, &dmin);
+#pragma unroll
+        for (uint32_t k = 0; k < 8u; k++) {
+            const uint32_t i = lane + (k << 5u);
+            const float weight = q2_K_dequant_256_scaled_w32(
+                weight_block, lane, k, d, dmin);
+            acc += weight * mid_row[(uint64_t)b * 256u + i];
+        }
+    }
+    acc = warp_sum_f32(acc);
+    if (lane == 0u) {
+        down_out_h[(uint64_t)pair * out_dim + row] = __float2half(acc);
     }
 }
 

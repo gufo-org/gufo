@@ -581,6 +581,18 @@ if (BUILD_TESTING)
   set_tests_properties(serving_bench_test PROPERTIES
     LABELS "cpu;tools;server;benchmarks;statistics;json")
 
+  add_test(NAME speculative_corpus_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/speculative_corpus_test.py)
+  set_tests_properties(speculative_corpus_test PROPERTIES
+    LABELS "cpu;tools;benchmarks;speculative;deepseek-v4-flash;qwen")
+
+  add_test(NAME prof_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/prof_test.py)
+  set_tests_properties(prof_test PROPERTIES
+    LABELS "cpu;tools;profiling")
+
   add_executable(bandwidth_test tests/diagnostics/bandwidth_test.cpp)
   target_compile_definitions(bandwidth_test PRIVATE TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diagnostics")
   target_link_libraries(bandwidth_test PRIVATE gufo_diagnostics)

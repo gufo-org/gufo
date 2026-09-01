@@ -18,6 +18,8 @@ struct ModelOptions {
   std::uint32_t max_context = 4096;
   std::uint32_t prefill_chunk = 2048;
   int power_percent = 100;
+  /// Optional DSpark support model. Empty leaves speculative decoding off.
+  std::string dspark_model_path;
 };
 
 struct ChatMessage {
@@ -83,6 +85,31 @@ public:
                                float min_p = 0.0F) const;
   [[nodiscard]] int SelectNextExcluding(int excluded_token) const;
   [[nodiscard]] bool Evaluate(int token, std::string* error_msg = nullptr);
+  /// Compares batched DSpark verification against one-token decode and reports
+  /// the relative cost of both paths. Diagnostic only.
+  [[nodiscard]] bool DsparkSelfTest(int rows, std::string* error_msg = nullptr);
+  /// Runs whole DSpark speculative cycles and reports acceptance. Diagnostic
+  /// only.
+  [[nodiscard]] bool DsparkDraftSelfTest(int cycles,
+                                         std::string* error_msg = nullptr);
+  /// True when this session has a DSpark drafter attached.
+  [[nodiscard]] bool HasDspark() const;
+  /// Runs one greedy speculative cycle and appends the emitted tokens.
+  [[nodiscard]] bool DsparkStep(std::vector<int>* emitted,
+                                std::string* error_msg = nullptr);
+  struct DsparkStats {
+    std::uint64_t verifier_rows{0};
+    std::uint64_t verifier_accepted{0};
+    std::uint64_t support_drafted{0};
+    std::uint64_t support_accepted{0};
+    std::uint64_t positional_accepted{0};
+    std::uint64_t anchors{0};
+    std::uint64_t full_blocks{0};
+    std::uint64_t steps{0};
+    std::uint64_t skipped{0};
+    std::uint32_t context_tokens{0};
+  };
+  [[nodiscard]] DsparkStats DsparkStatistics() const;
   [[nodiscard]] std::vector<float> CopyLogits(
       std::string* error_msg = nullptr) const;
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(

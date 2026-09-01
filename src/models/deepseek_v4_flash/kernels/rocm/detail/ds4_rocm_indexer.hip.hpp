@@ -1184,3 +1184,112 @@ extern "C" int ds4_gpu_dsv4_indexer_qat_tensor(ds4_gpu_tensor *x, uint32_t n_row
     indexer_hadamard_fp4_kernel<<<n_rows, 128>>>((float *)x->ptr, n_rows, head_dim);
     return hip_ok(hipGetLastError(), "indexer_hadamard_fp4 launch");
 }
+
+/* Dequantize one Q8_0 row of the DSpark Markov W1 table. The row for the
+ * previously selected token is the state consumed by the path selector. */
+__global__ static void dspark_markov_w1_row_kernel(
+        float *out,
+        const unsigned char *w1_row,
+        uint32_t rank_blocks) {
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= rank_blocks * 32u) return;
+    const uint32_t block = tid >> 5u;
+    const uint32_t lane = tid & 31u;
+    const unsigned char *qblock = w1_row + (uint64_t)block * 34u;
+    const float scale = __half2float(*(const __half *)qblock);
+    out[tid] = scale * (float)((const int8_t *)(qblock + 2u))[lane];
+}
+
+/* Decode the packed (value, index) key produced by the Markov argmax reduce. */
+__global__ static void dspark_markov_key_decode_kernel(
+        int32_t *out_index,
+        const unsigned long long *key) {
+    if (threadIdx.x != 0u || blockIdx.x != 0u) return;
+    out_index[0] = (int32_t)(~(unsigned int)(key[0] & 0xffffffffull));
+}
+
+extern "C" int ds4_gpu_dspark_markov_w1_row_tensor(
+        ds4_gpu_tensor       *out_state,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                w1_offset,
+        uint32_t                markov_rank,
+        uint32_t                token) {
+    if (!out_state || !model_map || markov_rank == 0u || markov_rank % 32u != 0u ||
+        !hip_tensor_has_elems(out_state, markov_rank, sizeof(float))) {
+        return 0;
+    }
+    const uint32_t rank_blocks = markov_rank / 32u;
+    const uint64_t row_bytes = (uint64_t)rank_blocks * 34u;
+    uint64_t row_offset = 0;
+    if (!hip_u64_mul_checked(token, row_bytes, &row_offset)) return 0;
+    if (!hip_model_range_fits(model_size, w1_offset + row_offset, row_bytes)) return 0;
+    const unsigned char *row = (const unsigned char *)hip_model_range_ptr(
+            model_map, w1_offset + row_offset, row_bytes, "dspark_markov_w1_row");
+    if (!row) return 0;
+    dspark_markov_w1_row_kernel<<<(markov_rank + 255u) / 256u, 256>>>(
+            (float *)out_state->ptr, row, rank_blocks);
+    return hip_ok(hipGetLastError(), "dspark markov w1 row launch");
+}
+
+/*
+ * DSpark path selection for one drafted position.
+ *
+ * Selecting each position independently by argmax lets the block drift, because
+ * position t's best token given the block's own context is not the best token
+ * given what position t-1 actually emitted. The Markov head restores that
+ * coupling with a rank-256 bilinear term, and it stays on the device: the
+ * vocabulary row never moves to the host.
+ */
+extern "C" int ds4_gpu_dspark_markov_argmax_tensor(
+        ds4_gpu_tensor       *out_index,
+        ds4_gpu_tensor       *scratch_key,
+        const ds4_gpu_tensor *logits_row,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                w1_offset,
+        uint64_t                w2_offset,
+        uint32_t                vocab,
+        uint32_t                markov_rank,
+        uint32_t                previous_token) {
+    if (!out_index || !scratch_key || !logits_row || !model_map ||
+        vocab == 0u || markov_rank == 0u || markov_rank % 32u != 0u ||
+        previous_token >= vocab ||
+        !hip_tensor_has_elems(out_index, 1, sizeof(int32_t)) ||
+        !hip_tensor_has_elems(scratch_key, 1, sizeof(unsigned long long)) ||
+        !hip_tensor_has_elems(logits_row, vocab, sizeof(float))) {
+        return 0;
+    }
+    const uint32_t rank_blocks = markov_rank / 32u;
+    if (rank_blocks * 32u > 256u) return 0;
+    const uint64_t row_bytes = (uint64_t)rank_blocks * 34u;
+    uint64_t w1_row_offset = 0, w2_bytes = 0;
+    if (!hip_u64_mul_checked(previous_token, row_bytes, &w1_row_offset) ||
+        !hip_u64_mul_checked(vocab, row_bytes, &w2_bytes) ||
+        !hip_model_range_fits(model_size, w1_offset + w1_row_offset, row_bytes) ||
+        !hip_model_range_fits(model_size, w2_offset, w2_bytes)) {
+        return 0;
+    }
+    const unsigned char *w1_row = (const unsigned char *)hip_model_range_ptr(
+            model_map, w1_offset + w1_row_offset, row_bytes, "dspark_markov_w1");
+    const unsigned char *w2 = (const unsigned char *)hip_model_range_ptr(
+            model_map, w2_offset, w2_bytes, "dspark_markov_w2");
+    if (!w1_row || !w2) return 0;
+    if (!hip_ok(hipMemset(scratch_key->ptr, 0, sizeof(unsigned long long)),
+                "dspark markov key reset")) {
+        return 0;
+    }
+    const uint32_t blocks = (vocab + 255u) / 256u;
+    dspark_markov_argmax_kernel<<<blocks, 256>>>(
+            (unsigned long long *)scratch_key->ptr,
+            (const float *)logits_row->ptr,
+            w1_row,
+            w2,
+            vocab,
+            rank_blocks);
+    if (!hip_ok(hipGetLastError(), "dspark markov argmax launch")) return 0;
+    dspark_markov_key_decode_kernel<<<1, 1>>>(
+            (int32_t *)out_index->ptr,
+            (const unsigned long long *)scratch_key->ptr);
+    return hip_ok(hipGetLastError(), "dspark markov decode launch");
+}

@@ -202,6 +202,68 @@ __global__ static void matmul_q8_0_preq_rows_w32_kernel(
     if (lane == 0u) out[row] = acc;
 }
 
+
+/*
+ * Narrow-batch Q8_0 projection: read each weight block once, apply it to every
+ * row in the batch.
+ *
+ * The prompt-chunk batch kernel stages float activations and reaches only about a
+ * quarter of DRAM bandwidth at these widths, while the prequantized batch kernel
+ * re-reads the whole weight matrix per row. This one keeps the single-row decode
+ * kernel's shape - one warp per output row, lane-strided 34-byte blocks, dp4a
+ * dots - and adds an inner loop over the batch, so the weights move once and the
+ * activations are already quantized.
+ *
+ * The accumulation order per (output row, row index) is deliberately identical to
+ * matmul_q8_0_preq_rows_w32_kernel: same block sequence per lane, same
+ * multiply order, same warp reduction. That is what keeps a verified speculative
+ * row bitwise equal to what ordinary decode would have produced.
+ */
+template <uint32_t MAXT>
+__global__ static void matmul_q8_0_preq_batch_reuse_w32_kernel(
+        float *out,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks,
+        uint32_t n_tok,
+        uint32_t rows_per_block,
+        int use_dp4a) {
+    const uint64_t row = (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    const uint32_t lane = threadIdx.x & 31u;
+    /* row depends only on threadIdx.x >> 5, so a warp exits as a whole and the
+     * reductions below always run with a full warp. */
+    if (row >= out_dim) return;
+    const unsigned char *wr = w + row * blocks * 34u;
+
+    float acc[MAXT];
+#pragma unroll
+    for (uint32_t t = 0; t < MAXT; t++) acc[t] = 0.0f;
+
+    for (uint64_t b = lane; b < blocks; b += 32u) {
+        const uint64_t i0 = b * 32u;
+        const uint64_t bn = in_dim - i0 < 32u ? in_dim - i0 : 32u;
+        const float wscale = __half2float(*(const __half *)(wr + b * 34u));
+        const int8_t *qs = (const int8_t *)(wr + b * 34u + 2u);
+#pragma unroll
+        for (uint32_t t = 0; t < MAXT; t++) {
+            if (t >= n_tok) break;
+            const int8_t *xqb = xq + (uint64_t)t * blocks * 32u + b * 32u;
+            const int dot = dot_i8_block(qs, xqb, bn, use_dp4a);
+            acc[t] += wscale * xscale[(uint64_t)t * blocks + b] * (float)dot;
+        }
+    }
+
+#pragma unroll
+    for (uint32_t t = 0; t < MAXT; t++) {
+        if (t >= n_tok) break;
+        const float sum = warp_sum_f32(acc[t]);
+        if (lane == 0u) out[(uint64_t)t * out_dim + row] = sum;
+    }
+}
+
 __global__ static void matmul_q8_0_pair_preq_warp8_kernel(
         float *out0,
         float *out1,

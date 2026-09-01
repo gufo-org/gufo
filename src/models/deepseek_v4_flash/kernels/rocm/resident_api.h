@@ -21,6 +21,14 @@ int ds4_gpu_attention_prefill_raw_heads_tensor(ds4_gpu_tensor *heads, const void
 int ds4_gpu_attention_prefill_static_mixed_heads_tensor(ds4_gpu_tensor *heads, const void *model_map, uint64_t model_size, uint64_t sinks_offset, const ds4_gpu_tensor *q, const ds4_gpu_tensor *raw_kv, const ds4_gpu_tensor *comp_kv, uint32_t comp_kv_f16, uint32_t n_tokens, uint32_t n_comp, uint32_t window, uint32_t ratio, uint32_t n_head, uint32_t head_dim);
 int ds4_gpu_begin_commands(void);
 int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t bytes, const char *label);
+int ds4_gpu_reserve_support_map(const void *support_map, uint64_t support_size, uint64_t arena_bytes);
+int ds4_gpu_cache_support_range(const void *support_map, uint64_t support_size, uint64_t offset, uint64_t bytes, const char *label);
+void ds4_gpu_release_support_map(void);
+/* Enables verification-block kernel selection. Off for prefill and decode so
+ * their kernel choice, output, and throughput stay exactly as baselined. */
+void ds4_gpu_set_small_batch_mode(int enabled);
+int ds4_gpu_dspark_repeat_hc_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *x, uint32_t n_embd, uint32_t n_hc, uint32_t n_rows);
+int ds4_gpu_dspark_capture_features_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *hc, uint32_t out_row_stride, uint32_t slot_offset, uint32_t n_embd, uint32_t n_hc, uint32_t n_rows);
 void ds4_gpu_cleanup(void);
 int ds4_gpu_compressor_prefill_ratio4_replay_tensor(ds4_gpu_tensor *comp_cache, ds4_gpu_tensor *state_kv, ds4_gpu_tensor *state_score, const ds4_gpu_tensor *kv, const ds4_gpu_tensor *sc, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset, uint32_t norm_type, uint32_t head_dim, uint32_t pos0, uint32_t n_tokens, uint32_t n_rot, uint32_t n_ctx_orig, bool quantize_fp8, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float rms_eps, ds4_gpu_tensor *comp_mirror_f16);
 int ds4_gpu_compressor_prefill_state_ratio4_tensor(ds4_gpu_tensor *state_kv, ds4_gpu_tensor *state_score, const ds4_gpu_tensor *kv_tail, const ds4_gpu_tensor *sc_tail, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint32_t head_dim, uint32_t pos0);
@@ -70,6 +78,10 @@ int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model_size, uint
 int ds4_gpu_shared_down_hc_expand_q8_0_tensor(ds4_gpu_tensor *out_hc, ds4_gpu_tensor *shared_out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *shared_mid, const ds4_gpu_tensor *routed_out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, float clamp);
 int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint64_t context_bytes);
+int ds4_gpu_spec_row_argmax_tensor(ds4_gpu_tensor *out_index, const ds4_gpu_tensor *logits, uint32_t vocab, uint32_t n_rows);
+int ds4_gpu_attention_noncausal_raw_batch_heads_tensor(ds4_gpu_tensor *heads, const void *model_map, uint64_t model_size, uint64_t sinks_offset, const ds4_gpu_tensor *q, const ds4_gpu_tensor *raw_kv, uint32_t n_tokens, uint32_t n_raw, uint32_t raw_cap, uint32_t raw_start, uint32_t n_head, uint32_t head_dim);
+int ds4_gpu_dspark_markov_w1_row_tensor(ds4_gpu_tensor *out_state, const void *model_map, uint64_t model_size, uint64_t w1_offset, uint32_t markov_rank, uint32_t token);
+int ds4_gpu_dspark_markov_argmax_tensor(ds4_gpu_tensor *out_index, ds4_gpu_tensor *scratch_key, const ds4_gpu_tensor *logits_row, const void *model_map, uint64_t model_size, uint64_t w1_offset, uint64_t w2_offset, uint32_t vocab, uint32_t markov_rank, uint32_t previous_token);
 int ds4_gpu_store_raw_kv_batch_tensor(ds4_gpu_tensor *raw_cache, const ds4_gpu_tensor *kv, uint32_t raw_cap, uint32_t pos0, uint32_t n_tokens, uint32_t head_dim);
 int ds4_gpu_store_raw_kv_tensor(ds4_gpu_tensor *raw_cache, const ds4_gpu_tensor *kv, uint32_t raw_cap, uint32_t row, uint32_t head_dim);
 int ds4_gpu_swiglu_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *gate, const ds4_gpu_tensor *up, uint32_t n, float clamp, float weight);

@@ -347,3 +347,65 @@ extern "C" int ds4_gpu_matmul_q8_0_hc_expand_tensor(
                                                     n_embd, n_hc,
                                                     "q8_hc_expand");
 }
+
+extern "C" int ds4_gpu_spec_row_argmax_tensor(
+        ds4_gpu_tensor       *out_index,
+        const ds4_gpu_tensor *logits,
+        uint32_t                vocab,
+        uint32_t                n_rows) {
+    if (vocab == 0u || n_rows == 0u ||
+        !hip_tensor_has_elems(out_index, n_rows, sizeof(int32_t)) ||
+        !hip_tensor_has_elems2(logits, n_rows, vocab, sizeof(float))) {
+        return 0;
+    }
+    spec_row_argmax_kernel<<<n_rows, 256>>>((int32_t *)out_index->ptr,
+                                            (const float *)logits->ptr,
+                                            vocab,
+                                            n_rows);
+    return hip_ok(hipGetLastError(), "spec row argmax launch");
+}
+
+extern "C" int ds4_gpu_dspark_capture_features_tensor(
+        ds4_gpu_tensor       *out,
+        const ds4_gpu_tensor *hc,
+        uint32_t                out_row_stride,
+        uint32_t                slot_offset,
+        uint32_t                n_embd,
+        uint32_t                n_hc,
+        uint32_t                n_rows) {
+    if (!out || !hc || n_embd == 0u || n_hc == 0u || n_rows == 0u ||
+        out_row_stride < slot_offset + n_embd ||
+        !hip_tensor_has_elems2(out, n_rows, out_row_stride, sizeof(float)) ||
+        !hip_tensor_has_elems3(hc, n_rows, n_hc, n_embd, sizeof(float))) {
+        return 0;
+    }
+    const uint64_t n = (uint64_t)n_embd * n_rows;
+    dspark_capture_features_kernel<<<(n + 255u) / 256u, 256>>>(
+            (float *)out->ptr + slot_offset,
+            (const float *)hc->ptr,
+            out_row_stride,
+            n_embd,
+            n_hc,
+            n_rows);
+    return hip_ok(hipGetLastError(), "dspark capture features launch");
+}
+
+extern "C" int ds4_gpu_dspark_repeat_hc_tensor(
+        ds4_gpu_tensor       *out_hc,
+        const ds4_gpu_tensor *x,
+        uint32_t                n_embd,
+        uint32_t                n_hc,
+        uint32_t                n_rows) {
+    if (n_embd == 0u || n_hc == 0u || n_rows == 0u ||
+        !hip_tensor_has_elems3(out_hc, n_rows, n_hc, n_embd, sizeof(float)) ||
+        !hip_tensor_has_elems2(x, n_rows, n_embd, sizeof(float))) {
+        return 0;
+    }
+    const uint64_t n = (uint64_t)n_embd * n_hc * n_rows;
+    dspark_repeat_hc_kernel<<<(n + 255u) / 256u, 256>>>((float *)out_hc->ptr,
+                                                        (const float *)x->ptr,
+                                                        n_embd,
+                                                        n_hc,
+                                                        n_rows);
+    return hip_ok(hipGetLastError(), "dspark repeat hc launch");
+}
