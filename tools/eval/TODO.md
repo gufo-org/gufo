@@ -19,11 +19,21 @@ Against [plan.md](../../plan.md) and issue #153.
       covering what Pi actually exercises. #153 specifies the #203 fixture,
       which does not exist; converge when it lands.
 
+## Long runs are not survivable
+
+Found while recording the first results. A full tier takes 12-26 hours on
+this hardware, which makes both of these load-bearing rather than polish.
+
+- [ ] **Results are only written when the whole run finishes.** `cmd_run`
+      calls `RunResult.write` after the task loop, so nothing is persisted
+      while it is running. A twenty-task run that dies at task nineteen loses
+      every completed result. Write incrementally instead.
+- [ ] **No resume.** An interrupted tier run must start over. Upstream
+      terminal-bench-mini has resume and retry-failed commands; neither was
+      carried over.
+
 ## Needs a long run to answer
 
-- [ ] **Token accounting.** Usage reads zero on truncated runs, because Pi
-      reports cumulative usage only at completion. Confirm it is correct on a
-      full attempt before trusting the aggregate figures.
 - [ ] **Repeat-run stability and tolerance.** Requires several full runs
       (12-26h each on this hardware) before a tolerance can be declared.
 
@@ -66,3 +76,9 @@ Against [plan.md](../../plan.md) and issue #153.
 - [x] PR gate: `nix build .#checks.x86_64-linux.eval-agent`
 - [x] `nix run .#eval-agent`, `nix develop`, help and task listings
 - [x] Cleanup on kill: PDEATHSIG on the forwarder, stale scratch sweep
+- [x] Token accounting verified on complete attempts: input and output are
+      populated correctly. The zeros seen earlier were truncated runs, and
+      `cache_read` is zero because of a server-side cache bug (#224), not a
+      harness gap.
+- [x] First results recorded end to end, with sanitized documents and raw
+      output kept alongside
