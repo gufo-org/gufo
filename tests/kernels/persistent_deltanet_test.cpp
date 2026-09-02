@@ -119,8 +119,13 @@ void TestArenaRestoresOnlyMutableRecurrentState() {
 
   const auto conv_restored =
       CopyToHost(arena.d_ssm_conv_state, conv_initial.size());
+  // `d_ssm_deltanet_state` is `void*` because the carried matrix has a
+  // selectable element type (`opt-c0138-bf16-recurrent`), but production keeps
+  // it FP32 and every write above stages floats into it, so the readback names
+  // the same type rather than letting `CopyToHost` deduce `void`.
   const auto deltanet_restored =
-      CopyToHost(arena.d_ssm_deltanet_state, deltanet_initial.size());
+      CopyToHost(static_cast<const float*>(arena.d_ssm_deltanet_state),
+                 deltanet_initial.size());
   const auto kv_after_restore = CopyToHost(arena.d_kv_cache, kv_initial.size());
   Expect(conv_restored == conv_initial, "convolution state restore");
   Expect(deltanet_restored == deltanet_initial, "DeltaNet state restore");
