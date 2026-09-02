@@ -485,6 +485,19 @@ static int routed_moe_launch(
         const uint32_t use_expert_tiles = use_sorted_pairs;
         const uint32_t expert_tile_m = grouped_gate ? 4u : 8u;
         const uint32_t write_gate_up = 0u;
+        /*
+         * The vendored MMQ tier owns routed IQ2 gate/up for prompt chunks. It
+         * reaches the integer matrix cores through `mul_mat_q`, which the native
+         * hotlist WMMA kernel below cannot, and bounds each expert by
+         * `n_tokens` rather than `n_tokens * top_k`.
+         *
+         * It is excluded from every DSpark route. MMQ's reduction order differs
+         * from the native kernels', and speculative verification is only
+         * lossless while a batched row's argmax matches ordinary decode's.
+         */
+        const uint32_t use_mmq_gateup =
+            g_rocm_mmq_ready && iq2_path && !q4k_path &&
+            n_tokens > 1u && !g_small_batch_mode;
         const uint32_t use_p2_sorted = 0u;
         const uint32_t use_atomic_down = use_expert_tiles && n_tokens >= 128u;
         const uint32_t use_gate_row2048 = !q4k_path && use_expert_tiles && n_tokens >= 128u;
@@ -513,9 +526,12 @@ static int routed_moe_launch(
         uint32_t *iq2_gate_hot_dev = NULL;
         uint32_t tile_capacity = 0;
         uint32_t tile16_capacity = 0;
-        dim3 xq_grid(xq_blocks, n_tokens, 1);
-        q8_K_quantize_kernel<<<xq_grid, 256>>>(xq, (const float *)x->ptr, expert_in_dim, n_tokens);
-        ok = hip_ok(hipGetLastError(), "routed_moe x quantize launch");
+        if (!use_mmq_gateup) {
+            dim3 xq_grid(xq_blocks, n_tokens, 1);
+            q8_K_quantize_kernel<<<xq_grid, 256>>>(
+                    xq, (const float *)x->ptr, expert_in_dim, n_tokens);
+            ok = hip_ok(hipGetLastError(), "routed_moe x quantize launch");
+        }
         if (ok && use_sorted_pairs) {
             const uint64_t counts_bytes = 256ull * sizeof(uint32_t);
             const uint64_t offsets_bytes = 257ull * sizeof(uint32_t);
@@ -609,13 +625,112 @@ static int routed_moe_launch(
                 }
             }
         }
+        int mmq_gateup_done = 0;
+        int mmq_hot_mid_f16 = 0;
+        __half *mmq_mid_h = NULL;
+        if (ok && use_mmq_gateup) {
+            const uint64_t pair_count64 = (uint64_t)n_tokens * n_expert;
+            const uint64_t mid_count = pair_count64 * expert_mid_dim;
+            uint64_t down_h_bytes = 0;
+            uint64_t mid_h_bytes = 0;
+            /* The wide Q2 down kernel reads its activations as F16, so carve the
+             * mirror out of the down scratch behind the F16 down result. */
+            if ((out_dim & 1u) == 0u &&
+                hip_u64_mul3_checked(
+                    pair_count64, out_dim, sizeof(__half), &down_h_bytes) &&
+                hip_u64_mul_checked(mid_count, sizeof(__half), &mid_h_bytes) &&
+                down_h_bytes <= down->bytes &&
+                mid_h_bytes <= down->bytes - down_h_bytes) {
+                mmq_mid_h = (__half *)((char *)down->ptr + down_h_bytes);
+            }
+
+            const int use_fused_swiglu = g_rocm_gfx1151 && mmq_mid_h != NULL;
+            int rc = -1;
+            if (use_fused_swiglu) {
+                ds4_mmq_set_aligned_q81_scratch(up->ptr, (size_t)up->bytes);
+                rc = ds4_mmq_iq2_xxs_moe_pair_token_bound_swiglu(
+                    gate_w,
+                    up_w,
+                    (const float *)x->ptr,
+                    (const int32_t *)selected->ptr,
+                    (const float *)weights->ptr,
+                    (float *)gate->ptr,
+                    (float *)down->ptr,
+                    (float *)mid->ptr,
+                    mmq_mid_h,
+                    (int)expert_mid_dim,
+                    (int)expert_in_dim,
+                    (int)n_tokens,
+                    (int)n_total_expert,
+                    (int)n_expert,
+                    clamp,
+                    (hipStream_t)0);
+            }
+            const int fused_swiglu_done = use_fused_swiglu && rc == 0;
+            if (rc != 0) {
+                ds4_mmq_set_aligned_q81_scratch(down->ptr, (size_t)down->bytes);
+                rc = ds4_mmq_iq2_xxs_moe_pair_token_bound(
+                    gate_w,
+                    up_w,
+                    (const float *)x->ptr,
+                    (const int32_t *)selected->ptr,
+                    (float *)gate->ptr,
+                    (float *)up->ptr,
+                    (int)expert_mid_dim,
+                    (int)expert_in_dim,
+                    (int)n_tokens,
+                    (int)n_total_expert,
+                    (int)n_expert,
+                    (hipStream_t)0);
+            }
+            ds4_mmq_set_aligned_q81_scratch(NULL, 0);
+            if (rc == 0 && !fused_swiglu_done) {
+                moe_mmq_swiglu_weighted_clamp_kernel<<<
+                        (uint32_t)((mid_count + 255u) / 256u), 256>>>(
+                        (float *)mid->ptr,
+                        mmq_mid_h,
+                        (const float *)gate->ptr,
+                        (const float *)up->ptr,
+                        (const float *)weights->ptr,
+                        expert_mid_dim,
+                        n_tokens,
+                        n_expert,
+                        clamp);
+                rc = hip_ok(hipGetLastError(),
+                             "routed_moe HIP MMQ swiglu launch") ? 0 : -1;
+            }
+            if (rc == 0 && mmq_mid_h) mmq_hot_mid_f16 = 1;
+            if (rc == 0) {
+                mmq_gateup_done = 1;
+                static int logged = 0;
+                if (!logged) {
+                    logged = 1;
+                    fprintf(stderr,
+                            DS4_GPU_LOG_PREFIX
+                            "routed MoE using HIP MMQ gate/up%s with native Q2 down\n",
+                            fused_swiglu_done ? " fused SwiGLU" : "");
+                }
+            } else {
+                fprintf(stderr,
+                        DS4_GPU_LOG_PREFIX "gate/up MMQ returned %d "
+                        "(tokens=%u); falling back\n",
+                        rc,
+                        n_tokens);
+                dim3 xq_grid(xq_blocks, n_tokens, 1);
+                q8_K_quantize_kernel<<<xq_grid, 256>>>(
+                        xq, (const float *)x->ptr, expert_in_dim, n_tokens);
+                ok = hip_ok(hipGetLastError(),
+                             "routed_moe MMQ fallback x quantize launch");
+            }
+        }
         uint32_t iq2_gate_hot_count = 0u;
         uint32_t iq2_gate_hot_max = 0u;
         const uint32_t iq2_gate_hot_threshold = 8u;
         const uint32_t iq2_down_hot_threshold = 8u;
         uint32_t h_iq2_gate_hot[256] = {0};
         const uint32_t use_iq2_gate_wmma =
-            ok && iq2_path && n_tokens >= iq2_gate_hot_threshold &&
+            ok && !mmq_gateup_done &&
+            iq2_path && n_tokens >= iq2_gate_hot_threshold &&
             n_expert == 6u && !write_gate_up &&
             sorted_pairs && sorted_offsets && sorted_counts && tile_experts && iq2_gate_hot_dev && use_expert_tiles &&
             (expert_in_dim % 16u) == 0u && (expert_mid_dim % 16u) == 0u;
@@ -641,9 +756,14 @@ static int routed_moe_launch(
             }
         }
         const uint32_t iq2_gate_scalar_max = iq2_gate_hot_count != 0u ? iq2_gate_hot_threshold : 0u;
-        const int use_iq2_hot_f16_mid = use_iq2_gate_wmma && iq2_gate_hot_count != 0u &&
-            iq2_gate_hot_threshold == iq2_down_hot_threshold && (out_dim & 1u) == 0u;
-        __half *iq2_hot_mid_h = use_iq2_hot_f16_mid ? (__half *)gate->ptr : NULL;
+        const int use_iq2_hot_f16_mid =
+            mmq_hot_mid_f16 ||
+            (use_iq2_gate_wmma && iq2_gate_hot_count != 0u &&
+             iq2_gate_hot_threshold == iq2_down_hot_threshold &&
+             (out_dim & 1u) == 0u);
+        __half *iq2_hot_mid_h = mmq_mid_h
+            ? mmq_mid_h
+            : (use_iq2_hot_f16_mid ? (__half *)gate->ptr : NULL);
         const int use_iq2_x_f16 = use_iq2_gate_wmma && iq2_gate_hot_count != 0u &&
             up->bytes >= (uint64_t)n_tokens * expert_in_dim * sizeof(__half);
         __half *iq2_x_h = use_iq2_x_f16 ? (__half *)up->ptr : NULL;
@@ -652,7 +772,7 @@ static int routed_moe_launch(
             f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(iq2_x_h, (const float *)x->ptr, xh_count);
             ok = hip_ok(hipGetLastError(), "routed_moe iq2 gate x f16 launch");
         }
-        if (ok) {
+        if (ok && !mmq_gateup_done) {
             dim3 mgrid((expert_mid_dim + 31u) / 32u, n_tokens * n_expert, 1);
             if (ok && sorted_pairs && use_expert_tiles && sorted_offsets && sorted_counts && tile_total && tile_experts && tile_starts) {
                 if (q4k_path) {

@@ -1,3 +1,263 @@
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#include <type_traits>
+#include <rocwmma/rocwmma.hpp>
+
+/* Blocked F16 GEMM for the attention output B projection.
+ *
+ * The engine sends this shape (`m=4096 n=chunk k=8192`, `opA=N`, F16 operands
+ * and an F32 result) to hipBLASLt, which picks a `MT96x96x32` Tensile kernel.
+ * That tile re-reads each panel `m/96` and `n/96` times, about 5.7 GB for a
+ * 4,096-token chunk, and a kernel trace prices the call at 25.58 ms, which is
+ * roughly DRAM peak for that traffic. A 256x128 macro tile moves 3.22 GB
+ * instead. `rocm/tools/f16_gemm_bench.cpp` scored every geometry with three
+ * rotating operand copies so that the 32 MB MALL could not hide the re-reads:
+ * 15.82 ms for the production candidate against 11.80 ms here.
+ *
+ * This is the only projection shape worth taking off hipBLASLt. Tensile wins
+ * every `opA=T` shape in the same harness, by 1.4x to 2.6x.
+ *
+ * Layout: A is the transposed weight cache `Wt[k][m]` row-major, so the LDS
+ * tile is `[k][m]` with a `col_major` fragment and both the global read and the
+ * LDS write stay contiguous in `m`. B is `low[n][k]` row-major, staged `[n][k]`
+ * with a `col_major` matrix_b. C is `out[n][m]` row-major, which is column-major
+ * `[m][n]` with leading dimension `m`.
+ *
+ * Accumulators live in registers for the whole K loop, so each output element
+ * is a single ascending walk over K: deterministic, though not hipBLASLt's
+ * order, so this needs a likelihood gate rather than an exact logit hash. */
+template <uint32_t BM, uint32_t BN, uint32_t BK, uint32_t WMF, uint32_t WNF,
+          uint32_t SWZ, bool A_ROWMAJOR, typename OutT>
+__global__ __launch_bounds__((BM / 16u / WMF) * (BN / 16u / WNF) * 32u) void
+ds4_gemm_f16_wmma_kernel(OutT *__restrict__ out,
+                         const __half *__restrict__ weight,
+                         const __half *__restrict__ act,
+                         uint32_t m,
+                         uint32_t n,
+                         uint32_t k,
+                         uint32_t ldc,
+                         uint64_t stride_a,
+                         uint64_t stride_b,
+                         uint64_t stride_c) {
+    /* `blockIdx.z` walks independent problems for the strided-batched form; a
+     * plain GEMM passes a z extent of one and zero strides. `ldc` lets the
+     * result land in a wider matrix, which the attention output A GEMM needs
+     * because each group writes its own `rank` block of a `low_dim` row. */
+    const __half *__restrict__ weight_t = weight + (uint64_t)blockIdx.z * stride_a;
+    const __half *__restrict__ low_h = act + (uint64_t)blockIdx.z * stride_b;
+    out += (uint64_t)blockIdx.z * stride_c;
+    constexpr uint32_t WAVES_M = BM / 16u / WMF;
+    constexpr uint32_t WAVES_N = BN / 16u / WNF;
+    constexpr uint32_t THREADS = WAVES_M * WAVES_N * 32u;
+    /* A's LDS tile follows the source's contiguous axis: [m][k] for a row-major
+     * W[m][k] (opA=T) and [k][m] for a row-major Wt[k][m] (opA=N), so both the
+     * global read and the LDS write stay contiguous either way. */
+    constexpr uint32_t A_PITCH = A_ROWMAJOR ? BK : BM;
+    constexpr uint32_t A_LINES = A_ROWMAJOR ? BM : BK;
+    __shared__ __half shA[A_LINES * A_PITCH];
+    __shared__ __half shB[BN * BK];
+    /* Narrowing epilogue scratch, one 16x16 F32 tile per wave. Only the F16
+     * result path needs it; the F32 path stores straight to global. */
+    __shared__ float shEpi[std::is_same<OutT, __half>::value
+                                   ? WAVES_M * WAVES_N * 256u
+                                   : 1u];
+
+    uint32_t bm, bn;
+    if (SWZ <= 1u) {
+        bm = blockIdx.x;
+        bn = blockIdx.y;
+    } else {
+        const uint32_t tiles_m = gridDim.x;
+        const uint32_t group = SWZ * tiles_m;
+        const uint32_t linear = blockIdx.y * tiles_m + blockIdx.x;
+        const uint32_t gid = linear / group;
+        const uint32_t within = linear - gid * group;
+        const uint32_t cols = min(SWZ, gridDim.y - gid * SWZ);
+        bm = within / cols;
+        bn = gid * SWZ + (within - bm * cols);
+    }
+    const uint32_t m0 = bm * BM;
+    const uint32_t n0 = bn * BN;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t wave = tid >> 5u;
+    const uint32_t wm = wave % WAVES_M;
+    const uint32_t wn = wave / WAVES_M;
+
+    using frag_a = rocwmma::fragment<
+            rocwmma::matrix_a, 16, 16, 16, __half,
+            typename std::conditional<A_ROWMAJOR, rocwmma::row_major,
+                                      rocwmma::col_major>::type>;
+    using frag_b = rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, __half,
+                                     rocwmma::col_major>;
+    using frag_c = rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>;
+    frag_c acc[WMF][WNF];
+    for (uint32_t i = 0; i < WMF; i++)
+        for (uint32_t j = 0; j < WNF; j++) rocwmma::fill_fragment(acc[i][j], 0.0f);
+
+    constexpr uint32_t A_GROUPS = BM * BK / 8u;
+    constexpr uint32_t B_GROUPS = BN * BK / 8u;
+    constexpr uint32_t A_RUN = A_PITCH / 8u;
+    constexpr uint32_t B_RUN = BK / 8u;
+
+    for (uint32_t k0 = 0; k0 < k; k0 += BK) {
+        for (uint32_t g = tid; g < A_GROUPS; g += THREADS) {
+            const uint32_t run = g % A_RUN;
+            const uint32_t line = g / A_RUN;
+            const uint64_t src = A_ROWMAJOR
+                    ? (uint64_t)(m0 + line) * k + k0 + run * 8u
+                    : (uint64_t)(k0 + line) * m + m0 + run * 8u;
+            *reinterpret_cast<uint4 *>(&shA[line * A_PITCH + run * 8u]) =
+                    *reinterpret_cast<const uint4 *>(&weight_t[src]);
+        }
+        for (uint32_t g = tid; g < B_GROUPS; g += THREADS) {
+            const uint32_t run = g % B_RUN;
+            const uint32_t line = g / B_RUN;
+            *reinterpret_cast<uint4 *>(&shB[line * BK + run * 8u]) =
+                    *reinterpret_cast<const uint4 *>(
+                            &low_h[(uint64_t)(n0 + line) * k + k0 + run * 8u]);
+        }
+        __syncthreads();
+        for (uint32_t kk = 0; kk < BK; kk += 16u) {
+            frag_a fa[WMF];
+            frag_b fb[WNF];
+            for (uint32_t i = 0; i < WMF; i++) {
+                const uint32_t mm = (wm * WMF + i) * 16u;
+                if (A_ROWMAJOR) {
+                    rocwmma::load_matrix_sync(fa[i], &shA[mm * A_PITCH + kk],
+                                              A_PITCH);
+                } else {
+                    rocwmma::load_matrix_sync(fa[i], &shA[kk * A_PITCH + mm],
+                                              A_PITCH);
+                }
+            }
+            for (uint32_t j = 0; j < WNF; j++) {
+                rocwmma::load_matrix_sync(
+                        fb[j], &shB[(wn * WNF + j) * 16u * BK + kk], BK);
+            }
+            for (uint32_t i = 0; i < WMF; i++)
+                for (uint32_t j = 0; j < WNF; j++)
+                    rocwmma::mma_sync(acc[i][j], fa[i], fb[j], acc[i][j]);
+        }
+        __syncthreads();
+    }
+
+    if (std::is_same<OutT, float>::value) {
+        for (uint32_t i = 0; i < WMF; i++) {
+            for (uint32_t j = 0; j < WNF; j++) {
+                const uint32_t mo = m0 + (wm * WMF + i) * 16u;
+                const uint32_t no = n0 + (wn * WNF + j) * 16u;
+                rocwmma::store_matrix_sync(
+                        (float *)out + mo + (uint64_t)no * ldc, acc[i][j], ldc,
+                        rocwmma::mem_col_major);
+            }
+        }
+        return;
+    }
+    /* An F16 result needs a narrowing epilogue that rocWMMA's F32 accumulator
+     * cannot store directly, so page each wave's tiles back through LDS. */
+    float *tile = shEpi + (uint64_t)wave * 256u;
+    const uint32_t lane = tid & 31u;
+    for (uint32_t i = 0; i < WMF; i++) {
+        for (uint32_t j = 0; j < WNF; j++) {
+            rocwmma::store_matrix_sync(tile, acc[i][j], 16u,
+                                       rocwmma::mem_col_major);
+            const uint32_t mo = m0 + (wm * WMF + i) * 16u;
+            const uint32_t no = n0 + (wn * WNF + j) * 16u;
+            for (uint32_t e = lane; e < 256u; e += 32u) {
+                const uint32_t c = e >> 4u;
+                const uint32_t r = e & 15u;
+                ((__half *)out)[(uint64_t)(no + c) * ldc + mo + r] =
+                        __float2half(tile[c * 16u + r]);
+            }
+        }
+    }
+}
+
+/* 256x128 with four m-fragments and two n-fragments per wave, 512 threads, and
+ * a two-column swizzle scored best across every shape in
+ * `rocm/tools/f16_gemm_bench.cpp`. Bigger macro tiles spill: 256x256 needs 128
+ * accumulator VGPRs and measured 1.8x slower. */
+#define DS4_WMMA_GEMM_BM 256u
+#define DS4_WMMA_GEMM_BN 128u
+#define DS4_WMMA_GEMM_BK 32u
+
+/* A 256x128 tile only pays when the grid can fill the 40 CUs several times
+ * over. Routing every `opA=T` projection through it cost +456 ms per two-chunk
+ * trace, because `m=256` and `m=512` leave 32 and 64 workgroups for 40 CUs while
+ * Tensile's MT96x96 and MT32x32 tiles keep hundreds in flight. Six workgroups
+ * per CU is the floor that kept only the shapes this kernel wins. */
+#define DS4_WMMA_GEMM_MIN_BLOCKS 240u
+
+static int ds4_gemm_f16_wmma_eligible(uint64_t m, uint64_t n, uint64_t k) {
+    /* Static LDS is BM*BK + BN*BK halves = 24 KiB, so two workgroups per CU. */
+    if (!g_rocm_gfx1151 || m % DS4_WMMA_GEMM_BM != 0u ||
+        n % DS4_WMMA_GEMM_BN != 0u || k % DS4_WMMA_GEMM_BK != 0u ||
+        m > UINT32_MAX || n > UINT32_MAX || k > UINT32_MAX) {
+        return 0;
+    }
+    return (m / DS4_WMMA_GEMM_BM) * (n / DS4_WMMA_GEMM_BN) >=
+           DS4_WMMA_GEMM_MIN_BLOCKS;
+}
+
+template <bool A_ROWMAJOR, typename OutT>
+static int ds4_gemm_f16_wmma_launch(OutT *out,
+                                    const __half *weight,
+                                    const __half *act,
+                                    uint64_t m,
+                                    uint64_t n,
+                                    uint64_t k,
+                                    const char *what) {
+    const dim3 grid((uint32_t)(m / DS4_WMMA_GEMM_BM),
+                    (uint32_t)(n / DS4_WMMA_GEMM_BN),
+                    1u);
+    ds4_gemm_f16_wmma_kernel<DS4_WMMA_GEMM_BM, DS4_WMMA_GEMM_BN,
+                             DS4_WMMA_GEMM_BK, 4u, 2u, 2u, A_ROWMAJOR, OutT>
+            <<<grid, 512u>>>(out, weight, act, (uint32_t)m, (uint32_t)n,
+                             (uint32_t)k, (uint32_t)m, 0, 0, 0);
+    return hip_ok(hipGetLastError(), what);
+}
+
+/* Strided-batched form for the attention output A GEMM.
+ *
+ * `hipblasGemmStridedBatchedEx` sends `rank x n_tokens x group_dim` once per
+ * head group to rocBLAS, which picks `Cijk_Alik_Bljk_HHS_MT128x128x32` and
+ * reaches 2.7 TFLOP/s: 12.88 ms per call for 34.4 GFLOP. Each group's A panel
+ * is only `rank * group_dim * 2` bytes, so it stays in the MALL across the whole
+ * n sweep and the call should be bound by B, which is read once.
+ *
+ * A 128-row macro tile matches `rank` exactly, so `m` needs no padding, and the
+ * output leading dimension is `low_dim` because group `g` owns the `rank` block
+ * at offset `g * rank` of every token's row. */
+#define DS4_WMMA_BATCH_BM 128u
+#define DS4_WMMA_BATCH_BN 128u
+
+static int ds4_gemm_f16_wmma_batched_eligible(uint64_t m,
+                                              uint64_t n,
+                                              uint64_t k,
+                                              uint64_t batches) {
+    return g_rocm_gfx1151 && m == DS4_WMMA_BATCH_BM &&
+           n % DS4_WMMA_BATCH_BN == 0u && k % DS4_WMMA_GEMM_BK == 0u &&
+           batches > 0u && batches <= UINT16_MAX && m <= UINT32_MAX &&
+           n <= UINT32_MAX && k <= UINT32_MAX &&
+           (n / DS4_WMMA_BATCH_BN) * batches >= DS4_WMMA_GEMM_MIN_BLOCKS;
+}
+
+static int ds4_gemm_f16_wmma_batched_launch(__half *out,
+                                            const __half *weight,
+                                            const __half *act,
+                                            uint64_t m,
+                                            uint64_t n,
+                                            uint64_t k,
+                                            uint64_t ldc,
+                                            uint64_t batches,
+                                            const char *what) {
+    const dim3 grid(1u, (uint32_t)(n / DS4_WMMA_BATCH_BN), (uint32_t)batches);
+    ds4_gemm_f16_wmma_kernel<DS4_WMMA_BATCH_BM, DS4_WMMA_BATCH_BN,
+                             DS4_WMMA_GEMM_BK, 2u, 2u, 1u, true, __half>
+            <<<grid, 512u>>>(out, weight, act, (uint32_t)m, (uint32_t)n,
+                             (uint32_t)k, (uint32_t)ldc, m * k, n * k, m);
+    return hip_ok(hipGetLastError(), what);
+}
+#endif
 __global__ static void matmul_f16_tiny_batch_wave_kernel(
         float *out,
         const __half *w,
@@ -311,6 +571,19 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
     if (!xh) return 0;
     f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(xh, (const float *)x->ptr, xh_count);
     if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
+#ifdef __HIP_PLATFORM_AMD__
+    if (hipblaslt_gemm_f16(out->ptr,
+                           w_f16,
+                           xh,
+                           (uint32_t)out_dim,
+                           (uint32_t)n_tok,
+                           (uint32_t)in_dim,
+                           HIPBLAS_OP_T,
+                           HIP_R_32F,
+                           label ? label : "q8 f16 projection")) {
+        return 1;
+    }
+#endif
     const float alpha = 1.0f;
     const float beta = 0.0f;
     hipblasStatus_t st = hipblasGemmEx(g_hipblas,
@@ -368,6 +641,19 @@ static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
     if (!xh) return 0;
     f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(xh, (const float *)x->ptr, xh_count);
     if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch")) return 0;
+#ifdef __HIP_PLATFORM_AMD__
+    if (hipblaslt_gemm_f16(out_h->ptr,
+                           w_f16,
+                           xh,
+                           (uint32_t)out_dim,
+                           (uint32_t)n_tok,
+                           (uint32_t)in_dim,
+                           HIPBLAS_OP_T,
+                           HIP_R_16F,
+                           label ? label : "q8 f16-out projection")) {
+        return 1;
+    }
+#endif
     const float alpha = 1.0f;
     const float beta = 0.0f;
     hipblasStatus_t st = hipblasGemmEx(g_hipblas,
@@ -419,6 +705,25 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
     }
     const char *wptr = hip_model_range_ptr(model_map, weight_offset, weight_bytes, "q8_0");
     if (!wptr) return 0;
+    /* Dense Q8 prefill through the vendored MMQ tier. Excluded from DSpark
+     * verification blocks so a verified row keeps decode's reduction order. */
+    if (n_tok > 1u && !g_small_batch_mode && g_rocm_mmq_ready &&
+        ds4_mmq_q8_0_dense(
+            wptr,
+            (const float *)x->ptr,
+            (float *)out->ptr,
+            (int)out_dim,
+            (int)n_tok,
+            (int)in_dim,
+            (hipStream_t)0) == 0) {
+        static int notice_printed = 0;
+        if (!notice_printed) {
+            fprintf(stderr,
+                    DS4_GPU_LOG_PREFIX "dense Q8 prefill using native HIP MMQ\n");
+            notice_printed = 1;
+        }
+        return 1;
+    }
     if (n_tok == 1 && !hip_q8_prequant_decode_enabled()) {
         const bool extended_sharedx =
             in_dim > 8192u &&
@@ -954,6 +1259,19 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         if (!xh) return 0;
         f32_to_f16_kernel<<<(xh_count + 255) / 256, 256>>>(xh, (const float *)x->ptr, xh_count);
         if (!hip_ok(hipGetLastError(), "f16 activation convert launch")) return 0;
+#ifdef __HIP_PLATFORM_AMD__
+        if (hipblaslt_gemm_f16(out->ptr,
+                               w,
+                               xh,
+                               (uint32_t)out_dim,
+                               (uint32_t)n_tok,
+                               (uint32_t)in_dim,
+                               HIPBLAS_OP_T,
+                               HIP_R_32F,
+                               "f16 projection")) {
+            return 1;
+        }
+#endif
         const float alpha = 1.0f;
         const float beta = 0.0f;
         hipblasStatus_t st = hipblasGemmEx(g_hipblas,

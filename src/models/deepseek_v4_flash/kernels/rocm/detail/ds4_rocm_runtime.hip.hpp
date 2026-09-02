@@ -9,6 +9,12 @@ static int g_model_cache_full;
 static hipStream_t g_model_upload_stream;
 static hipblasHandle_t g_hipblas;
 static int g_hipblas_ready;
+/* Strix Halo detection. The optimized prefill routes below are scored on
+ * gfx1151 only; every one of them keeps its generic fallback so an unexpected
+ * device still runs. */
+static int g_rocm_gfx1151;
+/* Vendored llama.cpp MMQ tier availability (kernels/rocm/mmq). */
+static int g_rocm_mmq_ready;
 #ifdef __HIP_PLATFORM_AMD__
 #include "ds4_rocm_hipblaslt.hip.hpp"
 #endif
@@ -965,8 +971,10 @@ static int hipblas_ok(hipblasStatus_t st, const char *what) {
 extern "C" int ds4_gpu_init(void) {
     int dev = 0;
     if (!hip_ok(hipSetDevice(dev), "set device")) return 0;
+    g_rocm_gfx1151 = 0;
     hipDeviceProp_t prop;
     if (hipGetDeviceProperties(&prop, dev) == hipSuccess) {
+        g_rocm_gfx1151 = prop.major == 11 && prop.minor == 5;
         fprintf(stderr, DS4_GPU_LOG_PREFIX "backend initialized on %s (sm_%d%d)\n",
                 prop.name, prop.major, prop.minor);
     }
@@ -982,6 +990,9 @@ extern "C" int ds4_gpu_init(void) {
         }
     }
 #endif
+    g_rocm_mmq_ready = g_rocm_gfx1151 && ds4_mmq_init(dev) == 0;
+    fprintf(stderr, DS4_GPU_LOG_PREFIX "native MMQ %s\n",
+            g_rocm_mmq_ready ? "enabled" : "unavailable");
     return 1;
 }
 
@@ -989,6 +1000,7 @@ extern "C" void ds4_gpu_release_support_map(void);
 
 extern "C" void ds4_gpu_cleanup(void) {
     (void)hipDeviceSynchronize();
+    ds4_mmq_cleanup();
     ds4_gpu_release_support_map();
     hip_shared_gate_up_async_cleanup();
 #ifdef __HIP_PLATFORM_AMD__

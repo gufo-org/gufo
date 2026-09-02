@@ -2554,6 +2554,42 @@ __global__ static void moe_sum_kernel(float *out, const float *down, uint32_t ou
     out[gid] = acc;
 }
 
+/* SwiGLU epilogue for the MMQ routed gate/up pair.
+ *
+ * MMQ writes raw gate and up projections, so this applies the clamp, the SiLU
+ * gate, and the router weight in one pass and emits the F16 mirror the wide Q2
+ * down kernel reads. It runs only when MMQ could not fuse the epilogue itself. */
+__global__ static void moe_mmq_swiglu_weighted_clamp_kernel(
+        float *mid_out,
+        __half *mid_out_h,
+        const float *gate_buf,
+        const float *up_buf,
+        const float *weights,
+        uint32_t expert_mid_dim,
+        uint32_t n_tokens,
+        uint32_t n_expert,
+        float clamp) {
+    const uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t n = (uint64_t)n_tokens * n_expert * expert_mid_dim;
+    if (gid >= n) return;
+    const uint64_t pair = gid / expert_mid_dim;
+    const uint32_t tok = (uint32_t)(pair / n_expert);
+    const uint32_t slot = (uint32_t)(pair - (uint64_t)tok * n_expert);
+    float g = gate_buf[gid];
+    float u = up_buf[gid];
+    if (!isfinite(g)) g = 0.0f;
+    if (!isfinite(u)) u = 0.0f;
+    if (clamp > 1.0e-6f) {
+        if (g > clamp) g = clamp;
+        if (u > clamp) u = clamp;
+        if (u < -clamp) u = -clamp;
+    }
+    const float w = weights[(uint64_t)tok * n_expert + slot];
+    const float value = (g / (1.0f + expf(-g))) * u * w;
+    if (mid_out) mid_out[gid] = value;
+    if (mid_out_h) mid_out_h[gid] = __float2half(value);
+}
+
 __global__ static void moe_sum_f16_kernel(float *out, const __half *down_h, uint32_t out_dim, uint32_t n_expert, uint32_t n_tokens) {
     uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t n = (uint64_t)n_tokens * out_dim;

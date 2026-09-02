@@ -1,6 +1,21 @@
 #include "backend.h"
 #include <hipblaslt/hipblaslt.h>
 
+/* Vendored llama.cpp quantized-matmul tier. It owns the routed IQ2 gate/up and
+ * dense Q8 prefill kernels; see mmq/VENDOR.md. */
+#include "mmq/ds4_mmq.h"
+
+/* MMQ can reuse a producer-emitted Q8_1 activation instead of quantizing its
+ * own. This backend keeps no such registry, so MMQ always takes its regular
+ * activation-quantize prelude. */
+extern "C" int ds4_cuda_q8_fold_take_q81(
+        const void *src, uint64_t in_dim, const void **q81) {
+    (void)src;
+    (void)in_dim;
+    if (q81) *q81 = NULL;
+    return 0;
+}
+
 #define FULL_WARP_MASK 0xFFFFFFFFFFFFFFFFULL
 #define MASK_T uint64_t
 #define DS4_GPU_BACKEND_NAME "ROCm"
