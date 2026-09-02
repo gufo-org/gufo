@@ -177,9 +177,26 @@ __global__ static void indexer_scores_wmma128_kernel(
         }
     }
 
+    /* `c_sh` is gone. It existed only to redistribute each warp's 16x16 result
+     * so that all 256 threads could stripe across all eight warp tiles, which
+     * forced a store, a barrier and a strided read per head, 64 heads deep, plus
+     * 8,192 B of LDS. Instead each warp now accumulates its *own* tile in
+     * registers, reachable because the gfx1151 wave32 accumulator maps element
+     * `e` of lane `l` to (row `2 * e + l / 16`, col `l % 16`) -- recovered by
+     * `rocm/tools/wmma_acc_layout.cpp`, not assumed.
+     *
+     * LDS drops 12,288 -> 4,096 B, so residency stops being LDS-bound and hits
+     * the 16-waves-per-SIMD ceiling instead: 1 workgroup per CU becomes 4. The
+     * per-output accumulation order over heads is unchanged, so this is
+     * bit-identical. `b_sh` stays: it is staged once and reused by all 64 heads,
+     * and serving those B fragments from global instead would re-read 8.4 GB. */
     __shared__ __half a_sh[16 * 128];
     __shared__ __half b_sh[128 * 128];
-    __shared__ float c_sh[8 * 16 * 16];
+
+    const uint32_t lane = tid & 31u;
+    const uint32_t acc_col = lane & 15u;
+    const uint32_t acc_row_base = lane >> 4u;
+    const uint32_t comp_own = tile_c + warp * 16u + acc_col;
 
     float acc[8];
 #pragma unroll
@@ -218,42 +235,31 @@ __global__ static void indexer_scores_wmma128_kernel(
             wmma::load_matrix_sync(b_frag, b_sh + col0 * 128u + k0, 128);
             wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         }
-        wmma::store_matrix_sync(c_sh + warp * 16u * 16u, c_frag, 16, wmma::mem_row_major);
-        __syncthreads();
-
-        const uint32_t local0 = tid & 255u;
-        const uint32_t token0 = tile_t + (local0 >> 4u);
-        const float w0 = token0 < n_tokens ? weights[(uint64_t)token0 * n_head + h] : 0.0f;
-        uint32_t slot = 0;
-        for (uint32_t i = tid; i < 8u * 16u * 16u; i += 256u, slot++) {
-            const uint32_t wtile = i >> 8u;
-            const uint32_t local = i & 255u;
-            const uint32_t r = local >> 4u;
-            const uint32_t c = local & 15u;
-            const uint32_t token = tile_t + r;
-            const uint32_t comp = tile_c + wtile * 16u + c;
-            if (token < n_tokens && comp < n_comp) {
-                acc[slot] += fmaxf(c_sh[i], 0.0f) * w0;
+        if (comp_own < n_comp) {
+#pragma unroll
+            for (uint32_t e = 0; e < 8u; e++) {
+                const uint32_t token = tile_t + 2u * e + acc_row_base;
+                if (token < n_tokens) {
+                    acc[e] += fmaxf(c_frag.x[e], 0.0f) *
+                              weights[(uint64_t)token * n_head + h];
+                }
             }
         }
+        /* Only one barrier per head now, and it is the one that orders this
+         * head's `a_sh` reads against the next head's `a_sh` writes. */
         __syncthreads();
     }
 
-    uint32_t slot = 0;
-    for (uint32_t i = tid; i < 8u * 16u * 16u; i += 256u, slot++) {
-        const uint32_t wtile = i >> 8u;
-        const uint32_t local = i & 255u;
-        const uint32_t r = local >> 4u;
-        const uint32_t c = local & 15u;
-        const uint32_t token = tile_t + r;
-        const uint32_t comp = tile_c + wtile * 16u + c;
-        if (token < n_tokens && comp < n_comp) {
-            float out = acc[slot] * scale;
+#pragma unroll
+    for (uint32_t e = 0; e < 8u; e++) {
+        const uint32_t token = tile_t + 2u * e + acc_row_base;
+        if (token < n_tokens && comp_own < n_comp) {
+            float out = acc[e] * scale;
             if (causal) {
                 const uint32_t visible = (pos0 + token + 1u) / ratio;
-                if (comp >= visible) out = -INFINITY;
+                if (comp_own >= visible) out = -INFINITY;
             }
-            scores[(uint64_t)token * n_comp + comp] = out;
+            scores[(uint64_t)token * n_comp + comp_own] = out;
         }
     }
 #endif

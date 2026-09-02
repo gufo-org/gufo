@@ -1015,7 +1015,22 @@ extern "C" int ds4_gpu_attention_output_q8_batch_tensor(
                 const float alpha = 1.0f;
                 const float beta0 = 0.0f;
                 const float beta1 = 1.0f;
-                hipblasStatus_t st = hipblasGemmStridedBatchedEx(g_hipblas,
+                int a_wmma_ok = 0;
+#ifdef __HIP_PLATFORM_AMD__
+                /* rocBLAS reaches 2.7 TFLOP/s on this strided-batched shape;
+                 * see the batched launcher. Only the interleaved-B layout puts
+                 * each group's rank block at `g * rank` of a `low_dim` row,
+                 * which is what the kernel's `ldc` and C stride assume. */
+                a_wmma_ok = interleaved_b &&
+                            ds4_gemm_f16_wmma_batched_eligible(
+                                    rank, n_tokens, group_dim, n_groups) &&
+                            ds4_gemm_f16_wmma_batched_launch(
+                                    low_h, out_a_f16, heads_h, rank, n_tokens,
+                                    group_dim, low_dim, n_groups,
+                                    "attention output a batched wmma launch");
+#endif
+                hipblasStatus_t st = HIPBLAS_STATUS_SUCCESS;
+                if (!a_wmma_ok) st = hipblasGemmStridedBatchedEx(g_hipblas,
                                                                HIPBLAS_OP_T,
                                                                HIPBLAS_OP_N,
                                                                (int)rank,
@@ -1042,6 +1057,30 @@ extern "C" int ds4_gpu_attention_output_q8_batch_tensor(
                     const __half *b_ptr = out_b_f16_t ? out_b_f16_t : out_b_f16;
                     const auto b_op = out_b_f16_t ? HIPBLAS_OP_N : HIPBLAS_OP_T;
                     const int b_lda = out_b_f16_t ? (int)out_dim : (int)low_dim;
+#ifdef __HIP_PLATFORM_AMD__
+                    /* The 256x128 rocWMMA tile moves 3.22 GB against Tensile's
+                     * 5.7 GB on this shape; see the kernel comment. Needs the
+                     * transposed weight cache, so opA is N. */
+                    if (out_b_f16_t &&
+                        ds4_gemm_f16_wmma_eligible(out_dim, n_tokens, low_dim) &&
+                        ds4_gemm_f16_wmma_launch<false, float>(
+                                (float *)out->ptr, out_b_f16_t, low_h,
+                                out_dim, n_tokens, low_dim,
+                                "attention output b wmma launch")) {
+                        return 1;
+                    }
+                    if (hipblaslt_gemm_f16(out->ptr,
+                                           b_ptr,
+                                           low_h,
+                                           (uint32_t)out_dim,
+                                           n_tokens,
+                                           (uint32_t)low_dim,
+                                           b_op,
+                                           HIP_R_32F,
+                                           "attention output b")) {
+                        return 1;
+                    }
+#endif
                     st = hipblasGemmEx(g_hipblas,
                                       b_op,
                                       HIPBLAS_OP_N,

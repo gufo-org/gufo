@@ -200,6 +200,18 @@ __global__ static void dequant_q8_0_to_f16_transpose_kernel(
         uint64_t out_dim,
         uint64_t blocks);
 
+/* Tile geometry for dequant_q8_0_to_f16_transpose_tiled_kernel; see its
+ * definition in ds4_rocm_q8.hip.hpp for why the transpose is tiled. */
+#define DS4_Q8_T_TILE_I 32u
+#define DS4_Q8_T_TILE_ROW 64u
+#define DS4_Q8_T_LDS_PITCH (DS4_Q8_T_TILE_ROW + 8u)
+__global__ static void dequant_q8_0_to_f16_transpose_tiled_kernel(
+        __half *out,
+        const unsigned char *w,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks);
+
 static void hip_shared_gate_up_async_cleanup(void);
 
 static void *hip_tmp_alloc(uint64_t bytes, const char *what) {
@@ -594,12 +606,16 @@ static const __half *hip_q8_f16_transpose_ptr(
         return NULL;
     }
     const uint64_t blocks = (in_dim + 31u) / 32u;
-    const uint64_t n = in_dim * out_dim;
-    dequant_q8_0_to_f16_transpose_kernel<<<(n + 255u) / 256u, 256>>>(dev,
-                                                                     (const unsigned char *)q8,
-                                                                     in_dim,
-                                                                     out_dim,
-                                                                     blocks);
+    const dim3 grid(
+            (unsigned)((out_dim + DS4_Q8_T_TILE_ROW - 1u) / DS4_Q8_T_TILE_ROW),
+            (unsigned)blocks,
+            1u);
+    dequant_q8_0_to_f16_transpose_tiled_kernel<<<grid, 256>>>(
+            dev,
+            (const unsigned char *)q8,
+            in_dim,
+            out_dim,
+            blocks);
     if (!hip_ok(hipGetLastError(), "q8 fp16 transpose dequant launch")) {
         (void)hipFree(dev);
         hip_q8_f16_cache_disable_after_failure("transpose launch failure", out_bytes);

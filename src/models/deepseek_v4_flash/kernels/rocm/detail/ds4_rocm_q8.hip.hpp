@@ -1853,6 +1853,59 @@ __global__ static void dequant_q8_0_to_f16_transpose_kernel(
     out[i * out_dim + row] = __hmul(scale, __float2half((float)q));
 }
 
+/* LDS-tiled transpose for the same dequantization.
+ *
+ * The scalar kernel above gives each lane a private output address `i *
+ * out_dim + row`, so a wave's 32 stores land 8,192 B apart: 32 separate cache
+ * lines for 64 B of payload, and (8192 / 256) % 16 == 0 puts every one of them
+ * on a single memory channel. Measured 1.9 GB/s, about 25x off roofline.
+ *
+ * Here a workgroup owns a 32-`i` by 64-`row` tile. Reads stay wave-contiguous
+ * (32 lanes sweep one Q8_0 block's 32 codes), LDS holds the tile transposed,
+ * and each store writes 64 consecutive halves. `row` is on `blockIdx.x` so the
+ * concurrently dispatched blocks cover the full `out_dim` span of a row and
+ * spread across all 16 channels. The arithmetic per element is unchanged, so
+ * output is bit-identical. */
+__global__ static void dequant_q8_0_to_f16_transpose_tiled_kernel(
+        __half *out,
+        const unsigned char *w,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks) {
+    __shared__ __half tile[DS4_Q8_T_TILE_I * DS4_Q8_T_LDS_PITCH];
+    const uint64_t r0 = (uint64_t)blockIdx.x * DS4_Q8_T_TILE_ROW;
+    const uint64_t b = (uint64_t)blockIdx.y;
+    const uint64_t i0 = b * DS4_Q8_T_TILE_I;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t j = tid & 31u;
+    const uint32_t wave = tid >> 5u;
+    const uint32_t waves = blockDim.x >> 5u;
+
+    for (uint32_t rl = wave; rl < DS4_Q8_T_TILE_ROW; rl += waves) {
+        const uint64_t row = r0 + rl;
+        __half v = __float2half(0.0f);
+        if (row < out_dim && i0 + j < in_dim) {
+            const unsigned char *blk = w + (row * blocks + b) * 34u;
+            const __half scale = *(const __half *)blk;
+            const int8_t q = *(const int8_t *)(blk + 2u + j);
+            v = __hmul(scale, __float2half((float)q));
+        }
+        tile[j * DS4_Q8_T_LDS_PITCH + rl] = v;
+    }
+    __syncthreads();
+
+    const uint32_t rows_per_pass = blockDim.x / DS4_Q8_T_TILE_ROW;
+    const uint32_t store_row = tid & (DS4_Q8_T_TILE_ROW - 1u);
+    for (uint32_t jj = tid / DS4_Q8_T_TILE_ROW; jj < DS4_Q8_T_TILE_I;
+         jj += rows_per_pass) {
+        const uint64_t i = i0 + jj;
+        const uint64_t row = r0 + store_row;
+        if (i < in_dim && row < out_dim) {
+            out[i * out_dim + row] = tile[jj * DS4_Q8_T_LDS_PITCH + store_row];
+        }
+    }
+}
+
 __global__ static void grouped_q8_0_a_preq_warp8_kernel(
         float *low,
         const unsigned char *w,
