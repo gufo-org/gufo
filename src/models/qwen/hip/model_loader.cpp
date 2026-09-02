@@ -203,39 +203,33 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
 
   // opt-q4kxl: whether this shard runs its K-quants natively.
   //
-  // The Q8_K_XL shard is 86% Q8_0 by element count with a small Q5_K/Q6_K tail,
-  // and expanding that 3.9G-element tail to device BF16 costs 7.7 GB (about
-  // 4.5 GB more than its packed form) while letting the tuned BF16 hipBLAS
-  // prefill own those projections. The UD-Q4_K_XL shard inverts the ratio:
-  // Q5_K + Q6_K alone are 15.0G elements, so the same expansion would cost
-  // 30 GB and hand back every byte Q4 was chosen to save.
+  // Q6_K, Q5_K and Q8_K used to be dequantized to BF16 at load, because they
+  // had no in-kernel decoder. They have had one since `opt-q4kxl`, and keeping
+  // them packed is now better on all three axes:
   //
-  // The discriminator is whether the shard uses a format that has no BF16
-  // pre-dequant route at all (Q4_K / Q3_K / IQ4_NL / IQ4_XS / IQ3_S). If it
-  // does, the shard is a mixed low-bit shard and everything stays packed;
-  // otherwise the historical behaviour is preserved exactly.
-  // GUFO_QUANT_NATIVE_KQUANT=1/0 forces the decision either way.
-  const auto has_native_only_type = [](core::GgmlType type) {
-    return type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ3_K ||
-           type == core::GgmlType::kIQ4_NL || type == core::GgmlType::kIQ4_XS ||
-           type == core::GgmlType::kIQ3_S;
-  };
-  bool native_kquant = has_native_only_type(weights_opt->token_embd.type) ||
-                       has_native_only_type(weights_opt->output.type);
-  for (const auto& layer : weights_opt->layers) {
-    native_kquant = native_kquant || has_native_only_type(layer.attn_q.type) ||
-                    has_native_only_type(layer.attn_k.type) ||
-                    has_native_only_type(layer.attn_v.type) ||
-                    has_native_only_type(layer.attn_output.type) ||
-                    has_native_only_type(layer.attn_qkv.type) ||
-                    has_native_only_type(layer.attn_gate.type) ||
-                    has_native_only_type(layer.ssm_out.type) ||
-                    has_native_only_type(layer.ssm_alpha.type) ||
-                    has_native_only_type(layer.ssm_beta.type) ||
-                    has_native_only_type(layer.ffn_gate.type) ||
-                    has_native_only_type(layer.ffn_up.type) ||
-                    has_native_only_type(layer.ffn_down.type);
-  }
+  //  - **Exactness.** The dequantized copies land on the BF16 projection route,
+  //    whose batched spelling (`LaunchExactBf16GEMMFp32SmallBatch`, used by the
+  //    speculative verifier) does not reproduce the dense BF16 GEMV that
+  //    single-token decode uses. A drafted token is only acceptable if the
+  //    verifier reproduces decode exactly, so on any shard that hit this path
+  //    speculation silently stopped being greedy-faithful: UD-Q8_K_L was 0/10
+  //    exact against UD-Q4_K_XL's 10/10, diverging first at the earliest layer
+  //    whose `ffn_down` was converted. The packed routes are bit-exact against
+  //    the decode GEMV and covered by `qwen_q4kxl_quant_ops_test` and
+  //    `qwen_quant_gemv_ops_test`.
+  //  - **Speed.** Q6_K is 0.82 bytes per element against BF16's two, and decode
+  //    is bandwidth bound. Interleaved `tg128` on UD-Q8_K_L, six pairs:
+  //    dequantized 5.65/4.44/5.89/6.29/4.33/6.28 (median 5.77), packed
+  //    5.39/5.50/6.83/6.94/6.99/6.53 (median 6.68), **+15.8%**, five pairs of
+  //    six.
+  //  - **Footprint.** The conversion allocated a device-resident BF16 copy of
+  //    every converted projection, roughly 3 GB on this shard.
+  //
+  // UD-Q4_K_XL never took this path -- it carries Q4_K/IQ4_XS/IQ3_S, which the
+  // old heuristic already recognized as native-only -- which is exactly why it
+  // was bit-exact while the Q8 shard was not.
+  // GUFO_QUANT_NATIVE_KQUANT=0 restores the dequantizing behaviour.
+  bool native_kquant = true;
   if (const char* forced = std::getenv("GUFO_QUANT_NATIVE_KQUANT");
       forced != nullptr) {
     const std::string_view setting{forced};
