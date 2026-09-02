@@ -728,6 +728,47 @@ static int attention_prefill_mixed_launch(
     const float *sinks = (const float *)hip_model_range_ptr(
             model_map, sinks_offset, (uint64_t)n_head * sizeof(float), "attn_sinks");
     if (!sinks) return 0;
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+    /* Mixed-window prompt chunks reach the same wave32 rocWMMA producer the
+     * indexed layers use. This launcher is the zero-prefix route, so the raw
+     * cache is the chunk's own linear KV: positions start at zero, the ring is
+     * the chunk itself, and `window <= 256` keeps `raw_count` inside the
+     * kernel's row table. */
+    if (!use_comp_mask && g_rocm_gfx1151 && n_tokens >= 128u && n_comp != 0u &&
+        n_head == 64u && head_dim == 512u && window != 0u && window <= 256u) {
+        const dim3 grid(n_tokens, n_head / 32u, 1u);
+        attention_mixed_heads32_wmma_kernel<false, false><<<grid, 1024>>>(
+                (float *)heads->ptr,
+                sinks,
+                (const float *)q->ptr,
+                (const float *)raw_kv->ptr,
+                (const float *)comp_kv->ptr,
+                NULL,
+                NULL,
+                0u,
+                n_tokens,
+                0u,
+                n_tokens,
+                n_tokens,
+                0u,
+                n_comp,
+                0u,
+                window,
+                ratio,
+                n_head,
+                head_dim);
+        static int notice_printed = 0;
+        if (!notice_printed) {
+            fprintf(stderr,
+                    DS4_GPU_LOG_PREFIX
+                    "mixed-window prefill using wave32 rocWMMA "
+                    "(heads=32, rows=16, single-pass)\n");
+            notice_printed = 1;
+        }
+        return hip_ok(hipGetLastError(),
+                      "attention mixed-window wave32 wmma launch");
+    }
+#endif
     if (!use_comp_mask && n_tokens > 1 && head_dim == 512 &&
         ((window != 0u ? window : n_tokens) + n_comp <= 768u)) {
         dim3 grid(n_tokens, (n_head + 7u) / 8u, 1);

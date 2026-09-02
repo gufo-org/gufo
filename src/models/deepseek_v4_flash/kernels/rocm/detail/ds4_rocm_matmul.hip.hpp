@@ -224,9 +224,9 @@ static int ds4_gemm_f16_wmma_launch(OutT *out,
  * is only `rank * group_dim * 2` bytes, so it stays in the MALL across the whole
  * n sweep and the call should be bound by B, which is read once.
  *
- * A 128-row macro tile matches `rank` exactly, so `m` needs no padding, and the
- * output leading dimension is `low_dim` because group `g` owns the `rank` block
- * at offset `g * rank` of every token's row. */
+ * A 128-row macro tile divides `rank`, so `m` needs no padding, and the output
+ * leading dimension is `low_dim` because group `g` owns the `rank` block at
+ * offset `g * rank` of every token's row. */
 #define DS4_WMMA_BATCH_BM 128u
 #define DS4_WMMA_BATCH_BN 128u
 
@@ -234,11 +234,12 @@ static int ds4_gemm_f16_wmma_batched_eligible(uint64_t m,
                                               uint64_t n,
                                               uint64_t k,
                                               uint64_t batches) {
-    return g_rocm_gfx1151 && m == DS4_WMMA_BATCH_BM &&
+    return g_rocm_gfx1151 && m != 0u && m % DS4_WMMA_BATCH_BM == 0u &&
            n % DS4_WMMA_BATCH_BN == 0u && k % DS4_WMMA_GEMM_BK == 0u &&
            batches > 0u && batches <= UINT16_MAX && m <= UINT32_MAX &&
            n <= UINT32_MAX && k <= UINT32_MAX &&
-           (n / DS4_WMMA_BATCH_BN) * batches >= DS4_WMMA_GEMM_MIN_BLOCKS;
+           (m / DS4_WMMA_BATCH_BM) * (n / DS4_WMMA_BATCH_BN) * batches >=
+                   DS4_WMMA_GEMM_MIN_BLOCKS;
 }
 
 static int ds4_gemm_f16_wmma_batched_launch(__half *out,
@@ -250,7 +251,9 @@ static int ds4_gemm_f16_wmma_batched_launch(__half *out,
                                             uint64_t ldc,
                                             uint64_t batches,
                                             const char *what) {
-    const dim3 grid(1u, (uint32_t)(n / DS4_WMMA_BATCH_BN), (uint32_t)batches);
+    const dim3 grid((uint32_t)(m / DS4_WMMA_BATCH_BM),
+                    (uint32_t)(n / DS4_WMMA_BATCH_BN),
+                    (uint32_t)batches);
     ds4_gemm_f16_wmma_kernel<DS4_WMMA_BATCH_BM, DS4_WMMA_BATCH_BN,
                              DS4_WMMA_GEMM_BK, 2u, 2u, 1u, true, __half>
             <<<grid, 512u>>>(out, weight, act, (uint32_t)m, (uint32_t)n,
