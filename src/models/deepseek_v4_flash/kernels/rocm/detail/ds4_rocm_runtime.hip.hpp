@@ -27,6 +27,21 @@ static int g_rocm_mmq_ready;
  * this width instead of to `n_tokens > 1`.
  */
 #define DS4_ROCM_WIDE_PREFILL_ROWS 128u
+
+/*
+ * Retained hipBLASLt routing subset; see hipblaslt_route_mask.
+ *
+ * 23 is every site except the attention output-B fallback (bit 8). Each site
+ * was measured against the pinned trajectory on its own: bits 1, 2, 4 and 16
+ * each hold it at 116/128 rank sum 142, and bit 8 alone drops it to 114/128
+ * rank sum 150. Bit 8 only fires when the 256x128 rocWMMA tile rejects the
+ * shape, which at prompt-chunk width means an `n` that is not a multiple of
+ * 128 -- so excluding it costs nothing at a 4,096-token prompt and removes the
+ * drift entirely.
+ */
+#ifndef DS4_ROCM_LT_ROUTE_DEFAULT_MASK
+#define DS4_ROCM_LT_ROUTE_DEFAULT_MASK 23
+#endif
 #ifdef __HIP_PLATFORM_AMD__
 #include "ds4_rocm_hipblaslt.hip.hpp"
 #endif

@@ -286,13 +286,41 @@ static int hipblaslt_gemm_plan_tune(
  * sum 150 against a 116/142 floor. Every other route below, MMQ included, keeps
  * the trajectory at 116/128 rank sum 142. Enable with
  * GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=1. */
-static int hipblaslt_extra_routing_enabled(void) {
+enum {
+    DS4_ROCM_LT_ROUTE_Q8_F32 = 1u,   /* dense Q8 projection, F32 result */
+    DS4_ROCM_LT_ROUTE_Q8_F16 = 2u,   /* dense Q8 projection, F16 result */
+    DS4_ROCM_LT_ROUTE_F16    = 4u,   /* F16-weight projection */
+    DS4_ROCM_LT_ROUTE_ATTN_B = 8u,   /* attention output B fallback */
+    DS4_ROCM_LT_ROUTE_F16_PAIR = 16u /* paired F16 projection */
+};
+
+/* Which projections move from hipBLAS to hipBLASLt, as a bitmask.
+ *
+ * hipBLASLt picks a different Tensile kernel for the same shape, worth up to
+ * 363.9 -> 410.5 tok/s at a 4,096-token prompt, but it is the one accelerated
+ * prefill route the retained envelope can reject: width scoping does not save
+ * it, because the pinned trajectory's own prompt prefill is wide. The default
+ * keeps the subset that leaves the trajectory at 116/128 rank sum 142; set
+ * GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING to a mask (31 for all of them) to
+ * explore, or 0 to disable. */
+static int hipblaslt_route_mask(void) {
     static int cached = -1;
     if (cached < 0) {
+        cached = DS4_ROCM_LT_ROUTE_DEFAULT_MASK;
         const char *env = getenv("GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING");
-        cached = (env != NULL && env[0] != '0') ? 1 : 0;
+        if (env != NULL && env[0] != '\0') {
+            char *end = NULL;
+            const unsigned long value = strtoul(env, &end, 10);
+            if (end != env && end != NULL && *end == '\0' && value <= 31ul) {
+                cached = (int)value;
+            }
+        }
     }
     return cached;
+}
+
+static int hipblaslt_route_enabled(unsigned int which) {
+    return (hipblaslt_route_mask() & (int)which) != 0;
 }
 
 static int hipblaslt_gemm_f16(

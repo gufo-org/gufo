@@ -225,22 +225,21 @@ The quality column is the pinned 128-token trajectory from
 `deepseek_v4_flash_engine_test`; its floor is 116/128 top-1, rank sum 142,
 worst rank 3.
 
-| Stack | `pp4096` | `tg16` | Pinned trajectory | Gate |
-| --- | ---: | ---: | --- | --- |
-| `16d5e30` baseline | 193.04 | 15.41 | 116/128, 142, 3 | pass |
-| Retained default | 363.9 | 16.7 | 116/128, 142, 3 | pass |
-| Retained default, MMQ disabled | 270.1 | 16.6 | 116/128, 142, 3 | pass |
-| Plus opt-in hipBLASLt routing | 410.5 | 16.6 | 114/128, 150, 5 | fail |
+| Stack | `pp4096` | `tg16` | Pinned trajectory | Prefill `rmse` | Gate |
+| --- | ---: | ---: | --- | ---: | --- |
+| `16d5e30` baseline | 193.04 | 15.41 | 116/128, 142, 3 | 0.478146 | pass |
+| Retained default | 418.8 | 16.6 | 116/128, 142, 3 | 0.38 | pass |
+| Retained default, MMQ disabled | 270.1 | 16.6 | 116/128, 142, 3 | — | pass |
+| Plus the attention output-B hipBLASLt fallback | 410.5 | 16.6 | 114/128, 150, 5 | — | fail |
 
-The retained default is **+88.5% prompt** and **+8.4% decode** with the pinned
+The retained default is **+117% prompt** and **+7.8% decode** with the pinned
 trajectory and the greedy continuation unchanged from the baseline, and with the
-273-token batched-versus-sequential prefill comparison inside its retained
-envelope: `rmse=0.596012` against a 1.12 limit, `cosine=0.994083` against 0.979,
-`max_error=2.95719` against 5.0, and the sequential winner still rank 1. Both
-this stack and the faster opt-in one also reproduce the retained first-four
-capability baseline greedily through `gufo serve`, extracting `B`, `C`, `70`,
-`C` — the same answers as [eval/README.md](eval/README.md) — 4/4 with no
-execution errors.
+273-token batched-versus-sequential prefill comparison not merely inside its
+envelope but *tighter than the baseline's*: `rmse` 0.478146 to 0.38, `cosine`
+0.99617 to 1.00, `max_error` 2.39995 to 2.04, sequential winner still rank 1.
+This stack also reproduces the retained first-four capability baseline greedily
+through `gufo serve`, extracting `B`, `C`, `70`, `C` — the same answers as
+[eval/README.md](eval/README.md) — 4/4 with no execution errors.
 
 ### Width scoping is what made the accelerated routes retainable
 
@@ -309,18 +308,26 @@ Reordering, and therefore scoped to prompt-chunk width:
   this backend builds with `-ffast-math`.
 - hipBLASLt algorithm pinning uses the profiled gfx1151 candidate for
   prompt-chunk shapes and the heuristic's first choice below that width.
+- Projections that ship on hipBLAS move to hipBLASLt for a measured subset of
+  sites, `DS4_ROCM_LT_ROUTE_DEFAULT_MASK` = 23. Each site was gated on its own:
+  the dense Q8 F32 and F16-result projections, the F16 projection and the paired
+  F16 projection each hold the trajectory at 116/128 rank sum 142, while the
+  attention output-B fallback alone drops it to 114/128 rank sum 150 and is
+  excluded. That fallback only runs when the `256x128` rocWMMA tile rejects the
+  shape, which at prompt-chunk width means an `n` that is not a multiple of 128,
+  so excluding it costs nothing at a 4,096-token prompt.
 
 `GUFO_DEEPSEEK_ROCM_MMQ=0`, `GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=0`,
 `GUFO_DEEPSEEK_ROCM_FUSED_QNORM_ROPE=0`, `GUFO_DEEPSEEK_ROCM_HIPBLASLT_CANDIDATE=<n>`
-and `GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=1` reach each route individually.
+and `GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=<mask>` reach each route individually.
 
 ### Comparison against the upstream ds4 optimization
 
 [antirez/ds4#887](https://github.com/antirez/ds4/pull/887) is the same class of
 work on the same GPU and artifact, reporting 187.26 to 292.86 tok/s at a
 4,096-token prefill on ROCm 10.0 with rocBLAS `5.6.0.8d1ae90e`. This tree is on
-ROCm 7.2.3, so library versions differ, but the retained default here is 363.9
-tok/s, `+24%` on that figure, and the opt-in stack is 410.5.
+ROCm 7.2.3, so library versions differ, but the retained default here is 418.8
+tok/s, `+43%` on that figure.
 
 Upstream's own quality evidence, scored with `score_official` on the official
 100-case Flash manifest at context 4096, is worth recording because it is a
@@ -375,8 +382,12 @@ or depth knob is neutral:
 | One barrier per K step by double-buffering both tiles | 410.1 versus 417.9 tok/s: 4 KiB more LDS drops residency six to four workgroups per CU |
 | Attention score pass across eight wave groups instead of two | 374.47 to 363.14 tok/s, ruling out the score chain and pointing at KV staging |
 
-A 500 tok/s target needs about 1.9 s more removed from a 10.1 s kernel path. The
-only place with that much is those two kernels, and reaching it means a tile
+A 500 tok/s target needs 4,096 tokens in 8.19 s. This prefill is about 105
+TFLOP of arithmetic, so that is 12.8 TFLOP/s sustained across everything,
+including roughly 2 s of memory-bound norm, convert and pack work that does
+almost no arithmetic; the retained default sustains 10.5. Even removing every
+one of those 2 s -- which is not achievable -- lands at about 513. The only
+places with that much time are those two kernels, and reaching it means a tile
 layout with a materially smaller LDS footprint. For MMQ's IQ2 tile that is
 already closed: the 76-int row is `2*32` code bytes plus scales plus padding
 because `iu8` WMMA consumes byte-expanded codes. For the Q2-down kernel the

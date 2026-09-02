@@ -1104,7 +1104,7 @@ extern "C" int ds4_gpu_attention_output_q8_batch_tensor(
                                 "attention output b wmma launch")) {
                         return 1;
                     }
-                    if (hipblaslt_extra_routing_enabled() &&
+                    if (hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_ATTN_B) &&
                         hipblaslt_gemm_f16(out->ptr, b_ptr, low_h,
                                            (uint32_t)out_dim, n_tokens,
                                            (uint32_t)low_dim, b_op, HIP_R_32F,

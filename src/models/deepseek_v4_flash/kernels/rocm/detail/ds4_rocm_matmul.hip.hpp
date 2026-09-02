@@ -580,7 +580,7 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
     if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
 #ifdef __HIP_PLATFORM_AMD__
     if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
-        hipblaslt_extra_routing_enabled() &&
+        hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F32) &&
         hipblaslt_gemm_f16(out->ptr, w_f16, xh, (uint32_t)out_dim,
                            (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
                            HIP_R_32F, label ? label : "q8 f16 projection")) {
@@ -646,7 +646,7 @@ static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
     if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch")) return 0;
 #ifdef __HIP_PLATFORM_AMD__
     if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
-        hipblaslt_extra_routing_enabled() &&
+        hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F16) &&
         hipblaslt_gemm_f16(out_h->ptr, w_f16, xh, (uint32_t)out_dim,
                            (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
                            HIP_R_16F,
@@ -1262,7 +1262,7 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         if (!hip_ok(hipGetLastError(), "f16 activation convert launch")) return 0;
 #ifdef __HIP_PLATFORM_AMD__
         if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
-        hipblaslt_extra_routing_enabled() &&
+        hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_F16) &&
             hipblaslt_gemm_f16(out->ptr, w, xh, (uint32_t)out_dim,
                                (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
                                HIP_R_32F, "f16 projection")) {
@@ -1350,7 +1350,7 @@ static int hip_matmul_f16_f16_input_tensor(
     const __half *w = (const __half *)wptr;
 #ifdef __HIP_PLATFORM_AMD__
     if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
-        hipblaslt_extra_routing_enabled() &&
+        hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_F16_PAIR) &&
         hipblaslt_gemm_f16(out->ptr, w, x_h, (uint32_t)out_dim,
                            (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
                            HIP_R_32F, "f16 paired projection")) {
