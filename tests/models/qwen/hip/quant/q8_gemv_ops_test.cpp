@@ -174,7 +174,7 @@ void TestQ8KSmallBatchFp32GEMMEquivalence() {
 
   for (const std::size_t batch :
        {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5},
-        std::size_t{6}, std::size_t{8}}) {
+        std::size_t{6}, std::size_t{7}, std::size_t{8}}) {
     for (std::size_t token = 0; token < batch; ++token) {
       gufo::hip::LaunchQ8KBlockGEMV(device_weights, gufo::core::GgmlType::kQ8_K,
                                     device_inputs + (token * kColumns),
@@ -210,11 +210,16 @@ void TestQ8KSmallBatchFp32GEMMEquivalence() {
   HIP_CHECK(hipFree(device_batched));
 }
 
-void TestQ8_0SmallBatchFp32GEMMEquivalence() {
-  constexpr std::size_t kRows = 16;
+// `opt-c206-q8-small-batch` selects among physical kernel widths by shape, so a
+// 16x512 toy matrix does not exercise the routes a real projection reaches. The
+// shapes below are the ones the Q8 shard actually dispatches: attention output
+// (5120x5120), FFN gate/up (17408x5120) and the tied LM head (248320x5120),
+// truncated in rows where the full tensor would not fit but keeping each
+// distinct row-to-K ratio that the selector branches on.
+void TestQ8_0SmallBatchFp32GEMMEquivalence(std::size_t kRows,
+                                           std::size_t kColumns) {
   constexpr std::size_t kBlockSize = 32;
-  constexpr std::size_t kColumns = 512;
-  constexpr std::size_t kBlocksPerRow = kColumns / kBlockSize;
+  const std::size_t kBlocksPerRow = kColumns / kBlockSize;
   constexpr std::size_t kMaximumBatch = 8;
 
   using Q8_0BlockTest = gufo::quant::block_q8_0;
@@ -277,9 +282,16 @@ void TestQ8_0SmallBatchFp32GEMMEquivalence() {
   HIP_CHECK(hipMemcpy(device_inputs, inputs.data(),
                       inputs.size() * sizeof(float), hipMemcpyHostToDevice));
 
+  // Every width the speculative verifier can dispatch, not a sample of them.
+  // DFlash-2 runs a fixed draft width of 7, so verification batches are
+  // routinely 8 but drop to 7 and below whenever a block is truncated or the
+  // controller narrows, and a width with no exact route silently stops
+  // reproducing the decode GEMV. Width 1 is excluded because
+  // `ForwardTokenBatch` rejects a batch below two, so it is not a verification
+  // width at all.
   for (const std::size_t batch :
        {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5},
-        std::size_t{6}, std::size_t{8}}) {
+        std::size_t{6}, std::size_t{7}, std::size_t{8}}) {
     for (std::size_t token = 0; token < batch; ++token) {
       gufo::hip::LaunchQ8KBlockGEMV(device_weights, gufo::core::GgmlType::kQ8_0,
                                     device_inputs + (token * kColumns),
@@ -300,9 +312,10 @@ void TestQ8_0SmallBatchFp32GEMMEquivalence() {
                         batched.size() * sizeof(float), hipMemcpyDeviceToHost));
     for (std::size_t index = 0; index < reference.size(); ++index) {
       if (reference[index] != batched[index]) {
-        std::cerr << "exact Q8_0 small-batch mismatch at batch " << batch
-                  << " index " << index << ": expected " << reference[index]
-                  << ", got " << batched[index] << "\n";
+        std::cerr << "exact Q8_0 small-batch mismatch at " << kRows << "x"
+                  << kColumns << " batch " << batch << " index " << index
+                  << ": expected " << reference[index] << ", got "
+                  << batched[index] << "\n";
         std::abort();
       }
     }
@@ -436,7 +449,10 @@ int main() {
 
   TestQ8KBlockGEMVEquivalence();
   TestQ8KSmallBatchFp32GEMMEquivalence();
-  TestQ8_0SmallBatchFp32GEMMEquivalence();
+  TestQ8_0SmallBatchFp32GEMMEquivalence(16, 512);
+  TestQ8_0SmallBatchFp32GEMMEquivalence(5120, 5120);
+  TestQ8_0SmallBatchFp32GEMMEquivalence(17408, 5120);
+  TestQ8_0SmallBatchFp32GEMMEquivalence(4096, 17408);
   TestQ8_0BlockGEMVEquivalence();
   std::cout << "Qwen Q8 GEMV ops test passed on gfx1151.\n";
   return 0;

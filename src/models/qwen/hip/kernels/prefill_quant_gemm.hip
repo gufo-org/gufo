@@ -2480,7 +2480,7 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     return;
   }
   if ((type == core::GgmlType::kQ8_0 || type == core::GgmlType::kQ8_K) &&
-      batch > 1 && batch <= 8 && UseExactSharedQ8SmallBatchFp32()) {
+      batch >= 1 && batch <= 8 && UseExactSharedQ8SmallBatchFp32()) {
     const dim3 block(static_cast<unsigned int>(kWarp * kWarpsPerBlock));
     // The LDS-staged route streams each weight row once for the whole batch, so
     // it is the fastest option at every width. Narrow batches used to fall back
@@ -2496,6 +2496,11 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
       const dim3 vec_block(
           static_cast<unsigned int>(kWarp * kVecWarpsPerBlock));
       switch (batch) {
+        case 1:
+          SmallBatchQ8_0ExactFp32VecGEMMKernel<kVecWarpsPerBlock, 1,
+                                               kVecRowsPerWave>
+              <<<vec_blocks, vec_block, 0, stream>>>(w, fp32_x, y, m, k);
+          return;
         case 2:
           SmallBatchQ8_0ExactFp32VecGEMMKernel<kVecWarpsPerBlock, 2,
                                                kVecRowsPerWave>
@@ -2535,7 +2540,11 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     }
     // Only Q8_K reaches here: Q8_0 always takes the width-templated route
     // above.
-    if (batch <= 2) {
+    if (batch <= 1) {
+      SmallBatchQ8KFp32GEMMKernel<kWarpsPerBlock, 1>
+          <<<static_cast<unsigned int>(num_blocks_x), block, 0, stream>>>(
+              w, fp32_x, y, batch, m, k);
+    } else if (batch <= 2) {
       SmallBatchQ8KFp32GEMMKernel<kWarpsPerBlock, 2>
           <<<static_cast<unsigned int>(num_blocks_x), block, 0, stream>>>(
               w, fp32_x, y, batch, m, k);
