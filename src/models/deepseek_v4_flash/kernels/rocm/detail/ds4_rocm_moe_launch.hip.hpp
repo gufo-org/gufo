@@ -651,7 +651,12 @@ static int routed_moe_launch(
                 mmq_mid_h = (__half *)((char *)down->ptr + down_h_bytes);
             }
 
-            const int use_fused_swiglu = g_rocm_gfx1151 && mmq_mid_h != NULL;
+            static const int fused_swiglu_allowed = [] {
+                const char *env = getenv("GUFO_DEEPSEEK_ROCM_MMQ_FUSED_SWIGLU");
+                return env == NULL || env[0] != '0';
+            }();
+            const int use_fused_swiglu =
+                g_rocm_gfx1151 && fused_swiglu_allowed && mmq_mid_h != NULL;
             int rc = -1;
             if (use_fused_swiglu) {
                 ds4_mmq_set_aligned_q81_scratch(up->ptr, (size_t)up->bytes);

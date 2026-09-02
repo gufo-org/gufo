@@ -368,9 +368,19 @@ __global__ static void f32_to_f16_vec4_kernel(
 
 /* Convert `n` floats to halves, vectorized when the extent and both pointers
  * allow it. Callers check hipGetLastError afterwards as before. */
+/* Attribution switch for the retained bit-exact bandwidth rewrites. */
+static int hip_vec_convert_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_VEC_CONVERT");
+        cached = (env == NULL || env[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
 static void hip_launch_f32_to_f16(__half *out, const float *x, uint64_t n) {
     if (n == 0u) return;
-    if ((n & 3u) == 0u &&
+    if (hip_vec_convert_enabled() && (n & 3u) == 0u &&
         ((uintptr_t)x & 15u) == 0u && ((uintptr_t)out & 7u) == 0u) {
         const uint64_t groups = n >> 2u;
         f32_to_f16_vec4_kernel<<<(groups + 255u) / 256u, 256>>>(out, x, groups);

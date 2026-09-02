@@ -606,10 +606,19 @@ static const __half *hip_q8_f16_transpose_ptr(
         return NULL;
     }
     const uint64_t blocks = (in_dim + 31u) / 32u;
+    static const int tiled_transpose = [] {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_TILED_Q8_TRANSPOSE");
+        return env == NULL || env[0] != '0';
+    }();
     const dim3 grid(
             (unsigned)((out_dim + DS4_Q8_T_TILE_ROW - 1u) / DS4_Q8_T_TILE_ROW),
             (unsigned)blocks,
             1u);
+    if (!tiled_transpose) {
+        const uint64_t n = in_dim * out_dim;
+        dequant_q8_0_to_f16_transpose_kernel<<<(n + 255u) / 256u, 256>>>(
+                dev, (const unsigned char *)q8, in_dim, out_dim, blocks);
+    } else
     dequant_q8_0_to_f16_transpose_tiled_kernel<<<grid, 256>>>(
             dev,
             (const unsigned char *)q8,
@@ -1006,7 +1015,22 @@ extern "C" int ds4_gpu_init(void) {
         }
     }
 #endif
-    g_rocm_mmq_ready = g_rocm_gfx1151 && ds4_mmq_init(dev) == 0;
+    /* Opt-in.
+     *
+     * The vendored MMQ tier is the single largest prefill win available here --
+     * 243.95 to 335.59 tok/s at a 4,096-token prompt -- but it replaces the
+     * native routed IQ2 gate/up and dense Q8 kernels with int8 matrix-core
+     * kernels whose reduction order differs. The pinned 128-token trajectory
+     * that gates this backend was recorded against the native kernels and has
+     * no margin (116/128 top-1 against a 116 floor), so MMQ moves it to
+     * 111/128. Upstream ds4 adopted the same tier after scoring 100 official
+     * cases (average NLL +0.387%, top-1 agreement 85.863% to 85.949%), so the
+     * envelope, not the arithmetic, is what needs re-deriving before this can
+     * default on. Enable with GUFO_DEEPSEEK_ROCM_MMQ=1. */
+    const char *mmq_env = getenv("GUFO_DEEPSEEK_ROCM_MMQ");
+    const int mmq_enabled = mmq_env != NULL && mmq_env[0] != '0';
+    g_rocm_mmq_ready =
+        g_rocm_gfx1151 && mmq_enabled && ds4_mmq_init(dev) == 0;
     fprintf(stderr, DS4_GPU_LOG_PREFIX "native MMQ %s\n",
             g_rocm_mmq_ready ? "enabled" : "unavailable");
     return 1;

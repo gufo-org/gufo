@@ -708,12 +708,25 @@ static int attention_prefill_mixed_launch(
             model_map, sinks_offset, (uint64_t)n_head * sizeof(float), "attn_sinks");
     if (!sinks) return 0;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-    /* Mixed-window prompt chunks reach the same wave32 rocWMMA producer the
+    /* Mixed-window prompt chunks can reach the same wave32 rocWMMA producer the
      * indexed layers use. This launcher is the zero-prefix route, so the raw
      * cache is the chunk's own linear KV: positions start at zero, the ring is
      * the chunk itself, and `window <= 256` keeps `raw_count` inside the
-     * kernel's row table. */
-    if (!use_comp_mask && g_rocm_gfx1151 && n_tokens >= 128u && n_comp != 0u &&
+     * kernel's row table.
+     *
+     * Off by default. It is worth 599 ms per 4,096-token chunk (915.82 ->
+     * 316.35 ms), but it is the one retained candidate that lowers precision
+     * rather than reordering a reduction: the scalar kernel below keeps the
+     * whole mixed-window score and value pass in F32, while the rocWMMA
+     * producer converts Q and KV to F16. Enabling it on the 22 ratio-128
+     * layers -- the indexed layers already use it -- moved the pinned
+     * 128-token trajectory from 116/128 to 109/128 top-1 with worst rank 4,
+     * outside the retained envelope. Set
+     * GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=1 to measure it. */
+    static const int mixed_window_wmma =
+        hip_env_present(getenv("GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA"));
+    if (mixed_window_wmma &&
+        !use_comp_mask && g_rocm_gfx1151 && n_tokens >= 128u && n_comp != 0u &&
         n_head == 64u && head_dim == 512u && window != 0u && window <= 256u) {
         const dim3 grid(n_tokens, n_head / 32u, 1u);
         attention_mixed_heads32_wmma_kernel<false, false><<<grid, 1024>>>(
@@ -1090,14 +1103,10 @@ extern "C" int ds4_gpu_attention_output_q8_batch_tensor(
                                 "attention output b wmma launch")) {
                         return 1;
                     }
-                    if (hipblaslt_gemm_f16(out->ptr,
-                                           b_ptr,
-                                           low_h,
-                                           (uint32_t)out_dim,
-                                           n_tokens,
-                                           (uint32_t)low_dim,
-                                           b_op,
-                                           HIP_R_32F,
+                    if (hipblaslt_extra_routing_enabled() &&
+                        hipblaslt_gemm_f16(out->ptr, b_ptr, low_h,
+                                           (uint32_t)out_dim, n_tokens,
+                                           (uint32_t)low_dim, b_op, HIP_R_32F,
                                            "attention output b")) {
                         return 1;
                     }

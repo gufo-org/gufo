@@ -144,11 +144,13 @@ __device__ static float rope_yarn_ramp_dev(float low, float high, int i0);
  * The row is `head_dim` floats -- 2 KiB at the 512 this model uses -- so it
  * fits beside the reduction scratch and the second read disappears entirely.
  *
- * Every value, the reduction tree, and the per-element arithmetic are
- * unchanged, so the output is bit-identical to the norm-then-rope sequence: the
- * staged values are the *unscaled* row and the rotated tail starts at
- * `n_nope`, so scaling the non-rotated head cannot clobber anything the
- * rotation still needs. */
+ * Not bit-identical to the norm-then-rope sequence in practice. Every value,
+ * the reduction tree, and the per-element arithmetic are written identically,
+ * and the tail is still stored and reloaded so the rotation's operands come
+ * from memory as before, yet the pinned trajectory still moves (116/128 to
+ * 113/128 top-1). Staging the row in LDS changes the schedule enough for
+ * -ffast-math to land somewhere else. Kept opt-in for that reason; see the
+ * launcher. */
 #define DS4_HEAD_ROPE_LDS_DIM 512u
 
 __global__ static void head_rms_norm_rope_tail_lds_kernel(
@@ -187,9 +189,19 @@ __global__ static void head_rms_norm_rope_tail_lds_kernel(
     }
     const float scale = rsqrtf(partial[0] / (float)head_dim + eps);
     const uint32_t n_nope = head_dim - n_rot;
-    for (uint32_t i = threadIdx.x; i < n_nope; i += blockDim.x) {
+    /* Scale the whole row, tail included, exactly as the standalone norm did.
+     *
+     * Scaling only the head and carrying `rowbuf[n_nope + i] * scale` into the
+     * rotation below is algebraically the same, but `-ffast-math` is then free
+     * to reassociate `(r * scale) * c` into `r * (scale * c)`, which moved the
+     * pinned 128-token trajectory from 116/128 to 113/128 top-1 with worst rank
+     * 7. Storing the scaled tail and loading it back keeps the rotation's
+     * operands opaque to the optimizer, so this is bit-identical while still
+     * saving the standalone norm's second full-row read. */
+    for (uint32_t i = threadIdx.x; i < head_dim; i += blockDim.x) {
         xr[i] = rowbuf[i] * scale;
     }
+    __syncthreads();
 
     float corr0 = 0.0f, corr1 = 0.0f;
     if (ext_factor != 0.0f) {
@@ -215,8 +227,8 @@ __global__ static void head_rms_norm_rope_tail_lds_kernel(
         float s = sinf(theta) * mscale;
         if (inverse) s = -s;
         float *tail = xr + n_nope;
-        const float x0 = rowbuf[n_nope + i] * scale;
-        const float x1 = rowbuf[n_nope + i + 1u] * scale;
+        const float x0 = tail[i];
+        const float x1 = tail[i + 1];
         tail[i] = x0 * c - x1 * s;
         tail[i + 1] = x0 * s + x1 * c;
     }
@@ -540,7 +552,7 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
         !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
     if (n == 0u || rows == 0u) return 1;
     /* The hot caller is the 4-way hyper-connection row, 16,384 floats wide. */
-    if (n == 256u * 64u) {
+    if (n == 256u * 64u && hip_vec_convert_enabled()) {
         rms_norm_plain_regs_kernel<64u><<<rows, 256>>>(
                 (float *)out->ptr, (const float *)x->ptr, n, rows, eps);
         return hip_ok(hipGetLastError(), "rms_norm_plain regs launch");
@@ -635,6 +647,16 @@ extern "C" int ds4_gpu_head_rms_norm_rope_tail_tensor(ds4_gpu_tensor *x, uint32_
         return 0;
     }
     if (rows64 == 0u) return 1;
+    /* Opt-in: worth about 250 ms per 4,096-token chunk, but it perturbs the
+     * pinned trajectory (116/128 to 113/128 top-1). Staging the row in LDS
+     * changes what the optimizer can do with the scale multiply even when the
+     * expression is written identically, and this backend builds with
+     * -ffast-math. Enable with GUFO_DEEPSEEK_ROCM_FUSED_QNORM_ROPE=1. */
+    static const int fused_allowed = [] {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_FUSED_QNORM_ROPE");
+        return env != NULL && env[0] != '0';
+    }();
+    if (!fused_allowed) return 0;
     head_rms_norm_rope_tail_lds_kernel<<<(uint32_t)rows64, 256>>>(
             (float *)x->ptr, n_tok, n_head, head_dim, n_rot, pos0, n_ctx_orig,
             inverse ? 1 : 0, freq_base, freq_scale, ext_factor, attn_factor,

@@ -749,7 +749,8 @@ static void hip_launch_attention_pack_group_heads_f16(
         uint32_t group_dim,
         uint64_t count) {
     if (count == 0u) return;
-    if ((group_dim & 3u) == 0u && ((uintptr_t)heads & 15u) == 0u &&
+    if (hip_vec_convert_enabled() && (group_dim & 3u) == 0u &&
+        ((uintptr_t)heads & 15u) == 0u &&
         ((uintptr_t)dst & 7u) == 0u) {
         const uint64_t groups4 = count >> 2u;
         attention_pack_group_heads_f16_vec4_kernel<<<

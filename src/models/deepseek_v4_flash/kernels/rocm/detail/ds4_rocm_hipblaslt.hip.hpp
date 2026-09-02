@@ -154,17 +154,36 @@ static int hipblaslt_gemm_plan_tune(
         const __half *b,
         const char *label) {
     if (!p || p->candidates.empty()) return 0;
+    static const int tune_allowed = [] {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_HIPBLASLT_TUNE");
+        return env == NULL || env[0] != '0';
+    }();
+    if (!tune_allowed) {
+        /* Pre-plan-cache behavior: take the heuristic's first entry as-is. */
+        p->algo = p->candidates[0].algo;
+        p->tuned = 1;
+        return 1;
+    }
     // Runtime timing made the near-tied 64x2048x4096 shape alternate between
     // algorithms with different FP accumulation order. Pin the profiled
     // gfx1151 choices so identical inputs produce identical logits.
-    size_t gfx1151_preferred_candidate = 4u;
-    if (p->op_a == HIPBLAS_OP_T && p->in_dim == 4096u) {
-        if (p->out_dim == 256u && p->n_tok > 4u) {
-            gfx1151_preferred_candidate = 6u;
-        } else if (p->out_dim == 1024u && p->n_tok <= 4u) {
-            gfx1151_preferred_candidate = 6u;
-        } else if (p->out_dim == 512u) {
-            gfx1151_preferred_candidate = 5u;
+    /* Candidate 0 is the heuristic's own first choice, which is what this
+     * backend used before the plan cache learned to keep the whole candidate
+     * list. Profiled picks (4 for most shapes, 5 and 6 for three of the
+     * `in_dim == 4096` projections) are faster on gfx1151, but they change the
+     * accumulation order of nearly every dense projection, and the retained
+     * 128-token trajectory envelope has no margin for that. Keep the
+     * heuristic's choice and leave the sweep reachable through the environment.
+     */
+    size_t gfx1151_preferred_candidate = 0u;
+    {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_HIPBLASLT_CANDIDATE");
+        if (env != NULL && env[0] != '\0') {
+            char *end = NULL;
+            const unsigned long value = strtoul(env, &end, 10);
+            if (end != env && end != NULL && *end == '\0' && value < 16ul) {
+                gfx1151_preferred_candidate = (size_t)value;
+            }
         }
     }
     if (g_rocm_gfx1151 &&
@@ -248,6 +267,20 @@ static int hipblaslt_gemm_plan_tune(
             p->in_dim,
             best_ms);
     return 1;
+}
+
+/* Opt-in: send projections that ship on hipBLAS through hipBLASLt instead.
+ *
+ * hipBLASLt picks a different Tensile kernel for the same shape, which is worth
+ * roughly 11% of prompt throughput on gfx1151 but reorders the accumulation of
+ * nearly every dense projection. Paired with GUFO_DEEPSEEK_ROCM_MMQ. */
+static int hipblaslt_extra_routing_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING");
+        cached = (env != NULL && env[0] != '0') ? 1 : 0;
+    }
+    return cached;
 }
 
 static int hipblaslt_gemm_f16(
