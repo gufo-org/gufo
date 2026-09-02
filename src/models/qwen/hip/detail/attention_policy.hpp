@@ -237,6 +237,37 @@ KQuantSmallBatchFetchFromEnv() noexcept {
   return fetch;
 }
 
+// opt-dflash2-verify-marginal: measurement-only route that deletes the
+// Q4_K/Q5_K minimum correction from the small-batch verifier. `w = scale*q -
+// offset` is not `scale*q`, so the result is WRONG and the correctness gate
+// rejects it; it exists to bound what an exact cheaper formulation of the
+// correction could be worth in the speculative step, the same way
+// `GUFO_KQUANT_PREFILL_TILE=drop-offset-probe` bounds it for prefill. The
+// verifier pays the term once per verified row, so its cost scales with draft
+// width where prefill's scales with prompt length.
+enum class KQuantSmallBatchOffset : std::uint8_t {
+  kExact,
+  kDropProbe,
+};
+
+[[nodiscard]] inline KQuantSmallBatchOffset ResolveKQuantSmallBatchOffset(
+    const char* value) noexcept {
+  if (value == nullptr) {
+    return KQuantSmallBatchOffset::kExact;
+  }
+  const std::string_view text{value};
+  return text == "drop-probe" || text == "drop-offset-probe"
+             ? KQuantSmallBatchOffset::kDropProbe
+             : KQuantSmallBatchOffset::kExact;
+}
+
+[[nodiscard]] inline KQuantSmallBatchOffset
+KQuantSmallBatchOffsetFromEnv() noexcept {
+  static const KQuantSmallBatchOffset offset = ResolveKQuantSmallBatchOffset(
+      std::getenv("GUFO_KQUANT_SMALL_BATCH_OFFSET"));
+  return offset;
+}
+
 // opt-q4kxl-actsum: Q4_K/Q5_K blocked WMMA needs the sum of each quantized
 // 32-element activation block for its minimum correction. Computing it in the
 // kernel costs eight `sudot4` per token tile per K block, and every row tile in
