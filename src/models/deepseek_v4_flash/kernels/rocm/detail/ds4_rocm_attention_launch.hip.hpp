@@ -714,19 +714,20 @@ static int attention_prefill_mixed_launch(
      * the chunk itself, and `window <= 256` keeps `raw_count` inside the
      * kernel's row table.
      *
-     * Off by default. It is worth 599 ms per 4,096-token chunk (915.82 ->
-     * 316.35 ms), but it is the one retained candidate that lowers precision
-     * rather than reordering a reduction: the scalar kernel below keeps the
-     * whole mixed-window score and value pass in F32, while the rocWMMA
-     * producer converts Q and KV to F16. Enabling it on the 22 ratio-128
-     * layers -- the indexed layers already use it -- moved the pinned
-     * 128-token trajectory from 116/128 to 109/128 top-1 with worst rank 4,
-     * outside the retained envelope. Set
-     * GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=1 to measure it. */
-    static const int mixed_window_wmma =
-        hip_env_present(getenv("GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA"));
+     * Worth 599 ms per 4,096-token chunk (915.82 -> 316.35 ms). It is the one
+     * accelerated route that lowers precision rather than reordering a
+     * reduction -- the scalar kernel below keeps the whole mixed-window score
+     * and value pass in F32, while the rocWMMA producer converts Q and KV to
+     * F16 -- so it is held to the prompt-chunk width like the rest. The indexed
+     * layers already use this producer. Set
+     * GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=0 to fall back. */
+    static const int mixed_window_wmma = [] {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA");
+        return env == NULL || env[0] != '0';
+    }();
     if (mixed_window_wmma &&
-        !use_comp_mask && g_rocm_gfx1151 && n_tokens >= 128u && n_comp != 0u &&
+        !use_comp_mask && g_rocm_gfx1151 &&
+        n_tokens >= DS4_ROCM_WIDE_PREFILL_ROWS && n_comp != 0u &&
         n_head == 64u && head_dim == 512u && window != 0u && window <= 256u) {
         const dim3 grid(n_tokens, n_head / 32u, 1u);
         attention_mixed_heads32_wmma_kernel<false, false><<<grid, 1024>>>(

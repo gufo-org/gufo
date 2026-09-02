@@ -579,7 +579,8 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
     hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
     if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
 #ifdef __HIP_PLATFORM_AMD__
-    if (hipblaslt_extra_routing_enabled() &&
+    if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
+        hipblaslt_extra_routing_enabled() &&
         hipblaslt_gemm_f16(out->ptr, w_f16, xh, (uint32_t)out_dim,
                            (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
                            HIP_R_32F, label ? label : "q8 f16 projection")) {
@@ -644,7 +645,8 @@ static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
     hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
     if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch")) return 0;
 #ifdef __HIP_PLATFORM_AMD__
-    if (hipblaslt_extra_routing_enabled() &&
+    if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
+        hipblaslt_extra_routing_enabled() &&
         hipblaslt_gemm_f16(out_h->ptr, w_f16, xh, (uint32_t)out_dim,
                            (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
                            HIP_R_16F,
@@ -705,7 +707,8 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
     if (!wptr) return 0;
     /* Dense Q8 prefill through the vendored MMQ tier. Excluded from DSpark
      * verification blocks so a verified row keeps decode's reduction order. */
-    if (n_tok > 1u && !g_small_batch_mode && g_rocm_mmq_ready &&
+    if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS && !g_small_batch_mode &&
+        g_rocm_mmq_ready &&
         ds4_mmq_q8_0_dense(
             wptr,
             (const float *)x->ptr,
@@ -1258,7 +1261,8 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
         if (!hip_ok(hipGetLastError(), "f16 activation convert launch")) return 0;
 #ifdef __HIP_PLATFORM_AMD__
-        if (hipblaslt_extra_routing_enabled() &&
+        if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
+        hipblaslt_extra_routing_enabled() &&
             hipblaslt_gemm_f16(out->ptr, w, xh, (uint32_t)out_dim,
                                (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
                                HIP_R_32F, "f16 projection")) {
@@ -1345,7 +1349,8 @@ static int hip_matmul_f16_f16_input_tensor(
     if (!wptr) return 0;
     const __half *w = (const __half *)wptr;
 #ifdef __HIP_PLATFORM_AMD__
-    if (hipblaslt_extra_routing_enabled() &&
+    if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
+        hipblaslt_extra_routing_enabled() &&
         hipblaslt_gemm_f16(out->ptr, w, x_h, (uint32_t)out_dim,
                            (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
                            HIP_R_32F, "f16 paired projection")) {

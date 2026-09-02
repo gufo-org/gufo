@@ -1,6 +1,6 @@
 # DeepSeek V4 Flash Q2-imatrix on Strix Halo
 
-Status: 2026-08-30. This page is the current functional and performance
+Status: 2026-09-03. This page is the current functional and performance
 snapshot, not an optimization history.
 
 ## Model
@@ -217,23 +217,49 @@ after generation.
   canonical 2K-suffix prompt rows improve 2.4-3.3% through 32K, with neutral
   autoregressive throughput and unchanged serialized state.
 
-## gfx1151 prefill kernels (September 2, 2026)
+## gfx1151 prefill kernels (September 3, 2026)
 
-Two stacks, both measured on the artifact above with `-p 4096 -n 16 -r 2`
-against the `16d5e30` baseline. The default stack keeps the pinned trajectory
-bit-identical; the opt-in stack does not.
+Measured on the artifact above with `-p 4096 -n 16 -r 2`, alternating
+configurations within one script so APU throttling cannot favour an order.
+The quality column is the pinned 128-token trajectory from
+`deepseek_v4_flash_engine_test`; its floor is 116/128 top-1, rank sum 142,
+worst rank 3.
 
-| Stack | `pp4096` | `tg16` | Pinned 128-token trajectory |
-| --- | ---: | ---: | --- |
-| `16d5e30` baseline | 193.04 | 15.41 | 116/128 top-1, rank sum 142, worst rank 3 |
-| Retained default | 240.57 | 16.38 | 116/128, rank sum 142, worst rank 3 (unchanged) |
-| Opt-in fast prefill | 395.52 | 16.65 | 103/128, rank sum 163, worst rank 5 |
+| Stack | `pp4096` | `tg16` | Pinned trajectory | Gate |
+| --- | ---: | ---: | --- | --- |
+| `16d5e30` baseline | 193.04 | 15.41 | 116/128, 142, 3 | pass |
+| Retained default | 363.9 | 16.7 | 116/128, 142, 3 | pass |
+| Retained default, MMQ disabled | 270.1 | 16.6 | 116/128, 142, 3 | pass |
+| Plus opt-in hipBLASLt routing | 410.5 | 16.6 | 114/128, 150, 5 | fail |
 
-The retained default is `+24.6%` prompt and `+6.3%` decode with the pinned
-trajectory, the 273-token batched-versus-sequential envelope
-(`rmse=0.478146 cosine=0.99617 max_error=2.39995`), and the greedy continuation
-all unchanged from the baseline. It is made of changes that do not move a single
-logit bit:
+The retained default is **+88.5% prompt** and **+8.4% decode** with the pinned
+trajectory and the greedy continuation unchanged from the baseline, and with the
+273-token batched-versus-sequential prefill comparison inside its retained
+envelope: `rmse=0.596012` against a 1.12 limit, `cosine=0.994083` against 0.979,
+`max_error=2.95719` against 5.0, and the sequential winner still rank 1. Both
+this stack and the faster opt-in one also reproduce the retained first-four
+capability baseline greedily through `gufo serve`, extracting `B`, `C`, `70`,
+`C` — the same answers as [eval/README.md](eval/README.md) — 4/4 with no
+execution errors.
+
+### Width scoping is what made the accelerated routes retainable
+
+Every accelerated prefill route is gated on `DS4_ROCM_WIDE_PREFILL_ROWS`, 128
+rows, rather than on `n_tokens > 1`. Below that width a batch is a decode step,
+a DSpark verification block, or a short resumed batch, and those are the routes
+the pinned trajectory's teacher-forced 15- and 17-row batches measure, where the
+envelope demands bit-identical output. Above it the governing envelope is the
+273-token prefill comparison, which has real tolerances, so a reordered
+reduction can be justified there on its own evidence.
+
+That distinction is the whole difference between this table and the first
+attempt at the same work: applying the routes at `n_tokens > 1` put the
+trajectory at 103/128, and scoping them to prompt-chunk width alone recovers
+116/128 for all of them except hipBLASLt routing.
+
+### Retained routes
+
+Bit-identical, so they hold at every width:
 
 - A `256x128x32` rocWMMA F16 GEMM replaces Tensile's `MT64x32x8` choice for the
   `4096 x chunk x 8192` attention output-B projection: 2,753.69 ms to 558.03 ms
@@ -247,6 +273,11 @@ logit bit:
   running maximum into the accumulator removes the second traversal of every KV
   row block, its staging and its barriers: 1,206.87 ms to 902.52 ms. The 1 GiB
   score cache the old second pass read is gone with it.
+- The routed Q2-down kernel stages each expert row's raw Q2_K block once per
+  256-value K slab instead of re-reading it on all sixteen `BK` steps. Each
+  re-read was six scalar sub-word loads from a two-byte-aligned 84-byte block.
+  1,879.68 ms to 1,597.32 ms, `+4.4%` to `+5.0%` end to end, and the kernel then
+  prefetches the next K step's mid tile into registers for a further `+3.6%`.
 - The F32-to-F16 stages and the attention group-head pack move four elements per
   thread. At one element per thread a wave issued 128 B of loads against 64 B of
   stores, so every store was a partial line: 420.63 ms to 271.74 ms and
@@ -255,46 +286,101 @@ logit bit:
   (263.40 ms to 233.92 ms), and the routed Q2-down epilogue pages one
   accumulator fragment at a time instead of two, halving that kernel's dynamic
   LDS.
+- The scalar cold-expert Q2-down launch is skipped when every populated expert
+  reached the WMMA hot list, which is the common case at prompt-chunk width.
 
-The opt-in stack is `+104.9%` prompt but moves the trajectory outside the
-retained envelope, so every piece of it is off by default:
+Reordering, and therefore scoped to prompt-chunk width:
 
-| Environment variable | Effect | Measured cost |
-| --- | --- | --- |
-| `GUFO_DEEPSEEK_ROCM_MMQ=1` | Routed IQ2 gate/up and dense Q8 prefill through the vendored llama.cpp MMQ tier (`kernels/rocm/mmq`) | 240.57 to 335.59 tok/s; trajectory 116/128 to 111/128 |
-| `GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=1` | Send the projections that ship on hipBLAS through hipBLASLt | about `+11%` prompt with MMQ |
-| `GUFO_DEEPSEEK_ROCM_HIPBLASLT_CANDIDATE=4` | Pin the profiled gfx1151 algorithm instead of the heuristic's first choice | reorders nearly every dense projection |
-| `GUFO_DEEPSEEK_ROCM_FUSED_QNORM_ROPE=1` | One pass for the query head norm and rotated tail | about 250 ms per chunk; trajectory 116/128 to 113/128 |
-| `GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=1` | Mixed-window prefill attention on the rocWMMA producer instead of the F32 scalar kernel | 915.82 to 316.35 ms; the only piece that lowers precision rather than reordering |
+- The vendored llama.cpp MMQ tier (`kernels/rocm/mmq`, see its `VENDOR.md`) owns
+  routed IQ2 gate/up and dense Q8 prefill. Worth 270.1 to 363.9 tok/s. Its
+  column-tile cap is already at its optimum: sweeping `DS4_CUDA_MMQ_X_MAX`
+  through 80 / 64 / 48 / 32 / 24 gives 420.18 / 416.04 / 407.17 / 368.03 /
+  361.59 tok/s, so the 80 cap wins despite leaving about 40% of each tile as
+  padding at 96 columns per expert.
+- Mixed-window prefill attention uses the same rocWMMA producer as the indexed
+  layers: 915.82 ms to 316.35 ms. It is the one route that lowers precision
+  rather than reordering, converting Q and KV to F16 where the scalar kernel
+  stayed in F32, and it leaves the trajectory at 116/128 while the prefill
+  comparison moves `rmse` 0.478146 to 0.479653 and `max_error` 2.39995 to
+  2.16629.
+- The query head norm and rotated tail run as one pass over the row, about
+  250 ms per chunk. Staging the row in LDS is not bit-identical even with the
+  expression written identically and the tail still stored and reloaded, because
+  this backend builds with `-ffast-math`.
+- hipBLASLt algorithm pinning uses the profiled gfx1151 candidate for
+  prompt-chunk shapes and the heuristic's first choice below that width.
 
-MMQ is the large one and the blocker is the envelope, not the arithmetic. The
-pinned trajectory was recorded against the native kernels and passes with zero
-margin (116 against a 116 floor), so any reordering fails it. Upstream ds4
-adopted the same MMQ tier after scoring 100 official Flash cases: average NLL
-`+0.387%`, API top-1 agreement `85.863%` to `85.949%`. Promoting MMQ here needs
-that class of evidence and a re-derived envelope, not a looser threshold.
+`GUFO_DEEPSEEK_ROCM_MMQ=0`, `GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=0`,
+`GUFO_DEEPSEEK_ROCM_FUSED_QNORM_ROPE=0`, `GUFO_DEEPSEEK_ROCM_HIPBLASLT_CANDIDATE=<n>`
+and `GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=1` reach each route individually.
+
+### Comparison against the upstream ds4 optimization
+
+[antirez/ds4#887](https://github.com/antirez/ds4/pull/887) is the same class of
+work on the same GPU and artifact, reporting 187.26 to 292.86 tok/s at a
+4,096-token prefill on ROCm 10.0 with rocBLAS `5.6.0.8d1ae90e`. This tree is on
+ROCm 7.2.3, so library versions differ, but the retained default here is 363.9
+tok/s, `+24%` on that figure, and the opt-in stack is 410.5.
+
+Upstream's own quality evidence, scored with `score_official` on the official
+100-case Flash manifest at context 4096, is worth recording because it is a
+different instrument from the gate used here:
+
+| Revision | Average NLL | First-token matches | Average greedy prefix |
+| --- | ---: | ---: | ---: |
+| ROCm 10.0 pre-optimization | 0.402107528 | 55/100 | 4.650 |
+| ROCm 10.0 with the PR | 0.403662338 | 55/100 | 4.690 |
+| CUDA 13.0, either revision | 0.404811251 | 55/100 | 5.150 |
+
+So upstream's ROCm arithmetic moved too — average NLL by `+0.387%`, greedy
+prefix 4.650 to 4.690 — and their API top-1 agreement moved 85.863% to 85.949%.
+Their CUDA rows are byte-identical only because the PR does not touch CUDA. They
+did not preserve numerics; they measured that the change was benign across 100
+cases and shipped it.
+
+The gate here is a stricter instrument on a narrower sample: a pinned 128-token
+teacher-forced trajectory with a hard 116/128 floor that the baseline hits
+exactly. It cannot distinguish a benign reordering from a real regression, and
+it fails on any reordering at all — including, if it were applied here,
+upstream's own. That is why the routes above are scoped by width rather than
+loosened, and why the numbers in the first table were reachable without touching
+the envelope.
 
 ### Where the remaining time goes
 
-`tools/prof/prof.py` on one 4,096-token prefill, opt-in stack, 10,427 ms of
-kernel time at 99.8% GPU-busy:
+Both routed-MoE kernels are latency-bound, not throughput-bound. A
+`rocprofv3 --pmc` pass on a 2,048-token prefill:
 
-| Kernel | Total | Share | Achieved |
-| --- | ---: | ---: | --- |
-| `mul_mat_q` IQ2 gate/up + dense Q8 | 3,048 ms | 29.2% | about 19 TFLOP/s on the IQ2 half |
-| `moe_down_q2K_hotlist_wmma_wide` | 1,880 ms | 18.0% | about 9.3 TFLOP/s |
-| rocWMMA attention producers | 1,222 ms | 11.7% | DRAM-bound on KV staging |
-| Attention output A and B GEMMs | 1,139 ms | 10.9% | 19 to 21 TFLOP/s |
+| Kernel | Waves | VALU/wave | LDS/wave | VGPR | Scratch |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `mul_mat_q` | 74.9 M | 888 | 166 | 192 | 0 |
+| `moe_down_q2K_hotlist_wmma_wide` | 15.4 M | 3,018 | 836 | 96 | 0 |
 
-The routed Q2 down is the one kernel far off its own resource bounds -- about
-2.9x slower than its mma and DRAM floors combined -- and it did not respond to
-column-fragment width (`NFRAG` 4 versus 8: 1,913 versus 1,900 ms), row-tile
-depth (`MTILES` 4 versus 8: 377.41 versus 377.14 tok/s) or doubling residency
-through the smaller LDS window. Splitting the rocWMMA attention score pass
-across eight wave groups instead of two also regressed (`374.47` to
-`363.14 tok/s`), which rules out the score chain and points at KV staging
-bandwidth. A 500 tok/s target needs about 2.2 s more removed than any of these
-levers produced.
+The Q2-down kernel's whole instruction stream is 46.4 G wave-VALU plus 12.9 G
+wave-LDS, which the GPU can issue in about 330 ms scaled to a 4,096-token chunk,
+against 1,597 ms measured: **9 to 18% issue utilisation**, no scratch, and VGPRs
+that allow sixteen waves per SIMD. `mul_mat_q` sits at about 23% by the same
+accounting. Both are waiting, and what they are short of is resident waves,
+because their tile layouts need enough LDS to cap residency at two (MMQ) to six
+(Q2 down) workgroups per CU.
+
+Everything that trades LDS for work per barrier therefore loses, and every width
+or depth knob is neutral:
+
+| Change | Result |
+| --- | --- |
+| `NFRAG` 8 versus 4 | 417.69 / 415.46 versus 406.53 / 406.54 tok/s |
+| Mid-tile register prefetch | 421.0 tok/s, and does not stack with `NFRAG` 8 |
+| `MTILES` 8 versus 4 | 377.14 versus 377.41 tok/s |
+| One barrier per K step by double-buffering both tiles | 410.1 versus 417.9 tok/s: 4 KiB more LDS drops residency six to four workgroups per CU |
+| Attention score pass across eight wave groups instead of two | 374.47 to 363.14 tok/s, ruling out the score chain and pointing at KV staging |
+
+A 500 tok/s target needs about 1.9 s more removed from a 10.1 s kernel path. The
+only place with that much is those two kernels, and reaching it means a tile
+layout with a materially smaller LDS footprint. For MMQ's IQ2 tile that is
+already closed: the 76-int row is `2*32` code bytes plus scales plus padding
+because `iu8` WMMA consumes byte-expanded codes. For the Q2-down kernel the
+layout resisted every width, depth, residency and barrier change above.
 
 ## Failed
 

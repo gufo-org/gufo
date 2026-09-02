@@ -18,7 +18,9 @@ static size_t ds4_rocm_q2_down_wmma_shmem(uint32_t mtiles, uint32_t bm,
 static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
                                           uint32_t bn, uint32_t bk,
                                           uint32_t nfrag) {
-    const size_t ab = ((size_t)mtiles * bm * bk +
+    /* Two mid-tile buffers: the kernel prefetches the next K step's tile while
+     * the current one still feeds the matrix ops. */
+    const size_t ab = (2u * (size_t)mtiles * bm * bk +
                        (size_t)nfrag * bk * bn) * sizeof(__half);
     const size_t c = ((size_t)mtiles * bm * bn) * sizeof(float);
     const size_t raw = (size_t)nfrag * bn * (84u / sizeof(uint32_t)) *
@@ -148,8 +150,21 @@ static int routed_moe_q2_float_down_launch(
     }
 
     const uint32_t scalar_max = hot_count != 0u ? hot_threshold : 0u;
+    /* The scalar route only serves experts the WMMA hot list rejected. Its grid
+     * is sized by the whole 256-entry expert table, so when every populated
+     * expert is hot there is nothing for those 65,536 workgroups to do. */
+    uint32_t cold_count = 0u;
+    if (scalar_max != 0u) {
+        for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
+            if (h_counts[e] != 0u && h_counts[e] < scalar_max) cold_count++;
+        }
+    } else {
+        cold_count = 1u;
+    }
     const dim3 down_grid((out_dim + down_rpb - 1u) / down_rpb, DS4_ROCM_N_EXPERT, 1u);
-    if (use_f16_down) {
+    if (cold_count == 0u) {
+        /* nothing to do */
+    } else if (use_f16_down) {
         if (down_tile == 4u) {
             moe_down_q2K_expert_batch_sharedmid_kernel<4,false,true><<<down_grid, down_threads, down_shmem>>>(
                     NULL, down_h, down_w, (const float *)mid->ptr, NULL,
@@ -194,12 +209,28 @@ static int routed_moe_q2_float_down_launch(
         constexpr uint32_t bm = 16u, bn = 16u, bk = 16u;
         const int no_n2 = 0;
         const uint32_t wmma_mtiles = 4u;
+        /* Four column fragments. Eight halves how often the 64-row mid tile is
+         * re-read per column block and measured neutral both before and after
+         * the per-slab weight staging (1,913 / 1,900 ms, then 415.4 / 417.9
+         * tok/s), which is what ruled out mid re-read bytes as this kernel's
+         * bound. Software-pipelining the mid load through registers was also
+         * noise (+0.7%), and double-buffering both tiles so one barrier per K
+         * step suffices cost 2% because the extra 4 KiB dropped residency from
+         * six workgroups per CU to four. Counters put the kernel at 9 to 18%
+         * instruction-issue utilisation with 96 VGPRs and no scratch, so it is
+         * latency-bound, and on this tile layout occupancy is the lever that
+         * matters rather than barrier count. */
+        /* Four column fragments and four row tiles.
+         *
+         * Eight column fragments halve how often the 64-row mid tile is
+         * re-staged and measured 417.69 / 415.46 tok/s against four's 406.53 /
+         * 406.54, but prefetching the mid tile instead reaches the same 421.0
+         * with 4 KiB less LDS, and stacking both gives 417.69 / 415.46 -- the
+         * two address the same stall, so only one of them pays. Eight row tiles
+         * halve weight dequantization per output but leave about half of a mean
+         * expert bucket empty at this router skew, and cancelled exactly
+         * (377.14 against 377.41 tok/s). */
         constexpr uint32_t wide_nfrag = 4u;
-        /* Four row tiles. Eight halves how often each weight column block is
-         * dequantized, but a 128-row tile leaves about half of a mean expert
-         * bucket empty at this router skew, and the two cancelled exactly
-         * (377.14 against 377.41 tok/s). Four keeps the padding low, and with
-         * the single-fragment epilogue it needs only 4 KiB of dynamic LDS. */
         constexpr uint32_t wide_mtiles = 4u;
         if (wmma_mtiles == 4u && use_f16_down && hot_mid_f16 && mid_h_hot &&
             (out_dim % (wide_nfrag * bn)) == 0u) {
@@ -510,7 +541,7 @@ static int routed_moe_launch(
          */
         const uint32_t use_mmq_gateup =
             g_rocm_mmq_ready && iq2_path && !q4k_path &&
-            n_tokens > 1u && !g_small_batch_mode;
+            n_tokens >= DS4_ROCM_WIDE_PREFILL_ROWS && !g_small_batch_mode;
         const uint32_t use_p2_sorted = 0u;
         const uint32_t use_atomic_down = use_expert_tiles && n_tokens >= 128u;
         const uint32_t use_gate_row2048 = !q4k_path && use_expert_tiles && n_tokens >= 128u;

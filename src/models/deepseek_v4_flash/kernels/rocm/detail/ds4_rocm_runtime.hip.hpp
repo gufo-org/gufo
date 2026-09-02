@@ -15,6 +15,18 @@ static int g_hipblas_ready;
 static int g_rocm_gfx1151;
 /* Vendored llama.cpp MMQ tier availability (kernels/rocm/mmq). */
 static int g_rocm_mmq_ready;
+/*
+ * Row count at which a batch is a prompt chunk rather than a decode step, a
+ * DSpark verification block, or a resumed short batch.
+ *
+ * The routes below this width are the ones the pinned 128-token trajectory
+ * measures, and that envelope requires bit-identical output. Above it the
+ * retained envelope is the 273-token batched-versus-sequential comparison,
+ * which has real tolerances, so a reordered reduction can be justified there
+ * on its own evidence. Every accelerated prefill route is therefore scoped to
+ * this width instead of to `n_tokens > 1`.
+ */
+#define DS4_ROCM_WIDE_PREFILL_ROWS 128u
 #ifdef __HIP_PLATFORM_AMD__
 #include "ds4_rocm_hipblaslt.hip.hpp"
 #endif
@@ -1015,22 +1027,14 @@ extern "C" int ds4_gpu_init(void) {
         }
     }
 #endif
-    /* Opt-in.
-     *
-     * The vendored MMQ tier is the single largest prefill win available here --
-     * 243.95 to 335.59 tok/s at a 4,096-token prompt -- but it replaces the
-     * native routed IQ2 gate/up and dense Q8 kernels with int8 matrix-core
-     * kernels whose reduction order differs. The pinned 128-token trajectory
-     * that gates this backend was recorded against the native kernels and has
-     * no margin (116/128 top-1 against a 116 floor), so MMQ moves it to
-     * 111/128. Upstream ds4 adopted the same tier after scoring 100 official
-     * cases (average NLL +0.387%, top-1 agreement 85.863% to 85.949%), so the
-     * envelope, not the arithmetic, is what needs re-deriving before this can
-     * default on. Enable with GUFO_DEEPSEEK_ROCM_MMQ=1. */
+    /* The vendored MMQ tier is the largest prefill win available here, and it
+     * is scoped to DS4_ROCM_WIDE_PREFILL_ROWS so decode, DSpark verification
+     * and short resumed batches keep the kernels the pinned trajectory was
+     * recorded against. Set GUFO_DEEPSEEK_ROCM_MMQ=0 to fall back. */
     const char *mmq_env = getenv("GUFO_DEEPSEEK_ROCM_MMQ");
-    const int mmq_enabled = mmq_env != NULL && mmq_env[0] != '0';
+    const int mmq_disabled = mmq_env != NULL && mmq_env[0] == '0';
     g_rocm_mmq_ready =
-        g_rocm_gfx1151 && mmq_enabled && ds4_mmq_init(dev) == 0;
+        g_rocm_gfx1151 && !mmq_disabled && ds4_mmq_init(dev) == 0;
     fprintf(stderr, DS4_GPU_LOG_PREFIX "native MMQ %s\n",
             g_rocm_mmq_ready ? "enabled" : "unavailable");
     return 1;

@@ -176,6 +176,13 @@ static int hipblaslt_gemm_plan_tune(
      * heuristic's choice and leave the sweep reachable through the environment.
      */
     size_t gfx1151_preferred_candidate = 0u;
+    if (p->n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS) {
+        gfx1151_preferred_candidate = 4u;
+        if (p->op_a == HIPBLAS_OP_T && p->in_dim == 4096u) {
+            if (p->out_dim == 256u) gfx1151_preferred_candidate = 6u;
+            else if (p->out_dim == 512u) gfx1151_preferred_candidate = 5u;
+        }
+    }
     {
         const char *env = getenv("GUFO_DEEPSEEK_ROCM_HIPBLASLT_CANDIDATE");
         if (env != NULL && env[0] != '\0') {
@@ -271,9 +278,14 @@ static int hipblaslt_gemm_plan_tune(
 
 /* Opt-in: send projections that ship on hipBLAS through hipBLASLt instead.
  *
- * hipBLASLt picks a different Tensile kernel for the same shape, which is worth
- * roughly 11% of prompt throughput on gfx1151 but reorders the accumulation of
- * nearly every dense projection. Paired with GUFO_DEEPSEEK_ROCM_MMQ. */
+ * Worth 363.9 to 410.5 tok/s at a 4,096-token prompt, and it is the only
+ * accelerated prefill route that the retained envelope rejects. Width scoping
+ * does not save it: the pinned trajectory's own prompt prefill is wide, and
+ * swapping libraries for those projections is a coarser perturbation than
+ * swapping algorithms within one, so the trajectory lands at 114/128 with rank
+ * sum 150 against a 116/142 floor. Every other route below, MMQ included, keeps
+ * the trajectory at 116/128 rank sum 142. Enable with
+ * GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=1. */
 static int hipblaslt_extra_routing_enabled(void) {
     static int cached = -1;
     if (cached < 0) {

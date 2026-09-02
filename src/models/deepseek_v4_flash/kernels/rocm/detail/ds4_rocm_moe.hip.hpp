@@ -4046,8 +4046,15 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
         uint64_t down_row_bytes,
         uint32_t n_tokens = 0u) {
     extern __shared__ unsigned char raw_sh[];
+    /* Two mid-tile buffers. Counters put this kernel at 9 to 18%
+     * instruction-issue utilisation with 96 VGPRs and no scratch, so it is
+     * waiting rather than working, and the mid tile is the only global read
+     * left inside the K step once the weights are staged per slab. Fetching the
+     * next step's tile into registers before this step's dequantize, barrier
+     * and matrix ops lets that load retire underneath them. */
+    constexpr uint32_t A_TILE = (uint32_t)(MTILES * BM * BK);
     __half *shA = reinterpret_cast<__half *>(raw_sh);
-    __half *shB = shA + MTILES * BM * BK;
+    __half *shB = shA + 2u * A_TILE;
     /* Raw Q2_K blocks for this workgroup's NFRAG * BN output rows, one 256-value
      * K slab at a time. shC still aliases the A and B staging area, which the K
      * loop has finished with by the time the epilogue runs, so the raw window
@@ -4055,6 +4062,9 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
     constexpr uint32_t RAW_DWORDS = 84u / sizeof(uint32_t);
     constexpr uint32_t RAW_ROWS = (uint32_t)(NFRAG * BN);
     uint32_t *shW = reinterpret_cast<uint32_t *>(shB + (uint32_t)(NFRAG * BK * BN));
+    /* MTILES*BM*(BK/2) uint32 over 32*MTILES threads is BM*(BK/2)/32 each,
+     * independent of MTILES. */
+    constexpr uint32_t MID_PRE = (uint32_t)(BM * (BK / 2) / 32);
     float *shC = reinterpret_cast<float *>(raw_sh);
     const uint32_t hot_idx = (uint32_t)blockIdx.z;
     if (hot_idx >= hot_count) return;
@@ -4085,6 +4095,26 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
     }
 
     const unsigned char *dew = (const unsigned char *)down_base + (uint64_t)expert * down_expert_bytes;
+
+    uint32_t pre[MID_PRE];
+    const auto fetch_mid = [&](uint32_t k0, uint32_t *dst) {
+#pragma unroll
+        for (uint32_t u = 0; u < MID_PRE; u++) {
+            const uint32_t j = tid + u * blockDim.x;
+            const uint32_t pair_row = j / (BK / 2);
+            const uint32_t kk2 = j - pair_row * (BK / 2);
+            const uint32_t pair = shPair[pair_row];
+            uint32_t v = 0u;
+            if (pair != UINT32_MAX) {
+                const uint64_t moff =
+                    (uint64_t)pair * expert_mid_dim + k0 + kk2 * 2u;
+                v = *reinterpret_cast<const uint32_t *>(mid_h + moff);
+            }
+            dst[u] = v;
+        }
+    };
+    if (MID_F16) fetch_mid(0u, pre);
+    uint32_t abuf = 0u;
     for (uint32_t kb = 0; kb < expert_mid_dim; kb += 256u) {
         for (uint32_t j = tid; j < RAW_ROWS * RAW_DWORDS; j += blockDim.x) {
             const uint32_t row_local = j / RAW_DWORDS;
@@ -4104,18 +4134,18 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
         for (uint32_t krel = 0; krel < 256u && kb + krel < expert_mid_dim;
              krel += BK) {
             const uint32_t k0 = kb + krel;
+            uint32_t next[MID_PRE];
             if (MID_F16) {
-                for (uint32_t j = tid; j < MTILES * BM * (BK / 2); j += blockDim.x) {
+#pragma unroll
+                for (uint32_t u = 0; u < MID_PRE; u++) {
+                    const uint32_t j = tid + u * blockDim.x;
                     const uint32_t pair_row = j / (BK / 2);
                     const uint32_t kk2 = j - pair_row * (BK / 2);
-                    const uint32_t pair = shPair[pair_row];
-                    uint32_t v = 0u;
-                    if (pair != UINT32_MAX) {
-                        const uint64_t moff = (uint64_t)pair * expert_mid_dim + k0 + kk2 * 2u;
-                        v = *reinterpret_cast<const uint32_t *>(mid_h + moff);
-                    }
-                    *reinterpret_cast<uint32_t *>(shA + pair_row * BK + kk2 * 2u) = v;
+                    *reinterpret_cast<uint32_t *>(
+                        shA + abuf * A_TILE + pair_row * BK + kk2 * 2u) = pre[u];
                 }
+                const uint32_t k_next = k0 + BK;
+                if (k_next < expert_mid_dim) fetch_mid(k_next, next);
             } else {
                 for (uint32_t j = tid; j < MTILES * BM * BK; j += blockDim.x) {
                     const uint32_t mt = j / (BM * BK);
@@ -4124,9 +4154,10 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
                     const uint32_t kk = rem - mm * BK;
                     const uint32_t pair = shPair[mt * BM + mm];
                     if (pair != UINT32_MAX) {
-                        shA[j] = __float2half(mid[(uint64_t)pair * expert_mid_dim + k0 + kk]);
+                        shA[abuf * A_TILE + j] = __float2half(
+                            mid[(uint64_t)pair * expert_mid_dim + k0 + kk]);
                     } else {
-                        shA[j] = __float2half(0.0f);
+                        shA[abuf * A_TILE + j] = __float2half(0.0f);
                     }
                 }
             }
@@ -4134,13 +4165,19 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
                     shB, shW, krel, tid);
             __syncthreads();
             if (wave < MTILES) {
-                rocwmma::load_matrix_sync(a, shA + wave * BM * BK, BK);
+                rocwmma::load_matrix_sync(
+                    a, shA + abuf * A_TILE + wave * BM * BK, BK);
 #pragma unroll
                 for (int f = 0; f < NFRAG; f++) {
                     rocwmma::load_matrix_sync(b[f], shB + f * (BK * BN), BN);
                     rocwmma::mma_sync(acc[f], a, b[f], acc[f]);
                 }
             }
+            if (MID_F16) {
+#pragma unroll
+                for (uint32_t u = 0; u < MID_PRE; u++) pre[u] = next[u];
+            }
+            abuf ^= 1u;
             __syncthreads();
         }
     }
