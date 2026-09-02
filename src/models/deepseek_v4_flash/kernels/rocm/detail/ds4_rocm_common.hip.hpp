@@ -347,6 +347,38 @@ __global__ static void f32_to_f16_kernel(__half *out, const float *x, uint64_t n
     if (i < n) out[i] = __float2half(x[i]);
 }
 
+/* Four elements per thread.
+ *
+ * One element per thread gives a wave 128 B of loads against 64 B of stores, so
+ * every store is a partial cache line and the conversion runs at about half of
+ * DRAM peak even though it is pure streaming. A `float4` load and a paired-half
+ * store per thread makes both sides full lines. Per-element arithmetic is
+ * unchanged, and elementwise conversion has no accumulation order. */
+__global__ static void f32_to_f16_vec4_kernel(
+        __half *out, const float *x, uint64_t groups) {
+    const uint64_t g = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= groups) return;
+    const float4 v = *(const float4 *)(x + g * 4u);
+    __half2 packed[2];
+    packed[0] = __floats2half2_rn(v.x, v.y);
+    packed[1] = __floats2half2_rn(v.z, v.w);
+    *(__half2 *)(out + g * 4u) = packed[0];
+    *(__half2 *)(out + g * 4u + 2u) = packed[1];
+}
+
+/* Convert `n` floats to halves, vectorized when the extent and both pointers
+ * allow it. Callers check hipGetLastError afterwards as before. */
+static void hip_launch_f32_to_f16(__half *out, const float *x, uint64_t n) {
+    if (n == 0u) return;
+    if ((n & 3u) == 0u &&
+        ((uintptr_t)x & 15u) == 0u && ((uintptr_t)out & 7u) == 0u) {
+        const uint64_t groups = n >> 2u;
+        f32_to_f16_vec4_kernel<<<(groups + 255u) / 256u, 256>>>(out, x, groups);
+        return;
+    }
+    f32_to_f16_kernel<<<(n + 255u) / 256u, 256>>>(out, x, n);
+}
+
 __device__ static float warp_sum_f32(float v) {
     for (int offset = 16; offset > 0; offset >>= 1) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)

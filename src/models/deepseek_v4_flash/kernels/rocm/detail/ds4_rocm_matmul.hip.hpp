@@ -576,7 +576,7 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
     const uint64_t xh_count = n_tok * in_dim;
     __half *xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16 gemm activations");
     if (!xh) return 0;
-    f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(xh, (const float *)x->ptr, xh_count);
+    hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
     if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
 #ifdef __HIP_PLATFORM_AMD__
     if (hipblaslt_gemm_f16(out->ptr,
@@ -646,7 +646,7 @@ static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
     const uint64_t xh_count = n_tok * in_dim;
     __half *xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16-out gemm activations");
     if (!xh) return 0;
-    f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(xh, (const float *)x->ptr, xh_count);
+    hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
     if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch")) return 0;
 #ifdef __HIP_PLATFORM_AMD__
     if (hipblaslt_gemm_f16(out_h->ptr,
@@ -887,7 +887,7 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
             const uint64_t xh_count = n_tok * in_dim;
             __half *xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16 gemm activations");
             if (!xh) return 0;
-            f32_to_f16_kernel<<<(xh_count + 255) / 256, 256>>>(xh, (const float *)x->ptr, xh_count);
+            hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
             if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
             const float alpha = 1.0f;
             const float beta = 0.0f;
@@ -1264,7 +1264,7 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         const uint64_t xh_count = n_tok * in_dim;
         __half *xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "f16 gemm activations");
         if (!xh) return 0;
-        f32_to_f16_kernel<<<(xh_count + 255) / 256, 256>>>(xh, (const float *)x->ptr, xh_count);
+        hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
         if (!hip_ok(hipGetLastError(), "f16 activation convert launch")) return 0;
 #ifdef __HIP_PLATFORM_AMD__
         if (hipblaslt_gemm_f16(out->ptr,
@@ -1420,7 +1420,7 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
                 xh_bytes, "f16 pair gemm activations");
             if (xh) {
                 const uint64_t xh_count = n_tok * in_dim;
-                f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(
+                hip_launch_f32_to_f16(
                     xh, (const float *)x->ptr, xh_count);
                 if (hip_ok(hipGetLastError(),
                             "f16 pair activation convert launch") &&

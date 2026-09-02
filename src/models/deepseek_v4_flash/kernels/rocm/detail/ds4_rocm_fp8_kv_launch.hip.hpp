@@ -43,7 +43,7 @@ extern "C" int ds4_gpu_tensor_convert_f32_to_f16(
         return 0;
     }
     if (count == 0u) return 1;
-    f32_to_f16_kernel<<<(count + 255u) / 256u, 256>>>(
+    hip_launch_f32_to_f16(
             (half *)dst->ptr,
             (const float *)src->ptr,
             count);

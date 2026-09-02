@@ -1025,12 +1025,13 @@ extern "C" int ds4_gpu_attention_output_q8_batch_tensor(
                 if (!tmp) return 0;
                 __half *heads_h = (__half *)tmp;
                 __half *low_h = (__half *)((char *)tmp + low_h_offset);
-                attention_pack_group_heads_f16_kernel<<<(heads_h_count + 255) / 256, 256>>>(
+                hip_launch_attention_pack_group_heads_f16(
                         heads_h,
                         (const float *)heads->ptr,
                         n_tokens,
                         n_groups,
-                        group_dim);
+                        group_dim,
+                        heads_h_count);
                 if (!hip_ok(hipGetLastError(), "attention_output_q8 packed heads pack launch")) return 0;
                 const float alpha = 1.0f;
                 const float beta0 = 0.0f;
@@ -1166,12 +1167,13 @@ extern "C" int ds4_gpu_attention_output_q8_batch_tensor(
         if (!tmp) return 0;
         __half *heads_h = (__half *)tmp;
         float *low_packed = (float *)((char *)tmp + low_tmp_offset);
-        attention_pack_group_heads_f16_kernel<<<(heads_h_count + 255) / 256, 256>>>(
+        hip_launch_attention_pack_group_heads_f16(
                 heads_h,
                 (const float *)heads->ptr,
                 n_tokens,
                 n_groups,
-                group_dim);
+                group_dim,
+                heads_h_count);
         if (!hip_ok(hipGetLastError(), "attention_output_q8_a pack launch")) return 0;
         const float alpha = 1.0f;
         const float beta = 0.0f;

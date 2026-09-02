@@ -776,7 +776,7 @@ static int routed_moe_launch(
         __half *iq2_x_h = use_iq2_x_f16 ? (__half *)up->ptr : NULL;
         if (ok && use_iq2_x_f16) {
             const uint64_t xh_count = (uint64_t)n_tokens * expert_in_dim;
-            f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(iq2_x_h, (const float *)x->ptr, xh_count);
+            hip_launch_f32_to_f16(iq2_x_h, (const float *)x->ptr, xh_count);
             ok = hip_ok(hipGetLastError(), "routed_moe iq2 gate x f16 launch");
         }
         if (ok && !mmq_gateup_done) {
@@ -1323,7 +1323,7 @@ static int routed_moe_launch(
         }
         if (ok && moe_wmma_hot) {
             const uint64_t xh_count = (uint64_t)n_tokens * expert_in_dim;
-            f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(wmma_x_h, (const float *)x->ptr, xh_count);
+            hip_launch_f32_to_f16(wmma_x_h, (const float *)x->ptr, xh_count);
             ok = hip_ok(hipGetLastError(), "routed_moe q2 wmma x f16 launch");
         }
         if (!ok) return 0;

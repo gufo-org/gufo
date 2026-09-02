@@ -539,8 +539,9 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
     if (!hip_tensor_has_elems2(out, n, rows, sizeof(float)) ||
         !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
     if (n == 0u || rows == 0u) return 1;
-    if (n == 256u * 16u) {
-        rms_norm_plain_regs_kernel<16u><<<rows, 256>>>(
+    /* The hot caller is the 4-way hyper-connection row, 16,384 floats wide. */
+    if (n == 256u * 64u) {
+        rms_norm_plain_regs_kernel<64u><<<rows, 256>>>(
                 (float *)out->ptr, (const float *)x->ptr, n, rows, eps);
         return hip_ok(hipGetLastError(), "rms_norm_plain regs launch");
     }

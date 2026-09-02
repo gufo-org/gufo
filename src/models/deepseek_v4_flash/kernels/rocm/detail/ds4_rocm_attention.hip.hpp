@@ -712,6 +712,56 @@ __global__ static void attention_pack_group_heads_f16_kernel(
     dst[gid] = __float2half(heads[((uint64_t)t * n_groups + g) * group_dim + d]);
 }
 
+/* Four elements per thread.
+ *
+ * The pack is a (token, group) to (group, token) block permutation; both sides
+ * stay contiguous in `d`, so the only thing costing bandwidth in the scalar form
+ * is that a wave stores 64 B at a time. A `float4` load and paired-half stores
+ * make both sides full cache lines. Use hip_launch_attention_pack_group_heads_f16
+ * rather than calling either kernel directly. */
+__global__ static void attention_pack_group_heads_f16_vec4_kernel(
+        __half *dst,
+        const float *heads,
+        uint32_t n_tokens,
+        uint32_t n_groups,
+        uint32_t group_dim) {
+    const uint64_t g4 = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t groups4 =
+        (uint64_t)n_groups * n_tokens * (group_dim >> 2u);
+    if (g4 >= groups4) return;
+    const uint32_t d4 = (uint32_t)(g4 % (group_dim >> 2u));
+    const uint64_t q = g4 / (group_dim >> 2u);
+    const uint32_t t = (uint32_t)(q % n_tokens);
+    const uint32_t g = (uint32_t)(q / n_tokens);
+    const uint32_t d = d4 << 2u;
+    const float4 v = *(const float4 *)(
+        heads + ((uint64_t)t * n_groups + g) * group_dim + d);
+    __half *out = dst + q * group_dim + d;
+    *(__half2 *)out = __floats2half2_rn(v.x, v.y);
+    *(__half2 *)(out + 2u) = __floats2half2_rn(v.z, v.w);
+}
+
+static void hip_launch_attention_pack_group_heads_f16(
+        __half *dst,
+        const float *heads,
+        uint32_t n_tokens,
+        uint32_t n_groups,
+        uint32_t group_dim,
+        uint64_t count) {
+    if (count == 0u) return;
+    if ((group_dim & 3u) == 0u && ((uintptr_t)heads & 15u) == 0u &&
+        ((uintptr_t)dst & 7u) == 0u) {
+        const uint64_t groups4 = count >> 2u;
+        attention_pack_group_heads_f16_vec4_kernel<<<
+                (uint32_t)((groups4 + 255u) / 256u), 256>>>(
+                dst, heads, n_tokens, n_groups, group_dim);
+        return;
+    }
+    attention_pack_group_heads_f16_kernel<<<
+            (uint32_t)((count + 255u) / 256u), 256>>>(
+            dst, heads, n_tokens, n_groups, group_dim);
+}
+
 __global__ static void attention_unpack_group_low_kernel(
         float *low,
         const float *tmp,
