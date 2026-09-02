@@ -214,6 +214,22 @@ KQuantSmallBatchOccupancyFromEnv() noexcept {
 //
 // The arithmetic is untouched -- same terms, same order -- so the bit-exact
 // contract against the decode GEMV holds by construction.
+//
+// It loses, and the default here used to say otherwise. `opt-q4kxl-hoist`
+// measured the hoisted route at -7.6% `tg128-dflash2` (20.28 -> 18.75, 4/4
+// interleaved pairs) and rejected it, but this resolver kept returning
+// `kHoisted` for an unset variable, so production ran the rejected route.
+// Re-measured under DFlash-2 at draft width 7 on UD-Q4_K_XL, three interleaved
+// pairs, `GUFO_VERIFY_TIMING=1`:
+//
+//   hoisted   26.28 / 30.15 / 30.15 tok/s, ffn 111.70 / 84.38 / 84.45 ms/chunk
+//   in-order  32.59 / 32.49 / 32.52 tok/s, ffn  78.55 / 78.84 / 78.61 ms/chunk
+//
+// Median 30.15 -> 32.52 tok/s (+7.9%, 3/3 pairs), verify chunk 142.08 -> 131.02
+// ms. Extending the decoded sub-blocks' live range across the staging loop and
+// its barrier costs the allocator more than the earlier issue buys back; the
+// in-order kernel already has twelve waves per SIMD to hide that latency with.
+// The route stays selectable as `GUFO_KQUANT_SMALL_BATCH_FETCH=hoist`.
 enum class KQuantSmallBatchFetch : std::uint8_t {
   kInOrder,
   kHoisted,
@@ -222,12 +238,12 @@ enum class KQuantSmallBatchFetch : std::uint8_t {
 [[nodiscard]] inline KQuantSmallBatchFetch ResolveKQuantSmallBatchFetch(
     const char* value) noexcept {
   if (value == nullptr) {
-    return KQuantSmallBatchFetch::kHoisted;
+    return KQuantSmallBatchFetch::kInOrder;
   }
   const std::string_view text{value};
-  return text == "0" || text == "in-order" || text == "inorder"
-             ? KQuantSmallBatchFetch::kInOrder
-             : KQuantSmallBatchFetch::kHoisted;
+  return text == "1" || text == "hoist" || text == "hoisted"
+             ? KQuantSmallBatchFetch::kHoisted
+             : KQuantSmallBatchFetch::kInOrder;
 }
 
 [[nodiscard]] inline KQuantSmallBatchFetch
