@@ -2460,7 +2460,26 @@ static bool rocm_graph_encode_layer_attention_batch(
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("q_b");
-    if (ok) ok = ds4_gpu_head_rms_norm_tensor(g->batch_q,
+    /* One pass over the query rows instead of two. The fused kernel stages each
+     * row in LDS, so the norm's write-back is no longer read again by the rope
+     * pass; it is bit-identical and falls back when the row does not fit. */
+    bool q_norm_rope_fused =
+        ok && ds4_gpu_head_rms_norm_rope_tail_tensor(g->batch_q,
+                                                     n_tokens,
+                                                     DS4_N_HEAD,
+                                                     DS4_N_HEAD_DIM,
+                                                     DS4_N_ROT,
+                                                     pos0,
+                                                     compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0,
+                                                     false,
+                                                     freq_base,
+                                                     freq_scale,
+                                                     ext_factor,
+                                                     attn_factor,
+                                                     DS4_ROPE_YARN_BETA_FAST,
+                                                     DS4_ROPE_YARN_BETA_SLOW,
+                                                     DS4_RMS_EPS) != 0;
+    if (ok && !q_norm_rope_fused) ok = ds4_gpu_head_rms_norm_tensor(g->batch_q,
                                                 n_tokens,
                                                 DS4_N_HEAD,
                                                 DS4_N_HEAD_DIM,
@@ -2468,7 +2487,7 @@ static bool rocm_graph_encode_layer_attention_batch(
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("head_norm");
-    if (ok) ok = ds4_gpu_rope_tail_tensor(g->batch_q,
+    if (ok && !q_norm_rope_fused) ok = ds4_gpu_rope_tail_tensor(g->batch_q,
                                             n_tokens,
                                             DS4_N_HEAD,
                                             DS4_N_HEAD_DIM,

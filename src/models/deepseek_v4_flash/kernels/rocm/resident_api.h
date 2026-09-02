@@ -52,6 +52,9 @@ int ds4_gpu_hc_split_weighted_sum_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *sp
 int ds4_gpu_hc_weighted_sum_split_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_hc_weighted_sum_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *weights, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_head_rms_norm_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, float eps);
+/* Fused head RMS norm plus rotated tail. Returns 0 when the shape is not
+ * supported so the caller keeps the separate norm and rope launches. */
+int ds4_gpu_head_rms_norm_rope_tail_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, uint32_t n_rot, uint32_t pos0, uint32_t n_ctx_orig, bool inverse, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float eps);
 int ds4_gpu_indexer_score_one_tensor(ds4_gpu_tensor *scores, const ds4_gpu_tensor *q, const ds4_gpu_tensor *weights, const ds4_gpu_tensor *index_comp, uint32_t n_comp, uint32_t n_head, uint32_t head_dim, float scale);
 int ds4_gpu_indexer_scores_decode_batch_tensor(ds4_gpu_tensor *scores, const ds4_gpu_tensor *q, const ds4_gpu_tensor *weights, const ds4_gpu_tensor *index_comp, uint32_t n_comp, uint32_t n_tokens, uint32_t pos0, uint32_t n_head, uint32_t head_dim, uint32_t ratio, float scale);
 int ds4_gpu_indexer_scores_prefill_tensor(ds4_gpu_tensor *scores, const ds4_gpu_tensor *q, const ds4_gpu_tensor *weights, const ds4_gpu_tensor *index_comp, uint32_t n_comp, uint32_t n_tokens, uint32_t n_head, uint32_t head_dim, uint32_t ratio, float scale);

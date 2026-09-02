@@ -102,6 +102,91 @@ __global__ static void head_rms_norm_kernel(float *x, uint32_t n_tok, uint32_t n
 
 __device__ static float rope_yarn_ramp_dev(float low, float high, int i0);
 
+/* Head RMS norm and the rotated tail in one pass, with the row staged in LDS.
+ *
+ * Run as two kernels this touches global memory four times per row: read to
+ * square, write the scaled head, read the tail back, write the rotated tail.
+ * The row is `head_dim` floats -- 2 KiB at the 512 this model uses -- so it
+ * fits beside the reduction scratch and the second read disappears entirely.
+ *
+ * Every value, the reduction tree, and the per-element arithmetic are
+ * unchanged, so the output is bit-identical to the norm-then-rope sequence: the
+ * staged values are the *unscaled* row and the rotated tail starts at
+ * `n_nope`, so scaling the non-rotated head cannot clobber anything the
+ * rotation still needs. */
+#define DS4_HEAD_ROPE_LDS_DIM 512u
+
+__global__ static void head_rms_norm_rope_tail_lds_kernel(
+        float *x,
+        uint32_t n_tok,
+        uint32_t n_head,
+        uint32_t head_dim,
+        uint32_t n_rot,
+        uint32_t pos0,
+        uint32_t n_ctx_orig,
+        int inverse,
+        float freq_base,
+        float freq_scale,
+        float ext_factor,
+        float attn_factor,
+        float beta_fast,
+        float beta_slow,
+        float eps) {
+    const uint32_t row = blockIdx.x;
+    if (row >= n_tok * n_head) return;
+    const uint32_t t = row / n_head;
+    float *xr = x + (uint64_t)row * head_dim;
+    __shared__ float partial[256];
+    __shared__ float rowbuf[DS4_HEAD_ROPE_LDS_DIM];
+    float sum = 0.0f;
+    for (uint32_t i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        const float v = xr[i];
+        rowbuf[i] = v;
+        sum += v * v;
+    }
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
+        __syncthreads();
+    }
+    const float scale = rsqrtf(partial[0] / (float)head_dim + eps);
+    const uint32_t n_nope = head_dim - n_rot;
+    for (uint32_t i = threadIdx.x; i < n_nope; i += blockDim.x) {
+        xr[i] = rowbuf[i] * scale;
+    }
+
+    float corr0 = 0.0f, corr1 = 0.0f;
+    if (ext_factor != 0.0f) {
+        const float denom = 2.0f * logf(freq_base);
+        corr0 = floorf((float)n_rot * logf((float)n_ctx_orig / (beta_fast * 2.0f * (float)M_PI)) / denom);
+        corr1 = ceilf((float)n_rot * logf((float)n_ctx_orig / (beta_slow * 2.0f * (float)M_PI)) / denom);
+        corr0 = fmaxf(0.0f, corr0);
+        corr1 = fminf((float)(n_rot - 1), corr1);
+    }
+    const float theta_scale = powf(freq_base, -2.0f / (float)n_rot);
+    for (uint32_t pair = threadIdx.x; pair < n_rot / 2; pair += blockDim.x) {
+        const uint32_t i = pair * 2u;
+        const float theta_extrap = (float)(pos0 + t) * powf(theta_scale, (float)pair);
+        const float theta_interp = freq_scale * theta_extrap;
+        float theta = theta_interp;
+        float mscale = attn_factor;
+        if (ext_factor != 0.0f) {
+            const float ramp_mix = rope_yarn_ramp_dev(corr0, corr1, (int)i) * ext_factor;
+            theta = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
+            mscale *= 1.0f + 0.1f * logf(1.0f / freq_scale);
+        }
+        const float c = cosf(theta) * mscale;
+        float s = sinf(theta) * mscale;
+        if (inverse) s = -s;
+        float *tail = xr + n_nope;
+        const float x0 = rowbuf[n_nope + i] * scale;
+        const float x1 = rowbuf[n_nope + i + 1u] * scale;
+        tail[i] = x0 * c - x1 * s;
+        tail[i + 1] = x0 * s + x1 * c;
+    }
+}
+
 __global__ static void head_rms_norm_rope_tail_kernel(
         float *x,
         uint32_t n_tok,
@@ -499,6 +584,21 @@ extern "C" int ds4_gpu_head_rms_norm_tensor(ds4_gpu_tensor *x, uint32_t n_tok, u
     if (rows64 == 0u || head_dim == 0u) return 1;
     head_rms_norm_kernel<<<(uint32_t)rows64, 256>>>((float *)x->ptr, n_tok, n_head, head_dim, eps);
     return hip_ok(hipGetLastError(), "head_rms_norm launch");
+}
+extern "C" int ds4_gpu_head_rms_norm_rope_tail_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, uint32_t n_rot, uint32_t pos0, uint32_t n_ctx_orig, bool inverse, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float eps) {
+    uint64_t rows64 = 0;
+    if (n_rot > head_dim || (n_rot & 1u) ||
+        head_dim == 0u || head_dim > DS4_HEAD_ROPE_LDS_DIM ||
+        !hip_u64_mul_checked(n_tok, n_head, &rows64) || rows64 > UINT32_MAX ||
+        !hip_tensor_has_elems3(x, n_tok, n_head, head_dim, sizeof(float))) {
+        return 0;
+    }
+    if (rows64 == 0u) return 1;
+    head_rms_norm_rope_tail_lds_kernel<<<(uint32_t)rows64, 256>>>(
+            (float *)x->ptr, n_tok, n_head, head_dim, n_rot, pos0, n_ctx_orig,
+            inverse ? 1 : 0, freq_base, freq_scale, ext_factor, attn_factor,
+            beta_fast, beta_slow, eps);
+    return hip_ok(hipGetLastError(), "head_rms_norm_rope_tail lds launch");
 }
 static int hip_rope_tail_stride_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, uint32_t n_rot, uint32_t pos0, uint32_t pos_stride, uint32_t n_ctx_orig, bool inverse, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow) {
     if (!x || n_rot > head_dim || (n_rot & 1) || x->bytes < (uint64_t)n_tok * n_head * head_dim * sizeof(float)) return 0;
