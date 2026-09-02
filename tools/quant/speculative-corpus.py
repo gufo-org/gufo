@@ -128,6 +128,52 @@ def build_prompt_command(
     return command
 
 
+def autoregressive_key(args: argparse.Namespace, prompt: str) -> str:
+    """Identity of an autoregressive reference run.
+
+    The reference depends on the binary, the target shard, the prompt framing
+    and the greedy decode length, and on nothing speculative, so several draft
+    companions benchmarked against one target can share it -- but never across
+    builds or framings, which would score a completion against a reference that
+    could not have produced it.
+    """
+    digest = hashlib.sha256()
+    prompt_mode = args.prompt_mode
+    if prompt_mode == "auto":
+        prompt_mode = "chat" if args.backend == "dspark" else "raw"
+    for field in (
+        os.path.realpath(args.binary),
+        os.path.realpath(args.model),
+        str(args.max_tokens),
+        prompt_mode,
+        str(args.system_prompt),
+        prompt,
+    ):
+        digest.update(field.encode("utf-8"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def load_autoregressive_cache(path: Path | None) -> dict[str, dict]:
+    if path is None or not path.exists():
+        return {}
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if document.get("schema") != "gufo.ar-cache.v1":
+        return {}
+    entries = document.get("entries", {})
+    return entries if isinstance(entries, dict) else {}
+
+
+def store_autoregressive_cache(path: Path | None, cache: dict[str, dict]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"schema": "gufo.ar-cache.v1", "entries": cache}, indent=1),
+        encoding="utf-8",
+    )
+
+
 def verification_environment(profile: str, backend: str) -> dict[str, str]:
     result: dict[str, str] = {}
     if profile == "production" or backend == "dspark":
@@ -317,6 +363,22 @@ def main() -> int:
     )
     parser.add_argument("--allow-sparse", action="store_true")
     parser.add_argument("--env", action="append", default=[])
+    parser.add_argument(
+        "--ar-cache",
+        default="",
+        help="Reuse autoregressive reference runs across invocations. The\ncache is keyed by binary, target shard, framing, decode length and\nprompt, so comparing several draft companions against one target\nmeasures the reference once.",
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_path",
+        default="",
+        help="Write the per-case and aggregate results to this path",
+    )
+    parser.add_argument(
+        "--label",
+        default="",
+        help="Free-form tag recorded in the JSON report",
+    )
     args = parser.parse_args()
 
     if (
@@ -345,7 +407,11 @@ def main() -> int:
         "---: | ---: | ---: |"
     )
 
+    cache_path = Path(args.ar_cache) if args.ar_cache else None
+    cache = load_autoregressive_cache(cache_path)
+    rows: list[dict[str, object]] = []
     mismatches: list[str] = []
+    skipped_cases: list[str] = []
     sparse_samples: list[str] = []
     total_tokens = 0
     total_ar_seconds = 0.0
@@ -364,11 +430,29 @@ def main() -> int:
         minimum_steps = 8
 
     for case in prompts:
-        autoregressive = run_prompt(args, case["text"], False, {})
-        speculative_runs = [
-            run_prompt(args, case["text"], True, environment)
-            for _ in range(args.repetitions)
-        ]
+        key = autoregressive_key(args, case["text"])
+        cached = cache.get(key)
+        try:
+            if cached is None:
+                autoregressive = run_prompt(args, case["text"], False, {})
+                cache[key] = autoregressive
+                store_autoregressive_cache(cache_path, cache)
+            else:
+                autoregressive = cached
+            speculative_runs = [
+                run_prompt(args, case["text"], True, environment)
+                for _ in range(args.repetitions)
+            ]
+        except (subprocess.TimeoutExpired, RuntimeError) as error:
+            # One pathological target/companion pairing must not abort the
+            # suite: that it did not finish is itself a result, and the
+            # remaining cases still carry information.
+            skipped_cases.append(f"{case['id']}: {type(error).__name__}")
+            print(
+                f"| {case['id']} | {case['category']} | - | - | - | - | - | "
+                f"- | - | - | - | - |"
+            )
+            continue
         exact = all(
             run["completion"] == autoregressive["completion"]
             for run in speculative_runs
@@ -442,6 +526,18 @@ def main() -> int:
             f"{positional_cell} | {full_block_cell} | {attempts} | {skipped} | "
             f"{average_draft:.2f} |"
         )
+        rows.append(
+            {
+                "id": case["id"],
+                "category": case["category"],
+                "exact": exact,
+                "ar_tps": ar_tps,
+                "spec_tps": spec_tps,
+                "speedup": speedup,
+                "acceptance": acceptance,
+                "average_draft": average_draft,
+            }
+        )
         if minimum_steps > 0 and attempts < minimum_steps:
             sparse_samples.append(
                 f"{case['id']}: {attempts} attempted blocks, need {minimum_steps}"
@@ -452,6 +548,16 @@ def main() -> int:
                 str(representative["completion"]),
             )
             mismatches.append(f"{case['id']}: {detail}")
+
+    if not rows:
+        print()
+        print(
+            f"aggregate: prompts={len(prompts)} completed=0 "
+            f"skipped={len(skipped_cases)}"
+        )
+        for entry in skipped_cases:
+            print(f"skipped: {entry}", file=sys.stderr)
+        return 0 if args.allow_mismatch else 1
 
     aggregate_ar = total_tokens / total_ar_seconds
     aggregate_spec = total_tokens / total_spec_seconds
@@ -484,7 +590,8 @@ def main() -> int:
     print()
     print(
         f"aggregate: prompts={len(prompts)} suite={suite_hash} "
-        f"exact={len(prompts) - len(mismatches)}/{len(prompts)} "
+        f"exact={len(rows) - len(mismatches)}/{len(rows)} "
+        f"skipped={len(skipped_cases)} "
         f"AR={aggregate_ar:.2f} tok/s speculative={aggregate_spec:.2f} tok/s "
         f"speedup={aggregate_spec / aggregate_ar:.2f}x "
         f"median_speedup={statistics.median(speedups):.2f}x "
@@ -493,8 +600,49 @@ def main() -> int:
         f"attempts={total_steps} skipped={total_skipped} "
         f"avg_support={total_drafted / max(total_steps, 1):.2f}"
     )
+    if args.json_path:
+        prompt_mode = args.prompt_mode
+        if prompt_mode == "auto":
+            prompt_mode = "chat" if args.backend == "dspark" else "raw"
+        Path(args.json_path).write_text(
+            json.dumps(
+                {
+                    "schema": "gufo.speculative-corpus-report.v1",
+                    "label": args.label,
+                    "binary": os.path.realpath(args.binary),
+                    "model": os.path.realpath(args.model),
+                    "draft_model": os.path.realpath(args.draft_model),
+                    "backend": args.backend,
+                    "profile": args.profile,
+                    "prompt_mode": prompt_mode,
+                    "suite": str(args.suite),
+                    "suite_hash": suite_hash,
+                    "max_tokens": args.max_tokens,
+                    "draft_tokens": args.draft_tokens,
+                    "draft_policy": args.draft_policy,
+                    "cases": rows,
+                    "aggregate": {
+                        "prompts": len(prompts),
+                        "completed": len(rows),
+                        "skipped": skipped_cases,
+                        "exact": len(rows) - len(mismatches),
+                        "ar_tps": aggregate_ar,
+                        "spec_tps": aggregate_spec,
+                        "speedup": aggregate_spec / aggregate_ar,
+                        "median_speedup": statistics.median(speedups),
+                        "acceptance": aggregate_acceptance,
+                        "average_draft": total_drafted / max(total_steps, 1),
+                    },
+                },
+                indent=1,
+            ),
+            encoding="utf-8",
+        )
+
     for mismatch in mismatches:
         print(f"mismatch: {mismatch}", file=sys.stderr)
+    for entry in skipped_cases:
+        print(f"skipped: {entry}", file=sys.stderr)
     for sparse in sparse_samples:
         print(f"sparse: {sparse}", file=sys.stderr)
 
