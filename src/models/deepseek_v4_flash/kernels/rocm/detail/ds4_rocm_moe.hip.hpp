@@ -4072,12 +4072,19 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
 
     /* Page the accumulators out two fragments at a time so the C window stays
      * the same size the n2 kernel aliases. */
+    /* Page the accumulators out one fragment at a time.
+     *
+     * Two at a time needed `2 * MTILES * BM * BN` floats, which made the C
+     * window rather than the A/B staging the binding term and capped MTILES at
+     * four for eight resident workgroups per CU. One fragment halves that
+     * window, so MTILES can double without costing residency, and doubling the
+     * row tile halves how often each weight column block is dequantized. The
+     * epilogue writes the same values in the same order either way. */
 #pragma unroll
-    for (int base = 0; base < NFRAG; base += 2) {
+    for (int f = 0; f < NFRAG; f++) {
         __syncthreads();
         if (wave < MTILES) {
-            rocwmma::store_matrix_sync(shC + wave * BM * BN, acc[base], BN, rocwmma::mem_row_major);
-            rocwmma::store_matrix_sync(shC + (MTILES + wave) * BM * BN, acc[base + 1], BN, rocwmma::mem_row_major);
+            rocwmma::store_matrix_sync(shC + wave * BM * BN, acc[f], BN, rocwmma::mem_row_major);
         }
         __syncthreads();
         for (uint32_t j = tid; j < MTILES * BM * BN; j += blockDim.x) {
@@ -4089,16 +4096,13 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
             if (pair == UINT32_MAX) continue;
             const uint32_t tok = pair / 6u;
             const uint32_t slot = pair - tok * 6u;
-#pragma unroll
-            for (int half_i = 0; half_i < 2; half_i++) {
-                const uint32_t row = n0 + (uint32_t)(base + half_i) * BN + nn;
-                if (row >= out_dim) continue;
-                const float v = shC[(uint32_t)half_i * (MTILES * BM * BN) + j];
-                uint64_t dst = (uint64_t)pair * out_dim + row;
-                if (SLOT_MAJOR) dst = ((uint64_t)slot * n_tokens + tok) * out_dim + row;
-                if (OUT_F16) down_out_h[dst] = __float2half(v);
-                else down_out[dst] = v;
-            }
+            const uint32_t row = n0 + (uint32_t)f * BN + nn;
+            if (row >= out_dim) continue;
+            const float v = shC[j];
+            uint64_t dst = (uint64_t)pair * out_dim + row;
+            if (SLOT_MAJOR) dst = ((uint64_t)slot * n_tokens + tok) * out_dim + row;
+            if (OUT_F16) down_out_h[dst] = __float2half(v);
+            else down_out[dst] = v;
         }
     }
 }

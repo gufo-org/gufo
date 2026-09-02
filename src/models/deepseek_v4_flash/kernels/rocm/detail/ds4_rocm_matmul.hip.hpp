@@ -1326,6 +1326,75 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
     return hip_ok(hipGetLastError(), "matmul_f16 launch");
 }
 
+/* F16 projection over activations that are already F16.
+ *
+ * The paired form below feeds two weight matrices from one activation, so the
+ * F32-to-F16 conversion has no reason to run twice. */
+static int hip_matmul_f16_f16_input_tensor(
+        ds4_gpu_tensor *out,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t weight_offset,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        const __half *x_h,
+        uint64_t x_bytes_available,
+        uint64_t n_tok) {
+    if (!out || !x_h || !model_map || !g_hipblas_ready || n_tok < 2u ||
+        in_dim == 0u || out_dim == 0u ||
+        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) {
+        return 0;
+    }
+    uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+    if (weight_offset > model_size ||
+        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t), &weight_bytes) ||
+        weight_bytes > model_size - weight_offset ||
+        !hip_u64_mul3_checked(n_tok, in_dim, sizeof(__half), &x_bytes) ||
+        !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+        x_bytes_available < x_bytes || out->bytes < out_bytes) {
+        return 0;
+    }
+    const char *wptr = hip_model_range_ptr(
+            model_map, weight_offset, weight_bytes, "f16_half_input");
+    if (!wptr) return 0;
+    const __half *w = (const __half *)wptr;
+#ifdef __HIP_PLATFORM_AMD__
+    if (hipblaslt_gemm_f16(out->ptr,
+                           w,
+                           x_h,
+                           (uint32_t)out_dim,
+                           (uint32_t)n_tok,
+                           (uint32_t)in_dim,
+                           HIPBLAS_OP_T,
+                           HIP_R_32F,
+                           "f16 paired projection")) {
+        return 1;
+    }
+#endif
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    const hipblasStatus_t st = hipblasGemmEx(g_hipblas,
+                                     HIPBLAS_OP_T,
+                                     HIPBLAS_OP_N,
+                                     (int)out_dim,
+                                     (int)n_tok,
+                                     (int)in_dim,
+                                     &alpha,
+                                     w,
+                                     HIPBLAS_R_16F,
+                                     (int)in_dim,
+                                     x_h,
+                                     HIPBLAS_R_16F,
+                                     (int)in_dim,
+                                     &beta,
+                                     out->ptr,
+                                     HIPBLAS_R_32F,
+                                     (int)out_dim,
+                                     HIPBLAS_COMPUTE_32F,
+                                     HIPBLAS_GEMM_DEFAULT);
+    return st == HIPBLAS_STATUS_SUCCESS;
+}
+
 extern "C" int ds4_gpu_matmul_f16_pair_tensor(
         ds4_gpu_tensor *out0,
         ds4_gpu_tensor *out1,
@@ -1340,6 +1409,31 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
     if (!out0 || !out1 || !x || !model_map || in_dim == 0 || out_dim == 0 || n_tok == 0 ||
         in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) {
         return 0;
+    }
+    if (n_tok >= 128u && g_hipblas_ready) {
+        /* One activation conversion for both weights. */
+        uint64_t x_bytes = 0, xh_bytes = 0;
+        if (hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) &&
+            hip_u64_mul3_checked(n_tok, in_dim, sizeof(__half), &xh_bytes) &&
+            x->bytes >= x_bytes) {
+            __half *xh = (__half *)hip_tmp_alloc(
+                xh_bytes, "f16 pair gemm activations");
+            if (xh) {
+                const uint64_t xh_count = n_tok * in_dim;
+                f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(
+                    xh, (const float *)x->ptr, xh_count);
+                if (hip_ok(hipGetLastError(),
+                            "f16 pair activation convert launch") &&
+                    hip_matmul_f16_f16_input_tensor(
+                        out0, model_map, model_size, weight0_offset,
+                        in_dim, out_dim, xh, xh_bytes, n_tok) &&
+                    hip_matmul_f16_f16_input_tensor(
+                        out1, model_map, model_size, weight1_offset,
+                        in_dim, out_dim, xh, xh_bytes, n_tok)) {
+                    return 1;
+                }
+            }
+        }
     }
     if (n_tok != 1) {
         return ds4_gpu_matmul_f16_tensor(out0, model_map, model_size, weight0_offset,

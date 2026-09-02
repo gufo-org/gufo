@@ -10,13 +10,13 @@ static size_t ds4_rocm_q2_down_wmma_shmem(uint32_t mtiles, uint32_t bm,
 }
 
 /* Dynamic LDS for the wide-N variant: NFRAG B tiles for staging, versus the
- * two-fragment C page used by its epilogue. */
+ * single-fragment C page used by its epilogue. */
 static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
                                           uint32_t bn, uint32_t bk,
                                           uint32_t nfrag) {
     const size_t ab = ((size_t)mtiles * bm * bk +
                        (size_t)nfrag * bk * bn) * sizeof(__half);
-    const size_t c = (2u * (size_t)mtiles * bm * bn) * sizeof(float);
+    const size_t c = ((size_t)mtiles * bm * bn) * sizeof(float);
     return ab > c ? ab : c;
 }
 
@@ -189,16 +189,23 @@ static int routed_moe_q2_float_down_launch(
         const int no_n2 = 0;
         const uint32_t wmma_mtiles = 4u;
         constexpr uint32_t wide_nfrag = 4u;
+        /* Four row tiles. Eight halves how often each weight column block is
+         * dequantized, but a 128-row tile leaves about half of a mean expert
+         * bucket empty at this router skew, and the two cancelled exactly
+         * (377.14 against 377.41 tok/s). Four keeps the padding low, and with
+         * the single-fragment epilogue it needs only 4 KiB of dynamic LDS. */
+        constexpr uint32_t wide_mtiles = 4u;
         if (wmma_mtiles == 4u && use_f16_down && hot_mid_f16 && mid_h_hot &&
             (out_dim % (wide_nfrag * bn)) == 0u) {
-            constexpr uint32_t mt = 4u;
+            constexpr uint32_t mt = wide_mtiles;
             const dim3 block(32u * mt, 1u, 1u);
             const dim3 grid(out_dim / (wide_nfrag * bn),
                             (hot_max + mt * bm - 1u) / (mt * bm), hot_count);
             const size_t shmem =
                 ds4_rocm_q2_down_wide_shmem(mt, bm, bn, bk, wide_nfrag);
             moe_down_q2K_hotlist_wmma_wide_kernel<
-                4, 16, 16, 16, wide_nfrag, true, true><<<grid, block, shmem>>>(
+                wide_mtiles, 16, 16, 16, wide_nfrag, true, true>
+                    <<<grid, block, shmem>>>(
                     NULL, down_h, down_w, NULL, mid_h_hot,
                     counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
                     expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes);

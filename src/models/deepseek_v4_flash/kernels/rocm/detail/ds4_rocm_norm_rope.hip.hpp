@@ -1,3 +1,38 @@
+/* Plain RMS norm with the row held in registers.
+ *
+ * The generic kernel below reads the row twice from global memory: once to
+ * square and once to scale. At `n == blockDim.x * PER_THREAD` each thread can
+ * keep its own strided slice, so the second read disappears and a 4,096-wide
+ * row costs 16 VGPRs. The accumulation order and the reduction tree are
+ * unchanged, so the output is bit-identical. */
+template <uint32_t PER_THREAD>
+__global__ static void rms_norm_plain_regs_kernel(
+        float *out, const float *x, uint32_t n, uint32_t rows, float eps) {
+    const uint32_t row = blockIdx.x;
+    if (row >= rows) return;
+    const float *xr = x + (uint64_t)row * n;
+    float *orow = out + (uint64_t)row * n;
+    float v[PER_THREAD];
+    float sum = 0.0f;
+#pragma unroll
+    for (uint32_t k = 0; k < PER_THREAD; k++) {
+        v[k] = xr[threadIdx.x + k * blockDim.x];
+        sum += v[k] * v[k];
+    }
+    __shared__ float partial[256];
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
+        __syncthreads();
+    }
+    const float scale = rsqrtf(partial[0] / (float)n + eps);
+#pragma unroll
+    for (uint32_t k = 0; k < PER_THREAD; k++) {
+        orow[threadIdx.x + k * blockDim.x] = v[k] * scale;
+    }
+}
+
 __global__ static void rms_norm_plain_kernel(float *out, const float *x, uint32_t n, uint32_t rows, float eps) {
     uint32_t row = blockIdx.x;
     if (row >= rows) return;
@@ -504,6 +539,11 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
     if (!hip_tensor_has_elems2(out, n, rows, sizeof(float)) ||
         !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
     if (n == 0u || rows == 0u) return 1;
+    if (n == 256u * 16u) {
+        rms_norm_plain_regs_kernel<16u><<<rows, 256>>>(
+                (float *)out->ptr, (const float *)x->ptr, n, rows, eps);
+        return hip_ok(hipGetLastError(), "rms_norm_plain regs launch");
+    }
     rms_norm_plain_kernel<<<rows, 256>>>((float *)out->ptr, (const float *)x->ptr, n, rows, eps);
     return hip_ok(hipGetLastError(), "rms_norm_plain launch");
 }
