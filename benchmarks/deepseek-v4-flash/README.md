@@ -217,6 +217,85 @@ after generation.
   canonical 2K-suffix prompt rows improve 2.4-3.3% through 32K, with neutral
   autoregressive throughput and unchanged serialized state.
 
+## gfx1151 prefill kernels (September 2, 2026)
+
+Two stacks, both measured on the artifact above with `-p 4096 -n 16 -r 2`
+against the `16d5e30` baseline. The default stack keeps the pinned trajectory
+bit-identical; the opt-in stack does not.
+
+| Stack | `pp4096` | `tg16` | Pinned 128-token trajectory |
+| --- | ---: | ---: | --- |
+| `16d5e30` baseline | 193.04 | 15.41 | 116/128 top-1, rank sum 142, worst rank 3 |
+| Retained default | 240.57 | 16.38 | 116/128, rank sum 142, worst rank 3 (unchanged) |
+| Opt-in fast prefill | 395.52 | 16.65 | 103/128, rank sum 163, worst rank 5 |
+
+The retained default is `+24.6%` prompt and `+6.3%` decode with the pinned
+trajectory, the 273-token batched-versus-sequential envelope
+(`rmse=0.478146 cosine=0.99617 max_error=2.39995`), and the greedy continuation
+all unchanged from the baseline. It is made of changes that do not move a single
+logit bit:
+
+- A `256x128x32` rocWMMA F16 GEMM replaces Tensile's `MT64x32x8` choice for the
+  `4096 x chunk x 8192` attention output-B projection: 2,753.69 ms to 558.03 ms
+  per 4,096-token chunk. Accumulators stay in registers for the whole K loop.
+- The Q8_0-to-F16 transposed weight cache is built by an LDS-tiled kernel
+  instead of one output element per lane. The scalar form put a wave's 32 stores
+  8,192 B apart, one cache line each and all on one memory channel: 2,306.89 ms
+  to 44.10 ms of first-prefill latency, and it is what collapsed the run-to-run
+  spread from `±32` to `±6` tok/s.
+- The 32-head wave32 rocWMMA attention producer is single-pass. Folding the
+  running maximum into the accumulator removes the second traversal of every KV
+  row block, its staging and its barriers: 1,206.87 ms to 902.52 ms. The 1 GiB
+  score cache the old second pass read is gone with it.
+- The F32-to-F16 stages and the attention group-head pack move four elements per
+  thread. At one element per thread a wave issued 128 B of loads against 64 B of
+  stores, so every store was a partial line: 420.63 ms to 271.74 ms and
+  255.46 ms to 161.80 ms.
+- Plain RMS norm holds its row in registers, dropping the second full-row read
+  (263.40 ms to 233.92 ms), and the routed Q2-down epilogue pages one
+  accumulator fragment at a time instead of two, halving that kernel's dynamic
+  LDS.
+
+The opt-in stack is `+104.9%` prompt but moves the trajectory outside the
+retained envelope, so every piece of it is off by default:
+
+| Environment variable | Effect | Measured cost |
+| --- | --- | --- |
+| `GUFO_DEEPSEEK_ROCM_MMQ=1` | Routed IQ2 gate/up and dense Q8 prefill through the vendored llama.cpp MMQ tier (`kernels/rocm/mmq`) | 240.57 to 335.59 tok/s; trajectory 116/128 to 111/128 |
+| `GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=1` | Send the projections that ship on hipBLAS through hipBLASLt | about `+11%` prompt with MMQ |
+| `GUFO_DEEPSEEK_ROCM_HIPBLASLT_CANDIDATE=4` | Pin the profiled gfx1151 algorithm instead of the heuristic's first choice | reorders nearly every dense projection |
+| `GUFO_DEEPSEEK_ROCM_FUSED_QNORM_ROPE=1` | One pass for the query head norm and rotated tail | about 250 ms per chunk; trajectory 116/128 to 113/128 |
+| `GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=1` | Mixed-window prefill attention on the rocWMMA producer instead of the F32 scalar kernel | 915.82 to 316.35 ms; the only piece that lowers precision rather than reordering |
+
+MMQ is the large one and the blocker is the envelope, not the arithmetic. The
+pinned trajectory was recorded against the native kernels and passes with zero
+margin (116 against a 116 floor), so any reordering fails it. Upstream ds4
+adopted the same MMQ tier after scoring 100 official Flash cases: average NLL
+`+0.387%`, API top-1 agreement `85.863%` to `85.949%`. Promoting MMQ here needs
+that class of evidence and a re-derived envelope, not a looser threshold.
+
+### Where the remaining time goes
+
+`tools/prof/prof.py` on one 4,096-token prefill, opt-in stack, 10,427 ms of
+kernel time at 99.8% GPU-busy:
+
+| Kernel | Total | Share | Achieved |
+| --- | ---: | ---: | --- |
+| `mul_mat_q` IQ2 gate/up + dense Q8 | 3,048 ms | 29.2% | about 19 TFLOP/s on the IQ2 half |
+| `moe_down_q2K_hotlist_wmma_wide` | 1,880 ms | 18.0% | about 9.3 TFLOP/s |
+| rocWMMA attention producers | 1,222 ms | 11.7% | DRAM-bound on KV staging |
+| Attention output A and B GEMMs | 1,139 ms | 10.9% | 19 to 21 TFLOP/s |
+
+The routed Q2 down is the one kernel far off its own resource bounds -- about
+2.9x slower than its mma and DRAM floors combined -- and it did not respond to
+column-fragment width (`NFRAG` 4 versus 8: 1,913 versus 1,900 ms), row-tile
+depth (`MTILES` 4 versus 8: 377.41 versus 377.14 tok/s) or doubling residency
+through the smaller LDS window. Splitting the rocWMMA attention score pass
+across eight wave groups instead of two also regressed (`374.47` to
+`363.14 tok/s`), which rules out the score chain and points at KV staging
+bandwidth. A 500 tok/s target needs about 2.2 s more removed than any of these
+levers produced.
+
 ## Failed
 
 - Automatic CMake discovery was not reliable for the header-only ROCm
@@ -236,7 +315,13 @@ after generation.
   fused production of the derived FP16 mirror.
 - Native MMQ, device expert queues, cached hipBLASLt projection routing, and
   dense-Q8 32/128-token tile variants either failed the quality envelope or
-  regressed the 4K prompt and were removed.
+  regressed the 4K prompt and were removed. MMQ and hipBLASLt routing were
+  revisited on September 2, 2026 and are now large wins rather than regressions,
+  but they still fail the envelope; see "gfx1151 prefill kernels" above.
+- Widening the batched attention output-A rocWMMA tile to any multiple of 128
+  rows, which lets `rank=1024` through, cost 855.99 ms against rocBLAS's
+  563.72 ms for the same call: each group's A panel stops being MALL-resident
+  across the n sweep, which is the whole premise of that tile.
 - Direct HIP registration of the full GGUF mapping was numerically valid but,
   even warm, regressed 2K prompt/decode throughput by 25.3%/42.3% and added
   about 80.5 GiB of process RSS, so copied device arenas remain authoritative.
