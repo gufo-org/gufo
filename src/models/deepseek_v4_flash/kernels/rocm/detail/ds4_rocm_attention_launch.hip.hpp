@@ -417,38 +417,17 @@ extern "C" int ds4_gpu_attention_indexed_mixed_batch_heads_tensor(
                 (uint32_t)((head_dim & 3u) == 0u));
         return hip_ok(hipGetLastError(), "attention indexed decode oldhip fast launch");
     }
-    float *wmma_score_cache = nullptr;
-    uint32_t wmma_score_stride = 0u;
+    /* The single-pass rocWMMA kernel visits each KV row block once, so the score
+     * cache that let the old second pass skip its QK matrix multiply has no
+     * reader. It cost up to 1 GiB of the shared scratch buffer. */
+    float *const wmma_score_cache = nullptr;
+    const uint32_t wmma_score_stride = 0u;
     if (n_tokens > 1u && top_k == 512u) {
         const uint64_t sort_bytes = (uint64_t)n_tokens * top_k * sizeof(int32_t);
-        const uint64_t sort_aligned = (sort_bytes + 255u) & ~255ull;
-        uint64_t tmp_bytes = sort_aligned;
-        if (wmma_supported) {
-            const uint32_t stride = DS4_ROCM_ATTENTION_RAW_SCORE_CAP + top_k;
-            uint64_t score_bytes = 0u;
-            if (hip_u64_mul3_checked(
-                    n_tokens,
-                    (uint64_t)n_head * stride,
-                    sizeof(float),
-                    &score_bytes) &&
-                score_bytes <= (1ull << 30u) &&
-                sort_aligned <= UINT64_MAX - score_bytes) {
-                wmma_score_stride = stride;
-                tmp_bytes = sort_aligned + score_bytes;
-            }
-        }
         char *scratch = (char *)hip_tmp_alloc(
-            tmp_bytes, "indexed attention topk and WMMA scores");
-        if (!scratch && wmma_score_stride != 0u) {
-            wmma_score_stride = 0u;
-            scratch = (char *)hip_tmp_alloc(
-                sort_bytes, "indexed attention topk sort");
-        }
+            sort_bytes, "indexed attention topk sort");
         int32_t *sorted = (int32_t *)scratch;
         if (!sorted) return 0;
-        if (wmma_score_stride != 0u) {
-            wmma_score_cache = (float *)(scratch + sort_aligned);
-        }
         indexed_topk_sort_512_asc_kernel<<<n_tokens, 512>>>(sorted, topk_ptr, n_tokens);
         if (!hip_ok(hipGetLastError(), "indexed attention topk sort launch")) return 0;
         topk_ptr = sorted;

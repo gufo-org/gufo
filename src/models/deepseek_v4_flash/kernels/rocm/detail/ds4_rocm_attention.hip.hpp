@@ -117,11 +117,11 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
     if (t >= n_tokens || head_dim != DIM || head0 + HEADS > n_head) return;
     const uint32_t tid = threadIdx.x;
     const uint32_t wave = tid >> 5u;
-    float *block_score_cache = score_cache
-        ? score_cache +
-            ((uint64_t)t * (n_head / HEADS) + (uint32_t)blockIdx.y) *
-                HEADS * score_stride
-        : NULL;
+    /* The score cache existed so the second pass could skip recomputing QK.
+     * The single-pass form below visits each row block once, so nothing reads
+     * it; the parameters stay for ABI compatibility with the launchers. */
+    (void)score_cache;
+    (void)score_stride;
 
     __shared__ uint32_t raw_rows[256];
     __shared__ uint32_t comp_rows[
@@ -134,6 +134,7 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
     __shared__ half probs[HEADS * ROWS];
     __shared__ float softmax_max[HEADS];
     __shared__ float softmax_den[HEADS];
+    __shared__ float softmax_rescale[HEADS];
 
     const uint32_t qpos = pos0 + t;
     const uint32_t first_raw_pos = pos0 + n_tokens - n_raw;
@@ -207,139 +208,151 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
 
     frag_c out0;
     frag_c out1;
+    rocwmma::fill_fragment(out0, 0.0f);
+    rocwmma::fill_fragment(out1, 0.0f);
     const uint32_t raw_count = raw_count_s;
     const uint32_t n_score = raw_count + comp_count_s;
     const float score_scale = rsqrtf((float)DIM);
+    const uint32_t lane = tid & 31u;
+    /* Accumulator element (row, col) for a wave32 16x16 F32 fragment on
+     * gfx1151 is (2 * e + lane / 16, lane % 16), recovered with
+     * `rocm/tools/wmma_acc_layout.cpp` rather than assumed. `out0` rows are
+     * heads 0..15 of the group and `out1` rows heads 16..31, so a per-head
+     * factor reaches the accumulator with register arithmetic alone. */
+    const uint32_t acc_row_base = lane >> 4u;
 
-    for (uint32_t pass = 0u; pass < 2u; pass++) {
-        if (pass == 1u) {
-            rocwmma::fill_fragment(out0, 0.0f);
-            rocwmma::fill_fragment(out1, 0.0f);
-        }
-        for (uint32_t row0 = 0u; row0 < n_score; row0 += ROWS) {
-            const uint32_t nr =
-                n_score - row0 < ROWS ? n_score - row0 : ROWS;
-            for (uint32_t j = tid; j < ROWS * DIM; j += blockDim.x) {
-                const uint32_t rr = j / DIM;
-                const uint32_t d = j - rr * DIM;
-                half v = __float2half(0.0f);
-                if (rr < nr) {
-                    const uint32_t sr = row0 + rr;
-                    if (sr < raw_count) {
-                        v = __float2half(
-                            raw_kv[(uint64_t)raw_rows[sr] * DIM + d]);
+    /* Single traversal of the KV rows.
+     *
+     * The two-pass form walked every row block twice -- once for the scores and
+     * the online softmax statistics, once for the probabilities and PV -- and
+     * staged, barriered and LDS-wrote the KV tile on both. The score cache
+     * spared the second pass its QK matrix multiply but not the staging. Here
+     * the running maximum is folded into the accumulator instead: each block
+     * rescales the partial output by `exp(m_old - m_new)` before adding its own
+     * contribution, and the denominator divides only at the end. Same algebra,
+     * one traversal, and the score cache is no longer needed. */
+    for (uint32_t row0 = 0u; row0 < n_score; row0 += ROWS) {
+        const uint32_t nr = n_score - row0 < ROWS ? n_score - row0 : ROWS;
+        for (uint32_t j = tid; j < ROWS * DIM; j += blockDim.x) {
+            const uint32_t rr = j / DIM;
+            const uint32_t d = j - rr * DIM;
+            half v = __float2half(0.0f);
+            if (rr < nr) {
+                const uint32_t sr = row0 + rr;
+                if (sr < raw_count) {
+                    v = __float2half(raw_kv[(uint64_t)raw_rows[sr] * DIM + d]);
+                } else {
+                    uint32_t comp_row = sr - raw_count;
+                    if constexpr (INDEXED) {
+                        comp_row = comp_rows[comp_row];
+                    }
+                    if constexpr (COMP_F16) {
+                        v = ((const half *)comp_kv)[(uint64_t)comp_row * DIM + d];
                     } else {
-                        uint32_t comp_row = sr - raw_count;
-                        if constexpr (INDEXED) {
-                            comp_row = comp_rows[comp_row];
-                        }
-                        if constexpr (COMP_F16) {
-                            v = ((const half *)comp_kv)[
-                                (uint64_t)comp_row * DIM + d];
-                        } else {
-                            v = __float2half(((const float *)comp_kv)[
-                                (uint64_t)comp_row * DIM + d]);
-                        }
+                        v = __float2half(
+                            ((const float *)comp_kv)[(uint64_t)comp_row * DIM + d]);
                     }
                 }
-                kv_half[rr * LDS_DIM + d] = v;
             }
-            __syncthreads();
-
-            if (pass == 0u || !block_score_cache) {
-                frag_c score_acc;
-                if (wave < 2u) {
-                    rocwmma::fill_fragment(score_acc, 0.0f);
-                }
-                for (uint32_t k0 = 0u; k0 < DIM; k0 += BK) {
-                    if (wave < 2u) {
-                        frag_a qa;
-                        frag_b_col kb;
-                        rocwmma::load_matrix_sync(
-                            qa, q_half + wave * BM * LDS_DIM + k0, LDS_DIM);
-                        rocwmma::load_matrix_sync(
-                            kb, kv_half + k0, LDS_DIM);
-                        rocwmma::mma_sync(score_acc, qa, kb, score_acc);
-                    }
-                }
-                if (wave < 2u) {
-                    rocwmma::store_matrix_sync(
-                        scores + wave * BM * ROWS,
-                        score_acc,
-                        ROWS,
-                        rocwmma::mem_row_major);
-                }
-                __syncthreads();
-                if (pass == 0u && block_score_cache) {
-                    for (uint32_t j = tid; j < HEADS * ROWS;
-                         j += blockDim.x) {
-                        const uint32_t h = j / ROWS;
-                        const uint32_t r = j - h * ROWS;
-                        if (r < nr) {
-                            block_score_cache[h * score_stride + row0 + r] =
-                                scores[j];
-                        }
-                    }
-                    __syncthreads();
-                }
-            } else {
-                for (uint32_t j = tid; j < HEADS * ROWS;
-                     j += blockDim.x) {
-                    const uint32_t h = j / ROWS;
-                    const uint32_t r = j - h * ROWS;
-                    if (r < nr) {
-                        scores[j] =
-                            block_score_cache[h * score_stride + row0 + r];
-                    }
-                }
-                __syncthreads();
-            }
-
-            if (pass == 0u) {
-                if (tid < HEADS) {
-                    float m = softmax_max[tid];
-                    float den = softmax_den[tid];
-                    for (uint32_t r = 0u; r < nr; r++) {
-                        const float s = scores[tid * ROWS + r] * score_scale;
-                        const float new_m = fmaxf(m, s);
-                        den = den * expf(m - new_m) + expf(s - new_m);
-                        m = new_m;
-                    }
-                    softmax_max[tid] = m;
-                    softmax_den[tid] = den;
-                }
-                __syncthreads();
-                continue;
-            }
-
-            for (uint32_t j = tid; j < HEADS * ROWS; j += blockDim.x) {
-                const uint32_t h = j / ROWS;
-                const uint32_t r = j - h * ROWS;
-                float p = 0.0f;
-                if (r < nr && softmax_den[h] != 0.0f) {
-                    const float s = scores[h * ROWS + r] * score_scale;
-                    p = expf(s - softmax_max[h]) / softmax_den[h];
-                }
-                probs[j] = __float2half(p);
-            }
-            __syncthreads();
-
-            if (wave < 32u) {
-                frag_a p0;
-                frag_a p1;
-                frag_b_row vb;
-                rocwmma::load_matrix_sync(p0, probs, ROWS);
-                rocwmma::load_matrix_sync(p1, probs + BM * ROWS, ROWS);
-                rocwmma::load_matrix_sync(
-                    vb, kv_half + wave * BN, LDS_DIM);
-                rocwmma::mma_sync(out0, p0, vb, out0);
-                rocwmma::mma_sync(out1, p1, vb, out1);
-            }
-            __syncthreads();
+            kv_half[rr * LDS_DIM + d] = v;
         }
+        __syncthreads();
+
+        frag_c score_acc;
+        if (wave < 2u) {
+            rocwmma::fill_fragment(score_acc, 0.0f);
+        }
+        for (uint32_t k0 = 0u; k0 < DIM; k0 += BK) {
+            if (wave < 2u) {
+                frag_a qa;
+                frag_b_col kb;
+                rocwmma::load_matrix_sync(
+                    qa, q_half + wave * BM * LDS_DIM + k0, LDS_DIM);
+                rocwmma::load_matrix_sync(kb, kv_half + k0, LDS_DIM);
+                rocwmma::mma_sync(score_acc, qa, kb, score_acc);
+            }
+        }
+        if (wave < 2u) {
+            rocwmma::store_matrix_sync(
+                scores + wave * BM * ROWS, score_acc, ROWS,
+                rocwmma::mem_row_major);
+        }
+        __syncthreads();
+
+        /* Advance the online statistics and publish this block's rescale.
+         *
+         * One wave per head, one row per lane. The obvious form walks the 16
+         * rows on 32 of the block's 1024 threads with a carried dependency on
+         * both the maximum and the denominator, so the whole workgroup waits on
+         * a 16-deep serial chain of `expf`. Reducing across lanes instead needs
+         * eight shuffles and keeps every wave busy. Rows beyond `nr` contribute
+         * -inf to the maximum and 0 to the sum, so the tail needs no branch. */
+        if (wave < HEADS) {
+            const float s = lane < nr
+                    ? scores[wave * ROWS + lane] * score_scale
+                    : -INFINITY;
+            float m_new = s;
+            for (int off = 16; off > 0; off >>= 1) {
+                m_new = fmaxf(m_new, __shfl_xor(m_new, off, 32));
+            }
+            const float m_old = softmax_max[wave];
+            m_new = fmaxf(m_old, m_new);
+            float block_sum = lane < nr ? expf(s - m_new) : 0.0f;
+            for (int off = 16; off > 0; off >>= 1) {
+                block_sum += __shfl_xor(block_sum, off, 32);
+            }
+            if (lane == 0u) {
+                const float factor = expf(m_old - m_new);
+                softmax_den[wave] = softmax_den[wave] * factor + block_sum;
+                softmax_max[wave] = m_new;
+                softmax_rescale[wave] = factor;
+            }
+        }
+        __syncthreads();
+
+        if (row0 != 0u) {
+#pragma unroll
+            for (uint32_t e = 0u; e < out0.num_elements; e++) {
+                const uint32_t r = 2u * e + acc_row_base;
+                out0.x[e] *= softmax_rescale[r];
+                out1.x[e] *= softmax_rescale[BM + r];
+            }
+        }
+
+        for (uint32_t j = tid; j < HEADS * ROWS; j += blockDim.x) {
+            const uint32_t h = j / ROWS;
+            const uint32_t r = j - h * ROWS;
+            float p = 0.0f;
+            if (r < nr) {
+                p = expf(scores[h * ROWS + r] * score_scale - softmax_max[h]);
+            }
+            probs[j] = __float2half(p);
+        }
+        __syncthreads();
+
+        if (wave < 32u) {
+            frag_a p0;
+            frag_a p1;
+            frag_b_row vb;
+            rocwmma::load_matrix_sync(p0, probs, ROWS);
+            rocwmma::load_matrix_sync(p1, probs + BM * ROWS, ROWS);
+            rocwmma::load_matrix_sync(vb, kv_half + wave * BN, LDS_DIM);
+            rocwmma::mma_sync(out0, p0, vb, out0);
+            rocwmma::mma_sync(out1, p1, vb, out1);
+        }
+        __syncthreads();
     }
 
     if (wave < 32u) {
+        /* The denominator was deferred so that no block had to be revisited. */
+#pragma unroll
+        for (uint32_t e = 0u; e < out0.num_elements; e++) {
+            const uint32_t r = 2u * e + acc_row_base;
+            const float d0 = softmax_den[r];
+            const float d1 = softmax_den[BM + r];
+            if (d0 != 0.0f) out0.x[e] /= d0;
+            if (d1 != 0.0f) out1.x[e] /= d1;
+        }
         float *out = heads + ((uint64_t)t * n_head + head0) * DIM;
         rocwmma::store_matrix_sync(
             out + wave * BN, out0, DIM, rocwmma::mem_row_major);
@@ -351,7 +364,6 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
     }
 }
 #endif
-
 __global__ static void attention_prefill_raw_kernel(
         float *heads,
         const float *sinks,

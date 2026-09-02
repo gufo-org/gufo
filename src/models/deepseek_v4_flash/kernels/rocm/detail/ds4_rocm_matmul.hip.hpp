@@ -224,9 +224,14 @@ static int ds4_gemm_f16_wmma_launch(OutT *out,
  * is only `rank * group_dim * 2` bytes, so it stays in the MALL across the whole
  * n sweep and the call should be bound by B, which is read once.
  *
- * A 128-row macro tile divides `rank`, so `m` needs no padding, and the output
- * leading dimension is `low_dim` because group `g` owns the `rank` block at
- * offset `g * rank` of every token's row. */
+ * A 128-row macro tile matches `rank` exactly, so `m` needs no padding, and the
+ * output leading dimension is `low_dim` because group `g` owns the `rank` block
+ * at offset `g * rank` of every token's row.
+ *
+ * `m` must equal the tile: relaxing it to any multiple, which lets `rank=1024`
+ * through, measured 855.99 ms per 4,096-token chunk against rocBLAS's 563.72 ms
+ * for the same call. Each group's A panel then no longer stays MALL-resident
+ * across the n sweep, which is the whole premise of the tile. */
 #define DS4_WMMA_BATCH_BM 128u
 #define DS4_WMMA_BATCH_BN 128u
 
@@ -234,12 +239,11 @@ static int ds4_gemm_f16_wmma_batched_eligible(uint64_t m,
                                               uint64_t n,
                                               uint64_t k,
                                               uint64_t batches) {
-    return g_rocm_gfx1151 && m != 0u && m % DS4_WMMA_BATCH_BM == 0u &&
+    return g_rocm_gfx1151 && m == DS4_WMMA_BATCH_BM &&
            n % DS4_WMMA_BATCH_BN == 0u && k % DS4_WMMA_GEMM_BK == 0u &&
            batches > 0u && batches <= UINT16_MAX && m <= UINT32_MAX &&
            n <= UINT32_MAX && k <= UINT32_MAX &&
-           (m / DS4_WMMA_BATCH_BM) * (n / DS4_WMMA_BATCH_BN) * batches >=
-                   DS4_WMMA_GEMM_MIN_BLOCKS;
+           (n / DS4_WMMA_BATCH_BN) * batches >= DS4_WMMA_GEMM_MIN_BLOCKS;
 }
 
 static int ds4_gemm_f16_wmma_batched_launch(__half *out,
