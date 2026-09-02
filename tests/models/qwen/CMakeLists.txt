@@ -158,6 +158,10 @@ if (ENGINE_ENABLE_HIP)
     tests/models/qwen/hip/attention/component_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;component")
 
+  add_qwen_hip_test(qwen_dflash_noncausal_attention_ops_test
+    tests/models/qwen/hip/dflash/noncausal_attention_ops_test.cpp
+    "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;dflash;dflash2;opt-dflash2-attn-wave")
+
   add_qwen_hip_test(qwen_ssm_ops_test
     tests/models/qwen/hip/ssm_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;ssm;opt-c010-ssm-gate-residual;opt-c010-rmsnorm-projection;opt-c0138-bf16-recurrent")
