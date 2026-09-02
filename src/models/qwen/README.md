@@ -354,17 +354,15 @@ program that consume that ABI. See also
 
 DFlash and DFlash-2 are parallel block-diffusion speculative drafting systems. Unlike traditional autoregressive drafters (such as EAGLE-3 or sequential draft models) that predict draft tokens one step at a time, DFlash predicts an entire block of $K$ candidate tokens ($K \in [8, 16]$) simultaneously in a single forward pass.
 
-The validated Qwen3.8 pairings are the Unsloth
-`Qwen3.8-27B-UD-Q8_K_XL.gguf` target with the z-lab
-`Qwen3.8-27B-DFlash2-Q8_0.gguf` companion, and the Unsloth
-`Qwen3.8-27B-UD-Q4_K_XL.gguf` target with the z-lab
-`Qwen3.8-27B-DFlash2-Q4_K_M.gguf` companion. The Q4 companion is kept in its
-packed form rather than expanded to BF16 (1.14 GB against 3.85 GB), because the
-draft graph re-reads every draft matrix on each speculation step. Draft-width
-verification of a K-quant target runs on a shared-weight kernel that is
-bit-exact with the single-token decode GEMV, which is required for a drafted
-token to be acceptable. See `benchmarks/qwen3.8-27b/README.md` under
-"Unsloth UD-Q4_K_XL target" for the format census and measurements.
+Three z-lab companions ship for Qwen3.8 -- `Qwen3.8-27B-DFlash2-Q4_K_M.gguf`,
+`-Q8_0.gguf` and `-BF16.gguf` -- and **`Q4_K_M` is the right choice for both the
+Unsloth `Qwen3.8-27B-UD-Q8_K_XL.gguf` and `Qwen3.8-27B-UD-Q4_K_XL.gguf`
+targets**. It is first on both corpora and both targets, and it is the smallest
+artifact. Acceptance is set by the target and is flat in the companion's own
+quantization, so what the companion changes is the bytes the draft graph
+re-reads on every speculation step (1.58 GB packed against 2.34 GB for Q8_0 and
+3.85 GB for BF16), and throughput follows those bytes. Every companion is kept
+in its packed form rather than expanded to BF16 for the same reason.
 
 Extra MTP and vision tensors in the
 Unsloth GGUFs do not shift target-layer indices: the target loader resolves

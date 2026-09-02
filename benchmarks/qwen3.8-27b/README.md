@@ -546,6 +546,334 @@ request exercised DFlash-2 (40.8-75.3% draft acceptance in server telemetry),
 so this is a behavioral validation of the speculative path rather than only a
 model-load smoke test.
 
+### Which DFlash-2 companion per target (`opt-dflash2-companion`)
+
+Three DFlash-2 companions ship for this checkpoint -- Q4_K_M (1.14 GB on disk,
+1.58 GB packed), Q8_0 (2.06 GB / 2.34 GB) and BF16 (3.86 GB / 3.85 GB) -- and
+the question is which one each target quantization should use, on throughput
+and on draft acceptance.
+
+**Measure it chat-framed and at a realistic length.** The operating point moves
+the answer more than the companion does. Same target, companion and prompt
+(`cpp_ring_buffer`), on a quiet host:
+
+| Framing | Tokens | Speculative tok/s | Acceptance |
+| --- | ---: | ---: | ---: |
+| raw | 128 | 24.66 | 53.4% |
+| chat | 128 | 27.41 | 63.7% |
+| chat | 512 | **33.53** | **77.0%** |
+
+Autoregressive decode is 11.24 tok/s under either framing, so the last row is a
+2.98x speedup. A raw prompt puts the model outside the instruction distribution
+it was tuned on, and a short generation is dominated by the opening tokens of an
+answer, which are its least predictable part. `speculative-corpus.py
+--prompt-mode auto` resolves to `raw` for Qwen, so the two must be requested
+explicitly; `tools/quant/dflash-matrix.sh` now defaults to `chat` at 512 tokens.
+
+Acceptance is also strongly content-dependent and no single number describes it.
+On UD-Q4_K_XL with the Q4_K_M companion, per case: reasoning 79.2%, code 77.0%,
+repetition 71.4%, summarization 53.1%, structured 51.2%, expository 31.6%,
+Italian 28.6%, creative 21.6%, Chinese 19.4%. The token-weighted corpus
+aggregate sits far below the median case because the low-acceptance prompts are
+also the ones that generate the most tokens.
+
+`tools/quant/dflash-matrix.sh` drives the 2x3 grid. The autoregressive reference
+depends only on the binary, target shard, framing, decode length and prompt, so
+it is measured once per target and shared across companions through
+`--ar-cache`, and companion order is reversed on the second repetition so
+thermal drift does not bias the last arm. Two repetitions, chat-framed, 512
+tokens, fixed draft width 7, with the load path and verifier fixes below in
+place -- every arm now reproduces greedy output:
+
+| Target | Companion | Packed draft | Exact | AR | Speculative | Speedup | Median case | Acceptance |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| UD-Q8_K_L | **Q4_K_M** | 1.58 GB | 10/10 | 7.26 | **19.76** | **2.72x** | 19.12 | 40.1% |
+| UD-Q8_K_L | Q8_0 | 2.34 GB | 10/10 | 7.26 | 19.42 | 2.68x | 19.72 | 40.1% |
+| UD-Q8_K_L | BF16 | 3.85 GB | 10/10 | 7.26 | 18.40 | 2.53x | 18.22 | 40.3% |
+| UD-Q4_K_XL | **Q4_K_M** | 1.58 GB | 10/10 | 11.14 | **18.79** | **1.69x** | 18.61 | 38.2% |
+| UD-Q4_K_XL | Q8_0 | 2.34 GB | 10/10 | 11.14 | 18.23 | 1.64x | 17.36 | 38.5% |
+| UD-Q4_K_XL | BF16 | 3.85 GB | 10/10 | 11.14 | 17.26 | 1.55x | 16.14 | 38.6% |
+
+The three-prompt adaptive corpus agrees on both targets:
+
+| Target | Q4_K_M | Q8_0 | BF16 |
+| --- | ---: | ---: | ---: |
+| UD-Q8_K_L | **20.02** (40.2%) | 20.01 (40.4%) | 18.55 (40.4%) |
+| UD-Q4_K_XL | **21.66** (43.8%) | 21.05 (43.7%) | 18.98 (43.7%) |
+
+**Use Q4_K_M on both targets.** It is first on both corpora and both targets,
+and acceptance does not depend on the companion's own quantization -- 38.2-40.4%
+across all six main-corpus arms, with the spread inside a target under 0.4
+points. The target sets acceptance; the companion only sets the bytes the draft
+graph re-reads per speculation step, and throughput follows those bytes
+monotonically everywhere. BF16 is the clear rejection: last on every target and
+corpus, -6.9% against Q4_K_M on Q8 and -8.1% on Q4, for 2.44x the draft
+bandwidth and no acceptance gain. Q4_K_M's margin over Q8_0 is small (+1.8% on
+Q8, +3.1% on Q4) but consistent, and it is also the smallest artifact.
+
+An earlier revision of this table, measured before the load-path fix, put Q8_0
+ahead on the Q8 target. That ordering was an artifact: the Q8 arms were 0/10
+exact then, so each companion was being scored against a token stream the
+verifier was not reproducing.
+
+Measure this chat-framed and at a realistic length. Same target, companion and
+prompt: raw at 128 tokens reads 24.66 tok/s at 53.4% acceptance, chat at 128
+reads 27.41 at 63.7%, chat at 512 reads 33.53 at 77.0%.
+`speculative-corpus.py --prompt-mode auto` resolves to `raw` for Qwen, so the
+difference has to be asked for explicitly. Acceptance is also strongly
+content-dependent: on UD-Q4_K_XL with the Q4_K_M companion, reasoning 79.2%,
+code 77.0%, repetition 71.4%, summarization 53.1%, structured 51.2%, expository
+31.6%, Italian 28.6%, creative 21.6%, Chinese 19.4%. The token-weighted corpus
+aggregate sits below the median case because the low-acceptance prompts generate
+the most tokens.
+
+#### Why the Q8 target did not reproduce greedy output (`opt-dflash2-q8-exact`)
+
+Every UD-Q8_K_L arm used to be 0/10 exact while every UD-Q4_K_XL arm was 10/10,
+across all three companions -- a target property rather than a companion one.
+`GUFO_SPEC_BATCH_VERIFY=0` reproduced autoregressive output bit for bit at 4.56
+tok/s (0.77x of unspeculated decode), so the batched verification chunk was the
+divergent side.
+
+The cause was not in the verifier at all. `CreateFromGguf` dequantized Q6_K,
+Q5_K and Q8_K projections to device BF16 at load unless the shard also carried a
+format with no BF16 route at all (Q4_K, Q3_K, IQ4_NL, IQ4_XS, IQ3_S).
+UD-Q4_K_XL carries those, so nothing was converted and it stayed on the packed
+K-quant kernels, which `qwen_q4kxl_quant_ops_test` proves bit-exact against the
+decode GEMV. UD-Q8_K_L carries only Q8_0, Q6_K and Q5_K, so its Q6_K/Q5_K
+projections became **BF16 at runtime** even though the file contains no BF16 --
+and the BF16 projection route's batched spelling,
+`LaunchExactBf16GEMMFp32SmallBatch`, does not reproduce the dense BF16 GEMV that
+single-token decode uses.
+
+That is why the divergence was invisible to every kernel-level test: the seams
+being compared were the quantized ones, and the shard was not running them.
+A bit-exact per-layer trace put the first disagreement at layer 1, one ulp in
+the residual sum, amplified to 12% by layer 2 -- and layers 1, 4, 10, 13, 20,
+23, 27 and 32 are exactly the layers whose `ffn_down` the loader had converted.
+
+Q6_K, Q5_K and Q8_K have had in-kernel decoders since `opt-q4kxl`, so the
+conversion is now pure downside and the default is to keep them packed:
+
+| | Dequantized to BF16 | Packed (now default) |
+| --- | ---: | ---: |
+| Exact prompts, UD-Q8_K_L | 0/10 | **10/10** |
+| `tg128`, six interleaved pairs, median | 5.77 | **6.68** (+15.8%) |
+| Corpus autoregressive | 6.08 tok/s | 6.68 tok/s |
+| Extra device memory | ~3 GB of BF16 copies | none |
+
+Raw `tg128` pairs: dequantized 5.65 / 4.44 / 5.89 / 6.29 / 4.33 / 6.28, packed
+5.39 / 5.50 / 6.83 / 6.94 / 6.99 / 6.53 -- packed wins five of six, and the
+spread is wide because each sample reloads the 28 GB shard.
+
+UD-Q4_K_XL is untouched: it never took the conversion path, which is precisely
+why it was the clean control throughout. `GUFO_QUANT_NATIVE_KQUANT=0` restores
+the dequantizing behaviour.
+
+**This changes autoregressive output on shards that previously converted.** The
+packed decode is a different but equally valid fp32 path, and it is the one the
+verifier can reproduce; on UD-Q8_K_L a 48-token greedy completion moves from
+`6084379b8387575a98a1112e46527a90` to `1ca48448a2eedbc663abc125927cce79`. Any
+fixture pinned to the old bytes moves with it.
+
+### What actually caps speculative throughput (`opt-dflash2-verify-marginal`)
+
+At the realistic operating point the drafter is not the bottleneck and neither
+is draft bandwidth. UD-Q4_K_XL + DFlash2-Q4_K_M, chat-framed, 512 tokens,
+acceptance 0.7696 over 80 steps, `GUFO_SPEC_TIMING=1`:
+
+| Phase | ms/step | Share |
+| --- | ---: | ---: |
+| verify chunk | 158.25 | 85.6% |
+| propose (draft) | 23.48 | 12.7% |
+| save state | 2.06 | 1.1% |
+| rollback | 1.10 | 0.6% |
+| draft hidden | 0.03 | - |
+
+`GUFO_DFLASH_TIMING=1` shows the draft itself is at roofline -- gemm 12.50 ms
+for 1.58 GB (126 GB/s), lm head 6.23 ms for 822 MB (132 GB/s), attention 0.64,
+norm+conv 1.18, selector 0.69, embed 0.08, download 0.01 -- so the 12.7% it
+occupies is close to irreducible, and it is also why the companion's format
+barely moves the total.
+
+Verification does not amortize the way the weight-stationary argument suggests.
+Sweeping the fixed draft width at 256 tokens:
+
+| Verify batch | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| verify chunk (ms) | 101.5 | 109.2 | 117.2 | 123.7 | 131.6 | 143.4 | 152.3 |
+| end-to-end tok/s | 16.33 | 21.99 | 25.22 | 28.85 | 31.08 | 31.48 | 30.92 |
+
+That is **86 ms fixed plus 8.3 ms per verified row**, extrapolating to ~93 ms at
+batch 1 against the 89 ms an autoregressive token costs. The target weights are
+read once whatever the batch, so the marginal is arithmetic, not traffic.
+
+`GUFO_VERIFY_TIMING=1` locates it. The Q8 shard is shown beside it, but as a
+comparison it is confounded -- its FFN is Q8_0 and runs a different kernel -- so
+it suggests where to look rather than settling anything:
+
+| Stage | Q4 b2 | Q4 b8 | Q4 per row | Q8 b2 | Q8 b8 | Q8 per row |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ffn | 60.53 | 84.49 | **4.00** | 90.14 | 94.07 | **0.66** |
+| projections | 20.30 | 30.87 | 1.76 | 40.20 | 35.92 | -0.71 |
+| attention | 5.07 | 11.83 | 1.13 | 5.65 | 11.68 | 1.01 |
+| ssm recur | 3.17 | 8.18 | 0.84 | 3.28 | 7.99 | 0.79 |
+| lm head | 5.04 | 6.79 | 0.29 | 6.18 | 21.34 | 2.53 |
+| total | 94.10 | 142.17 | 8.01 | 145.44 | 171.01 | 4.26 |
+
+Attention and the recurrence scale identically on both shards (1.13 against
+1.01, 0.84 against 0.79), so the hybrid's sequential state update is **not**
+what caps the batch -- it is 10% of the marginal. The FFN is, at half of it.
+
+#### Rejected: the minimum correction as the cause
+
+The obvious reading of the table is that the Q4_K/Q5_K per-(row, K-block)
+minimum correction is the marginal, since that is the arithmetic Q8_0 does not
+do. It is not. `GUFO_KQUANT_SMALL_BATCH_OFFSET=drop-probe` adds the same probe
+to `SmallBatchKQuantExactFp32GEMMKernel` that
+`GUFO_KQUANT_PREFILL_TILE=drop-offset-probe` gives the blocked kernel: it
+deletes the term, which makes the result **wrong** (`w = scale*q - offset` is
+not `scale*q`) and exists only to bound what an exact cheaper formulation could
+buy. Three interleaved pairs at width 7:
+
+| Arm | FFN ms/chunk | Verify total ms/chunk |
+| --- | --- | --- |
+| exact | 84.47 / 84.46 / 84.60 | 142.20 / 142.15 / 142.38 |
+| offset dropped | 81.52 / 81.56 / 81.51 | 137.83 / 137.83 / 137.79 |
+
+**2.95 ms of 84.5, 3.5%** -- roughly 0.5 ms of the 4.00 ms/row marginal. The
+correction is worth chasing for prefill, where `opt-q4kxl-probe` bounds it at
++8.6% of `pp2048`, but it is not what caps speculation. End-to-end throughput
+under the probe collapses to 5.67 tok/s because the completion is garbage and
+acceptance goes to zero, which is why only the per-chunk timing is read from it.
+
+#### The rejected weight-fetch order was the shipped default
+
+`opt-q4kxl-hoist` measured hoisting the verifier's weight decode above the
+activation stage's barrier at -7.6% `tg128-dflash2` and rejected it, keeping it
+"selectable with `GUFO_KQUANT_SMALL_BATCH_FETCH=hoist`". The rejection never
+reached the code: `ResolveKQuantSmallBatchFetch` returned `kHoisted` for an
+unset variable, so every production run since has used the rejected route. It
+also allocates 1,920-2,144 scratch bytes per lane on the dispatched
+instantiations, against the no-scratch contract.
+
+Re-measured under DFlash-2 at width 7, three interleaved pairs with
+`GUFO_VERIFY_TIMING=1`:
+
+| Pair | hoisted tok/s | in-order tok/s | hoisted ffn | in-order ffn |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 26.28 | 32.59 | 111.70 | 78.55 |
+| 2 | 30.15 | 32.49 | 84.38 | 78.84 |
+| 3 | 30.15 | 32.52 | 84.45 | 78.61 |
+
+Median 30.15 -> 32.52 tok/s (**+7.9%**, 3/3 pairs); verify chunk 142.08 ->
+131.02 ms. With the default corrected, `result-main` against the branch,
+chat-framed at 512 tokens, four interleaved pairs:
+
+| Pair | main | branch |
+| ---: | ---: | ---: |
+| 1 | 33.58 | 35.99 |
+| 2 | 33.53 | 36.16 |
+| 3 | 33.55 | 36.19 |
+| 4 | 33.52 | 36.18 |
+
+Median **33.54 -> 36.17 tok/s, +7.8%, 4/4 pairs**. Acceptance is byte-identical
+in every run (0.769643, 560 drafted, 431 accepted, 80 steps), so this is kernel
+time and changes no emitted token: the greedy completion md5 matches across
+main, the branch and unspeculated decode, `qwen_q4kxl_quant_ops_test` stays
+bit-exact against the decode GEMV at batch 1/3/8, and `pp2048` is 464.75 against
+463.52 because prefill runs the blocked kernel rather than this one.
+
+The numbers in the sections above were all taken on the hoisted default and are
+left as measured; the per-row marginal and its 32%-of-VALU-peak reading move
+with it but the ranking of the stages does not.
+
+#### What the cap actually is
+
+Against the measured ceilings from `tools/bench/gfx1151_peak` -- VALU fp32 FMA
+**26.96 TFLOPS**, WMMA int8/bf16 55.09 TOPS, DRAM read 240.06 GB/s:
+
+- The **fixed** cost is already near optimal. 94.10 ms/chunk at batch 2 moves
+  the 16.35 GiB shard at 186 GB/s, **78% of the measured DRAM read roofline**.
+- The **marginal** cost is not. The MLP is 17.38 G parameters, so one verified
+  row is 2 x 17.38e9 = 34.8 GFLOP; at 4.00 ms/row that is 8.7 TFLOP/s, **32% of
+  the VALU fp32 peak**.
+
+So what caps DFlash-2 throughput on this target is the exact fp32 dot product in
+the verifier running at a third of scalar VALU peak. Not the drafter, which is
+12.7% of a step and at its own bandwidth roofline -- which is also why the
+companion's format barely moves the total. Not draft bandwidth. Not the
+recurrence. Not the K-quant correction.
+
+It cannot be moved onto the 55 TOPS WMMA path: the verifier has to reproduce the
+single-token decode GEMV bit for bit or a drafted token cannot be accepted, and
+a matrix instruction changes the rounding. The remaining ~3x is therefore an
+issue-efficiency problem *inside* exact fp32 -- dual-issue packing and inner-loop
+ILP, the same arithmetic in the same order -- and reaching VALU roofline on the
+marginal would be worth roughly 31 -> 46 tok/s at width 7.
+
+Two smaller items fall out of the same table. The Q8 shard's BF16 LM head has a
+2.53 ms/row slope against the Q4 quantized head's 0.29, the second largest
+marginal term anywhere here and specific to the Q8 target. And end-to-end peaks
+at width 6 (31.48 tok/s) with width 7 already past it (30.92) while
+`--draft-policy auto` resolves to 7 -- single samples about 2% apart, so that
+needs interleaved repetitions before it is worth acting on.
+
+### Coalesced DFlash-2 draft attention (`opt-dflash2-attn-wave`)
+
+`dflash_noncausal_attention_kernel` gave each attended key one thread, which
+then walked `head_dim` contiguous floats: consecutive threads were `kv_dim`
+floats apart and every four-byte read pulled a whole cache line for itself. The
+draft topology is sixteen query heads over four key/value heads at head_dim 256
+with an eight-slot block (`decoder.Qcur` is 8x4096 and `decoder.Kcur` 8x1024
+under `GUFO_DFLASH_DEBUG`), and the draft window is 2,048 keys, so at depth this
+stage dominated the draft step.
+
+Two candidate routes were built and both are within 2e-7 of the reference at
+empty, 128-key and window-clipped 4,096-key histories
+(`qwen_dflash_noncausal_attention_ops_test`, label `opt-dflash2-attn-wave`):
+
+- `wave`: one wave32 per key with `float4` lane-strided loads and a
+  `__shfl_xor` reduction, the same shape `attention_batched.hip` already uses
+  for the target. The PV stage was already coalesced and is unchanged.
+- `gqa`: one workgroup per (draft token, key/value head) instead of per (draft
+  token, query head), so a K row is dotted against all four query heads of the
+  group while it is in registers and the PV stage accumulates four outputs from
+  one read of each V element -- a 4x cut on K/V traffic. The group width is a
+  template parameter, otherwise the per-head arrays index dynamically and spill.
+
+Resource table on gfx1151, all zero scratch and sixteen waves per SIMD:
+
+| Kernel | SGPR | VGPR | Scratch | Waves/SIMD |
+| --- | ---: | ---: | ---: | ---: |
+| scalar reference | 42 | 16 | 0 | 16 |
+| wave | 40 | 30 | 0 | 16 |
+| gqa<4> (shipped shape) | 53 | 38 | 0 | 16 |
+
+Interleaved `tg128-dflash2` on UD-Q4_K_XL + DFlash2-Q4_K_M, default route
+against `GUFO_DFLASH_ATTENTION=scalar`, four pairs:
+
+| Pair | d0 default | d0 scalar | d4096 default | d4096 scalar | d8192 default | d8192 scalar |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 14.29 | 14.17 | 13.45 | 12.56 | 35.06 | 33.02 |
+| 2 | 14.96 | 14.38 | 13.38 | 12.56 | 33.38 | 32.95 |
+| 3 | 14.69 | 13.97 | 13.39 | 12.54 | 34.98 | 32.85 |
+| 4 | 14.47 | 14.73 | 13.39 | 12.55 | 33.88 | 31.22 |
+
+Medians: `d4096` 12.555 -> 13.39 (**+6.6%**, 4/4 pairs), `d8192` 32.90 -> 34.43
+(**+4.7%**, 4/4 pairs), `d0` 14.28 -> 14.58 inside the noise band. A separate
+six-pair shallow run put `tg128` at 12.54 against 12.49, also neutral. Greedy
+output is identical across `scalar`, `wave`, `gqa` and unspeculated decode
+(md5 `e81ee7fecf9227b9ec674914f419135f` on a 96-token completion).
+
+**`wave` is retained as the default**; `GUFO_DFLASH_ATTENTION=scalar` pins the
+reference. `gqa` matches `wave` at depth and never beats it (13.34-13.41 at
+d4096) despite reading a quarter of the K/V bytes, which says the stage was
+limited by request coalescing rather than by K/V footprint -- L2 was already
+serving the rows the group shares. It stays selectable as
+`GUFO_DFLASH_ATTENTION=gqa` and is **not** promoted: more registers, a shared
+memory ceiling and a geometry constraint, for no measured gain.
+
 ### What the prefill gap actually costs (`opt-q4kxl-probe`)
 
 Two measurements reframe the prefill gap, and both contradict earlier
@@ -1050,7 +1378,11 @@ depth. Read the Q8 section for the current state of the engine.
 | Prefill minimum-correction cost (`opt-q4kxl-probe`) | Nothing yet; the measurement itself. Deleting the Q4_K/Q5_K correction is worth +8.6% `pp2048` (471.14 -> 511.47) and puts Q4 **above** Q8's 491.71, so an exact cheaper formulation wins the card. llama.cpp on the same host shows the same shape from the other side: its Q4 beats its Q8 1.10x while gufo's loses 0.93x | The probe route itself: `GUFO_KQUANT_PREFILL_TILE=drop-offset-probe` is numerically wrong (3.15% on Q4_K, 1.64% on Q5_K) and the correctness gate rejects it. Measurement only |
 | Prefill instruction accounting (`opt-q4kxl-isa`) | The measurement: the minimum correction is 340 of the 432-instruction Q4-vs-Q8 gap (79%), and all other K-quant decode is ~92. Epilogue address arithmetic (367 instructions) runs once per block and is under 1% of dynamic issue, which retrospectively explains the neutral store-addressing result | Folding the correction into the main term to shorten the `acc` chain (`GUFO_KQUANT_PREFILL_TILE=fuse`): 3,481 -> 3,635 instructions, `s_delay_alu` 527 -> 545, `pp2048` 471.88 -> 459.28 (-2.7%, 3/3 pairs) |
 | Prefill stage depth (`opt-q4kxl-bk1`) | Nothing; `BK=2` stands | One K block per stage: LDS 19,456 -> 10,240 and VGPR 240 -> 200, but `pp2048` 469.55 -> 355.54 (-24.3%, 4/4 pairs). Isolates the earlier `narrow` rejection as a `BK=1` effect rather than a 64-row-tile one. Kept selectable with `GUFO_KQUANT_PREFILL_TILE=bk1` |
-| Verifier weight-fetch order (`opt-q4kxl-hoist`) | Nothing; the in-order fetch stands | Hoisting the weight decode above the activation stage's barrier: `tg128-dflash2` 20.28 -> 18.75 (-7.6%, 4/4 pairs) and 68 private bytes/lane on a dispatched IQ3_S instantiation. Kept selectable with `GUFO_KQUANT_SMALL_BATCH_FETCH=hoist` |
+| Q6_K/Q5_K load-time dequantization (`opt-dflash2-q8-exact`) | Keeping them packed. The loader converted Q6_K/Q5_K/Q8_K projections to device BF16 unless the shard also carried Q4_K/Q3_K/IQ4_NL/IQ4_XS/IQ3_S, which put UD-Q8_K_L's converted projections on a BF16 route whose batched spelling does not reproduce the decode GEMV -- so speculation was not greedy-faithful there (0/10 exact against UD-Q4_K_XL's 10/10). Packed is **10/10 exact**, `tg128` median 5.77 -> 6.68 (+15.8%, five of six pairs) and drops ~3 GB of BF16 copies | The conversion itself, which predates the in-kernel Q6_K/Q5_K decoders `opt-q4kxl` added. `GUFO_QUANT_NATIVE_KQUANT=0` restores it. Note it changes autoregressive output on shards that previously converted |
+| Verifier weight-fetch order (`opt-q4kxl-hoist`) | The in-order fetch, and now it is actually the default. `ResolveKQuantSmallBatchFetch` returned `kHoisted` for an unset variable, so the route this card rejected at -7.6% had been shipping ever since. Correcting it is `tg128-dflash2` width 7 median 30.15 -> 32.52 (+7.9%, 3/3 pairs) and chat-framed 512-token generation 33.54 -> 36.17 tok/s (+7.8%, 4/4 pairs) with byte-identical acceptance and greedy output | Hoisting the weight decode above the activation stage's barrier: -7.6% and 1,920-2,144 scratch bytes/lane on the dispatched instantiations. Kept selectable with `GUFO_KQUANT_SMALL_BATCH_FETCH=hoist` |
+| DFlash-2 companion per target (`opt-dflash2-companion`) | **Q4_K_M on both targets**, and the measurement point. Chat-framed at 512 tokens the same target and companion read 33.53 tok/s at 77.0% acceptance where raw at 128 read 24.66 at 53.4%, so framing and decode length move the answer more than the companion does. Two repetitions with every arm 10/10 exact: Q8 target 19.76 / 19.42 / 18.40 tok/s and Q4 target 18.79 / 18.23 / 17.26 for Q4_K_M / Q8_0 / BF16. Acceptance is flat in the companion's quantization (38.2-40.4%), so the target sets acceptance | BF16 as a companion: last on every target and corpus for 2.44x the Q4_K_M draft bandwidth and no acceptance gain. Also the pre-fix ordering that put Q8_0 first on the Q8 target -- those arms were 0/10 exact, so they were scored against a stream the verifier was not reproducing |
+| Speculative step accounting (`opt-dflash2-verify-marginal`) | The diagnosis, and a probe. At 33 tok/s the verify chunk is 85.6% of a step and the drafter 12.7% at its own bandwidth roofline, so companion bandwidth cannot be the lever. Verification is 86 ms fixed plus **8.3 ms per verified row**; the fixed part moves 16.35 GiB at 186 GB/s, 78% of the measured 240 GB/s DRAM roofline, while the marginal runs one row's 34.8 GFLOP at 8.7 TFLOP/s, **32% of the measured 26.96 TFLOPS VALU fp32 peak**. Reaching VALU roofline on the marginal is worth roughly 31 -> 46 tok/s. `GUFO_KQUANT_SMALL_BATCH_OFFSET=drop-probe` added to bound the correction term | The Q4_K/Q5_K minimum correction as the cause: the probe deletes it and saves 2.95 ms of 84.5 (3.5%), 0.5 of the 4.00 ms/row FFN marginal. Also the hybrid's sequential DeltaNet recurrence, which is 0.84 ms/row and scales identically on the Q8 shard (0.79) |
+| Coalesced DFlash-2 draft attention (`opt-dflash2-attn-wave`) | One wave32 per attended key with `float4` lane-strided loads, replacing the thread-per-key reference that made consecutive threads `kv_dim` floats apart; within 2e-7 of the reference, zero scratch, sixteen waves/SIMD, `tg128@d4096` 12.555 -> 13.39 (+6.6%, 4/4 pairs) and `tg128@d8192` 32.90 -> 34.43 (+4.7%, 4/4 pairs), shallow neutral, greedy output identical. `GUFO_DFLASH_ATTENTION=scalar` pins the reference | The group-query route (one workgroup per (draft token, kv head), a 4x cut on K/V traffic): ties the wave route at depth and never beats it, so the stage was coalescing-limited rather than footprint-limited. Kept selectable as `GUFO_DFLASH_ATTENTION=gqa` |
 | DeltaNet | Two-lane persistent recurrence and SSM input replay | Four-lane recurrence |
 | Prefill attention | 64-key native tile, odd LDS stride, CK fallback | Head-major KV and lower-precision weighted-V accumulation |
 | Decode attention | Online softmax and 32-way split-K | Context-sized LDS scores and oversized GEMV launches |
@@ -1227,6 +1559,40 @@ it multiplies a contribution that starts at ~3%.
   next piece of work; see "What the prefill gap actually costs
   (`opt-q4kxl-probe`)" for the two ways to make `sx` an `int8` operand and for
   the measurement showing the term is worth 8.6% and enough to beat Q8.
+- Decide whether `LaunchExactBf16GEMMFp32SmallBatch` should be made bit-exact
+  with the dense BF16 GEMV, or removed. Keeping Q6_K/Q5_K packed took every
+  shipped Qwen shard off that route, so it is no longer a correctness risk here,
+  but it stays wrong for any future BF16-weight model that speculates: the
+  batched and single-token spellings of the same projection disagree, and a
+  drafted token is only acceptable if they do not. See "Why the Q8 target did
+  not reproduce greedy output".
+- Re-measure the DFlash-2 companion matrix once that verifier is exact. Q4_K_M
+  and Q8_0 are inside the noise band of each other and the aggregate and the
+  median case disagree, so the Q8 rows cannot be acted on while they are scored
+  against a token stream the verifier is not reproducing.
+- Raise the exact fp32 verifier's issue efficiency. Its marginal cost per
+  verified row runs at 32% of the measured 26.96 TFLOPS VALU fp32 peak while its
+  fixed cost is already at 78% of the DRAM roofline, so this is the one place
+  where speculative throughput is left on the table: VALU roofline on the
+  marginal is worth roughly 31 -> 46 tok/s at width 7. It has to stay exact fp32
+  -- a drafted token is only acceptable if the verifier reproduces the decode
+  GEMV bit for bit, so the 55 TOPS WMMA path is closed -- which makes this
+  dual-issue packing and inner-loop ILP over the same operations in the same
+  order, not different arithmetic. See "What actually caps speculative
+  throughput". The minimum correction is **not** the lever here (3.5%,
+  measured); it remains worth chasing for prefill only.
+- Measure the Q8 target's BF16 LM head at draft width. It has a 2.53 ms/row
+  marginal against the Q4 quantized head's 0.29, the second largest marginal
+  term in the verify chunk, and `QuantizeDraftHead` already builds a Q8_0 copy
+  for the *draft* graph while the verifier keeps the BF16 head.
+- Re-check the draft width controller at the realistic operating point.
+  End-to-end peaks at width 6 (31.48 tok/s) with width 7 past it (30.92) while
+  `--draft-policy auto` resolves to 7, but those are single samples ~2% apart.
+- The DFlash-2 draft attention stage is coalescing-limited, not
+  footprint-limited: the group-query route reads a quarter of the K/V bytes and
+  ties the retained wave route. The next thing worth trying there is a tiled
+  online-softmax (flash) form that also removes the per-key score row from
+  shared memory, which is the only remaining way to change the stage's shape.
 - Consider whether a per-tensor requantization of Q4_K/Q5_K to Q8_0 in scratch
   before prefill is worth measuring. It replaces sixteen in-kernel decodes with
   one and hands the untouched W8A8 blocked kernel the result, but it also
