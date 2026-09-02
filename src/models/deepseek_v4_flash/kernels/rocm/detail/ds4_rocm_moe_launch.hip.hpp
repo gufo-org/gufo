@@ -9,15 +9,21 @@ static size_t ds4_rocm_q2_down_wmma_shmem(uint32_t mtiles, uint32_t bm,
     return ab > c ? ab : c;
 }
 
-/* Dynamic LDS for the wide-N variant: NFRAG B tiles for staging, versus the
- * single-fragment C page used by its epilogue. */
+/* Dynamic LDS for the wide-N variant.
+ *
+ * The A and B staging halves, then the raw Q2_K slab window that the staged
+ * dequantizer reads. The epilogue's single-fragment C page aliases A and B, so
+ * only the larger of those two counts, but the raw window has to sit beyond
+ * both because the K loop still needs it. */
 static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
                                           uint32_t bn, uint32_t bk,
                                           uint32_t nfrag) {
     const size_t ab = ((size_t)mtiles * bm * bk +
                        (size_t)nfrag * bk * bn) * sizeof(__half);
     const size_t c = ((size_t)mtiles * bm * bn) * sizeof(float);
-    return ab > c ? ab : c;
+    const size_t raw = (size_t)nfrag * bn * (84u / sizeof(uint32_t)) *
+                       sizeof(uint32_t);
+    return (ab > c ? ab : c) + raw;
 }
 
 /*
