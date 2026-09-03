@@ -609,10 +609,38 @@ score pass returned. DS4 attention also needs attention sinks, a 128-token raw
 window, ratio-4 compressed KV and per-token top-k 512 indexing in one kernel,
 which no stock interface expresses.
 
-Left on the table: a FlashAttention-2 tiling for the ratio-128 attention layers,
-several query tokens per block sharing one staged KV window. Worth perhaps 150 ms
-of their 268 ms. It cannot serve the ratio-4 layers, where each token carries its
-own top-k row set, so it would be built for 20 of the 41 layers.
+### A FlashAttention-2 tiling cannot help at head_dim 512
+
+This was the last candidate and it closes by counting, not by measurement.
+
+An attention block stages a KV tile once and reuses it for whatever queries the
+block holds. Q costs 1 KiB of shared memory per (token, head) at head_dim 512,
+the 16-row KV tile costs 16 KiB, and the score and probability tiles about 3 KiB,
+so the Q budget is roughly 45 KiB -- about 45 (token, head) pairs, and `H` has to
+divide the 64 heads. For a `T` tokens by `H` heads block on the window-only
+layers, the KV rows staged over a 4,096-token chunk are
+
+    (n_tokens / T) * (n_head / H) * (window + T - 1 + n_comp)
+
+The leading product is `n_tokens * n_head / (T * H)`, constant at a fixed Q
+budget, so the only free term is `window + T - 1 + n_comp`, which is **minimized
+at T = 1**. Tokens in a block each add a staged row; heads add none. At `T * H`
+of 32:
+
+| block | KV rows staged |
+| --- | ---: |
+| **1 token x 32 heads** (shipped) | **1,310,720** |
+| 2 x 16 | 1,318,912 |
+| 4 x 8 | 1,335,296 |
+| 8 x 4 | 1,368,064 |
+| 32 x 1 (textbook FA2) | 1,564,672 |
+
+So the shipped geometry is already the optimum, and a textbook FA2 tile is 19%
+worse. FlashAttention's usual win comes from head_dim 64 or 128, where many
+tokens' Q fits beside the KV tile; at 512 that inverts and heads are the operand
+worth batching. Going past 32 heads needs 64 KiB of Q alone, which leaves no room
+for the KV tile, and splitting K to make room re-stages Q per row block -- ten
+times the Q traffic.
 
 One lesson from the two wins in this round: **the byte-traffic estimate
 underprices a fusion that removes a kernel outright.** The routed-sum fold was
