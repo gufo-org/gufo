@@ -524,7 +524,14 @@ schedule-shaped lever available:
 | Fragment operand layout | -30% by analogy with attention | 2x worse |
 | DRAM traffic | — | 25.8 GB/s of a 240 GB/s ceiling: no headroom to reclaim |
 | Resident waves per CU, 8 -> 16, by splitting warps along the column axis (`DS4_ROCM_WMMA_MMQ_NCW`) | -0.9 to -1.2 s if wave-starved | **18% slower**: 354.9 against 419.6 tok/s mean |
+| Deriving the IQ2 sign masks arithmetically instead of loading `ksigns64`, removing one of the two dependent indexed loads per eight weights from the inner loop | the loader is stalled, not computing, and VALU is 89% idle | bit-identical (rmse 0.41, max_error 1.95) and **neutral**: 435.1 against 439.6 tok/s mean. The sign lookup is not the cost either |
 | Staging the Q2-down weight tile as `[k][n]` so its value fragments load row-major (`GUFO_DEEPSEEK_ROCM_WIDE_DOWN_B_ROWMAJOR`) | -25% by analogy with attention | **5% slower**: 401.4 against 423.3 tok/s mean. The attention win needs a staging-to-read ratio of about 1,280; this tile is read 16 times per dequantize and the strided stores cost more |
+
+**What the cost is has not been identified, and two plausible mechanisms are now
+excluded.** It is not the byte expansion of the IQ2 tile as claimed earlier: that
+claim was never measured, and the one part of the expansion that is avoidable --
+the `ksigns64` lookup -- turns out to be free. It is not the dependent indexed
+loads in general, since removing half of them changed nothing.
 
 Its cost tracks neither bytes, nor tiles, nor workgroups, nor operand layout,
 and the counters say it is not issuing either. 74.9 M waves at 888 VALU and 166

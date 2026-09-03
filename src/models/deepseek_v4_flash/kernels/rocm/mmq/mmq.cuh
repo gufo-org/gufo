@@ -3031,6 +3031,13 @@ template <int mmq_y, bool need_check, int fixed_stride = 0> static __device__ __
             const uint32_t sign_bits = (aux32 >> (7 * l)) & 0x7fu;
             int grid0;
             int grid1;
+            /* ds4: the arithmetic form below was tried here too, replacing the
+             * ksigns64 load with four VALU ops on the theory that the two
+             * dependent indexed loads per eight weights were what the 31x stall
+             * factor was waiting on. It is bit-identical -- same gate output,
+             * rmse 0.41 and max_error 1.95 -- and measurement-neutral: 435.1
+             * against 439.6 tok/s mean. So the sign lookup is not the cost
+             * either; it is presumably L1-resident. Kept as upstream wrote it. */
             if constexpr (fixed_stride == 16) {
                 const uint2 sign_mask = ((const uint2 *) ksigns64)[sign_bits];
                 const uint32_t add0 = sign_mask.x & 0x01010101u;
