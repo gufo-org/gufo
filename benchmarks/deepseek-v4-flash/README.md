@@ -568,9 +568,9 @@ isolation. Going further there means a FlashAttention-2 tiling with several quer
 tokens per block, which the ratio-4 layers block because each token carries its
 own top-k row set, so it would have to be built for the ratio-128 layers alone.
 
-**Resolved.** Normalizing the hyper-connection row straight to F16 is now
-retained and byte-identical: the gate reads 116/128, 142, 3 with `rmse` 0.41 and
-`max_error` 2.15 whether the route is on or off.
+**Resolved.** Normalizing the hyper-connection row straight to F16 is retained
+unconditionally and carries no switch, because it is byte-identical: the gate
+reads 116/128, 142, 3 with `rmse` 0.41 and `max_error` 2.15 either way.
 
 The earlier drift to `rmse` 0.53 was not the projection and not the rounding
 primitive. A same-input comparison settled the projection question outright --

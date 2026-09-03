@@ -620,14 +620,6 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
  * projection on the same halves. Returns 0 when the shape is not the hot
  * hyper-connection row. */
 extern "C" int ds4_gpu_rms_norm_plain_rows_f16_tensor(ds4_gpu_tensor *out_h, const ds4_gpu_tensor *x, uint32_t n, uint32_t rows, float eps) {
-    /* Kill switch only; there is nothing to trade. The gate output is byte
-     * identical either way: 116/128, 142, 3 and rmse 0.41, max_error 2.15. */
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_F16_HC_NORM");
-        enabled = (env && env[0] == '0') ? 0 : 1;
-    }
-    if (!enabled) return 0;
     if (n != 256u * 64u || !hip_vec_convert_enabled()) return 0;
     if (!hip_tensor_has_elems2(out_h, n, rows, sizeof(__half)) ||
         !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
