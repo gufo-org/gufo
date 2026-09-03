@@ -228,13 +228,14 @@ worst rank 3.
 | Stack | `pp4096` | `tg16` | Pinned trajectory | Prefill `rmse` | Gate |
 | --- | ---: | ---: | --- | ---: | --- |
 | `16d5e30` baseline | 188.5 | 16.5 | 116/128, 142, 3 | 0.478146 | pass |
-| Retained default | 433.8 | 16.6 | 116/128, 142, 3 | 0.41 | pass |
+| Retained default | 427.3 | 16.6 | 116/128, 142, 3 | 0.41 | pass |
 | Retained default, MMQ disabled | 270.1 | 16.6 | 116/128, 142, 3 | — | pass |
 | Plus the attention output-B hipBLASLt fallback | 410.5 | 16.6 | 114/128, 150, 5 | — | fail |
 
 Four interleaved rounds of the two binaries: baseline 188.24 / 188.22 / 187.67 /
-190.04, retained 399.22 / 426.69 / 428.83 / 445.80 (the first round is cold).
-The same pairing at 8,192 tokens, which chunks: 198.83 / 199.60 against
+190.04, retained 399.22 / 426.69 / 428.83 / 445.80 (the first round is cold);
+four warm rounds of the final binary read 417.33 / 427.61 / 437.34 / 426.80. The
+same pairing at 8,192 tokens, which chunks: 198.83 / 199.60 against
 431.84 / 434.53, **+117%**.
 
 Two different noise regimes, and telling them apart matters for every A/B below:
@@ -520,6 +521,7 @@ schedule-shaped lever available:
 | Tile fill (column width 80 -> 96/112/128) | -1.0 s at 88% fill | nil |
 | Fragment operand layout | -30% by analogy with attention | 2x worse |
 | DRAM traffic | — | 25.8 GB/s of a 240 GB/s ceiling: no headroom to reclaim |
+| Resident waves per CU, 8 -> 16, by splitting warps along the column axis (`DS4_ROCM_WMMA_MMQ_NCW`) | -0.9 to -1.2 s if wave-starved | **18% slower**: 354.9 against 419.6 tok/s mean |
 
 Its cost tracks neither bytes, nor tiles, nor workgroups, nor operand layout,
 and the counters say it is not issuing either. 74.9 M waves at 888 VALU and 166
@@ -528,19 +530,34 @@ retires in about 297 ms and 111 ms respectively against 2,792 ms measured: **11%
 VALU and 5% LDS utilisation**, a 31x stall factor. It is waiting on memory it
 cannot hide, and what it is short of is resident waves.
 
-That shortage is structural to the MMQ tile, which is why every geometry knob was
-neutral. Waves per CU is `(65,536 / LDS_per_workgroup) * nwarps`, and `nwarps`
-is pinned to `mmq_y / 16` because a warp owns `mmq_y / nwarps` rows and that must
-be at least the 16-row accumulator tile. So LDS and `nwarps` both scale with
-`mmq_y` and the product is invariant: **8 waves per CU of the 32 the hardware
-offers, at every `mmq_y`**. Confirmed by measurement -- `mmq_y` 128 doubles both
-the tile and the warp count and changes nothing.
+Upstream's decomposition pins that at 8 waves per CU of the 32 the hardware
+offers. Waves per CU is `(65,536 / LDS_per_workgroup) * nwarps`, and `nwarps` is
+`mmq_y / 16` because a warp owns `mmq_y / nwarps` rows and that must be at least
+the 16-row accumulator tile, so LDS and `nwarps` both scale with `mmq_y` and the
+product is invariant -- which is why `mmq_y` 128, doubling both, changed nothing.
 
-Lifting it means decomposing warps along the column axis instead of the row axis,
-which is a rewrite of the vendored MMQ tier rather than a tuning change. The
-alternative is a routed-expert format whose tile does not need byte-expanded
-codes for `iu8` WMMA -- a quantization change. Neither is a kernel tweak, and
-without one of them the 2.8 s does not move.
+**That was the one structural lever left, so it was built and measured.**
+`DS4_ROCM_WMMA_MMQ_NCW` adds a second decomposition axis: `NCW` warps share a
+row group and take every `NCW`-th column tile, giving `nwarps = (mmq_y/16)*NCW`
+at unchanged shared memory and therefore 16 resident waves per CU at `NCW = 2`.
+It is correct -- the pinned trajectory holds at 116/128, 142, 3 and the prefill
+envelope improves to `rmse` 0.38, `max_error` 1.76 -- and it is **18% slower**:
+367.93 / 350.56 / 346.34 tok/s against 406.94 / 429.48 / 422.49, and a forced
+96-column width does not recover it (348.26 / 354.55). Halving the columns per
+warp also halves the matrix ops that each A-fragment load feeds, and that costs
+more than the extra waves recover.
+
+So wave starvation is falsified as well. The default stays `NCW = 1`, which
+reproduces upstream exactly (verified: the same gate output, `rmse` 0.41 and
+`max_error` 2.15, as before the refactor), and the knob is kept because it
+records the attempt.
+
+With bytes, tiles, workgroups, operand layout, issue rate and resident waves all
+eliminated, what remains is the per-warp serial dependency inside the IQ2 tile:
+each A-fragment load feeds a fixed number of matrix ops and nothing available
+changes that ratio in the favourable direction. Moving it needs a routed-expert
+format whose tile does not need byte-expanded codes for `iu8` WMMA -- a
+quantization change, not a kernel change.
 
 The two attention producers are the one place a rewrite still pays: 1.1 s at 8
 to 15% of the WMMA ceiling, of which the transposed-Q staging takes 30 to 37% in

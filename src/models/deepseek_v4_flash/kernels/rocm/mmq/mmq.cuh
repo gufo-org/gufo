@@ -338,10 +338,45 @@ static constexpr __device__ int mmq_get_granularity_device(const int /*mmq_x*/) 
 }
 #endif // AMD_MFMA_AVAILABLE
 
+/* ds4: warps per workgroup along the column axis.
+ *
+ * Upstream decomposes the workgroup purely by rows: a warp owns
+ * `mmq_y / nwarps` rows and must own at least the 16-row accumulator tile, so
+ * `nwarps == mmq_y / 16`. Shared-memory use also scales with `mmq_y`, which
+ * makes resident waves per CU -- `(65536 / LDS) * nwarps` -- invariant at eight
+ * of the 32 the hardware offers, at every `mmq_y`. Counters put the routed
+ * gate/up at 11% VALU and 5% LDS issue with a 31x stall factor, so what it is
+ * short of is exactly those waves.
+ *
+ * This adds a second axis: `NCW` warps share a row group and split the column
+ * tiles between them, so `nwarps == (mmq_y / 16) * NCW` at unchanged shared
+ * memory. Each warp then accumulates `mmq_x / NCW` columns, so the register
+ * footprint drops with it. The column tiles a warp owns are strided by NCW,
+ * which requires mmq_x to be a multiple of `NCW * ntx * tile_C::J`; the host
+ * selector below enforces that.
+ *
+ * NCW == 1 reproduces upstream exactly, and that is the default: the split
+ * works and is gate-clean, but it **loses**. Measured 2026-09-03 at a
+ * 4,096-token chunk, three interleaved rounds each: NCW 1 gives 406.94 / 429.48
+ * / 422.49 tok/s and NCW 2 gives 367.93 / 350.56 / 346.34, an 18% regression
+ * that a forced 96-column width does not recover (348.26 / 354.55). Doubling
+ * resident waves per CU from eight to sixteen therefore does not help, which
+ * falsifies wave starvation as the explanation for the stall: halving the
+ * columns per warp also halves the matrix ops each A-fragment load feeds, and
+ * that costs more than the extra waves recover. Kept because it is the one
+ * structural lever left and this records that it was tried. */
+#ifndef DS4_ROCM_WMMA_MMQ_NCW
+#define DS4_ROCM_WMMA_MMQ_NCW 1
+#endif
+static_assert(DS4_ROCM_WMMA_MMQ_NCW == 1 || DS4_ROCM_WMMA_MMQ_NCW == 2 ||
+              DS4_ROCM_WMMA_MMQ_NCW == 4,
+              "RDNA WMMA MMQ column-warp factor must be 1, 2, or 4");
+
 #if defined(GGML_USE_HIP)
 static int mmq_get_nwarps_host(const int cc, const int warp_size) {
     return amd_mfma_available(cc) ? 8 :
-        (amd_wmma_available(cc) ? DS4_ROCM_WMMA_MMQ_Y/16 : 256/warp_size);
+        (amd_wmma_available(cc) ? (DS4_ROCM_WMMA_MMQ_Y/16)*DS4_ROCM_WMMA_MMQ_NCW
+                                : 256/warp_size);
 }
 #else
 static int mmq_get_nwarps_host(const int /*cc*/, const int warp_size) {
@@ -349,11 +384,20 @@ static int mmq_get_nwarps_host(const int /*cc*/, const int warp_size) {
 }
 #endif // (GGML_USE_HIP)
 
+/* Non-1 only where mmq_get_nwarps_device() is boosted to match. */
+static constexpr __device__ int mmq_get_ncw_device() {
+#if defined(AMD_WMMA_AVAILABLE) && !defined(AMD_MFMA_AVAILABLE)
+    return DS4_ROCM_WMMA_MMQ_NCW;
+#else
+    return 1;
+#endif
+}
+
 static constexpr __device__ int mmq_get_nwarps_device() {
 #if defined(AMD_MFMA_AVAILABLE)
     return 8;
 #elif defined(AMD_WMMA_AVAILABLE)
-    return DS4_ROCM_WMMA_MMQ_Y/16;
+    return (DS4_ROCM_WMMA_MMQ_Y/16)*DS4_ROCM_WMMA_MMQ_NCW;
 #else
     return 256/ggml_cuda_get_physical_warp_size();
 #endif // defined(AMD_MFMA_AVAILABLE)
@@ -1214,8 +1258,17 @@ static __device__ __forceinline__ void vec_dot_q8_0_q8_1_mma(
     constexpr int granularity = mmq_get_granularity_device(mmq_x);
     constexpr int rows_per_warp = granularity;
     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+    /* ds4: see DS4_ROCM_WMMA_MMQ_NCW. `ncw` warps share this row group and
+     * take every ncw-th column tile; `wrow` is the warp's index within the
+     * row decomposition upstream assumes. */
+    constexpr int ncw = mmq_get_ncw_device();
+    /* mmq_x is a multiple of j_stride for every width the host selector offers;
+     * unreachable specializations are still instantiated, so this cannot assert. */
+    constexpr int j_stride = ncw*ntx*tile_C::J;
+    const int cgroup = threadIdx.y % ncw;
+    const int wrow = threadIdx.y / ncw;
 
-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
+    y += (wrow % ntx) * (tile_C::J*MMQ_TILE_Y_K);
 
     const int   * x_qs = (const int   *) x;
     const float * x_df = (const float *) x_qs + 2*MMQ_TILE_NE_K;
@@ -1223,7 +1276,7 @@ static __device__ __forceinline__ void vec_dot_q8_0_q8_1_mma(
     const float * y_df = (const float *) y;
     const half2 * y_ds = (const half2 *) y;
 
-    const int i0 = (threadIdx.y / ntx) * rows_per_warp;
+    const int i0 = (wrow / ntx) * rows_per_warp;
 
     for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += QI8_0) {
         const int k0 = k00 + k01;
@@ -1235,7 +1288,7 @@ static __device__ __forceinline__ void vec_dot_q8_0_q8_1_mma(
         }
 
 #pragma unroll
-        for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+        for (int j0 = cgroup*ntx*tile_C::J; j0 < mmq_x; j0 += j_stride) {
             tile_B B;
             load_ldmatrix(B, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
 
@@ -1256,7 +1309,7 @@ static __device__ __forceinline__ void vec_dot_q8_0_q8_1_mma(
                 for (int l = 0; l < tile_C::ne; ++l) {
                     const int i = i0 + n*tile_A::I + tile_C::get_i(l);
                     const float dA = x_df[i*MMQ_MMA_TILE_X_K_Q8_0 + k0/QI8_0];
-                    sum[(j0/tile_C::J + n)*tile_C::ne + l] += C.x[l]*dA*dB;
+                    sum[((j0 - cgroup*ntx*tile_C::J)/j_stride*ntx + n)*tile_C::ne + l] += C.x[l]*dA*dB;
                 }
             }
         }
@@ -1385,15 +1438,24 @@ static __device__ __forceinline__ void vec_dot_q8_1_q8_1_mma(
     constexpr int granularity = mmq_get_granularity_device(mmq_x);
     constexpr int rows_per_warp = granularity;
     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+    /* ds4: see DS4_ROCM_WMMA_MMQ_NCW. `ncw` warps share this row group and
+     * take every ncw-th column tile; `wrow` is the warp's index within the
+     * row decomposition upstream assumes. */
+    constexpr int ncw = mmq_get_ncw_device();
+    /* mmq_x is a multiple of j_stride for every width the host selector offers;
+     * unreachable specializations are still instantiated, so this cannot assert. */
+    constexpr int j_stride = ncw*ntx*tile_C::J;
+    const int cgroup = threadIdx.y % ncw;
+    const int wrow = threadIdx.y / ncw;
 
-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
+    y += (wrow % ntx) * (tile_C::J*MMQ_TILE_Y_K);
 
     const int   * x_qs = (const int   *) x;
     const half2 * x_dm = (const half2 *) x_qs + 2*MMQ_TILE_NE_K;
     const int   * y_qs = (const int   *) y + 4;
     const half2 * y_dm = (const half2 *) y;
 
-    const int i0 = (threadIdx.y / ntx) * rows_per_warp;
+    const int i0 = (wrow / ntx) * rows_per_warp;
 
     for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += QI8_1) {
         const int k0 = k00 + k01;
@@ -1405,7 +1467,7 @@ static __device__ __forceinline__ void vec_dot_q8_1_q8_1_mma(
         }
 
 #pragma unroll
-        for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+        for (int j0 = cgroup*ntx*tile_C::J; j0 < mmq_x; j0 += j_stride) {
             tile_B B;
             load_ldmatrix(B, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
 
@@ -1421,8 +1483,8 @@ static __device__ __forceinline__ void vec_dot_q8_1_q8_1_mma(
                 for (int l = 0; l < tile_C::ne; ++l) {
                     const int i = i0 + n*tile_A::I + tile_C::get_i(l);
                     float2 dmA = __half22float2(x_dm[i*MMQ_MMA_TILE_X_K_Q8_1 + k0/QI8_1]);
-                    sum[(j0/tile_C::J + n)*tile_C::ne + l] += dmA.x*dsB.x*C.x[l];
-                    sum[(j0/tile_C::J + n)*tile_C::ne + l] += dmA.y*dsB.y;
+                    sum[((j0 - cgroup*ntx*tile_C::J)/j_stride*ntx + n)*tile_C::ne + l] += dmA.x*dsB.x*C.x[l];
+                    sum[((j0 - cgroup*ntx*tile_C::J)/j_stride*ntx + n)*tile_C::ne + l] += dmA.y*dsB.y;
                 }
             }
         }
@@ -1550,15 +1612,24 @@ static __device__ __forceinline__ void vec_dot_q8_0_16_q8_1_mma(
     constexpr int granularity = mmq_get_granularity_device(mmq_x);
     constexpr int rows_per_warp = granularity;
     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+    /* ds4: see DS4_ROCM_WMMA_MMQ_NCW. `ncw` warps share this row group and
+     * take every ncw-th column tile; `wrow` is the warp's index within the
+     * row decomposition upstream assumes. */
+    constexpr int ncw = mmq_get_ncw_device();
+    /* mmq_x is a multiple of j_stride for every width the host selector offers;
+     * unreachable specializations are still instantiated, so this cannot assert. */
+    constexpr int j_stride = ncw*ntx*tile_C::J;
+    const int cgroup = threadIdx.y % ncw;
+    const int wrow = threadIdx.y / ncw;
 
-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
+    y += (wrow % ntx) * (tile_C::J*MMQ_TILE_Y_K);
 
     const int   * x_qs = (const int   *) x;
     const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K*2;
     const int   * y_qs = (const int   *) y + 4;
     const float * y_df = (const float *) y;
 
-    const int i0 = (threadIdx.y / ntx) * rows_per_warp;
+    const int i0 = (wrow / ntx) * rows_per_warp;
 
     for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += 4) {
         const int k0 = k00 + k01;
@@ -1570,7 +1641,7 @@ static __device__ __forceinline__ void vec_dot_q8_0_16_q8_1_mma(
         }
 
 #pragma unroll
-        for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+        for (int j0 = cgroup*ntx*tile_C::J; j0 < mmq_x; j0 += j_stride) {
             tile_B B;
             load_ldmatrix(B, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
 
@@ -1585,7 +1656,7 @@ static __device__ __forceinline__ void vec_dot_q8_0_16_q8_1_mma(
 #pragma unroll
                 for (int l = 0; l < tile_C::ne; ++l) {
                     const int i = i0 + n*tile_C::I + tile_C::get_i(l);
-                    sum[(j0/tile_C::J + n)*tile_C::ne + l] += C.x[l] * x_df[i*MMQ_MMA_TILE_X_K_Q3_K + k0/4] * dB;
+                    sum[((j0 - cgroup*ntx*tile_C::J)/j_stride*ntx + n)*tile_C::ne + l] += C.x[l] * x_df[i*MMQ_MMA_TILE_X_K_Q3_K + k0/4] * dB;
                 }
             }
         }
@@ -1904,15 +1975,24 @@ static __device__ __forceinline__ void vec_dot_q2_K_q8_1_mma(
     constexpr int granularity = mmq_get_granularity_device(mmq_x);
     constexpr int rows_per_warp = granularity;
     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+    /* ds4: see DS4_ROCM_WMMA_MMQ_NCW. `ncw` warps share this row group and
+     * take every ncw-th column tile; `wrow` is the warp's index within the
+     * row decomposition upstream assumes. */
+    constexpr int ncw = mmq_get_ncw_device();
+    /* mmq_x is a multiple of j_stride for every width the host selector offers;
+     * unreachable specializations are still instantiated, so this cannot assert. */
+    constexpr int j_stride = ncw*ntx*tile_C::J;
+    const int cgroup = threadIdx.y % ncw;
+    const int wrow = threadIdx.y / ncw;
 
-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
+    y += (wrow % ntx) * (tile_C::J*MMQ_TILE_Y_K);
 
     const int   * x_qs = (const int   *) x;
     const half2 * x_dm = (const half2 *) x_qs + MMQ_TILE_NE_K*2;
     const int   * y_qs = (const int   *) y + 4;
     const half2 * y_ds = (const half2 *) y;
 
-    const int i0 = (threadIdx.y / ntx) * rows_per_warp;
+    const int i0 = (wrow / ntx) * rows_per_warp;
 
     for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += 4) {
         const int k0 = k00 + k01;
@@ -1924,7 +2004,7 @@ static __device__ __forceinline__ void vec_dot_q2_K_q8_1_mma(
         }
 
 #pragma unroll
-        for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+        for (int j0 = cgroup*ntx*tile_C::J; j0 < mmq_x; j0 += j_stride) {
             tile_B B;
             load_ldmatrix(B, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
 
@@ -1957,8 +2037,8 @@ static __device__ __forceinline__ void vec_dot_q2_K_q8_1_mma(
                     if (k01 >= MMQ_TILE_NE_K * 3/4) {
                         tmp -= Cm.x[l]*dm.y;
                     }
-                    sum[(j0/tile_C::J + n)*tile_C::ne + l] += tmp*dB;
-                    sum[(j0/tile_C::J + n)*tile_C::ne + l] -= dm.y*sB;
+                    sum[((j0 - cgroup*ntx*tile_C::J)/j_stride*ntx + n)*tile_C::ne + l] += tmp*dB;
+                    sum[((j0 - cgroup*ntx*tile_C::J)/j_stride*ntx + n)*tile_C::ne + l] -= dm.y*sB;
                 }
             }
         }
@@ -2668,8 +2748,17 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
     constexpr int granularity = mmq_get_granularity_device(mmq_x);
     constexpr int rows_per_warp = granularity;
     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+    /* ds4: see DS4_ROCM_WMMA_MMQ_NCW. `ncw` warps share this row group and
+     * take every ncw-th column tile; `wrow` is the warp's index within the
+     * row decomposition upstream assumes. */
+    constexpr int ncw = mmq_get_ncw_device();
+    /* mmq_x is a multiple of j_stride for every width the host selector offers;
+     * unreachable specializations are still instantiated, so this cannot assert. */
+    constexpr int j_stride = ncw*ntx*tile_C::J;
+    const int cgroup = threadIdx.y % ncw;
+    const int wrow = threadIdx.y / ncw;
 
-    y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
+    y += (wrow % ntx) * (tile_C::J*MMQ_TILE_Y_K);
 
     const int   * x_qs = (const int   *) x;
     const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K*2;
@@ -2677,7 +2766,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
     const int   * y_qs = (const int   *) y + 4;
     const float * y_df = (const float *) y;
 
-    const int i0 = (threadIdx.y / ntx) * rows_per_warp;
+    const int i0 = (wrow / ntx) * rows_per_warp;
 
     for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += 4) {
         const int k0 = k00 + k01;
@@ -2689,7 +2778,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
         }
 
 #pragma unroll
-        for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+        for (int j0 = cgroup*ntx*tile_C::J; j0 < mmq_x; j0 += j_stride) {
             tile_B B;
             load_ldmatrix(B, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
 
@@ -2705,7 +2794,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
                 for (int l = 0; l < tile_C::ne; ++l) {
                     const int i = i0 + n*tile_C::I + tile_C::get_i(l);
                     const int8_t * sc = (const int8_t *) (x_sc + i*MMQ_MMA_TILE_X_K_Q6_K + k00/16);
-                    sum[(j0/tile_C::J + n)*tile_C::ne + l] += C.x[l] * sc[k01/4] * x_df[i*MMQ_MMA_TILE_X_K_Q6_K] * dB;
+                    sum[((j0 - cgroup*ntx*tile_C::J)/j_stride*ntx + n)*tile_C::ne + l] += C.x[l] * sc[k01/4] * x_df[i*MMQ_MMA_TILE_X_K_Q6_K] * dB;
                 }
             }
         }
@@ -3524,21 +3613,28 @@ static __device__ __forceinline__ void mmq_write_back_mma(
     constexpr int rows_per_warp = 2 * granularity;
 #endif // defined(AMD_MFMA_AVAILABLE)
     constexpr int ntx = rows_per_warp/tile_C::I; // Number of x minitiles per warp.
+    /* ds4: see DS4_ROCM_WMMA_MMQ_NCW -- must mirror the vec_dot decomposition. */
+    constexpr int ncw = mmq_get_ncw_device();
+    /* mmq_x is a multiple of j_stride for every width the host selector offers;
+     * unreachable specializations are still instantiated, so this cannot assert. */
+    constexpr int j_stride = ncw*ntx*tile_C::J;
+    const int cgroup = threadIdx.y % ncw;
+    const int wrow = threadIdx.y / ncw;
 
-    const int i0 = (threadIdx.y / ntx) * (ntx*tile_C::I);
+    const int i0 = (wrow / ntx) * (ntx*tile_C::I);
 #if defined(TURING_MMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-    static_assert(nwarps*tile_C::I == mmq_y, "nwarps*tile_C::I != mmq_y");
+    static_assert(nwarps*tile_C::I == mmq_y*ncw, "nwarps*tile_C::I != mmq_y*ncw");
 #else
     GGML_UNUSED(nwarps);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
 #pragma unroll
-    for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+    for (int j0 = cgroup*ntx*tile_C::J; j0 < mmq_x; j0 += j_stride) {
 #pragma unroll
         for (int n = 0; n < ntx; ++n) {
 #pragma unroll
             for (int l = 0; l < tile_C::ne; ++l) {
-                const int j = j0 + (threadIdx.y % ntx) * tile_C::J + tile_C::get_j(l);
+                const int j = j0 + (wrow % ntx) * tile_C::J + tile_C::get_j(l);
 
                 if (j > j_max) {
                     continue;
@@ -3552,7 +3648,7 @@ static __device__ __forceinline__ void mmq_write_back_mma(
 
                 const int dst_j = ids_dst ? ids_dst[j] : j;
                 const int dst_i = dst_j*stride + i;
-                float u = sum[(j0/tile_C::J + n)*tile_C::ne + l];
+                float u = sum[((j0 - cgroup*ntx*tile_C::J)/j_stride*ntx + n)*tile_C::ne + l];
                 if (!epilogue_mid) {
                     if constexpr (sanitize_output) {
                         if (!isfinite(u)) u = 0.0f;
@@ -4600,7 +4696,12 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
     for (int mmq_x = 8; mmq_x <= mmq_x_max && ntiles_x_best > 1; mmq_x += 8) {
         const int granularity = mmq_get_granularity_host(mmq_x, cc);
 
-        if (mmq_x % granularity != 0 || mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size, nwarps) > smpbo) {
+        /* ds4: with a column split a warp owns every ncw-th column tile, so the
+         * width has to divide ncw * granularity. See DS4_ROCM_WMMA_MMQ_NCW. */
+        const int ncw = (amd_wmma_available(cc) && !amd_mfma_available(cc))
+                ? DS4_ROCM_WMMA_MMQ_NCW : 1;
+        if (mmq_x % (granularity * ncw) != 0 ||
+            mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size, nwarps) > smpbo) {
             continue;
         }
 
