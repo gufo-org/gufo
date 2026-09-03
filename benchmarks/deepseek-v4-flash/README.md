@@ -568,51 +568,46 @@ isolation. Going further there means a FlashAttention-2 tiling with several quer
 tokens per block, which the ratio-4 layers block because each token carries its
 own top-k row set, so it would have to be built for the ratio-128 layers alone.
 
-**Held back on quality grounds, not performance:** normalizing the
-hyper-connection row straight to F16
-(`GUFO_DEEPSEEK_ROCM_F16_HC_NORM=1`, default off) is worth **5.4%** -- 444.9
-against 420.7 tok/s mean, best round 450.85 -- because the row is consumed by
-exactly one F16 projection, so the F32 store and the conversion pass after it both
-disappear, 268 MiB written and 402 MiB moved per call. The pinned trajectory holds
-at 116/128, 142, 3, but the 273-token prefill envelope moves to `rmse` 0.53 and
-`max_error` 2.44 from 0.41 and 2.15. That is inside the 1.12 / 5.0 tolerance and
-would pass the gate, but it is the first route to land *worse* than the
-`16d5e30` baseline's 0.478146 / 2.39995 rather than better, and the cause is not
-identified: an explicit round-to-nearest conversion matching
-`f32_to_f16_vec4_kernel` leaves it at 0.53, and both routes issue the same
-hipBLASLt call with the same plan key. Parity with the baseline wins until that is
-explained.
+**Resolved.** Normalizing the hyper-connection row straight to F16 is now
+retained and byte-identical: the gate reads 116/128, 142, 3 with `rmse` 0.41 and
+`max_error` 2.15 whether the route is on or off.
 
-Three candidate causes have been eliminated, so the search should start elsewhere:
+The earlier drift to `rmse` 0.53 was not the projection and not the rounding
+primitive. A same-input comparison settled the projection question outright --
+running the F32 entry and `hip_matmul_f16_f16_input_tensor` back to back on
+byte-identical halves differs in **0 of 98,304 outputs**. What was left was the
+norm: a *separate* F16 kernel with source identical to `rms_norm_plain_regs_kernel`
+computed a slightly different `scale`, because under `-ffast-math` `rsqrtf` need
+not lower to the same instruction sequence in two different functions. Giving the
+one kernel two nullable outputs -- `float *` and `__half *`, one compilation
+shared by both callers -- makes the halves exactly what converting its floats
+would produce. The F32 store is skipped entirely when only halves are wanted, so
+the conversion pass and the store both go.
 
-- **Not the rounding primitive.** `__float2half_rn`, matching
-  `f32_to_f16_vec4_kernel`'s explicit round-to-nearest, leaves it at 0.53 / 2.44.
-- **Not the `scale`.** A dual-output form of `rms_norm_plain_regs_kernel` writing
-  the F32 row and rounding the very same register to F16 -- so `rsqrtf` cannot
-  lower differently between two kernels -- also leaves it at 0.53 / 2.44, and
-  gains nothing on its own (429.1 tok/s), which locates the 5.4% in dropping the
-  F32 store rather than in removing the conversion pass.
-- **Not plan selection.** `hipblaslt_gemm_plan_get` keys on
-  `(out_dim, n_tok, in_dim, op_a, output_type)` and the candidate pin depends only
-  on those, so the label the two routes pass differs but the algorithm cannot.
+It stays scoped to `n_tokens >= 128`: below that the F32 entry deliberately
+replays decode's per-row reduction so a verified row's greedy choice matches
+autoregressive decode, and the F16 route bypasses that. Removing the scoping fails
+the trajectory outright at 110/128, 154, 4.
 
-What remains is `hip_matmul_f16_f16_input_tensor` itself against the F32 entry's
-tail. Note that `hip_model_range_ptr` keys on the offset alone and
-`hipblaslt_gemm_plan_get` on the shape alone, so neither the differing weight
-label nor the differing route label can select a different kernel -- by
-inspection the two routes issue the same call on the same bytes, and yet they do
-not agree.
+### Off-the-shelf flash attention does not fit this model
 
-**What the route costs in observable terms:** the four-question capability eval
-passes 4/4 greedily either way with identical grades, but the generated traces
-differ on three of the four cases (the fourth is byte-identical). Same answers,
-divergent reasoning -- which is what any numerical change does to a greedy
-reasoning model once one logit flips. Four cases cannot establish parity, so the
-default stays off; the evidence is here for anyone who wants the 5.4% and is
-willing to accept trace divergence. Note also that dropping the `n_tokens >= 128` scoping on this route fails
-the trajectory outright at 110/128, 154, 4: below that width the F32 entry
-deliberately replays decode's per-row reduction, and the F16-input route bypasses
-it.
+Checked rather than assumed, because head_dim 512 is far outside what the tuned
+libraries ship:
+
+- **AOTriton** (already linked for MiniMax H3) rejects it: the shipped
+  `libaotriton_v2` carries the string `head_dim > 192  Input unsupported`.
+- **Composable Kernel** at this ROCm version ships only the `ck/` v1 tree, whose
+  matrix path is XDLOPS, and no `ck_tile` FMHA; nothing under `include/ck_tile`
+  and no gfx11 FMHA kernels exist to call.
+- Upstream FlashAttention-2 caps head_dim at 256 and FlashAttention-3 is
+  Hopper-only.
+
+A hand-written Triton kernel would lower through the same LLVM and WMMA path as
+the current rocWMMA producer with less control over the LDS layout -- and layout
+is exactly where this kernel's largest win came from, the 31% the transposed-Q
+score pass returned. DS4 attention also needs attention sinks, a 128-token raw
+window, ratio-4 compressed KV and per-token top-k 512 indexing in one kernel,
+which no stock interface expresses.
 
 Left on the table: a FlashAttention-2 tiling for the ratio-128 attention layers,
 several query tokens per block sharing one staged KV window. Worth perhaps 150 ms

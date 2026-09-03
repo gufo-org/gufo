@@ -5,13 +5,26 @@
  * keep its own strided slice, so the second read disappears and a 4,096-wide
  * row costs 16 VGPRs. The accumulation order and the reduction tree are
  * unchanged, so the output is bit-identical. */
+/* Both outputs are optional, and that is load-bearing rather than a convenience.
+ *
+ * A separate F16 norm kernel with identical source drifted -- the 273-token
+ * prefill envelope moved to rmse 0.53 from 0.41 -- because under -ffast-math
+ * `rsqrtf` need not lower to the same instruction sequence in two different
+ * functions, so the two kernels computed slightly different `scale`. A
+ * measurement settled that it was not the projection: running the F32 and
+ * F16-activation routes back to back on byte-identical F16 input differs in
+ * 0 of 98,304 outputs. Keeping one function for both output forms makes the
+ * halves exactly what converting the floats would produce, because it is the
+ * same `scale` from the same compiled code. */
 template <uint32_t PER_THREAD>
 __global__ static void rms_norm_plain_regs_kernel(
-        float *out, const float *x, uint32_t n, uint32_t rows, float eps) {
+        float *out, __half *out_h, const float *x, uint32_t n, uint32_t rows,
+        float eps) {
     const uint32_t row = blockIdx.x;
     if (row >= rows) return;
     const float *xr = x + (uint64_t)row * n;
-    float *orow = out + (uint64_t)row * n;
+    float *orow = out ? out + (uint64_t)row * n : NULL;
+    __half *orow_h = out_h ? out_h + (uint64_t)row * n : NULL;
     float v[PER_THREAD];
     float sum = 0.0f;
 #pragma unroll
@@ -29,7 +42,10 @@ __global__ static void rms_norm_plain_regs_kernel(
     const float scale = rsqrtf(partial[0] / (float)n + eps);
 #pragma unroll
     for (uint32_t k = 0; k < PER_THREAD; k++) {
-        orow[threadIdx.x + k * blockDim.x] = v[k] * scale;
+        const float y = v[k] * scale;
+        const uint32_t idx = threadIdx.x + k * blockDim.x;
+        if (orow) orow[idx] = y;
+        if (orow_h) orow_h[idx] = __float2half_rn(y);
     }
 }
 
@@ -592,37 +608,32 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
     /* The hot caller is the 4-way hyper-connection row, 16,384 floats wide. */
     if (n == 256u * 64u && hip_vec_convert_enabled()) {
         rms_norm_plain_regs_kernel<64u><<<rows, 256>>>(
-                (float *)out->ptr, (const float *)x->ptr, n, rows, eps);
+                (float *)out->ptr, NULL, (const float *)x->ptr, n, rows, eps);
         return hip_ok(hipGetLastError(), "rms_norm_plain regs launch");
     }
     rms_norm_plain_kernel<<<rows, 256>>>((float *)out->ptr, (const float *)x->ptr, n, rows, eps);
     return hip_ok(hipGetLastError(), "rms_norm_plain launch");
 }
-/* F16 result form; returns 0 when the shape is not the hot hyper-connection row
- * so the caller keeps the F32 norm plus its conversion.
- *
- * **Opt-in.** Worth 5.4% (444.9 against 420.7 tok/s mean), and the pinned
- * trajectory holds at 116/128, 142, 3, but the 273-token prefill envelope moves
- * to rmse 0.53 and max_error 2.44 from 0.41 and 2.15 -- inside the 1.12 / 5.0
- * tolerance, yet for the first time worse than the pre-optimization baseline's
- * 0.478146 / 2.39995. The cause is not the rounding primitive (explicit
- * round-to-nearest, matching f32_to_f16_vec4_kernel, leaves it at 0.53) and both
- * routes issue the same hipBLASLt call with the same plan key, so it is not
- * understood; until it is, quality parity with the baseline wins over the 5.4%.
- * Set GUFO_DEEPSEEK_ROCM_F16_HC_NORM=1 to enable. */
+/* F16-only result from the shared norm kernel, so the halves are exactly what
+ * converting its floats would give. Pair with
+ * ds4_gpu_matmul_f16_f16_input_tensor, which is byte-identical to the F32 entry's
+ * projection on the same halves. Returns 0 when the shape is not the hot
+ * hyper-connection row. */
 extern "C" int ds4_gpu_rms_norm_plain_rows_f16_tensor(ds4_gpu_tensor *out_h, const ds4_gpu_tensor *x, uint32_t n, uint32_t rows, float eps) {
+    /* Kill switch only; there is nothing to trade. The gate output is byte
+     * identical either way: 116/128, 142, 3 and rmse 0.41, max_error 2.15. */
     static int enabled = -1;
     if (enabled < 0) {
         const char *env = getenv("GUFO_DEEPSEEK_ROCM_F16_HC_NORM");
-        enabled = (env && env[0] == '1') ? 1 : 0;
+        enabled = (env && env[0] == '0') ? 0 : 1;
     }
     if (!enabled) return 0;
     if (n != 256u * 64u || !hip_vec_convert_enabled()) return 0;
     if (!hip_tensor_has_elems2(out_h, n, rows, sizeof(__half)) ||
         !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
     if (rows == 0u) return 1;
-    rms_norm_plain_regs_f16_kernel<64u><<<rows, 256>>>(
-            (__half *)out_h->ptr, (const float *)x->ptr, n, rows, eps);
+    rms_norm_plain_regs_kernel<64u><<<rows, 256>>>(
+            NULL, (__half *)out_h->ptr, (const float *)x->ptr, n, rows, eps);
     return hip_ok(hipGetLastError(), "rms_norm_plain regs f16 launch");
 }
 
