@@ -583,6 +583,25 @@ identified: an explicit round-to-nearest conversion matching
 hipBLASLt call with the same plan key. Parity with the baseline wins until that is
 explained.
 
+Three candidate causes have been eliminated, so the search should start elsewhere:
+
+- **Not the rounding primitive.** `__float2half_rn`, matching
+  `f32_to_f16_vec4_kernel`'s explicit round-to-nearest, leaves it at 0.53 / 2.44.
+- **Not the `scale`.** A dual-output form of `rms_norm_plain_regs_kernel` writing
+  the F32 row and rounding the very same register to F16 -- so `rsqrtf` cannot
+  lower differently between two kernels -- also leaves it at 0.53 / 2.44, and
+  gains nothing on its own (429.1 tok/s), which locates the 5.4% in dropping the
+  F32 store rather than in removing the conversion pass.
+- **Not plan selection.** `hipblaslt_gemm_plan_get` keys on
+  `(out_dim, n_tok, in_dim, op_a, output_type)` and the candidate pin depends only
+  on those, so the label the two routes pass differs but the algorithm cannot.
+
+What remains is `hip_matmul_f16_f16_input_tensor` itself against the F32 entry's
+tail. Note also that dropping the `n_tokens >= 128` scoping on this route fails
+the trajectory outright at 110/128, 154, 4: below that width the F32 entry
+deliberately replays decode's per-row reduction, and the F16-input route bypasses
+it.
+
 Left on the table: a FlashAttention-2 tiling for the ratio-128 attention layers,
 several query tokens per block sharing one staged KV window. Worth perhaps 150 ms
 of their 268 ms. It cannot serve the ratio-4 layers, where each token carries its
