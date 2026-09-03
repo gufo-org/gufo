@@ -116,6 +116,7 @@ static size_t g_q81_scratch_bytes = 0;
 static bool   g_q81_scratch_enabled = false;
 static void  *g_aligned_q81_scratch_ptr = nullptr;
 static size_t g_aligned_q81_scratch_bytes = 0;
+static int    g_routed_max_expert_rows = 0;
 
 #if defined(GGML_USE_HIP)
 struct ds4_hip_persistent_scratch {
@@ -166,6 +167,15 @@ static void *ds4_hip_persistent_scratch_reserve_locked(
 extern "C" void ds4_mmq_set_aligned_q81_scratch(void *ptr, size_t bytes) {
     g_aligned_q81_scratch_ptr = ptr;
     g_aligned_q81_scratch_bytes = ptr ? bytes : 0;
+}
+
+extern "C" void ds4_mmq_set_routed_max_expert_rows(int rows) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *env = getenv("DS4_MMQ_ROUTED_TILE_BOUND");
+        enabled = (env && env[0] == '0') ? 0 : 1;
+    }
+    g_routed_max_expert_rows = (enabled && rows > 0) ? rows : 0;
 }
 
 // Read by ds4_mmq_moe_vec_impl; non-zero means use the persistent buffer.
@@ -1545,6 +1555,14 @@ int ds4_mmq_moe_pair_impl(
     const int64_t routed_ncols_max = fused_down || token_expert_unique
         ? (int64_t)n_tokens
         : ne_get_rows;
+    /* The caller may know the largest expert bucket (see
+     * ds4_mmq_set_routed_max_expert_rows). ncols_max keeps selecting the tile
+     * shape from the chunk width; only the column-tile grid shrinks. */
+    const int64_t routed_ncols_grid =
+        g_routed_max_expert_rows > 0 &&
+        (int64_t)g_routed_max_expert_rows < routed_ncols_max
+            ? (int64_t)g_routed_max_expert_rows
+            : 0;
 
     /* The materialized path stream-frees gate/up Q8_1 before allocating the
      * down Q8_1. The direct path needs both simultaneously, but writes down
@@ -1807,6 +1825,7 @@ int ds4_mmq_moe_pair_impl(
         /*x_soa=*/xa_soa,
         /*soa_blocks=*/soa_blocks,
     };
+    args.ncols_grid_max = routed_ncols_grid;
 
     {
         ds4_mmq_nvtx_scope stage(
@@ -1897,7 +1916,7 @@ int ds4_mmq_moe_pair_impl(
         const int64_t down_s02 = (int64_t)fused_down->out_dim * down_s01;
         const int64_t down_s12 =
             down_ne10_padded * sizeof(block_q8_1) / (QK8_1 * sizeof(int));
-        const mmq_args down_args = {
+        mmq_args down_args = {
             /*x=*/(const char *)fused_down->W,
             /*type_x=*/GGML_TYPE_Q2_K,
             /*y=*/(const int *)down_q8_1.get(),
@@ -1925,6 +1944,7 @@ int ds4_mmq_moe_pair_impl(
             /*x_soa=*/fused_down->W_soa,
             /*soa_blocks=*/fused_down->soa_blocks,
         };
+        down_args.ncols_grid_max = routed_ncols_grid;
         bool down_done = false;
         if (fused_down->W_soa != nullptr && d2r_enabled() &&
             ne_get_rows >= d2r_min_cols() &&

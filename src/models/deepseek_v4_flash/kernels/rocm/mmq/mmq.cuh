@@ -3939,65 +3939,89 @@ static __global__ void mul_mat_q(
         const uint2 tmp2 = fast_div_modulo(blockIdx.z, nchannels_y);
         const int wt = tmp2.x;
         const int zt = tmp2.y;
-        const int jt = blockIdx.y;
         const int it = blockIdx.x;
 
         // Defaults for regular matrix multiplication:
         int col_low    = 0;
         int col_high   = ncols_dst;
         int col_diff   = ncols_dst;
-        int offset_y   = wt*stride_sample_y   + zt*stride_channel_y;
-        int offset_dst = wt*stride_sample_dst + zt*stride_channel_dst + jt*mmq_x*stride_col_dst;
+        int base_off_y   = wt*stride_sample_y   + zt*stride_channel_y;
+        int base_off_dst = wt*stride_sample_dst + zt*stride_channel_dst;
 
         if (ids_dst) {
             col_low  = expert_bounds[zt + 0];
             col_high = expert_bounds[zt + 1];
             col_diff = col_high - col_low;
 
-            offset_y   = 0;
-            offset_dst = 0;
-
-            if (jt*mmq_x >= col_diff) {
-                return;
-            }
-
-            // __syncthreads(); // There is no previous tile that could cause a race condition.
-#pragma unroll
-            for (int j0 = 0; j0 < mmq_x; j0 += nwarps*warp_size) {
-                const int j = j0 + threadIdx.y*warp_size + threadIdx.x;
-
-                if (j0 + nwarps*warp_size > mmq_x && j >= mmq_x) {
-                    break;
-                }
-
-                // ds4 (S1.1a): the final column tile of an expert is partial
-                // when col_diff % mmq_x != 0; reading all mmq_x lanes over-reads
-                // ids_dst past col_high (OOB for the last expert -- confirmed by
-                // compute-sanitizer memcheck).  These lanes are masked out of
-                // write-back (tile_y_max_j), so clamp the read to valid columns.
-                const int j_col = jt*mmq_x + j;
-                ids_dst_shared[j] = j_col < col_diff ? ids_dst[col_low + j_col] : 0;
-            }
-            __syncthreads();
+            base_off_y   = 0;
+            base_off_dst = 0;
         }
 
-        offset_y   += (col_low + jt*mmq_x)*(sizeof(block_q8_1_mmq)/sizeof(int));
-        offset_dst += it*mmq_y;
-
         const int tile_x_max_i = nrows_x  - it*mmq_y - 1;
-        const int tile_y_max_j = col_diff - jt*mmq_x - 1;
-
         const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*mmq_y*stride_row_x;
 
-        constexpr bool fixup = false;
-        mul_mat_q_process_tile<type, mmq_x, need_check, fixup, sanitize_output, iq2_raw_stride16>
-            (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, stride_row_x, ncols_y, stride_col_dst,
-             tile_x_max_i, tile_y_max_j, 0, blocks_per_ne00.z, x_soa, soa_blocks,
-             epilogue_gate ? epilogue_gate + offset_dst : nullptr,
-             epilogue_weights,
-             epilogue_mid ? epilogue_mid + offset_dst : nullptr,
-             epilogue_mid_h ? epilogue_mid_h + offset_dst : nullptr,
-             epilogue_clamp);
+        /*
+         * ds4: grid-stride over column tiles.
+         *
+         * The launcher may size gridDim.y below the tile count (see
+         * mmq_column_tile_slots). Two reasons:
+         *
+         *  - Routed MoE gives every expert the same rectangular tile count, so
+         *    a block whose tile falls past its own bucket used to exit here
+         *    after reserving the full 31.5 KiB tile, which caps residency at two
+         *    workgroups per CU. At a 4,096-token chunk over 256 experts the
+         *    mean bucket is 96 rows against an 80-column tile, so nearly the
+         *    whole grid was empty reservations.
+         *  - For a dense matmul, sweeping the column tiles inside one block
+         *    keeps that block's weight rows resident across them instead of
+         *    re-streaming the whole weight matrix once per column tile.
+         *
+         * Same tiles, same per-tile reduction order, disjoint outputs.
+         */
+        for (int jt = blockIdx.y, iter = 0; jt*mmq_x < col_diff; jt += gridDim.y, ++iter) {
+            if (ids_dst) {
+                if (iter != 0) {
+                    // The previous tile's write-back read ids_dst_shared.
+                    __syncthreads();
+                }
+#pragma unroll
+                for (int j0 = 0; j0 < mmq_x; j0 += nwarps*warp_size) {
+                    const int j = j0 + threadIdx.y*warp_size + threadIdx.x;
+
+                    if (j0 + nwarps*warp_size > mmq_x && j >= mmq_x) {
+                        break;
+                    }
+
+                    // ds4 (S1.1a): the final column tile of an expert is partial
+                    // when col_diff % mmq_x != 0; reading all mmq_x lanes over-reads
+                    // ids_dst past col_high (OOB for the last expert -- confirmed by
+                    // compute-sanitizer memcheck).  These lanes are masked out of
+                    // write-back (tile_y_max_j), so clamp the read to valid columns.
+                    const int j_col = jt*mmq_x + j;
+                    ids_dst_shared[j] = j_col < col_diff ? ids_dst[col_low + j_col] : 0;
+                }
+                __syncthreads();
+            } else if (iter != 0) {
+                __syncthreads();
+            }
+
+            const int offset_y   = base_off_y + (col_low + jt*mmq_x)*(sizeof(block_q8_1_mmq)/sizeof(int));
+            /* MoE write-back carries the absolute column in ids_dst_shared, so
+             * only the dense path advances dst by the column tile. */
+            const int offset_dst = base_off_dst + it*mmq_y +
+                (ids_dst ? 0 : jt*mmq_x*stride_col_dst);
+            const int tile_y_max_j = col_diff - jt*mmq_x - 1;
+
+            constexpr bool fixup = false;
+            mul_mat_q_process_tile<type, mmq_x, need_check, fixup, sanitize_output, iq2_raw_stride16>
+                (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, stride_row_x, ncols_y, stride_col_dst,
+                 tile_x_max_i, tile_y_max_j, 0, blocks_per_ne00.z, x_soa, soa_blocks,
+                 epilogue_gate ? epilogue_gate + offset_dst : nullptr,
+                 epilogue_weights,
+                 epilogue_mid ? epilogue_mid + offset_dst : nullptr,
+                 epilogue_mid_h ? epilogue_mid_h + offset_dst : nullptr,
+                 epilogue_clamp);
+        }
         return;
     }
 #endif // (defined(GGML_USE_HIP) && !defined(CDNA4) && !defined(CDNA3)) || __CUDA_ARCH__ < GGML_CUDA_CC_VOLTA
@@ -4323,7 +4347,31 @@ struct mmq_args {
     // Dense Q8 can fold its non-finite contract into final MMQ write-back.
     // This is false for routed and stream-K paths.
     bool sanitize_output;
+    // ds4: real upper bound on one expert's bucket, when the caller knows it.
+    // ncols_max still selects mmq_x (so the tile shape and its specializations
+    // stay tied to the chunk width), while this bounds only the column-tile
+    // grid dimension. Zero means "unknown", i.e. fall back to ncols_max.
+    int64_t ncols_grid_max;
 };
+
+/* ds4: how many column-tile slots the launcher gives one (row tile, channel).
+ * Zero keeps one block per column tile, the upstream geometry. A positive value
+ * caps gridDim.y there and lets each block grid-stride over the rest, which is
+ * what removes the routed path's empty tile reservations and gives a dense
+ * matmul weight-row reuse across column tiles. */
+static int mmq_column_tile_slots(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        cached = 0;
+        const char * env = getenv("DS4_MMQ_COL_SLOTS");
+        if (env && env[0]) {
+            char * end = nullptr;
+            const long v = strtol(env, &end, 10);
+            if (end != env && v >= 0 && v < (1 << 20)) cached = (int)v;
+        }
+    }
+    return cached;
+}
 
 template<ggml_type type>
 static size_t mmq_get_nbytes_shared(
@@ -4361,9 +4409,21 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     }
 
     const int nty  = (args.nrows_x   + mmq_y - 1) / mmq_y;
-    const int ntx  = (args.ncols_max + mmq_x - 1) / mmq_x;
+    /* ds4: see mmq_args::ncols_grid_max -- the routed path knows the largest
+     * expert bucket, and every column tile past it exits immediately while
+     * still reserving the full shared-memory tile. */
+    const int64_t ncols_grid =
+        args.ncols_grid_max > 0 && args.ncols_grid_max < args.ncols_max
+            ? args.ncols_grid_max
+            : args.ncols_max;
+    const int ntx  = (ncols_grid + mmq_x - 1) / mmq_x;
     const int ntzw = args.nchannels_y * args.nsamples_y;
-    const dim3 block_nums_xy_tiling(nty, ntx, ntzw);
+    /* ds4: column-tile grid-stride slots; see the loop in mul_mat_q. */
+    const int col_slots = mmq_column_tile_slots();
+    const int grid_ntx  = (!args.use_stream_k && col_slots > 0 && col_slots < ntx)
+        ? col_slots
+        : ntx;
+    const dim3 block_nums_xy_tiling(nty, grid_ntx, ntzw);
 
     GGML_ASSERT(args.nchannels_y % args.nchannels_x == 0);
     GGML_ASSERT(args.nsamples_y  % args.nsamples_x  == 0);

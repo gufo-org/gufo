@@ -38,6 +38,23 @@ int ds4_mmq_init(int device);
 void ds4_mmq_cleanup(void);
 void ds4_mmq_set_aligned_q81_scratch(void *ptr, size_t bytes);
 
+// ds4: routed MoE column-tile bound.
+//
+// The routed path sizes its column-tile grid from ncols_max, and without a
+// better bound that has to be the whole chunk width: any one expert could in
+// principle receive every token. Every block outside an expert's real bucket
+// then exits immediately at the top of mul_mat_q, but it still costs a
+// dispatch and a full 31.5 KiB shared-memory reservation, which caps residency
+// at two workgroups per CU. At a 4,096-token chunk over 256 experts the mean
+// bucket is n_tokens * n_expert_used / n_experts = 96 rows, so about 96% of the
+// grid is empty.
+//
+// The caller already reads the per-expert assignment counts back to the host to
+// build the Q2 down hot list, so it can pass the real maximum here. rows <= 0
+// restores the conservative bound. Purely a launch-geometry bound: the blocks
+// it removes did no work, so results are unchanged.
+void ds4_mmq_set_routed_max_expert_rows(int rows);
+
 // Query whether ds4_mmq is willing to handle a given matmul. Returns
 //   1 if mmq is faster than dequant+cublas for this shape on this device,
 //   0 otherwise (caller should fall back to its existing dequant+cublas path).
