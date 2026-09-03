@@ -80,6 +80,11 @@ __global__ static void attention_noncausal_raw_batch_heads_kernel(
 
 #define DS4_ROCM_ATTENTION_PREFILL_MIXED_SCORE_CAP 2048u
 #define DS4_ROCM_ATTENTION_INDEXED_TOPK_CAP 1024u
+/* The wave32 rocWMMA producer is only dispatched at top_k == 512 (see
+ * attention_indexed_mixed_batch_heads_tensor's eligibility check), so its row
+ * table needs half the generic cap. The 2 KiB that frees is what lets the score
+ * pass split K across four wave groups. */
+#define DS4_ROCM_ATTENTION_WMMA_TOPK_CAP 512u
 #define DS4_ROCM_ATTENTION_INDEXED_SCORE_CAP \
     (256u + DS4_ROCM_ATTENTION_INDEXED_TOPK_CAP)
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
@@ -125,7 +130,7 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
 
     __shared__ uint32_t raw_rows[256];
     __shared__ uint32_t comp_rows[
-        INDEXED ? DS4_ROCM_ATTENTION_INDEXED_TOPK_CAP : 1u];
+        INDEXED ? DS4_ROCM_ATTENTION_WMMA_TOPK_CAP : 1u];
     __shared__ uint32_t raw_count_s;
     __shared__ uint32_t comp_count_s;
     /* Q is staged transposed, as [k][head], so the score pass reads both of its
@@ -147,6 +152,11 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
     __shared__ half kv_half[ROWS * LDS_DIM];
     __shared__ float scores[HEADS * ROWS];
     /* Second half of the K split; group 0 writes straight into `scores`. */
+    /* Two groups, not four. Four measured -4.4% on this kernel in isolation but
+     * nothing end-to-end (433.1 against 433.2 tok/s), and its extra
+     * reassociation of the score sum moved the prefill envelope from rmse 0.41
+     * to 0.48 -- no longer clearly better than the 16d5e30 baseline's 0.478146.
+     * Not worth the margin. */
     constexpr uint32_t QK_WG = 2u;
     __shared__ float qk_part[2u * (QK_WG - 1u) * BM * ROWS];
     __shared__ half probs[HEADS * ROWS];
@@ -185,7 +195,7 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
             uint32_t comp_count = 0u;
             for (uint32_t i = 0u;
                  i < top_k &&
-                 comp_count < DS4_ROCM_ATTENTION_INDEXED_TOPK_CAP;
+                 comp_count < DS4_ROCM_ATTENTION_WMMA_TOPK_CAP;
                  i++) {
                 const int32_t ci = topk[(uint64_t)t * top_k + i];
                 if (ci >= 0 && (uint32_t)ci < n_comp &&
@@ -344,6 +354,14 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
                 softmax_max[wave] = m_new;
                 softmax_rescale[wave] = factor;
             }
+            /* This wave already holds exp(score - m_new) for its own lane while
+             * forming the block sum, which is exactly what the separate
+             * probability pass recomputed -- so write it here and drop that pass
+             * along with the barrier in front of it. Same value, same rounding. */
+            if (lane < ROWS) {
+                probs[wave * ROWS + lane] =
+                    __float2half(lane < nr ? expf(s - m_new) : 0.0f);
+            }
         }
         __syncthreads();
 
@@ -355,17 +373,6 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
                 out1.x[e] *= softmax_rescale[BM + r];
             }
         }
-
-        for (uint32_t j = tid; j < HEADS * ROWS; j += blockDim.x) {
-            const uint32_t h = j / ROWS;
-            const uint32_t r = j - h * ROWS;
-            float p = 0.0f;
-            if (r < nr) {
-                p = expf(scores[r * HEADS + h] * score_scale - softmax_max[h]);
-            }
-            probs[j] = __float2half(p);
-        }
-        __syncthreads();
 
         if (wave < 32u) {
             frag_a p0;

@@ -609,6 +609,27 @@ score pass returned. DS4 attention also needs attention sinks, a 128-token raw
 window, ratio-4 compressed KV and per-token top-k 512 indexing in one kernel,
 which no stock interface expresses.
 
+### Writing a faster attention producer: what worked and what did not
+
+Retained, and arithmetically free: **the online-softmax wave already evaluates
+`exp(score - m_new)` for its own lane while forming the block sum**, which is
+exactly what the separate probability pass recomputed. Writing it there deletes
+that pass and the barrier in front of it. Worth 1.6% on the window kernel in
+isolation and about 1.5% end-to-end, and it *improves* the envelope: `max_error`
+2.15 to 1.95 at unchanged `rmse` 0.41, because the fused form keeps one product
+where the separate pass let `-ffast-math` contract a different way.
+
+Rejected, both measured in `tools/bench/dsv4_attn_mixed_bench.hip`:
+
+| Attempt | Reasoning | Measured |
+| --- | --- | --- |
+| Q^T fragments held in registers, the freed 34 KiB of staging arena recycled as a multi-buffered KV pipeline | the ablation prices exposed KV staging at 29% and barriers at 24%, and this is the only change that attacks both | **+15% to +135%**. The held fragments spill: 16 per wave at two K groups, 8 at four, against a 96-VGPR budget at full occupancy. Four groups with three KV buffers is the least bad at +15% |
+| Score pass split across four wave groups instead of two | -4.4% on the kernel in isolation | nothing end-to-end (433.1 against 433.2 tok/s) and the extra reassociation of the score sum moved `rmse` 0.41 to 0.48, no longer clearly better than the baseline's 0.478146. Not worth the margin |
+
+The wave32 producer's row table was also cut to a 512-entry local cap, since the
+launcher only dispatches it at `top_k == 512`; that is what freed the shared
+memory the four-group split needed, and it stays as headroom.
+
 ### A FlashAttention-2 tiling cannot help at head_dim 512
 
 This was the last candidate and it closes by counting, not by measurement.
