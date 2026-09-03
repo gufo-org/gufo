@@ -4444,7 +4444,13 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
         // The gfx1151 routed DeepSeek gate/up shape uses raw IQ2 weights with
         // 16 blocks per row. Keep one specialization instead of duplicating
         // the complete raw/SoA MMQ family.
-        if constexpr (type == GGML_TYPE_IQ2_XXS && mmq_x == 80) {
+        //
+        // ds4: the column width is orthogonal to the raw-stride handling, and
+        // the tile fill this shape achieves depends on it -- the mean expert
+        // bucket is n_tokens * n_expert_used / n_experts, so a width that
+        // divides it leaves far less of each tile empty. Keep every width the
+        // selector can reach on this path rather than only 80.
+        if constexpr (type == GGML_TYPE_IQ2_XXS) {
             if (cc == GGML_CUDA_CC_OFFSET_AMD + 0x1151 &&
                 args.ids_dst != nullptr && !args.sanitize_output &&
                 args.x_soa == nullptr && args.stride_row_x == 16 &&
