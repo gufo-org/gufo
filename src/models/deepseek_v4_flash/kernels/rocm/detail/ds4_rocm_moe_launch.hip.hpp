@@ -28,6 +28,18 @@ static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
     return (ab > c ? ab : c) + raw;
 }
 
+/* Row group the wide Q2-down kernel covers per workgroup: wide_mtiles * BM. */
+#define DS4_ROCM_WIDE_DOWN_TILE_M 64u
+
+static int ds4_rocm_wide_down_tile_map_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_WIDE_DOWN_TILE_MAP");
+        cached = (env && env[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
 /*
  * Row count below which a routed-MoE call is treated as a speculative
  * verification block rather than a prompt chunk.
@@ -84,7 +96,9 @@ static int routed_moe_q2_float_down_launch(
         uint32_t expert_mid_dim,
         uint32_t out_dim,
         uint64_t down_expert_bytes,
-        uint64_t down_row_bytes) {
+        uint64_t down_row_bytes,
+        const uint32_t *h_counts_in,
+        uint32_t *wide_tile_map_dev) {
     if (!out || !down || !mid || !down_w || !counts || !offsets || !sorted_pairs ||
         n_tokens == 0u || n_expert != DS4_ROCM_N_EXPERT_USED ||
         (expert_mid_dim % ROCM_QK_K) != 0u || expert_mid_dim == 0u || out_dim == 0u ||
@@ -97,7 +111,9 @@ static int routed_moe_q2_float_down_launch(
     uint32_t h_counts[DS4_ROCM_N_EXPERT] = {0};
     const bool report_expert_spread =
         getenv("GUFO_DEEPSEEK_ROCM_MOE_EXPERT_SPREAD") != NULL;
-    if (!hip_ok(hipMemcpy(
+    if (h_counts_in) {
+        memcpy(h_counts, h_counts_in, sizeof(h_counts));
+    } else if (!hip_ok(hipMemcpy(
                     h_counts,
                     counts,
                     sizeof(h_counts),
@@ -236,8 +252,44 @@ static int routed_moe_q2_float_down_launch(
             (out_dim % (wide_nfrag * bn)) == 0u) {
             constexpr uint32_t mt = wide_mtiles;
             const dim3 block(32u * mt, 1u, 1u);
+            /*
+             * A rectangular (row group, hot expert) grid has to be sized by the
+             * largest bucket, and the router skew at a 4,096-token chunk puts
+             * that near 3,500 rows while the mean bucket is 96. Every block past
+             * its own expert's bucket exits immediately, but it still reserves
+             * the full dynamic LDS tile, and that reservation is what caps
+             * residency. Compact the pairs that have rows into one list instead.
+             */
+            uint32_t *tile_map = NULL;
+            uint32_t wide_tiles = 0u;
+            if (wide_tile_map_dev && ds4_rocm_wide_down_tile_map_enabled()) {
+                const uint32_t cap =
+                    n_tokens * n_expert / DS4_ROCM_WIDE_DOWN_TILE_M +
+                    DS4_ROCM_N_EXPERT + 1u;
+                static std::vector<uint32_t> h_map;
+                h_map.clear();
+                h_map.reserve(cap);
+                for (uint32_t h = 0; h < hot_count && h_map.size() < cap; h++) {
+                    const uint32_t groups =
+                        (h_counts[h_hot[h]] + DS4_ROCM_WIDE_DOWN_TILE_M - 1u) /
+                        DS4_ROCM_WIDE_DOWN_TILE_M;
+                    for (uint32_t g = 0; g < groups && h_map.size() < cap; g++) {
+                        h_map.push_back((h << 16) | g);
+                    }
+                }
+                if (!h_map.empty() &&
+                    hip_ok(hipMemcpy(wide_tile_map_dev, h_map.data(),
+                                       h_map.size() * sizeof(uint32_t),
+                                       hipMemcpyHostToDevice),
+                            "routed_moe wide down tile map copy")) {
+                    tile_map = wide_tile_map_dev;
+                    wide_tiles = (uint32_t)h_map.size();
+                }
+            }
             const dim3 grid(out_dim / (wide_nfrag * bn),
-                            (hot_max + mt * bm - 1u) / (mt * bm), hot_count);
+                            tile_map ? wide_tiles
+                                     : (hot_max + mt * bm - 1u) / (mt * bm),
+                            tile_map ? 1u : hot_count);
             const size_t shmem =
                 ds4_rocm_q2_down_wide_shmem(mt, bm, bn, bk, wide_nfrag);
             moe_down_q2K_hotlist_wmma_wide_kernel<
@@ -245,7 +297,8 @@ static int routed_moe_q2_float_down_launch(
                     <<<grid, block, shmem>>>(
                     NULL, down_h, down_w, NULL, mid_h_hot,
                     counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
-                    expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes);
+                    expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes,
+                    0u, tile_map);
         } else if (!no_n2) {
             if (wmma_mtiles == 4u) {
                 constexpr uint32_t mt = 4u;
@@ -568,8 +621,15 @@ static int routed_moe_launch(
         uint32_t *tile16_experts = NULL;
         uint32_t *tile16_starts = NULL;
         uint32_t *iq2_gate_hot_dev = NULL;
+        uint32_t *wide_tile_map_dev = NULL;
         uint32_t tile_capacity = 0;
         uint32_t tile16_capacity = 0;
+        /* Per-expert assignment counts, read back once and shared by every
+         * consumer below: the MMQ column-tile bound, the Q2 down hot list, and
+         * the cold-expert launch skip. */
+        uint32_t h_sorted_counts[DS4_ROCM_N_EXPERT] = {0};
+        int h_sorted_counts_valid = 0;
+        uint32_t h_sorted_counts_max = 0;
         if (!use_mmq_gateup) {
             dim3 xq_grid(xq_blocks, n_tokens, 1);
             q8_K_quantize_kernel<<<xq_grid, 256>>>(
@@ -610,7 +670,13 @@ static int routed_moe_launch(
             const uint64_t tile16_starts_off = tile16_experts_off + tile16_experts_bytes;
             const uint64_t iq2_gate_hot_off = tile16_starts_off + tile16_starts_bytes;
             const uint64_t iq2_gate_hot_bytes = 256ull * sizeof(uint32_t);
-            const uint64_t scratch_bytes = iq2_gate_hot_off + iq2_gate_hot_bytes;
+            /* One entry per (hot expert, row group) the wide Q2 down kernel has
+             * rows for, replacing its rectangular hot_max-by-hot_count grid. */
+            const uint64_t wide_tile_map_off = iq2_gate_hot_off + iq2_gate_hot_bytes;
+            const uint64_t wide_tile_map_bytes =
+                ((uint64_t)pair_count / DS4_ROCM_WIDE_DOWN_TILE_M +
+                 DS4_ROCM_N_EXPERT + 1ull) * sizeof(uint32_t);
+            const uint64_t scratch_bytes = wide_tile_map_off + wide_tile_map_bytes;
             uint8_t *scratch = (uint8_t *)hip_tmp_alloc(scratch_bytes,
                                                          "routed_moe sorted pairs");
             if (!scratch) {
@@ -631,6 +697,7 @@ static int routed_moe_launch(
                 tile16_experts = use_down_tile16 ? (uint32_t *)(scratch + tile16_experts_off) : NULL;
                 tile16_starts = use_down_tile16 ? (uint32_t *)(scratch + tile16_starts_off) : NULL;
                 iq2_gate_hot_dev = (uint32_t *)(scratch + iq2_gate_hot_off);
+                wide_tile_map_dev = (uint32_t *)(scratch + wide_tile_map_off);
                 ok = hip_ok(hipMemset(counts, 0, counts_bytes), "routed_moe sorted counts clear");
                 if (ok) {
                     moe_count_sorted_pairs_kernel<<<(pair_count + 255u) / 256u, 256>>>(
@@ -638,6 +705,21 @@ static int routed_moe_launch(
                         (const int32_t *)selected->ptr,
                         pair_count);
                     ok = hip_ok(hipGetLastError(), "routed_moe sorted count launch");
+                }
+                if (ok) {
+                    ok = hip_ok(hipMemcpy(h_sorted_counts,
+                                            counts,
+                                            sizeof(h_sorted_counts),
+                                            hipMemcpyDeviceToHost),
+                                 "routed_moe sorted counts copy");
+                    if (ok) {
+                        h_sorted_counts_valid = 1;
+                        for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
+                            if (h_sorted_counts[e] > h_sorted_counts_max) {
+                                h_sorted_counts_max = h_sorted_counts[e];
+                            }
+                        }
+                    }
                 }
                 if (ok) {
                     moe_prefix_sorted_pairs_kernel<<<1, 1>>>(offsets, cursors, counts);
@@ -695,6 +777,11 @@ static int routed_moe_launch(
             const int use_fused_swiglu =
                 g_rocm_gfx1151 && fused_swiglu_allowed && mmq_mid_h != NULL;
             int rc = -1;
+            /* The routed grid covers ncols_max column tiles for all 256
+             * experts; without a bound that is the whole chunk, of which one
+             * bucket holds about n_tokens * n_expert / 256 rows. */
+            ds4_mmq_set_routed_max_expert_rows(
+                h_sorted_counts_valid ? (int)h_sorted_counts_max : 0);
             if (use_fused_swiglu) {
                 ds4_mmq_set_aligned_q81_scratch(up->ptr, (size_t)up->bytes);
                 rc = ds4_mmq_iq2_xxs_moe_pair_token_bound_swiglu(
@@ -733,6 +820,7 @@ static int routed_moe_launch(
                     (hipStream_t)0);
             }
             ds4_mmq_set_aligned_q81_scratch(NULL, 0);
+            ds4_mmq_set_routed_max_expert_rows(0);
             if (rc == 0 && !fused_swiglu_done) {
                 moe_mmq_swiglu_weighted_clamp_kernel<<<
                         (uint32_t)((mid_count + 255u) / 256u), 256>>>(
@@ -1119,7 +1207,9 @@ static int routed_moe_launch(
                         out, down, mid, iq2_hot_mid_h, use_iq2_hot_f16_mid, down_w,
                         sorted_counts, sorted_offsets, sorted_pairs, tile_experts,
                         n_tokens, n_expert, expert_mid_dim, out_dim,
-                        down_expert_bytes, down_row_bytes);
+                        down_expert_bytes, down_row_bytes,
+                        h_sorted_counts_valid ? h_sorted_counts : NULL,
+                        wide_tile_map_dev);
             } else {
             dim3 dgrid((out_dim + 31u) / 32u, n_tokens * n_expert, 1);
             uint32_t *down_tile_total = tile_total;

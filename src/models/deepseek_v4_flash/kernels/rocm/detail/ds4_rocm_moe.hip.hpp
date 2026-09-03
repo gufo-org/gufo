@@ -4044,7 +4044,11 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
         uint32_t out_dim,
         uint64_t down_expert_bytes,
         uint64_t down_row_bytes,
-        uint32_t n_tokens = 0u) {
+        uint32_t n_tokens = 0u,
+        /* When non-null, blockIdx.y indexes a compacted list of the
+         * (hot expert, row group) pairs that actually have rows, packed as
+         * (hot_index << 16) | row_group, and gridDim.z is 1. */
+        const uint32_t *tile_map = nullptr) {
     extern __shared__ unsigned char raw_sh[];
     /* Two mid-tile buffers. Counters put this kernel at 9 to 18%
      * instruction-issue utilisation with 96 VGPRs and no scratch, so it is
@@ -4066,11 +4070,19 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
      * independent of MTILES. */
     constexpr uint32_t MID_PRE = (uint32_t)(BM * (BK / 2) / 32);
     float *shC = reinterpret_cast<float *>(raw_sh);
-    const uint32_t hot_idx = (uint32_t)blockIdx.z;
+    uint32_t hot_idx;
+    uint32_t m_group0;
+    if (tile_map) {
+        const uint32_t packed = tile_map[blockIdx.y];
+        hot_idx = packed >> 16u;
+        m_group0 = (packed & 0xffffu) * MTILES * BM;
+    } else {
+        hot_idx = (uint32_t)blockIdx.z;
+        m_group0 = (uint32_t)blockIdx.y * MTILES * BM;
+    }
     if (hot_idx >= hot_count) return;
     const uint32_t expert = hot_experts[hot_idx];
     const uint32_t count = counts[expert];
-    const uint32_t m_group0 = (uint32_t)blockIdx.y * MTILES * BM;
     if (m_group0 >= count) return;
     const uint32_t n0 = (uint32_t)blockIdx.x * (NFRAG * BN);
     const uint32_t tid = threadIdx.x;
