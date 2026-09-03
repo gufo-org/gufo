@@ -237,13 +237,20 @@ Four interleaved rounds of the two binaries: baseline 188.24 / 188.22 / 187.67 /
 The same pairing at 8,192 tokens, which chunks: 198.83 / 199.60 against
 431.84 / 434.53, **+117%**.
 
-Note the asymmetry in spread. The baseline holds ±0.6% across rounds while the
-retained stack swings ±5%, because the retained stack runs at the package power
-cap: `rocm-smi` during a 4,096-token prefill reads 138 to 140 W and 2.78 to
-2.83 GHz against the 2.90 GHz the register-resident peak harness reaches. That
-±5% is the noise floor for every end-to-end A/B below, and it is larger than any
-single remaining kernel win, which is why the later work is scored on isolated
-microbenchmarks and hardware counters instead.
+Two different noise regimes, and telling them apart matters for every A/B below:
+
+- **Alternating two binaries is ±5%.** Each arm is a fresh process that re-reads
+  an 80 GiB artifact, so the thermal and page-cache state differs per arm; the
+  retained stack swung 399.22 to 445.80 across four rounds this way.
+- **Alternating configurations inside one binary is under 1%.** Six warm runs of
+  one binary under two `DS4_CUDA_MMQ_X_MAX` settings read 431.39 / 427.19 /
+  430.81 and 430.73 / 426.37 / 428.94.
+
+So sweep with an env switch in one process wherever a knob allows it, and treat
+any cross-binary delta under 5% as unmeasured. `rocm-smi` during a 4,096-token
+prefill reads 138 to 140 W at 2.78 to 2.83 GHz against the 2.90 GHz the
+register-resident peak harness reaches, so the prefill does sit at the package
+power cap, but the cap is not what produces the cross-binary spread.
 
 The retained default is **+126% prompt** and flat decode with the pinned
 trajectory and the greedy continuation unchanged from the baseline, and with the
@@ -480,6 +487,8 @@ or depth knob is neutral:
 | Hoisting the loop-invariant Q fragments into registers | -5.5% at four wave groups, +55% at one (32 fragments spill); the transposed-Q staging subsumes it |
 | `DS4_ROCM_WMMA_MMQ_Y` 128 instead of 64, halving the routed activation re-reads | 399.7 / 398.7 versus 400.8 / 413.5 tok/s |
 | Every macro tile, wave split and swizzle for the attention output projections | the shipped 256x128x32 W4x2 SWZ2 tile is the best of 17 geometries in `tools/bench/dsv4_attn_out_gemm_bench.hip` at 23.9 TFLOP/s; larger tiles, `BK` 64, and register double-buffering all lose (see the table there) |
+| Taking the output GEMM's fragments off `col_major` the way the attention score pass did, by transposing at LDS write time | 11.49 to 26.58 ms for A and 12.95 ms for B. The attention win does **not** generalize: there Q is staged once per block and read 40 x 32 times, so a staging transpose is amortized away; here both tiles are re-staged every K step and read about twice, so the eight scalar LDS writes per 16-byte global read dominate |
+| Routed IQ2 column width above the old 80 cap, which the tile-fill arithmetic predicted would be the largest remaining lever | a dead tie. The mean expert bucket is 96 rows, so 80-column tiles leave about 45% of the tile work empty and 128-column tiles about 32%, yet warm interleaved runs read 429.8 versus 428.7 tok/s mean. The specialization was generalized off `mmq_x == 80` so every width the selector can reach stays on the raw-IQ2 path, and the default stays 80 |
 
 A 500 tok/s target needs 4,096 tokens in 8.19 s and 600 needs 6.83 s. This
 prefill is about 105 TFLOP of arithmetic, so 600 is 15.4 TFLOP/s sustained
@@ -499,13 +508,34 @@ that in isolation, which is the single largest remaining win found and is worth
 about 4% of the chunk. The two output projections hold 1.1 s and are already on
 the best of 17 measured geometries, at 2x hipBLASLt.
 
-What is left is not a kernel change. The routed MoE's mean expert bucket is
-`n_tokens * n_expert_used / n_experts`, 96 rows at this width against an
-80-column tile, so 40% of every tile is empty; that ratio improves linearly with
-chunk width, which is why `pp8192` now matches `pp4096` instead of trailing it,
-and it is the one structural lever left. Reaching 600 at 4,096 tokens would need
-a different routed-expert format -- one whose tile does not need byte-expanded
-codes -- rather than a better schedule for this one.
+What makes 500 and 600 both out of reach is not one missing optimization but
+that the routed gate/up, which holds 2.8 s, has now been shown inert to every
+schedule-shaped lever available:
+
+| Lever | Predicted | Measured |
+| --- | --- | --- |
+| Workgroup count (90-96% of the grid was empty) | large | kernel-level -351 ms, end-to-end nil |
+| Activation re-reads (`MMQ_Y` 64 -> 128, halves them) | -850 ms | nil |
+| Tile fill (column width 80 -> 96/112/128) | -1.0 s at 88% fill | nil |
+| Fragment operand layout | -30% by analogy with attention | 2x worse |
+| DRAM traffic | — | 25.8 GB/s of a 240 GB/s ceiling: no headroom to reclaim |
+
+Its cost tracks neither bytes, nor tiles, nor workgroups, nor operand layout. It
+is the IQ2 dequantize-and-issue stream inside the tile, and shrinking that means
+a routed-expert format whose tile does not need byte-expanded codes for `iu8`
+WMMA -- a quantization change, not a kernel change.
+
+The two attention producers are the one place a rewrite still pays: 1.1 s at 8
+to 15% of the WMMA ceiling, of which the transposed-Q staging takes 30 to 37% in
+isolation. Going further there means a FlashAttention-2 tiling with several query
+tokens per block, which the ratio-4 layers block because each token carries its
+own top-k row set, so it would have to be built for the ratio-128 layers alone.
+
+Left on the table, both measured or bounded and both under 1% of the chunk:
+folding the routed 6-way sum into `hc_expand4_add` (one 128 MiB pass, about
+22 ms) and sharing one F16 copy of `batch_attn_norm` across the five projections
+that each convert it (about 70 ms, and it needs a 32 MiB resident buffer -- the
+same trade that measured as noise for the hyper-connection norm above).
 
 ## Failed
 
