@@ -376,6 +376,8 @@ or depth knob is neutral:
 
 | Change | Result |
 | --- | --- |
+| Emitting the F16 hyper-connection row from the norm that produces it, removing a separate conversion pass | 416.92 / 423.71 versus 418.76 / 418.88 tok/s, so within noise for 134 MiB of resident buffer; not retained |
+| Routing the 32,768 x chunk x 1,024 query-B projection to the rocWMMA tile | the 2.9 GiB transposed weight cache is refused by the shared F16 budget guard, so the route never fires |
 | `NFRAG` 8 versus 4 | 417.69 / 415.46 versus 406.53 / 406.54 tok/s |
 | Mid-tile register prefetch | 421.0 tok/s, and does not stack with `NFRAG` 8 |
 | `MTILES` 8 versus 4 | 377.14 versus 377.41 tok/s |
