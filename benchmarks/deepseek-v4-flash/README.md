@@ -527,11 +527,43 @@ schedule-shaped lever available:
 | Deriving the IQ2 sign masks arithmetically instead of loading `ksigns64`, removing one of the two dependent indexed loads per eight weights from the inner loop | the loader is stalled, not computing, and VALU is 89% idle | bit-identical (rmse 0.41, max_error 1.95) and **neutral**: 435.1 against 439.6 tok/s mean. The sign lookup is not the cost either |
 | Staging the Q2-down weight tile as `[k][n]` so its value fragments load row-major (`GUFO_DEEPSEEK_ROCM_WIDE_DOWN_B_ROWMAJOR`) | -25% by analogy with attention | **5% slower**: 401.4 against 423.3 tok/s mean. The attention win needs a staging-to-read ratio of about 1,280; this tile is read 16 times per dequantize and the strided stores cost more |
 
-**What the cost is has not been identified, and two plausible mechanisms are now
-excluded.** It is not the byte expansion of the IQ2 tile as claimed earlier: that
-claim was never measured, and the one part of the expansion that is avoidable --
-the `ksigns64` lookup -- turns out to be free. It is not the dependent indexed
-loads in general, since removing half of them changed nothing.
+#### What the cost actually is: instruction count, at a shared issue ceiling
+
+A `rocprofv3` pass over a 2,048-token chunk, one counter group at a time (this
+hardware refuses more than a couple at once -- `FETCH_SIZE WRITE_SIZE` together
+already returns error code 38), comparing the routed IQ2 dispatches against the
+dense Q8 dispatches of the *same* `mul_mat_q` kernel:
+
+| | IQ2_XXS routed | Q8_0 dense |
+| --- | ---: | ---: |
+| dispatches | 86 | 215 |
+| time | 1,281.9 ms | 488.5 ms |
+| VALU wave-instructions | **45.5 G** | **15.2 G** |
+| VALU issue rate | 35.5 G/s (**15.3%** of capacity) | 31.1 G/s (**13.4%**) |
+| waves resident per SQ | **15.6** | **15.7** |
+| L2 hit | 83.5% | 75.4% |
+| MemUnitBusy | 55.2% | 41.5% |
+
+The two paths sit at the **same residency and the same issue rate**, and the time
+ratio (2.62x) tracks the instruction ratio (3.00x). So the routed path is not
+starved of waves relative to the dense one, and it is not stalled differently: it
+simply issues three times the instructions, for less useful work. Per output
+element it costs about 20 VALU wave-instructions against the dense path's one --
+that is the IQ2 expansion, counted rather than assumed.
+
+This explains every null result above at once. Grid compaction, tile height, tile
+width, warp decomposition and operand layout all change *how* the instructions are
+scheduled; none of them change how many there are, and the time is proportional to
+how many there are. It also explains why replacing the `ksigns64` load with four
+VALU operations was slightly negative rather than positive: it traded a cached
+load for more of the resource that actually gates the kernel.
+
+Two further consequences. Both kernels leave 85% of VALU capacity unused, so the
+15% ceiling is itself a dependency-stall property of the inner loop rather than a
+throughput limit -- shortening the dependency chain per weight would help as much
+as removing instructions. And the requantization direction is now supported rather
+than assumed: a routed format with fewer operations per weight is the one change
+that moves the term the time is proportional to.
 
 Its cost tracks neither bytes, nor tiles, nor workgroups, nor operand layout,
 and the counters say it is not issuing either. 74.9 M waves at 888 VALU and 166
