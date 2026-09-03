@@ -1513,3 +1513,13 @@ extern "C" int ds4_gpu_matmul_f32_tensor(ds4_gpu_tensor *out, const void *model_
     matmul_f32_kernel<<<grid, 256>>>((float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim, n_tok);
     return hip_ok(hipGetLastError(), "matmul_f32 launch");
 }
+
+/* F16-activation entry for callers that already hold narrowed rows; returns 0
+ * when the route is unavailable so the caller falls back to the F32 form. */
+extern "C" int ds4_gpu_matmul_f16_f16_input_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x_h, uint64_t n_tok) {
+    if (!x_h) return 0;
+    return hip_matmul_f16_f16_input_tensor(out, model_map, model_size,
+                                           weight_offset, in_dim, out_dim,
+                                           (const __half *)x_h->ptr,
+                                           x_h->bytes, n_tok);
+}

@@ -152,6 +152,7 @@ struct ds4_rocm_graph {
     ds4_gpu_tensor *batch_cur_hc;
     ds4_gpu_tensor *batch_next_hc;
     ds4_gpu_tensor *batch_flat_hc;
+    ds4_gpu_tensor *batch_flat_hc_h;
     ds4_gpu_tensor *batch_hc_mix;
     ds4_gpu_tensor *batch_hc_split;
     ds4_gpu_tensor *batch_attn_cur;
@@ -422,6 +423,7 @@ static void rocm_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->batch_hc_split);
     ds4_gpu_tensor_free(g->batch_hc_mix);
     ds4_gpu_tensor_free(g->batch_flat_hc);
+    ds4_gpu_tensor_free(g->batch_flat_hc_h);
     ds4_gpu_tensor_free(g->batch_next_hc);
     ds4_gpu_tensor_free(g->batch_cur_hc);
     ds4_gpu_tensor_free(g->prefill_tokens);
@@ -725,6 +727,9 @@ static bool rocm_graph_alloc_raw_cap(
     g->batch_cur_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
     g->batch_next_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
     g->batch_flat_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
+    /* F16 mirror so the hyper-connection projection can consume the norm
+     * directly; optional, the F32 path stands if this allocation fails. */
+    g->batch_flat_hc_h = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(uint16_t));
     g->batch_hc_mix = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
     g->batch_hc_split = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
     g->batch_attn_cur = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
@@ -2341,12 +2346,24 @@ static bool rocm_graph_encode_layer_attention_batch(
     ds4_gpu_tensor *after_attn_hc_view = ds4_gpu_tensor_view(
             g->batch_after_attn_hc, 0, (uint64_t)n_tokens * hc_dim * sizeof(float));
     bool ok = hc_mix_view && hc_split_view && attn_cur_view && after_attn_hc_view;
-    if (ok) ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
+    /* Normalize straight to F16 when the projection can take it: the F32 store
+     * and the conversion pass that followed both disappear. Falls back whole. */
+    bool hc_norm_f16 = false;
+    if (ok && n_tokens >= 128u && g->batch_flat_hc_h) {
+        hc_norm_f16 = ds4_gpu_rms_norm_plain_rows_f16_tensor(
+                          g->batch_flat_hc_h, g->batch_cur_hc,
+                          (uint32_t)hc_dim, n_tokens, DS4_RMS_EPS) != 0 &&
+                      ds4_gpu_matmul_f16_f16_input_tensor(
+                          hc_mix_view, model->map, model->size,
+                          layer->hc_attn_fn->abs_offset, hc_dim, mix_hc,
+                          g->batch_flat_hc_h, n_tokens) != 0;
+    }
+    if (ok && !hc_norm_f16) ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
                                                       g->batch_cur_hc,
                                                       (uint32_t)hc_dim,
                                                       n_tokens,
                                                       DS4_RMS_EPS) != 0;
-    if (ok) ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
+    if (ok && !hc_norm_f16) ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
                                              model->map,
                                              model->size,
                                              layer->hc_attn_fn->abs_offset,
@@ -3631,12 +3648,24 @@ static bool rocm_graph_encode_layer_ffn_batch(
     ds4_gpu_tensor *next_hc_view = ds4_gpu_tensor_view(
             g->batch_next_hc, 0, (uint64_t)n_tokens * hc_dim * sizeof(float));
     bool ok = hc_mix_view && hc_split_view && ffn_cur_view && next_hc_view;
-    if (ok) ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
+    /* Normalize straight to F16 when the projection can take it: the F32 store
+     * and the conversion pass that followed both disappear. Falls back whole. */
+    bool hc_norm_f16 = false;
+    if (ok && n_tokens >= 128u && g->batch_flat_hc_h) {
+        hc_norm_f16 = ds4_gpu_rms_norm_plain_rows_f16_tensor(
+                          g->batch_flat_hc_h, g->batch_after_attn_hc,
+                          (uint32_t)hc_dim, n_tokens, DS4_RMS_EPS) != 0 &&
+                      ds4_gpu_matmul_f16_f16_input_tensor(
+                          hc_mix_view, model->map, model->size,
+                          layer->hc_ffn_fn->abs_offset, hc_dim, mix_hc,
+                          g->batch_flat_hc_h, n_tokens) != 0;
+    }
+    if (ok && !hc_norm_f16) ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
                                                       g->batch_after_attn_hc,
                                                       (uint32_t)hc_dim,
                                                       n_tokens,
                                                       DS4_RMS_EPS) != 0;
-    if (ok) ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
+    if (ok && !hc_norm_f16) ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
                                              model->map,
                                              model->size,
                                              layer->hc_ffn_fn->abs_offset,

@@ -33,6 +33,41 @@ __global__ static void rms_norm_plain_regs_kernel(
     }
 }
 
+/* Same reduction, F16 result.
+ *
+ * The hyper-connection row is normalized and then consumed by exactly one F16
+ * projection, so the F32 store and the separate conversion pass that followed it
+ * were both avoidable: 268 MiB written and 402 MiB moved per call for a value the
+ * consumer immediately narrows. Bit-identical -- the F32 the separate form stored
+ * is exactly what is rounded here. */
+template <uint32_t PER_THREAD>
+__global__ static void rms_norm_plain_regs_f16_kernel(
+        __half *out, const float *x, uint32_t n, uint32_t rows, float eps) {
+    const uint32_t row = blockIdx.x;
+    if (row >= rows) return;
+    const float *xr = x + (uint64_t)row * n;
+    __half *orow = out + (uint64_t)row * n;
+    float v[PER_THREAD];
+    float sum = 0.0f;
+#pragma unroll
+    for (uint32_t k = 0; k < PER_THREAD; k++) {
+        v[k] = xr[threadIdx.x + k * blockDim.x];
+        sum += v[k] * v[k];
+    }
+    __shared__ float partial[256];
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
+        __syncthreads();
+    }
+    const float scale = rsqrtf(partial[0] / (float)n + eps);
+#pragma unroll
+    for (uint32_t k = 0; k < PER_THREAD; k++) {
+        orow[threadIdx.x + k * blockDim.x] = __float2half(v[k] * scale);
+    }
+}
+
 __global__ static void rms_norm_plain_kernel(float *out, const float *x, uint32_t n, uint32_t rows, float eps) {
     uint32_t row = blockIdx.x;
     if (row >= rows) return;
@@ -560,6 +595,24 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
     rms_norm_plain_kernel<<<rows, 256>>>((float *)out->ptr, (const float *)x->ptr, n, rows, eps);
     return hip_ok(hipGetLastError(), "rms_norm_plain launch");
 }
+/* F16 result form; returns 0 when the shape is not the hot hyper-connection row
+ * so the caller keeps the F32 norm plus its conversion. */
+extern "C" int ds4_gpu_rms_norm_plain_rows_f16_tensor(ds4_gpu_tensor *out_h, const ds4_gpu_tensor *x, uint32_t n, uint32_t rows, float eps) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_F16_HC_NORM");
+        enabled = (env && env[0] == '0') ? 0 : 1;
+    }
+    if (!enabled) return 0;
+    if (n != 256u * 64u || !hip_vec_convert_enabled()) return 0;
+    if (!hip_tensor_has_elems2(out_h, n, rows, sizeof(__half)) ||
+        !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
+    if (rows == 0u) return 1;
+    rms_norm_plain_regs_f16_kernel<64u><<<rows, 256>>>(
+            (__half *)out_h->ptr, (const float *)x->ptr, n, rows, eps);
+    return hip_ok(hipGetLastError(), "rms_norm_plain regs f16 launch");
+}
+
 extern "C" int ds4_gpu_rms_norm_weight_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n, float eps) {
     uint64_t weight_bytes = 0;
     if (!model_map || !hip_u64_mul_checked(n, sizeof(float), &weight_bytes) ||
