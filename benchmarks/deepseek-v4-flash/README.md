@@ -227,12 +227,25 @@ worst rank 3.
 
 | Stack | `pp4096` | `tg16` | Pinned trajectory | Prefill `rmse` | Gate |
 | --- | ---: | ---: | --- | ---: | --- |
-| `16d5e30` baseline | 193.04 | 15.41 | 116/128, 142, 3 | 0.478146 | pass |
-| Retained default | 418.8 | 16.6 | 116/128, 142, 3 | 0.38 | pass |
+| `16d5e30` baseline | 188.5 | 16.5 | 116/128, 142, 3 | 0.478146 | pass |
+| Retained default | 433.8 | 16.6 | 116/128, 142, 3 | 0.41 | pass |
 | Retained default, MMQ disabled | 270.1 | 16.6 | 116/128, 142, 3 | — | pass |
 | Plus the attention output-B hipBLASLt fallback | 410.5 | 16.6 | 114/128, 150, 5 | — | fail |
 
-The retained default is **+117% prompt** and **+7.8% decode** with the pinned
+Four interleaved rounds of the two binaries: baseline 188.24 / 188.22 / 187.67 /
+190.04, retained 399.22 / 426.69 / 428.83 / 445.80 (the first round is cold).
+The same pairing at 8,192 tokens, which chunks: 198.83 / 199.60 against
+431.84 / 434.53, **+117%**.
+
+Note the asymmetry in spread. The baseline holds ±0.6% across rounds while the
+retained stack swings ±5%, because the retained stack runs at the package power
+cap: `rocm-smi` during a 4,096-token prefill reads 138 to 140 W and 2.78 to
+2.83 GHz against the 2.90 GHz the register-resident peak harness reaches. That
+±5% is the noise floor for every end-to-end A/B below, and it is larger than any
+single remaining kernel win, which is why the later work is scored on isolated
+microbenchmarks and hardware counters instead.
+
+The retained default is **+126% prompt** and flat decode with the pinned
 trajectory and the greedy continuation unchanged from the baseline, and with the
 273-token batched-versus-sequential prefill comparison not merely inside its
 envelope but *tighter than the baseline's*: `rmse` 0.478146 to 0.38, `cosine`
@@ -257,6 +270,16 @@ trajectory at 103/128, and scoping them to prompt-chunk width alone recovers
 116/128 for all of them except hipBLASLt routing.
 
 ### Retained routes
+
+Added this round, all width-scoped and all gate-clean:
+
+| Route | Evidence |
+| --- | --- |
+| Routed MMQ column-tile grid bounded by the real largest bucket | `mul_mat_q` 3,143 to 2,792 ms at kernel level; pure launch geometry |
+| Wide Q2-down grid compacted to the populated `(hot expert, row group)` pairs | 1,363 to 1,190 ms at kernel level; pure launch geometry |
+| Inverse rotated tail folded into the F16 attention group pack | `rope_tail_kernel` 254.73 to 28.08 ms, the pack unchanged at 159.5 ms: one read-modify-write pass over 512 MiB per layer removed |
+| Resumed mixed-window chunks routed to the same rocWMMA producer as the first chunk | `pp8192` 406.4 / 410.8 to 425.1 / 429.8 tok/s; the ratio-128 layers of every chunk after the first were reaching the scalar F32 kernel |
+| Attention score pass with both operands row-major | -36.8% indexed and -28.3% mixed window in the ablation harness, output identical to 1.7e-06 |
 
 Bit-identical, so they hold at every width:
 
@@ -353,6 +376,76 @@ upstream's own. That is why the routes above are scoped by width rather than
 loosened, and why the numbers in the first table were reachable without touching
 the envelope.
 
+### Nothing in this prefill is bandwidth bound
+
+A `rocprofv3 --pmc FETCH_SIZE` pass over a 4,096-token chunk settles what the
+five hot kernels are actually waiting on. `FETCH_SIZE` is bytes that reach
+memory, so it prices each kernel against the 240 GB/s DRAM read ceiling the peak
+harness measures:
+
+| Kernel | Calls | Fetched | Time | Achieved |
+| --- | ---: | ---: | ---: | ---: |
+| `mul_mat_q` dense Q8 | 215 | 69.7 GB | 910 ms | 76.6 GB/s |
+| `moe_down_q2K_hotlist_wmma_wide` | 43 | 51.0 GB | 1,192 ms | 42.8 GB/s |
+| `mul_mat_q` routed IQ2 | 86 | 48.4 GB | 1,876 ms | 25.8 GB/s |
+| `attention_mixed_heads32_wmma<true,true>` | 21 | 7.7 GB | 875 ms | 8.8 GB/s |
+| `attention_mixed_heads32_wmma<false,false>` | 20 | 5.5 GB | 697 ms | 7.9 GB/s |
+
+The routed gate/up moves 48 GB at 11% of the DRAM ceiling. That killed two
+plausible theories at once. Its activation tile is re-read once per row tile, so
+the logical traffic per call is 7.5 GB against 562 MB fetched -- the MALL absorbs
+93% of it -- and doubling `DS4_ROCM_WMMA_MMQ_Y` to 128, which halves those
+re-reads at unchanged wave occupancy, measured 399.7 / 398.7 against 400.8 /
+413.5 tok/s. Not retained.
+
+The same counter run also rules out the workgroup geometry. Both routed kernels
+launched a rectangular grid sized by the largest expert bucket, and the router
+skew at this width puts that near 3,500 rows against a mean bucket of 96, so
+about 90 to 96% of their workgroups exited immediately after reserving their full
+shared-memory tile. Compacting both -- the MMQ column-tile bound and the wide
+Q2-down `(hot expert, row group)` work list, both retained because they are pure
+launch geometry and cannot be worse -- is worth `mul_mat_q` 3,143 to 2,792 ms and
+the Q2-down kernel 1,363 to 1,190 ms at kernel level, and nothing measurable
+end-to-end. A grid-stride variant over the column tiles
+(`DS4_MMQ_COL_SLOTS`, default off) was neutral at every slot count.
+
+### The attention score pass reads one operand the expensive way
+
+`tools/bench/dsv4_attn_mixed_bench.hip` removes one phase of the mixed producer
+at a time, keeping the barriers, at 1,024 tokens:
+
+| Phase removed | Indexed (ratio 4) | Mixed window (ratio 128) |
+| --- | ---: | ---: |
+| — (full) | 6.34 ms | 4.36 ms |
+| KV staging | -17.7% | -28.9% |
+| QK matrix ops | **-60.8%** | **-64.5%** |
+| Online softmax | -4.8% | -8.3% |
+| PV matrix ops | -7.6% | -11.9% |
+| Barriers | -17.7% | -24.2% |
+
+The score pass and the value pass issue the same number of matrix ops per row
+block, yet the score pass costs about eight times as much. It was not the
+dependency chain: four independent accumulators over the same K sum measured
+-0.2% to +2.4%. It was not parallelism: splitting K across four wave groups
+instead of running on two of the block's 32 waves recovered only 4.5 to 8.8%.
+It was not LDS traffic: hoisting the loop-invariant Q fragments into registers,
+which halves the pass's LDS reads, recovered 5.5 to 8.8% and at one wave group
+cost 55% because 32 held fragments spill.
+
+It was the operand layout. K was a `col_major` matrix_b, which rocwmma gathers.
+Staging Q transposed instead turns the product into `scoresT = KV . Q^T` with
+both operands row-major:
+
+| Variant | Indexed | Mixed window |
+| --- | ---: | ---: |
+| Transposed Q | -31.0% | -21.4% |
+| Transposed Q, K split over 2 wave groups | **-36.8%** | **-28.3%** |
+| Transposed Q, K split over 4 wave groups | -38.1% | -28.0% |
+
+Every variant's `heads` output agrees with the baseline to 1.7e-06 absolute.
+Two wave groups is what ships: four needs 6 KiB of reduction scratch, which does
+not fit beside the production 1,024-entry top-k row table.
+
 ### Where the remaining time goes
 
 Both routed-MoE kernels are latency-bound, not throughput-bound. A
@@ -382,18 +475,37 @@ or depth knob is neutral:
 | Mid-tile register prefetch | 421.0 tok/s, and does not stack with `NFRAG` 8 |
 | `MTILES` 8 versus 4 | 377.14 versus 377.41 tok/s |
 | One barrier per K step by double-buffering both tiles | 410.1 versus 417.9 tok/s: 4 KiB more LDS drops residency six to four workgroups per CU |
-| Attention score pass across eight wave groups instead of two | 374.47 to 363.14 tok/s, ruling out the score chain and pointing at KV staging |
+| Attention score pass across eight wave groups instead of two | 374.47 to 363.14 tok/s; the ablation harness later showed why -- the score pass is bound by its operand layout, not by how many waves run it |
+| Attention score pass with four independent accumulators | -0.2% to +2.4% in the ablation harness: the K reduction is not dependency-latency bound |
+| Hoisting the loop-invariant Q fragments into registers | -5.5% at four wave groups, +55% at one (32 fragments spill); the transposed-Q staging subsumes it |
+| `DS4_ROCM_WMMA_MMQ_Y` 128 instead of 64, halving the routed activation re-reads | 399.7 / 398.7 versus 400.8 / 413.5 tok/s |
+| Every macro tile, wave split and swizzle for the attention output projections | the shipped 256x128x32 W4x2 SWZ2 tile is the best of 17 geometries in `tools/bench/dsv4_attn_out_gemm_bench.hip` at 23.9 TFLOP/s; larger tiles, `BK` 64, and register double-buffering all lose (see the table there) |
 
-A 500 tok/s target needs 4,096 tokens in 8.19 s. This prefill is about 105
-TFLOP of arithmetic, so that is 12.8 TFLOP/s sustained across everything,
-including roughly 2 s of memory-bound norm, convert and pack work that does
-almost no arithmetic; the retained default sustains 10.5. Even removing every
-one of those 2 s -- which is not achievable -- lands at about 513. The only
-places with that much time are those two kernels, and reaching it means a tile
-layout with a materially smaller LDS footprint. For MMQ's IQ2 tile that is
-already closed: the 76-int row is `2*32` code bytes plus scales plus padding
-because `iu8` WMMA consumes byte-expanded codes. For the Q2-down kernel the
-layout resisted every width, depth, residency and barrier change above.
+A 500 tok/s target needs 4,096 tokens in 8.19 s and 600 needs 6.83 s. This
+prefill is about 105 TFLOP of arithmetic, so 600 is 15.4 TFLOP/s sustained
+across everything, including roughly 1.7 s of memory-bound norm, convert and
+pack work that does almost no arithmetic; the retained default sustains 10.9.
+Even removing every one of those 1.7 s -- which is not achievable -- lands at
+about 530.
+
+The counter evidence above says why the gap does not close with kernel work.
+Nothing is near the DRAM ceiling, so there is no bandwidth to reclaim. The two
+routed-MoE kernels hold 3.4 s between them and have now resisted grid
+compaction, tile height, column width, `NFRAG`, `MTILES`, barrier count and
+residency; MMQ's IQ2 tile cannot shrink because `iu8` WMMA consumes
+byte-expanded codes, and the Q2-down layout resisted every knob. The two
+attention producers hold 1.1 s and the transposed-Q rewrite takes 30 to 37% of
+that in isolation, which is the single largest remaining win found and is worth
+about 4% of the chunk. The two output projections hold 1.1 s and are already on
+the best of 17 measured geometries, at 2x hipBLASLt.
+
+What is left is not a kernel change. The routed MoE's mean expert bucket is
+`n_tokens * n_expert_used / n_experts`, 96 rows at this width against an
+80-column tile, so 40% of every tile is empty; that ratio improves linearly with
+chunk width, which is why `pp8192` now matches `pp4096` instead of trailing it,
+and it is the one structural lever left. Reaching 600 at 4,096 tokens would need
+a different routed-expert format -- one whose tile does not need byte-expanded
+codes -- rather than a better schedule for this one.
 
 ## Failed
 
