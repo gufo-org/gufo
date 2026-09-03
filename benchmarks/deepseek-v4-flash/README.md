@@ -597,7 +597,19 @@ Three candidate causes have been eliminated, so the search should start elsewher
   on those, so the label the two routes pass differs but the algorithm cannot.
 
 What remains is `hip_matmul_f16_f16_input_tensor` itself against the F32 entry's
-tail. Note also that dropping the `n_tokens >= 128` scoping on this route fails
+tail. Note that `hip_model_range_ptr` keys on the offset alone and
+`hipblaslt_gemm_plan_get` on the shape alone, so neither the differing weight
+label nor the differing route label can select a different kernel -- by
+inspection the two routes issue the same call on the same bytes, and yet they do
+not agree.
+
+**What the route costs in observable terms:** the four-question capability eval
+passes 4/4 greedily either way with identical grades, but the generated traces
+differ on three of the four cases (the fourth is byte-identical). Same answers,
+divergent reasoning -- which is what any numerical change does to a greedy
+reasoning model once one logit flips. Four cases cannot establish parity, so the
+default stays off; the evidence is here for anyone who wants the 5.4% and is
+willing to accept trace divergence. Note also that dropping the `n_tokens >= 128` scoping on this route fails
 the trajectory outright at 110/128, 154, 4: below that width the F32 entry
 deliberately replays decode's per-row reduction, and the F16-input route bypasses
 it.
