@@ -841,15 +841,46 @@ __global__ static void moe_scatter_sorted_pairs_kernel(
 
 /* Keep pair order stable inside each expert bucket.  The MoE WMMA kernels are
  * row-position sensitive enough that atomic append order changes logits. */
+/* One block per expert, scanning the assignment list for its own pairs.
+ *
+ * This ran on a single thread per block, so all 256 blocks walked the whole
+ * `pair_count` list serially: 24,576 dependent loads each at a 4,096-token
+ * chunk, 539 us per call. Scanning in chunks of blockDim.x with a block-wide
+ * stable prefix sum keeps the output byte-identical -- pair indices still land in
+ * ascending order within each expert -- while cutting the serial depth by the
+ * block width. */
 __global__ static void moe_scatter_sorted_pairs_deterministic_kernel(
         uint32_t *sorted_pairs,
         const uint32_t *offsets,
         const int32_t *selected,
         uint32_t pair_count) {
     const uint32_t expert = (uint32_t)blockIdx.x;
-    if (expert >= 256u || threadIdx.x != 0u) return;
-    uint32_t pos = offsets[expert];
-    for (uint32_t pair = 0; pair < pair_count; pair++) {
+    if (expert >= 256u) return;
+    extern __shared__ uint32_t scatter_scan[];
+    const uint32_t tid = threadIdx.x;
+    /* Contiguous range per thread, counted then written: thread t's range
+     * precedes t+1's and each is walked in order, so the output is byte-identical
+     * to the single-threaded form -- ascending pair indices within each expert --
+     * with one block-wide prefix sum instead of a per-chunk one. */
+    const uint32_t per = (pair_count + blockDim.x - 1u) / blockDim.x;
+    const uint32_t lo = tid * per;
+    const uint32_t hi = lo + per < pair_count ? lo + per : pair_count;
+    uint32_t count = 0u;
+    for (uint32_t pair = lo; pair < hi; pair++) {
+        int32_t expert_i = selected[pair];
+        if (expert_i < 0) expert_i = 0;
+        if ((uint32_t)expert_i == expert) count++;
+    }
+    scatter_scan[tid] = count;
+    __syncthreads();
+    for (uint32_t off = 1u; off < blockDim.x; off <<= 1u) {
+        const uint32_t add = tid >= off ? scatter_scan[tid - off] : 0u;
+        __syncthreads();
+        scatter_scan[tid] += add;
+        __syncthreads();
+    }
+    uint32_t pos = offsets[expert] + scatter_scan[tid] - count;
+    for (uint32_t pair = lo; pair < hi; pair++) {
         int32_t expert_i = selected[pair];
         if (expert_i < 0) expert_i = 0;
         if ((uint32_t)expert_i == expert) sorted_pairs[pos++] = pair;

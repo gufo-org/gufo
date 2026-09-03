@@ -288,6 +288,8 @@ Added this round, all width-scoped and all gate-clean:
 | Inverse rotated tail folded into the F16 attention group pack | `rope_tail_kernel` 254.73 to 28.08 ms, the pack unchanged at 159.5 ms: one read-modify-write pass over 512 MiB per layer removed |
 | Resumed mixed-window chunks routed to the same rocWMMA producer as the first chunk | `pp8192` 406.4 / 410.8 to 425.1 / 429.8 tok/s; the ratio-128 layers of every chunk after the first were reaching the scalar F32 kernel |
 | Attention score pass with both operands row-major | -36.8% indexed and -28.3% mixed window in the ablation harness, output identical to 1.7e-06 |
+| Routed expert sum folded into the hyper-connection expansion | +2.1% (442.9 against 433.9 tok/s mean, best round 452.58). Bit-identical: both forms accumulate the same F16 slots in ascending expert order in F32, and the buffer the separate form stored was F32, so the round trip was lossless. Estimated at 0.2% from traffic alone and worth ten times that -- removing a whole kernel launch beats the byte accounting |
+| Deterministic assignment scatter parallelized | ran one thread per block walking all 24,576 pairs, 539 us per call. Two passes over contiguous per-thread ranges with one block-wide prefix sum keeps the output byte-identical. A first attempt that scanned in chunks of the block width was slower -- 18 barriers per chunk, 1,728 per block |
 | One published F16 mirror of the normalized attention rows, shared by the layer's projections | `f32_to_f16_vec4_kernel` 423 to 321 launches and 97.13 to 57.32 ms at 1,024 tokens, so about 160 ms at 4,096. Bit-identical: the conversion is row-local, so every consumer sees the bytes it would have produced. The graph clears the mirror at each layer boundary, before any buffer it names can be rewritten |
 
 Bit-identical, so they hold at every width:
@@ -522,6 +524,7 @@ schedule-shaped lever available:
 | Fragment operand layout | -30% by analogy with attention | 2x worse |
 | DRAM traffic | — | 25.8 GB/s of a 240 GB/s ceiling: no headroom to reclaim |
 | Resident waves per CU, 8 -> 16, by splitting warps along the column axis (`DS4_ROCM_WMMA_MMQ_NCW`) | -0.9 to -1.2 s if wave-starved | **18% slower**: 354.9 against 419.6 tok/s mean |
+| Staging the Q2-down weight tile as `[k][n]` so its value fragments load row-major (`GUFO_DEEPSEEK_ROCM_WIDE_DOWN_B_ROWMAJOR`) | -25% by analogy with attention | **5% slower**: 401.4 against 423.3 tok/s mean. The attention win needs a staging-to-read ratio of about 1,280; this tile is read 16 times per dequantize and the strided stores cost more |
 
 Its cost tracks neither bytes, nor tiles, nor workgroups, nor operand layout,
 and the counters say it is not issuing either. 74.9 M waves at 888 VALU and 166
@@ -565,11 +568,14 @@ isolation. Going further there means a FlashAttention-2 tiling with several quer
 tokens per block, which the ratio-4 layers block because each token carries its
 own top-k row set, so it would have to be built for the ratio-128 layers alone.
 
-Left on the table: folding the routed 6-way sum into `hc_expand4_add`, one
-128 MiB pass worth about 22 ms. It is bit-identical in principle -- the F32
-round-trip through `routed_out` is lossless -- but reaching it needs a
-deferred-finalize flag through a routed-MoE entry point that prefill, decode and
-DSpark verification all share, and 0.2% does not justify that surface.
+Left on the table: a FlashAttention-2 tiling for the ratio-128 attention layers,
+several query tokens per block sharing one staged KV window. Worth perhaps 150 ms
+of their 268 ms. It cannot serve the ratio-4 layers, where each token carries its
+own top-k row set, so it would be built for 20 of the 41 layers.
+
+One lesson from the two wins in this round: **the byte-traffic estimate
+underprices a fusion that removes a kernel outright.** The routed-sum fold was
+predicted at 22 ms from its 128 MiB round trip and delivered ten times that.
 
 ## Failed
 

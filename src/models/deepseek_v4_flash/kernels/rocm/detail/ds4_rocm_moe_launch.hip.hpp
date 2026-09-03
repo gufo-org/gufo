@@ -775,7 +775,8 @@ static int routed_moe_launch(
                     ok = hip_ok(hipGetLastError(), "routed_moe sorted prefix launch");
                 }
                 if (ok) {
-                    moe_scatter_sorted_pairs_deterministic_kernel<<<256u, 1u>>>(
+                    moe_scatter_sorted_pairs_deterministic_kernel<<<
+                            256u, 256u, 256u * sizeof(uint32_t)>>>(
                         sorted_pairs,
                         offsets,
                         (const int32_t *)selected->ptr,
@@ -1495,7 +1496,8 @@ static int routed_moe_launch(
             ok = hip_ok(hipGetLastError(), "routed_moe q2 expert prefix launch");
         }
         if (ok) {
-            moe_scatter_sorted_pairs_deterministic_kernel<<<256u, 1u>>>(
+            moe_scatter_sorted_pairs_deterministic_kernel<<<
+                    256u, 256u, 256u * sizeof(uint32_t)>>>(
                     sorted_pairs,
                     offsets,
                     (const int32_t *)selected->ptr,
