@@ -64,7 +64,10 @@ __global__ static void rms_norm_plain_regs_f16_kernel(
     const float scale = rsqrtf(partial[0] / (float)n + eps);
 #pragma unroll
     for (uint32_t k = 0; k < PER_THREAD; k++) {
-        orow[threadIdx.x + k * blockDim.x] = __float2half(v[k] * scale);
+        /* Explicit round-to-nearest, matching f32_to_f16_vec4_kernel: the plain
+         * conversion is not pinned to a rounding mode under -ffast-math, and the
+         * separate F32-store-then-convert pair this replaces rounded once, here. */
+        orow[threadIdx.x + k * blockDim.x] = __float2half_rn(v[k] * scale);
     }
 }
 
@@ -596,12 +599,22 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
     return hip_ok(hipGetLastError(), "rms_norm_plain launch");
 }
 /* F16 result form; returns 0 when the shape is not the hot hyper-connection row
- * so the caller keeps the F32 norm plus its conversion. */
+ * so the caller keeps the F32 norm plus its conversion.
+ *
+ * **Opt-in.** Worth 5.4% (444.9 against 420.7 tok/s mean), and the pinned
+ * trajectory holds at 116/128, 142, 3, but the 273-token prefill envelope moves
+ * to rmse 0.53 and max_error 2.44 from 0.41 and 2.15 -- inside the 1.12 / 5.0
+ * tolerance, yet for the first time worse than the pre-optimization baseline's
+ * 0.478146 / 2.39995. The cause is not the rounding primitive (explicit
+ * round-to-nearest, matching f32_to_f16_vec4_kernel, leaves it at 0.53) and both
+ * routes issue the same hipBLASLt call with the same plan key, so it is not
+ * understood; until it is, quality parity with the baseline wins over the 5.4%.
+ * Set GUFO_DEEPSEEK_ROCM_F16_HC_NORM=1 to enable. */
 extern "C" int ds4_gpu_rms_norm_plain_rows_f16_tensor(ds4_gpu_tensor *out_h, const ds4_gpu_tensor *x, uint32_t n, uint32_t rows, float eps) {
     static int enabled = -1;
     if (enabled < 0) {
         const char *env = getenv("GUFO_DEEPSEEK_ROCM_F16_HC_NORM");
-        enabled = (env && env[0] == '0') ? 0 : 1;
+        enabled = (env && env[0] == '1') ? 1 : 0;
     }
     if (!enabled) return 0;
     if (n != 256u * 64u || !hip_vec_convert_enabled()) return 0;

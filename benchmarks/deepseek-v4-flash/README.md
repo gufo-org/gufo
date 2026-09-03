@@ -228,7 +228,7 @@ worst rank 3.
 | Stack | `pp4096` | `tg16` | Pinned trajectory | Prefill `rmse` | Gate |
 | --- | ---: | ---: | --- | ---: | --- |
 | `16d5e30` baseline | 188.5 | 16.5 | 116/128, 142, 3 | 0.478146 | pass |
-| Retained default | 444.9 | 16.6 | 116/128, 142, 3 | 0.53 | pass |
+| Retained default | 427.3 | 16.6 | 116/128, 142, 3 | 0.41 | pass |
 | Retained default, MMQ disabled | 270.1 | 16.6 | 116/128, 142, 3 | — | pass |
 | Plus the attention output-B hipBLASLt fallback | 410.5 | 16.6 | 114/128, 150, 5 | — | fail |
 
@@ -288,7 +288,6 @@ Added this round, all width-scoped and all gate-clean:
 | Inverse rotated tail folded into the F16 attention group pack | `rope_tail_kernel` 254.73 to 28.08 ms, the pack unchanged at 159.5 ms: one read-modify-write pass over 512 MiB per layer removed |
 | Resumed mixed-window chunks routed to the same rocWMMA producer as the first chunk | `pp8192` 406.4 / 410.8 to 425.1 / 429.8 tok/s; the ratio-128 layers of every chunk after the first were reaching the scalar F32 kernel |
 | Attention score pass with both operands row-major | -36.8% indexed and -28.3% mixed window in the ablation harness, output identical to 1.7e-06 |
-| Hyper-connection row normalized straight to F16 (`GUFO_DEEPSEEK_ROCM_F16_HC_NORM`) | **+5.4%** (444.9 against 420.7 tok/s mean, best round 450.85). The row is normalized and then consumed by exactly one F16 projection, so the F32 store and the conversion pass that followed it both disappear -- 268 MiB written and 402 MiB moved per call removed. **The one retained route whose prefill envelope moves adverse:** `rmse` 0.41 to 0.53 and `max_error` 2.15 to 2.44, which is inside the 1.12 / 5.0 tolerance and leaves the pinned trajectory at 116/128, 142, 3, but is for the first time marginally worse than the `16d5e30` baseline's 0.478146 / 2.39995. Set the variable to 0 to revert to 420.7 with `rmse` 0.41 |
 | Routed expert sum folded into the hyper-connection expansion | +2.1% (442.9 against 433.9 tok/s mean, best round 452.58). Bit-identical: both forms accumulate the same F16 slots in ascending expert order in F32, and the buffer the separate form stored was F32, so the round trip was lossless. Estimated at 0.2% from traffic alone and worth ten times that -- removing a whole kernel launch beats the byte accounting |
 | Deterministic assignment scatter parallelized | ran one thread per block walking all 24,576 pairs, 539 us per call. Two passes over contiguous per-thread ranges with one block-wide prefix sum keeps the output byte-identical. A first attempt that scanned in chunks of the block width was slower -- 18 barriers per chunk, 1,728 per block |
 | One published F16 mirror of the normalized attention rows, shared by the layer's projections | `f32_to_f16_vec4_kernel` 423 to 321 launches and 97.13 to 57.32 ms at 1,024 tokens, so about 160 ms at 4,096. Bit-identical: the conversion is row-local, so every consumer sees the bytes it would have produced. The graph clears the mirror at each layer boundary, before any buffer it names can be rewritten |
@@ -568,6 +567,21 @@ to 15% of the WMMA ceiling, of which the transposed-Q staging takes 30 to 37% in
 isolation. Going further there means a FlashAttention-2 tiling with several query
 tokens per block, which the ratio-4 layers block because each token carries its
 own top-k row set, so it would have to be built for the ratio-128 layers alone.
+
+**Held back on quality grounds, not performance:** normalizing the
+hyper-connection row straight to F16
+(`GUFO_DEEPSEEK_ROCM_F16_HC_NORM=1`, default off) is worth **5.4%** -- 444.9
+against 420.7 tok/s mean, best round 450.85 -- because the row is consumed by
+exactly one F16 projection, so the F32 store and the conversion pass after it both
+disappear, 268 MiB written and 402 MiB moved per call. The pinned trajectory holds
+at 116/128, 142, 3, but the 273-token prefill envelope moves to `rmse` 0.53 and
+`max_error` 2.44 from 0.41 and 2.15. That is inside the 1.12 / 5.0 tolerance and
+would pass the gate, but it is the first route to land *worse* than the
+`16d5e30` baseline's 0.478146 / 2.39995 rather than better, and the cause is not
+identified: an explicit round-to-nearest conversion matching
+`f32_to_f16_vec4_kernel` leaves it at 0.53, and both routes issue the same
+hipBLASLt call with the same plan key. Parity with the baseline wins until that is
+explained.
 
 Left on the table: a FlashAttention-2 tiling for the ratio-128 attention layers,
 several query tokens per block sharing one staged KV window. Worth perhaps 150 ms
