@@ -741,6 +741,125 @@ __global__ static void attention_pack_group_heads_f16_vec4_kernel(
     *(__half2 *)(out + 2u) = __floats2half2_rn(v.z, v.w);
 }
 
+/* Inverse rotated tail folded into the group pack.
+ *
+ * The heads tensor is written by attention, rewritten in place by the inverse
+ * rope, then read again here and converted to F16 -- three passes over 512 MiB
+ * per layer for one rotation. Nothing else reads the roped F32, so the rotation
+ * can happen in registers between this kernel's load and its store, which
+ * removes a whole read-modify-write pass. The rope pairs are adjacent
+ * (`tail[i]`, `tail[i + 1]` for `i = 2 * pair`), so one float4 covers exactly
+ * two consecutive pairs whenever head_dim - n_rot is a multiple of four.
+ *
+ * Same expression and the same F32 inputs as rope_tail_kernel; the F32
+ * intermediate the separate pass stored is exactly representable, so the F16
+ * result matches it. */
+__global__ static void attention_pack_group_heads_rope_f16_vec4_kernel(
+        __half *dst,
+        const float *heads,
+        uint32_t n_tokens,
+        uint32_t n_groups,
+        uint32_t group_dim,
+        uint32_t head_dim,
+        uint32_t n_rot,
+        uint32_t pos0,
+        uint32_t n_ctx_orig,
+        int inverse,
+        float freq_base,
+        float freq_scale,
+        float ext_factor,
+        float attn_factor,
+        float beta_fast,
+        float beta_slow) {
+    const uint64_t g4 = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t groups4 =
+        (uint64_t)n_groups * n_tokens * (group_dim >> 2u);
+    if (g4 >= groups4) return;
+    const uint32_t d4 = (uint32_t)(g4 % (group_dim >> 2u));
+    const uint64_t q = g4 / (group_dim >> 2u);
+    const uint32_t t = (uint32_t)(q % n_tokens);
+    const uint32_t g = (uint32_t)(q / n_tokens);
+    const uint32_t d = d4 << 2u;
+    float4 v = *(const float4 *)(
+        heads + ((uint64_t)t * n_groups + g) * group_dim + d);
+
+    const uint32_t n_nope = head_dim - n_rot;
+    const uint32_t dh = (g * group_dim + d) % head_dim;
+    if (dh >= n_nope) {
+        float corr0 = 0.0f, corr1 = 0.0f;
+        if (ext_factor != 0.0f) {
+            const float denom = 2.0f * logf(freq_base);
+            corr0 = floorf((float)n_rot *
+                           logf((float)n_ctx_orig /
+                                (beta_fast * 2.0f * (float)M_PI)) / denom);
+            corr1 = ceilf((float)n_rot *
+                          logf((float)n_ctx_orig /
+                               (beta_slow * 2.0f * (float)M_PI)) / denom);
+            corr0 = fmaxf(0.0f, corr0);
+            corr1 = fminf((float)(n_rot - 1), corr1);
+        }
+        const float theta_scale = powf(freq_base, -2.0f / (float)n_rot);
+        float *lane = &v.x;
+#pragma unroll
+        for (uint32_t half_pair = 0u; half_pair < 2u; half_pair++) {
+            const uint32_t pair = (dh - n_nope) / 2u + half_pair;
+            const uint32_t i = pair * 2u;
+            const float theta_extrap =
+                (float)(pos0 + t) * powf(theta_scale, (float)pair);
+            const float theta_interp = freq_scale * theta_extrap;
+            float theta = theta_interp;
+            float mscale = attn_factor;
+            if (ext_factor != 0.0f) {
+                const float ramp_mix =
+                    rope_yarn_ramp_dev(corr0, corr1, (int)i) * ext_factor;
+                theta = theta_interp * (1.0f - ramp_mix) +
+                        theta_extrap * ramp_mix;
+                mscale *= 1.0f + 0.1f * logf(1.0f / freq_scale);
+            }
+            float c = cosf(theta) * mscale;
+            float sn = sinf(theta) * mscale;
+            if (inverse) sn = -sn;
+            const float x0 = lane[half_pair * 2u];
+            const float x1 = lane[half_pair * 2u + 1u];
+            lane[half_pair * 2u] = x0 * c - x1 * sn;
+            lane[half_pair * 2u + 1u] = x0 * sn + x1 * c;
+        }
+    }
+
+    __half *out = dst + q * group_dim + d;
+    *(__half2 *)out = __floats2half2_rn(v.x, v.y);
+    *(__half2 *)(out + 2u) = __floats2half2_rn(v.z, v.w);
+}
+
+struct ds4_attn_pack_rope {
+    uint32_t head_dim;
+    uint32_t n_rot;
+    uint32_t pos0;
+    uint32_t n_ctx_orig;
+    int inverse;
+    float freq_base;
+    float freq_scale;
+    float ext_factor;
+    float attn_factor;
+    float beta_fast;
+    float beta_slow;
+};
+
+/* Whether the fused rope-plus-pack can serve this shape. The pack walks the
+ * token's heads row as float4, so a rope pair must never straddle a vector and
+ * the nope prefix must be vector aligned. */
+static int ds4_attn_pack_rope_eligible(const ds4_attn_pack_rope *rope,
+                                       uint32_t group_dim) {
+    if (!rope) return 0;
+    if (rope->head_dim == 0u || rope->n_rot == 0u) return 0;
+    if (rope->n_rot > rope->head_dim) return 0;
+    if ((rope->head_dim & 3u) != 0u) return 0;
+    if ((rope->n_rot & 3u) != 0u) return 0;
+    if (((rope->head_dim - rope->n_rot) & 3u) != 0u) return 0;
+    if (group_dim == 0u || (group_dim % rope->head_dim) != 0u) return 0;
+    return 1;
+}
+
 static void hip_launch_attention_pack_group_heads_f16(
         __half *dst,
         const float *heads,
@@ -761,6 +880,32 @@ static void hip_launch_attention_pack_group_heads_f16(
     attention_pack_group_heads_f16_kernel<<<
             (uint32_t)((count + 255u) / 256u), 256>>>(
             dst, heads, n_tokens, n_groups, group_dim);
+}
+
+/* Returns 0 when the fused form is unavailable, so the caller keeps the
+ * separate rope_tail launch plus the plain pack. */
+static int hip_launch_attention_pack_group_heads_rope_f16(
+        __half *dst,
+        const float *heads,
+        uint32_t n_tokens,
+        uint32_t n_groups,
+        uint32_t group_dim,
+        uint64_t count,
+        const ds4_attn_pack_rope *rope) {
+    if (count == 0u) return 0;
+    if (!ds4_attn_pack_rope_eligible(rope, group_dim)) return 0;
+    if (!hip_vec_convert_enabled() || (group_dim & 3u) != 0u ||
+        ((uintptr_t)heads & 15u) != 0u || ((uintptr_t)dst & 7u) != 0u) {
+        return 0;
+    }
+    const uint64_t groups4 = count >> 2u;
+    attention_pack_group_heads_rope_f16_vec4_kernel<<<
+            (uint32_t)((groups4 + 255u) / 256u), 256>>>(
+            dst, heads, n_tokens, n_groups, group_dim, rope->head_dim,
+            rope->n_rot, rope->pos0, rope->n_ctx_orig, rope->inverse,
+            rope->freq_base, rope->freq_scale, rope->ext_factor,
+            rope->attn_factor, rope->beta_fast, rope->beta_slow);
+    return 1;
 }
 
 __global__ static void attention_unpack_group_low_kernel(

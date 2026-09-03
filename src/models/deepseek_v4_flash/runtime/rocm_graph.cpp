@@ -3491,7 +3491,38 @@ static bool rocm_graph_encode_layer_attention_batch(
 
     if (ok) {
     }
-    if (ok) ok = ds4_gpu_rope_tail_tensor(g->batch_heads,
+    /* The output projection can fold the inverse rotated tail into its F16 group
+     * pack; nothing else reads the roped F32 heads. It declines when the shape
+     * or width does not qualify, in which case the separate pass runs. */
+    bool inv_rope_fused = false;
+    if (ok) {
+        inv_rope_fused = ds4_gpu_attention_output_q8_batch_inv_rope_tensor(
+                             g->batch_attn_out,
+                             g->batch_attn_low,
+                             g->batch_group_tmp,
+                             g->batch_low_tmp,
+                             model->map,
+                             model->size,
+                             layer->attn_output_a->abs_offset,
+                             layer->attn_output_b->abs_offset,
+                             group_dim,
+                             rank,
+                             n_groups,
+                             DS4_N_EMBD,
+                             g->batch_heads,
+                             n_tokens,
+                             DS4_N_HEAD_DIM,
+                             DS4_N_ROT,
+                             pos0,
+                             compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0,
+                             freq_base,
+                             freq_scale,
+                             ext_factor,
+                             attn_factor,
+                             DS4_ROPE_YARN_BETA_FAST,
+                             DS4_ROPE_YARN_BETA_SLOW) != 0;
+    }
+    if (ok && !inv_rope_fused) ok = ds4_gpu_rope_tail_tensor(g->batch_heads,
                                             n_tokens,
                                             DS4_N_HEAD,
                                             DS4_N_HEAD_DIM,
@@ -3508,7 +3539,7 @@ static bool rocm_graph_encode_layer_attention_batch(
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("inv_rope");
-    if (ok) {
+    if (ok && !inv_rope_fused) {
         ok = ds4_gpu_attention_output_q8_batch_tensor(g->batch_attn_out,
                                                         g->batch_attn_low,
                                                         g->batch_group_tmp,
