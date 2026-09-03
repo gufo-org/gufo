@@ -378,6 +378,43 @@ static int hip_vec_convert_enabled(void) {
     return cached;
 }
 
+/* Published F16 mirror of one activation buffer.
+ *
+ * A ratio-4 layer's normalized attention rows feed eight projections -- the
+ * compressor KV and gate, the indexer KV, gate and projection, and the QKV
+ * pair -- and every F16 route among them converted the same 4,096 x 4,096 rows
+ * again, 188 conversions per prefill at 0.475 ms each.
+ *
+ * The graph publishes the mirror once after producing the rows and clears it at
+ * every layer boundary, and a consumer reuses it only when both the pointer and
+ * the element count match, so a recycled buffer cannot be served stale: the
+ * clear happens before anything can overwrite the published rows. */
+static const void *g_f16_input_src = NULL;
+static uint64_t     g_f16_input_count = 0;
+static __half      *g_f16_input_mirror = NULL;
+static uint64_t     g_f16_input_mirror_bytes = 0;
+
+static void hip_f16_input_release(void) {
+    if (g_f16_input_mirror) (void)hipFree(g_f16_input_mirror);
+    g_f16_input_mirror = NULL;
+    g_f16_input_mirror_bytes = 0;
+    g_f16_input_src = NULL;
+    g_f16_input_count = 0;
+}
+
+static void hip_f16_input_clear(void) {
+    g_f16_input_src = NULL;
+    g_f16_input_count = 0;
+}
+
+static __half *hip_f16_input_lookup(const float *x, uint64_t count) {
+    if (!g_f16_input_mirror || !g_f16_input_src || count == 0u) return NULL;
+    if (g_f16_input_src != (const void *)x || g_f16_input_count != count) {
+        return NULL;
+    }
+    return g_f16_input_mirror;
+}
+
 static void hip_launch_f32_to_f16(__half *out, const float *x, uint64_t n) {
     if (n == 0u) return;
     if (hip_vec_convert_enabled() && (n & 3u) == 0u &&
@@ -387,6 +424,39 @@ static void hip_launch_f32_to_f16(__half *out, const float *x, uint64_t n) {
         return;
     }
     f32_to_f16_kernel<<<(n + 255u) / 256u, 256>>>(out, x, n);
+}
+
+static int hip_f16_input_mirror_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_F16_INPUT_MIRROR");
+        cached = (env && env[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
+static int hip_f16_input_publish(const float *x, uint64_t count) {
+    hip_f16_input_clear();
+    if (!x || count == 0u || !hip_f16_input_mirror_enabled()) return 0;
+    uint64_t bytes = 0;
+    if (!hip_u64_mul_checked(count, sizeof(__half), &bytes)) return 0;
+    if (g_f16_input_mirror_bytes < bytes) {
+        if (g_f16_input_mirror) (void)hipFree(g_f16_input_mirror);
+        g_f16_input_mirror = NULL;
+        g_f16_input_mirror_bytes = 0;
+        void *ptr = NULL;
+        if (!hip_ok(hipMalloc(&ptr, (size_t)bytes), "f16 input mirror alloc")) {
+            (void)hipGetLastError();
+            return 0;
+        }
+        g_f16_input_mirror = (__half *)ptr;
+        g_f16_input_mirror_bytes = bytes;
+    }
+    hip_launch_f32_to_f16(g_f16_input_mirror, x, count);
+    if (!hip_ok(hipGetLastError(), "f16 input mirror convert")) return 0;
+    g_f16_input_src = (const void *)x;
+    g_f16_input_count = count;
+    return 1;
 }
 
 __device__ static float warp_sum_f32(float v) {

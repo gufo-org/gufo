@@ -2286,6 +2286,10 @@ static bool rocm_graph_encode_layer_attention_batch(
         uint32_t                n_tokens) {
     if (n_tokens == 0 || n_tokens > g->prefill_cap) return false;
 
+    /* Any published F16 activation mirror belongs to the previous layer, whose
+     * buffers this layer reuses. Drop it before anything can overwrite them. */
+    ds4_gpu_clear_f16_input();
+
     const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
     const uint64_t mix_hc = 2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
     const uint64_t q_rank = layer->attn_q_a->dim[1];
@@ -2390,6 +2394,14 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                        DS4_N_EMBD,
                                                        n_tokens,
                                                        DS4_RMS_EPS) != 0;
+    /* Eight projections in a ratio-4 layer read these rows, and each F16 route
+     * among them was converting them again. One mirror serves all of them; the
+     * conversion is row-local, so every consumer sees the bytes it would have
+     * produced itself. Declining is not an error. */
+    if (ok && n_tokens >= 128u) {  /* DS4_ROCM_WIDE_PREFILL_ROWS */
+        (void)ds4_gpu_publish_f16_input_tensor(g->batch_attn_norm,
+                                                (uint64_t)n_tokens * DS4_N_EMBD);
+    }
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("norm");

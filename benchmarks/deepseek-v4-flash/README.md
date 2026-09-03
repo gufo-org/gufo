@@ -287,6 +287,7 @@ Added this round, all width-scoped and all gate-clean:
 | Inverse rotated tail folded into the F16 attention group pack | `rope_tail_kernel` 254.73 to 28.08 ms, the pack unchanged at 159.5 ms: one read-modify-write pass over 512 MiB per layer removed |
 | Resumed mixed-window chunks routed to the same rocWMMA producer as the first chunk | `pp8192` 406.4 / 410.8 to 425.1 / 429.8 tok/s; the ratio-128 layers of every chunk after the first were reaching the scalar F32 kernel |
 | Attention score pass with both operands row-major | -36.8% indexed and -28.3% mixed window in the ablation harness, output identical to 1.7e-06 |
+| One published F16 mirror of the normalized attention rows, shared by the layer's projections | `f32_to_f16_vec4_kernel` 423 to 321 launches and 97.13 to 57.32 ms at 1,024 tokens, so about 160 ms at 4,096. Bit-identical: the conversion is row-local, so every consumer sees the bytes it would have produced. The graph clears the mirror at each layer boundary, before any buffer it names can be rewritten |
 
 Bit-identical, so they hold at every width:
 
@@ -520,10 +521,26 @@ schedule-shaped lever available:
 | Fragment operand layout | -30% by analogy with attention | 2x worse |
 | DRAM traffic | — | 25.8 GB/s of a 240 GB/s ceiling: no headroom to reclaim |
 
-Its cost tracks neither bytes, nor tiles, nor workgroups, nor operand layout. It
-is the IQ2 dequantize-and-issue stream inside the tile, and shrinking that means
-a routed-expert format whose tile does not need byte-expanded codes for `iu8`
-WMMA -- a quantization change, not a kernel change.
+Its cost tracks neither bytes, nor tiles, nor workgroups, nor operand layout,
+and the counters say it is not issuing either. 74.9 M waves at 888 VALU and 166
+LDS instructions each is 66.5 G VALU and 12.4 G LDS operations, which this GPU
+retires in about 297 ms and 111 ms respectively against 2,792 ms measured: **11%
+VALU and 5% LDS utilisation**, a 31x stall factor. It is waiting on memory it
+cannot hide, and what it is short of is resident waves.
+
+That shortage is structural to the MMQ tile, which is why every geometry knob was
+neutral. Waves per CU is `(65,536 / LDS_per_workgroup) * nwarps`, and `nwarps`
+is pinned to `mmq_y / 16` because a warp owns `mmq_y / nwarps` rows and that must
+be at least the 16-row accumulator tile. So LDS and `nwarps` both scale with
+`mmq_y` and the product is invariant: **8 waves per CU of the 32 the hardware
+offers, at every `mmq_y`**. Confirmed by measurement -- `mmq_y` 128 doubles both
+the tile and the warp count and changes nothing.
+
+Lifting it means decomposing warps along the column axis instead of the row axis,
+which is a rewrite of the vendored MMQ tier rather than a tuning change. The
+alternative is a routed-expert format whose tile does not need byte-expanded
+codes for `iu8` WMMA -- a quantization change. Neither is a kernel tweak, and
+without one of them the 2.8 s does not move.
 
 The two attention producers are the one place a rewrite still pays: 1.1 s at 8
 to 15% of the WMMA ceiling, of which the transposed-Q staging takes 30 to 37% in
@@ -531,11 +548,11 @@ isolation. Going further there means a FlashAttention-2 tiling with several quer
 tokens per block, which the ratio-4 layers block because each token carries its
 own top-k row set, so it would have to be built for the ratio-128 layers alone.
 
-Left on the table, both measured or bounded and both under 1% of the chunk:
-folding the routed 6-way sum into `hc_expand4_add` (one 128 MiB pass, about
-22 ms) and sharing one F16 copy of `batch_attn_norm` across the five projections
-that each convert it (about 70 ms, and it needs a 32 MiB resident buffer -- the
-same trade that measured as noise for the hyper-connection norm above).
+Left on the table: folding the routed 6-way sum into `hc_expand4_add`, one
+128 MiB pass worth about 22 ms. It is bit-identical in principle -- the F32
+round-trip through `routed_out` is lossless -- but reaching it needs a
+deferred-finalize flag through a routed-MoE entry point that prefill, decode and
+DSpark verification all share, and 0.2% does not justify that surface.
 
 ## Failed
 

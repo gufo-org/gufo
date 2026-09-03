@@ -574,10 +574,14 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
     const __half *w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes, in_dim, out_dim, label);
     if (!w_f16) return 0;
     const uint64_t xh_count = n_tok * in_dim;
-    __half *xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16 gemm activations");
-    if (!xh) return 0;
-    hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
-    if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
+    /* See hip_f16_input_publish: several projections in a layer share these rows. */
+    __half *xh = hip_f16_input_lookup((const float *)x->ptr, xh_count);
+    if (!xh) {
+        xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16 gemm activations");
+        if (!xh) return 0;
+        hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
+        if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
+    }
 #ifdef __HIP_PLATFORM_AMD__
     if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
         hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F32) &&
@@ -640,10 +644,13 @@ static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
     const __half *w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes, in_dim, out_dim, label);
     if (!w_f16) return 0;
     const uint64_t xh_count = n_tok * in_dim;
-    __half *xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16-out gemm activations");
-    if (!xh) return 0;
-    hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
-    if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch")) return 0;
+    __half *xh = hip_f16_input_lookup((const float *)x->ptr, xh_count);
+    if (!xh) {
+        xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16-out gemm activations");
+        if (!xh) return 0;
+        hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
+        if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch")) return 0;
+    }
 #ifdef __HIP_PLATFORM_AMD__
     if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
         hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F16) &&
@@ -879,10 +886,13 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
         const __half *w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes, in_dim, out_dim, label);
         if (w_f16) {
             const uint64_t xh_count = n_tok * in_dim;
-            __half *xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16 gemm activations");
-            if (!xh) return 0;
-            hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
-            if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
+            __half *xh = hip_f16_input_lookup((const float *)x->ptr, xh_count);
+            if (!xh) {
+                xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16 gemm activations");
+                if (!xh) return 0;
+                hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
+                if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
+            }
             const float alpha = 1.0f;
             const float beta = 0.0f;
             hipblasStatus_t st = hipblasGemmEx(g_hipblas,
@@ -1256,10 +1266,13 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
     }
     if (g_hipblas_ready && n_tok > 1) {
         const uint64_t xh_count = n_tok * in_dim;
-        __half *xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "f16 gemm activations");
-        if (!xh) return 0;
-        hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
-        if (!hip_ok(hipGetLastError(), "f16 activation convert launch")) return 0;
+        __half *xh = hip_f16_input_lookup((const float *)x->ptr, xh_count);
+        if (!xh) {
+            xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "f16 gemm activations");
+            if (!xh) return 0;
+            hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
+            if (!hip_ok(hipGetLastError(), "f16 activation convert launch")) return 0;
+        }
 #ifdef __HIP_PLATFORM_AMD__
         if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
         hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_F16) &&
