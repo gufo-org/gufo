@@ -128,9 +128,27 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
         INDEXED ? DS4_ROCM_ATTENTION_INDEXED_TOPK_CAP : 1u];
     __shared__ uint32_t raw_count_s;
     __shared__ uint32_t comp_count_s;
-    __shared__ half q_half[HEADS * LDS_DIM];
+    /* Q is staged transposed, as [k][head], so the score pass reads both of its
+     * operands row-major.
+     *
+     * The score and value passes issue the same number of matrix ops per row
+     * block, yet an ablation harness (tools/bench/dsv4_attn_mixed_bench.hip)
+     * priced the score pass at about eight times the value pass. Neither
+     * spreading it over more waves nor halving its LDS reads moved it, which
+     * left the operand layout: K was a col_major matrix_b, and rocwmma has to
+     * gather that. With Q transposed the score product becomes
+     * `scoresT = KV . Q^T`, both operands row-major, worth 31% of the kernel on
+     * the indexed shape and 21% on the mixed window one.
+     *
+     * The score tile is then [kv row][head] rather than [head][kv row]; every
+     * reader below indexes accordingly. */
+    constexpr uint32_t QT_PITCH = HEADS + 2u;
+    __shared__ half qt_half[DIM * QT_PITCH];
     __shared__ half kv_half[ROWS * LDS_DIM];
     __shared__ float scores[HEADS * ROWS];
+    /* Second half of the K split; group 0 writes straight into `scores`. */
+    constexpr uint32_t QK_WG = 2u;
+    __shared__ float qk_part[2u * (QK_WG - 1u) * BM * ROWS];
     __shared__ half probs[HEADS * ROWS];
     __shared__ float softmax_max[HEADS];
     __shared__ float softmax_den[HEADS];
@@ -188,7 +206,7 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
     for (uint32_t j = tid; j < HEADS * DIM; j += blockDim.x) {
         const uint32_t h = j / DIM;
         const uint32_t d = j - h * DIM;
-        q_half[h * LDS_DIM + d] = __float2half(
+        qt_half[d * QT_PITCH + h] = __float2half(
             q[((uint64_t)t * n_head + head0 + h) * DIM + d]);
     }
     if (tid < HEADS) {
@@ -199,8 +217,6 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
 
     using frag_a = rocwmma::fragment<
         rocwmma::matrix_a, BM, BN, BK, half, rocwmma::row_major>;
-    using frag_b_col = rocwmma::fragment<
-        rocwmma::matrix_b, BM, BN, BK, half, rocwmma::col_major>;
     using frag_b_row = rocwmma::fragment<
         rocwmma::matrix_b, BM, BN, BK, half, rocwmma::row_major>;
     using frag_c = rocwmma::fragment<
@@ -258,24 +274,45 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
         }
         __syncthreads();
 
+        constexpr uint32_t QK_WAVES = 2u * QK_WG;
+        constexpr uint32_t K_PER_WG = DIM / QK_WG;
+        const uint32_t qk_head_block = wave / QK_WG;
+        const uint32_t qk_group = wave % QK_WG;
         frag_c score_acc;
-        if (wave < 2u) {
+        if (wave < QK_WAVES) {
             rocwmma::fill_fragment(score_acc, 0.0f);
-        }
-        for (uint32_t k0 = 0u; k0 < DIM; k0 += BK) {
-            if (wave < 2u) {
-                frag_a qa;
-                frag_b_col kb;
+            for (uint32_t k0 = qk_group * K_PER_WG;
+                 k0 < (qk_group + 1u) * K_PER_WG; k0 += BK) {
+                frag_a ka;
+                frag_b_row qb;
+                rocwmma::load_matrix_sync(ka, kv_half + k0, LDS_DIM);
                 rocwmma::load_matrix_sync(
-                    qa, q_half + wave * BM * LDS_DIM + k0, LDS_DIM);
-                rocwmma::load_matrix_sync(kb, kv_half + k0, LDS_DIM);
-                rocwmma::mma_sync(score_acc, qa, kb, score_acc);
+                    qb, qt_half + k0 * QT_PITCH + qk_head_block * BM, QT_PITCH);
+                rocwmma::mma_sync(score_acc, ka, qb, score_acc);
+            }
+            if (qk_group == 0u) {
+                rocwmma::store_matrix_sync(scores + qk_head_block * BM,
+                                            score_acc, HEADS,
+                                            rocwmma::mem_row_major);
+            } else {
+                rocwmma::store_matrix_sync(
+                    qk_part +
+                        (qk_head_block * (QK_WG - 1u) + qk_group - 1u) * BM * ROWS,
+                    score_acc, ROWS, rocwmma::mem_row_major);
             }
         }
-        if (wave < 2u) {
-            rocwmma::store_matrix_sync(
-                scores + wave * BM * ROWS, score_acc, ROWS,
-                rocwmma::mem_row_major);
+        __syncthreads();
+        for (uint32_t j = tid; j < 2u * BM * ROWS; j += blockDim.x) {
+            const uint32_t b = j / (BM * ROWS);
+            const uint32_t o = j - b * (BM * ROWS);
+            float sum = 0.0f;
+#pragma unroll
+            for (uint32_t gq = 1u; gq < QK_WG; gq++) {
+                sum += qk_part[(b * (QK_WG - 1u) + gq - 1u) * BM * ROWS + o];
+            }
+            const uint32_t r = o / BM;
+            const uint32_t hl = o - r * BM;
+            scores[r * HEADS + b * BM + hl] += sum;
         }
         __syncthreads();
 
@@ -289,7 +326,7 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
          * -inf to the maximum and 0 to the sum, so the tail needs no branch. */
         if (wave < HEADS) {
             const float s = lane < nr
-                    ? scores[wave * ROWS + lane] * score_scale
+                    ? scores[lane * HEADS + wave] * score_scale
                     : -INFINITY;
             float m_new = s;
             for (int off = 16; off > 0; off >>= 1) {
@@ -324,7 +361,7 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
             const uint32_t r = j - h * ROWS;
             float p = 0.0f;
             if (r < nr) {
-                p = expf(scores[h * ROWS + r] * score_scale - softmax_max[h]);
+                p = expf(scores[r * HEADS + h] * score_scale - softmax_max[h]);
             }
             probs[j] = __float2half(p);
         }
