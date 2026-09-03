@@ -54,6 +54,12 @@ int ds4_gpu_embed_tokens_hc_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor 
 int ds4_gpu_end_commands(void);
 int ds4_gpu_flush_commands(void);
 int ds4_gpu_hc_expand_add_split_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *block_out, const ds4_gpu_tensor *block_add, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
+/* Same expansion with the routed per-expert F16 rows summed in place of a
+ * materialized block_out. Pair with ds4_gpu_set_routed_defer_sum and only use it
+ * when ds4_gpu_routed_sum_deferred() reports the routed MoE skipped its sum. */
+int ds4_gpu_hc_expand_add_split_moesum_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *down_h, const ds4_gpu_tensor *block_add, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc, uint32_t n_expert, uint32_t n_tokens);
+void ds4_gpu_set_routed_defer_sum(int enabled);
+int ds4_gpu_routed_sum_deferred(void);
 int ds4_gpu_hc_expand_split_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *block_out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_hc_expand_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *block_out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *post, const ds4_gpu_tensor *comb, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_hc_split_sinkhorn_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *mix, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_hc, uint32_t sinkhorn_iters, float eps);

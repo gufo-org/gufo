@@ -31,6 +31,40 @@ static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
 /* Row group the wide Q2-down kernel covers per workgroup: wide_mtiles * BM. */
 #define DS4_ROCM_WIDE_DOWN_TILE_M 64u
 
+/* Deferred routed expert sum.
+ *
+ * The 6-way sum over the per-expert F16 down rows writes a float buffer that the
+ * hyper-connection expansion immediately reads back, one 128 MiB round trip per
+ * layer. When the caller asks to defer it and the F16 down route is the one that
+ * runs, the sum is skipped here and folded into the expansion instead. The
+ * caller must read ds4_gpu_routed_sum_deferred() afterwards: only the F16 route
+ * can defer, so the request is advisory. */
+static int g_routed_defer_sum_request = 0;
+static int g_routed_defer_sum_taken = 0;
+
+extern "C" void ds4_gpu_set_routed_defer_sum(int enabled) {
+    static int allowed = -1;
+    if (allowed < 0) {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_FUSED_MOE_SUM");
+        allowed = (env && env[0] == '0') ? 0 : 1;
+    }
+    g_routed_defer_sum_request = (allowed && enabled) ? 1 : 0;
+    g_routed_defer_sum_taken = 0;
+}
+
+extern "C" int ds4_gpu_routed_sum_deferred(void) { return g_routed_defer_sum_taken; }
+
+/* Stage the dequantized Q2 weight tile as [k][n] so the value fragments load
+ * row_major; see the B_ROWMAJOR note on moe_down_q2K_hotlist_wmma_wide_kernel. */
+static int ds4_rocm_wide_down_b_rowmajor(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("GUFO_DEEPSEEK_ROCM_WIDE_DOWN_B_ROWMAJOR");
+        cached = (env && env[0] == '1') ? 1 : 0;
+    }
+    return cached;
+}
+
 static int ds4_rocm_wide_down_tile_map_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
@@ -292,13 +326,23 @@ static int routed_moe_q2_float_down_launch(
                             tile_map ? 1u : hot_count);
             const size_t shmem =
                 ds4_rocm_q2_down_wide_shmem(mt, bm, bn, bk, wide_nfrag);
-            moe_down_q2K_hotlist_wmma_wide_kernel<
-                wide_mtiles, 16, 16, 16, wide_nfrag, true, true>
-                    <<<grid, block, shmem>>>(
-                    NULL, down_h, down_w, NULL, mid_h_hot,
-                    counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
-                    expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes,
-                    0u, tile_map);
+            if (ds4_rocm_wide_down_b_rowmajor()) {
+                moe_down_q2K_hotlist_wmma_wide_kernel<
+                    wide_mtiles, 16, 16, 16, wide_nfrag, true, true, false, true>
+                        <<<grid, block, shmem>>>(
+                        NULL, down_h, down_w, NULL, mid_h_hot,
+                        counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
+                        expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes,
+                        0u, tile_map);
+            } else {
+                moe_down_q2K_hotlist_wmma_wide_kernel<
+                    wide_mtiles, 16, 16, 16, wide_nfrag, true, true>
+                        <<<grid, block, shmem>>>(
+                        NULL, down_h, down_w, NULL, mid_h_hot,
+                        counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
+                        expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes,
+                        0u, tile_map);
+            }
         } else if (!no_n2) {
             if (wmma_mtiles == 4u) {
                 constexpr uint32_t mt = 4u;
@@ -421,6 +465,11 @@ static int routed_moe_q2_float_down_launch(
 #endif
 
     const uint64_t n = (uint64_t)n_tokens * out_dim;
+    if (use_f16_down && g_routed_defer_sum_request) {
+        /* The per-expert F16 rows stay in `down` for the fused expansion. */
+        g_routed_defer_sum_taken = 1;
+        return 1;
+    }
     if (use_f16_down && (out_dim & 1u) == 0u) {
         const uint64_t n2 = (uint64_t)n_tokens * (out_dim >> 1u);
         moe_sum_f16x2_kernel<<<(n2 + 255u) / 256u, 256>>>(

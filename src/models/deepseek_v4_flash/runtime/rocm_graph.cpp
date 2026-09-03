@@ -3717,6 +3717,11 @@ static bool rocm_graph_encode_layer_ffn_batch(
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("router");
 
+    /* Ask the routed MoE to leave its per-expert F16 rows unsummed so the
+     * hyper-connection expansion below can fold the 6-way sum in, saving one
+     * round trip through batch_routed_out. Advisory: only the F16 down route can
+     * do it, so the outcome is read back after the call. */
+    if (ok) ds4_gpu_set_routed_defer_sum(n_tokens >= 128u ? 1 : 0);
     if (ok) {
         ok = ds4_gpu_routed_moe_batch_tensor(g->batch_routed_out,
                                                g->batch_routed_gate,
@@ -3802,7 +3807,24 @@ static bool rocm_graph_encode_layer_ffn_batch(
     if (ok) {
     }
 
-    if (ok) {
+    const bool routed_sum_deferred = ds4_gpu_routed_sum_deferred() != 0;
+    ds4_gpu_set_routed_defer_sum(0);
+    if (ok && routed_sum_deferred) {
+        ok = ds4_gpu_hc_expand_add_split_moesum_tensor(next_hc_view,
+                                                         g->batch_routed_down,
+                                                         g->batch_shared_out,
+                                                         g->batch_after_attn_hc,
+                                                         hc_split_view,
+                                                         DS4_N_EMBD,
+                                                         DS4_N_HC,
+                                                         DS4_N_EXPERT_USED,
+                                                         n_tokens) != 0;
+        if (!ok) {
+            fprintf(stderr,
+                    "ds4: fused routed sum expansion rejected the shape; "
+                    "set GUFO_DEEPSEEK_ROCM_FUSED_MOE_SUM=0\n");
+        }
+    } else if (ok) {
         ok = ds4_gpu_hc_expand_add_split_tensor(next_hc_view,
                                                   g->batch_routed_out,
                                                   g->batch_shared_out,

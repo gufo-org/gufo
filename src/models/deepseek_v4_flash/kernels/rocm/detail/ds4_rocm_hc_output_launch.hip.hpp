@@ -297,6 +297,36 @@ extern "C" int ds4_gpu_hc_expand_add_split_tensor(ds4_gpu_tensor *out_hc, const 
                                                     mix_hc, mix_hc, 1);
     return hip_ok(hipGetLastError(), "hc_expand_add_split launch");
 }
+/* Fused form of ds4_gpu_hc_expand_add_split_tensor: `down_h` holds the routed
+ * per-expert F16 rows and the 6-way sum happens here. Returns 0 when the shape
+ * is unsupported so the caller keeps the separate sum plus expand. */
+extern "C" int ds4_gpu_hc_expand_add_split_moesum_tensor(
+        ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *down_h,
+        const ds4_gpu_tensor *block_add, const ds4_gpu_tensor *residual_hc,
+        const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc,
+        uint32_t n_expert, uint32_t n_tokens) {
+    uint64_t flat_bytes = 0, hc_bytes = 0, split_bytes = 0, mix_hc64 = 0,
+             down_bytes = 0;
+    if (!out_hc || !down_h || !block_add || !residual_hc || !split ||
+        n_hc != 4u || n_embd == 0u || n_expert == 0u || n_tokens == 0u ||
+        !hip_hc_mix_width(n_hc, &mix_hc64) ||
+        !hip_u64_mul3_checked(n_tokens, n_embd, sizeof(float), &flat_bytes) ||
+        !hip_u64_mul3_checked(n_tokens, (uint64_t)n_hc * n_embd, sizeof(float), &hc_bytes) ||
+        !hip_u64_mul3_checked(n_tokens, mix_hc64, sizeof(float), &split_bytes) ||
+        !hip_u64_mul3_checked((uint64_t)n_tokens * n_expert, n_embd, sizeof(__half), &down_bytes) ||
+        block_add->bytes < flat_bytes || residual_hc->bytes < hc_bytes ||
+        split->bytes < split_bytes || down_h->bytes < down_bytes ||
+        out_hc->bytes < hc_bytes) {
+        return 0;
+    }
+    const uint64_t n = (uint64_t)n_tokens * n_embd;
+    hc_expand4_add_moesum_kernel<<<(n + 255) / 256, 256>>>(
+            (float *)out_hc->ptr, (const __half *)down_h->ptr,
+            (const float *)block_add->ptr, (const float *)residual_hc->ptr,
+            (const float *)split->ptr, n_embd, n_expert, n_tokens);
+    return hip_ok(hipGetLastError(), "hc_expand_add_split4 moesum launch");
+}
+
 extern "C" int ds4_gpu_shared_down_hc_expand_q8_0_tensor(
         ds4_gpu_tensor       *out_hc,
         ds4_gpu_tensor       *shared_out,
