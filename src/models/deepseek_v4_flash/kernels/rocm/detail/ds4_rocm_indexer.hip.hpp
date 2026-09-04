@@ -190,13 +190,36 @@ __global__ static void indexer_scores_wmma128_kernel(
      * per-output accumulation order over heads is unchanged, so this is
      * bit-identical. `b_sh` stays: it is staged once and reused by all 64 heads,
      * and serving those B fragments from global instead would re-read 8.4 GB. */
-    __shared__ __half a_sh[16 * 128];
+    /* `a_sh` is double buffered. Each head's 16x128 q tile is a scattered global
+     * read -- consecutive token rows are `n_head * head_dim` floats apart, so 16
+     * separate cache lines -- and it used to sit between two barriers with only
+     * eight `mma_sync` of work after it, 64 heads deep: 128 barriers per block
+     * with the load latency fully exposed. Staging head h+1 into the other
+     * buffer before consuming head h leaves one barrier per head and lets that
+     * read retire underneath the matrix ops. FETCH_SIZE says this kernel moves
+     * 9.9 GB/s, 4% of the DRAM ceiling, so it is latency bound rather than
+     * bandwidth bound and the extra 4 KiB is free. Head accumulation order is
+     * unchanged, so output is bit-identical. */
+    /* q is staged **transposed**, as qt[d][token]. The product becomes
+     * scoresT[comp][token] = K[comp][d] . Qt[d][token], which makes both
+     * fragments row_major: `b_sh` is already [comp][d]. A col_major matrix_b
+     * load costs several times its row_major twin on gfx1151 -- the same swap in
+     * this model's attention score pass was worth -21% to -31% of that kernel.
+     * The pitch carries +2 halves so the 16 token columns of consecutive `d`
+     * rows do not share LDS banks. */
+    constexpr uint32_t QT_PITCH = 18u;
+    __shared__ __half a_sh[2][128 * QT_PITCH];
     __shared__ __half b_sh[128 * 128];
 
     const uint32_t lane = tid & 31u;
+    /* The gfx1151 wave32 accumulator maps element `e` of lane `l` to
+     * (row 2 * e + l / 16, col l % 16). Rows are now comp and cols are tokens,
+     * so the token is fixed per lane and comp varies with `e` -- the reverse of
+     * the untransposed form. */
     const uint32_t acc_col = lane & 15u;
     const uint32_t acc_row_base = lane >> 4u;
-    const uint32_t comp_own = tile_c + warp * 16u + acc_col;
+    const uint32_t token_own = tile_t + acc_col;
+    const uint32_t comp_base = tile_c + warp * 16u + acc_row_base;
 
     float acc[8];
 #pragma unroll
@@ -223,60 +246,70 @@ __global__ static void indexer_scores_wmma128_kernel(
     }
     __syncthreads();
 
-    for (uint32_t h = 0; h < n_head; h++) {
-        /* Same widening, and this one runs once per head. */
+    /* Stage one head's 16x128 q tile transposed into `dst` as qt[d][token]. The
+     * global read stays a coalesced float4 over four consecutive `d`; the four
+     * halves then land in four different `d` rows, so the stores are scalar. */
+    const auto stage_q_head = [&](uint32_t h, __half *dst) {
         for (uint32_t i4 = tid; i4 < 16u * 32u; i4 += 256u) {
             const uint32_t r = i4 >> 5u;
             const uint32_t d = (i4 & 31u) * 4u;
             const uint32_t token = tile_t + r;
-            uint2 packed = make_uint2(0u, 0u);
+            float4 v4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             if (token < n_tokens) {
-                const float4 v4 = *reinterpret_cast<const float4 *>(
+                v4 = *reinterpret_cast<const float4 *>(
                         q + ((uint64_t)token * n_head + h) * head_dim + d);
-                const __half2 lo = __floats2half2_rn(v4.x, v4.y);
-                const __half2 hi = __floats2half2_rn(v4.z, v4.w);
-                packed.x = *reinterpret_cast<const uint32_t *>(&lo);
-                packed.y = *reinterpret_cast<const uint32_t *>(&hi);
             }
-            *reinterpret_cast<uint2 *>(&a_sh[r * 128u + d]) = packed;
+            dst[(d + 0u) * QT_PITCH + r] = __float2half_rn(v4.x);
+            dst[(d + 1u) * QT_PITCH + r] = __float2half_rn(v4.y);
+            dst[(d + 2u) * QT_PITCH + r] = __float2half_rn(v4.z);
+            dst[(d + 3u) * QT_PITCH + r] = __float2half_rn(v4.w);
         }
-        __syncthreads();
+    };
+
+    if (n_head != 0u) stage_q_head(0u, a_sh[0]);
+    __syncthreads();
+
+    for (uint32_t h = 0; h < n_head; h++) {
+        const uint32_t cur = h & 1u;
+        /* Issue the next head's scattered global read now. It targets the other
+         * buffer, so it cannot race this head's reads below, and the barrier at
+         * the end of the iteration publishes it. */
+        if (h + 1u < n_head) stage_q_head(h + 1u, a_sh[cur ^ 1u]);
 
         wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
-        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> b_frag;
         wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
         wmma::fill_fragment(c_frag, 0.0f);
-        const uint32_t col0 = warp * 16u;
+        const uint32_t comp_row0 = warp * 16u;
         for (uint32_t k0 = 0; k0 < 128u; k0 += 16u) {
-            wmma::load_matrix_sync(a_frag, a_sh + k0, 128);
-            wmma::load_matrix_sync(b_frag, b_sh + col0 * 128u + k0, 128);
+            wmma::load_matrix_sync(a_frag, b_sh + comp_row0 * 128u + k0, 128);
+            wmma::load_matrix_sync(b_frag, a_sh[cur] + k0 * QT_PITCH, QT_PITCH);
             wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         }
-        if (comp_own < n_comp) {
+        /* The token is fixed per lane, so its head weight is one load rather
+         * than eight. */
+        if (token_own < n_tokens) {
+            const float w = weights[(uint64_t)token_own * n_head + h];
 #pragma unroll
             for (uint32_t e = 0; e < 8u; e++) {
-                const uint32_t token = tile_t + 2u * e + acc_row_base;
-                if (token < n_tokens) {
-                    acc[e] += fmaxf(c_frag.x[e], 0.0f) *
-                              weights[(uint64_t)token * n_head + h];
-                }
+                acc[e] += fmaxf(c_frag.x[e], 0.0f) * w;
             }
         }
-        /* Only one barrier per head now, and it is the one that orders this
-         * head's `a_sh` reads against the next head's `a_sh` writes. */
+        /* Orders this head's `a_sh[cur]` reads against the writes that iteration
+         * h+1 makes to that same buffer, and publishes `a_sh[cur ^ 1]`. */
         __syncthreads();
     }
 
+    if (token_own < n_tokens) {
+        const uint32_t visible = causal ? (pos0 + token_own + 1u) / ratio : n_comp;
 #pragma unroll
-    for (uint32_t e = 0; e < 8u; e++) {
-        const uint32_t token = tile_t + 2u * e + acc_row_base;
-        if (token < n_tokens && comp_own < n_comp) {
-            float out = acc[e] * scale;
-            if (causal) {
-                const uint32_t visible = (pos0 + token + 1u) / ratio;
-                if (comp_own >= visible) out = -INFINITY;
+        for (uint32_t e = 0; e < 8u; e++) {
+            const uint32_t comp = comp_base + 2u * e;
+            if (comp < n_comp) {
+                float out = acc[e] * scale;
+                if (causal && comp >= visible) out = -INFINITY;
+                scores[(uint64_t)token_own * n_comp + comp] = out;
             }
-            scores[(uint64_t)token * n_comp + comp_own] = out;
         }
     }
 #endif

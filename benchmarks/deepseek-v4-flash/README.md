@@ -1094,6 +1094,96 @@ Two things this ruled out at the same time:
   duration. Take bytes from the counter pass and time from a plain kernel
   trace.)
 
+### Long context: the indexer is the whole degradation curve (September 4, 2026)
+
+Prefill throughput against prompt length, one process, `result-clean`:
+
+| prompt | tok/s |
+|---|---:|
+| 4,096 | 434.20 |
+| 8,192 | 481.18 |
+| 16,384 | 482.92 |
+| 32,768 | 460.48 |
+| 65,536 | 414.00 |
+
+The peak is at 16K -- 4,096 is *below* it because a single chunk cannot amortize
+per-chunk setup -- and 64K gives up **14.3%** against that peak. For a 16x
+context increase that is a flat curve, which is the sparse-attention design
+working: the raw KV window and the 512-row indexer top-k bound per-token
+attention work independently of context length.
+
+What does not stay bounded is the indexer's own scoring, which must compare each
+token against every compressed row so far. Normalized per token against the
+4,096 profile:
+
+| kernel | 4K ms/token | 64K ms/token | ratio |
+|---|---:|---:|---:|
+| `indexer_scores_wmma128_kernel` | 0.0250 | 0.334 | **13.4x** |
+| `mul_mat_q` | 0.740 | 0.653 | 0.88 |
+| `moe_down_q2K_hotlist_wmma_wide` | 0.285 | 0.284 | 1.00 |
+| `attention_mixed_heads32_wmma<true,true>` | 0.2368 | 0.1864 | 0.79 |
+
+Everything except the indexer is flat or *cheaper* per token at 64K. The indexer
+scoring plus its top-k machinery (`indexer_topk_chunk_pow2`,
+`..._merge_pow2`, `..._8192_cub`) is **16.8% of a 64K prefill against about 1.5%
+at 4K**, which is the entire degradation and then some.
+
+**The scoring kernel was loading one operand the expensive way.** It computes
+`scores[token][comp] = sum_h relu(q_h[token] . k[comp]) * w_h`, staging the
+shared compressed key tile as `b_sh[comp][d]` and loading it as a **`col_major`
+matrix_b** -- the exact pattern that cost this model's attention score pass about
+8x, recorded above. Staging q transposed as `qt[d][token]` turns the product into
+`scoresT[comp][token] = K . Qt` with **both fragments row_major**:
+
+| variant | `indexer_scores_wmma128` at 16K |
+|---|---:|
+| baseline | 1,413.49 ms |
+| + double-buffered q staging | 1,358.13 ms (-3.9%) |
+| + transposed q, both operands row_major | **952.37 ms (-32.6%)** |
+
+Two changes, and the second is by far the larger:
+
+- **Double-buffered q staging.** Each head's 16x128 q tile is a scattered global
+  read (consecutive token rows are `n_head * head_dim` floats apart, so 16 cache
+  lines) and it sat between two barriers with only eight `mma_sync` after it, 64
+  heads deep -- 128 barriers per block with the load latency exposed. Staging head
+  h+1 into the other buffer before consuming head h leaves one barrier per head.
+  Worth -3.9%, so barriers were not the main cost.
+- **Transposed q.** -30.9% on its own. As a bonus the token is now fixed per lane
+  rather than varying with the accumulator element, so each head's weight is one
+  load instead of eight.
+
+`FETCH_SIZE` was measured first and ruled out the tempting explanation: q is
+logically re-read once per comp tile, which at 64K is 16.8 GB per call against a
+134 MB buffer, and 65 ms per call would put that at 258 GB/s -- apparently at the
+DRAM ceiling. The counter says the kernel actually fetches **13.88 GB over
+1,405 ms at 16K, 9.9 GB/s, 4% of the ceiling**: the 32 MB MALL absorbs
+essentially all of the re-reads. It is latency bound, not bandwidth bound, and
+acting on the analytical estimate would have been wrong.
+
+End to end, measured with the new build bracketing the old one so thermal drift
+cannot favour either:
+
+| prompt | before | after | change |
+|---|---:|---:|---:|
+| 16,384 | 463.00 | 472.07 | +2.0% |
+| 65,536 | 411.03 | 431.13 | **+4.9%** |
+
+The gain grows with context because the kernel's share does. **Degradation from
+the 16K peak out to 64K falls from 14.3% to 8.7%.**
+
+`nix build .#checks.x86_64-linux.pr` stays green at 81/81 with both changes, which
+matters here because swapping the two WMMA operands can reorder the intra-fragment
+summation.
+
+What is left on the long-context curve, in order: the scoring kernel is still
+about 9% of a 64K prefill, and the top-k stages (`indexer_topk_chunk_pow2` 2.1%,
+`..._merge_pow2` 0.6%, `..._8192_cub` 0.4%) another 3%. The remaining scoring cost
+is irreducibly O(context) per token -- exact top-k over all compressed rows -- so
+further work there means either a cheaper score (fewer than 64 heads contributing,
+which changes selection and therefore quality) or a hierarchical/approximate
+top-k.
+
 ### Every DS4 tuning switch is now compiled in (September 4, 2026)
 
 The backend had accumulated **35 behaviour-selecting environment variables** from
