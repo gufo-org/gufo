@@ -814,6 +814,77 @@ predicted at 22 ms from its 128 MiB round trip and delivered ten times that.
   even warm, regressed 2K prompt/decode throughput by 25.3%/42.3% and added
   about 80.5 GiB of process RSS, so copied device arenas remain authoritative.
 
+### Four more levers, all falsified (September 4, 2026)
+
+Each of these follows from a mechanism that had already paid somewhere else in
+this model, which is why they were worth measuring; none of them transfers.
+
+- **LDS pad on the attention output GEMM.** `ds4_gemm_f16_wmma_kernel` stages
+  its A tile at a 256-half pitch -- 128 dwords, exactly 0 mod 32 banks -- so
+  every fragment row starts on the same bank. Padding the pitch is the textbook
+  fix and measured `11.52` (AP16) and `11.54` ms (AP8) against `11.63` base, or
+  0.8% of one kernel and 0.06% end to end. Padding B instead is neutral to
+  slightly worse. The base geometry stands. (First attempt at this reported
+  `maxdiff inf`: the pad widened `A_RUN` as well, so the staging loop ran off
+  the end of its source. The pad is only a pitch, never a data extent.)
+- **A 16-byte dequant store in the wide Q2-down staging.** Going from two
+  4-byte LDS stores to one 8-byte store in this kernel was worth `1,192` ->
+  `812` ms, so `KG = 8` and a `uint4` -- which also halves how often the block
+  and group scales are re-decoded -- looked like the same win again. It is
+  worth nothing: `1,167.03` -> `1,164.80` ms at kernel level, and the +1.2%
+  end-to-end mean sat inside a +-12 tok/s spread. **The 8-byte win was never
+  about store width.** Split stores get paired into
+  `ds_store_2addr_stride64_b32`, whose two addresses are 64 dwords apart and so
+  land in the same bank; once that pairing is broken the kernel is back to
+  being latency bound at 9-18% issue utilisation, and LDS store bandwidth is
+  not what it is waiting on.
+- **float4 in the hyper-connection kernels.** `hc_expand4` keeps eight streams
+  in flight at one dword per lane and looked under-vectorized. Sixteen bytes
+  per lane made all three *worse*: `hc_expand4` `116.75` -> `118.48`,
+  `hc_expand4_add_moesum` `159.20` -> `163.18`, and
+  `hc_split_weighted_sum_fused` `148.61` -> `170.75` ms. A wave already covers a
+  full cache line per stream at one dword per lane, so there was no coalescing
+  to win, and quartering the block count while raising register pressure costs
+  more than the wider access buys.
+- **Moving sampling to the GPU.** Worth 24 microseconds. See below.
+
+### Sampling is on the CPU and that is not costing anything
+
+DS4 selects tokens on the host: `ds4_session_argmax` for greedy decode and a
+bounded top-k insertion scan (capped at 1024) when sampling, both in
+`runtime/sampling.cpp`. Qwen has a full GPU sampler
+(`src/models/qwen/hip/kernels/sample.hip`), and DS4 already has a bit-exact GPU
+argmax -- `spec_row_argmax_kernel` resolves ties to the lower index precisely so
+that it matches the host, and NaN never wins in either -- so porting the greedy
+path is a small, exactly equivalent change.
+
+It is not worth making. `GUFO_DEEPSEEK_ROCM_GRAPH_TOKEN_PROFILE=1` puts the
+full-vocabulary device-to-host read at **0.024 ms of a 59 ms token**:
+
+```
+ds4: ROCm graph token pos=22 encode=6.395 ms execute=52.567 ms read=0.023 ms total=58.986 ms
+```
+
+129,280 floats is 517 KB, and on an APU with unified memory that is a memcpy,
+not a transfer. Host argmax over the same buffer adds a comparable amount, so
+all host-side token selection is about 0.1% of the decode budget.
+
+Two things this ruled out at the same time:
+
+- **The 6.4 ms encode is not dead GPU time.** `ds4_gpu_begin_commands` is a
+  no-op and `ds4_gpu_end_commands` is just `hipDeviceSynchronize`, so there is
+  no graph capture and launches issue eagerly; the GPU is already working on
+  early layers while the host is still issuing later ones. `execute` is the tail
+  wait, not the whole of it.
+- **Decode is not DRAM bound either.** The obvious story -- 52.7 ms is just the
+  time to stream the active weights -- does not survive `FETCH_SIZE`: decode
+  moves roughly 2.75 GB per token, which against 52.7 ms is far under the
+  240 GB/s ceiling. tg has headroom, but it is latency headroom and a separate
+  work item from prefill. (Do not read achieved bandwidth off a `--pmc` run's
+  own timestamps: counter collection serializes dispatches and inflates every
+  duration. Take bytes from the counter pass and time from a plain kernel
+  trace.)
+
 ## To Do
 
 - Add model-owned thinking/reasoning mode and effort controls; the current chat
