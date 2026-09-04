@@ -893,6 +893,38 @@ this model, which is why they were worth measuring; none of them transfers.
   more than the wider access buys.
 - **Moving sampling to the GPU.** Worth 24 microseconds. See below.
 
+### Prefetching the MMQ activation tile: the one non-requant lever on `mul_mat_q`, and it loses
+
+`mul_mat_q` is 34% of prefill (3,031 ms) and every throughput explanation for it
+has now been falsified: 25.8 GB/s of a 240 GB/s ceiling, 11% VALU and 5% LDS
+issue, tile width 64 through 128 a dead tie, tile height 128 no gain, resident
+waves pinned at 8 of 32 by LDS. What is left is a 31x stall factor, and
+`L2CacheHit` says the kernel gets **83.7%** of its loads from L2, so what it
+waits on is L2 latency, not DRAM.
+
+The K loop stages `tile_y` in two halves through a single LDS buffer, so the
+second half's global loads were necessarily issued *after* the barrier that ends
+the first `vec_dot` -- their latency fully exposed, with eight waves to hide it.
+Issuing those loads before the first `vec_dot` and replaying them from registers
+afterwards is the textbook fix, it changes no arithmetic, and it looked free:
+1,536 VGPRs per SIMD against 176 allows eight waves per SIMD while LDS pins the
+kernel to two, so 23 more registers cost no residency. **It is 7.7% slower**
+(419.5 against 454.3 tok/s mean over three interleaved pairs).
+
+Not a spill and not occupancy -- the prefetch build reports `scratch=0` and
+VGPR 144 (IQ2) / 216 (Q8), both still allowing seven or more waves per SIMD.
+Interleaving the two streams in one loop makes every first-half LDS store wait
+on the second half's loads as well, because `s_waitcnt vmcnt` counts all
+outstanding loads rather than a specific one. Draining the first half in its own
+loop before issuing the second recovers most of that -- and is still 2.7% slower
+than no prefetch (446.6 against 458.8). Holding 23 values live across `vec_dot`
+constrains the scheduling inside it by more than the covered latency is worth.
+
+**Do not retry this.** What remains on this kernel is either the routed-expert
+format change (a requant) or rocBLAS solution-index retuning for this exact
+library build, which targets the 554 ms `Cijk_Alik_Bljk_HHS_BH_MT128x128x32` and
+365 ms `MT96x96` calls rather than `mul_mat_q` itself.
+
 ### Sampling is on the CPU and that is not costing anything
 
 DS4 selects tokens on the host: `ds4_session_argmax` for greedy decode and a
