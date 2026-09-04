@@ -457,12 +457,7 @@ int ds4_session_dspark_selftest(ds4_session *session,
      * first verification block at a new width pays setup that steady-state
      * decoding never sees again. Report every repetition rather than one
      * number that silently mixes the two. */
-    int repetitions = 4;
-    if (const char *env = getenv("GUFO_DEEPSEEK_DSPARK_SELFTEST_REPS");
-        env != nullptr && env[0] != '\0') {
-        const int parsed = atoi(env);
-        if (parsed > 0 && parsed <= 32) repetitions = parsed;
-    }
+    const int repetitions = 4;
     double verify_seconds = 0.0;
     double verify_best = 0.0;
     for (int rep = 0; rep < repetitions; ++rep) {

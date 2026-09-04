@@ -368,16 +368,6 @@ __global__ static void f32_to_f16_vec4_kernel(
 
 /* Convert `n` floats to halves, vectorized when the extent and both pointers
  * allow it. Callers check hipGetLastError afterwards as before. */
-/* Attribution switch for the retained bit-exact bandwidth rewrites. */
-static int hip_vec_convert_enabled(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_VEC_CONVERT");
-        cached = (env == NULL || env[0] != '0') ? 1 : 0;
-    }
-    return cached;
-}
-
 /* Published F16 mirror of one activation buffer.
  *
  * A ratio-4 layer's normalized attention rows feed eight projections -- the
@@ -417,7 +407,7 @@ static __half *hip_f16_input_lookup(const float *x, uint64_t count) {
 
 static void hip_launch_f32_to_f16(__half *out, const float *x, uint64_t n) {
     if (n == 0u) return;
-    if (hip_vec_convert_enabled() && (n & 3u) == 0u &&
+    if ((n & 3u) == 0u &&
         ((uintptr_t)x & 15u) == 0u && ((uintptr_t)out & 7u) == 0u) {
         const uint64_t groups = n >> 2u;
         f32_to_f16_vec4_kernel<<<(groups + 255u) / 256u, 256>>>(out, x, groups);
@@ -426,18 +416,9 @@ static void hip_launch_f32_to_f16(__half *out, const float *x, uint64_t n) {
     f32_to_f16_kernel<<<(n + 255u) / 256u, 256>>>(out, x, n);
 }
 
-static int hip_f16_input_mirror_enabled(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_F16_INPUT_MIRROR");
-        cached = (env && env[0] == '0') ? 0 : 1;
-    }
-    return cached;
-}
-
 static int hip_f16_input_publish(const float *x, uint64_t count) {
     hip_f16_input_clear();
-    if (!x || count == 0u || !hip_f16_input_mirror_enabled()) return 0;
+    if (!x || count == 0u) return 0;
     uint64_t bytes = 0;
     if (!hip_u64_mul_checked(count, sizeof(__half), &bytes)) return 0;
     if (g_f16_input_mirror_bytes < bytes) {

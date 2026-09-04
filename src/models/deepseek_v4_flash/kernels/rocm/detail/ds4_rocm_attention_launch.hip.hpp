@@ -210,17 +210,6 @@ extern "C" int ds4_gpu_attention_prefill_raw_heads_tensor(ds4_gpu_tensor *heads,
                                                 n_tokens, window, n_head, head_dim);
     return hip_ok(hipGetLastError(), "attention_prefill_raw launch");
 }
-/* Mixed-window rocWMMA producer switch, shared by the zero-prefix prompt chunk
- * and the resumed chunks that arrive through the decode-batch entry. */
-static int ds4_rocm_mixed_window_wmma_enabled(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA");
-        cached = (env == NULL || env[0] != '0') ? 1 : 0;
-    }
-    return cached;
-}
-
 static int attention_decode_batch_launch(
         ds4_gpu_tensor       *heads,
         const void             *model_map,
@@ -292,9 +281,9 @@ static int attention_decode_batch_launch(
      *
      * Held to the same conditions as the zero-prefix route: it converts Q and
      * KV to F16 rather than reordering a reduction, so it stays at prompt-chunk
-     * width. GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=0 falls back.
+     * width.
      */
-    if (ds4_rocm_mixed_window_wmma_enabled() && !use_comp_mask &&
+    if (!use_comp_mask &&
         g_rocm_gfx1151 && n_tokens >= DS4_ROCM_WIDE_PREFILL_ROWS &&
         n_comp != 0u && comp_kv && n_head == 64u && head_dim == 512u &&
         window != 0u && window <= 256u && ratio != 0u) {
@@ -781,10 +770,8 @@ static int attention_prefill_mixed_launch(
      * reduction -- the scalar kernel below keeps the whole mixed-window score
      * and value pass in F32, while the rocWMMA producer converts Q and KV to
      * F16 -- so it is held to the prompt-chunk width like the rest. The indexed
-     * layers already use this producer. Set
-     * GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=0 to fall back. */
-    if (ds4_rocm_mixed_window_wmma_enabled() &&
-        !use_comp_mask && g_rocm_gfx1151 &&
+     * layers already use this producer. */
+    if (!use_comp_mask && g_rocm_gfx1151 &&
         n_tokens >= DS4_ROCM_WIDE_PREFILL_ROWS && n_comp != 0u &&
         n_head == 64u && head_dim == 512u && window != 0u && window <= 256u) {
         const dim3 grid(n_tokens, n_head / 32u, 1u);
@@ -1405,12 +1392,6 @@ extern "C" int ds4_gpu_attention_output_q8_batch_inv_rope_tensor(
      * changes, so the narrow verification widths keep the separate launches. */
     if (n_tokens < DS4_ROCM_WIDE_PREFILL_ROWS) return 0;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_FUSED_INV_ROPE_PACK");
-        enabled = (env && env[0] == '0') ? 0 : 1;
-    }
-    if (!enabled) return 0;
     const ds4_attn_pack_rope rope = {
         head_dim, n_rot, pos0, n_ctx_orig, /*inverse=*/1,
         freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow,

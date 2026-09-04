@@ -686,16 +686,7 @@ struct accelerator_tensor_span {
 };
 
 static uint64_t accelerator_rocm_preload_span_bytes(void) {
-    uint64_t mb = 1024;
-    const char *env = getenv("DS4_ROCM_WEIGHT_PRELOAD_SPAN_MB");
-    if (env && env[0]) {
-        char *end = NULL;
-        unsigned long long v = strtoull(env, &end, 10);
-        if (end != env && v > 0) mb = (uint64_t)v;
-    }
-    if (mb < 64) mb = 64;
-    if (mb > 4096) mb = 4096;
-    return mb * 1048576ull;
+    return 1024ull * 1048576ull;
 }
 
 static bool accelerator_cache_model_tensor_spans(const ds4_model *m, uint64_t *cached_out) {

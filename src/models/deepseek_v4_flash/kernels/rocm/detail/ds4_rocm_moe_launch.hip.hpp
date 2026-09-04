@@ -43,25 +43,11 @@ static int g_routed_defer_sum_request = 0;
 static int g_routed_defer_sum_taken = 0;
 
 extern "C" void ds4_gpu_set_routed_defer_sum(int enabled) {
-    static int allowed = -1;
-    if (allowed < 0) {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_FUSED_MOE_SUM");
-        allowed = (env && env[0] == '0') ? 0 : 1;
-    }
-    g_routed_defer_sum_request = (allowed && enabled) ? 1 : 0;
+    g_routed_defer_sum_request = enabled ? 1 : 0;
     g_routed_defer_sum_taken = 0;
 }
 
 extern "C" int ds4_gpu_routed_sum_deferred(void) { return g_routed_defer_sum_taken; }
-
-static int ds4_rocm_wide_down_tile_map_enabled(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_WIDE_DOWN_TILE_MAP");
-        cached = (env && env[0] == '0') ? 0 : 1;
-    }
-    return cached;
-}
 
 /*
  * Row count below which a routed-MoE call is treated as a speculative
@@ -73,25 +59,7 @@ static int ds4_rocm_wide_down_tile_map_enabled(void) {
  * the work and reproduces one-token decode's per-row arithmetic.
  */
 static uint32_t ds4_rocm_moe_small_batch_rows(void) {
-    static int parsed = -1;
-    static uint32_t cached = 16u;
-    if (parsed < 0) {
-        parsed = 1;
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_MOE_SMALL_BATCH_ROWS");
-        if (env && env[0]) {
-            char *end = NULL;
-            const unsigned long value = strtoul(env, &end, 10);
-            if (end != env && end && *end == '\0' && value <= 64ul) {
-                cached = (uint32_t)value;
-            } else {
-                fprintf(stderr,
-                        DS4_GPU_LOG_PREFIX "invalid GUFO_DEEPSEEK_ROCM_MOE_SMALL_BATCH_ROWS=%s; "
-                        "expected 0..64\n",
-                        env);
-            }
-        }
-    }
-    return ds4_rocm_small_batch_limit(cached);
+    return 16u;
 }
 
 static uint32_t ds4_rocm_compact_down_rows_per_block(void) {
@@ -132,8 +100,6 @@ static int routed_moe_q2_float_down_launch(
     }
 
     uint32_t h_counts[DS4_ROCM_N_EXPERT] = {0};
-    const bool report_expert_spread =
-        getenv("GUFO_DEEPSEEK_ROCM_MOE_EXPERT_SPREAD") != NULL;
     if (h_counts_in) {
         memcpy(h_counts, h_counts_in, sizeof(h_counts));
     } else if (!hip_ok(hipMemcpy(
@@ -143,22 +109,6 @@ static int routed_moe_q2_float_down_launch(
                     hipMemcpyDeviceToHost),
                 "routed_moe iq2/q2 float-down counts copy")) {
         return 0;
-    }
-    /*
-     * How many distinct experts a batch actually touches decides whether grouping
-     * rows by expert is worth anything: the per-(row, expert) route reloads an
-     * expert once per row, so the saving available is exactly the overlap.
-     */
-    if (report_expert_spread) {
-        uint32_t distinct = 0;
-        for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
-            if (h_counts[e] != 0u) distinct++;
-        }
-        fprintf(stderr,
-                DS4_GPU_LOG_PREFIX "moe expert spread rows=%u pairs=%u distinct=%u\n",
-                n_tokens,
-                n_tokens * n_expert,
-                distinct);
     }
 
     const uint32_t down_tile = 4u;
@@ -285,7 +235,7 @@ static int routed_moe_q2_float_down_launch(
              */
             uint32_t *tile_map = NULL;
             uint32_t wide_tiles = 0u;
-            if (wide_tile_map_dev && ds4_rocm_wide_down_tile_map_enabled()) {
+            if (wide_tile_map_dev) {
                 const uint32_t cap =
                     n_tokens * n_expert / DS4_ROCM_WIDE_DOWN_TILE_M +
                     DS4_ROCM_N_EXPERT + 1u;
@@ -799,12 +749,7 @@ static int routed_moe_launch(
                 mmq_mid_h = (__half *)((char *)down->ptr + down_h_bytes);
             }
 
-            static const int fused_swiglu_allowed = [] {
-                const char *env = getenv("GUFO_DEEPSEEK_ROCM_MMQ_FUSED_SWIGLU");
-                return env == NULL || env[0] != '0';
-            }();
-            const int use_fused_swiglu =
-                g_rocm_gfx1151 && fused_swiglu_allowed && mmq_mid_h != NULL;
+            const int use_fused_swiglu = g_rocm_gfx1151 && mmq_mid_h != NULL;
             int rc = -1;
             /* The routed grid covers ncols_max column tiles for all 256
              * experts; without a bound that is the whole chunk, of which one

@@ -124,26 +124,9 @@ static int get_mmq_x_max_host(const int cc) {
 #if defined(GGML_USE_HIP)
     if (base > 80) base = 80;
 #endif
-    // The selector below picks the smallest x that minimises the tile count for
-    // args.ncols_max, and the routed path passes the whole chunk width there, so
-    // it always lands on the cap. Per expert the real column count is far
-    // smaller -- about n_tokens * n_expert_used / n_expert -- and a tile only
-    // partly filled still pays its full weight load and mma. Keep the cap
-    // tunable on every backend so the fill can be swept against a real chunk.
-    static int g_override_init = 0;
-    static int g_override      = 0;
-    if (!g_override_init) {
-        g_override_init = 1;
-        const char * env = getenv("DS4_CUDA_MMQ_X_MAX");
-        if (env && env[0]) {
-            char * end = nullptr;
-            long v = strtol(env, &end, 10);
-            if (end != env && v >= 8) {
-                g_override = (int)((v / 8) * 8);
-            }
-        }
-    }
-    if (g_override > 0 && g_override < base) base = g_override;
+    // The width was swept against a real 4,096-token chunk: 24, 32 and 40 are
+    // monotonically worse (397-412 tok/s), and 64, 96, 112 and 128 all tie 80
+    // within noise, so the cap above is the whole story and needs no knob.
     return base;
 }
 
@@ -4091,18 +4074,12 @@ static __global__ void mul_mat_q(
         /*
          * ds4: grid-stride over column tiles.
          *
-         * The launcher may size gridDim.y below the tile count (see
-         * mmq_column_tile_slots). Two reasons:
-         *
-         *  - Routed MoE gives every expert the same rectangular tile count, so
-         *    a block whose tile falls past its own bucket used to exit here
-         *    after reserving the full 31.5 KiB tile, which caps residency at two
-         *    workgroups per CU. At a 4,096-token chunk over 256 experts the
-         *    mean bucket is 96 rows against an 80-column tile, so nearly the
-         *    whole grid was empty reservations.
-         *  - For a dense matmul, sweeping the column tiles inside one block
-         *    keeps that block's weight rows resident across them instead of
-         *    re-streaming the whole weight matrix once per column tile.
+         * gridDim.y currently covers the tile count exactly, so this runs once
+         * per block and is equivalent to the upstream single-tile form. It is
+         * kept in the general form because it costs nothing: clamping gridDim.y
+         * below the tile count and striding was measured and bought nothing
+         * end-to-end, an immediately-exiting workgroup being essentially free on
+         * gfx1151 even with a full shared-memory reservation.
          *
          * Same tiles, same per-tile reduction order, disjoint outputs.
          */
@@ -4482,25 +4459,6 @@ struct mmq_args {
     int64_t ncols_grid_max;
 };
 
-/* ds4: how many column-tile slots the launcher gives one (row tile, channel).
- * Zero keeps one block per column tile, the upstream geometry. A positive value
- * caps gridDim.y there and lets each block grid-stride over the rest, which is
- * what removes the routed path's empty tile reservations and gives a dense
- * matmul weight-row reuse across column tiles. */
-static int mmq_column_tile_slots(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        cached = 0;
-        const char * env = getenv("DS4_MMQ_COL_SLOTS");
-        if (env && env[0]) {
-            char * end = nullptr;
-            const long v = strtol(env, &end, 10);
-            if (end != env && v >= 0 && v < (1 << 20)) cached = (int)v;
-        }
-    }
-    return cached;
-}
-
 template<ggml_type type>
 static size_t mmq_get_nbytes_shared(
         const int mmq_x, const int mmq_y, const int cc,
@@ -4512,22 +4470,13 @@ static size_t mmq_get_nbytes_shared(
         ? mmq_y*mmq_tile_x_k*sizeof(int)
         : txs.qs*sizeof(int) + txs.dm*sizeof(half2) + txs.sc*sizeof(int);
     const size_t nbs_y = mmq_x * (sizeof(block_q8_1_mmq));
-    /* ds4: occupancy probe. DS4_MMQ_LDS_PAD=N adds N KiB of unused dynamic
-     * shared memory, which lowers workgroups per CU while leaving the grid,
-     * the tile shape and the work per wave byte-for-byte identical. That is the
-     * only way to measure this kernel's sensitivity to residency alone --
-     * narrowing `mmq_x` also multiplies column tiles and weight re-reads, and
-     * the NCW column split also halves matrix ops per A-fragment load, so both
-     * confound the question. Default 0. */
-    static const size_t lds_pad = [] {
-        const char * env = getenv("DS4_MMQ_LDS_PAD");
-        if (env == nullptr || env[0] == '\0') return (size_t)0;
-        char * end = nullptr;
-        const unsigned long kib = strtoul(env, &end, 10);
-        if (end == env || end == nullptr || *end != '\0' || kib > 64ul) return (size_t)0;
-        return (size_t)kib * 1024ul;
-    }();
-    return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int)) + lds_pad;
+    /* This kernel is not residency-starved, which is why nothing that trades
+     * shared memory for waves has ever paid here. Padding this figure to lower
+     * workgroups per CU -- the one measurement that isolates residency, since
+     * the grid, tile shape and per-wave work stay identical -- gave 4 wgs/WGP
+     * 453.6, 3 wgs 445.0-454.1 and 2 wgs 418.2 tok/s: halving residency costs
+     * 7.8% and 4->3 is free. See benchmarks/deepseek-v4-flash/README.md. */
+    return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
 }
 
 template <ggml_type type, int mmq_x>
@@ -4561,12 +4510,7 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
             : args.ncols_max;
     const int ntx  = (ncols_grid + mmq_x - 1) / mmq_x;
     const int ntzw = args.nchannels_y * args.nsamples_y;
-    /* ds4: column-tile grid-stride slots; see the loop in mul_mat_q. */
-    const int col_slots = mmq_column_tile_slots();
-    const int grid_ntx  = (!args.use_stream_k && col_slots > 0 && col_slots < ntx)
-        ? col_slots
-        : ntx;
-    const dim3 block_nums_xy_tiling(nty, grid_ntx, ntzw);
+    const dim3 block_nums_xy_tiling(nty, ntx, ntzw);
 
     GGML_ASSERT(args.nchannels_y % args.nchannels_x == 0);
     GGML_ASSERT(args.nsamples_y  % args.nsamples_x  == 0);

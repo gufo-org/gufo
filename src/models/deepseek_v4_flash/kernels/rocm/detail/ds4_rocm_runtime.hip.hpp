@@ -220,13 +220,6 @@ __global__ static void dequant_q8_0_to_f32_kernel(
         uint64_t in_dim,
         uint64_t out_dim,
         uint64_t blocks);
-__global__ static void dequant_q8_0_to_f16_transpose_kernel(
-        __half *out,
-        const unsigned char *w,
-        uint64_t in_dim,
-        uint64_t out_dim,
-        uint64_t blocks);
-
 /* Tile geometry for dequant_q8_0_to_f16_transpose_tiled_kernel; see its
  * definition in ds4_rocm_q8.hip.hpp for why the transpose is tiled. */
 #define DS4_Q8_T_TILE_I 32u
@@ -377,10 +370,7 @@ static const ds4_rocm_runtime_config *hip_runtime_config(void) {
         g_rocm_cfg.disable_shared_gate_up_fused_w32 = 1;
         g_rocm_cfg.attention_output_hipblas_all = 1;
         g_rocm_cfg.shared_down_hipblas = 1;
-        const char *sharedx_env =
-            getenv("GUFO_DEEPSEEK_ROCM_Q8_DECODE_SHAREDX_64K");
-        g_rocm_cfg.q8_decode_sharedx_64k =
-            sharedx_env == NULL || hip_env_present(sharedx_env);
+        g_rocm_cfg.q8_decode_sharedx_64k = 1;
         g_rocm_cfg.q8_decode_rpb = 1u;
         g_rocm_cfg.q8_hc_decode_rpb = 16u;
         g_rocm_cfg.attn_out_low_decode_rpb = 32u;
@@ -633,19 +623,10 @@ static const __half *hip_q8_f16_transpose_ptr(
         return NULL;
     }
     const uint64_t blocks = (in_dim + 31u) / 32u;
-    static const int tiled_transpose = [] {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_TILED_Q8_TRANSPOSE");
-        return env == NULL || env[0] != '0';
-    }();
     const dim3 grid(
             (unsigned)((out_dim + DS4_Q8_T_TILE_ROW - 1u) / DS4_Q8_T_TILE_ROW),
             (unsigned)blocks,
             1u);
-    if (!tiled_transpose) {
-        const uint64_t n = in_dim * out_dim;
-        dequant_q8_0_to_f16_transpose_kernel<<<(n + 255u) / 256u, 256>>>(
-                dev, (const unsigned char *)q8, in_dim, out_dim, blocks);
-    } else
     dequant_q8_0_to_f16_transpose_tiled_kernel<<<grid, 256>>>(
             dev,
             (const unsigned char *)q8,
@@ -1045,11 +1026,8 @@ extern "C" int ds4_gpu_init(void) {
     /* The vendored MMQ tier is the largest prefill win available here, and it
      * is scoped to DS4_ROCM_WIDE_PREFILL_ROWS so decode, DSpark verification
      * and short resumed batches keep the kernels the pinned trajectory was
-     * recorded against. Set GUFO_DEEPSEEK_ROCM_MMQ=0 to fall back. */
-    const char *mmq_env = getenv("GUFO_DEEPSEEK_ROCM_MMQ");
-    const int mmq_disabled = mmq_env != NULL && mmq_env[0] == '0';
-    g_rocm_mmq_ready =
-        g_rocm_gfx1151 && !mmq_disabled && ds4_mmq_init(dev) == 0;
+     * recorded against. */
+    g_rocm_mmq_ready = g_rocm_gfx1151 && ds4_mmq_init(dev) == 0;
     fprintf(stderr, DS4_GPU_LOG_PREFIX "native MMQ %s\n",
             g_rocm_mmq_ready ? "enabled" : "unavailable");
     return 1;

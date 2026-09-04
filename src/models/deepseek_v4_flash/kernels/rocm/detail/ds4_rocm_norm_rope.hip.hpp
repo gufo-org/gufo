@@ -606,7 +606,7 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
         !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
     if (n == 0u || rows == 0u) return 1;
     /* The hot caller is the 4-way hyper-connection row, 16,384 floats wide. */
-    if (n == 256u * 64u && hip_vec_convert_enabled()) {
+    if (n == 256u * 64u) {
         rms_norm_plain_regs_kernel<64u><<<rows, 256>>>(
                 (float *)out->ptr, NULL, (const float *)x->ptr, n, rows, eps);
         return hip_ok(hipGetLastError(), "rms_norm_plain regs launch");
@@ -620,7 +620,7 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
  * projection on the same halves. Returns 0 when the shape is not the hot
  * hyper-connection row. */
 extern "C" int ds4_gpu_rms_norm_plain_rows_f16_tensor(ds4_gpu_tensor *out_h, const ds4_gpu_tensor *x, uint32_t n, uint32_t rows, float eps) {
-    if (n != 256u * 64u || !hip_vec_convert_enabled()) return 0;
+    if (n != 256u * 64u) return 0;
     if (!hip_tensor_has_elems2(out_h, n, rows, sizeof(__half)) ||
         !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
     if (rows == 0u) return 1;

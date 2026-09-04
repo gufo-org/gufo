@@ -5,5 +5,4 @@ void ggml_cuda_launch_mm_ids_helper(
         int n_experts, int n_tokens, int n_expert_used, int nchannels_y, int si1, int sis1, cudaStream_t stream);
 
 // ds4 local (P5): whether the large-n global-memory mm_ids path is enabled
-// (default on; DS4_MMID_LARGE=0 reverts callers to the past-cap refusal).
-bool ds4_mmid_large_enabled(void);
+// (unconditional; callers no longer refuse past-cap shapes).

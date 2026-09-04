@@ -351,9 +351,9 @@ Reordering, and therefore scoped to prompt-chunk width:
   shape, which at prompt-chunk width means an `n` that is not a multiple of 128,
   so excluding it costs nothing at a 4,096-token prompt.
 
-`GUFO_DEEPSEEK_ROCM_MMQ=0`, `GUFO_DEEPSEEK_ROCM_MIXED_WINDOW_WMMA=0`,
-`GUFO_DEEPSEEK_ROCM_FUSED_QNORM_ROPE=0`, `GUFO_DEEPSEEK_ROCM_HIPBLASLT_CANDIDATE=<n>`
-and `GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=<mask>` reach each route individually.
+Each of those routes was reachable individually through an environment switch
+while it was being evaluated. All of them are now compiled in unconditionally;
+see "Every DS4 tuning switch is now compiled in" below.
 
 ### Comparison against the upstream ds4 optimization
 
@@ -960,10 +960,10 @@ kernel is actually residency-starved, and both earlier attempts to test it were
 confounded -- narrowing `mmq_x` also multiplies column tiles and weight re-reads,
 and the NCW column split also halves matrix ops per A-fragment load.
 
-`DS4_MMQ_LDS_PAD=N` (added to `mmq_get_nbytes_shared`, default 0, no-op) adds N
-KiB of *unused* dynamic shared memory. MMQ's shared block is dynamic and the
-kernel indexes only what it needs, so the grid, the tile shape and the work per
-wave stay byte-for-byte identical and only workgroups per CU move:
+The measurement that settles it padded `mmq_get_nbytes_shared` with N KiB of
+*unused* dynamic shared memory. MMQ's shared block is dynamic and the kernel
+indexes only what it needs, so the grid, the tile shape and the work per wave
+stay byte-for-byte identical and only workgroups per CU move:
 
 | LDS | workgroups/WGP | pp4096 mean |
 |---|---:|---:|
@@ -1093,6 +1093,70 @@ Two things this ruled out at the same time:
   own timestamps: counter collection serializes dispatches and inflates every
   duration. Take bytes from the counter pass and time from a plain kernel
   trace.)
+
+### Every DS4 tuning switch is now compiled in (September 4, 2026)
+
+The backend had accumulated **35 behaviour-selecting environment variables** from
+successive rollouts -- kill switches for routes that have long since become
+unconditional, sweep knobs for settled questions, and debug instruments whose
+non-default branch had not run in months. Every one of them defaulted to the
+shipped behaviour, so none was needed to get it, and each one was a live path
+that could silently change numerics.
+
+All 35 are gone and their defaults are compiled in. Removed, by category:
+
+- **Kill switches for now-unconditional routes** (default on): `..._MMQ`,
+  `..._MIXED_WINDOW_WMMA`, `..._MMQ_FUSED_SWIGLU`, `..._FUSED_MOE_SUM`,
+  `..._FUSED_INV_ROPE_PACK`, `..._WIDE_DOWN_TILE_MAP`, `..._TILED_Q8_TRANSPOSE`,
+  `..._F16_INPUT_MIRROR`, `..._VEC_CONVERT`, `..._Q8_DECODE_SHAREDX_64K`,
+  `..._HIPBLASLT_TUNE`, `..._DISABLE_SHARED_GATE_UP_SWIGLU_FUSION`,
+  `..._NO_PREFILL_KERNEL_WARMUP`, `DS4_MMQ_D2R`, `DS4_MMQ_D2R_IQ2`,
+  `DS4_MMQ_NO_YIND`, `DS4_MMQ_ROUTED_TILE_BOUND`, `DS4_CUDA_NO_MOE_DEDUP`,
+  `DS4_MMID_LARGE`, `DS4_MMID_CASE1`.
+- **Seven more of the same, hidden behind a helper** that took the variable name
+  as a parameter, so a `grep` for `getenv("` did not find them:
+  `..._DISABLE_HC_FUSION`, `..._DISABLE_KV_FUSION`,
+  `..._DISABLE_QKV_NORM_FUSION`, `..._DISABLE_COMPRESSOR_PAIR_PROJ`,
+  `..._DISABLE_HC_NORM_FUSION`, `..._DISABLE_SHARED_DOWN_HC_FUSION`,
+  `..._DISABLE_ATTN_OUT_HC_FUSION`.
+- **Sweep knobs for settled questions**: `DS4_CUDA_MMQ_X_MAX`,
+  `DS4_MMQ_COL_SLOTS`, `DS4_MMQ_LDS_PAD`, `..._HIPBLASLT_CANDIDATE`,
+  `..._HIPBLASLT_ROUTING`.
+- **Numeric thresholds** now the constants they defaulted to:
+  `..._PREFILL_CHUNK` (4,096), `..._RESUME_PREFILL_MIN` (4),
+  `..._GRAPH_RAW_CAP`, `..._DECODE_INDEXER_SPARSE_THRESHOLD` (1,024),
+  `..._GRAPH_TOKEN_SPLIT_LAYERS` (4), `..._GRAPH_OUTPUT_ROW`,
+  `..._DENSE_SMALL_BATCH_ROWS` (24), `..._MOE_SMALL_BATCH_ROWS` (16),
+  `DS4_MMQ_D2R_MIN_COLS` (1,024), `DS4_ROCM_WEIGHT_PRELOAD_SPAN_MB` (1,024).
+- **Debug instruments** whose default-off branch was dead: `DS4_MMQ_OUT_MEMSET`,
+  `DS4_MMQ_YBUF_MEMSET`, `DS4_MMQ_YIND_VERIFY`, `DS4_Q8_FOLD_SELFTEST`,
+  `DS4_CUDA_MMQ_Q81_PERSISTENT` (and its eight dead fast paths),
+  `..._MOE_EXPERT_SPREAD`, `DS4_CUDA_NVTX` / `DS4_CUDA_NSYS_PREFILL_START_POS`
+  (nsys is CUDA tooling; `DS4_MMQ_HAS_NVTX` is 0 on this HIP build),
+  `GUFO_DEEPSEEK_DSPARK_SELFTEST_REPS` (4).
+
+**Verified behaviour-preserving structurally, not just by timing.** A 4,096-token
+prefill profiled before and after dispatches **133 kernel groups and 3,926
+dispatches, identical in name, grid, workgroup size and count** -- so every
+removal was unreachable code. `nix build .#checks.x86_64-linux.pr` stays green at
+81/81. Timing agreed once the thermal confound was removed: a first A/B put the
+cleaned build 10% down, but both pairs had run the old binary first, and
+reversing the order within each pair gave 450.2 against 452.9 tok/s. **Alternate
+the order within pairs, not just between them** -- ordering alone is worth 10% on
+this APU.
+
+What is deliberately kept, none of which changes behaviour:
+
+- Seven observability switches: `..._GRAPH_TOKEN_PROFILE`,
+  `..._GRAPH_PREFILL_PROFILE`, `..._GRAPH_PREFILL_SPLIT_PROFILE`,
+  `..._LAYER_STAGE_PROFILE`, `..._DECODE_STAGE_PROFILE`,
+  `..._INDEXER_STAGE_PROFILE`, `..._Q_STAGE_PROFILE`, plus
+  `GUFO_DEEPSEEK_DSPARK_TRACE`. These only print timings, and the token profile
+  is what settled the sampling question above.
+- `DS4_LOCK_FILE`, an operational path override for the single-instance lock;
+  hardcoding `/tmp/ds4.lock` would leave no escape in a container.
+- `GGML_CUDA_DISABLE_GRAPHS` in `mmq/common.cuh`, which is verbatim upstream
+  llama.cpp and pinned by `mmq/VENDOR.md`.
 
 ## To Do
 

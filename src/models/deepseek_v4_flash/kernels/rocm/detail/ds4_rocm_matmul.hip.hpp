@@ -528,25 +528,7 @@ static int hip_launch_q8_batch_reuse(
  * disables the small-batch route entirely, which is how an A/B run isolates it.
  */
 static uint32_t ds4_rocm_dense_small_batch_rows(void) {
-    static int parsed = -1;
-    static uint32_t cached = 24u;
-    if (parsed < 0) {
-        parsed = 1;
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_DENSE_SMALL_BATCH_ROWS");
-        if (env && env[0]) {
-            char *end = NULL;
-            const unsigned long value = strtoul(env, &end, 10);
-            if (end != env && end && *end == '\0' && value <= 256ul) {
-                cached = (uint32_t)value;
-            } else {
-                fprintf(stderr,
-                        DS4_GPU_LOG_PREFIX "invalid GUFO_DEEPSEEK_ROCM_DENSE_SMALL_BATCH_ROWS=%s; "
-                        "expected 0..256\n",
-                        env);
-            }
-        }
-    }
-    return ds4_rocm_small_batch_limit(cached);
+    return 24u;
 }
 
 static int hip_matmul_q8_0_tensor_f16_gemm(

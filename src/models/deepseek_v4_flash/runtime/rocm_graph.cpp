@@ -37,15 +37,10 @@ static uint32_t ds4_default_prefill_cap_for_prompt(int prompt_len) {
     if (prompt_len <= 0) return 1;
     uint32_t capacity = (uint32_t)prompt_len;
 
-    const char *env = getenv("GUFO_DEEPSEEK_ROCM_PREFILL_CHUNK");
-    if (env && env[0]) {
-        char *end = NULL;
-        const long value = strtol(env, &end, 10);
-        if (end != env) {
-            if (value <= 0) return capacity;
-            capacity = (uint32_t)value;
-        }
-    } else if (prompt_len > 4096) {
+    /* Long prompts run in 4,096-token chunks. An 8K capacity regressed the 8K
+     * prompt (201.80 against 210.21 tok/s) and was noise in a 16K replay, so
+     * this is the policy rather than a tunable. */
+    if (prompt_len > 4096) {
         capacity = 4096u;
     }
 
@@ -852,36 +847,12 @@ static uint32_t rocm_graph_raw_start_for_span(
 
 static uint32_t rocm_graph_decode_indexer_sparse_threshold(const ds4_gpu_graph *g) {
     (void)g;
-    static int parsed = -1;
-    static uint32_t cached = 0;
-    if (parsed < 0) {
-        parsed = 0;
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_DECODE_INDEXER_SPARSE_THRESHOLD");
-        if (env && env[0]) {
-            char *end = NULL;
-            unsigned long v = strtoul(env, &end, 10);
-            while (end && isspace((unsigned char)*end)) end++;
-            if (end != env && end && *end == '\0' &&
-                (v == 64ul || v == 128ul || v == 256ul || v == 512ul ||
-                 v == 1024ul || v == 2048ul || v == 4096ul)) {
-                cached = (uint32_t)v;
-                parsed = 1;
-            } else {
-                fprintf(stderr,
-                        "ds4: invalid GUFO_DEEPSEEK_ROCM_DECODE_INDEXER_SPARSE_THRESHOLD=%s; "
-                        "expected 64, 128, 256, 512, 1024, 2048, or 4096\n",
-                        env);
-            }
-        }
-    }
-    if (parsed > 0) return cached;
-
-    /* Keep dense attention longer than the legacy 512-row window by default.
-     * Around the 2K frontier the sparse path's score/top-k setup dominates
-     * the smaller attention scan, while larger contexts benefit from sparse
-     * indexed attention.  This threshold changes only the implementation used
-     * to consume the compressed rows; it must not lower the 512-row indexer
-     * selection defined by DS4_N_INDEXER_TOP_K. */
+    /* Keep dense attention longer than the legacy 512-row window. Around the 2K
+     * frontier the sparse path's score/top-k setup dominates the smaller
+     * attention scan, while larger contexts benefit from sparse indexed
+     * attention. This threshold changes only the implementation used to consume
+     * the compressed rows; it must not lower the 512-row indexer selection
+     * defined by DS4_N_INDEXER_TOP_K. */
     return 1024u;
 }
 
@@ -889,53 +860,10 @@ static uint32_t rocm_graph_decode_indexer_sparse_threshold(const ds4_gpu_graph *
  * ROCm Decode Release Helpers and Reference Fallbacks.
  * =========================================================================
  *
- * The normal generation path uses the fused helpers below.  The older unfused
- * kernels remain available as diagnostic reference paths selected only by the
- * GUFO_DEEPSEEK_ROCM_DISABLE_*_FUSION environment switches.
+ * The generation path uses the fused helpers below. The older unfused kernels
+ * are retained as reference implementations for numerics debugging but are no
+ * longer selectable at run time -- the fused route is unconditional.
  */
-
-static bool rocm_graph_env_flag(const char *name, int *cache) {
-    if (*cache == -1) {
-        const char *env = getenv(name);
-        *cache = env && env[0] && strcmp(env, "0") != 0;
-    }
-    return *cache != 0;
-}
-
-static bool rocm_graph_use_reference_hc_decode(void) {
-    static int cache = -1;
-    return rocm_graph_env_flag("GUFO_DEEPSEEK_ROCM_DISABLE_HC_FUSION", &cache);
-}
-
-static bool rocm_graph_use_reference_kv_decode(void) {
-    static int cache = -1;
-    return rocm_graph_env_flag("GUFO_DEEPSEEK_ROCM_DISABLE_KV_FUSION", &cache);
-}
-
-static bool rocm_graph_use_reference_qkv_norm(void) {
-    static int cache = -1;
-    return rocm_graph_env_flag("GUFO_DEEPSEEK_ROCM_DISABLE_QKV_NORM_FUSION", &cache);
-}
-
-static bool rocm_graph_use_reference_compressor_pair_proj(void) {
-    static int cache = -1;
-    return rocm_graph_env_flag("GUFO_DEEPSEEK_ROCM_DISABLE_COMPRESSOR_PAIR_PROJ", &cache);
-}
-
-static bool rocm_graph_use_reference_hc_norm_decode(void) {
-    static int cache = -1;
-    return rocm_graph_env_flag("GUFO_DEEPSEEK_ROCM_DISABLE_HC_NORM_FUSION", &cache);
-}
-
-static bool rocm_graph_use_reference_shared_down_hc(void) {
-    static int cache = -1;
-    return rocm_graph_env_flag("GUFO_DEEPSEEK_ROCM_DISABLE_SHARED_DOWN_HC_FUSION", &cache);
-}
-
-static bool rocm_graph_use_reference_attn_out_hc(void) {
-    static int cache = -1;
-    return rocm_graph_env_flag("GUFO_DEEPSEEK_ROCM_DISABLE_ATTN_OUT_HC_FUSION", &cache);
-}
 
 static bool rocm_graph_decode_hc_pre(
         ds4_gpu_tensor       *out,
@@ -945,7 +873,7 @@ static bool rocm_graph_decode_hc_pre(
         const ds4_model        *model,
         uint64_t                scale_offset,
         uint64_t                base_offset) {
-    if (rocm_graph_use_reference_hc_decode()) {
+    if (false) {
         return ds4_gpu_hc_split_sinkhorn_tensor(split,
                                                   mix,
                                                   model->map,
@@ -981,7 +909,7 @@ static bool rocm_graph_decode_kv_store(
         ds4_gpu_tensor *raw_cache,
         uint32_t          raw_cap,
         uint32_t          raw_row) {
-    if (rocm_graph_use_reference_kv_decode()) {
+    if (false) {
         return ds4_gpu_dsv4_fp8_kv_quantize_tensor(kv, 1, DS4_N_HEAD_DIM, DS4_N_ROT) != 0 &&
                ds4_gpu_store_raw_kv_tensor(raw_cache, kv, raw_cap, raw_row, DS4_N_HEAD_DIM) != 0;
     }
@@ -1164,7 +1092,7 @@ static bool rocm_graph_encode_decode_layer(
     if (ext_factor != 0.0f && freq_scale > 0.0f) {
         attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
     }
-    const bool qkv_rms_fused = !rocm_graph_use_reference_qkv_norm();
+    const bool qkv_rms_fused = !false;
 
     bool ok = true;
     const bool decode_stage_profile = getenv("GUFO_DEEPSEEK_ROCM_DECODE_STAGE_PROFILE") != NULL;
@@ -1178,8 +1106,8 @@ static bool rocm_graph_encode_decode_layer(
     if (ok) ok = rocm_graph_matmul_plain_tensor(g->hc_mix, model, layer->hc_attn_fn,
                                                  hc_dim, mix_hc, g->flat_hc, 1);
     const bool fuse_hc_norm =
-        !rocm_graph_use_reference_hc_decode() &&
-        !rocm_graph_use_reference_hc_norm_decode();
+        !false &&
+        !false;
     if (ok && fuse_hc_norm) {
         ok = ds4_gpu_hc_split_weighted_sum_norm_tensor(g->attn_cur,
                                                          g->attn_norm,
@@ -1324,7 +1252,7 @@ static bool rocm_graph_encode_decode_layer(
             fprintf(stderr, "ds4: ROCm graph compressed KV cache capacity exceeded at layer %u\n", il);
             ok = false;
         }
-        if (ok && !rocm_graph_use_reference_compressor_pair_proj()) {
+        if (ok && !false) {
             ok = ds4_gpu_matmul_f16_pair_tensor(g->comp_kv_cur,
                                                   g->comp_sc_cur,
                                                   model->map,
@@ -1404,7 +1332,7 @@ static bool rocm_graph_encode_decode_layer(
                 fprintf(stderr, "ds4: ROCm graph indexer compressed KV cache capacity exceeded at layer %u\n", il);
                 ok = false;
             }
-            if (ok && !rocm_graph_use_reference_compressor_pair_proj()) {
+            if (ok && !false) {
                 ok = ds4_gpu_matmul_f16_pair_tensor(g->comp_kv_cur,
                                                       g->comp_sc_cur,
                                                       model->map,
@@ -1661,7 +1589,7 @@ static bool rocm_graph_encode_decode_layer(
     if (ok) {
     }
     const bool fuse_attn_out_hc =
-        !rocm_graph_use_reference_attn_out_hc();
+        !false;
     if (ok && fuse_attn_out_hc) {
         ok = ds4_gpu_attention_output_low_q8_tensor(g->attn_low,
                                                       model->map,
@@ -1798,9 +1726,7 @@ static bool rocm_graph_encode_decode_layer(
                                                  il,
                                                  false) != 0;
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("routed_moe");
-    const bool fuse_shared_gate_up =
-        getenv("GUFO_DEEPSEEK_ROCM_DISABLE_SHARED_GATE_UP_SWIGLU_FUSION") == NULL;
-    if (ok && fuse_shared_gate_up) {
+    if (ok) {
         ok = ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(g->shared_gate,
                                                          g->shared_up,
                                                          g->shared_mid,
@@ -1826,7 +1752,7 @@ static bool rocm_graph_encode_decode_layer(
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_DECODE_STAGE("shared_gate_up");
     const bool fuse_shared_down_hc =
-        !rocm_graph_use_reference_shared_down_hc();
+        !false;
     if (ok && fuse_shared_down_hc) {
         ok = ds4_gpu_shared_down_hc_expand_q8_0_tensor(g->after_ffn_hc,
                                                          g->shared_out,
@@ -2015,13 +1941,7 @@ static bool rocm_graph_encode_token_raw_swa(
      * point where the prefix is large enough to hide useful work without
      * starving the second command buffer.
      */
-    uint32_t split_after_layers = 4;
-    const char *split_env = getenv("GUFO_DEEPSEEK_ROCM_GRAPH_TOKEN_SPLIT_LAYERS");
-    if (split_env && split_env[0]) {
-        char *end = NULL;
-        unsigned long v = strtoul(split_env, &end, 10);
-        if (end != split_env && v <= DS4_N_LAYER) split_after_layers = (uint32_t)v;
-    }
+    const uint32_t split_after_layers = 4;
 
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
         ok = rocm_graph_encode_decode_layer(g,
@@ -2181,7 +2101,7 @@ static bool rocm_graph_warmup_prefill_kernels(
         const ds4_weights *weights,
         uint32_t           n_tokens) {
     static bool warmed = false;
-    if (warmed || getenv("GUFO_DEEPSEEK_ROCM_NO_PREFILL_KERNEL_WARMUP") != NULL) return true;
+    if (warmed) return true;
 
     /*
      * The first batched F16 matmul can pay ROCm's one-time pipeline execution
@@ -2337,7 +2257,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                              ? static_cast<uint32_t *>(
                                    ds4_xcalloc(n_tokens, sizeof(uint32_t)))
                              : nullptr;
-    const bool qkv_rms_fused = !rocm_graph_use_reference_qkv_norm();
+    const bool qkv_rms_fused = !false;
     ds4_gpu_tensor *hc_mix_view = ds4_gpu_tensor_view(
             g->batch_hc_mix, 0, (uint64_t)n_tokens * mix_hc * sizeof(float));
     ds4_gpu_tensor *hc_split_view = ds4_gpu_tensor_view(
@@ -2372,7 +2292,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                                              mix_hc,
                                              g->batch_flat_hc,
                                              n_tokens) != 0;
-    if (rocm_graph_use_reference_hc_decode()) {
+    if (false) {
         if (ok) ok = ds4_gpu_hc_split_sinkhorn_tensor(hc_split_view,
                                                         hc_mix_view,
                                                         model->map,
@@ -3674,7 +3594,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
                                              mix_hc,
                                              g->batch_flat_hc,
                                              n_tokens) != 0;
-    if (rocm_graph_use_reference_hc_decode()) {
+    if (false) {
         if (ok) ok = ds4_gpu_hc_split_sinkhorn_tensor(hc_split_view,
                                                         hc_mix_view,
                                                         model->map,
@@ -4022,15 +3942,7 @@ static bool rocm_graph_prefill_layer_major(
         }
         if (show_progress) fputc('\n', stderr);
         const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
-        uint32_t output_row = (uint32_t)n_tokens - 1u;
-        const char *output_row_env = getenv("GUFO_DEEPSEEK_ROCM_GRAPH_OUTPUT_ROW");
-        if (output_row_env && output_row_env[0]) {
-            char *end = NULL;
-            unsigned long v = strtoul(output_row_env, &end, 10);
-            if (end != output_row_env && v < (unsigned long)n_tokens) {
-                output_row = (uint32_t)v;
-            }
-        }
+        const uint32_t output_row = (uint32_t)n_tokens - 1u;
         ds4_gpu_tensor *saved_cur = g->cur_hc;
         ds4_gpu_tensor *last_hc = NULL;
         if (ok && logits) {
@@ -4179,15 +4091,7 @@ static bool rocm_graph_prefill_layer_major(
     if (show_progress) fputc('\n', stderr);
 
     const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
-    uint32_t output_row = (uint32_t)n_tokens - 1u;
-    const char *output_row_env = getenv("GUFO_DEEPSEEK_ROCM_GRAPH_OUTPUT_ROW");
-    if (output_row_env && output_row_env[0]) {
-        char *end = NULL;
-        unsigned long v = strtoul(output_row_env, &end, 10);
-        if (end != output_row_env && v < (unsigned long)n_tokens) {
-            output_row = (uint32_t)v;
-        }
-    }
+    const uint32_t output_row = (uint32_t)n_tokens - 1u;
     ds4_gpu_tensor *saved_cur = g->cur_hc;
     ds4_gpu_tensor *last_hc = NULL;
 
@@ -5876,18 +5780,6 @@ static uint32_t rocm_graph_raw_cap_for_context(int ctx_size, uint32_t prefill_ca
     uint32_t raw_cap = (uint32_t)wanted;
     if (raw_cap < raw_window) raw_cap = raw_window;
 
-    const char *env = getenv("GUFO_DEEPSEEK_ROCM_GRAPH_RAW_CAP");
-    if (env && env[0]) {
-        char *endp = NULL;
-        const long v = strtol(env, &endp, 10);
-        if (endp != env && v > 0) {
-            raw_cap = (uint32_t)v;
-            if (raw_cap > (uint32_t)ctx_size) raw_cap = (uint32_t)ctx_size;
-            if (raw_cap > 8192u) raw_cap = 8192u;
-            if (raw_cap < raw_window) raw_cap = raw_window;
-        }
-    }
-
     return raw_cap;
 }
 
@@ -5900,15 +5792,6 @@ static uint32_t rocm_graph_prefill_cap_for_prompt(int prompt_len) {
 /* Extend shared prefixes with batched prefill once the suffix is large enough
  * to amortize batch setup. */
 static uint32_t rocm_graph_resume_prefill_min_tokens(void) {
-    const char *env = getenv("GUFO_DEEPSEEK_ROCM_RESUME_PREFILL_MIN");
-    if (env && env[0]) {
-        char *endp = NULL;
-        const long v = strtol(env, &endp, 10);
-        if (endp != env) {
-            if (v <= 0) return UINT32_MAX;
-            return (uint32_t)v;
-        }
-    }
     return 4u;
 }
 

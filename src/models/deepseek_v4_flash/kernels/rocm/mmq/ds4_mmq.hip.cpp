@@ -41,15 +41,10 @@
 #define DS4_MMQ_HAS_NVTX 0
 #endif
 
+/* NVTX ranges are nsys/CUDA tooling; DS4_MMQ_HAS_NVTX is 0 on this HIP build,
+ * so the scopes below compile out entirely. */
 static bool ds4_mmq_nvtx_requested() {
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char *nvtx = getenv("DS4_CUDA_NVTX");
-        const char *capture = getenv("DS4_CUDA_NSYS_PREFILL_START_POS");
-        enabled = (nvtx != nullptr && std::strcmp(nvtx, "1") == 0) ||
-                  (capture != nullptr && capture[0] != '\0');
-    }
-    return enabled != 0;
+    return false;
 }
 
 static uint64_t ds4_mmq_nvtx_payload(uint32_t first, uint32_t second) {
@@ -113,7 +108,6 @@ private:
 // 256 KB allocation gives generous headroom for short prefill batches.
 static void *g_q81_scratch_ptr   = nullptr;
 static size_t g_q81_scratch_bytes = 0;
-static bool   g_q81_scratch_enabled = false;
 static void  *g_aligned_q81_scratch_ptr = nullptr;
 static size_t g_aligned_q81_scratch_bytes = 0;
 static int    g_routed_max_expert_rows = 0;
@@ -170,20 +164,12 @@ extern "C" void ds4_mmq_set_aligned_q81_scratch(void *ptr, size_t bytes) {
 }
 
 extern "C" void ds4_mmq_set_routed_max_expert_rows(int rows) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char *env = getenv("DS4_MMQ_ROUTED_TILE_BOUND");
-        enabled = (env && env[0] == '0') ? 0 : 1;
-    }
-    g_routed_max_expert_rows = (enabled && rows > 0) ? rows : 0;
+    g_routed_max_expert_rows = rows > 0 ? rows : 0;
 }
 
 // Read by ds4_mmq_moe_vec_impl; non-zero means use the persistent buffer.
 // Set by ds4_mmq_init once based on env.  (Single-threaded GPU work; no
 // atomicity needed.)
-extern "C" int ds4_mmq_q81_persistent_enabled(void) {
-    return g_q81_scratch_enabled ? 1 : 0;
-}
 
 extern "C" void *ds4_mmq_q81_scratch_ptr(void) {
     return g_q81_scratch_ptr;
@@ -210,83 +196,9 @@ static char *ds4_mmq_folded_q81(const float *X_f32, int64_t K, int n_tokens,
     return (char *)(uintptr_t)p;
 }
 
-// Default ON (2026-07-09 gated increment: same-boot ABBA 427->493 tok/s @12k,
-// gsm8k 97.5 / mbpp 90). DS4_MMQ_D2R=0 is the kill switch back to the
-// mul_mat_q SoA-tile down path.
-static bool d2r_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("DS4_MMQ_D2R");
-        cached = (env && env[0] == '0') ? 0 : 1;
-    }
-    return cached != 0;
-}
-
-static bool d2r_iq2_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("DS4_MMQ_D2R_IQ2");
-        cached = (env && env[0] == '0') ? 0 : 1;
-    }
-    return cached != 0;
-}
-
-// Blanket output zeroing on the dense/MoE-down/pair GEMM entries.  Added by
-// 82b2622 as belt-and-suspenders while root-causing the cont BOS spam; the
-// actual roots were fixed in the same commit (stream-K fixup write_back goes
-// dense + tmp_fixup zeroed + ncols_max=ne_get_rows), after which every
-// element a consumer reads is stored by the GEMM itself and the zeroing was
-// ~1.0 s/12k-admission of pure memset tax.  Default OFF (2026-07-09 gated
-// increment: L42 deep tensors BIT-IDENTICAL with/without, same-boot ABBA
-// 641.5 -> 678 tok/s @12k, gsm8k 119/120 / mbpp 36/40 / canary=[]).
-// DS4_MMQ_OUT_MEMSET=1 restores the zeroing.
-static bool out_memset_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("DS4_MMQ_OUT_MEMSET");
-        cached = (env && env[0] == '1') ? 1 : 0;
-        if (cached) {
-            fprintf(stderr, "ds4: DS4_MMQ_OUT_MEMSET=1 - blanket GEMM output zeroing restored\n");
-        }
-    }
-    return cached != 0;
-}
-
-/* v0.5 inc-12 slice 2: Y-buffer (q8_1 activation) memset diet.  The S1.1a-era
- * zero of every quantize staging buffer before quantize_mmq_q8_1 cost ~2.3
- * s/180k of stream time (reslice10 MEMSET table: 56.6/28.3/18.9/9.45/4.7 MB
- * classes = the gateup/down/o_proj/dense/shexp Y buffers).  quantize writes
- * every valid column; only the never-written pad/slack tail is at stake, and
- * the mmq write_back masks tail lanes out of the output (the D2R kernels
- * guard their token loops outright).  Modes, same contract as the cublas ws
- * knob:
- *   DS4_MMQ_YBUF_MEMSET unset/0 -> no zero (default; bit-exact IFF no tail
- *     byte can reach an output, proven by the poison gate)
- *   =1      -> S1.1a always-zero (the old behavior)
- *   =poison -> fill 0xFF: the bit-exactness instrument.  Exact twins vs
- *     always-zero across the gate battery prove the masking claim; any
- *     drift means some path DOES leak tail bytes and OFF must not ship. */
-static int ybuf_memset_mode() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("DS4_MMQ_YBUF_MEMSET");
-        cached = 0;
-        if (env && env[0] == '1') cached = 1;
-        else if (env && (env[0] == 'p' || env[0] == 'P')) cached = 2;
-        if (cached) {
-            fprintf(stderr, "ds4: DS4_MMQ_YBUF_MEMSET=%s - q8_1 staging %s\n",
-                    cached == 1 ? "1" : "poison",
-                    cached == 1 ? "zeroing restored" : "poisoned (0xFF)");
-        }
-    }
-    return cached;
-}
-
-static void ybuf_memset(void *ptr, size_t bytes, cudaStream_t stream) {
-    const int mode = ybuf_memset_mode();
-    if (mode == 0 || ptr == NULL || bytes == 0) return;
-    (void)cudaMemsetAsync(ptr, mode == 1 ? 0 : 0xFF, bytes, stream);
-}
+// The D2R down path is unconditional. It was gated during its rollout
+// (same-boot ABBA 427->493 tok/s at 12k, gsm8k 97.5 / mbpp 90) and the kill
+// switch back to the mul_mat_q SoA-tile down path has not been needed since.
 
 /* flat-pool p5b: the direct fused gate/up path stages its input Q8 through
  * the ids_src1 column->token map inside the D2R kernel, so the activation
@@ -294,43 +206,10 @@ static void ybuf_memset(void *ptr, size_t bytes, cudaStream_t stream) {
  * assignment slot (n_tokens * top-k rows and bytes).  Bit-identical by
  * construction: the quantize is row-local, so a gathered slot for token t
  * holds exactly the bytes of compact row t; the kernel consumes the same
- * blocks in the same tile order through the indirection.  DS4_MMQ_NO_YIND
- * restores the slot-gathered quantize; DS4_MMQ_YIND_VERIFY byte-compares
- * the two buffers in situ (expect bad=0). */
-static int moe_yind_enabled(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        cached = getenv("DS4_MMQ_NO_YIND") == NULL ? 1 : 0;
-        if (!cached) {
-            fprintf(stderr, "ds4: DS4_MMQ_NO_YIND - moe gate/up y-indirect staging disabled\n");
-        }
-    }
-    return cached;
-}
-
-static int moe_yind_verify_enabled(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        cached = getenv("DS4_MMQ_YIND_VERIFY") != NULL ? 1 : 0;
-    }
-    return cached;
-}
-
-static int64_t d2r_min_cols() {
-    static int64_t cached = -1;
-    if (cached < 0) {
-        cached = 1024;
-        const char *env = getenv("DS4_MMQ_D2R_MIN_COLS");
-        if (env && env[0] != '\0') {
-            char *end = nullptr;
-            const long v = strtol(env, &end, 10);
-            if (end != env && v > 0) {
-                cached = (int64_t)v;
-            }
-        }
-    }
-    return cached;
-}
+ * blocks in the same tile order through the indirection. The two buffers were
+ * byte-compared in situ during rollout (bad=0). */
+/* Column floor for the D2R down path. */
+static constexpr int64_t D2R_MIN_COLS = 1024;
 
 extern "C" size_t ds4_mmq_q81_scratch_bytes(void) {
     return g_q81_scratch_bytes;
@@ -354,26 +233,6 @@ extern "C" int ds4_mmq_init(int device) {
         return -1;
     }
 
-    // Step 7 task #29: pre-allocate persistent Q8_1 scratch if enabled.
-    // Must happen here (before any layer-graph capture) so the cudaMalloc
-    // is not forbidden by capture-mode restrictions, and so the kernel
-    // pointer arg baked into the captured graph stays valid at replay.
-    if (getenv("DS4_CUDA_MMQ_Q81_PERSISTENT") && !g_q81_scratch_ptr) {
-        const size_t bytes = 256 * 1024;
-        cudaError_t err = cudaMalloc(&g_q81_scratch_ptr, bytes);
-        if (err != cudaSuccess) {
-            fprintf(stderr, "ds4_mmq_init: cudaMalloc(q81_scratch %zu B) failed: %s; "
-                            "falling back to pool_alloc\n",
-                    bytes, cudaGetErrorString(err));
-            g_q81_scratch_ptr = nullptr;
-            g_q81_scratch_enabled = false;
-        } else {
-            g_q81_scratch_bytes = bytes;
-            g_q81_scratch_enabled = true;
-            fprintf(stderr, "ds4_mmq_init: persistent Q8_1 scratch enabled (%zu B at %p)\n",
-                    bytes, g_q81_scratch_ptr);
-        }
-    }
     return 0;
 }
 
@@ -401,7 +260,6 @@ extern "C" void ds4_mmq_cleanup(void) {
         (void)cudaFree(g_q81_scratch_ptr);
         g_q81_scratch_ptr = nullptr;
         g_q81_scratch_bytes = 0;
-        g_q81_scratch_enabled = false;
     }
     g_aligned_q81_scratch_ptr = nullptr;
     g_aligned_q81_scratch_bytes = 0;
@@ -644,7 +502,6 @@ int ds4_mmq_dense_impl(
     // The tail's dot-products are masked out by write_back, so only their
     // non-determinism matters; zero the buffer so the tail is a deterministic zero
     // (a zero q8_1 block contributes 0 to the dot product).
-    ybuf_memset(src1_q8_1, nbytes_src1_q8_1, stream);
 
     if (use_native_fp4) {
         quantize_mmq_fp4_cuda(
@@ -679,10 +536,6 @@ int ds4_mmq_dense_impl(
     const bool use_stream_k =
         (GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) ||
         GGML_CUDA_CC_IS_CDNA(cc);
-
-    if (out_memset_enabled()) {
-        cudaMemsetAsync(out_f32, 0, (size_t)M * (size_t)N * sizeof(float), stream);
-    }
 
     mmq_args args = {
         /*x=*/(const char *)W,
@@ -805,10 +658,6 @@ extern "C" int ds4_mmq_q8_0_dense_preq(
         (GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) ||
         GGML_CUDA_CC_IS_CDNA(cc);
 
-    if (out_memset_enabled()) {
-        cudaMemsetAsync(out, 0, (size_t)M * (size_t)N * sizeof(float), stream);
-    }
-
     mmq_args args = {
         /*x=*/(const char *)W,
         /*type_x=*/GGML_TYPE_Q8_0,
@@ -881,7 +730,6 @@ extern "C" int ds4_mmq_q8_0_dense_d2r(
         slack_blocks * sizeof(block_q8_1_mmq);
 
     ggml_cuda_pool_alloc<char> src1_q8_1(ctx->pool(), nbytes_src1_q8_1);
-    ybuf_memset(src1_q8_1.get(), nbytes_src1_q8_1, stream);
 
     quantize_mmq_q8_1_cuda(
         X_f32, /*ids=*/nullptr, (void *)src1_q8_1.get(),
@@ -1065,14 +913,7 @@ int ds4_mmq_moe_impl(
     // the cap the launcher dispatches the bit-identical two-pass global
     // variant instead (mmid.cu mm_ids_helper_global) — refusing here used to
     // throw the WHOLE MoE block (including gate/up mmq work) onto the legacy
-    // expert-tile fallback, the W8192 prefill cliff.  DS4_MMID_LARGE=0
-    // restores the refusal.
-    if ((size_t)n_tokens * 4u > ggml_cuda_info().devices[dev].smpbo && !ds4_mmid_large_enabled()) {
-        fprintf(stderr, "%s: n_tokens=%d exceeds mm_ids_helper shared-mem cap; falling back\n",
-                tag, n_tokens);
-        return -1;
-    }
-
+    // expert-tile fallback, the W8192 prefill cliff.
     ggml_cuda_launch_mm_ids_helper(
         ids, ids_src1.get(), ids_dst.get(), expert_bounds.get(),
         n_experts, n_tokens, n_expert_used, /*nchannels_y=*/(int)ne11, si1, sis1, stream);
@@ -1103,7 +944,6 @@ int ds4_mmq_moe_impl(
     // tail from stale pool memory -> allocator-perturbation-dependent garbage in the
     // (write_back-masked) tail lanes -> non-deterministic batched-forward output.
     // Zero it so the masked-out tail is a deterministic zero.
-    ybuf_memset(src1_q8_1.get(), nbytes_src1_q8_1, stream);
 
     // src1 logical [K, ne11=1, ne12=n_tokens, ne13=1] - K innermost, then
     // one row per channel, channels = tokens.
@@ -1153,12 +993,8 @@ int ds4_mmq_moe_impl(
         (GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) ||
         GGML_CUDA_CC_IS_CDNA(cc);
 
-    if (out_memset_enabled()) {
-        cudaMemsetAsync(out_f32, 0, (size_t)M * (size_t)ne_get_rows * sizeof(float), stream);
-    }
-
-    if (type == GGML_TYPE_Q2_K && x_soa != nullptr && d2r_enabled() &&
-        K % 256 == 0 && M % 2 == 0 && ne_get_rows >= d2r_min_cols()) {
+    if (type == GGML_TYPE_Q2_K && x_soa != nullptr &&
+        K % 256 == 0 && M % 2 == 0 && ne_get_rows >= D2R_MIN_COLS) {
         static int d2r_avail_cc = -1;
         static int d2r_avail = 0;
         if (d2r_avail_cc != cc) {
@@ -1445,8 +1281,7 @@ int ds4_mmq_moe_pair_impl(
         if (fused_down->input_q8_scratch_bytes < nbytes_src1_q8_1) return -91;
         if (fused_down->q8_scratch_bytes < direct_down_q8_bytes) return -92;
         if (gateup_work_bytes == 0 || down_work_bytes == 0) return -93;
-        if (!d2r_enabled() || !d2r_iq2_enabled()) return -94;
-        if (ne_get_rows < d2r_min_cols()) return -95;
+        if (ne_get_rows < D2R_MIN_COLS) return -95;
         if (!ds4_mmq_iq2_xxs_moe_d2r_available(cc) ||
             !ds4_mmq_q2_K_moe_d2r_available(cc)) {
             return -96;
@@ -1513,14 +1348,7 @@ int ds4_mmq_moe_pair_impl(
     const int sis1 = 1;
 
     // Same cap guard as ds4_mmq_moe_impl (see comment there): past the smem
-    // cap the launcher takes the bit-identical global variant (P5); only
-    // refuse with DS4_MMID_LARGE=0.
-    if ((size_t)n_tokens * 4u > ggml_cuda_info().devices[dev].smpbo && !ds4_mmid_large_enabled()) {
-        fprintf(stderr, "%s: n_tokens=%d exceeds mm_ids_helper shared-mem cap; falling back\n",
-                tag, n_tokens);
-        return -1;
-    }
-
+    // cap the launcher takes the bit-identical global variant (P5).
     cudaError_t err = cudaSuccess;
     {
         ds4_mmq_nvtx_scope stage(
@@ -1593,7 +1421,7 @@ int ds4_mmq_moe_pair_impl(
      * p5c: a producer-emitted token-compact buffer replaces even the
      * compact quantize — same layout by construction (ib = kseg*n_tokens
      * + row), so the p5b indirection consumes it unchanged. */
-    const bool moe_yind = direct_gateup_q8 && moe_yind_enabled();
+    const bool moe_yind = direct_gateup_q8;
     const void *input_q8_ext = nullptr;
     if (moe_yind && fused_down && fused_down->input_q8_ext) {
         const size_t ext_need =
@@ -1617,7 +1445,6 @@ int ds4_mmq_moe_pair_impl(
                 "ds4/prefill/moe/input_quant_q8_1",
                 ds4_mmq_nvtx_payload((uint32_t)quant_rows, (uint32_t)K),
                 nvtx_prefill);
-        ybuf_memset(src1_q8_1, nbytes_src1_q8_1, stream);
         if (use_native_fp4) {
             quantize_mmq_fp4_cuda(
                 X_f32, moe_yind ? nullptr : ids_src1, (void *)src1_q8_1,
@@ -1650,53 +1477,6 @@ int ds4_mmq_moe_pair_impl(
                         n_tokens, (long long)ne_get_rows);
             }
         }
-        if (moe_yind && moe_yind_verify_enabled()) {
-            /* In-situ byte-diff (p5a VERIFY pattern): run the slot-gathered
-             * reference quantize into a temp buffer and compare every
-             * assignment slot's blocks against the token-compact buffer
-             * through ids_src1.  Instrument only - synchronous. */
-            const size_t blk = sizeof(block_q8_1_mmq);
-            const int nkseg = (int)(ne10_padded / (4 * QK8_1));
-            const size_t ref_payload = (size_t)nkseg * (size_t)ne_get_rows * blk;
-            const size_t cmp_payload = (size_t)nkseg * (size_t)n_tokens * blk;
-            char *ref = nullptr;
-            if (cudaMalloc((void **)&ref, ref_payload) == cudaSuccess) {
-                quantize_mmq_q8_1_cuda(
-                    X_f32, ids_src1, (void *)ref,
-                    type, K, s11_src, s12_src, s13_src,
-                    ne10_padded, ne_get_rows, 1, 1, stream);
-                char *h_ref = (char *)malloc(ref_payload);
-                char *h_cmp = (char *)malloc(cmp_payload);
-                int32_t *h_ids = (int32_t *)malloc((size_t)ne_get_rows * sizeof(int32_t));
-                if (h_ref && h_cmp && h_ids) {
-                    cudaMemcpyAsync(h_ref, ref, ref_payload, cudaMemcpyDeviceToHost, stream);
-                    cudaMemcpyAsync(h_cmp, src1_q8_1, cmp_payload, cudaMemcpyDeviceToHost, stream);
-                    cudaMemcpyAsync(h_ids, ids_src1, (size_t)ne_get_rows * sizeof(int32_t),
-                                    cudaMemcpyDeviceToHost, stream);
-                    cudaStreamSynchronize(stream);
-                    long long bad = 0;
-                    long long first_slot = -1, first_kseg = -1;
-                    for (int ks = 0; ks < nkseg; ++ks) {
-                        for (int64_t slot = 0; slot < ne_get_rows; ++slot) {
-                            const char *a = h_ref + ((size_t)ks * (size_t)ne_get_rows + (size_t)slot) * blk;
-                            const char *b = h_cmp + ((size_t)ks * (size_t)n_tokens + (size_t)h_ids[slot]) * blk;
-                            if (memcmp(a, b, blk) != 0) {
-                                if (first_slot < 0) { first_slot = slot; first_kseg = ks; }
-                                ++bad;
-                            }
-                        }
-                    }
-                    fprintf(stderr, "ds4: moe yind VERIFY n_tokens=%d n_assign=%lld ksegs=%d "
-                            "bad=%lld/%lld first_slot=%lld first_kseg=%lld\n",
-                            n_tokens, (long long)ne_get_rows, nkseg,
-                            bad, (long long)nkseg * (long long)ne_get_rows,
-                            first_slot, first_kseg);
-                }
-                free(h_ref); free(h_cmp); free(h_ids);
-                cudaFree(ref);
-            }
-        }
-        ybuf_memset(fused_down->q8_scratch, direct_down_q8_bytes, stream);
         const size_t gateup_work_bytes =
             ds4_mmq_iq2_xxs_moe_d2r_fused_scratch_bytes(
                 ne_get_rows, n_experts);
@@ -1722,11 +1502,6 @@ int ds4_mmq_moe_pair_impl(
             }
         }
 
-        if (out_memset_enabled()) {
-            cudaMemsetAsync(fused_down->out, 0,
-                    (size_t)fused_down->out_dim * (size_t)ne_get_rows * sizeof(float),
-                    stream);
-        }
         const size_t down_work_bytes =
             ds4_mmq_q2_K_moe_d2r_scratch_bytes(ne_get_rows, n_experts);
         if (down_work_bytes == 0) {
@@ -1758,18 +1533,11 @@ int ds4_mmq_moe_pair_impl(
                             (y_values_per_block * sizeof(int));
     const int64_t s13_mmq = ne12 * s12_mmq;
 
-    if (out_memset_enabled()) {
-        cudaMemsetAsync(out_a, 0, (size_t)M * (size_t)ne_get_rows * sizeof(float), stream);
-        if (!swiglu_epilogue) {
-            cudaMemsetAsync(out_b, 0, (size_t)M * (size_t)ne_get_rows * sizeof(float), stream);
-        }
-    }
-
     bool gate_up_done = false;
     if (!swiglu_epilogue &&
         type == GGML_TYPE_IQ2_XXS && xa_soa != nullptr && xb_soa != nullptr &&
-        d2r_enabled() && d2r_iq2_enabled() && K % 256 == 0 &&
-        ne_get_rows >= d2r_min_cols()) {
+        K % 256 == 0 &&
+        ne_get_rows >= D2R_MIN_COLS) {
         static int d2r_iq2_avail_cc = -1;
         static int d2r_iq2_avail = 0;
         if (d2r_iq2_avail_cc != cc) {
@@ -1881,7 +1649,6 @@ int ds4_mmq_moe_pair_impl(
                     "ds4/prefill/moe/swiglu_down_quant",
                     ds4_mmq_nvtx_payload((uint32_t)ne_get_rows, (uint32_t)M),
                     nvtx_prefill);
-            ybuf_memset(down_q8_1.get(), logical_q8_bytes + tail_q8_bytes, stream);
             ds4_swiglu_weighted_f32<<<
                 (uint32_t)((mid_values + 255u) / 256u), 256, 0, stream>>>(
                     out_a, out_b, fused_down->router_weights,
@@ -1907,11 +1674,6 @@ int ds4_mmq_moe_pair_impl(
             }
         }
 
-        if (out_memset_enabled()) {
-            cudaMemsetAsync(fused_down->out, 0,
-                    (size_t)fused_down->out_dim * (size_t)ne_get_rows * sizeof(float),
-                    stream);
-        }
         const int64_t down_s01 = (int64_t)M / ggml_blck_size(GGML_TYPE_Q2_K);
         const int64_t down_s02 = (int64_t)fused_down->out_dim * down_s01;
         const int64_t down_s12 =
@@ -1946,8 +1708,8 @@ int ds4_mmq_moe_pair_impl(
         };
         down_args.ncols_grid_max = routed_ncols_grid;
         bool down_done = false;
-        if (fused_down->W_soa != nullptr && d2r_enabled() &&
-            ne_get_rows >= d2r_min_cols() &&
+        if (fused_down->W_soa != nullptr &&
+            ne_get_rows >= D2R_MIN_COLS &&
             ds4_mmq_q2_K_moe_d2r_available(cc)) {
             const size_t work_bytes =
                 ds4_mmq_q2_K_moe_d2r_scratch_bytes(ne_get_rows, n_experts);
@@ -2360,13 +2122,9 @@ int ds4_mmq_moe_vec_impl(
     // fall back to the pool path.  See ds4_mmq_init for setup.
     ggml_cuda_pool_alloc<char> src1_q8_1_pool;
     char *src1_q8_1_ptr = nullptr;
-    if (g_q81_scratch_enabled && g_q81_scratch_ptr &&
-        g_q81_scratch_bytes >= nbytes_q8_1) {
-        src1_q8_1_ptr = (char *)g_q81_scratch_ptr;
-    } else {
         src1_q8_1_pool.alloc(ctx->pool(), nbytes_q8_1);
         src1_q8_1_ptr = src1_q8_1_pool.get();
-    }
+    
 
     // s11 = stride between rows of an src1 channel in source-float units.
     //       Logical src1 [K, ne11=1, ne12=n_tokens, ne13=1] - K innermost.
@@ -2898,12 +2656,9 @@ int ds4_mmq_moe_pair_raw_vec_impl(
                                 sizeof(block_q8_1) / QK8_1;
     ggml_cuda_pool_alloc<char> src1_q8_1_pool;
     char *src1_q8_1_ptr = nullptr;
-    if (g_q81_scratch_enabled && g_q81_scratch_ptr && g_q81_scratch_bytes >= nbytes_q8_1) {
-        src1_q8_1_ptr = (char *)g_q81_scratch_ptr;
-    } else {
         src1_q8_1_pool.alloc(ctx->pool(), nbytes_q8_1);
         src1_q8_1_ptr = src1_q8_1_pool.get();
-    }
+    
 
     quantize_row_q8_1_cuda(
         X_f32, /*ids=*/nullptr, (void *)src1_q8_1_ptr,
@@ -3496,12 +3251,9 @@ int ds4_mmq_moe_down_sum6_vec_impl(
 
     ggml_cuda_pool_alloc<char> src1_q8_1_pool;
     char *src1_q8_1_ptr = nullptr;
-    if (g_q81_scratch_enabled && g_q81_scratch_ptr && g_q81_scratch_bytes >= nbytes_q8_1) {
-        src1_q8_1_ptr = (char *)g_q81_scratch_ptr;
-    } else {
         src1_q8_1_pool.alloc(ctx->pool(), nbytes_q8_1);
         src1_q8_1_ptr = src1_q8_1_pool.get();
-    }
+    
 
     quantize_row_q8_1_cuda(
         X_f32, /*ids=*/nullptr, (void *)src1_q8_1_ptr,
@@ -3744,12 +3496,9 @@ int ds4_mmq_moe_gate_up_mid_vec_impl(
     char *src1_q8_1_ptr = ds4_mmq_folded_q81(X_f32, K, n_tokens, ne10_padded);
     cudaError_t err;
     if (!src1_q8_1_ptr) {
-    if (g_q81_scratch_enabled && g_q81_scratch_ptr && g_q81_scratch_bytes >= nbytes_q8_1) {
-        src1_q8_1_ptr = (char *)g_q81_scratch_ptr;
-    } else {
         src1_q8_1_pool.alloc(ctx->pool(), nbytes_q8_1);
         src1_q8_1_ptr = src1_q8_1_pool.get();
-    }
+    
 
     quantize_row_q8_1_cuda(
         X_f32, /*ids=*/nullptr, (void *)src1_q8_1_ptr,
@@ -4025,12 +3774,9 @@ extern "C" int ds4_mmq_q8_0_aligned_dense_vec(
     char *x8 = N == 1 ? ds4_mmq_folded_q81(X_f32, K, 1, ne10_padded) : NULL;
     cudaError_t err;
     if (!x8) {
-    if (g_q81_scratch_enabled && g_q81_scratch_ptr && g_q81_scratch_bytes >= nbytes_q8_1) {
-        x8 = (char *)g_q81_scratch_ptr;
-    } else {
         q8_pool.alloc(ctx->pool(), nbytes_q8_1);
         x8 = q8_pool.get();
-    }
+    
     quantize_row_q8_1_cuda(
         X_f32, /*ids=*/nullptr, (void *)x8,
         GGML_TYPE_Q8_0, /*ne00=*/K,
@@ -4278,9 +4024,6 @@ extern "C" int ds4_mmq_q2_K_aligned_moe_vec(
     if (g_aligned_q81_scratch_ptr &&
         g_aligned_q81_scratch_bytes >= nbytes_q8_1) {
         src1_q8_1_ptr = (char *)g_aligned_q81_scratch_ptr;
-    } else if (g_q81_scratch_enabled && g_q81_scratch_ptr &&
-               g_q81_scratch_bytes >= nbytes_q8_1) {
-        src1_q8_1_ptr = (char *)g_q81_scratch_ptr;
     } else {
         src1_q8_1_pool.alloc(ctx->pool(), nbytes_q8_1);
         src1_q8_1_ptr = src1_q8_1_pool.get();
@@ -4388,50 +4131,12 @@ static char *iq2_aligned_quantize_xn(
     // stage) -- take them and skip the quantize prelude.
     char *folded = ds4_mmq_folded_q81(X_f32, K, n_tokens, ne10_padded);
     if (folded) {
-        // C3-Inc4 fold twin selftest (DS4_Q8_FOLD_SELFTEST=<call budget>,
-        // eager legs only -- syncs the stream): the taken sidecar must be
-        // byte-identical to the fresh quantize this prelude would have run.
-        // Do NOT combine with DS4_HC_STAGE_BATCH_PARITY (the probe rewrites
-        // norm_out after the sidecar was emitted).
-        static int fold_st = -1;
-        if (fold_st < 0) {
-            const char *st = getenv("DS4_Q8_FOLD_SELFTEST");
-            fold_st = st && *st ? atoi(st) : 0;
-            if (st && *st && fold_st <= 1) fold_st = 512;
-        }
-        cudaStreamCaptureStatus fold_cs = cudaStreamCaptureStatusNone;
-        if (fold_st > 0) (void)cudaStreamIsCapturing(stream, &fold_cs);
-        if (fold_st > 0 && fold_cs == cudaStreamCaptureStatusNone &&
-            nbytes_q8_1 <= 16384u) {
-            fold_st--;
-            static char h[2][16384];
-            pool->alloc(ctx->pool(), nbytes_q8_1);
-            char *fresh = pool->get();
-            quantize_row_q8_1_cuda(
-                X_f32, /*ids=*/nullptr, (void *)fresh,
-                GGML_TYPE_IQ2_XXS, /*ne00=*/K,
-                /*s11=*/(int64_t)K, /*s12=*/(int64_t)K, /*s13=*/(int64_t)K * n_tokens,
-                /*ne0=*/ne10_padded, /*ne1=*/1, /*ne2=*/n_tokens, /*ne3=*/1,
-                stream);
-            if (cudaGetLastError() == cudaSuccess &&
-                cudaStreamSynchronize(stream) == cudaSuccess &&
-                cudaMemcpy(h[0], folded, nbytes_q8_1, cudaMemcpyDeviceToHost) == cudaSuccess &&
-                cudaMemcpy(h[1], fresh, nbytes_q8_1, cudaMemcpyDeviceToHost) == cudaSuccess) {
-                fprintf(stderr, "ds4: Q8F-SELFTEST(q81 moe) K=%d %s\n", K,
-                        memcmp(h[0], h[1], nbytes_q8_1) == 0 ? "PASS" : "FAIL");
-            } else {
-                fprintf(stderr, "ds4: Q8F-SELFTEST(q81 moe) SKIP (setup failed)\n");
-            }
-        }
         return folded;
     }
     char *ptr = nullptr;
     if (g_aligned_q81_scratch_ptr &&
         g_aligned_q81_scratch_bytes >= nbytes_q8_1) {
         ptr = (char *)g_aligned_q81_scratch_ptr;
-    } else if (g_q81_scratch_enabled && g_q81_scratch_ptr &&
-               g_q81_scratch_bytes >= nbytes_q8_1) {
-        ptr = (char *)g_q81_scratch_ptr;
     } else {
         pool->alloc(ctx->pool(), nbytes_q8_1);
         ptr = pool->get();
@@ -4516,10 +4221,8 @@ extern "C" int ds4_mmq_iq2_xxs_aligned_moe_gate_up_mid_vec(
     /* v0.4 V6: verify widths dedup expert overlap (see the dedup kernel's
      * header comment).  n_tokens==1 has no cross-token overlap and keeps
      * the per-slot kernel; widths beyond the verify envelope likewise.
-     * DS4_CUDA_NO_MOE_DEDUP restores the per-slot kernel (diagnostic). */
-    static int moe_dedup_en = -1;
-    if (moe_dedup_en < 0) moe_dedup_en = getenv("DS4_CUDA_NO_MOE_DEDUP") == NULL;
-    if (moe_dedup_en && n_tokens >= 2 && n_tokens <= 8) {
+     */
+    if (n_tokens >= 2 && n_tokens <= 8) {
         const int n_slots = n_tokens * n_expert_used;
         switch (n_tokens) {
 #define DS4_GATEUP_DEDUP_CASE(NT) \
@@ -4583,12 +4286,9 @@ extern "C" int ds4_mmq_iq2_xxs_aligned_moe_vec(
     const size_t  nbytes_q8_1 = (size_t)n_tokens * ne10_padded * sizeof(block_q8_1) / QK8_1;
     ggml_cuda_pool_alloc<char> src1_q8_1_pool;
     char *src1_q8_1_ptr = nullptr;
-    if (g_q81_scratch_enabled && g_q81_scratch_ptr && g_q81_scratch_bytes >= nbytes_q8_1) {
-        src1_q8_1_ptr = (char *)g_q81_scratch_ptr;
-    } else {
         src1_q8_1_pool.alloc(ctx->pool(), nbytes_q8_1);
         src1_q8_1_ptr = src1_q8_1_pool.get();
-    }
+    
     quantize_row_q8_1_cuda(
         X_f32, /*ids=*/nullptr, (void *)src1_q8_1_ptr,
         GGML_TYPE_IQ2_XXS, /*ne00=*/K,

@@ -1,3 +1,13 @@
+/* The vec4 expand kernels read and write four adjacent embedding lanes as one
+ * 16-byte access, which needs the row pitch to be a multiple of four and every
+ * base 16-byte aligned. hipMalloc over-aligns, but these tensors can be views
+ * into a larger arena, so check rather than assume. */
+static inline bool hip_hc_vec4_ok(uint32_t n_embd, const void *a, const void *b,
+                                  const void *c) {
+    return (n_embd & 3u) == 0u &&
+           (((uintptr_t)a | (uintptr_t)b | (uintptr_t)c) & 15u) == 0u;
+}
+
 extern "C" int ds4_gpu_hc_split_sinkhorn_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *mix, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_hc, uint32_t sinkhorn_iters, float eps) {
     if (!out || !mix || !model_map || n_hc != 4) return 0;
     const uint64_t mix_bytes = 24ull * sizeof(float);
@@ -241,6 +251,13 @@ extern "C" int ds4_gpu_hc_expand_split_tensor(ds4_gpu_tensor *out_hc, const ds4_
     uint32_t n_tokens = (uint32_t)n_tokens64;
     if (n_hc == 4u) {
         const uint64_t n = (uint64_t)n_tokens * n_embd;
+        if (hip_hc_vec4_ok(n_embd, out_hc->ptr, block_out->ptr, residual_hc->ptr)) {
+            hc_expand4_vec4_kernel<<<((n >> 2u) + 255) / 256, 256>>>(
+                    (float *)out_hc->ptr, (const float *)block_out->ptr,
+                    (const float *)residual_hc->ptr, (const float *)split->ptr,
+                    n_embd, n_tokens);
+            return hip_ok(hipGetLastError(), "hc_expand_split4 vec4 launch");
+        }
         hc_expand4_kernel<<<(n + 255) / 256, 256>>>((float *)out_hc->ptr,
                                                     (const float *)block_out->ptr,
                                                     (const float *)residual_hc->ptr,
@@ -320,6 +337,15 @@ extern "C" int ds4_gpu_hc_expand_add_split_moesum_tensor(
         return 0;
     }
     const uint64_t n = (uint64_t)n_tokens * n_embd;
+    if (hip_hc_vec4_ok(n_embd, out_hc->ptr, block_add->ptr, residual_hc->ptr) &&
+        ((uintptr_t)down_h->ptr & 7u) == 0u) {
+        hc_expand4_add_moesum_vec4_kernel<<<((n >> 2u) + 255) / 256, 256>>>(
+                (float *)out_hc->ptr, (const __half *)down_h->ptr,
+                (const float *)block_add->ptr, (const float *)residual_hc->ptr,
+                (const float *)split->ptr, n_embd, n_expert, n_tokens);
+        return hip_ok(hipGetLastError(),
+                      "hc_expand_add_split4 moesum vec4 launch");
+    }
     hc_expand4_add_moesum_kernel<<<(n + 255) / 256, 256>>>(
             (float *)out_hc->ptr, (const __half *)down_h->ptr,
             (const float *)block_add->ptr, (const float *)residual_hc->ptr,

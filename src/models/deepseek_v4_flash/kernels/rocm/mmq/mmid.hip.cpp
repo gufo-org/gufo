@@ -236,18 +236,6 @@ static __global__ void mm_ids_helper_global(
     expert_bounds[gridDim.x] = nex_prev + it_compact_count;
 }
 
-// ds4 local: kill switch for the large-n global path (DS4_MMID_LARGE=0).
-// With the switch off the ds4_mmq.cu callers refuse past-cap shapes exactly
-// as before (whole-MoE fallback to the expert-tile kernels).
-bool ds4_mmid_large_enabled(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("DS4_MMID_LARGE");
-        cached = !(env && env[0] == '0');
-    }
-    return cached != 0;
-}
-
 template <int n_expert_used_template>
 static void launch_mm_ids_helper(
         const int32_t * __restrict__ ids, int32_t * __restrict__ ids_src1, int32_t * __restrict__ ids_dst, int32_t * __restrict__ expert_bounds,
@@ -283,16 +271,6 @@ static void launch_mm_ids_helper(
         (ids, ids_src1, ids_dst, expert_bounds, n_tokens, n_expert_used_var, nchannels_y, si1, sis1);
 }
 
-// ds4 local: kill switch for the case-1 fast path below (DS4_MMID_CASE1=0).
-static bool ds4_mmid_case1_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("DS4_MMID_CASE1");
-        cached = !(env && env[0] == '0');
-    }
-    return cached != 0;
-}
-
 void ggml_cuda_launch_mm_ids_helper(
         const int32_t * __restrict__ ids, int32_t * __restrict__ ids_src1, int32_t * __restrict__ ids_dst, int32_t * __restrict__ expert_bounds,
         const int n_experts, const int n_tokens, const int n_expert_used, const int nchannels_y, const int si1, const int sis1, cudaStream_t stream) {
@@ -306,13 +284,8 @@ void ggml_cuda_launch_mm_ids_helper(
             // W4096 prefill (2.90 s of a 12k admission).  The optimized template
             // at neu_padded=1 covers 32 rows/iteration and emits bit-identical
             // id maps (proto_mm_ids.cu: parity on uniform/skewed/2%-invalid/
-            // decode shapes, 20.4x at the W4096 shape).  DS4_MMID_CASE1=0
-            // reverts to the generic path.
-            if (ds4_mmid_case1_enabled()) {
-                launch_mm_ids_helper< 1>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, stream);
-            } else {
-                launch_mm_ids_helper< 0>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, stream);
-            }
+            // decode shapes, 20.4x at the W4096 shape).
+            launch_mm_ids_helper< 1>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, stream);
             break;
         case  2:
             launch_mm_ids_helper< 2>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, stream);

@@ -1834,31 +1834,12 @@ __global__ static void dequant_q8_0_to_f32_kernel(
     out[gid] = scale * (float)q;
 }
 
-__global__ static void dequant_q8_0_to_f16_transpose_kernel(
-        __half *out,
-        const unsigned char *w,
-        uint64_t in_dim,
-        uint64_t out_dim,
-        uint64_t blocks) {
-    const uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    const uint64_t n = in_dim * out_dim;
-    if (gid >= n) return;
-    const uint64_t row = gid / in_dim;
-    const uint64_t i = gid - row * in_dim;
-    const uint64_t b = i / 32u;
-    const uint64_t j = i - b * 32u;
-    const unsigned char *blk = w + (row * blocks + b) * 34u;
-    const __half scale = *(const __half *)blk;
-    const int8_t q = *(const int8_t *)(blk + 2u + j);
-    out[i * out_dim + row] = __hmul(scale, __float2half((float)q));
-}
-
 /* LDS-tiled transpose for the same dequantization.
  *
- * The scalar kernel above gives each lane a private output address `i *
- * out_dim + row`, so a wave's 32 stores land 8,192 B apart: 32 separate cache
- * lines for 64 B of payload, and (8192 / 256) % 16 == 0 puts every one of them
- * on a single memory channel. Measured 1.9 GB/s, about 25x off roofline.
+ * A scalar kernel gives each lane a private output address `i * out_dim + row`,
+ * so a wave's 32 stores land 8,192 B apart: 32 separate cache lines for 64 B of
+ * payload, and (8192 / 256) % 16 == 0 puts every one of them on a single memory
+ * channel. Measured 1.9 GB/s, about 25x off roofline.
  *
  * Here a workgroup owns a 32-`i` by 64-`row` tile. Reads stay wave-contiguous
  * (32 lanes sweep one Q8_0 block's 32 codes), LDS holds the tile transposed,

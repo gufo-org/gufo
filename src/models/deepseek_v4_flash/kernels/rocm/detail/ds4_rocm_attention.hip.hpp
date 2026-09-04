@@ -943,7 +943,7 @@ static void hip_launch_attention_pack_group_heads_f16(
         uint32_t group_dim,
         uint64_t count) {
     if (count == 0u) return;
-    if (hip_vec_convert_enabled() && (group_dim & 3u) == 0u &&
+    if ((group_dim & 3u) == 0u &&
         ((uintptr_t)heads & 15u) == 0u &&
         ((uintptr_t)dst & 7u) == 0u) {
         const uint64_t groups4 = count >> 2u;
@@ -969,7 +969,7 @@ static int hip_launch_attention_pack_group_heads_rope_f16(
         const ds4_attn_pack_rope *rope) {
     if (count == 0u) return 0;
     if (!ds4_attn_pack_rope_eligible(rope, group_dim)) return 0;
-    if (!hip_vec_convert_enabled() || (group_dim & 3u) != 0u ||
+    if ((group_dim & 3u) != 0u ||
         ((uintptr_t)heads & 15u) != 0u || ((uintptr_t)dst & 7u) != 0u) {
         return 0;
     }

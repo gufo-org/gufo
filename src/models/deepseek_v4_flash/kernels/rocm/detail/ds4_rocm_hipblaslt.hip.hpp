@@ -154,16 +154,6 @@ static int hipblaslt_gemm_plan_tune(
         const __half *b,
         const char *label) {
     if (!p || p->candidates.empty()) return 0;
-    static const int tune_allowed = [] {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_HIPBLASLT_TUNE");
-        return env == NULL || env[0] != '0';
-    }();
-    if (!tune_allowed) {
-        /* Pre-plan-cache behavior: take the heuristic's first entry as-is. */
-        p->algo = p->candidates[0].algo;
-        p->tuned = 1;
-        return 1;
-    }
     // Runtime timing made the near-tied 64x2048x4096 shape alternate between
     // algorithms with different FP accumulation order. Pin the profiled
     // gfx1151 choices so identical inputs produce identical logits.
@@ -172,8 +162,9 @@ static int hipblaslt_gemm_plan_tune(
      * list. Profiled picks (4 for most shapes, 5 and 6 for three of the
      * `in_dim == 4096` projections) are faster on gfx1151, but they change the
      * accumulation order of nearly every dense projection, and the retained
-     * 128-token trajectory envelope has no margin for that. Keep the
-     * heuristic's choice and leave the sweep reachable through the environment.
+     * 128-token trajectory envelope has no margin for that, so narrow batches
+     * keep candidate 0. A uniform sweep over candidates 0..15 was measured and
+     * never beat these picks.
      */
     size_t gfx1151_preferred_candidate = 0u;
     if (p->n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS) {
@@ -181,16 +172,6 @@ static int hipblaslt_gemm_plan_tune(
         if (p->op_a == HIPBLAS_OP_T && p->in_dim == 4096u) {
             if (p->out_dim == 256u) gfx1151_preferred_candidate = 6u;
             else if (p->out_dim == 512u) gfx1151_preferred_candidate = 5u;
-        }
-    }
-    {
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_HIPBLASLT_CANDIDATE");
-        if (env != NULL && env[0] != '\0') {
-            char *end = NULL;
-            const unsigned long value = strtoul(env, &end, 10);
-            if (end != env && end != NULL && *end == '\0' && value < 16ul) {
-                gfx1151_preferred_candidate = (size_t)value;
-            }
         }
     }
     if (g_rocm_gfx1151 &&
@@ -285,7 +266,7 @@ static int hipblaslt_gemm_plan_tune(
  * swapping algorithms within one, so the trajectory lands at 114/128 with rank
  * sum 150 against a 116/142 floor. Every other route below, MMQ included, keeps
  * the trajectory at 116/128 rank sum 142. Enable with
- * GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=1. */
+ * the default mask below. */
 enum {
     DS4_ROCM_LT_ROUTE_Q8_F32 = 1u,   /* dense Q8 projection, F32 result */
     DS4_ROCM_LT_ROUTE_Q8_F16 = 2u,   /* dense Q8 projection, F16 result */
@@ -300,23 +281,11 @@ enum {
  * 363.9 -> 410.5 tok/s at a 4,096-token prompt, but it is the one accelerated
  * prefill route the retained envelope can reject: width scoping does not save
  * it, because the pinned trajectory's own prompt prefill is wide. The default
- * keeps the subset that leaves the trajectory at 116/128 rank sum 142; set
- * GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING to a mask (31 for all of them) to
- * explore, or 0 to disable. */
+ * keeps the subset that leaves the trajectory at 116/128 rank sum 142. Adding
+ * the one route left out, ATTN_B, was measured at 457.5 against 455.2 tok/s --
+ * neutral, because the own rocWMMA output-B kernel already serves that shape. */
 static int hipblaslt_route_mask(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        cached = DS4_ROCM_LT_ROUTE_DEFAULT_MASK;
-        const char *env = getenv("GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING");
-        if (env != NULL && env[0] != '\0') {
-            char *end = NULL;
-            const unsigned long value = strtoul(env, &end, 10);
-            if (end != env && end != NULL && *end == '\0' && value <= 31ul) {
-                cached = (int)value;
-            }
-        }
-    }
-    return cached;
+    return DS4_ROCM_LT_ROUTE_DEFAULT_MASK;
 }
 
 static int hipblaslt_route_enabled(unsigned int which) {
