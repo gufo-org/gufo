@@ -4512,7 +4512,22 @@ static size_t mmq_get_nbytes_shared(
         ? mmq_y*mmq_tile_x_k*sizeof(int)
         : txs.qs*sizeof(int) + txs.dm*sizeof(half2) + txs.sc*sizeof(int);
     const size_t nbs_y = mmq_x * (sizeof(block_q8_1_mmq));
-    return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
+    /* ds4: occupancy probe. DS4_MMQ_LDS_PAD=N adds N KiB of unused dynamic
+     * shared memory, which lowers workgroups per CU while leaving the grid,
+     * the tile shape and the work per wave byte-for-byte identical. That is the
+     * only way to measure this kernel's sensitivity to residency alone --
+     * narrowing `mmq_x` also multiplies column tiles and weight re-reads, and
+     * the NCW column split also halves matrix ops per A-fragment load, so both
+     * confound the question. Default 0. */
+    static const size_t lds_pad = [] {
+        const char * env = getenv("DS4_MMQ_LDS_PAD");
+        if (env == nullptr || env[0] == '\0') return (size_t)0;
+        char * end = nullptr;
+        const unsigned long kib = strtoul(env, &end, 10);
+        if (end == env || end == nullptr || *end != '\0' || kib > 64ul) return (size_t)0;
+        return (size_t)kib * 1024ul;
+    }();
+    return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int)) + lds_pad;
 }
 
 template <ggml_type type, int mmq_x>

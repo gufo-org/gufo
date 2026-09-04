@@ -893,6 +893,45 @@ this model, which is why they were worth measuring; none of them transfers.
   more than the wider access buys.
 - **Moving sampling to the GPU.** Worth 24 microseconds. See below.
 
+### The IQ2 byte-expansion / occupancy program, measured rather than assumed
+
+The standing argument for a routed-expert format change was: `tile_x` byte-expands
+2-bit IQ2 codes for `iu8` WMMA, that is 19.5 KiB of the kernel's 30.8 KiB, and it
+pins residency to 8 of the hardware's 32 waves. That argument only pays if this
+kernel is actually residency-starved, and both earlier attempts to test it were
+confounded -- narrowing `mmq_x` also multiplies column tiles and weight re-reads,
+and the NCW column split also halves matrix ops per A-fragment load.
+
+`DS4_MMQ_LDS_PAD=N` (added to `mmq_get_nbytes_shared`, default 0, no-op) adds N
+KiB of *unused* dynamic shared memory. MMQ's shared block is dynamic and the
+kernel indexes only what it needs, so the grid, the tile shape and the work per
+wave stay byte-for-byte identical and only workgroups per CU move:
+
+| LDS | workgroups/WGP | pp4096 mean |
+|---|---:|---:|
+| 30.8 KiB (pad 0) | 4 | 453.6 |
+| 32.8 KiB (pad 2) | 3 | 445.0 |
+| 38.8 KiB (pad 8) | 3 | 454.1 |
+| 54.8 KiB (pad 24) | 2 | 418.2 |
+
+**Halving residency costs 7.8%, and going from four workgroups to three costs
+nothing.** The kernel is already past the point where more resident waves buy
+anything, which is also why the 31x stall factor never responded to occupancy
+work: it is latency that additional waves do not hide.
+
+So the payoff ceiling for un-expanding the IQ2 codes -- roughly doubling
+residency -- is *below* 7.8%, before paying for the on-the-fly fragment
+construction it would require (packed 2-bit codes in LDS cannot be fed to
+`load_matrix_sync`; the A fragment would have to be built in registers in the
+exact `iu8` matrix_a lane layout). Reaching 500 tok/s from a 455 mean needs about
+10%. **The routed-expert format change does not get there**, and that is now a
+measurement rather than an inference. `iu4` is not an escape either: IQ2_XXS grid
+magnitudes are the odd values 1..15, which need 16 signed levels and do not fit
+`int4`'s -8..7 without a non-linear remap that breaks the dot product.
+
+Narrowing `mmq_x` for the same purpose, for completeness: 80 (default) 465.2,
+40 410.1, 32 411.6, 24 397.4 tok/s. Monotonically worse.
+
 ### rocBLAS solution-index retuning: closed by measurement, not declined
 
 This was the last lever named as sized-but-untested, so it was measured.
