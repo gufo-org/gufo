@@ -228,7 +228,7 @@ worst rank 3.
 | Stack | `pp4096` | `tg16` | Pinned trajectory | Prefill `rmse` | Gate |
 | --- | ---: | ---: | --- | ---: | --- |
 | `16d5e30` baseline | 188.5 | 16.5 | 116/128, 142, 3 | 0.478146 | pass |
-| Retained default | 427.3 | 16.6 | 116/128, 142, 3 | 0.41 | pass |
+| Retained default | 455-462 | 16.6 | 116/128, 142, 3 | 0.41 | pass |
 | Retained default, MMQ disabled | 270.1 | 16.6 | 116/128, 142, 3 | — | pass |
 | Plus the attention output-B hipBLASLt fallback | 410.5 | 16.6 | 114/128, 150, 5 | — | fail |
 
@@ -526,6 +526,39 @@ schedule-shaped lever available:
 | Resident waves per CU, 8 -> 16, by splitting warps along the column axis (`DS4_ROCM_WMMA_MMQ_NCW`) | -0.9 to -1.2 s if wave-starved | **18% slower**: 354.9 against 419.6 tok/s mean |
 | Deriving the IQ2 sign masks arithmetically instead of loading `ksigns64`, removing one of the two dependent indexed loads per eight weights from the inner loop | the loader is stalled, not computing, and VALU is 89% idle | bit-identical (rmse 0.41, max_error 1.95) and **neutral**: 435.1 against 439.6 tok/s mean. The sign lookup is not the cost either |
 | Staging the Q2-down weight tile as `[k][n]` so its value fragments load row-major (`GUFO_DEEPSEEK_ROCM_WIDE_DOWN_B_ROWMAJOR`) | -25% by analogy with attention | **5% slower**: 401.4 against 423.3 tok/s mean. The attention win needs a staging-to-read ratio of about 1,280; this tile is read 16 times per dequantize and the strided stores cost more |
+
+#### The LDS access width, which is what finally moved it
+
+The counters that priced the routed loader at 19.7% LDS bank-conflict cycles led
+somewhere after all, but not to the tile layout. `tools/prof/isa_mix.py` on the
+production instantiation showed the two adjacent 4-byte stores of the decoded
+pair being fused by the compiler into **`ds_store_2addr_stride64_b32`** -- whose
+two addresses are 64 dwords apart, exactly 32 banks, hence *the same bank*. Every
+one of those instructions self-conflicts before cross-lane conflicts are even
+counted.
+
+Writing the pair as one `int2` gives `ds_store_b64` across banks b and b+1
+instead. The pair is always 8-byte aligned (the row stride is even, and so are
+`8*kqsx` and `2*l`), so it is bit-identical, costs no shared memory, and took the
+conflict rate from **19.7% to 11.7%** with total LDS cycles 40.5 G to 34.0 G.
+
+The same idiom appeared in this repository's own kernels, and the wins there were
+larger than in the vendored one:
+
+| Change | Effect |
+| --- | --- |
+| IQ2 decoded pair as one 8-byte store | conflicts 19.7% to 11.7%; +1.7% end to end |
+| Q2-down dequantized pair as one 8-byte store | that kernel **1,192 to 812 ms**, conflicts to 6.7% |
+| Attention KV tile staged four values per lane instead of one half | the window producer 259 to 206 ms |
+| Indexer and remaining Q2 dequant stores widened the same way | neutral; kept because it is strictly fewer, wider accesses |
+| Attention row-table setup taken off lane 0 (512 dependent `topk` reads and 256 serial writes per block) | neutral; kept for the same reason |
+
+Two things in the same family were measured and **rejected**:
+
+| Rejected | Why it looked right | Measured |
+| --- | --- | ---: |
+| Nine-dword group pitch in the IQ2 tile, so the eight groups land on eight distinct banks | conflicts are structural at an 8-dword pitch: lanes `kqsx` and `kqsx + 4` are 32 dwords apart whatever the row stride | conflicts 19.7% to 7.7%, but 9 dwords breaks 16-byte alignment for `ds_read_b128`, so total LDS cycles went 33.9 G to 44.8 G and the kernel got slower |
+| `int4` copy in the `tile_y` staging loop, the hottest staging in the model | one dword per lane is four times the loads and stores it needs | **7% slower** (428 against 462 tok/s). It also needs a scalar remainder: a full vector step reaches past `GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size)`, which is where `tile_x` starts -- at mmq_x 80 it would run to 3,071 against a 2,944 pad and corrupt the weight tile |
 
 #### What the cost actually is: instruction count, at a shared issue ceiling
 

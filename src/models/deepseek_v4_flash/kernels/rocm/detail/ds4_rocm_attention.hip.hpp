@@ -131,7 +131,6 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
     __shared__ uint32_t raw_rows[256];
     __shared__ uint32_t comp_rows[
         INDEXED ? DS4_ROCM_ATTENTION_WMMA_TOPK_CAP : 1u];
-    __shared__ uint32_t raw_count_s;
     __shared__ uint32_t comp_count_s;
     /* Q is staged transposed, as [k][head], so the score pass reads both of its
      * operands row-major.
@@ -171,45 +170,59 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
         visible_comp = (qpos + 1u) / ratio;
         if (visible_comp > n_comp) visible_comp = n_comp;
     }
-    if (tid == 0u) {
-        uint32_t raw_count = 0u;
-        uint32_t raw_first_idx = 0u;
-        if (n_raw != 0u) {
-            const uint32_t raw_last_pos = first_raw_pos + n_raw - 1u;
-            if (qpos >= first_raw_pos) {
-                uint32_t lo = first_raw_pos;
-                if (window != 0u && qpos + 1u > window) {
-                    const uint32_t wlo = qpos + 1u - window;
-                    if (wlo > lo) lo = wlo;
-                }
-                const uint32_t hi = qpos < raw_last_pos ? qpos : raw_last_pos;
-                if (hi >= lo) {
-                    raw_first_idx = lo - first_raw_pos;
-                    raw_count = hi - lo + 1u;
-                    if (raw_count > 256u) raw_count = 256u;
-                }
+    /* Row-table setup, off the single-thread path.
+     *
+     * This block used to run entirely on lane 0: a `top_k` loop of 512 *dependent*
+     * global reads of `topk`, plus up to 256 serial `raw_rows` writes, once per
+     * block -- and there are `n_tokens * n_head / 32` blocks. The window bounds
+     * are pure scalar arithmetic, so every thread can derive them without help;
+     * `raw_rows` then fills in parallel; and the top-k reads become one coalesced
+     * pass into scratch, leaving lane 0 only an LDS-local compaction with no
+     * memory latency in the chain. The compaction order and the filter are
+     * unchanged, so the row tables are identical. */
+    uint32_t raw_count = 0u;
+    uint32_t raw_first_idx = 0u;
+    if (n_raw != 0u) {
+        const uint32_t raw_last_pos = first_raw_pos + n_raw - 1u;
+        if (qpos >= first_raw_pos) {
+            uint32_t lo = first_raw_pos;
+            if (window != 0u && qpos + 1u > window) {
+                const uint32_t wlo = qpos + 1u - window;
+                if (wlo > lo) lo = wlo;
+            }
+            const uint32_t hi = qpos < raw_last_pos ? qpos : raw_last_pos;
+            if (hi >= lo) {
+                raw_first_idx = lo - first_raw_pos;
+                raw_count = hi - lo + 1u;
+                if (raw_count > 256u) raw_count = 256u;
             }
         }
-        raw_count_s = raw_count;
-        if constexpr (INDEXED) {
+    }
+    for (uint32_t r = tid; r < raw_count; r += blockDim.x) {
+        raw_rows[r] = (raw_start + raw_first_idx + r) % raw_cap;
+    }
+    if constexpr (INDEXED) {
+        /* `scores` is untouched until the first row block, so it doubles as the
+         * candidate buffer: HEADS * ROWS is exactly the top-k cap. */
+        uint32_t *cand = reinterpret_cast<uint32_t *>(scores);
+        const uint32_t nk = top_k < DS4_ROCM_ATTENTION_WMMA_TOPK_CAP
+                                ? top_k : DS4_ROCM_ATTENTION_WMMA_TOPK_CAP;
+        for (uint32_t i = tid; i < nk; i += blockDim.x) {
+            const int32_t ci = topk[(uint64_t)t * top_k + i];
+            cand[i] = (ci >= 0 && (uint32_t)ci < n_comp &&
+                       (uint32_t)ci < visible_comp)
+                          ? (uint32_t)ci : UINT32_MAX;
+        }
+        __syncthreads();
+        if (tid == 0u) {
             uint32_t comp_count = 0u;
-            for (uint32_t i = 0u;
-                 i < top_k &&
-                 comp_count < DS4_ROCM_ATTENTION_WMMA_TOPK_CAP;
-                 i++) {
-                const int32_t ci = topk[(uint64_t)t * top_k + i];
-                if (ci >= 0 && (uint32_t)ci < n_comp &&
-                    (uint32_t)ci < visible_comp) {
-                    comp_rows[comp_count++] = (uint32_t)ci;
-                }
+            for (uint32_t i = 0u; i < nk; i++) {
+                if (cand[i] != UINT32_MAX) comp_rows[comp_count++] = cand[i];
             }
             comp_count_s = comp_count;
-        } else {
-            comp_count_s = visible_comp;
         }
-        for (uint32_t r = 0u; r < raw_count; r++) {
-            raw_rows[r] = (raw_start + raw_first_idx + r) % raw_cap;
-        }
+    } else if (tid == 0u) {
+        comp_count_s = visible_comp;
     }
     __syncthreads();
 
@@ -236,7 +249,6 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
     frag_c out1;
     rocwmma::fill_fragment(out0, 0.0f);
     rocwmma::fill_fragment(out1, 0.0f);
-    const uint32_t raw_count = raw_count_s;
     const uint32_t n_score = raw_count + comp_count_s;
     const float score_scale = rsqrtf((float)DIM);
     const uint32_t lane = tid & 31u;
