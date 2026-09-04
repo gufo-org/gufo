@@ -2858,8 +2858,7 @@ __device__ __forceinline__ static void q2_K_dequant_wide_tile_half_rowwise_stage
         __half *shB,
         const uint32_t *raw_rows,
         uint32_t k0,
-        uint32_t tid,
-        bool b_rowmajor = false) {
+        uint32_t tid) {
     const uint32_t g = (k0 & 255u) >> 4u;
     const uint32_t within = g & 7u;
     const uint32_t qbase = (g >> 3u) * 32u + (within & 1u) * 16u;
@@ -2888,22 +2887,16 @@ __device__ __forceinline__ static void q2_K_dequant_wide_tile_half_rowwise_stage
         const uint32_t q3 = (qbits >> (24u + shift)) & 3u;
         const float ds = d * s;
         const float dmm = dm * m;
-        if (b_rowmajor) {
-            /* [k][n] so the consumer reads matrix_b row_major; four strided
-             * scalar stores replace two packed ones, paid once against sixteen
-             * fragment loads per K step. */
-            __half *dst = shB + tile * (uint32_t)(BK * BN) + nn;
-            dst[(kk0 + 0u) * (uint32_t)BN] = __float2half(ds * (float)q0 - dmm);
-            dst[(kk0 + 1u) * (uint32_t)BN] = __float2half(ds * (float)q1 - dmm);
-            dst[(kk0 + 2u) * (uint32_t)BN] = __float2half(ds * (float)q2 - dmm);
-            dst[(kk0 + 3u) * (uint32_t)BN] = __float2half(ds * (float)q3 - dmm);
-        } else {
-            __half *dst = shB + tile * (uint32_t)(BK * BN) + nn * (uint32_t)BK + kk0;
-            *reinterpret_cast<uint32_t *>(dst) =
-                    dev_pack_half2_bits(ds * (float)q0 - dmm, ds * (float)q1 - dmm);
-            *reinterpret_cast<uint32_t *>(dst + 2u) =
-                    dev_pack_half2_bits(ds * (float)q2 - dmm, ds * (float)q3 - dmm);
-        }
+        /* One 8-byte LDS store rather than two adjacent 4-byte ones. Split, the
+         * compiler pairs them into a two-address form whose halves land in the
+         * same bank; the same change in the IQ2 tile loader took its conflict
+         * rate from 19.7% to 11.7%. `kk0` is a multiple of KG = 4, so `dst` is
+         * always 8-byte aligned. Same bytes in the same order. */
+        __half *dst = shB + tile * (uint32_t)(BK * BN) + nn * (uint32_t)BK + kk0;
+        uint2 packed;
+        packed.x = dev_pack_half2_bits(ds * (float)q0 - dmm, ds * (float)q1 - dmm);
+        packed.y = dev_pack_half2_bits(ds * (float)q2 - dmm, ds * (float)q3 - dmm);
+        *reinterpret_cast<uint2 *>(dst) = packed;
     }
 }
 
@@ -4070,14 +4063,8 @@ __global__ static void moe_down_q2K_hotlist_wmma_n2_kernel(
  * kernel uses, so dynamic LDS and resident workgroups per CU are unchanged.
  * The K loop order, fragment shapes, and accumulation order per output element
  * are identical to the n2 kernel, so results stay bit-exact. */
-/* B_ROWMAJOR stages the dequantized weight tile as [k][n] so the value fragments
- * load row_major. The score pass of the attention producer showed a col_major
- * matrix_b load costing several times its row_major twin, and here each staged
- * tile feeds sixteen fragment loads (MTILES waves x NFRAG fragments) against one
- * dequantize, so the strided stores it costs are amortized. */
 template <int MTILES=4, int BM=16, int BN=16, int BK=16, int NFRAG=4,
-          bool MID_F16=false, bool OUT_F16=false, bool SLOT_MAJOR=false,
-          bool B_ROWMAJOR=false>
+          bool MID_F16=false, bool OUT_F16=false, bool SLOT_MAJOR=false>
 __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
         float *down_out,
         __half *down_out_h,
@@ -4145,10 +4132,7 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
     __syncthreads();
 
     using frag_a = rocwmma::fragment<rocwmma::matrix_a, BM, BN, BK, __half, rocwmma::row_major>;
-    using frag_b = rocwmma::fragment<
-        rocwmma::matrix_b, BM, BN, BK, __half,
-        typename std::conditional<B_ROWMAJOR, rocwmma::row_major,
-                                  rocwmma::col_major>::type>;
+    using frag_b = rocwmma::fragment<rocwmma::matrix_b, BM, BN, BK, __half, rocwmma::col_major>;
     using frag_c = rocwmma::fragment<rocwmma::accumulator, BM, BN, BK, float>;
     frag_a a;
     frag_b b[NFRAG];
@@ -4226,15 +4210,14 @@ __global__ static void moe_down_q2K_hotlist_wmma_wide_kernel(
                 }
             }
             q2_K_dequant_wide_tile_half_rowwise_staged<BN, BK, NFRAG>(
-                    shB, shW, krel, tid, B_ROWMAJOR);
+                    shB, shW, krel, tid);
             __syncthreads();
             if (wave < MTILES) {
                 rocwmma::load_matrix_sync(
                     a, shA + abuf * A_TILE + wave * BM * BK, BK);
 #pragma unroll
                 for (int f = 0; f < NFRAG; f++) {
-                    rocwmma::load_matrix_sync(b[f], shB + f * (BK * BN),
-                                              B_ROWMAJOR ? BN : BK);
+                    rocwmma::load_matrix_sync(b[f], shB + f * (BK * BN), BN);
                     rocwmma::mma_sync(acc[f], a, b[f], acc[f]);
                 }
             }
