@@ -1257,11 +1257,34 @@ All 35 are gone and their defaults are compiled in. Removed, by category:
   (nsys is CUDA tooling; `DS4_MMQ_HAS_NVTX` is 0 on this HIP build),
   `GUFO_DEEPSEEK_DSPARK_SELFTEST_REPS` (4).
 
-**Verified behaviour-preserving structurally, not just by timing.** A 4,096-token
-prefill profiled before and after dispatches **133 kernel groups and 3,926
-dispatches, identical in name, grid, workgroup size and count** -- so every
-removal was unreachable code. `nix build .#checks.x86_64-linux.pr` stays green at
-81/81. Timing agreed once the thermal confound was removed: a first A/B put the
+**Two of the 35 were not behaviour-preserving, and the structural check could
+not see it.** `..._DENSE_SMALL_BATCH_ROWS` (24) and `..._MOE_SMALL_BATCH_ROWS`
+(16) were not read directly. Both returned
+`ds4_rocm_small_batch_limit(configured)`, which is
+`g_small_batch_mode ? configured : 0u`, so compiling in the constants dropped
+that gate: the dense and routed-MoE small-batch routes went from off outside a
+DSpark verification block to unconditionally on, and one-token decode began
+taking the verifier's kernels. The pinned trajectory fell from 116/128 rank sum
+142 to **104/128 rank sum 160**. Bisected to `5f231f8` and fixed by restoring
+both calls.
+
+The structural check was blind to this by construction. At 24 and 16 rows those
+routes never fire on prompt-width batches, so a **prefill** trace really is
+identical -- 133 kernel groups and 3,926 dispatches, identical in name, grid,
+workgroup size and count -- while the one affected shape, single-row decode, was
+never traced. Two lessons, both cheap: **when removing a tuning switch, check
+whether its value passes through a helper before use**, and **trace the shape the
+switch actually governs, not the one you are optimizing**.
+`nix build .#checks.x86_64-linux.pr` stays green at 81/81 either way -- it sets
+`BUILD_TESTING=OFF` and never builds this gate.
+
+Restoring the gate costs nothing. Interleaved against the unfixed head, both
+arms `nix build` Release: `pp4096` 478.1 against 480.2 tok/s, `tg16` 16.65
+against 16.69, `tg128` 16.63 against 16.63, `pp512` 240.5 against 244.9 -- every
+one inside the +-5% cross-binary noise, and the trajectory back at 116/128, 142,
+3 with the 273-token envelope at `rmse` 0.41, `max_error` 1.95. The always-on
+small-batch routes were buying no throughput whatever; they only changed the
+arithmetic. Timing agreed once the thermal confound was removed: a first A/B put the
 cleaned build 10% down, but both pairs had run the old binary first, and
 reversing the order within each pair gave 450.2 against 452.9 tok/s. **Alternate
 the order within pairs, not just between them** -- ordering alone is worth 10% on
