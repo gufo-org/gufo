@@ -179,7 +179,7 @@ __global__ void QuantizeActivationToQ8_1Kernel(const T* __restrict__ x,
 
   const float d = max_abs / 127.0F;
   const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-  const int8_t q = static_cast<int8_t>(roundf(val * id));
+  const int8_t q = static_cast<int8_t>(__float2int_rn(val * id));
 
   StoreQ8ActLane<StoreActivationSum>(y, batch, num_blocks, tok, blk, lane_id, d,
                                      q);
@@ -269,7 +269,7 @@ __global__ void BatchedFusedRMSNormQuantizeQ8_1Kernel(
     }
     const float d = max_abs / 127.0F;
     const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-    const std::int8_t q = static_cast<std::int8_t>(roundf(val * id));
+    const std::int8_t q = static_cast<std::int8_t>(__float2int_rn(val * id));
     StoreQ8ActLane<StoreActivationSum>(q8_out, batch_size, num_blocks, b, blk,
                                        lane_id, d, q);
   }
@@ -349,7 +349,7 @@ __global__ void BatchedFusedSSMPostNormGateQuantizeQ8_1Kernel(
   }
   const float d = max_abs / 127.0F;
   const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-  const std::int8_t q = static_cast<std::int8_t>(roundf(val * id));
+  const std::int8_t q = static_cast<std::int8_t>(__float2int_rn(val * id));
   StoreQ8ActLane<StoreActivationSum>(q8_out, batch_size, num_blocks, t, blk,
                                      lane_id, d, q);
 }
@@ -412,7 +412,7 @@ __global__ void BatchedFusedSwiGLUQuantizeQ8_1Kernel(
 
   const float d = max_abs / 127.0F;
   const float id = (d != 0.0F) ? (1.0F / d) : 0.0F;
-  const int8_t q = static_cast<int8_t>(roundf(val * id));
+  const int8_t q = static_cast<int8_t>(__float2int_rn(val * id));
 
   StoreQ8ActLane<StoreActivationSum>(y, batch, num_blocks, tok, blk, lane_id, d,
                                      q);
