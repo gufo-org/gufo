@@ -259,28 +259,47 @@ __global__ __launch_bounds__(1024, 1) static void attention_mixed_heads32_wmma_k
      * one traversal, and the score cache is no longer needed. */
     for (uint32_t row0 = 0u; row0 < n_score; row0 += ROWS) {
         const uint32_t nr = n_score - row0 < ROWS ? n_score - row0 : ROWS;
-        for (uint32_t j = tid; j < ROWS * DIM; j += blockDim.x) {
-            const uint32_t rr = j / DIM;
-            const uint32_t d = j - rr * DIM;
-            half v = __float2half(0.0f);
+        /* Stage four values per lane, not one.
+         *
+         * One half per lane is a 2-byte LDS store: 32 lanes move 64 of the 128
+         * bytes the LDS can retire per cycle, and adjacent lanes share banks. The
+         * row pitch is a multiple of four halves and `d` is too, so a uint2 store
+         * is always 8-byte aligned, and the F32 source is 16-byte aligned for a
+         * float4 read. Same values, same locations, a quarter of the accesses. */
+        constexpr uint32_t DIM4 = DIM / 4u;
+        static_assert(LDS_DIM % 4u == 0u, "row pitch must allow 8-byte stores");
+        for (uint32_t j = tid; j < ROWS * DIM4; j += blockDim.x) {
+            const uint32_t rr = j / DIM4;
+            const uint32_t d = (j - rr * DIM4) * 4u;
+            uint2 packed = make_uint2(0u, 0u);
             if (rr < nr) {
                 const uint32_t sr = row0 + rr;
+                const half *src_h = nullptr;
+                const float *src_f = nullptr;
                 if (sr < raw_count) {
-                    v = __float2half(raw_kv[(uint64_t)raw_rows[sr] * DIM + d]);
+                    src_f = raw_kv + (uint64_t)raw_rows[sr] * DIM + d;
                 } else {
                     uint32_t comp_row = sr - raw_count;
                     if constexpr (INDEXED) {
                         comp_row = comp_rows[comp_row];
                     }
                     if constexpr (COMP_F16) {
-                        v = ((const half *)comp_kv)[(uint64_t)comp_row * DIM + d];
+                        src_h = ((const half *)comp_kv) + (uint64_t)comp_row * DIM + d;
                     } else {
-                        v = __float2half(
-                            ((const float *)comp_kv)[(uint64_t)comp_row * DIM + d]);
+                        src_f = ((const float *)comp_kv) + (uint64_t)comp_row * DIM + d;
                     }
                 }
+                if (src_h != nullptr) {
+                    packed = *reinterpret_cast<const uint2 *>(src_h);
+                } else {
+                    const float4 v4 = *reinterpret_cast<const float4 *>(src_f);
+                    const __half2 lo = __floats2half2_rn(v4.x, v4.y);
+                    const __half2 hi = __floats2half2_rn(v4.z, v4.w);
+                    packed.x = *reinterpret_cast<const uint32_t *>(&lo);
+                    packed.y = *reinterpret_cast<const uint32_t *>(&hi);
+                }
             }
-            kv_half[rr * LDS_DIM + d] = v;
+            *reinterpret_cast<uint2 *>(&kv_half[rr * LDS_DIM + d]) = packed;
         }
         __syncthreads();
 
