@@ -2270,7 +2270,19 @@ static bool rocm_graph_encode_layer_attention_batch(
     /* Normalize straight to F16 when the projection can take it: the F32 store
      * and the conversion pass that followed both disappear. Falls back whole. */
     bool hc_norm_f16 = false;
-    if (ok && n_tokens >= 128u && g->batch_flat_hc_h) {
+    bool hc_pre_fused = false;
+    if (ok && n_tokens >= 128u) {
+        hc_pre_fused = ds4_gpu_hc_norm_mix_split_weighted_sum_tensor(
+                           attn_cur_view, hc_mix_view, hc_split_view,
+                           g->batch_cur_hc, model->map, model->size,
+                           layer->hc_attn_fn->abs_offset,
+                           layer->hc_attn_scale->abs_offset,
+                           layer->hc_attn_base->abs_offset,
+                           DS4_N_EMBD, DS4_N_HC, n_tokens,
+                           DS4_N_HC_SINKHORN_ITER, DS4_HC_EPS,
+                           DS4_RMS_EPS) != 0;
+    }
+    if (ok && !hc_pre_fused && n_tokens >= 128u && g->batch_flat_hc_h) {
         hc_norm_f16 = ds4_gpu_rms_norm_plain_rows_f16_tensor(
                           g->batch_flat_hc_h, g->batch_cur_hc,
                           (uint32_t)hc_dim, n_tokens, DS4_RMS_EPS) != 0 &&
@@ -2279,12 +2291,12 @@ static bool rocm_graph_encode_layer_attention_batch(
                           layer->hc_attn_fn->abs_offset, hc_dim, mix_hc,
                           g->batch_flat_hc_h, n_tokens) != 0;
     }
-    if (ok && !hc_norm_f16) ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
+    if (ok && !hc_pre_fused && !hc_norm_f16) ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
                                                       g->batch_cur_hc,
                                                       (uint32_t)hc_dim,
                                                       n_tokens,
                                                       DS4_RMS_EPS) != 0;
-    if (ok && !hc_norm_f16) ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
+    if (ok && !hc_pre_fused && !hc_norm_f16) ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
                                              model->map,
                                              model->size,
                                              layer->hc_attn_fn->abs_offset,
@@ -2307,7 +2319,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                             hc_split_view,
                                                             DS4_N_EMBD,
                                                             DS4_N_HC) != 0;
-    } else {
+    } else if (!hc_pre_fused) {
         if (ok) ok = ds4_gpu_hc_split_weighted_sum_tensor(attn_cur_view,
                                                             hc_split_view,
                                                             hc_mix_view,
@@ -3572,7 +3584,19 @@ static bool rocm_graph_encode_layer_ffn_batch(
     /* Normalize straight to F16 when the projection can take it: the F32 store
      * and the conversion pass that followed both disappear. Falls back whole. */
     bool hc_norm_f16 = false;
-    if (ok && n_tokens >= 128u && g->batch_flat_hc_h) {
+    bool hc_pre_fused = false;
+    if (ok && n_tokens >= 128u) {
+        hc_pre_fused = ds4_gpu_hc_norm_mix_split_weighted_sum_tensor(
+                           ffn_cur_view, hc_mix_view, hc_split_view,
+                           g->batch_after_attn_hc, model->map, model->size,
+                           layer->hc_ffn_fn->abs_offset,
+                           layer->hc_ffn_scale->abs_offset,
+                           layer->hc_ffn_base->abs_offset,
+                           DS4_N_EMBD, DS4_N_HC, n_tokens,
+                           DS4_N_HC_SINKHORN_ITER, DS4_HC_EPS,
+                           DS4_RMS_EPS) != 0;
+    }
+    if (ok && !hc_pre_fused && n_tokens >= 128u && g->batch_flat_hc_h) {
         hc_norm_f16 = ds4_gpu_rms_norm_plain_rows_f16_tensor(
                           g->batch_flat_hc_h, g->batch_after_attn_hc,
                           (uint32_t)hc_dim, n_tokens, DS4_RMS_EPS) != 0 &&
@@ -3581,12 +3605,12 @@ static bool rocm_graph_encode_layer_ffn_batch(
                           layer->hc_ffn_fn->abs_offset, hc_dim, mix_hc,
                           g->batch_flat_hc_h, n_tokens) != 0;
     }
-    if (ok && !hc_norm_f16) ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
+    if (ok && !hc_pre_fused && !hc_norm_f16) ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
                                                       g->batch_after_attn_hc,
                                                       (uint32_t)hc_dim,
                                                       n_tokens,
                                                       DS4_RMS_EPS) != 0;
-    if (ok && !hc_norm_f16) ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
+    if (ok && !hc_pre_fused && !hc_norm_f16) ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
                                              model->map,
                                              model->size,
                                              layer->hc_ffn_fn->abs_offset,
@@ -3609,7 +3633,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
                                                             hc_split_view,
                                                             DS4_N_EMBD,
                                                             DS4_N_HC) != 0;
-    } else {
+    } else if (!hc_pre_fused) {
         if (ok) ok = ds4_gpu_hc_split_weighted_sum_tensor(ffn_cur_view,
                                                             hc_split_view,
                                                             hc_mix_view,

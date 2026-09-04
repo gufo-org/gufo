@@ -111,6 +111,14 @@ static int routed_moe_q2_float_down_launch(
         return 0;
     }
 
+    /* Pairs a wave carries per dequantization of its weight row.
+     *
+     * Eight looks free -- this route only serves experts below the hot
+     * threshold, so every bucket would fit one tile instead of the two that a
+     * five-to-seven-row bucket pays at four -- and it is 64% slower: 132.6 to
+     * 218.0 ms at kernel level. The mid staging loop runs over the whole tile
+     * whatever the bucket holds, so eight stages 2,048 floats per K block for
+     * three real rows, and that costs more than the second weight pass it saves. */
     const uint32_t down_tile = 4u;
     const uint32_t down_rpb = 16u;
     const uint32_t down_threads = down_rpb * 32u;

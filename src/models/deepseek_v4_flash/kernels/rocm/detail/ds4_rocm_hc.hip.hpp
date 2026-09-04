@@ -544,6 +544,155 @@ __global__ static void hc_split_weighted_sum_norm_fused_kernel(
     }
 }
 
+/* One pass over the hyper-connection row for the whole pre-block chain.
+ *
+ * The chain is norm -> mix projection -> Sinkhorn split -> weighted sum, and
+ * every stage read the same 16,384-wide row again: the norm read it and wrote a
+ * F16 mirror, the 24-wide projection read that mirror back, and the weighted sum
+ * read the F32 row a second time. At a 4,096-token chunk that is 268 MiB read,
+ * 134 MiB written, 134 MiB read and 268 MiB read for one 67 MiB result, and the
+ * projection's own shape -- 24 columns against a 16,384-deep K -- gives the
+ * library a tile that reaches 84 GB/s of a 242 GB/s ceiling.
+ *
+ * Holding the row in registers collapses all of it to one read. A thread owns
+ * COLS contiguous embedding columns in all four streams, which is what makes the
+ * weighted sum thread-local: the four values it needs for a column are four of
+ * its own registers. The projection weight is the only re-read, 24 x 16,384
+ * halves per block, and it stays in L2 across the grid.
+ *
+ * `mix` and therefore `split` are NOT bit-identical to the separate chain: the
+ * K reduction is a wave shuffle tree here and a Tensile tile there. The F16
+ * rounding of the normalized row is kept, so that reassociation is the only
+ * difference. */
+struct alignas(16) ds4_hc_half8 {
+    __half2 p[4];
+};
+
+template <uint32_t TOK, uint32_t TPT, uint32_t COLS>
+__global__ static void hc4_norm_mix_split_weighted_sum_kernel(
+        float *out,
+        float *mix_out,
+        float *split_out,
+        const float *residual_hc,
+        const __half *mix_w,
+        const float *scale,
+        const float *base,
+        uint32_t n_embd,
+        uint32_t n_rows,
+        uint32_t sinkhorn_iters,
+        float epsv,
+        float norm_eps) {
+    constexpr uint32_t MIX_HC = 24u;
+    constexpr uint32_t WAVES_PER_TOK = TPT / 32u;
+    const uint32_t tl = threadIdx.x / TPT;
+    const uint32_t lane = threadIdx.x - tl * TPT;
+    const uint32_t wave = lane >> 5u;
+    const uint32_t wlane = lane & 31u;
+    const uint32_t row = blockIdx.x * TOK + tl;
+    const int active = row < n_rows;
+    const uint32_t t = active ? row : 0u;
+    const uint32_t hc_dim = 4u * n_embd;
+    const uint32_t col0 = lane * COLS;
+
+    __shared__ float partial[TOK][WAVES_PER_TOK];
+    __shared__ float wavered[TOK][WAVES_PER_TOK][MIX_HC];
+    __shared__ float mixbuf[TOK][MIX_HC];
+    __shared__ float splitbuf[TOK][MIX_HC];
+
+    /* Four streams x COLS contiguous columns, as float4 loads. */
+    float v[4][COLS];
+    const float *rrow = residual_hc + (uint64_t)t * hc_dim + col0;
+#pragma unroll
+    for (uint32_t h = 0; h < 4u; h++) {
+        const float *src = rrow + (uint64_t)h * n_embd;
+#pragma unroll
+        for (uint32_t c = 0; c < COLS; c += 4u) {
+            const float4 q = *reinterpret_cast<const float4 *>(src + c);
+            v[h][c + 0u] = q.x;
+            v[h][c + 1u] = q.y;
+            v[h][c + 2u] = q.z;
+            v[h][c + 3u] = q.w;
+        }
+    }
+
+    float sum = 0.0f;
+#pragma unroll
+    for (uint32_t h = 0; h < 4u; h++) {
+#pragma unroll
+        for (uint32_t c = 0; c < COLS; c++) sum += v[h][c] * v[h][c];
+    }
+    /* Shuffle inside the wave, then one combine over the wave totals. A 256-lane
+     * LDS tree needs eight barriers and this workgroup is 32 waves wide, which
+     * made the two reductions here cost more than the pass they replaced. */
+    sum = warp_sum_f32(sum);
+    if (wlane == 0u) partial[tl][wave] = sum;
+    __syncthreads();
+    float rowsum = 0.0f;
+#pragma unroll
+    for (uint32_t w = 0; w < WAVES_PER_TOK; w++) rowsum += partial[tl][w];
+    const float nscale = rsqrtf(rowsum / (float)hc_dim + norm_eps);
+
+    /* The projection is linear in the row, so the scale comes out of the sum:
+     * mix[j] = nscale * sum_k w[j][k] * x[k]. That skips the separate chain's
+     * F16 rounding of the normalized row entirely -- strictly more accurate than
+     * the mirror it replaces, and it keeps the raw row as the only live copy.
+     *
+     * One output column at a time, reduced across the wave before the next, so
+     * the 24 partial sums are never live together and nothing spills. */
+    for (uint32_t j = 0; j < MIX_HC; j++) {
+        const __half *wrow = mix_w + (uint64_t)j * hc_dim + col0;
+        float a = 0.0f;
+#pragma unroll
+        for (uint32_t h = 0; h < 4u; h++) {
+            const __half *wsrc = wrow + (uint64_t)h * n_embd;
+#pragma unroll
+            for (uint32_t c = 0; c < COLS; c += 8u) {
+                const ds4_hc_half8 w8 =
+                    *reinterpret_cast<const ds4_hc_half8 *>(wsrc + c);
+#pragma unroll
+                for (uint32_t p = 0; p < 4u; p++) {
+                    const float2 wf = __half22float2(w8.p[p]);
+                    a += wf.x * v[h][c + 2u * p];
+                    a += wf.y * v[h][c + 2u * p + 1u];
+                }
+            }
+        }
+        const float s = warp_sum_f32(a);
+        if (wlane == 0u) wavered[tl][wave][j] = s;
+    }
+    __syncthreads();
+    if (lane < MIX_HC) {
+        float s = 0.0f;
+#pragma unroll
+        for (uint32_t w = 0; w < WAVES_PER_TOK; w++) s += wavered[tl][w][lane];
+        s *= nscale;
+        mixbuf[tl][lane] = s;
+        if (active) mix_out[(uint64_t)t * MIX_HC + lane] = s;
+    }
+    __syncthreads();
+    if (lane == 0u) {
+        hc4_split_one(splitbuf[tl], mixbuf[tl], scale, base, sinkhorn_iters, epsv);
+    }
+    __syncthreads();
+    if (lane < MIX_HC && active) {
+        split_out[(uint64_t)t * MIX_HC + lane] = splitbuf[tl][lane];
+    }
+
+    if (!active) return;
+    const float s0 = splitbuf[tl][0], s1 = splitbuf[tl][1];
+    const float s2 = splitbuf[tl][2], s3 = splitbuf[tl][3];
+    float *orow = out + (uint64_t)t * n_embd + col0;
+#pragma unroll
+    for (uint32_t c = 0; c < COLS; c += 4u) {
+        float4 q;
+        q.x = v[0][c + 0u] * s0; q.x += v[1][c + 0u] * s1; q.x += v[2][c + 0u] * s2; q.x += v[3][c + 0u] * s3;
+        q.y = v[0][c + 1u] * s0; q.y += v[1][c + 1u] * s1; q.y += v[2][c + 1u] * s2; q.y += v[3][c + 1u] * s3;
+        q.z = v[0][c + 2u] * s0; q.z += v[1][c + 2u] * s1; q.z += v[2][c + 2u] * s2; q.z += v[3][c + 2u] * s3;
+        q.w = v[0][c + 3u] * s0; q.w += v[1][c + 3u] * s1; q.w += v[2][c + 3u] * s2; q.w += v[3][c + 3u] * s3;
+        *reinterpret_cast<float4 *>(orow + c) = q;
+    }
+}
+
 /* Collapse one layer's hyper-connection streams into the plain hidden state the
  * DSpark drafter consumes, writing into a strided slot of the fused feature
  * row.

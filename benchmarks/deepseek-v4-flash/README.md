@@ -228,9 +228,15 @@ worst rank 3.
 | Stack | `pp4096` | `tg16` | Pinned trajectory | Prefill `rmse` | Gate |
 | --- | ---: | ---: | --- | ---: | --- |
 | `16d5e30` baseline | 188.5 | 16.5 | 116/128, 142, 3 | 0.478146 | pass |
-| Retained default | 455-462 | 16.6 | 116/128, 142, 3 | 0.41 | pass |
+| Retained default (September 3) | 455-462 | 16.6 | 116/128, 142, 3 | 0.41 | pass |
+| Plus the fused hyper-connection pre-block chain | 496.1 | 16.3 | 116/128, 142, 3 | 0.42 | pass |
 | Retained default, MMQ disabled | 270.1 | 16.6 | 116/128, 142, 3 | — | pass |
 | Plus the attention output-B hipBLASLt fallback | 410.5 | 16.6 | 114/128, 150, 5 | — | fail |
+
+The September 4 row is the mean of three interleaved rounds against `a8158c7` on
+one host, which read 483.4 over the same rounds; across sessions only that paired
+number is comparable, not the absolute. See "The hyper-connection pre-block
+chain, fused into one pass".
 
 Four interleaved rounds of the two binaries: baseline 188.24 / 188.22 / 187.67 /
 190.04, retained 399.22 / 426.69 / 428.83 / 445.80 (the first round is cold);
@@ -933,6 +939,11 @@ and need sixteen signed levels against `int4`'s -8..7.
 
 ### Status: the search for the remaining 10% is exhausted
 
+Superseded on September 4, 2026: it was exhausted for *kernels*, not for
+*chains*. Fusing the hyper-connection pre-block chain took 445 ms of dispatches
+to 199 ms for +2.6% paired; see "The hyper-connection pre-block chain, fused
+into one pass" below. The per-kernel table here still stands.
+
 pp4096 stands at **441-480 tok/s, mean ~455**, from a 188.5 baseline (+142%),
 with the pinned trajectory at 116/128 rank sum 142 worst rank 3 and prefill rmse
 0.41 -- better than baseline on both. Reaching 500 needs about 880 ms of the
@@ -1302,6 +1313,168 @@ What is deliberately kept, none of which changes behaviour:
   hardcoding `/tmp/ds4.lock` would leave no escape in a container.
 - `GGML_CUDA_DISABLE_GRAPHS` in `mmq/common.cuh`, which is verbatim upstream
   llama.cpp and pinned by `mmq/VENDOR.md`.
+
+### The hyper-connection pre-block chain, fused into one pass (September 4, 2026)
+
+The "exhausted" verdict above held for the kernels it examined. It missed a
+*chain*: every layer half ran norm -> 24-wide mix projection -> Sinkhorn split ->
+weighted sum as three dispatches over the same 16,384-wide hyper-connection row,
+and re-read that row at every step. At a 4,096-token chunk, per call:
+
+| Pass | Bytes | Measured |
+| --- | ---: | ---: |
+| `rms_norm_plain_regs<64>`, F32 row in, F16 mirror out | 268 MiB read, 134 MiB written | 2.01 ms (199 GB/s) |
+| `Cijk_..._MT32x32`, the 24-column projection | 134 MiB read | 1.24 ms (**108 GB/s**) |
+| `hc_split_weighted_sum_fused` | 268 MiB read, 67 MiB written | 1.58 ms (187 GB/s) |
+
+The projection is the tell: 24 output columns against a 16,384-deep K gives
+Tensile an `MT32x32` tile and 256 workgroups of 128 threads for the whole chunk,
+which is under half the DRAM ceiling because there is not enough of the grid to
+cover latency, not because there are too many bytes.
+
+`hc4_norm_mix_split_weighted_sum_kernel` holds the row in registers instead. A
+lane owns sixteen *contiguous* embedding columns in all four streams -- 64
+floats, four `float4` loads -- and that choice is what makes the weighted sum
+thread-local: the four values a column needs are four of the lane's own
+registers, so no stage after the first read touches memory again. The projection
+is linear in the row, so `rsqrt` comes out of the sum (`mix[j] = nscale * sum_k
+w[j][k] x[k]`), which also skips the F16 mirror's rounding entirely. Four tokens
+share a workgroup so the 786 KiB projection weight -- the one operand still
+re-read, and L2-resident across the grid -- is amortized over four rows.
+
+Both reductions are a wave shuffle plus one combine over the eight wave totals
+rather than a 256-lane LDS tree. That is not cosmetic: the workgroup is 32 waves
+wide, so eight barriers per reduction cost more than the pass being replaced. The
+first version used LDS trees and ran 263.1 ms; the same kernel with shuffles runs
+198.5 ms.
+
+| | Separate | Fused |
+| --- | ---: | ---: |
+| dispatches per layer half | 3 | 1 |
+| kernel time for the chain | 444.7 ms | **198.5 ms** |
+| dispatches in the chunk | 3,842 | 3,670 |
+| profile | 8,890.6 ms | 8,259.5 ms |
+
+The chain accounts for **-246 ms, or -2.8% of the profile**; the profile sums
+carry more spread than that between runs, so the mechanism is the 246 ms. Three
+interleaved rounds of the two release binaries on one host read
+
+| round | `a8158c7` | fused | delta |
+| --- | ---: | ---: | ---: |
+| 1 | 479.64 | 495.29 | +3.3% |
+| 2 | 487.77 | 493.50 | +1.2% |
+| 3 | 482.87 | 499.58 | +3.5% |
+| mean | **483.4** | **496.1** | **+2.6%** |
+
+152 VGPRs, no scratch, under 8 KiB of shared memory. Two and eight tokens per
+workgroup measured 494.0 and 493.1 tok/s against four's 498.6: the weight
+amortization and the register room for a second resident workgroup trade off
+almost exactly, and four is the flat optimum.
+
+It holds across the whole depth curve, one process per arm, arms alternated:
+
+| prompt | `a8158c7` | fused | delta |
+| ---: | ---: | ---: | ---: |
+| 4,096 | 439.25 | 456.01 | +3.8% |
+| 8,192 | 478.16 | **509.06** | +6.5% |
+| 16,384 | 489.70 | 500.41 | +2.2% |
+| 32,768 | 476.40 | 481.50 | +1.1% |
+| 65,536 | 436.03 | 440.67 | +1.1% |
+
+The saving is per chunk and fixed, so it dilutes as the indexer's O(context)
+scoring grows: +3.8% at 4K down to +1.1% at 64K. The peak moves from 16K to 8K
+because the chain was a larger share of the shorter chunks.
+
+Not bit-identical, and scoped to `n_tokens >= 128` for that reason: `mix`, and
+therefore `split`, reassociates the K reduction into a shuffle tree where Tensile
+used a tile. The gate is unmoved and the envelope barely is:
+
+| | `a8158c7` | Fused | Fused, plus the block-norm fold |
+| --- | --- | --- | --- |
+| pinned trajectory | 116/128, 142, 3 | 116/128, 142, 3 | 116/128, 142, 3 |
+| 273-token `rmse` | 0.41 | **0.42** | 0.48 |
+| `max_error` | 1.95 | **2.00** | 2.04 |
+| `cosine` / `top1_match` / rank | 1.00 / 1 / 1 | 1.00 / 1 / 1 | 1.00 / 1 / 1 |
+
+The pinned trajectory cannot move: its prompt is about twenty tokens and its 128
+steps are one row each, so a route scoped to 128 rows never fires there. All three
+readings are the same `build/gpu-test` binary, and the whole
+`deepseek_v4_flash_engine_test` suite exits 0.
+
+**Folding the following weighted block norm in as well was measured and
+rejected.** `rms_norm_weight_kernel` reads the row this kernel produces back
+twice and the values are already in registers, so the fold removes 134 MiB per
+call and a dispatch, and it is worth 48 ms. It also takes `rmse` 0.42 to **0.48**
+-- the same value that got `QK_WG = 4` rejected, and no longer clearly better
+than the `16d5e30` baseline's 0.478146. The cost is entirely the reduction: the
+separate kernel sums each lane's strided pair into a 256-lane LDS tree, this one
+sums sixteen contiguous columns into a shuffle tree, and reproducing the former
+from the latter's register layout would mean redistributing the row through
+shared memory. 48 ms is not worth the margin, so the separate norm pass stays.
+
+**Reduction order matters where a norm scale is involved and not where a
+projection is.** The same reassociation cost 0.01 rmse on `mix` and 0.06 on the
+block norm, because the envelope measures agreement with the sequential path,
+which still uses the old order. Price the two separately before fusing.
+
+#### DSpark is untouched, and the long-context curve only improves
+
+The ten-category corpus, both arms alternated on one host:
+
+| | `a8158c7` | fused |
+|---|---:|---:|
+| exact vs AR | 3/10 | 3/10 |
+| support acceptance | 60.7% | **60.7%** |
+| positional agreement | 74.4% | **74.4%** |
+| full-block rate | 38.0% | **38.0%** |
+| attempts / skipped | 163 / 541 | **163 / 541** |
+| AR / speculative tok/s | 16.15 / 17.85 | 16.12 / 17.40 |
+| aggregate / median speedup | 1.11x / 1.04x | 1.08x / 0.98x |
+
+**Every behavioural column is identical, per category as well as in aggregate**,
+and for a structural reason rather than by luck: these prompts are chat framings of
+a few dozen tokens, so the prompt prefill never reaches the 128-row scope and the
+fused route does not run at all in this suite. The speedup columns move by the
+documented +-0.15x of single 128-token generations with no acceptance change
+behind them, which the section above already says to read as noise.
+
+The stable throughput target is the one case with enough blocks to be signal, and
+it improves: `repetition_sequence` in raw mode goes **27.48 to 29.00 tok/s, 1.67x
+to 1.77x**, at 100% acceptance, 100% positional, 100% full blocks and 22 attempts
+on both arms.
+
+**A note on the DSpark table two sections up.** Its "before"/"after" columns read
+61.2% acceptance and 164/505 attempts/skips against the 2026-09-01 record's 60.7%
+and 163/541. Both were measured with the `5f231f8` small-batch regression live, so
+that difference was the regression, not the indexer change: with `08584bd` in
+place the corpus returns to 60.7% and 163/541 exactly. The attribution in that
+section -- that the indexer change leaves the draft and verify streams alone --
+still holds, since both of its arms carried the same regression.
+
+### Two more prefill levers, both falsified (September 4, 2026)
+
+| Lever | Predicted | Measured |
+| --- | --- | --- |
+| Route the routed-expert Q2_K **down** projection through the vendored MMQ tier, the way gate/up already goes, reusing the same `ids_dst` map and the SwiGLU epilogue's `mid` | the native wide WMMA kernel sustains 12.2 TFLOP/s against gate/up MMQ's 18.7 on comparable arithmetic, so about -500 ms | **19% slower at every tile width.** 461.4 tok/s native against 370.0 / 374.4 / 370.0 / 368.8 at `mmq_x` 16 / 24 / 32 / 40. Q2_K's MMQ tile carries a second accumulator set for its per-block minima: at the width the selector picks it needs **256 VGPRs plus 2,768 bytes of scratch** and 37,696 bytes of shared memory -- one workgroup per CU and a spilled inner loop -- against IQ2_XXS's 176 VGPRs, no scratch and 31,552 bytes. Capping the width removes the spill and the column tiles then multiply; neither end wins. The composition itself is sound and cheap (`swiglu_epilogue` and `fused_down` now share one `mid`, no second `mm_ids_helper`), so the finding is about the Q2_K tile, not the plumbing |
+| Compact the cold-expert Q2 down grid, which is sized by the whole 256-entry expert table while the router skew leaves about 83 experts cold at prompt width | 65,536 workgroups down to 21,248, so most of 138 ms | **7 ms.** 138.3 to 131.1 ms at kernel level with `grid.y` 256 to 83. This is the third independent confirmation that empty workgroups are free on this GPU (see "Nothing in this prefill is bandwidth bound"): the 131 ms is real work, 83 experts' full 4,096 x 2,048 weight streams for a few hundred assignments, at about 1.3 TFLOP/s. Reverted -- it also added a synchronous host copy per layer for less than its own noise |
+| `PAIR_TILE` 8 instead of 4 on that same cold route, so a five-to-seven-row bucket stops paying a second full weight dequantization pass | about -30% of 133 ms | **+64%**, 132.6 to 218.0 ms. The mid staging loop covers the whole tile whatever the bucket holds, so eight stages 2,048 floats per K block to use three of them, and that costs more than the weight pass it saves. The default stays 4 |
+
+### What is left, and why it was not attempted
+
+The attention producer writes its 32,768-wide F32 output and
+`attention_pack_group_heads_rope_f16_vec4_kernel` immediately reads all of it
+back to transpose `(token, group)`, apply the inverse rope and narrow to F16:
+537 MiB written, 537 MiB read, 268 MiB written per layer, of which the fused form
+would keep only the last. That is about **190 ms**, the largest single chain left.
+
+It does not fit the producer's epilogue. The accumulators leave WMMA through
+`rocwmma::store_matrix_sync` with one leading dimension, and the packed
+destination is `[group][token][group_dim]`, so a 16-row fragment spanning two
+groups needs two different strides -- the fragment would have to land in shared
+memory first and be rewritten per head. That kernel already holds 57,992 of
+65,536 bytes of shared memory, which is exactly what pins it to one workgroup per
+CU, so the staging buffer would come out of the operand tiles that make it fast.
+Worth revisiting only together with a rewrite of that producer's LDS budget.
 
 ## To Do
 
