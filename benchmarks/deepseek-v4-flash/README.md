@@ -1094,6 +1094,38 @@ Two things this ruled out at the same time:
   duration. Take bytes from the counter pass and time from a plain kernel
   trace.)
 
+### DSpark re-validated after the prefill work (September 4, 2026)
+
+Ten-category corpus, 128 tokens per prompt, run on the build before and after the
+indexer change so the comparison attributes rather than guesses:
+
+| | before | after | recorded 2026-09-01 |
+|---|---:|---:|---:|
+| AR | 15.82 | 15.76 | 16.32 |
+| DSpark | 17.69 | 17.82 | 18.00 |
+| mean speedup | 1.12x | **1.13x** | 1.10x |
+| median speedup | 1.00x | 1.01x | 1.00x |
+| support acceptance | 61.2% | 61.2% | 60.7% |
+| attempts / skipped | 164 / 505 | 164 / 505 | 163 / 541 |
+
+**The two builds produce byte-identical speculative behaviour.** Support
+acceptance, positional agreement, full-block rate, attempts and skips match
+exactly in all ten categories, and the exact-vs-AR set is the same 4/10. So the
+indexer change does not touch the draft or verify streams, and DSpark needs no
+re-tuning after it.
+
+What *does* move between runs is the per-category speedup, by up to +-0.15x on
+identical token streams: summarization 1.01x -> 0.84x, but Italian 0.93x -> 1.02x
+and creative 0.86x -> 0.95x in the opposite direction. These are single 128-token
+generations with 5 to 8 speculative blocks each, so they are timing noise, not
+signal. **Read the aggregate and the acceptance columns; treat a single
+category's speedup as noise unless its acceptance moved too.**
+
+The repetitive case, which is the stable throughput target, holds at **29.22
+tok/s and 1.83x** (recorded 29.05 / 1.85x -- the ratio is slightly lower only
+because AR itself is faster now). Its 96.4% acceptance and 90.9% full-block rate
+are unchanged.
+
 ### Long context: the indexer is the whole degradation curve (September 4, 2026)
 
 Prefill throughput against prompt length, one process, `result-clean`:
