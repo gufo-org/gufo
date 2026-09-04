@@ -893,6 +893,41 @@ this model, which is why they were worth measuring; none of them transfers.
   more than the wider access buys.
 - **Moving sampling to the GPU.** Worth 24 microseconds. See below.
 
+### rocBLAS solution-index retuning: closed by measurement, not declined
+
+This was the last lever named as sized-but-untested, so it was measured.
+
+Two things had to be separated first. The call site for the strided-batched
+attention output-A carries the note "rocBLAS reaches 2.7 TFLOP/s on this
+strided-batched shape", which reads like 5% of peak on a 554 ms call. That
+figure is the **small-n** instance of the shape -- the DSpark verifier at
+`n_tokens` of 5 or 6, where the call is latency bound. In prefill the same
+`Cijk_Alik_Bljk_HHS_BH_MT128x128x32` dispatch is `m=1024 n=4096 k=4096 batch=8`,
+and 43 calls at 12.886 ms each is **21.3 TFLOP/s, about 39% of peak.** This is
+also why PR 887's `-401` solution override is worth 1.30x for them and would not
+be here: it targets their `4096 x N x 8192` projection at N=5 and N=6.
+
+Swept against it, `tools/bench/dsv4_attn_out_gemm_bench.hip` puts the best of
+**27 own-kernel geometries** at `BM128 BN128 BK32 W4x2 SWZ4`, **12.857 ms /
+21.38 TFLOP/s** -- a dead tie with rocBLAS's live 12.886 ms, and `maxdiff 0`.
+(The earlier 855.99 ms figure recorded for this shape was the `BM256` tile;
+`BM128` matches rocBLAS rather than beating it, so there is still nothing to
+gain by switching.) rocBLAS's heuristic is already choosing a near-optimal
+kernel for the prefill shape, so there is no solution index to find.
+
+The other library block, `MT96x96` at 365 ms over 236 calls, is hipBLASLt at
+roughly 22 TFLOP/s on a `K`-short shape where our own kernel measures *worse*
+than on the two longer-K shapes above (23.6 at K=8192, 21.4 at K=4096). Not a
+candidate either.
+
+Also swept and neutral: the one hipBLASLt route still disabled by default,
+`DS4_ROCM_LT_ROUTE_ATTN_B`. `GUFO_DEEPSEEK_ROCM_HIPBLASLT_ROUTING=31` against
+the default 23 measured 457.5 against 455.2 tok/s -- the bit is a fallback that
+the own rocWMMA output-B kernel already serves, so it rarely fires. The
+candidate-index picks (4, with 5 and 6 for two `in_dim == 4096` projections) are
+already enabled and already width-scoped to `n_tokens >= 128`, which is what
+keeps them out of the pinned trajectory's narrow decode path.
+
 ### Prefetching the MMQ activation tile: the one non-requant lever on `mul_mat_q`, and it loses
 
 `mul_mat_q` is 34% of prefill (3,031 ms) and every throughput explanation for it
