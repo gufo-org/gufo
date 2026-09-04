@@ -3026,30 +3026,33 @@ template <int mmq_y, bool need_check, int fixed_stride = 0> static __device__ __
 
 #pragma unroll
         for (int l = 0; l < QR2_XXS; ++l) {
-            const uint2 grid_pos = ((const uint2*)iq2xxs_grid)[aux8[l]];
 #if defined(__gfx1151__)
             const uint32_t sign_bits = (aux32 >> (7 * l)) & 0x7fu;
             int grid0;
             int grid1;
-            /* ds4: the arithmetic form below was tried here too, replacing the
-             * ksigns64 load with four VALU ops on the theory that the two
-             * dependent indexed loads per eight weights were what the 31x stall
-             * factor was waiting on. It is bit-identical -- same gate output,
-             * rmse 0.41 and max_error 1.95 -- and measurement-neutral: 435.1
-             * against 439.6 tok/s mean. So the sign lookup is not the cost
-             * either; it is presumably L1-resident. Kept as upstream wrote it. */
+            /* ds4: two rewrites of this expansion were measured and rejected,
+             * both bit-identical. Deriving the sign masks arithmetically instead
+             * of loading ksigns64 was neutral (435.1 against 439.6 tok/s), and
+             * precomputing the whole sign-applied codebook into a 2^15-entry
+             * table -- one 8-byte load replacing two loads and six operations --
+             * was slightly worse (412.1 against 418.7). The loader's time is not
+             * sensitive to its own instruction mix; see the counter table in
+             * benchmarks/deepseek-v4-flash/README.md. */
             if constexpr (fixed_stride == 16) {
+                const uint2 grid_pos = ((const uint2*)iq2xxs_grid)[aux8[l]];
                 const uint2 sign_mask = ((const uint2 *) ksigns64)[sign_bits];
                 const uint32_t add0 = sign_mask.x & 0x01010101u;
                 const uint32_t add1 = sign_mask.y & 0x01010101u;
                 grid0 = (grid_pos.x ^ sign_mask.x) + add0;
                 grid1 = (grid_pos.y ^ sign_mask.y) + add1;
             } else {
+                const uint2 grid_pos = ((const uint2*)iq2xxs_grid)[aux8[l]];
                 const uint32_t signs = sign_bits | ((__popc(sign_bits) & 1u) << 7);
                 grid0 = iq2_xxs_apply_sign4(grid_pos.x, signs);
                 grid1 = iq2_xxs_apply_sign4(grid_pos.y, signs >> 4);
             }
 #else
+            const uint2 grid_pos = ((const uint2*)iq2xxs_grid)[aux8[l]];
             const uint32_t signs = unpack_ksigns(aux32 >> (7 * l));
 
             const int signs0 = __vcmpne4(signs & 0x08040201, 0);

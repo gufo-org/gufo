@@ -558,12 +558,57 @@ how many there are. It also explains why replacing the `ksigns64` load with four
 VALU operations was slightly negative rather than positive: it traded a cached
 load for more of the resource that actually gates the kernel.
 
-Two further consequences. Both kernels leave 85% of VALU capacity unused, so the
-15% ceiling is itself a dependency-stall property of the inner loop rather than a
-throughput limit -- shortening the dependency chain per weight would help as much
-as removing instructions. And the requantization direction is now supported rather
-than assumed: a routed format with fewer operations per weight is the one change
-that moves the term the time is proportional to.
+Both kernels leave 85% of VALU capacity unused, so the 15% ceiling is a
+dependency-stall property of the inner loop rather than a throughput limit.
+
+#### But reducing the instruction count does not reduce the time
+
+Three interventions on the expansion, all bit-identical (gate output 116/128,
+142, 3 with `rmse` 0.41 and `max_error` 1.95 in every case):
+
+| Intervention | Effect on the inner loop | Measured |
+| --- | --- | ---: |
+| Sign masks derived arithmetically instead of loading `ksigns64` | -1 load, +4 VALU per 8 weights | 435.1 against 439.6 tok/s |
+| Whole sign-applied codebook precomputed into a 2^15-entry table | -1 load and -6 VALU per 8 weights, one 8-byte load for the pair | 412.1 against 418.7 tok/s |
+| Row-loop unroll factor | more independent decode chains | already tuned: `#pragma unroll 2` is deliberate, "limit concurrent row decompression while retaining two-row ILP" |
+
+So the descriptive correlation (2.62x the time for 3.00x the instructions) is not
+causal in the direction that helps: the loader's time is insensitive to its own
+instruction mix. Removing six operations per eight weights, or trading a load for
+arithmetic, or the reverse, all land inside noise or slightly negative.
+
+The instruction listing and the remaining counters say why there is no single term
+to attack. `tools/prof/isa_mix.py` on the production instantiation gives 4,063
+instructions with **568 `s_delay_alu`** -- the compiler's explicit dependency
+stalls, which is the 15% issue ceiling made visible -- and 728 instructions (18%)
+of 64-bit vector address arithmetic. That address arithmetic is mostly the fused
+SwiGLU epilogue's four separate pointer computations per output, and the epilogue
+turns out to be dynamically cheap: disabling it
+(`GUFO_DEEPSEEK_ROCM_MMQ_FUSED_SWIGLU=0`) moves `mul_mat_q` only 2,791.68 to
+2,738.08 ms, about 2%. Statically prominent, dynamically small.
+
+Against the dense path the routed one issues about three times as much of
+*every* instruction class, not one:
+
+| | IQ2 routed | Q8 dense | ratio |
+| --- | ---: | ---: | ---: |
+| VALU | 45.5 G | 15.2 G | 3.0x |
+| SALU | 8.3 G | 1.0 G | **8.3x** |
+| LDS | 8.9 G | 3.3 G | 2.7x |
+| LDS bank-conflict cycles | 6.66 G of 33.9 G (**19.7%**) | 0.66 G of 9.3 G (7.1%) | 2.8x |
+
+The bank conflicts are structural rather than a padding mistake, and worth about
+4% of the kernel if eliminated. Within a wave `kqsx` and `kqsx + 4` write exactly
+`8 * 4 = 32` dwords apart, the same bank, whatever the row stride is -- and the
+row stride is already padded for the row case (`MMQ_MMA_TILE_X_K_Q8_0 % 8 == 4`,
+76 dwords). Fixing it means interleaving the K axis inside the tile, which the
+consumer's `load_ldmatrix` layout in `vec_dot_q8_0_q8_1_mma` also has to mirror --
+a relayout of vendored MMQ internals for ~1.2% end-to-end.
+
+So the honest position after all of this: the routed gate/up's cost is the volume
+of decode work the IQ2_XXS format implies, it is spread across VALU, SALU and LDS
+in proportions that no single source change shifts, and the schedule around it is
+already at the layout's limits.
 
 Its cost tracks neither bytes, nor tiles, nor workgroups, nor operand layout,
 and the counters say it is not issuing either. 74.9 M waves at 888 VALU and 166
