@@ -2841,8 +2841,8 @@ __device__ __forceinline__ static void q2_K_dequant_wide_tile_half_rowwise(
                                      ds * (float)q3 - dmm);
         }
         __half *dst = shB + tile * (uint32_t)(BK * BN) + nn * (uint32_t)BK + kk0;
-        *reinterpret_cast<uint32_t *>(dst) = v0;
-        *reinterpret_cast<uint32_t *>(dst + 2u) = v1;
+        /* One 8-byte store; see the note in the wide dequantizer. */
+        *reinterpret_cast<uint2 *>(dst) = make_uint2(v0, v1);
     }
 }
 
@@ -2944,8 +2944,8 @@ __device__ __forceinline__ static void q2_K_dequant_pair_tile_half_rowwise(
                                      ds * (float)q3 - dmm);
         }
         __half *dst = shB + nn * (uint32_t)BK + kk0;
-        *reinterpret_cast<uint32_t *>(dst) = v0;
-        *reinterpret_cast<uint32_t *>(dst + 2u) = v1;
+        /* One 8-byte store; see the note in the wide dequantizer. */
+        *reinterpret_cast<uint2 *>(dst) = make_uint2(v0, v1);
     }
 }
 
@@ -3015,10 +3015,9 @@ __device__ __forceinline__ static void q2_K_dequant_dual_pair_tile_half_rowwise(
                                       uds * (float)uq3 - umm);
         }
         const uint32_t sj = nn * (uint32_t)BK + kk0;
-        *reinterpret_cast<uint32_t *>(shBg + sj) = gv0;
-        *reinterpret_cast<uint32_t *>(shBg + sj + 2u) = gv1;
-        *reinterpret_cast<uint32_t *>(shBu + sj) = uv0;
-        *reinterpret_cast<uint32_t *>(shBu + sj + 2u) = uv1;
+        /* One 8-byte store each; see the note in the wide dequantizer. */
+        *reinterpret_cast<uint2 *>(shBg + sj) = make_uint2(gv0, gv1);
+        *reinterpret_cast<uint2 *>(shBu + sj) = make_uint2(uv0, uv1);
     }
 }
 
@@ -3516,10 +3515,9 @@ __device__ __forceinline__ static void iq2_xxs_dequant_dual_pair_tile_half_rowwi
             uv1 = dev_pack_half2_bits(u2, u3);
         }
         const uint32_t sj = nn * (uint32_t)BK + kk0;
-        *reinterpret_cast<uint32_t *>(shBg + sj) = gv0;
-        *reinterpret_cast<uint32_t *>(shBg + sj + 2u) = gv1;
-        *reinterpret_cast<uint32_t *>(shBu + sj) = uv0;
-        *reinterpret_cast<uint32_t *>(shBu + sj + 2u) = uv1;
+        /* One 8-byte store each; see the note in the wide dequantizer. */
+        *reinterpret_cast<uint2 *>(shBg + sj) = make_uint2(gv0, gv1);
+        *reinterpret_cast<uint2 *>(shBu + sj) = make_uint2(uv0, uv1);
     }
 }
 

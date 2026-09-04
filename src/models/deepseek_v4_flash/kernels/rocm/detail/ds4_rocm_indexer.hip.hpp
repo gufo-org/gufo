@@ -202,26 +202,43 @@ __global__ static void indexer_scores_wmma128_kernel(
 #pragma unroll
     for (uint32_t i = 0; i < 8u; i++) acc[i] = 0.0f;
 
-    for (uint32_t i = tid; i < 128u * 128u; i += 256u) {
-        const uint32_t c = i >> 7u;
-        const uint32_t d = i & 127u;
+    /* Four values per lane: a single half is a 2-byte LDS store, which uses half
+     * the bytes the LDS can retire per cycle and shares banks between adjacent
+     * lanes. The row pitch is 128 halves and `d` steps by four, so the uint2 store
+     * and the float4 read are both aligned. */
+    for (uint32_t i4 = tid; i4 < 128u * 32u; i4 += 256u) {
+        const uint32_t c = i4 >> 5u;
+        const uint32_t d = (i4 & 31u) * 4u;
         const uint32_t comp = tile_c + c;
-        float v = 0.0f;
-        if (comp < n_comp) v = index_comp[(uint64_t)comp * head_dim + d];
-        b_sh[d + c * 128u] = __float2half(v);
+        uint2 packed = make_uint2(0u, 0u);
+        if (comp < n_comp) {
+            const float4 v4 = *reinterpret_cast<const float4 *>(
+                    index_comp + (uint64_t)comp * head_dim + d);
+            const __half2 lo = __floats2half2_rn(v4.x, v4.y);
+            const __half2 hi = __floats2half2_rn(v4.z, v4.w);
+            packed.x = *reinterpret_cast<const uint32_t *>(&lo);
+            packed.y = *reinterpret_cast<const uint32_t *>(&hi);
+        }
+        *reinterpret_cast<uint2 *>(&b_sh[d + c * 128u]) = packed;
     }
     __syncthreads();
 
     for (uint32_t h = 0; h < n_head; h++) {
-        for (uint32_t i = tid; i < 16u * 128u; i += 256u) {
-            const uint32_t r = i >> 7u;
-            const uint32_t d = i & 127u;
+        /* Same widening, and this one runs once per head. */
+        for (uint32_t i4 = tid; i4 < 16u * 32u; i4 += 256u) {
+            const uint32_t r = i4 >> 5u;
+            const uint32_t d = (i4 & 31u) * 4u;
             const uint32_t token = tile_t + r;
-            float v = 0.0f;
+            uint2 packed = make_uint2(0u, 0u);
             if (token < n_tokens) {
-                v = q[((uint64_t)token * n_head + h) * head_dim + d];
+                const float4 v4 = *reinterpret_cast<const float4 *>(
+                        q + ((uint64_t)token * n_head + h) * head_dim + d);
+                const __half2 lo = __floats2half2_rn(v4.x, v4.y);
+                const __half2 hi = __floats2half2_rn(v4.z, v4.w);
+                packed.x = *reinterpret_cast<const uint32_t *>(&lo);
+                packed.y = *reinterpret_cast<const uint32_t *>(&hi);
             }
-            a_sh[i] = __float2half(v);
+            *reinterpret_cast<uint2 *>(&a_sh[r * 128u + d]) = packed;
         }
         __syncthreads();
 
