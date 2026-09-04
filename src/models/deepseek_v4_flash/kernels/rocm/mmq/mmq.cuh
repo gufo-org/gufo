@@ -3063,8 +3063,19 @@ template <int mmq_y, bool need_check, int fixed_stride = 0> static __device__ __
 #endif
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l + 0)] = grid0;
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l + 1)] = grid1;
+            /* ds4: one 8-byte store, not two 4-byte ones.
+             *
+             * Left as two scalar stores the compiler pairs them into
+             * `ds_store_2addr_stride64_b32`, whose two addresses are 64 dwords
+             * apart -- exactly 32 banks, hence the same bank -- so every such
+             * instruction self-conflicts before cross-lane conflicts are counted.
+             * Counters put this loader at 19.7% LDS bank-conflict cycles against
+             * the dense Q8 path's 7.1%. The pair is always 8-byte aligned here
+             * (the row stride is even, and so are `8*kqsx` and `2*l`), so writing
+             * it as one `int2` gives `ds_store_b64` across banks b and b+1. */
+            *reinterpret_cast<int2 *>(
+                &x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + 2*l]) =
+                    make_int2(grid0, grid1);
 #else
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 0)] = grid0;
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 1)] = grid1;
@@ -3150,8 +3161,19 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 #endif
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l + 0)] = grid0;
-            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + (2*l + 1)] = grid1;
+            /* ds4: one 8-byte store, not two 4-byte ones.
+             *
+             * Left as two scalar stores the compiler pairs them into
+             * `ds_store_2addr_stride64_b32`, whose two addresses are 64 dwords
+             * apart -- exactly 32 banks, hence the same bank -- so every such
+             * instruction self-conflicts before cross-lane conflicts are counted.
+             * Counters put this loader at 19.7% LDS bank-conflict cycles against
+             * the dense Q8 path's 7.1%. The pair is always 8-byte aligned here
+             * (the row stride is even, and so are `8*kqsx` and `2*l`), so writing
+             * it as one `int2` gives `ds_store_b64` across banks b and b+1. */
+            *reinterpret_cast<int2 *>(
+                &x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + 2*l]) =
+                    make_int2(grid0, grid1);
 #else
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 0)] = grid0;
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + (2*l + 1)] = grid1;
