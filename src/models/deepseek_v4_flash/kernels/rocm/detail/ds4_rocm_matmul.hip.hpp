@@ -528,7 +528,7 @@ static int hip_launch_q8_batch_reuse(
  * disables the small-batch route entirely, which is how an A/B run isolates it.
  */
 static uint32_t ds4_rocm_dense_small_batch_rows(void) {
-    return 24u;
+    return ds4_rocm_small_batch_limit(24u);
 }
 
 static int hip_matmul_q8_0_tensor_f16_gemm(

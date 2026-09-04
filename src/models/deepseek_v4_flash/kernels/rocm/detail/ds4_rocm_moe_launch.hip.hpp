@@ -59,7 +59,7 @@ extern "C" int ds4_gpu_routed_sum_deferred(void) { return g_routed_defer_sum_tak
  * the work and reproduces one-token decode's per-row arithmetic.
  */
 static uint32_t ds4_rocm_moe_small_batch_rows(void) {
-    return 16u;
+    return ds4_rocm_small_batch_limit(16u);
 }
 
 static uint32_t ds4_rocm_compact_down_rows_per_block(void) {
