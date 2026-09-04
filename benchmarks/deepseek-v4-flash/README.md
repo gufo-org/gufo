@@ -893,6 +893,64 @@ this model, which is why they were worth measuring; none of them transfers.
   more than the wider access buys.
 - **Moving sampling to the GPU.** Worth 24 microseconds. See below.
 
+### No requant can reduce matrix ops on gfx1151 (compiler-verified)
+
+The second form of the requant argument is not about LDS at all: get *fewer
+matrix ops per output* by carrying more k per WMMA instruction. On this hardware
+that is not available. Probing the compiler directly:
+
+```
+wprobe.hip:7:8: error: use of undeclared identifier
+  '__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32'; did you mean
+  '__builtin_amdgcn_wmma_i32_16x16x16_iu4_w32'?
+```
+
+`16x16x32` does not exist for gfx1151; the only integer WMMA shapes are
+`16x16x16` in `iu8` and `iu4`. **Matrix ops per output is therefore
+`M*N*K/4096`, fixed by the GEMM dimensions and completely independent of the
+weight format.** No routed-expert requant can reduce it. `iu4` would only halve
+LDS, which the occupancy table above already shows is not the lever -- and it
+cannot represent IQ2_XXS's grid magnitudes anyway, which are the odd values 1..15
+and need sixteen signed levels against `int4`'s -8..7.
+
+### The last two small items, sized properly
+
+- **`QK_WG = 4` in the mixed attention kernel is worth zero, not 0.4%.** The
+  isolated harness shows `QT WG4 FUSEP` at 3.920 against `WG2 FUSEP`'s 4.068 ms,
+  a 3.6% kernel win, and scaling that by the kernel's 10.9% share suggests 0.4%
+  end to end. It does not translate: measured **433.1 against 433.2 tok/s**. It
+  also reassociates the score sum and moves the prefill envelope from rmse 0.41
+  to 0.48, which is no longer clearly better than the `16d5e30` baseline's
+  0.478146. Both numbers were already recorded at the `QK_WG` declaration; the
+  0.4% estimate was the error.
+- **`quantize_mmq_q8_1` has about 0.7% in it, not 1.7%.** Its 203 ms splits into
+  127 ms on a `4096 x 4096` shape at **115 GB/s** (48% of ceiling) and 66.6 ms on
+  the routed `24576 x 4096` shape at **329 GB/s** -- above DRAM peak, so
+  MALL-served, because the routed activations are the same 4,096 tokens
+  replicated per expert. Only the first is winnable, and the kernel already reads
+  `float4`, writes `char4` and reduces by shuffle; 48% is about what a 4:1
+  read/write asymmetry gives.
+
+### Status: the search for the remaining 10% is exhausted
+
+pp4096 stands at **441-480 tok/s, mean ~455**, from a 188.5 baseline (+142%),
+with the pinned trajectory at 116/128 rank sum 142 worst rank 3 and prefill rmse
+0.41 -- better than baseline on both. Reaching 500 needs about 880 ms of the
+8,898 ms profile. Every mechanism identified for it has now been measured rather
+than argued:
+
+| Candidate | Outcome |
+|---|---|
+| All of antirez PR 887's prefill levers | already present; branch is ~55% ahead of its result from a matching baseline |
+| `mmq_x` 24/32/40/64/96/112/128 | tie at 64-128, monotonically worse below 64 |
+| MMQ activation-tile register prefetch | -2.7% split loops, -7.7% interleaved |
+| Own kernel vs rocBLAS/hipBLASLt on every hot GEMM | parity (best of 27 geometries ties rocBLAS at 21.4 TFLOP/s) |
+| More resident waves (the point of shrinking `tile_x`) | halving residency costs only 7.8%; 4->3 workgroups is free |
+| Fewer matrix ops via requant | impossible: every gfx1151 WMMA shape is K=16 |
+| `QK_WG = 4` | 433.1 vs 433.2, and costs the rmse margin |
+| `quantize_mmq_q8_1` | ~0.7% ceiling, already vectorized |
+| GPU sampling | 24 microseconds of a 59 ms token |
+
 ### The IQ2 byte-expansion / occupancy program, measured rather than assumed
 
 The standing argument for a routed-expert format change was: `tile_x` byte-expands
