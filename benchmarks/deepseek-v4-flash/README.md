@@ -814,6 +814,51 @@ predicted at 22 ms from its 128 MiB round trip and delivered ten times that.
   even warm, regressed 2K prompt/decode throughput by 25.3%/42.3% and added
   about 80.5 GiB of process RSS, so copied device arenas remain authoritative.
 
+### Against antirez/ds4 PR 887 (September 4, 2026)
+
+[PR 887](https://github.com/antirez/ds4/pull/887), "ROCm: optimize DeepSeek V4
+Flash prefill and DSpark on gfx1151", was pulled and compared change by change.
+It takes 4,096-token prefill from **187.26 to 292.86 tok/s**. This branch takes
+it from **188.5 to 455-462 tok/s mean, 478.2 peak**. The two baselines agree to
+0.7%, which makes the comparison a controlled one despite the different ROCm
+(7.2.3 here, 10.0 there): **the same starting point, and this branch ends 57%
+ahead.**
+
+Every prefill lever in that PR is already present here:
+
+| PR 887 prefill change | Status here |
+|---|---|
+| Four-wave wave32 `y64` IQ2 MMQ tile (their largest single item, 33.2% on the isolated gate/up test) | Present: `DS4_ROCM_WMMA_MMQ_Y=64` with `nwarps = mmq_y/16`, which the profile confirms as `wg=128` |
+| `mmq_x` clamped to 64 on gfx1151 | Tested, **dead tie**: 453.5 against 454.0 tok/s mean over three interleaved pairs via `DS4_CUDA_MMQ_X_MAX=64` |
+| 32-head wave32 rocWMMA prefill attention | Present |
+| Dedicated `4096 x 2048 x 8192` F16 rocWMMA attention-output-B kernel (25.89 -> 11.88 ms there) | Present, 13.6 ms live and 11.6 ms standalone, best of 17 geometries |
+| Vectorized F32-to-F16 KV staging | Present |
+| Cooperative Q2_K weight staging once per 256-value K slab | Present (`shW` in the wide down kernel) |
+| `ksigns64` `uint2` sign-mask lookup in the IQ2 tile loader | Present; the arithmetic alternative was measured here and was neutral |
+| Halved down-kernel accumulator LDS plus a raw Q2_K window | Present |
+| Routed grid bounded by the largest expert bucket rather than the whole chunk | Present (`ds4_mmq_set_routed_max_expert_rows`) |
+
+What is *not* ported, and why:
+
+- **rocBLAS solution-index overrides.** Those indices are pinned to two exact
+  library builds (`5.5.0.cd957402` in ROCm 7.14 uses `-217/-216`,
+  `5.6.0.8d1ae90e` in ROCm 10.0 uses `-50/-49` plus `-401`). This box runs
+  neither, and PR 887's own code falls back silently on an unknown build, so
+  porting the table would be inert. Retuning for this build is open work; the
+  largest library calls left are `Cijk_Alik_Bljk_HHS_BH_MT128x128x32` at 554 ms
+  and `MT96x96` at 365 ms.
+- **The tiny-M matmul specializations** (`matmul_f16_tinym24_wmma_kernel` at
+  `M=24, N=2048, K=16384`, `matmul_f16_smallm_wmma_kernel`,
+  `matmul_q8_0_f32_batch_sharedx_exact8_kernel<2..5>`) and the `down_tile == 2`
+  / `expert_tile_m = 4` / `compact_active` MoE paths. All of these are gated to
+  `n_tokens <= 8`: they are DSpark verifier and decode shapes, not prefill.
+- **The 16-cycle DSpark scheduler policy and the support-model cache fix.**
+  Orthogonal to prefill throughput.
+
+Consistent with that, PR 887 reports ordinary decode unchanged at 16.87 tok/s
+before and after, which matches the 16.6 tok/s measured here: neither branch
+moves tg, and for the same reason -- see the decode note below.
+
 ### Four more levers, all falsified (September 4, 2026)
 
 Each of these follows from a mechanism that had already paid somewhere else in
