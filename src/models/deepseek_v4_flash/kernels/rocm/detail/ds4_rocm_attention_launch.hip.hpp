@@ -1022,7 +1022,82 @@ static int attention_output_q8_batch_launch(
         !(n_tokens > 1u && n_tokens <= attn_small_batch_rows);
     if (rope && !attn_output_hipblas) return 0;
     if (!attn_output_hipblas) {
-        if ((group_dim & 31u) == 0u && rank <= UINT32_MAX && n_tokens <= UINT32_MAX) {
+        if (hip_q8_prequant_decode_enabled() &&
+            (group_dim & 31u) == 0u &&
+            rank <= UINT32_MAX && n_tokens <= 8u) {
+            const uint64_t x_rows = (uint64_t)n_tokens * n_groups;
+            const uint64_t xq_bytes = x_rows * blocks_a * 32u;
+            const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
+            const uint64_t tmp_bytes =
+                scale_offset + x_rows * blocks_a * sizeof(float);
+            void *tmp = hip_tmp_alloc(
+                tmp_bytes, "attention output a session batch prequant");
+            if (!tmp) return 0;
+            int8_t *xq = (int8_t *)tmp;
+            float *xscale = (float *)((char *)tmp + scale_offset);
+            dim3 qgrid((unsigned)blocks_a, (unsigned)x_rows, 1u);
+            quantize_q8_0_f32_kernel<<<qgrid, 32u>>>(
+                xq,
+                xscale,
+                (const float *)heads->ptr,
+                group_dim,
+                blocks_a);
+            if (!hip_ok(
+                    hipGetLastError(),
+                    "attention output a session batch quantize launch")) {
+                return 0;
+            }
+
+            constexpr uint32_t rows_per_block = 4u;
+            const unsigned grid =
+                (unsigned)((low_dim + rows_per_block - 1u) /
+                           rows_per_block);
+            const unsigned threads = rows_per_block * 32u;
+            if (n_tokens <= 2u) {
+                grouped_q8_0_a_preq_batch_reuse_w32_kernel<2u>
+                    <<<grid, threads>>>(
+                        (float *)low->ptr,
+                        out_a,
+                        xq,
+                        xscale,
+                        group_dim,
+                        rank,
+                        n_groups,
+                        n_tokens,
+                        blocks_a,
+                        rows_per_block,
+                        1);
+            } else if (n_tokens <= 4u) {
+                grouped_q8_0_a_preq_batch_reuse_w32_kernel<4u>
+                    <<<grid, threads>>>(
+                        (float *)low->ptr,
+                        out_a,
+                        xq,
+                        xscale,
+                        group_dim,
+                        rank,
+                        n_groups,
+                        n_tokens,
+                        blocks_a,
+                        rows_per_block,
+                        1);
+            } else {
+                grouped_q8_0_a_preq_batch_reuse_w32_kernel<8u>
+                    <<<grid, threads>>>(
+                        (float *)low->ptr,
+                        out_a,
+                        xq,
+                        xscale,
+                        group_dim,
+                        rank,
+                        n_groups,
+                        n_tokens,
+                        blocks_a,
+                        rows_per_block,
+                        1);
+            }
+        } else if ((group_dim & 31u) == 0u && rank <= UINT32_MAX &&
+                   n_tokens <= UINT32_MAX) {
             const uint32_t rows_per_block = 32u;
             /* Token tile matched to the rows present, as in the dense Q8 path. */
             const uint32_t tile = n_tokens >= 32u ? 32u
@@ -1054,7 +1129,11 @@ static int attention_output_q8_batch_launch(
                     n_tokens,
                     blocks_a);
         }
-        if (!hip_ok(hipGetLastError(), "attention_output_q8_a f32 batch launch")) return 0;
+        if (!hip_ok(
+                hipGetLastError(),
+                "attention_output_q8_a narrow batch launch")) {
+            return 0;
+        }
         return hip_matmul_q8_0_tensor_labeled(out,
                                                model_map,
                                                model_size,

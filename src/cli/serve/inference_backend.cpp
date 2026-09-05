@@ -1254,6 +1254,18 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
   return *deepseek;
 }
 
+[[nodiscard]] bool DeepSeekSessionBatchEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_DEEPSEEK_SESSION_BATCH");
+    if (value == nullptr) {
+      return true;
+    }
+    const std::string_view setting(value);
+    return setting != "0" && setting != "false" && setting != "off";
+  }();
+  return enabled;
+}
+
 class DeepSeekTextRunner final : public TextModelRunner {
 public:
   DeepSeekTextRunner(std::shared_ptr<models::deepseek_v4_flash::Model> model,
@@ -1304,10 +1316,27 @@ public:
   }
 
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
-    return {{
-        .kind = TextExecutionPlanKind::kSerial,
-        .physical_width = 1,
-    }};
+    if (!DeepSeekSessionBatchEnabled() || model_->HasDspark()) {
+      return {{
+          .kind = TextExecutionPlanKind::kSerial,
+          .physical_width = 1,
+      }};
+    }
+    std::vector<TextExecutionPlan> plans{
+        {
+            .kind = TextExecutionPlanKind::kSerial,
+            .physical_width = 1,
+        },
+    };
+    for (const std::size_t width : {2u, 4u, 8u}) {
+      if (width <= model_->PrefillChunk()) {
+        plans.push_back({
+            .kind = TextExecutionPlanKind::kBatched,
+            .physical_width = width,
+        });
+      }
+    }
+    return plans;
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -1458,6 +1487,46 @@ public:
       throw std::runtime_error("DeepSeek decode failed: " + error);
     }
     deepseek.set_position(deepseek.position() + 1);
+  }
+
+  void AdvanceBatch(
+      std::span<const TextRunnerAdvance> advances) const override {
+    if (!DeepSeekSessionBatchEnabled() || model_->HasDspark()) {
+      throw std::logic_error("DeepSeek session batching is disabled");
+    }
+    if (advances.size() < 2 || advances.size() > 8 ||
+        advances.size() > model_->PrefillChunk()) {
+      throw std::invalid_argument(
+          "DeepSeek batched decode exceeds the configured batch arena");
+    }
+
+    std::array<models::deepseek_v4_flash::SessionBatchItem, 8> items{};
+    std::array<DeepSeekTextRunnerState*, 8> states{};
+    std::size_t item_count = 0;
+    for (const auto& advance : advances) {
+      if (advance.token >
+          static_cast<TextRunnerToken>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("DeepSeek token ID exceeds engine range");
+      }
+      auto& deepseek = RequireDeepSeekState(advance.state.get());
+      states[item_count] = &deepseek;
+      items[item_count] = {
+          .session = &deepseek.session(),
+          .token = static_cast<int>(advance.token),
+      };
+      ++item_count;
+    }
+
+    std::string error;
+    if (!model_->EvaluateBatch(
+            std::span<const models::deepseek_v4_flash::SessionBatchItem>(
+                items.data(), item_count),
+            &error)) {
+      throw std::runtime_error("DeepSeek batch decode failed: " + error);
+    }
+    for (std::size_t index = 0; index < item_count; ++index) {
+      states[index]->set_position(states[index]->position() + 1);
+    }
   }
 
   [[nodiscard]] std::size_t CheckpointPosition(

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <array>
 #include <memory>
 #include <new>
 
@@ -314,6 +315,93 @@ int ds4_session_eval(ds4_session *session,
         return 1;
     }
     session->checkpoint_valid = true;
+    return 0;
+}
+
+int ds4_sessions_eval_batch(const ds4_session_batch_item *items,
+                            size_t item_count,
+                            char *error,
+                            size_t error_capacity) {
+    if (!items || item_count < 2 || item_count > 8) {
+        set_error(error,
+                  error_capacity,
+                  "batch decode requires two to eight sessions");
+        return 1;
+    }
+
+    ds4_engine *engine = nullptr;
+    std::array<ds4_rocm_batch_item, 8> graph_items{};
+    size_t graph_item_count = 0;
+    for (size_t index = 0; index < item_count; ++index) {
+        ds4_session *session = items[index].session;
+        if (!session || !session->checkpoint_valid) {
+            set_error(error,
+                      error_capacity,
+                      "batch decode contains an invalid session");
+            return 1;
+        }
+        if (engine == nullptr) {
+            engine = session->engine;
+        } else if (session->engine != engine) {
+            set_error(error,
+                      error_capacity,
+                      "batch decode sessions do not share one model");
+            return 1;
+        }
+        if (session_cancelled(session)) {
+            set_error(error, error_capacity, "batch decode cancelled");
+            return DS4_SESSION_SYNC_INTERRUPTED;
+        }
+        if (items[index].token < 0 ||
+            items[index].token >= ds4_engine_vocab_size(session->engine)) {
+            set_error(error,
+                      error_capacity,
+                      "batch decode contains an invalid token");
+            return 1;
+        }
+        if (session->checkpoint.len < 0 ||
+            session->checkpoint.len >= session->context_size) {
+            set_error(error,
+                      error_capacity,
+                      "batch decode exceeds a session context");
+            return 1;
+        }
+        if (ds4_rocm_graph_dspark_block_size(session->graph) != 0) {
+            set_error(error,
+                      error_capacity,
+                      "DSpark sessions do not support batch decode");
+            return 1;
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (items[previous].session == session) {
+                set_error(error,
+                          error_capacity,
+                          "batch decode contains a duplicate session");
+                return 1;
+            }
+        }
+        graph_items[graph_item_count++] = {
+            .graph = session->graph,
+            .token = items[index].token,
+            .position = static_cast<uint32_t>(session->checkpoint.len),
+            .logits = session->logits.get(),
+        };
+    }
+
+    if (!ds4_rocm_graph_eval_batch(engine,
+                                   graph_items.data(),
+                                   graph_item_count)) {
+        for (size_t index = 0; index < item_count; ++index) {
+            items[index].session->checkpoint_valid = false;
+        }
+        set_error(error, error_capacity, "ROCm batch decode failed");
+        return 1;
+    }
+
+    for (size_t index = 0; index < item_count; ++index) {
+        ds4_tokens_push(&items[index].session->checkpoint, items[index].token);
+        items[index].session->checkpoint_valid = true;
+    }
     return 0;
 }
 

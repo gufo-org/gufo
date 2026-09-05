@@ -98,6 +98,39 @@ std::unique_ptr<Session> Model::CreateSession(std::uint32_t max_context,
   return std::unique_ptr<Session>(new Session(shared_from_this(), session));
 }
 
+bool Model::EvaluateBatch(std::span<const SessionBatchItem> items,
+                          std::string* error_msg) const {
+  if (items.size() < 2 || items.size() > 8 ||
+      items.size() > options_.prefill_chunk) {
+    AssignError(error_msg,
+                "DeepSeek batch decode exceeds the configured batch arena");
+    return false;
+  }
+
+  std::array<ds4_session_batch_item, 8> native_items{};
+  std::size_t item_count = 0;
+  for (const auto& item : items) {
+    if (item.session == nullptr || item.session->model_.get() != this) {
+      AssignError(error_msg, "DeepSeek batch contains an incompatible session");
+      return false;
+    }
+    native_items[item_count] = {
+        .session = item.session->session_,
+        .token = item.token,
+    };
+    ++item_count;
+  }
+
+  std::array<char, kErrorCapacity> error{};
+  if (ds4_sessions_eval_batch(native_items.data(), item_count, error.data(),
+                              error.size()) != 0) {
+    AssignError(error_msg, error[0] != '\0' ? error.data()
+                                            : "DeepSeek batch decode failed");
+    return false;
+  }
+  return true;
+}
+
 std::vector<int> Model::Tokenize(std::string_view text) const {
   const std::string owned(text);
   ds4_tokens tokens{};
@@ -162,6 +195,10 @@ std::uint32_t Model::PrefillChunk() const {
 
 std::uint32_t Model::MaxContext() const noexcept {
   return options_.max_context;
+}
+
+bool Model::HasDspark() const {
+  return ds4_engine_has_dspark(engine_);
 }
 
 Session::Session(std::shared_ptr<Model> model, ds4_session* session)

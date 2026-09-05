@@ -23,6 +23,13 @@ struct ds4_string_iterator {
     uint64_t remaining;
 };
 
+struct ds4_rocm_batch_item {
+    ds4_rocm_graph *graph;
+    int token;
+    uint32_t position;
+    float *logits;
+};
+
 struct ds4_engine {
     ds4_model *model;
     ds4_vocab *vocab;
@@ -101,6 +108,9 @@ bool ds4_rocm_graph_eval(ds4_rocm_graph *graph,
                          int token,
                          uint32_t position,
                          float *logits);
+bool ds4_rocm_graph_eval_batch(ds4_engine *engine,
+                               const ds4_rocm_batch_item *items,
+                               size_t item_count);
 /* DSpark speculative verification.
  *
  * ds4_rocm_graph_verify_suffix scores `n_tokens` candidates in one batched pass

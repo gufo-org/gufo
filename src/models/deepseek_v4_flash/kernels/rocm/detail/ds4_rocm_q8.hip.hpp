@@ -1925,3 +1925,67 @@ __global__ static void grouped_q8_0_a_preq_warp8_kernel(
     acc = warp_sum_f32(acc);
     if (lane == 0) low[tok * low_dim + row] = acc;
 }
+
+/*
+ * Session-batch attention output-A projection.
+ *
+ * Each warp owns one output row and walks the Q8 blocks in the same lane order
+ * as grouped_q8_0_a_preq_warp8_kernel. Keeping one accumulator per concurrent
+ * session therefore preserves C1's quantization, multiply order, and warp
+ * reduction while reusing every weight block across W2-W8.
+ */
+template <uint32_t MAXT>
+__global__ static void grouped_q8_0_a_preq_batch_reuse_w32_kernel(
+        float *low,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t group_dim,
+        uint64_t rank,
+        uint32_t n_groups,
+        uint32_t n_tokens,
+        uint64_t blocks,
+        uint32_t rows_per_block,
+        int use_dp4a) {
+    const uint64_t row =
+        (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint64_t low_dim = (uint64_t)n_groups * rank;
+    if (row >= low_dim) return;
+
+    const uint64_t group = row / rank;
+    const uint64_t row_in_group = row - group * rank;
+    const unsigned char *wr =
+        w + (group * rank + row_in_group) * blocks * 34u;
+    float acc[MAXT];
+#pragma unroll
+    for (uint32_t t = 0; t < MAXT; ++t) acc[t] = 0.0f;
+
+    for (uint64_t b = lane; b < blocks; b += 32u) {
+        const uint64_t i0 = b * 32u;
+        const uint64_t bn =
+            group_dim - i0 < 32u ? group_dim - i0 : 32u;
+        const float weight_scale =
+            __half2float(*(const __half *)(wr + b * 34u));
+        const int8_t *qs = (const int8_t *)(wr + b * 34u + 2u);
+#pragma unroll
+        for (uint32_t t = 0; t < MAXT; ++t) {
+            if (t >= n_tokens) break;
+            const uint64_t xrow = (uint64_t)t * n_groups + group;
+            const int8_t *xqb =
+                xq + (xrow * blocks + b) * 32u;
+            const float activation_scale =
+                xscale[xrow * blocks + b];
+            const int dot = dot_i8_block(qs, xqb, bn, use_dp4a);
+            acc[t] +=
+                weight_scale * activation_scale * (float)dot;
+        }
+    }
+
+#pragma unroll
+    for (uint32_t t = 0; t < MAXT; ++t) {
+        if (t >= n_tokens) break;
+        const float sum = warp_sum_f32(acc[t]);
+        if (lane == 0u) low[(uint64_t)t * low_dim + row] = sum;
+    }
+}

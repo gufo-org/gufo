@@ -251,11 +251,11 @@ int main() {
     Expect(concurrent_result_a.requested_logical_concurrency == 2 &&
                concurrent_result_b.requested_logical_concurrency == 2,
            "DeepSeek scheduler reports two logical sessions");
-    Expect(concurrent_result_a.physical_execution_width == 1 &&
-               concurrent_result_b.physical_execution_width == 1 &&
-               concurrent_result_a.execution_plan == "serial-fallback" &&
-               concurrent_result_b.execution_plan == "serial-fallback",
-           "DeepSeek reports exact serialized fallback");
+    Expect(concurrent_result_a.physical_execution_width == 2 &&
+               concurrent_result_b.physical_execution_width == 2 &&
+               concurrent_result_a.execution_plan == "batched-w2" &&
+               concurrent_result_b.execution_plan == "batched-w2",
+           "DeepSeek reports native two-session execution");
     const auto first_a = std::find(events.begin(), events.end(), 'a');
     const auto first_b = std::find(events.begin(), events.end(), 'b');
     const auto last_a = std::find(events.rbegin(), events.rend(), 'a').base();

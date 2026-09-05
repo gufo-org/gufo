@@ -6,6 +6,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -169,6 +170,197 @@ void CheckBatchedPrefill(
   Expect(sequential_choice_rank <= 3, "prefill sequential choice rank");
 }
 
+void CheckSessionBatch(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  using gufo::models::deepseek_v4_flash::SessionBatchItem;
+
+  constexpr std::array<std::string_view, 8> kPrompts{
+      "Explain virtual memory in one paragraph.",
+      "Write a short C++ function that adds two integers.",
+      "What causes ocean tides? Answer concisely.",
+      "List three practical ways to reduce database query latency.",
+      "Describe how a hash table handles collisions.",
+      "Give one advantage of immutable data structures.",
+      "Why do compilers inline small functions?",
+      "Name two ways to reduce network request latency.",
+  };
+  constexpr std::array<std::size_t, 8> kPromptTokens{
+      32, 48, 64, 96, 128, 160, 192, 256,
+  };
+
+  std::string error;
+  std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 8>
+      batched;
+  std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 8>
+      sequential;
+  for (std::size_t index = 0; index < kPrompts.size(); ++index) {
+    const auto prompt =
+        model->EncodeChat("You are a concise assistant.", kPrompts[index]);
+    Expect(!prompt.empty(), "session batch prompt tokenization");
+    auto extended_prompt = prompt;
+    for (std::size_t token = 0; extended_prompt.size() < kPromptTokens[index];
+         ++token) {
+      extended_prompt.push_back(
+          kPinnedDs4Trajectory[token % kPinnedDs4Trajectory.size()]);
+    }
+    batched[index] = model->CreateSession(512, &error);
+    sequential[index] = model->CreateSession(512, &error);
+    Expect(batched[index] != nullptr, error.c_str());
+    Expect(sequential[index] != nullptr, error.c_str());
+    Expect(batched[index]->Sync(extended_prompt, &error), error.c_str());
+    Expect(sequential[index]->Sync(extended_prompt, &error), error.c_str());
+    Expect(batched[index]->SelectNext(0.0F, nullptr) ==
+               sequential[index]->SelectNext(0.0F, nullptr),
+           "session batch initial greedy token");
+  }
+
+  const int position0 = batched[0]->Position();
+  const int position1 = batched[1]->Position();
+  const int token0 = batched[0]->SelectNext(0.0F, nullptr);
+  const int token1 = batched[1]->SelectNext(0.0F, nullptr);
+  const auto expect_preflight_rejection =
+      [&](std::span<const SessionBatchItem> items, const char* message) {
+        Expect(!model->EvaluateBatch(items, &error), message);
+        Expect(batched[0]->Position() == position0 &&
+                   batched[1]->Position() == position1,
+               "session batch preflight preserves positions");
+      };
+
+  const std::array<SessionBatchItem, 2> duplicate_items{{
+      {.session = batched[0].get(), .token = token0},
+      {.session = batched[0].get(), .token = token0},
+  }};
+  expect_preflight_rejection(duplicate_items,
+                             "session batch rejects duplicate sessions");
+
+  const std::array<SessionBatchItem, 2> invalid_token_items{{
+      {.session = batched[0].get(), .token = token0},
+      {.session = batched[1].get(), .token = model->VocabSize()},
+  }};
+  expect_preflight_rejection(invalid_token_items,
+                             "session batch rejects invalid tokens");
+
+  batched[1]->SetCancellationCheck([] { return true; });
+  const std::array<SessionBatchItem, 2> cancelled_items{{
+      {.session = batched[0].get(), .token = token0},
+      {.session = batched[1].get(), .token = token1},
+  }};
+  expect_preflight_rejection(cancelled_items,
+                             "session batch rejects cancelled sessions");
+  batched[1]->SetCancellationCheck({});
+
+  int comparisons = 0;
+  int top1_matches = 0;
+  double worst_rmse = 0.0;
+  double worst_cosine = 1.0;
+  float worst_max_error = 0.0F;
+  int worst_sequential_choice_rank = 0;
+  const auto compare = [&](std::size_t index) {
+    const int batched_token = batched[index]->SelectNext(0.0F, nullptr);
+    const int sequential_token = sequential[index]->SelectNext(0.0F, nullptr);
+    const auto batched_logits = batched[index]->CopyLogits(&error);
+    const auto sequential_logits = sequential[index]->CopyLogits(&error);
+    Expect(batched_logits.size() == sequential_logits.size(),
+           "session batch logit shape");
+    double squared_error = 0.0;
+    double dot = 0.0;
+    double batched_norm = 0.0;
+    double sequential_norm = 0.0;
+    float max_error = 0.0F;
+    bool finite = true;
+    for (std::size_t token_index = 0; token_index < batched_logits.size();
+         ++token_index) {
+      const float batched_value = batched_logits[token_index];
+      const float sequential_value = sequential_logits[token_index];
+      finite = finite && std::isfinite(batched_value) &&
+               std::isfinite(sequential_value);
+      const double difference =
+          static_cast<double>(batched_value) - sequential_value;
+      squared_error += difference * difference;
+      dot += static_cast<double>(batched_value) * sequential_value;
+      batched_norm += static_cast<double>(batched_value) * batched_value;
+      sequential_norm +=
+          static_cast<double>(sequential_value) * sequential_value;
+      max_error =
+          std::max(max_error, std::abs(batched_value - sequential_value));
+    }
+    const double rmse =
+        std::sqrt(squared_error / static_cast<double>(batched_logits.size()));
+    const double denominator = std::sqrt(batched_norm * sequential_norm);
+    const double cosine = denominator > std::numeric_limits<double>::min()
+                              ? dot / denominator
+                              : 0.0;
+    const float sequential_choice_logit =
+        batched_logits[static_cast<std::size_t>(sequential_token)];
+    const int sequential_choice_rank =
+        1 + static_cast<int>(
+                std::count_if(batched_logits.begin(), batched_logits.end(),
+                              [sequential_choice_logit](float value) {
+                                return value > sequential_choice_logit;
+                              }));
+
+    ++comparisons;
+    top1_matches += batched_token == sequential_token ? 1 : 0;
+    worst_rmse = std::max(worst_rmse, rmse);
+    worst_cosine = std::min(worst_cosine, cosine);
+    worst_max_error = std::max(worst_max_error, max_error);
+    worst_sequential_choice_rank =
+        std::max(worst_sequential_choice_rank, sequential_choice_rank);
+    if (batched_token != sequential_token) {
+      std::cout << "Session batch near-tie: member=" << index
+                << " position=" << batched[index]->Position()
+                << " batched=" << batched_token
+                << " sequential=" << sequential_token << " rmse=" << rmse
+                << " cosine=" << cosine << " max_error=" << max_error
+                << " sequential_choice_rank=" << sequential_choice_rank << '\n';
+    }
+    Expect(finite, "session batch finite logits");
+    Expect(rmse <= 0.85, "session batch RMSE envelope");
+    Expect(cosine >= 0.99, "session batch cosine envelope");
+    Expect(max_error <= 4.5F, "session batch maximum error envelope");
+    Expect(sequential_choice_rank <= 3, "session batch sequential choice rank");
+  };
+
+  const auto advance = [&](std::span<const std::size_t> members) {
+    std::vector<SessionBatchItem> items;
+    items.reserve(members.size());
+    for (const std::size_t index : members) {
+      const int token = sequential[index]->SelectNext(0.0F, nullptr);
+      Expect(sequential[index]->Evaluate(token, &error), error.c_str());
+      items.push_back({.session = batched[index].get(), .token = token});
+    }
+    Expect(model->EvaluateBatch(items, &error), error.c_str());
+    for (const std::size_t index : members) {
+      Expect(batched[index]->Position() == sequential[index]->Position(),
+             "session batch position");
+      compare(index);
+    }
+  };
+
+  constexpr std::array<std::size_t, 4> kAll{0, 1, 2, 3};
+  for (int step = 0; step < 3; ++step) {
+    advance(kAll);
+  }
+
+  constexpr std::array<std::size_t, 2> kChangedMembership{0, 2};
+  advance(kChangedMembership);
+
+  constexpr std::array<std::size_t, 8> kAllEight{0, 1, 2, 3, 4, 5, 6, 7};
+  advance(kAllEight);
+
+  const int token = sequential[0]->SelectNext(0.0F, nullptr);
+  Expect(sequential[0]->Evaluate(token, &error), error.c_str());
+  Expect(batched[0]->Evaluate(token, &error), error.c_str());
+  compare(0);
+
+  std::cout << "DeepSeek V4 session batch quality: top1=" << top1_matches << '/'
+            << comparisons << " worst_rmse=" << worst_rmse
+            << " worst_cosine=" << worst_cosine
+            << " worst_max_error=" << worst_max_error
+            << " worst_sequential_choice_rank=" << worst_sequential_choice_rank
+            << '\n';
+}
+
 void CheckDsparkPromptSeed(
     const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
   std::string error;
@@ -261,6 +453,13 @@ int main() {
   Expect(model->VocabSize() > 0, "vocabulary size");
   Expect(!model->ModelName().empty(), "model name");
 
+  if (std::getenv("GUFO_DEEPSEEK_V4_FLASH_SESSION_BATCH_ONLY") != nullptr) {
+    Expect(!model->HasDspark(),
+           "session batch diagnostic requires target only");
+    CheckSessionBatch(model);
+    return 0;
+  }
+
   const auto prompt =
       model->EncodeChat("You are a concise assistant.", "Reply with one word.");
   Expect(!prompt.empty(), "chat prompt tokenization");
@@ -300,6 +499,9 @@ int main() {
 
   CheckPinnedTrajectory(model);
   CheckBatchedPrefill(model);
+  if (!model->HasDspark()) {
+    CheckSessionBatch(model);
+  }
   if (dspark_model_path != nullptr && dspark_model_path[0] != '\0') {
     CheckDsparkPromptSeed(model);
   }

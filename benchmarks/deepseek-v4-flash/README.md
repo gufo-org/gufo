@@ -154,43 +154,49 @@ workgroup. The mirror adds about 21, 42, 84, 168, and 336 MiB at 4K, 8K, 16K,
 ### Resident server scheduling
 
 The OpenAI-compatible server keeps independent DeepSeek sessions resident in
-the common text scheduler. DeepSeek currently advertises physical width one,
-so C=2 and C=4 requests make fair round-robin progress through an exact serial
-fallback rather than a native batched decode kernel.
+the common text scheduler. Without DSpark it advertises native physical widths
+2, 4, and 8 in addition to the unchanged width-one decode path. Dense HC/Q/KV
+projections, attention output, FFN/MoE, and the LM head run layer-synchronously
+over the concurrent rows. Each row still updates its own raw, compressed, and
+indexer attention state at its own absolute position.
 
-Release-package qualification used distinct raw prompts, 16 greedy output
-tokens per request, a 512-token context, and isolated replays of every
-concurrent request:
+The narrow attention-output kernel quantizes every row exactly as C=1 does,
+then loads each Q8 weight block once and carries one accumulator per concurrent
+session. This preserves the per-row block and warp reduction order while
+reusing the weight stream across W2-W8. DSpark stays serial, and
+`GUFO_DEEPSEEK_SESSION_BATCH=0` provides an operational fallback.
 
-| Workload | Decode rate after TTFT | Whole-request aggregate | Result |
-| --- | ---: | ---: | --- |
-| C=1 | 16.47 tok/s | 11.50-11.53 tok/s | +1.3% decode rate against the prior 16.25 tok/s baseline |
-| C=2 | Width-one serialized | 11.18-11.20 tok/s | Both outputs exactly match isolated execution |
-| C=4 | Width-one serialized | 11.21-11.22 tok/s | All outputs exactly match isolated execution |
+Release-package qualification on September 5, 2026 used an 81-token prompt,
+32 greedy output tokens, a 512-token context, one warmup, and three measured
+rounds:
 
-The C=1 decode rate is the reciprocal of the 60.73 ms median inter-token
-latency across four steady samples after graph warmup. It is the number
-comparable to `tg` throughput and is consistent with the 15-16 tok/s
-longer-context results above. The previous direct-server baseline had a
-61.54 ms steady inter-token latency, or 16.25 tok/s.
+| Concurrent requests | Plan | Request p50 | TTFT p50 | ITL p50 | Aggregate tok/s | vs C=1 |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | serial fallback | 3,006.9 ms | 1,153.2 ms | 59.8 ms | 37.25 | control |
+| 2 | W2 | 4,956.9 ms | 1,761.0 ms | 103.1 ms | 45.05 | **+20.9%** |
+| 4 | W4 | 8,554.3 ms | 2,984.2 ms | 179.7 ms | 51.73 | **+38.9%** |
+| 8 | W8 | 15,441.9 ms | 5,481.2 ms | 321.3 ms | 56.91 | **+52.8%** |
 
-The 11.x tok/s values are a different metric: generated tokens divided by
-whole HTTP wall time, including roughly 477-532 ms of prompt prefill per short
-request. The C=2 and C=4 rows are two steady concurrent samples after graph
-warmup. They are useful end-to-end workload measurements, but must not be
-reported as DeepSeek decode or `tg` throughput.
+Per-request inter-token latency grows because one device pass advances every
+active row, but total delivered throughput now scales with concurrency. A
+separate ten-round C=1 control measured 37.73 aggregate tok/s, 17.26 decode
+tok/s, and 59.82 ms median ITL. The earlier serial baseline was 38.06 aggregate
+tok/s, a 0.9% difference, and C=1 never enters the session-batch function.
 
-Whole-request aggregate throughput does not yet scale with concurrency because
-every physical model advance remains width one; the current benefit is
-resident state, overlap, fair scheduling, cancellation, and prefix reuse
-without reloading the model.
+Quality compares aligned token histories over prompt positions 32 through 256,
+three W4 steps, a changed W2 membership, one W8 step, and a return to C1:
 
-Clean server startup measurements reported about 89.4, 90.0, and 90.2 GiB of
-consumed system-available memory at C=1, C=2, and C=4 respectively. Thus the
-incremental resident-session cost was about 0.60 GiB at C=2 and 0.82 GiB at
-C=4 relative to C=1, while the 80.76 GiB model tensor cache remained shared.
-A short 20-token state snapshot contained 14.1 MiB after prefill and 15.2 MiB
-after generation.
+| Measure | Bound | Result |
+| --- | ---: | ---: |
+| top-1 agreement | descriptive | 22/23 |
+| worst RMSE | <= 0.85 | **0.65** |
+| worst cosine | >= 0.99 | **0.99** |
+| worst maximum logit error | <= 4.5 | **3.59** |
+| serial winner rank in batch | <= 3 | **3** |
+
+The one free-running difference is a near-tie; the serial winner remains in
+the batch top three. Cancellation, duplicate-session and invalid-token
+preflight, and transition back to serial decode are covered by the same test.
 
 ## Quality and Integration
 
@@ -1641,9 +1647,10 @@ two mechanisms account for all of it: routed gate/up 599.76 -> 447.4 ms, output 
 
 `tools/serving/gufo-serving-bench.py` against `gufo serve`, a 223-token prompt,
 32 greedy output tokens, one warmup and three measured repetitions per
-concurrency level, arms alternated within each pair. DeepSeek still advertises
-physical width one, so C=2 and C=4 are the fair round-robin serial fallback and
-their queueing is included:
+concurrency level, arms alternated within each pair. This prompt-only comparison
+predates the native session-batch route above; physical width was pinned to one
+so C=2 and C=4 are the fair round-robin serial fallback and their queueing is
+included:
 
 | | `9719ae2` | this change | delta |
 | --- | ---: | ---: | ---: |
@@ -1722,8 +1729,7 @@ Worth revisiting only together with a rewrite of that producer's LDS budget.
   sustained high-acceptance decoding; see "DSpark speculative decoding" below.
 - Add model-owned offline calibration/imatrix tooling only when a new
   quantization recipe requires it.
-- Add native concurrent decode batching and restart-safe SSD state reuse
-  through the serving milestones.
+- Continue restart-safe SSD state reuse through the serving milestones.
 
 ## DSpark speculative decoding (September 1, 2026)
 

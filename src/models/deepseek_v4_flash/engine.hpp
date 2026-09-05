@@ -26,6 +26,11 @@ struct ModelOptions {
 class Session;
 class SessionSnapshot;
 
+struct SessionBatchItem {
+  Session* session = nullptr;
+  int token = 0;
+};
+
 class Model final : public std::enable_shared_from_this<Model> {
 public:
   ~Model();
@@ -41,6 +46,8 @@ public:
 
   [[nodiscard]] std::unique_ptr<Session> CreateSession(
       std::uint32_t max_context, std::string* error_msg = nullptr);
+  [[nodiscard]] bool EvaluateBatch(std::span<const SessionBatchItem> items,
+                                   std::string* error_msg = nullptr) const;
   [[nodiscard]] std::vector<int> Tokenize(std::string_view text) const;
   [[nodiscard]] std::vector<int> EncodeChat(std::string_view system_prompt,
                                             std::string_view user_prompt) const;
@@ -57,6 +64,7 @@ public:
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] std::uint32_t PrefillChunk() const;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
+  [[nodiscard]] bool HasDspark() const;
 
 private:
   Model(ds4_engine* engine, ModelOptions options);

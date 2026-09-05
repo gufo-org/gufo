@@ -37,6 +37,28 @@ static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
  * to 14%. The table is at the call site. */
 #define DS4_ROCM_ROUTED_TILE_MODEL_ROWS 1024u
 
+/* The wide Q2-down pair tile stays at four row fragments at every width.
+ *
+ * The routed gate/up column tile had to follow the bucket distribution, so the
+ * same cost model was tried here -- a workgroup executes its whole MTILES * 16
+ * pair-row tile whether the bucket fills it or not, and at a 512-token chunk the
+ * mean hot bucket is about 24 rows against a 64-row tile. Forced-width sweep,
+ * one warm process per arm, four repeated at the end to bracket drift:
+ *
+ *   MTILES   pp256   pp512  pp1024  pp2048
+ *        4  260.03  354.58  421.08  494.30
+ *        2  260.09  347.27  404.85  470.60
+ *        1  240.42  309.86  356.09  407.42
+ *        4  261.97  354.79  421.29  494.14
+ *
+ * Narrowing it loses at every width, up to -18% at 1,024. The two tiles are not
+ * the same trade: the MMQ column tile *streams* a 2-bit weight panel per tile,
+ * which the MALL largely absorbs, while this kernel *dequantizes* its Q2_K panel
+ * per tile, so halving the rows per tile doubles real dequantization work. Fitting
+ * the same `sum ceil(c/m) * (m + P)` model to this sweep puts one reload at about
+ * 75 pair-rows rather than 16, which makes four optimal everywhere and the model a
+ * no-op. Do not retry: price the reload for the kernel, not for the shape. */
+
 /* Deferred routed expert sum.
  *
  * The 6-way sum over the per-expert F16 down rows writes a float buffer that the
@@ -126,6 +148,25 @@ static int routed_moe_q2_float_down_launch(
      * whatever the bucket holds, so eight stages 2,048 floats per K block for
      * three real rows, and that costs more than the second weight pass it saves. */
     const uint32_t down_tile = 4u;
+    /* Output rows per workgroup on the scalar route, one wave each.
+     *
+     * Swept because this kernel takes two barriers per 256-value K slab with
+     * however many waves the block holds, so sixteen looked like it might be
+     * paying for synchronization it did not need. It is the other way round --
+     * the waves share one staged mid tile, so fewer of them means the tile is
+     * staged more often for less work:
+     *
+     *   rows/block   pp256   pp512  pp1024  pp2048
+     *            2  225.15  321.08  397.01  478.04
+     *            4  242.77  337.54  409.62  486.08
+     *            8  254.89  348.86  416.84  490.54
+     *           16  355.20 / 354.92 either side of the sweep
+     *           32  264.90  357.61  422.24  494.46
+     *
+     * Monotone in the number of waves, so the barriers are not the cost. The
+     * 1,024-thread block is worth about +0.7% at 512 over sixteen, which is one
+     * sample inside the spread of the two bracketing sixteen arms, so sixteen
+     * stays; revisit only with a proper interleaved pair. */
     const uint32_t down_rpb = 16u;
     const uint32_t down_threads = down_rpb * 32u;
     const size_t down_shmem = (size_t)down_tile * 256u * sizeof(float);

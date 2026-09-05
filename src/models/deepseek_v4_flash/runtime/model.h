@@ -31,6 +31,11 @@ struct ds4_session_snapshot {
   uint64_t cap;
 };
 
+struct ds4_session_batch_item {
+  ds4_session* session;
+  int token;
+};
+
 inline constexpr int DS4_SESSION_SYNC_INTERRUPTED = 2;
 inline constexpr std::uint32_t DS4_SESSION_PAYLOAD_VERSION = 2;
 
@@ -65,6 +70,9 @@ int ds4_session_sample(const ds4_session* session, float temperature, int top_k,
                        float top_p, float min_p, uint64_t* rng_state);
 int ds4_session_eval(ds4_session* session, int token, char* error,
                      size_t error_capacity);
+int ds4_sessions_eval_batch(const ds4_session_batch_item* items,
+                            size_t item_count, char* error,
+                            size_t error_capacity);
 /* Measures whether batched DSpark verification reproduces one-token decode's
  * greedy continuation, and how much cheaper a verification block is than the
  * tokens it replaces. Returns 0 when the suffix agrees exactly. */
