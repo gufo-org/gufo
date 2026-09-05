@@ -277,6 +277,7 @@ void CheckSessionBatch(
   };
 
   std::string error;
+  std::array<std::vector<int>, 8> session_prompts;
   std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 8>
       batched;
   std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 8>
@@ -291,16 +292,24 @@ void CheckSessionBatch(
       extended_prompt.push_back(
           kPinnedDs4Trajectory[token % kPinnedDs4Trajectory.size()]);
     }
-    batched[index] = model->CreateSession(512, &error);
-    sequential[index] = model->CreateSession(512, &error);
-    Expect(batched[index] != nullptr, error.c_str());
-    Expect(sequential[index] != nullptr, error.c_str());
-    Expect(batched[index]->Sync(extended_prompt, &error), error.c_str());
-    Expect(sequential[index]->Sync(extended_prompt, &error), error.c_str());
-    Expect(batched[index]->SelectNext(0.0F, nullptr) ==
-               sequential[index]->SelectNext(0.0F, nullptr),
-           "session batch initial greedy token");
+    session_prompts[index] = std::move(extended_prompt);
   }
+  const auto reset_sessions = [&] {
+    for (std::size_t index = 0; index < kPrompts.size(); ++index) {
+      batched[index] = model->CreateSession(512, &error);
+      sequential[index] = model->CreateSession(512, &error);
+      Expect(batched[index] != nullptr, error.c_str());
+      Expect(sequential[index] != nullptr, error.c_str());
+      Expect(batched[index]->Sync(session_prompts[index], &error),
+             error.c_str());
+      Expect(sequential[index]->Sync(session_prompts[index], &error),
+             error.c_str());
+      Expect(batched[index]->SelectNext(0.0F, nullptr) ==
+                 sequential[index]->SelectNext(0.0F, nullptr),
+             "session batch initial greedy token");
+    }
+  };
+  reset_sessions();
 
   const int position0 = batched[0]->Position();
   const int position1 = batched[1]->Position();
@@ -394,8 +403,9 @@ void CheckSessionBatch(
     worst_max_error = std::max(worst_max_error, max_error);
     worst_sequential_choice_rank =
         std::max(worst_sequential_choice_rank, sequential_choice_rank);
-    if (batched_token != sequential_token) {
-      std::cout << "Session batch near-tie: member=" << index
+    if (batched_token != sequential_token || rmse > 0.85 || cosine < 0.99 ||
+        max_error > 4.5F || sequential_choice_rank > 3) {
+      std::cout << "Session batch quality detail: member=" << index
                 << " position=" << batched[index]->Position()
                 << " batched=" << batched_token
                 << " sequential=" << sequential_token << " rmse=" << rmse
@@ -424,6 +434,10 @@ void CheckSessionBatch(
       compare(index);
     }
   };
+
+  constexpr std::array<std::size_t, 6> kAllSix{0, 1, 2, 3, 4, 5};
+  advance(kAllSix);
+  reset_sessions();
 
   constexpr std::array<std::size_t, 4> kAll{0, 1, 2, 3};
   for (int step = 0; step < 3; ++step) {

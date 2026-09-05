@@ -800,6 +800,143 @@ __global__ static void moe_gate_up_mid_decode_lut_qwarp32_kernel(
     }
 }
 
+/*
+ * Decode batches often select the same routed expert for several sessions.
+ * Keep the ordinary per-pair reduction order, but let the first assignment for
+ * an expert decode each IQ2 weight block once for all matching rows. Later
+ * assignments for that expert retire after the ownership scan.
+ */
+__global__ static void moe_gate_up_mid_decode_dedup8_lut_qwarp32_kernel(
+    float* gate_out, float* up_out, float* mid_out, const char* gate_base,
+    const char* up_base, const hip_block_q8_K* xq, const int32_t* selected,
+    const float* weights, uint64_t gate_expert_bytes, uint64_t gate_row_bytes,
+    uint32_t xq_blocks, uint32_t expert_mid_dim, uint32_t n_tokens,
+    uint32_t n_expert, uint32_t write_aux, float clamp) {
+  const uint32_t owner_pair = blockIdx.y;
+  const uint32_t pair_count = n_tokens * n_expert;
+  __shared__ uint32_t s_np;
+  __shared__ uint32_t s_expert;
+  __shared__ uint32_t s_pair[8];
+  __shared__ uint32_t s_tok[8];
+  __shared__ uint32_t s_slot[8];
+  __shared__ hip_block_q8_K sxq[8][16];
+  __shared__ uint64_t s_iq2_grid[256];
+  __shared__ uint8_t s_iq2_signs[128];
+
+  if (threadIdx.x == 0u) {
+    int32_t expert_i = selected[owner_pair];
+    if (expert_i < 0)
+      expert_i = 0;
+    const uint32_t expert = (uint32_t)expert_i;
+    bool first = true;
+    for (uint32_t pair = 0; pair < owner_pair; pair++) {
+      int32_t prior_i = selected[pair];
+      if (prior_i < 0)
+        prior_i = 0;
+      if ((uint32_t)prior_i == expert) {
+        first = false;
+        break;
+      }
+    }
+
+    uint32_t np = 0;
+    if (first) {
+      s_expert = expert;
+      for (uint32_t pair = owner_pair; pair < pair_count && np < 8u; pair++) {
+        int32_t candidate_i = selected[pair];
+        if (candidate_i < 0)
+          candidate_i = 0;
+        if ((uint32_t)candidate_i == expert) {
+          s_pair[np] = pair;
+          s_tok[np] = pair / n_expert;
+          s_slot[np] = pair - s_tok[np] * n_expert;
+          np++;
+        }
+      }
+    }
+    s_np = np;
+  }
+  __syncthreads();
+
+  const uint32_t np = s_np;
+  if (np == 0u)
+    return;
+
+  const hip_block_q8_K* xqb[8] = {
+      NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  };
+  for (uint32_t p = 0; p < np; p++) {
+    xqb[p] = xq + (uint64_t)s_tok[p] * xq_blocks;
+  }
+  for (uint32_t i = threadIdx.x; i < np * xq_blocks; i += blockDim.x) {
+    const uint32_t p = i / xq_blocks;
+    const uint32_t b = i - p * xq_blocks;
+    sxq[p][b] = xqb[p][b];
+  }
+  for (uint32_t i = threadIdx.x; i < 256u; i += blockDim.x) {
+    s_iq2_grid[i] = hip_iq2xxs_grid[i];
+  }
+  for (uint32_t i = threadIdx.x; i < 128u; i += blockDim.x) {
+    s_iq2_signs[i] = hip_ksigns_iq2xs[i];
+  }
+  __syncthreads();
+  for (uint32_t p = 0; p < np; p++)
+    xqb[p] = sxq[p];
+
+  const uint32_t lane = threadIdx.x & 7u;
+  const uint32_t row_lane = threadIdx.x >> 3u;
+  for (uint32_t rr = 0; rr < 4u; rr++) {
+    const uint32_t row = blockIdx.x * 128u + row_lane + rr * 32u;
+    if (row >= expert_mid_dim)
+      continue;
+    const hip_block_iq2_xxs* gr =
+        (const hip_block_iq2_xxs*)(gate_base +
+                                   (uint64_t)s_expert * gate_expert_bytes +
+                                   (uint64_t)row * gate_row_bytes);
+    const hip_block_iq2_xxs* ur =
+        (const hip_block_iq2_xxs*)(up_base +
+                                   (uint64_t)s_expert * gate_expert_bytes +
+                                   (uint64_t)row * gate_row_bytes);
+    float gate[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float up[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t b = lane; b < xq_blocks; b += 8u) {
+      dev_dot_iq2_xxs_q8_K_block8_deq_lut(
+          gr + b, xqb[0] ? xqb[0] + b : NULL, xqb[1] ? xqb[1] + b : NULL,
+          xqb[2] ? xqb[2] + b : NULL, xqb[3] ? xqb[3] + b : NULL,
+          xqb[4] ? xqb[4] + b : NULL, xqb[5] ? xqb[5] + b : NULL,
+          xqb[6] ? xqb[6] + b : NULL, xqb[7] ? xqb[7] + b : NULL, np, gate,
+          s_iq2_grid, s_iq2_signs);
+      dev_dot_iq2_xxs_q8_K_block8_deq_lut(
+          ur + b, xqb[0] ? xqb[0] + b : NULL, xqb[1] ? xqb[1] + b : NULL,
+          xqb[2] ? xqb[2] + b : NULL, xqb[3] ? xqb[3] + b : NULL,
+          xqb[4] ? xqb[4] + b : NULL, xqb[5] ? xqb[5] + b : NULL,
+          xqb[6] ? xqb[6] + b : NULL, xqb[7] ? xqb[7] + b : NULL, np, up,
+          s_iq2_grid, s_iq2_signs);
+    }
+    for (uint32_t p = 0; p < np; p++) {
+      gate[p] = quarter_warp_sum_f32(gate[p], lane);
+      up[p] = quarter_warp_sum_f32(up[p], lane);
+      if (lane == 0u) {
+        if (clamp > 1.0e-6f) {
+          if (gate[p] > clamp)
+            gate[p] = clamp;
+          if (up[p] > clamp)
+            up[p] = clamp;
+          if (up[p] < -clamp)
+            up[p] = -clamp;
+        }
+        const uint64_t off = (uint64_t)s_pair[p] * expert_mid_dim + row;
+        if (write_aux) {
+          gate_out[off] = gate[p];
+          up_out[off] = up[p];
+        }
+        mid_out[off] = (gate[p] / (1.0f + expf(-gate[p]))) * up[p] *
+                       weights[(uint64_t)s_tok[p] * n_expert + s_slot[p]];
+      }
+    }
+  }
+}
+
 __global__ static void moe_count_sorted_pairs_kernel(
         uint32_t *counts,
         const int32_t *selected,

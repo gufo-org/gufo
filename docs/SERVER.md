@@ -100,12 +100,12 @@ and the executed plan. Prompts, generated text, local paths, request IDs, and
 token IDs are excluded.
 
 DeepSeek V4 Flash uses native layer-synchronous session batches when DSpark is
-not attached. The scheduler advertises physical widths 2, 4, and 8 and chooses
-the largest width supported by the runnable request set. Every request keeps
-its own attention caches and position; dense projections, attention output,
-FFN/MoE, and the LM head run over the concurrent rows together. Width one stays
-on the existing serial decode path. Set `GUFO_DEEPSEEK_SESSION_BATCH=0` before
-starting the server to disable this route. DSpark sessions remain serial.
+not attached. The scheduler advertises every physical width from 2 through 8
+and chooses the exact runnable width. Every request keeps its own attention
+caches and position; dense projections, attention output, FFN/MoE, and the LM
+head run over the concurrent rows together. Width one stays on the existing
+serial decode path. Set `GUFO_DEEPSEEK_SESSION_BATCH=0` before starting the
+server to disable this route. DSpark sessions remain serial.
 
 ### Reasoning controls
 

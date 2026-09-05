@@ -656,6 +656,10 @@ static int routed_moe_launch(
         const uint32_t use_decode_lut_gate =
             (n_tokens == 1u || (small_batch && !grouped_gate)) &&
             xq_blocks <= 16u;
+        const uint32_t use_decode_dedup_gate =
+            (ds4_rocm_verifier_batch_mode() || ds4_rocm_support_batch_mode()) &&
+            iq2_path && !q4k_path && n_expert == 6u && n_tokens >= 7u &&
+            n_tokens <= 8u && xq_blocks <= 16u;
         const uint32_t gate_row_span = 1024u;
         const uint32_t down_row_span = 2048u;
         const uint32_t use_down_row2048 = !q4k_path && use_atomic_down && use_down_tile16;
@@ -760,20 +764,24 @@ static int routed_moe_launch(
                         pair_count);
                     ok = hip_ok(hipGetLastError(), "routed_moe sorted count launch");
                 }
-                if (ok) {
-                    ok = hip_ok(hipMemcpy(h_sorted_counts,
-                                            counts,
-                                            sizeof(h_sorted_counts),
-                                            hipMemcpyDeviceToHost),
-                                 "routed_moe sorted counts copy");
-                    if (ok) {
-                        h_sorted_counts_valid = 1;
-                        for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
-                            if (h_sorted_counts[e] > h_sorted_counts_max) {
-                                h_sorted_counts_max = h_sorted_counts[e];
-                            }
-                        }
+                /*
+                 * The compact verifier/session down path consumes the device
+                 * counts directly. Avoid synchronizing all 256 counters back
+                 * to the host on every layer when no later route reads them.
+                 */
+                if (ok && !use_compact_float_down) {
+                  ok = hip_ok(
+                      hipMemcpy(h_sorted_counts, counts,
+                                sizeof(h_sorted_counts), hipMemcpyDeviceToHost),
+                      "routed_moe sorted counts copy");
+                  if (ok) {
+                    h_sorted_counts_valid = 1;
+                    for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
+                      if (h_sorted_counts[e] > h_sorted_counts_max) {
+                        h_sorted_counts_max = h_sorted_counts[e];
+                      }
                     }
+                  }
                 }
                 if (ok) {
                     moe_prefix_sorted_pairs_kernel<<<1, 1>>>(offsets, cursors, counts);
@@ -853,17 +861,18 @@ static int routed_moe_launch(
              * The default rule yields 80 at every one of these widths, so it
              * gives up 14% at 256 and 10% at 512 and is within 1.1% of the best
              * measured width at 1,024 and 2,048. The cost model reproduces the
-             * narrow optimum and mis-ranks 32 against 48 at the wide end, where
-             * there is nothing to win, so it only runs where it is validated.
-             * A fixed 48-column tile measured +3.4% at 1,024 and +1.1% at 2,048
-             * and is the obvious next step; it is not retained here because the
-             * same sweep's 4,096 point is a cold-cache reading. */
-            const int routed_tile_cols =
-                h_sorted_counts_valid &&
-                        n_tokens < DS4_ROCM_ROUTED_TILE_MODEL_ROWS
-                    ? ds4_mmq_routed_tile_cols_for_counts(
-                          h_sorted_counts, (int)DS4_ROCM_N_EXPERT)
-                    : 0;
+             * narrow optimum and mis-ranks 32 against 48 at the wide end. A
+             * fixed 48-column tile measured +3.4% at 1,024 and +1.1% at 2,048,
+             * so use it only across that measured interval and leave 4,096 and
+             * larger chunks on the vendored selector. */
+            int routed_tile_cols = 0;
+            if (h_sorted_counts_valid &&
+                n_tokens < DS4_ROCM_ROUTED_TILE_MODEL_ROWS) {
+              routed_tile_cols = ds4_mmq_routed_tile_cols_for_counts(
+                  h_sorted_counts, (int)DS4_ROCM_N_EXPERT);
+            } else if (h_sorted_counts_valid && n_tokens <= 2048u) {
+              routed_tile_cols = 48;
+            }
             ds4_mmq_set_routed_tile_cols(routed_tile_cols);
             if (routed_tile_cols != 0) {
                 static int logged_tile_cols = 0;
@@ -1148,39 +1157,28 @@ static int routed_moe_launch(
                         n_expert,
                         write_gate_up,
                         clamp);
+                } else if (use_decode_dedup_gate) {
+                  moe_gate_up_mid_decode_dedup8_lut_qwarp32_kernel<<<qgrid,
+                                                                     256>>>(
+                      (float*)gate->ptr, (float*)up->ptr, (float*)mid->ptr,
+                      gate_w, up_w, xq, (const int32_t*)selected->ptr,
+                      (const float*)weights->ptr, gate_expert_bytes,
+                      gate_row_bytes, xq_blocks, expert_mid_dim, n_tokens,
+                      n_expert, write_gate_up, clamp);
                 } else if (use_decode_lut_gate) {
-                    moe_gate_up_mid_decode_lut_qwarp32_kernel<<<qgrid, 256>>>(
-                        (float *)gate->ptr,
-                        (float *)up->ptr,
-                        (float *)mid->ptr,
-                        gate_w,
-                        up_w,
-                        xq,
-                        (const int32_t *)selected->ptr,
-                        (const float *)weights->ptr,
-                        gate_expert_bytes,
-                        gate_row_bytes,
-                        xq_blocks,
-                        expert_mid_dim,
-                        n_expert,
-                        write_gate_up,
-                        clamp);
+                  moe_gate_up_mid_decode_lut_qwarp32_kernel<<<qgrid, 256>>>(
+                      (float*)gate->ptr, (float*)up->ptr, (float*)mid->ptr,
+                      gate_w, up_w, xq, (const int32_t*)selected->ptr,
+                      (const float*)weights->ptr, gate_expert_bytes,
+                      gate_row_bytes, xq_blocks, expert_mid_dim, n_expert,
+                      write_gate_up, clamp);
                 } else {
-                    moe_gate_up_mid_qwarp32_kernel<<<qgrid, 256>>>(
-                        (float *)gate->ptr,
-                        (float *)up->ptr,
-                        (float *)mid->ptr,
-                        gate_w,
-                        up_w,
-                        xq,
-                        (const int32_t *)selected->ptr,
-                        (const float *)weights->ptr,
-                        gate_expert_bytes,
-                        gate_row_bytes,
-                        xq_blocks,
-                        expert_mid_dim,
-                        n_expert,
-                        clamp);
+                  moe_gate_up_mid_qwarp32_kernel<<<qgrid, 256>>>(
+                      (float*)gate->ptr, (float*)up->ptr, (float*)mid->ptr,
+                      gate_w, up_w, xq, (const int32_t*)selected->ptr,
+                      (const float*)weights->ptr, gate_expert_bytes,
+                      gate_row_bytes, xq_blocks, expert_mid_dim, n_expert,
+                      clamp);
                 }
             }
             ok = hip_ok(hipGetLastError(), "routed_moe gate/up launch");

@@ -1328,7 +1328,7 @@ public:
             .physical_width = 1,
         },
     };
-    for (const std::size_t width : {2u, 4u, 8u}) {
+    for (std::size_t width = 2; width <= 8; ++width) {
       if (width <= model_->PrefillChunk()) {
         plans.push_back({
             .kind = TextExecutionPlanKind::kBatched,

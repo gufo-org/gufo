@@ -160,6 +160,12 @@ narrow widths and not the 4,096-token chunk are what a conversation pays. See
 "The conversational prompt widths, which were at half speed" below for the two
 mechanisms and their measurements.
 
+The follow-up routed-MMQ tile sweep also found that the vendored 80-column
+selector was too wide from 1,024 through 2,048 prompt tokens. Holding that
+interval at 48 columns improved pp1024 from 420.05 to 436.19 tok/s (+3.8%),
+pp1536 from 465.67 to 475.08 (+2.0%), and pp2048 from 492.84 to 497.86 (+1.0%).
+The measured 4,096-token route remains on the default selector.
+
 A separate full-prompt comparison isolates the retained prompt kernels:
 
 | Prompt | Baseline | Current | Delta |
@@ -181,7 +187,7 @@ workgroup. The mirror adds about 21, 42, 84, 168, and 336 MiB at 4K, 8K, 16K,
 
 The OpenAI-compatible server keeps independent DeepSeek sessions resident in
 the common text scheduler. Without DSpark it advertises native physical widths
-2, 4, and 8 in addition to the unchanged width-one decode path. Dense HC/Q/KV
+2 through 8 in addition to the unchanged width-one decode path. Dense HC/Q/KV
 projections, attention output, FFN/MoE, and the LM head run layer-synchronously
 over the concurrent rows. Each row still updates its own raw, compressed, and
 indexer attention state at its own absolute position.
@@ -191,6 +197,14 @@ then loads each Q8 weight block once and carries one accumulator per concurrent
 session. This preserves the per-row block and warp reduction order while
 reusing the weight stream across W2-W8. DSpark stays serial, and
 `GUFO_DEEPSEEK_SESSION_BATCH=0` provides an operational fallback.
+
+Exact physical plans remove the old C5/C6 padding to W8. The W6 attention
+output-A specialization improves the measured C6 decode rate without changing
+C1. At C7/C8, a first-owner routed gate/up kernel decodes a repeated IQ2 expert
+weight block once for all sessions that selected it while retaining each
+session's original dot-product and reduction order. The compact C2-C6 route
+also no longer copies 256 device expert counters to the host on every layer
+when no later route consumes the host copy.
 
 Release-package qualification on September 5, 2026 used an 80-token prompt,
 32 greedy output tokens, a 512-token context, one warmup, and three measured
@@ -214,26 +228,33 @@ same 32-token output, context, warmup, and repetition count:
 
 | C | Plan | Prefill tok/s | Per-request decode tok/s | Combined active decode tok/s | Output-only end-to-end tok/s | Total processed tok/s |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | serial | 286.46 | 17.09 | 17.09 | 9.67 | 133.90 |
-| 2 | W2 | 286.16 | 12.13 | 24.26 | 11.48 | 158.89 |
-| 4 | W4 | 286.18 | 8.14 | 32.58 | 12.92 | 178.80 |
-| 8 | W8 | 287.02 | 5.31 | 42.47 | 14.05 | 194.53 |
+| 1 | serial | 286.58 | 17.07 | 17.07 | 9.68 | 133.47 |
+| 2 | W2 | 285.91 | 12.16 | 24.32 | 11.50 | 158.52 |
+| 4 | W4 | 286.28 | 8.27 | 33.09 | 13.04 | 179.64 |
+| 6 | W6 | 286.40 | 6.26 | 37.58 | 13.59 | 187.33 |
+| 8 | W8 | 286.52 | 5.46 | 43.71 | 14.23 | 196.11 |
 
 `C` counts concurrent requests and `W` is the physical decode width reached by
-the scheduler. Per-request decode excludes prefill. Combined active decode is
-that rate multiplied by `C`, so W2 gives each of two users 12.13 tok/s while
-the GPU emits 24.26 tok/s across both. Output-only end-to-end includes prefill,
+the scheduler. Exact W2-W8 plans mean C6 runs a six-row kernel rather than a
+padded W8 kernel. Per-request decode excludes prefill. Combined active decode
+is that rate multiplied by `C`, so W2 gives each of two users 12.16 tok/s while
+the GPU emits 24.32 tok/s across both. Output-only end-to-end includes prefill,
 TTFT, queueing, and scheduling gaps. Total processed also counts prompt tokens;
 it must not be reported as decode speed.
 
-Quality compares aligned token histories over prompt positions 32 through 256,
-three W4 steps, a changed W2 membership, one W8 step, and a return to C1:
+The C8 IQ2 dedup route improved per-request decode from 5.35 to 5.47 tok/s
+(+2.2%). A matching Q2 down dedup kernel regressed it to 5.23 and was rejected.
+Expanding the IQ2 kernel from 128-row to 32-row blocks remained at 5.47 while
+launching four times as many blocks, so the simpler 128-row form was retained.
+
+Quality first isolates one W6 step, resets every session, then repeats the
+existing three W4 steps, changed W2 membership, W8 step, and return to C1:
 
 | Measure | Bound | Result |
 | --- | ---: | ---: |
-| top-1 agreement | descriptive | 22/23 |
+| top-1 agreement | descriptive | 27/29 |
 | worst RMSE | <= 0.85 | **0.36** |
-| worst cosine | >= 0.99 | **0.99** |
+| worst cosine | >= 0.99 | **1.00** |
 | worst maximum logit error | <= 4.5 | **2.64** |
 | serial winner rank in batch | <= 3 | **2** |
 

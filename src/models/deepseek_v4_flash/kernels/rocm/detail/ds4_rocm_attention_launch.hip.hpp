@@ -1068,33 +1068,17 @@ static int attention_output_q8_batch_launch(
                         rows_per_block,
                         1);
             } else if (n_tokens <= 4u) {
-                grouped_q8_0_a_preq_batch_reuse_w32_kernel<4u>
-                    <<<grid, threads>>>(
-                        (float *)low->ptr,
-                        out_a,
-                        xq,
-                        xscale,
-                        group_dim,
-                        rank,
-                        n_groups,
-                        n_tokens,
-                        blocks_a,
-                        rows_per_block,
-                        1);
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<4u><<<grid, threads>>>(
+                  (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
+                  n_groups, n_tokens, blocks_a, rows_per_block, 1);
+            } else if (n_tokens <= 6u) {
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<6u><<<grid, threads>>>(
+                  (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
+                  n_groups, n_tokens, blocks_a, rows_per_block, 1);
             } else {
-                grouped_q8_0_a_preq_batch_reuse_w32_kernel<8u>
-                    <<<grid, threads>>>(
-                        (float *)low->ptr,
-                        out_a,
-                        xq,
-                        xscale,
-                        group_dim,
-                        rank,
-                        n_groups,
-                        n_tokens,
-                        blocks_a,
-                        rows_per_block,
-                        1);
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<8u><<<grid, threads>>>(
+                  (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
+                  n_groups, n_tokens, blocks_a, rows_per_block, 1);
             }
         } else if ((group_dim & 31u) == 0u && rank <= UINT32_MAX &&
                    n_tokens <= UINT32_MAX) {
