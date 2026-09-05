@@ -179,7 +179,15 @@ static int routed_moe_q2_float_down_launch(
 
     uint32_t hot_count = 0u;
     uint32_t hot_max = 0u;
-    const uint32_t hot_threshold = 8u;
+    /*
+     * The scalar/WMMA crossover shifts with prompt width. At pp512, thresholds
+     * 2/3/4/6/8/10 measured 357.88/359.70/361.05/358.64/355.71/352.63
+     * tok/s after a pp4096 warmup. Four also improves pp256 through pp2048.
+     * Keep sub-64-row state initialization and wide prompts on the established
+     * eight-row policy; short-seed arithmetic affects the pinned trajectory.
+     */
+    const uint32_t hot_threshold =
+        n_tokens >= 64u && n_tokens <= 2048u ? 4u : 8u;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
     const int use_wmma_hot = hot_experts_dev &&
         (expert_mid_dim % 16u) == 0u && (out_dim % 16u) == 0u;
@@ -623,11 +631,15 @@ static int routed_moe_launch(
             (ds4_rocm_verifier_batch_mode() ||
              ds4_rocm_support_batch_mode()) &&
             iq2_path && !q4k_path && n_expert == 6u &&
-            n_tokens > 1u && n_tokens <= 6u;
+            n_tokens > 1u && n_tokens <= 8u;
+        const uint32_t grouped_gate_only =
+            grouped_gate && n_tokens > 6u;
         /*
          * DSpark rows share enough routed experts to amortize sorting and load
          * each selected gate/up matrix once. The verifier's Q2 down projection
-         * is compacted separately over the live (row, slot) pairs below.
+         * is compacted separately over the live (row, slot) pairs below. W7
+         * and W8 use sorting only for gate/up, retaining the qualified decode
+         * down route and reduction order.
          */
         const uint32_t use_sorted_pairs =
             grouped_gate ||
@@ -656,10 +668,6 @@ static int routed_moe_launch(
         const uint32_t use_decode_lut_gate =
             (n_tokens == 1u || (small_batch && !grouped_gate)) &&
             xq_blocks <= 16u;
-        const uint32_t use_decode_dedup_gate =
-            (ds4_rocm_verifier_batch_mode() || ds4_rocm_support_batch_mode()) &&
-            iq2_path && !q4k_path && n_expert == 6u && n_tokens >= 7u &&
-            n_tokens <= 8u && xq_blocks <= 16u;
         const uint32_t gate_row_span = 1024u;
         const uint32_t down_row_span = 2048u;
         const uint32_t use_down_row2048 = !q4k_path && use_atomic_down && use_down_tile16;
@@ -769,7 +777,7 @@ static int routed_moe_launch(
                  * counts directly. Avoid synchronizing all 256 counters back
                  * to the host on every layer when no later route reads them.
                  */
-                if (ok && !use_compact_float_down) {
+                if (ok && !use_compact_float_down && !grouped_gate_only) {
                   ok = hip_ok(
                       hipMemcpy(h_sorted_counts, counts,
                                 sizeof(h_sorted_counts), hipMemcpyDeviceToHost),
@@ -979,7 +987,7 @@ static int routed_moe_launch(
         const uint32_t use_iq2_gate_wmma =
             ok && !mmq_gateup_done &&
             iq2_path && n_tokens >= iq2_gate_hot_threshold &&
-            n_expert == 6u && !write_gate_up &&
+            n_expert == 6u && !write_gate_up && !grouped_gate_only &&
             sorted_pairs && sorted_offsets && sorted_counts && tile_experts && iq2_gate_hot_dev && use_expert_tiles &&
             (expert_in_dim % 16u) == 0u && (expert_mid_dim % 16u) == 0u;
         if (use_iq2_gate_wmma) {
@@ -1157,14 +1165,6 @@ static int routed_moe_launch(
                         n_expert,
                         write_gate_up,
                         clamp);
-                } else if (use_decode_dedup_gate) {
-                  moe_gate_up_mid_decode_dedup8_lut_qwarp32_kernel<<<qgrid,
-                                                                     256>>>(
-                      (float*)gate->ptr, (float*)up->ptr, (float*)mid->ptr,
-                      gate_w, up_w, xq, (const int32_t*)selected->ptr,
-                      (const float*)weights->ptr, gate_expert_bytes,
-                      gate_row_bytes, xq_blocks, expert_mid_dim, n_tokens,
-                      n_expert, write_gate_up, clamp);
                 } else if (use_decode_lut_gate) {
                   moe_gate_up_mid_decode_lut_qwarp32_kernel<<<qgrid, 256>>>(
                       (float*)gate->ptr, (float*)up->ptr, (float*)mid->ptr,
@@ -1260,6 +1260,7 @@ static int routed_moe_launch(
         const uint32_t use_iq2_q2_float_down =
             ok && iq2_path && n_tokens > 1u && n_expert == 6u &&
             !use_direct_down_sum6 && !use_compact_float_down &&
+            !grouped_gate_only &&
             sorted_pairs && sorted_offsets && sorted_counts && tile_experts;
         if (ok && !use_iq2_q2_float_down && !use_compact_float_down) {
             dim3 midq_grid(midq_blocks, n_tokens * n_expert, 1);
@@ -1352,7 +1353,7 @@ static int routed_moe_launch(
             }
             if (use_direct_down_sum6) {
                 /* The direct decode kernel writes the final token row. */
-            } else if (sorted_pairs && use_expert_tiles && sorted_offsets && sorted_counts &&
+            } else if (!grouped_gate_only && sorted_pairs && use_expert_tiles && sorted_offsets && sorted_counts &&
                 down_tile_total && down_tile_experts && down_tile_starts) {
                 if (q4k_path) {
                     dim3 tgrid((out_dim + 31u) / 32u, down_tile_capacity, 1);
@@ -1414,7 +1415,7 @@ static int routed_moe_launch(
                         down_tile_total, down_tile_experts, down_tile_starts, down_expert_bytes, down_row_bytes,
                         midq_blocks, out_dim, n_expert, use_atomic_down);
                 }
-            } else if (sorted_pairs && use_p2_sorted) {
+            } else if (!grouped_gate_only && sorted_pairs && use_p2_sorted) {
                 dim3 p2_dgrid((out_dim + 15u) / 16u, (pair_count + 1u) / 2u, 1);
                 moe_down_sorted_p2_qwarp32_kernel<<<p2_dgrid, 256>>>(
                     (float *)down->ptr,
@@ -1428,7 +1429,7 @@ static int routed_moe_launch(
                     out_dim,
                     n_expert,
                     pair_count);
-            } else if (sorted_pairs) {
+            } else if (!grouped_gate_only && sorted_pairs) {
                 if (q4k_path) {
                     moe_down_q4K_sorted_qwarp32_kernel<<<dgrid, 256>>>(
                         (float *)down->ptr,

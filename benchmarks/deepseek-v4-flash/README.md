@@ -166,6 +166,27 @@ interval at 48 columns improved pp1024 from 420.05 to 436.19 tok/s (+3.8%),
 pp1536 from 465.67 to 475.08 (+2.0%), and pp2048 from 492.84 to 497.86 (+1.0%).
 The measured 4,096-token route remains on the default selector.
 
+The remaining narrow-prompt profile put the scalar Q2 down projection at
+145.4 ms for pp512. Moving experts with at least four rows to the existing
+WMMA route reduced it to 85.3 ms; total Q2 down time fell by 47.6 ms. A
+2/3/4/6/8/10-row threshold sweep measured
+357.88/359.70/361.05/358.64/355.71/352.63 tok/s, respectively. The retained
+four-row threshold applies only from 64 through 2,048 prompt rows:
+
+| prompt | eight-row threshold | final release | delta |
+| ---: | ---: | ---: | ---: |
+| 128 | unchanged | 189.62 | control |
+| 256 | 262.79 | 266.63 | +1.5% |
+| 512 | 355.71 | 361.54 | +1.6% |
+| 1,024 | 435.69 | 438.70 | +0.7% |
+| 1,536 | 474.29 | 477.81 | +0.7% |
+| 2,048 | 499.48 | 500.27 | +0.2% |
+
+Applying the threshold below 64 rows changed the pinned trajectory to 81/128
+top-1 tokens, so that broader policy was rejected. The scoped policy restores
+116/128 top-1 tokens, aggregate rank 142, and worst rank 3. Custom four- through
+seven-row WMMA tiles were neutral at pp512 and were also removed.
+
 A separate full-prompt comparison isolates the retained prompt kernels:
 
 | Prompt | Baseline | Current | Delta |
@@ -200,11 +221,12 @@ reusing the weight stream across W2-W8. DSpark stays serial, and
 
 Exact physical plans remove the old C5/C6 padding to W8. The W6 attention
 output-A specialization improves the measured C6 decode rate without changing
-C1. At C7/C8, a first-owner routed gate/up kernel decodes a repeated IQ2 expert
-weight block once for all sessions that selected it while retaining each
-session's original dot-product and reduction order. The compact C2-C6 route
-also no longer copies 256 device expert counters to the host on every layer
-when no later route consumes the host copy.
+C1. At C7/C8, the existing sorted-expert gate/up route now groups all rows that
+selected an IQ2 expert and loads that expert's weights once for the group. Q2
+down keeps the qualified decode route and reduction order. This supersedes and
+removes the narrower first-owner kernel. The compact C2-C8 gate routes also no
+longer copy 256 device expert counters to the host on every layer when no later
+route consumes the host copy.
 
 Release-package qualification on September 5, 2026 used an 80-token prompt,
 32 greedy output tokens, a 512-token context, one warmup, and three measured
@@ -228,31 +250,39 @@ same 32-token output, context, warmup, and repetition count:
 
 | C | Plan | Prefill tok/s | Per-request decode tok/s | Combined active decode tok/s | Output-only end-to-end tok/s | Total processed tok/s |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | serial | 286.58 | 17.07 | 17.07 | 9.68 | 133.47 |
-| 2 | W2 | 285.91 | 12.16 | 24.32 | 11.50 | 158.52 |
-| 4 | W4 | 286.28 | 8.27 | 33.09 | 13.04 | 179.64 |
-| 6 | W6 | 286.40 | 6.26 | 37.58 | 13.59 | 187.33 |
-| 8 | W8 | 286.52 | 5.46 | 43.71 | 14.23 | 196.11 |
+| 1 | serial | 291.90 | 17.04 | 17.04 | 9.73 | 134.77 |
+| 2 | W2 | 292.00 | 12.14 | 24.28 | 11.59 | 160.50 |
+| 4 | W4 | 292.29 | 8.20 | 32.81 | 13.13 | 181.70 |
+| 6 | W6 | 292.87 | 6.18 | 37.05 | 13.67 | 189.22 |
+| 8 | W8 | 292.83 | 5.76 | 46.12 | 14.63 | 202.48 |
 
 `C` counts concurrent requests and `W` is the physical decode width reached by
 the scheduler. Exact W2-W8 plans mean C6 runs a six-row kernel rather than a
 padded W8 kernel. Per-request decode excludes prefill. Combined active decode
-is that rate multiplied by `C`, so W2 gives each of two users 12.16 tok/s while
-the GPU emits 24.32 tok/s across both. Output-only end-to-end includes prefill,
-TTFT, queueing, and scheduling gaps. Total processed also counts prompt tokens;
-it must not be reported as decode speed.
+is that rate multiplied by `C`, so W2 gives each of two users 12.14 tok/s while
+the GPU emits 24.28 tok/s across both. `W2` names that two-row physical plan;
+it is not itself a throughput measurement. Output-only end-to-end includes
+prefill, TTFT, queueing, and scheduling gaps. Total processed also counts
+prompt tokens; it must not be reported as decode speed.
 
-The C8 IQ2 dedup route improved per-request decode from 5.35 to 5.47 tok/s
-(+2.2%). A matching Q2 down dedup kernel regressed it to 5.23 and was rejected.
-Expanding the IQ2 kernel from 128-row to 32-row blocks remained at 5.47 while
-launching four times as many blocks, so the simpler 128-row form was retained.
+The final C8 sorted gate/up route improved per-request decode from 5.46 to
+5.76 tok/s (+5.6%) and combined active decode from 43.71 to 46.12 tok/s while
+C1 remained at 17.04. A matching Q2 down dedup kernel regressed C8 to 5.23 and
+was rejected. Expanding the earlier IQ2 kernel from 128-row to 32-row blocks
+was neutral while launching four times as many blocks, so both experiments
+were removed.
+
+A decode-heavy C2 profile attributes 22.9% of kernel time to the dense Q8
+projection, 14.9% to routed gate/up, and 11.7% to Q2 down. Interleaved sweeps of
+Q8 rows per block, Q2-down rows per block, and gate row span did not produce a
+repeatable improvement and were rejected rather than adding C2 regressions.
 
 Quality first isolates one W6 step, resets every session, then repeats the
 existing three W4 steps, changed W2 membership, W8 step, and return to C1:
 
 | Measure | Bound | Result |
 | --- | ---: | ---: |
-| top-1 agreement | descriptive | 27/29 |
+| top-1 agreement | descriptive | 28/29 |
 | worst RMSE | <= 0.85 | **0.36** |
 | worst cosine | >= 0.99 | **1.00** |
 | worst maximum logit error | <= 4.5 | **2.64** |
