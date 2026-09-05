@@ -721,7 +721,7 @@ extern "C" int ds4_gpu_head_rms_norm_rope_tail_tensor(ds4_gpu_tensor *x, uint32_
      * changes what the optimizer can do with the scale multiply even when the
      * expression is written identically, and this backend builds with
      * -ffast-math. Enable with GUFO_DEEPSEEK_ROCM_FUSED_QNORM_ROPE=1. */
-    if (n_tok < DS4_ROCM_WIDE_PREFILL_ROWS) return 0;
+    if (n_tok < DS4_ROCM_ATTENTION_WIDE_ROWS) return 0;
     head_rms_norm_rope_tail_lds_kernel<<<(uint32_t)rows64, 256>>>(
             (float *)x->ptr, n_tok, n_head, head_dim, n_rot, pos0, n_ctx_orig,
             inverse ? 1 : 0, freq_base, freq_scale, ext_factor, attn_factor,

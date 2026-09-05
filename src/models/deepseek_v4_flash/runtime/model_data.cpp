@@ -744,7 +744,9 @@ static bool accelerator_cache_model_tensors(const ds4_model *m) {
 
     const double t0 = ds4_now_seconds();
     uint64_t cached = 0;
-    if (!accelerator_cache_model_tensor_spans(m, &cached)) return false;
+    const bool cache_ok = accelerator_cache_model_tensor_spans(m, &cached);
+    ds4_gpu_release_model_staging();
+    if (!cache_ok) return false;
     if (cached != 0) {
         const double t1 = ds4_now_seconds();
         if (ds4_log_is_tty(stderr)) fputc('\n', stderr);

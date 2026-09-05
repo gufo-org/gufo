@@ -284,7 +284,7 @@ static int attention_decode_batch_launch(
      * width.
      */
     if (!use_comp_mask &&
-        g_rocm_gfx1151 && n_tokens >= DS4_ROCM_WIDE_PREFILL_ROWS &&
+        g_rocm_gfx1151 && n_tokens >= DS4_ROCM_ATTENTION_WIDE_ROWS &&
         n_comp != 0u && comp_kv && n_head == 64u && head_dim == 512u &&
         window != 0u && window <= 256u && ratio != 0u) {
         const dim3 grid(n_tokens, n_head / 32u, 1u);
@@ -772,7 +772,7 @@ static int attention_prefill_mixed_launch(
      * F16 -- so it is held to the prompt-chunk width like the rest. The indexed
      * layers already use this producer. */
     if (!use_comp_mask && g_rocm_gfx1151 &&
-        n_tokens >= DS4_ROCM_WIDE_PREFILL_ROWS && n_comp != 0u &&
+        n_tokens >= DS4_ROCM_ATTENTION_WIDE_ROWS && n_comp != 0u &&
         n_head == 64u && head_dim == 512u && window != 0u && window <= 256u) {
         const dim3 grid(n_tokens, n_head / 32u, 1u);
         attention_mixed_heads32_wmma_kernel<false, false><<<grid, 1024>>>(
@@ -1173,7 +1173,7 @@ static int attention_output_q8_batch_launch(
                  * this envelope was measured against. */
                 uint64_t b_pad_n = ds4_gemm_f16_wmma_pad_n(n_tokens);
                 if (out_b_f16_t == NULL ||
-                    n_tokens < DS4_ROCM_WIDE_PREFILL_ROWS ||
+                    n_tokens < DS4_ROCM_ATTENTION_WIDE_ROWS ||
                     !ds4_gemm_f16_wmma_padded_eligible(out_dim, b_pad_n, low_dim) ||
                     out->bytes < b_pad_n * out_dim * sizeof(float)) {
                     b_pad_n = n_tokens;
@@ -1499,7 +1499,7 @@ extern "C" int ds4_gpu_attention_output_q8_batch_inv_rope_tensor(
      * F16 conversion, which is the same value the separate pass produced, but
      * this backend builds with -ffast-math and the surrounding expression
      * changes, so the narrow verification widths keep the separate launches. */
-    if (n_tokens < DS4_ROCM_WIDE_PREFILL_ROWS) return 0;
+    if (n_tokens < DS4_ROCM_ATTENTION_WIDE_ROWS) return 0;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
     const ds4_attn_pack_rope rope = {
         head_dim, n_rot, pos0, n_ctx_orig, /*inverse=*/1,

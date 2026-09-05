@@ -141,13 +141,17 @@ static int routed_moe_q2_float_down_launch(
 
     /* Pairs a wave carries per dequantization of its weight row.
      *
+     * At 32 tokens the mean live expert bucket is below two assignments. A
+     * two-pair tile avoids staging two empty activation rows for most experts
+     * while preserving each pair's K accumulation and F16 storage order.
+     *
      * Eight looks free -- this route only serves experts below the hot
      * threshold, so every bucket would fit one tile instead of the two that a
      * five-to-seven-row bucket pays at four -- and it is 64% slower: 132.6 to
      * 218.0 ms at kernel level. The mid staging loop runs over the whole tile
      * whatever the bucket holds, so eight stages 2,048 floats per K block for
      * three real rows, and that costs more than the second weight pass it saves. */
-    const uint32_t down_tile = 4u;
+    const uint32_t down_tile = n_tokens <= 32u ? 2u : 4u;
     /* Output rows per workgroup on the scalar route, one wave each.
      *
      * Swept because this kernel takes two barriers per 256-value K slab with
@@ -182,79 +186,89 @@ static int routed_moe_q2_float_down_launch(
 #else
     const int use_wmma_hot = 0;
 #endif
-    uint32_t h_hot[256] = {0};
+    uint32_t h_active[256] = {0};
     if (use_wmma_hot) {
         for (uint32_t e = 0; e < 256u; e++) {
             const uint32_t c = h_counts[e];
             if (c >= hot_threshold) {
-                h_hot[hot_count++] = e;
+                h_active[hot_count++] = e;
                 if (c > hot_max) hot_max = c;
             }
         }
     }
 
     const uint32_t scalar_max = hot_count != 0u ? hot_threshold : 0u;
-    /* The scalar route only serves experts the WMMA hot list rejected. Its grid
-     * is sized by the whole 256-entry expert table, so when every populated
-     * expert is hot there is nothing for those 65,536 workgroups to do.
-     *
-     * Compacting the populated ones into a list was measured again at a
-     * 512-token chunk, where about 100 of 256 experts are live: 156.15 to
-     * 145.39 ms of a 1,841 ms chunk with `grid.y` 256 to 83, which reproduces
-     * the 138.3 to 131.1 ms recorded for the same experiment at 4,096 tokens.
-     * It stays reverted for the same reason: 0.7% of the chunk, inside the
-     * noise of an end-to-end pair, for a host copy per layer. */
+    /* Keep the hot experts first and append the populated scalar experts. The
+     * same short H2D copy feeds both kernels. At 32 tokens fewer than half the
+     * expert table is live, so this avoids tens of thousands of empty scalar
+     * workgroups without changing pair order or arithmetic. */
     uint32_t cold_count = 0u;
-    if (scalar_max != 0u) {
-        for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
-            if (h_counts[e] != 0u && h_counts[e] < scalar_max) cold_count++;
+    for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
+        const uint32_t count = h_counts[e];
+        if (count != 0u && (scalar_max == 0u || count < scalar_max)) {
+            h_active[hot_count + cold_count++] = e;
         }
-    } else {
-        cold_count = 1u;
     }
-    const dim3 down_grid((out_dim + down_rpb - 1u) / down_rpb, DS4_ROCM_N_EXPERT, 1u);
+    const uint32_t active_count = hot_count + cold_count;
+    const bool compact_experts = hot_experts_dev != NULL;
+    if (compact_experts && active_count != 0u &&
+        !hip_ok(hipMemcpy(hot_experts_dev, h_active,
+                         active_count * sizeof(uint32_t), hipMemcpyHostToDevice),
+                "routed_moe iq2/q2 float-down active copy")) {
+        return 0;
+    }
+    const uint32_t *cold_experts_dev =
+        compact_experts ? hot_experts_dev + hot_count : NULL;
+    const dim3 down_grid(
+        (out_dim + down_rpb - 1u) / down_rpb,
+        compact_experts ? cold_count : DS4_ROCM_N_EXPERT,
+        1u);
     if (cold_count == 0u) {
         /* nothing to do */
     } else if (use_f16_down) {
-        if (down_tile == 4u) {
+        if (down_tile == 2u) {
+            moe_down_q2K_expert_batch_sharedmid_kernel<2,false,true><<<down_grid, down_threads, down_shmem>>>(
+                    NULL, down_h, down_w, (const float *)mid->ptr, NULL,
+                    counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
+                    down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
+        } else if (down_tile == 4u) {
             moe_down_q2K_expert_batch_sharedmid_kernel<4,false,true><<<down_grid, down_threads, down_shmem>>>(
                     NULL, down_h, down_w, (const float *)mid->ptr, NULL,
                     counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                    down_expert_bytes, down_row_bytes);
+                    down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
         } else if (down_tile == 8u) {
             moe_down_q2K_expert_batch_sharedmid_kernel<8,false,true><<<down_grid, down_threads, down_shmem>>>(
                     NULL, down_h, down_w, (const float *)mid->ptr, NULL,
                     counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                    down_expert_bytes, down_row_bytes);
+                    down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
         } else {
             moe_down_q2K_expert_batch_sharedmid_kernel<16,false,true><<<down_grid, down_threads, down_shmem>>>(
                     NULL, down_h, down_w, (const float *)mid->ptr, NULL,
                     counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                    down_expert_bytes, down_row_bytes);
+                    down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
         }
+    } else if (down_tile == 2u) {
+        moe_down_q2K_expert_batch_sharedmid_kernel<2><<<down_grid, down_threads, down_shmem>>>(
+                (float *)down->ptr, NULL, down_w, (const float *)mid->ptr, NULL,
+                counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
+                down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
     } else if (down_tile == 4u) {
         moe_down_q2K_expert_batch_sharedmid_kernel<4><<<down_grid, down_threads, down_shmem>>>(
                 (float *)down->ptr, NULL, down_w, (const float *)mid->ptr, NULL,
                 counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                down_expert_bytes, down_row_bytes);
+                down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
     } else if (down_tile == 8u) {
         moe_down_q2K_expert_batch_sharedmid_kernel<8><<<down_grid, down_threads, down_shmem>>>(
                 (float *)down->ptr, NULL, down_w, (const float *)mid->ptr, NULL,
                 counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                down_expert_bytes, down_row_bytes);
+                down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
     } else {
         moe_down_q2K_expert_batch_sharedmid_kernel<16><<<down_grid, down_threads, down_shmem>>>(
                 (float *)down->ptr, NULL, down_w, (const float *)mid->ptr, NULL,
                 counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                down_expert_bytes, down_row_bytes);
+                down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
     }
     if (!hip_ok(hipGetLastError(), "routed_moe iq2/q2 float-down scalar launch")) return 0;
-    if (hot_count != 0u &&
-        !hip_ok(hipMemcpy(hot_experts_dev, h_hot, hot_count * sizeof(uint32_t), hipMemcpyHostToDevice),
-                 "routed_moe iq2/q2 float-down hot copy")) {
-        return 0;
-    }
-
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
     if (use_wmma_hot && hot_count != 0u) {
         constexpr uint32_t bm = 16u, bn = 16u, bk = 16u;
@@ -306,7 +320,7 @@ static int routed_moe_q2_float_down_launch(
                 h_map.reserve(cap);
                 for (uint32_t h = 0; h < hot_count && h_map.size() < cap; h++) {
                     const uint32_t groups =
-                        (h_counts[h_hot[h]] + DS4_ROCM_WIDE_DOWN_TILE_M - 1u) /
+                        (h_counts[h_active[h]] + DS4_ROCM_WIDE_DOWN_TILE_M - 1u) /
                         DS4_ROCM_WIDE_DOWN_TILE_M;
                     for (uint32_t g = 0; g < groups && h_map.size() < cap; g++) {
                         h_map.push_back((h << 16) | g);
@@ -634,7 +648,7 @@ static int routed_moe_launch(
          */
         const uint32_t use_mmq_gateup =
             g_rocm_mmq_ready && iq2_path && !q4k_path &&
-            n_tokens >= DS4_ROCM_WIDE_PREFILL_ROWS && !g_small_batch_mode;
+            n_tokens >= DS4_ROCM_ROUTED_MMQ_ROWS && !g_small_batch_mode;
         const uint32_t use_p2_sorted = 0u;
         const uint32_t use_atomic_down = use_expert_tiles && n_tokens >= 128u;
         const uint32_t use_gate_row2048 = !q4k_path && use_expert_tiles && n_tokens >= 128u;

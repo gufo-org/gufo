@@ -84,8 +84,16 @@ for the same artifact. Prompt rows compare the final context after adding the
 | 32K | 179.18 | 171.83 | +4.3% | 13.66 | 12.93 | +5.6% | 475,014,540 |
 | 64K | not remeasured | not supplied | - | 12.42 | 11.91 | +4.3% | 926,033,292 |
 
-The model loads 80.76 GiB of tensor spans in about 21 seconds. The 64K run
-plans 82.07 GiB total, including model, KV state, and working buffers.
+The model loads 80.76 GiB of tensor spans in about 21 seconds. The startup
+copier issues sixteen aligned direct reads in parallel, sizes each chunk to the
+current tensor span, copies through pinned buffers, and releases the roughly
+1 GiB staging pool as soon as the model cache is ready. The same release path
+took 141.79 seconds with one synchronous direct read in flight; retained cold
+runs take 21.05-21.43 seconds. A queue-depth-16 storage check still sustains
+6.21-6.44 GiB/s, so an isolated 29.75-second run after sustained profiling was
+system variance rather than a return to serialized I/O.
+
+The 64K run plans 82.07 GiB total, including model, KV state, and working buffers.
 The 2K decode value was confirmed by two paired candidate samples; the 8K-32K
 rows come from one sparse-depth sweep. The 64K
 prompt row was not rerun because the retained prompt-kernel gain was already
@@ -129,6 +137,24 @@ plan selection land outside the measured rows, arms alternated within each pair:
 | 2,048 | 494.35 | 493.66 | -0.1% |
 | 4,096 | 529.49 | 529.54 | +0.0% |
 
+The follow-up short-width routes were measured against commit `cb663c8` with
+the same release binary harness, five repetitions, and a 16-token warm point:
+
+| prompt | `cb663c8` | current | delta |
+| ---: | ---: | ---: | ---: |
+| 32 | 53.63 | 61.43 | **+14.5%** |
+| 64 | 72.64 | 103.41 | **+42.4%** |
+| 96 | 86.06 | 147.86 | **+71.8%** |
+| 128 | 169.01 | 183.08 | **+8.3%** |
+| 256 | 261.61 | 262.26 | +0.2% |
+
+Routed MMQ now starts at 32 rows. Dense MMQ and hipBLASLt start at 64, while
+the accuracy-sensitive mixed-attention, fused norm/rope, output-B padding, and
+inverse-rope routes stay at 96. At 32 rows, a two-pair Q2 down tile matches the
+sparse expert buckets and a compact live-expert list avoids launching against
+all 256 experts. The 32/64/96 full-logit comparisons remain top-1/rank-1
+against sequential evaluation.
+
 A chat turn prefills only what the prefix cache does not already hold, so these
 narrow widths and not the 4,096-token chunk are what a conversation pays. See
 "The conversational prompt widths, which were at half speed" below for the two
@@ -166,7 +192,7 @@ session. This preserves the per-row block and warp reduction order while
 reusing the weight stream across W2-W8. DSpark stays serial, and
 `GUFO_DEEPSEEK_SESSION_BATCH=0` provides an operational fallback.
 
-Release-package qualification on September 5, 2026 used an 81-token prompt,
+Release-package qualification on September 5, 2026 used an 80-token prompt,
 32 greedy output tokens, a 512-token context, one warmup, and three measured
 rounds:
 
@@ -183,16 +209,33 @@ separate ten-round C=1 control measured 37.73 aggregate tok/s, 17.26 decode
 tok/s, and 59.82 ms median ITL. The earlier serial baseline was 38.06 aggregate
 tok/s, a 0.9% difference, and C=1 never enters the session-batch function.
 
+The final post-change serving run used the canonical 411-token prompt and the
+same 32-token output, context, warmup, and repetition count:
+
+| C | Plan | Prefill tok/s | Per-request decode tok/s | Combined active decode tok/s | Output-only end-to-end tok/s | Total processed tok/s |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | serial | 286.46 | 17.09 | 17.09 | 9.67 | 133.90 |
+| 2 | W2 | 286.16 | 12.13 | 24.26 | 11.48 | 158.89 |
+| 4 | W4 | 286.18 | 8.14 | 32.58 | 12.92 | 178.80 |
+| 8 | W8 | 287.02 | 5.31 | 42.47 | 14.05 | 194.53 |
+
+`C` counts concurrent requests and `W` is the physical decode width reached by
+the scheduler. Per-request decode excludes prefill. Combined active decode is
+that rate multiplied by `C`, so W2 gives each of two users 12.13 tok/s while
+the GPU emits 24.26 tok/s across both. Output-only end-to-end includes prefill,
+TTFT, queueing, and scheduling gaps. Total processed also counts prompt tokens;
+it must not be reported as decode speed.
+
 Quality compares aligned token histories over prompt positions 32 through 256,
 three W4 steps, a changed W2 membership, one W8 step, and a return to C1:
 
 | Measure | Bound | Result |
 | --- | ---: | ---: |
 | top-1 agreement | descriptive | 22/23 |
-| worst RMSE | <= 0.85 | **0.65** |
+| worst RMSE | <= 0.85 | **0.36** |
 | worst cosine | >= 0.99 | **0.99** |
-| worst maximum logit error | <= 4.5 | **3.59** |
-| serial winner rank in batch | <= 3 | **3** |
+| worst maximum logit error | <= 4.5 | **2.64** |
+| serial winner rank in batch | <= 3 | **2** |
 
 The one free-running difference is a near-tie; the serial winner remains in
 the batch top three. Cancellation, duplicate-session and invalid-token

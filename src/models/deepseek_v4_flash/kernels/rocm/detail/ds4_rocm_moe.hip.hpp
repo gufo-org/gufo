@@ -3318,14 +3318,16 @@ __global__ static void moe_down_q2K_expert_batch_sharedmid_kernel(
         uint32_t out_dim,
         uint64_t down_expert_bytes,
         uint64_t down_row_bytes,
-        uint32_t n_tokens = 0u) {
+        uint32_t n_tokens = 0u,
+        const uint32_t *expert_indices = NULL) {
     extern __shared__ float shmid[];
     const uint32_t tid = threadIdx.x;
     const uint32_t lane = tid & 31u;
     const uint32_t wave = tid >> 5u;
     const uint32_t rows_per_block = blockDim.x >> 5u;
     const uint32_t row = blockIdx.x * rows_per_block + wave;
-    const uint32_t expert = blockIdx.y;
+    const uint32_t expert =
+        expert_indices ? expert_indices[blockIdx.y] : blockIdx.y;
     if (expert >= 256u) return;
     const bool row_valid = row < out_dim;
     const uint32_t count = counts[expert];
