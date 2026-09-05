@@ -1,6 +1,6 @@
 # DeepSeek V4 Flash Q2-imatrix on Strix Halo
 
-Status: 2026-09-03. This page is the current functional and performance
+Status: 2026-09-05. This page is the current functional and performance
 snapshot, not an optimization history.
 
 ## Model
@@ -112,6 +112,27 @@ quality envelope exactly: pinned trajectory 116/128 top-1, rank sum 142,
 worst rank 3; batched-prefill RMSE 0.478146, cosine 0.99617, maximum error
 2.39995, and sequential choice rank 1. The candidate was therefore rejected
 for placement performance and memory behavior, not numerical quality.
+
+### Prompt throughput against prompt length
+
+One warm process, a 4,096-token point first so the one-time weight mirrors and
+plan selection land outside the measured rows, arms alternated within each pair:
+
+| prompt | before | now | delta |
+| ---: | ---: | ---: | ---: |
+| 128 | 143.04 | 180.38 | +26.1% |
+| 256 | 212.58 | 260.91 | +22.7% |
+| 512 | 293.84 | 354.77 | +20.7% |
+| 768 | 343.15 | 391.80 | +14.2% |
+| 1,024 | 374.01 | 421.63 | +12.7% |
+| 1,536 | 405.24 | 467.96 | +15.5% |
+| 2,048 | 494.35 | 493.66 | -0.1% |
+| 4,096 | 529.49 | 529.54 | +0.0% |
+
+A chat turn prefills only what the prefix cache does not already hold, so these
+narrow widths and not the 4,096-token chunk are what a conversation pays. See
+"The conversational prompt widths, which were at half speed" below for the two
+mechanisms and their measurements.
 
 A separate full-prompt comparison isolates the retained prompt kernels:
 
@@ -1458,6 +1479,219 @@ still holds, since both of its arms carried the same regression.
 | Route the routed-expert Q2_K **down** projection through the vendored MMQ tier, the way gate/up already goes, reusing the same `ids_dst` map and the SwiGLU epilogue's `mid` | the native wide WMMA kernel sustains 12.2 TFLOP/s against gate/up MMQ's 18.7 on comparable arithmetic, so about -500 ms | **19% slower at every tile width.** 461.4 tok/s native against 370.0 / 374.4 / 370.0 / 368.8 at `mmq_x` 16 / 24 / 32 / 40. Q2_K's MMQ tile carries a second accumulator set for its per-block minima: at the width the selector picks it needs **256 VGPRs plus 2,768 bytes of scratch** and 37,696 bytes of shared memory -- one workgroup per CU and a spilled inner loop -- against IQ2_XXS's 176 VGPRs, no scratch and 31,552 bytes. Capping the width removes the spill and the column tiles then multiply; neither end wins. The composition itself is sound and cheap (`swiglu_epilogue` and `fused_down` now share one `mid`, no second `mm_ids_helper`), so the finding is about the Q2_K tile, not the plumbing |
 | Compact the cold-expert Q2 down grid, which is sized by the whole 256-entry expert table while the router skew leaves about 83 experts cold at prompt width | 65,536 workgroups down to 21,248, so most of 138 ms | **7 ms.** 138.3 to 131.1 ms at kernel level with `grid.y` 256 to 83. This is the third independent confirmation that empty workgroups are free on this GPU (see "Nothing in this prefill is bandwidth bound"): the 131 ms is real work, 83 experts' full 4,096 x 2,048 weight streams for a few hundred assignments, at about 1.3 TFLOP/s. Reverted -- it also added a synchronous host copy per layer for less than its own noise |
 | `PAIR_TILE` 8 instead of 4 on that same cold route, so a five-to-seven-row bucket stops paying a second full weight dequantization pass | about -30% of 133 ms | **+64%**, 132.6 to 218.0 ms. The mid staging loop covers the whole tile whatever the bucket holds, so eight stages 2,048 floats per K block to use three of them, and that costs more than the weight pass it saves. The default stays 4 |
+
+### The conversational prompt widths, which were at half speed (September 5, 2026)
+
+Every prefill number above is a 4,096-token chunk. A chat turn is not one: the
+prefix cache already holds the conversation, so the chunk is whatever is new --
+a few hundred tokens. Measured in one warm process on `9719ae2`, with a
+4,096-token point first so the one-time weight mirrors and plan selection land
+outside the rows being compared:
+
+| prompt | tok/s | of the 4,096 rate |
+| ---: | ---: | ---: |
+| 128 | 142.69 | 27% |
+| 256 | 211.94 | 40% |
+| 512 | 293.73 | 55% |
+| 768 | 343.98 | 65% |
+| 1,024 | 373.62 | 70% |
+| 1,536 | 407.52 | 77% |
+| 2,048 | 494.19 | 93% |
+| 4,096 | 530.33 | 100% |
+
+`GUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE` puts essentially all of the deficit in
+two stages. Per token, 512 against 4,096 (these readings carry a per-stage
+synchronize, so read the ratios and not the absolute values):
+
+| stage | 512 | 4,096 | ratio | excess per 512-token chunk |
+| --- | ---: | ---: | ---: | ---: |
+| `attn inv_rope`, the attention output projection | 1,298 us | 298 us | **4.36x** | 512 ms |
+| `ffn routed_moe` | 1,904 us | 785 us | **2.43x** | 573 ms |
+| the other fifteen stages, summed | 972 us | 823 us | 1.18x | 76 ms |
+
+The two own 1,085 ms of a 2,137 ms chunk. Nothing else is worth more than 40 ms,
+and four stages -- `attention`, both norms, `attn hc_post` -- are *cheaper* per
+token at 512, which is the sparse-attention window working as designed.
+
+#### The routed column tile was sized by the chunk, not by the bucket
+
+`mul_mat_q` is 39.7% of a 512-token chunk (729.91 ms of 1,840.76 ms of kernel
+time), of which 599.76 ms over 86 dispatches is the routed IQ2 gate/up pair. Its
+grid is `(nty, ntx, 256)`, and `ncols_grid_max` already bounds `ntx` by the
+largest expert bucket -- but `mmq_x`, the width each surviving column tile
+actually executes, is still chosen from `ncols_max`, the chunk width. That yields
+the 80-column tile at every width from 256 up.
+
+A tile executes all of its columns whether the bucket fills them or not, so the
+cost is `sum_e ceil(c_e / w) * w` column-slots plus one weight-panel reload per
+tile, and what decides it is the whole distribution rather than its maximum:
+
+| chunk | live experts per layer | mean bucket |
+| ---: | ---: | ---: |
+| 256 | 116 | 13 |
+| 512 | 131 | 23 |
+| 1,024 | 147 | 42 |
+| 2,048 | 161 | 76 |
+| 4,096 | 170 | 145 |
+
+and the router skew is large: at 512 tokens the largest bucket is 358 to 483 of
+3,072 pairs against a mean of 23, and at 4,096 it reaches 3,496 of 24,576.
+
+At 4,096 tokens `w = 80` is nearly full. At 512 it spends about 85% of its
+matrix-core issue on padding -- and the router skew means the maximum bucket
+cannot tell you that. The host already copies the per-expert counts back to build
+the Q2 down hot list, so `ds4_mmq_set_routed_tile_cols` now takes the width that
+minimizes the cost above.
+
+The change is bit-identical by construction: the macro tile only partitions
+output columns, and each element still walks K once in the same order.
+
+A forced-width sweep, one warm process per width, says the model is worth having
+below about a thousand rows and nothing above it:
+
+| width | pp256 | pp512 | pp1024 | pp2048 |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | **261.47** | **354.44** | 426.59 | 472.36 |
+| 32 | 243.66 | 343.55 | 420.91 | 476.07 |
+| 48 | 240.51 | 346.71 | **435.80** | **499.01** |
+| 64 | 228.26 | 332.74 | 429.85 | 496.93 |
+| 80 | 219.74 | 320.62 | 420.49 | 493.31 |
+| default rule | 228.80 | 321.43 | 421.62 | 493.80 |
+
+The default gives up 14% at 256 and 10% at 512, and is within 1.1% of the best
+measured width at 1,024 and 2,048. The reload constant was then fitted rather
+than assumed: the real per-expert counts were dumped for all 43 layers at each of
+those four widths and scored against this sweep. `P = 16` is the single best
+constant -- 0.85% mean and 3.4% worst-case shortfall against a per-width oracle,
+where `P = 8` and `P = 32` both give 1.7% and `P = 48` gives 2.6%.
+
+**No constant reproduces the whole curve.** The optimum is 16 columns at 512 and
+48 at 1,024, and any cost of the form `a * (column-slots) + b * (tiles)` collapses
+to `tiles * (w + b/a)`, which cannot separate those two: 16 beats 48 at 512 only
+for `P < 29.5`, 48 beats 32 at 1,024 only for `P > 33.7`. So the model runs only
+where the sweep validates it, under `DS4_ROCM_ROUTED_TILE_MODEL_ROWS` (1,024).
+Left on the table: a fixed 48-column tile is worth +3.4% at 1,024 and +1.1% at
+2,048 and is the obvious next step, not taken here only because the same sweep's
+4,096 point is a cold-cache reading that cannot settle the wide end.
+
+#### The attention output-B projection had fallen off its own kernel
+
+`DS4_WMMA_GEMM_MIN_BLOCKS` is 240 tiles, "six workgroups per CU", and it was
+calibrated to keep the 256x128 tile off the small-`m` `opA=T` projections where 32
+to 64 workgroups lose to Tensile. At `m=4096 n=chunk k=8192` -- the one shape the
+kernel was written for -- 16 `m`-tiles means the floor is not met until
+`n >= 1,920`, so every chunk under 2,048 rows took the fallback. And the fallback
+for this shape is not Tensile's good `opA=T` tile; it is rocBLAS on `opA=N`, which
+holds 5.6 to 6.6 TFLOP/s at every width while both macro tiles reach 16 to 20.
+
+`tools/bench/dsv4_attn_out_gemm_bench.hip`, three rotating operand copies so the
+32 MB MALL cannot hide a re-read the production call pays cold:
+
+| n | rocBLAS `opA=N` | 256x128 W4x2 | 128x128 W2x2 SWZ8 | 64x64 W1x2 |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 | 1.533 ms (5.60) | 0.934 (9.20) | 0.653 (13.16) | **0.600 (14.32)** |
+| 256 | 2.879 (5.97) | 1.018 (16.87) | **0.949 (18.11)** | 1.198 (14.34) |
+| 512 | 5.202 (6.61) | 2.094 (16.41) | **1.887 (18.20)** | 2.352 (14.61) |
+| 1,024 | 10.521 (6.53) | **3.505 (19.61)** | 4.042 (17.00) | 6.508 (10.56) |
+
+TFLOP/s in parentheses. Two things fell out of the sweep. **All 26 WMMA
+geometries agree bit for bit** -- `maxdiff 0` throughout -- so the macro tile is a
+scheduling choice with no numerical consequence, and only leaving rocBLAS changes
+anything at all (the two disagree by 3e-4 at these widths). And the crossover is
+sharp: 128x128 below n=1,024, 256x128 above.
+
+The remaining obstacle was that a real chunk width is not a multiple of the tile.
+The caller owns both the staged activation and the result, so it stages them for
+the width rounded up to 128, zeroes the activation pad, and lets the extra result
+columns be computed from zeros and never read -- no guard in the K loop, and the
+real columns stay bit-identical to the aligned case. It is held to
+`DS4_ROCM_WIDE_PREFILL_ROWS` like every other accelerated prefill route, which
+keeps the pinned trajectory's own twenty-token prefill on the library its envelope
+was measured against.
+
+Per 512-token chunk, at kernel level: **229.87 ms of rocBLAS becomes 79.73 ms** of
+`ds4_gemm_f16_wmma_kernel<128,128,32,2,2,8>`, 1.854 ms per layer against the
+harness's 1.887.
+
+#### Result
+
+Two arms of `nix build`, alternated within each pair so ordering alone cannot
+decide it, one warm process per arm, a 4,096-token point first:
+
+| prompt | `9719ae2` | this change | delta |
+| ---: | ---: | ---: | ---: |
+| 128 | 143.04 | 180.38 | **+26.1%** |
+| 256 | 212.58 | 260.91 | **+22.7%** |
+| 512 | 293.84 | 354.77 | **+20.7%** |
+| 768 | 343.15 | 391.80 | **+14.2%** |
+| 1,024 | 374.01 | 421.63 | **+12.7%** |
+| 1,536 | 405.24 | 467.96 | **+15.5%** |
+| 2,048 | 494.35 | 493.66 | -0.1% |
+| 4,096 | 529.49 | 529.54 | +0.0% |
+| `tg16` | 16.90 | 16.95 | +0.3% |
+
+Both mechanisms are scoped away from single-row work, so `tg16` is the control
+rather than a result: decode takes the same kernels it did before.
+
+Kernel time for a 512-token chunk falls from 1,840.76 ms to 1,527.85 ms, and the
+two mechanisms account for all of it: routed gate/up 599.76 -> 447.4 ms, output B
+229.87 -> 79.73 ms.
+
+#### What it is worth on the real server
+
+`tools/serving/gufo-serving-bench.py` against `gufo serve`, a 223-token prompt,
+32 greedy output tokens, one warmup and three measured repetitions per
+concurrency level, arms alternated within each pair. DeepSeek still advertises
+physical width one, so C=2 and C=4 are the fair round-robin serial fallback and
+their queueing is included:
+
+| | `9719ae2` | this change | delta |
+| --- | ---: | ---: | ---: |
+| prefill tok/s | 155.4 | 205.2 | **+32.1%** |
+| TTFT p50, C=1 | 1,429.5 ms | 1,087.3 ms | **-23.9%** |
+| TTFT p50, C=2 | 3,088.6 ms | 2,562.2 ms | **-17.0%** |
+| TTFT p50, C=4 | 6,401.7 ms | 5,516.0 ms | **-13.8%** |
+| whole request p50, C=1 | 3,303.4 ms | 2,957.3 ms | -10.5% |
+| aggregate tok/s, C=1 | 76.9 | 86.2 | **+12.1%** |
+| aggregate tok/s, C=2 | 76.8 | 86.3 | **+12.4%** |
+| aggregate tok/s, C=4 | 76.7 | 86.3 | **+12.5%** |
+| decode inter-token p50 | 60.40 ms | 60.29 ms | -0.2% |
+
+The aggregate gain is the same at every concurrency because the thing that got
+faster is the per-request prefill each of them pays, and the inter-token latency
+is the control: it does not move, which is the check that neither route reached
+single-row decode.
+
+#### The envelope does not move
+
+`build/gpu-test/deepseek_v4_flash_engine_test`, same binary and model:
+
+| | floor | `16d5e30` baseline | this change |
+| --- | --- | --- | --- |
+| pinned trajectory top-1 | >= 116/128 | 116/128 | **116/128** |
+| aggregate rank | <= 142 | 142 | **142** |
+| worst rank | <= 3 | 3 | **3** |
+| 273-token `rmse` | <= 1.12 | 0.478146 | **0.47** |
+| `cosine` | >= 0.979 | 0.99617 | **1.00** |
+| `max_error` | <= 5.0 | 2.39995 | **2.13** |
+| sequential choice rank | <= 3 | 1 | **1** |
+
+The pinned trajectory cannot move: its prompt is about twenty tokens and its 128
+steps are one row each, so neither route fires there. The 273-token comparison
+does exercise both, and lands below the immutable pre-optimization `rmse`.
+`nix build .#checks.x86_64-linux.pr` is green.
+
+#### One falsified item, re-confirming a recorded one
+
+Compacting the cold-expert Q2 down grid -- `grid.y` from the whole 256-entry
+expert table to the populated experts -- was measured again at 512 tokens, where
+about 130 of 256 experts are live and 83 of them land on that route: **156.15 ms
+before against 145.39 ms in a build that also carries both changes above, which
+do not touch this kernel's work**, with `grid.y` 256 to 83. That reproduces the
+138.3 to 131.1 ms recorded for the same experiment at 4,096 tokens, at a second
+chunk width and a 3x grid reduction, and it stays reverted for the same reason:
+0.7% of the chunk, inside the noise of an end-to-end pair, for a host copy per
+layer. **Empty workgroups really are free on this GPU.**
 
 ### What is left, and why it was not attempted
 

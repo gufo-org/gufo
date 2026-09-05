@@ -17,6 +17,7 @@
 //
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
 #include <rocwmma/rocwmma.hpp>
 
@@ -518,6 +519,60 @@ struct Result {
 
 static std::vector<Result> g_results;
 
+// ---------------------------------------------------------------------------
+// The library route production actually takes when the 256x128 tile's grid is
+// too small: `DS4_WMMA_GEMM_MIN_BLOCKS` is 240 tiles, so at n < 2048 the out-B
+// projection falls back to `hipblasGemmEx` with the transposed weight cache and
+// `opA=N`. Score it here so a narrow-n geometry is compared against what ships,
+// not against the wide-n kernel it cannot reach.
+// ---------------------------------------------------------------------------
+static hipblasHandle_t g_hipblas;
+
+static void rocblas_ref_launch(const Problem &p, Buffers &buf, int copy) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    for (uint32_t b = 0; b < p.batch; b++) {
+        const __half *a = buf.a[copy] + (uint64_t)b * p.k * p.m;
+        const __half *x = buf.b[copy] + (uint64_t)b * p.n * p.k;
+        float *c = buf.c + (uint64_t)b * p.m;
+        (void)hipblasGemmEx(g_hipblas, HIPBLAS_OP_N, HIPBLAS_OP_N, (int)p.m,
+                            (int)p.n, (int)p.k, &alpha, a, HIPBLAS_R_16F,
+                            (int)p.m, x, HIPBLAS_R_16F, (int)p.k, &beta, c,
+                            HIPBLAS_R_32F, (int)p.ldc, HIPBLAS_COMPUTE_32F,
+                            HIPBLAS_GEMM_DEFAULT);
+    }
+}
+
+static void run_rocblas_ref(const Problem &p, Buffers &buf, int iters) {
+    const size_t cn = (size_t)p.batch * p.n * p.ldc;
+    HIP_OK(hipMemset(buf.c, 0, cn * sizeof(float)));
+    rocblas_ref_launch(p, buf, 0);
+    if (hipDeviceSynchronize() != hipSuccess) {
+        (void)hipGetLastError();
+        std::printf("  %-40s LAUNCH FAIL\n", "rocBLAS opA=N");
+        return;
+    }
+    std::vector<float> host(cn);
+    HIP_OK(hipMemcpy(host.data(), buf.c, cn * sizeof(float), hipMemcpyDeviceToHost));
+    double maxdiff = 0.0;
+    if (buf.ref.empty()) {
+        buf.ref = host;
+    } else {
+        for (size_t i = 0; i < cn; i++) {
+            const double d = std::fabs((double)host[i] - (double)buf.ref[i]);
+            if (d > maxdiff) maxdiff = d;
+        }
+    }
+    const double ms = bench(p, buf, rocblas_ref_launch, iters);
+    const double flops = 2.0 * p.m * p.n * p.k * p.batch;
+    g_results.push_back({"rocBLAS opA=N (production fallback)", ms,
+                         flops / (ms * 1e-3) / 1e12, maxdiff});
+    std::printf("  %-40s %8.3f ms  %6.2f TFLOP/s  maxdiff %.3g\n",
+                "rocBLAS opA=N (fallback)", ms, flops / (ms * 1e-3) / 1e12,
+                maxdiff);
+    std::fflush(stdout);
+}
+
 template <uint32_t BM, uint32_t BN, uint32_t BK, uint32_t WMF, uint32_t WNF,
           uint32_t SWZ, uint32_t MODE>
 static void run_geom(const Problem &p, Buffers &buf, int iters) {
@@ -563,6 +618,10 @@ static void run_geom(const Problem &p, Buffers &buf, int iters) {
 
 int main(int argc, char **argv) {
     const uint32_t tokens = argc > 1 ? (uint32_t)std::atoi(argv[1]) : 4096u;
+    if (hipblasCreate(&g_hipblas) != HIPBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "hipblasCreate failed\n");
+        return 1;
+    }
 
     const Problem problems[] = {
         /* attention output B: out[n][m] = Wt[k][m]^T . low[n][k] */
@@ -596,27 +655,39 @@ int main(int argc, char **argv) {
         const int iters = 20;
         /* Production geometry first, so it defines the reference output. */
         run_geom<256, 128, 32, 4, 2, 2, 0u>(p, buf, iters);
-        run_geom<256, 128, 32, 4, 2, 1, 0u>(p, buf, iters);
+        run_rocblas_ref(p, buf, iters);
         run_geom<256, 128, 32, 4, 2, 4, 0u>(p, buf, iters);
         run_geom<256, 128, 32, 4, 2, 8, 0u>(p, buf, iters);
-        run_geom<256, 128, 32, 4, 2, 16, 0u>(p, buf, iters);
         run_geom<256, 128, 64, 4, 2, 4, 0u>(p, buf, iters);
-        run_geom<256, 128, 32, 2, 2, 4, 0u>(p, buf, iters);
-        run_geom<256, 128, 32, 4, 4, 4, 0u>(p, buf, iters);
-        run_geom<256, 128, 32, 8, 2, 4, 0u>(p, buf, iters);
         run_geom<128, 128, 32, 4, 2, 4, 0u>(p, buf, iters);
-        run_geom<128, 256, 32, 2, 4, 4, 0u>(p, buf, iters);
         run_geom<256, 256, 32, 4, 4, 4, 0u>(p, buf, iters);
-        run_geom<256, 256, 32, 4, 2, 4, 0u>(p, buf, iters);
-        run_geom<512, 128, 32, 8, 2, 4, 0u>(p, buf, iters);
         run_geom<256, 64, 32, 4, 2, 8, 0u>(p, buf, iters);
+        /* Narrow-n candidates. At n < 2048 the shipped 256x128 tile leaves
+         * fewer than the 240 workgroups its own gate demands, so these smaller
+         * macro tiles are the ones that have a grid at conversational prompt
+         * widths. Two m-tiles per n-column keep the A panel L2-resident across
+         * the adjacent n-tiles the swizzle schedules together. */
+        run_geom<128, 64, 32, 2, 1, 8, 0u>(p, buf, iters);
+        run_geom<128, 64, 32, 4, 1, 8, 0u>(p, buf, iters);
+        run_geom<128, 64, 32, 2, 2, 8, 0u>(p, buf, iters);
+        run_geom<64, 128, 32, 1, 2, 8, 0u>(p, buf, iters);
+        run_geom<64, 128, 32, 2, 2, 8, 0u>(p, buf, iters);
+        run_geom<64, 64, 32, 1, 1, 16, 0u>(p, buf, iters);
+        run_geom<64, 64, 32, 2, 1, 16, 0u>(p, buf, iters);
+        run_geom<64, 64, 32, 1, 2, 16, 0u>(p, buf, iters);
+        run_geom<128, 64, 64, 2, 1, 8, 0u>(p, buf, iters);
+        run_geom<64, 128, 64, 1, 2, 8, 0u>(p, buf, iters);
+        run_geom<128, 128, 32, 2, 2, 8, 0u>(p, buf, iters);
+        run_geom<128, 128, 32, 2, 1, 8, 0u>(p, buf, iters);
+        /* 32-column tiles, for the widths where even BN=64 has no grid. */
+        run_geom<128, 32, 32, 2, 1, 16, 0u>(p, buf, iters);
+        run_geom<64, 32, 32, 1, 1, 16, 0u>(p, buf, iters);
+        run_geom<256, 32, 32, 4, 1, 16, 0u>(p, buf, iters);
+        /* Pipelined and transposed-operand variants of the two most promising
+         * narrow tiles, to separate a barrier cost from a layout cost. */
+        run_geom<128, 64, 32, 2, 1, 8, 1u>(p, buf, iters);
+        run_geom<64, 128, 32, 1, 2, 8, 1u>(p, buf, iters);
         run_geom<256, 128, 32, 4, 2, 4, 1u>(p, buf, iters);
-        run_geom<256, 128, 32, 4, 2, 2, 2u>(p, buf, iters);
-        run_geom<256, 128, 32, 4, 2, 2, 4u>(p, buf, iters);
-        run_geom<256, 128, 32, 4, 2, 2, 6u>(p, buf, iters);
-        run_geom<256, 128, 32, 4, 4, 2, 6u>(p, buf, iters);
-        run_geom<256, 256, 32, 4, 4, 2, 6u>(p, buf, iters);
-        run_geom<256, 256, 32, 4, 4, 4, 1u>(p, buf, iters);
 
         for (int c = 0; c < kCopies; c++) {
             HIP_OK(hipFree(buf.a[c]));

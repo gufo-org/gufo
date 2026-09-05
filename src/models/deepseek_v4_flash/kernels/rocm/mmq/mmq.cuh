@@ -4457,6 +4457,14 @@ struct mmq_args {
     // stay tied to the chunk width), while this bounds only the column-tile
     // grid dimension. Zero means "unknown", i.e. fall back to ncols_max.
     int64_t ncols_grid_max;
+    // ds4: column-tile width the caller wants, when it knows the whole bucket
+    // distribution and not just its maximum. The default rule picks the widest
+    // tile that minimizes the tile count for `ncols_max`, which is right for a
+    // dense column range but wrong for a routed one: a 512-token chunk spreads
+    // 3,072 (row, expert) pairs over 256 buckets, so the mean bucket is twelve
+    // rows and an 80-column tile spends most of its matrix-core issue on
+    // padding. Zero keeps the default rule. See ds4_mmq_set_routed_tile_cols.
+    int mmq_x_request;
 };
 
 template<ggml_type type>
@@ -4684,15 +4692,29 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
     int mmq_x_best  = 0;
     int ntiles_x_best = INT_MAX;
 
-    for (int mmq_x = 8; mmq_x <= mmq_x_max && ntiles_x_best > 1; mmq_x += 8) {
+    /* ds4: with a column split a warp owns every ncw-th column tile, so the
+     * width has to divide ncw * granularity. See DS4_ROCM_WMMA_MMQ_NCW. */
+    const int ncw = (amd_wmma_available(cc) && !amd_mfma_available(cc))
+            ? DS4_ROCM_WMMA_MMQ_NCW : 1;
+    const auto mmq_x_usable = [&](const int mmq_x) {
         const int granularity = mmq_get_granularity_host(mmq_x, cc);
+        return mmq_x > 0 && mmq_x <= mmq_x_max &&
+               mmq_x % (granularity * ncw) == 0 &&
+               mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size,
+                                           nwarps) <= smpbo;
+    };
 
-        /* ds4: with a column split a warp owns every ncw-th column tile, so the
-         * width has to divide ncw * granularity. See DS4_ROCM_WMMA_MMQ_NCW. */
-        const int ncw = (amd_wmma_available(cc) && !amd_mfma_available(cc))
-                ? DS4_ROCM_WMMA_MMQ_NCW : 1;
-        if (mmq_x % (granularity * ncw) != 0 ||
-            mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size, nwarps) > smpbo) {
+    /* ds4: a caller that knows the whole routed bucket distribution asks for a
+     * width directly; see mmq_args::mmq_x_request. */
+    const bool requested =
+            args.mmq_x_request > 0 && mmq_x_usable(args.mmq_x_request);
+    if (requested) {
+        mmq_x_best = args.mmq_x_request;
+    }
+
+    for (int mmq_x = 8; !requested && mmq_x <= mmq_x_max && ntiles_x_best > 1;
+         mmq_x += 8) {
+        if (!mmq_x_usable(mmq_x)) {
             continue;
         }
 

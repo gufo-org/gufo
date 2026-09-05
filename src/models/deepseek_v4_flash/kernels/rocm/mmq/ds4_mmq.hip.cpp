@@ -111,6 +111,7 @@ static size_t g_q81_scratch_bytes = 0;
 static void  *g_aligned_q81_scratch_ptr = nullptr;
 static size_t g_aligned_q81_scratch_bytes = 0;
 static int    g_routed_max_expert_rows = 0;
+static int    g_routed_tile_cols = 0;
 
 #if defined(GGML_USE_HIP)
 struct ds4_hip_persistent_scratch {
@@ -165,6 +166,52 @@ extern "C" void ds4_mmq_set_aligned_q81_scratch(void *ptr, size_t bytes) {
 
 extern "C" void ds4_mmq_set_routed_max_expert_rows(int rows) {
     g_routed_max_expert_rows = rows > 0 ? rows : 0;
+}
+
+extern "C" void ds4_mmq_set_routed_tile_cols(int cols) {
+    g_routed_tile_cols = cols > 0 ? cols : 0;
+}
+
+extern "C" int ds4_mmq_routed_tile_cols_for_counts(
+        const unsigned int *counts, int n_experts) {
+    /* Pick the column-tile width that minimizes what the routed gate/up pass
+     * actually issues. A tile is executed whole, so expert e with c_e rows
+     * costs `ceil(c_e / w)` tiles of `w` columns each, and every one of those
+     * tiles also re-reads e's weight panel. The padding term therefore falls
+     * with w while the weight term rises, and the balance depends on the
+     * distribution rather than on its maximum: at a 4,096-token chunk the mean
+     * bucket is 96 rows and 80 is right, at 512 tokens it is twelve and 80
+     * spends 85% of its issue on padding.
+     *
+     * `kPanel` prices one weight-panel reload in column-equivalents. It was
+     * fitted, not assumed: the real per-expert counts were dumped for every
+     * layer at 256, 512, 1,024 and 2,048 tokens and scored against a
+     * forced-width sweep of the same four chunks. Over P in 0..128, P = 16 is
+     * the single constant closest to the per-width optimum -- 0.85% mean and
+     * 3.4% worst-case shortfall, against 1.7% mean at P = 8 or 32 and 2.6% at
+     * P = 48. No constant reproduces the whole curve: the optimum is 16 columns
+     * at 512 tokens and 48 at 1,024, and this cost function is linear in
+     * `tiles * (w + P)`, so it cannot separate those two. The caller therefore
+     * runs it only where it is validated; see
+     * DS4_ROCM_ROUTED_TILE_MODEL_ROWS. */
+    if (!counts || n_experts <= 0) return 0;
+    constexpr int kPanel = 16;
+    int best_cols = 0;
+    long long best_cost = 0;
+    for (int w = 16; w <= 80; w += 16) {
+        long long cost = 0;
+        for (int e = 0; e < n_experts; e++) {
+            const unsigned int c = counts[e];
+            if (c == 0u) continue;
+            cost += (long long)((c + (unsigned int)w - 1u) / (unsigned int)w) *
+                    (long long)(w + kPanel);
+        }
+        if (best_cols == 0 || cost < best_cost) {
+            best_cols = w;
+            best_cost = cost;
+        }
+    }
+    return best_cols;
 }
 
 // Read by ds4_mmq_moe_vec_impl; non-zero means use the persistent buffer.
@@ -1594,6 +1641,7 @@ int ds4_mmq_moe_pair_impl(
         /*soa_blocks=*/soa_blocks,
     };
     args.ncols_grid_max = routed_ncols_grid;
+    args.mmq_x_request = g_routed_tile_cols;
 
     {
         ds4_mmq_nvtx_scope stage(

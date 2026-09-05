@@ -55,6 +55,27 @@ void ds4_mmq_set_aligned_q81_scratch(void *ptr, size_t bytes);
 // it removes did no work, so results are unchanged.
 void ds4_mmq_set_routed_max_expert_rows(int rows);
 
+// Column-tile width for the next routed gate/up pass, when the caller knows the
+// whole bucket distribution and not just its maximum.
+//
+// The default rule takes the widest tile that minimizes the tile count for the
+// chunk width, which is the right answer for a dense column range and the wrong
+// one for a routed one. A tile executes all its columns whether or not the
+// bucket fills them, so the cost is `sum_e ceil(c_e / w) * w` column-slots plus
+// one weight-panel reload per tile: at a 4,096-token chunk the mean bucket is 96
+// rows and the 80-column tile is nearly full, while at 512 tokens it is twelve
+// rows and about 85% of the matrix-core issue is padding.
+//
+// cols <= 0, or a width the device cannot host, restores the default rule.
+// Purely a tiling choice: each output element still walks K once in the same
+// order, so results are unchanged.
+void ds4_mmq_set_routed_tile_cols(int cols);
+
+// The width the model above picks for one per-expert assignment-count array.
+// Returns 0 when the counts are unusable, which the setter treats as "default".
+int ds4_mmq_routed_tile_cols_for_counts(const unsigned int *counts,
+                                        int n_experts);
+
 // Query whether ds4_mmq is willing to handle a given matmul. Returns
 //   1 if mmq is faster than dequant+cublas for this shape on this device,
 //   0 otherwise (caller should fall back to its existing dequant+cublas path).

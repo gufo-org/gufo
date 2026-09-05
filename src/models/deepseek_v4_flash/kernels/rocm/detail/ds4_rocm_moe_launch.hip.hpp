@@ -31,6 +31,12 @@ static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
 /* Row group the wide Q2-down kernel covers per workgroup: wide_mtiles * BM. */
 #define DS4_ROCM_WIDE_DOWN_TILE_M 64u
 
+/* Chunk width above which the routed column-tile cost model stands aside and the
+ * vendored selector's own rule runs. A forced-width sweep put the default within
+ * 1.1% of the best measured width from here up; below it the default gives up 10
+ * to 14%. The table is at the call site. */
+#define DS4_ROCM_ROUTED_TILE_MODEL_ROWS 1024u
+
 /* Deferred routed expert sum.
  *
  * The 6-way sum over the per-expert F16 down rows writes a float buffer that the
@@ -149,7 +155,14 @@ static int routed_moe_q2_float_down_launch(
     const uint32_t scalar_max = hot_count != 0u ? hot_threshold : 0u;
     /* The scalar route only serves experts the WMMA hot list rejected. Its grid
      * is sized by the whole 256-entry expert table, so when every populated
-     * expert is hot there is nothing for those 65,536 workgroups to do. */
+     * expert is hot there is nothing for those 65,536 workgroups to do.
+     *
+     * Compacting the populated ones into a list was measured again at a
+     * 512-token chunk, where about 100 of 256 experts are live: 156.15 to
+     * 145.39 ms of a 1,841 ms chunk with `grid.y` 256 to 83, which reproduces
+     * the 138.3 to 131.1 ms recorded for the same experiment at 4,096 tokens.
+     * It stays reverted for the same reason: 0.7% of the chunk, inside the
+     * noise of an end-to-end pair, for a host copy per layer. */
     uint32_t cold_count = 0u;
     if (scalar_max != 0u) {
         for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
@@ -764,6 +777,57 @@ static int routed_moe_launch(
              * bucket holds about n_tokens * n_expert / 256 rows. */
             ds4_mmq_set_routed_max_expert_rows(
                 h_sorted_counts_valid ? (int)h_sorted_counts_max : 0);
+            /* The bound above removes empty column tiles; this sizes the ones
+             * that remain. A narrow chunk spreads its pairs so thinly that the
+             * default 80-column tile is mostly padding, and only the whole
+             * count array says how thinly. See ds4_mmq_set_routed_tile_cols.
+             *
+             * Scoped to chunks under DS4_ROCM_ROUTED_TILE_MODEL_ROWS because a
+             * forced-width sweep says the default is already right above it.
+             * Whole-chunk tok/s, one warm process, this build with the width
+             * pinned:
+             *
+             *   width   pp256   pp512  pp1024  pp2048
+             *      16  261.47  354.44  426.59  472.36
+             *      32  243.66  343.55  420.91  476.07
+             *      48  240.51  346.71  435.80  499.01
+             *      64  228.26  332.74  429.85  496.93
+             *      80  219.74  320.62  420.49  493.31
+             *  default  228.80  321.43  421.62  493.80
+             *
+             * The default rule yields 80 at every one of these widths, so it
+             * gives up 14% at 256 and 10% at 512 and is within 1.1% of the best
+             * measured width at 1,024 and 2,048. The cost model reproduces the
+             * narrow optimum and mis-ranks 32 against 48 at the wide end, where
+             * there is nothing to win, so it only runs where it is validated.
+             * A fixed 48-column tile measured +3.4% at 1,024 and +1.1% at 2,048
+             * and is the obvious next step; it is not retained here because the
+             * same sweep's 4,096 point is a cold-cache reading. */
+            const int routed_tile_cols =
+                h_sorted_counts_valid &&
+                        n_tokens < DS4_ROCM_ROUTED_TILE_MODEL_ROWS
+                    ? ds4_mmq_routed_tile_cols_for_counts(
+                          h_sorted_counts, (int)DS4_ROCM_N_EXPERT)
+                    : 0;
+            ds4_mmq_set_routed_tile_cols(routed_tile_cols);
+            if (routed_tile_cols != 0) {
+                static int logged_tile_cols = 0;
+                if (logged_tile_cols != routed_tile_cols) {
+                    logged_tile_cols = routed_tile_cols;
+                    uint32_t live = 0;
+                    for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
+                        if (h_sorted_counts[e] != 0u) live++;
+                    }
+                    fprintf(stderr,
+                            DS4_GPU_LOG_PREFIX
+                            "routed gate/up column tile %d (tokens=%u, "
+                            "%u live experts, max bucket %u)\n",
+                            routed_tile_cols,
+                            n_tokens,
+                            live,
+                            h_sorted_counts_max);
+                }
+            }
             if (use_fused_swiglu) {
                 ds4_mmq_set_aligned_q81_scratch(up->ptr, (size_t)up->bytes);
                 rc = ds4_mmq_iq2_xxs_moe_pair_token_bound_swiglu(
@@ -803,6 +867,7 @@ static int routed_moe_launch(
             }
             ds4_mmq_set_aligned_q81_scratch(NULL, 0);
             ds4_mmq_set_routed_max_expert_rows(0);
+            ds4_mmq_set_routed_tile_cols(0);
             if (rc == 0 && !fused_swiglu_done) {
                 moe_mmq_swiglu_weighted_clamp_kernel<<<
                         (uint32_t)((mid_count + 255u) / 256u), 256>>>(

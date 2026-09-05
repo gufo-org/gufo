@@ -216,6 +216,85 @@ static int ds4_gemm_f16_wmma_launch(OutT *out,
     return hip_ok(hipGetLastError(), what);
 }
 
+/* Narrow-n companion tile, and the padding rule that lets an arbitrary chunk
+ * width reach either of them.
+ *
+ * `DS4_WMMA_GEMM_MIN_BLOCKS` was calibrated to keep this kernel off the small-m
+ * `opA=T` projections, where 32 to 64 workgroups lose to Tensile. It also
+ * excluded the one shape the kernel was written for whenever the prompt chunk
+ * was under 2,048 rows -- which is every conversational turn -- and there the
+ * fallback is not Tensile's good `opA=T` tile but rocBLAS on `opA=N`.
+ * `tools/bench/dsv4_attn_out_gemm_bench.hip` at `m=4096 k=8192`:
+ *
+ *   n      rocBLAS  256x128 W4x2  128x128 W2x2 SWZ8
+ *    128  1.533 ms      0.934 ms           0.653 ms
+ *    256  2.879 ms      1.018 ms           0.949 ms
+ *    512  5.202 ms      2.094 ms           1.887 ms
+ *   1024 10.521 ms      3.505 ms           4.042 ms
+ *
+ * rocBLAS holds 5.6-6.6 TFLOP/s at every width while both tiles reach 16-18, so
+ * the block floor was giving away a factor of three; 128x128 wins below n=1024
+ * and 256x128 above it. Every WMMA geometry in that harness agrees bit for bit:
+ * the macro tile only partitions the output, and each element still walks K once
+ * in ascending order, so this is a scheduling choice with no numerical
+ * consequence. Only leaving rocBLAS is a numerical change, and at these widths
+ * the two disagree by 3e-4.
+ *
+ * A width that is not a multiple of the tile is rounded up. The caller owns
+ * both the activation staging buffer and the result, so it sizes them for the
+ * padded width and zeroes the activation pad; the extra result columns are
+ * computed from zeros and never read. */
+#define DS4_WMMA_GEMM_NARROW_BM 128u
+#define DS4_WMMA_GEMM_NARROW_BN 128u
+#define DS4_WMMA_GEMM_WIDE_MIN_N 1024u
+
+/* Column granularity both tiles share, hence the padding the caller must hold. */
+static inline uint64_t ds4_gemm_f16_wmma_pad_n(uint64_t n) {
+    const uint64_t bn = DS4_WMMA_GEMM_NARROW_BN;
+    return (n + bn - 1u) / bn * bn;
+}
+
+/* Whether either tile can serve `m x n_pad x k`, with `n_pad` already rounded. */
+static int ds4_gemm_f16_wmma_padded_eligible(uint64_t m, uint64_t n_pad,
+                                             uint64_t k) {
+    if (!g_rocm_gfx1151 || n_pad % DS4_WMMA_GEMM_NARROW_BN != 0u ||
+        k % DS4_WMMA_GEMM_BK != 0u || m > UINT32_MAX || n_pad > UINT32_MAX ||
+        k > UINT32_MAX) {
+        return 0;
+    }
+    return m % DS4_WMMA_GEMM_NARROW_BM == 0u;
+}
+
+template <bool A_ROWMAJOR, typename OutT>
+static int ds4_gemm_f16_wmma_padded_launch(OutT *out,
+                                           const __half *weight,
+                                           const __half *act,
+                                           uint64_t m,
+                                           uint64_t n_pad,
+                                           uint64_t k,
+                                           const char *what) {
+    if (n_pad >= DS4_WMMA_GEMM_WIDE_MIN_N && m % DS4_WMMA_GEMM_BM == 0u &&
+        n_pad % DS4_WMMA_GEMM_BN == 0u) {
+        return ds4_gemm_f16_wmma_launch<A_ROWMAJOR, OutT>(out, weight, act, m,
+                                                          n_pad, k, what);
+    }
+    constexpr uint32_t kNarrowWmf = 2u;
+    constexpr uint32_t kNarrowWnf = 2u;
+    constexpr uint32_t kNarrowThreads =
+            (DS4_WMMA_GEMM_NARROW_BM / 16u / kNarrowWmf) *
+            (DS4_WMMA_GEMM_NARROW_BN / 16u / kNarrowWnf) * 32u;
+    const dim3 grid((uint32_t)(m / DS4_WMMA_GEMM_NARROW_BM),
+                    (uint32_t)(n_pad / DS4_WMMA_GEMM_NARROW_BN),
+                    1u);
+    ds4_gemm_f16_wmma_kernel<DS4_WMMA_GEMM_NARROW_BM, DS4_WMMA_GEMM_NARROW_BN,
+                             DS4_WMMA_GEMM_BK, kNarrowWmf, kNarrowWnf, 8u,
+                             A_ROWMAJOR, OutT>
+            <<<grid, kNarrowThreads>>>(out, weight, act, (uint32_t)m,
+                                       (uint32_t)n_pad, (uint32_t)k,
+                                       (uint32_t)m, 0, 0, 0);
+    return hip_ok(hipGetLastError(), what);
+}
+
 /* Strided-batched form for the attention output A GEMM.
  *
  * `hipblasGemmStridedBatchedEx` sends `rank x n_tokens x group_dim` once per

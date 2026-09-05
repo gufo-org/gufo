@@ -1083,13 +1083,42 @@ static int attention_output_q8_batch_launch(
             if (out_b_f16 || out_b_f16_t) {
                 const uint64_t heads_h_count = (uint64_t)n_groups * n_tokens * group_dim;
                 const uint64_t low_h_count = (uint64_t)n_groups * n_tokens * rank;
+                /* The B projection's macro tile covers whole column blocks, so
+                 * stage the activations and check the result for a width rounded
+                 * up to that block. The pad columns are zeroed below, computed
+                 * from zeros, and never read back.
+                 *
+                 * Held to prompt-chunk width like every other accelerated
+                 * prefill route: below it the fallback stays, which keeps the
+                 * pinned trajectory's own twenty-token prefill on the library
+                 * this envelope was measured against. */
+                uint64_t b_pad_n = ds4_gemm_f16_wmma_pad_n(n_tokens);
+                if (out_b_f16_t == NULL ||
+                    n_tokens < DS4_ROCM_WIDE_PREFILL_ROWS ||
+                    !ds4_gemm_f16_wmma_padded_eligible(out_dim, b_pad_n, low_dim) ||
+                    out->bytes < b_pad_n * out_dim * sizeof(float)) {
+                    b_pad_n = n_tokens;
+                }
+                const uint64_t low_h_pad_count = b_pad_n * low_dim;
                 const uint64_t heads_h_bytes = heads_h_count * sizeof(__half);
                 const uint64_t low_h_offset = (heads_h_bytes + 255u) & ~255ull;
-                const uint64_t tmp_bytes = low_h_offset + low_h_count * sizeof(__half);
+                const uint64_t tmp_bytes = low_h_offset + low_h_pad_count * sizeof(__half);
                 void *tmp = hip_tmp_alloc(tmp_bytes, "attention output packed b hipblas");
                 if (!tmp) return 0;
                 __half *heads_h = (__half *)tmp;
                 __half *low_h = (__half *)((char *)tmp + low_h_offset);
+                /* Async so the pass keeps one command stream: the shared scratch
+                 * arena is also the routed MoE's, so the pad cannot be zeroed
+                 * once per chunk, and a blocking clear would be a host
+                 * round-trip per layer half. */
+                if (b_pad_n != n_tokens &&
+                    !hip_ok(hipMemsetAsync(low_h + low_h_count, 0,
+                                            (low_h_pad_count - low_h_count) *
+                                                    sizeof(__half),
+                                            0),
+                             "attention output b activation pad clear")) {
+                    return 0;
+                }
                 if (rope) {
                     if (!hip_launch_attention_pack_group_heads_rope_f16(
                                 heads_h,
@@ -1157,14 +1186,15 @@ static int attention_output_q8_batch_launch(
                     const auto b_op = out_b_f16_t ? HIPBLAS_OP_N : HIPBLAS_OP_T;
                     const int b_lda = out_b_f16_t ? (int)out_dim : (int)low_dim;
 #ifdef __HIP_PLATFORM_AMD__
-                    /* The 256x128 rocWMMA tile moves 3.22 GB against Tensile's
-                     * 5.7 GB on this shape; see the kernel comment. Needs the
-                     * transposed weight cache, so opA is N. */
+                    /* The rocWMMA tile moves 3.22 GB against Tensile's 5.7 GB on
+                     * this shape; see the kernel comment. Needs the transposed
+                     * weight cache, so opA is N. `b_pad_n` is n_tokens unless a
+                     * tile is available for a rounded-up width. */
                     if (out_b_f16_t &&
-                        ds4_gemm_f16_wmma_eligible(out_dim, n_tokens, low_dim) &&
-                        ds4_gemm_f16_wmma_launch<false, float>(
+                        ds4_gemm_f16_wmma_padded_eligible(out_dim, b_pad_n, low_dim) &&
+                        ds4_gemm_f16_wmma_padded_launch<false, float>(
                                 (float *)out->ptr, out_b_f16_t, low_h,
-                                out_dim, n_tokens, low_dim,
+                                out_dim, b_pad_n, low_dim,
                                 "attention output b wmma launch")) {
                         return 1;
                     }
