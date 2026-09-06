@@ -382,6 +382,10 @@ Repeated prompts produced identical text and the same drafted/accepted counts:
 40/16, 80/44, 80/47, and 40/19. The three-prompt quality corpus remains at
 58.5% aggregate acceptance with two of three outputs byte-exact; the remaining
 near-tie trajectory is unchanged from the qualified DSpark baseline.
+A final release-level lifecycle audit forced all eight resident sessions
+through exact W8 with zero drafts, then issued the same lone request twice.
+Both C1 requests resumed DSpark immediately, produced byte-identical text and
+the same 40/17 drafted/accepted counts, and decoded at 21.41 tok/s.
 
 Prompt capture now grows only while a DSpark session is prefilling and shrinks
 to the verification width afterward. All DSpark sessions borrow one
