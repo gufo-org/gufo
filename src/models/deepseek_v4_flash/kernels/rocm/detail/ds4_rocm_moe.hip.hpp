@@ -171,14 +171,15 @@ __device__ static void dev_dot_iq2_xxs_q8_K_block8_deq_lut(
     for (uint32_t p = 0; p < n; p++) acc[p] += 0.125f * xd * ys[p]->d * (float)bsum[p];
 }
 
-__device__ static void dev_dot_iq2_xxs_q8_K_block4(
+template <uint32_t N>
+__device__ __forceinline__ static void dev_dot_iq2_xxs_q8_K_block4(
         const hip_block_iq2_xxs *x,
         const hip_block_q8_K *y0,
         const hip_block_q8_K *y1,
         const hip_block_q8_K *y2,
         const hip_block_q8_K *y3,
-        uint32_t n,
         float acc[4]) {
+    static_assert(N >= 1u && N <= 4u);
     const float xd = dev_f16_to_f32(x->d);
     const uint16_t *q2 = x->qs;
     int32_t bsum[4] = {0, 0, 0, 0};
@@ -197,7 +198,8 @@ __device__ static void dev_dot_iq2_xxs_q8_K_block4(
         const uint8_t a1 = (uint8_t)((aux0 >> 8) & 0xffu);
         const uint8_t a2 = (uint8_t)((aux0 >> 16) & 0xffu);
         const uint8_t a3 = (uint8_t)((aux0 >> 24) & 0xffu);
-        for (uint32_t p = 0; p < n; p++) {
+#pragma unroll
+        for (uint32_t p = 0; p < N; p++) {
             int32_t sumi = 0;
             sumi += dev_dot_iq2_pair_16(a0, (aux1 >> 0) & 127u, a1, (aux1 >> 7) & 127u, q8[p] + ib32 * 32);
             sumi += dev_dot_iq2_pair_16(a2, (aux1 >> 14) & 127u, a3, (aux1 >> 21) & 127u, q8[p] + ib32 * 32 + 16);
@@ -205,7 +207,10 @@ __device__ static void dev_dot_iq2_xxs_q8_K_block4(
         }
     }
     const hip_block_q8_K *ys[4] = { y0, y1, y2, y3 };
-    for (uint32_t p = 0; p < n; p++) acc[p] += 0.125f * xd * ys[p]->d * (float)bsum[p];
+#pragma unroll
+    for (uint32_t p = 0; p < N; p++) {
+        acc[p] += 0.125f * xd * ys[p]->d * (float)bsum[p];
+    }
 }
 
 __device__ static DS4_ROCM_UNUSED void dev_dot_iq2_xxs_q8_K_block8(
@@ -1089,22 +1094,31 @@ __global__ static void moe_gate_up_mid_expert_tile4_row32_kernel(
     float gate[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float up[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     for (uint32_t b = lane; b < xq_blocks; b += 8u) {
-        dev_dot_iq2_xxs_q8_K_block4(
-            gr + b,
-            xqb[0] ? xqb[0] + b : NULL,
-            xqb[1] ? xqb[1] + b : NULL,
-            xqb[2] ? xqb[2] + b : NULL,
-            xqb[3] ? xqb[3] + b : NULL,
-            np,
-            gate);
-        dev_dot_iq2_xxs_q8_K_block4(
-            ur + b,
-            xqb[0] ? xqb[0] + b : NULL,
-            xqb[1] ? xqb[1] + b : NULL,
-            xqb[2] ? xqb[2] + b : NULL,
-            xqb[3] ? xqb[3] + b : NULL,
-            np,
-            up);
+        const hip_block_q8_K *y0 = xqb[0] ? xqb[0] + b : NULL;
+        const hip_block_q8_K *y1 = xqb[1] ? xqb[1] + b : NULL;
+        const hip_block_q8_K *y2 = xqb[2] ? xqb[2] + b : NULL;
+        const hip_block_q8_K *y3 = xqb[3] ? xqb[3] + b : NULL;
+        if (np == 1u) {
+            dev_dot_iq2_xxs_q8_K_block4<1u>(
+                gr + b, y0, y1, y2, y3, gate);
+            dev_dot_iq2_xxs_q8_K_block4<1u>(
+                ur + b, y0, y1, y2, y3, up);
+        } else if (np == 2u) {
+            dev_dot_iq2_xxs_q8_K_block4<2u>(
+                gr + b, y0, y1, y2, y3, gate);
+            dev_dot_iq2_xxs_q8_K_block4<2u>(
+                ur + b, y0, y1, y2, y3, up);
+        } else if (np == 3u) {
+            dev_dot_iq2_xxs_q8_K_block4<3u>(
+                gr + b, y0, y1, y2, y3, gate);
+            dev_dot_iq2_xxs_q8_K_block4<3u>(
+                ur + b, y0, y1, y2, y3, up);
+        } else {
+            dev_dot_iq2_xxs_q8_K_block4<4u>(
+                gr + b, y0, y1, y2, y3, gate);
+            dev_dot_iq2_xxs_q8_K_block4<4u>(
+                ur + b, y0, y1, y2, y3, up);
+        }
     }
     for (uint32_t p = 0; p < np; p++) {
         gate[p] = quarter_warp_sum_f32(gate[p], lane);

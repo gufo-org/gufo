@@ -561,39 +561,42 @@ static int hip_launch_q8_batch_reuse(
         uint64_t out_dim,
         uint64_t blocks,
         uint32_t n_tok,
-        uint32_t rows_per_block,
-        int use_dp4a) {
+        uint32_t rows_per_block) {
     const unsigned grid =
         (unsigned)((out_dim + rows_per_block - 1u) / rows_per_block);
     const unsigned threads = rows_per_block * 32u;
-    if (n_tok <= 2u) {
-        matmul_q8_0_preq_batch_reuse_w32_kernel<2><<<grid, threads>>>(
+    if (n_tok == 2u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<2, true><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
-                rows_per_block, use_dp4a);
+                rows_per_block);
     } else if (n_tok == 3u) {
-        matmul_q8_0_preq_batch_reuse_w32_kernel<3><<<grid, threads>>>(
+        matmul_q8_0_preq_batch_reuse_w32_kernel<3, true><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
-                rows_per_block, use_dp4a);
-    } else if (n_tok <= 4u) {
-        matmul_q8_0_preq_batch_reuse_w32_kernel<4><<<grid, threads>>>(
+                rows_per_block);
+    } else if (n_tok == 4u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<4, true><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
-                rows_per_block, use_dp4a);
+                rows_per_block);
     } else if (n_tok == 5u) {
-        matmul_q8_0_preq_batch_reuse_w32_kernel<5><<<grid, threads>>>(
+        matmul_q8_0_preq_batch_reuse_w32_kernel<5, true><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
-                rows_per_block, use_dp4a);
+                rows_per_block);
     } else if (n_tok == 6u) {
-        matmul_q8_0_preq_batch_reuse_w32_kernel<6><<<grid, threads>>>(
+        matmul_q8_0_preq_batch_reuse_w32_kernel<6, true><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
-                rows_per_block, use_dp4a);
-    } else if (n_tok <= 8u) {
-        matmul_q8_0_preq_batch_reuse_w32_kernel<8><<<grid, threads>>>(
+                rows_per_block);
+    } else if (n_tok == 7u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<7, true><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
-                rows_per_block, use_dp4a);
+                rows_per_block);
+    } else if (n_tok == 8u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<8, true><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block);
     } else {
-        matmul_q8_0_preq_batch_reuse_w32_kernel<16><<<grid, threads>>>(
+        matmul_q8_0_preq_batch_reuse_w32_kernel<16, false><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
-                rows_per_block, use_dp4a);
+                rows_per_block);
     }
     return hip_ok(hipGetLastError(), "matmul_q8_0 batch reuse launch");
 }
@@ -900,8 +903,7 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
                             out_dim,
                             blocks,
                             (uint32_t)n_tok,
-                            hip_runtime_config()->q8_decode_rpb,
-                            1);
+                            hip_runtime_config()->q8_decode_rpb);
                 }
             }
         }
@@ -1290,6 +1292,56 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
             hipGetLastError(),
             "f16 DSpark support tiny-batch wave launch");
     }
+    const bool f16_decode_router_shape = (in_dim == 4096u && out_dim == 256u);
+    const bool f16_decode_sharedx_shape =
+        !f16_decode_router_shape &&
+        in_dim <= 8192u &&
+        in_dim * sizeof(float) <= 65536u;
+    if (n_tok > 1u && n_tok <= 6u &&
+        n_tok <= ds4_rocm_dense_small_batch_rows() &&
+        !f16_decode_sharedx_shape) {
+        const dim3 grid((uint32_t)out_dim, 1u, 1u);
+        if (n_tok == 2u) {
+            matmul_f16_ordered_batch_reuse_kernel<2u><<<grid, 32u>>>(
+                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
+        } else if (n_tok == 3u) {
+            matmul_f16_ordered_batch_reuse_kernel<3u><<<grid, 32u>>>(
+                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
+        } else if (n_tok == 4u) {
+            matmul_f16_ordered_batch_reuse_kernel<4u><<<grid, 32u>>>(
+                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
+        } else if (n_tok == 5u) {
+            matmul_f16_ordered_batch_reuse_kernel<5u><<<grid, 32u>>>(
+                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
+        } else if (n_tok == 6u) {
+            matmul_f16_ordered_batch_reuse_kernel<6u><<<grid, 32u>>>(
+                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
+        }
+        return hip_ok(
+            hipGetLastError(),
+            "f16 ordered narrow-batch reuse launch");
+    }
+    if (n_tok == 8u &&
+        n_tok <= ds4_rocm_dense_small_batch_rows() &&
+        !f16_decode_sharedx_shape) {
+        const dim3 grid((uint32_t)out_dim, 1u, 1u);
+        matmul_f16_ordered_batch_reuse_kernel<4u><<<grid, 32u>>>(
+            (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
+        if (!hip_ok(
+                hipGetLastError(),
+                "f16 ordered first half-batch reuse launch")) {
+            return 0;
+        }
+        matmul_f16_ordered_batch_reuse_kernel<4u><<<grid, 32u>>>(
+            (float *)out->ptr + 4u * out_dim,
+            w,
+            (const float *)x->ptr + 4u * in_dim,
+            in_dim,
+            out_dim);
+        return hip_ok(
+            hipGetLastError(),
+            "f16 ordered second half-batch reuse launch");
+    }
     /*
      * A speculative verification block has a handful of rows. hipBLAS pads M to
      * its macro-tile, so a six-row projection costs about what a 128-row one
@@ -1369,7 +1421,6 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
     /* The 4096x256 F16 router projection is latency-bound and the ordered
      * 32-thread row kernel is at least as fast on gfx1151; keep shared-X for
      * compressor/indexer F16 decode where reusing x across rows is the win. */
-    const bool f16_decode_router_shape = (in_dim == 4096u && out_dim == 256u);
     if (n_tok == 1u && !f16_decode_router_shape) {
         if (in_dim <= 8192u && in_dim * sizeof(float) <= 65536u) {
             const uint32_t rows_per_block = 32u;

@@ -1,6 +1,6 @@
 # DeepSeek V4 Flash Q2-imatrix on Strix Halo
 
-Status: 2026-09-05. This page is the current functional and performance
+Status: 2026-09-06. This page is the current functional and performance
 snapshot, not an optimization history.
 
 ## Model
@@ -89,8 +89,9 @@ copier issues sixteen aligned direct reads in parallel, sizes each chunk to the
 current tensor span, copies through pinned buffers, and releases the roughly
 1 GiB staging pool as soon as the model cache is ready. The same release path
 took 141.79 seconds with one synchronous direct read in flight; retained cold
-runs take 21.05-21.43 seconds. A queue-depth-16 storage check still sustains
-6.21-6.44 GiB/s, so an isolated 29.75-second run after sustained profiling was
+runs take 21.05-21.48 seconds. Final runs after hours of builds and profiling
+measured 22.71 and 23.97 seconds. A queue-depth-16 storage check still sustains
+6.21-6.44 GiB/s, so this spread and an earlier isolated 29.75-second run are
 system variance rather than a return to serialized I/O.
 
 The 64K run plans 82.07 GiB total, including model, KV state, and working buffers.
@@ -187,6 +188,26 @@ top-1 tokens, so that broader policy was rejected. The scoped policy restores
 116/128 top-1 tokens, aggregate rank 142, and worst rank 3. Custom four- through
 seven-row WMMA tiles were neutral at pp512 and were also removed.
 
+The September 6 closeout separates singleton cold experts from multi-row
+buckets, keeps the two-pair scalar tile through 128 prompt rows, and uses a
+32-row WMMA tile for hot experts at those same widths. At pp128, scalar Q2-down
+time fell from 250.93 to 240.46 ms and the hot WMMA kernel from 361.27 to
+335.27 ms; total profiled GPU span fell from 2,050.16 to 2,025.54 ms. A final
+five-repetition release sweep after a 4K warm point measured:
+
+| prompt | final tok/s |
+| ---: | ---: |
+| 128 | 191.17 |
+| 256 | 267.54 |
+| 512 | 360.74 |
+| 1,024 | 435.92 |
+| 1,536 | 477.56 |
+| 2,048 | 499.33 |
+| 4,096 | 525.76 |
+
+The 512-2,048 rows remain inside the established cross-run spread. The narrow
+routes preserve each dot-product and routed-slot reduction order.
+
 A separate full-prompt comparison isolates the retained prompt kernels:
 
 | Prompt | Baseline | Current | Delta |
@@ -272,6 +293,26 @@ was rejected. Expanding the earlier IQ2 kernel from 128-row to 32-row blocks
 was neutral while launching four times as many blocks, so both experiments
 were removed.
 
+The September 6 decode-heavy closeout uses a 45-token prompt, 64 generated
+tokens, context 512, one warmup, and one measured round. `Combined decode` is
+the sum across active users, while `per request` is what each user receives:
+
+| C | Physical plan | Per-request decode tok/s | Combined decode tok/s |
+| ---: | --- | ---: | ---: |
+| 1 | serial | 17.11 | 17.11 |
+| 2 | W2 | 13.35 | 26.71 |
+| 4 | W4 | 9.67 | 38.66 |
+| 6 | W6 | 7.61 | 45.65 |
+| 8 | W8 | 7.52 | 60.15 |
+
+Packed Q8 weights now have exact W2-W8 specializations, ordered F16
+projections reuse each weight across the live rows, C8 F16 projections execute
+as two W4 groups, and routed IQ2 gate/up uses exact one- through four-pair
+helpers. C1 still takes the serial route. The final C8 profile attributes
+18.2% of kernel time to routed gate/up, 8.0% to Q2 down, 7.6% to prompt-side
+Q8 projection work, 6.4% to hipBLAS, 6.3% to the W8 Q8 projection, and 6.0%
+to paired F16 projection.
+
 A decode-heavy C2 profile attributes 22.9% of kernel time to the dense Q8
 projection, 14.9% to routed gate/up, and 11.7% to Q2 down. Interleaved sweeps of
 Q8 rows per block, Q2-down rows per block, and gate row span did not produce a
@@ -283,10 +324,10 @@ existing three W4 steps, changed W2 membership, W8 step, and return to C1:
 | Measure | Bound | Result |
 | --- | ---: | ---: |
 | top-1 agreement | descriptive | 28/29 |
-| worst RMSE | <= 0.85 | **0.36** |
+| worst RMSE | <= 0.85 | **0.47** |
 | worst cosine | >= 0.99 | **1.00** |
-| worst maximum logit error | <= 4.5 | **2.64** |
-| serial winner rank in batch | <= 3 | **2** |
+| worst maximum logit error | <= 4.5 | **3.03** |
+| serial winner rank in batch | <= 3 | **3** |
 
 The one free-running difference is a near-tie; the serial winner remains in
 the batch top three. Cancellation, duplicate-session and invalid-token

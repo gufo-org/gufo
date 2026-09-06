@@ -28,8 +28,9 @@ static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
     return (ab > c ? ab : c) + raw;
 }
 
-/* Row group the wide Q2-down kernel covers per workgroup: wide_mtiles * BM. */
-#define DS4_ROCM_WIDE_DOWN_TILE_M 64u
+/* Smallest row group used by the wide Q2-down kernel. Scratch is sized for
+ * this case; the wider 64-row route therefore only over-allocates. */
+#define DS4_ROCM_WIDE_DOWN_MIN_TILE_M 32u
 
 /* Chunk width above which the routed column-tile cost model stands aside and the
  * vendored selector's own rule runs. A forced-width sweep put the default within
@@ -151,7 +152,7 @@ static int routed_moe_q2_float_down_launch(
      * 218.0 ms at kernel level. The mid staging loop runs over the whole tile
      * whatever the bucket holds, so eight stages 2,048 floats per K block for
      * three real rows, and that costs more than the second weight pass it saves. */
-    const uint32_t down_tile = n_tokens <= 32u ? 2u : 4u;
+    const uint32_t down_tile = n_tokens <= 128u ? 2u : 4u;
     /* Output rows per workgroup on the scalar route, one wave each.
      *
      * Swept because this kernel takes two barriers per 256-value K slab with
@@ -210,13 +211,21 @@ static int routed_moe_q2_float_down_launch(
      * same short H2D copy feeds both kernels. At 32 tokens fewer than half the
      * expert table is live, so this avoids tens of thousands of empty scalar
      * workgroups without changing pair order or arithmetic. */
-    uint32_t cold_count = 0u;
+    uint32_t singleton_count = 0u;
     for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
         const uint32_t count = h_counts[e];
-        if (count != 0u && (scalar_max == 0u || count < scalar_max)) {
-            h_active[hot_count + cold_count++] = e;
+        if (count == 1u && (scalar_max == 0u || count < scalar_max)) {
+            h_active[hot_count + singleton_count++] = e;
         }
     }
+    uint32_t cold_multi_count = 0u;
+    for (uint32_t e = 0; e < DS4_ROCM_N_EXPERT; e++) {
+        const uint32_t count = h_counts[e];
+        if (count > 1u && (scalar_max == 0u || count < scalar_max)) {
+            h_active[hot_count + singleton_count + cold_multi_count++] = e;
+        }
+    }
+    const uint32_t cold_count = singleton_count + cold_multi_count;
     const uint32_t active_count = hot_count + cold_count;
     const bool compact_experts = hot_experts_dev != NULL;
     if (compact_experts && active_count != 0u &&
@@ -225,56 +234,77 @@ static int routed_moe_q2_float_down_launch(
                 "routed_moe iq2/q2 float-down active copy")) {
         return 0;
     }
-    const uint32_t *cold_experts_dev =
+    const uint32_t *singleton_experts_dev =
         compact_experts ? hot_experts_dev + hot_count : NULL;
+    const uint32_t *cold_multi_experts_dev =
+        compact_experts ? singleton_experts_dev + singleton_count : NULL;
+    const uint32_t singleton_rpb = 32u;
+    const uint32_t singleton_threads = singleton_rpb * 32u;
+    const dim3 singleton_grid(
+        (out_dim + singleton_rpb - 1u) / singleton_rpb,
+        compact_experts ? singleton_count : DS4_ROCM_N_EXPERT,
+        1u);
     const dim3 down_grid(
         (out_dim + down_rpb - 1u) / down_rpb,
-        compact_experts ? cold_count : DS4_ROCM_N_EXPERT,
+        compact_experts ? cold_multi_count : DS4_ROCM_N_EXPERT,
         1u);
-    if (cold_count == 0u) {
+    if (singleton_count != 0u && use_f16_down) {
+        moe_down_q2K_expert_batch_sharedmid_kernel<1,false,true><<<
+                singleton_grid, singleton_threads, 256u * sizeof(float)>>>(
+                NULL, down_h, down_w, (const float *)mid->ptr, NULL,
+                counts, offsets, sorted_pairs, 1u, 2u, expert_mid_dim, out_dim,
+                down_expert_bytes, down_row_bytes, 0u, singleton_experts_dev);
+    } else if (singleton_count != 0u) {
+        moe_down_q2K_expert_batch_sharedmid_kernel<1><<<
+                singleton_grid, singleton_threads, 256u * sizeof(float)>>>(
+                (float *)down->ptr, NULL, down_w, (const float *)mid->ptr, NULL,
+                counts, offsets, sorted_pairs, 1u, 2u, expert_mid_dim, out_dim,
+                down_expert_bytes, down_row_bytes, 0u, singleton_experts_dev);
+    }
+    if (cold_multi_count == 0u) {
         /* nothing to do */
     } else if (use_f16_down) {
         if (down_tile == 2u) {
             moe_down_q2K_expert_batch_sharedmid_kernel<2,false,true><<<down_grid, down_threads, down_shmem>>>(
                     NULL, down_h, down_w, (const float *)mid->ptr, NULL,
-                    counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                    down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
+                    counts, offsets, sorted_pairs, 2u, scalar_max, expert_mid_dim, out_dim,
+                    down_expert_bytes, down_row_bytes, 0u, cold_multi_experts_dev);
         } else if (down_tile == 4u) {
             moe_down_q2K_expert_batch_sharedmid_kernel<4,false,true><<<down_grid, down_threads, down_shmem>>>(
                     NULL, down_h, down_w, (const float *)mid->ptr, NULL,
-                    counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                    down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
+                    counts, offsets, sorted_pairs, 2u, scalar_max, expert_mid_dim, out_dim,
+                    down_expert_bytes, down_row_bytes, 0u, cold_multi_experts_dev);
         } else if (down_tile == 8u) {
             moe_down_q2K_expert_batch_sharedmid_kernel<8,false,true><<<down_grid, down_threads, down_shmem>>>(
                     NULL, down_h, down_w, (const float *)mid->ptr, NULL,
-                    counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                    down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
+                    counts, offsets, sorted_pairs, 2u, scalar_max, expert_mid_dim, out_dim,
+                    down_expert_bytes, down_row_bytes, 0u, cold_multi_experts_dev);
         } else {
             moe_down_q2K_expert_batch_sharedmid_kernel<16,false,true><<<down_grid, down_threads, down_shmem>>>(
                     NULL, down_h, down_w, (const float *)mid->ptr, NULL,
-                    counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                    down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
+                    counts, offsets, sorted_pairs, 2u, scalar_max, expert_mid_dim, out_dim,
+                    down_expert_bytes, down_row_bytes, 0u, cold_multi_experts_dev);
         }
     } else if (down_tile == 2u) {
         moe_down_q2K_expert_batch_sharedmid_kernel<2><<<down_grid, down_threads, down_shmem>>>(
                 (float *)down->ptr, NULL, down_w, (const float *)mid->ptr, NULL,
-                counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
+                counts, offsets, sorted_pairs, 2u, scalar_max, expert_mid_dim, out_dim,
+                down_expert_bytes, down_row_bytes, 0u, cold_multi_experts_dev);
     } else if (down_tile == 4u) {
         moe_down_q2K_expert_batch_sharedmid_kernel<4><<<down_grid, down_threads, down_shmem>>>(
                 (float *)down->ptr, NULL, down_w, (const float *)mid->ptr, NULL,
-                counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
+                counts, offsets, sorted_pairs, 2u, scalar_max, expert_mid_dim, out_dim,
+                down_expert_bytes, down_row_bytes, 0u, cold_multi_experts_dev);
     } else if (down_tile == 8u) {
         moe_down_q2K_expert_batch_sharedmid_kernel<8><<<down_grid, down_threads, down_shmem>>>(
                 (float *)down->ptr, NULL, down_w, (const float *)mid->ptr, NULL,
-                counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
+                counts, offsets, sorted_pairs, 2u, scalar_max, expert_mid_dim, out_dim,
+                down_expert_bytes, down_row_bytes, 0u, cold_multi_experts_dev);
     } else {
         moe_down_q2K_expert_batch_sharedmid_kernel<16><<<down_grid, down_threads, down_shmem>>>(
                 (float *)down->ptr, NULL, down_w, (const float *)mid->ptr, NULL,
-                counts, offsets, sorted_pairs, 1u, scalar_max, expert_mid_dim, out_dim,
-                down_expert_bytes, down_row_bytes, 0u, cold_experts_dev);
+                counts, offsets, sorted_pairs, 2u, scalar_max, expert_mid_dim, out_dim,
+                down_expert_bytes, down_row_bytes, 0u, cold_multi_experts_dev);
     }
     if (!hip_ok(hipGetLastError(), "routed_moe iq2/q2 float-down scalar launch")) return 0;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
@@ -293,7 +323,8 @@ static int routed_moe_q2_float_down_launch(
          * instruction-issue utilisation with 96 VGPRs and no scratch, so it is
          * latency-bound, and on this tile layout occupancy is the lever that
          * matters rather than barrier count. */
-        /* Four column fragments and four row tiles.
+        /* Four column fragments. Narrow chunks use two row tiles; wider
+         * chunks retain four.
          *
          * Eight column fragments halve how often the 64-row mid tile is
          * re-staged and measured 417.69 / 415.46 tok/s against four's 406.53 /
@@ -304,11 +335,11 @@ static int routed_moe_q2_float_down_launch(
          * expert bucket empty at this router skew, and cancelled exactly
          * (377.14 against 377.41 tok/s). */
         constexpr uint32_t wide_nfrag = 4u;
-        constexpr uint32_t wide_mtiles = 4u;
+        const uint32_t wide_mtiles = n_tokens <= 128u ? 2u : 4u;
         if (wmma_mtiles == 4u && use_f16_down && hot_mid_f16 && mid_h_hot &&
             (out_dim % (wide_nfrag * bn)) == 0u) {
-            constexpr uint32_t mt = wide_mtiles;
-            const dim3 block(32u * mt, 1u, 1u);
+            const uint32_t wide_tile_m = wide_mtiles * bm;
+            const dim3 block(32u * wide_mtiles, 1u, 1u);
             /*
              * A rectangular (row group, hot expert) grid has to be sized by the
              * largest bucket, and the router skew at a 4,096-token chunk puts
@@ -321,15 +352,15 @@ static int routed_moe_q2_float_down_launch(
             uint32_t wide_tiles = 0u;
             if (wide_tile_map_dev) {
                 const uint32_t cap =
-                    n_tokens * n_expert / DS4_ROCM_WIDE_DOWN_TILE_M +
+                    n_tokens * n_expert / DS4_ROCM_WIDE_DOWN_MIN_TILE_M +
                     DS4_ROCM_N_EXPERT + 1u;
                 static std::vector<uint32_t> h_map;
                 h_map.clear();
                 h_map.reserve(cap);
                 for (uint32_t h = 0; h < hot_count && h_map.size() < cap; h++) {
                     const uint32_t groups =
-                        (h_counts[h_active[h]] + DS4_ROCM_WIDE_DOWN_TILE_M - 1u) /
-                        DS4_ROCM_WIDE_DOWN_TILE_M;
+                        (h_counts[h_active[h]] + wide_tile_m - 1u) /
+                        wide_tile_m;
                     for (uint32_t g = 0; g < groups && h_map.size() < cap; g++) {
                         h_map.push_back((h << 16) | g);
                     }
@@ -345,17 +376,28 @@ static int routed_moe_q2_float_down_launch(
             }
             const dim3 grid(out_dim / (wide_nfrag * bn),
                             tile_map ? wide_tiles
-                                     : (hot_max + mt * bm - 1u) / (mt * bm),
+                                     : (hot_max + wide_tile_m - 1u) / wide_tile_m,
                             tile_map ? 1u : hot_count);
             const size_t shmem =
-                ds4_rocm_q2_down_wide_shmem(mt, bm, bn, bk, wide_nfrag);
-            moe_down_q2K_hotlist_wmma_wide_kernel<
-                wide_mtiles, 16, 16, 16, wide_nfrag, true, true>
-                    <<<grid, block, shmem>>>(
-                    NULL, down_h, down_w, NULL, mid_h_hot,
-                    counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
-                    expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes,
-                    0u, tile_map);
+                ds4_rocm_q2_down_wide_shmem(
+                    wide_mtiles, bm, bn, bk, wide_nfrag);
+            if (wide_mtiles == 2u) {
+                moe_down_q2K_hotlist_wmma_wide_kernel<
+                    2, 16, 16, 16, wide_nfrag, true, true>
+                        <<<grid, block, shmem>>>(
+                        NULL, down_h, down_w, NULL, mid_h_hot,
+                        counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
+                        expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes,
+                        0u, tile_map);
+            } else {
+                moe_down_q2K_hotlist_wmma_wide_kernel<
+                    4, 16, 16, 16, wide_nfrag, true, true>
+                        <<<grid, block, shmem>>>(
+                        NULL, down_h, down_w, NULL, mid_h_hot,
+                        counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
+                        expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes,
+                        0u, tile_map);
+            }
         } else if (!no_n2) {
             if (wmma_mtiles == 4u) {
                 constexpr uint32_t mt = 4u;
@@ -740,7 +782,7 @@ static int routed_moe_launch(
              * rows for, replacing its rectangular hot_max-by-hot_count grid. */
             const uint64_t wide_tile_map_off = iq2_gate_hot_off + iq2_gate_hot_bytes;
             const uint64_t wide_tile_map_bytes =
-                ((uint64_t)pair_count / DS4_ROCM_WIDE_DOWN_TILE_M +
+                ((uint64_t)pair_count / DS4_ROCM_WIDE_DOWN_MIN_TILE_M +
                  DS4_ROCM_N_EXPERT + 1ull) * sizeof(uint32_t);
             const uint64_t scratch_bytes = wide_tile_map_off + wide_tile_map_bytes;
             uint8_t *scratch = (uint8_t *)hip_tmp_alloc(scratch_bytes,

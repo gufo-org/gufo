@@ -1053,8 +1053,8 @@ static int attention_output_q8_batch_launch(
                 (unsigned)((low_dim + rows_per_block - 1u) /
                            rows_per_block);
             const unsigned threads = rows_per_block * 32u;
-            if (n_tokens <= 2u) {
-                grouped_q8_0_a_preq_batch_reuse_w32_kernel<2u>
+            if (n_tokens == 2u) {
+                grouped_q8_0_a_preq_batch_reuse_w32_kernel<2u, true>
                     <<<grid, threads>>>(
                         (float *)low->ptr,
                         out_a,
@@ -1065,20 +1065,35 @@ static int attention_output_q8_batch_launch(
                         n_groups,
                         n_tokens,
                         blocks_a,
-                        rows_per_block,
-                        1);
-            } else if (n_tokens <= 4u) {
-              grouped_q8_0_a_preq_batch_reuse_w32_kernel<4u><<<grid, threads>>>(
+                        rows_per_block);
+            } else if (n_tokens == 3u) {
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<3u, true><<<grid, threads>>>(
                   (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
-                  n_groups, n_tokens, blocks_a, rows_per_block, 1);
-            } else if (n_tokens <= 6u) {
-              grouped_q8_0_a_preq_batch_reuse_w32_kernel<6u><<<grid, threads>>>(
+                  n_groups, n_tokens, blocks_a, rows_per_block);
+            } else if (n_tokens == 4u) {
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<4u, true><<<grid, threads>>>(
                   (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
-                  n_groups, n_tokens, blocks_a, rows_per_block, 1);
+                  n_groups, n_tokens, blocks_a, rows_per_block);
+            } else if (n_tokens == 5u) {
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<5u, true><<<grid, threads>>>(
+                  (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
+                  n_groups, n_tokens, blocks_a, rows_per_block);
+            } else if (n_tokens == 6u) {
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<6u, true><<<grid, threads>>>(
+                  (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
+                  n_groups, n_tokens, blocks_a, rows_per_block);
+            } else if (n_tokens == 7u) {
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<7u, true><<<grid, threads>>>(
+                  (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
+                  n_groups, n_tokens, blocks_a, rows_per_block);
+            } else if (n_tokens == 8u) {
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<8u, true><<<grid, threads>>>(
+                  (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
+                  n_groups, n_tokens, blocks_a, rows_per_block);
             } else {
-              grouped_q8_0_a_preq_batch_reuse_w32_kernel<8u><<<grid, threads>>>(
+              grouped_q8_0_a_preq_batch_reuse_w32_kernel<2u, false><<<grid, threads>>>(
                   (float*)low->ptr, out_a, xq, xscale, group_dim, rank,
-                  n_groups, n_tokens, blocks_a, rows_per_block, 1);
+                  n_groups, n_tokens, blocks_a, rows_per_block);
             }
         } else if ((group_dim & 31u) == 0u && rank <= UINT32_MAX &&
                    n_tokens <= UINT32_MAX) {

@@ -28,6 +28,28 @@ __device__ __forceinline__ static int32_t dot_i8x32_dp4a(const int8_t *a, const 
     return dot;
 }
 
+__device__ __forceinline__ static int32_t dot_i8x32_dp4a_loaded(
+        int32_t a0,
+        int32_t a1,
+        int32_t a2,
+        int32_t a3,
+        int32_t a4,
+        int32_t a5,
+        int32_t a6,
+        int32_t a7,
+        const int8_t *b) {
+    int32_t dot = 0;
+    dot = __dp4a(a0, load_i8x4_i32_aligned(b + 0u), dot);
+    dot = __dp4a(a1, load_i8x4_i32_aligned(b + 4u), dot);
+    dot = __dp4a(a2, load_i8x4_i32_aligned(b + 8u), dot);
+    dot = __dp4a(a3, load_i8x4_i32_aligned(b + 12u), dot);
+    dot = __dp4a(a4, load_i8x4_i32_aligned(b + 16u), dot);
+    dot = __dp4a(a5, load_i8x4_i32_aligned(b + 20u), dot);
+    dot = __dp4a(a6, load_i8x4_i32_aligned(b + 24u), dot);
+    dot = __dp4a(a7, load_i8x4_i32_aligned(b + 28u), dot);
+    return dot;
+}
+
 __device__ __forceinline__ static int32_t dot_i8_block(const int8_t *a, const int8_t *b, uint64_t n, int use_dp4a) {
     if (use_dp4a && n == 32u) return dot_i8x32_dp4a(a, b);
     int32_t dot = 0;
@@ -219,7 +241,7 @@ __global__ static void matmul_q8_0_preq_rows_w32_kernel(
  * multiply order, same warp reduction. That is what keeps a verified speculative
  * row bitwise equal to what ordinary decode would have produced.
  */
-template <uint32_t MAXT>
+template <uint32_t MAXT, bool EXACT>
 __global__ static void matmul_q8_0_preq_batch_reuse_w32_kernel(
         float *out,
         const unsigned char *w,
@@ -229,8 +251,7 @@ __global__ static void matmul_q8_0_preq_batch_reuse_w32_kernel(
         uint64_t out_dim,
         uint64_t blocks,
         uint32_t n_tok,
-        uint32_t rows_per_block,
-        int use_dp4a) {
+        uint32_t rows_per_block) {
     const uint64_t row = (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
     const uint32_t lane = threadIdx.x & 31u;
     /* row depends only on threadIdx.x >> 5, so a warp exits as a whole and the
@@ -243,22 +264,33 @@ __global__ static void matmul_q8_0_preq_batch_reuse_w32_kernel(
     for (uint32_t t = 0; t < MAXT; t++) acc[t] = 0.0f;
 
     for (uint64_t b = lane; b < blocks; b += 32u) {
-        const uint64_t i0 = b * 32u;
-        const uint64_t bn = in_dim - i0 < 32u ? in_dim - i0 : 32u;
         const float wscale = __half2float(*(const __half *)(wr + b * 34u));
         const int8_t *qs = (const int8_t *)(wr + b * 34u + 2u);
+        const int32_t q0 = load_i8x4_i32_unaligned(qs + 0u);
+        const int32_t q1 = load_i8x4_i32_unaligned(qs + 4u);
+        const int32_t q2 = load_i8x4_i32_unaligned(qs + 8u);
+        const int32_t q3 = load_i8x4_i32_unaligned(qs + 12u);
+        const int32_t q4 = load_i8x4_i32_unaligned(qs + 16u);
+        const int32_t q5 = load_i8x4_i32_unaligned(qs + 20u);
+        const int32_t q6 = load_i8x4_i32_unaligned(qs + 24u);
+        const int32_t q7 = load_i8x4_i32_unaligned(qs + 28u);
 #pragma unroll
         for (uint32_t t = 0; t < MAXT; t++) {
-            if (t >= n_tok) break;
+            if constexpr (!EXACT) {
+                if (t >= n_tok) break;
+            }
             const int8_t *xqb = xq + (uint64_t)t * blocks * 32u + b * 32u;
-            const int dot = dot_i8_block(qs, xqb, bn, use_dp4a);
+            const int dot = dot_i8x32_dp4a_loaded(
+                q0, q1, q2, q3, q4, q5, q6, q7, xqb);
             acc[t] += wscale * xscale[(uint64_t)t * blocks + b] * (float)dot;
         }
     }
 
 #pragma unroll
     for (uint32_t t = 0; t < MAXT; t++) {
-        if (t >= n_tok) break;
+        if constexpr (!EXACT) {
+            if (t >= n_tok) break;
+        }
         const float sum = warp_sum_f32(acc[t]);
         if (lane == 0u) out[(uint64_t)t * out_dim + row] = sum;
     }
@@ -1934,7 +1966,7 @@ __global__ static void grouped_q8_0_a_preq_warp8_kernel(
  * session therefore preserves C1's quantization, multiply order, and warp
  * reduction while reusing every weight block across W2-W8.
  */
-template <uint32_t MAXT>
+template <uint32_t MAXT, bool EXACT>
 __global__ static void grouped_q8_0_a_preq_batch_reuse_w32_kernel(
         float *low,
         const unsigned char *w,
@@ -1945,8 +1977,7 @@ __global__ static void grouped_q8_0_a_preq_batch_reuse_w32_kernel(
         uint32_t n_groups,
         uint32_t n_tokens,
         uint64_t blocks,
-        uint32_t rows_per_block,
-        int use_dp4a) {
+        uint32_t rows_per_block) {
     const uint64_t row =
         (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
     const uint32_t lane = threadIdx.x & 31u;
@@ -1962,21 +1993,29 @@ __global__ static void grouped_q8_0_a_preq_batch_reuse_w32_kernel(
     for (uint32_t t = 0; t < MAXT; ++t) acc[t] = 0.0f;
 
     for (uint64_t b = lane; b < blocks; b += 32u) {
-        const uint64_t i0 = b * 32u;
-        const uint64_t bn =
-            group_dim - i0 < 32u ? group_dim - i0 : 32u;
         const float weight_scale =
             __half2float(*(const __half *)(wr + b * 34u));
         const int8_t *qs = (const int8_t *)(wr + b * 34u + 2u);
+        const int32_t q0 = load_i8x4_i32_unaligned(qs + 0u);
+        const int32_t q1 = load_i8x4_i32_unaligned(qs + 4u);
+        const int32_t q2 = load_i8x4_i32_unaligned(qs + 8u);
+        const int32_t q3 = load_i8x4_i32_unaligned(qs + 12u);
+        const int32_t q4 = load_i8x4_i32_unaligned(qs + 16u);
+        const int32_t q5 = load_i8x4_i32_unaligned(qs + 20u);
+        const int32_t q6 = load_i8x4_i32_unaligned(qs + 24u);
+        const int32_t q7 = load_i8x4_i32_unaligned(qs + 28u);
 #pragma unroll
         for (uint32_t t = 0; t < MAXT; ++t) {
-            if (t >= n_tokens) break;
+            if constexpr (!EXACT) {
+                if (t >= n_tokens) break;
+            }
             const uint64_t xrow = (uint64_t)t * n_groups + group;
             const int8_t *xqb =
                 xq + (xrow * blocks + b) * 32u;
             const float activation_scale =
                 xscale[xrow * blocks + b];
-            const int dot = dot_i8_block(qs, xqb, bn, use_dp4a);
+            const int dot = dot_i8x32_dp4a_loaded(
+                q0, q1, q2, q3, q4, q5, q6, q7, xqb);
             acc[t] +=
                 weight_scale * activation_scale * (float)dot;
         }
@@ -1984,7 +2023,9 @@ __global__ static void grouped_q8_0_a_preq_batch_reuse_w32_kernel(
 
 #pragma unroll
     for (uint32_t t = 0; t < MAXT; ++t) {
-        if (t >= n_tokens) break;
+        if constexpr (!EXACT) {
+            if (t >= n_tokens) break;
+        }
         const float sum = warp_sum_f32(acc[t]);
         if (lane == 0u) low[(uint64_t)t * low_dim + row] = sum;
     }
