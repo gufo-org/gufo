@@ -1270,7 +1270,7 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
   static const bool enabled = [] {
     const char* value = std::getenv("GUFO_DEEPSEEK_DSPARK_SESSION_BATCH");
     if (value == nullptr) {
-      return true;
+      return false;
     }
     const std::string_view setting(value);
     return setting != "0" && setting != "false" && setting != "off";
