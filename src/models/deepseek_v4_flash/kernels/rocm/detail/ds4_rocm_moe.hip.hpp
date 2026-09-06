@@ -1065,7 +1065,6 @@ __global__ static void moe_gate_up_mid_expert_tile4_row32_kernel(
     uint32_t count = counts[expert];
     if (max_count != 0u && count >= max_count) return;
     uint32_t local_start = tile_starts[tile];
-    __shared__ hip_block_q8_K sxq[4][16];
     uint32_t pair[4] = {0, 0, 0, 0};
     uint32_t tok[4] = {0, 0, 0, 0};
     uint32_t slot[4] = {0, 0, 0, 0};
@@ -1078,15 +1077,6 @@ __global__ static void moe_gate_up_mid_expert_tile4_row32_kernel(
         tok[np] = pair[np] / n_expert;
         slot[np] = pair[np] - tok[np] * n_expert;
         xqb[np] = xq + (uint64_t)tok[np] * xq_blocks;
-    }
-    if (xq_blocks <= 16u) {
-        for (uint32_t i = threadIdx.x; i < np * xq_blocks; i += blockDim.x) {
-            uint32_t p = i / xq_blocks;
-            uint32_t b = i - p * xq_blocks;
-            sxq[p][b] = xqb[p][b];
-        }
-        __syncthreads();
-        for (uint32_t p = 0; p < np; p++) xqb[p] = sxq[p];
     }
     if (row >= expert_mid_dim) return;
     const hip_block_iq2_xxs *gr = (const hip_block_iq2_xxs *)(gate_base + (uint64_t)expert * gate_expert_bytes + (uint64_t)row * gate_row_bytes);

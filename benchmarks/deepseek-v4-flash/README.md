@@ -299,19 +299,25 @@ the sum across active users, while `per request` is what each user receives:
 
 | C | Physical plan | Per-request decode tok/s | Combined decode tok/s |
 | ---: | --- | ---: | ---: |
-| 1 | serial | 17.11 | 17.11 |
-| 2 | W2 | 13.35 | 26.71 |
-| 4 | W4 | 9.67 | 38.66 |
-| 6 | W6 | 7.61 | 45.65 |
-| 8 | W8 | 7.52 | 60.15 |
+| 1 | serial | 16.93 | 16.93 |
+| 2 | W2 | 13.17 | 26.34 |
+| 4 | W4 | 9.64 | 38.56 |
+| 6 | W6 | 7.70 | 46.20 |
+| 8 | W8 | 7.40 | 59.20 |
 
 Packed Q8 weights now have exact W2-W8 specializations, ordered F16
 projections reuse each weight across the live rows, C8 F16 projections execute
 as two W4 groups, and routed IQ2 gate/up uses exact one- through four-pair
-helpers. C1 still takes the serial route. The final C8 profile attributes
-18.2% of kernel time to routed gate/up, 8.0% to Q2 down, 7.6% to prompt-side
-Q8 projection work, 6.4% to hipBLAS, 6.3% to the W8 Q8 projection, and 6.0%
-to paired F16 projection.
+helpers. C1 still takes the serial route.
+
+The routed gate/up kernel previously staged four activation rows in 18,688
+bytes of LDS. On gfx1151, direct reads through MALL are faster and allow more
+resident workgroups: in a matched C8 profile, gate/up fell from 5,235.69 to
+4,198.79 ms (-19.8%) and total GPU time from 28,724.37 to 27,363.94 ms
+(-4.7%). The final profile attributes 15.3% of kernel time to routed gate/up,
+9.9% to the W8 Q8 projection, 8.1% each to dense prompt MMQ and Q2 down, 8.0%
+to prompt-side shared-X Q8 work, 6.8% to hipBLAS, and 6.5% to paired F16
+projection.
 
 A decode-heavy C2 profile attributes 22.9% of kernel time to the dense Q8
 projection, 14.9% to routed gate/up, and 11.7% to Q2 down. Interleaved sweeps of

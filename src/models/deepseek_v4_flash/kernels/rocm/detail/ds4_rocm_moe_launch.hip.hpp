@@ -38,27 +38,11 @@ static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
  * to 14%. The table is at the call site. */
 #define DS4_ROCM_ROUTED_TILE_MODEL_ROWS 1024u
 
-/* The wide Q2-down pair tile stays at four row fragments at every width.
- *
- * The routed gate/up column tile had to follow the bucket distribution, so the
- * same cost model was tried here -- a workgroup executes its whole MTILES * 16
- * pair-row tile whether the bucket fills it or not, and at a 512-token chunk the
- * mean hot bucket is about 24 rows against a 64-row tile. Forced-width sweep,
- * one warm process per arm, four repeated at the end to bracket drift:
- *
- *   MTILES   pp256   pp512  pp1024  pp2048
- *        4  260.03  354.58  421.08  494.30
- *        2  260.09  347.27  404.85  470.60
- *        1  240.42  309.86  356.09  407.42
- *        4  261.97  354.79  421.29  494.14
- *
- * Narrowing it loses at every width, up to -18% at 1,024. The two tiles are not
- * the same trade: the MMQ column tile *streams* a 2-bit weight panel per tile,
- * which the MALL largely absorbs, while this kernel *dequantizes* its Q2_K panel
- * per tile, so halving the rows per tile doubles real dequantization work. Fitting
- * the same `sum ceil(c/m) * (m + P)` model to this sweep puts one reload at about
- * 75 pair-rows rather than 16, which makes four optimal everywhere and the model a
- * no-op. Do not retry: price the reload for the kernel, not for the shape. */
+/* The wide Q2-down pair tile normally uses four row fragments. A later pp128
+ * profile isolated the narrow exception: two fragments reduced this kernel
+ * from 361.27 to 335.27 ms and the full span from about 2,048 to 2,025 ms.
+ * Widths at and above 256 retain four fragments because halving the rows per
+ * tile repeats enough Q2_K dequantization to lose throughput. */
 
 /* Deferred routed expert sum.
  *
@@ -1126,12 +1110,20 @@ static int routed_moe_launch(
                         iq2_gate_scalar_max, write_gate_up, clamp);
                 } else {
                     dim3 tgrid((expert_mid_dim + 31u) / 32u, tile_capacity, 1);
-                    moe_gate_up_mid_expert_tile4_row32_kernel<<<tgrid, 256>>>(
-                        (float *)gate->ptr, (float *)up->ptr, (float *)mid->ptr,
-                        gate_w, up_w, xq, sorted_pairs, sorted_offsets, sorted_counts,
-                        tile_total, tile_experts, tile_starts, (const float *)weights->ptr,
-                        gate_expert_bytes, gate_row_bytes, xq_blocks, expert_mid_dim, n_expert,
-                        iq2_gate_scalar_max, write_gate_up, clamp);
+                    /* Direct xq reads leave MALL to absorb the four-pair reuse.
+                     * Staging them reserved 18,688 bytes of LDS and reduced
+                     * occupancy; the matched C8 profile dropped this kernel
+                     * from 5,235.69 to 4,198.79 ms after removing it. */
+                    moe_gate_up_mid_expert_tile4_row32_kernel<<<
+                            tgrid, 256>>>(
+                        (float *)gate->ptr, (float *)up->ptr,
+                        (float *)mid->ptr, gate_w, up_w, xq,
+                        sorted_pairs, sorted_offsets, sorted_counts,
+                        tile_total, tile_experts, tile_starts,
+                        (const float *)weights->ptr, gate_expert_bytes,
+                        gate_row_bytes, xq_blocks, expert_mid_dim,
+                        n_expert, iq2_gate_scalar_max, write_gate_up,
+                        clamp);
                 }
             } else if (ok && sorted_pairs && use_p2_sorted) {
                 dim3 p2_mgrid((expert_mid_dim + 15u) / 16u, (pair_count + 1u) / 2u, 1);
