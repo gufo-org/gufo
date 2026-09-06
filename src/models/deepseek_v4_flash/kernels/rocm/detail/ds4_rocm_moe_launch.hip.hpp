@@ -1110,20 +1110,37 @@ static int routed_moe_launch(
                         iq2_gate_scalar_max, write_gate_up, clamp);
                 } else {
                     dim3 tgrid((expert_mid_dim + 31u) / 32u, tile_capacity, 1);
-                    /* Direct xq reads leave MALL to absorb the four-pair reuse.
-                     * Staging them reserved 18,688 bytes of LDS and reduced
-                     * occupancy; the matched C8 profile dropped this kernel
-                     * from 5,235.69 to 4,198.79 ms after removing it. */
-                    moe_gate_up_mid_expert_tile4_row32_kernel<<<
-                            tgrid, 256>>>(
-                        (float *)gate->ptr, (float *)up->ptr,
-                        (float *)mid->ptr, gate_w, up_w, xq,
-                        sorted_pairs, sorted_offsets, sorted_counts,
-                        tile_total, tile_experts, tile_starts,
-                        (const float *)weights->ptr, gate_expert_bytes,
-                        gate_row_bytes, xq_blocks, expert_mid_dim,
-                        n_expert, iq2_gate_scalar_max, write_gate_up,
-                        clamp);
+                    if (n_tokens <= 8u || xq_blocks > 16u) {
+                        /* At native C2-C8 decode widths, direct xq reads leave
+                         * MALL to absorb four-pair reuse and avoid 18,688 bytes
+                         * of LDS. A matched C8 profile dropped this kernel from
+                         * 5,235.69 to 4,198.79 ms. */
+                        moe_gate_up_mid_expert_tile4_row32_kernel<false><<<
+                                tgrid, 256>>>(
+                            (float *)gate->ptr, (float *)up->ptr,
+                            (float *)mid->ptr, gate_w, up_w, xq,
+                            sorted_pairs, sorted_offsets, sorted_counts,
+                            tile_total, tile_experts, tile_starts,
+                            (const float *)weights->ptr, gate_expert_bytes,
+                            gate_row_bytes, xq_blocks, expert_mid_dim,
+                            n_expert, iq2_gate_scalar_max, write_gate_up,
+                            clamp);
+                    } else {
+                        /* Prompt batches have enough pair reuse to repay the
+                         * LDS copy; pp128 regressed when direct reads were used
+                         * here as well. */
+                        moe_gate_up_mid_expert_tile4_row32_kernel<true><<<
+                                tgrid, 256,
+                                4u * 16u * sizeof(hip_block_q8_K)>>>(
+                            (float *)gate->ptr, (float *)up->ptr,
+                            (float *)mid->ptr, gate_w, up_w, xq,
+                            sorted_pairs, sorted_offsets, sorted_counts,
+                            tile_total, tile_experts, tile_starts,
+                            (const float *)weights->ptr, gate_expert_bytes,
+                            gate_row_bytes, xq_blocks, expert_mid_dim,
+                            n_expert, iq2_gate_scalar_max, write_gate_up,
+                            clamp);
+                    }
                 }
             } else if (ok && sorted_pairs && use_p2_sorted) {
                 dim3 p2_mgrid((expert_mid_dim + 15u) / 16u, (pair_count + 1u) / 2u, 1);

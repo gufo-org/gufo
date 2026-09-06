@@ -310,14 +310,15 @@ projections reuse each weight across the live rows, C8 F16 projections execute
 as two W4 groups, and routed IQ2 gate/up uses exact one- through four-pair
 helpers. C1 still takes the serial route.
 
-The routed gate/up kernel previously staged four activation rows in 18,688
-bytes of LDS. On gfx1151, direct reads through MALL are faster and allow more
-resident workgroups: in a matched C8 profile, gate/up fell from 5,235.69 to
-4,198.79 ms (-19.8%) and total GPU time from 28,724.37 to 27,363.94 ms
-(-4.7%). The final profile attributes 15.3% of kernel time to routed gate/up,
-9.9% to the W8 Q8 projection, 8.1% each to dense prompt MMQ and Q2 down, 8.0%
-to prompt-side shared-X Q8 work, 6.8% to hipBLAS, and 6.5% to paired F16
-projection.
+The concurrent routed gate/up kernel previously staged four activation rows in
+18,688 bytes of LDS. At C2-C8, direct reads through MALL are faster and allow
+more resident workgroups: in a matched C8 profile, gate/up fell from 5,235.69
+to 4,198.79 ms (-19.8%) and total GPU time from 28,724.37 to 27,363.94 ms
+(-4.7%). Prompt batches retain the staged route because their greater pair
+reuse repays the copy. The final C8 profile attributes 15.3% of kernel time to
+routed gate/up, 9.9% to the W8 Q8 projection, 8.1% each to dense prompt MMQ
+and Q2 down, 8.0% to prompt-side shared-X Q8 work, 6.8% to hipBLAS, and 6.5%
+to paired F16 projection.
 
 A decode-heavy C2 profile attributes 22.9% of kernel time to the dense Q8
 projection, 14.9% to routed gate/up, and 11.7% to Q2 down. Interleaved sweeps of
