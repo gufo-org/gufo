@@ -131,6 +131,55 @@ bool Model::EvaluateBatch(std::span<const SessionBatchItem> items,
   return true;
 }
 
+bool Model::DsparkStepBatch(std::span<const SessionDsparkBatchItem> items,
+                            std::string* error_msg) const {
+  if (items.size() < 2 || items.size() > 8) {
+    AssignError(error_msg,
+                "DeepSeek DSpark batch requires two to eight sessions");
+    return false;
+  }
+
+  std::array<std::array<int, 32>, 8> blocks{};
+  std::array<int, 8> produced{};
+  std::array<ds4_session_dspark_batch_item, 8> native_items{};
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    const SessionDsparkBatchItem& item = items[index];
+    if (item.session == nullptr || item.session->model_.get() != this ||
+        item.emitted == nullptr) {
+      AssignError(error_msg,
+                  "DeepSeek DSpark batch contains an incompatible session");
+      return false;
+    }
+    if (item.max_tokens == 0) {
+      AssignError(error_msg,
+                  "DeepSeek DSpark batch needs a positive token budget");
+      return false;
+    }
+    native_items[index] = {
+        .session = item.session->session_,
+        .emitted = blocks[index].data(),
+        .emitted_cap =
+            static_cast<int>(std::min(item.max_tokens, blocks[index].size())),
+        .n_emitted = &produced[index],
+    };
+  }
+
+  std::array<char, kErrorCapacity> error{};
+  if (ds4_sessions_dspark_step_batch(native_items.data(), items.size(),
+                                     error.data(), error.size()) != 0) {
+    AssignError(error_msg,
+                error[0] != '\0'
+                    ? error.data()
+                    : "DeepSeek V4 Flash speculative batch step failed");
+    return false;
+  }
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    items[index].emitted->assign(blocks[index].begin(),
+                                 blocks[index].begin() + produced[index]);
+  }
+  return true;
+}
+
 std::vector<int> Model::Tokenize(std::string_view text) const {
   const std::string owned(text);
   ds4_tokens tokens{};

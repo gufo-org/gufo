@@ -1256,6 +1256,58 @@ __global__ static void dspark_markov_w1_row_kernel(
     out[tid] = scale * (float)((const int8_t *)(qblock + 2u))[lane];
 }
 
+/*
+ * Confidence head over [draft_hidden, W1[previous_token]].
+ *
+ * Both learned inputs are Q8_0 rows. Decode the W1 value and the matching
+ * confidence weight in registers so a rejected proposal costs one small
+ * reduction kernel instead of materializing W1 and launching two matmuls.
+ */
+__global__ static void dspark_confidence_kernel(
+    float* out_probability, const float* hidden,
+    const unsigned char* confidence_row, const unsigned char* w1_row,
+    uint32_t hidden_dim, uint32_t markov_rank) {
+  __shared__ float partial[256];
+  const uint32_t tid = threadIdx.x;
+  float sum = 0.0f;
+
+  for (uint32_t index = tid; index < hidden_dim; index += blockDim.x) {
+    const uint32_t block = index >> 5u;
+    const uint32_t lane = index & 31u;
+    const unsigned char* qblock = confidence_row + (uint64_t)block * 34u;
+    const float scale = __half2float(*(const __half*)qblock);
+    const float weight = scale * (float)((const int8_t*)(qblock + 2u))[lane];
+    sum += hidden[index] * weight;
+  }
+
+  const uint32_t confidence_block_base = hidden_dim >> 5u;
+  for (uint32_t index = tid; index < markov_rank; index += blockDim.x) {
+    const uint32_t block = index >> 5u;
+    const uint32_t lane = index & 31u;
+    const unsigned char* state_block = w1_row + (uint64_t)block * 34u;
+    const unsigned char* weight_block =
+        confidence_row + (uint64_t)(confidence_block_base + block) * 34u;
+    const float state_scale = __half2float(*(const __half*)state_block);
+    const float weight_scale = __half2float(*(const __half*)weight_block);
+    const float state =
+        state_scale * (float)((const int8_t*)(state_block + 2u))[lane];
+    const float weight =
+        weight_scale * (float)((const int8_t*)(weight_block + 2u))[lane];
+    sum += state * weight;
+  }
+
+  partial[tid] = sum;
+  __syncthreads();
+  for (uint32_t stride = blockDim.x >> 1u; stride != 0u; stride >>= 1u) {
+    if (tid < stride)
+      partial[tid] += partial[tid + stride];
+    __syncthreads();
+  }
+  if (tid == 0u) {
+    out_probability[0] = 1.0f / (1.0f + expf(-partial[0]));
+  }
+}
+
 /* Decode the packed (value, index) key produced by the Markov argmax reduce. */
 __global__ static void dspark_markov_key_decode_kernel(
         int32_t *out_index,
@@ -1286,6 +1338,45 @@ extern "C" int ds4_gpu_dspark_markov_w1_row_tensor(
     dspark_markov_w1_row_kernel<<<(markov_rank + 255u) / 256u, 256>>>(
             (float *)out_state->ptr, row, rank_blocks);
     return hip_ok(hipGetLastError(), "dspark markov w1 row launch");
+}
+
+extern "C" int ds4_gpu_dspark_confidence_tensor(
+    ds4_gpu_tensor* out_probability, const ds4_gpu_tensor* hidden_row,
+    const void* model_map, uint64_t model_size, uint64_t confidence_offset,
+    uint64_t w1_offset, uint32_t hidden_dim, uint32_t markov_rank,
+    uint32_t previous_token) {
+  if (!out_probability || !hidden_row || !model_map || hidden_dim == 0u ||
+      hidden_dim % 32u != 0u || markov_rank == 0u || markov_rank % 32u != 0u ||
+      !hip_tensor_has_elems(out_probability, 1u, sizeof(float)) ||
+      !hip_tensor_has_elems(hidden_row, hidden_dim, sizeof(float))) {
+    return 0;
+  }
+  const uint32_t rank_blocks = markov_rank / 32u;
+  const uint64_t w1_row_bytes = (uint64_t)rank_blocks * 34u;
+  uint64_t w1_row_offset = 0u;
+  if (!hip_u64_mul_checked(previous_token, w1_row_bytes, &w1_row_offset)) {
+    return 0;
+  }
+  const uint64_t confidence_bytes =
+      (uint64_t)((hidden_dim + markov_rank) / 32u) * 34u;
+  if (!hip_model_range_fits(model_size, confidence_offset, confidence_bytes) ||
+      !hip_model_range_fits(model_size, w1_offset + w1_row_offset,
+                            w1_row_bytes)) {
+    return 0;
+  }
+  const unsigned char* confidence_row =
+      (const unsigned char*)hip_model_range_ptr(
+          model_map, confidence_offset, confidence_bytes, "dspark_confidence");
+  const unsigned char* w1_row = (const unsigned char*)hip_model_range_ptr(
+      model_map, w1_offset + w1_row_offset, w1_row_bytes,
+      "dspark_confidence_w1");
+  if (!confidence_row || !w1_row)
+    return 0;
+
+  dspark_confidence_kernel<<<1, 256>>>(
+      (float*)out_probability->ptr, (const float*)hidden_row->ptr,
+      confidence_row, w1_row, hidden_dim, markov_rank);
+  return hip_ok(hipGetLastError(), "dspark confidence launch");
 }
 
 /*

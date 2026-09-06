@@ -45,6 +45,9 @@ struct TextRunnerCapabilities {
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
+  bool batched_multi_token_decode{false};
+  /// Zero means no physical-width limit.
+  std::size_t batched_multi_token_decode_max_width{0};
   bool prefix_reuse{true};
 };
 
@@ -146,6 +149,12 @@ struct TextRunnerAdvance {
   TextRunnerToken token{0};
 };
 
+struct TextRunnerDecode {
+  std::reference_wrapper<TextRunnerState> state;
+  std::size_t max_tokens{0};
+  std::reference_wrapper<sampling::SamplerState> sampler;
+};
+
 /// Coarse text-model adapter used by cache, scheduling, and HTTP layers.
 ///
 /// Prefill and Advance are the only model execution work units. SelectNext
@@ -201,6 +210,8 @@ public:
   [[nodiscard]] virtual TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const;
+  [[nodiscard]] virtual std::vector<TextDecodeStep> DecodeBatch(
+      std::span<const TextRunnerDecode> decodes) const;
   virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
@@ -303,6 +314,9 @@ public:
   [[nodiscard]] std::size_t capacity() const noexcept;
   [[nodiscard]] TextExecutionPlan SelectDecodePlan(
       std::size_t ready_requests) const;
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+      std::span<Request*> requests, std::span<const std::size_t> max_tokens,
+      const TextExecutionPlan& plan);
   void AdvanceBatch(std::span<Request*> requests,
                     const TextExecutionPlan& plan);
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,

@@ -1266,6 +1266,18 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
   return enabled;
 }
 
+[[nodiscard]] bool DeepSeekDsparkSessionBatchEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_DEEPSEEK_DSPARK_SESSION_BATCH");
+    if (value == nullptr) {
+      return true;
+    }
+    const std::string_view setting(value);
+    return setting != "0" && setting != "false" && setting != "off";
+  }();
+  return enabled;
+}
+
 class DeepSeekTextRunner final : public TextModelRunner {
 public:
   DeepSeekTextRunner(std::shared_ptr<models::deepseek_v4_flash::Model> model,
@@ -1295,6 +1307,9 @@ public:
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = dspark,
+                .batched_multi_token_decode =
+                    dspark && DeepSeekDsparkSessionBatchEnabled(),
+                .batched_multi_token_decode_max_width = 2,
                 .prefix_reuse = !dspark,
             },
         .persistence = dspark ? std::optional<TextRunnerPersistenceDescriptor>{}
@@ -1432,7 +1447,7 @@ public:
   }
 
   void PrepareBatchExecution(TextRunnerState& state) const override {
-    if (model_->HasDspark()) {
+    if (model_->HasDspark() && !DeepSeekDsparkSessionBatchEnabled()) {
       RequireDeepSeekState(state).session().PrepareBatchExecution();
     }
   }
@@ -1541,6 +1556,71 @@ public:
     step.draft_accepted_tokens =
         stats_after.support_accepted - stats_before.support_accepted;
     return step;
+  }
+
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+      std::span<const TextRunnerDecode> decodes) const override {
+    if (!DeepSeekDsparkSessionBatchEnabled() || !model_->HasDspark() ||
+        decodes.size() < 2 || decodes.size() > 8) {
+      return TextModelRunner::DecodeBatch(decodes);
+    }
+    for (const auto& decode : decodes) {
+      if (!decode.sampler.get().config().can_use_unmodified_argmax()) {
+        return TextModelRunner::DecodeBatch(decodes);
+      }
+    }
+
+    std::array<models::deepseek_v4_flash::SessionDsparkBatchItem, 8> items{};
+    std::array<DeepSeekTextRunnerState*, 8> states{};
+    std::array<models::deepseek_v4_flash::Session::DsparkStats, 8>
+        stats_before{};
+    std::array<std::vector<int>, 8> emitted{};
+    for (std::size_t index = 0; index < decodes.size(); ++index) {
+      auto& deepseek = RequireDeepSeekState(decodes[index].state.get());
+      states[index] = &deepseek;
+      stats_before[index] = deepseek.session().DsparkStatistics();
+      items[index] = {
+          .session = &deepseek.session(),
+          .max_tokens = decodes[index].max_tokens,
+          .emitted = &emitted[index],
+      };
+    }
+
+    std::string error;
+    if (!model_->DsparkStepBatch(
+            std::span<const models::deepseek_v4_flash::SessionDsparkBatchItem>(
+                items.data(), decodes.size()),
+            &error)) {
+      throw std::runtime_error("DeepSeek DSpark batch decode failed: " + error);
+    }
+
+    std::vector<TextDecodeStep> steps(decodes.size());
+    for (std::size_t index = 0; index < decodes.size(); ++index) {
+      if (emitted[index].empty()) {
+        throw std::runtime_error("DeepSeek DSpark batch produced no tokens");
+      }
+      auto& step = steps[index];
+      states[index]->set_position(states[index]->position() +
+                                  emitted[index].size());
+      step.selections.reserve(emitted[index].size());
+      for (const int token : emitted[index]) {
+        if (model_->IsStopToken(token)) {
+          step.stop = true;
+          break;
+        }
+        step.selections.push_back({
+            .stop = false,
+            .token = static_cast<TextRunnerToken>(token),
+            .piece = model_->DecodeToken(token),
+        });
+      }
+      const auto stats_after = states[index]->session().DsparkStatistics();
+      step.draft_tokens =
+          stats_after.support_drafted - stats_before[index].support_drafted;
+      step.draft_accepted_tokens =
+          stats_after.support_accepted - stats_before[index].support_accepted;
+    }
+    return steps;
   }
 
   void AdvanceBatch(

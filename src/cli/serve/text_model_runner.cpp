@@ -324,6 +324,17 @@ TextDecodeStep TextModelRunner::DecodeStep(
   };
 }
 
+std::vector<TextDecodeStep> TextModelRunner::DecodeBatch(
+    std::span<const TextRunnerDecode> decodes) const {
+  std::vector<TextDecodeStep> steps;
+  steps.reserve(decodes.size());
+  for (const auto& decode : decodes) {
+    steps.push_back(DecodeStep(decode.state.get(), decode.max_tokens,
+                               decode.sampler.get()));
+  }
+  return steps;
+}
+
 std::unique_ptr<TextRunnerSnapshot> TextModelRunner::Snapshot(
     const TextRunnerState&) const {
   throw std::logic_error("text runner does not support snapshots");
@@ -865,6 +876,70 @@ void TextRunnerPool::AdvanceBatch(std::span<Request*> requests,
   for (auto* request : requests) {
     request->impl_->pending_selection.reset();
   }
+}
+
+std::vector<TextDecodeStep> TextRunnerPool::DecodeBatch(
+    std::span<Request*> requests, std::span<const std::size_t> max_tokens,
+    const TextExecutionPlan& plan) {
+  if (plan.kind != TextExecutionPlanKind::kBatched || requests.size() < 2 ||
+      requests.size() > plan.physical_width ||
+      max_tokens.size() != requests.size()) {
+    throw std::invalid_argument("invalid batched text decode plan");
+  }
+  if (std::find(impl_->validated.plans.begin(), impl_->validated.plans.end(),
+                plan) == impl_->validated.plans.end()) {
+    throw std::invalid_argument(
+        "text runner does not support the requested batched plan");
+  }
+
+  std::vector<TextRunnerDecode> decodes;
+  decodes.reserve(requests.size());
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    auto* request = requests[index];
+    if (request == nullptr || !*request ||
+        request->impl_->runner != impl_->validated.runner ||
+        !request->impl_->decode_ready || request->impl_->stopped ||
+        request->impl_->pending_selection.has_value() ||
+        max_tokens[index] == 0) {
+      throw std::logic_error("invalid request in batched text decode");
+    }
+    const auto previous_requests = requests.first(index);
+    if (std::find(previous_requests.begin(), previous_requests.end(),
+                  request) != previous_requests.end()) {
+      throw std::invalid_argument(
+          "batched text decode contains a duplicate request");
+    }
+    decodes.push_back({
+        .state = dynamic_cast<TextRunnerState&>(request->impl_->lease.state()),
+        .max_tokens = max_tokens[index],
+        .sampler = request->impl_->sampler,
+    });
+  }
+
+  auto steps = impl_->validated.runner->DecodeBatch(decodes);
+  if (steps.size() != requests.size()) {
+    throw std::runtime_error(
+        "text runner returned an invalid decode batch size");
+  }
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    auto& step = steps[index];
+    auto& request = *requests[index]->impl_;
+    if (step.selections.size() > max_tokens[index] ||
+        (step.selections.empty() && !step.stop)) {
+      throw std::runtime_error(
+          "text runner returned an invalid batched decode step");
+    }
+    for (const auto& selection : step.selections) {
+      if (selection.stop) {
+        throw std::runtime_error(
+            "text runner batched decode contains an embedded stop selection");
+      }
+      request.sampler.Accept(selection.token);
+      request.generated.push_back(selection.token);
+    }
+    request.stopped = step.stop;
+  }
+  return steps;
 }
 
 TextRunnerPool::Request TextRunnerPool::Acquire(

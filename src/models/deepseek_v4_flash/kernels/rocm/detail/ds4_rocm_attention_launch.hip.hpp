@@ -1048,7 +1048,8 @@ static int attention_output_q8_batch_launch(
                 return 0;
             }
 
-            constexpr uint32_t rows_per_block = 4u;
+            const uint32_t rows_per_block =
+                n_tokens == 2u ? hip_runtime_config()->attn_q8_batch_rpb : 4u;
             const unsigned grid =
                 (unsigned)((low_dim + rows_per_block - 1u) /
                            rows_per_block);

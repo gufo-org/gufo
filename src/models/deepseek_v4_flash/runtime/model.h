@@ -36,6 +36,13 @@ struct ds4_session_batch_item {
   int token;
 };
 
+struct ds4_session_dspark_batch_item {
+  ds4_session* session;
+  int* emitted;
+  int emitted_cap;
+  int* n_emitted;
+};
+
 inline constexpr int DS4_SESSION_SYNC_INTERRUPTED = 2;
 inline constexpr std::uint32_t DS4_SESSION_PAYLOAD_VERSION = 2;
 
@@ -89,6 +96,9 @@ bool ds4_engine_has_dspark(const ds4_engine* engine);
  * cannot be drafted or verified. */
 int ds4_session_dspark_step(ds4_session* session, int* emitted, int emitted_cap,
                             int* n_emitted, char* error, size_t error_capacity);
+int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
+                                   size_t item_count, char* error,
+                                   size_t error_capacity);
 void ds4_session_dspark_stats(const ds4_session* session, uint64_t* drafted,
                               uint64_t* accepted, uint64_t* support_drafted,
                               uint64_t* support_accepted,

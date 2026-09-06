@@ -209,6 +209,13 @@ struct TextGenerationScheduler::Impl {
                                     .capabilities.incremental_text_is_exact;
     multi_token_decode =
         runner_pool->runner().Descriptor().capabilities.multi_token_decode;
+    batched_multi_token_decode = runner_pool->runner()
+                                     .Descriptor()
+                                     .capabilities.batched_multi_token_decode;
+    batched_multi_token_decode_max_width =
+        runner_pool->runner()
+            .Descriptor()
+            .capabilities.batched_multi_token_decode_max_width;
     worker = std::jthread(
         [this](const std::stop_token& stop_token) { Run(stop_token); });
   }
@@ -637,6 +644,14 @@ struct TextGenerationScheduler::Impl {
 
   void StepDecodeBatch(
       const std::vector<std::shared_ptr<ScheduledRequest>>& requests) {
+    const auto selected_plan = runner_pool->SelectDecodePlan(requests.size());
+    if (batched_multi_token_decode &&
+        (batched_multi_token_decode_max_width == 0 ||
+         selected_plan.physical_width <=
+             batched_multi_token_decode_max_width)) {
+      StepMultiTokenDecodeBatch(requests);
+      return;
+    }
     if (requests.size() == 1) {
       StepDecode(requests.front());
       return;
@@ -710,6 +725,105 @@ struct TextGenerationScheduler::Impl {
           item.request->result.physical_execution_width, plan.physical_width);
       item.request->result.execution_plan = execution_plan;
       FinishAdvanced(item.request, item.decode_start);
+    }
+  }
+
+  void StepMultiTokenDecodeBatch(
+      const std::vector<std::shared_ptr<ScheduledRequest>>& requests) {
+    if (requests.size() == 1) {
+      StepMultiTokenDecode(requests.front());
+      return;
+    }
+
+    consecutive_active_prefill_chunks = 0;
+    struct PreparedRequest {
+      std::shared_ptr<ScheduledRequest> request;
+      Clock::time_point decode_start;
+      std::size_t remaining;
+    };
+    std::vector<PreparedRequest> prepared;
+    prepared.reserve(requests.size());
+    for (const auto& request : requests) {
+      if (CompleteIfStopped(request)) {
+        continue;
+      }
+      request->phase.store(TextRequestPhase::kDecoding,
+                           std::memory_order_release);
+      prepared.push_back({
+          .request = request,
+          .decode_start = Clock::now(),
+          .remaining = request->token_limit - request->result.tokens.size(),
+      });
+    }
+    if (prepared.empty()) {
+      return;
+    }
+    if (prepared.size() == 1) {
+      StepMultiTokenDecode(prepared.front().request);
+      return;
+    }
+
+    const auto plan = runner_pool->SelectDecodePlan(prepared.size());
+    if (plan.kind != TextExecutionPlanKind::kBatched) {
+      for (const auto& item : prepared) {
+        StepMultiTokenDecode(item.request);
+      }
+      return;
+    }
+
+    std::vector<TextRunnerPool::Request*> runner_requests;
+    std::vector<std::size_t> max_tokens;
+    runner_requests.reserve(prepared.size());
+    max_tokens.reserve(prepared.size());
+    for (const auto& item : prepared) {
+      runner_requests.push_back(&item.request->runner_request);
+      max_tokens.push_back(item.remaining);
+    }
+
+    std::vector<TextDecodeStep> steps;
+    try {
+      steps = runner_pool->DecodeBatch(runner_requests, max_tokens, plan);
+    } catch (...) {
+      const auto failure = std::current_exception();
+      for (const auto& item : prepared) {
+        CompleteFailure(item.request, failure);
+      }
+      return;
+    }
+
+    const std::string execution_plan =
+        "dspark-batched-w" + std::to_string(plan.physical_width);
+    for (std::size_t index = 0; index < prepared.size(); ++index) {
+      const auto& item = prepared[index];
+      const auto& step = steps[index];
+      item.request->result.physical_execution_width = std::max(
+          item.request->result.physical_execution_width, plan.physical_width);
+      item.request->result.execution_plan = execution_plan;
+      item.request->result.draft_tokens += step.draft_tokens;
+      item.request->result.draft_accepted_tokens += step.draft_accepted_tokens;
+
+      bool published = true;
+      for (const auto& selection : step.selections) {
+        if (!PublishSelection(item.request, selection)) {
+          published = false;
+          break;
+        }
+      }
+      item.request->result.decode_ms +=
+          std::chrono::duration<double, std::milli>(Clock::now() -
+                                                    item.decode_start)
+              .count();
+      if (!published || IsTerminal(item.request)) {
+        continue;
+      }
+      if (step.stop) {
+        CompleteSuccess(item.request,
+                        TextGenerationBackend::FinishReason::kStop);
+      } else if (item.request->result.tokens.size() >=
+                 item.request->token_limit) {
+        CompleteSuccess(item.request,
+                        TextGenerationBackend::FinishReason::kLength);
+      }
     }
   }
 
@@ -880,6 +994,8 @@ struct TextGenerationScheduler::Impl {
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
+  bool batched_multi_token_decode{false};
+  std::size_t batched_multi_token_decode_max_width{0};
   mutable std::mutex queue_mutex;
   std::condition_variable queue_condition;
   std::deque<PendingClient> queued_clients;

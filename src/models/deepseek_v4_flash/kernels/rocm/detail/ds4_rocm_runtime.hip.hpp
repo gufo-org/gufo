@@ -359,6 +359,10 @@ struct ds4_rocm_runtime_config {
     int shared_down_hipblas;
     int q8_decode_sharedx_64k;
     uint32_t q8_decode_rpb;
+    uint32_t q8_batch_rpb;
+    uint32_t attn_q8_batch_rpb;
+    uint32_t dense_mmq_rows;
+    uint32_t dense_mmq_mask;
     uint32_t q8_hc_decode_rpb;
     uint32_t attn_out_low_decode_rpb;
     uint32_t moe_decode_rpb;
@@ -378,6 +382,25 @@ static const ds4_rocm_runtime_config *hip_runtime_config(void) {
         g_rocm_cfg.shared_down_hipblas = 1;
         g_rocm_cfg.q8_decode_sharedx_64k = 1;
         g_rocm_cfg.q8_decode_rpb = 1u;
+        const char* q8_batch_rpb = getenv("GUFO_DEEPSEEK_ROCM_Q8_BATCH_RPB");
+        g_rocm_cfg.q8_batch_rpb = hip_rows_per_block_or_default(
+            q8_batch_rpb ? (uint32_t)strtoul(q8_batch_rpb, NULL, 10) : 0u, 2u);
+        const char* attn_q8_batch_rpb =
+            getenv("GUFO_DEEPSEEK_ROCM_ATTN_Q8_BATCH_RPB");
+        g_rocm_cfg.attn_q8_batch_rpb = hip_rows_per_block_or_default(
+            attn_q8_batch_rpb ? (uint32_t)strtoul(attn_q8_batch_rpb, NULL, 10)
+                              : 0u,
+            2u);
+        const char* dense_mmq_rows =
+            getenv("GUFO_DEEPSEEK_ROCM_DENSE_MMQ_ROWS");
+        const uint32_t requested_dense_mmq_rows =
+            dense_mmq_rows ? (uint32_t)strtoul(dense_mmq_rows, NULL, 10) : 32u;
+        g_rocm_cfg.dense_mmq_rows =
+            requested_dense_mmq_rows == 32u ? 32u : DS4_ROCM_WIDE_PREFILL_ROWS;
+        const char* dense_mmq_mask =
+            getenv("GUFO_DEEPSEEK_ROCM_DENSE_MMQ_MASK");
+        g_rocm_cfg.dense_mmq_mask =
+            dense_mmq_mask ? (uint32_t)strtoul(dense_mmq_mask, NULL, 0) : 4u;
         g_rocm_cfg.q8_hc_decode_rpb = 16u;
         g_rocm_cfg.attn_out_low_decode_rpb = 32u;
         g_rocm_cfg.moe_decode_rpb = 1u;

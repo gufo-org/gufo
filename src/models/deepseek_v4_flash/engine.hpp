@@ -31,6 +31,12 @@ struct SessionBatchItem {
   int token = 0;
 };
 
+struct SessionDsparkBatchItem {
+  Session* session = nullptr;
+  std::size_t max_tokens = 32;
+  std::vector<int>* emitted = nullptr;
+};
+
 class Model final : public std::enable_shared_from_this<Model> {
 public:
   ~Model();
@@ -48,6 +54,9 @@ public:
       std::uint32_t max_context, std::string* error_msg = nullptr);
   [[nodiscard]] bool EvaluateBatch(std::span<const SessionBatchItem> items,
                                    std::string* error_msg = nullptr) const;
+  [[nodiscard]] bool DsparkStepBatch(
+      std::span<const SessionDsparkBatchItem> items,
+      std::string* error_msg = nullptr) const;
   [[nodiscard]] std::vector<int> Tokenize(std::string_view text) const;
   [[nodiscard]] std::vector<int> EncodeChat(std::string_view system_prompt,
                                             std::string_view user_prompt) const;

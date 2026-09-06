@@ -106,7 +106,9 @@ caches and position; dense projections, attention output, FFN/MoE, and the LM
 head run over the concurrent rows together. Width one stays on the existing
 serial decode path. Set `GUFO_DEEPSEEK_SESSION_BATCH=0` before starting the
 server to disable this route. With DSpark attached, C1 uses speculative decode
-and C2-C8 switch to the matching exact target batch before decode.
+and C2 uses confidence-trimmed batched DSpark. A poor first C2 cycle disables
+further support work for that request pair and keeps the exact W2 target path.
+C4-C8 use the matching exact target batch directly.
 
 ### Reasoning controls
 

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -526,6 +527,127 @@ void CheckDsparkPromptSeed(
          "snapshot restore does not draft across a support-cache gap");
 }
 
+void CheckDsparkSessionBatch(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  using gufo::models::deepseek_v4_flash::SessionDsparkBatchItem;
+
+  constexpr std::size_t kComparedTokens = 24;
+  constexpr std::array<std::string_view, 2> kPrompts{
+      "Continue this technical explanation with concrete examples: virtual "
+      "memory lets an operating system",
+      "Explain why speculative decoding can improve language model inference "
+      "while preserving the target model output.",
+  };
+  std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 2>
+      sequential;
+  std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 2>
+      batched;
+  std::string error;
+  for (std::size_t index = 0; index < kPrompts.size(); ++index) {
+    const auto prompt = model->Tokenize(kPrompts[index]);
+    Expect(!prompt.empty(), "DSpark batch prompt tokenization");
+    sequential[index] = model->CreateSession(512, &error);
+    batched[index] = model->CreateSession(512, &error);
+    Expect(sequential[index] != nullptr, error.c_str());
+    Expect(batched[index] != nullptr, error.c_str());
+    Expect(sequential[index]->Sync(prompt, &error), error.c_str());
+    Expect(batched[index]->Sync(prompt, &error), error.c_str());
+  }
+
+  double serial_seconds = 0.0;
+  double batch_seconds = 0.0;
+  std::array<std::vector<int>, 2> serial_tokens;
+  for (std::size_t index = 0; index < sequential.size(); ++index) {
+    while (serial_tokens[index].size() < kComparedTokens) {
+      std::vector<int> emitted;
+      const auto start = std::chrono::steady_clock::now();
+      Expect(sequential[index]->DsparkStep(&emitted, &error), error.c_str());
+      serial_seconds += std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+      serial_tokens[index].insert(serial_tokens[index].end(), emitted.begin(),
+                                  emitted.end());
+    }
+  }
+
+  std::array<std::vector<int>, 2> batch_tokens;
+  while (batch_tokens[0].size() < kComparedTokens ||
+         batch_tokens[1].size() < kComparedTokens) {
+    std::array<std::vector<int>, 2> emitted;
+    const std::array<SessionDsparkBatchItem, 2> items{{
+        {
+            .session = batched[0].get(),
+            .max_tokens = 32,
+            .emitted = &emitted[0],
+        },
+        {
+            .session = batched[1].get(),
+            .max_tokens = 32,
+            .emitted = &emitted[1],
+        },
+    }};
+    auto start = std::chrono::steady_clock::now();
+    Expect(model->DsparkStepBatch(items, &error), error.c_str());
+    batch_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count();
+    for (std::size_t index = 0; index < batch_tokens.size(); ++index) {
+      batch_tokens[index].insert(batch_tokens[index].end(),
+                                 emitted[index].begin(), emitted[index].end());
+    }
+  }
+
+  std::uint64_t serial_emitted = 0;
+  std::uint64_t batch_emitted = 0;
+  std::uint64_t serial_support_drafted = 0;
+  std::uint64_t serial_support_accepted = 0;
+  std::uint64_t batch_support_drafted = 0;
+  std::uint64_t batch_support_accepted = 0;
+  for (std::size_t index = 0; index < batch_tokens.size(); ++index) {
+    const auto mismatch =
+        std::mismatch(serial_tokens[index].begin(),
+                      serial_tokens[index].begin() + kComparedTokens,
+                      batch_tokens[index].begin());
+    if (mismatch.first != serial_tokens[index].begin() + kComparedTokens) {
+      const std::size_t token_index = static_cast<std::size_t>(
+          mismatch.first - serial_tokens[index].begin());
+      std::cerr << "DSpark batch stream mismatch session=" << index
+                << " token=" << token_index << " serial=" << *mismatch.first
+                << " batch=" << *mismatch.second << "\nserial:";
+      for (const int token : serial_tokens[index]) {
+        std::cerr << ' ' << token;
+      }
+      std::cerr << "\nbatch:";
+      for (const int token : batch_tokens[index]) {
+        std::cerr << ' ' << token;
+      }
+      std::cerr << '\n';
+    }
+    Expect(mismatch.first == serial_tokens[index].begin() + kComparedTokens,
+           "batched DSpark preserves serial DSpark output");
+    const auto serial_stats = sequential[index]->DsparkStatistics();
+    const auto batch_stats = batched[index]->DsparkStatistics();
+    serial_emitted += serial_tokens[index].size();
+    batch_emitted += batch_tokens[index].size();
+    serial_support_drafted += serial_stats.support_drafted;
+    serial_support_accepted += serial_stats.support_accepted;
+    batch_support_drafted += batch_stats.support_drafted;
+    batch_support_accepted += batch_stats.support_accepted;
+  }
+  const double serial_acceptance =
+      static_cast<double>(serial_support_accepted) / serial_support_drafted;
+  const double batch_acceptance =
+      static_cast<double>(batch_support_accepted) / batch_support_drafted;
+  std::cout << "DeepSeek DSpark C2 batch: serial=" << serial_seconds * 1000.0
+            << " ms batch=" << batch_seconds * 1000.0
+            << " ms speedup=" << serial_seconds / batch_seconds << "x combined="
+            << static_cast<double>(batch_emitted) / batch_seconds
+            << " tok/s serial_acceptance=" << serial_acceptance
+            << " batch_acceptance=" << batch_acceptance
+            << " serial_tokens=" << serial_emitted
+            << " batch_tokens=" << batch_emitted << '\n';
+}
+
 }  // namespace
 
 int main() {
@@ -567,6 +689,13 @@ int main() {
     Expect(!model->HasDspark(),
            "session batch diagnostic requires target only");
     CheckSessionBatch(model);
+    return 0;
+  }
+
+  if (std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_BATCH_ONLY") != nullptr) {
+    Expect(model->HasDspark(),
+           "DSpark batch diagnostic requires a support model");
+    CheckDsparkSessionBatch(model);
     return 0;
   }
 

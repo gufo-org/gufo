@@ -110,6 +110,13 @@ int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint64_t contex
 int ds4_gpu_spec_row_argmax_tensor(ds4_gpu_tensor *out_index, const ds4_gpu_tensor *logits, uint32_t vocab, uint32_t n_rows);
 int ds4_gpu_attention_noncausal_raw_batch_heads_tensor(ds4_gpu_tensor *heads, const void *model_map, uint64_t model_size, uint64_t sinks_offset, const ds4_gpu_tensor *q, const ds4_gpu_tensor *raw_kv, uint32_t n_tokens, uint32_t n_raw, uint32_t raw_cap, uint32_t raw_start, uint32_t n_head, uint32_t head_dim);
 int ds4_gpu_dspark_markov_w1_row_tensor(ds4_gpu_tensor *out_state, const void *model_map, uint64_t model_size, uint64_t w1_offset, uint32_t markov_rank, uint32_t token);
+int ds4_gpu_dspark_confidence_tensor(ds4_gpu_tensor* out_probability,
+                                     const ds4_gpu_tensor* hidden_row,
+                                     const void* model_map, uint64_t model_size,
+                                     uint64_t confidence_offset,
+                                     uint64_t w1_offset, uint32_t hidden_dim,
+                                     uint32_t markov_rank,
+                                     uint32_t previous_token);
 int ds4_gpu_dspark_markov_argmax_tensor(ds4_gpu_tensor *out_index, ds4_gpu_tensor *scratch_key, const ds4_gpu_tensor *logits_row, const void *model_map, uint64_t model_size, uint64_t w1_offset, uint64_t w2_offset, uint32_t vocab, uint32_t markov_rank, uint32_t previous_token);
 int ds4_gpu_store_raw_kv_batch_tensor(ds4_gpu_tensor *raw_cache, const ds4_gpu_tensor *kv, uint32_t raw_cap, uint32_t pos0, uint32_t n_tokens, uint32_t head_dim);
 int ds4_gpu_store_raw_kv_tensor(ds4_gpu_tensor *raw_cache, const ds4_gpu_tensor *kv, uint32_t raw_cap, uint32_t row, uint32_t head_dim);

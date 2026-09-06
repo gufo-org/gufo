@@ -778,23 +778,41 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
     if (!wptr) return 0;
     /* Dense Q8 prefill through the vendored MMQ tier. Excluded from DSpark
      * verification blocks so a verified row keeps decode's reduction order. */
-    if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS && !g_small_batch_mode &&
-        g_rocm_mmq_ready &&
-        ds4_mmq_q8_0_dense(
-            wptr,
-            (const float *)x->ptr,
-            (float *)out->ptr,
-            (int)out_dim,
-            (int)n_tok,
-            (int)in_dim,
-            (hipStream_t)0) == 0) {
-        static int notice_printed = 0;
-        if (!notice_printed) {
-            fprintf(stderr,
-                    DS4_GPU_LOG_PREFIX "dense Q8 prefill using native HIP MMQ\n");
-            notice_printed = 1;
-        }
-        return 1;
+    /*
+     * Dense MMQ at pp32 is a quality-sensitive policy, not a blanket size
+     * threshold.  The bit assignments let profiler runs isolate projection
+     * families.  Only Q-B (bit 2) is enabled by default: it improved pp32
+     * throughput while preserving the sequential greedy choice.  KV and Q-A
+     * changed that choice, and enabling more individually-safe families
+     * provided no repeatable gain.
+     */
+    uint32_t dense_mmq_shape_bit = 32u;
+    if (out_dim == 512u) {
+      dense_mmq_shape_bit = 1u;
+    } else if (out_dim == 1024u) {
+      dense_mmq_shape_bit = 2u;
+    } else if (out_dim == 32768u) {
+      dense_mmq_shape_bit = 4u;
+    } else if (out_dim == 2048u) {
+      dense_mmq_shape_bit = 8u;
+    } else if (out_dim == 4096u) {
+      dense_mmq_shape_bit = 16u;
+    }
+    const bool dense_mmq_shape_enabled =
+        n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS ||
+        (hip_runtime_config()->dense_mmq_mask & dense_mmq_shape_bit) != 0u;
+    if (n_tok >= hip_runtime_config()->dense_mmq_rows && !g_small_batch_mode &&
+        dense_mmq_shape_enabled && g_rocm_mmq_ready &&
+        ds4_mmq_q8_0_dense(wptr, (const float*)x->ptr, (float*)out->ptr,
+                           (int)out_dim, (int)n_tok, (int)in_dim,
+                           (hipStream_t)0) == 0) {
+      static int notice_printed = 0;
+      if (!notice_printed) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "dense Q8 prefill using native HIP MMQ\n");
+        notice_printed = 1;
+      }
+      return 1;
     }
     if (n_tok == 1 && !hip_q8_prequant_decode_enabled()) {
         const bool extended_sharedx =
@@ -894,16 +912,12 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
                         xq, xscale, (const float *)x->ptr, in_dim, blocks);
                 if (hip_ok(hipGetLastError(),
                            "matmul_q8_0 narrow batch quantize launch")) {
-                    return hip_launch_q8_batch_reuse(
-                            (float *)out->ptr,
-                            reinterpret_cast<const unsigned char *>(wptr),
-                            xq,
-                            xscale,
-                            in_dim,
-                            out_dim,
-                            blocks,
-                            (uint32_t)n_tok,
-                            hip_runtime_config()->q8_decode_rpb);
+                  return hip_launch_q8_batch_reuse(
+                      (float*)out->ptr,
+                      reinterpret_cast<const unsigned char*>(wptr), xq, xscale,
+                      in_dim, out_dim, blocks, (uint32_t)n_tok,
+                      n_tok == 2u ? hip_runtime_config()->q8_batch_rpb
+                                  : hip_runtime_config()->q8_decode_rpb);
                 }
             }
         }
