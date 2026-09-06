@@ -79,6 +79,21 @@ static uint32_t ds4_rocm_compact_down_rows_per_block(void) {
     return 32u;
 }
 
+static uint32_t ds4_rocm_expert_tile_capacity(
+        uint32_t pair_count,
+        uint32_t tile_m) {
+    const uint32_t first_tiles =
+        pair_count < DS4_ROCM_N_EXPERT ? pair_count : DS4_ROCM_N_EXPERT;
+    /*
+     * Give every live expert its first tile, then charge a complete tile_m
+     * additional pairs for every later tile. This is the exact worst-case
+     * bound over 256 expert buckets. The previous ceil(pair_count/tile_m) plus
+     * one partial tile per expert double-counted the first tile and launched
+     * 25% empty gate/up blocks at C2-C8.
+     */
+    return first_tiles + (pair_count - first_tiles) / tile_m;
+}
+
 /* Mixed IQ2_XXS-gate/Q2_K-down models already compute routed mid activations
  * as float.  Reuse the newer Q2_K expert-batch/WMMA down kernels instead of
  * re-quantizing mid to Q8_K and taking the older qwarp down path.  This keeps
@@ -697,12 +712,14 @@ static int routed_moe_launch(
         const uint32_t gate_row_span = 1024u;
         const uint32_t down_row_span = 2048u;
         const uint32_t use_down_row2048 = !q4k_path && use_atomic_down && use_down_tile16;
+        const uint32_t use_direct_down_sum6 =
+            n_expert == 6u && n_tokens == 1u;
         const uint32_t use_compact_float_down =
             ds4_rocm_verifier_batch_mode() &&
             grouped_gate && n_expert == DS4_ROCM_N_EXPERT_USED &&
             n_tokens > 1u && n_tokens <= 6u;
-        const uint32_t use_direct_down_sum6 =
-            n_expert == 6u && n_tokens == 1u;
+        const uint32_t use_compact_tiled_down =
+            use_compact_float_down && n_tokens >= 3u;
         uint32_t *sorted_pairs = NULL;
         uint32_t *sorted_offsets = NULL;
         uint32_t *sorted_counts = NULL;
@@ -733,17 +750,11 @@ static int routed_moe_launch(
             const uint64_t offsets_bytes = 257ull * sizeof(uint32_t);
             const uint64_t cursors_bytes = 256ull * sizeof(uint32_t);
             const uint64_t sorted_bytes = (uint64_t)pair_count * sizeof(uint32_t);
-            /*
-             * One tile per full group plus at most one partial tile per distinct
-             * expert. A batch cannot touch more experts than it has pairs, so the
-             * old flat +256 slack made a narrow batch launch two orders of
-             * magnitude more tiles than it could ever fill.
-             */
-            const uint32_t tile_slack =
-                pair_count < DS4_ROCM_N_EXPERT ? pair_count : DS4_ROCM_N_EXPERT;
             tile_capacity =
-                (pair_count + expert_tile_m - 1u) / expert_tile_m + tile_slack;
-            tile16_capacity = use_down_tile16 ? ((pair_count + 15u) / 16u + 256u) : 0u;
+                ds4_rocm_expert_tile_capacity(pair_count, expert_tile_m);
+            tile16_capacity = use_down_tile16
+                ? ds4_rocm_expert_tile_capacity(pair_count, 16u)
+                : 0u;
             const uint64_t tile_offsets_bytes = 257ull * sizeof(uint32_t);
             const uint64_t tile_total_bytes = sizeof(uint32_t);
             const uint64_t tile_experts_bytes = (uint64_t)tile_capacity * sizeof(uint32_t);
@@ -790,13 +801,37 @@ static int routed_moe_launch(
                 tile16_starts = use_down_tile16 ? (uint32_t *)(scratch + tile16_starts_off) : NULL;
                 iq2_gate_hot_dev = (uint32_t *)(scratch + iq2_gate_hot_off);
                 wide_tile_map_dev = (uint32_t *)(scratch + wide_tile_map_off);
-                ok = hip_ok(hipMemset(counts, 0, counts_bytes), "routed_moe sorted counts clear");
-                if (ok) {
-                    moe_count_sorted_pairs_kernel<<<(pair_count + 255u) / 256u, 256>>>(
+                const uint32_t use_narrow_sorted_builder =
+                    grouped_gate && pair_count <= 48u && !use_down_tile16;
+                if (use_narrow_sorted_builder) {
+                    moe_build_narrow_sorted_tiles_kernel<<<1, 256>>>(
                         counts,
+                        offsets,
+                        sorted_pairs,
+                        tile_offsets,
+                        tile_total,
+                        tile_experts,
+                        tile_starts,
                         (const int32_t *)selected->ptr,
-                        pair_count);
-                    ok = hip_ok(hipGetLastError(), "routed_moe sorted count launch");
+                        pair_count,
+                        expert_tile_m);
+                    ok = hip_ok(
+                        hipGetLastError(),
+                        "routed_moe narrow sorted tiles launch");
+                } else {
+                    ok = hip_ok(
+                        hipMemset(counts, 0, counts_bytes),
+                        "routed_moe sorted counts clear");
+                    if (ok) {
+                        moe_count_sorted_pairs_kernel<<<
+                                (pair_count + 255u) / 256u, 256>>>(
+                            counts,
+                            (const int32_t *)selected->ptr,
+                            pair_count);
+                        ok = hip_ok(
+                            hipGetLastError(),
+                            "routed_moe sorted count launch");
+                    }
                 }
                 /*
                  * The compact verifier/session down path consumes the device
@@ -817,11 +852,11 @@ static int routed_moe_launch(
                     }
                   }
                 }
-                if (ok) {
+                if (ok && !use_narrow_sorted_builder) {
                     moe_prefix_sorted_pairs_kernel<<<1, 1>>>(offsets, cursors, counts);
                     ok = hip_ok(hipGetLastError(), "routed_moe sorted prefix launch");
                 }
-                if (ok) {
+                if (ok && !use_narrow_sorted_builder) {
                     moe_scatter_sorted_pairs_deterministic_kernel<<<
                             256u, 256u, 256u * sizeof(uint32_t)>>>(
                         sorted_pairs,
@@ -830,11 +865,13 @@ static int routed_moe_launch(
                         pair_count);
                     ok = hip_ok(hipGetLastError(), "routed_moe sorted scatter launch");
                 }
-                if (ok && use_expert_tiles) {
+                if (ok && use_expert_tiles &&
+                    !use_narrow_sorted_builder) {
                     moe_build_expert_tile_offsets_kernel<<<1, 1>>>(tile_offsets, tile_total, counts, expert_tile_m);
                     ok = hip_ok(hipGetLastError(), "routed_moe expert tile offsets launch");
                 }
-                if (ok && use_expert_tiles) {
+                if (ok && use_expert_tiles &&
+                    !use_narrow_sorted_builder) {
                     moe_build_expert_tiles_kernel<<<1, 256>>>(tile_experts, tile_starts, tile_offsets, counts, expert_tile_m);
                     ok = hip_ok(hipGetLastError(), "routed_moe expert tiles launch");
                 }
@@ -1322,22 +1359,47 @@ static int routed_moe_launch(
             if (use_compact_float_down) {
                 const uint32_t rows_per_block =
                     ds4_rocm_compact_down_rows_per_block();
-                const uint32_t pair_count = n_tokens * n_expert;
-                dim3 compact_grid(
-                    (out_dim + rows_per_block - 1u) / rows_per_block,
-                    pair_count,
-                    1u);
-                moe_down_q2K_pair_float_batch_warp32_kernel
-                    <<<compact_grid, rows_per_block * 32u>>>(
-                        (__half *)down->ptr,
-                        down_w,
-                        (const float *)mid->ptr,
-                        (const int32_t *)selected->ptr,
-                        down_expert_bytes,
-                        down_row_bytes,
-                        expert_mid_dim,
-                        out_dim,
-                        pair_count);
+                if (use_compact_tiled_down &&
+                    tile_total && tile_experts && tile_starts &&
+                    sorted_pairs && sorted_offsets && sorted_counts) {
+                    dim3 compact_grid(
+                        (out_dim + rows_per_block - 1u) / rows_per_block,
+                        tile_capacity,
+                        1u);
+                    moe_down_q2K_tile4_float_batch_warp32_kernel
+                        <<<compact_grid, rows_per_block * 32u,
+                           4u * 256u * sizeof(float)>>>(
+                            (__half *)down->ptr,
+                            down_w,
+                            (const float *)mid->ptr,
+                            sorted_pairs,
+                            sorted_offsets,
+                            sorted_counts,
+                            tile_total,
+                            tile_experts,
+                            tile_starts,
+                            down_expert_bytes,
+                            down_row_bytes,
+                            expert_mid_dim,
+                            out_dim);
+                } else {
+                    const uint32_t pair_count = n_tokens * n_expert;
+                    dim3 compact_grid(
+                        (out_dim + rows_per_block - 1u) / rows_per_block,
+                        pair_count,
+                        1u);
+                    moe_down_q2K_pair_float_batch_warp32_kernel
+                        <<<compact_grid, rows_per_block * 32u>>>(
+                            (__half *)down->ptr,
+                            down_w,
+                            (const float *)mid->ptr,
+                            (const int32_t *)selected->ptr,
+                            down_expert_bytes,
+                            down_row_bytes,
+                            expert_mid_dim,
+                            out_dim,
+                            pair_count);
+                }
                 ok = hip_ok(
                     hipGetLastError(),
                     "routed_moe compact float down launch");

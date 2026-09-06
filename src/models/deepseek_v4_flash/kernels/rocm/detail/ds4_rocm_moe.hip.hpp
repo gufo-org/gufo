@@ -831,6 +831,77 @@ __global__ static void moe_prefix_sorted_pairs_kernel(
     }
 }
 
+/*
+ * Build the complete narrow-batch expert index in one workgroup.
+ *
+ * Pair threads build shared counts, then compute their stable rank among
+ * earlier pairs. The block prefixes the 256 counts and writes both
+ * deterministic pair order and the expert-tile map. This replaces memset plus
+ * five tiny dependent kernels on C2-C8 without making every expert rescan the
+ * pair list.
+ */
+__global__ static void moe_build_narrow_sorted_tiles_kernel(
+        uint32_t *counts,
+        uint32_t *offsets,
+        uint32_t *sorted_pairs,
+        uint32_t *tile_offsets,
+        uint32_t *tile_total,
+        uint32_t *tile_experts,
+        uint32_t *tile_starts,
+        const int32_t *selected,
+        uint32_t pair_count,
+        uint32_t tile_m) {
+    __shared__ uint32_t shared_experts[48];
+    __shared__ uint32_t shared_counts[256];
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t expert = tid;
+    shared_counts[expert] = 0u;
+    if (tid < pair_count) {
+        int32_t expert_i = selected[tid];
+        if (expert_i < 0) expert_i = 0;
+        shared_experts[tid] = (uint32_t)expert_i;
+    }
+    __syncthreads();
+
+    if (tid < pair_count) {
+        atomicAdd(&shared_counts[shared_experts[tid]], 1u);
+    }
+    __syncthreads();
+
+    const uint32_t count = shared_counts[expert];
+    counts[expert] = count;
+    if (expert == 0u) {
+        uint32_t pair_off = 0u;
+        uint32_t tile_off = 0u;
+        for (uint32_t e = 0; e < 256u; e++) {
+            offsets[e] = pair_off;
+            tile_offsets[e] = tile_off;
+            pair_off += shared_counts[e];
+            tile_off += (shared_counts[e] + tile_m - 1u) / tile_m;
+        }
+        offsets[256] = pair_off;
+        tile_offsets[256] = tile_off;
+        *tile_total = tile_off;
+    }
+    __syncthreads();
+
+    if (tid < pair_count) {
+        const uint32_t pair_expert = shared_experts[tid];
+        uint32_t rank = 0u;
+        for (uint32_t pair = 0; pair < tid; pair++) {
+            rank += shared_experts[pair] == pair_expert;
+        }
+        sorted_pairs[offsets[pair_expert] + rank] = tid;
+    }
+    const uint32_t first_tile = tile_offsets[expert];
+    const uint32_t n_tiles = (count + tile_m - 1u) / tile_m;
+    for (uint32_t t = 0; t < n_tiles; t++) {
+        tile_experts[first_tile + t] = expert;
+        tile_starts[first_tile + t] = t * tile_m;
+    }
+}
+
 __global__ static void moe_scatter_sorted_pairs_kernel(
         uint32_t *sorted_pairs,
         uint32_t *cursors,
@@ -3467,6 +3538,124 @@ __global__ static void moe_down_q2K_pair_float_batch_warp32_kernel(
     acc = warp_sum_f32(acc);
     if (lane == 0u) {
         down_out_h[(uint64_t)pair * out_dim + row] = __float2half(acc);
+    }
+}
+
+/*
+ * Narrow grouped float down projection.
+ *
+ * A tile contains up to four rows routed to the same expert. Singleton tiles
+ * take the exact compact-pair path without LDS. Multi-pair tiles stage their
+ * mid rows and dequantize each Q2_K weight once, while preserving each pair's
+ * K order, warp reduction, and F16 output boundary.
+ */
+__global__ static void moe_down_q2K_tile4_float_batch_warp32_kernel(
+        __half *down_out_h,
+        const char *down_base,
+        const float *mid,
+        const uint32_t *sorted_pairs,
+        const uint32_t *offsets,
+        const uint32_t *counts,
+        const uint32_t *tile_total,
+        const uint32_t *tile_experts,
+        const uint32_t *tile_starts,
+        uint64_t down_expert_bytes,
+        uint64_t down_row_bytes,
+        uint32_t expert_mid_dim,
+        uint32_t out_dim) {
+    const uint32_t tile = blockIdx.y;
+    if (tile >= *tile_total) return;
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t rows_per_block = blockDim.x >> 5u;
+    const uint32_t row =
+        blockIdx.x * rows_per_block + (tid >> 5u);
+    const uint32_t expert = tile_experts[tile];
+    const uint32_t count = counts[expert];
+    const uint32_t local_start = tile_starts[tile];
+    uint32_t pair[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+    uint32_t np = 0u;
+#pragma unroll
+    for (; np < 4u; np++) {
+        const uint32_t local_pair = local_start + np;
+        if (local_pair >= count) break;
+        pair[np] = sorted_pairs[offsets[expert] + local_pair];
+    }
+
+    const unsigned char *down_row =
+        (const unsigned char *)down_base +
+        (uint64_t)expert * down_expert_bytes +
+        (uint64_t)(row < out_dim ? row : 0u) * down_row_bytes;
+    const uint32_t n_blocks = expert_mid_dim >> 8u;
+    if (np == 1u) {
+        if (row >= out_dim) return;
+        const float *mid_row =
+            mid + (uint64_t)pair[0] * expert_mid_dim;
+        float acc = 0.0f;
+        for (uint32_t b = 0; b < n_blocks; b++) {
+            const unsigned char *weight_block =
+                down_row + (uint64_t)b * 84u;
+            float d = 0.0f;
+            float dmin = 0.0f;
+            q2_K_scale_broadcast_w32(weight_block, &d, &dmin);
+#pragma unroll
+            for (uint32_t k = 0; k < 8u; k++) {
+                const uint32_t i = lane + (k << 5u);
+                const float weight = q2_K_dequant_256_scaled_w32(
+                    weight_block, lane, k, d, dmin);
+                acc += weight * mid_row[(uint64_t)b * 256u + i];
+            }
+        }
+        acc = warp_sum_f32(acc);
+        if (lane == 0u) {
+            down_out_h[(uint64_t)pair[0] * out_dim + row] =
+                __float2half(acc);
+        }
+        return;
+    }
+
+    extern __shared__ float shmid[];
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t b = 0; b < n_blocks; b++) {
+        const uint64_t mid_base = (uint64_t)b * 256u;
+        for (uint32_t j = tid; j < np * 256u; j += blockDim.x) {
+            const uint32_t p = j >> 8u;
+            const uint32_t k = j & 255u;
+            shmid[j] =
+                mid[(uint64_t)pair[p] * expert_mid_dim + mid_base + k];
+        }
+        __syncthreads();
+        if (row < out_dim) {
+            const unsigned char *weight_block =
+                down_row + (uint64_t)b * 84u;
+            float d = 0.0f;
+            float dmin = 0.0f;
+            q2_K_scale_broadcast_w32(weight_block, &d, &dmin);
+#pragma unroll
+            for (uint32_t k = 0; k < 8u; k++) {
+                const uint32_t i = lane + (k << 5u);
+                const float weight = q2_K_dequant_256_scaled_w32(
+                    weight_block, lane, k, d, dmin);
+#pragma unroll
+                for (uint32_t p = 0; p < 4u; p++) {
+                    if (p < np) {
+                        acc[p] += weight * shmid[(p << 8u) + i];
+                    }
+                }
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (uint32_t p = 0; p < 4u; p++) {
+        if (p < np) {
+            acc[p] = warp_sum_f32(acc[p]);
+            if (lane == 0u && row < out_dim) {
+                down_out_h[(uint64_t)pair[p] * out_dim + row] =
+                    __float2half(acc[p]);
+            }
+        }
     }
 }
 
