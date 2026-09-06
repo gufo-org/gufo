@@ -73,6 +73,7 @@ int ds4_session_eval(ds4_session* session, int token, char* error,
 int ds4_sessions_eval_batch(const ds4_session_batch_item* items,
                             size_t item_count, char* error,
                             size_t error_capacity);
+void ds4_session_prepare_batch_execution(ds4_session* session);
 /* Measures whether batched DSpark verification reproduces one-token decode's
  * greedy continuation, and how much cheaper a verification block is than the
  * tokens it replaces. Returns 0 when the suffix agrees exactly. */

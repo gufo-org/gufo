@@ -105,7 +105,8 @@ and chooses the exact runnable width. Every request keeps its own attention
 caches and position; dense projections, attention output, FFN/MoE, and the LM
 head run over the concurrent rows together. Width one stays on the existing
 serial decode path. Set `GUFO_DEEPSEEK_SESSION_BATCH=0` before starting the
-server to disable this route. DSpark sessions remain serial.
+server to disable this route. With DSpark attached, C1 uses speculative decode
+and C2-C8 switch to the matching exact target batch before decode.
 
 ### Reasoning controls
 

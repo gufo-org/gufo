@@ -786,6 +786,34 @@ struct TextGenerationScheduler::Impl {
       }
 
       const bool due_decoder = HasDueDecoder(decoding);
+      const std::size_t resident_count = prefilling.size() + decoding.size();
+      const bool preparing_multi_token_batch =
+          multi_token_decode && resident_count > 1 && !prefilling.empty() &&
+          runner_pool->SelectDecodePlan(resident_count).kind ==
+              TextExecutionPlanKind::kBatched;
+      if (preparing_multi_token_batch) {
+        for (const auto& pending : prefilling) {
+          pending->runner_request.PrepareBatchExecution();
+        }
+        for (const auto& ready : decoding) {
+          ready->runner_request.PrepareBatchExecution();
+        }
+      }
+      if (preparing_multi_token_batch && !decoding.empty()) {
+        auto request = std::move(prefilling.front());
+        prefilling.pop_front();
+        StepPrefill(request, true);
+        if (!IsTerminal(request)) {
+          if (request->runner_request.prefill_complete()) {
+            request->decode_due = true;
+            decoding.push_back(std::move(request));
+          } else {
+            prefilling.push_back(std::move(request));
+          }
+        }
+        continue;
+      }
+
       if (!prefilling.empty() && !decoding.empty() && !due_decoder) {
         auto request = std::move(prefilling.front());
         prefilling.pop_front();
@@ -810,7 +838,7 @@ struct TextGenerationScheduler::Impl {
                 : decoding.size();
         const auto plan = runner_pool->SelectDecodePlan(candidate_count);
         const std::size_t batch_size =
-            !multi_token_decode && plan.kind == TextExecutionPlanKind::kBatched
+            plan.kind == TextExecutionPlanKind::kBatched
                 ? std::min(candidate_count, plan.physical_width)
                 : 1;
         std::vector<std::shared_ptr<ScheduledRequest>> batch;

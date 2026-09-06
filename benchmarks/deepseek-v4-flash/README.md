@@ -237,8 +237,11 @@ indexer attention state at its own absolute position.
 The narrow attention-output kernel quantizes every row exactly as C=1 does,
 then loads each Q8 weight block once and carries one accumulator per concurrent
 session. This preserves the per-row block and warp reduction order while
-reusing the weight stream across W2-W8. DSpark stays serial, and
-`GUFO_DEEPSEEK_SESSION_BATCH=0` provides an operational fallback.
+reusing the weight stream across W2-W8. With DSpark, C1 keeps speculative
+decoding. A C2-C8 wave switches to the exact target W2-W8 plan before prefill,
+so it does not spend time capturing support features or drafting tokens that
+the concurrent target path cannot consume. `GUFO_DEEPSEEK_SESSION_BATCH=0`
+provides an operational fallback.
 
 Exact physical plans remove the old C5/C6 padding to W8. The W6 attention
 output-A specialization improves the measured C6 decode rate without changing
@@ -339,6 +342,58 @@ existing three W4 steps, changed W2 membership, W8 step, and return to C1:
 The one free-running difference is a near-tie; the serial winner remains in
 the batch top three. Cancellation, duplicate-session and invalid-token
 preflight, and transition back to serial decode are covered by the same test.
+
+### Adaptive DSpark serving
+
+DSpark now works through the OpenAI-compatible server with
+`--speculative dspark --dspark-model <path>`. Its request policy follows the
+measured crossover:
+
+- C1 uses DSpark speculative decoding.
+- C2-C8 use exact target batching at the matching physical width.
+- A later cold C1 request enables DSpark again; target-only state does not leak
+  across session reuse.
+
+Serializing one DSpark cycle per request was slower than target batching at
+every measured concurrent width and varied with draft acceptance. The scheduler
+therefore marks the entire concurrent wave target-only before its first prefill
+and completes all prefills before decode. This avoids both unused support
+feature capture and an admission-order window in which one request could begin
+drafting before its peers became ready.
+
+Release-package qualification used a 121-token prompt, 64 greedy output tokens,
+one warmup, and two measured rounds:
+
+| C | Physical plan | Per-request decode tok/s | Combined active decode tok/s | Prefill tok/s | Total processed tok/s |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 2 | W2 | 13.86 | 27.73 | 178.48 | 61.92 |
+| 4 | W4 | 10.04 | 40.16 | 178.44 | 81.41 |
+| 6 | W6 | 8.15 | 48.90 | 178.74 | 93.06 |
+| 8 | W8 | 8.01 | 64.09 | 178.62 | 110.24 |
+
+`C` is the number of active requests and `W` is the number of rows advanced by
+one physical target pass. Each of two C2 users receives 13.86 decode tok/s; the
+GPU advances them at 27.73 tok/s combined. Total processed tok/s also counts all
+prompt tokens and is not a decode-speed measurement. C2-C8 draft zero tokens,
+so speculative acceptance is not defined for those exact target waves.
+
+C1 retains the same DSpark decisions after the scheduler and memory changes.
+Repeated prompts produced identical text and the same drafted/accepted counts:
+40/16, 80/44, 80/47, and 40/19. The three-prompt quality corpus remains at
+58.5% aggregate acceptance with two of three outputs byte-exact; the remaining
+near-tie trajectory is unchanged from the qualified DSpark baseline.
+
+Prompt capture now grows only while a DSpark session is prefilling and shrinks
+to the verification width afterward. All DSpark sessions borrow one
+engine-owned 4,096-row batch workspace because scheduler execution is
+serialized. Eight resident sessions load with about 17 GiB still available,
+instead of allocating roughly 4 GiB of duplicate prompt workspace per session.
+Warm unified-memory model loads remain 21.4-21.6 seconds.
+
+Moving greedy vocabulary sampling to a separate GPU argmax was also measured.
+The selected tokens were identical and host readback took about 0.012 ms, but
+the extra vocabulary scan and logits persistence slowed C2-C8. That experiment
+was removed; the retained path keeps the existing fused/host selection behavior.
 
 ## Quality and Integration
 

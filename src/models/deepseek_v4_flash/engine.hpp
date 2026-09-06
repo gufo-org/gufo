@@ -102,8 +102,14 @@ public:
                                          std::string* error_msg = nullptr);
   /// True when this session has a DSpark drafter attached.
   [[nodiscard]] bool HasDspark() const;
+  /// Discards DSpark-only request state before exact multi-session execution.
+  void PrepareBatchExecution();
   /// Runs one greedy speculative cycle and appends the emitted tokens.
   [[nodiscard]] bool DsparkStep(std::vector<int>* emitted,
+                                std::string* error_msg = nullptr);
+  /// Runs one greedy speculative cycle without committing more than max_tokens.
+  [[nodiscard]] bool DsparkStep(std::size_t max_tokens,
+                                std::vector<int>* emitted,
                                 std::string* error_msg = nullptr);
   struct DsparkStats {
     std::uint64_t verifier_rows{0};

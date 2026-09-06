@@ -278,16 +278,29 @@ bool Session::HasDspark() const {
   return ds4_engine_has_dspark(model_->engine_);
 }
 
+void Session::PrepareBatchExecution() {
+  ds4_session_prepare_batch_execution(session_);
+}
+
 bool Session::DsparkStep(std::vector<int>* emitted, std::string* error_msg) {
+  return DsparkStep(32, emitted, error_msg);
+}
+
+bool Session::DsparkStep(std::size_t max_tokens, std::vector<int>* emitted,
+                         std::string* error_msg) {
   if (emitted == nullptr) {
     AssignError(error_msg, "DSpark step needs an output buffer");
     return false;
   }
+  if (max_tokens == 0) {
+    AssignError(error_msg, "DSpark step needs a positive token budget");
+    return false;
+  }
   std::array<int, 32> block{};
+  const int capacity = static_cast<int>(std::min(max_tokens, block.size()));
   int produced = 0;
   std::array<char, kErrorCapacity> error{};
-  if (ds4_session_dspark_step(session_, block.data(),
-                              static_cast<int>(block.size()), &produced,
+  if (ds4_session_dspark_step(session_, block.data(), capacity, &produced,
                               error.data(), error.size()) != 0) {
     AssignError(error_msg, error[0] != '\0'
                                ? error.data()

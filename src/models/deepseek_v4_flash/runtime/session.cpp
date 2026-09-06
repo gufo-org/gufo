@@ -32,6 +32,8 @@ struct ds4_session {
     uint64_t dspark_steps;
     uint64_t dspark_skipped;
     uint32_t dspark_skip_remaining;
+    bool dspark_plain_only;
+    bool dspark_force_plain_request;
 };
 
 static void set_error(char *error,
@@ -45,6 +47,26 @@ static void set_error(char *error,
 static bool session_cancelled(const ds4_session *session) {
     return session && session->cancel &&
            session->cancel(session->cancel_user_data);
+}
+
+static void session_dspark_reset_request_state(ds4_session *session,
+                                               bool preserve_force_plain) {
+    if (!session) return;
+    const bool force_plain =
+        preserve_force_plain && session->dspark_force_plain_request;
+    session->dspark_drafted = 0;
+    session->dspark_accepted = 0;
+    session->dspark_support_drafted = 0;
+    session->dspark_support_accepted = 0;
+    session->dspark_positional_accepted = 0;
+    session->dspark_anchors = 0;
+    session->dspark_full_blocks = 0;
+    session->dspark_steps = 0;
+    session->dspark_skipped = 0;
+    session->dspark_skip_remaining = 0;
+    session->dspark_force_plain_request = force_plain;
+    session->dspark_plain_only = force_plain;
+    ds4_rocm_graph_dspark_set_capture_enabled(session->graph, !force_plain);
 }
 
 int ds4_session_create(ds4_session **out,
@@ -111,6 +133,16 @@ void ds4_session_set_cancel(ds4_session *session,
 void ds4_session_invalidate(ds4_session *session) {
     if (!session) return;
     session->checkpoint_valid = false;
+    session_dspark_reset_request_state(session, false);
+}
+
+void ds4_session_prepare_batch_execution(ds4_session *session) {
+    if (!session || ds4_rocm_graph_dspark_block_size(session->graph) == 0u) {
+        return;
+    }
+    session->dspark_force_plain_request = true;
+    session->dspark_plain_only = true;
+    ds4_rocm_graph_dspark_set_capture_enabled(session->graph, false);
 }
 
 /*
@@ -228,6 +260,7 @@ int ds4_session_sync(ds4_session *session,
     }
 
     session->checkpoint_valid = false;
+    session_dspark_reset_request_state(session, true);
     if (!ds4_rocm_graph_reset(session->graph)) {
         set_error(error, error_capacity, "ROCm prefill state reset failed");
         return 1;
@@ -366,12 +399,6 @@ int ds4_sessions_eval_batch(const ds4_session_batch_item *items,
                       "batch decode exceeds a session context");
             return 1;
         }
-        if (ds4_rocm_graph_dspark_block_size(session->graph) != 0) {
-            set_error(error,
-                      error_capacity,
-                      "DSpark sessions do not support batch decode");
-            return 1;
-        }
         for (size_t previous = 0; previous < index; ++previous) {
             if (items[previous].session == session) {
                 set_error(error,
@@ -401,6 +428,16 @@ int ds4_sessions_eval_batch(const ds4_session_batch_item *items,
     for (size_t index = 0; index < item_count; ++index) {
         ds4_tokens_push(&items[index].session->checkpoint, items[index].token);
         items[index].session->checkpoint_valid = true;
+        /*
+         * The multi-session target path does not capture per-session sampled
+         * hidden states for the support ring. Keep this request on exact target
+         * batching after its first concurrent step; a cold request reset
+         * enables DSpark again.
+         */
+        items[index].session->dspark_plain_only = true;
+        items[index].session->dspark_force_plain_request = true;
+        ds4_rocm_graph_dspark_set_capture_enabled(
+            items[index].session->graph, false);
     }
     return 0;
 }
@@ -910,7 +947,7 @@ int ds4_session_dspark_step(ds4_session *session,
     /* Fall back to one ordinary token whenever a block cannot be drafted or
      * verified: no drafter, no captured features, or not enough context room. */
     bool can_draft =
-        block != 0 && length >= 2 &&
+        !session->dspark_plain_only && block != 0 && length >= 2 &&
         length + (int)block + 1 < session->context_size &&
         ds4_rocm_graph_dspark_context_len(session->graph) >=
             required_context &&

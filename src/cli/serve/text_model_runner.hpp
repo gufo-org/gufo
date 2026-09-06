@@ -186,6 +186,12 @@ public:
     (void)state;
     (void)prefix;
   }
+  /// Tells a request state that its next execution will use a multi-request
+  /// batch. Runners with request-local speculative state may discard work that
+  /// the batched path cannot consume.
+  virtual void PrepareBatchExecution(TextRunnerState& state) const {
+    (void)state;
+  }
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;
@@ -262,6 +268,7 @@ public:
     [[nodiscard]] std::size_t prompt_tokens() const noexcept;
     [[nodiscard]] bool prefill_complete() const noexcept;
 
+    void PrepareBatchExecution();
     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
     [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();

@@ -141,6 +141,7 @@ struct FakeControl {
   std::atomic<std::size_t> invalidations{0};
   std::atomic<std::size_t> states_created{0};
   std::atomic<std::size_t> decode_calls{0};
+  std::atomic<std::size_t> batch_preparations{0};
   bool incremental_prefill{true};
   bool supports_batched_advance{false};
   bool final_token_advance_required{true};
@@ -264,6 +265,11 @@ public:
   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
     control_->states_created.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FakeState>(control_);
+  }
+
+  void PrepareBatchExecution(TextRunnerState& state) const override {
+    (void)RequireFakeState(state);
+    control_->batch_preparations.fetch_add(1, std::memory_order_relaxed);
   }
 
   [[nodiscard]] TextPrefillStep Prefill(
@@ -524,6 +530,33 @@ void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
   const auto second = scheduler->Submit({7, 70}, 2, 0.0F).Wait();
   Expect(!second.cache_hit,
          "runner-disabled prefix reuse cannot retain speculative state");
+}
+
+void TestMultiTokenRunnerCanSwitchToBatchedExecution() {
+  auto control = std::make_shared<FakeControl>();
+  control->multi_token_decode = true;
+  control->prefix_reuse = false;
+  control->supports_batched_advance = true;
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 2);
+
+  auto request_a = scheduler->Submit({1, 10}, 4, 0.0F);
+  control->WaitForPrefill(1);
+  auto request_b = scheduler->Submit({2, 20}, 4, 0.0F);
+  control->ReleasePrefill();
+
+  const auto result_a = request_a.Wait();
+  const auto result_b = request_b.Wait();
+  Expect(result_a.tokens == ExpectedTokens(1, 4) &&
+             result_b.tokens == ExpectedTokens(2, 4),
+         "batched speculative-capable requests preserve both trajectories");
+  Expect(result_a.execution_plan == "batched-w2" &&
+             result_b.execution_plan == "batched-w2",
+         "speculative-capable requests can use the physical W2 plan");
+  Expect(result_a.draft_tokens == 0 && result_b.draft_tokens == 0,
+         "target batching bypasses per-request draft steps");
+  Expect(control->batch_preparations.load(std::memory_order_relaxed) >= 2,
+         "both resident states are prepared before target batching");
 }
 
 void TestMultiResidentPrefillUsesBoundedWorkUnits() {
@@ -1051,6 +1084,7 @@ int main() {
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRunnerCanReuseExactIncrementalText();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
+  TestMultiTokenRunnerCanSwitchToBatchedExecution();
   TestMultiResidentPrefillUsesBoundedWorkUnits();
   TestDecodeActivePrefillIsBounded();
   TestPrefillYieldsToEveryDueDecoder();

@@ -346,6 +346,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string preserve_thinking = "auto";
     std::string speculative_backend;
     std::string dflash_model_path;
+    std::string dspark_model_path;
     std::string mtp_model_path;
     std::size_t draft_tokens = 7;
     std::string draft_policy = "auto";
@@ -404,11 +405,14 @@ void PrintServeHelp(std::string_view program_name,
 
     // Speculative & Hardware
     parser.AddOption("", "--speculative", "MODE",
-                     "HTTP draft backend: dflash, dflash2, or off",
+                     "HTTP draft backend: dspark, dflash, dflash2, or off",
                      "Speculative", &speculative_backend);
     parser.AddOption("", "--dflash-model", "PATH",
                      "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
                      "Speculative", &dflash_model_path);
+    parser.AddOption("", "--dspark-model", "PATH",
+                     "Path to DeepSeek V4 Flash DSpark support GGUF file",
+                     "Speculative", &dspark_model_path);
     parser.AddOption("", "--mtp-model", "PATH",
                      "Path to quantized Qwen MTP draft head GGUF file",
                      "Speculative", &mtp_model_path);
@@ -908,6 +912,7 @@ int RunServe(std::span<const char* const> args) {
     std::string preserve_thinking = "auto";
     std::string speculative_backend;
     std::string dflash_model_path;
+    std::string dspark_model_path;
     std::string mtp_model_path;
     std::size_t draft_tokens = 7;
     std::string draft_policy = "auto";
@@ -960,11 +965,14 @@ int RunServe(std::span<const char* const> args) {
                          "Replay prior reasoning: on, off, or auto",
                          "Reasoning Defaults", &preserve_thinking);
     llm_parser.AddOption("", "--speculative", "MODE",
-                         "HTTP draft backend: dflash, dflash2, or off",
+                         "HTTP draft backend: dspark, dflash, dflash2, or off",
                          "Speculative", &speculative_backend);
     llm_parser.AddOption("", "--dflash-model", "PATH",
                          "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
                          "Speculative", &dflash_model_path);
+    llm_parser.AddOption("", "--dspark-model", "PATH",
+                         "Path to DeepSeek V4 Flash DSpark support GGUF file",
+                         "Speculative", &dspark_model_path);
     llm_parser.AddOption("", "--mtp-model", "PATH",
                          "Path to quantized Qwen MTP draft head GGUF file",
                          "Speculative", &mtp_model_path);
@@ -1085,12 +1093,17 @@ int RunServe(std::span<const char* const> args) {
                speculative_backend == "dflash2" ||
                speculative_backend == "dflash-2") {
       speculative_config.backend = server::TextSpeculativeBackend::kDFlash;
+    } else if (speculative_backend == "dspark") {
+      speculative_config.backend = server::TextSpeculativeBackend::kDSpark;
     } else {
       std::cerr << "Error: speculative backend '" << speculative_backend
                 << "' is not supported by the HTTP server\n";
       return 2;
     }
-    speculative_config.draft_model_path = dflash_model_path;
+    speculative_config.draft_model_path =
+        speculative_config.backend == server::TextSpeculativeBackend::kDSpark
+            ? dspark_model_path
+            : dflash_model_path;
     speculative_config.max_draft_tokens =
         static_cast<std::uint32_t>(draft_tokens);
     speculative_config.min_draft_tokens =
@@ -1148,6 +1161,9 @@ int RunServe(std::span<const char* const> args) {
                 << speculative_config.max_draft_tokens
                 << ", min_draft_tokens=" << speculative_config.min_draft_tokens
                 << ", draft_p_min=" << speculative_config.draft_p_min << ")\n";
+    } else if (speculative_config.backend ==
+               server::TextSpeculativeBackend::kDSpark) {
+      std::cout << "[Speculative]: DSpark enabled\n";
     }
     backend->set_model_id(served_model_name);
     backend->set_sampling_defaults(max_tokens, sampling_config);

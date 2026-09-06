@@ -26,6 +26,7 @@ namespace gufo::server {
 enum class TextSpeculativeBackend : std::uint8_t {
   kDisabled,
   kDFlash,
+  kDSpark,
 };
 
 enum class TextDraftPolicy : std::uint8_t {

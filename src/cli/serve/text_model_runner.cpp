@@ -563,6 +563,14 @@ bool TextRunnerPool::Request::prefill_complete() const noexcept {
   return impl_ != nullptr && impl_->decode_ready;
 }
 
+void TextRunnerPool::Request::PrepareBatchExecution() {
+  if (!*this) {
+    throw std::logic_error("text runner request is empty");
+  }
+  impl_->runner->PrepareBatchExecution(
+      dynamic_cast<TextRunnerState&>(impl_->lease.state()));
+}
+
 TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   if (!*this) {
     throw std::logic_error("text runner request is empty");

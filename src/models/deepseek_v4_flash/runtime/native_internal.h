@@ -35,6 +35,7 @@ struct ds4_engine {
     ds4_vocab *vocab;
     ds4_weights *weights;
     ds4_dspark_model *dspark;
+    ds4_rocm_graph *dspark_batch_workspace;
     int power_percent;
     uint32_t prefill_chunk;
     bool rocm_ready;
@@ -146,6 +147,8 @@ bool ds4_rocm_graph_dspark_attach(ds4_rocm_graph *graph,
                                   ds4_engine *engine,
                                   const ds4_dspark_model *dspark);
 uint32_t ds4_rocm_graph_dspark_block_size(const ds4_rocm_graph *graph);
+void ds4_rocm_graph_dspark_set_capture_enabled(ds4_rocm_graph *graph,
+                                               bool enabled);
 bool ds4_rocm_graph_dspark_capture_ready(const ds4_rocm_graph *graph);
 void ds4_rocm_graph_dspark_capture_reset(ds4_rocm_graph *graph);
 uint32_t ds4_rocm_graph_dspark_batch_capture_rows(const ds4_rocm_graph *graph,

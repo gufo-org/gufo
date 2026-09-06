@@ -1816,6 +1816,8 @@ const char *ds4_engine_model_name(const ds4_engine *e) {
 
 void ds4_engine_close(ds4_engine *e) {
     if (!e) return;
+    ds4_rocm_graph_destroy(e->dspark_batch_workspace);
+    e->dspark_batch_workspace = NULL;
     ds4_dspark_close(e->dspark);
     e->dspark = NULL;
     weights_free(e->weights);

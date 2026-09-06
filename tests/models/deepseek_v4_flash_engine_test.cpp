@@ -475,15 +475,15 @@ void CheckDsparkPromptSeed(
   Expect(session != nullptr, error.c_str());
   Expect(session->Sync(prompt, &error), error.c_str());
   auto stats = session->DsparkStatistics();
-  Expect(stats.context_tokens == 0,
-         "DSpark prompt cache is lazy during target prefill");
+  Expect(stats.context_tokens >= prompt.size(),
+         "DSpark prefill seeds the complete prompt");
 
   std::vector<int> emitted;
   Expect(session->DsparkStep(&emitted, &error), error.c_str());
   Expect(!emitted.empty(), "DSpark first step emitted tokens");
   stats = session->DsparkStatistics();
   Expect(stats.context_tokens >= prompt.size(),
-         "first DSpark cycle seeds the complete prompt");
+         "first DSpark cycle retains complete prompt coverage");
   Expect(stats.steps == 1, "DSpark drafts on the first generation cycle");
   Expect(stats.anchors == 1, "DSpark records one target-known anchor");
   Expect(stats.support_drafted == 5, "DSpark records five support rows");

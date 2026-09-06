@@ -1282,6 +1282,7 @@ public:
   }
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    const bool dspark = model_->HasDspark();
     return {
         .model_id = model_->ModelName(),
         .state_abi = std::string(kDeepSeekStateAbi),
@@ -1289,12 +1290,15 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = true,
-                .fork = true,
+                .snapshot = !dspark,
+                .fork = !dspark,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
+                .multi_token_decode = dspark,
+                .prefix_reuse = !dspark,
             },
-        .persistence = persistence_,
+        .persistence = dspark ? std::optional<TextRunnerPersistenceDescriptor>{}
+                              : persistence_,
     };
   }
 
@@ -1316,7 +1320,7 @@ public:
   }
 
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
-    if (!DeepSeekSessionBatchEnabled() || model_->HasDspark()) {
+    if (!DeepSeekSessionBatchEnabled()) {
       return {{
           .kind = TextExecutionPlanKind::kSerial,
           .physical_width = 1,
@@ -1427,6 +1431,12 @@ public:
     return std::make_unique<DeepSeekTextRunnerState>(model_, max_context_);
   }
 
+  void PrepareBatchExecution(TextRunnerState& state) const override {
+    if (model_->HasDspark()) {
+      RequireDeepSeekState(state).session().PrepareBatchExecution();
+    }
+  }
+
   [[nodiscard]] TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
@@ -1489,9 +1499,53 @@ public:
     deepseek.set_position(deepseek.position() + 1);
   }
 
+  [[nodiscard]] TextDecodeStep DecodeStep(
+      TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const override {
+    if (!model_->HasDspark() || !sampler.config().can_use_unmodified_argmax()) {
+      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    }
+    if (max_tokens == 0) {
+      throw std::invalid_argument(
+          "DeepSeek DSpark decode budget must be at least one token");
+    }
+
+    auto& deepseek = RequireDeepSeekState(state);
+    const auto stats_before = deepseek.session().DsparkStatistics();
+    std::vector<int> emitted;
+    std::string error;
+    if (!deepseek.session().DsparkStep(max_tokens, &emitted, &error)) {
+      throw std::runtime_error("DeepSeek DSpark decode failed: " + error);
+    }
+    if (emitted.empty()) {
+      throw std::runtime_error("DeepSeek DSpark decode produced no tokens");
+    }
+
+    TextDecodeStep step;
+    deepseek.set_position(deepseek.position() + emitted.size());
+    step.selections.reserve(emitted.size());
+    for (const int token : emitted) {
+      if (model_->IsStopToken(token)) {
+        step.stop = true;
+        break;
+      }
+      step.selections.push_back({
+          .stop = false,
+          .token = static_cast<TextRunnerToken>(token),
+          .piece = model_->DecodeToken(token),
+      });
+    }
+    const auto stats_after = deepseek.session().DsparkStatistics();
+    step.draft_tokens =
+        stats_after.support_drafted - stats_before.support_drafted;
+    step.draft_accepted_tokens =
+        stats_after.support_accepted - stats_before.support_accepted;
+    return step;
+  }
+
   void AdvanceBatch(
       std::span<const TextRunnerAdvance> advances) const override {
-    if (!DeepSeekSessionBatchEnabled() || model_->HasDspark()) {
+    if (!DeepSeekSessionBatchEnabled()) {
       throw std::logic_error("DeepSeek session batching is disabled");
     }
     if (advances.size() < 2 || advances.size() > 8 ||
@@ -1743,9 +1797,21 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
   if (reader->GetMetadataString("general.architecture") == "deepseek4") {
-    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+        speculative_config.backend != TextSpeculativeBackend::kDSpark) {
       SetError(error,
-               "Speculative decoding is only supported by Qwen HTTP models");
+               "DeepSeek HTTP models support only DSpark speculative decoding");
+      return false;
+    }
+    if (speculative_config.backend == TextSpeculativeBackend::kDSpark &&
+        speculative_config.draft_model_path.empty()) {
+      SetError(error, "DeepSeek DSpark HTTP decoding requires --dspark-model");
+      return false;
+    }
+    if (speculative_config.backend == TextSpeculativeBackend::kDSpark &&
+        DiskCacheEnabled(resolved_disk_cache_config)) {
+      SetError(error,
+               "DeepSeek DSpark HTTP decoding does not support disk snapshots");
       return false;
     }
     if (!models::deepseek_v4_flash::ValidateGgufTemplate(*reader,
@@ -1759,6 +1825,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .max_context = max_context,
             .prefill_chunk = 2048,
             .power_percent = 100,
+            .dspark_model_path =
+                speculative_config.backend == TextSpeculativeBackend::kDSpark
+                    ? speculative_config.draft_model_path
+                    : std::string{},
         },
         &load_error);
     if (model == nullptr) {
@@ -1822,6 +1892,10 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
                             TextDiskCacheConfig disk_cache_config) {
   if (model == nullptr) {
     SetError(error, "Qwen GPU model must not be null");
+    return false;
+  }
+  if (speculative_config.backend == TextSpeculativeBackend::kDSpark) {
+    SetError(error, "DSpark HTTP decoding requires a DeepSeek model");
     return false;
   }
   if (session_count == 0) {
