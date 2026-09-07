@@ -1607,6 +1607,84 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
     return hip_ok(hipGetLastError(), "matmul_f16_pair_ordered_chunks launch");
 }
 
+extern "C" int ds4_gpu_matmul_f16_pair_narrow_tensor(
+        ds4_gpu_tensor *out0,
+        ds4_gpu_tensor *out1,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t weight0_offset,
+        uint64_t weight1_offset,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t n_tok) {
+    if (!out0 || !out1 || !x || !model_map || in_dim == 0u ||
+        out_dim == 0u || n_tok < 2u || n_tok > 8u ||
+        in_dim > UINT32_MAX || out_dim > UINT32_MAX) {
+        return 0;
+    }
+    uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+    if (weight0_offset > model_size || weight1_offset > model_size ||
+        !hip_u64_mul3_checked(
+            out_dim, in_dim, sizeof(uint16_t), &weight_bytes) ||
+        weight_bytes > model_size - weight0_offset ||
+        weight_bytes > model_size - weight1_offset ||
+        !hip_u64_mul3_checked(
+            n_tok, in_dim, sizeof(float), &x_bytes) ||
+        !hip_u64_mul3_checked(
+            n_tok, out_dim, sizeof(float), &out_bytes) ||
+        x->bytes < x_bytes || out0->bytes < out_bytes ||
+        out1->bytes < out_bytes) {
+        return 0;
+    }
+    const __half *w0 = (const __half *)hip_model_range_ptr(
+        model_map, weight0_offset, weight_bytes, "f16_pair_narrow0");
+    const __half *w1 = (const __half *)hip_model_range_ptr(
+        model_map, weight1_offset, weight_bytes, "f16_pair_narrow1");
+    if (!w0 || !w1) return 0;
+    constexpr uint32_t rows_per_block = 32u;
+    const unsigned grid =
+        (unsigned)((out_dim + rows_per_block - 1u) / rows_per_block);
+    const unsigned threads = rows_per_block * 32u;
+#define DS4_LAUNCH_F16_PAIR_NARROW(BATCH, OUT0, OUT1, X)                  \
+    matmul_f16_pair_batch_reuse_warp_rows_w32_kernel<BATCH>              \
+        <<<grid, threads>>>(                                              \
+            (OUT0), (OUT1), w0, w1, (X), (uint32_t)in_dim, out_dim,      \
+            rows_per_block)
+    if (n_tok == 2u) {
+        DS4_LAUNCH_F16_PAIR_NARROW(
+            2u, (float *)out0->ptr, (float *)out1->ptr,
+            (const float *)x->ptr);
+    } else if (n_tok == 3u) {
+        DS4_LAUNCH_F16_PAIR_NARROW(
+            3u, (float *)out0->ptr, (float *)out1->ptr,
+            (const float *)x->ptr);
+    } else if (n_tok == 4u) {
+        DS4_LAUNCH_F16_PAIR_NARROW(
+            4u, (float *)out0->ptr, (float *)out1->ptr,
+            (const float *)x->ptr);
+    } else if (n_tok == 5u) {
+        DS4_LAUNCH_F16_PAIR_NARROW(
+            5u, (float *)out0->ptr, (float *)out1->ptr,
+            (const float *)x->ptr);
+    } else if (n_tok == 6u) {
+        DS4_LAUNCH_F16_PAIR_NARROW(
+            6u, (float *)out0->ptr, (float *)out1->ptr,
+            (const float *)x->ptr);
+    } else if (n_tok == 7u) {
+        DS4_LAUNCH_F16_PAIR_NARROW(
+            7u, (float *)out0->ptr, (float *)out1->ptr,
+            (const float *)x->ptr);
+    } else {
+        DS4_LAUNCH_F16_PAIR_NARROW(
+            8u, (float *)out0->ptr, (float *)out1->ptr,
+            (const float *)x->ptr);
+    }
+#undef DS4_LAUNCH_F16_PAIR_NARROW
+    return hip_ok(
+        hipGetLastError(), "f16 ordered paired narrow-batch launch");
+}
+
 extern "C" int ds4_gpu_matmul_f32_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok) {
     if (!out || !x || !model_map || in_dim == 0 || out_dim == 0 || n_tok == 0 ||
         in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;

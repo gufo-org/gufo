@@ -313,6 +313,33 @@ projections reuse each weight across the live rows, C8 F16 projections execute
 as two W4 groups, and routed IQ2 gate/up uses exact one- through four-pair
 helpers. C1 still takes the serial route.
 
+The attention compressor now batches its paired F16 KV and score projections
+across the same physical width. One workgroup covers 32 output rows and keeps
+one accumulator pair per live request, so each of the two weight streams is
+loaded once for W2-W8. Every row retains the serial lane reduction order and
+continues into its own compressor state and KV cache. The C8 specialization
+uses one W8 launch instead of two W4 launches.
+
+Matched release qualification with the batched compressor disabled and enabled
+produced identical completion-hash multisets:
+
+| C | Compressor off | Compressor on | Change |
+| ---: | ---: | ---: | ---: |
+| 1 | 17.09187 tok/s | 17.09251 tok/s | control |
+| 2 | 13.69222 tok/s | 13.90365 tok/s | **+1.54%** |
+| 4 | 10.32088 tok/s | 10.57844 tok/s | **+2.50%** |
+| 6 | 8.12098 tok/s | 8.36513 tok/s | **+3.01%** |
+| 8 | 7.86722 tok/s | 8.23946 tok/s | **+4.73%** |
+
+Replacing the two W4 compressor launches with one W8 launch raised C8 again to
+8.29156 tok/s (+0.63%). A matched C2 profile reduced total GPU kernel time from
+4,051.23 to 3,861.43 ms (-4.7%); the compressor projections themselves fell
+from 253.62 to 214.48 ms (-15.4%). The model-backed session gate remained
+28/29 top-1 with 0.32 worst RMSE, 1.00 worst cosine, 1.81 worst maximum error,
+and serial winner rank 2. Unified-memory startup remained in the normal
+21.0-21.2 second band. Set
+`GUFO_DEEPSEEK_ROCM_SESSION_COMPRESSOR_BATCH=0` to restore the previous route.
+
 The concurrent routed gate/up kernel previously staged four activation rows in
 18,688 bytes of LDS. At C2-C8, direct reads through MALL are faster and allow
 more resident workgroups: in a matched C8 profile, gate/up fell from 5,235.69
@@ -327,6 +354,17 @@ A decode-heavy C2 profile attributes 22.9% of kernel time to the dense Q8
 projection, 14.9% to routed gate/up, and 11.7% to Q2 down. Interleaved sweeps of
 Q8 rows per block, Q2-down rows per block, and gate row span did not produce a
 repeatable improvement and were rejected rather than adding C2 regressions.
+
+The next measured concurrency experiments were also rejected. Grouping the
+DSpark support body across C2 changed the strict verified stream at token 12.
+A ragged verifier recovered 74.8% acceptance but reduced per-request decode
+from 13.31 to 12.57 tok/s and combined throughput from 30.53 to 25.79 tok/s,
+with category completion hashes changing. The exact target route therefore
+remains the production policy. On prompt prefill, forcing dense MMQ column tiles
+from 16 through 80 did not beat the existing selector: at pp128 the default
+measured 196.46 tok/s versus 186.89, 188.69, 194.02, 196.58, and 194.75. A
+16-row Q2-down hot tile also regressed pp64 from 117.86 to 114.18 tok/s and
+pp128 from 196.74 to 185.24 tok/s. Both ablations were removed.
 
 Quality first isolates one W6 step, resets every session, then repeats the
 existing three W4 steps, changed W2 membership, W8 step, and return to C1:

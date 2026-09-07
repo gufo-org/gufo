@@ -222,6 +222,98 @@ __global__ static void matmul_f16_ordered_batch_reuse_kernel(
     }
 }
 
+template <uint32_t BATCH>
+__global__ static void matmul_f16_pair_batch_reuse_warp_rows_w32_kernel(
+        float *out0,
+        float *out1,
+        const __half *w0,
+        const __half *w1,
+        const float *x,
+        uint32_t in_dim,
+        uint64_t out_dim,
+        uint32_t rows_per_block) {
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint64_t row =
+        (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    if (row >= out_dim) return;
+
+    const __half *wr0 = w0 + row * (uint64_t)in_dim;
+    const __half *wr1 = w1 + row * (uint64_t)in_dim;
+    float acc0[BATCH];
+    float acc1[BATCH];
+#pragma unroll
+    for (uint32_t token = 0; token < BATCH; token++) {
+        acc0[token] = 0.0f;
+        acc1[token] = 0.0f;
+    }
+    uint32_t i = lane;
+    for (; i + 224u < in_dim; i += 256u) {
+        const float weight00 = __half2float(wr0[i]);
+        const float weight10 = __half2float(wr1[i]);
+        const float weight01 = __half2float(wr0[i + 32u]);
+        const float weight11 = __half2float(wr1[i + 32u]);
+        const float weight02 = __half2float(wr0[i + 64u]);
+        const float weight12 = __half2float(wr1[i + 64u]);
+        const float weight03 = __half2float(wr0[i + 96u]);
+        const float weight13 = __half2float(wr1[i + 96u]);
+        const float weight04 = __half2float(wr0[i + 128u]);
+        const float weight14 = __half2float(wr1[i + 128u]);
+        const float weight05 = __half2float(wr0[i + 160u]);
+        const float weight15 = __half2float(wr1[i + 160u]);
+        const float weight06 = __half2float(wr0[i + 192u]);
+        const float weight16 = __half2float(wr1[i + 192u]);
+        const float weight07 = __half2float(wr0[i + 224u]);
+        const float weight17 = __half2float(wr1[i + 224u]);
+#pragma unroll
+        for (uint32_t token = 0; token < BATCH; token++) {
+            const float *xr = x + (uint64_t)token * in_dim;
+            float xv = xr[i];
+            acc0[token] += weight00 * xv;
+            acc1[token] += weight10 * xv;
+            xv = xr[i + 32u];
+            acc0[token] += weight01 * xv;
+            acc1[token] += weight11 * xv;
+            xv = xr[i + 64u];
+            acc0[token] += weight02 * xv;
+            acc1[token] += weight12 * xv;
+            xv = xr[i + 96u];
+            acc0[token] += weight03 * xv;
+            acc1[token] += weight13 * xv;
+            xv = xr[i + 128u];
+            acc0[token] += weight04 * xv;
+            acc1[token] += weight14 * xv;
+            xv = xr[i + 160u];
+            acc0[token] += weight05 * xv;
+            acc1[token] += weight15 * xv;
+            xv = xr[i + 192u];
+            acc0[token] += weight06 * xv;
+            acc1[token] += weight16 * xv;
+            xv = xr[i + 224u];
+            acc0[token] += weight07 * xv;
+            acc1[token] += weight17 * xv;
+        }
+    }
+    for (; i < in_dim; i += 32u) {
+        const float weight0 = __half2float(wr0[i]);
+        const float weight1 = __half2float(wr1[i]);
+#pragma unroll
+        for (uint32_t token = 0; token < BATCH; token++) {
+            const float activation = x[(uint64_t)token * in_dim + i];
+            acc0[token] += weight0 * activation;
+            acc1[token] += weight1 * activation;
+        }
+    }
+#pragma unroll
+    for (uint32_t token = 0; token < BATCH; token++) {
+        const float total0 = warp_sum_f32(acc0[token]);
+        const float total1 = warp_sum_f32(acc1[token]);
+        if (lane == 0u) {
+            out0[(uint64_t)token * out_dim + row] = total0;
+            out1[(uint64_t)token * out_dim + row] = total1;
+        }
+    }
+}
+
 __global__ static void matmul_f16_f32_sharedx_warp_rows_w32_kernel(
         float *out,
         const __half *w,

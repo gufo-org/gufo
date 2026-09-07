@@ -105,9 +105,12 @@ and chooses the exact runnable width. Every request keeps its own attention
 caches and position; dense projections, attention output, FFN/MoE, and the LM
 head run over the concurrent rows together. Width one stays on the existing
 serial decode path. Set `GUFO_DEEPSEEK_SESSION_BATCH=0` before starting the
-server to disable this route. With DSpark attached, C1 uses speculative decode
-and C2-C8 use the matching exact target batch. Experimental confidence-trimmed
-C2 DSpark batching is available with
+server to disable this route. The paired F16 attention-compressor projections
+also share their weight streams across C2-C8 while preserving each row's serial
+reduction order. Set `GUFO_DEEPSEEK_ROCM_SESSION_COMPRESSOR_BATCH=0` to restore
+the earlier per-request compressor launches for an A/B comparison. With DSpark
+attached, C1 uses speculative decode and C2-C8 use the matching exact target
+batch. Experimental confidence-trimmed C2 DSpark batching is available with
 `GUFO_DEEPSEEK_DSPARK_SESSION_BATCH=1`; it remains opt-in because unrelated
 requests usually do not share a nonzero confidence-qualified draft tail. When
 the route does propose for both requests, their session-local support passes

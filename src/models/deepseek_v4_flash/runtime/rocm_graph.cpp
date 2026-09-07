@@ -2367,9 +2367,13 @@ static bool rocm_graph_encode_session_attention_core(
         const ds4_gpu_tensor *qr_norm,
         ds4_gpu_tensor       *q,
         ds4_gpu_tensor       *kv,
-        ds4_gpu_tensor       *heads) {
+        ds4_gpu_tensor       *heads,
+        const ds4_gpu_tensor *precomputed_comp_kv,
+        const ds4_gpu_tensor *precomputed_comp_sc) {
     if (!g || !model || !layer || !attn_norm || !qr_norm || !q || !kv ||
-        !heads || g->raw_cap == 0) {
+        !heads || g->raw_cap == 0 ||
+        ((precomputed_comp_kv == nullptr) !=
+         (precomputed_comp_sc == nullptr))) {
         return false;
     }
 
@@ -2452,7 +2456,7 @@ static bool rocm_graph_encode_session_attention_core(
                     il);
             ok = false;
         }
-        if (ok) {
+        if (ok && !precomputed_comp_kv) {
             ok = ds4_gpu_matmul_f16_pair_tensor(
                      g->comp_kv_cur,
                      g->comp_sc_cur,
@@ -2465,11 +2469,15 @@ static bool rocm_graph_encode_session_attention_core(
                      attn_norm,
                      1) != 0;
         }
+        const ds4_gpu_tensor *attn_comp_kv =
+            precomputed_comp_kv ? precomputed_comp_kv : g->comp_kv_cur;
+        const ds4_gpu_tensor *attn_comp_sc =
+            precomputed_comp_sc ? precomputed_comp_sc : g->comp_sc_cur;
         const uint32_t comp_row = g->layer_n_comp[il];
         if (ok) {
             ok = ds4_gpu_compressor_update_tensor(
-                     g->comp_kv_cur,
-                     g->comp_sc_cur,
+                     attn_comp_kv,
+                     attn_comp_sc,
                      g->layer_attn_state_kv[il],
                      g->layer_attn_state_score[il],
                      rocm_graph_attn_comp_update_target(g, il),
@@ -4336,6 +4344,46 @@ static bool rocm_graph_encode_sessions_attention_batch(
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_SESSION_ATTN("qkv");
 
+    /*
+     * The compressor projections use the same ordered per-row reduction as
+     * serial decode while sharing both F16 weight streams across C2-C8.
+     */
+    const char *compressor_batch =
+        getenv("GUFO_DEEPSEEK_ROCM_SESSION_COMPRESSOR_BATCH");
+    const bool use_compressor_batch =
+        (compressor_batch == nullptr ||
+         (compressor_batch[0] != '\0' &&
+          strcmp(compressor_batch, "0") != 0 &&
+          strcmp(compressor_batch, "false") != 0 &&
+          strcmp(compressor_batch, "off") != 0)) &&
+        ds4_layer_compress_ratio(il) != 0u;
+    uint32_t compressor_width = 0u;
+    if (ok && use_compressor_batch) {
+        const uint32_t ratio = ds4_layer_compress_ratio(il);
+        const uint32_t coff = ratio == 4u ? 2u : 1u;
+        compressor_width = coff * DS4_N_HEAD_DIM;
+        if (!layer->attn_compressor_kv || !layer->attn_compressor_gate ||
+            layer->attn_compressor_kv->type != DS4_TENSOR_F16 ||
+            layer->attn_compressor_gate->type != DS4_TENSOR_F16 ||
+            layer->attn_compressor_kv->dim[0] != DS4_N_EMBD ||
+            layer->attn_compressor_gate->dim[0] != DS4_N_EMBD ||
+            layer->attn_compressor_kv->dim[1] != compressor_width ||
+            layer->attn_compressor_gate->dim[1] != compressor_width) {
+            ok = false;
+        } else {
+            ok = ds4_gpu_matmul_f16_pair_narrow_tensor(
+                     g->batch_comp_kv,
+                     g->batch_comp_sc,
+                     model->map,
+                     model->size,
+                     layer->attn_compressor_kv->abs_offset,
+                     layer->attn_compressor_gate->abs_offset,
+                     DS4_N_EMBD,
+                     compressor_width,
+                     g->batch_attn_norm,
+                     n_tokens) != 0;
+        }
+    }
     for (uint32_t row = 0; ok && row < n_tokens; ++row) {
         ds4_gpu_tensor *attn_norm = rocm_graph_tensor_row_view(
             g->batch_attn_norm, row, DS4_N_EMBD);
@@ -4347,7 +4395,16 @@ static bool rocm_graph_encode_sessions_attention_batch(
             g->batch_kv, row, DS4_N_HEAD_DIM);
         ds4_gpu_tensor *heads =
             rocm_graph_tensor_row_view(g->batch_heads, row, q_dim);
-        ok = attn_norm && qr_norm && q && kv && heads;
+        ds4_gpu_tensor *comp_kv = use_compressor_batch
+            ? rocm_graph_tensor_row_view(
+                  g->batch_comp_kv, row, compressor_width)
+            : nullptr;
+        ds4_gpu_tensor *comp_sc = use_compressor_batch
+            ? rocm_graph_tensor_row_view(
+                  g->batch_comp_sc, row, compressor_width)
+            : nullptr;
+        ok = attn_norm && qr_norm && q && kv && heads &&
+             (!use_compressor_batch || (comp_kv && comp_sc));
         if (ok) {
             ok = rocm_graph_encode_session_attention_core(
                 items[row].graph,
@@ -4359,8 +4416,12 @@ static bool rocm_graph_encode_sessions_attention_batch(
                 qr_norm,
                 q,
                 kv,
-                heads);
+                heads,
+                comp_kv,
+                comp_sc);
         }
+        ds4_gpu_tensor_free(comp_sc);
+        ds4_gpu_tensor_free(comp_kv);
         ds4_gpu_tensor_free(heads);
         ds4_gpu_tensor_free(kv);
         ds4_gpu_tensor_free(q);
