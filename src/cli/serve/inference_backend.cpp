@@ -1270,7 +1270,19 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
   static const bool enabled = [] {
     const char* value = std::getenv("GUFO_DEEPSEEK_DSPARK_SESSION_BATCH");
     if (value == nullptr) {
-      return false;
+      return true;
+    }
+    const std::string_view setting(value);
+    return setting != "0" && setting != "false" && setting != "off";
+  }();
+  return enabled;
+}
+
+[[nodiscard]] bool DeepSeekDsparkMultiBatchEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_DEEPSEEK_DSPARK_MULTI_BATCH");
+    if (value == nullptr) {
+      return true;
     }
     const std::string_view setting(value);
     return setting != "0" && setting != "false" && setting != "off";
@@ -1309,7 +1321,8 @@ public:
                 .multi_token_decode = dspark,
                 .batched_multi_token_decode =
                     dspark && DeepSeekDsparkSessionBatchEnabled(),
-                .batched_multi_token_decode_max_width = 2,
+                .batched_multi_token_decode_max_width =
+                    DeepSeekDsparkMultiBatchEnabled() ? 8u : 2u,
                 .prefix_reuse = !dspark,
             },
         .persistence = dspark ? std::optional<TextRunnerPersistenceDescriptor>{}

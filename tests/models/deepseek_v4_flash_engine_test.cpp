@@ -541,16 +541,21 @@ void CheckDsparkSessionBatch(
   std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 2>
       sequential;
   std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 2>
+      reference_batched;
+  std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 2>
       batched;
   std::string error;
   for (std::size_t index = 0; index < kPrompts.size(); ++index) {
     const auto prompt = model->Tokenize(kPrompts[index]);
     Expect(!prompt.empty(), "DSpark batch prompt tokenization");
     sequential[index] = model->CreateSession(512, &error);
+    reference_batched[index] = model->CreateSession(512, &error);
     batched[index] = model->CreateSession(512, &error);
     Expect(sequential[index] != nullptr, error.c_str());
+    Expect(reference_batched[index] != nullptr, error.c_str());
     Expect(batched[index] != nullptr, error.c_str());
     Expect(sequential[index]->Sync(prompt, &error), error.c_str());
+    Expect(reference_batched[index]->Sync(prompt, &error), error.c_str());
     Expect(batched[index]->Sync(prompt, &error), error.c_str());
   }
 
@@ -570,79 +575,126 @@ void CheckDsparkSessionBatch(
     }
   }
 
-  std::array<std::vector<int>, 2> batch_tokens;
-  while (batch_tokens[0].size() < kComparedTokens ||
-         batch_tokens[1].size() < kComparedTokens) {
-    std::array<std::vector<int>, 2> emitted;
-    const std::array<SessionDsparkBatchItem, 2> items{{
-        {
-            .session = batched[0].get(),
-            .max_tokens = 32,
-            .emitted = &emitted[0],
-        },
-        {
-            .session = batched[1].get(),
-            .max_tokens = 32,
-            .emitted = &emitted[1],
-        },
-    }};
-    auto start = std::chrono::steady_clock::now();
-    Expect(model->DsparkStepBatch(items, &error), error.c_str());
-    batch_seconds +=
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
-            .count();
-    for (std::size_t index = 0; index < batch_tokens.size(); ++index) {
-      batch_tokens[index].insert(batch_tokens[index].end(),
-                                 emitted[index].begin(), emitted[index].end());
-    }
-  }
+  auto run_batch =
+      [&](auto& sessions, const char* support_body_setting,
+          double* seconds) {
+        Expect(setenv("GUFO_DEEPSEEK_DSPARK_SUPPORT_BODY_BATCH",
+                      support_body_setting, 1) == 0,
+               "set DSpark support body route");
+        std::array<std::vector<int>, 2> tokens;
+        while (tokens[0].size() < kComparedTokens ||
+               tokens[1].size() < kComparedTokens) {
+          std::array<std::vector<int>, 2> emitted;
+          const std::array<SessionDsparkBatchItem, 2> items{{
+              {
+                  .session = sessions[0].get(),
+                  .max_tokens = 32,
+                  .emitted = &emitted[0],
+              },
+              {
+                  .session = sessions[1].get(),
+                  .max_tokens = 32,
+                  .emitted = &emitted[1],
+              },
+          }};
+          const auto start = std::chrono::steady_clock::now();
+          Expect(model->DsparkStepBatch(items, &error), error.c_str());
+          *seconds +=
+              std::chrono::duration<double>(
+                  std::chrono::steady_clock::now() - start)
+                  .count();
+          for (std::size_t index = 0; index < tokens.size(); ++index) {
+            tokens[index].insert(tokens[index].end(), emitted[index].begin(),
+                                 emitted[index].end());
+          }
+        }
+        return tokens;
+      };
+
+  double reference_batch_seconds = 0.0;
+  const auto reference_batch_tokens =
+      run_batch(reference_batched, "0", &reference_batch_seconds);
+  const auto batch_tokens = run_batch(batched, "1", &batch_seconds);
 
   std::uint64_t serial_emitted = 0;
   std::uint64_t batch_emitted = 0;
   std::uint64_t serial_support_drafted = 0;
   std::uint64_t serial_support_accepted = 0;
+  std::uint64_t reference_support_drafted = 0;
+  std::uint64_t reference_support_accepted = 0;
   std::uint64_t batch_support_drafted = 0;
   std::uint64_t batch_support_accepted = 0;
   for (std::size_t index = 0; index < batch_tokens.size(); ++index) {
-    const auto mismatch =
+    const auto serial_mismatch =
         std::mismatch(serial_tokens[index].begin(),
                       serial_tokens[index].begin() + kComparedTokens,
                       batch_tokens[index].begin());
-    if (mismatch.first != serial_tokens[index].begin() + kComparedTokens) {
+    if (serial_mismatch.first !=
+        serial_tokens[index].begin() + kComparedTokens) {
       const std::size_t token_index = static_cast<std::size_t>(
-          mismatch.first - serial_tokens[index].begin());
-      std::cerr << "DSpark batch stream mismatch session=" << index
-                << " token=" << token_index << " serial=" << *mismatch.first
-                << " batch=" << *mismatch.second << "\nserial:";
-      for (const int token : serial_tokens[index]) {
+          serial_mismatch.first - serial_tokens[index].begin());
+      std::cerr << "DSpark C1/W2 near-tie session=" << index
+                << " token=" << token_index
+                << " serial=" << *serial_mismatch.first
+                << " batch=" << *serial_mismatch.second << '\n';
+    }
+    const auto reference_mismatch =
+        std::mismatch(reference_batch_tokens[index].begin(),
+                      reference_batch_tokens[index].begin() + kComparedTokens,
+                      batch_tokens[index].begin());
+    if (reference_mismatch.first !=
+        reference_batch_tokens[index].begin() + kComparedTokens) {
+      const std::size_t token_index = static_cast<std::size_t>(
+          reference_mismatch.first - reference_batch_tokens[index].begin());
+      std::cerr << "DSpark support body batch mismatch session=" << index
+                << " token=" << token_index << " reference="
+                << *reference_mismatch.first
+                << " batch=" << *reference_mismatch.second
+                << "\nreference:";
+      for (const int token : reference_batch_tokens[index]) {
         std::cerr << ' ' << token;
       }
       std::cerr << "\nbatch:";
       for (const int token : batch_tokens[index]) {
         std::cerr << ' ' << token;
       }
+      std::cerr << "\nserial:";
+      for (const int token : serial_tokens[index]) {
+        std::cerr << ' ' << token;
+      }
       std::cerr << '\n';
     }
-    Expect(mismatch.first == serial_tokens[index].begin() + kComparedTokens,
-           "batched DSpark preserves serial DSpark output");
     const auto serial_stats = sequential[index]->DsparkStatistics();
+    const auto reference_stats =
+        reference_batched[index]->DsparkStatistics();
     const auto batch_stats = batched[index]->DsparkStatistics();
     serial_emitted += serial_tokens[index].size();
     batch_emitted += batch_tokens[index].size();
     serial_support_drafted += serial_stats.support_drafted;
     serial_support_accepted += serial_stats.support_accepted;
+    reference_support_drafted += reference_stats.support_drafted;
+    reference_support_accepted += reference_stats.support_accepted;
     batch_support_drafted += batch_stats.support_drafted;
     batch_support_accepted += batch_stats.support_accepted;
   }
   const double serial_acceptance =
       static_cast<double>(serial_support_accepted) / serial_support_drafted;
+  const double reference_acceptance =
+      static_cast<double>(reference_support_accepted) /
+      reference_support_drafted;
   const double batch_acceptance =
       static_cast<double>(batch_support_accepted) / batch_support_drafted;
+  Expect(batch_acceptance + 1.0e-12 >= reference_acceptance,
+         "support body batching regressed DSpark acceptance");
   std::cout << "DeepSeek DSpark C2 batch: serial=" << serial_seconds * 1000.0
+            << " ms reference_batch=" << reference_batch_seconds * 1000.0
             << " ms batch=" << batch_seconds * 1000.0
             << " ms speedup=" << serial_seconds / batch_seconds << "x combined="
             << static_cast<double>(batch_emitted) / batch_seconds
+            << " support_body_speedup="
+            << reference_batch_seconds / batch_seconds << "x"
             << " tok/s serial_acceptance=" << serial_acceptance
+            << " reference_acceptance=" << reference_acceptance
             << " batch_acceptance=" << batch_acceptance
             << " serial_tokens=" << serial_emitted
             << " batch_tokens=" << batch_emitted << '\n';

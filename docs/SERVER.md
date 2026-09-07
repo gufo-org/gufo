@@ -99,26 +99,27 @@ actual prefill work; cache use; logical concurrency; physical execution width;
 and the executed plan. Prompts, generated text, local paths, request IDs, and
 token IDs are excluded.
 
-DeepSeek V4 Flash uses native layer-synchronous session batches when DSpark is
-not attached. The scheduler advertises every physical width from 2 through 8
-and chooses the exact runnable width. Every request keeps its own attention
-caches and position; dense projections, attention output, FFN/MoE, and the LM
-head run over the concurrent rows together. Width one stays on the existing
-serial decode path. Set `GUFO_DEEPSEEK_SESSION_BATCH=0` before starting the
-server to disable this route. The paired F16 attention-compressor projections
-also share their weight streams across C2-C8 while preserving each row's serial
-reduction order. Set `GUFO_DEEPSEEK_ROCM_SESSION_COMPRESSOR_BATCH=0` to restore
-the earlier per-request compressor launches for an A/B comparison. With DSpark
-attached, C1 uses speculative decode and C2-C8 use the matching exact target
-batch. Experimental confidence-trimmed C2 DSpark batching is available with
-`GUFO_DEEPSEEK_DSPARK_SESSION_BATCH=1`; it remains opt-in because unrelated
-requests usually do not share a nonzero confidence-qualified draft tail. When
-the route does propose for both requests, their session-local support passes
-share one ten-row target-vocabulary projection. Set
-`GUFO_DEEPSEEK_DSPARK_SUPPORT_HEAD_BATCH=0` to use the serial support heads for
-an A/B comparison. Wider concurrent DSpark proposals remain disabled because
-measured C4-C8 proposal and verification costs exceed exact W4-W8 target
-batching.
+DeepSeek V4 Flash uses native layer-synchronous session batches at physical
+widths 2 through 8. Every request keeps its own attention caches and position;
+dense projections, attention output, FFN/MoE, and the LM head run over the
+concurrent rows together. Width one stays on the existing serial decode path.
+Set `GUFO_DEEPSEEK_SESSION_BATCH=0` before starting the server to disable exact
+target batching. The paired F16 attention-compressor projections share their
+weight streams across C2-C8 while preserving each row's serial reduction order.
+Set `GUFO_DEEPSEEK_ROCM_SESSION_COMPRESSOR_BATCH=0` to restore the earlier
+per-request compressor launches for an A/B comparison.
+
+With DSpark attached, concurrent speculative decoding is enabled at C2-C8.
+Support blocks and ragged target-verification rows are flattened across
+runnable requests. Router selection remains request-local, while the
+verifier retains request-local routed-expert tile boundaries and combines the
+Q2 down launches and six-slot reductions without changing arithmetic. Set
+`GUFO_DEEPSEEK_DSPARK_SESSION_BATCH=0` to disable concurrent DSpark,
+`GUFO_DEEPSEEK_DSPARK_MULTI_BATCH=0` to retain only the earlier C2 route,
+`GUFO_DEEPSEEK_DSPARK_SUPPORT_BODY_BATCH=0` to restore serial support bodies,
+or `GUFO_DEEPSEEK_DSPARK_MULTI_DOWN=0` to restore separate request-local
+verifier down launches. These switches are intended for profiling and
+numerical A/B comparisons.
 
 ### Reasoning controls
 

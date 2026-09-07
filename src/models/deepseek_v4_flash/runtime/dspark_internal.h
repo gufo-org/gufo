@@ -37,9 +37,12 @@ inline constexpr uint32_t DS4_DSPARK_MAX_STAGES = 8;
 inline constexpr uint32_t DS4_DSPARK_MAX_BLOCK = 16;
 inline constexpr uint32_t DS4_DSPARK_MAX_TARGET_LAYERS = 8;
 
-/* Verification block rows the graph reserves logits and top-token storage for:
- * one row per drafted token plus the target's own correction row. */
-inline constexpr uint32_t DS4_SPEC_MAX_ROWS = DS4_DSPARK_MAX_BLOCK + 1u;
+/* One request verifies its drafted block plus the target correction row.
+ * A coordinator lazily grows to eight such independent request blocks. */
+inline constexpr uint32_t DS4_SPEC_SESSION_MAX_ROWS =
+    DS4_DSPARK_MAX_BLOCK + 1u;
+inline constexpr uint32_t DS4_SPEC_MAX_ROWS =
+    8u * DS4_SPEC_SESSION_MAX_ROWS;
 
 struct ds4_dspark_stage_weights {
     /* Present on the first stage only: fuses the target's sampled layers. */

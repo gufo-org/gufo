@@ -902,6 +902,152 @@ __global__ static void moe_build_narrow_sorted_tiles_kernel(
     }
 }
 
+struct moe_grouped_narrow_layout {
+    uint32_t group_count;
+    uint32_t offsets[9];
+};
+
+/*
+ * Build one independent expert-tile list per speculative request.
+ *
+ * Combining the requests into one ordinary expert bucket can join the tail of
+ * one request to the head of the next. That changes a tile from, for example,
+ * two three-pair dot products into a four-pair and a two-pair dot product.
+ * The generated IQ2 arithmetic is then slightly different at near ties. Keep
+ * each request's stable expert order and four-pair tile boundaries while still
+ * launching all request tiles in one gate/up grid.
+ */
+__global__ static void moe_build_grouped_narrow_tiles_kernel(
+        uint32_t *tile_experts,
+        uint32_t *tile_pair_counts,
+        uint32_t *tile_pairs,
+        moe_grouped_narrow_layout layout,
+        const int32_t *selected,
+        uint32_t n_expert,
+        uint32_t tile_capacity_per_group) {
+    const uint32_t group = blockIdx.x;
+    if (group >= layout.group_count) return;
+
+    __shared__ uint32_t shared_experts[36];
+    __shared__ uint32_t shared_counts[256];
+    __shared__ uint32_t shared_tile_offsets[256];
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t row0 = layout.offsets[group];
+    const uint32_t group_rows = layout.offsets[group + 1u] - row0;
+    const uint32_t pair_count = group_rows * n_expert;
+    const uint32_t tile_base = group * tile_capacity_per_group;
+
+    shared_counts[tid] = 0u;
+    if (tid < tile_capacity_per_group) {
+        tile_pair_counts[tile_base + tid] = 0u;
+    }
+    if (tid < pair_count) {
+        int32_t expert_i =
+            selected[(uint64_t)row0 * n_expert + tid];
+        if (expert_i < 0) expert_i = 0;
+        shared_experts[tid] = (uint32_t)expert_i;
+    }
+    __syncthreads();
+
+    if (tid < pair_count) {
+        atomicAdd(&shared_counts[shared_experts[tid]], 1u);
+    }
+    __syncthreads();
+
+    if (tid == 0u) {
+        uint32_t tile_offset = 0u;
+        for (uint32_t expert = 0u; expert < 256u; ++expert) {
+            shared_tile_offsets[expert] = tile_offset;
+            tile_offset += (shared_counts[expert] + 3u) / 4u;
+        }
+    }
+    __syncthreads();
+
+    const uint32_t count = shared_counts[tid];
+    const uint32_t first_tile = shared_tile_offsets[tid];
+    const uint32_t n_tiles = (count + 3u) / 4u;
+    for (uint32_t tile = 0u; tile < n_tiles; ++tile) {
+        const uint32_t global_tile = tile_base + first_tile + tile;
+        tile_experts[global_tile] = tid;
+        const uint32_t remaining = count - tile * 4u;
+        tile_pair_counts[global_tile] =
+            remaining < 4u ? remaining : 4u;
+    }
+    __syncthreads();
+
+    if (tid < pair_count) {
+        const uint32_t expert = shared_experts[tid];
+        uint32_t rank = 0u;
+        for (uint32_t pair = 0u; pair < tid; ++pair) {
+            rank += shared_experts[pair] == expert;
+        }
+        const uint32_t global_tile =
+            tile_base + shared_tile_offsets[expert] + rank / 4u;
+        tile_pairs[(uint64_t)global_tile * 4u + rank % 4u] =
+            row0 * n_expert + tid;
+    }
+}
+
+/*
+ * Re-index request-local tiles by expert without changing their contents.
+ * The consumer can then process all tiles for one expert in one workgroup,
+ * retaining each tile's qualified arithmetic while keeping that expert row's
+ * gate/up weights hot across requests.
+ */
+__global__ static void moe_build_grouped_tile_expert_index_kernel(
+        uint32_t *expert_offsets,
+        uint32_t *sorted_tiles,
+        uint32_t *active_count,
+        uint32_t *active_experts,
+        const uint32_t *tile_experts,
+        const uint32_t *tile_pair_counts,
+        uint32_t tile_capacity) {
+    __shared__ uint32_t shared_counts[256];
+    __shared__ uint32_t shared_offsets[257];
+
+    const uint32_t tid = threadIdx.x;
+    shared_counts[tid] = 0u;
+    __syncthreads();
+
+    for (uint32_t tile = tid; tile < tile_capacity;
+         tile += blockDim.x) {
+        if (tile_pair_counts[tile] != 0u) {
+            atomicAdd(&shared_counts[tile_experts[tile]], 1u);
+        }
+    }
+    __syncthreads();
+
+    if (tid == 0u) {
+        uint32_t tile_offset = 0u;
+        uint32_t live = 0u;
+        for (uint32_t expert = 0u; expert < 256u; ++expert) {
+            shared_offsets[expert] = tile_offset;
+            expert_offsets[expert] = tile_offset;
+            tile_offset += shared_counts[expert];
+            if (shared_counts[expert] != 0u) {
+                active_experts[live++] = expert;
+            }
+        }
+        shared_offsets[256] = tile_offset;
+        expert_offsets[256] = tile_offset;
+        *active_count = live;
+    }
+    __syncthreads();
+
+    for (uint32_t tile = tid; tile < tile_capacity;
+         tile += blockDim.x) {
+        if (tile_pair_counts[tile] == 0u) continue;
+        const uint32_t expert = tile_experts[tile];
+        uint32_t rank = 0u;
+        for (uint32_t previous = 0u; previous < tile; ++previous) {
+            rank += tile_pair_counts[previous] != 0u &&
+                    tile_experts[previous] == expert;
+        }
+        sorted_tiles[shared_offsets[expert] + rank] = tile;
+    }
+}
+
 __global__ static void moe_scatter_sorted_pairs_kernel(
         uint32_t *sorted_pairs,
         uint32_t *cursors,
@@ -1207,6 +1353,227 @@ __global__ static void moe_gate_up_mid_expert_tile4_row32_kernel(
                 up_out[off] = up[p];
             }
             mid_out[off] = (gate[p] / (1.0f + expf(-gate[p]))) * up[p] * weights[(uint64_t)tok[p] * n_expert + slot[p]];
+        }
+    }
+}
+
+/*
+ * Gate/up counterpart to moe_build_grouped_narrow_tiles_kernel.
+ *
+ * This is the qualified tile4 arithmetic with direct Q8_K input reads. The
+ * only indexing change is that each tile carries its own pair list, allowing a
+ * single launch to retain every request's original expert-tile boundaries.
+ */
+__global__ static void moe_gate_up_mid_grouped_tile4_row32_kernel(
+        float *gate_out,
+        float *up_out,
+        float *mid_out,
+        const char *gate_base,
+        const char *up_base,
+        const hip_block_q8_K *xq,
+        const uint32_t *tile_experts,
+        const uint32_t *tile_pair_counts,
+        const uint32_t *tile_pairs,
+        const float *weights,
+        uint64_t gate_expert_bytes,
+        uint64_t gate_row_bytes,
+        uint32_t xq_blocks,
+        uint32_t expert_mid_dim,
+        uint32_t n_expert,
+        uint32_t write_aux,
+        float clamp) {
+    const uint32_t tile = blockIdx.y;
+    const uint32_t np = tile_pair_counts[tile];
+    if (np == 0u) return;
+
+    const uint32_t lane = threadIdx.x & 7u;
+    const uint32_t row = blockIdx.x * 32u + (threadIdx.x >> 3u);
+    if (row >= expert_mid_dim) return;
+
+    const uint32_t expert = tile_experts[tile];
+    uint32_t pair[4] = {0u, 0u, 0u, 0u};
+    uint32_t tok[4] = {0u, 0u, 0u, 0u};
+    uint32_t slot[4] = {0u, 0u, 0u, 0u};
+    const hip_block_q8_K *xqb[4] = {NULL, NULL, NULL, NULL};
+#pragma unroll
+    for (uint32_t p = 0u; p < 4u; ++p) {
+        if (p < np) {
+            pair[p] = tile_pairs[(uint64_t)tile * 4u + p];
+            tok[p] = pair[p] / n_expert;
+            slot[p] = pair[p] - tok[p] * n_expert;
+            xqb[p] = xq + (uint64_t)tok[p] * xq_blocks;
+        }
+    }
+
+    const hip_block_iq2_xxs *gr =
+        (const hip_block_iq2_xxs *)(
+            gate_base + (uint64_t)expert * gate_expert_bytes +
+            (uint64_t)row * gate_row_bytes);
+    const hip_block_iq2_xxs *ur =
+        (const hip_block_iq2_xxs *)(
+            up_base + (uint64_t)expert * gate_expert_bytes +
+            (uint64_t)row * gate_row_bytes);
+    float gate[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float up[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t b = lane; b < xq_blocks; b += 8u) {
+        const hip_block_q8_K *y0 = xqb[0] ? xqb[0] + b : NULL;
+        const hip_block_q8_K *y1 = xqb[1] ? xqb[1] + b : NULL;
+        const hip_block_q8_K *y2 = xqb[2] ? xqb[2] + b : NULL;
+        const hip_block_q8_K *y3 = xqb[3] ? xqb[3] + b : NULL;
+        if (np == 1u) {
+            dev_dot_iq2_xxs_q8_K_block4<1u>(
+                gr + b, y0, y1, y2, y3, gate);
+            dev_dot_iq2_xxs_q8_K_block4<1u>(
+                ur + b, y0, y1, y2, y3, up);
+        } else if (np == 2u) {
+            dev_dot_iq2_xxs_q8_K_block4<2u>(
+                gr + b, y0, y1, y2, y3, gate);
+            dev_dot_iq2_xxs_q8_K_block4<2u>(
+                ur + b, y0, y1, y2, y3, up);
+        } else if (np == 3u) {
+            dev_dot_iq2_xxs_q8_K_block4<3u>(
+                gr + b, y0, y1, y2, y3, gate);
+            dev_dot_iq2_xxs_q8_K_block4<3u>(
+                ur + b, y0, y1, y2, y3, up);
+        } else {
+            dev_dot_iq2_xxs_q8_K_block4<4u>(
+                gr + b, y0, y1, y2, y3, gate);
+            dev_dot_iq2_xxs_q8_K_block4<4u>(
+                ur + b, y0, y1, y2, y3, up);
+        }
+    }
+#pragma unroll
+    for (uint32_t p = 0u; p < 4u; ++p) {
+        if (p >= np) break;
+        gate[p] = quarter_warp_sum_f32(gate[p], lane);
+        up[p] = quarter_warp_sum_f32(up[p], lane);
+        if (lane == 0u) {
+            if (clamp > 1.0e-6f) {
+                if (gate[p] > clamp) gate[p] = clamp;
+                if (up[p] > clamp) up[p] = clamp;
+                if (up[p] < -clamp) up[p] = -clamp;
+            }
+            const uint64_t off =
+                (uint64_t)pair[p] * expert_mid_dim + row;
+            if (write_aux) {
+                gate_out[off] = gate[p];
+                up_out[off] = up[p];
+            }
+            mid_out[off] =
+                (gate[p] / (1.0f + expf(-gate[p]))) * up[p] *
+                weights[(uint64_t)tok[p] * n_expert + slot[p]];
+        }
+    }
+}
+
+__global__ static void moe_gate_up_mid_grouped_expert_row32_kernel(
+        float *gate_out,
+        float *up_out,
+        float *mid_out,
+        const char *gate_base,
+        const char *up_base,
+        const hip_block_q8_K *xq,
+        const uint32_t *expert_offsets,
+        const uint32_t *sorted_tiles,
+        const uint32_t *active_count,
+        const uint32_t *active_experts,
+        const uint32_t *tile_pair_counts,
+        const uint32_t *tile_pairs,
+        const float *weights,
+        uint64_t gate_expert_bytes,
+        uint64_t gate_row_bytes,
+        uint32_t xq_blocks,
+        uint32_t expert_mid_dim,
+        uint32_t n_expert,
+        uint32_t write_aux,
+        float clamp) {
+    const uint32_t active = blockIdx.y;
+    if (active >= *active_count) return;
+    const uint32_t expert = active_experts[active];
+    const uint32_t first = expert_offsets[expert];
+    const uint32_t count =
+        expert_offsets[expert + 1u] - first;
+    const uint32_t lane = threadIdx.x & 7u;
+    const uint32_t row = blockIdx.x * 32u + (threadIdx.x >> 3u);
+    if (row >= expert_mid_dim) return;
+
+    const hip_block_iq2_xxs *gr =
+        (const hip_block_iq2_xxs *)(
+            gate_base + (uint64_t)expert * gate_expert_bytes +
+            (uint64_t)row * gate_row_bytes);
+    const hip_block_iq2_xxs *ur =
+        (const hip_block_iq2_xxs *)(
+            up_base + (uint64_t)expert * gate_expert_bytes +
+            (uint64_t)row * gate_row_bytes);
+
+    for (uint32_t tile_index = 0u; tile_index < count;
+         ++tile_index) {
+        const uint32_t tile = sorted_tiles[first + tile_index];
+        const uint32_t np = tile_pair_counts[tile];
+        uint32_t pair[4] = {0u, 0u, 0u, 0u};
+        uint32_t tok[4] = {0u, 0u, 0u, 0u};
+        uint32_t slot[4] = {0u, 0u, 0u, 0u};
+        const hip_block_q8_K *xqb[4] = {NULL, NULL, NULL, NULL};
+#pragma unroll
+        for (uint32_t p = 0u; p < 4u; ++p) {
+            if (p < np) {
+                pair[p] = tile_pairs[(uint64_t)tile * 4u + p];
+                tok[p] = pair[p] / n_expert;
+                slot[p] = pair[p] - tok[p] * n_expert;
+                xqb[p] = xq + (uint64_t)tok[p] * xq_blocks;
+            }
+        }
+
+        float gate[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float up[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (uint32_t b = lane; b < xq_blocks; b += 8u) {
+            const hip_block_q8_K *y0 = xqb[0] ? xqb[0] + b : NULL;
+            const hip_block_q8_K *y1 = xqb[1] ? xqb[1] + b : NULL;
+            const hip_block_q8_K *y2 = xqb[2] ? xqb[2] + b : NULL;
+            const hip_block_q8_K *y3 = xqb[3] ? xqb[3] + b : NULL;
+            if (np == 1u) {
+                dev_dot_iq2_xxs_q8_K_block4<1u>(
+                    gr + b, y0, y1, y2, y3, gate);
+                dev_dot_iq2_xxs_q8_K_block4<1u>(
+                    ur + b, y0, y1, y2, y3, up);
+            } else if (np == 2u) {
+                dev_dot_iq2_xxs_q8_K_block4<2u>(
+                    gr + b, y0, y1, y2, y3, gate);
+                dev_dot_iq2_xxs_q8_K_block4<2u>(
+                    ur + b, y0, y1, y2, y3, up);
+            } else if (np == 3u) {
+                dev_dot_iq2_xxs_q8_K_block4<3u>(
+                    gr + b, y0, y1, y2, y3, gate);
+                dev_dot_iq2_xxs_q8_K_block4<3u>(
+                    ur + b, y0, y1, y2, y3, up);
+            } else {
+                dev_dot_iq2_xxs_q8_K_block4<4u>(
+                    gr + b, y0, y1, y2, y3, gate);
+                dev_dot_iq2_xxs_q8_K_block4<4u>(
+                    ur + b, y0, y1, y2, y3, up);
+            }
+        }
+#pragma unroll
+        for (uint32_t p = 0u; p < 4u; ++p) {
+            if (p >= np) break;
+            gate[p] = quarter_warp_sum_f32(gate[p], lane);
+            up[p] = quarter_warp_sum_f32(up[p], lane);
+            if (lane == 0u) {
+                if (clamp > 1.0e-6f) {
+                    if (gate[p] > clamp) gate[p] = clamp;
+                    if (up[p] > clamp) up[p] = clamp;
+                    if (up[p] < -clamp) up[p] = -clamp;
+                }
+                const uint64_t off =
+                    (uint64_t)pair[p] * expert_mid_dim + row;
+                if (write_aux) {
+                    gate_out[off] = gate[p];
+                    up_out[off] = up[p];
+                }
+                mid_out[off] =
+                    (gate[p] / (1.0f + expf(-gate[p]))) * up[p] *
+                    weights[(uint64_t)tok[p] * n_expert + slot[p]];
+            }
         }
     }
 }
@@ -3649,6 +4016,116 @@ __global__ static void moe_down_q2K_tile4_float_batch_warp32_kernel(
     }
 #pragma unroll
     for (uint32_t p = 0; p < 4u; p++) {
+        if (p < np) {
+            acc[p] = warp_sum_f32(acc[p]);
+            if (lane == 0u && row < out_dim) {
+                down_out_h[(uint64_t)pair[p] * out_dim + row] =
+                    __float2half(acc[p]);
+            }
+        }
+    }
+}
+
+/*
+ * One-launch form of the qualified request-local compact down projection.
+ * Tiles retain their original request boundary, pair order, and 1/2/3/4-row
+ * arithmetic; only the launch and final six-slot sum are shared.
+ */
+__global__ static void moe_down_q2K_grouped_tile4_float_batch_warp32_kernel(
+        __half *down_out_h,
+        const char *down_base,
+        const float *mid,
+        const uint32_t *tile_experts,
+        const uint32_t *tile_pair_counts,
+        const uint32_t *tile_pairs,
+        uint64_t down_expert_bytes,
+        uint64_t down_row_bytes,
+        uint32_t expert_mid_dim,
+        uint32_t out_dim) {
+    const uint32_t tile = blockIdx.y;
+    const uint32_t np = tile_pair_counts[tile];
+    if (np == 0u) return;
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t rows_per_block = blockDim.x >> 5u;
+    const uint32_t row =
+        blockIdx.x * rows_per_block + (tid >> 5u);
+    const uint32_t expert = tile_experts[tile];
+    uint32_t pair[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+#pragma unroll
+    for (uint32_t p = 0u; p < 4u; ++p) {
+        if (p < np) {
+            pair[p] = tile_pairs[(uint64_t)tile * 4u + p];
+        }
+    }
+
+    const unsigned char *down_row =
+        (const unsigned char *)down_base +
+        (uint64_t)expert * down_expert_bytes +
+        (uint64_t)(row < out_dim ? row : 0u) * down_row_bytes;
+    const uint32_t n_blocks = expert_mid_dim >> 8u;
+    if (np == 1u) {
+        if (row >= out_dim) return;
+        const float *mid_row =
+            mid + (uint64_t)pair[0] * expert_mid_dim;
+        float acc = 0.0f;
+        for (uint32_t b = 0u; b < n_blocks; ++b) {
+            const unsigned char *weight_block =
+                down_row + (uint64_t)b * 84u;
+            float d = 0.0f;
+            float dmin = 0.0f;
+            q2_K_scale_broadcast_w32(weight_block, &d, &dmin);
+#pragma unroll
+            for (uint32_t k = 0u; k < 8u; ++k) {
+                const uint32_t i = lane + (k << 5u);
+                const float weight = q2_K_dequant_256_scaled_w32(
+                    weight_block, lane, k, d, dmin);
+                acc += weight * mid_row[(uint64_t)b * 256u + i];
+            }
+        }
+        acc = warp_sum_f32(acc);
+        if (lane == 0u) {
+            down_out_h[(uint64_t)pair[0] * out_dim + row] =
+                __float2half(acc);
+        }
+        return;
+    }
+
+    extern __shared__ float shmid[];
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint32_t b = 0u; b < n_blocks; ++b) {
+        const uint64_t mid_base = (uint64_t)b * 256u;
+        for (uint32_t j = tid; j < np * 256u; j += blockDim.x) {
+            const uint32_t p = j >> 8u;
+            const uint32_t k = j & 255u;
+            shmid[j] =
+                mid[(uint64_t)pair[p] * expert_mid_dim + mid_base + k];
+        }
+        __syncthreads();
+        if (row < out_dim) {
+            const unsigned char *weight_block =
+                down_row + (uint64_t)b * 84u;
+            float d = 0.0f;
+            float dmin = 0.0f;
+            q2_K_scale_broadcast_w32(weight_block, &d, &dmin);
+#pragma unroll
+            for (uint32_t k = 0u; k < 8u; ++k) {
+                const uint32_t i = lane + (k << 5u);
+                const float weight = q2_K_dequant_256_scaled_w32(
+                    weight_block, lane, k, d, dmin);
+#pragma unroll
+                for (uint32_t p = 0u; p < 4u; ++p) {
+                    if (p < np) {
+                        acc[p] += weight * shmid[(p << 8u) + i];
+                    }
+                }
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (uint32_t p = 0u; p < 4u; ++p) {
         if (p < np) {
             acc[p] = warp_sum_f32(acc[p]);
             if (lane == 0u && row < out_dim) {

@@ -1,3 +1,4 @@
+#include <array>
 #include <vector>
 #include <ctype.h>
 #include <math.h>
@@ -4471,14 +4472,45 @@ static bool rocm_graph_encode_sessions_attention_batch(
 static bool rocm_graph_encode_layer_ffn_batch(
     ds4_gpu_graph* g, const ds4_model* model, const ds4_layer_weights* layer,
     uint32_t il, uint32_t pos0, uint32_t n_tokens,
-    const ds4_gpu_tensor* tokens = nullptr, uint32_t router_group_rows = 0) {
+    const ds4_gpu_tensor* tokens = nullptr, uint32_t router_group_rows = 0,
+    const uint32_t* router_group_offsets = nullptr,
+    uint32_t router_group_count = 0, bool combine_grouped_moe = false) {
   if (n_tokens == 0 || n_tokens > g->prefill_cap)
     return false;
   if (!tokens)
     tokens = g->prefill_tokens;
-  if (router_group_rows > n_tokens ||
-      (router_group_rows != 0u && n_tokens % router_group_rows != 0u)) {
+  if ((router_group_offsets != nullptr) != (router_group_count != 0u) ||
+      (router_group_offsets != nullptr && router_group_rows != 0u) ||
+      router_group_rows > n_tokens ||
+      (router_group_rows != 0u && n_tokens % router_group_rows != 0u) ||
+      router_group_count > 8u ||
+      (combine_grouped_moe && router_group_offsets == nullptr)) {
     return false;
+  }
+  std::array<uint32_t, 9> group_offsets{};
+  uint32_t group_count = 0u;
+  if (router_group_offsets != nullptr) {
+    if (router_group_offsets[0] != 0u ||
+        router_group_offsets[router_group_count] != n_tokens) {
+      return false;
+    }
+    for (uint32_t group = 0; group <= router_group_count; ++group) {
+      group_offsets[group] = router_group_offsets[group];
+      if (group != 0u &&
+          group_offsets[group] <= group_offsets[group - 1u]) {
+        return false;
+      }
+    }
+    group_count = router_group_count;
+  } else if (router_group_rows != 0u &&
+             router_group_rows < n_tokens) {
+    group_count = n_tokens / router_group_rows;
+    if (group_count > 8u) {
+      return false;
+    }
+    for (uint32_t group = 0; group <= group_count; ++group) {
+      group_offsets[group] = group * router_group_rows;
+    }
   }
 
   const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
@@ -4587,38 +4619,40 @@ static bool rocm_graph_encode_layer_ffn_batch(
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_FFN_STAGE("norm");
-    if (ok && router_group_rows != 0u && router_group_rows < n_tokens) {
+    if (ok && group_count != 0u) {
       const uint64_t logits_row_bytes = (uint64_t)DS4_N_EXPERT * sizeof(float);
       const uint64_t selected_row_bytes =
           (uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t);
       const uint64_t weights_row_bytes =
           (uint64_t)DS4_N_EXPERT_USED * sizeof(float);
-      for (uint32_t row0 = 0; ok && row0 < n_tokens;
-           row0 += router_group_rows) {
+      for (uint32_t group = 0; ok && group < group_count; ++group) {
+        const uint32_t row0 = group_offsets[group];
+        const uint32_t group_rows =
+            group_offsets[group + 1u] - row0;
         ds4_gpu_tensor* logits_view = ds4_gpu_tensor_view(
             g->batch_router_logits, (uint64_t)row0 * logits_row_bytes,
-            (uint64_t)router_group_rows * logits_row_bytes);
+            (uint64_t)group_rows * logits_row_bytes);
         ds4_gpu_tensor* probs_view = ds4_gpu_tensor_view(
             g->batch_router_probs, (uint64_t)row0 * logits_row_bytes,
-            (uint64_t)router_group_rows * logits_row_bytes);
+            (uint64_t)group_rows * logits_row_bytes);
         ds4_gpu_tensor* selected_view = ds4_gpu_tensor_view(
             g->batch_router_selected, (uint64_t)row0 * selected_row_bytes,
-            (uint64_t)router_group_rows * selected_row_bytes);
+            (uint64_t)group_rows * selected_row_bytes);
         ds4_gpu_tensor* weights_view = ds4_gpu_tensor_view(
             g->batch_router_weights, (uint64_t)row0 * weights_row_bytes,
-            (uint64_t)router_group_rows * weights_row_bytes);
+            (uint64_t)group_rows * weights_row_bytes);
         ds4_gpu_tensor* norm_view = ds4_gpu_tensor_view(
             g->batch_ffn_norm, (uint64_t)row0 * DS4_N_EMBD * sizeof(float),
-            (uint64_t)router_group_rows * DS4_N_EMBD * sizeof(float));
+            (uint64_t)group_rows * DS4_N_EMBD * sizeof(float));
         ds4_gpu_tensor* tokens_view =
             ds4_gpu_tensor_view(tokens, (uint64_t)row0 * sizeof(int32_t),
-                                (uint64_t)router_group_rows * sizeof(int32_t));
+                                (uint64_t)group_rows * sizeof(int32_t));
         ok = logits_view && probs_view && selected_view && weights_view &&
              norm_view && tokens_view;
         if (ok) {
           ok = rocm_graph_matmul_plain_tensor(
               logits_view, model, layer->ffn_gate_inp, DS4_N_EMBD, DS4_N_EXPERT,
-              norm_view, router_group_rows);
+              norm_view, group_rows);
         }
         if (ok) {
           ok = ds4_gpu_router_select_batch_tensor(
@@ -4634,7 +4668,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
                    0, 0, layer->ffn_exp_probs_b != nullptr,
                    layer->ffn_gate_tid2eid != nullptr, logits_view, tokens_view,
                    DS4_N_EXPERT, DS4_N_EXPERT_USED, DS4_EXPERT_WEIGHT_SCALE,
-                   router_group_rows) != 0;
+                   group_rows) != 0;
         }
         ds4_gpu_tensor_free(tokens_view);
         ds4_gpu_tensor_free(norm_view);
@@ -4675,7 +4709,7 @@ static bool rocm_graph_encode_layer_ffn_batch(
      * round trip through batch_routed_out. Advisory: only the F16 down route can
      * do it, so the outcome is read back after the call. */
     if (ok) ds4_gpu_set_routed_defer_sum(n_tokens >= 128u ? 1 : 0);
-    if (ok && router_group_rows != 0u && router_group_rows < n_tokens) {
+    if (ok && group_count != 0u && !combine_grouped_moe) {
       const uint64_t gate_row_elems =
           (uint64_t)DS4_N_EXPERT_USED * expert_mid_dim;
       const uint64_t down_row_elems =
@@ -4685,36 +4719,38 @@ static bool rocm_graph_encode_layer_ffn_batch(
       const uint64_t weights_row_bytes =
           (uint64_t)DS4_N_EXPERT_USED * sizeof(float);
       bool all_mid_f16 = true;
-      for (uint32_t row0 = 0; ok && row0 < n_tokens;
-           row0 += router_group_rows) {
+      for (uint32_t group = 0; ok && group < group_count; ++group) {
+        const uint32_t row0 = group_offsets[group];
+        const uint32_t group_rows =
+            group_offsets[group + 1u] - row0;
         ds4_gpu_tensor* out_view = ds4_gpu_tensor_view(
             g->batch_routed_out,
             (uint64_t)row0 * routed_out_dim * sizeof(float),
-            (uint64_t)router_group_rows * routed_out_dim * sizeof(float));
+            (uint64_t)group_rows * routed_out_dim * sizeof(float));
         ds4_gpu_tensor* gate_view = ds4_gpu_tensor_view(
             g->batch_routed_gate,
             (uint64_t)row0 * gate_row_elems * sizeof(float),
-            (uint64_t)router_group_rows * gate_row_elems * sizeof(float));
+            (uint64_t)group_rows * gate_row_elems * sizeof(float));
         ds4_gpu_tensor* up_view = ds4_gpu_tensor_view(
             g->batch_routed_up, (uint64_t)row0 * gate_row_elems * sizeof(float),
-            (uint64_t)router_group_rows * gate_row_elems * sizeof(float));
+            (uint64_t)group_rows * gate_row_elems * sizeof(float));
         ds4_gpu_tensor* mid_view = ds4_gpu_tensor_view(
             g->batch_routed_mid,
             (uint64_t)row0 * gate_row_elems * sizeof(float),
-            (uint64_t)router_group_rows * gate_row_elems * sizeof(float));
+            (uint64_t)group_rows * gate_row_elems * sizeof(float));
         ds4_gpu_tensor* down_view = ds4_gpu_tensor_view(
             g->batch_routed_down,
             (uint64_t)row0 * down_row_elems * sizeof(float),
-            (uint64_t)router_group_rows * down_row_elems * sizeof(float));
+            (uint64_t)group_rows * down_row_elems * sizeof(float));
         ds4_gpu_tensor* selected_view = ds4_gpu_tensor_view(
             g->batch_router_selected, (uint64_t)row0 * selected_row_bytes,
-            (uint64_t)router_group_rows * selected_row_bytes);
+            (uint64_t)group_rows * selected_row_bytes);
         ds4_gpu_tensor* weights_view = ds4_gpu_tensor_view(
             g->batch_router_weights, (uint64_t)row0 * weights_row_bytes,
-            (uint64_t)router_group_rows * weights_row_bytes);
+            (uint64_t)group_rows * weights_row_bytes);
         ds4_gpu_tensor* norm_view = ds4_gpu_tensor_view(
             g->batch_ffn_norm, (uint64_t)row0 * DS4_N_EMBD * sizeof(float),
-            (uint64_t)router_group_rows * DS4_N_EMBD * sizeof(float));
+            (uint64_t)group_rows * DS4_N_EMBD * sizeof(float));
         ok = out_view && gate_view && up_view && mid_view && down_view &&
              selected_view && weights_view && norm_view;
         bool group_mid_f16 = false;
@@ -4730,8 +4766,8 @@ static bool rocm_graph_encode_layer_ffn_batch(
                    static_cast<uint32_t>(down_in_dim),
                    static_cast<uint32_t>(routed_out_dim), selected_view,
                    weights_view, DS4_N_EXPERT, DS4_N_EXPERT_USED,
-                   DS4_SWIGLU_CLAMP_EXP, norm_view, il, router_group_rows,
-                   &group_mid_f16, false) != 0;
+                   DS4_SWIGLU_CLAMP_EXP, norm_view, il, group_rows,
+                   nullptr, 0u, &group_mid_f16, false) != 0;
         }
         all_mid_f16 = all_mid_f16 && group_mid_f16;
         ds4_gpu_tensor_free(norm_view);
@@ -4757,6 +4793,8 @@ static bool rocm_graph_encode_layer_ffn_batch(
                static_cast<uint32_t>(routed_out_dim), g->batch_router_selected,
                g->batch_router_weights, DS4_N_EXPERT, DS4_N_EXPERT_USED,
                DS4_SWIGLU_CLAMP_EXP, g->batch_ffn_norm, il, n_tokens,
+               combine_grouped_moe ? router_group_offsets : nullptr,
+               combine_grouped_moe ? router_group_count : 0u,
                &g->batch_routed_mid_is_f16, false) != 0;
     }
     if (ok) {
@@ -5937,7 +5975,7 @@ static bool rocm_graph_verify_suffix(ds4_gpu_graph* g, const ds4_model* model,
 }
 
 /*
- * Verify one equally sized draft block per session.
+ * Verify one independently sized draft block per session.
  *
  * Attention remains session-local because it mutates independent raw,
  * compressed, and indexer caches. The much larger FFN/MoE and output-head
@@ -5957,11 +5995,20 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
       !coordinator->batch_dspark_verify_after_attn_hc) {
     return false;
   }
-  const uint32_t rows_per_session = items[0].n_tokens;
-  if (rows_per_session == 0u)
-    return false;
-  const uint32_t total_rows =
-      static_cast<uint32_t>(item_count) * rows_per_session;
+  std::array<uint32_t, 9> row_offsets{};
+  bool saved_capture_prefixes[8] = {};
+  for (size_t index = 0; index < item_count; ++index) {
+    const ds4_rocm_verify_item& item = items[index];
+    if (!item.graph || !item.tokens || !item.row_tops ||
+        item.n_tokens == 0u ||
+        item.start > static_cast<uint32_t>(item.tokens->len) ||
+        item.n_tokens > static_cast<uint32_t>(item.tokens->len) - item.start) {
+      return false;
+    }
+    row_offsets[index + 1u] = row_offsets[index] + item.n_tokens;
+    saved_capture_prefixes[index] = item.graph->spec_capture_prefixes;
+  }
+  const uint32_t total_rows = row_offsets[item_count];
   if (total_rows > coordinator->prefill_cap ||
       total_rows > coordinator->batch_dspark_verify_rows_cap) {
     return false;
@@ -5969,32 +6016,22 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
 
   std::vector<int32_t> flat_tokens(total_rows);
   std::vector<int32_t> flat_tops(total_rows);
-  bool saved_capture_prefixes[8] = {};
-  for (size_t index = 0; index < item_count; ++index) {
-    const ds4_rocm_verify_item& item = items[index];
-    if (!item.graph || !item.tokens || !item.row_tops ||
-        item.n_tokens != rows_per_session ||
-        item.start > static_cast<uint32_t>(item.tokens->len) ||
-        item.n_tokens > static_cast<uint32_t>(item.tokens->len) - item.start) {
-      return false;
-    }
-    saved_capture_prefixes[index] = item.graph->spec_capture_prefixes;
-  }
 
   size_t prepared_count = 0;
   for (; prepared_count < item_count; ++prepared_count) {
     const ds4_rocm_verify_item& item = items[prepared_count];
     const uint32_t rows_cap =
-        prepared_count == 0u ? total_rows : rows_per_session;
+        prepared_count == 0u ? total_rows : item.n_tokens;
     if (!rocm_graph_spec_prepare(item.graph, engine->weights, rows_cap) ||
         !rocm_graph_spec_frontier_save(item.graph)) {
       break;
     }
     item.graph->spec_capture_prefixes =
-        rows_per_session > 1u && rows_per_session <= DS4_SPEC_PREFIX_SLOTS + 2u;
+        item.n_tokens > 1u &&
+        item.n_tokens <= DS4_SPEC_PREFIX_SLOTS + 2u;
     ds4_rocm_graph_dspark_capture_reset(item.graph);
-    for (uint32_t row = 0; row < rows_per_session; ++row) {
-      flat_tokens[prepared_count * rows_per_session + row] =
+    for (uint32_t row = 0; row < item.n_tokens; ++row) {
+      flat_tokens[row_offsets[prepared_count] + row] =
           item.tokens->v[item.start + row];
     }
   }
@@ -6007,10 +6044,19 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
 
   const bool serial_layers =
       getenv("GUFO_DEEPSEEK_DSPARK_BATCH_SERIAL_LAYERS") != NULL;
+  const char* multi_batch_setting =
+      getenv("GUFO_DEEPSEEK_DSPARK_MULTI_BATCH");
+  const bool multi_batch =
+      (multi_batch_setting == NULL ||
+       (strcmp(multi_batch_setting, "0") != 0 &&
+        strcmp(multi_batch_setting, "false") != 0 &&
+        strcmp(multi_batch_setting, "off") != 0)) &&
+      getenv("GUFO_DEEPSEEK_DSPARK_MULTI_VERIFY_SERIAL") == NULL;
   const bool combine_output_head =
-      getenv("GUFO_DEEPSEEK_DSPARK_BATCH_HEAD") != NULL;
+      getenv("GUFO_DEEPSEEK_DSPARK_BATCH_HEAD") != NULL || multi_batch;
   const bool interleave =
       getenv("GUFO_DEEPSEEK_DSPARK_BATCH_INTERLEAVE") != NULL ||
+      multi_batch ||
       (item_count == 2u && getenv("GUFO_DEEPSEEK_DSPARK_BATCH_DIRECT") == NULL);
   if ((!interleave && !serial_layers) ||
       (serial_layers && !combine_output_head)) {
@@ -6039,9 +6085,9 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
       if (ok) {
         ok = ds4_gpu_tensor_copy(
                  coordinator->batch_dspark_verify_cur_hc,
-                 (uint64_t)index * rows_per_session * hc_row_bytes,
+                 (uint64_t)row_offsets[index] * hc_row_bytes,
                  item.graph->batch_cur_hc, 0,
-                 (uint64_t)rows_per_session * hc_row_bytes) != 0;
+                 (uint64_t)item.n_tokens * hc_row_bytes) != 0;
       }
     }
     ds4_gpu_set_small_batch_mode(1);
@@ -6084,17 +6130,19 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
       if (index != 0u &&
           ds4_gpu_tensor_copy(
               items[index].graph->spec_logits, 0, coordinator->spec_logits,
-              (uint64_t)index * rows_per_session * logits_row_bytes,
-              (uint64_t)rows_per_session * logits_row_bytes) == 0) {
+              (uint64_t)row_offsets[index] * logits_row_bytes,
+              (uint64_t)items[index].n_tokens * logits_row_bytes) == 0) {
         return false;
       }
-      memcpy(items[index].row_tops, flat_tops.data() + index * rows_per_session,
-             (size_t)rows_per_session * sizeof(items[index].row_tops[0]));
+      memcpy(items[index].row_tops, flat_tops.data() + row_offsets[index],
+             (size_t)items[index].n_tokens *
+                 sizeof(items[index].row_tops[0]));
     }
     return true;
   }
 
   const bool combine_ffn = getenv("GUFO_DEEPSEEK_DSPARK_BATCH_FFN") != NULL ||
+                           multi_batch ||
                            (item_count == 2u && !serial_layers);
   const bool sync_layers =
       getenv("GUFO_DEEPSEEK_DSPARK_BATCH_SYNC_LAYERS") != NULL;
@@ -6123,29 +6171,29 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
                graph->batch_cur_hc, graph->prefill_tokens, engine->model->map,
                engine->model->size, engine->weights->token_embd->abs_offset,
                static_cast<uint32_t>(engine->weights->token_embd->dim[1]),
-               rows_per_session, DS4_N_EMBD, DS4_N_HC) != 0;
+               items[index].n_tokens, DS4_N_EMBD, DS4_N_HC) != 0;
       for (uint32_t il = 0; ok && il < DS4_N_LAYER; ++il) {
         ok = rocm_graph_encode_layer_batch(
             graph, engine->model, &engine->weights->layer[il], il,
-            items[index].start, rows_per_session);
+            items[index].start, items[index].n_tokens);
       }
       if (ok && combine_output_head) {
         ok = ds4_gpu_tensor_copy(
                  coordinator->batch_dspark_verify_cur_hc,
-                 (uint64_t)index * rows_per_session * hc_row_bytes,
+                 (uint64_t)row_offsets[index] * hc_row_bytes,
                  graph->batch_cur_hc, 0,
-                 (uint64_t)rows_per_session * hc_row_bytes) != 0;
+                 (uint64_t)items[index].n_tokens * hc_row_bytes) != 0;
       }
       if (ok && !combine_output_head) {
         ok = rocm_graph_encode_output_head_batch(
-            graph, engine->model, engine->weights, rows_per_session,
+            graph, engine->model, engine->weights, items[index].n_tokens,
             engine->weights->output->dim[1]);
       }
       if (ok && !combine_output_head) {
         ok = ds4_gpu_spec_row_argmax_tensor(
                  graph->spec_row_tops, graph->spec_logits,
                  static_cast<uint32_t>(engine->weights->output->dim[1]),
-                 rows_per_session) != 0;
+                 items[index].n_tokens) != 0;
       }
       if (ok) {
         ok = ds4_gpu_flush_commands() != 0;
@@ -6157,15 +6205,16 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
     for (size_t index = 0; ok && index < item_count; ++index) {
       ds4_gpu_graph* graph = items[index].graph;
       const uint64_t block_offset =
-          (uint64_t)index * rows_per_session * hc_row_bytes;
-      const uint64_t block_bytes = (uint64_t)rows_per_session * hc_row_bytes;
+          (uint64_t)row_offsets[index] * hc_row_bytes;
+      const uint64_t block_bytes =
+          (uint64_t)items[index].n_tokens * hc_row_bytes;
       ok = ds4_gpu_tensor_copy(graph->batch_cur_hc, 0,
                                coordinator->batch_dspark_verify_cur_hc,
                                block_offset, block_bytes) != 0;
       if (ok) {
         ok = rocm_graph_encode_layer_attention_batch(
             graph, engine->model, layer, il, items[index].start,
-            rows_per_session);
+            items[index].n_tokens);
       }
       if (ok) {
         if (combine_ffn) {
@@ -6175,13 +6224,13 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
         } else {
           ds4_gpu_tensor* session_tokens = ds4_gpu_tensor_view(
               coordinator->prefill_tokens,
-              (uint64_t)index * rows_per_session * sizeof(flat_tokens[0]),
-              (uint64_t)rows_per_session * sizeof(flat_tokens[0]));
+              (uint64_t)row_offsets[index] * sizeof(flat_tokens[0]),
+              (uint64_t)items[index].n_tokens * sizeof(flat_tokens[0]));
           ok = session_tokens != nullptr;
           if (ok) {
             ok = rocm_graph_encode_layer_ffn_batch(
                 graph, engine->model, layer, il, items[index].start,
-                rows_per_session, session_tokens);
+                items[index].n_tokens, session_tokens);
           }
           ds4_gpu_tensor_free(session_tokens);
         }
@@ -6191,7 +6240,7 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
         graph->batch_cur_hc = graph->batch_next_hc;
         graph->batch_next_hc = tmp;
         ok = rocm_graph_dspark_capture_rows(graph, il, graph->batch_cur_hc,
-                                            rows_per_session);
+                                            items[index].n_tokens);
       }
       if (ok && !combine_ffn) {
         ok = ds4_gpu_tensor_copy(coordinator->batch_dspark_verify_after_attn_hc,
@@ -6208,20 +6257,29 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
                                0, (uint64_t)total_rows * hc_row_bytes) != 0;
     }
     if (ok && combine_ffn) {
+      const char* multi_moe =
+          getenv("GUFO_DEEPSEEK_DSPARK_MULTI_MOE");
+      const bool combine_moe =
+          multi_batch &&
+          (multi_moe == nullptr ||
+           (strcmp(multi_moe, "0") != 0 &&
+            strcmp(multi_moe, "false") != 0 &&
+            strcmp(multi_moe, "off") != 0));
       ok = rocm_graph_encode_layer_ffn_batch(
           coordinator, engine->model, layer, il, items[0].start, total_rows,
-          coordinator->prefill_tokens, rows_per_session);
+          coordinator->prefill_tokens, 0u, row_offsets.data(),
+          static_cast<uint32_t>(item_count), combine_moe);
     }
     for (size_t index = 0; ok && combine_ffn && index < item_count; ++index) {
       const uint64_t block_offset =
-          (uint64_t)index * rows_per_session * hc_row_bytes;
+          (uint64_t)row_offsets[index] * hc_row_bytes;
       ds4_gpu_tensor* block_hc =
           ds4_gpu_tensor_view(coordinator->batch_next_hc, block_offset,
-                              (uint64_t)rows_per_session * hc_row_bytes);
+                              (uint64_t)items[index].n_tokens * hc_row_bytes);
       ok = block_hc != NULL;
       if (ok) {
         ok = rocm_graph_dspark_capture_rows(items[index].graph, il, block_hc,
-                                            rows_per_session);
+                                            items[index].n_tokens);
       }
       ds4_gpu_tensor_free(block_hc);
     }
@@ -6257,21 +6315,22 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
        ++index) {
     ds4_gpu_graph* graph = items[index].graph;
     const uint64_t block_offset =
-        (uint64_t)index * rows_per_session * hc_row_bytes;
-    const uint64_t block_bytes = (uint64_t)rows_per_session * hc_row_bytes;
+        (uint64_t)row_offsets[index] * hc_row_bytes;
+    const uint64_t block_bytes =
+        (uint64_t)items[index].n_tokens * hc_row_bytes;
     ok = ds4_gpu_tensor_copy(graph->batch_cur_hc, 0,
                              coordinator->batch_dspark_verify_cur_hc,
                              block_offset, block_bytes) != 0;
     if (ok) {
       ok = rocm_graph_encode_output_head_batch(
-          graph, engine->model, engine->weights, rows_per_session,
+          graph, engine->model, engine->weights, items[index].n_tokens,
           engine->weights->output->dim[1]);
     }
     if (ok) {
       ok = ds4_gpu_spec_row_argmax_tensor(
                graph->spec_row_tops, graph->spec_logits,
                static_cast<uint32_t>(engine->weights->output->dim[1]),
-               rows_per_session) != 0;
+               items[index].n_tokens) != 0;
     }
   }
   if (ok) {
@@ -6297,16 +6356,17 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
     if (combine_output_head && index != 0u &&
         ds4_gpu_tensor_copy(
             items[index].graph->spec_logits, 0, coordinator->spec_logits,
-            (uint64_t)index * rows_per_session * logits_row_bytes,
-            (uint64_t)rows_per_session * logits_row_bytes) == 0) {
+            (uint64_t)row_offsets[index] * logits_row_bytes,
+            (uint64_t)items[index].n_tokens * logits_row_bytes) == 0) {
       return false;
     }
     if (combine_output_head) {
-      memcpy(items[index].row_tops, flat_tops.data() + index * rows_per_session,
-             (size_t)rows_per_session * sizeof(items[index].row_tops[0]));
+      memcpy(items[index].row_tops, flat_tops.data() + row_offsets[index],
+             (size_t)items[index].n_tokens *
+                 sizeof(items[index].row_tops[0]));
     } else if (ds4_gpu_tensor_read(items[index].graph->spec_row_tops, 0,
                                    items[index].row_tops,
-                                   (uint64_t)rows_per_session *
+                                   (uint64_t)items[index].n_tokens *
                                        sizeof(items[index].row_tops[0])) == 0) {
       return false;
     }
@@ -6750,7 +6810,7 @@ static bool rocm_graph_dspark_inject(ds4_gpu_graph *g,
  * token rows shifts every draft's RoPE position and changes the support model
  * being evaluated.
  */
-static bool rocm_graph_encode_dspark_stage_reference(ds4_gpu_graph *g,
+static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                                                      uint32_t stage,
                                                      uint32_t pos0,
                                                      uint32_t n_rows) {
@@ -7047,8 +7107,21 @@ static bool rocm_graph_encode_dspark_stage_reference(ds4_gpu_graph *g,
     ds4_gpu_tensor_free(attn_cur_view);
     ds4_gpu_tensor_free(hc_split_view);
     ds4_gpu_tensor_free(hc_mix_view);
-    if (!ok)
-      return false;
+    return ok;
+}
+
+static bool rocm_graph_encode_dspark_stage_reference(ds4_gpu_graph *g,
+                                                     uint32_t stage,
+                                                     uint32_t pos0,
+                                                     uint32_t n_rows) {
+    if (!rocm_graph_encode_dspark_stage_attention(g, stage, pos0, n_rows)) {
+        return false;
+    }
+    const ds4_dspark_model *d = g->dspark;
+    const uint32_t draft_rows = n_rows - 1u;
+    const ds4_model *sm = d->model;
+    const ds4_layer_weights *layer = &d->stage[stage].block;
+    const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
     if (!rocm_graph_encode_layer_ffn_batch(
             g, sm, layer, stage, pos0, draft_rows)) {
         return false;
@@ -7373,6 +7446,131 @@ static bool rocm_graph_dspark_prepare_hidden(
   return ok;
 }
 
+/*
+ * Run one support-model block for every active request.
+ *
+ * All sessions intentionally borrow one large batch scratch arena. Keep each
+ * request's persistent draft rows in the dedicated flattened buffers and stage
+ * only the request currently running its stateful attention into shared
+ * scratch. The support FFN/MoE is stateless, so it can consume all flattened
+ * rows in one pass while retaining one router group per request.
+ */
+static bool rocm_graph_dspark_prepare_hidden_batch(
+    ds4_engine* engine, const ds4_rocm_dspark_draft_item* items,
+    size_t item_count, ds4_gpu_tensor* hidden_out) {
+  if (!engine || !engine->model || !engine->weights || !items ||
+      item_count < 2u || item_count > 8u || !hidden_out) {
+    return false;
+  }
+  ds4_gpu_graph* coordinator = items[0].graph;
+  const ds4_dspark_model* d = coordinator ? coordinator->dspark : nullptr;
+  if (!coordinator || !d || !coordinator->batch_dspark_verify_cur_hc ||
+      !coordinator->batch_dspark_verify_after_attn_hc) {
+    return false;
+  }
+  const uint32_t block = d->block_size;
+  const uint32_t rows = block + 1u;
+  const uint32_t total_draft_rows =
+      static_cast<uint32_t>(item_count) * block;
+  if (block == 0u || total_draft_rows > coordinator->prefill_cap ||
+      total_draft_rows > coordinator->batch_dspark_verify_rows_cap ||
+      total_draft_rows > DS4_SPEC_MAX_ROWS) {
+    return false;
+  }
+
+  std::vector<int32_t> flat_tokens(total_draft_rows);
+  for (size_t index = 0; index < item_count; ++index) {
+    const ds4_rocm_dspark_draft_item& item = items[index];
+    ds4_gpu_graph* graph = item.graph;
+    if (!graph || graph->dspark != d || item.position == 0u ||
+        graph->dspark_context_len < item.position ||
+        rows > graph->prefill_cap || rows > graph->dspark_cache_cap) {
+      return false;
+    }
+    const uint32_t row0 = static_cast<uint32_t>(index) * block;
+    flat_tokens[row0] = item.last_token;
+    for (uint32_t row = 1u; row < block; ++row) {
+      flat_tokens[row0 + row] =
+          static_cast<int32_t>(d->noise_token_id);
+    }
+  }
+  if (ds4_gpu_tensor_write(
+          coordinator->prefill_tokens, 0, flat_tokens.data(),
+          static_cast<uint64_t>(total_draft_rows) *
+              sizeof(flat_tokens[0])) == 0) {
+    return false;
+  }
+
+  const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
+  const uint64_t hc_row_bytes = hc_dim * sizeof(float);
+  bool ok = ds4_gpu_begin_commands() != 0;
+  if (ok) {
+    ok = ds4_gpu_embed_tokens_hc_tensor(
+             coordinator->batch_dspark_verify_cur_hc,
+             coordinator->prefill_tokens, engine->model->map,
+             engine->model->size,
+             engine->weights->token_embd->abs_offset, DS4_N_VOCAB,
+             total_draft_rows, DS4_N_EMBD, DS4_N_HC) != 0;
+  }
+
+  for (uint32_t stage = 0; ok && stage < d->n_stages; ++stage) {
+    const ds4_layer_weights* layer = &d->stage[stage].block;
+    for (size_t index = 0; ok && index < item_count; ++index) {
+      ds4_gpu_graph* graph = items[index].graph;
+      const uint64_t block_offset =
+          static_cast<uint64_t>(index) * block * hc_row_bytes;
+      ok = ds4_gpu_tensor_copy(
+               graph->batch_cur_hc, hc_row_bytes,
+               coordinator->batch_dspark_verify_cur_hc, block_offset,
+               static_cast<uint64_t>(block) * hc_row_bytes) != 0;
+      if (ok) {
+        ok = rocm_graph_encode_dspark_stage_attention(
+            graph, stage, items[index].position, rows);
+      }
+      if (ok) {
+        ok = ds4_gpu_tensor_copy(
+                 coordinator->batch_dspark_verify_after_attn_hc,
+                 block_offset, graph->batch_after_attn_hc, 0,
+                 static_cast<uint64_t>(block) * hc_row_bytes) != 0;
+      }
+    }
+    if (ok) {
+      ok = ds4_gpu_tensor_copy(
+               coordinator->batch_after_attn_hc, 0,
+               coordinator->batch_dspark_verify_after_attn_hc, 0,
+               static_cast<uint64_t>(total_draft_rows) * hc_row_bytes) != 0;
+    }
+    if (ok) {
+      ok = rocm_graph_encode_layer_ffn_batch(
+          coordinator, d->model, layer, stage, items[0].position,
+          total_draft_rows, coordinator->prefill_tokens);
+    }
+    if (ok) {
+      ok = ds4_gpu_tensor_copy(
+               coordinator->batch_dspark_verify_cur_hc, 0,
+               coordinator->batch_next_hc, 0,
+               static_cast<uint64_t>(total_draft_rows) * hc_row_bytes) != 0;
+    }
+  }
+
+  if (ok) {
+    ok = ds4_gpu_tensor_copy(
+             coordinator->batch_cur_hc, 0,
+             coordinator->batch_dspark_verify_cur_hc, 0,
+             static_cast<uint64_t>(total_draft_rows) * hc_row_bytes) != 0;
+  }
+  if (ok) {
+    ok = rocm_graph_encode_dspark_final_hidden(
+        coordinator, 0u, total_draft_rows, hidden_out, 0u);
+  }
+  if (ok) {
+    ok = ds4_gpu_end_commands() != 0;
+  } else {
+    (void)ds4_gpu_synchronize();
+  }
+  return ok;
+}
+
 static bool rocm_graph_dspark_draft(ds4_gpu_graph* g,
                                     const ds4_model* target_model,
                                     const ds4_weights* target_weights,
@@ -7434,7 +7632,7 @@ static bool rocm_graph_dspark_draft_head_batch(
     ds4_engine* engine, const ds4_rocm_dspark_draft_item* items,
     size_t item_count, bool schedule_confidence) {
   if (!engine || !engine->model || !engine->weights || !items ||
-      item_count != 2u) {
+      item_count < 2u || item_count > 8u) {
     return false;
   }
   ds4_gpu_graph* coordinator = items[0].graph;
@@ -7452,19 +7650,35 @@ static bool rocm_graph_dspark_draft_head_batch(
   }
 
   bool ok = true;
-  ds4_gpu_set_small_batch_mode(2);
-  for (size_t index = 0; ok && index < item_count; ++index) {
+  for (size_t index = 0; index < item_count; ++index) {
     const ds4_rocm_dspark_draft_item& item = items[index];
     if (!item.graph || item.graph->dspark != coordinator->dspark ||
         !item.tokens || !item.n_tokens) {
-      ok = false;
-      break;
+      return false;
     }
     *item.n_tokens = 0u;
-    ok = rocm_graph_dspark_prepare_hidden(
-        item.graph, engine->model, engine->weights, item.last_token,
-        item.position, coordinator->batch_dspark_verify_after_attn_hc,
-        static_cast<uint32_t>(index) * block);
+  }
+
+  ds4_gpu_set_small_batch_mode(2);
+  const char* support_body_batch =
+      getenv("GUFO_DEEPSEEK_DSPARK_SUPPORT_BODY_BATCH");
+  const bool use_support_body_batch =
+      support_body_batch == nullptr ||
+      (strcmp(support_body_batch, "0") != 0 &&
+       strcmp(support_body_batch, "false") != 0 &&
+       strcmp(support_body_batch, "off") != 0);
+  if (use_support_body_batch) {
+    ok = rocm_graph_dspark_prepare_hidden_batch(
+        engine, items, item_count,
+        coordinator->batch_dspark_verify_after_attn_hc);
+  } else {
+    for (size_t index = 0; ok && index < item_count; ++index) {
+      const ds4_rocm_dspark_draft_item& item = items[index];
+      ok = rocm_graph_dspark_prepare_hidden(
+          item.graph, engine->model, engine->weights, item.last_token,
+          item.position, coordinator->batch_dspark_verify_after_attn_hc,
+          static_cast<uint32_t>(index) * block);
+    }
   }
 
   if (ok)

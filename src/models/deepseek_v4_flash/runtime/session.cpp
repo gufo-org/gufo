@@ -547,7 +547,7 @@ int ds4_session_dspark_selftest(ds4_session *session,
         set_error(error, error_capacity, "invalid DSpark self-test request");
         return 1;
     }
-    if (rows > (int)DS4_SPEC_MAX_ROWS) {
+    if (rows > (int)DS4_SPEC_SESSION_MAX_ROWS) {
         set_error(error, error_capacity, "DSpark self-test row count exceeds the verifier cap");
         return 1;
     }
@@ -1207,7 +1207,9 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
   int vocabulary_size = 0;
   std::array<int, 8> lengths{};
   std::array<int, 8> target_first{};
+  std::array<bool, 8> can_draft_items{};
   bool all_can_draft = true;
+  bool any_can_draft = false;
   for (size_t index = 0; index < item_count; ++index) {
     const ds4_session_dspark_batch_item& item = items[index];
     ds4_session* session = item.session;
@@ -1256,15 +1258,24 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
       session->dspark_skipped++;
       can_draft = false;
     }
+    can_draft_items[index] = can_draft;
     all_can_draft = all_can_draft && can_draft;
+    any_can_draft = any_can_draft || can_draft;
   }
+  const char* multi_batch_setting =
+      getenv("GUFO_DEEPSEEK_DSPARK_MULTI_BATCH");
+  const bool multi_batch =
+      multi_batch_setting == nullptr ||
+      (strcmp(multi_batch_setting, "0") != 0 &&
+       strcmp(multi_batch_setting, "false") != 0 &&
+       strcmp(multi_batch_setting, "off") != 0);
 
   /*
    * C2 can amortize a confidence-trimmed support proposal against W2.
    * Wider waves stream target weights more efficiently than serial support
    * passes, so keep C4-C8 on their exact W4-W8 route.
    */
-  if (item_count > 2u) {
+  if (!multi_batch && item_count > 2u) {
     for (size_t index = 0; index < item_count; ++index) {
       ds4_session* session = items[index].session;
       session->dspark_plain_only = true;
@@ -1291,7 +1302,8 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
    * the weight-streaming benefit. Keep request state intact and advance all
    * members exactly once; a later cycle can batch them again.
    */
-  if (!all_can_draft) {
+  if ((!multi_batch && !all_can_draft) ||
+      (multi_batch && !any_can_draft)) {
     if (!sessions_commit_and_extend_batch(items, target_first, item_count)) {
       for (size_t index = 0; index < item_count; ++index) {
         items[index].session->checkpoint_valid = false;
@@ -1320,7 +1332,7 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
        strcmp(support_head_batch, "false") != 0 &&
        strcmp(support_head_batch, "off") != 0);
   bool proposed_all = false;
-  if (use_support_head_batch) {
+  if (use_support_head_batch && all_can_draft) {
     std::array<ds4_rocm_dspark_draft_item, 8> draft_items{};
     for (size_t index = 0; index < item_count; ++index) {
       draft_items[index] = {
@@ -1332,24 +1344,30 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
       };
     }
     proposed_all = ds4_rocm_graph_dspark_draft_head_batch(
-        engine, draft_items.data(), item_count, true);
+        engine, draft_items.data(), item_count, !multi_batch);
   } else {
     proposed_all = true;
     for (size_t index = 0; index < item_count; ++index) {
+      if (!can_draft_items[index]) {
+        continue;
+      }
       const bool proposed = ds4_rocm_graph_dspark_draft(
           items[index].session->graph, engine, target_first[index],
           static_cast<uint32_t>(lengths[index]), drafts[index].data() + 1,
-          &tail_drafted[index], true);
+          &tail_drafted[index], !multi_batch);
       proposed_all = proposed_all && proposed;
     }
   }
 
   uint32_t common_tail = DS4_DSPARK_MAX_BLOCK;
   for (size_t index = 0; index < item_count; ++index) {
+    drafts[index][0] = target_first[index];
     if (proposed_all && tail_drafted[index] <= DS4_DSPARK_MAX_BLOCK) {
-      drafts[index][0] = target_first[index];
-      drafted_counts[index] = tail_drafted[index] + 1u;
-      common_tail = std::min(common_tail, tail_drafted[index]);
+      drafted_counts[index] =
+          can_draft_items[index] ? tail_drafted[index] + 1u : 1u;
+      if (!multi_batch) {
+        common_tail = std::min(common_tail, tail_drafted[index]);
+      }
     }
     proposed_all = proposed_all && drafted_counts[index] != 0u &&
                    drafted_counts[index] <= kDraftCapacity;
@@ -1370,7 +1388,7 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
     }
     return 0;
   }
-  if (common_tail == 0u) {
+  if (!multi_batch && common_tail == 0u) {
     if (!sessions_commit_and_extend_batch(items, target_first, item_count)) {
       for (size_t index = 0; index < item_count; ++index) {
         items[index].session->checkpoint_valid = false;
@@ -1388,8 +1406,10 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
     }
     return 0;
   }
-  for (size_t index = 0; index < item_count; ++index) {
-    drafted_counts[index] = common_tail + 1u;
+  if (!multi_batch) {
+    for (size_t index = 0; index < item_count; ++index) {
+      drafted_counts[index] = common_tail + 1u;
+    }
   }
 
   std::array<ds4_rocm_verify_item, 8> verify_items{};
@@ -1422,7 +1442,7 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
 
   for (size_t index = 0; index < item_count; ++index) {
     const int result = session_dspark_finish_verified(
-        items[index].session, lengths[index], vocabulary_size, true,
+        items[index].session, lengths[index], vocabulary_size, !multi_batch,
         drafts[index].data(), drafted_counts[index], row_tops[index].data(),
         items[index].emitted, items[index].n_emitted, error, error_capacity);
     if (result != 0) {
