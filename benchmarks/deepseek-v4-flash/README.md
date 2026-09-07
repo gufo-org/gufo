@@ -399,6 +399,51 @@ The selected tokens were identical and host readback took about 0.012 ms, but
 the extra vocabulary scan and logits persistence slowed C2-C8. That experiment
 was removed; the retained path keeps the existing fused/host selection behavior.
 
+### Concurrent DSpark qualification by text type
+
+Concurrent DSpark must be judged by both acceptance and proposal coverage.
+Acceptance alone measures how many proposed support tokens the target kept;
+coverage measures how often proposals were made. A route with high acceptance
+over a small fraction of output tokens can still have little effect on serving
+speed.
+
+The serving harness now runs the shared ten-category corpus as synchronized
+waves and reports drafted/accepted tokens, drafted tokens per output token,
+per-category decode speed, and privacy-safe completion-hash counts. `distinct`
+pairs unrelated cases to represent independent users. `homogeneous` runs C
+copies of each case to expose text types where both requests qualify for a
+shared speculative tail.
+
+On a September 7 release C2 homogeneous run, the normal confidence scheduler
+drafted 88 support tokens, accepted 73 (82.95%), and proposed only 0.072 tokens
+per output token. Acceptance was concentrated in summarization (36/44),
+structured output (18/18), repetitive text (13/16), and multilingual text
+(6/6). Code, creative, expository, and instruction cases did not draft; the
+reasoning case rejected all four proposals. This is why one blended acceptance
+number cannot decide the route.
+
+The retained C2 support-head kernel keeps support attention, KV, MoE, and final
+transform session-local, then runs the tied target vocabulary projection once
+over both five-row support blocks. The exact Q8 ten-row specialization reduced
+the two output-head launches from 54.62 ms to 28.18 ms per eleven proposal
+cycles in a matched profile. Forced full-tail C2 decode improved repeatedly
+from about 10.63 to 10.73 tok/s per user. Under the normal category scheduler,
+where proposals cover little of the output, median decode moved from 14.13 to
+14.15 tok/s overall and from 14.57 to 14.69 tok/s for summarization. Draft and
+accepted counts were identical, and every per-case completion-hash multiset
+matched. The kernel is therefore the default inside the already opt-in C2
+DSpark route; `GUFO_DEEPSEEK_DSPARK_SUPPORT_HEAD_BATCH=0` restores serial heads
+for qualification.
+
+Wider concurrent support was implemented and measured rather than inferred.
+The custom C4/C6/C8 output kernels preserved the qualified trajectories, but
+the support bodies remained session-local and verification expanded to 24, 36,
+and 48 target rows. Against exact target batching, per-user decode regressed
+56.3%, 65.1%, and 73.4% respectively. Those candidates were removed. C4-C8
+therefore remain exact W4-W8 target batches until a future design can batch the
+support model's routed body and avoid verifying one full six-row block per
+request.
+
 ## Quality and Integration
 
 - The pinned upstream DS4 CLI and packaged Gufo CLI produce the exact same

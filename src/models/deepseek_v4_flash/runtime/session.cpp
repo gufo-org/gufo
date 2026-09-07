@@ -1312,13 +1312,36 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
   std::array<std::array<int32_t, kDraftCapacity>, 8> row_tops{};
   std::array<uint32_t, 8> drafted_counts{};
   std::array<uint32_t, 8> tail_drafted{};
-  bool proposed_all = true;
-  for (size_t index = 0; index < item_count; ++index) {
-    const bool proposed = ds4_rocm_graph_dspark_draft(
-        items[index].session->graph, engine, target_first[index],
-        static_cast<uint32_t>(lengths[index]), drafts[index].data() + 1,
-        &tail_drafted[index], true);
-    proposed_all = proposed_all && proposed;
+  const char* support_head_batch =
+      getenv("GUFO_DEEPSEEK_DSPARK_SUPPORT_HEAD_BATCH");
+  const bool use_support_head_batch =
+      support_head_batch == nullptr ||
+      (strcmp(support_head_batch, "0") != 0 &&
+       strcmp(support_head_batch, "false") != 0 &&
+       strcmp(support_head_batch, "off") != 0);
+  bool proposed_all = false;
+  if (use_support_head_batch) {
+    std::array<ds4_rocm_dspark_draft_item, 8> draft_items{};
+    for (size_t index = 0; index < item_count; ++index) {
+      draft_items[index] = {
+          .graph = items[index].session->graph,
+          .last_token = target_first[index],
+          .position = static_cast<uint32_t>(lengths[index]),
+          .tokens = drafts[index].data() + 1,
+          .n_tokens = &tail_drafted[index],
+      };
+    }
+    proposed_all = ds4_rocm_graph_dspark_draft_head_batch(
+        engine, draft_items.data(), item_count, true);
+  } else {
+    proposed_all = true;
+    for (size_t index = 0; index < item_count; ++index) {
+      const bool proposed = ds4_rocm_graph_dspark_draft(
+          items[index].session->graph, engine, target_first[index],
+          static_cast<uint32_t>(lengths[index]), drafts[index].data() + 1,
+          &tail_drafted[index], true);
+      proposed_all = proposed_all && proposed;
+    }
   }
 
   uint32_t common_tail = DS4_DSPARK_MAX_BLOCK;

@@ -593,6 +593,10 @@ static int hip_launch_q8_batch_reuse(
         matmul_q8_0_preq_batch_reuse_w32_kernel<8, true><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
                 rows_per_block);
+    } else if (n_tok == 10u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<10, true><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block);
     } else {
         matmul_q8_0_preq_batch_reuse_w32_kernel<16, false><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,

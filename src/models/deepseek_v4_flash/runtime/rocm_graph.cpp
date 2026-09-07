@@ -7016,9 +7016,13 @@ static bool rocm_graph_encode_dspark_stage(ds4_gpu_graph *g,
 /* Final support hidden rows, consumed by the tied target LM head. */
 static bool rocm_graph_encode_dspark_final_hidden(ds4_gpu_graph *g,
                                                   uint32_t row_offset,
-                                                  uint32_t n_rows) {
+                                                  uint32_t n_rows,
+                                                  ds4_gpu_tensor *hidden_out,
+                                                  uint32_t hidden_row_offset) {
     const ds4_dspark_model *d = g->dspark;
-    if (!d || n_rows == 0 || n_rows > g->spec_rows_cap) return false;
+    if (!d || !hidden_out || n_rows == 0 || n_rows > g->spec_rows_cap) {
+        return false;
+    }
     const ds4_model *sm = d->model;
     const ds4_dspark_stage_weights *last = &d->stage[d->n_stages - 1u];
     const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
@@ -7037,7 +7041,9 @@ static bool rocm_graph_encode_dspark_final_hidden(ds4_gpu_graph *g,
     ds4_gpu_tensor *head_embd = ds4_gpu_tensor_view(
             g->batch_ffn_cur, 0, (uint64_t)n_rows * DS4_N_EMBD * sizeof(float));
     ds4_gpu_tensor *head_norm = ds4_gpu_tensor_view(
-            g->batch_ffn_norm, 0, (uint64_t)n_rows * DS4_N_EMBD * sizeof(float));
+            hidden_out,
+            (uint64_t)hidden_row_offset * DS4_N_EMBD * sizeof(float),
+            (uint64_t)n_rows * DS4_N_EMBD * sizeof(float));
     bool ok = head_pre && head_weights && head_embd && head_norm;
 
     if (ok) ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
@@ -7087,8 +7093,10 @@ static bool rocm_graph_encode_dspark_logits(
         ds4_gpu_graph *g,
         const ds4_model *target_model,
         const ds4_weights *target_weights,
+        const ds4_gpu_tensor *hidden_rows,
         uint32_t n_rows) {
-    if (!g || !target_model || !target_weights || n_rows == 0u ||
+    if (!g || !target_model || !target_weights || !hidden_rows ||
+        n_rows == 0u ||
         n_rows > g->spec_rows_cap) {
         return false;
     }
@@ -7099,7 +7107,7 @@ static bool rocm_graph_encode_dspark_logits(
                                       target_weights->output->abs_offset,
                                       DS4_N_EMBD,
                                       vocab_dim,
-                                      g->batch_ffn_norm,
+                                      hidden_rows,
                                       n_rows) != 0;
 }
 
@@ -7245,16 +7253,13 @@ static bool rocm_graph_dspark_select_block(
  * captured its sampled hidden states for position pos0 - 1 and that those have
  * been injected into the rings.
  */
-static bool rocm_graph_dspark_draft(ds4_gpu_graph* g,
-                                    const ds4_model* target_model,
-                                    const ds4_weights* target_weights,
-                                    int last_token, uint32_t pos0,
-                                    int32_t* tokens_out, uint32_t* n_out,
-                                    bool schedule_confidence) {
+static bool rocm_graph_dspark_prepare_hidden(
+    ds4_gpu_graph* g, const ds4_model* target_model,
+    const ds4_weights* target_weights, int last_token, uint32_t pos0,
+    ds4_gpu_tensor* hidden_out, uint32_t hidden_row_offset) {
   const ds4_dspark_model* d = g->dspark;
-  if (!d || !tokens_out || !n_out)
+  if (!d)
     return false;
-  *n_out = 0;
   const uint32_t block = d->block_size;
   /* One encoder row plus one row per drafted token. */
   const uint32_t rows = block + 1u;
@@ -7285,9 +7290,6 @@ static bool rocm_graph_dspark_draft(ds4_gpu_graph* g,
     return false;
   }
 
-  /* Mode 2 keeps generic narrow-batch routing available to the support
-   * model without enabling verifier-only arithmetic candidates. */
-  ds4_gpu_set_small_batch_mode(2);
   bool ok = ds4_gpu_begin_commands() != 0;
   /* Tied target embeddings, expanded across the hyper-connection streams. */
   if (ok)
@@ -7299,22 +7301,45 @@ static bool rocm_graph_dspark_draft(ds4_gpu_graph* g,
     ok = rocm_graph_encode_dspark_stage(g, stage, pos0, rows);
   }
   if (ok) {
-    ok = rocm_graph_encode_dspark_final_hidden(g, 1u, block);
+    ok = rocm_graph_encode_dspark_final_hidden(
+        g, 1u, block, hidden_out, hidden_row_offset);
   }
   if (ok) {
     ok = ds4_gpu_end_commands() != 0;
   } else {
     (void)ds4_gpu_synchronize();
   }
+  return ok;
+}
+
+static bool rocm_graph_dspark_draft(ds4_gpu_graph* g,
+                                    const ds4_model* target_model,
+                                    const ds4_weights* target_weights,
+                                    int last_token, uint32_t pos0,
+                                    int32_t* tokens_out, uint32_t* n_out,
+                                    bool schedule_confidence) {
+  if (!g || !tokens_out || !n_out)
+    return false;
+  *n_out = 0;
+  const ds4_dspark_model* d = g->dspark;
+  if (!d)
+    return false;
+  const uint32_t block = d->block_size;
+
+  /* Mode 2 keeps generic narrow-batch routing available to the support
+   * model without enabling verifier-only arithmetic candidates. */
+  ds4_gpu_set_small_batch_mode(2);
+  bool ok = rocm_graph_dspark_prepare_hidden(
+      g, target_model, target_weights, last_token, pos0, g->batch_ffn_norm,
+      0u);
   if (!ok) {
     ds4_gpu_set_small_batch_mode(0);
     return false;
   }
-
   ok = ds4_gpu_begin_commands() != 0;
   if (ok) {
-    ok =
-        rocm_graph_encode_dspark_logits(g, target_model, target_weights, block);
+    ok = rocm_graph_encode_dspark_logits(
+        g, target_model, target_weights, g->batch_ffn_norm, block);
   }
   if (ok) {
     ok = ds4_gpu_end_commands() != 0;
@@ -7336,6 +7361,81 @@ static bool rocm_graph_dspark_draft(ds4_gpu_graph* g,
   }
   *n_out = selected_rows;
   return true;
+}
+
+/*
+ * Draft each request with its session-local support attention and KV state,
+ * then stream the tied target vocabulary projection once across all hidden
+ * rows. This preserves the support model's arithmetic through final norm and
+ * changes only the row count of the shared Q8 output projection.
+ */
+static bool rocm_graph_dspark_draft_head_batch(
+    ds4_engine* engine, const ds4_rocm_dspark_draft_item* items,
+    size_t item_count, bool schedule_confidence) {
+  if (!engine || !engine->model || !engine->weights || !items ||
+      item_count != 2u) {
+    return false;
+  }
+  ds4_gpu_graph* coordinator = items[0].graph;
+  if (!coordinator || !coordinator->dspark ||
+      !coordinator->batch_dspark_verify_after_attn_hc) {
+    return false;
+  }
+  const uint32_t block = coordinator->dspark->block_size;
+  const uint32_t total_rows = static_cast<uint32_t>(item_count) * block;
+  if (block == 0u || total_rows > coordinator->prefill_cap ||
+      total_rows > coordinator->batch_dspark_verify_rows_cap ||
+      total_rows > DS4_SPEC_MAX_ROWS ||
+      !rocm_graph_spec_prepare(coordinator, engine->weights, total_rows)) {
+    return false;
+  }
+
+  bool ok = true;
+  ds4_gpu_set_small_batch_mode(2);
+  for (size_t index = 0; ok && index < item_count; ++index) {
+    const ds4_rocm_dspark_draft_item& item = items[index];
+    if (!item.graph || item.graph->dspark != coordinator->dspark ||
+        !item.tokens || !item.n_tokens) {
+      ok = false;
+      break;
+    }
+    *item.n_tokens = 0u;
+    ok = rocm_graph_dspark_prepare_hidden(
+        item.graph, engine->model, engine->weights, item.last_token,
+        item.position, coordinator->batch_dspark_verify_after_attn_hc,
+        static_cast<uint32_t>(index) * block);
+  }
+
+  if (ok)
+    ok = ds4_gpu_begin_commands() != 0;
+  if (ok) {
+    ok = rocm_graph_encode_dspark_logits(
+        coordinator, engine->model, engine->weights,
+        coordinator->batch_dspark_verify_after_attn_hc, total_rows);
+  }
+  if (ok) {
+    ok = ds4_gpu_end_commands() != 0;
+  } else {
+    (void)ds4_gpu_synchronize();
+  }
+  if (!ok) {
+    ds4_gpu_set_small_batch_mode(0);
+    return false;
+  }
+
+  for (size_t index = 0; ok && index < item_count; ++index) {
+    const ds4_rocm_dspark_draft_item& item = items[index];
+    uint32_t selected_rows = 0u;
+    ok = rocm_graph_dspark_select_block(
+        item.graph, coordinator->batch_dspark_verify_after_attn_hc,
+        coordinator->spec_logits, static_cast<uint32_t>(index) * block,
+        item.last_token, 0u, block, item.tokens, schedule_confidence,
+        &selected_rows);
+    if (ok)
+      *item.n_tokens = selected_rows;
+  }
+  ds4_gpu_set_small_batch_mode(0);
+  return ok;
 }
 
 /*
@@ -7658,6 +7758,13 @@ bool ds4_rocm_graph_dspark_draft(ds4_rocm_graph* graph, ds4_engine* engine,
          rocm_graph_dspark_draft(graph, engine->model, engine->weights,
                                  last_token, pos0, tokens_out, n_out,
                                  schedule_confidence);
+}
+
+bool ds4_rocm_graph_dspark_draft_head_batch(
+    ds4_engine* engine, const ds4_rocm_dspark_draft_item* items,
+    size_t item_count, bool schedule_confidence) {
+  return rocm_graph_dspark_draft_head_batch(
+      engine, items, item_count, schedule_confidence);
 }
 
 /* =========================================================================

@@ -109,7 +109,13 @@ server to disable this route. With DSpark attached, C1 uses speculative decode
 and C2-C8 use the matching exact target batch. Experimental confidence-trimmed
 C2 DSpark batching is available with
 `GUFO_DEEPSEEK_DSPARK_SESSION_BATCH=1`; it remains opt-in because unrelated
-requests did not share a nonzero confidence-qualified draft tail.
+requests usually do not share a nonzero confidence-qualified draft tail. When
+the route does propose for both requests, their session-local support passes
+share one ten-row target-vocabulary projection. Set
+`GUFO_DEEPSEEK_DSPARK_SUPPORT_HEAD_BATCH=0` to use the serial support heads for
+an A/B comparison. Wider concurrent DSpark proposals remain disabled because
+measured C4-C8 proposal and verification costs exceed exact W4-W8 target
+batching.
 
 ### Reasoning controls
 

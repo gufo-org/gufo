@@ -190,6 +190,28 @@ tools/serving/gufo-serving-bench.py \
   --validate-artifact artifacts/serving/benchmark.json
 ```
 
+For speculative decoding, run the shared categorized corpus. `distinct` pairs
+different request types in each wave; `homogeneous` runs C copies of each case
+to measure the best case for shared draft behavior:
+
+```sh
+tools/serving/gufo-serving-bench.py \
+  --base-url http://127.0.0.1:8080 \
+  --suite benchmarks/qwen3.8-27b/speculative-corpus.json \
+  --corpus-layout distinct \
+  --concurrency 1,2,4,6,8 \
+  --max-tokens 128 \
+  --output artifacts/serving/speculative-distinct.json
+
+tools/serving/gufo-serving-bench.py \
+  --base-url http://127.0.0.1:8080 \
+  --suite benchmarks/qwen3.8-27b/speculative-corpus.json \
+  --corpus-layout homogeneous \
+  --concurrency 2 \
+  --max-tokens 128 \
+  --output artifacts/serving/speculative-homogeneous-c2.json
+```
+
 The report keeps these metrics separate:
 
 - Prefill throughput: actual uncached prefill tokens divided by server
@@ -203,6 +225,13 @@ The report keeps these metrics separate:
   client request wall time.
 - Aggregate throughput: summed useful tokens divided by the synchronized
   C=1, C=2, or C=4 round span.
+- Draft acceptance: target-accepted support tokens divided by support tokens
+  proposed. Also inspect drafted tokens per output token: high acceptance with
+  very low proposal coverage cannot materially change end-to-end throughput.
+- Category and case summaries: acceptance, proposal coverage, decode speed,
+  and generated-text SHA-256 counts. The hashes support exact A/B comparison
+  without storing generated text; compare counts for homogeneous waves because
+  equivalent trajectories may exchange request slots.
 
 Raw per-request samples and p50/p95/p99 summaries are retained. Endpoint hosts,
 prompt text, generated text, model paths, timestamps, and token IDs are never

@@ -38,6 +38,14 @@ struct ds4_rocm_verify_item {
   int32_t* row_tops;
 };
 
+struct ds4_rocm_dspark_draft_item {
+  ds4_rocm_graph* graph;
+  int last_token;
+  uint32_t position;
+  int32_t* tokens;
+  uint32_t* n_tokens;
+};
+
 struct ds4_engine {
     ds4_model *model;
     ds4_vocab *vocab;
@@ -180,6 +188,9 @@ bool ds4_rocm_graph_dspark_draft(ds4_rocm_graph* graph, ds4_engine* engine,
                                  int last_token, uint32_t pos0,
                                  int32_t* tokens_out, uint32_t* n_out,
                                  bool schedule_confidence);
+bool ds4_rocm_graph_dspark_draft_head_batch(
+    ds4_engine* engine, const ds4_rocm_dspark_draft_item* items,
+    size_t item_count, bool schedule_confidence);
 
 uint64_t ds4_rocm_graph_snapshot_bytes(const ds4_rocm_graph *graph,
                                        const ds4_tokens *checkpoint);
