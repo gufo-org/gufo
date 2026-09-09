@@ -1016,7 +1016,8 @@ static int attention_output_q8_batch_launch(
      * macro tile is far wider than a DSpark verification block, so at these
      * widths the grouped Q8 kernels win outright.
      */
-    const uint32_t attn_small_batch_rows = ds4_rocm_dense_small_batch_rows();
+    const uint32_t attn_small_batch_rows =
+        ds4_rocm_dense_small_batch_rows();
     const int attn_output_hipblas =
         hip_runtime_config()->attention_output_hipblas_all &&
         !(n_tokens > 1u && n_tokens <= attn_small_batch_rows);
@@ -1448,6 +1449,126 @@ static int attention_output_q8_batch_launch(
                                            "attn_output_b");
 }
 
+/*
+ * Exact multi-request verifier output projection.
+ *
+ * Concurrent DSpark verifies independently sized request prefixes. Keep one
+ * accumulator per flattened row in the narrow decode kernel so every row
+ * remains bit-identical while each Q8 weight block is read once.
+ */
+static int attention_output_q8_exact_batch_launch(
+        ds4_gpu_tensor       *out,
+        ds4_gpu_tensor       *low,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                out_a_offset,
+        uint64_t                out_b_offset,
+        uint64_t                group_dim,
+        uint64_t                rank,
+        uint32_t                n_groups,
+        uint64_t                out_dim,
+        const ds4_gpu_tensor *heads,
+        uint32_t                n_tokens) {
+    if (!out || !low || !heads || !model_map ||
+        (n_tokens != 4u && n_tokens != 5u && n_tokens != 6u &&
+         n_tokens != 7u && n_tokens != 8u && n_tokens != 10u &&
+         n_tokens != 12u &&
+         n_tokens != 16u && n_tokens != 18u && n_tokens != 24u &&
+         n_tokens != 32u) ||
+        group_dim == 0u || (group_dim & 31u) != 0u || rank == 0u ||
+        rank > UINT32_MAX || n_groups == 0u || out_dim == 0u) {
+        return 0;
+    }
+    const uint64_t low_dim = (uint64_t)n_groups * rank;
+    const uint64_t blocks_a = group_dim / 32u;
+    const uint64_t blocks_b = (low_dim + 31u) / 32u;
+    const uint64_t out_a_bytes =
+        (uint64_t)n_groups * rank * blocks_a * 34u;
+    const uint64_t out_b_bytes = out_dim * blocks_b * 34u;
+    if (out_a_offset > model_size || out_b_offset > model_size ||
+        out_a_bytes > model_size - out_a_offset ||
+        out_b_bytes > model_size - out_b_offset ||
+        heads->bytes <
+            (uint64_t)n_tokens * n_groups * group_dim * sizeof(float) ||
+        low->bytes < (uint64_t)n_tokens * low_dim * sizeof(float) ||
+        out->bytes < (uint64_t)n_tokens * out_dim * sizeof(float)) {
+        return 0;
+    }
+    const unsigned char *out_a =
+        reinterpret_cast<const unsigned char *>(hip_model_range_ptr(
+            model_map, out_a_offset, out_a_bytes, "attn_out_a_exact_batch"));
+    const unsigned char *out_b =
+        reinterpret_cast<const unsigned char *>(hip_model_range_ptr(
+            model_map, out_b_offset, out_b_bytes, "attn_out_b_exact_batch"));
+    if (!out_a || !out_b) return 0;
+
+    const uint64_t x_rows = (uint64_t)n_tokens * n_groups;
+    const uint64_t xq_a_bytes = x_rows * blocks_a * 32u;
+    const uint64_t xscale_a_offset = (xq_a_bytes + 15u) & ~15ull;
+    const uint64_t tmp_a_bytes =
+        xscale_a_offset + x_rows * blocks_a * sizeof(float);
+    void *tmp_a =
+        hip_tmp_alloc(tmp_a_bytes, "attention output exact batch a prequant");
+    if (!tmp_a) return 0;
+    int8_t *xq_a = (int8_t *)tmp_a;
+    float *xscale_a = (float *)((char *)tmp_a + xscale_a_offset);
+    quantize_q8_0_f32_kernel<<<dim3((unsigned)blocks_a, (unsigned)x_rows, 1u),
+                              32u>>>(
+        xq_a, xscale_a, (const float *)heads->ptr, group_dim, blocks_a);
+    if (!hip_ok(hipGetLastError(),
+                "attention output exact batch a quantize launch")) {
+        return 0;
+    }
+
+    constexpr uint32_t kRowsPerBlockA = 4u;
+    const unsigned grid_a =
+        (unsigned)((low_dim + kRowsPerBlockA - 1u) / kRowsPerBlockA);
+    constexpr unsigned kThreadsA = kRowsPerBlockA * 32u;
+#define DS4_LAUNCH_EXACT_ATTN_A(NT)                                      \
+    grouped_q8_0_a_preq_batch_reuse_w32_kernel<NT, true>                 \
+        <<<grid_a, kThreadsA>>>(                                         \
+            (float *)low->ptr, out_a, xq_a, xscale_a, group_dim, rank,   \
+            n_groups, n_tokens, blocks_a, kRowsPerBlockA)
+    switch (n_tokens) {
+        case 4u: DS4_LAUNCH_EXACT_ATTN_A(4u); break;
+        case 5u: DS4_LAUNCH_EXACT_ATTN_A(5u); break;
+        case 6u: DS4_LAUNCH_EXACT_ATTN_A(6u); break;
+        case 7u: DS4_LAUNCH_EXACT_ATTN_A(7u); break;
+        case 8u: DS4_LAUNCH_EXACT_ATTN_A(8u); break;
+        case 10u: DS4_LAUNCH_EXACT_ATTN_A(10u); break;
+        case 12u: DS4_LAUNCH_EXACT_ATTN_A(12u); break;
+        case 16u: DS4_LAUNCH_EXACT_ATTN_A(16u); break;
+        case 18u: DS4_LAUNCH_EXACT_ATTN_A(18u); break;
+        case 24u: DS4_LAUNCH_EXACT_ATTN_A(24u); break;
+        case 32u: DS4_LAUNCH_EXACT_ATTN_A(32u); break;
+        default: return 0;
+    }
+#undef DS4_LAUNCH_EXACT_ATTN_A
+    if (!hip_ok(hipGetLastError(),
+                "attention output exact batch a launch")) {
+        return 0;
+    }
+
+    const uint64_t xq_b_bytes = (uint64_t)n_tokens * blocks_b * 32u;
+    const uint64_t xscale_b_offset = (xq_b_bytes + 15u) & ~15ull;
+    const uint64_t tmp_b_bytes =
+        xscale_b_offset + (uint64_t)n_tokens * blocks_b * sizeof(float);
+    void *tmp_b =
+        hip_tmp_alloc(tmp_b_bytes, "attention output exact batch b prequant");
+    if (!tmp_b) return 0;
+    int8_t *xq_b = (int8_t *)tmp_b;
+    float *xscale_b = (float *)((char *)tmp_b + xscale_b_offset);
+    quantize_q8_0_f32_kernel<<<dim3((unsigned)blocks_b, n_tokens, 1u), 32u>>>(
+        xq_b, xscale_b, (const float *)low->ptr, low_dim, blocks_b);
+    if (!hip_ok(hipGetLastError(),
+                "attention output exact batch b quantize launch")) {
+        return 0;
+    }
+    return hip_launch_q8_batch_reuse(
+        (float *)out->ptr, out_b, xq_b, xscale_b, low_dim, out_dim, blocks_b,
+        n_tokens, hip_runtime_config()->q8_decode_rpb);
+}
+
 extern "C" int ds4_gpu_attention_output_q8_batch_tensor(
         ds4_gpu_tensor       *out,
         ds4_gpu_tensor       *low,
@@ -1468,6 +1589,24 @@ extern "C" int ds4_gpu_attention_output_q8_batch_tensor(
                                             out_b_offset, group_dim, rank,
                                             n_groups, out_dim, heads, n_tokens,
                                             NULL);
+}
+
+extern "C" int ds4_gpu_attention_output_q8_exact_batch_tensor(
+        ds4_gpu_tensor       *out,
+        ds4_gpu_tensor       *low,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                out_a_offset,
+        uint64_t                out_b_offset,
+        uint64_t                group_dim,
+        uint64_t                rank,
+        uint32_t                n_groups,
+        uint64_t                out_dim,
+        const ds4_gpu_tensor *heads,
+        uint32_t                n_tokens) {
+    return attention_output_q8_exact_batch_launch(
+        out, low, model_map, model_size, out_a_offset, out_b_offset,
+        group_dim, rank, n_groups, out_dim, heads, n_tokens);
 }
 
 extern "C" int ds4_gpu_attention_output_q8_batch_inv_rope_tensor(

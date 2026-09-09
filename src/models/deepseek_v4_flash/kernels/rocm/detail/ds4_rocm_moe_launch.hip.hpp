@@ -79,6 +79,16 @@ static uint32_t ds4_rocm_compact_down_rows_per_block(void) {
     return 32u;
 }
 
+static uint32_t ds4_rocm_grouped_down_tiles_per_pass(
+        uint32_t group_count) {
+    const char *value =
+        getenv("GUFO_DEEPSEEK_DSPARK_DOWN_TILES_PER_PASS");
+    const int parsed = value
+        ? atoi(value)
+        : (group_count >= 4u ? 4 : 2);
+    return parsed >= 4 ? 4u : parsed >= 3 ? 3u : 2u;
+}
+
 static uint32_t ds4_rocm_expert_tile_capacity(
         uint32_t pair_count,
         uint32_t tile_m) {
@@ -711,10 +721,24 @@ static int routed_moe_launch(
         const char *grouped_gate_setting =
             getenv("GUFO_DEEPSEEK_DSPARK_MULTI_GATE_EXPERT");
         const uint32_t use_grouped_expert_gate =
-            use_grouped_compact_down && grouped_gate_setting != NULL &&
-            strcmp(grouped_gate_setting, "0") != 0 &&
-            strcmp(grouped_gate_setting, "false") != 0 &&
-            strcmp(grouped_gate_setting, "off") != 0;
+            use_grouped_compact_down &&
+            (grouped_gate_setting == NULL ||
+             (strcmp(grouped_gate_setting, "0") != 0 &&
+              strcmp(grouped_gate_setting, "false") != 0 &&
+              strcmp(grouped_gate_setting, "off") != 0));
+        const char *grouped_down_expert_setting =
+            getenv("GUFO_DEEPSEEK_DSPARK_MULTI_DOWN_EXPERT");
+        const uint32_t use_grouped_expert_down =
+            use_global_grouped_compact_down &&
+            use_grouped_expert_gate &&
+            (grouped_down_expert_setting == NULL ||
+             (strcmp(grouped_down_expert_setting, "0") != 0 &&
+             strcmp(grouped_down_expert_setting, "false") != 0 &&
+              strcmp(grouped_down_expert_setting, "off") != 0));
+        const uint32_t grouped_active_expert_capacity =
+            pair_count < DS4_ROCM_N_EXPERT
+                ? pair_count
+                : DS4_ROCM_N_EXPERT;
         /*
          * DSpark rows share enough routed experts to amortize sorting and load
          * each selected gate/up matrix once. The verifier's Q2 down projection
@@ -740,9 +764,17 @@ static int routed_moe_launch(
          * from the native kernels', and speculative verification is only
          * lossless while a batched row's argmax matches ordinary decode's.
          */
+        const char *verify_mmq_setting =
+            getenv("GUFO_DEEPSEEK_DSPARK_VERIFY_MMQ");
+        const uint32_t force_verify_mmq =
+            ds4_rocm_verifier_batch_mode() &&
+            verify_mmq_setting != NULL &&
+            strcmp(verify_mmq_setting, "1") == 0;
         const uint32_t use_mmq_gateup =
             g_rocm_mmq_ready && iq2_path && !q4k_path &&
-            n_tokens >= DS4_ROCM_ROUTED_MMQ_ROWS && !g_small_batch_mode;
+            ((n_tokens >= DS4_ROCM_ROUTED_MMQ_ROWS &&
+              !g_small_batch_mode) ||
+             force_verify_mmq);
         const uint32_t use_p2_sorted = 0u;
         const uint32_t use_atomic_down = use_expert_tiles && n_tokens >= 128u;
         const uint32_t use_gate_row2048 = !q4k_path && use_expert_tiles && n_tokens >= 128u;
@@ -1332,22 +1364,81 @@ static int routed_moe_launch(
                 grouped_gate_tile_experts &&
                 grouped_gate_tile_pair_counts &&
                 grouped_gate_tile_pairs) {
-                dim3 tgrid((expert_mid_dim + 31u) / 32u,
-                           grouped_gate_tile_capacity, 1u);
+                dim3 tgrid(
+                    (expert_mid_dim + 31u) / 32u,
+                    use_grouped_expert_gate
+                        ? grouped_active_expert_capacity
+                        : grouped_gate_tile_capacity,
+                    1u);
                 if (use_grouped_expert_gate) {
-                    moe_gate_up_mid_grouped_expert_row32_kernel<<<
-                        tgrid, 256>>>(
-                            (float *)gate->ptr, (float *)up->ptr,
-                            (float *)mid->ptr, gate_w, up_w, xq,
-                            grouped_gate_expert_offsets,
-                            grouped_gate_sorted_tiles,
-                            grouped_gate_active_count,
-                            grouped_gate_active_experts,
-                            grouped_gate_tile_pair_counts,
-                            grouped_gate_tile_pairs,
-                            (const float *)weights->ptr,
-                            gate_expert_bytes, gate_row_bytes, xq_blocks,
-                            expert_mid_dim, n_expert, write_gate_up, clamp);
+                    const char *packed_gate_setting =
+                        getenv("GUFO_DEEPSEEK_DSPARK_GATE_PACKED_TILE2");
+                    const bool packed_gate =
+                        packed_gate_setting == NULL ||
+                        (strcmp(packed_gate_setting, "0") != 0 &&
+                         strcmp(packed_gate_setting, "false") != 0 &&
+                         strcmp(packed_gate_setting, "off") != 0);
+                    const char *split_gate_setting =
+                        getenv("GUFO_DEEPSEEK_DSPARK_GATE_SPLIT");
+                    const bool split_gate =
+                        split_gate_setting != NULL &&
+                        strcmp(split_gate_setting, "1") == 0;
+                    const char *gate_pairs_setting =
+                        getenv("GUFO_DEEPSEEK_DSPARK_GATE_PAIRS_PER_PASS");
+                    const bool gate_pair2 =
+                        gate_pairs_setting != NULL &&
+                        strcmp(gate_pairs_setting, "2") == 0;
+                    const char *shared_dequant_setting =
+                        getenv("GUFO_DEEPSEEK_DSPARK_GATE_SHARED_DEQUANT");
+                    const bool shared_dequant =
+                        shared_dequant_setting != NULL &&
+                        strcmp(shared_dequant_setting, "1") == 0;
+#define DS4_LAUNCH_GROUPED_GATE(KERNEL)                                \
+                    KERNEL<<<tgrid, 256>>>(                            \
+                            (float *)gate->ptr, (float *)up->ptr,       \
+                            (float *)mid->ptr, gate_w, up_w, xq,       \
+                            grouped_gate_expert_offsets,               \
+                            grouped_gate_sorted_tiles,                 \
+                            grouped_gate_active_count,                 \
+                            grouped_gate_active_experts,               \
+                            grouped_gate_tile_pair_counts,             \
+                            grouped_gate_tile_pairs,                   \
+                            (const float *)weights->ptr,                \
+                            gate_expert_bytes, gate_row_bytes,         \
+                            xq_blocks, expert_mid_dim, n_expert,       \
+                            write_gate_up, clamp)
+                    if (gate_pair2) {
+                        DS4_LAUNCH_GROUPED_GATE(
+                            moe_gate_up_mid_grouped_expert_pair2_row32_kernel);
+                    } else if (split_gate) {
+                        DS4_LAUNCH_GROUPED_GATE(
+                            moe_gate_up_mid_grouped_expert_split_row32_kernel);
+                    } else if (shared_dequant) {
+                        DS4_LAUNCH_GROUPED_GATE(
+                            moe_gate_up_mid_grouped_expert_row32_kernel<true>);
+                    } else if (packed_gate) {
+                        dim3 packed_grid(
+                            (expert_mid_dim + 31u) / 32u,
+                            (grouped_gate_tile_capacity + 1u) / 2u,
+                            1u);
+                        moe_gate_up_mid_grouped_sorted_tile2_row32_kernel<<<
+                            packed_grid, 512>>>(
+                                (float *)gate->ptr, (float *)up->ptr,
+                                (float *)mid->ptr, gate_w, up_w, xq,
+                                grouped_gate_expert_offsets,
+                                grouped_gate_sorted_tiles,
+                                grouped_gate_tile_experts,
+                                grouped_gate_tile_pair_counts,
+                                grouped_gate_tile_pairs,
+                                (const float *)weights->ptr,
+                                gate_expert_bytes, gate_row_bytes,
+                                xq_blocks, expert_mid_dim, n_expert,
+                                write_gate_up, clamp);
+                    } else {
+                        DS4_LAUNCH_GROUPED_GATE(
+                            moe_gate_up_mid_grouped_expert_row32_kernel<false>);
+                    }
+#undef DS4_LAUNCH_GROUPED_GATE
                 } else {
                     moe_gate_up_mid_grouped_tile4_row32_kernel<<<
                         tgrid, 256>>>(
@@ -1629,16 +1720,76 @@ static int routed_moe_launch(
                     ds4_rocm_compact_down_rows_per_block();
                 dim3 compact_grid(
                     (out_dim + rows_per_block - 1u) / rows_per_block,
-                    grouped_gate_tile_capacity, 1u);
-                moe_down_q2K_grouped_tile4_float_batch_warp32_kernel
-                    <<<compact_grid, rows_per_block * 32u,
-                       4u * 256u * sizeof(float)>>>(
+                    use_grouped_expert_down
+                        ? grouped_active_expert_capacity
+                        : grouped_gate_tile_capacity,
+                    1u);
+                if (use_grouped_expert_down) {
+                    const uint32_t tiles_per_pass =
+                        ds4_rocm_grouped_down_tiles_per_pass(
+                            down_group_count);
+                    const char *down_rows_per_warp_setting =
+                        getenv(
+                            "GUFO_DEEPSEEK_DSPARK_DOWN_ROWS_PER_WARP");
+                    /*
+                     * Reuse each staged mid tile across 64 output rows. The
+                     * per-row Q2 multiply and reduction order are unchanged;
+                     * only the independent row work is interleaved. On C8 W3
+                     * this reduced the grouped down kernel by 12.4%.
+                     */
+                    const bool down_rows_per_warp2 =
+                        down_rows_per_warp_setting == NULL ||
+                        (strcmp(down_rows_per_warp_setting, "1") != 0 &&
+                         strcmp(down_rows_per_warp_setting, "false") != 0 &&
+                         strcmp(down_rows_per_warp_setting, "off") != 0);
+#define DS4_LAUNCH_GROUPED_DOWN(TILES, ROWS)                            \
+                    moe_down_q2K_grouped_expert_float_batch_warp32_kernel \
+                        <TILES, ROWS><<<                                 \
+                            compact_grid, rows_per_block * 32u,         \
+                            (TILES) * 4u * 256u * sizeof(float)>>>(      \
+                            (__half *)down->ptr, down_w,                 \
+                            (const float *)mid->ptr,                     \
+                            grouped_gate_expert_offsets,                 \
+                            grouped_gate_sorted_tiles,                   \
+                            grouped_gate_active_count,                   \
+                            grouped_gate_active_experts,                 \
+                            grouped_gate_tile_pair_counts,               \
+                            grouped_gate_tile_pairs, down_expert_bytes,  \
+                            down_row_bytes, expert_mid_dim, out_dim)
+                    compact_grid.x =
+                        (out_dim +
+                         rows_per_block *
+                                 (down_rows_per_warp2 ? 2u : 1u) -
+                             1u) /
+                        (rows_per_block *
+                         (down_rows_per_warp2 ? 2u : 1u));
+                    if (tiles_per_pass == 4u &&
+                        down_rows_per_warp2) {
+                        DS4_LAUNCH_GROUPED_DOWN(4u, 2u);
+                    } else if (tiles_per_pass == 4u) {
+                        DS4_LAUNCH_GROUPED_DOWN(4u, 1u);
+                    } else if (tiles_per_pass == 3u &&
+                               down_rows_per_warp2) {
+                        DS4_LAUNCH_GROUPED_DOWN(3u, 2u);
+                    } else if (tiles_per_pass == 3u) {
+                        DS4_LAUNCH_GROUPED_DOWN(3u, 1u);
+                    } else if (down_rows_per_warp2) {
+                        DS4_LAUNCH_GROUPED_DOWN(2u, 2u);
+                    } else {
+                        DS4_LAUNCH_GROUPED_DOWN(2u, 1u);
+                    }
+#undef DS4_LAUNCH_GROUPED_DOWN
+                } else {
+                    moe_down_q2K_grouped_tile4_float_batch_warp32_kernel
+                        <<<compact_grid, rows_per_block * 32u,
+                           4u * 256u * sizeof(float)>>>(
                         (__half *)down->ptr, down_w,
                         (const float *)mid->ptr,
                         grouped_gate_tile_experts,
                         grouped_gate_tile_pair_counts,
                         grouped_gate_tile_pairs, down_expert_bytes,
                         down_row_bytes, expert_mid_dim, out_dim);
+                }
                 ok = hip_ok(
                     hipGetLastError(),
                     "routed_moe global grouped compact down launch");

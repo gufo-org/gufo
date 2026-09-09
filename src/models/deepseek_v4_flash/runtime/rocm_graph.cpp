@@ -205,6 +205,7 @@ struct ds4_rocm_graph {
     uint32_t spec_rows_cap;
     ds4_gpu_tensor *spec_logits;
     ds4_gpu_tensor *spec_row_tops;
+    ds4_gpu_tensor *spec_frontier_logits;
 
     /*
      * Rollback frontier.
@@ -349,8 +350,10 @@ static void rocm_graph_spec_free(ds4_gpu_graph *g) {
     }
     ds4_gpu_tensor_free(g->spec_row_tops);
     ds4_gpu_tensor_free(g->spec_logits);
+    ds4_gpu_tensor_free(g->spec_frontier_logits);
     g->spec_row_tops = NULL;
     g->spec_logits = NULL;
+    g->spec_frontier_logits = NULL;
     g->spec_rows_cap = 0;
     g->spec_frontier_valid = false;
     g->spec_capture_prefixes = false;
@@ -2787,8 +2790,18 @@ static bool rocm_graph_encode_layer_attention_batch(
         const ds4_layer_weights *layer,
         uint32_t                il,
         uint32_t                pos0,
-        uint32_t                n_tokens) {
-    if (n_tokens == 0 || n_tokens > g->prefill_cap) return false;
+        uint32_t                n_tokens,
+        bool                    front_ready = false,
+        bool                    front_only = false,
+        bool                    project_qb = true,
+        bool                    project_q_a_kv = true,
+        bool                    compressor_projection_ready = false,
+        bool                    indexer_query_projection_ready = false,
+        bool                    project_output = true) {
+    if (n_tokens == 0 || n_tokens > g->prefill_cap ||
+        (front_ready && front_only)) {
+        return false;
+    }
 
     /* Any published F16 activation mirror belongs to the previous layer, whose
      * buffers this layer reuses. Drop it before anything can overwrite them. */
@@ -2845,6 +2858,7 @@ static bool rocm_graph_encode_layer_attention_batch(
     ds4_gpu_tensor *after_attn_hc_view = ds4_gpu_tensor_view(
             g->batch_after_attn_hc, 0, (uint64_t)n_tokens * hc_dim * sizeof(float));
     bool ok = hc_mix_view && hc_split_view && attn_cur_view && after_attn_hc_view;
+    if (!front_ready) {
     /* Normalize straight to F16 when the projection can take it: the F32 store
      * and the conversion pass that followed both disappear. Falls back whole. */
     bool hc_norm_f16 = false;
@@ -2933,6 +2947,7 @@ static bool rocm_graph_encode_layer_attention_batch(
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("norm");
+    if (project_q_a_kv) {
     GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("pre_q");
     if (ok) ok = rocm_graph_matmul_q8_0_named_tensor("attn_q_a",
                                                       il,
@@ -2987,19 +3002,32 @@ static bool rocm_graph_encode_layer_attention_batch(
     if (qkv_rms_fused && ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("q_a_norm");
-    if (ok) ok = rocm_graph_matmul_q8_0_named_tensor("attn_q_b",
-                                                      il,
-                                                      pos0,
-                                                      g->batch_q,
-                                                      model,
-                                                      layer->attn_q_b,
-                                                      q_rank,
-                                                      q_dim,
-                                                      g->batch_qr_norm,
-                                                      n_tokens);
+    }
+    if (ok && project_qb) {
+        ok = rocm_graph_matmul_q8_0_named_tensor("attn_q_b",
+                                                 il,
+                                                 pos0,
+                                                 g->batch_q,
+                                                 model,
+                                                 layer->attn_q_b,
+                                                 q_rank,
+                                                 q_dim,
+                                                 g->batch_qr_norm,
+                                                 n_tokens);
+    }
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_Q_STAGE("q_b");
+    }
+    if (front_only) {
+        ds4_gpu_tensor_free(after_attn_hc_view);
+        ds4_gpu_tensor_free(attn_cur_view);
+        ds4_gpu_tensor_free(hc_split_view);
+        ds4_gpu_tensor_free(hc_mix_view);
+        free(index_counts);
+        free(comp_counts);
+        return ok;
+    }
     /* One pass over the query rows instead of two. The fused kernel stages each
      * row in LDS, so the norm's write-back is no longer read again by the rope
      * pass; it is bit-identical and falls back when the row does not fit. */
@@ -3169,7 +3197,7 @@ static bool rocm_graph_encode_layer_attention_batch(
             fprintf(stderr, "ds4: ROCm layer-major prefill needs attention compressor weights\n");
             ok = false;
         }
-        if (ok) {
+        if (ok && !compressor_projection_ready) {
             ok = ds4_gpu_matmul_f16_tensor(g->batch_comp_kv,
                                              model->map,
                                              model->size,
@@ -3443,7 +3471,8 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                          g->batch_attn_norm,
                                                          n_tokens) != 0;
             }
-            if (ok) ok = ds4_gpu_matmul_f16_tensor(g->batch_indexer_q,
+            if (ok && !indexer_query_projection_ready) {
+                ok = ds4_gpu_matmul_f16_tensor(g->batch_indexer_q,
                                                      model->map,
                                                      model->size,
                                                      layer->indexer_attn_q_b->abs_offset,
@@ -3451,6 +3480,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                      (uint64_t)DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM,
                                                      g->batch_qr_norm,
                                                      n_tokens) != 0;
+            }
             if (ok) ok = ds4_gpu_rope_tail_tensor(g->batch_indexer_q,
                                                     n_tokens,
                                                     DS4_N_INDEXER_HEAD,
@@ -3468,7 +3498,8 @@ static bool rocm_graph_encode_layer_attention_batch(
             if (ok) ok = ds4_gpu_dsv4_indexer_qat_tensor(g->batch_indexer_q,
                                                           n_tokens * DS4_N_INDEXER_HEAD,
                                                           DS4_N_INDEXER_HEAD_DIM) != 0;
-            if (ok) ok = ds4_gpu_matmul_f16_tensor(g->batch_indexer_weights,
+            if (ok && !indexer_query_projection_ready) {
+                ok = ds4_gpu_matmul_f16_tensor(g->batch_indexer_weights,
                                                      model->map,
                                                      model->size,
                                                      layer->indexer_proj->abs_offset,
@@ -3476,6 +3507,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                      DS4_N_INDEXER_HEAD,
                                                      g->batch_attn_norm,
                                                      n_tokens) != 0;
+            }
             if (zero_prefix) {
                 if (ok && n_comp > g->layer_comp_cap[il]) {
                     fprintf(stderr, "ds4: ROCm layer-major indexer cache capacity exceeded at layer %u\n", il);
@@ -4029,6 +4061,23 @@ static bool rocm_graph_encode_layer_attention_batch(
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("attention");
 
+    if (ok && !project_output) {
+        ok = ds4_gpu_rope_tail_tensor(
+                 g->batch_heads, n_tokens, DS4_N_HEAD, DS4_N_HEAD_DIM,
+                 DS4_N_ROT, pos0,
+                 compressed ? (uint32_t)DS4_ROPE_ORIG_CTX : 0, true,
+                 freq_base, freq_scale, ext_factor, attn_factor,
+                 DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW) != 0;
+        GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("inv_rope");
+        ds4_gpu_tensor_free(after_attn_hc_view);
+        ds4_gpu_tensor_free(attn_cur_view);
+        ds4_gpu_tensor_free(hc_split_view);
+        ds4_gpu_tensor_free(hc_mix_view);
+        free(index_counts);
+        free(comp_counts);
+        return ok;
+    }
+
     if (ok) {
     }
     /*
@@ -4115,7 +4164,8 @@ static bool rocm_graph_encode_layer_attention_batch(
                              DS4_ROPE_YARN_BETA_FAST,
                              DS4_ROPE_YARN_BETA_SLOW) != 0;
     }
-    if (ok && !output_hc_fused && !inv_rope_fused) ok = ds4_gpu_rope_tail_tensor(g->batch_heads,
+    if (ok && !output_hc_fused && !inv_rope_fused) {
+        ok = ds4_gpu_rope_tail_tensor(g->batch_heads,
                                             n_tokens,
                                             DS4_N_HEAD,
                                             DS4_N_HEAD_DIM,
@@ -4129,6 +4179,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                                             attn_factor,
                                             DS4_ROPE_YARN_BETA_FAST,
                                             DS4_ROPE_YARN_BETA_SLOW) != 0;
+    }
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("inv_rope");
@@ -4153,12 +4204,14 @@ static bool rocm_graph_encode_layer_attention_batch(
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("output_proj");
-    if (ok && !output_hc_fused) ok = ds4_gpu_hc_expand_split_tensor(after_attn_hc_view,
+    if (ok && !output_hc_fused) {
+        ok = ds4_gpu_hc_expand_split_tensor(after_attn_hc_view,
                                                   g->batch_attn_out,
                                                   g->batch_cur_hc,
                                                   hc_split_view,
                                                   DS4_N_EMBD,
                                                   DS4_N_HC) != 0;
+    }
     if (ok) {
     }
     GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("hc_post");
@@ -4573,14 +4626,12 @@ static bool rocm_graph_encode_layer_ffn_batch(
                                                       (uint32_t)hc_dim,
                                                       n_tokens,
                                                       DS4_RMS_EPS) != 0;
-    if (ok && !hc_pre_fused && !hc_norm_f16) ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
-                                             model->map,
-                                             model->size,
-                                             layer->hc_ffn_fn->abs_offset,
-                                             hc_dim,
-                                             mix_hc,
-                                             g->batch_flat_hc,
-                                             n_tokens) != 0;
+    if (ok && !hc_pre_fused && !hc_norm_f16) {
+        ok = ds4_gpu_matmul_f16_tensor(
+                 hc_mix_view, model->map, model->size,
+                 layer->hc_ffn_fn->abs_offset, hc_dim, mix_hc,
+                 g->batch_flat_hc, n_tokens) != 0;
+    }
     if (ok && !hc_pre_fused) {
         /*
          * The decode fusion is row-independent, so a W2-W8 grid is exact to
@@ -5397,7 +5448,10 @@ static bool rocm_graph_spec_prepare(ds4_gpu_graph *g,
                                     uint32_t rows_cap) {
     if (!g || !weights || rows_cap == 0 || rows_cap > DS4_SPEC_MAX_ROWS) return false;
     if (rows_cap > g->prefill_cap) return false;
-    if (g->spec_rows_cap >= rows_cap && g->spec_logits && g->spec_row_tops) return true;
+    if (g->spec_rows_cap >= rows_cap && g->spec_logits && g->spec_row_tops &&
+        g->spec_frontier_logits) {
+        return true;
+    }
 
     rocm_graph_spec_free(g);
     const uint64_t vocab_dim = weights->output->dim[1];
@@ -5405,7 +5459,11 @@ static bool rocm_graph_spec_prepare(ds4_gpu_graph *g,
         ds4_gpu_tensor_alloc((uint64_t)rows_cap * vocab_dim * sizeof(float));
     g->spec_row_tops =
         ds4_gpu_tensor_alloc((uint64_t)rows_cap * sizeof(int32_t));
-    bool ok = g->spec_logits != NULL && g->spec_row_tops != NULL;
+    g->spec_frontier_logits = ds4_gpu_tensor_alloc(
+        (uint64_t)(rows_cap < 8u ? rows_cap : 8u) *
+        vocab_dim * sizeof(float));
+    bool ok = g->spec_logits != NULL && g->spec_row_tops != NULL &&
+              g->spec_frontier_logits != NULL;
 
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
         const uint32_t ratio = ds4_layer_compress_ratio(il);
@@ -5549,9 +5607,11 @@ static bool rocm_graph_dspark_attach(ds4_gpu_graph *g,
                 ds4_gpu_tensor_alloc((uint64_t)DS4_N_EMBD * sizeof(float));
         g->dspark_block_tokens = ds4_gpu_tensor_alloc(
                 (uint64_t)(DS4_DSPARK_MAX_BLOCK + 1u) * sizeof(int32_t));
-        g->dspark_confidence = ds4_gpu_tensor_alloc(sizeof(float));
-        g->dspark_markov_key = ds4_gpu_tensor_alloc(sizeof(unsigned long long));
-        g->dspark_markov_index = ds4_gpu_tensor_alloc(sizeof(int32_t));
+        g->dspark_confidence = ds4_gpu_tensor_alloc(8u * sizeof(float));
+        g->dspark_markov_key = ds4_gpu_tensor_alloc(
+                8u * sizeof(unsigned long long));
+        g->dspark_markov_index =
+                ds4_gpu_tensor_alloc(8u * sizeof(int32_t));
         ok = g->dspark_features && g->dspark_fused && g->dspark_fused_last &&
              g->dspark_block_tokens && g->dspark_confidence &&
              g->dspark_markov_key && g->dspark_markov_index;
@@ -5974,6 +6034,79 @@ static bool rocm_graph_verify_suffix(ds4_gpu_graph* g, const ds4_model* model,
                              (uint64_t)n_tokens * sizeof(row_tops[0])) != 0;
 }
 
+static bool rocm_graph_distribute_verify_results(
+    ds4_gpu_graph* coordinator, const ds4_rocm_verify_item* items,
+    size_t item_count, const std::array<uint32_t, 9>& row_offsets,
+    const std::vector<int32_t>& flat_tops, uint64_t vocab_dim) {
+  if (!coordinator || !items || item_count == 0u ||
+      flat_tops.size() < row_offsets[item_count]) {
+    return false;
+  }
+
+  bool gather_frontiers = coordinator->spec_frontier_logits != nullptr;
+  for (size_t index = 0; index < item_count; ++index) {
+    const ds4_rocm_verify_item& item = items[index];
+    memcpy(item.row_tops, flat_tops.data() + row_offsets[index],
+           (size_t)item.n_tokens * sizeof(item.row_tops[0]));
+    gather_frontiers =
+        gather_frontiers && item.frontier_logits != nullptr &&
+        item.logical_n_tokens != 0u &&
+        item.logical_n_tokens <= item.n_tokens;
+  }
+
+  const uint64_t logits_row_bytes = vocab_dim * sizeof(float);
+  if (gather_frontiers) {
+    bool ok = ds4_gpu_begin_commands() != 0;
+    for (size_t index = 0; ok && index < item_count; ++index) {
+      const ds4_rocm_verify_item& item = items[index];
+      uint32_t accepted = 1u;
+      while (accepted < item.logical_n_tokens &&
+             item.row_tops[accepted - 1u] ==
+                 item.tokens->v[item.start + accepted]) {
+        ++accepted;
+      }
+      const uint32_t source_row =
+          row_offsets[index] + accepted - 1u;
+      ok = ds4_gpu_tensor_copy(
+               coordinator->spec_frontier_logits,
+               (uint64_t)index * logits_row_bytes,
+               coordinator->spec_logits,
+               (uint64_t)source_row * logits_row_bytes,
+               logits_row_bytes) != 0;
+    }
+    if (ok) {
+      ok = ds4_gpu_end_commands() != 0;
+    } else {
+      (void)ds4_gpu_synchronize();
+    }
+    if (!ok) return false;
+
+    std::vector<float> frontier_logits(item_count * vocab_dim);
+    if (ds4_gpu_tensor_read(
+            coordinator->spec_frontier_logits, 0, frontier_logits.data(),
+            (uint64_t)item_count * logits_row_bytes) == 0) {
+      return false;
+    }
+    for (size_t index = 0; index < item_count; ++index) {
+      memcpy(items[index].frontier_logits,
+             frontier_logits.data() + index * vocab_dim,
+             (size_t)logits_row_bytes);
+    }
+    return true;
+  }
+
+  for (size_t index = 0; index < item_count; ++index) {
+    if (index != 0u &&
+        ds4_gpu_tensor_copy(
+            items[index].graph->spec_logits, 0, coordinator->spec_logits,
+            (uint64_t)row_offsets[index] * logits_row_bytes,
+            (uint64_t)items[index].n_tokens * logits_row_bytes) == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /*
  * Verify one independently sized draft block per session.
  *
@@ -6001,6 +6134,8 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
     const ds4_rocm_verify_item& item = items[index];
     if (!item.graph || !item.tokens || !item.row_tops ||
         item.n_tokens == 0u ||
+        item.logical_n_tokens == 0u ||
+        item.logical_n_tokens > item.n_tokens ||
         item.start > static_cast<uint32_t>(item.tokens->len) ||
         item.n_tokens > static_cast<uint32_t>(item.tokens->len) - item.start) {
       return false;
@@ -6123,27 +6258,60 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
                             (uint64_t)total_rows * sizeof(flat_tops[0])) == 0) {
       return false;
     }
-
-    const uint64_t logits_row_bytes =
-        engine->weights->output->dim[1] * sizeof(float);
-    for (size_t index = 0; index < item_count; ++index) {
-      if (index != 0u &&
-          ds4_gpu_tensor_copy(
-              items[index].graph->spec_logits, 0, coordinator->spec_logits,
-              (uint64_t)row_offsets[index] * logits_row_bytes,
-              (uint64_t)items[index].n_tokens * logits_row_bytes) == 0) {
-        return false;
-      }
-      memcpy(items[index].row_tops, flat_tops.data() + row_offsets[index],
-             (size_t)items[index].n_tokens *
-                 sizeof(items[index].row_tops[0]));
-    }
-    return true;
+    return rocm_graph_distribute_verify_results(
+        coordinator, items, item_count, row_offsets, flat_tops,
+        engine->weights->output->dim[1]);
   }
 
   const bool combine_ffn = getenv("GUFO_DEEPSEEK_DSPARK_BATCH_FFN") != NULL ||
                            multi_batch ||
                            (item_count == 2u && !serial_layers);
+  bool attn_group_pairs_compatible = (item_count & 1u) == 0u;
+  for (size_t index = 0;
+       attn_group_pairs_compatible && index < item_count; index += 2u) {
+    attn_group_pairs_compatible =
+        items[index].n_tokens != 0u &&
+        items[index].n_tokens <= 6u &&
+        items[index + 1u].n_tokens != 0u &&
+        items[index + 1u].n_tokens <= 6u;
+  }
+  const char* multi_attn_front_setting =
+      getenv("GUFO_DEEPSEEK_DSPARK_MULTI_ATTN_FRONT");
+  const bool combine_attn_front =
+      multi_batch && attn_group_pairs_compatible &&
+      (multi_attn_front_setting == nullptr ||
+       (strcmp(multi_attn_front_setting, "0") != 0 &&
+        strcmp(multi_attn_front_setting, "false") != 0 &&
+        strcmp(multi_attn_front_setting, "off") != 0));
+  const char* multi_attn_qb_setting =
+      getenv("GUFO_DEEPSEEK_DSPARK_MULTI_ATTN_QB");
+  const bool combine_attn_qb =
+      combine_attn_front &&
+      (multi_attn_qb_setting == nullptr ||
+       (strcmp(multi_attn_qb_setting, "0") != 0 &&
+        strcmp(multi_attn_qb_setting, "false") != 0 &&
+        strcmp(multi_attn_qb_setting, "off") != 0));
+  const char* multi_attn_q_a_kv_setting =
+      getenv("GUFO_DEEPSEEK_DSPARK_MULTI_ATTN_Q_A_KV");
+  const bool combine_attn_q_a_kv =
+      combine_attn_qb &&
+      (multi_attn_q_a_kv_setting == nullptr ||
+       (strcmp(multi_attn_q_a_kv_setting, "0") != 0 &&
+        strcmp(multi_attn_q_a_kv_setting, "false") != 0 &&
+        strcmp(multi_attn_q_a_kv_setting, "off") != 0));
+  const char* multi_attn_output_setting =
+      getenv("GUFO_DEEPSEEK_DSPARK_MULTI_ATTN_OUTPUT");
+  const bool exact_attn_output_rows =
+      (total_rows >= 4u && total_rows <= 8u) ||
+      total_rows == 10u || total_rows == 12u || total_rows == 16u ||
+      total_rows == 18u || total_rows == 24u ||
+      total_rows == 32u;
+  const bool combine_attn_output =
+      combine_attn_front && combine_ffn && exact_attn_output_rows &&
+      (multi_attn_output_setting == nullptr ||
+       (strcmp(multi_attn_output_setting, "0") != 0 &&
+        strcmp(multi_attn_output_setting, "false") != 0 &&
+        strcmp(multi_attn_output_setting, "off") != 0));
   const bool sync_layers =
       getenv("GUFO_DEEPSEEK_DSPARK_BATCH_SYNC_LAYERS") != NULL;
   bool ok = true;
@@ -6202,38 +6370,426 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
   }
   for (uint32_t il = 0; ok && !serial_layers && il < DS4_N_LAYER; ++il) {
     const ds4_layer_weights* layer = &engine->weights->layer[il];
+    const uint64_t mix_hc =
+        2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
+    const uint64_t q_rank = layer->attn_q_a->dim[1];
+    const uint64_t q_dim =
+        (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
+    const uint32_t ratio = ds4_layer_compress_ratio(il);
+    const uint32_t comp_width =
+        (ratio == 4u ? 2u : 1u) * DS4_N_HEAD_DIM;
+    const uint64_t indexer_q_dim =
+        (uint64_t)DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM;
+    const char* multi_attn_f16_setting =
+        getenv("GUFO_DEEPSEEK_DSPARK_MULTI_ATTN_F16");
+    const bool combine_attn_f16 =
+        combine_attn_front && ratio != 0u &&
+        (multi_attn_f16_setting == nullptr ||
+         (strcmp(multi_attn_f16_setting, "0") != 0 &&
+          strcmp(multi_attn_f16_setting, "false") != 0 &&
+          strcmp(multi_attn_f16_setting, "off") != 0));
+    const bool combine_indexer_f16 =
+        combine_attn_f16 && ratio == 4u;
+    auto with_attention_slice =
+        [&](ds4_gpu_graph* graph, uint32_t row0, uint32_t rows,
+            auto&& operation) {
+          std::array<ds4_gpu_tensor**, 15> slots{{
+              &graph->batch_cur_hc,
+              &graph->batch_flat_hc,
+              &graph->batch_hc_mix,
+              &graph->batch_hc_split,
+              &graph->batch_attn_cur,
+              &graph->batch_attn_norm,
+              &graph->batch_qr,
+              &graph->batch_qr_norm,
+              &graph->batch_q,
+              &graph->batch_kv_raw,
+              &graph->batch_kv,
+              &graph->batch_after_attn_hc,
+              &graph->batch_indexer_q,
+              &graph->batch_indexer_weights,
+              &graph->batch_heads,
+          }};
+          std::array<ds4_gpu_tensor*, 15> bases{{
+              coordinator->batch_cur_hc,
+              coordinator->batch_flat_hc,
+              coordinator->batch_hc_mix,
+              coordinator->batch_hc_split,
+              coordinator->batch_attn_cur,
+              coordinator->batch_attn_norm,
+              coordinator->batch_qr,
+              coordinator->batch_qr_norm,
+              coordinator->batch_q,
+              coordinator->batch_kv_raw,
+              coordinator->batch_kv,
+              coordinator->batch_after_attn_hc,
+              coordinator->batch_indexer_q,
+              coordinator->batch_indexer_weights,
+              coordinator->batch_heads,
+          }};
+          const std::array<uint64_t, 15> row_bytes{{
+              hc_row_bytes,
+              hc_row_bytes,
+              mix_hc * sizeof(float),
+              mix_hc * sizeof(float),
+              (uint64_t)DS4_N_EMBD * sizeof(float),
+              (uint64_t)DS4_N_EMBD * sizeof(float),
+              q_rank * sizeof(float),
+              q_rank * sizeof(float),
+              q_dim * sizeof(float),
+              (uint64_t)DS4_N_HEAD_DIM * sizeof(float),
+              (uint64_t)DS4_N_HEAD_DIM * sizeof(float),
+              hc_row_bytes,
+              indexer_q_dim * sizeof(float),
+              (uint64_t)DS4_N_INDEXER_HEAD * sizeof(float),
+              q_dim * sizeof(float),
+          }};
+          std::array<ds4_gpu_tensor*, 15> saved{};
+          std::array<ds4_gpu_tensor*, 15> views{};
+          bool slice_ok = true;
+          for (size_t field = 0; field < slots.size(); ++field) {
+            saved[field] = *slots[field];
+            views[field] = ds4_gpu_tensor_view(
+                bases[field], (uint64_t)row0 * row_bytes[field],
+                (uint64_t)rows * row_bytes[field]);
+            slice_ok = slice_ok && views[field] != nullptr;
+          }
+          if (slice_ok) {
+            for (size_t field = 0; field < slots.size(); ++field) {
+              *slots[field] = views[field];
+            }
+            slice_ok = operation();
+            for (size_t field = 0; field < slots.size(); ++field) {
+              *slots[field] = saved[field];
+            }
+          }
+          for (ds4_gpu_tensor* view : views) {
+            ds4_gpu_tensor_free(view);
+          }
+          return slice_ok;
+        };
+    if (combine_attn_front) {
+      for (size_t index = 0; ok && index < item_count; ++index) {
+        ds4_gpu_graph* graph = items[index].graph;
+        const uint32_t row0 = row_offsets[index];
+        const uint32_t rows = items[index].n_tokens;
+        ok = ds4_gpu_tensor_copy(
+                 coordinator->batch_cur_hc,
+                 (uint64_t)row0 * hc_row_bytes,
+                 coordinator->batch_dspark_verify_cur_hc,
+                 (uint64_t)row0 * hc_row_bytes,
+                 (uint64_t)rows * hc_row_bytes) != 0;
+        if (ok) {
+          ok = with_attention_slice(graph, row0, rows, [&]() {
+            return rocm_graph_encode_layer_attention_batch(
+                graph, engine->model, layer, il, items[index].start,
+                rows, false, true, !combine_attn_qb,
+                !combine_attn_q_a_kv);
+          });
+        }
+      }
+      if (ok && combine_attn_q_a_kv) {
+        ok = ds4_gpu_matmul_q8_0_group_pairs_tensor(
+                 coordinator->batch_qr, engine->model->map,
+                 engine->model->size, layer->attn_q_a->abs_offset,
+                 DS4_N_EMBD, q_rank, coordinator->batch_attn_norm,
+                 total_rows, row_offsets.data(),
+                 static_cast<uint32_t>(item_count)) != 0;
+      }
+      if (ok && combine_attn_q_a_kv) {
+        ok = ds4_gpu_matmul_q8_0_group_pairs_tensor(
+                 coordinator->batch_kv_raw, engine->model->map,
+                 engine->model->size, layer->attn_kv->abs_offset,
+                 DS4_N_EMBD, DS4_N_HEAD_DIM,
+                 coordinator->batch_attn_norm, total_rows,
+                 row_offsets.data(), static_cast<uint32_t>(item_count)) != 0;
+      }
+      if (ok && combine_attn_q_a_kv) {
+        ok = ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
+                 coordinator->batch_qr_norm, coordinator->batch_qr,
+                 engine->model->map, engine->model->size,
+                 layer->attn_q_a_norm->abs_offset,
+                 static_cast<uint32_t>(q_rank), coordinator->batch_kv,
+                 coordinator->batch_kv_raw,
+                 layer->attn_kv_a_norm->abs_offset, DS4_N_HEAD_DIM,
+                 total_rows, DS4_RMS_EPS) != 0;
+      }
+      const bool validate_group_pairs =
+          combine_attn_qb &&
+          getenv("GUFO_DEEPSEEK_DSPARK_VALIDATE_ATTN_GROUP_PAIRS") !=
+              nullptr;
+      static bool group_pairs_validated = false;
+      if (ok && validate_group_pairs && !group_pairs_validated) {
+        for (size_t index = 0; ok && index < item_count; ++index) {
+          const uint64_t row0 = row_offsets[index];
+          const uint64_t rows = items[index].n_tokens;
+          ds4_gpu_tensor* reference_q = ds4_gpu_tensor_view(
+              coordinator->batch_heads, row0 * q_dim * sizeof(float),
+              rows * q_dim * sizeof(float));
+          ds4_gpu_tensor* request_qr_norm = ds4_gpu_tensor_view(
+              coordinator->batch_qr_norm, row0 * q_rank * sizeof(float),
+              rows * q_rank * sizeof(float));
+          ok = reference_q != nullptr && request_qr_norm != nullptr;
+          if (ok) {
+            ok = ds4_gpu_matmul_q8_0_tensor(
+                     reference_q, engine->model->map, engine->model->size,
+                     layer->attn_q_b->abs_offset, q_rank, q_dim,
+                     request_qr_norm, rows) != 0;
+          }
+          ds4_gpu_tensor_free(request_qr_norm);
+          ds4_gpu_tensor_free(reference_q);
+        }
+      }
+      if (ok && combine_attn_qb) {
+        ok = ds4_gpu_matmul_q8_0_group_pairs_tensor(
+                 coordinator->batch_q, engine->model->map,
+                 engine->model->size, layer->attn_q_b->abs_offset,
+                 q_rank, q_dim, coordinator->batch_qr_norm, total_rows,
+                 row_offsets.data(), static_cast<uint32_t>(item_count)) != 0;
+      }
+      if (ok && validate_group_pairs && !group_pairs_validated) {
+        std::vector<float> reference((uint64_t)total_rows * q_dim);
+        std::vector<float> candidate((uint64_t)total_rows * q_dim);
+        ok = ds4_gpu_tensor_read(
+                 coordinator->batch_heads, 0, reference.data(),
+                 reference.size() * sizeof(float)) != 0 &&
+             ds4_gpu_tensor_read(
+                 coordinator->batch_q, 0, candidate.data(),
+                 candidate.size() * sizeof(float)) != 0;
+        if (ok) {
+          uint64_t mismatch_count = 0u;
+          uint64_t first_mismatch = 0u;
+          float max_abs_diff = 0.0f;
+          for (uint64_t value = 0; value < reference.size(); ++value) {
+            if (memcmp(&reference[value], &candidate[value],
+                       sizeof(float)) != 0) {
+              if (mismatch_count == 0u) first_mismatch = value;
+              mismatch_count++;
+              max_abs_diff = fmaxf(
+                  max_abs_diff,
+                  fabsf(reference[value] - candidate[value]));
+            }
+          }
+          fprintf(stderr,
+                  "ds4: grouped Q8 A/B layer=%u rows=%u mismatches=%llu "
+                  "first=%llu reference=%a candidate=%a max_abs=%a\n",
+                  il, total_rows,
+                  (unsigned long long)mismatch_count,
+                  (unsigned long long)first_mismatch,
+                  reference[first_mismatch], candidate[first_mismatch],
+                  max_abs_diff);
+          ok = mismatch_count == 0u;
+          group_pairs_validated = true;
+        }
+      }
+      const bool validate_attn_f16 =
+          combine_attn_f16 &&
+          getenv("GUFO_DEEPSEEK_DSPARK_VALIDATE_MULTI_ATTN_F16") !=
+              nullptr;
+      static uint32_t attn_f16_validated = 0u;
+      auto validate_f16_projection =
+          [&](const char* name, const ds4_tensor* weight,
+              uint64_t in_dim, uint64_t out_dim,
+              ds4_gpu_tensor* input,
+              ds4_gpu_tensor* candidate_output,
+              uint32_t validation_bit) {
+            if (!validate_attn_f16 ||
+                (attn_f16_validated & validation_bit) != 0u) {
+              return true;
+            }
+            ds4_gpu_tensor* reference_output = ds4_gpu_tensor_view(
+                coordinator->batch_heads, 0,
+                (uint64_t)total_rows * out_dim * sizeof(float));
+            bool valid = reference_output != nullptr;
+            for (size_t index = 0; valid && index < item_count; ++index) {
+              const uint64_t row0 = row_offsets[index];
+              const uint64_t rows = items[index].n_tokens;
+              ds4_gpu_tensor* reference_request = ds4_gpu_tensor_view(
+                  reference_output, row0 * out_dim * sizeof(float),
+                  rows * out_dim * sizeof(float));
+              ds4_gpu_tensor* input_request = ds4_gpu_tensor_view(
+                  input, row0 * in_dim * sizeof(float),
+                  rows * in_dim * sizeof(float));
+              valid =
+                  reference_request != nullptr &&
+                  input_request != nullptr &&
+                  ds4_gpu_matmul_f16_tensor(
+                      reference_request, engine->model->map,
+                      engine->model->size, weight->abs_offset, in_dim,
+                      out_dim, input_request, rows) != 0;
+              ds4_gpu_tensor_free(input_request);
+              ds4_gpu_tensor_free(reference_request);
+            }
+            const uint64_t value_count =
+                (uint64_t)total_rows * out_dim;
+            std::vector<float> reference(value_count);
+            std::vector<float> candidate(value_count);
+            if (valid) {
+              valid =
+                  ds4_gpu_tensor_read(
+                      reference_output, 0, reference.data(),
+                      value_count * sizeof(float)) != 0 &&
+                  ds4_gpu_tensor_read(
+                      candidate_output, 0, candidate.data(),
+                      value_count * sizeof(float)) != 0;
+            }
+            uint64_t mismatch_count = 0u;
+            uint64_t first_mismatch = 0u;
+            float max_abs_diff = 0.0f;
+            if (valid) {
+              for (uint64_t value = 0u; value < value_count; ++value) {
+                if (memcmp(&reference[value], &candidate[value],
+                           sizeof(float)) != 0) {
+                  if (mismatch_count == 0u) first_mismatch = value;
+                  mismatch_count++;
+                  max_abs_diff = fmaxf(
+                      max_abs_diff,
+                      fabsf(reference[value] - candidate[value]));
+                }
+              }
+              fprintf(
+                  stderr,
+                  "ds4: grouped F16 attention %s layer=%u rows=%u "
+                  "mismatches=%llu first=%llu reference=%a candidate=%a "
+                  "max_abs=%a\n",
+                  name, il, total_rows,
+                  (unsigned long long)mismatch_count,
+                  (unsigned long long)first_mismatch,
+                  reference[first_mismatch], candidate[first_mismatch],
+                  max_abs_diff);
+              valid = mismatch_count == 0u;
+            }
+            ds4_gpu_tensor_free(reference_output);
+            if (valid) attn_f16_validated |= validation_bit;
+            return valid;
+          };
+      if (ok && combine_attn_f16) {
+        ok = ds4_gpu_matmul_f16_group_pairs_tensor(
+                 coordinator->batch_comp_kv, engine->model->map,
+                 engine->model->size,
+                 layer->attn_compressor_kv->abs_offset, DS4_N_EMBD,
+                 comp_width, coordinator->batch_attn_norm, total_rows,
+                 row_offsets.data(),
+                 static_cast<uint32_t>(item_count)) != 0;
+      }
+      if (ok && combine_attn_f16) {
+        ok = validate_f16_projection(
+            ratio == 4u ? "compressor_kv_r4" : "compressor_kv_r2",
+            layer->attn_compressor_kv, DS4_N_EMBD, comp_width,
+            coordinator->batch_attn_norm, coordinator->batch_comp_kv,
+            ratio == 4u ? 1u << 2u : 1u << 0u);
+      }
+      if (ok && combine_attn_f16) {
+        ok = ds4_gpu_matmul_f16_group_pairs_tensor(
+                 coordinator->batch_comp_sc, engine->model->map,
+                 engine->model->size,
+                 layer->attn_compressor_gate->abs_offset, DS4_N_EMBD,
+                 comp_width, coordinator->batch_attn_norm, total_rows,
+                 row_offsets.data(),
+                 static_cast<uint32_t>(item_count)) != 0;
+      }
+      if (ok && combine_attn_f16) {
+        ok = validate_f16_projection(
+            ratio == 4u ? "compressor_gate_r4"
+                        : "compressor_gate_r2",
+            layer->attn_compressor_gate, DS4_N_EMBD, comp_width,
+            coordinator->batch_attn_norm, coordinator->batch_comp_sc,
+            ratio == 4u ? 1u << 3u : 1u << 1u);
+      }
+      if (ok && combine_indexer_f16) {
+        ok = ds4_gpu_matmul_f16_group_pairs_tensor(
+                 coordinator->batch_indexer_q, engine->model->map,
+                 engine->model->size,
+                 layer->indexer_attn_q_b->abs_offset, q_rank,
+                 indexer_q_dim, coordinator->batch_qr_norm, total_rows,
+                 row_offsets.data(),
+                 static_cast<uint32_t>(item_count)) != 0;
+      }
+      if (ok && combine_indexer_f16) {
+        ok = validate_f16_projection(
+            "indexer_q", layer->indexer_attn_q_b, q_rank,
+            indexer_q_dim, coordinator->batch_qr_norm,
+            coordinator->batch_indexer_q, 1u << 4u);
+      }
+      if (ok && combine_indexer_f16) {
+        ok = ds4_gpu_matmul_f16_group_pairs_tensor(
+                 coordinator->batch_indexer_weights, engine->model->map,
+                 engine->model->size, layer->indexer_proj->abs_offset,
+                 DS4_N_EMBD, DS4_N_INDEXER_HEAD,
+                 coordinator->batch_attn_norm, total_rows,
+                 row_offsets.data(),
+                 static_cast<uint32_t>(item_count)) != 0;
+      }
+      if (ok && combine_indexer_f16) {
+        ok = validate_f16_projection(
+            "indexer_weights", layer->indexer_proj, DS4_N_EMBD,
+            DS4_N_INDEXER_HEAD, coordinator->batch_attn_norm,
+            coordinator->batch_indexer_weights, 1u << 5u);
+      }
+    }
     for (size_t index = 0; ok && index < item_count; ++index) {
       ds4_gpu_graph* graph = items[index].graph;
       const uint64_t block_offset =
           (uint64_t)row_offsets[index] * hc_row_bytes;
       const uint64_t block_bytes =
           (uint64_t)items[index].n_tokens * hc_row_bytes;
-      ok = ds4_gpu_tensor_copy(graph->batch_cur_hc, 0,
-                               coordinator->batch_dspark_verify_cur_hc,
-                               block_offset, block_bytes) != 0;
-      if (ok) {
-        ok = rocm_graph_encode_layer_attention_batch(
-            graph, engine->model, layer, il, items[index].start,
-            items[index].n_tokens);
+      if (!combine_attn_front) {
+        ok = ds4_gpu_tensor_copy(graph->batch_cur_hc, 0,
+                                 coordinator->batch_dspark_verify_cur_hc,
+                                 block_offset, block_bytes) != 0;
+      }
+      if (ok && combine_attn_f16 && index != 0u) {
+        const uint64_t comp_row_bytes =
+            (uint64_t)comp_width * sizeof(float);
+        const uint64_t comp_offset =
+            (uint64_t)row_offsets[index] * comp_row_bytes;
+        const uint64_t comp_bytes =
+            (uint64_t)items[index].n_tokens * comp_row_bytes;
+        ok = ds4_gpu_tensor_copy(
+                 graph->batch_comp_kv, 0,
+                 coordinator->batch_comp_kv, comp_offset,
+                 comp_bytes) != 0;
+        if (ok) {
+          ok = ds4_gpu_tensor_copy(
+                   graph->batch_comp_sc, 0,
+                   coordinator->batch_comp_sc, comp_offset,
+                   comp_bytes) != 0;
+        }
       }
       if (ok) {
-        if (combine_ffn) {
-          ok = ds4_gpu_tensor_copy(
-                   coordinator->batch_dspark_verify_after_attn_hc, block_offset,
-                   graph->batch_after_attn_hc, 0, block_bytes) != 0;
+        if (combine_attn_front) {
+          ok = with_attention_slice(
+              graph, row_offsets[index], items[index].n_tokens, [&]() {
+                return rocm_graph_encode_layer_attention_batch(
+                    graph, engine->model, layer, il, items[index].start,
+                    items[index].n_tokens, true, false, true, true,
+                    combine_attn_f16, combine_indexer_f16,
+                    !combine_attn_output);
+              });
         } else {
-          ds4_gpu_tensor* session_tokens = ds4_gpu_tensor_view(
-              coordinator->prefill_tokens,
-              (uint64_t)row_offsets[index] * sizeof(flat_tokens[0]),
-              (uint64_t)items[index].n_tokens * sizeof(flat_tokens[0]));
-          ok = session_tokens != nullptr;
-          if (ok) {
-            ok = rocm_graph_encode_layer_ffn_batch(
-                graph, engine->model, layer, il, items[index].start,
-                items[index].n_tokens, session_tokens);
-          }
-          ds4_gpu_tensor_free(session_tokens);
+          ok = rocm_graph_encode_layer_attention_batch(
+              graph, engine->model, layer, il, items[index].start,
+              items[index].n_tokens);
         }
+      }
+      if (ok && combine_ffn && !combine_attn_output) {
+        ok = ds4_gpu_tensor_copy(
+                 coordinator->batch_dspark_verify_after_attn_hc, block_offset,
+                 coordinator->batch_after_attn_hc,
+                 combine_attn_front ? block_offset : 0, block_bytes) != 0;
+      }
+      if (ok && !combine_ffn) {
+        ds4_gpu_tensor* session_tokens = ds4_gpu_tensor_view(
+            coordinator->prefill_tokens,
+            (uint64_t)row_offsets[index] * sizeof(flat_tokens[0]),
+            (uint64_t)items[index].n_tokens * sizeof(flat_tokens[0]));
+        ok = session_tokens != nullptr;
+        if (ok) {
+          ok = rocm_graph_encode_layer_ffn_batch(
+              graph, engine->model, layer, il, items[index].start,
+              items[index].n_tokens, session_tokens);
+        }
+        ds4_gpu_tensor_free(session_tokens);
       }
       if (ok && !combine_ffn) {
         ds4_gpu_tensor* tmp = graph->batch_cur_hc;
@@ -6251,6 +6807,38 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
         ok = ds4_gpu_flush_commands() != 0;
       }
     }
+    if (ok && combine_attn_output) {
+      ok = ds4_gpu_attention_output_q8_exact_batch_tensor(
+               coordinator->batch_attn_out, coordinator->batch_attn_low,
+               engine->model->map, engine->model->size,
+               layer->attn_output_a->abs_offset,
+               layer->attn_output_b->abs_offset,
+               DS4_N_HEAD_DIM * (DS4_N_HEAD / DS4_N_OUT_GROUP),
+               DS4_N_LORA_O, DS4_N_OUT_GROUP, DS4_N_EMBD,
+               coordinator->batch_heads, total_rows) != 0;
+    }
+    if (ok && combine_attn_output) {
+      ds4_gpu_tensor* attn_out = ds4_gpu_tensor_view(
+          coordinator->batch_attn_out, 0,
+          (uint64_t)total_rows * DS4_N_EMBD * sizeof(float));
+      ds4_gpu_tensor* cur_hc = ds4_gpu_tensor_view(
+          coordinator->batch_cur_hc, 0,
+          (uint64_t)total_rows * hc_row_bytes);
+      ds4_gpu_tensor* hc_split = ds4_gpu_tensor_view(
+          coordinator->batch_hc_split, 0,
+          (uint64_t)total_rows * mix_hc * sizeof(float));
+      ds4_gpu_tensor* after_attn_hc = ds4_gpu_tensor_view(
+          coordinator->batch_dspark_verify_after_attn_hc, 0,
+          (uint64_t)total_rows * hc_row_bytes);
+      ok = attn_out && cur_hc && hc_split && after_attn_hc &&
+           ds4_gpu_hc_expand_split_tensor(
+               after_attn_hc, attn_out, cur_hc, hc_split, DS4_N_EMBD,
+               DS4_N_HC) != 0;
+      ds4_gpu_tensor_free(after_attn_hc);
+      ds4_gpu_tensor_free(hc_split);
+      ds4_gpu_tensor_free(cur_hc);
+      ds4_gpu_tensor_free(attn_out);
+    }
     if (ok && combine_ffn) {
       ok = ds4_gpu_tensor_copy(coordinator->batch_after_attn_hc, 0,
                                coordinator->batch_dspark_verify_after_attn_hc,
@@ -6266,9 +6854,10 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
             strcmp(multi_moe, "false") != 0 &&
             strcmp(multi_moe, "off") != 0));
       ok = rocm_graph_encode_layer_ffn_batch(
-          coordinator, engine->model, layer, il, items[0].start, total_rows,
-          coordinator->prefill_tokens, 0u, row_offsets.data(),
-          static_cast<uint32_t>(item_count), combine_moe);
+          coordinator, engine->model, layer, il, items[0].start,
+          total_rows, coordinator->prefill_tokens, 0u,
+          row_offsets.data(), static_cast<uint32_t>(item_count),
+          combine_moe);
     }
     for (size_t index = 0; ok && combine_ffn && index < item_count; ++index) {
       const uint64_t block_offset =
@@ -6345,29 +6934,21 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
   if (!ok)
     return false;
 
-  const uint64_t logits_row_bytes =
-      engine->weights->output->dim[1] * sizeof(float);
   if (combine_output_head &&
       ds4_gpu_tensor_read(coordinator->spec_row_tops, 0, flat_tops.data(),
                           (uint64_t)total_rows * sizeof(flat_tops[0])) == 0) {
     return false;
   }
+  if (combine_output_head) {
+    return rocm_graph_distribute_verify_results(
+        coordinator, items, item_count, row_offsets, flat_tops,
+        engine->weights->output->dim[1]);
+  }
   for (size_t index = 0; index < item_count; ++index) {
-    if (combine_output_head && index != 0u &&
-        ds4_gpu_tensor_copy(
-            items[index].graph->spec_logits, 0, coordinator->spec_logits,
-            (uint64_t)row_offsets[index] * logits_row_bytes,
-            (uint64_t)items[index].n_tokens * logits_row_bytes) == 0) {
-      return false;
-    }
-    if (combine_output_head) {
-      memcpy(items[index].row_tops, flat_tops.data() + row_offsets[index],
-             (size_t)items[index].n_tokens *
-                 sizeof(items[index].row_tops[0]));
-    } else if (ds4_gpu_tensor_read(items[index].graph->spec_row_tops, 0,
-                                   items[index].row_tops,
-                                   (uint64_t)items[index].n_tokens *
-                                       sizeof(items[index].row_tops[0])) == 0) {
+    if (ds4_gpu_tensor_read(items[index].graph->spec_row_tops, 0,
+                            items[index].row_tops,
+                            (uint64_t)items[index].n_tokens *
+                                sizeof(items[index].row_tops[0])) == 0) {
       return false;
     }
   }
@@ -6813,7 +7394,11 @@ static bool rocm_graph_dspark_inject(ds4_gpu_graph *g,
 static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                                                      uint32_t stage,
                                                      uint32_t pos0,
-                                                     uint32_t n_rows) {
+                                                     uint32_t n_rows,
+                                                     bool front_ready = false,
+                                                     bool front_only = false,
+                                                     bool project_qb = true,
+                                                     bool project_q_a_kv = true) {
     const ds4_dspark_model *d = g->dspark;
     if (!d || stage >= d->n_stages || n_rows < 2u) return false;
     const uint32_t draft_rows = n_rows - 1u;
@@ -6862,21 +7447,21 @@ static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
         draft_attn_norm_view && draft_hc_view && draft_hc_split_view &&
         kv_target_view && kv_draft_view && after_attn_hc_view;
 
-    if (ok) {
+    if (ok && !front_ready) {
         ok = ds4_gpu_dspark_repeat_hc_tensor(g->batch_cur_hc,
                                              g->dspark_fused_last,
                                              DS4_N_EMBD,
                                              DS4_N_HC,
                                              1u) != 0;
     }
-    if (ok) {
+    if (ok && !front_ready) {
         ok = ds4_gpu_rms_norm_plain_rows_tensor(g->batch_flat_hc,
                                                 g->batch_cur_hc,
                                                 (uint32_t)hc_dim,
                                                 n_rows,
                                                 DS4_RMS_EPS) != 0;
     }
-    if (ok) {
+    if (ok && !front_ready) {
         ok = ds4_gpu_matmul_f16_tensor(hc_mix_view,
                                        sm->map,
                                        sm->size,
@@ -6886,7 +7471,7 @@ static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                                        g->batch_flat_hc,
                                        n_rows) != 0;
     }
-    if (ok) {
+    if (ok && !front_ready) {
         ok = ds4_gpu_hc_split_weighted_sum_tensor(
                  attn_cur_view,
                  hc_split_view,
@@ -6901,7 +7486,7 @@ static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                  DS4_N_HC_SINKHORN_ITER,
                  DS4_HC_EPS) != 0;
     }
-    if (ok) {
+    if (ok && !front_ready) {
         ok = ds4_gpu_rms_norm_weight_rows_tensor(
                  g->batch_attn_norm,
                  g->batch_attn_cur,
@@ -6913,7 +7498,7 @@ static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                  DS4_RMS_EPS) != 0;
     }
 
-    if (ok) {
+    if (ok && project_q_a_kv) {
         ok = ds4_gpu_matmul_q8_0_tensor(g->batch_qr,
                                         sm->map,
                                         sm->size,
@@ -6923,7 +7508,7 @@ static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                                         draft_attn_norm_view,
                                         draft_rows) != 0;
     }
-    if (ok) {
+    if (ok && project_q_a_kv) {
         ok = ds4_gpu_rms_norm_weight_rows_tensor(
                  g->batch_qr_norm,
                  g->batch_qr,
@@ -6934,7 +7519,7 @@ static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                  draft_rows,
                  DS4_RMS_EPS) != 0;
     }
-    if (ok) {
+    if (ok && project_qb) {
         ok = ds4_gpu_matmul_q8_0_tensor(g->batch_q,
                                         sm->map,
                                         sm->size,
@@ -6943,6 +7528,18 @@ static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                                         q_dim,
                                         g->batch_qr_norm,
                                         draft_rows) != 0;
+    }
+    if (front_only) {
+        ds4_gpu_tensor_free(after_attn_hc_view);
+        ds4_gpu_tensor_free(kv_draft_view);
+        ds4_gpu_tensor_free(kv_target_view);
+        ds4_gpu_tensor_free(draft_hc_split_view);
+        ds4_gpu_tensor_free(draft_hc_view);
+        ds4_gpu_tensor_free(draft_attn_norm_view);
+        ds4_gpu_tensor_free(attn_cur_view);
+        ds4_gpu_tensor_free(hc_split_view);
+        ds4_gpu_tensor_free(hc_mix_view);
+        return ok;
     }
     if (ok) {
         ok = ds4_gpu_head_rms_norm_tensor(g->batch_q,
@@ -6968,7 +7565,7 @@ static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                                       DS4_ROPE_YARN_BETA_SLOW) != 0;
     }
 
-    if (ok) {
+    if (ok && project_q_a_kv) {
         ok = ds4_gpu_matmul_q8_0_tensor(g->batch_kv_raw,
                                         sm->map,
                                         sm->size,
@@ -6978,7 +7575,7 @@ static bool rocm_graph_encode_dspark_stage_attention(ds4_gpu_graph *g,
                                         g->batch_attn_norm,
                                         n_rows) != 0;
     }
-    if (ok) {
+    if (ok && project_q_a_kv) {
         ok = ds4_gpu_rms_norm_weight_rows_tensor(
                  g->batch_kv,
                  g->batch_kv_raw,
@@ -7379,6 +7976,158 @@ static bool rocm_graph_dspark_select_block(
   return true;
 }
 
+static bool rocm_graph_dspark_select_block_batch(
+    ds4_gpu_graph* coordinator, const ds4_rocm_dspark_draft_item* items,
+    size_t item_count, const ds4_gpu_tensor* hidden_rows,
+    const ds4_gpu_tensor* logits_rows, uint32_t rows_per_item,
+    bool schedule_confidence) {
+  if (!coordinator || !coordinator->dspark || !items || !hidden_rows ||
+      !logits_rows || rows_per_item == 0u ||
+      (item_count != 2u && item_count != 4u && item_count != 6u &&
+       item_count != 8u) ||
+      !coordinator->dspark_markov_index ||
+      !coordinator->dspark_markov_key) {
+    return false;
+  }
+  const ds4_dspark_model* d = coordinator->dspark;
+  const ds4_model* sm = d->model;
+  const ds4_dspark_stage_weights* last =
+      &d->stage[d->n_stages - 1u];
+  if (!last->markov_w1 || !last->markov_w2) {
+    return false;
+  }
+
+  std::array<int32_t, 8> previous{};
+  std::array<int32_t, 8> selected{};
+  std::array<float, 8> confidence{};
+  std::array<bool, 8> active{};
+  std::array<uint32_t, 8> row_limits{};
+  std::array<uint32_t, 8> selected_rows{};
+  for (size_t index = 0; index < item_count; ++index) {
+    if (!items[index].tokens || !items[index].n_tokens ||
+        items[index].max_draft_tokens == 0u ||
+        items[index].last_token < 0 ||
+        (uint32_t)items[index].last_token >= DS4_N_VOCAB) {
+      return false;
+    }
+    previous[index] = items[index].last_token;
+    row_limits[index] =
+        std::min(items[index].max_draft_tokens, rows_per_item);
+    active[index] = true;
+  }
+
+  const float confidence_threshold =
+      schedule_confidence ? rocm_graph_dspark_confidence_threshold() : -1.0f;
+  const bool trace_confidence =
+      getenv("GUFO_DEEPSEEK_DSPARK_CONFIDENCE_TRACE") != NULL;
+  const bool evaluate_confidence =
+      confidence_threshold >= 0.0f || trace_confidence;
+  if (evaluate_confidence &&
+      (!last->confidence_proj || !last->markov_w1 ||
+       !coordinator->dspark_confidence)) {
+    return false;
+  }
+
+  const uint64_t hidden_row_bytes =
+      (uint64_t)DS4_N_EMBD * sizeof(float);
+  const uint64_t hidden_row_stride =
+      (uint64_t)rows_per_item * DS4_N_EMBD;
+  const uint64_t vocab_row_bytes =
+      (uint64_t)DS4_N_VOCAB * sizeof(float);
+  const uint64_t logits_row_stride =
+      (uint64_t)rows_per_item * DS4_N_VOCAB;
+  for (uint32_t row = 0u; row < rows_per_item; ++row) {
+    if (ds4_gpu_tensor_write(
+            coordinator->prefill_tokens, 0u, previous.data(),
+            (uint64_t)item_count * sizeof(previous[0])) == 0) {
+      return false;
+    }
+    if (evaluate_confidence) {
+      const uint64_t hidden_bytes =
+          ((uint64_t)(item_count - 1u) * rows_per_item + 1u) *
+          hidden_row_bytes;
+      ds4_gpu_tensor* hidden_view = ds4_gpu_tensor_view(
+          hidden_rows, (uint64_t)row * hidden_row_bytes, hidden_bytes);
+      if (!hidden_view) {
+        return false;
+      }
+      const bool confidence_ok =
+          ds4_gpu_dspark_confidence_batch_tensor(
+              coordinator->dspark_confidence, hidden_view,
+              coordinator->prefill_tokens, sm->map, sm->size,
+              last->confidence_proj->abs_offset, last->markov_w1->abs_offset,
+              DS4_N_VOCAB, DS4_N_EMBD, d->markov_rank,
+              static_cast<uint32_t>(item_count), hidden_row_stride) != 0;
+      ds4_gpu_tensor_free(hidden_view);
+      if (!confidence_ok) {
+        return false;
+      }
+    }
+    const uint64_t logits_bytes =
+        ((uint64_t)(item_count - 1u) * rows_per_item + 1u) *
+        vocab_row_bytes;
+    ds4_gpu_tensor* logits_view = ds4_gpu_tensor_view(
+        logits_rows, (uint64_t)row * vocab_row_bytes, logits_bytes);
+    if (!logits_view) {
+      return false;
+    }
+    const bool ok =
+        ds4_gpu_dspark_markov_argmax_batch_tensor(
+            coordinator->dspark_markov_index,
+            coordinator->dspark_markov_key, logits_view,
+            coordinator->prefill_tokens, sm->map, sm->size,
+            last->markov_w1->abs_offset, last->markov_w2->abs_offset,
+            DS4_N_VOCAB, d->markov_rank,
+            static_cast<uint32_t>(item_count), logits_row_stride) != 0;
+    ds4_gpu_tensor_free(logits_view);
+    if (!ok ||
+        ds4_gpu_tensor_read(
+            coordinator->dspark_markov_index, 0u, selected.data(),
+            (uint64_t)item_count * sizeof(selected[0])) == 0) {
+      return false;
+    }
+    if (evaluate_confidence &&
+        ds4_gpu_tensor_read(
+            coordinator->dspark_confidence, 0u, confidence.data(),
+            (uint64_t)item_count * sizeof(confidence[0])) == 0) {
+      return false;
+    }
+    for (size_t index = 0; index < item_count; ++index) {
+      if (selected[index] < 0 ||
+          (uint32_t)selected[index] >= DS4_N_VOCAB) {
+        return false;
+      }
+      if (!active[index] || row >= row_limits[index]) {
+        active[index] = false;
+        continue;
+      }
+      if (evaluate_confidence) {
+        if (!isfinite(confidence[index])) {
+          return false;
+        }
+        if (trace_confidence) {
+          fprintf(stderr,
+                  "ds4: DSpark confidence request=%zu row=%u "
+                  "probability=%.6f threshold=%.6f\n",
+                  index, row, confidence[index], confidence_threshold);
+        }
+        if (confidence_threshold > 0.0f &&
+            confidence[index] < confidence_threshold) {
+          active[index] = false;
+          continue;
+        }
+      }
+      items[index].tokens[row] = selected[index];
+      previous[index] = selected[index];
+      selected_rows[index] = row + 1u;
+    }
+  }
+  for (size_t index = 0; index < item_count; ++index) {
+    *items[index].n_tokens = selected_rows[index];
+  }
+  return true;
+}
+
 /*
  * Propose a block of draft tokens for positions [pos0, pos0 + block_size).
  *
@@ -7390,11 +8139,15 @@ static bool rocm_graph_dspark_select_block(
 static bool rocm_graph_dspark_prepare_hidden(
     ds4_gpu_graph* g, const ds4_model* target_model,
     const ds4_weights* target_weights, int last_token, uint32_t pos0,
-    ds4_gpu_tensor* hidden_out, uint32_t hidden_row_offset) {
+    ds4_gpu_tensor* hidden_out, uint32_t hidden_row_offset,
+    uint32_t max_draft_tokens = 0u) {
   const ds4_dspark_model* d = g->dspark;
   if (!d)
     return false;
-  const uint32_t block = d->block_size;
+  const uint32_t block =
+      max_draft_tokens == 0u
+          ? d->block_size
+          : std::min(max_draft_tokens, d->block_size);
   /* One encoder row plus one row per drafted token. */
   const uint32_t rows = block + 1u;
   if (block == 0 || block > g->spec_rows_cap || rows > g->prefill_cap)
@@ -7457,7 +8210,7 @@ static bool rocm_graph_dspark_prepare_hidden(
  */
 static bool rocm_graph_dspark_prepare_hidden_batch(
     ds4_engine* engine, const ds4_rocm_dspark_draft_item* items,
-    size_t item_count, ds4_gpu_tensor* hidden_out) {
+    size_t item_count, uint32_t block, ds4_gpu_tensor* hidden_out) {
   if (!engine || !engine->model || !engine->weights || !items ||
       item_count < 2u || item_count > 8u || !hidden_out) {
     return false;
@@ -7468,13 +8221,18 @@ static bool rocm_graph_dspark_prepare_hidden_batch(
       !coordinator->batch_dspark_verify_after_attn_hc) {
     return false;
   }
-  const uint32_t block = d->block_size;
   const uint32_t rows = block + 1u;
   const uint32_t total_draft_rows =
       static_cast<uint32_t>(item_count) * block;
-  if (block == 0u || total_draft_rows > coordinator->prefill_cap ||
+  const uint32_t total_front_rows =
+      static_cast<uint32_t>(item_count) * rows;
+  if (block == 0u || block > d->block_size ||
+      total_draft_rows > coordinator->prefill_cap ||
+      total_front_rows > coordinator->prefill_cap ||
       total_draft_rows > coordinator->batch_dspark_verify_rows_cap ||
-      total_draft_rows > DS4_SPEC_MAX_ROWS) {
+      total_front_rows > coordinator->batch_dspark_verify_rows_cap ||
+      total_draft_rows > DS4_SPEC_MAX_ROWS ||
+      total_front_rows > DS4_SPEC_MAX_ROWS) {
     return false;
   }
 
@@ -7503,6 +8261,124 @@ static bool rocm_graph_dspark_prepare_hidden_batch(
 
   const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
   const uint64_t hc_row_bytes = hc_dim * sizeof(float);
+  const uint64_t mix_hc =
+      2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
+  const char* support_attn_q8_batch =
+      getenv("GUFO_DEEPSEEK_DSPARK_SUPPORT_ATTN_Q8_BATCH");
+  const bool combine_attn_q8 =
+      (support_attn_q8_batch == nullptr ||
+       (strcmp(support_attn_q8_batch, "0") != 0 &&
+        strcmp(support_attn_q8_batch, "false") != 0 &&
+        strcmp(support_attn_q8_batch, "off") != 0)) &&
+      item_count >= 4u && (item_count & 1u) == 0u && rows <= 6u;
+  std::array<uint32_t, 9> front_offsets{};
+  for (size_t index = 0; index <= item_count; ++index) {
+    front_offsets[index] = static_cast<uint32_t>(index) * rows;
+  }
+
+  auto with_front_slice =
+      [&](ds4_gpu_graph* graph, uint32_t row0, auto&& operation) {
+        std::array<ds4_gpu_tensor**, 6> slots{{
+            &graph->batch_cur_hc,
+            &graph->batch_flat_hc,
+            &graph->batch_hc_mix,
+            &graph->batch_hc_split,
+            &graph->batch_attn_cur,
+            &graph->batch_attn_norm,
+        }};
+        std::array<ds4_gpu_tensor*, 6> bases{{
+            coordinator->batch_cur_hc,
+            coordinator->batch_flat_hc,
+            coordinator->batch_hc_mix,
+            coordinator->batch_hc_split,
+            coordinator->batch_attn_cur,
+            coordinator->batch_attn_norm,
+        }};
+        const std::array<uint64_t, 6> row_bytes{{
+            hc_row_bytes,
+            hc_row_bytes,
+            mix_hc * sizeof(float),
+            mix_hc * sizeof(float),
+            (uint64_t)DS4_N_EMBD * sizeof(float),
+            (uint64_t)DS4_N_EMBD * sizeof(float),
+        }};
+        std::array<ds4_gpu_tensor*, 6> saved{};
+        std::array<ds4_gpu_tensor*, 6> views{};
+        bool slice_ok = true;
+        for (size_t field = 0; field < slots.size(); ++field) {
+          saved[field] = *slots[field];
+          views[field] = ds4_gpu_tensor_view(
+              bases[field], (uint64_t)row0 * row_bytes[field],
+              (uint64_t)rows * row_bytes[field]);
+          slice_ok = slice_ok && views[field] != nullptr;
+        }
+        if (slice_ok) {
+          for (size_t field = 0; field < slots.size(); ++field) {
+            *slots[field] = views[field];
+          }
+          slice_ok = operation();
+          for (size_t field = 0; field < slots.size(); ++field) {
+            *slots[field] = saved[field];
+          }
+        }
+        for (ds4_gpu_tensor* view : views) {
+          ds4_gpu_tensor_free(view);
+        }
+        return slice_ok;
+      };
+
+  auto with_projected_slice =
+      [&](ds4_gpu_graph* graph, uint32_t front_row0, auto&& operation) {
+        ds4_gpu_tensor* saved_cur_hc = graph->batch_cur_hc;
+        ds4_gpu_tensor* saved_hc_split = graph->batch_hc_split;
+        ds4_gpu_tensor* saved_attn_norm = graph->batch_attn_norm;
+        ds4_gpu_tensor* saved_q = graph->batch_q;
+        ds4_gpu_tensor* saved_kv = graph->batch_kv;
+        ds4_gpu_tensor* cur_hc = ds4_gpu_tensor_view(
+            coordinator->batch_cur_hc,
+            (uint64_t)front_row0 * hc_row_bytes,
+            (uint64_t)rows * hc_row_bytes);
+        ds4_gpu_tensor* hc_split = ds4_gpu_tensor_view(
+            coordinator->batch_hc_split,
+            (uint64_t)front_row0 * mix_hc * sizeof(float),
+            (uint64_t)rows * mix_hc * sizeof(float));
+        ds4_gpu_tensor* attn_norm = ds4_gpu_tensor_view(
+            coordinator->batch_attn_norm,
+            (uint64_t)front_row0 * DS4_N_EMBD * sizeof(float),
+            (uint64_t)rows * DS4_N_EMBD * sizeof(float));
+        ds4_gpu_tensor* q = ds4_gpu_tensor_view(
+            coordinator->batch_q,
+            (uint64_t)(front_row0 + 1u) * DS4_N_HEAD *
+                DS4_N_HEAD_DIM * sizeof(float),
+            (uint64_t)block * DS4_N_HEAD * DS4_N_HEAD_DIM *
+                sizeof(float));
+        ds4_gpu_tensor* kv = ds4_gpu_tensor_view(
+            coordinator->batch_kv,
+            (uint64_t)front_row0 * DS4_N_HEAD_DIM * sizeof(float),
+            (uint64_t)rows * DS4_N_HEAD_DIM * sizeof(float));
+        bool slice_ok =
+            cur_hc && hc_split && attn_norm && q && kv;
+        if (slice_ok) {
+          graph->batch_cur_hc = cur_hc;
+          graph->batch_hc_split = hc_split;
+          graph->batch_attn_norm = attn_norm;
+          graph->batch_q = q;
+          graph->batch_kv = kv;
+          slice_ok = operation();
+          graph->batch_cur_hc = saved_cur_hc;
+          graph->batch_hc_split = saved_hc_split;
+          graph->batch_attn_norm = saved_attn_norm;
+          graph->batch_q = saved_q;
+          graph->batch_kv = saved_kv;
+        }
+        ds4_gpu_tensor_free(kv);
+        ds4_gpu_tensor_free(q);
+        ds4_gpu_tensor_free(attn_norm);
+        ds4_gpu_tensor_free(hc_split);
+        ds4_gpu_tensor_free(cur_hc);
+        return slice_ok;
+      };
+
   bool ok = ds4_gpu_begin_commands() != 0;
   if (ok) {
     ok = ds4_gpu_embed_tokens_hc_tensor(
@@ -7515,23 +8391,98 @@ static bool rocm_graph_dspark_prepare_hidden_batch(
 
   for (uint32_t stage = 0; ok && stage < d->n_stages; ++stage) {
     const ds4_layer_weights* layer = &d->stage[stage].block;
-    for (size_t index = 0; ok && index < item_count; ++index) {
-      ds4_gpu_graph* graph = items[index].graph;
-      const uint64_t block_offset =
-          static_cast<uint64_t>(index) * block * hc_row_bytes;
-      ok = ds4_gpu_tensor_copy(
-               graph->batch_cur_hc, hc_row_bytes,
-               coordinator->batch_dspark_verify_cur_hc, block_offset,
-               static_cast<uint64_t>(block) * hc_row_bytes) != 0;
-      if (ok) {
-        ok = rocm_graph_encode_dspark_stage_attention(
-            graph, stage, items[index].position, rows);
+    if (combine_attn_q8) {
+      const uint64_t q_rank = layer->attn_q_a->dim[1];
+      const uint64_t q_dim =
+          (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
+      for (size_t index = 0; ok && index < item_count; ++index) {
+        ds4_gpu_graph* graph = items[index].graph;
+        const uint32_t front_row0 = front_offsets[index];
+        const uint64_t block_offset =
+            static_cast<uint64_t>(index) * block * hc_row_bytes;
+        ok = ds4_gpu_tensor_copy(
+                 coordinator->batch_cur_hc,
+                 (uint64_t)(front_row0 + 1u) * hc_row_bytes,
+                 coordinator->batch_dspark_verify_cur_hc, block_offset,
+                 static_cast<uint64_t>(block) * hc_row_bytes) != 0;
+        if (ok) {
+          ok = with_front_slice(graph, front_row0, [&]() {
+            return rocm_graph_encode_dspark_stage_attention(
+                graph, stage, items[index].position, rows, false, true,
+                false, false);
+          });
+        }
       }
       if (ok) {
+        ok = ds4_gpu_matmul_q8_0_group_pairs_tensor(
+                 coordinator->batch_qr, d->model->map, d->model->size,
+                 layer->attn_q_a->abs_offset, DS4_N_EMBD, q_rank,
+                 coordinator->batch_attn_norm, total_front_rows,
+                 front_offsets.data(),
+                 static_cast<uint32_t>(item_count)) != 0;
+      }
+      if (ok) {
+        ok = ds4_gpu_matmul_q8_0_group_pairs_tensor(
+                 coordinator->batch_kv_raw, d->model->map, d->model->size,
+                 layer->attn_kv->abs_offset, DS4_N_EMBD,
+                 DS4_N_HEAD_DIM, coordinator->batch_attn_norm,
+                 total_front_rows, front_offsets.data(),
+                 static_cast<uint32_t>(item_count)) != 0;
+      }
+      if (ok) {
+        ok = ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
+                 coordinator->batch_qr_norm, coordinator->batch_qr,
+                 d->model->map, d->model->size,
+                 layer->attn_q_a_norm->abs_offset,
+                 static_cast<uint32_t>(q_rank), coordinator->batch_kv,
+                 coordinator->batch_kv_raw,
+                 layer->attn_kv_a_norm->abs_offset, DS4_N_HEAD_DIM,
+                 total_front_rows, DS4_RMS_EPS) != 0;
+      }
+      if (ok) {
+        ok = ds4_gpu_matmul_q8_0_group_pairs_tensor(
+                 coordinator->batch_q, d->model->map, d->model->size,
+                 layer->attn_q_b->abs_offset, q_rank, q_dim,
+                 coordinator->batch_qr_norm, total_front_rows,
+                 front_offsets.data(),
+                 static_cast<uint32_t>(item_count)) != 0;
+      }
+      for (size_t index = 0; ok && index < item_count; ++index) {
+        ds4_gpu_graph* graph = items[index].graph;
+        const uint32_t front_row0 = front_offsets[index];
+        const uint64_t block_offset =
+            static_cast<uint64_t>(index) * block * hc_row_bytes;
+        ok = with_projected_slice(graph, front_row0, [&]() {
+          return rocm_graph_encode_dspark_stage_attention(
+              graph, stage, items[index].position, rows, true, false,
+              false, false);
+        });
+        if (ok) {
+          ok = ds4_gpu_tensor_copy(
+                   coordinator->batch_dspark_verify_after_attn_hc,
+                   block_offset, graph->batch_after_attn_hc, 0,
+                   static_cast<uint64_t>(block) * hc_row_bytes) != 0;
+        }
+      }
+    } else {
+      for (size_t index = 0; ok && index < item_count; ++index) {
+        ds4_gpu_graph* graph = items[index].graph;
+        const uint64_t block_offset =
+            static_cast<uint64_t>(index) * block * hc_row_bytes;
         ok = ds4_gpu_tensor_copy(
-                 coordinator->batch_dspark_verify_after_attn_hc,
-                 block_offset, graph->batch_after_attn_hc, 0,
+                 graph->batch_cur_hc, hc_row_bytes,
+                 coordinator->batch_dspark_verify_cur_hc, block_offset,
                  static_cast<uint64_t>(block) * hc_row_bytes) != 0;
+        if (ok) {
+          ok = rocm_graph_encode_dspark_stage_attention(
+              graph, stage, items[index].position, rows);
+        }
+        if (ok) {
+          ok = ds4_gpu_tensor_copy(
+                   coordinator->batch_dspark_verify_after_attn_hc,
+                   block_offset, graph->batch_after_attn_hc, 0,
+                   static_cast<uint64_t>(block) * hc_row_bytes) != 0;
+        }
       }
     }
     if (ok) {
@@ -7641,8 +8592,15 @@ static bool rocm_graph_dspark_draft_head_batch(
     return false;
   }
   const uint32_t block = coordinator->dspark->block_size;
-  const uint32_t total_rows = static_cast<uint32_t>(item_count) * block;
-  if (block == 0u || total_rows > coordinator->prefill_cap ||
+  uint32_t requested_block = 0u;
+  for (size_t index = 0; index < item_count; ++index) {
+    requested_block = std::max(
+        requested_block,
+        std::min(block, items[index].max_draft_tokens));
+  }
+  const uint32_t total_rows =
+      static_cast<uint32_t>(item_count) * requested_block;
+  if (requested_block == 0u || total_rows > coordinator->prefill_cap ||
       total_rows > coordinator->batch_dspark_verify_rows_cap ||
       total_rows > DS4_SPEC_MAX_ROWS ||
       !rocm_graph_spec_prepare(coordinator, engine->weights, total_rows)) {
@@ -7669,7 +8627,7 @@ static bool rocm_graph_dspark_draft_head_batch(
        strcmp(support_body_batch, "off") != 0);
   if (use_support_body_batch) {
     ok = rocm_graph_dspark_prepare_hidden_batch(
-        engine, items, item_count,
+        engine, items, item_count, requested_block,
         coordinator->batch_dspark_verify_after_attn_hc);
   } else {
     for (size_t index = 0; ok && index < item_count; ++index) {
@@ -7677,7 +8635,7 @@ static bool rocm_graph_dspark_draft_head_batch(
       ok = rocm_graph_dspark_prepare_hidden(
           item.graph, engine->model, engine->weights, item.last_token,
           item.position, coordinator->batch_dspark_verify_after_attn_hc,
-          static_cast<uint32_t>(index) * block);
+          static_cast<uint32_t>(index) * requested_block, requested_block);
     }
   }
 
@@ -7698,16 +8656,32 @@ static bool rocm_graph_dspark_draft_head_batch(
     return false;
   }
 
-  for (size_t index = 0; ok && index < item_count; ++index) {
-    const ds4_rocm_dspark_draft_item& item = items[index];
-    uint32_t selected_rows = 0u;
-    ok = rocm_graph_dspark_select_block(
-        item.graph, coordinator->batch_dspark_verify_after_attn_hc,
-        coordinator->spec_logits, static_cast<uint32_t>(index) * block,
-        item.last_token, 0u, block, item.tokens, schedule_confidence,
-        &selected_rows);
-    if (ok)
-      *item.n_tokens = selected_rows;
+  const char* markov_batch_setting =
+      getenv("GUFO_DEEPSEEK_DSPARK_MARKOV_BATCH");
+  const bool use_markov_batch =
+      (markov_batch_setting == nullptr ||
+       (strcmp(markov_batch_setting, "0") != 0 &&
+        strcmp(markov_batch_setting, "false") != 0 &&
+        strcmp(markov_batch_setting, "off") != 0));
+  if (ok && use_markov_batch) {
+    ok = rocm_graph_dspark_select_block_batch(
+        coordinator, items, item_count,
+        coordinator->batch_dspark_verify_after_attn_hc,
+        coordinator->spec_logits, requested_block, schedule_confidence);
+  } else {
+    for (size_t index = 0; ok && index < item_count; ++index) {
+      const ds4_rocm_dspark_draft_item& item = items[index];
+      uint32_t selected_rows = 0u;
+      ok = rocm_graph_dspark_select_block(
+          item.graph, coordinator->batch_dspark_verify_after_attn_hc,
+          coordinator->spec_logits,
+          static_cast<uint32_t>(index) * requested_block, item.last_token, 0u,
+          std::min(requested_block, item.max_draft_tokens), item.tokens,
+          schedule_confidence,
+          &selected_rows);
+      if (ok)
+        *item.n_tokens = selected_rows;
+    }
   }
   ds4_gpu_set_small_batch_mode(0);
   return ok;

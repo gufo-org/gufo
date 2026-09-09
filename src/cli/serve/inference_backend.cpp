@@ -1293,9 +1293,13 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
 class DeepSeekTextRunner final : public TextModelRunner {
 public:
   DeepSeekTextRunner(std::shared_ptr<models::deepseek_v4_flash::Model> model,
-                     std::uint32_t max_context,
+                     std::uint32_t max_context, std::uint32_t max_draft_tokens,
+                     TextDraftPolicy draft_policy,
                      std::string artifact_fingerprint = {})
-      : model_(std::move(model)), max_context_(max_context) {
+      : model_(std::move(model)),
+        max_context_(max_context),
+        max_draft_tokens_(std::max(max_draft_tokens, 1u)),
+        draft_policy_(draft_policy) {
     if (!artifact_fingerprint.empty()) {
       persistence_ = TextRunnerPersistenceDescriptor{
           .compatibility_identity =
@@ -1588,6 +1592,7 @@ public:
     std::array<models::deepseek_v4_flash::Session::DsparkStats, 8>
         stats_before{};
     std::array<std::vector<int>, 8> emitted{};
+    const bool schedule_confidence = draft_policy_ != TextDraftPolicy::kFixed;
     for (std::size_t index = 0; index < decodes.size(); ++index) {
       auto& deepseek = RequireDeepSeekState(decodes[index].state.get());
       states[index] = &deepseek;
@@ -1595,6 +1600,8 @@ public:
       items[index] = {
           .session = &deepseek.session(),
           .max_tokens = decodes[index].max_tokens,
+          .max_draft_tokens = max_draft_tokens_,
+          .schedule_confidence = schedule_confidence,
           .emitted = &emitted[index],
       };
     }
@@ -1773,6 +1780,8 @@ public:
 private:
   std::shared_ptr<models::deepseek_v4_flash::Model> model_;
   std::uint32_t max_context_;
+  std::uint32_t max_draft_tokens_;
+  TextDraftPolicy draft_policy_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
 };
 
@@ -1940,7 +1949,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       }
     }
     return load(std::move(model), error, max_context, session_count,
-                prefill_policy, scheduler_policy,
+                prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config));
   }
   auto model = hip::QwenGpuModel::CreateFromGguf(reader, &load_error);
@@ -2120,6 +2129,7 @@ bool InferenceBackend::load(
     std::shared_ptr<models::deepseek_v4_flash::Model> model, std::string* error,
     std::uint32_t max_context, std::size_t session_count,
     TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
     TextDiskCacheConfig disk_cache_config) {
   if (model == nullptr) {
     SetError(error, "DeepSeek model must not be null");
@@ -2133,6 +2143,13 @@ bool InferenceBackend::load(
     SetError(error, "HTTP context exceeds the loaded DeepSeek model context");
     return false;
   }
+  if (model->HasDspark() && (speculative_config.max_draft_tokens == 0 ||
+                             speculative_config.min_draft_tokens == 0 ||
+                             speculative_config.min_draft_tokens >
+                                 speculative_config.max_draft_tokens)) {
+    SetError(error, "DeepSeek DSpark draft limits are invalid");
+    return false;
+  }
   if (DiskCacheEnabled(disk_cache_config) &&
       (!IsSha256Hex(disk_cache_config.model_artifact_fingerprint) ||
        disk_cache_config.capacity_bytes == 0 ||
@@ -2144,7 +2161,8 @@ bool InferenceBackend::load(
   try {
     auto new_state = std::make_shared<Impl::State>();
     auto runner = std::make_shared<DeepSeekTextRunner>(
-        std::move(model), max_context,
+        std::move(model), max_context, speculative_config.max_draft_tokens,
+        speculative_config.draft_policy,
         disk_cache_config.model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;

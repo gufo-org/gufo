@@ -296,6 +296,291 @@ __global__ static void matmul_q8_0_preq_batch_reuse_w32_kernel(
     }
 }
 
+/*
+ * Two independent verification blocks share one Q8 weight stream while each
+ * block keeps the exact accumulation order of the original narrow-batch
+ * kernel. DSpark pairs C2/C4/C6/C8 requests, so this halves the dominant
+ * projection traffic without flattening request boundaries.
+ */
+template <uint32_t NT>
+__global__ static void matmul_q8_0_preq_group_pair_w32_kernel(
+        float *out,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks,
+        uint32_t row0,
+        uint32_t row1,
+        uint32_t rows_per_block) {
+    const uint64_t row =
+        (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    const uint32_t lane = threadIdx.x & 31u;
+    if (row >= out_dim) return;
+    const unsigned char *wr = w + row * blocks * 34u;
+
+    float acc0[NT];
+    float acc1[NT];
+#pragma unroll
+    for (uint32_t t = 0; t < NT; ++t) {
+        acc0[t] = 0.0f;
+        acc1[t] = 0.0f;
+    }
+
+    for (uint64_t b = lane; b < blocks; b += 32u) {
+        const float wscale =
+            __half2float(*(const __half *)(wr + b * 34u));
+        const int8_t *qs = (const int8_t *)(wr + b * 34u + 2u);
+        const int32_t q0 = load_i8x4_i32_unaligned(qs + 0u);
+        const int32_t q1 = load_i8x4_i32_unaligned(qs + 4u);
+        const int32_t q2 = load_i8x4_i32_unaligned(qs + 8u);
+        const int32_t q3 = load_i8x4_i32_unaligned(qs + 12u);
+        const int32_t q4 = load_i8x4_i32_unaligned(qs + 16u);
+        const int32_t q5 = load_i8x4_i32_unaligned(qs + 20u);
+        const int32_t q6 = load_i8x4_i32_unaligned(qs + 24u);
+        const int32_t q7 = load_i8x4_i32_unaligned(qs + 28u);
+#pragma unroll
+        for (uint32_t t = 0; t < NT; ++t) {
+            const uint64_t token0 = (uint64_t)row0 + t;
+            const uint64_t token1 = (uint64_t)row1 + t;
+            const int dot0 = dot_i8x32_dp4a_loaded(
+                q0, q1, q2, q3, q4, q5, q6, q7,
+                xq + token0 * blocks * 32u + b * 32u);
+            const int dot1 = dot_i8x32_dp4a_loaded(
+                q0, q1, q2, q3, q4, q5, q6, q7,
+                xq + token1 * blocks * 32u + b * 32u);
+            const float scaled0 =
+                wscale * xscale[token0 * blocks + b];
+            const float scaled1 =
+                wscale * xscale[token1 * blocks + b];
+            acc0[t] = fmaf(scaled0, (float)dot0, acc0[t]);
+            acc1[t] = fmaf(scaled1, (float)dot1, acc1[t]);
+        }
+    }
+
+#pragma unroll
+    for (uint32_t t = 0; t < NT; ++t) {
+        const float sum0 = warp_sum_f32(acc0[t]);
+        const float sum1 = warp_sum_f32(acc1[t]);
+        if (lane == 0u) {
+            out[((uint64_t)row0 + t) * out_dim + row] = sum0;
+            out[((uint64_t)row1 + t) * out_dim + row] = sum1;
+        }
+    }
+}
+
+/*
+ * Ragged request pairs retain the qualified per-row accumulation order while
+ * sharing each Q8 weight block across two independently sized draft prefixes.
+ */
+template <uint32_t NT0, uint32_t NT1>
+__global__ static void matmul_q8_0_preq_ragged_group_pair_w32_kernel(
+        float *out,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks,
+        uint32_t row0,
+        uint32_t row1,
+        uint32_t rows_per_block) {
+    static_assert(NT0 >= 1u && NT0 <= 6u);
+    static_assert(NT1 >= 1u && NT1 <= 6u);
+    const uint64_t row =
+        (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    const uint32_t lane = threadIdx.x & 31u;
+    if (row >= out_dim) return;
+    const unsigned char *wr = w + row * blocks * 34u;
+
+    float acc0[NT0] = {};
+    float acc1[NT1] = {};
+    for (uint64_t b = lane; b < blocks; b += 32u) {
+        const float wscale =
+            __half2float(*(const __half *)(wr + b * 34u));
+        const int8_t *qs = (const int8_t *)(wr + b * 34u + 2u);
+        const int32_t q0 = load_i8x4_i32_unaligned(qs + 0u);
+        const int32_t q1 = load_i8x4_i32_unaligned(qs + 4u);
+        const int32_t q2 = load_i8x4_i32_unaligned(qs + 8u);
+        const int32_t q3 = load_i8x4_i32_unaligned(qs + 12u);
+        const int32_t q4 = load_i8x4_i32_unaligned(qs + 16u);
+        const int32_t q5 = load_i8x4_i32_unaligned(qs + 20u);
+        const int32_t q6 = load_i8x4_i32_unaligned(qs + 24u);
+        const int32_t q7 = load_i8x4_i32_unaligned(qs + 28u);
+#pragma unroll
+        for (uint32_t t = 0u; t < NT0; ++t) {
+            const uint64_t token = (uint64_t)row0 + t;
+            const int dot = dot_i8x32_dp4a_loaded(
+                q0, q1, q2, q3, q4, q5, q6, q7,
+                xq + token * blocks * 32u + b * 32u);
+            acc0[t] = fmaf(
+                wscale * xscale[token * blocks + b],
+                (float)dot, acc0[t]);
+        }
+#pragma unroll
+        for (uint32_t t = 0u; t < NT1; ++t) {
+            const uint64_t token = (uint64_t)row1 + t;
+            const int dot = dot_i8x32_dp4a_loaded(
+                q0, q1, q2, q3, q4, q5, q6, q7,
+                xq + token * blocks * 32u + b * 32u);
+            acc1[t] = fmaf(
+                wscale * xscale[token * blocks + b],
+                (float)dot, acc1[t]);
+        }
+    }
+
+#pragma unroll
+    for (uint32_t t = 0u; t < NT0; ++t) {
+        const float sum = warp_sum_f32(acc0[t]);
+        if (lane == 0u) {
+            out[((uint64_t)row0 + t) * out_dim + row] = sum;
+        }
+    }
+#pragma unroll
+    for (uint32_t t = 0u; t < NT1; ++t) {
+        const float sum = warp_sum_f32(acc1[t]);
+        if (lane == 0u) {
+            out[((uint64_t)row1 + t) * out_dim + row] = sum;
+        }
+    }
+}
+
+/*
+ * Equal-width request pairs use the same arithmetic as the single-pair kernel
+ * above, but place the pair index in grid.y. This keeps every request's
+ * accumulator independent while replacing C/2 launches per projection with
+ * one launch for C2/C4/C6/C8.
+ */
+template <uint32_t NT>
+__global__ static void matmul_q8_0_preq_equal_group_pairs_w32_kernel(
+        float *out,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks,
+        uint32_t rows_per_block) {
+    const uint64_t row =
+        (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    const uint32_t lane = threadIdx.x & 31u;
+    if (row >= out_dim) return;
+
+    const uint32_t row0 = (uint32_t)blockIdx.y * (2u * NT);
+    const uint32_t row1 = row0 + NT;
+    const unsigned char *wr = w + row * blocks * 34u;
+
+    float acc0[NT];
+    float acc1[NT];
+#pragma unroll
+    for (uint32_t t = 0; t < NT; ++t) {
+        acc0[t] = 0.0f;
+        acc1[t] = 0.0f;
+    }
+
+    for (uint64_t b = lane; b < blocks; b += 32u) {
+        const float wscale =
+            __half2float(*(const __half *)(wr + b * 34u));
+        const int8_t *qs = (const int8_t *)(wr + b * 34u + 2u);
+        const int32_t q0 = load_i8x4_i32_unaligned(qs + 0u);
+        const int32_t q1 = load_i8x4_i32_unaligned(qs + 4u);
+        const int32_t q2 = load_i8x4_i32_unaligned(qs + 8u);
+        const int32_t q3 = load_i8x4_i32_unaligned(qs + 12u);
+        const int32_t q4 = load_i8x4_i32_unaligned(qs + 16u);
+        const int32_t q5 = load_i8x4_i32_unaligned(qs + 20u);
+        const int32_t q6 = load_i8x4_i32_unaligned(qs + 24u);
+        const int32_t q7 = load_i8x4_i32_unaligned(qs + 28u);
+#pragma unroll
+        for (uint32_t t = 0; t < NT; ++t) {
+            const uint64_t token0 = (uint64_t)row0 + t;
+            const uint64_t token1 = (uint64_t)row1 + t;
+            const int dot0 = dot_i8x32_dp4a_loaded(
+                q0, q1, q2, q3, q4, q5, q6, q7,
+                xq + token0 * blocks * 32u + b * 32u);
+            const int dot1 = dot_i8x32_dp4a_loaded(
+                q0, q1, q2, q3, q4, q5, q6, q7,
+                xq + token1 * blocks * 32u + b * 32u);
+            const float scaled0 =
+                wscale * xscale[token0 * blocks + b];
+            const float scaled1 =
+                wscale * xscale[token1 * blocks + b];
+            acc0[t] = fmaf(scaled0, (float)dot0, acc0[t]);
+            acc1[t] = fmaf(scaled1, (float)dot1, acc1[t]);
+        }
+    }
+
+#pragma unroll
+    for (uint32_t t = 0; t < NT; ++t) {
+        const float sum0 = warp_sum_f32(acc0[t]);
+        const float sum1 = warp_sum_f32(acc1[t]);
+        if (lane == 0u) {
+            out[((uint64_t)row0 + t) * out_dim + row] = sum0;
+            out[((uint64_t)row1 + t) * out_dim + row] = sum1;
+        }
+    }
+}
+
+/*
+ * A DSpark multi-request decode is one logical row batch. Request boundaries
+ * only select KV-cache slices; dense projections do not depend on them. Keep
+ * one accumulator per flattened row so every Q8 weight block is loaded once
+ * for the whole C2/C4/C6/C8 batch while preserving the single-row fmaf order.
+ */
+template <uint32_t NT>
+__global__ static void matmul_q8_0_preq_all_rows_exact_w32_kernel(
+        float *out,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks,
+        uint32_t rows_per_block) {
+    const uint64_t row =
+        (uint64_t)blockIdx.x * rows_per_block + (threadIdx.x >> 5u);
+    const uint32_t lane = threadIdx.x & 31u;
+    if (row >= out_dim) return;
+
+    const unsigned char *wr = w + row * blocks * 34u;
+    float acc[NT];
+#pragma unroll
+    for (uint32_t token = 0; token < NT; ++token) {
+        acc[token] = 0.0f;
+    }
+
+    for (uint64_t b = lane; b < blocks; b += 32u) {
+        const float wscale =
+            __half2float(*(const __half *)(wr + b * 34u));
+        const int8_t *qs = (const int8_t *)(wr + b * 34u + 2u);
+        const int32_t q0 = load_i8x4_i32_unaligned(qs + 0u);
+        const int32_t q1 = load_i8x4_i32_unaligned(qs + 4u);
+        const int32_t q2 = load_i8x4_i32_unaligned(qs + 8u);
+        const int32_t q3 = load_i8x4_i32_unaligned(qs + 12u);
+        const int32_t q4 = load_i8x4_i32_unaligned(qs + 16u);
+        const int32_t q5 = load_i8x4_i32_unaligned(qs + 20u);
+        const int32_t q6 = load_i8x4_i32_unaligned(qs + 24u);
+        const int32_t q7 = load_i8x4_i32_unaligned(qs + 28u);
+#pragma unroll
+        for (uint32_t token = 0; token < NT; ++token) {
+            const int dot = dot_i8x32_dp4a_loaded(
+                q0, q1, q2, q3, q4, q5, q6, q7,
+                xq + ((uint64_t)token * blocks + b) * 32u);
+            const float scaled =
+                wscale * xscale[(uint64_t)token * blocks + b];
+            acc[token] = fmaf(scaled, (float)dot, acc[token]);
+        }
+    }
+
+#pragma unroll
+    for (uint32_t token = 0; token < NT; ++token) {
+        const float sum = warp_sum_f32(acc[token]);
+        if (lane == 0u) {
+            out[(uint64_t)token * out_dim + row] = sum;
+        }
+    }
+}
+
 __global__ static void matmul_q8_0_pair_preq_warp8_kernel(
         float *out0,
         float *out1,

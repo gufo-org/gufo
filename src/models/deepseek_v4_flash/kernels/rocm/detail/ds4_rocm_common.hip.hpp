@@ -222,6 +222,159 @@ __global__ static void matmul_f16_ordered_batch_reuse_kernel(
     }
 }
 
+/*
+ * Reuse one F16 weight row across corresponding rows from two requests while
+ * retaining the scalar accumulation sequence of
+ * matmul_f16_ordered_chunks_kernel. Keeping only two accumulators live avoids
+ * the register pressure of treating every row in the request pair as one
+ * compile-time batch.
+ */
+__global__ static void matmul_f16_ordered_equal_group_pairs_exact_kernel(
+        float *out,
+        const __half *w,
+        const float *x,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint32_t rows_per_group) {
+    const uint64_t row = (uint64_t)blockIdx.x;
+    if (row >= out_dim) return;
+
+    const uint32_t pair_row = blockIdx.y;
+    const uint32_t pair = pair_row / rows_per_group;
+    const uint32_t token = pair_row - pair * rows_per_group;
+    const uint32_t row0 = 2u * pair * rows_per_group + token;
+    const uint32_t row1 = row0 + rows_per_group;
+
+    __shared__ float partial0[32];
+    __shared__ float partial1[32];
+    const uint32_t tid = threadIdx.x;
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    const uint64_t chunk = (in_dim + 31u) / 32u;
+    const uint64_t k0 = (uint64_t)tid * chunk;
+    uint64_t k1 = k0 + chunk;
+    if (k1 > in_dim) k1 = in_dim;
+    const __half *wr = w + row * in_dim;
+    const float *x0 = x + (uint64_t)row0 * in_dim;
+    const float *x1 = x + (uint64_t)row1 * in_dim;
+    for (uint64_t i = k0; i < k1; ++i) {
+        const float weight = __half2float(wr[i]);
+        sum0 += weight * x0[i];
+        sum1 += weight * x1[i];
+    }
+    partial0[tid] = sum0;
+    partial1[tid] = sum1;
+    __syncthreads();
+    if (tid == 0u) {
+        float total0 = 0.0f;
+        float total1 = 0.0f;
+        for (uint32_t lane = 0; lane < 32u; ++lane) {
+            total0 += partial0[lane];
+            total1 += partial1[lane];
+        }
+        out[(uint64_t)row0 * out_dim + row] = total0;
+        out[(uint64_t)row1 * out_dim + row] = total1;
+    }
+}
+
+__global__ static void matmul_f16_ordered_group_pair_exact_kernel(
+        float *out,
+        const __half *w,
+        const float *x,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint32_t row0,
+        uint32_t row1) {
+    const uint64_t row = (uint64_t)blockIdx.x;
+    if (row >= out_dim) return;
+
+    const uint32_t token = blockIdx.y;
+    __shared__ float partial0[32];
+    __shared__ float partial1[32];
+    const uint32_t tid = threadIdx.x;
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    const uint64_t chunk = (in_dim + 31u) / 32u;
+    const uint64_t k0 = (uint64_t)tid * chunk;
+    uint64_t k1 = k0 + chunk;
+    if (k1 > in_dim) k1 = in_dim;
+    const __half *wr = w + row * in_dim;
+    const float *x0 = x + (uint64_t)(row0 + token) * in_dim;
+    const float *x1 = x + (uint64_t)(row1 + token) * in_dim;
+    for (uint64_t i = k0; i < k1; ++i) {
+        const float weight = __half2float(wr[i]);
+        sum0 += weight * x0[i];
+        sum1 += weight * x1[i];
+    }
+    partial0[tid] = sum0;
+    partial1[tid] = sum1;
+    __syncthreads();
+    if (tid == 0u) {
+        float total0 = 0.0f;
+        float total1 = 0.0f;
+        for (uint32_t lane = 0; lane < 32u; ++lane) {
+            total0 += partial0[lane];
+            total1 += partial1[lane];
+        }
+        out[(uint64_t)(row0 + token) * out_dim + row] = total0;
+        out[(uint64_t)(row1 + token) * out_dim + row] = total1;
+    }
+}
+
+__global__ static void matmul_f16_ordered_ragged_group_pair_exact_kernel(
+        float *out,
+        const __half *w,
+        const float *x,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint32_t row0,
+        uint32_t row1,
+        uint32_t rows0,
+        uint32_t rows1) {
+    const uint64_t row = (uint64_t)blockIdx.x;
+    if (row >= out_dim) return;
+
+    const uint32_t token = blockIdx.y;
+    const bool active0 = token < rows0;
+    const bool active1 = token < rows1;
+    __shared__ float partial0[32];
+    __shared__ float partial1[32];
+    const uint32_t tid = threadIdx.x;
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    const uint64_t chunk = (in_dim + 31u) / 32u;
+    const uint64_t k0 = (uint64_t)tid * chunk;
+    uint64_t k1 = k0 + chunk;
+    if (k1 > in_dim) k1 = in_dim;
+    const __half *wr = w + row * in_dim;
+    const float *x0 =
+        x + ((uint64_t)row0 + (active0 ? token : 0u)) * in_dim;
+    const float *x1 =
+        x + ((uint64_t)row1 + (active1 ? token : 0u)) * in_dim;
+    for (uint64_t i = k0; i < k1; ++i) {
+        const float weight = __half2float(wr[i]);
+        if (active0) sum0 += weight * x0[i];
+        if (active1) sum1 += weight * x1[i];
+    }
+    partial0[tid] = sum0;
+    partial1[tid] = sum1;
+    __syncthreads();
+    if (tid == 0u) {
+        float total0 = 0.0f;
+        float total1 = 0.0f;
+        for (uint32_t lane = 0u; lane < 32u; ++lane) {
+            total0 += partial0[lane];
+            total1 += partial1[lane];
+        }
+        if (active0) {
+            out[((uint64_t)row0 + token) * out_dim + row] = total0;
+        }
+        if (active1) {
+            out[((uint64_t)row1 + token) * out_dim + row] = total1;
+        }
+    }
+}
+
 template <uint32_t BATCH>
 __global__ static void matmul_f16_pair_batch_reuse_warp_rows_w32_kernel(
         float *out0,
@@ -348,6 +501,161 @@ __global__ static void matmul_f16_f32_sharedx_warp_rows_w32_kernel(
     }
     acc = warp_sum_f32(acc);
     if (lane == 0u) out[row] = acc;
+}
+
+__global__ static void
+matmul_f16_f32_equal_group_pairs_sharedx_warp_rows_w32_kernel(
+        float *out,
+        const __half *w,
+        const float *x,
+        uint32_t in_dim,
+        uint64_t out_dim,
+        uint32_t rows_per_group) {
+    extern __shared__ float shx[];
+    float *shx0 = shx;
+    float *shx1 = shx + in_dim;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t wave = tid >> 5u;
+    const uint32_t rows_per_block = blockDim.x >> 5u;
+    const uint32_t pair_row = blockIdx.y;
+    const uint32_t pair = pair_row / rows_per_group;
+    const uint32_t token = pair_row - pair * rows_per_group;
+    const uint32_t row0 = 2u * pair * rows_per_group + token;
+    const uint32_t row1 = row0 + rows_per_group;
+    const float *x0 = x + (uint64_t)row0 * in_dim;
+    const float *x1 = x + (uint64_t)row1 * in_dim;
+    for (uint32_t i = tid; i < in_dim; i += blockDim.x) {
+        shx0[i] = x0[i];
+        shx1[i] = x1[i];
+    }
+    __syncthreads();
+
+    const uint64_t row =
+        (uint64_t)blockIdx.x * rows_per_block + wave;
+    if (row >= out_dim) return;
+    const __half *wr = w + row * (uint64_t)in_dim;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    uint32_t i = lane;
+    for (; i + 224u < in_dim; i += 256u) {
+        float weight = __half2float(wr[i]);
+        acc0 = fmaf(weight, shx0[i], acc0);
+        acc1 = fmaf(weight, shx1[i], acc1);
+        weight = __half2float(wr[i + 32u]);
+        acc0 = fmaf(weight, shx0[i + 32u], acc0);
+        acc1 = fmaf(weight, shx1[i + 32u], acc1);
+        weight = __half2float(wr[i + 64u]);
+        acc0 = fmaf(weight, shx0[i + 64u], acc0);
+        acc1 = fmaf(weight, shx1[i + 64u], acc1);
+        weight = __half2float(wr[i + 96u]);
+        acc0 = fmaf(weight, shx0[i + 96u], acc0);
+        acc1 = fmaf(weight, shx1[i + 96u], acc1);
+        weight = __half2float(wr[i + 128u]);
+        acc0 = fmaf(weight, shx0[i + 128u], acc0);
+        acc1 = fmaf(weight, shx1[i + 128u], acc1);
+        weight = __half2float(wr[i + 160u]);
+        acc0 = fmaf(weight, shx0[i + 160u], acc0);
+        acc1 = fmaf(weight, shx1[i + 160u], acc1);
+        weight = __half2float(wr[i + 192u]);
+        acc0 = fmaf(weight, shx0[i + 192u], acc0);
+        acc1 = fmaf(weight, shx1[i + 192u], acc1);
+        weight = __half2float(wr[i + 224u]);
+        acc0 = fmaf(weight, shx0[i + 224u], acc0);
+        acc1 = fmaf(weight, shx1[i + 224u], acc1);
+    }
+    for (; i < in_dim; i += 32u) {
+        const float weight = __half2float(wr[i]);
+        acc0 = fmaf(weight, shx0[i], acc0);
+        acc1 = fmaf(weight, shx1[i], acc1);
+    }
+    acc0 = warp_sum_f32(acc0);
+    acc1 = warp_sum_f32(acc1);
+    if (lane == 0u) {
+        out[(uint64_t)row0 * out_dim + row] = acc0;
+        out[(uint64_t)row1 * out_dim + row] = acc1;
+    }
+}
+
+__global__ static void
+matmul_f16_f32_ragged_group_pair_sharedx_warp_rows_w32_kernel(
+        float *out,
+        const __half *w,
+        const float *x,
+        uint32_t in_dim,
+        uint64_t out_dim,
+        uint32_t row0,
+        uint32_t row1,
+        uint32_t rows0,
+        uint32_t rows1) {
+    extern __shared__ float shx[];
+    float *shx0 = shx;
+    float *shx1 = shx + in_dim;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t wave = tid >> 5u;
+    const uint32_t rows_per_block = blockDim.x >> 5u;
+    const uint32_t token = blockIdx.y;
+    const bool active0 = token < rows0;
+    const bool active1 = token < rows1;
+    const float *x0 =
+        x + ((uint64_t)row0 + (active0 ? token : 0u)) * in_dim;
+    const float *x1 =
+        x + ((uint64_t)row1 + (active1 ? token : 0u)) * in_dim;
+    for (uint32_t i = tid; i < in_dim; i += blockDim.x) {
+        if (active0) shx0[i] = x0[i];
+        if (active1) shx1[i] = x1[i];
+    }
+    __syncthreads();
+
+    const uint64_t row =
+        (uint64_t)blockIdx.x * rows_per_block + wave;
+    if (row >= out_dim) return;
+    const __half *wr = w + row * (uint64_t)in_dim;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    uint32_t i = lane;
+    for (; i + 224u < in_dim; i += 256u) {
+        float weight = __half2float(wr[i]);
+        if (active0) acc0 = fmaf(weight, shx0[i], acc0);
+        if (active1) acc1 = fmaf(weight, shx1[i], acc1);
+        weight = __half2float(wr[i + 32u]);
+        if (active0) acc0 = fmaf(weight, shx0[i + 32u], acc0);
+        if (active1) acc1 = fmaf(weight, shx1[i + 32u], acc1);
+        weight = __half2float(wr[i + 64u]);
+        if (active0) acc0 = fmaf(weight, shx0[i + 64u], acc0);
+        if (active1) acc1 = fmaf(weight, shx1[i + 64u], acc1);
+        weight = __half2float(wr[i + 96u]);
+        if (active0) acc0 = fmaf(weight, shx0[i + 96u], acc0);
+        if (active1) acc1 = fmaf(weight, shx1[i + 96u], acc1);
+        weight = __half2float(wr[i + 128u]);
+        if (active0) acc0 = fmaf(weight, shx0[i + 128u], acc0);
+        if (active1) acc1 = fmaf(weight, shx1[i + 128u], acc1);
+        weight = __half2float(wr[i + 160u]);
+        if (active0) acc0 = fmaf(weight, shx0[i + 160u], acc0);
+        if (active1) acc1 = fmaf(weight, shx1[i + 160u], acc1);
+        weight = __half2float(wr[i + 192u]);
+        if (active0) acc0 = fmaf(weight, shx0[i + 192u], acc0);
+        if (active1) acc1 = fmaf(weight, shx1[i + 192u], acc1);
+        weight = __half2float(wr[i + 224u]);
+        if (active0) acc0 = fmaf(weight, shx0[i + 224u], acc0);
+        if (active1) acc1 = fmaf(weight, shx1[i + 224u], acc1);
+    }
+    for (; i < in_dim; i += 32u) {
+        const float weight = __half2float(wr[i]);
+        if (active0) acc0 = fmaf(weight, shx0[i], acc0);
+        if (active1) acc1 = fmaf(weight, shx1[i], acc1);
+    }
+    acc0 = warp_sum_f32(acc0);
+    acc1 = warp_sum_f32(acc1);
+    if (lane == 0u) {
+        if (active0) {
+            out[((uint64_t)row0 + token) * out_dim + row] = acc0;
+        }
+        if (active1) {
+            out[((uint64_t)row1 + token) * out_dim + row] = acc1;
+        }
+    }
 }
 
 __global__ static void matmul_f16_pair_f32_sharedx_warp_rows_w32_kernel(

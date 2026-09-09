@@ -150,9 +150,9 @@ bool Model::DsparkStepBatch(std::span<const SessionDsparkBatchItem> items,
                   "DeepSeek DSpark batch contains an incompatible session");
       return false;
     }
-    if (item.max_tokens == 0) {
+    if (item.max_tokens == 0 || item.max_draft_tokens == 0) {
       AssignError(error_msg,
-                  "DeepSeek DSpark batch needs a positive token budget");
+                  "DeepSeek DSpark batch needs positive token budgets");
       return false;
     }
     native_items[index] = {
@@ -160,6 +160,8 @@ bool Model::DsparkStepBatch(std::span<const SessionDsparkBatchItem> items,
         .emitted = blocks[index].data(),
         .emitted_cap =
             static_cast<int>(std::min(item.max_tokens, blocks[index].size())),
+        .max_draft_tokens = item.max_draft_tokens,
+        .schedule_confidence = item.schedule_confidence,
         .n_emitted = &produced[index],
     };
   }

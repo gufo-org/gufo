@@ -40,6 +40,8 @@ struct ds4_session_dspark_batch_item {
   ds4_session* session;
   int* emitted;
   int emitted_cap;
+  uint32_t max_draft_tokens;
+  bool schedule_confidence;
   int* n_emitted;
 };
 

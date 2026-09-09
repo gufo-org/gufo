@@ -93,6 +93,7 @@ public:
             std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {});
 #endif
 

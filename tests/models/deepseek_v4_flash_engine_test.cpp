@@ -575,41 +575,39 @@ void CheckDsparkSessionBatch(
     }
   }
 
-  auto run_batch =
-      [&](auto& sessions, const char* support_body_setting,
-          double* seconds) {
-        Expect(setenv("GUFO_DEEPSEEK_DSPARK_SUPPORT_BODY_BATCH",
-                      support_body_setting, 1) == 0,
-               "set DSpark support body route");
-        std::array<std::vector<int>, 2> tokens;
-        while (tokens[0].size() < kComparedTokens ||
-               tokens[1].size() < kComparedTokens) {
-          std::array<std::vector<int>, 2> emitted;
-          const std::array<SessionDsparkBatchItem, 2> items{{
-              {
-                  .session = sessions[0].get(),
-                  .max_tokens = 32,
-                  .emitted = &emitted[0],
-              },
-              {
-                  .session = sessions[1].get(),
-                  .max_tokens = 32,
-                  .emitted = &emitted[1],
-              },
-          }};
-          const auto start = std::chrono::steady_clock::now();
-          Expect(model->DsparkStepBatch(items, &error), error.c_str());
-          *seconds +=
-              std::chrono::duration<double>(
-                  std::chrono::steady_clock::now() - start)
-                  .count();
-          for (std::size_t index = 0; index < tokens.size(); ++index) {
-            tokens[index].insert(tokens[index].end(), emitted[index].begin(),
-                                 emitted[index].end());
-          }
-        }
-        return tokens;
-      };
+  auto run_batch = [&](auto& sessions, const char* support_body_setting,
+                       double* seconds) {
+    Expect(setenv("GUFO_DEEPSEEK_DSPARK_SUPPORT_BODY_BATCH",
+                  support_body_setting, 1) == 0,
+           "set DSpark support body route");
+    std::array<std::vector<int>, 2> tokens;
+    while (tokens[0].size() < kComparedTokens ||
+           tokens[1].size() < kComparedTokens) {
+      std::array<std::vector<int>, 2> emitted;
+      const std::array<SessionDsparkBatchItem, 2> items{{
+          {
+              .session = sessions[0].get(),
+              .max_tokens = 32,
+              .emitted = &emitted[0],
+          },
+          {
+              .session = sessions[1].get(),
+              .max_tokens = 32,
+              .emitted = &emitted[1],
+          },
+      }};
+      const auto start = std::chrono::steady_clock::now();
+      Expect(model->DsparkStepBatch(items, &error), error.c_str());
+      *seconds += std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() - start)
+                      .count();
+      for (std::size_t index = 0; index < tokens.size(); ++index) {
+        tokens[index].insert(tokens[index].end(), emitted[index].begin(),
+                             emitted[index].end());
+      }
+    }
+    return tokens;
+  };
 
   double reference_batch_seconds = 0.0;
   const auto reference_batch_tokens =
@@ -647,10 +645,9 @@ void CheckDsparkSessionBatch(
       const std::size_t token_index = static_cast<std::size_t>(
           reference_mismatch.first - reference_batch_tokens[index].begin());
       std::cerr << "DSpark support body batch mismatch session=" << index
-                << " token=" << token_index << " reference="
-                << *reference_mismatch.first
-                << " batch=" << *reference_mismatch.second
-                << "\nreference:";
+                << " token=" << token_index
+                << " reference=" << *reference_mismatch.first
+                << " batch=" << *reference_mismatch.second << "\nreference:";
       for (const int token : reference_batch_tokens[index]) {
         std::cerr << ' ' << token;
       }
@@ -665,8 +662,7 @@ void CheckDsparkSessionBatch(
       std::cerr << '\n';
     }
     const auto serial_stats = sequential[index]->DsparkStatistics();
-    const auto reference_stats =
-        reference_batched[index]->DsparkStatistics();
+    const auto reference_stats = reference_batched[index]->DsparkStatistics();
     const auto batch_stats = batched[index]->DsparkStatistics();
     serial_emitted += serial_tokens[index].size();
     batch_emitted += batch_tokens[index].size();

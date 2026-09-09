@@ -12,10 +12,10 @@
  * DSpark is DeepSeek's own speculative drafter for this checkpoint. It is a
  * separate GGUF holding a short stack of full DS4 blocks (MLA attention, routed
  * MoE, hyper-connections) plus a low-rank Markov path selector. The support
- * artifact also carries a confidence head for format compatibility, but the
- * retained fixed-block scheduler does not evaluate it. DSpark is unrelated to
- * the Qwen DFlash and DFlash-2 drafters, which use block diffusion over a
- * single fused draft layer.
+ * artifact also carries a confidence head used to assign an independent
+ * contiguous verification prefix to every request. DSpark is unrelated to the
+ * Qwen DFlash and DFlash-2 drafters, which use block diffusion over a single
+ * fused draft layer.
  *
  * One draft pass proposes a whole block of `block_size` tokens:
  *
@@ -56,8 +56,7 @@ struct ds4_dspark_stage_weights {
     ds4_tensor *hc_head_scale;
     ds4_tensor *markov_w1;
     ds4_tensor *markov_w2;
-    /* Validated and cached because it is part of the support artifact, but not
-     * evaluated by the retained fixed-width scheduler. */
+    /* Learned probability that the target will accept a drafted position. */
     ds4_tensor *confidence_proj;
 
     /* Every stage is a DS4 block with no compressor and no indexer, so it

@@ -444,6 +444,125 @@ __global__ static void dspark_markov_argmax_kernel(
     }
 }
 
+/*
+ * Resolve one DSpark position for several requests while streaming Markov W2
+ * once. Each request keeps the scalar kernel's block/lane accumulation and
+ * reduction order; only the independent request dimension is fused.
+ */
+template <uint32_t N_ROWS>
+__global__ static void dspark_markov_argmax_batch_kernel(
+        unsigned long long *out_keys,
+        const float *logits,
+        uint64_t logits_row_stride,
+        const int32_t *previous_tokens,
+        const unsigned char *w1,
+        const unsigned char *w2,
+        uint32_t vocab,
+        uint32_t rank_blocks) {
+    __shared__ float states[N_ROWS][256];
+    __shared__ float values[N_ROWS][256];
+    __shared__ uint32_t indices[N_ROWS][256];
+    const uint32_t tid = threadIdx.x;
+    const uint64_t row_bytes = (uint64_t)rank_blocks * 34u;
+
+#pragma unroll
+    for (uint32_t request = 0; request < N_ROWS; ++request) {
+        if (tid < rank_blocks * 32u) {
+            const uint32_t block = tid >> 5u;
+            const uint32_t lane = tid & 31u;
+            const unsigned char *qblock =
+                w1 + (uint64_t)(uint32_t)previous_tokens[request] * row_bytes +
+                (uint64_t)block * 34u;
+            const float scale = __half2float(*(const __half *)qblock);
+            states[request][tid] =
+                scale * (float)((const int8_t *)(qblock + 2u))[lane];
+        }
+    }
+    __syncthreads();
+
+    float best_values[N_ROWS];
+    uint32_t best_indices[N_ROWS];
+#pragma unroll
+    for (uint32_t request = 0; request < N_ROWS; ++request) {
+        best_values[request] = -INFINITY;
+        best_indices[request] = 0u;
+    }
+
+    for (uint32_t i = blockIdx.x * blockDim.x + tid; i < vocab;
+         i += gridDim.x * blockDim.x) {
+        const unsigned char *row = w2 + (uint64_t)i * row_bytes;
+        float acc[N_ROWS] = {};
+        for (uint32_t block = 0; block < rank_blocks; ++block) {
+            const unsigned char *qblock = row + (uint64_t)block * 34u;
+            const float scale = __half2float(*(const __half *)qblock);
+            const int8_t *quants = (const int8_t *)(qblock + 2u);
+            float sums[N_ROWS] = {};
+#pragma unroll
+            for (uint32_t lane = 0; lane < 32u; ++lane) {
+                const float quant = (float)quants[lane];
+#pragma unroll
+                for (uint32_t request = 0; request < N_ROWS; ++request) {
+                    sums[request] +=
+                        quant * states[request][block * 32u + lane];
+                }
+            }
+#pragma unroll
+            for (uint32_t request = 0; request < N_ROWS; ++request) {
+                acc[request] += scale * sums[request];
+            }
+        }
+#pragma unroll
+        for (uint32_t request = 0; request < N_ROWS; ++request) {
+            const float value =
+                logits[(uint64_t)request * logits_row_stride + i] +
+                acc[request];
+            if (topk_score_better(value, i, best_values[request],
+                                  best_indices[request])) {
+                best_values[request] = value;
+                best_indices[request] = i;
+            }
+        }
+    }
+
+#pragma unroll
+    for (uint32_t request = 0; request < N_ROWS; ++request) {
+        values[request][tid] = best_values[request];
+        indices[request][tid] = best_indices[request];
+    }
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+#pragma unroll
+            for (uint32_t request = 0; request < N_ROWS; ++request) {
+                if (topk_score_better(
+                        values[request][tid + stride],
+                        indices[request][tid + stride],
+                        values[request][tid],
+                        indices[request][tid])) {
+                    values[request][tid] =
+                        values[request][tid + stride];
+                    indices[request][tid] =
+                        indices[request][tid + stride];
+                }
+            }
+        }
+        __syncthreads();
+    }
+    if (tid == 0u) {
+#pragma unroll
+        for (uint32_t request = 0; request < N_ROWS; ++request) {
+            const unsigned int bits =
+                __float_as_uint(values[request][0]);
+            const unsigned int value_key =
+                (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+            const unsigned long long key =
+                ((unsigned long long)value_key << 32) |
+                (unsigned int)(~indices[request][0]);
+            atomicMax(out_keys + request, key);
+        }
+    }
+}
+
 __device__ __forceinline__ static uint32_t topk_float_ordered_key(float v) {
     const uint32_t u = __float_as_uint(v);
     return (u & 0x80000000u) ? ~u : (u ^ 0x80000000u);
@@ -1308,12 +1427,82 @@ __global__ static void dspark_confidence_kernel(
   }
 }
 
+__global__ static void dspark_confidence_batch_kernel(
+    float* out_probabilities, const float* hidden_rows,
+    uint64_t hidden_row_stride, const unsigned char* confidence_row,
+    const unsigned char* w1, uint64_t w1_row_bytes,
+    const int32_t* previous_tokens, uint32_t vocab, uint32_t hidden_dim,
+    uint32_t markov_rank) {
+  __shared__ float partial[256];
+  const uint32_t row = blockIdx.x;
+  const uint32_t tid = threadIdx.x;
+  const int32_t previous_token = previous_tokens[row];
+  if (previous_token < 0 || (uint32_t)previous_token >= vocab) {
+    if (tid == 0u)
+      out_probabilities[row] = NAN;
+    return;
+  }
+
+  const float* hidden = hidden_rows + (uint64_t)row * hidden_row_stride;
+  const unsigned char* w1_row =
+      w1 + (uint64_t)(uint32_t)previous_token * w1_row_bytes;
+  float sum = 0.0f;
+  for (uint32_t index = tid; index < hidden_dim; index += blockDim.x) {
+    const uint32_t block = index >> 5u;
+    const uint32_t lane = index & 31u;
+    const unsigned char* qblock =
+        confidence_row + (uint64_t)block * 34u;
+    const float scale = __half2float(*(const __half*)qblock);
+    const float weight =
+        scale * (float)((const int8_t*)(qblock + 2u))[lane];
+    sum += hidden[index] * weight;
+  }
+
+  const uint32_t confidence_block_base = hidden_dim >> 5u;
+  for (uint32_t index = tid; index < markov_rank; index += blockDim.x) {
+    const uint32_t block = index >> 5u;
+    const uint32_t lane = index & 31u;
+    const unsigned char* state_block =
+        w1_row + (uint64_t)block * 34u;
+    const unsigned char* weight_block =
+        confidence_row + (uint64_t)(confidence_block_base + block) * 34u;
+    const float state_scale = __half2float(*(const __half*)state_block);
+    const float weight_scale = __half2float(*(const __half*)weight_block);
+    const float state =
+        state_scale * (float)((const int8_t*)(state_block + 2u))[lane];
+    const float weight =
+        weight_scale * (float)((const int8_t*)(weight_block + 2u))[lane];
+    sum += state * weight;
+  }
+
+  partial[tid] = sum;
+  __syncthreads();
+  for (uint32_t stride = blockDim.x >> 1u; stride != 0u; stride >>= 1u) {
+    if (tid < stride)
+      partial[tid] += partial[tid + stride];
+    __syncthreads();
+  }
+  if (tid == 0u) {
+    out_probabilities[row] = 1.0f / (1.0f + expf(-partial[0]));
+  }
+}
+
 /* Decode the packed (value, index) key produced by the Markov argmax reduce. */
 __global__ static void dspark_markov_key_decode_kernel(
         int32_t *out_index,
         const unsigned long long *key) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;
     out_index[0] = (int32_t)(~(unsigned int)(key[0] & 0xffffffffull));
+}
+
+__global__ static void dspark_markov_key_decode_batch_kernel(
+        int32_t *out_indices,
+        const unsigned long long *keys,
+        uint32_t n_rows) {
+    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n_rows) return;
+    out_indices[row] =
+        (int32_t)(~(unsigned int)(keys[row] & 0xffffffffull));
 }
 
 extern "C" int ds4_gpu_dspark_markov_w1_row_tensor(
@@ -1379,6 +1568,51 @@ extern "C" int ds4_gpu_dspark_confidence_tensor(
   return hip_ok(hipGetLastError(), "dspark confidence launch");
 }
 
+extern "C" int ds4_gpu_dspark_confidence_batch_tensor(
+    ds4_gpu_tensor* out_probabilities, const ds4_gpu_tensor* hidden_rows,
+    const ds4_gpu_tensor* previous_tokens, const void* model_map,
+    uint64_t model_size, uint64_t confidence_offset, uint64_t w1_offset,
+    uint32_t vocab, uint32_t hidden_dim, uint32_t markov_rank,
+    uint32_t n_rows, uint64_t hidden_row_stride) {
+  if (!out_probabilities || !hidden_rows || !previous_tokens || !model_map ||
+      vocab == 0u || hidden_dim == 0u || hidden_dim % 32u != 0u ||
+      markov_rank == 0u || markov_rank % 32u != 0u ||
+      (n_rows != 2u && n_rows != 4u && n_rows != 6u && n_rows != 8u) ||
+      hidden_row_stride < hidden_dim ||
+      !hip_tensor_has_elems(out_probabilities, n_rows, sizeof(float)) ||
+      !hip_tensor_has_elems(previous_tokens, n_rows, sizeof(int32_t)) ||
+      !hip_tensor_has_elems(
+          hidden_rows,
+          (uint64_t)(n_rows - 1u) * hidden_row_stride + hidden_dim,
+          sizeof(float))) {
+    return 0;
+  }
+  const uint32_t rank_blocks = markov_rank / 32u;
+  const uint64_t w1_row_bytes = (uint64_t)rank_blocks * 34u;
+  uint64_t w1_bytes = 0u;
+  const uint64_t confidence_bytes =
+      (uint64_t)((hidden_dim + markov_rank) / 32u) * 34u;
+  if (!hip_u64_mul_checked(vocab, w1_row_bytes, &w1_bytes) ||
+      !hip_model_range_fits(model_size, confidence_offset, confidence_bytes) ||
+      !hip_model_range_fits(model_size, w1_offset, w1_bytes)) {
+    return 0;
+  }
+  const unsigned char* confidence_row =
+      (const unsigned char*)hip_model_range_ptr(
+          model_map, confidence_offset, confidence_bytes,
+          "dspark_confidence_batch");
+  const unsigned char* w1 = (const unsigned char*)hip_model_range_ptr(
+      model_map, w1_offset, w1_bytes, "dspark_confidence_w1_batch");
+  if (!confidence_row || !w1)
+    return 0;
+
+  dspark_confidence_batch_kernel<<<n_rows, 256>>>(
+      (float*)out_probabilities->ptr, (const float*)hidden_rows->ptr,
+      hidden_row_stride, confidence_row, w1, w1_row_bytes,
+      (const int32_t*)previous_tokens->ptr, vocab, hidden_dim, markov_rank);
+  return hip_ok(hipGetLastError(), "dspark confidence batch launch");
+}
+
 /*
  * DSpark path selection for one drafted position.
  *
@@ -1439,4 +1673,95 @@ extern "C" int ds4_gpu_dspark_markov_argmax_tensor(
             (int32_t *)out_index->ptr,
             (const unsigned long long *)scratch_key->ptr);
     return hip_ok(hipGetLastError(), "dspark markov decode launch");
+}
+
+extern "C" int ds4_gpu_dspark_markov_argmax_batch_tensor(
+        ds4_gpu_tensor       *out_index,
+        ds4_gpu_tensor       *scratch_key,
+        const ds4_gpu_tensor *logits_rows,
+        const ds4_gpu_tensor *previous_tokens,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                w1_offset,
+        uint64_t                w2_offset,
+        uint32_t                vocab,
+        uint32_t                markov_rank,
+        uint32_t                n_rows,
+        uint64_t                logits_row_stride) {
+    if (!out_index || !scratch_key || !logits_rows || !previous_tokens ||
+        !model_map || vocab == 0u || markov_rank == 0u ||
+        markov_rank % 32u != 0u ||
+        (n_rows != 2u && n_rows != 4u && n_rows != 6u && n_rows != 8u) ||
+        logits_row_stride < vocab ||
+        !hip_tensor_has_elems(out_index, n_rows, sizeof(int32_t)) ||
+        !hip_tensor_has_elems(scratch_key, n_rows,
+                              sizeof(unsigned long long)) ||
+        !hip_tensor_has_elems(previous_tokens, n_rows, sizeof(int32_t)) ||
+        !hip_tensor_has_elems(
+            logits_rows,
+            (uint64_t)(n_rows - 1u) * logits_row_stride + vocab,
+            sizeof(float))) {
+        return 0;
+    }
+    const uint32_t rank_blocks = markov_rank / 32u;
+    if (rank_blocks * 32u > 256u) return 0;
+    const uint64_t row_bytes = (uint64_t)rank_blocks * 34u;
+    uint64_t table_bytes = 0u;
+    if (!hip_u64_mul_checked(vocab, row_bytes, &table_bytes) ||
+        !hip_model_range_fits(model_size, w1_offset, table_bytes) ||
+        !hip_model_range_fits(model_size, w2_offset, table_bytes)) {
+        return 0;
+    }
+    const unsigned char *w1 =
+        (const unsigned char *)hip_model_range_ptr(
+            model_map, w1_offset, table_bytes, "dspark_markov_w1_batch");
+    const unsigned char *w2 =
+        (const unsigned char *)hip_model_range_ptr(
+            model_map, w2_offset, table_bytes, "dspark_markov_w2_batch");
+    if (!w1 || !w2) return 0;
+    if (!hip_ok(hipMemset(scratch_key->ptr, 0,
+                          (size_t)n_rows * sizeof(unsigned long long)),
+                "dspark markov batch key reset")) {
+        return 0;
+    }
+    const uint32_t blocks = (vocab + 255u) / 256u;
+    switch (n_rows) {
+        case 2u:
+            dspark_markov_argmax_batch_kernel<2u><<<blocks, 256>>>(
+                (unsigned long long *)scratch_key->ptr,
+                (const float *)logits_rows->ptr, logits_row_stride,
+                (const int32_t *)previous_tokens->ptr, w1, w2, vocab,
+                rank_blocks);
+            break;
+        case 4u:
+            dspark_markov_argmax_batch_kernel<4u><<<blocks, 256>>>(
+                (unsigned long long *)scratch_key->ptr,
+                (const float *)logits_rows->ptr, logits_row_stride,
+                (const int32_t *)previous_tokens->ptr, w1, w2, vocab,
+                rank_blocks);
+            break;
+        case 6u:
+            dspark_markov_argmax_batch_kernel<6u><<<blocks, 256>>>(
+                (unsigned long long *)scratch_key->ptr,
+                (const float *)logits_rows->ptr, logits_row_stride,
+                (const int32_t *)previous_tokens->ptr, w1, w2, vocab,
+                rank_blocks);
+            break;
+        case 8u:
+            dspark_markov_argmax_batch_kernel<8u><<<blocks, 256>>>(
+                (unsigned long long *)scratch_key->ptr,
+                (const float *)logits_rows->ptr, logits_row_stride,
+                (const int32_t *)previous_tokens->ptr, w1, w2, vocab,
+                rank_blocks);
+            break;
+        default:
+            return 0;
+    }
+    if (!hip_ok(hipGetLastError(), "dspark markov batch argmax launch")) {
+        return 0;
+    }
+    dspark_markov_key_decode_batch_kernel<<<1, 32>>>(
+        (int32_t *)out_index->ptr,
+        (const unsigned long long *)scratch_key->ptr, n_rows);
+    return hip_ok(hipGetLastError(), "dspark markov batch decode launch");
 }

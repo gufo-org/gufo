@@ -34,6 +34,8 @@ struct SessionBatchItem {
 struct SessionDsparkBatchItem {
   Session* session = nullptr;
   std::size_t max_tokens = 32;
+  std::uint32_t max_draft_tokens = 5;
+  bool schedule_confidence = false;
   std::vector<int>* emitted = nullptr;
 };
 

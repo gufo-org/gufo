@@ -35,13 +35,16 @@ struct ds4_rocm_verify_item {
   const ds4_tokens* tokens;
   uint32_t start;
   uint32_t n_tokens;
+  uint32_t logical_n_tokens;
   int32_t* row_tops;
+  float* frontier_logits;
 };
 
 struct ds4_rocm_dspark_draft_item {
   ds4_rocm_graph* graph;
   int last_token;
   uint32_t position;
+  uint32_t max_draft_tokens;
   int32_t* tokens;
   uint32_t* n_tokens;
 };

@@ -597,12 +597,161 @@ static int hip_launch_q8_batch_reuse(
         matmul_q8_0_preq_batch_reuse_w32_kernel<10, true><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
                 rows_per_block);
+    } else if (n_tok == 12u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<12, true><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block);
+    } else if (n_tok == 16u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<16, true><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block);
+    } else if (n_tok == 18u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<18, true><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block);
+    } else if (n_tok == 24u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<24, true><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block);
+    } else if (n_tok == 32u) {
+        matmul_q8_0_preq_batch_reuse_w32_kernel<32, true><<<grid, threads>>>(
+                out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
+                rows_per_block);
     } else {
         matmul_q8_0_preq_batch_reuse_w32_kernel<16, false><<<grid, threads>>>(
                 out, w, xq, xscale, in_dim, out_dim, blocks, n_tok,
                 rows_per_block);
     }
     return hip_ok(hipGetLastError(), "matmul_q8_0 batch reuse launch");
+}
+
+static int hip_launch_q8_group_pairs(
+        float *out,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks,
+        const uint32_t *group_offsets,
+        uint32_t group_count,
+        uint32_t rows_per_block) {
+    if (!group_offsets || group_count < 2u || group_count > 8u ||
+        (group_count & 1u) != 0u) {
+        return 0;
+    }
+    const unsigned grid =
+        (unsigned)((out_dim + rows_per_block - 1u) / rows_per_block);
+    const unsigned threads = rows_per_block * 32u;
+    const uint32_t equal_rows = group_offsets[1u] - group_offsets[0u];
+    bool all_equal = equal_rows != 0u && equal_rows <= 6u;
+    for (uint32_t group = 1u; all_equal && group < group_count; ++group) {
+        all_equal =
+            group_offsets[group + 1u] - group_offsets[group] == equal_rows;
+    }
+    if (all_equal) {
+        const uint32_t total_rows = group_offsets[group_count];
+#define DS4_LAUNCH_Q8_ALL_ROWS(NT)                                      \
+        matmul_q8_0_preq_all_rows_exact_w32_kernel<NT>                  \
+            <<<grid, threads>>>(out, w, xq, xscale, in_dim, out_dim,    \
+                                blocks, rows_per_block)
+        switch (total_rows) {
+            case 6u:  DS4_LAUNCH_Q8_ALL_ROWS(6u);  break;
+            case 8u:  DS4_LAUNCH_Q8_ALL_ROWS(8u);  break;
+            case 12u: DS4_LAUNCH_Q8_ALL_ROWS(12u); break;
+            case 16u: DS4_LAUNCH_Q8_ALL_ROWS(16u); break;
+            case 18u: DS4_LAUNCH_Q8_ALL_ROWS(18u); break;
+            case 24u: DS4_LAUNCH_Q8_ALL_ROWS(24u); break;
+            case 32u: DS4_LAUNCH_Q8_ALL_ROWS(32u); break;
+            default: break;
+        }
+#undef DS4_LAUNCH_Q8_ALL_ROWS
+        if (total_rows == 6u || total_rows == 8u || total_rows == 12u ||
+            total_rows == 16u || total_rows == 18u || total_rows == 24u ||
+            total_rows == 32u) {
+            return hip_ok(hipGetLastError(),
+                          "matmul_q8_0 all-row exact launch");
+        }
+
+        const dim3 pair_grid(grid, group_count / 2u, 1u);
+#define DS4_LAUNCH_Q8_EQUAL_GROUP_PAIRS(NT)                                \
+        matmul_q8_0_preq_equal_group_pairs_w32_kernel<NT>                  \
+            <<<pair_grid, threads>>>(out, w, xq, xscale, in_dim, out_dim,  \
+                                     blocks, rows_per_block)
+        switch (equal_rows) {
+            case 1u: DS4_LAUNCH_Q8_EQUAL_GROUP_PAIRS(1u); break;
+            case 2u: DS4_LAUNCH_Q8_EQUAL_GROUP_PAIRS(2u); break;
+            case 3u: DS4_LAUNCH_Q8_EQUAL_GROUP_PAIRS(3u); break;
+            case 4u: DS4_LAUNCH_Q8_EQUAL_GROUP_PAIRS(4u); break;
+            case 5u: DS4_LAUNCH_Q8_EQUAL_GROUP_PAIRS(5u); break;
+            case 6u: DS4_LAUNCH_Q8_EQUAL_GROUP_PAIRS(6u); break;
+            default: return 0;
+        }
+#undef DS4_LAUNCH_Q8_EQUAL_GROUP_PAIRS
+        return hip_ok(hipGetLastError(),
+                      "matmul_q8_0 equal grouped-pairs launch");
+    }
+
+    for (uint32_t group = 0; group < group_count; group += 2u) {
+        const uint32_t rows0 =
+            group_offsets[group + 1u] - group_offsets[group];
+        const uint32_t rows1 =
+            group_offsets[group + 2u] - group_offsets[group + 1u];
+        if (rows0 == 0u || rows0 > 6u ||
+            rows1 == 0u || rows1 > 6u) {
+            return 0;
+        }
+#define DS4_LAUNCH_Q8_GROUP_PAIR(NT)                                    \
+        matmul_q8_0_preq_group_pair_w32_kernel<NT><<<grid, threads>>>(  \
+            out, w, xq, xscale, in_dim, out_dim, blocks,                \
+            group_offsets[group], group_offsets[group + 1u],            \
+            rows_per_block)
+        if (rows0 == rows1) {
+            switch (rows0) {
+                case 1u: DS4_LAUNCH_Q8_GROUP_PAIR(1u); break;
+                case 2u: DS4_LAUNCH_Q8_GROUP_PAIR(2u); break;
+                case 3u: DS4_LAUNCH_Q8_GROUP_PAIR(3u); break;
+                case 4u: DS4_LAUNCH_Q8_GROUP_PAIR(4u); break;
+                case 5u: DS4_LAUNCH_Q8_GROUP_PAIR(5u); break;
+                case 6u: DS4_LAUNCH_Q8_GROUP_PAIR(6u); break;
+                default: return 0;
+            }
+#undef DS4_LAUNCH_Q8_GROUP_PAIR
+        } else {
+#define DS4_LAUNCH_Q8_RAGGED_GROUP_PAIR(NT0, NT1)                       \
+        matmul_q8_0_preq_ragged_group_pair_w32_kernel<NT0, NT1>        \
+            <<<grid, threads>>>(                                        \
+                out, w, xq, xscale, in_dim, out_dim, blocks,           \
+                group_offsets[group], group_offsets[group + 1u],       \
+                rows_per_block)
+#define DS4_DISPATCH_Q8_RAGGED_SECOND(NT0)                              \
+        switch (rows1) {                                                \
+            case 1u: DS4_LAUNCH_Q8_RAGGED_GROUP_PAIR(NT0, 1u); break; \
+            case 2u: DS4_LAUNCH_Q8_RAGGED_GROUP_PAIR(NT0, 2u); break; \
+            case 3u: DS4_LAUNCH_Q8_RAGGED_GROUP_PAIR(NT0, 3u); break; \
+            case 4u: DS4_LAUNCH_Q8_RAGGED_GROUP_PAIR(NT0, 4u); break; \
+            case 5u: DS4_LAUNCH_Q8_RAGGED_GROUP_PAIR(NT0, 5u); break; \
+            case 6u: DS4_LAUNCH_Q8_RAGGED_GROUP_PAIR(NT0, 6u); break; \
+            default: return 0;                                          \
+        }
+            switch (rows0) {
+                case 1u: DS4_DISPATCH_Q8_RAGGED_SECOND(1u); break;
+                case 2u: DS4_DISPATCH_Q8_RAGGED_SECOND(2u); break;
+                case 3u: DS4_DISPATCH_Q8_RAGGED_SECOND(3u); break;
+                case 4u: DS4_DISPATCH_Q8_RAGGED_SECOND(4u); break;
+                case 5u: DS4_DISPATCH_Q8_RAGGED_SECOND(5u); break;
+                case 6u: DS4_DISPATCH_Q8_RAGGED_SECOND(6u); break;
+                default: return 0;
+            }
+#undef DS4_DISPATCH_Q8_RAGGED_SECOND
+#undef DS4_LAUNCH_Q8_RAGGED_GROUP_PAIR
+        }
+        if (!hip_ok(hipGetLastError(),
+                    "matmul_q8_0 grouped-pair launch")) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /*
@@ -1061,6 +1210,69 @@ extern "C" int ds4_gpu_matmul_q8_0_tensor(ds4_gpu_tensor *out, const void *model
                                            in_dim, out_dim, x, n_tok, "q8_0");
 }
 
+extern "C" int ds4_gpu_matmul_q8_0_group_pairs_tensor(
+        ds4_gpu_tensor *out,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t weight_offset,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t n_tok,
+        const uint32_t *group_offsets,
+        uint32_t group_count) {
+    if (!out || !x || !model_map || !group_offsets || in_dim == 0u ||
+        out_dim == 0u || n_tok == 0u || (in_dim & 31u) != 0u ||
+        in_dim > UINT32_MAX || out_dim > UINT32_MAX ||
+        n_tok > UINT32_MAX || group_count < 2u || group_count > 8u ||
+        (group_count & 1u) != 0u || group_offsets[0] != 0u ||
+        group_offsets[group_count] != n_tok) {
+        return 0;
+    }
+    for (uint32_t group = 0; group < group_count; ++group) {
+        if (group_offsets[group + 1u] <= group_offsets[group]) {
+            return 0;
+        }
+    }
+    const uint64_t blocks = in_dim / 32u;
+    uint64_t row_bytes = 0u;
+    uint64_t weight_bytes = 0u;
+    uint64_t x_bytes = 0u;
+    uint64_t out_bytes = 0u;
+    if (weight_offset > model_size ||
+        !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
+        !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
+        weight_bytes > model_size - weight_offset ||
+        !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+        !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+        x->bytes < x_bytes || out->bytes < out_bytes) {
+        return 0;
+    }
+    const unsigned char *w = reinterpret_cast<const unsigned char *>(
+        hip_model_range_ptr(
+            model_map, weight_offset, weight_bytes, "q8_0_group_pairs"));
+    if (!w) return 0;
+
+    const uint64_t xq_bytes = n_tok * blocks * 32u;
+    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
+    const uint64_t tmp_bytes =
+        scale_offset + n_tok * blocks * sizeof(float);
+    void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 grouped-pair prequant");
+    if (!tmp) return 0;
+    int8_t *xq = (int8_t *)tmp;
+    float *xscale = (float *)((char *)tmp + scale_offset);
+    dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1u);
+    quantize_q8_0_f32_kernel<<<qgrid, 32u>>>(
+        xq, xscale, (const float *)x->ptr, in_dim, blocks);
+    if (!hip_ok(hipGetLastError(),
+                "matmul_q8_0 grouped-pair quantize launch")) {
+        return 0;
+    }
+    return hip_launch_q8_group_pairs(
+        (float *)out->ptr, w, xq, xscale, in_dim, out_dim, blocks,
+        group_offsets, group_count, hip_runtime_config()->q8_decode_rpb);
+}
+
 static int ds4_gpu_matmul_q8_0_pair_tensor(
         ds4_gpu_tensor *out0,
         ds4_gpu_tensor *out1,
@@ -1457,6 +1669,123 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
     }
     matmul_f16_kernel<<<grid, 256>>>((float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim, n_tok);
     return hip_ok(hipGetLastError(), "matmul_f16 launch");
+}
+
+extern "C" int ds4_gpu_matmul_f16_group_pairs_tensor(
+        ds4_gpu_tensor *out,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t weight_offset,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t n_tok,
+        const uint32_t *group_offsets,
+        uint32_t group_count) {
+    if (!out || !x || !model_map || !group_offsets ||
+        in_dim == 0u || out_dim == 0u || n_tok == 0u ||
+        in_dim > UINT32_MAX || out_dim > UINT32_MAX ||
+        n_tok > UINT32_MAX || group_count < 2u || group_count > 8u ||
+        (group_count & 1u) != 0u || group_offsets[0] != 0u ||
+        group_offsets[group_count] != n_tok) {
+        return 0;
+    }
+    for (uint32_t group = 0u; group < group_count; ++group) {
+        if (group_offsets[group + 1u] <= group_offsets[group]) {
+            return 0;
+        }
+    }
+    uint64_t weight_bytes = 0u;
+    uint64_t x_bytes = 0u;
+    uint64_t out_bytes = 0u;
+    if (weight_offset > model_size ||
+        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t),
+                              &weight_bytes) ||
+        weight_bytes > model_size - weight_offset ||
+        !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+        !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+        x->bytes < x_bytes || out->bytes < out_bytes) {
+        return 0;
+    }
+    const char *wptr = hip_model_range_ptr(
+        model_map, weight_offset, weight_bytes, "f16_group_pairs");
+    if (!wptr) return 0;
+    const __half *w = reinterpret_cast<const __half *>(wptr);
+
+    const uint32_t equal_rows = group_offsets[1u] - group_offsets[0u];
+    bool all_equal = equal_rows != 0u && equal_rows <= 6u;
+    for (uint32_t group = 1u; all_equal && group < group_count; ++group) {
+        all_equal =
+            group_offsets[group + 1u] - group_offsets[group] == equal_rows;
+    }
+    if (all_equal && in_dim <= 8192u &&
+        2u * in_dim * sizeof(float) <= 65536u) {
+        const uint32_t rows_per_block = 32u;
+        const dim3 grid(
+            (static_cast<uint32_t>(out_dim) + rows_per_block - 1u) /
+                rows_per_block,
+            (group_count / 2u) * equal_rows, 1u);
+        matmul_f16_f32_equal_group_pairs_sharedx_warp_rows_w32_kernel<<<
+            grid, rows_per_block * 32u,
+            2u * static_cast<size_t>(in_dim) * sizeof(float)>>>(
+                reinterpret_cast<float *>(out->ptr), w,
+                reinterpret_cast<const float *>(x->ptr),
+                static_cast<uint32_t>(in_dim), out_dim, equal_rows);
+        return hip_ok(hipGetLastError(),
+                      "matmul_f16 equal grouped-pairs sharedx launch");
+    }
+    if (all_equal) {
+        const dim3 grid(static_cast<uint32_t>(out_dim),
+                        (group_count / 2u) * equal_rows, 1u);
+        matmul_f16_ordered_equal_group_pairs_exact_kernel<<<grid, 32u>>>(
+            reinterpret_cast<float *>(out->ptr), w,
+            reinterpret_cast<const float *>(x->ptr), in_dim, out_dim,
+            equal_rows);
+        return hip_ok(hipGetLastError(),
+                      "matmul_f16 equal grouped-pairs launch");
+    }
+
+    for (uint32_t group = 0u; group < group_count; group += 2u) {
+        const uint32_t row0 = group_offsets[group];
+        const uint32_t row1 = group_offsets[group + 1u];
+        const uint32_t rows0 = row1 - row0;
+        const uint32_t rows1 =
+            group_offsets[group + 2u] - group_offsets[group + 1u];
+        if (rows0 == 0u || rows0 > 6u ||
+            rows1 == 0u || rows1 > 6u) {
+            return 0;
+        }
+        const uint32_t pair_rows =
+            rows0 > rows1 ? rows0 : rows1;
+        if (in_dim <= 8192u &&
+            2u * in_dim * sizeof(float) <= 65536u) {
+            const uint32_t rows_per_block = 32u;
+            const dim3 grid(
+                (static_cast<uint32_t>(out_dim) + rows_per_block - 1u) /
+                    rows_per_block,
+                pair_rows, 1u);
+            matmul_f16_f32_ragged_group_pair_sharedx_warp_rows_w32_kernel<<<
+                grid, rows_per_block * 32u,
+                2u * static_cast<size_t>(in_dim) * sizeof(float)>>>(
+                    reinterpret_cast<float *>(out->ptr), w,
+                    reinterpret_cast<const float *>(x->ptr),
+                    static_cast<uint32_t>(in_dim), out_dim,
+                    row0, row1, rows0, rows1);
+        } else {
+            const dim3 grid(
+                static_cast<uint32_t>(out_dim), pair_rows, 1u);
+            matmul_f16_ordered_ragged_group_pair_exact_kernel<<<
+                grid, 32u>>>(
+                    reinterpret_cast<float *>(out->ptr), w,
+                    reinterpret_cast<const float *>(x->ptr),
+                    in_dim, out_dim, row0, row1, rows0, rows1);
+        }
+        if (!hip_ok(hipGetLastError(),
+                    "matmul_f16 grouped-pair launch")) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /* F16 projection over activations that are already F16.

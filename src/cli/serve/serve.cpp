@@ -1109,9 +1109,12 @@ int RunServe(std::span<const char* const> args) {
     speculative_config.min_draft_tokens =
         static_cast<std::uint32_t>(min_draft_tokens);
     speculative_config.draft_p_min = draft_p_min;
-    // `auto` follows the measured best per backend; see ResolveDraftPolicy.
+    // `auto` follows the measured best per backend. DFlash keeps its fixed
+    // width, while concurrent DSpark uses its lower-cost rolling width.
+    const bool fixed_width_draft =
+        speculative_config.backend == server::TextSpeculativeBackend::kDFlash;
     const std::string_view resolved_draft_policy =
-        speculative::ResolveDraftPolicy(draft_policy, true);
+        speculative::ResolveDraftPolicy(draft_policy, fixed_width_draft);
     if (resolved_draft_policy == "fixed") {
       speculative_config.draft_policy = server::TextDraftPolicy::kFixed;
     } else if (resolved_draft_policy == "rolling") {
