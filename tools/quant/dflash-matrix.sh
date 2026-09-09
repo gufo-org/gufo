@@ -11,7 +11,6 @@ BINARY=${BINARY:-./result/bin/gufo}
 SUITE=${SUITE:-benchmarks/qwen3.8-27b/speculative-corpus.json}
 MAX_TOKENS=${MAX_TOKENS:-512}
 DRAFT_TOKENS=${DRAFT_TOKENS:-7}
-DRAFT_POLICY=${DRAFT_POLICY:-auto}
 # Framing and decode length are the measurement, not a detail. A raw prompt puts
 # the model outside the instruction distribution it was tuned on, and a short
 # generation is dominated by the unpredictable opening tokens: on one corpus
@@ -69,7 +68,6 @@ for rep in $(seq 1 "$REPETITIONS"); do
         --suite "$SUITE" \
         --max-tokens "$MAX_TOKENS" \
         --draft-tokens "$DRAFT_TOKENS" \
-        --draft-policy "$DRAFT_POLICY" \
         --prompt-mode "$PROMPT_MODE" \
         --timeout "$TIMEOUT" \
         --allow-mismatch \

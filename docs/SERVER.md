@@ -99,27 +99,19 @@ actual prefill work; cache use; logical concurrency; physical execution width;
 and the executed plan. Prompts, generated text, local paths, request IDs, and
 token IDs are excluded.
 
-DeepSeek V4 Flash uses native layer-synchronous session batches at physical
-widths 2 through 8. Every request keeps its own attention caches and position;
-dense projections, attention output, FFN/MoE, and the LM head run over the
-concurrent rows together. Width one stays on the existing serial decode path.
-Set `GUFO_DEEPSEEK_SESSION_BATCH=0` before starting the server to disable exact
-target batching. The paired F16 attention-compressor projections share their
-weight streams across C2-C8 while preserving each row's serial reduction order.
-Set `GUFO_DEEPSEEK_ROCM_SESSION_COMPRESSOR_BATCH=0` to restore the earlier
-per-request compressor launches for an A/B comparison.
+DeepSeek V4 Flash batches up to eight active requests. Each request owns its
+attention caches, compressor state, position, and sampling state. Dense and
+expert projections share weight reads across the batch; one request uses the
+single-session path.
 
-With DSpark attached, concurrent speculative decoding is enabled at C2-C8.
-Support blocks and ragged target-verification rows are flattened across
-runnable requests. Router selection remains request-local, while the
-verifier retains request-local routed-expert tile boundaries and combines the
-Q2 down launches and six-slot reductions without changing arithmetic. Set
-`GUFO_DEEPSEEK_DSPARK_SESSION_BATCH=0` to disable concurrent DSpark,
-`GUFO_DEEPSEEK_DSPARK_MULTI_BATCH=0` to retain only the earlier C2 route,
-`GUFO_DEEPSEEK_DSPARK_SUPPORT_BODY_BATCH=0` to restore serial support bodies,
-or `GUFO_DEEPSEEK_DSPARK_MULTI_DOWN=0` to restore separate request-local
-verifier down launches. These switches are intended for profiling and
-numerical A/B comparisons.
+With `--dspark-model <support.gguf>`, DSpark is selected automatically unless
+`--speculative off` is explicit. Greedy requests share support computation and
+ragged verification; sampled requests use autoregressive decoding. Draft widths
+adapt within the requested `--draft-tokens` ceiling. C1 starts at three support
+tokens and can grow to the artifact limit; C2/C4/C8 cap the tail at three and C6
+at two. Low-acceptance C1 requests temporarily return to autoregressive decode.
+These measured defaults are model-owned. See the
+[DS4 benchmark and quality contract](../benchmarks/deepseek-v4-flash/README.md).
 
 ### Reasoning controls
 

@@ -161,7 +161,6 @@ bool Model::DsparkStepBatch(std::span<const SessionDsparkBatchItem> items,
         .emitted_cap =
             static_cast<int>(std::min(item.max_tokens, blocks[index].size())),
         .max_draft_tokens = item.max_draft_tokens,
-        .schedule_confidence = item.schedule_confidence,
         .n_emitted = &produced[index],
     };
   }
@@ -310,10 +309,6 @@ int Session::SelectNext(float temperature, std::uint64_t* rng_state, int top_k,
                             rng_state);
 }
 
-int Session::SelectNextExcluding(int excluded_token) const {
-  return ds4_session_argmax_excluding(session_, excluded_token);
-}
-
 bool Session::Evaluate(int token, std::string* error_msg) {
   std::array<char, kErrorCapacity> error{};
   if (ds4_session_eval(session_, token, error.data(), error.size()) != 0) {
@@ -339,27 +334,20 @@ bool Session::DsparkStep(std::vector<int>* emitted, std::string* error_msg) {
 
 bool Session::DsparkStep(std::size_t max_tokens, std::vector<int>* emitted,
                          std::string* error_msg) {
-  if (emitted == nullptr) {
-    AssignError(error_msg, "DSpark step needs an output buffer");
-    return false;
-  }
-  if (max_tokens == 0) {
-    AssignError(error_msg, "DSpark step needs a positive token budget");
-    return false;
-  }
-  std::array<int, 32> block{};
-  const int capacity = static_cast<int>(std::min(max_tokens, block.size()));
-  int produced = 0;
-  std::array<char, kErrorCapacity> error{};
-  if (ds4_session_dspark_step(session_, block.data(), capacity, &produced,
-                              error.data(), error.size()) != 0) {
-    AssignError(error_msg, error[0] != '\0'
-                               ? error.data()
-                               : "DeepSeek V4 Flash speculative step failed");
-    return false;
-  }
-  emitted->assign(block.begin(), block.begin() + produced);
-  return true;
+  return DsparkStep(max_tokens, SessionDsparkBatchItem{}.max_draft_tokens,
+                    emitted, error_msg);
+}
+
+bool Session::DsparkStep(std::size_t max_tokens, std::uint32_t max_draft_tokens,
+                         std::vector<int>* emitted, std::string* error_msg) {
+  const SessionDsparkBatchItem item{
+      .session = this,
+      .max_tokens = max_tokens,
+      .max_draft_tokens = max_draft_tokens,
+      .emitted = emitted,
+  };
+  return model_->DsparkStepBatch(
+      std::span<const SessionDsparkBatchItem>(&item, 1), error_msg);
 }
 
 Session::DsparkStats Session::DsparkStatistics() const {
@@ -370,32 +358,6 @@ Session::DsparkStats Session::DsparkStatistics() const {
                            &stats.anchors, &stats.full_blocks, &stats.steps,
                            &stats.skipped, &stats.context_tokens);
   return stats;
-}
-
-bool Session::DsparkDraftSelfTest(int cycles, std::string* error_msg) {
-  std::array<char, kErrorCapacity> error{};
-  if (ds4_session_dspark_draft_selftest(session_, cycles, error.data(),
-                                        error.size()) != 0) {
-    AssignError(error_msg,
-                error[0] != '\0'
-                    ? error.data()
-                    : "DeepSeek V4 Flash DSpark draft self-test failed");
-    return false;
-  }
-  return true;
-}
-
-bool Session::DsparkSelfTest(int rows, std::string* error_msg) {
-  std::array<char, kErrorCapacity> error{};
-  if (ds4_session_dspark_selftest(session_, rows, error.data(), error.size()) !=
-      0) {
-    AssignError(error_msg,
-                error[0] != '\0'
-                    ? error.data()
-                    : "DeepSeek V4 Flash DSpark verifier self-test failed");
-    return false;
-  }
-  return true;
 }
 
 std::vector<float> Session::CopyLogits(std::string* error_msg) const {

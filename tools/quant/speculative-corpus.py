@@ -105,14 +105,10 @@ def build_prompt_command(
 
     if speculative:
         command.extend(["--speculative", args.backend])
+        command.extend(["--draft-tokens", str(args.draft_tokens)])
         if args.backend != "dspark":
-            # DSpark's block length is fixed by its checkpoint metadata.
             command.extend(
                 [
-                    "--draft-tokens",
-                    str(args.draft_tokens),
-                    "--draft-policy",
-                    args.draft_policy,
                     "--min-draft-tokens",
                     str(args.min_draft_tokens),
                 ]
@@ -343,11 +339,6 @@ def main() -> int:
         help="chat-mode system prompt; DSpark auto mode uses the upstream default",
     )
     parser.add_argument("--draft-tokens", type=int, default=7)
-    parser.add_argument(
-        "--draft-policy",
-        choices=("auto", "fixed", "rolling", "accepted-ema"),
-        default="auto",
-    )
     parser.add_argument("--min-draft-tokens", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=180.0)
@@ -619,7 +610,6 @@ def main() -> int:
                     "suite_hash": suite_hash,
                     "max_tokens": args.max_tokens,
                     "draft_tokens": args.draft_tokens,
-                    "draft_policy": args.draft_policy,
                     "cases": rows,
                     "aggregate": {
                         "prompts": len(prompts),

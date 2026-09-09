@@ -41,7 +41,12 @@ if [ ${#targets[@]} -eq 0 ]; then
 fi
 
 for t in "${targets[@]}"; do
-  src="tools/bench/${t}.hip"
+  if [[ "$t" == *.hip ]]; then
+    src="$t"
+    t="$(basename "$t" .hip)"
+  else
+    src="tools/bench/${t}.hip"
+  fi
   out="/tmp/${t}"
   extra=()
   if grep -q "hipblas" "$src"; then
@@ -52,7 +57,7 @@ for t in "${targets[@]}"; do
   fi
   echo "==> $src -> $out"
   hipcc -O3 --offload-arch=gfx1151 -std=c++20 \
-    "${inc[@]}" "${lib[@]}" \
+    -I. "${inc[@]}" "${lib[@]}" \
     -Rpass-analysis=kernel-resource-usage \
     "$src" "${extra[@]}" -o "$out" 2>"/tmp/${t}.build.log" ||
     { tail -40 "/tmp/${t}.build.log"; exit 1; }

@@ -12,7 +12,12 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/crypto/sha256.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+
+namespace gufo::testing::ds4 {
+void CheckTokenGoldens(const models::deepseek_v4_flash::Model& model);
+}
 
 namespace {
 
@@ -84,6 +89,45 @@ void CheckPinnedTrajectory(
   Expect(top1_matches >= 116, "128-token top-1 agreement");
   Expect(rank_sum <= 142, "128-token aggregate rank");
   Expect(worst_rank <= 3, "128-token worst rank");
+}
+
+void CheckWidePrefill(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  const auto pattern = model->Tokenize(kTrajectoryPrompt);
+  Expect(!pattern.empty(), "wide prefill prompt tokenization");
+  std::vector<int> tokens(2048);
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    tokens[i] = pattern[i % pattern.size()];
+  }
+  const auto run = [&] {
+    std::string error;
+    auto session = model->CreateSession(4096, &error);
+    Expect(session != nullptr, error.c_str());
+    Expect(session->Sync(tokens, &error), error.c_str());
+    std::vector<float> trajectory;
+    for (int step = 0; step < 4; ++step) {
+      Expect(session->Position() == 2048 + step, "wide prefill frontier");
+      const auto logits = session->CopyLogits(&error);
+      Expect(!logits.empty(), error.c_str());
+      Expect(std::all_of(logits.begin(), logits.end(),
+                         [](float value) { return std::isfinite(value); }),
+             "wide prefill finite logits");
+      trajectory.insert(trajectory.end(), logits.begin(), logits.end());
+      if (step < 3) {
+        Expect(session->Evaluate(session->SelectNext(0.0F, nullptr), &error),
+               error.c_str());
+      }
+    }
+    return trajectory;
+  };
+  const auto reference = run();
+  const auto repeat = run();
+  Expect(reference == repeat, "wide prefill and continuation repeat exactly");
+  const auto* bytes = reinterpret_cast<const std::uint8_t*>(reference.data());
+  std::cout << "Wide prefill fingerprint "
+            << gufo::crypto::Sha256Hex(
+                   std::span(bytes, reference.size() * sizeof(float)))
+            << '\n';
 }
 
 void CheckBatchedPrefill(
@@ -487,8 +531,8 @@ void CheckDsparkPromptSeed(
          "first DSpark cycle retains complete prompt coverage");
   Expect(stats.steps == 1, "DSpark drafts on the first generation cycle");
   Expect(stats.anchors == 1, "DSpark records one target-known anchor");
-  Expect(stats.support_drafted == 5, "DSpark records five support rows");
-  Expect(stats.verifier_rows == 6, "DSpark verifies anchor plus support rows");
+  Expect(stats.support_drafted == 3, "DSpark begins with three support rows");
+  Expect(stats.verifier_rows == 4, "DSpark verifies anchor plus support rows");
 
   auto short_extension = prompt;
   short_extension.push_back(emitted.front());
@@ -527,175 +571,6 @@ void CheckDsparkPromptSeed(
          "snapshot restore does not draft across a support-cache gap");
 }
 
-void CheckDsparkSessionBatch(
-    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
-  using gufo::models::deepseek_v4_flash::SessionDsparkBatchItem;
-
-  constexpr std::size_t kComparedTokens = 24;
-  constexpr std::array<std::string_view, 2> kPrompts{
-      "Continue this technical explanation with concrete examples: virtual "
-      "memory lets an operating system",
-      "Explain why speculative decoding can improve language model inference "
-      "while preserving the target model output.",
-  };
-  std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 2>
-      sequential;
-  std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 2>
-      reference_batched;
-  std::array<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>, 2>
-      batched;
-  std::string error;
-  for (std::size_t index = 0; index < kPrompts.size(); ++index) {
-    const auto prompt = model->Tokenize(kPrompts[index]);
-    Expect(!prompt.empty(), "DSpark batch prompt tokenization");
-    sequential[index] = model->CreateSession(512, &error);
-    reference_batched[index] = model->CreateSession(512, &error);
-    batched[index] = model->CreateSession(512, &error);
-    Expect(sequential[index] != nullptr, error.c_str());
-    Expect(reference_batched[index] != nullptr, error.c_str());
-    Expect(batched[index] != nullptr, error.c_str());
-    Expect(sequential[index]->Sync(prompt, &error), error.c_str());
-    Expect(reference_batched[index]->Sync(prompt, &error), error.c_str());
-    Expect(batched[index]->Sync(prompt, &error), error.c_str());
-  }
-
-  double serial_seconds = 0.0;
-  double batch_seconds = 0.0;
-  std::array<std::vector<int>, 2> serial_tokens;
-  for (std::size_t index = 0; index < sequential.size(); ++index) {
-    while (serial_tokens[index].size() < kComparedTokens) {
-      std::vector<int> emitted;
-      const auto start = std::chrono::steady_clock::now();
-      Expect(sequential[index]->DsparkStep(&emitted, &error), error.c_str());
-      serial_seconds += std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - start)
-                            .count();
-      serial_tokens[index].insert(serial_tokens[index].end(), emitted.begin(),
-                                  emitted.end());
-    }
-  }
-
-  auto run_batch = [&](auto& sessions, const char* support_body_setting,
-                       double* seconds) {
-    Expect(setenv("GUFO_DEEPSEEK_DSPARK_SUPPORT_BODY_BATCH",
-                  support_body_setting, 1) == 0,
-           "set DSpark support body route");
-    std::array<std::vector<int>, 2> tokens;
-    while (tokens[0].size() < kComparedTokens ||
-           tokens[1].size() < kComparedTokens) {
-      std::array<std::vector<int>, 2> emitted;
-      const std::array<SessionDsparkBatchItem, 2> items{{
-          {
-              .session = sessions[0].get(),
-              .max_tokens = 32,
-              .emitted = &emitted[0],
-          },
-          {
-              .session = sessions[1].get(),
-              .max_tokens = 32,
-              .emitted = &emitted[1],
-          },
-      }};
-      const auto start = std::chrono::steady_clock::now();
-      Expect(model->DsparkStepBatch(items, &error), error.c_str());
-      *seconds += std::chrono::duration<double>(
-                      std::chrono::steady_clock::now() - start)
-                      .count();
-      for (std::size_t index = 0; index < tokens.size(); ++index) {
-        tokens[index].insert(tokens[index].end(), emitted[index].begin(),
-                             emitted[index].end());
-      }
-    }
-    return tokens;
-  };
-
-  double reference_batch_seconds = 0.0;
-  const auto reference_batch_tokens =
-      run_batch(reference_batched, "0", &reference_batch_seconds);
-  const auto batch_tokens = run_batch(batched, "1", &batch_seconds);
-
-  std::uint64_t serial_emitted = 0;
-  std::uint64_t batch_emitted = 0;
-  std::uint64_t serial_support_drafted = 0;
-  std::uint64_t serial_support_accepted = 0;
-  std::uint64_t reference_support_drafted = 0;
-  std::uint64_t reference_support_accepted = 0;
-  std::uint64_t batch_support_drafted = 0;
-  std::uint64_t batch_support_accepted = 0;
-  for (std::size_t index = 0; index < batch_tokens.size(); ++index) {
-    const auto serial_mismatch =
-        std::mismatch(serial_tokens[index].begin(),
-                      serial_tokens[index].begin() + kComparedTokens,
-                      batch_tokens[index].begin());
-    if (serial_mismatch.first !=
-        serial_tokens[index].begin() + kComparedTokens) {
-      const std::size_t token_index = static_cast<std::size_t>(
-          serial_mismatch.first - serial_tokens[index].begin());
-      std::cerr << "DSpark C1/W2 near-tie session=" << index
-                << " token=" << token_index
-                << " serial=" << *serial_mismatch.first
-                << " batch=" << *serial_mismatch.second << '\n';
-    }
-    const auto reference_mismatch =
-        std::mismatch(reference_batch_tokens[index].begin(),
-                      reference_batch_tokens[index].begin() + kComparedTokens,
-                      batch_tokens[index].begin());
-    if (reference_mismatch.first !=
-        reference_batch_tokens[index].begin() + kComparedTokens) {
-      const std::size_t token_index = static_cast<std::size_t>(
-          reference_mismatch.first - reference_batch_tokens[index].begin());
-      std::cerr << "DSpark support body batch mismatch session=" << index
-                << " token=" << token_index
-                << " reference=" << *reference_mismatch.first
-                << " batch=" << *reference_mismatch.second << "\nreference:";
-      for (const int token : reference_batch_tokens[index]) {
-        std::cerr << ' ' << token;
-      }
-      std::cerr << "\nbatch:";
-      for (const int token : batch_tokens[index]) {
-        std::cerr << ' ' << token;
-      }
-      std::cerr << "\nserial:";
-      for (const int token : serial_tokens[index]) {
-        std::cerr << ' ' << token;
-      }
-      std::cerr << '\n';
-    }
-    const auto serial_stats = sequential[index]->DsparkStatistics();
-    const auto reference_stats = reference_batched[index]->DsparkStatistics();
-    const auto batch_stats = batched[index]->DsparkStatistics();
-    serial_emitted += serial_tokens[index].size();
-    batch_emitted += batch_tokens[index].size();
-    serial_support_drafted += serial_stats.support_drafted;
-    serial_support_accepted += serial_stats.support_accepted;
-    reference_support_drafted += reference_stats.support_drafted;
-    reference_support_accepted += reference_stats.support_accepted;
-    batch_support_drafted += batch_stats.support_drafted;
-    batch_support_accepted += batch_stats.support_accepted;
-  }
-  const double serial_acceptance =
-      static_cast<double>(serial_support_accepted) / serial_support_drafted;
-  const double reference_acceptance =
-      static_cast<double>(reference_support_accepted) /
-      reference_support_drafted;
-  const double batch_acceptance =
-      static_cast<double>(batch_support_accepted) / batch_support_drafted;
-  Expect(batch_acceptance + 1.0e-12 >= reference_acceptance,
-         "support body batching regressed DSpark acceptance");
-  std::cout << "DeepSeek DSpark C2 batch: serial=" << serial_seconds * 1000.0
-            << " ms reference_batch=" << reference_batch_seconds * 1000.0
-            << " ms batch=" << batch_seconds * 1000.0
-            << " ms speedup=" << serial_seconds / batch_seconds << "x combined="
-            << static_cast<double>(batch_emitted) / batch_seconds
-            << " support_body_speedup="
-            << reference_batch_seconds / batch_seconds << "x"
-            << " tok/s serial_acceptance=" << serial_acceptance
-            << " reference_acceptance=" << reference_acceptance
-            << " batch_acceptance=" << batch_acceptance
-            << " serial_tokens=" << serial_emitted
-            << " batch_tokens=" << batch_emitted << '\n';
-}
-
 void CheckDsparkSingleQuality(
     const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
   using gufo::models::deepseek_v4_flash::SessionDsparkBatchItem;
@@ -710,7 +585,7 @@ void CheckDsparkSingleQuality(
       "。",
   };
   std::string error;
-  for (const bool rolling : {false, true}) {
+  {
     int top1 = 0;
     int compared = 0;
     int worst_rank = 0;
@@ -731,7 +606,6 @@ void CheckDsparkSingleQuality(
             .session = speculative.get(),
             .max_tokens = 32 - generated,
             .max_draft_tokens = 7,
-            .schedule_confidence = rolling,
             .emitted = &emitted,
         };
         Expect(model->DsparkStepBatch(
@@ -774,22 +648,21 @@ void CheckDsparkSingleQuality(
             worst_cosine, dot / std::sqrt(candidate_norm * reference_norm));
       }
     }
-    std::cout << "DSpark C1 " << (rolling ? "rolling" : "fixed")
+    std::cout << "DSpark C1 adaptive"
               << " teacher-forced quality: top1=" << top1 << '/' << compared
               << " worst_rank=" << worst_rank << " rmse=" << worst_rmse
               << " cosine=" << worst_cosine << " max_error=" << worst_error
               << '\n';
-    // The fixed full-width baseline scores 123/128 top-1, worst rank 6 on
-    // these free-running continuations. The separate immutable teacher-forced
-    // trajectory retains its stricter top-3 contract.
-    Expect(top1 >= 123 && worst_rank <= 6,
-           "single-request policy retains legacy scalar-token agreement");
+    // The scalar replay bounds free-running divergence; the immutable
+    // teacher-forced trajectory separately gates reference-model agreement.
+    Expect(top1 >= 125 && worst_rank <= 2,
+           "single-request policy retains scalar-token agreement");
     Expect(worst_rmse <= 1.12 && worst_cosine >= 0.979 && worst_error <= 5.0F,
            "single-request state retains the pinned full-logit envelope");
   }
 }
 
-void CheckDsparkDownRoutes(
+void CheckDsparkReproducibility(
     const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
   using gufo::models::deepseek_v4_flash::Session;
   using gufo::models::deepseek_v4_flash::SessionDsparkBatchItem;
@@ -801,17 +674,6 @@ void CheckDsparkDownRoutes(
       "Write a concise C++20 fixed-capacity ring buffer implementation.",
   };
   constexpr std::size_t kCycles = 6;
-  constexpr const char* kSetting = "GUFO_DEEPSEEK_DSPARK_DOWN_REUSE_MID";
-  const char* previous = std::getenv(kSetting);
-  const bool had_previous = previous != nullptr;
-  const std::string previous_value = previous != nullptr ? previous : "";
-  constexpr const char* kAttentionSetting =
-      "GUFO_DEEPSEEK_DSPARK_MULTI_ATTN_F16";
-  const char* previous_attention = std::getenv(kAttentionSetting);
-  const bool had_previous_attention = previous_attention != nullptr;
-  const std::string previous_attention_value =
-      previous_attention != nullptr ? previous_attention : "";
-
   struct Observation {
     std::vector<int> tokens;
     std::vector<float> logits;
@@ -834,7 +696,6 @@ void CheckDsparkDownRoutes(
           .session = configured.get(),
           .max_tokens = 16,
           .max_draft_tokens = tail,
-          .schedule_confidence = false,
           .emitted = &emitted,
       };
       Expect(model->DsparkStepBatch(
@@ -845,28 +706,26 @@ void CheckDsparkDownRoutes(
              "single-request draft limit is honored");
       Expect(!emitted.empty() && emitted.size() <= tail + 1,
              "single-request emitted prefix respects its limit");
-      if (tail == 7) {
+      {
         std::vector<int> legacy_emitted;
-        Expect(legacy->DsparkStep(16, &legacy_emitted, &error), error.c_str());
+        Expect(legacy->DsparkStep(16, tail, &legacy_emitted, &error),
+               error.c_str());
         Expect(emitted == legacy_emitted &&
                    configured->CopyLogits(&error) == legacy->CopyLogits(&error),
-               "full-width fixed C1 retains legacy tokens and logits");
+               "C1 session and batch APIs retain identical tokens and logits");
       }
     }
     Expect(configured->DsparkStatistics().support_drafted > 0,
            "single-request limit check exercised proposals");
   }
   for (const std::size_t concurrency : {1U, 2U, 4U, 6U, 8U}) {
-    auto run = [&](const char* setting) {
-      Expect(setenv(kSetting, setting, 1) == 0, "set grouped down route");
-      Expect(setenv(kAttentionSetting, setting, 1) == 0,
-             "set grouped compressor route");
+    auto run = [&] {
       std::vector<std::unique_ptr<Session>> sessions;
       for (std::size_t i = 0; i < concurrency; ++i) {
         auto session = model->CreateSession(512, &error);
         Expect(session != nullptr, error.c_str());
         auto prompt = model->Tokenize(kPrompts[i % kPrompts.size()]);
-        Expect(!prompt.empty(), "grouped down prompt tokenization");
+        Expect(!prompt.empty(), "DSpark repeat prompt tokenization");
         if (i >= kPrompts.size()) {
           // Cross the ratio-128 compression boundary at different offsets.
           auto context = model->Tokenize(kTrajectoryPrompt);
@@ -893,7 +752,6 @@ void CheckDsparkDownRoutes(
                            .max_tokens = budget,
                            .max_draft_tokens = static_cast<std::uint32_t>(
                                std::clamp<std::size_t>(budget - 1, 1, 3)),
-                           .schedule_confidence = true,
                            .emitted = &emitted[index]});
         }
         Expect(model->DsparkStepBatch(items, &error), error.c_str());
@@ -914,8 +772,24 @@ void CheckDsparkDownRoutes(
       return observations;
     };
 
-    const auto reference = run("0");
-    const auto candidate = run("1");
+    const auto reference = run();
+    const auto candidate = run();
+    std::vector<std::uint8_t> fingerprint;
+    const auto append = [&](const auto& values) {
+      const auto* bytes = reinterpret_cast<const std::uint8_t*>(values.data());
+      fingerprint.insert(fingerprint.end(), bytes,
+                         bytes + values.size() * sizeof(values[0]));
+    };
+    for (const auto& observation : candidate) {
+      append(observation.tokens);
+      append(observation.logits);
+      append(std::array<std::uint64_t, 4>{
+          static_cast<std::uint64_t>(observation.position),
+          observation.stats.support_drafted, observation.stats.support_accepted,
+          observation.stats.verifier_rows});
+    }
+    std::cout << "DSpark fingerprint C" << concurrency << " "
+              << gufo::crypto::Sha256Hex(fingerprint) << '\n';
     Expect(reference.size() == candidate.size(), "same observation count");
     std::uint64_t drafted = 0;
     for (std::size_t i = 0; i < reference.size(); ++i) {
@@ -931,7 +805,7 @@ void CheckDsparkDownRoutes(
           max_error = std::max(max_error, std::abs(delta));
           mismatched_logits += a.logits[j] != b.logits[j];
         }
-        std::cerr << "DSpark down route mismatch C=" << concurrency
+        std::cerr << "DSpark repeat route mismatch C=" << concurrency
                   << " cycle=" << i / concurrency
                   << " request=" << i % concurrency
                   << " logits=" << mismatched_logits
@@ -951,42 +825,38 @@ void CheckDsparkDownRoutes(
           std::cerr << ' ' << token;
         std::cerr << '\n';
       }
-      Expect(a.tokens == b.tokens, "grouped down retains exact emitted tokens");
-      Expect(a.logits == b.logits, "grouped down retains full frontier logits");
-      Expect(a.position == b.position, "grouped down retains request position");
-      Expect(a.stats.verifier_rows == b.stats.verifier_rows &&
-                 a.stats.verifier_accepted == b.stats.verifier_accepted &&
-                 a.stats.support_drafted == b.stats.support_drafted &&
-                 a.stats.support_accepted == b.stats.support_accepted &&
-                 a.stats.positional_accepted == b.stats.positional_accepted &&
-                 a.stats.anchors == b.stats.anchors &&
-                 a.stats.full_blocks == b.stats.full_blocks &&
-                 a.stats.steps == b.stats.steps &&
-                 a.stats.skipped == b.stats.skipped &&
-                 a.stats.context_tokens == b.stats.context_tokens,
-             "grouped down retains all speculative counters and support state");
+      Expect(a.tokens == b.tokens,
+             "DSpark repeat retains exact emitted tokens");
+      Expect(a.logits == b.logits,
+             "DSpark repeat retains full frontier logits");
+      Expect(a.position == b.position,
+             "DSpark repeat retains request position");
+      Expect(
+          a.stats.verifier_rows == b.stats.verifier_rows &&
+              a.stats.verifier_accepted == b.stats.verifier_accepted &&
+              a.stats.support_drafted == b.stats.support_drafted &&
+              a.stats.support_accepted == b.stats.support_accepted &&
+              a.stats.positional_accepted == b.stats.positional_accepted &&
+              a.stats.anchors == b.stats.anchors &&
+              a.stats.full_blocks == b.stats.full_blocks &&
+              a.stats.steps == b.stats.steps &&
+              a.stats.skipped == b.stats.skipped &&
+              a.stats.context_tokens == b.stats.context_tokens,
+          "DSpark repeat retains all speculative counters and support state");
       if (i >= reference.size() - concurrency) {
         drafted += b.stats.support_drafted;
       }
     }
-    Expect(drafted > 0, "grouped down comparison exercised DSpark proposals");
-    std::cout << "DSpark down C" << concurrency << ": " << reference.size()
+    Expect(drafted > 0, "DSpark repeat comparison exercised DSpark proposals");
+    std::cout << "DSpark repeat C" << concurrency << ": " << reference.size()
               << " exact token/logit/state comparisons, drafted=" << drafted
               << '\n';
   }
-  Expect(had_previous ? setenv(kSetting, previous_value.c_str(), 1) == 0
-                      : unsetenv(kSetting) == 0,
-         "restore grouped down route");
-  Expect(
-      had_previous_attention
-          ? setenv(kAttentionSetting, previous_attention_value.c_str(), 1) == 0
-          : unsetenv(kAttentionSetting) == 0,
-      "restore grouped compressor route");
 }
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   const char* model_path = std::getenv("GUFO_DEEPSEEK_V4_FLASH_MODEL");
   if (model_path == nullptr || model_path[0] == '\0') {
     std::cout << "SKIP: GUFO_DEEPSEEK_V4_FLASH_MODEL is not set\n";
@@ -996,8 +866,19 @@ int main() {
   using gufo::models::deepseek_v4_flash::Model;
   using gufo::models::deepseek_v4_flash::ModelOptions;
 
+  const bool dspark = argc == 2 && std::string_view(argv[1]) == "--dspark";
+  const bool wide_prefill =
+      argc == 2 && std::string_view(argv[1]) == "--wide-prefill";
+  if (argc > 1 && !dspark && !wide_prefill) {
+    std::cerr << "usage: ds4_quality_test [--dspark|--wide-prefill]\n";
+    return 2;
+  }
   const char* dspark_model_path =
-      std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL");
+      dspark ? std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL") : nullptr;
+  if (dspark && (dspark_model_path == nullptr || *dspark_model_path == '\0')) {
+    std::cout << "SKIP: GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL is not set\n";
+    return 77;
+  }
   std::string error;
   const auto model =
       Model::Load(model_path,
@@ -1013,39 +894,18 @@ int main() {
   Expect(model->VocabSize() > 0, "vocabulary size");
   Expect(!model->ModelName().empty(), "model name");
 
-  if (std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_DOWN_ROUTES_ONLY") !=
-      nullptr) {
-    if (!model->HasDspark()) {
-      std::cout << "SKIP: GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL is not set\n";
-      return 77;
-    }
-    CheckDsparkDownRoutes(model);
+  if (wide_prefill) {
+    CheckWidePrefill(model);
+    return 0;
+  }
+  if (dspark) {
+    CheckDsparkReproducibility(model);
     CheckDsparkSingleQuality(model);
+    CheckDsparkPromptSeed(model);
     return 0;
   }
 
-  if (std::getenv("GUFO_DEEPSEEK_V4_FLASH_CONVERSATIONAL_PREFILL_ONLY") !=
-      nullptr) {
-    Expect(!model->HasDspark(),
-           "conversational prefill diagnostic requires target only");
-    CheckConversationalPrefill(model);
-    return 0;
-  }
-
-  if (std::getenv("GUFO_DEEPSEEK_V4_FLASH_SESSION_BATCH_ONLY") != nullptr) {
-    Expect(!model->HasDspark(),
-           "session batch diagnostic requires target only");
-    CheckSessionBatch(model);
-    return 0;
-  }
-
-  if (std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_BATCH_ONLY") != nullptr) {
-    Expect(model->HasDspark(),
-           "DSpark batch diagnostic requires a support model");
-    CheckDsparkSessionBatch(model);
-    return 0;
-  }
-
+  gufo::testing::ds4::CheckTokenGoldens(*model);
   const auto prompt =
       model->EncodeChat("You are a concise assistant.", "Reply with one word.");
   Expect(!prompt.empty(), "chat prompt tokenization");
@@ -1086,6 +946,7 @@ int main() {
   CheckPinnedTrajectory(model);
   CheckBatchedPrefill(model);
   CheckConversationalPrefill(model);
+  CheckWidePrefill(model);
   if (!model->HasDspark()) {
     CheckSessionBatch(model);
   }

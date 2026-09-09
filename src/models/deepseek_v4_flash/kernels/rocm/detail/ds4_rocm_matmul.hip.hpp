@@ -192,7 +192,7 @@ static int ds4_gemm_f16_wmma_eligible(uint64_t m, uint64_t n, uint64_t k) {
     if (!g_rocm_gfx1151 || m % DS4_WMMA_GEMM_BM != 0u ||
         n % DS4_WMMA_GEMM_BN != 0u || k % DS4_WMMA_GEMM_BK != 0u ||
         m > UINT32_MAX || n > UINT32_MAX || k > UINT32_MAX) {
-        return 0;
+      return 0;
     }
     return (m / DS4_WMMA_GEMM_BM) * (n / DS4_WMMA_GEMM_BN) >=
            DS4_WMMA_GEMM_MIN_BLOCKS;
@@ -257,11 +257,11 @@ static inline uint64_t ds4_gemm_f16_wmma_pad_n(uint64_t n) {
 /* Whether either tile can serve `m x n_pad x k`, with `n_pad` already rounded. */
 static int ds4_gemm_f16_wmma_padded_eligible(uint64_t m, uint64_t n_pad,
                                              uint64_t k) {
-    if (!g_rocm_gfx1151 || n_pad % DS4_WMMA_GEMM_NARROW_BN != 0u ||
-        k % DS4_WMMA_GEMM_BK != 0u || m > UINT32_MAX || n_pad > UINT32_MAX ||
-        k > UINT32_MAX) {
-        return 0;
-    }
+  if (!g_rocm_gfx1151 || n_pad % DS4_WMMA_GEMM_NARROW_BN != 0u ||
+      k % DS4_WMMA_GEMM_BK != 0u || m > UINT32_MAX || n_pad > UINT32_MAX ||
+      k > UINT32_MAX) {
+    return 0;
+  }
     return m % DS4_WMMA_GEMM_NARROW_BM == 0u;
 }
 
@@ -273,11 +273,11 @@ static int ds4_gemm_f16_wmma_padded_launch(OutT *out,
                                            uint64_t n_pad,
                                            uint64_t k,
                                            const char *what) {
-    if (n_pad >= DS4_WMMA_GEMM_WIDE_MIN_N && m % DS4_WMMA_GEMM_BM == 0u &&
-        n_pad % DS4_WMMA_GEMM_BN == 0u) {
-        return ds4_gemm_f16_wmma_launch<A_ROWMAJOR, OutT>(out, weight, act, m,
-                                                          n_pad, k, what);
-    }
+  if (n_pad >= DS4_WMMA_GEMM_WIDE_MIN_N && m % DS4_WMMA_GEMM_BM == 0u &&
+      n_pad % DS4_WMMA_GEMM_BN == 0u) {
+    return ds4_gemm_f16_wmma_launch<A_ROWMAJOR, OutT>(out, weight, act, m,
+                                                      n_pad, k, what);
+  }
     constexpr uint32_t kNarrowWmf = 2u;
     constexpr uint32_t kNarrowWnf = 2u;
     constexpr uint32_t kNarrowThreads =
@@ -636,10 +636,10 @@ static int hip_launch_q8_group_pairs(
         const uint32_t *group_offsets,
         uint32_t group_count,
         uint32_t rows_per_block) {
-    if (!group_offsets || group_count < 2u || group_count > 8u ||
-        (group_count & 1u) != 0u) {
-        return 0;
-    }
+  if (!group_offsets || group_count < 2u || group_count > 8u ||
+      (group_count & 1u) != 0u) {
+    return 0;
+  }
     const unsigned grid =
         (unsigned)((out_dim + rows_per_block - 1u) / rows_per_block);
     const unsigned threads = rows_per_block * 32u;
@@ -669,8 +669,7 @@ static int hip_launch_q8_group_pairs(
         if (total_rows == 6u || total_rows == 8u || total_rows == 12u ||
             total_rows == 16u || total_rows == 18u || total_rows == 24u ||
             total_rows == 32u) {
-            return hip_ok(hipGetLastError(),
-                          "matmul_q8_0 all-row exact launch");
+          return hip_ok(hipGetLastError(), "matmul_q8_0 all-row exact launch");
         }
 
         const dim3 pair_grid(grid, group_count / 2u, 1u);
@@ -697,9 +696,8 @@ static int hip_launch_q8_group_pairs(
             group_offsets[group + 1u] - group_offsets[group];
         const uint32_t rows1 =
             group_offsets[group + 2u] - group_offsets[group + 1u];
-        if (rows0 == 0u || rows0 > 6u ||
-            rows1 == 0u || rows1 > 6u) {
-            return 0;
+        if (rows0 == 0u || rows0 > 6u || rows1 == 0u || rows1 > 6u) {
+          return 0;
         }
 #define DS4_LAUNCH_Q8_GROUP_PAIR(NT)                                    \
         matmul_q8_0_preq_group_pair_w32_kernel<NT><<<grid, threads>>>(  \
@@ -776,37 +774,45 @@ static int hip_matmul_q8_0_tensor_f16_gemm(
         const ds4_gpu_tensor *x,
         uint64_t n_tok,
         const char *label) {
-    if (!g_hipblas_ready || !out || !x || !model_map ||
-        in_dim == 0u || out_dim == 0u || n_tok == 0u ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;
-    const uint64_t blocks = (in_dim + 31u) / 32u;
-    uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
-    if (weight_offset > model_size ||
-        !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
-        !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
-        weight_bytes > model_size - weight_offset ||
-        !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
-        !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
-        x->bytes < x_bytes || out->bytes < out_bytes) return 0;
-    const __half *w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes, in_dim, out_dim, label);
-    if (!w_f16) return 0;
-    const uint64_t xh_count = n_tok * in_dim;
-    /* See hip_f16_input_publish: several projections in a layer share these rows. */
-    __half *xh = hip_f16_input_lookup((const float *)x->ptr, xh_count);
-    if (!xh) {
-        xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16 gemm activations");
-        if (!xh) return 0;
-        hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
-        if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch")) return 0;
-    }
+  if (!g_hipblas_ready || !out || !x || !model_map || in_dim == 0u ||
+      out_dim == 0u || n_tok == 0u || in_dim > UINT32_MAX ||
+      out_dim > UINT32_MAX || n_tok > UINT32_MAX)
+    return 0;
+  const uint64_t blocks = (in_dim + 31u) / 32u;
+  uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+  if (weight_offset > model_size ||
+      !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
+      !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
+      weight_bytes > model_size - weight_offset ||
+      !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+      !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+      x->bytes < x_bytes || out->bytes < out_bytes)
+    return 0;
+  const __half* w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes,
+                                       in_dim, out_dim, label);
+  if (!w_f16)
+    return 0;
+  const uint64_t xh_count = n_tok * in_dim;
+  /* See hip_f16_input_publish: several projections in a layer share these rows.
+   */
+  __half* xh = hip_f16_input_lookup((const float*)x->ptr, xh_count);
+  if (!xh) {
+    xh = (__half*)hip_tmp_alloc(xh_count * sizeof(__half),
+                                "q8 f16 gemm activations");
+    if (!xh)
+      return 0;
+    hip_launch_f32_to_f16(xh, (const float*)x->ptr, xh_count);
+    if (!hip_ok(hipGetLastError(), "q8 f16 activation convert launch"))
+      return 0;
+  }
 #ifdef __HIP_PLATFORM_AMD__
-    if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
-        hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F32) &&
-        hipblaslt_gemm_f16(out->ptr, w_f16, xh, (uint32_t)out_dim,
-                           (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
-                           HIP_R_32F, label ? label : "q8 f16 projection")) {
-        return 1;
-    }
+  if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
+      hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F32) &&
+      hipblaslt_gemm_f16(out->ptr, w_f16, xh, (uint32_t)out_dim,
+                         (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
+                         HIP_R_32F, label ? label : "q8 f16 projection")) {
+    return 1;
+  }
 #endif
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -846,37 +852,43 @@ static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
         const ds4_gpu_tensor *x,
         uint64_t n_tok,
         const char *label) {
-    if (!g_hipblas_ready || !out_h || !x || !model_map ||
-        in_dim == 0u || out_dim == 0u || n_tok == 0u ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;
-    const uint64_t blocks = (in_dim + 31u) / 32u;
-    uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
-    if (weight_offset > model_size ||
-        !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
-        !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
-        weight_bytes > model_size - weight_offset ||
-        !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
-        !hip_u64_mul3_checked(n_tok, out_dim, sizeof(__half), &out_bytes) ||
-        x->bytes < x_bytes || out_h->bytes < out_bytes) return 0;
-    const __half *w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes, in_dim, out_dim, label);
-    if (!w_f16) return 0;
-    const uint64_t xh_count = n_tok * in_dim;
-    __half *xh = hip_f16_input_lookup((const float *)x->ptr, xh_count);
-    if (!xh) {
-        xh = (__half *)hip_tmp_alloc(xh_count * sizeof(__half), "q8 f16-out gemm activations");
-        if (!xh) return 0;
-        hip_launch_f32_to_f16(xh, (const float *)x->ptr, xh_count);
-        if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch")) return 0;
-    }
+  if (!g_hipblas_ready || !out_h || !x || !model_map || in_dim == 0u ||
+      out_dim == 0u || n_tok == 0u || in_dim > UINT32_MAX ||
+      out_dim > UINT32_MAX || n_tok > UINT32_MAX)
+    return 0;
+  const uint64_t blocks = (in_dim + 31u) / 32u;
+  uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+  if (weight_offset > model_size ||
+      !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
+      !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
+      weight_bytes > model_size - weight_offset ||
+      !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+      !hip_u64_mul3_checked(n_tok, out_dim, sizeof(__half), &out_bytes) ||
+      x->bytes < x_bytes || out_h->bytes < out_bytes)
+    return 0;
+  const __half* w_f16 = hip_q8_f16_ptr(model_map, weight_offset, weight_bytes,
+                                       in_dim, out_dim, label);
+  if (!w_f16)
+    return 0;
+  const uint64_t xh_count = n_tok * in_dim;
+  __half* xh = hip_f16_input_lookup((const float*)x->ptr, xh_count);
+  if (!xh) {
+    xh = (__half*)hip_tmp_alloc(xh_count * sizeof(__half),
+                                "q8 f16-out gemm activations");
+    if (!xh)
+      return 0;
+    hip_launch_f32_to_f16(xh, (const float*)x->ptr, xh_count);
+    if (!hip_ok(hipGetLastError(), "q8 f16-out activation convert launch"))
+      return 0;
+  }
 #ifdef __HIP_PLATFORM_AMD__
-    if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
-        hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F16) &&
-        hipblaslt_gemm_f16(out_h->ptr, w_f16, xh, (uint32_t)out_dim,
-                           (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
-                           HIP_R_16F,
-                           label ? label : "q8 f16-out projection")) {
-        return 1;
-    }
+  if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
+      hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_Q8_F16) &&
+      hipblaslt_gemm_f16(out_h->ptr, w_f16, xh, (uint32_t)out_dim,
+                         (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
+                         HIP_R_16F, label ? label : "q8 f16-out projection")) {
+    return 1;
+  }
 #endif
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -907,26 +919,29 @@ static int hip_matmul_q8_0_tensor_f16_gemm_out_half(
 }
 
 static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok, const char *label) {
-    if (!out || !x || !model_map ||
-        in_dim == 0u || out_dim == 0u || n_tok == 0u ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;
-    uint64_t blocks = (in_dim + 31u) / 32u;
-    uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
-    if (weight_offset > model_size ||
-        !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
-        !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
-        weight_bytes > model_size - weight_offset ||
-        !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
-        !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
-        x->bytes < x_bytes || out->bytes < out_bytes) return 0;
-    /* The shared-expert hipBLAS route wins for prompt chunks and loses badly for
-     * verification blocks, for the same macro-tile padding reason. */
-    if (n_tok > ds4_rocm_dense_small_batch_rows() &&
-        hip_runtime_config()->shared_down_hipblas && in_dim == 2048u && out_dim == 4096u &&
-        hip_matmul_q8_0_tensor_f16_gemm(out, model_map, model_size, weight_offset,
-                                         in_dim, out_dim, x, n_tok, label ? label : "shared_expert")) {
-        return 1;
-    }
+  if (!out || !x || !model_map || in_dim == 0u || out_dim == 0u ||
+      n_tok == 0u || in_dim > UINT32_MAX || out_dim > UINT32_MAX ||
+      n_tok > UINT32_MAX)
+    return 0;
+  uint64_t blocks = (in_dim + 31u) / 32u;
+  uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+  if (weight_offset > model_size ||
+      !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
+      !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
+      weight_bytes > model_size - weight_offset ||
+      !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+      !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+      x->bytes < x_bytes || out->bytes < out_bytes)
+    return 0;
+  /* The shared-expert hipBLAS route wins for prompt chunks and loses badly for
+   * verification blocks, for the same macro-tile padding reason. */
+  if (n_tok > ds4_rocm_dense_small_batch_rows() && in_dim == 2048u &&
+      out_dim == 4096u &&
+      hip_matmul_q8_0_tensor_f16_gemm(out, model_map, model_size, weight_offset,
+                                      in_dim, out_dim, x, n_tok,
+                                      label ? label : "shared_expert")) {
+    return 1;
+  }
     const char *wptr = hip_model_range_ptr(model_map, weight_offset, weight_bytes, "q8_0");
     if (!wptr) return 0;
     /* Dense Q8 prefill through the vendored MMQ tier. Excluded from DSpark
@@ -952,10 +967,9 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
       dense_mmq_shape_bit = 16u;
     }
     const bool dense_mmq_shape_enabled =
-        n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS ||
-        (hip_runtime_config()->dense_mmq_mask & dense_mmq_shape_bit) != 0u;
-    if (n_tok >= hip_runtime_config()->dense_mmq_rows && !g_small_batch_mode &&
-        dense_mmq_shape_enabled && g_rocm_mmq_ready &&
+        n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS || (4u & dense_mmq_shape_bit) != 0u;
+    if (n_tok >= 32u && !g_small_batch_mode && dense_mmq_shape_enabled &&
+        g_rocm_mmq_ready &&
         ds4_mmq_q8_0_dense(wptr, (const float*)x->ptr, (float*)out->ptr,
                            (int)out_dim, (int)n_tok, (int)in_dim,
                            (hipStream_t)0) == 0) {
@@ -967,82 +981,21 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
       }
       return 1;
     }
-    if (n_tok == 1 && !hip_q8_prequant_decode_enabled()) {
-        const bool extended_sharedx =
-            in_dim > 8192u &&
-            in_dim <= 16384u &&
-            hip_runtime_config()->q8_decode_sharedx_64k;
-        if ((in_dim & 31u) == 0u &&
-            (in_dim <= 8192u || extended_sharedx)) {
-            const unsigned rows_per_block = 32u;
-            const unsigned threads = rows_per_block * 32u;
-            matmul_q8_0_f32_sharedx_warp_rows_w32_kernel<<<
-                    (unsigned)((out_dim + rows_per_block - 1u) / rows_per_block),
-                    threads,
-                    (size_t)in_dim * sizeof(float)>>>(
-                    (float *)out->ptr,
-                    reinterpret_cast<const unsigned char *>(wptr),
-                    (const float *)x->ptr,
-                    (uint32_t)blocks,
-                    out_dim,
-                    blocks * 34u);
-            const hipError_t launch_err = hipGetLastError();
-            if (launch_err == hipSuccess) {
-                if (extended_sharedx) {
-                    static int notice_printed = 0;
-                    if (!notice_printed) {
-                        fprintf(stderr,
-                                DS4_GPU_LOG_PREFIX
-                                "Q8 one-token shared-input kernel enabled "
-                                "through 64 KiB LDS (in_dim=%llu)\n",
-                                (unsigned long long)in_dim);
-                        notice_printed = 1;
-                    }
-                }
-                return 1;
-            }
-            if (!extended_sharedx) {
-                return hip_ok(launch_err,
-                               "matmul_q8_0 f32 sharedx launch");
-            }
-            static int fallback_notice_printed = 0;
-            if (!fallback_notice_printed) {
-                fprintf(stderr,
-                        DS4_GPU_LOG_PREFIX
-                        "Q8 64 KiB shared-input launch unavailable "
-                        "(%s); falling back to the warp-row kernel\n",
-                        hipGetErrorString(launch_err));
-                fallback_notice_printed = 1;
-            }
-        }
-        matmul_q8_0_f32_warp8_kernel<<<((unsigned)out_dim + 7u) / 8u, 256>>>(
-                (float *)out->ptr,
-                reinterpret_cast<const unsigned char *>(wptr),
-                (const float *)x->ptr,
-                in_dim,
-                out_dim,
-                blocks);
-        return hip_ok(hipGetLastError(), "matmul_q8_0 f32 warp launch");
-    }
+
     if (n_tok > 1) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-        if ((in_dim % 32u) == 0u &&
-            out_dim >= 1024u &&
-            n_tok >= 256u &&
-            in_dim <= UINT32_MAX && out_dim <= UINT32_MAX && n_tok <= UINT32_MAX) {
-            const dim3 grid((uint32_t)((out_dim + 63u) / 64u),
-                            (uint32_t)((n_tok + 63u) / 64u),
-                            1u);
-            matmul_q8_0_f32_batch_wmma_4w_kernel<<<grid, 128u>>>(
-                    (float *)out->ptr,
-                    reinterpret_cast<const unsigned char *>(wptr),
-                    (const float *)x->ptr,
-                    (uint32_t)n_tok,
-                    (uint32_t)in_dim,
-                    (uint32_t)out_dim,
-                    blocks * 34u);
-            return hip_ok(hipGetLastError(), "matmul_q8_0 f32 batch wmma 4w launch");
-        }
+      if ((in_dim % 32u) == 0u && out_dim >= 1024u && n_tok >= 256u &&
+          in_dim <= UINT32_MAX && out_dim <= UINT32_MAX &&
+          n_tok <= UINT32_MAX) {
+        const dim3 grid((uint32_t)((out_dim + 63u) / 64u),
+                        (uint32_t)((n_tok + 63u) / 64u), 1u);
+        matmul_q8_0_f32_batch_wmma_4w_kernel<<<grid, 128u>>>(
+            (float*)out->ptr, reinterpret_cast<const unsigned char*>(wptr),
+            (const float*)x->ptr, (uint32_t)n_tok, (uint32_t)in_dim,
+            (uint32_t)out_dim, blocks * 34u);
+        return hip_ok(hipGetLastError(),
+                      "matmul_q8_0 f32 batch wmma 4w launch");
+      }
 #endif
         const uint32_t small_batch_rows = ds4_rocm_dense_small_batch_rows();
         if ((in_dim & 31u) == 0u && n_tok <= small_batch_rows && n_tok <= 16u) {
@@ -1069,8 +1022,7 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
                       (float*)out->ptr,
                       reinterpret_cast<const unsigned char*>(wptr), xq, xscale,
                       in_dim, out_dim, blocks, (uint32_t)n_tok,
-                      n_tok == 2u ? hip_runtime_config()->q8_batch_rpb
-                                  : hip_runtime_config()->q8_decode_rpb);
+                      n_tok == 2u ? 2u : 1u);
                 }
             }
         }
@@ -1159,27 +1111,19 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
     void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 prequant");
     if (!tmp) return 0;
     int8_t *xq = (int8_t *)tmp;
-    float *xscale = (float *)((char *)tmp + scale_offset);
-    const ds4_rocm_runtime_config *cfg = hip_runtime_config();
+    float* xscale = (float*)((char*)tmp + scale_offset);
     const int use_dp4a = 1;
     dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1);
     quantize_q8_0_f32_kernel<<<qgrid, 32>>>(xq, xscale, (const float *)x->ptr, in_dim, blocks);
     if (!hip_ok(hipGetLastError(), "matmul_q8_0 quantize launch")) return 0;
     if (n_tok == 1) {
-        const uint32_t rows_per_block = cfg->q8_decode_rpb;
-        matmul_q8_0_preq_rows_w32_kernel<<<
-                ((unsigned)out_dim + rows_per_block - 1u) / rows_per_block,
-                rows_per_block * 32u>>>(
-                (float *)out->ptr,
-                reinterpret_cast<const unsigned char *>(wptr),
-                xq,
-                xscale,
-                in_dim,
-                out_dim,
-                blocks,
-                rows_per_block,
-                use_dp4a);
-        return hip_ok(hipGetLastError(), "matmul_q8_0 rows launch");
+      const uint32_t rows_per_block = 1u;
+      matmul_q8_0_preq_rows_w32_kernel<<<
+          ((unsigned)out_dim + rows_per_block - 1u) / rows_per_block,
+          rows_per_block * 32u>>>(
+          (float*)out->ptr, reinterpret_cast<const unsigned char*>(wptr), xq,
+          xscale, in_dim, out_dim, blocks, rows_per_block, use_dp4a);
+      return hip_ok(hipGetLastError(), "matmul_q8_0 rows launch");
     }
     if (blocks <= 32u) {
         dim3 bgrid(((unsigned)out_dim + 7u) / 8u, (unsigned)n_tok, 1);
@@ -1221,14 +1165,13 @@ extern "C" int ds4_gpu_matmul_q8_0_group_pairs_tensor(
         uint64_t n_tok,
         const uint32_t *group_offsets,
         uint32_t group_count) {
-    if (!out || !x || !model_map || !group_offsets || in_dim == 0u ||
-        out_dim == 0u || n_tok == 0u || (in_dim & 31u) != 0u ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX ||
-        n_tok > UINT32_MAX || group_count < 2u || group_count > 8u ||
-        (group_count & 1u) != 0u || group_offsets[0] != 0u ||
-        group_offsets[group_count] != n_tok) {
-        return 0;
-    }
+  if (!out || !x || !model_map || !group_offsets || in_dim == 0u ||
+      out_dim == 0u || n_tok == 0u || (in_dim & 31u) != 0u ||
+      in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX ||
+      group_count < 2u || group_count > 8u || (group_count & 1u) != 0u ||
+      group_offsets[0] != 0u || group_offsets[group_count] != n_tok) {
+    return 0;
+  }
     for (uint32_t group = 0; group < group_count; ++group) {
         if (group_offsets[group + 1u] <= group_offsets[group]) {
             return 0;
@@ -1246,7 +1189,7 @@ extern "C" int ds4_gpu_matmul_q8_0_group_pairs_tensor(
         !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
         !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
         x->bytes < x_bytes || out->bytes < out_bytes) {
-        return 0;
+      return 0;
     }
     const unsigned char *w = reinterpret_cast<const unsigned char *>(
         hip_model_range_ptr(
@@ -1268,9 +1211,9 @@ extern "C" int ds4_gpu_matmul_q8_0_group_pairs_tensor(
                 "matmul_q8_0 grouped-pair quantize launch")) {
         return 0;
     }
-    return hip_launch_q8_group_pairs(
-        (float *)out->ptr, w, xq, xscale, in_dim, out_dim, blocks,
-        group_offsets, group_count, hip_runtime_config()->q8_decode_rpb);
+    return hip_launch_q8_group_pairs((float*)out->ptr, w, xq, xscale, in_dim,
+                                     out_dim, blocks, group_offsets,
+                                     group_count, 1u);
 }
 
 static int ds4_gpu_matmul_q8_0_pair_tensor(
@@ -1285,11 +1228,11 @@ static int ds4_gpu_matmul_q8_0_pair_tensor(
         uint64_t out1_dim,
         const ds4_gpu_tensor *x,
         uint64_t n_tok) {
-    if (!out0 || !out1 || !x || !model_map ||
-        in_dim == 0 || out0_dim == 0 || out1_dim == 0 || n_tok == 0 ||
-        in_dim > UINT32_MAX || out0_dim > UINT32_MAX || out1_dim > UINT32_MAX || n_tok > UINT32_MAX) {
-        return 0;
-    }
+  if (!out0 || !out1 || !x || !model_map || in_dim == 0 || out0_dim == 0 ||
+      out1_dim == 0 || n_tok == 0 || in_dim > UINT32_MAX ||
+      out0_dim > UINT32_MAX || out1_dim > UINT32_MAX || n_tok > UINT32_MAX) {
+    return 0;
+  }
     if (n_tok != 1) {
         return hip_matmul_q8_0_tensor_labeled(out0, model_map, model_size, weight0_offset,
                                                in_dim, out0_dim, x, n_tok, "q8_0_pair0") &&
@@ -1302,50 +1245,19 @@ static int ds4_gpu_matmul_q8_0_pair_tensor(
         !hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
         !hip_u64_mul_checked(out0_dim, row_bytes, &weight0_bytes) ||
         !hip_u64_mul_checked(out1_dim, row_bytes, &weight1_bytes)) {
-        return 0;
+      return 0;
     }
     if (weight0_bytes > model_size - weight0_offset ||
         weight1_bytes > model_size - weight1_offset ||
         x->bytes < in_dim * sizeof(float) ||
         out0->bytes < out0_dim * sizeof(float) ||
         out1->bytes < out1_dim * sizeof(float)) {
-        return 0;
+      return 0;
     }
     const char *w0 = hip_model_range_ptr(model_map, weight0_offset, weight0_bytes, "q8_0_pair0");
     const char *w1 = hip_model_range_ptr(model_map, weight1_offset, weight1_bytes, "q8_0_pair1");
-    if (!w0 || !w1) return 0;
-    if (!hip_q8_prequant_decode_enabled()) {
-        const uint64_t max_out = out0_dim > out1_dim ? out0_dim : out1_dim;
-        if ((in_dim & 31u) == 0u && in_dim <= 8192u) {
-            const unsigned rows_per_block = 32u;
-            const unsigned threads = rows_per_block * 32u;
-            matmul_q8_0_pair_f32_sharedx_warp_rows_w32_kernel<<<
-                    (unsigned)((max_out + rows_per_block - 1u) / rows_per_block),
-                    threads,
-                    (size_t)in_dim * sizeof(float)>>>(
-                    (float *)out0->ptr,
-                    (float *)out1->ptr,
-                    reinterpret_cast<const unsigned char *>(w0),
-                    reinterpret_cast<const unsigned char *>(w1),
-                    (const float *)x->ptr,
-                    (uint32_t)blocks,
-                    out0_dim,
-                    out1_dim,
-                    blocks * 34u);
-            return hip_ok(hipGetLastError(), "matmul_q8_0 pair f32 sharedx launch");
-        }
-        matmul_q8_0_pair_f32_warp8_kernel<<<((unsigned)max_out + 7u) / 8u, 256>>>(
-                (float *)out0->ptr,
-                (float *)out1->ptr,
-                reinterpret_cast<const unsigned char *>(w0),
-                reinterpret_cast<const unsigned char *>(w1),
-                (const float *)x->ptr,
-                in_dim,
-                out0_dim,
-                out1_dim,
-                blocks);
-        return hip_ok(hipGetLastError(), "matmul_q8_0 pair f32 warp launch");
-    }
+    if (!w0 || !w1)
+      return 0;
 
     const uint64_t xq_bytes = blocks * 32u;
     const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
@@ -1393,11 +1305,11 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
         uint32_t                n_embd,
         uint32_t                n_hc,
         const char             *label) {
-    if (!out_hc || !block_out || !x || !residual_hc || !split || !model_map ||
-        in_dim == 0 || out_dim == 0 || n_embd == 0 || n_hc == 0 ||
-        out_dim != (uint64_t)n_embd) {
-        return 0;
-    }
+  if (!out_hc || !block_out || !x || !residual_hc || !split || !model_map ||
+      in_dim == 0 || out_dim == 0 || n_embd == 0 || n_hc == 0 ||
+      out_dim != (uint64_t)n_embd) {
+    return 0;
+  }
     const uint64_t blocks = (in_dim + 31) / 32;
     if (weight_offset > model_size || out_dim > UINT64_MAX / (blocks * 34)) return 0;
     const uint64_t weight_bytes = out_dim * blocks * 34;
@@ -1406,54 +1318,14 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
     if (weight_bytes > model_size - weight_offset ||
         x->bytes < in_dim * sizeof(float) ||
         block_out->bytes < out_dim * sizeof(float) ||
-        residual_hc->bytes < hc_bytes ||
-        split->bytes < split_bytes ||
+        residual_hc->bytes < hc_bytes || split->bytes < split_bytes ||
         out_hc->bytes < hc_bytes ||
         (block_add && block_add->bytes < out_dim * sizeof(float))) {
-        return 0;
+      return 0;
     }
     const char *wptr = hip_model_range_ptr(model_map, weight_offset, weight_bytes, label ? label : "q8_0_hc_expand");
-    if (!wptr) return 0;
-    if (!hip_q8_prequant_decode_enabled()) {
-        if ((in_dim & 31u) == 0u && in_dim <= 8192u) {
-            const unsigned rows_per_block = 32u;
-            const unsigned threads = rows_per_block * 32u;
-            matmul_q8_0_hc_expand_f32_sharedx_warp_rows_w32_kernel<<<
-                    (unsigned)((out_dim + rows_per_block - 1u) / rows_per_block),
-                    threads,
-                    (size_t)in_dim * sizeof(float)>>>(
-                    (float *)out_hc->ptr,
-                    (float *)block_out->ptr,
-                    block_add ? (const float *)block_add->ptr : (const float *)block_out->ptr,
-                    (const float *)residual_hc->ptr,
-                    (const float *)split->ptr,
-                    reinterpret_cast<const unsigned char *>(wptr),
-                    (const float *)x->ptr,
-                    (uint32_t)blocks,
-                    out_dim,
-                    blocks * 34u,
-                    n_embd,
-                    n_hc,
-                    block_add ? 1 : 0);
-            return hip_ok(hipGetLastError(), "matmul_q8_0_hc_expand f32 sharedx launch");
-        }
-        matmul_q8_0_hc_expand_f32_warp8_kernel<<<
-                ((unsigned)out_dim + 7u) / 8u, 256>>>(
-                (float *)out_hc->ptr,
-                (float *)block_out->ptr,
-                block_add ? (const float *)block_add->ptr : (const float *)block_out->ptr,
-                (const float *)residual_hc->ptr,
-                (const float *)split->ptr,
-                reinterpret_cast<const unsigned char *>(wptr),
-                (const float *)x->ptr,
-                in_dim,
-                out_dim,
-                n_embd,
-                n_hc,
-                blocks,
-                block_add ? 1 : 0);
-        return hip_ok(hipGetLastError(), "matmul_q8_0_hc_expand f32 launch");
-    }
+    if (!wptr)
+      return 0;
 
     const uint64_t xq_bytes = blocks * 32u;
     const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
@@ -1461,15 +1333,14 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
     void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 hc expand prequant");
     if (!tmp) return 0;
     int8_t *xq = (int8_t *)tmp;
-    float *xscale = (float *)((char *)tmp + scale_offset);
-    const ds4_rocm_runtime_config *cfg = hip_runtime_config();
+    float* xscale = (float*)((char*)tmp + scale_offset);
     const int use_dp4a = 1;
     quantize_q8_0_f32_kernel<<<(unsigned)blocks, 32>>>(
             xq, xscale, (const float *)x->ptr, in_dim, blocks);
     if (!hip_ok(hipGetLastError(), "matmul_q8_0_hc_expand quantize launch")) {
         return 0;
     }
-    const uint32_t rows_per_block = cfg->q8_hc_decode_rpb;
+    const uint32_t rows_per_block = 16u;
     matmul_q8_0_hc_expand_preq_rows_w32_kernel<<<
             ((unsigned)out_dim + rows_per_block - 1u) / rows_per_block,
             rows_per_block * 32u>>>(
@@ -1493,35 +1364,33 @@ static int hip_matmul_q8_0_hc_expand_tensor_labeled(
 }
 
 extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok) {
-    if (!out || !x || !model_map ||
-        in_dim == 0u || out_dim == 0u || n_tok == 0u ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;
-    uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
-    if (weight_offset > model_size ||
-        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t), &weight_bytes) ||
-        weight_bytes > model_size - weight_offset ||
-        !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
-        !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
-        x->bytes < x_bytes || out->bytes < out_bytes) return 0;
-    const char *wptr = hip_model_range_ptr(model_map, weight_offset, weight_bytes, "f16");
-    if (!wptr) return 0;
-    const __half *w = (const __half *)wptr;
-    const int ordered_decode = n_tok == 1u;
-    if (ds4_rocm_support_batch_mode() &&
-        n_tok > 1u && n_tok <= 8u &&
-        in_dim == 16384u && out_dim == 24u) {
-        const dim3 grid((uint32_t)out_dim, (uint32_t)n_tok, 1u);
-        matmul_f16_tiny_batch_wave_kernel<<<grid, 32u>>>(
-            (float *)out->ptr,
-            w,
-            (const float *)x->ptr,
-            (uint32_t)in_dim,
-            (uint32_t)out_dim,
-            (uint32_t)n_tok);
-        return hip_ok(
-            hipGetLastError(),
-            "f16 DSpark support tiny-batch wave launch");
-    }
+  if (!out || !x || !model_map || in_dim == 0u || out_dim == 0u ||
+      n_tok == 0u || in_dim > UINT32_MAX || out_dim > UINT32_MAX ||
+      n_tok > UINT32_MAX)
+    return 0;
+  uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+  if (weight_offset > model_size ||
+      !hip_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t), &weight_bytes) ||
+      weight_bytes > model_size - weight_offset ||
+      !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+      !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+      x->bytes < x_bytes || out->bytes < out_bytes)
+    return 0;
+  const char* wptr =
+      hip_model_range_ptr(model_map, weight_offset, weight_bytes, "f16");
+  if (!wptr)
+    return 0;
+  const __half* w = (const __half*)wptr;
+  const int ordered_decode = n_tok == 1u;
+  if (ds4_rocm_support_batch_mode() && n_tok > 1u && n_tok <= 8u &&
+      in_dim == 16384u && out_dim == 24u) {
+    const dim3 grid((uint32_t)out_dim, (uint32_t)n_tok, 1u);
+    matmul_f16_tiny_batch_wave_kernel<<<grid, 32u>>>(
+        (float*)out->ptr, w, (const float*)x->ptr, (uint32_t)in_dim,
+        (uint32_t)out_dim, (uint32_t)n_tok);
+    return hip_ok(hipGetLastError(),
+                  "f16 DSpark support tiny-batch wave launch");
+  }
     const bool f16_decode_router_shape = (in_dim == 4096u && out_dim == 256u);
     const bool f16_decode_sharedx_shape =
         !f16_decode_router_shape &&
@@ -1530,47 +1399,39 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
     if (n_tok > 1u && n_tok <= 6u &&
         n_tok <= ds4_rocm_dense_small_batch_rows() &&
         !f16_decode_sharedx_shape) {
-        const dim3 grid((uint32_t)out_dim, 1u, 1u);
-        if (n_tok == 2u) {
-            matmul_f16_ordered_batch_reuse_kernel<2u><<<grid, 32u>>>(
-                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
-        } else if (n_tok == 3u) {
-            matmul_f16_ordered_batch_reuse_kernel<3u><<<grid, 32u>>>(
-                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
-        } else if (n_tok == 4u) {
-            matmul_f16_ordered_batch_reuse_kernel<4u><<<grid, 32u>>>(
-                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
-        } else if (n_tok == 5u) {
-            matmul_f16_ordered_batch_reuse_kernel<5u><<<grid, 32u>>>(
-                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
-        } else if (n_tok == 6u) {
-            matmul_f16_ordered_batch_reuse_kernel<6u><<<grid, 32u>>>(
-                (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
-        }
-        return hip_ok(
-            hipGetLastError(),
-            "f16 ordered narrow-batch reuse launch");
+      const dim3 grid((uint32_t)out_dim, 1u, 1u);
+      if (n_tok == 2u) {
+        matmul_f16_ordered_batch_reuse_kernel<2u><<<grid, 32u>>>(
+            (float*)out->ptr, w, (const float*)x->ptr, in_dim, out_dim);
+      } else if (n_tok == 3u) {
+        matmul_f16_ordered_batch_reuse_kernel<3u><<<grid, 32u>>>(
+            (float*)out->ptr, w, (const float*)x->ptr, in_dim, out_dim);
+      } else if (n_tok == 4u) {
+        matmul_f16_ordered_batch_reuse_kernel<4u><<<grid, 32u>>>(
+            (float*)out->ptr, w, (const float*)x->ptr, in_dim, out_dim);
+      } else if (n_tok == 5u) {
+        matmul_f16_ordered_batch_reuse_kernel<5u><<<grid, 32u>>>(
+            (float*)out->ptr, w, (const float*)x->ptr, in_dim, out_dim);
+      } else if (n_tok == 6u) {
+        matmul_f16_ordered_batch_reuse_kernel<6u><<<grid, 32u>>>(
+            (float*)out->ptr, w, (const float*)x->ptr, in_dim, out_dim);
+      }
+      return hip_ok(hipGetLastError(), "f16 ordered narrow-batch reuse launch");
     }
-    if (n_tok == 8u &&
-        n_tok <= ds4_rocm_dense_small_batch_rows() &&
+    if (n_tok == 8u && n_tok <= ds4_rocm_dense_small_batch_rows() &&
         !f16_decode_sharedx_shape) {
-        const dim3 grid((uint32_t)out_dim, 1u, 1u);
-        matmul_f16_ordered_batch_reuse_kernel<4u><<<grid, 32u>>>(
-            (float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim);
-        if (!hip_ok(
-                hipGetLastError(),
-                "f16 ordered first half-batch reuse launch")) {
-            return 0;
-        }
-        matmul_f16_ordered_batch_reuse_kernel<4u><<<grid, 32u>>>(
-            (float *)out->ptr + 4u * out_dim,
-            w,
-            (const float *)x->ptr + 4u * in_dim,
-            in_dim,
-            out_dim);
-        return hip_ok(
-            hipGetLastError(),
-            "f16 ordered second half-batch reuse launch");
+      const dim3 grid((uint32_t)out_dim, 1u, 1u);
+      matmul_f16_ordered_batch_reuse_kernel<4u><<<grid, 32u>>>(
+          (float*)out->ptr, w, (const float*)x->ptr, in_dim, out_dim);
+      if (!hip_ok(hipGetLastError(),
+                  "f16 ordered first half-batch reuse launch")) {
+        return 0;
+      }
+      matmul_f16_ordered_batch_reuse_kernel<4u>
+          <<<grid, 32u>>>((float*)out->ptr + 4u * out_dim, w,
+                          (const float*)x->ptr + 4u * in_dim, in_dim, out_dim);
+      return hip_ok(hipGetLastError(),
+                    "f16 ordered second half-batch reuse launch");
     }
     /*
      * A speculative verification block has a handful of rows. hipBLAS pads M to
@@ -1618,11 +1479,11 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         }
 #ifdef __HIP_PLATFORM_AMD__
         if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
-        hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_F16) &&
+            hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_F16) &&
             hipblaslt_gemm_f16(out->ptr, w, xh, (uint32_t)out_dim,
                                (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
                                HIP_R_32F, "f16 projection")) {
-            return 1;
+          return 1;
         }
 #endif
         const float alpha = 1.0f;
@@ -1682,14 +1543,13 @@ extern "C" int ds4_gpu_matmul_f16_group_pairs_tensor(
         uint64_t n_tok,
         const uint32_t *group_offsets,
         uint32_t group_count) {
-    if (!out || !x || !model_map || !group_offsets ||
-        in_dim == 0u || out_dim == 0u || n_tok == 0u ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX ||
-        n_tok > UINT32_MAX || group_count < 2u || group_count > 8u ||
-        (group_count & 1u) != 0u || group_offsets[0] != 0u ||
-        group_offsets[group_count] != n_tok) {
-        return 0;
-    }
+  if (!out || !x || !model_map || !group_offsets || in_dim == 0u ||
+      out_dim == 0u || n_tok == 0u || in_dim > UINT32_MAX ||
+      out_dim > UINT32_MAX || n_tok > UINT32_MAX || group_count < 2u ||
+      group_count > 8u || (group_count & 1u) != 0u || group_offsets[0] != 0u ||
+      group_offsets[group_count] != n_tok) {
+    return 0;
+  }
     for (uint32_t group = 0u; group < group_count; ++group) {
         if (group_offsets[group + 1u] <= group_offsets[group]) {
             return 0;
@@ -1705,7 +1565,7 @@ extern "C" int ds4_gpu_matmul_f16_group_pairs_tensor(
         !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
         !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
         x->bytes < x_bytes || out->bytes < out_bytes) {
-        return 0;
+      return 0;
     }
     const char *wptr = hip_model_range_ptr(
         model_map, weight_offset, weight_bytes, "f16_group_pairs");
@@ -1718,21 +1578,19 @@ extern "C" int ds4_gpu_matmul_f16_group_pairs_tensor(
         all_equal =
             group_offsets[group + 1u] - group_offsets[group] == equal_rows;
     }
-    if (all_equal && in_dim <= 8192u &&
-        2u * in_dim * sizeof(float) <= 65536u) {
-        const uint32_t rows_per_block = 32u;
-        const dim3 grid(
-            (static_cast<uint32_t>(out_dim) + rows_per_block - 1u) /
-                rows_per_block,
-            (group_count / 2u) * equal_rows, 1u);
-        matmul_f16_f32_equal_group_pairs_sharedx_warp_rows_w32_kernel<<<
-            grid, rows_per_block * 32u,
-            2u * static_cast<size_t>(in_dim) * sizeof(float)>>>(
-                reinterpret_cast<float *>(out->ptr), w,
-                reinterpret_cast<const float *>(x->ptr),
-                static_cast<uint32_t>(in_dim), out_dim, equal_rows);
-        return hip_ok(hipGetLastError(),
-                      "matmul_f16 equal grouped-pairs sharedx launch");
+    if (all_equal && in_dim <= 8192u && 2u * in_dim * sizeof(float) <= 65536u) {
+      const uint32_t rows_per_block = 32u;
+      const dim3 grid((static_cast<uint32_t>(out_dim) + rows_per_block - 1u) /
+                          rows_per_block,
+                      (group_count / 2u) * equal_rows, 1u);
+      matmul_f16_f32_equal_group_pairs_sharedx_warp_rows_w32_kernel<<<
+          grid, rows_per_block * 32u,
+          2u * static_cast<size_t>(in_dim) * sizeof(float)>>>(
+          reinterpret_cast<float*>(out->ptr), w,
+          reinterpret_cast<const float*>(x->ptr), static_cast<uint32_t>(in_dim),
+          out_dim, equal_rows);
+      return hip_ok(hipGetLastError(),
+                    "matmul_f16 equal grouped-pairs sharedx launch");
     }
     if (all_equal) {
         const dim3 grid(static_cast<uint32_t>(out_dim),
@@ -1751,34 +1609,29 @@ extern "C" int ds4_gpu_matmul_f16_group_pairs_tensor(
         const uint32_t rows0 = row1 - row0;
         const uint32_t rows1 =
             group_offsets[group + 2u] - group_offsets[group + 1u];
-        if (rows0 == 0u || rows0 > 6u ||
-            rows1 == 0u || rows1 > 6u) {
-            return 0;
+        if (rows0 == 0u || rows0 > 6u || rows1 == 0u || rows1 > 6u) {
+          return 0;
         }
         const uint32_t pair_rows =
             rows0 > rows1 ? rows0 : rows1;
-        if (in_dim <= 8192u &&
-            2u * in_dim * sizeof(float) <= 65536u) {
-            const uint32_t rows_per_block = 32u;
-            const dim3 grid(
-                (static_cast<uint32_t>(out_dim) + rows_per_block - 1u) /
-                    rows_per_block,
-                pair_rows, 1u);
-            matmul_f16_f32_ragged_group_pair_sharedx_warp_rows_w32_kernel<<<
-                grid, rows_per_block * 32u,
-                2u * static_cast<size_t>(in_dim) * sizeof(float)>>>(
-                    reinterpret_cast<float *>(out->ptr), w,
-                    reinterpret_cast<const float *>(x->ptr),
-                    static_cast<uint32_t>(in_dim), out_dim,
-                    row0, row1, rows0, rows1);
+        if (in_dim <= 8192u && 2u * in_dim * sizeof(float) <= 65536u) {
+          const uint32_t rows_per_block = 32u;
+          const dim3 grid(
+              (static_cast<uint32_t>(out_dim) + rows_per_block - 1u) /
+                  rows_per_block,
+              pair_rows, 1u);
+          matmul_f16_f32_ragged_group_pair_sharedx_warp_rows_w32_kernel<<<
+              grid, rows_per_block * 32u,
+              2u * static_cast<size_t>(in_dim) * sizeof(float)>>>(
+              reinterpret_cast<float*>(out->ptr), w,
+              reinterpret_cast<const float*>(x->ptr),
+              static_cast<uint32_t>(in_dim), out_dim, row0, row1, rows0, rows1);
         } else {
-            const dim3 grid(
-                static_cast<uint32_t>(out_dim), pair_rows, 1u);
-            matmul_f16_ordered_ragged_group_pair_exact_kernel<<<
-                grid, 32u>>>(
-                    reinterpret_cast<float *>(out->ptr), w,
-                    reinterpret_cast<const float *>(x->ptr),
-                    in_dim, out_dim, row0, row1, rows0, rows1);
+          const dim3 grid(static_cast<uint32_t>(out_dim), pair_rows, 1u);
+          matmul_f16_ordered_ragged_group_pair_exact_kernel<<<grid, 32u>>>(
+              reinterpret_cast<float*>(out->ptr), w,
+              reinterpret_cast<const float*>(x->ptr), in_dim, out_dim, row0,
+              row1, rows0, rows1);
         }
         if (!hip_ok(hipGetLastError(),
                     "matmul_f16 grouped-pair launch")) {
@@ -1802,19 +1655,20 @@ static int hip_matmul_f16_f16_input_tensor(
         const __half *x_h,
         uint64_t x_bytes_available,
         uint64_t n_tok) {
-    if (!out || !x_h || !model_map || !g_hipblas_ready || n_tok < 2u ||
-        in_dim == 0u || out_dim == 0u ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) {
-        return 0;
-    }
+  if (!out || !x_h || !model_map || !g_hipblas_ready || n_tok < 2u ||
+      in_dim == 0u || out_dim == 0u || in_dim > UINT32_MAX ||
+      out_dim > UINT32_MAX || n_tok > UINT32_MAX) {
+    return 0;
+  }
     uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
     if (weight_offset > model_size ||
-        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t), &weight_bytes) ||
+        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t),
+                              &weight_bytes) ||
         weight_bytes > model_size - weight_offset ||
         !hip_u64_mul3_checked(n_tok, in_dim, sizeof(__half), &x_bytes) ||
         !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
         x_bytes_available < x_bytes || out->bytes < out_bytes) {
-        return 0;
+      return 0;
     }
     const char *wptr = hip_model_range_ptr(
             model_map, weight_offset, weight_bytes, "f16_half_input");
@@ -1823,10 +1677,10 @@ static int hip_matmul_f16_f16_input_tensor(
 #ifdef __HIP_PLATFORM_AMD__
     if (n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS &&
         hipblaslt_route_enabled(DS4_ROCM_LT_ROUTE_F16_PAIR) &&
-        hipblaslt_gemm_f16(out->ptr, w, x_h, (uint32_t)out_dim,
-                           (uint32_t)n_tok, (uint32_t)in_dim, HIPBLAS_OP_T,
-                           HIP_R_32F, "f16 paired projection")) {
-        return 1;
+        hipblaslt_gemm_f16(out->ptr, w, x_h, (uint32_t)out_dim, (uint32_t)n_tok,
+                           (uint32_t)in_dim, HIPBLAS_OP_T, HIP_R_32F,
+                           "f16 paired projection")) {
+      return 1;
     }
 #endif
     const float alpha = 1.0f;
@@ -1864,33 +1718,33 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
         uint64_t out_dim,
         const ds4_gpu_tensor *x,
         uint64_t n_tok) {
-    if (!out0 || !out1 || !x || !model_map || in_dim == 0 || out_dim == 0 || n_tok == 0 ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) {
-        return 0;
-    }
+  if (!out0 || !out1 || !x || !model_map || in_dim == 0 || out_dim == 0 ||
+      n_tok == 0 || in_dim > UINT32_MAX || out_dim > UINT32_MAX ||
+      n_tok > UINT32_MAX) {
+    return 0;
+  }
     if (n_tok >= 128u && g_hipblas_ready) {
         /* One activation conversion for both weights. */
         uint64_t x_bytes = 0, xh_bytes = 0;
         if (hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) &&
             hip_u64_mul3_checked(n_tok, in_dim, sizeof(__half), &xh_bytes) &&
             x->bytes >= x_bytes) {
-            __half *xh = (__half *)hip_tmp_alloc(
-                xh_bytes, "f16 pair gemm activations");
-            if (xh) {
-                const uint64_t xh_count = n_tok * in_dim;
-                hip_launch_f32_to_f16(
-                    xh, (const float *)x->ptr, xh_count);
-                if (hip_ok(hipGetLastError(),
-                            "f16 pair activation convert launch") &&
-                    hip_matmul_f16_f16_input_tensor(
-                        out0, model_map, model_size, weight0_offset,
-                        in_dim, out_dim, xh, xh_bytes, n_tok) &&
-                    hip_matmul_f16_f16_input_tensor(
-                        out1, model_map, model_size, weight1_offset,
-                        in_dim, out_dim, xh, xh_bytes, n_tok)) {
-                    return 1;
-                }
+          __half* xh =
+              (__half*)hip_tmp_alloc(xh_bytes, "f16 pair gemm activations");
+          if (xh) {
+            const uint64_t xh_count = n_tok * in_dim;
+            hip_launch_f32_to_f16(xh, (const float*)x->ptr, xh_count);
+            if (hip_ok(hipGetLastError(),
+                       "f16 pair activation convert launch") &&
+                hip_matmul_f16_f16_input_tensor(out0, model_map, model_size,
+                                                weight0_offset, in_dim, out_dim,
+                                                xh, xh_bytes, n_tok) &&
+                hip_matmul_f16_f16_input_tensor(out1, model_map, model_size,
+                                                weight1_offset, in_dim, out_dim,
+                                                xh, xh_bytes, n_tok)) {
+              return 1;
             }
+          }
         }
     }
     if (n_tok != 1) {
@@ -1901,15 +1755,16 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
     }
     uint64_t weight_bytes = 0;
     if (weight0_offset > model_size || weight1_offset > model_size ||
-        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t), &weight_bytes)) {
-        return 0;
+        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t),
+                              &weight_bytes)) {
+      return 0;
     }
     if (weight_bytes > model_size - weight0_offset ||
         weight_bytes > model_size - weight1_offset ||
         x->bytes < in_dim * sizeof(float) ||
         out0->bytes < out_dim * sizeof(float) ||
         out1->bytes < out_dim * sizeof(float)) {
-        return 0;
+      return 0;
     }
     const __half *w0 = (const __half *)hip_model_range_ptr(model_map, weight0_offset, weight_bytes, "f16_pair0");
     const __half *w1 = (const __half *)hip_model_range_ptr(model_map, weight1_offset, weight_bytes, "f16_pair1");
@@ -1947,24 +1802,21 @@ extern "C" int ds4_gpu_matmul_f16_pair_narrow_tensor(
         uint64_t out_dim,
         const ds4_gpu_tensor *x,
         uint64_t n_tok) {
-    if (!out0 || !out1 || !x || !model_map || in_dim == 0u ||
-        out_dim == 0u || n_tok < 2u || n_tok > 8u ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX) {
-        return 0;
-    }
+  if (!out0 || !out1 || !x || !model_map || in_dim == 0u || out_dim == 0u ||
+      n_tok < 2u || n_tok > 8u || in_dim > UINT32_MAX || out_dim > UINT32_MAX) {
+    return 0;
+  }
     uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
     if (weight0_offset > model_size || weight1_offset > model_size ||
-        !hip_u64_mul3_checked(
-            out_dim, in_dim, sizeof(uint16_t), &weight_bytes) ||
+        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t),
+                              &weight_bytes) ||
         weight_bytes > model_size - weight0_offset ||
         weight_bytes > model_size - weight1_offset ||
-        !hip_u64_mul3_checked(
-            n_tok, in_dim, sizeof(float), &x_bytes) ||
-        !hip_u64_mul3_checked(
-            n_tok, out_dim, sizeof(float), &out_bytes) ||
+        !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+        !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
         x->bytes < x_bytes || out0->bytes < out_bytes ||
         out1->bytes < out_bytes) {
-        return 0;
+      return 0;
     }
     const __half *w0 = (const __half *)hip_model_range_ptr(
         model_map, weight0_offset, weight_bytes, "f16_pair_narrow0");
@@ -2015,37 +1867,31 @@ extern "C" int ds4_gpu_matmul_f16_pair_narrow_tensor(
 }
 
 extern "C" int ds4_gpu_matmul_f32_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok) {
-    if (!out || !x || !model_map || in_dim == 0 || out_dim == 0 || n_tok == 0 ||
-        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;
-    uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
-    if (weight_offset > model_size ||
-        !hip_u64_mul3_checked(out_dim, in_dim, sizeof(float), &weight_bytes) ||
-        weight_bytes > model_size - weight_offset ||
-        !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
-        !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
-        x->bytes < x_bytes || out->bytes < out_bytes) return 0;
-    const char *wptr = hip_model_range_ptr(model_map, weight_offset, weight_bytes, "f32");
-    if (!wptr) return 0;
-    const float *w = (const float *)wptr;
-    if (g_hipblas_ready && n_tok > 1) {
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
-        hipblasStatus_t st = hipblasSgemm(g_hipblas,
-                                        HIPBLAS_OP_T,
-                                        HIPBLAS_OP_N,
-                                        (int)out_dim,
-                                        (int)n_tok,
-                                        (int)in_dim,
-                                        &alpha,
-                                        w,
-                                        (int)in_dim,
-                                        (const float *)x->ptr,
-                                        (int)in_dim,
-                                        &beta,
-                                        (float *)out->ptr,
-                                        (int)out_dim);
-        return hipblas_ok(st, "f32 matmul");
-    }
+  if (!out || !x || !model_map || in_dim == 0 || out_dim == 0 || n_tok == 0 ||
+      in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX)
+    return 0;
+  uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+  if (weight_offset > model_size ||
+      !hip_u64_mul3_checked(out_dim, in_dim, sizeof(float), &weight_bytes) ||
+      weight_bytes > model_size - weight_offset ||
+      !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+      !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+      x->bytes < x_bytes || out->bytes < out_bytes)
+    return 0;
+  const char* wptr =
+      hip_model_range_ptr(model_map, weight_offset, weight_bytes, "f32");
+  if (!wptr)
+    return 0;
+  const float* w = (const float*)wptr;
+  if (g_hipblas_ready && n_tok > 1) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    hipblasStatus_t st = hipblasSgemm(
+        g_hipblas, HIPBLAS_OP_T, HIPBLAS_OP_N, (int)out_dim, (int)n_tok,
+        (int)in_dim, &alpha, w, (int)in_dim, (const float*)x->ptr, (int)in_dim,
+        &beta, (float*)out->ptr, (int)out_dim);
+    return hipblas_ok(st, "f32 matmul");
+  }
     dim3 grid((unsigned)out_dim, (unsigned)n_tok, 1);
     matmul_f32_kernel<<<grid, 256>>>((float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim, n_tok);
     return hip_ok(hipGetLastError(), "matmul_f32 launch");

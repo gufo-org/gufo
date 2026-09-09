@@ -62,14 +62,14 @@
   cacheDisk ? null,
   cacheDiskBytes ? null,
   cacheDiskStagingBytes ? null,
-  speculative ? null, # "dflash", "dflash2", "mtp", "mtp-npu", "npu", "pld", "self", "off"
+  speculative ? null, # "dspark", "dflash", "dflash2", "mtp", "mtp-npu", "npu", "pld", "self", "off"
   specType ? null, # alias for speculative ("draft-mtp" -> "mtp", etc.)
   draftModel ? null, # generic draft model path / derivation
   dflashModel ? null,
+  dsparkModel ? null,
   mtpModel ? null,
   draftTokens ? null,
   specDraftNMax ? null, # alias for draftTokens
-  draftPolicy ? null, # "fixed", "rolling", "accepted-ema"
   minDraftTokens ? null,
   specDraftPMin ? null, # alias for speculative confidence / floor
   prefillChunk ? null,
@@ -113,10 +113,17 @@ let
       draftModel
     else
       null;
+  finalDsparkModel =
+    if dsparkModel != null then
+      dsparkModel
+    else if finalSpeculative == "dspark" then
+      draftModel
+    else
+      null;
   finalMtpModel =
     if mtpModel != null then
       mtpModel
-    else if (finalSpeculative != null && finalSpeculative != "dflash" && finalSpeculative != "dflash2" && finalSpeculative != "off") then
+    else if (finalSpeculative != null && finalSpeculative != "dflash" && finalSpeculative != "dflash2" && finalSpeculative != "dspark" && finalSpeculative != "off") then
       draftModel
     else
       null;
@@ -150,6 +157,7 @@ let
     "max"
   ];
   validSpeculativeModes = [
+    "dspark"
     "dflash"
     "dflash2"
     "mtp"
@@ -299,6 +307,10 @@ let
         "--dflash-model"
         (toString finalDflashModel)
       ]
+      ++ lib.optionals (finalDsparkModel != null) [
+        "--dspark-model"
+        (toString finalDsparkModel)
+      ]
       ++ lib.optionals (finalMtpModel != null && finalDflashModel == null) [
         "--mtp-model"
         (toString finalMtpModel)
@@ -306,10 +318,6 @@ let
       ++ lib.optionals (finalDraftTokens != null) [
         "--draft-tokens"
         (toString finalDraftTokens)
-      ]
-      ++ lib.optionals (draftPolicy != null) [
-        "--draft-policy"
-        draftPolicy
       ]
       ++ lib.optionals (minDraftTokens != null) [
         "--min-draft-tokens"

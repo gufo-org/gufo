@@ -185,14 +185,14 @@
     },
     {
       "name": "deepseek-gpu",
-      "displayName": "DeepSeek V4 Flash GPU Model Tests",
-      "configurePreset": "hardware-test",
+      "displayName": "DeepSeek V4 Flash Checks",
+      "configurePreset": "gpu-test",
       "output": {
         "outputOnFailure": true
       },
       "filter": {
         "include": {
-          "label": "deepseek-v4-flash"
+          "label": "ds4"
         }
       }
     },

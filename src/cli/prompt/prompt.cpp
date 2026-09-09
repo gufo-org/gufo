@@ -34,27 +34,35 @@
 
 namespace gufo::cli {
 
-void PrintPromptHelp(std::string_view program_name) {
+static void PrintTextHelp(std::string_view program_name,
+                          std::string_view command) {
   PromptOptions opt;
-  gufo::cli::ArgParser parser(std::string(program_name) + " prompt",
-                              "Execute one prompt request and exit.");
+  gufo::cli::ArgParser parser(
+      std::string(program_name) + " " + std::string(command),
+      command == "chat" ? "Interactive conversation."
+                        : "Execute one prompt request and exit.");
   parser.AddOption("-m", "--model", "PATH", "Path to GGUF model file", "Model",
                    &opt.model_path);
-  parser.AddOption("-p", "--prompt", "TEXT", "Direct input prompt text",
-                   "Prompt", &opt.prompt_text);
-  parser.AddOption("-f", "--file", "PATH",
-                   "File path to read input prompt text from", "Prompt",
-                   &opt.prompt_file);
+  if (command == "prompt") {
+    parser.AddOption("-p", "--prompt", "TEXT", "Direct input prompt text",
+                     "Prompt", &opt.prompt_text);
+    parser.AddOption("-f", "--file", "PATH",
+                     "File path to read input prompt text from", "Prompt",
+                     &opt.prompt_file);
+  }
   parser.AddOption("", "--system", "PROMPT",
                    "System role instructions prepended to the prompt "
                    "(default: helpful assistant)",
                    "Prompt", &opt.system_prompt);
-  parser.AddInverseFlag("", "--raw",
-                        "Disable chat template framing and pass raw tokens",
-                        "Prompt", &opt.use_chat_template);
-  parser.AddInverseFlag("", "--no-display-prompt",
-                        "Suppress echoing the prompt before generated response",
-                        "Prompt", &opt.display_prompt);
+  if (command == "prompt") {
+    parser.AddInverseFlag("", "--raw",
+                          "Disable chat template framing and pass raw tokens",
+                          "Prompt", &opt.use_chat_template);
+    parser.AddInverseFlag(
+        "", "--no-display-prompt",
+        "Suppress echoing the prompt before generated response", "Prompt",
+        &opt.display_prompt);
+  }
   parser.AddOption("-n", "--max-tokens", "N",
                    "Maximum number of new tokens to generate (default: 128)",
                    "Sampling", &opt.max_tokens);
@@ -89,10 +97,7 @@ void PrintPromptHelp(std::string_view program_name) {
   parser.AddOption("", "--spec-draft-n-max", "N",
                    "llama.cpp-compatible alias for --draft-tokens",
                    "Speculative", &opt.draft_tokens);
-  parser.AddOption("", "--draft-policy", "MODE",
-                   "Draft sizing: auto, fixed, rolling, or accepted-ema "
-                   "(default: auto, fixed for DFlash-2)",
-                   "Speculative", &opt.draft_policy);
+
   parser.AddOption("", "--min-draft-tokens", "N",
                    "Adaptive draft floor (default: 1)", "Speculative",
                    &opt.min_draft_tokens);
@@ -115,37 +120,12 @@ void PrintPromptHelp(std::string_view program_name) {
   parser.PrintHelp();
 }
 
+void PrintPromptHelp(std::string_view program_name) {
+  PrintTextHelp(program_name, "prompt");
+}
+
 void PrintChatHelp(std::string_view program_name) {
-  PromptOptions opt;
-  gufo::cli::ArgParser parser(
-      std::string(program_name) + " chat",
-      "Start an interactive conversation session in the terminal.");
-  parser.AddOption("-m", "--model", "PATH", "Path to GGUF model file", "Model",
-                   &opt.model_path);
-  parser.AddOption("", "--system", "PROMPT",
-                   "System role instructions prepended to the conversation "
-                   "(default: helpful assistant)",
-                   "Prompt", &opt.system_prompt);
-  parser.AddOption("-n", "--max-tokens", "N",
-                   "Maximum tokens generated per turn (default: 256)",
-                   "Sampling", &opt.max_tokens);
-  RegisterSamplingOptions(parser, &opt.sampling);
-  parser.AddOption("", "--think", "MODE",
-                   "Reasoning mode: on, off, or auto (default: off)",
-                   "Reasoning", &opt.reasoning_mode);
-  parser.AddOption("", "--reasoning-effort", "LEVEL",
-                   "Effort: auto, minimal, low, medium, high, xhigh, or max",
-                   "Reasoning", &opt.reasoning_effort);
-  parser.AddOption("", "--preserve-thinking", "MODE",
-                   "Replay prior reasoning: on, off, or auto", "Reasoning",
-                   &opt.preserve_thinking);
-  parser.AddFlag("", "--cpu",
-                 "Force CPU OpenMP execution fallback instead of GPU ROCm",
-                 "Hardware", &opt.force_cpu);
-  parser.AddFlag("-v", "--verbose",
-                 "Print detailed timing, latency breakdown, and tok/s metrics",
-                 "General", &opt.verbose);
-  parser.PrintHelp();
+  PrintTextHelp(program_name, "chat");
 }
 
 namespace {
@@ -225,12 +205,15 @@ tokenization::QwenReasoningEffort QwenEffort(
 }
 
 #if defined(ENGINE_ENABLE_HIP)
-int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
-                      std::chrono::steady_clock::time_point load_start) {
+constexpr std::uint32_t kDefaultContext = 4096;
+
+std::shared_ptr<models::deepseek_v4_flash::Model> LoadDeepSeekModel(
+    const PromptOptions& opt, const core::GgufReader& reader,
+    std::chrono::steady_clock::time_point load_start) {
   if (opt.force_cpu) {
     std::cerr << "DeepSeek V4 Flash is supported only by the ROCm backend\n";
     PrintModelLoadTime(load_start, false);
-    return 1;
+    return nullptr;
   }
   std::string template_error;
   if (!models::deepseek_v4_flash::ValidateGgufTemplate(reader,
@@ -238,22 +221,26 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
     std::cerr << "Unsupported DeepSeek chat template: " << template_error
               << '\n';
     PrintModelLoadTime(load_start, false);
-    return 1;
+    return nullptr;
   }
-  const bool dspark_requested =
-      opt.speculative_backend == "dspark" || !opt.dspark_model_path.empty();
+  const bool dspark_requested = opt.speculative_backend == "dspark";
   if (!opt.speculative_backend.empty() && !dspark_requested) {
     std::cerr << "DeepSeek V4 Flash supports only --speculative dspark\n";
     PrintModelLoadTime(load_start, false);
-    return 1;
+    return nullptr;
   }
   if (opt.speculative_backend == "dspark" && opt.dspark_model_path.empty()) {
     std::cerr << "--speculative dspark requires --dspark-model\n";
     PrintModelLoadTime(load_start, false);
-    return 1;
+    return nullptr;
+  }
+  if (dspark_requested &&
+      (opt.min_draft_tokens != 1 || opt.draft_p_min != 0.0F)) {
+    std::cerr << "DSpark uses model-owned adaptive drafting; "
+                 "--min-draft-tokens and --spec-draft-p-min are unsupported\n";
+    return nullptr;
   }
 
-  constexpr std::uint32_t kDefaultContext = 4096;
   std::string error;
   auto model = models::deepseek_v4_flash::Model::Load(
       opt.model_path,
@@ -261,71 +248,46 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
           .max_context = kDefaultContext,
           .prefill_chunk = 2048,
           .power_percent = 100,
-          .dspark_model_path = opt.dspark_model_path,
+          .dspark_model_path = dspark_requested ? opt.dspark_model_path : "",
       },
       &error);
   if (model == nullptr) {
     std::cerr << "Error creating DeepSeek V4 Flash model: " << error << '\n';
     PrintModelLoadTime(load_start, false);
-    return 1;
+    return nullptr;
   }
   PrintModelLoadTime(load_start);
 
-  std::vector<int> prompt_tokens;
-  if (opt.use_chat_template) {
-    const auto reasoning = PromptReasoningOptions(opt);
-    const std::vector<models::deepseek_v4_flash::ChatMessage> messages = {
-        {.role = "system",
-         .content = opt.system_prompt,
-         .reasoning_content = {}},
-        {.role = "user", .content = opt.prompt_text, .reasoning_content = {}},
-    };
-    prompt_tokens = model->EncodeChat(
-        messages,
-        models::deepseek_v4_flash::ChatTemplateOptions{
-            .enable_thinking = reasoning.enabled.value_or(false),
-            .reasoning_effort =
-                reasoning.effort.value_or(ReasoningEffort::kLow),
-            .preserve_thinking = reasoning.preserve_thinking.value_or(false),
-        });
-  } else {
-    prompt_tokens = model->Tokenize(opt.prompt_text);
-  }
+  return model;
+}
+
+int GenerateDeepSeekResponse(
+    const PromptOptions& opt,
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
+    models::deepseek_v4_flash::Session& session,
+    std::span<const int> prompt_tokens, std::string* reply = nullptr) {
+  std::string error;
+  const bool dspark_requested = model->HasDspark();
+  const auto emit = [&](int token) {
+    const auto piece = model->DecodeToken(token);
+    if (reply != nullptr)
+      reply->append(piece);
+    std::cout << piece << std::flush;
+  };
   if (prompt_tokens.empty()) {
     std::cerr << "DeepSeek V4 Flash prompt produced no tokens\n";
     return 1;
   }
-  if (prompt_tokens.size() + opt.max_tokens >= kDefaultContext) {
+  if (prompt_tokens.size() >= kDefaultContext ||
+      opt.max_tokens >= kDefaultContext - prompt_tokens.size()) {
     std::cerr << "DeepSeek V4 Flash prompt and output exceed the 4096-token "
                  "CLI context\n";
     return 1;
   }
 
-  auto session = model->CreateSession(kDefaultContext, &error);
-  if (session == nullptr || !session->Sync(prompt_tokens, &error)) {
+  if (!session.Sync(prompt_tokens, &error)) {
     std::cerr << "DeepSeek V4 Flash prefill failed: " << error << '\n';
     return 1;
-  }
-
-  if (const char* draft_test =
-          std::getenv("GUFO_DEEPSEEK_DSPARK_DRAFT_SELFTEST");
-      draft_test != nullptr && draft_test[0] != '\0') {
-    const int cycles = std::atoi(draft_test);
-    if (!session->DsparkDraftSelfTest(cycles > 0 ? cycles : 4, &error)) {
-      std::cerr << "DSpark draft self-test reported a problem: " << error
-                << '\n';
-    }
-    return 0;
-  }
-
-  if (const char* selftest = std::getenv("GUFO_DEEPSEEK_DSPARK_SELFTEST");
-      selftest != nullptr && selftest[0] != '\0') {
-    const int rows = std::atoi(selftest);
-    if (!session->DsparkSelfTest(rows > 1 ? rows : 6, &error)) {
-      std::cerr << "DSpark verifier self-test reported a problem: " << error
-                << '\n';
-    }
-    return 0;
   }
 
   if (opt.verbose) {
@@ -352,10 +314,9 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
    * a greedy prefix match, so a sampled request keeps the ordinary decode path
    * rather than silently changing the distribution.
    */
-  const bool use_dspark = opt.speculative_backend == "dspark" &&
-                          session->HasDspark() &&
+  const bool use_dspark = dspark_requested && session.HasDspark() &&
                           opt.sampling.can_use_unmodified_argmax();
-  if (opt.speculative_backend == "dspark" && !use_dspark) {
+  if (dspark_requested && !use_dspark) {
     std::cerr << "[Speculative]: dspark needs greedy sampling; using "
                  "autoregressive decode\n";
   }
@@ -366,7 +327,8 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
     std::vector<int> emitted;
     bool stop = false;
     while (generated < opt.max_tokens && !stop) {
-      if (!session->DsparkStep(&emitted, &error)) {
+      if (!session.DsparkStep(opt.max_tokens - generated, opt.draft_tokens,
+                              &emitted, &error)) {
         std::cerr << "\nDeepSeek V4 Flash speculative decode failed: " << error
                   << '\n';
         return 1;
@@ -379,13 +341,13 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
           break;
         }
         sampler.Accept(static_cast<sampling::TokenId>(token));
-        std::cout << model->DecodeToken(token) << std::flush;
+        emit(token);
         ++generated;
       }
     }
   } else {
     for (; generated < opt.max_tokens; ++generated) {
-      const auto logits = session->CopyLogits(&error);
+      const auto logits = session.CopyLogits(&error);
       if (logits.empty()) {
         std::cerr << "\nDeepSeek V4 Flash token selection failed: " << error
                   << '\n';
@@ -396,8 +358,8 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
         break;
       }
       sampler.Accept(static_cast<sampling::TokenId>(token));
-      std::cout << model->DecodeToken(token) << std::flush;
-      if (generated + 1 < opt.max_tokens && !session->Evaluate(token, &error)) {
+      emit(token);
+      if (generated + 1 < opt.max_tokens && !session.Evaluate(token, &error)) {
         std::cerr << "\nDeepSeek V4 Flash decode failed: " << error << '\n';
         return 1;
       }
@@ -406,7 +368,7 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
   std::cout << '\n';
 
   if (use_dspark) {
-    const auto stats = session->DsparkStatistics();
+    const auto stats = session.DsparkStatistics();
     const double support_acceptance =
         stats.support_drafted != 0
             ? static_cast<double>(stats.support_accepted) /
@@ -445,6 +407,108 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
   }
   return 0;
 }
+int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
+                      std::chrono::steady_clock::time_point load_start) {
+  auto model = LoadDeepSeekModel(opt, reader, load_start);
+  if (!model)
+    return 1;
+  std::string error;
+  auto session = model->CreateSession(kDefaultContext, &error);
+  if (!session) {
+    std::cerr << "DeepSeek session creation failed: " << error << '\n';
+    return 1;
+  }
+  std::vector<int> prompt_tokens;
+  if (opt.use_chat_template) {
+    const auto reasoning = PromptReasoningOptions(opt);
+    const std::vector<models::deepseek_v4_flash::ChatMessage> messages = {
+        {.role = "system",
+         .content = opt.system_prompt,
+         .reasoning_content = {},
+         .tool_calls = {}},
+        {.role = "user",
+         .content = opt.prompt_text,
+         .reasoning_content = {},
+         .tool_calls = {}},
+    };
+    prompt_tokens = model->EncodeChat(
+        messages,
+        models::deepseek_v4_flash::ChatTemplateOptions{
+            .enable_thinking = reasoning.enabled.value_or(false),
+            .reasoning_effort =
+                reasoning.effort.value_or(ReasoningEffort::kLow),
+            .preserve_thinking = reasoning.preserve_thinking.value_or(false),
+        });
+  } else {
+    prompt_tokens = model->Tokenize(opt.prompt_text);
+  }
+  return GenerateDeepSeekResponse(opt, model, *session, prompt_tokens);
+}
+
+int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
+                    std::chrono::steady_clock::time_point load_start) {
+  if (!opt.use_chat_template) {
+    std::cerr << "DeepSeek interactive chat requires chat framing; use prompt "
+                 "--raw for raw text\n";
+    return 1;
+  }
+  auto model = LoadDeepSeekModel(opt, reader, load_start);
+  if (!model)
+    return 1;
+  std::string error;
+  auto session = model->CreateSession(kDefaultContext, &error);
+  if (!session) {
+    std::cerr << "DeepSeek session creation failed: " << error << '\n';
+    return 1;
+  }
+  std::vector<models::deepseek_v4_flash::ChatMessage> history;
+  if (!opt.system_prompt.empty()) {
+    history.push_back({.role = "system",
+                       .content = opt.system_prompt,
+                       .reasoning_content = {},
+                       .tool_calls = {}});
+  }
+  const auto reasoning = PromptReasoningOptions(opt);
+  const models::deepseek_v4_flash::ChatTemplateOptions chat_options{
+      .enable_thinking = reasoning.enabled.value_or(false),
+      .reasoning_effort = reasoning.effort.value_or(ReasoningEffort::kLow),
+      .preserve_thinking = reasoning.preserve_thinking.value_or(false),
+  };
+  std::cout << "=== Gufo Interactive Chat (DeepSeek V4 Flash) ===\n"
+            << "Type 'exit' or Ctrl+D to quit.\n\n";
+  for (std::string input;;) {
+    std::cout << ">>> User: " << std::flush;
+    if (!std::getline(std::cin, input) || input == "exit" || input == "quit")
+      break;
+    if (input.empty())
+      continue;
+    history.push_back({.role = "user",
+                       .content = input,
+                       .reasoning_content = {},
+                       .tool_calls = {}});
+    const auto tokens = model->EncodeChat(history, chat_options);
+    std::cout << "<<< Assistant: ";
+    std::string reply;
+    if (GenerateDeepSeekResponse(opt, model, *session, tokens, &reply) != 0)
+      return 1;
+    models::deepseek_v4_flash::ChatMessage response{};
+    response.role = "assistant";
+    if (chat_options.enable_thinking) {
+      constexpr std::string_view end = "</think>";
+      const auto boundary = reply.find(end);
+      response.reasoning_content = reply.substr(0, boundary);
+      if (boundary != std::string::npos) {
+        response.content = reply.substr(boundary + end.size());
+      }
+    } else {
+      response.content = std::move(reply);
+    }
+    history.push_back(std::move(response));
+    std::cout << '\n';
+  }
+  return 0;
+}
+
 #endif
 
 }  // namespace
@@ -493,8 +557,11 @@ std::optional<PromptOptions> ParsePromptOptions(
                    &opt.preserve_thinking);
 
   // Speculative & Hardware
+  bool speculative_explicit = false;
   const auto parse_speculative_backend =
-      [&opt](std::string_view, std::string_view value, std::string*) -> bool {
+      [&opt, &speculative_explicit](std::string_view, std::string_view value,
+                                    std::string*) -> bool {
+    speculative_explicit = true;
     if (value == "none" || value == "off" || value == "false" ||
         value == "disabled") {
       opt.speculative_backend.clear();
@@ -526,7 +593,7 @@ std::optional<PromptOptions> ParsePromptOptions(
       "Speculative",
       [&opt](std::string_view, std::string_view value,
              std::string* error) -> bool {
-        std::size_t count = 0;
+        std::uint32_t count = 0;
         const auto [ptr, ec] =
             std::from_chars(value.data(), value.data() + value.size(), count);
         if (ec != std::errc{} || ptr != value.data() + value.size() ||
@@ -539,29 +606,13 @@ std::optional<PromptOptions> ParsePromptOptions(
         opt.draft_tokens = count;
         return true;
       });
-  parser.AddCustomOption(
-      "", "--draft-policy", "MODE",
-      "Draft sizing: auto, fixed, rolling, or accepted-ema (default: auto, "
-      "which is fixed for DFlash-2 and rolling otherwise)",
-      "Speculative",
-      [&opt](std::string_view, std::string_view value,
-             std::string* error) -> bool {
-        if (value != "auto" && value != "fixed" && value != "rolling" &&
-            value != "accepted-ema") {
-          if (error != nullptr) {
-            *error = "Invalid draft policy: " + std::string(value);
-          }
-          return false;
-        }
-        opt.draft_policy = value;
-        return true;
-      });
+
   parser.AddCustomOption(
       "", "--min-draft-tokens", "N", "Adaptive draft floor (default: 1)",
       "Speculative",
       [&opt](std::string_view, std::string_view value,
              std::string* error) -> bool {
-        std::size_t count = 0;
+        std::uint32_t count = 0;
         const auto [ptr, ec] =
             std::from_chars(value.data(), value.data() + value.size(), count);
         if (ec != std::errc{} || ptr != value.data() + value.size() ||
@@ -611,6 +662,10 @@ std::optional<PromptOptions> ParsePromptOptions(
     }
     return std::nullopt;
   }
+  if (!speculative_explicit && !opt.dspark_model_path.empty()) {
+    opt.speculative_backend = "dspark";
+  }
+
   if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0 ||
       opt.min_draft_tokens > opt.draft_tokens) {
     if (error_msg != nullptr) {
@@ -863,14 +918,7 @@ int RunPrompt(std::span<const char* const> args) {
               opt.speculative_backend == "dflash" ||
               opt.speculative_backend == "dflash2" ||
               opt.speculative_backend == "dflash-2";
-          const auto resolved_policy = speculative::ResolveDraftPolicy(
-              opt.draft_policy, block_diffusion_draft);
-          if (resolved_policy == "fixed") {
-            s_opts.enable_adaptive_draft_length = false;
-          } else if (resolved_policy == "accepted-ema") {
-            s_opts.adaptive_draft_policy =
-                speculative::AdaptiveDraftPolicy::kAcceptedTokenEma;
-          }
+          s_opts.enable_adaptive_draft_length = !block_diffusion_draft;
           if (opt.speculative_backend == "dflash" ||
               opt.speculative_backend == "dflash2" ||
               opt.speculative_backend == "dflash-2") {
@@ -1014,6 +1062,12 @@ int RunChat(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
+
+#if defined(ENGINE_ENABLE_HIP)
+  if (IsDeepSeekV4Flash(*reader)) {
+    return RunDeepSeekChat(opt, *reader, model_load_start);
+  }
+#endif
 
   auto generator = models::QwenGenerator::CreateFromGguf(*reader, &err);
   if (!generator) {

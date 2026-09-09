@@ -41,7 +41,6 @@ struct ds4_session_dspark_batch_item {
   int* emitted;
   int emitted_cap;
   uint32_t max_draft_tokens;
-  bool schedule_confidence;
   int* n_emitted;
 };
 
@@ -73,8 +72,6 @@ void ds4_session_free(ds4_session* session);
 int ds4_session_sync(ds4_session* session, const ds4_tokens* prompt,
                      char* error, size_t error_capacity);
 int ds4_session_argmax(const ds4_session* session);
-int ds4_session_argmax_excluding(const ds4_session* session,
-                                 int excluded_token);
 int ds4_session_sample(const ds4_session* session, float temperature, int top_k,
                        float top_p, float min_p, uint64_t* rng_state);
 int ds4_session_eval(ds4_session* session, int token, char* error,
@@ -83,21 +80,7 @@ int ds4_sessions_eval_batch(const ds4_session_batch_item* items,
                             size_t item_count, char* error,
                             size_t error_capacity);
 void ds4_session_prepare_batch_execution(ds4_session* session);
-/* Measures whether batched DSpark verification reproduces one-token decode's
- * greedy continuation, and how much cheaper a verification block is than the
- * tokens it replaces. Returns 0 when the suffix agrees exactly. */
-int ds4_session_dspark_selftest(ds4_session* session, int rows, char* error,
-                                size_t error_capacity);
-/* Proposes one DSpark block, verifies it against the target, and reports how
- * many tokens the target accepted. Returns 0 when a block was proposed. */
-int ds4_session_dspark_draft_selftest(ds4_session* session, int cycles,
-                                      char* error, size_t error_capacity);
 bool ds4_engine_has_dspark(const ds4_engine* engine);
-/* Runs one greedy DSpark speculative cycle, emitting the accepted prefix plus
- * the target's correction. Falls back to a single ordinary token when a block
- * cannot be drafted or verified. */
-int ds4_session_dspark_step(ds4_session* session, int* emitted, int emitted_cap,
-                            int* n_emitted, char* error, size_t error_capacity);
 int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
                                    size_t item_count, char* error,
                                    size_t error_capacity);

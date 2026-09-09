@@ -22,8 +22,8 @@ struct BenchOptions {
   std::string speculative_backend{""};
   std::string mtp_model_path;
   std::string dflash_model_path;
+  std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
-  std::string draft_policy{"auto"};
   std::uint32_t min_draft_tokens{1};
   float draft_p_min{0.0F};
   bool verbose{false};

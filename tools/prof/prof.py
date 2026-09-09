@@ -14,9 +14,9 @@ optimization decisions on gfx1151:
 
 Usage
 -----
-  tools/prof.py run  [-o DIR] [--stages qwen] -- <command> [args...]
-  tools/prof.py show DB [--stages qwen] [--top N] [--gaps N] [--json]
-  tools/prof.py diff BEFORE_DB AFTER_DB [--stages qwen] [--top N]
+  tools/prof/prof.py run  [-o DIR] [--stages qwen] -- <command> [args...]
+  tools/prof/prof.py show DB [--stages qwen] [--top N] [--gaps N] [--json]
+  tools/prof/prof.py diff BEFORE_DB AFTER_DB [--stages qwen] [--top N]
 
 `run` needs rocprofv3 on PATH, so invoke it inside `nix develop`.
 """
@@ -36,6 +36,31 @@ from dataclasses import dataclass, field
 
 # Kernel-name substring -> pipeline stage. First match wins, so order matters.
 STAGE_MAPS: dict[str, list[tuple[str, str]]] = {
+    "ds4": [
+        ("GroupedQ2Down", "moe: down"),
+        ("moe_gate_up", "moe: gate+up"),
+        ("moe_down", "moe: down"),
+        ("moe_sum", "moe: reduce"),
+        ("moe_", "moe: routing/layout"),
+        ("mul_mat_q", "moe/dense: mmq"),
+        ("dspark", "support: markov/fusion"),
+        ("indexer", "attention: indexer"),
+        ("compress", "attention: compressor"),
+        ("attention", "attention"),
+        ("attn_", "attention"),
+        ("flash_attn", "attention"),
+        ("hc_", "hyperconnections"),
+        ("matmul", "dense projections"),
+        ("Cijk", "dense: hipblaslt"),
+        ("gemm", "dense: gemm"),
+        ("rms", "norm"),
+        ("rope", "rope"),
+        ("quantize", "quantize"),
+        ("f16", "convert/dense"),
+        ("argmax", "sample"),
+        ("fillBuffer", "runtime: fill"),
+        ("copyBuffer", "runtime: copy"),
+    ],
     "qwen": [
         ("W8A8Dual", "gemm: ffn gate+up"),
         ("W8A8Blocked", "gemm: blocked w8a8"),
@@ -167,11 +192,12 @@ def load(db_path: str) -> Profile:
             busy += cur_end - cur_start
             gaps.append((start - cur_end, prev_name, name))
             cur_start, cur_end = start, end
-        else:
-            cur_end = max(cur_end, end)
-        prev_name = name
+            prev_name = name
+        elif end > cur_end:
+            cur_end = end
+            prev_name = name
     busy += cur_end - cur_start
-    wall = intervals[-1][1] - intervals[0][0]
+    wall = cur_end - intervals[0][0]
     gaps.sort(reverse=True)
     return Profile(dict(kernels), busy, wall, gaps, invalid_dispatches)
 
@@ -309,6 +335,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         stderr=subprocess.STDOUT,
         text=True,
     )
+    if proc.returncode:
+        sys.stdout.write(proc.stdout)
+        raise SystemExit(proc.returncode)
     db = os.path.join(out_dir, f"{tag}_results.db")
     if not os.path.exists(db):
         sys.stdout.write(proc.stdout)

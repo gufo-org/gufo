@@ -12,7 +12,7 @@ Gufo backend, or provide a second inference path.
 
 ## Pinned Question Set
 
-The committed data is [the unified DS4 fixture](../tests/quality/antirez-ds4.json).
+The committed data is [the unified DS4 fixture](../tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json).
 It was imported from `antirez/ds4`:
 
 | Field | Identity |
@@ -41,9 +41,9 @@ their DS4 indices, IDs, domains, and accepted line sets.
 To reproduce the import from a DS4 checkout:
 
 ```sh
-python3 tools/ci/import-ds4-eval.py \
+python3 tools/ds4/import-eval.py \
   --ds4-repository /path/to/ds4 \
-  --output tests/quality/antirez-ds4.json
+  --output tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json
 ```
 
 ## Request Contract

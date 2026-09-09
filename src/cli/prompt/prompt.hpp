@@ -34,9 +34,8 @@ struct PromptOptions {
   // DeepSeek V4 Flash DSpark support model. DSpark is DS4's own drafter and
   // is unrelated to the Qwen DFlash paths above.
   std::string dspark_model_path;
-  std::size_t draft_tokens = 7;
-  std::string draft_policy = "auto";
-  std::size_t min_draft_tokens = 1;
+  std::uint32_t draft_tokens = 7;
+  std::uint32_t min_draft_tokens = 1;
   float draft_p_min = 0.0F;
 };
 

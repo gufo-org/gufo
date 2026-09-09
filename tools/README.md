@@ -2,7 +2,7 @@
 
 This page covers the offline weight-conversion and quantization pipeline only.
 The GPU performance tooling that also lives under `tools/` -- `tools/bench/`,
-`tools/prof.py`, and `tools/isa_mix.py` -- is documented in
+`tools/prof/prof.py`, and `tools/prof/isa_mix.py` -- is documented in
 [docs/PERFORMANCE.md](../docs/PERFORMANCE.md) under "Commands".
 
 Python-only, torch-free serving. Never a transitive dependency of the server.
@@ -16,6 +16,7 @@ which is gitignored — nothing committed.
 
 The `tools/` directory is organized into domain-specific subdirectories:
 
+- `tools/ds4/` — DeepSeek V4 quality and performance workflow
 - `tools/quant/` — Offline model inspection, quantization, calibration, evaluation, and test suites
 - `tools/bench/` — GPU & kernel standalone microbenchmarks (HIP / C++)
 - `tools/prof/` — rocprofv3 profiling wrappers and RDNA 3.5 ISA mix analyzer

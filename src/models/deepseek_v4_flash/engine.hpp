@@ -35,7 +35,6 @@ struct SessionDsparkBatchItem {
   Session* session = nullptr;
   std::size_t max_tokens = 32;
   std::uint32_t max_draft_tokens = 5;
-  bool schedule_confidence = false;
   std::vector<int>* emitted = nullptr;
 };
 
@@ -102,15 +101,7 @@ public:
   [[nodiscard]] int SelectNext(float temperature, std::uint64_t* rng_state,
                                int top_k = 0, float top_p = 1.0F,
                                float min_p = 0.0F) const;
-  [[nodiscard]] int SelectNextExcluding(int excluded_token) const;
   [[nodiscard]] bool Evaluate(int token, std::string* error_msg = nullptr);
-  /// Compares batched DSpark verification against one-token decode and reports
-  /// the relative cost of both paths. Diagnostic only.
-  [[nodiscard]] bool DsparkSelfTest(int rows, std::string* error_msg = nullptr);
-  /// Runs whole DSpark speculative cycles and reports acceptance. Diagnostic
-  /// only.
-  [[nodiscard]] bool DsparkDraftSelfTest(int cycles,
-                                         std::string* error_msg = nullptr);
   /// True when this session has a DSpark drafter attached.
   [[nodiscard]] bool HasDspark() const;
   /// Discards DSpark-only request state before exact multi-session execution.
@@ -120,6 +111,10 @@ public:
                                 std::string* error_msg = nullptr);
   /// Runs one greedy speculative cycle without committing more than max_tokens.
   [[nodiscard]] bool DsparkStep(std::size_t max_tokens,
+                                std::vector<int>* emitted,
+                                std::string* error_msg = nullptr);
+  [[nodiscard]] bool DsparkStep(std::size_t max_tokens,
+                                std::uint32_t max_draft_tokens,
                                 std::vector<int>* emitted,
                                 std::string* error_msg = nullptr);
   struct DsparkStats {

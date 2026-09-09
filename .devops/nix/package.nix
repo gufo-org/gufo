@@ -44,8 +44,10 @@ let
       || relativePath == "src"
       || lib.hasPrefix "src/" relativePath
       || relativePath == "tests"
-      || relativePath == "tests/quality"
-      || relativePath == "tests/quality/antirez-ds4.json"
+      || relativePath == "tests/models"
+      || relativePath == "tests/models/deepseek_v4_flash"
+      || relativePath == "tests/models/deepseek_v4_flash/fixtures"
+      || relativePath == "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
       || relativePath == "tools"
       || relativePath == "tools/bench"
       || relativePath == "tools/bench/tune_hipblaslt.cpp"
@@ -146,7 +148,7 @@ stdenv.mkDerivation (finalAttrs: {
     cp $src/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json \
       $out/share/gufo/models/minimax_h3/
     mkdir -p $out/share/gufo/eval
-    cp $src/tests/quality/antirez-ds4.json $out/share/gufo/eval/
+    cp $src/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json $out/share/gufo/eval/
     if [ -f gufo-kernel-bench ]; then
       cp gufo-kernel-bench $out/bin/gufo-kernel-bench
     fi

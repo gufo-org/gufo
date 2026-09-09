@@ -17,7 +17,7 @@ struct hip_hipblaslt_gemm_plan {
     hipblasLtMatrixLayout_t d_desc;
     hipblasLtMatmulAlgo_t algo;
     std::vector<hipblasLtMatmulHeuristicResult_t> candidates;
-    int tuned;
+    bool selected;
 };
 static std::vector<hip_hipblaslt_gemm_plan> g_hipblaslt_gemm_plans;
 
@@ -124,7 +124,7 @@ static hip_hipblaslt_gemm_plan *hipblaslt_gemm_plan_get(
     p.d_desc = d_desc;
     memset(&p.algo, 0, sizeof(p.algo));
     p.candidates.assign(heur, heur + returned);
-    p.tuned = 0;
+    p.selected = false;
     g_hipblaslt_gemm_plans.push_back(p);
     return &g_hipblaslt_gemm_plans.back();
 }
@@ -147,126 +147,75 @@ static int hipblaslt_gemm_f16_launch(
                            NULL, 0, 0) == HIPBLAS_STATUS_SUCCESS;
 }
 
-static int hipblaslt_gemm_plan_tune(
-        hip_hipblaslt_gemm_plan *p,
-        void *out,
-        const __half *a,
-        const __half *b,
-        const char *label) {
-    if (!p || p->candidates.empty()) return 0;
-    // Runtime timing made the near-tied 64x2048x4096 shape alternate between
-    // algorithms with different FP accumulation order. Pin the profiled
-    // gfx1151 choices so identical inputs produce identical logits.
-    /* Candidate 0 is the heuristic's own first choice, which is what this
-     * backend used before the plan cache learned to keep the whole candidate
-     * list. Profiled picks (4 for most shapes, 5 and 6 for three of the
-     * `in_dim == 4096` projections) are faster on gfx1151, but they change the
-     * accumulation order of nearly every dense projection, and the retained
-     * 128-token trajectory envelope has no margin for that, so narrow batches
-     * keep candidate 0. A uniform sweep over candidates 0..15 was measured and
-     * never beat these picks.
-     */
-    size_t gfx1151_preferred_candidate = 0u;
-    if (p->n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS) {
-        gfx1151_preferred_candidate = 4u;
-        if (p->op_a == HIPBLAS_OP_T && p->in_dim == 4096u) {
-            if (p->out_dim == 256u) gfx1151_preferred_candidate = 6u;
-            else if (p->out_dim == 512u) gfx1151_preferred_candidate = 5u;
-        }
+static int hipblaslt_gemm_plan_select(hip_hipblaslt_gemm_plan* p, void* out,
+                                      const __half* a, const __half* b,
+                                      const char* label) {
+  if (!p || p->candidates.empty())
+    return 0;
+  // Runtime timing made the near-tied 64x2048x4096 shape alternate between
+  // algorithms with different FP accumulation order. Pin the profiled
+  // gfx1151 choices so identical inputs produce identical logits.
+  /* Candidate 0 is the heuristic's own first choice, which is what this
+   * backend used before the plan cache learned to keep the whole candidate
+   * list. Profiled picks (4 for most shapes, 5 and 6 for three of the
+   * `in_dim == 4096` projections) are faster on gfx1151, but they change the
+   * accumulation order of nearly every dense projection, and the retained
+   * 128-token trajectory envelope has no margin for that, so narrow batches
+   * keep candidate 0. A uniform sweep over candidates 0..15 was measured and
+   * never beat these picks.
+   */
+  size_t gfx1151_preferred_candidate = 0u;
+  if (p->n_tok >= DS4_ROCM_WIDE_PREFILL_ROWS) {
+    gfx1151_preferred_candidate = 4u;
+    if (p->op_a == HIPBLAS_OP_T && p->in_dim == 4096u) {
+      if (p->out_dim == 256u)
+        gfx1151_preferred_candidate = 6u;
+      else if (p->out_dim == 512u)
+        gfx1151_preferred_candidate = 5u;
     }
-    if (g_rocm_gfx1151 &&
-        p->candidates.size() > gfx1151_preferred_candidate) {
-        const hipblasLtMatmulHeuristicResult_t &candidate =
-            p->candidates[gfx1151_preferred_candidate];
-        if (candidate.state == HIPBLAS_STATUS_SUCCESS &&
-            candidate.workspaceSize == 0u &&
-            hipblaslt_gemm_f16_launch(
-                p, out, a, b, &candidate.algo)) {
-            p->algo = candidate.algo;
-            p->tuned = 1;
-            fprintf(stderr,
-                    "ds4: ROCm hipBLASLt selected fixed %s candidate %zu/%zu "
-                    "(opA=%c m=%u n=%u k=%u)\n",
-                    label ? label : "gemm",
-                    gfx1151_preferred_candidate,
-                    p->candidates.size(),
-                    p->op_a == HIPBLAS_OP_T ? 'T' : 'N',
-                    p->out_dim,
-                    p->n_tok,
-                    p->in_dim);
-            return 1;
-        }
+  }
+  if (g_rocm_gfx1151 && p->candidates.size() > gfx1151_preferred_candidate) {
+    const hipblasLtMatmulHeuristicResult_t& candidate =
+        p->candidates[gfx1151_preferred_candidate];
+    if (candidate.state == HIPBLAS_STATUS_SUCCESS &&
+        candidate.workspaceSize == 0u &&
+        hipblaslt_gemm_f16_launch(p, out, a, b, &candidate.algo)) {
+      p->algo = candidate.algo;
+      p->selected = true;
+      fprintf(stderr,
+              "ds4: ROCm hipBLASLt selected fixed %s candidate %zu/%zu "
+              "(opA=%c m=%u n=%u k=%u)\n",
+              label ? label : "gemm", gfx1151_preferred_candidate,
+              p->candidates.size(), p->op_a == HIPBLAS_OP_T ? 'T' : 'N',
+              p->out_dim, p->n_tok, p->in_dim);
+      return 1;
     }
+  }
 
-    hipEvent_t begin = NULL, end = NULL;
-    if (hipEventCreate(&begin) != hipSuccess ||
-        hipEventCreate(&end) != hipSuccess) {
-        if (begin) (void)hipEventDestroy(begin);
-        if (end) (void)hipEventDestroy(end);
-        return 0;
+  // A missing preferred algorithm must not make results depend on timing
+  // noise. Use the first runnable zero-workspace heuristic in stable order.
+  for (size_t i = 0; i < p->candidates.size(); ++i) {
+    const auto& candidate = p->candidates[i];
+    if (candidate.state != HIPBLAS_STATUS_SUCCESS ||
+        candidate.workspaceSize != 0u ||
+        !hipblaslt_gemm_f16_launch(p, out, a, b, &candidate.algo)) {
+      continue;
     }
-
-    float best_ms = INFINITY;
-    int best_index = -1;
-    const int tune_iterations = 3;
-    for (size_t i = 0; i < p->candidates.size(); i++) {
-        const hipblasLtMatmulHeuristicResult_t &candidate = p->candidates[i];
-        if (candidate.state != HIPBLAS_STATUS_SUCCESS ||
-            candidate.workspaceSize != 0u ||
-            !hipblaslt_gemm_f16_launch(p, out, a, b, &candidate.algo)) {
-            continue;
-        }
-        if (hipEventRecord(begin, 0) != hipSuccess) continue;
-        int launched = 1;
-        for (int it = 0; it < tune_iterations; it++) {
-            if (!hipblaslt_gemm_f16_launch(p, out, a, b, &candidate.algo)) {
-                launched = 0;
-                break;
-            }
-        }
-        if (!launched ||
-            hipEventRecord(end, 0) != hipSuccess ||
-            hipEventSynchronize(end) != hipSuccess) {
-            continue;
-        }
-        float elapsed = 0.0f;
-        if (hipEventElapsedTime(&elapsed, begin, end) != hipSuccess) continue;
-        const float mean_ms = elapsed / (float)tune_iterations;
-        if (mean_ms < best_ms) {
-            best_ms = mean_ms;
-            best_index = (int)i;
-        }
-    }
-    (void)hipEventDestroy(end);
-    (void)hipEventDestroy(begin);
-    if (best_index < 0) return 0;
-
-    p->algo = p->candidates[(size_t)best_index].algo;
-    p->tuned = 1;
+    p->algo = candidate.algo;
+    p->selected = true;
     fprintf(stderr,
-            "ds4: ROCm hipBLASLt selected %s candidate %d/%zu "
-            "(opA=%c m=%u n=%u k=%u, %.3f ms)\n",
-            label ? label : "gemm",
-            best_index,
-            p->candidates.size(),
-            p->op_a == HIPBLAS_OP_T ? 'T' : 'N',
-            p->out_dim,
-            p->n_tok,
-            p->in_dim,
-            best_ms);
+            "ds4: ROCm hipBLASLt selected fixed fallback %s candidate %zu/%zu "
+            "(opA=%c m=%u n=%u k=%u)\n",
+            label ? label : "gemm", i, p->candidates.size(),
+            p->op_a == HIPBLAS_OP_T ? 'T' : 'N', p->out_dim, p->n_tok,
+            p->in_dim);
     return 1;
+  }
+  return 0;
 }
 
-/* Opt-in: send projections that ship on hipBLAS through hipBLASLt instead.
- *
- * Worth 363.9 to 410.5 tok/s at a 4,096-token prompt, and it is the only
- * accelerated prefill route that the retained envelope rejects. Width scoping
- * does not save it: the pinned trajectory's own prompt prefill is wide, and
- * swapping libraries for those projections is a coarser perturbation than
- * swapping algorithms within one, so the trajectory lands at 114/128 with rank
- * sum 150 against a 116/142 floor. Every other route below, MMQ included, keeps
- * the trajectory at 116/128 rank sum 142. Enable with
- * the default mask below. */
+/* Qualified hipBLASLt projection routes. Attention output B remains on
+ * hipBLAS: its faster LT alternative fails the retained trajectory envelope. */
 enum {
     DS4_ROCM_LT_ROUTE_Q8_F32 = 1u,   /* dense Q8 projection, F32 result */
     DS4_ROCM_LT_ROUTE_Q8_F16 = 2u,   /* dense Q8 projection, F16 result */
@@ -307,7 +256,8 @@ static int hipblaslt_gemm_f16(
     hip_hipblaslt_gemm_plan *p = hipblaslt_gemm_plan_get(
         out_dim, n_tok, in_dim, op_a, output_type, label);
     if (!p) return 0;
-    if (!p->tuned && !hipblaslt_gemm_plan_tune(p, out, a, b, label)) return 0;
+    if (!p->selected && !hipblaslt_gemm_plan_select(p, out, a, b, label))
+      return 0;
     return hipblaslt_gemm_f16_launch(p, out, a, b, &p->algo);
 }
 

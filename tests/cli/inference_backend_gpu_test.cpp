@@ -224,8 +224,6 @@ int main(int argc, const char* const* argv) {
                      .draft_model_path = draft_model_path,
                      .max_draft_tokens = 7,
                      .min_draft_tokens = 1,
-                     .draft_policy =
-                         gufo::server::TextDraftPolicy::kRollingAcceptance,
                  }),
              error);
       const auto direct_spec = GenerateDirect(*direct, raw_prompt_tokens, 8);
@@ -457,7 +455,6 @@ int main(int argc, const char* const* argv) {
             .draft_model_path = draft_model_path,
             .max_draft_tokens = 7,
             .min_draft_tokens = 1,
-            .draft_policy = gufo::server::TextDraftPolicy::kRollingAcceptance,
         };
         auto dflash_disk_cache = disk_cache;
         dflash_disk_cache.draft_model_artifact_fingerprint =

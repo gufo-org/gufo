@@ -27,7 +27,6 @@ def make_args(backend):
         backend=backend,
         max_tokens=128,
         draft_tokens=7,
-        draft_policy="auto",
         min_draft_tokens=1,
         prompt_mode="auto",
         system_prompt=None,
@@ -45,6 +44,9 @@ check(
     "DSpark auto mode must use the reference system prompt",
 )
 check("--dspark-model" in dspark_command, "DSpark model argument")
+check(dspark_command[dspark_command.index("--draft-tokens") + 1] == "7",
+      "DSpark benchmark retains the requested draft budget")
+check("--draft-policy" not in dspark_command, "removed policy is never emitted")
 
 custom_args = make_args("dspark")
 custom_args.system_prompt = "Custom system prompt"

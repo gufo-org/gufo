@@ -29,7 +29,8 @@
 #define GUFO_VERSION "development"
 #endif
 #ifndef GUFO_EVAL_SOURCE_DATA
-#define GUFO_EVAL_SOURCE_DATA "tests/quality/antirez-ds4.json"
+#define GUFO_EVAL_SOURCE_DATA \
+  "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
 #endif
 #ifndef GUFO_EVAL_INSTALLED_DATA
 #define GUFO_EVAL_INSTALLED_DATA GUFO_EVAL_SOURCE_DATA

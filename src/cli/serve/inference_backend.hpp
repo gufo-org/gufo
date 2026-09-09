@@ -29,19 +29,12 @@ enum class TextSpeculativeBackend : std::uint8_t {
   kDSpark,
 };
 
-enum class TextDraftPolicy : std::uint8_t {
-  kFixed,
-  kRollingAcceptance,
-  kAcceptedTokenEma,
-};
-
 struct TextSpeculativeConfig {
   TextSpeculativeBackend backend{TextSpeculativeBackend::kDisabled};
   std::string draft_model_path;
   std::uint32_t max_draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
   float draft_p_min{0.0F};
-  TextDraftPolicy draft_policy{TextDraftPolicy::kRollingAcceptance};
 };
 
 struct TextDiskCacheConfig {

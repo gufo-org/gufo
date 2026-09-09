@@ -19,7 +19,6 @@ void TestDefaultOptions() {
   assert(opt->preserve_thinking == "auto");
   assert(!opt->verbose);
   assert(opt->draft_tokens == 7);
-  assert(opt->draft_policy == "auto");
   assert(opt->min_draft_tokens == 1);
   assert(opt->draft_p_min == 0.0F);
 }
@@ -40,14 +39,12 @@ void TestExplicitFlags() {
 }
 
 void TestHybridMtpFlags() {
-  const std::array<const char*, 13> args = {"--speculative",
+  const std::array<const char*, 11> args = {"--speculative",
                                             "mtp-npu",
                                             "--mtp-model",
                                             "mtp.gguf",
                                             "--spec-draft-n-max",
                                             "2",
-                                            "--draft-policy",
-                                            "fixed",
                                             "--spec-draft-n-min",
                                             "2",
                                             "--spec-draft-p-min",
@@ -58,7 +55,6 @@ void TestHybridMtpFlags() {
   assert(opt->speculative_backend == "mtp-npu");
   assert(opt->mtp_model_path == "mtp.gguf");
   assert(opt->draft_tokens == 2);
-  assert(opt->draft_policy == "fixed");
   assert(opt->min_draft_tokens == 2);
   assert(opt->draft_p_min > 0.74F && opt->draft_p_min < 0.76F);
 }
@@ -74,9 +70,6 @@ void TestInvalidFlags() {
 
   const std::array<const char*, 2> args3 = {"-t", "invalid_float"};
   assert(!gufo::cli::ParsePromptOptions(args3, &err).has_value());
-
-  const std::array<const char*, 2> args4 = {"--draft-policy", "unknown"};
-  assert(!gufo::cli::ParsePromptOptions(args4, &err).has_value());
 
   const std::array<const char*, 4> args5 = {"--draft-tokens", "3",
                                             "--min-draft-tokens", "4"};

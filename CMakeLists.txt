@@ -283,11 +283,17 @@ if (ENGINE_ENABLE_HIP)
     roc::hipblaslt roc::rocblas aotriton_v2)
 endif()
 
+add_library(gufo_llm_cli STATIC
+  src/cli/bench/bench.cpp
+  src/cli/prompt/prompt.cpp)
+target_link_libraries(gufo_llm_cli PUBLIC gufo_core)
+if(ENGINE_ENABLE_HIP)
+  target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash)
+endif()
+
 add_executable(gufo
   src/cli/main.cpp
-  src/cli/bench/bench.cpp
   src/cli/eval/eval.cpp
-  src/cli/prompt/prompt.cpp
   src/cli/transcribe/transcribe.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
@@ -307,10 +313,10 @@ add_executable(gufo
   src/cli/serve/openai_chat.cpp
   src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core CURL::libcurl)
+target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core gufo_llm_cli CURL::libcurl)
 target_compile_definitions(gufo PRIVATE
   GUFO_VERSION="${GUFO_VERSION}"
-  GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/quality/antirez-ds4.json"
+  GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
   GUFO_EVAL_INSTALLED_DATA="${CMAKE_INSTALL_PREFIX}/share/gufo/eval/antirez-ds4.json"
   GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
@@ -373,7 +379,7 @@ install(FILES
   src/models/qwen3_asr/tools/benchmark.py
   DESTINATION share/gufo/models/qwen3_asr)
 install(FILES
-  tests/quality/antirez-ds4.json
+  tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json
   DESTINATION share/gufo/eval)
 if (ENGINE_ENABLE_HIP)
   install(TARGETS gufo-kernel-bench tune_hipblaslt benchmark_ssm_replay
@@ -441,29 +447,18 @@ if (BUILD_TESTING)
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
 
-  add_executable(deepseek_v4_flash_chat_template_test
-    tests/models/deepseek_v4_flash_chat_template_test.cpp
-    src/models/deepseek_v4_flash/chat_template.cpp)
-  target_link_libraries(deepseek_v4_flash_chat_template_test PRIVATE gufo_core)
-  target_compile_definitions(deepseek_v4_flash_chat_template_test PRIVATE
-    GUFO_DEEPSEEK_CHAT_TEMPLATE_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja")
-  add_test(NAME deepseek_v4_flash_chat_template_test
-    COMMAND deepseek_v4_flash_chat_template_test)
-  set_tests_properties(deepseek_v4_flash_chat_template_test PROPERTIES
-    LABELS "cpu;tokenization;chat_template;deepseek")
+  add_subdirectory(tests/models/deepseek_v4_flash)
 
   if(ENGINE_ENABLE_HIP)
     add_executable(chat_template_hf_token_golden_test
       tests/models/chat_template_hf_token_golden_test.cpp)
-    target_link_libraries(chat_template_hf_token_golden_test PRIVATE
-      gufo_core
-      gufo_deepseek_v4_flash)
+    target_link_libraries(chat_template_hf_token_golden_test PRIVATE gufo_core)
     target_compile_definitions(chat_template_hf_token_golden_test PRIVATE
       GUFO_CHAT_TEMPLATE_HF_GOLDENS="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
     add_test(NAME chat_template_hf_token_golden_test
       COMMAND chat_template_hf_token_golden_test)
     set_tests_properties(chat_template_hf_token_golden_test PROPERTIES
-      LABELS "gpu;hip;tokenization;chat_template;qwen;deepseek;external-model"
+      LABELS "gpu;hip;tokenization;chat_template;qwen;external-model"
       SKIP_RETURN_CODE 77)
   endif()
 
@@ -516,24 +511,16 @@ if (BUILD_TESTING)
 
   add_executable(prompt_cli_test
     tests/cli/prompt_test.cpp
-    src/cli/prompt/prompt.cpp
   )
-  target_link_libraries(prompt_cli_test PRIVATE gufo_core)
-  if (ENGINE_ENABLE_HIP)
-    target_link_libraries(prompt_cli_test PRIVATE gufo_deepseek_v4_flash)
-  endif()
+  target_link_libraries(prompt_cli_test PRIVATE gufo_llm_cli)
 
   add_test(NAME prompt_cli_test COMMAND prompt_cli_test)
   set_tests_properties(prompt_cli_test PROPERTIES LABELS "cpu;server;cli")
 
   add_executable(bench_cli_test
     tests/cli/bench_test.cpp
-    src/cli/bench/bench.cpp
   )
-  target_link_libraries(bench_cli_test PRIVATE gufo_core)
-  if (ENGINE_ENABLE_HIP)
-    target_link_libraries(bench_cli_test PRIVATE gufo_deepseek_v4_flash)
-  endif()
+  target_link_libraries(bench_cli_test PRIVATE gufo_llm_cli)
 
   add_test(NAME bench_cli_test COMMAND bench_cli_test)
   set_tests_properties(bench_cli_test PROPERTIES LABELS "cpu;server;cli")
@@ -614,7 +601,7 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/speculative_corpus_test.py)
   set_tests_properties(speculative_corpus_test PROPERTIES
-    LABELS "cpu;tools;benchmarks;speculative;deepseek-v4-flash;qwen")
+    LABELS "cpu;tools;benchmarks;speculative;ds4;qwen")
 
   add_test(NAME prof_test
     COMMAND ${Python3_EXECUTABLE}
@@ -786,25 +773,11 @@ if (BUILD_TESTING)
   add_test(NAME eval_regrade_test COMMAND eval_regrade_test)
   set_tests_properties(eval_regrade_test PROPERTIES LABELS "cpu;quality;eval")
 
-  add_executable(eval_dataset_test tests/quality/eval_dataset_test.cpp)
-  target_compile_definitions(eval_dataset_test PRIVATE
-    GUFO_EVAL_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/quality/antirez-ds4.json")
-  target_link_libraries(eval_dataset_test PRIVATE gufo_core)
-  add_test(NAME eval_dataset_test COMMAND eval_dataset_test)
-  set_tests_properties(eval_dataset_test PROPERTIES
-    LABELS "cpu;quality;eval;dataset;extractor")
-
-  add_test(NAME eval_dataset_audit_test
-    COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_eval_dataset.py)
-  set_tests_properties(eval_dataset_audit_test PROPERTIES
-    LABELS "cpu;quality;eval;dataset;provenance;license")
-
   add_test(NAME eval_http_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_eval_http.py
       --gufo $<TARGET_FILE:gufo>
-      --data ${CMAKE_CURRENT_SOURCE_DIR}/tests/quality/antirez-ds4.json)
+      --data ${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json)
   set_tests_properties(eval_http_test PROPERTIES
     LABELS "cpu;quality;eval;http;cli;server")
 
@@ -984,21 +957,6 @@ if (BUILD_TESTING)
       LABELS "gpu;hip;gfx1151;minimax-h3;audio;vae;quality;external-model;very-slow"
       SKIP_RETURN_CODE 77)
 
-    add_executable(deepseek_v4_flash_engine_test
-      tests/models/deepseek_v4_flash_engine_test.cpp)
-    target_link_libraries(deepseek_v4_flash_engine_test PRIVATE
-      gufo_deepseek_v4_flash)
-    add_test(NAME deepseek_v4_flash_engine_test
-      COMMAND deepseek_v4_flash_engine_test)
-    set_tests_properties(deepseek_v4_flash_engine_test PROPERTIES
-      LABELS "gpu;hip;gfx1151;deepseek-v4-flash;external-model;slow"
-      SKIP_RETURN_CODE 77)
-    add_test(NAME deepseek_v4_flash_dspark_down_routes_test
-      COMMAND deepseek_v4_flash_engine_test)
-    set_tests_properties(deepseek_v4_flash_dspark_down_routes_test PROPERTIES
-      LABELS "gpu;hip;gfx1151;deepseek-v4-flash;dspark-down;external-model;slow"
-      ENVIRONMENT "GUFO_DEEPSEEK_V4_FLASH_DSPARK_DOWN_ROUTES_ONLY=1;GUFO_DEEPSEEK_DSPARK_VALIDATE_DOWN=1"
-      SKIP_RETURN_CODE 77)
 
     add_executable(hipblaslt_runtime_cache_test
       tests/kernels/hipblaslt_runtime_cache_test.cpp)
@@ -1038,20 +996,6 @@ if (BUILD_TESTING)
       LABELS "hip;gpu;server;correctness"
       SKIP_RETURN_CODE 77)
 
-    add_executable(deepseek_v4_flash_backend_test
-      tests/cli/deepseek_v4_flash_backend_test.cpp
-      src/cli/serve/continuation_cache.cpp
-      src/cli/serve/continuation_disk_store.cpp
-      src/cli/serve/text_model_runner.cpp
-      src/cli/serve/text_generation_scheduler.cpp
-      src/cli/serve/inference_backend.cpp)
-    target_link_libraries(deepseek_v4_flash_backend_test PRIVATE
-      gufo_core gufo_deepseek_v4_flash hip::host)
-    add_test(NAME deepseek_v4_flash_backend_test
-      COMMAND deepseek_v4_flash_backend_test)
-    set_tests_properties(deepseek_v4_flash_backend_test PROPERTIES
-      LABELS "hip;gpu;server;correctness;deepseek-v4-flash;external-model;slow"
-      SKIP_RETURN_CODE 77)
 
     add_executable(gfx1151_acceptance_test tests/benchmarks/gfx1151_acceptance_test.cpp)
     target_link_libraries(gfx1151_acceptance_test PRIVATE gufo_core hip::host roc::hipblas roc::rocblas)
@@ -1104,5 +1048,4 @@ if (BUILD_TESTING)
   endif()
 endif()
 
-# Static analysis and formatting targets
-include(cmake/StaticAnalysis.cmake)
+# Formatting and static analysis are owned by the canonical Nix PR checks.

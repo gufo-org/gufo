@@ -68,16 +68,20 @@ void PrintBenchHelp(std::string_view program_name) {
 
   parser.AddOption("", "--validate-prefill", "N",
                    "Compare batched prefill logits against sequential "
-                   "reference (TODO: deepseek)",
+                   "reference",
                    "Validation", &opt.model_path);
 
-  parser.AddOption("", "--speculative", "MODE",
-                   "Draft backend: dflash, dflash2, mtp, mtp-npu, npu, pld, "
-                   "self, or off",
-                   "Speculative", &opt.speculative_backend);
+  parser.AddOption(
+      "", "--speculative", "MODE",
+      "Draft backend: dflash, dflash2, mtp, mtp-npu, dspark, npu, pld, "
+      "self, or off",
+      "Speculative", &opt.speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
                    "Speculative", &opt.dflash_model_path);
+  parser.AddOption("", "--dspark-model", "PATH",
+                   "DeepSeek V4 Flash DSpark support GGUF", "Speculative",
+                   &opt.dspark_model_path);
   parser.AddOption("", "--mtp-model", "PATH",
                    "Path to quantized Qwen MTP draft head GGUF file",
                    "Speculative", &opt.mtp_model_path);
@@ -88,10 +92,7 @@ void PrintBenchHelp(std::string_view program_name) {
   parser.AddOption("", "--spec-draft-n-max", "N",
                    "llama.cpp-compatible alias for --draft-tokens",
                    "Speculative", &opt.draft_tokens);
-  parser.AddOption("", "--draft-policy", "MODE",
-                   "Draft sizing: auto, fixed, rolling, or accepted-ema "
-                   "(default: auto, fixed for DFlash-2)",
-                   "Speculative", &opt.draft_policy);
+
   parser.AddOption("", "--min-draft-tokens", "N",
                    "Adaptive draft floor (default: 1)", "Speculative",
                    &opt.min_draft_tokens);
@@ -128,24 +129,22 @@ void PrintModelLoadTime(std::chrono::steady_clock::time_point start,
   output << '\n';
 }
 
-std::vector<std::size_t> ParseCommaSeparatedSizes(std::string_view str,
-                                                  bool allow_zero = false) {
+std::optional<std::vector<std::size_t>> ParseCommaSeparatedSizes(
+    std::string_view text, bool keep_zero = false) {
+  if (text.empty() || text.back() == ',')
+    return std::nullopt;
   std::vector<std::size_t> result;
-  std::size_t start = 0;
-  while (start < str.size()) {
-    auto end = str.find(',', start);
-    if (end == std::string_view::npos) {
-      end = str.size();
-    }
-    const auto part = str.substr(start, end - start);
-    if (!part.empty()) {
-      std::size_t val = 0;
-      const auto [ptr, ec] =
-          std::from_chars(part.data(), part.data() + part.size(), val);
-      if (ec == std::errc{} && (val > 0 || allow_zero)) {
-        result.push_back(val);
-      }
-    }
+  for (std::size_t start = 0; start < text.size();) {
+    const auto comma = text.find(',', start);
+    const auto end = comma == std::string_view::npos ? text.size() : comma;
+    const auto part = text.substr(start, end - start);
+    std::size_t value = 0;
+    const auto [ptr, ec] =
+        std::from_chars(part.data(), part.data() + part.size(), value);
+    if (ec != std::errc{} || ptr != part.data() + part.size())
+      return std::nullopt;
+    if (value != 0 || keep_zero)
+      result.push_back(value);
     start = end + 1;
   }
   return result;
@@ -270,23 +269,32 @@ int RunDeepSeekBenchmark(
                           : *std::max_element(values.begin(), values.end());
   };
   const std::size_t max_depth = max_or_zero(options.n_depths);
-  const std::size_t max_test_tokens =
-      std::max(max_or_zero(options.n_prompts), max_or_zero(options.n_gens));
-  const std::size_t required_context =
-      std::max<std::size_t>(4096, max_depth + max_test_tokens + 1);
-  if (required_context > std::numeric_limits<std::uint32_t>::max()) {
+  const std::size_t max_prompt = max_or_zero(options.n_prompts);
+  const std::size_t max_generation = max_or_zero(options.n_gens);
+  constexpr std::size_t context_limit = std::numeric_limits<int>::max() - 1;
+  if (max_depth > context_limit || max_prompt > context_limit - max_depth ||
+      max_generation > context_limit - std::max<std::size_t>(max_depth, 16) ||
+      options.validate_prefill_tokens > context_limit) {
     std::cerr << "Error: requested DeepSeek benchmark context is too large\n";
-    PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (options.validate_prefill_tokens != 0) {
-    std::cerr << "Error: DeepSeek prefill oracle validation is not available "
-                 "through --validate-prefill\n";
+  const std::size_t required_context =
+      std::max({std::size_t{4096}, max_depth + max_prompt + 1,
+                std::max<std::size_t>(max_depth, 16) + max_generation + 1,
+                options.validate_prefill_tokens + 1});
+  const bool dspark = options.speculative_backend == "dspark";
+  if (!options.speculative_backend.empty() && !dspark) {
+    std::cerr << "Error: DeepSeek supports only --speculative dspark or off\n";
     return 1;
   }
-  if (!options.speculative_backend.empty()) {
-    std::cerr << "Error: DeepSeek speculative benchmark modes are not yet "
-                 "implemented\n";
+  if (dspark && options.dspark_model_path.empty()) {
+    std::cerr << "Error: --speculative dspark requires --dspark-model\n";
+    return 1;
+  }
+  if (dspark &&
+      (options.min_draft_tokens != 1 || options.draft_p_min != 0.0F)) {
+    std::cerr << "Error: DSpark uses model-owned adaptive drafting; custom "
+                 "draft floors and confidence thresholds are unsupported\n";
     return 1;
   }
 
@@ -297,6 +305,7 @@ int RunDeepSeekBenchmark(
           .max_context = static_cast<std::uint32_t>(required_context),
           .prefill_chunk = 2048,
           .power_percent = 100,
+          .dspark_model_path = dspark ? options.dspark_model_path : "",
       },
       &error);
   if (model == nullptr) {
@@ -307,6 +316,47 @@ int RunDeepSeekBenchmark(
   PrintModelLoadTime(model_load_start);
 
   const auto tokens = MakeDeepSeekBenchmarkTokens(*model, required_context);
+  if (options.validate_prefill_tokens != 0) {
+    auto sequential = model->CreateSession(required_context, &error);
+    auto batched = model->CreateSession(required_context, &error);
+    const auto prefix =
+        std::span(tokens).first(options.validate_prefill_tokens);
+    if (!sequential || !batched || !sequential->Sync(prefix.first(1), &error) ||
+        !batched->Sync(prefix, &error)) {
+      std::cerr << "DeepSeek prefill validation failed: " << error << '\n';
+      return 1;
+    }
+    for (const int token : prefix.subspan(1)) {
+      if (!sequential->Evaluate(token, &error)) {
+        std::cerr << "DeepSeek scalar reference failed: " << error << '\n';
+        return 1;
+      }
+    }
+    const auto reference = sequential->CopyLogits(&error);
+    const auto candidate = batched->CopyLogits(&error);
+    if (reference.empty() || reference.size() != candidate.size()) {
+      std::cerr << "DeepSeek validation logit readback failed: " << error
+                << '\n';
+      return 1;
+    }
+    const auto comparison = testing::CompareLogits(reference, candidate);
+    const std::size_t rank =
+        1 + std::count_if(candidate.begin(), candidate.end(), [&](float value) {
+          return value > candidate[comparison.reference_argmax];
+        });
+    std::cout << "[Prefill Validation] tokens=" << prefix.size()
+              << " finite=" << comparison.finite
+              << " scalar_winner_rank=" << rank
+              << " rmse=" << comparison.root_mean_square_error
+              << " cosine=" << comparison.cosine_similarity
+              << " max_error=" << comparison.max_abs_diff << '\n';
+    if (!comparison.finite || rank > 3 ||
+        comparison.root_mean_square_error > 1.12F ||
+        comparison.cosine_similarity < 0.979F ||
+        comparison.max_abs_diff > 5.0F) {
+      return 1;
+    }
+  }
   const double size_gib =
       static_cast<double>(reader->GetSize()) / (1024.0 * 1024.0 * 1024.0);
   const auto model_name = model->ModelName();
@@ -340,7 +390,7 @@ int RunDeepSeekBenchmark(
   std::size_t prepared_depth = 0;
   for (const std::size_t depth : options.n_depths) {
     std::unique_ptr<models::deepseek_v4_flash::SessionSnapshot> snapshot;
-    if (depth > 0) {
+    if (depth > 0 && !dspark) {
       if (prepared_session == nullptr || depth < prepared_depth) {
         prepared_session = model->CreateSession(
             static_cast<std::uint32_t>(required_context), &error);
@@ -376,10 +426,14 @@ int RunDeepSeekBenchmark(
            ++repetition) {
         std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
         models::deepseek_v4_flash::Session* session = prepared_session.get();
-        if (depth == 0) {
+        if (snapshot == nullptr) {
           local_session = model->CreateSession(
               static_cast<std::uint32_t>(required_context), &error);
           session = local_session.get();
+          if (session != nullptr && depth > 0 &&
+              !session->Sync(std::span(tokens).first(depth), &error)) {
+            session = nullptr;
+          }
         } else if (!prepared_session->RestoreSnapshot(*snapshot, &error)) {
           std::cerr << "Error restoring DeepSeek depth: " << error << '\n';
           return 1;
@@ -419,7 +473,7 @@ int RunDeepSeekBenchmark(
            ++repetition) {
         std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
         models::deepseek_v4_flash::Session* session = prepared_session.get();
-        if (depth == 0) {
+        if (snapshot == nullptr) {
           local_session = model->CreateSession(
               static_cast<std::uint32_t>(required_context), &error);
           session = local_session.get();
@@ -436,11 +490,23 @@ int RunDeepSeekBenchmark(
         }
 
         const auto start = std::chrono::steady_clock::now();
-        for (std::size_t step = 0; step < generation_length; ++step) {
-          const int token = session->SelectNextExcluding(model->EosToken());
-          if (token < 0 || !session->Evaluate(token, &error)) {
-            std::cerr << "Error running DeepSeek decode: " << error << '\n';
-            return 1;
+        for (std::size_t step = 0; step < generation_length;) {
+          if (dspark) {
+            std::vector<int> emitted;
+            if (!session->DsparkStep(generation_length - step,
+                                     options.draft_tokens, &emitted, &error) ||
+                emitted.empty()) {
+              std::cerr << "Error running DSpark decode: " << error << '\n';
+              return 1;
+            }
+            step += emitted.size();
+          } else {
+            const int token = session->SelectNext(0.0F, nullptr);
+            if (token < 0 || !session->Evaluate(token, &error)) {
+              std::cerr << "Error running DeepSeek decode: " << error << '\n';
+              return 1;
+            }
+            ++step;
           }
         }
         const double seconds = std::chrono::duration<double>(
@@ -450,13 +516,18 @@ int RunDeepSeekBenchmark(
         if (options.verbose) {
           std::cerr << "DeepSeek tg depth=" << depth
                     << " payload_bytes=" << session->PayloadBytes() << '\n';
+          if (dspark) {
+            const auto stats = session->DsparkStatistics();
+            std::cerr << "DSpark accepted=" << stats.support_accepted
+                      << " drafted=" << stats.support_drafted << '\n';
+          }
         }
       }
       print_result(MakeTestName("tg", generation_length, depth),
                    ComputeStats(runs));
     }
 
-    if (depth > 0 && !prepared_session->RestoreSnapshot(*snapshot, &error)) {
+    if (snapshot && !prepared_session->RestoreSnapshot(*snapshot, &error)) {
       std::cerr << "Error restoring final DeepSeek depth: " << error << '\n';
       return 1;
     }
@@ -490,9 +561,15 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
       "Prompt token lengths to benchmark (default: 64,128,512)", "Workload",
-      [&opt, &explicit_p](std::string_view, std::string_view val,
-                          std::string*) -> bool {
-        opt.n_prompts = ParseCommaSeparatedSizes(val);
+      [&opt, &explicit_p](std::string_view flag, std::string_view val,
+                          std::string* error) -> bool {
+        auto sizes = ParseCommaSeparatedSizes(val);
+        if (!sizes) {
+          if (error)
+            *error = "Invalid token counts for " + std::string(flag);
+          return false;
+        }
+        opt.n_prompts = std::move(*sizes);
         explicit_p = true;
         return true;
       });
@@ -501,9 +578,15 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       "-n", "--n-gen", "n,n,...",
       "Number of text generation tokens to benchmark (default: 128)",
       "Workload",
-      [&opt, &explicit_n](std::string_view, std::string_view val,
-                          std::string*) -> bool {
-        opt.n_gens = ParseCommaSeparatedSizes(val);
+      [&opt, &explicit_n](std::string_view flag, std::string_view val,
+                          std::string* error) -> bool {
+        auto sizes = ParseCommaSeparatedSizes(val);
+        if (!sizes) {
+          if (error)
+            *error = "Invalid token counts for " + std::string(flag);
+          return false;
+        }
+        opt.n_gens = std::move(*sizes);
         explicit_n = true;
         return true;
       });
@@ -513,13 +596,14 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       "Context depths prepared before timed region (default: 0)", "Workload",
       [&opt](std::string_view flag_name, std::string_view val,
              std::string* err) -> bool {
-        opt.n_depths = ParseCommaSeparatedSizes(val, true);
-        if (opt.n_depths.empty()) {
+        auto sizes = ParseCommaSeparatedSizes(val, true);
+        if (!sizes) {
           if (err != nullptr) {
             *err = "Invalid argument for " + std::string(flag_name);
           }
           return false;
         }
+        opt.n_depths = std::move(*sizes);
         return true;
       });
 
@@ -530,8 +614,7 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
 
   parser.AddCustomOption(
       "", "--validate-prefill", "N",
-      "Compare batched prefill logits against sequential reference (TODO: "
-      "deepseek)",
+      "Compare batched prefill logits against sequential reference",
       "Validation",
       [&opt](std::string_view, std::string_view val, std::string* err) -> bool {
         std::size_t num = 0;
@@ -547,8 +630,11 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
         return true;
       });
 
+  bool speculative_explicit = false;
   const auto parse_speculative_backend =
-      [&opt](std::string_view, std::string_view value, std::string*) -> bool {
+      [&opt, &speculative_explicit](std::string_view, std::string_view value,
+                                    std::string*) -> bool {
+    speculative_explicit = true;
     if (value == "none" || value == "off" || value == "false" ||
         value == "disabled") {
       opt.speculative_backend.clear();
@@ -557,16 +643,19 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     }
     return true;
   };
-  parser.AddCustomOption(
-      "", "--speculative", "MODE",
-      "Draft backend: dflash, dflash2, mtp, mtp-npu, npu, pld, self, or off",
-      "Speculative", parse_speculative_backend);
+  parser.AddCustomOption("", "--speculative", "MODE",
+                         "Draft backend: dflash, dflash2, mtp, mtp-npu, "
+                         "dspark, npu, pld, self, or off",
+                         "Speculative", parse_speculative_backend);
   parser.AddCustomOption("", "--speculative-decoding", "MODE",
                          "Alias for --speculative", "Speculative",
                          parse_speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
                    "Speculative", &opt.dflash_model_path);
+  parser.AddOption("", "--dspark-model", "PATH",
+                   "DeepSeek V4 Flash DSpark support GGUF", "Speculative",
+                   &opt.dspark_model_path);
   parser.AddOption("", "--mtp-model", "PATH",
                    "Path to quantized Qwen MTP draft head GGUF file",
                    "Speculative", &opt.mtp_model_path);
@@ -589,23 +678,7 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
         opt.draft_tokens = count;
         return true;
       });
-  parser.AddCustomOption(
-      "", "--draft-policy", "MODE",
-      "Draft sizing: auto, fixed, rolling, or accepted-ema (default: auto, "
-      "which is fixed for DFlash-2 and rolling otherwise)",
-      "Speculative",
-      [&opt](std::string_view, std::string_view value,
-             std::string* error) -> bool {
-        if (value != "auto" && value != "fixed" && value != "rolling" &&
-            value != "accepted-ema") {
-          if (error != nullptr) {
-            *error = "Invalid draft policy: " + std::string(value);
-          }
-          return false;
-        }
-        opt.draft_policy = value;
-        return true;
-      });
+
   parser.AddCustomOption(
       "", "--min-draft-tokens", "N", "Adaptive draft floor (default: 1)",
       "Speculative",
@@ -658,6 +731,18 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     opt.n_gens.clear();
   } else if (!explicit_p && explicit_n) {
     opt.n_prompts.clear();
+  }
+
+  if (opt.repetitions == 0 || (opt.n_prompts.empty() && opt.n_gens.empty() &&
+                               opt.validate_prefill_tokens == 0)) {
+    if (error_msg)
+      *error_msg =
+          "Benchmark needs positive repetitions and at least one workload";
+    return std::nullopt;
+  }
+
+  if (!speculative_explicit && !opt.dspark_model_path.empty()) {
+    opt.speculative_backend = "dspark";
   }
 
   if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0 ||
@@ -1035,14 +1120,7 @@ int RunBench(std::span<const char* const> args) {
               opt.speculative_backend == "dflash" ||
               opt.speculative_backend == "dflash2" ||
               opt.speculative_backend == "dflash-2";
-          const auto resolved_policy = speculative::ResolveDraftPolicy(
-              opt.draft_policy, block_diffusion_draft);
-          if (resolved_policy == "fixed") {
-            s_opts.enable_adaptive_draft_length = false;
-          } else if (resolved_policy == "accepted-ema") {
-            s_opts.adaptive_draft_policy =
-                speculative::AdaptiveDraftPolicy::kAcceptedTokenEma;
-          }
+          s_opts.enable_adaptive_draft_length = !block_diffusion_draft;
           if (opt.speculative_backend == "dflash" ||
               opt.speculative_backend == "dflash2" ||
               opt.speculative_backend == "dflash-2") {

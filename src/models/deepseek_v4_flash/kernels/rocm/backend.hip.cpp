@@ -46,7 +46,6 @@ extern "C" int ds4_cuda_q8_fold_take_q81(
 #endif
 
 #define ROCM_QK_K 256
-#define DS4_ROCM_UNUSED __attribute__((unused))
 
 enum {
     /* attention_decode_mixed_kernel stores raw-window scores plus visible

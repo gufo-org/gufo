@@ -66,10 +66,8 @@ target_compile_options(gufo_deepseek_v4_flash PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-O3;-ffast-math;-fno-finite-math-only>
   $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
 
-target_include_directories(gufo_deepseek_v4_flash
-  PUBLIC
-    ${PROJECT_SOURCE_DIR}
-  SYSTEM PUBLIC
+target_include_directories(gufo_deepseek_v4_flash PUBLIC ${PROJECT_SOURCE_DIR})
+target_include_directories(gufo_deepseek_v4_flash SYSTEM PUBLIC
     ${DEEPSEEK_V4_FLASH_RUNTIME_DIR}
     ${DEEPSEEK_V4_FLASH_ROCM_DIR}
     ${DEEPSEEK_V4_FLASH_ROCM_DIR}/detail

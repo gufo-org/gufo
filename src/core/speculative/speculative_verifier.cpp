@@ -22,7 +22,7 @@ namespace {
 
 constexpr std::array<std::uint8_t, 8> kVerifierPersistentMagic = {
     'G', 'S', 'P', 'V', 'E', 'R', '0', '1'};
-constexpr std::uint32_t kVerifierPersistentVersion = 1;
+constexpr std::uint32_t kVerifierPersistentVersion = 2;
 constexpr std::size_t kVerifierPersistentHeaderBytes = 96;
 
 template<typename T>
@@ -406,55 +406,14 @@ void SpeculativeVerifier::ConfigureAdaptiveDraftPolicy() {
   ResetAdaptiveDraftLength();
 }
 
-std::uint32_t SpeculativeVerifier::DraftLengthForEma() const noexcept {
-  const auto target =
-      static_cast<std::int64_t>(std::lround(accepted_token_ema_)) +
-      static_cast<std::int64_t>(options_.draft_headroom_tokens);
-  const auto floor_width = static_cast<std::int64_t>(options_.min_draft_tokens);
-  const auto ceiling_width =
-      static_cast<std::int64_t>(options_.max_draft_tokens);
-  return static_cast<std::uint32_t>(
-      std::clamp(target, floor_width, ceiling_width));
-}
-
 void SpeculativeVerifier::ResetAdaptiveDraftLength() noexcept {
-  constexpr float initial_accepted_token_ema = 2.0F;
   rolling_acceptance_.clear();
-  accepted_token_ema_ = initial_accepted_token_ema;
-  if (options_.enable_adaptive_draft_length &&
-      options_.adaptive_draft_policy ==
-          AdaptiveDraftPolicy::kAcceptedTokenEma) {
-    current_draft_length_ = DraftLengthForEma();
-    return;
-  }
   current_draft_length_ = options_.initial_draft_tokens;
 }
 
 void SpeculativeVerifier::UpdateAdaptiveDraftLength(std::size_t accepted,
                                                     std::size_t drafted) {
   if (!options_.enable_adaptive_draft_length || drafted == 0) {
-    return;
-  }
-
-  if (options_.adaptive_draft_policy ==
-      AdaptiveDraftPolicy::kAcceptedTokenEma) {
-    constexpr float ema_alpha = 0.25F;
-    constexpr float full_accept_probe = 1.0F;
-    // Accepting every drafted token censors the observation: the target would
-    // have taken at least `drafted`, but how much further is unknown, so
-    // averaging that lower bound would ratchet the width down and strand it.
-    // Probe upward instead. A partial accept saw the exact stopping point and
-    // is averaged. Headroom makes full accepts rare, so most observations are
-    // uncensored and the EMA tracks the true acceptance depth directly.
-    if (accepted >= drafted) {
-      accepted_token_ema_ += full_accept_probe;
-    } else {
-      accepted_token_ema_ = ((1.0F - ema_alpha) * accepted_token_ema_) +
-                            (ema_alpha * static_cast<float>(accepted));
-    }
-    accepted_token_ema_ = std::min(
-        accepted_token_ema_, static_cast<float>(options_.max_draft_tokens));
-    current_draft_length_ = DraftLengthForEma();
     return;
   }
 
@@ -1027,7 +986,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
 std::size_t SpeculativeVerifierSnapshot::PayloadBytes() const noexcept {
   return (draft_snapshot_ != nullptr ? draft_snapshot_->PayloadBytes() : 0) +
          rolling_acceptance_.size() * sizeof(float) + sizeof(stats_) +
-         sizeof(current_draft_length_) + sizeof(accepted_token_ema_);
+         sizeof(current_draft_length_);
 }
 
 std::size_t SpeculativeVerifierSnapshot::PersistentPayloadBytes() const {
@@ -1082,8 +1041,6 @@ std::size_t SpeculativeVerifierSnapshot::SerializePersistent(
   PutLittleEndian<std::uint64_t>(
       destination, 56, static_cast<std::uint64_t>(stats_.total_emitted_tokens));
   PutLittleEndian<std::uint32_t>(destination, 64, current_draft_length_);
-  PutLittleEndian<std::uint32_t>(
-      destination, 68, std::bit_cast<std::uint32_t>(accepted_token_ema_));
   PutLittleEndian<std::uint64_t>(destination, 72,
                                  static_cast<std::uint64_t>(expected_bytes));
 
@@ -1120,7 +1077,6 @@ std::size_t SpeculativeVerifier::SnapshotPayloadBytes() const {
   checked_add(rolling_acceptance_.size() * sizeof(float));
   checked_add(sizeof(stats_));
   checked_add(sizeof(current_draft_length_));
-  checked_add(sizeof(accepted_token_ema_));
   return bytes;
 }
 
@@ -1136,7 +1092,6 @@ std::unique_ptr<SpeculativeVerifierSnapshot> SpeculativeVerifier::Snapshot()
   snapshot->stats_ = stats_;
   snapshot->current_draft_length_ = current_draft_length_;
   snapshot->rolling_acceptance_ = rolling_acceptance_;
-  snapshot->accepted_token_ema_ = accepted_token_ema_;
   return snapshot;
 }
 
@@ -1154,7 +1109,6 @@ void SpeculativeVerifier::RestoreSnapshot(
   stats_ = snapshot.stats_;
   current_draft_length_ = snapshot.current_draft_length_;
   rolling_acceptance_ = snapshot.rolling_acceptance_;
-  accepted_token_ema_ = snapshot.accepted_token_ema_;
 }
 
 void SpeculativeVerifier::RestorePersistentSnapshot(
@@ -1170,6 +1124,7 @@ void SpeculativeVerifier::RestorePersistentSnapshot(
           kVerifierPersistentVersion ||
       GetLittleEndian<std::uint32_t>(payload, 12) !=
           kVerifierPersistentHeaderBytes ||
+      GetLittleEndian<std::uint32_t>(payload, 68) != 0 ||
       GetLittleEndian<std::uint64_t>(payload, 80) != 0 ||
       GetLittleEndian<std::uint64_t>(payload, 88) != 0) {
     throw std::invalid_argument(
@@ -1188,8 +1143,6 @@ void SpeculativeVerifier::RestorePersistentSnapshot(
   const auto total_emitted_tokens = GetLittleEndian<std::uint64_t>(payload, 56);
   const std::uint32_t current_draft_length =
       GetLittleEndian<std::uint32_t>(payload, 64);
-  const float accepted_token_ema =
-      std::bit_cast<float>(GetLittleEndian<std::uint32_t>(payload, 68));
   const std::size_t total_bytes =
       PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 72));
 
@@ -1203,9 +1156,6 @@ void SpeculativeVerifier::RestorePersistentSnapshot(
       total_emitted_tokens > std::numeric_limits<std::size_t>::max() ||
       current_draft_length < options_.min_draft_tokens ||
       current_draft_length > options_.max_draft_tokens ||
-      !std::isfinite(accepted_token_ema) || accepted_token_ema < 0.0F ||
-      accepted_token_ema >
-          std::max(2.0F, static_cast<float>(options_.max_draft_tokens)) ||
       total_bytes != payload.size()) {
     throw std::invalid_argument(
         "speculative verifier persistent metadata is invalid");
@@ -1249,7 +1199,6 @@ void SpeculativeVerifier::RestorePersistentSnapshot(
   };
   current_draft_length_ = current_draft_length;
   rolling_acceptance_ = std::move(rolling_acceptance);
-  accepted_token_ema_ = accepted_token_ema;
 }
 
 std::vector<tokenization::TokenId> SpeculativeVerifier::Generate(

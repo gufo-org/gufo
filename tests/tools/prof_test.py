@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import argparse
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,6 +53,14 @@ with tempfile.TemporaryDirectory() as directory:
     connection.close()
 
     result = prof.load(str(database))
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "INSERT INTO rocpd_kernel_dispatch VALUES "
+        "(3, 1, 150, 200, 64, 1, 1, 32, 1, 1)"
+    )
+    connection.commit()
+    connection.close()
+    overlapping = prof.load(str(database))
 
 assert result.dispatches == 1
 assert result.invalid_dispatches == 1
@@ -58,5 +69,21 @@ assert result.busy_ns == 200.0
 assert result.wall_ns == 200.0
 assert "valid_kernel" in result.kernels
 assert "invalid_kernel" not in result.kernels
+
+assert overlapping.total_ns == 250.0
+assert overlapping.busy_ns == 200.0
+assert overlapping.wall_ns == 200.0
+
+with tempfile.TemporaryDirectory() as directory:
+    args = argparse.Namespace(command=["false"], out=directory, tag="failed")
+    with patch.object(prof.shutil, "which", return_value="/fake/rocprofv3"), \
+         patch.object(prof.subprocess, "run",
+                      return_value=subprocess.CompletedProcess([], 23, "")):
+        try:
+            prof.cmd_run(args)
+        except SystemExit as error:
+            assert error.code == 23
+        else:
+            raise AssertionError("profiler hid the child command failure")
 
 print("Profiler tests passed.")

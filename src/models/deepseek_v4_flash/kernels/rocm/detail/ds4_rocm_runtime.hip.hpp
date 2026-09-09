@@ -22,7 +22,7 @@ static int g_rocm_mmq_ready;
  * start at 64. The mixed-attention, fused norm/rope, padded output-B, and
  * inverse-rope routes remain at 96 because enabling them at 64 exceeded the
  * conversational maximum-error envelope. The 32/64/96 batch-versus-sequential
- * logit gate in deepseek_v4_flash_engine_test covers these boundaries.
+ * logit gate in ds4.target covers these boundaries.
  */
 #define DS4_ROCM_WIDE_PREFILL_ROWS 64u
 #define DS4_ROCM_ATTENTION_WIDE_ROWS 96u
@@ -344,76 +344,6 @@ static void hip_q8_f16_cache_release_all(void) {
 static int hip_env_present(const char *env) {
     if (env != NULL) return env[0] != '\0' && strcmp(env, "0") != 0;
     return 0;
-}
-
-static uint32_t hip_rows_per_block_or_default(uint32_t v, uint32_t def) {
-    return (v == 1u || v == 2u || v == 4u || v == 8u || v == 16u || v == 32u) ? v : def;
-}
-
-struct ds4_rocm_runtime_config {
-    int initialized;
-    int q8_prequant_decode;
-    int disable_splitk_attn_out_low;
-    int disable_shared_gate_up_fused_w32;
-    int attention_output_hipblas_all;
-    int shared_down_hipblas;
-    int q8_decode_sharedx_64k;
-    uint32_t q8_decode_rpb;
-    uint32_t q8_batch_rpb;
-    uint32_t attn_q8_batch_rpb;
-    uint32_t dense_mmq_rows;
-    uint32_t dense_mmq_mask;
-    uint32_t q8_hc_decode_rpb;
-    uint32_t attn_out_low_decode_rpb;
-    uint32_t moe_decode_rpb;
-    uint32_t moe_decode_gate_rpb;
-    uint32_t moe_decode_down_rpb;
-    int oldhip_attention_decode;
-};
-
-static ds4_rocm_runtime_config g_rocm_cfg;
-
-static const ds4_rocm_runtime_config *hip_runtime_config(void) {
-    if (!g_rocm_cfg.initialized) {
-        g_rocm_cfg.q8_prequant_decode = 1;
-        g_rocm_cfg.disable_splitk_attn_out_low = 1;
-        g_rocm_cfg.disable_shared_gate_up_fused_w32 = 1;
-        g_rocm_cfg.attention_output_hipblas_all = 1;
-        g_rocm_cfg.shared_down_hipblas = 1;
-        g_rocm_cfg.q8_decode_sharedx_64k = 1;
-        g_rocm_cfg.q8_decode_rpb = 1u;
-        const char* q8_batch_rpb = getenv("GUFO_DEEPSEEK_ROCM_Q8_BATCH_RPB");
-        g_rocm_cfg.q8_batch_rpb = hip_rows_per_block_or_default(
-            q8_batch_rpb ? (uint32_t)strtoul(q8_batch_rpb, NULL, 10) : 0u, 2u);
-        const char* attn_q8_batch_rpb =
-            getenv("GUFO_DEEPSEEK_ROCM_ATTN_Q8_BATCH_RPB");
-        g_rocm_cfg.attn_q8_batch_rpb = hip_rows_per_block_or_default(
-            attn_q8_batch_rpb ? (uint32_t)strtoul(attn_q8_batch_rpb, NULL, 10)
-                              : 0u,
-            2u);
-        const char* dense_mmq_rows =
-            getenv("GUFO_DEEPSEEK_ROCM_DENSE_MMQ_ROWS");
-        const uint32_t requested_dense_mmq_rows =
-            dense_mmq_rows ? (uint32_t)strtoul(dense_mmq_rows, NULL, 10) : 32u;
-        g_rocm_cfg.dense_mmq_rows =
-            requested_dense_mmq_rows == 32u ? 32u : DS4_ROCM_WIDE_PREFILL_ROWS;
-        const char* dense_mmq_mask =
-            getenv("GUFO_DEEPSEEK_ROCM_DENSE_MMQ_MASK");
-        g_rocm_cfg.dense_mmq_mask =
-            dense_mmq_mask ? (uint32_t)strtoul(dense_mmq_mask, NULL, 0) : 4u;
-        g_rocm_cfg.q8_hc_decode_rpb = 16u;
-        g_rocm_cfg.attn_out_low_decode_rpb = 32u;
-        g_rocm_cfg.moe_decode_rpb = 1u;
-        g_rocm_cfg.moe_decode_gate_rpb = g_rocm_cfg.moe_decode_rpb;
-        g_rocm_cfg.moe_decode_down_rpb = g_rocm_cfg.moe_decode_rpb;
-        g_rocm_cfg.oldhip_attention_decode = 1;
-        g_rocm_cfg.initialized = 1;
-    }
-    return &g_rocm_cfg;
-}
-
-static bool hip_q8_prequant_decode_enabled(void) {
-    return hip_runtime_config()->q8_prequant_decode;
 }
 
 static uint64_t hip_q8_f16_cache_limit_bytes(void) {

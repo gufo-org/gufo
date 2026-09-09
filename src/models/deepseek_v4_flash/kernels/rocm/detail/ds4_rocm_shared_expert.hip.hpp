@@ -16,10 +16,10 @@ extern "C" int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
         uint64_t                out_dim,
         const ds4_gpu_tensor *x,
         float                   clamp) {
-    if (!gate || !up || !mid || !model_map || !x ||
-        in_dim == 0u || out_dim == 0u || in_dim > UINT32_MAX || out_dim > UINT32_MAX) {
-        return 0;
-    }
+  if (!gate || !up || !mid || !model_map || !x || in_dim == 0u ||
+      out_dim == 0u || in_dim > UINT32_MAX || out_dim > UINT32_MAX) {
+    return 0;
+  }
     const uint64_t blocks = (in_dim + 31u) / 32u;
     uint64_t row_bytes = 0;
     uint64_t weight_bytes = 0;
@@ -29,35 +29,13 @@ extern "C" int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
         !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
         !hip_u64_mul3_checked(in_dim, 1u, sizeof(float), &x_bytes) ||
         !hip_u64_mul3_checked(out_dim, 1u, sizeof(float), &out_bytes) ||
-        !hip_tensor_has_bytes(x, x_bytes) || !hip_tensor_has_bytes(gate, out_bytes) ||
-        !hip_tensor_has_bytes(up, out_bytes) || !hip_tensor_has_bytes(mid, out_bytes)) {
-        return 0;
+        !hip_tensor_has_bytes(x, x_bytes) ||
+        !hip_tensor_has_bytes(gate, out_bytes) ||
+        !hip_tensor_has_bytes(up, out_bytes) ||
+        !hip_tensor_has_bytes(mid, out_bytes)) {
+      return 0;
     }
-    if (in_dim == 4096u && (in_dim & 31u) == 0u &&
-        hip_model_range_fits(model_size, gate_offset, weight_bytes) &&
-        hip_model_range_fits(model_size, up_offset, weight_bytes) &&
-        !hip_runtime_config()->disable_shared_gate_up_fused_w32) {
-        const char *wg = hip_model_range_ptr(model_map, gate_offset, weight_bytes, "shared_gate_q8");
-        const char *wu = hip_model_range_ptr(model_map, up_offset, weight_bytes, "shared_up_q8");
-        if (!wg || !wu) return 0;
-        constexpr int store_gate_up = 0;
-        const unsigned rows_per_block = 32u;
-        shared_gate_up_swiglu_q8_0_rows_w32_kernel<<<
-                (unsigned)((out_dim + rows_per_block - 1u) / rows_per_block),
-                rows_per_block * 32u>>>(
-                (float *)gate->ptr,
-                (float *)up->ptr,
-                (float *)mid->ptr,
-                reinterpret_cast<const unsigned char *>(wg),
-                reinterpret_cast<const unsigned char *>(wu),
-                (const float *)x->ptr,
-                (uint32_t)blocks,
-                out_dim,
-                row_bytes,
-                store_gate_up,
-                clamp);
-        return hip_ok(hipGetLastError(), "shared gate/up fused q8 launch");
-    }
+
     return ds4_gpu_matmul_q8_0_pair_tensor(gate, up,
                                              model_map, model_size,
                                              gate_offset, up_offset,
@@ -156,16 +134,19 @@ static int ds4_gpu_shared_gate_up_swiglu_q8_0_batch_tensor(
         in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX ||
         !hip_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
         !hip_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
-        x->bytes < x_bytes || gate->bytes < out_bytes || up->bytes < out_bytes || mid->bytes < out_bytes) {
-        return 0;
+        x->bytes < x_bytes || gate->bytes < out_bytes ||
+        up->bytes < out_bytes || mid->bytes < out_bytes) {
+      return 0;
     }
     const uint64_t blocks = (in_dim + 31u) / 32u;
     uint64_t row_bytes = 0, weight_bytes = 0;
     if (!hip_u64_mul_checked(blocks, 34u, &row_bytes) ||
-        !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes)) return 0;
+        !hip_u64_mul_checked(out_dim, row_bytes, &weight_bytes))
+      return 0;
     if (gate_offset > model_size || up_offset > model_size ||
-        weight_bytes > model_size - gate_offset || weight_bytes > model_size - up_offset) {
-        return 0;
+        weight_bytes > model_size - gate_offset ||
+        weight_bytes > model_size - up_offset) {
+      return 0;
     }
     const char *wg = hip_model_range_ptr(model_map, gate_offset, weight_bytes, "shared_gate_q8_batch");
     const char *wu = hip_model_range_ptr(model_map, up_offset, weight_bytes, "shared_up_q8_batch");

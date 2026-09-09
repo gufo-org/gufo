@@ -189,11 +189,10 @@ bool ds4_rocm_graph_dspark_reselect_tail(ds4_rocm_graph *graph,
                                          int32_t *tokens_out);
 bool ds4_rocm_graph_dspark_draft(ds4_rocm_graph* graph, ds4_engine* engine,
                                  int last_token, uint32_t pos0,
-                                 int32_t* tokens_out, uint32_t* n_out,
-                                 bool schedule_confidence);
+                                 int32_t* tokens_out, uint32_t* n_out);
 bool ds4_rocm_graph_dspark_draft_head_batch(
     ds4_engine* engine, const ds4_rocm_dspark_draft_item* items,
-    size_t item_count, bool schedule_confidence);
+    size_t item_count);
 
 uint64_t ds4_rocm_graph_snapshot_bytes(const ds4_rocm_graph *graph,
                                        const ds4_tokens *checkpoint);

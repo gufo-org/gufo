@@ -56,10 +56,10 @@ encoder/tokenizer are stored in
 [`tests/fixtures/chat_template_hf_goldens.json`](../../../tests/fixtures/chat_template_hf_goldens.json).
 The template tests cover chat mode, all native effort levels, history
 drop/preserve, strict artifact validation, and DSML tool loops. The
-model-backed `chat_template_hf_token_golden_test` loads the real DS4 artifact
-and compares Gufo's complete token-ID sequences with those goldens. Set
-`GUFO_QWEN_GGUF` and `GUFO_DEEPSEEK_GGUF` to run it; CTest skips it when the
-artifacts are absent.
+model-backed `ds4.target` check compares complete token-ID sequences with these
+goldens while reusing the model loaded for target quality checks. All DS4 checks
+are registered in `tests/models/deepseek_v4_flash/CMakeLists.txt`; see the
+[quality workflow](../../../benchmarks/deepseek-v4-flash/README.md).
 
 ## Runtime boundary
 

@@ -1,3 +1,5 @@
+#include "src/models/deepseek_v4_flash/chat_template.hpp"
+
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -10,7 +12,6 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
-#include "src/models/deepseek_v4_flash/chat_template.hpp"
 
 namespace {
 

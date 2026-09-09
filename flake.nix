@@ -528,6 +528,12 @@
                 cacheDiskBytes = 1024;
                 cacheDiskStagingBytes = 512;
               };
+              dsparkCmd = self.lib.${system}.mkGufoServe {
+                model = "/var/models/ds4.gguf";
+                speculative = "dspark";
+                draftModel = "/var/models/dspark.gguf";
+                draftTokens = 3;
+              };
             in
             pkgsSys.runCommand "check-mk-serve" { } ''
               # Verify the synthesized CLI string contains expected flags and binary path
@@ -583,6 +589,13 @@
               echo "${ttsAliasCmd}" | grep -F -- " audio --model /var/models/qwen3-tts"
               echo "${sttAliasCmd}" | grep -F -- " audio --asr-model /var/models/qwen3-asr"
 
+              dspark_cmd="${dsparkCmd}"
+              echo "$dspark_cmd" | grep -F -- "--speculative dspark"
+              echo "$dspark_cmd" | grep -F -- "--dspark-model /var/models/dspark.gguf"
+              echo "$dspark_cmd" | grep -F -- "--draft-tokens 3"
+              if echo "$dspark_cmd" | grep -E -- '--mtp-model|--draft-policy'; then
+                exit 1
+              fi
               mkdir -p $out
               echo "PASS: mkGufoServe CLI string check passed" > $out/result.txt
             '';

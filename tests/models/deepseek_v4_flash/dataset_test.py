@@ -13,11 +13,7 @@ import unittest
 class EvalDatasetTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.path = (
-            Path(__file__).resolve().parent.parent
-            / "quality"
-            / "antirez-ds4.json"
-        )
+        cls.path = Path(__file__).parent / "fixtures" / "antirez-ds4.json"
         cls.document = json.loads(cls.path.read_text(encoding="utf-8"))
 
     def test_source_identity_and_counts(self) -> None:

@@ -27,20 +27,32 @@ void Expect(bool condition, std::string_view message) {
 
 std::vector<gufo::tokenization::TokenId> GenerateDirect(
     const std::shared_ptr<Model>& model, std::span<const int> prompt,
-    std::size_t max_tokens) {
+    std::size_t max_tokens,
+    const gufo::sampling::SamplingConfig& sampling = {}) {
   std::string error;
   auto session = model->CreateSession(512, &error);
   Expect(session != nullptr, error);
   Expect(session->Sync(prompt, &error), error);
+  const std::vector<gufo::sampling::TokenId> history(prompt.begin(),
+                                                     prompt.end());
+  gufo::sampling::SamplerState sampler(sampling, history);
 
   std::vector<gufo::tokenization::TokenId> result;
   result.reserve(max_tokens);
   for (std::size_t index = 0; index < max_tokens; ++index) {
-    const int token = session->SelectNext(0.0F, nullptr);
+    int token = -1;
+    if (sampling.can_use_unmodified_argmax()) {
+      token = session->SelectNext(0.0F, nullptr);
+    } else {
+      const auto logits = session->CopyLogits(&error);
+      Expect(!logits.empty(), error);
+      token = static_cast<int>(sampler.Sample(logits));
+    }
     Expect(token >= 0, "direct token selection");
     if (model->IsStopToken(token)) {
       break;
     }
+    sampler.Accept(static_cast<gufo::sampling::TokenId>(token));
     result.push_back(static_cast<gufo::tokenization::TokenId>(token));
     if (index + 1 < max_tokens) {
       Expect(session->Evaluate(token, &error), error);
@@ -79,6 +91,21 @@ int main() {
     const auto http_raw = backend.complete(raw_prompt, 2, 0.0F);
     Expect(http_raw.tokens == direct_raw, "raw direct/HTTP token parity");
     Expect(http_raw.ttft_ms > 0.0, "raw TTFT");
+
+    const gufo::sampling::SamplingConfig sampled{
+        .temperature = 0.8F,
+        .top_k = 20,
+        .top_p = 0.9F,
+        .seed = 1234,
+        .repeat_penalty = 1.1F,
+    };
+    const auto direct_sampled =
+        GenerateDirect(model, model->Tokenize(raw_prompt), 8, sampled);
+    const auto sampled_first = backend.complete(raw_prompt, 8, sampled);
+    const auto sampled_repeat = backend.complete(raw_prompt, 8, sampled);
+    Expect(sampled_first.tokens == direct_sampled &&
+               sampled_repeat.tokens == direct_sampled,
+           "seeded sampling and penalties match direct execution and repeat");
 
     const std::vector<gufo::tokenization::ChatMessage> messages = {
         {gufo::tokenization::ChatRole::kSystem,
