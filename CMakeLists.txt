@@ -993,6 +993,12 @@ if (BUILD_TESTING)
     set_tests_properties(deepseek_v4_flash_engine_test PROPERTIES
       LABELS "gpu;hip;gfx1151;deepseek-v4-flash;external-model;slow"
       SKIP_RETURN_CODE 77)
+    add_test(NAME deepseek_v4_flash_dspark_down_routes_test
+      COMMAND deepseek_v4_flash_engine_test)
+    set_tests_properties(deepseek_v4_flash_dspark_down_routes_test PROPERTIES
+      LABELS "gpu;hip;gfx1151;deepseek-v4-flash;dspark-down;external-model;slow"
+      ENVIRONMENT "GUFO_DEEPSEEK_V4_FLASH_DSPARK_DOWN_ROUTES_ONLY=1;GUFO_DEEPSEEK_DSPARK_VALIDATE_DOWN=1"
+      SKIP_RETURN_CODE 77)
 
     add_executable(hipblaslt_runtime_cache_test
       tests/kernels/hipblaslt_runtime_cache_test.cpp)

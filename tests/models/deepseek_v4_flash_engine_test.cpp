@@ -696,6 +696,294 @@ void CheckDsparkSessionBatch(
             << " batch_tokens=" << batch_emitted << '\n';
 }
 
+void CheckDsparkSingleQuality(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  using gufo::models::deepseek_v4_flash::SessionDsparkBatchItem;
+  constexpr std::array<std::string_view, 4> kPrompts{
+      "Continue the pattern for twenty more terms and briefly state the rule: "
+      "red, blue, blue, red, blue, blue, red,",
+      "Return only JSON for a three-day study plan. Each day must contain a "
+      "topic, minutes, and one measurable goal.",
+      "Write the opening paragraph of a science-fiction story set in a silent "
+      "railway station orbiting Jupiter.",
+      "请用简洁的中文解释什么是推测解码，以及为什么草稿模型的接受率会影响性能"
+      "。",
+  };
+  std::string error;
+  for (const bool rolling : {false, true}) {
+    int top1 = 0;
+    int compared = 0;
+    int worst_rank = 0;
+    double worst_rmse = 0;
+    double worst_cosine = 1;
+    float worst_error = 0;
+    for (const auto text : kPrompts) {
+      auto speculative = model->CreateSession(512, &error);
+      auto sequential = model->CreateSession(512, &error);
+      Expect(speculative != nullptr && sequential != nullptr, error.c_str());
+      const auto prompt = model->EncodeChat("", text);
+      Expect(speculative->Sync(prompt, &error), error.c_str());
+      Expect(sequential->Sync(prompt, &error), error.c_str());
+      std::size_t generated = 0;
+      while (generated < 32) {
+        std::vector<int> emitted;
+        const SessionDsparkBatchItem item{
+            .session = speculative.get(),
+            .max_tokens = 32 - generated,
+            .max_draft_tokens = 7,
+            .schedule_confidence = rolling,
+            .emitted = &emitted,
+        };
+        Expect(model->DsparkStepBatch(
+                   std::span<const SessionDsparkBatchItem>(&item, 1), &error),
+               error.c_str());
+        Expect(!emitted.empty(), "single-request quality test makes progress");
+        for (const int token : emitted) {
+          const auto logits = sequential->CopyLogits(&error);
+          Expect(token >= 0 && static_cast<std::size_t>(token) < logits.size(),
+                 "single-request token is in the reference vocabulary");
+          const int rank =
+              1 + static_cast<int>(std::count_if(
+                      logits.begin(), logits.end(),
+                      [&](float value) { return value > logits[token]; }));
+          top1 += rank == 1;
+          ++compared;
+          worst_rank = std::max(worst_rank, rank);
+          Expect(sequential->Evaluate(token, &error), error.c_str());
+        }
+        generated += emitted.size();
+        const auto candidate = speculative->CopyLogits(&error);
+        const auto reference = sequential->CopyLogits(&error);
+        Expect(candidate.size() == reference.size() && !candidate.empty(),
+               "single-request frontier logit shape");
+        double squared = 0, dot = 0, candidate_norm = 0, reference_norm = 0;
+        for (std::size_t i = 0; i < candidate.size(); ++i) {
+          Expect(std::isfinite(candidate[i]) && std::isfinite(reference[i]),
+                 "single-request finite frontier logits");
+          const double delta = static_cast<double>(candidate[i]) - reference[i];
+          squared += delta * delta;
+          dot += static_cast<double>(candidate[i]) * reference[i];
+          candidate_norm += static_cast<double>(candidate[i]) * candidate[i];
+          reference_norm += static_cast<double>(reference[i]) * reference[i];
+          worst_error =
+              std::max(worst_error, std::abs(candidate[i] - reference[i]));
+        }
+        worst_rmse =
+            std::max(worst_rmse, std::sqrt(squared / candidate.size()));
+        worst_cosine = std::min(
+            worst_cosine, dot / std::sqrt(candidate_norm * reference_norm));
+      }
+    }
+    std::cout << "DSpark C1 " << (rolling ? "rolling" : "fixed")
+              << " teacher-forced quality: top1=" << top1 << '/' << compared
+              << " worst_rank=" << worst_rank << " rmse=" << worst_rmse
+              << " cosine=" << worst_cosine << " max_error=" << worst_error
+              << '\n';
+    // The fixed full-width baseline scores 123/128 top-1, worst rank 6 on
+    // these free-running continuations. The separate immutable teacher-forced
+    // trajectory retains its stricter top-3 contract.
+    Expect(top1 >= 123 && worst_rank <= 6,
+           "single-request policy retains legacy scalar-token agreement");
+    Expect(worst_rmse <= 1.12 && worst_cosine >= 0.979 && worst_error <= 5.0F,
+           "single-request state retains the pinned full-logit envelope");
+  }
+}
+
+void CheckDsparkDownRoutes(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  using gufo::models::deepseek_v4_flash::Session;
+  using gufo::models::deepseek_v4_flash::SessionDsparkBatchItem;
+
+  constexpr std::array<std::string_view, 4> kPrompts{
+      "Continue the pattern: red, blue, blue, red, blue, blue, red,",
+      "Return only JSON for a three-day study plan with topic and minutes.",
+      "Explain why virtual memory is useful for a database engine.",
+      "Write a concise C++20 fixed-capacity ring buffer implementation.",
+  };
+  constexpr std::size_t kCycles = 6;
+  constexpr const char* kSetting = "GUFO_DEEPSEEK_DSPARK_DOWN_REUSE_MID";
+  const char* previous = std::getenv(kSetting);
+  const bool had_previous = previous != nullptr;
+  const std::string previous_value = previous != nullptr ? previous : "";
+  constexpr const char* kAttentionSetting =
+      "GUFO_DEEPSEEK_DSPARK_MULTI_ATTN_F16";
+  const char* previous_attention = std::getenv(kAttentionSetting);
+  const bool had_previous_attention = previous_attention != nullptr;
+  const std::string previous_attention_value =
+      previous_attention != nullptr ? previous_attention : "";
+
+  struct Observation {
+    std::vector<int> tokens;
+    std::vector<float> logits;
+    Session::DsparkStats stats;
+    int position;
+  };
+
+  std::string error;
+  for (const std::uint32_t tail : {1U, 3U, 7U}) {
+    auto configured = model->CreateSession(512, &error);
+    auto legacy = model->CreateSession(512, &error);
+    Expect(configured != nullptr && legacy != nullptr, error.c_str());
+    const auto prompt = model->Tokenize(kPrompts[0]);
+    Expect(configured->Sync(prompt, &error), error.c_str());
+    Expect(legacy->Sync(prompt, &error), error.c_str());
+    for (int cycle = 0; cycle < 4; ++cycle) {
+      const auto before = configured->DsparkStatistics();
+      std::vector<int> emitted;
+      const SessionDsparkBatchItem item{
+          .session = configured.get(),
+          .max_tokens = 16,
+          .max_draft_tokens = tail,
+          .schedule_confidence = false,
+          .emitted = &emitted,
+      };
+      Expect(model->DsparkStepBatch(
+                 std::span<const SessionDsparkBatchItem>(&item, 1), &error),
+             error.c_str());
+      const auto after = configured->DsparkStatistics();
+      Expect(after.support_drafted - before.support_drafted <= tail,
+             "single-request draft limit is honored");
+      Expect(!emitted.empty() && emitted.size() <= tail + 1,
+             "single-request emitted prefix respects its limit");
+      if (tail == 7) {
+        std::vector<int> legacy_emitted;
+        Expect(legacy->DsparkStep(16, &legacy_emitted, &error), error.c_str());
+        Expect(emitted == legacy_emitted &&
+                   configured->CopyLogits(&error) == legacy->CopyLogits(&error),
+               "full-width fixed C1 retains legacy tokens and logits");
+      }
+    }
+    Expect(configured->DsparkStatistics().support_drafted > 0,
+           "single-request limit check exercised proposals");
+  }
+  for (const std::size_t concurrency : {1U, 2U, 4U, 6U, 8U}) {
+    auto run = [&](const char* setting) {
+      Expect(setenv(kSetting, setting, 1) == 0, "set grouped down route");
+      Expect(setenv(kAttentionSetting, setting, 1) == 0,
+             "set grouped compressor route");
+      std::vector<std::unique_ptr<Session>> sessions;
+      for (std::size_t i = 0; i < concurrency; ++i) {
+        auto session = model->CreateSession(512, &error);
+        Expect(session != nullptr, error.c_str());
+        auto prompt = model->Tokenize(kPrompts[i % kPrompts.size()]);
+        Expect(!prompt.empty(), "grouped down prompt tokenization");
+        if (i >= kPrompts.size()) {
+          // Cross the ratio-128 compression boundary at different offsets.
+          auto context = model->Tokenize(kTrajectoryPrompt);
+          context.insert(context.end(), kPinnedDs4Trajectory.begin(),
+                         kPinnedDs4Trajectory.end());
+          context.resize(120 + i - prompt.size());
+          context.insert(context.end(), prompt.begin(), prompt.end());
+          prompt = std::move(context);
+        }
+        Expect(session->Sync(prompt, &error), error.c_str());
+        sessions.push_back(std::move(session));
+      }
+
+      std::vector<Observation> observations;
+      for (std::size_t cycle = 0; cycle < kCycles; ++cycle) {
+        std::vector<std::vector<int>> emitted(concurrency);
+        std::vector<SessionDsparkBatchItem> items;
+        for (std::size_t slot = 0; slot < concurrency; ++slot) {
+          // Rotate request order and vary budgets to exercise ragged rows,
+          // rejection/rollback, and the one-token tail of a request.
+          const std::size_t index = (slot + cycle) % concurrency;
+          const std::size_t budget = cycle == 0 ? 7 : 1 + (index + cycle) % 5;
+          items.push_back({.session = sessions[index].get(),
+                           .max_tokens = budget,
+                           .max_draft_tokens = static_cast<std::uint32_t>(
+                               std::clamp<std::size_t>(budget - 1, 1, 3)),
+                           .schedule_confidence = true,
+                           .emitted = &emitted[index]});
+        }
+        Expect(model->DsparkStepBatch(items, &error), error.c_str());
+        for (std::size_t i = 0; i < concurrency; ++i) {
+          const auto logits = sessions[i]->CopyLogits(&error);
+          Expect(!logits.empty(), error.c_str());
+          Expect(std::all_of(logits.begin(), logits.end(),
+                             [](float value) { return std::isfinite(value); }),
+                 "finite concurrent DSpark frontier logits");
+          Expect(!emitted[i].empty(), "each DSpark request makes progress");
+          const std::size_t budget = cycle == 0 ? 7 : 1 + (i + cycle) % 5;
+          Expect(emitted[i].size() <= budget, "DSpark respects request budget");
+          observations.push_back({std::move(emitted[i]), logits,
+                                  sessions[i]->DsparkStatistics(),
+                                  sessions[i]->Position()});
+        }
+      }
+      return observations;
+    };
+
+    const auto reference = run("0");
+    const auto candidate = run("1");
+    Expect(reference.size() == candidate.size(), "same observation count");
+    std::uint64_t drafted = 0;
+    for (std::size_t i = 0; i < reference.size(); ++i) {
+      const auto& a = reference[i];
+      const auto& b = candidate[i];
+      if (a.tokens != b.tokens || a.logits != b.logits) {
+        double square_error = 0;
+        float max_error = 0;
+        std::size_t mismatched_logits = 0;
+        for (std::size_t j = 0; j < a.logits.size(); ++j) {
+          const float delta = a.logits[j] - b.logits[j];
+          square_error += static_cast<double>(delta) * delta;
+          max_error = std::max(max_error, std::abs(delta));
+          mismatched_logits += a.logits[j] != b.logits[j];
+        }
+        std::cerr << "DSpark down route mismatch C=" << concurrency
+                  << " cycle=" << i / concurrency
+                  << " request=" << i % concurrency
+                  << " logits=" << mismatched_logits
+                  << " rmse=" << std::sqrt(square_error / a.logits.size())
+                  << " max=" << max_error
+                  << " drafted=" << a.stats.support_drafted << "/"
+                  << b.stats.support_drafted
+                  << " accepted=" << a.stats.support_accepted << "/"
+                  << b.stats.support_accepted
+                  << " verifier=" << a.stats.verifier_rows << "/"
+                  << b.stats.verifier_rows << " position=" << a.position << "/"
+                  << b.position << "\ntokens:";
+        for (const int token : a.tokens)
+          std::cerr << ' ' << token;
+        std::cerr << "\ncandidate:";
+        for (const int token : b.tokens)
+          std::cerr << ' ' << token;
+        std::cerr << '\n';
+      }
+      Expect(a.tokens == b.tokens, "grouped down retains exact emitted tokens");
+      Expect(a.logits == b.logits, "grouped down retains full frontier logits");
+      Expect(a.position == b.position, "grouped down retains request position");
+      Expect(a.stats.verifier_rows == b.stats.verifier_rows &&
+                 a.stats.verifier_accepted == b.stats.verifier_accepted &&
+                 a.stats.support_drafted == b.stats.support_drafted &&
+                 a.stats.support_accepted == b.stats.support_accepted &&
+                 a.stats.positional_accepted == b.stats.positional_accepted &&
+                 a.stats.anchors == b.stats.anchors &&
+                 a.stats.full_blocks == b.stats.full_blocks &&
+                 a.stats.steps == b.stats.steps &&
+                 a.stats.skipped == b.stats.skipped &&
+                 a.stats.context_tokens == b.stats.context_tokens,
+             "grouped down retains all speculative counters and support state");
+      if (i >= reference.size() - concurrency) {
+        drafted += b.stats.support_drafted;
+      }
+    }
+    Expect(drafted > 0, "grouped down comparison exercised DSpark proposals");
+    std::cout << "DSpark down C" << concurrency << ": " << reference.size()
+              << " exact token/logit/state comparisons, drafted=" << drafted
+              << '\n';
+  }
+  Expect(had_previous ? setenv(kSetting, previous_value.c_str(), 1) == 0
+                      : unsetenv(kSetting) == 0,
+         "restore grouped down route");
+  Expect(
+      had_previous_attention
+          ? setenv(kAttentionSetting, previous_attention_value.c_str(), 1) == 0
+          : unsetenv(kAttentionSetting) == 0,
+      "restore grouped compressor route");
+}
+
 }  // namespace
 
 int main() {
@@ -724,6 +1012,17 @@ int main() {
   Expect(model != nullptr, error.c_str());
   Expect(model->VocabSize() > 0, "vocabulary size");
   Expect(!model->ModelName().empty(), "model name");
+
+  if (std::getenv("GUFO_DEEPSEEK_V4_FLASH_DSPARK_DOWN_ROUTES_ONLY") !=
+      nullptr) {
+    if (!model->HasDspark()) {
+      std::cout << "SKIP: GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL is not set\n";
+      return 77;
+    }
+    CheckDsparkDownRoutes(model);
+    CheckDsparkSingleQuality(model);
+    return 0;
+  }
 
   if (std::getenv("GUFO_DEEPSEEK_V4_FLASH_CONVERSATIONAL_PREFILL_ONLY") !=
       nullptr) {

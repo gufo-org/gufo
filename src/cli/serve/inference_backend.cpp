@@ -1546,7 +1546,17 @@ public:
     const auto stats_before = deepseek.session().DsparkStatistics();
     std::vector<int> emitted;
     std::string error;
-    if (!deepseek.session().DsparkStep(max_tokens, &emitted, &error)) {
+    const models::deepseek_v4_flash::SessionDsparkBatchItem item{
+        .session = &deepseek.session(),
+        .max_tokens = max_tokens,
+        .max_draft_tokens = max_draft_tokens_,
+        .schedule_confidence = draft_policy_ != TextDraftPolicy::kFixed,
+        .emitted = &emitted,
+    };
+    if (!model_->DsparkStepBatch(
+            std::span<const models::deepseek_v4_flash::SessionDsparkBatchItem>(
+                &item, 1),
+            &error)) {
       throw std::runtime_error("DeepSeek DSpark decode failed: " + error);
     }
     if (emitted.empty()) {

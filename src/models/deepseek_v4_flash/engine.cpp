@@ -133,9 +133,9 @@ bool Model::EvaluateBatch(std::span<const SessionBatchItem> items,
 
 bool Model::DsparkStepBatch(std::span<const SessionDsparkBatchItem> items,
                             std::string* error_msg) const {
-  if (items.size() < 2 || items.size() > 8) {
+  if (items.empty() || items.size() > 8) {
     AssignError(error_msg,
-                "DeepSeek DSpark batch requires two to eight sessions");
+                "DeepSeek DSpark batch requires one to eight sessions");
     return false;
   }
 

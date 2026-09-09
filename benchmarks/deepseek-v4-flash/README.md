@@ -1,7 +1,8 @@
 # DeepSeek V4 Flash Q2-imatrix on Strix Halo
 
-Status: 2026-09-06. This page is the current functional and performance
-snapshot, not an optimization history.
+Status: 2026-09-09. Current concurrent DSpark qualification appears under
+"Concurrent DSpark qualification by text type"; dated measurements below retain
+their original workload and policy.
 
 ## Model
 
@@ -355,12 +356,13 @@ projection, 14.9% to routed gate/up, and 11.7% to Q2 down. Interleaved sweeps of
 Q8 rows per block, Q2-down rows per block, and gate row span did not produce a
 repeatable improvement and were rejected rather than adding C2 regressions.
 
-The next measured concurrency experiments were also rejected. Grouping the
+Earlier concurrency experiments were rejected before the independent-request
+verifier was introduced. Grouping the
 DSpark support body across C2 changed the strict verified stream at token 12.
 A ragged verifier recovered 74.8% acceptance but reduced per-request decode
 from 13.31 to 12.57 tok/s and combined throughput from 30.53 to 25.79 tok/s,
-with category completion hashes changing. The exact target route therefore
-remains the production policy. On prompt prefill, forcing dense MMQ column tiles
+with category completion hashes changing. The exact target route was retained
+at that stage. On prompt prefill, forcing dense MMQ column tiles
 from 16 through 80 did not beat the existing selector: at pp128 the default
 measured 196.46 tok/s versus 186.89, 188.69, 194.02, 196.58, and 194.75. A
 16-row Q2-down hot tile also regressed pp64 from 117.86 to 114.18 tok/s and
@@ -384,23 +386,23 @@ preflight, and transition back to serial decode are covered by the same test.
 ### Adaptive DSpark serving
 
 DSpark now works through the OpenAI-compatible server with
-`--speculative dspark --dspark-model <path>`. Its request policy follows the
-measured crossover:
+`--speculative dspark --dspark-model <path>`. The current request policy is:
 
-- C1 uses DSpark speculative decoding.
-- C2-C8 use exact target batching at the matching physical width.
-- A later cold C1 request enables DSpark again; target-only state does not leak
-  across session reuse.
+- C1 uses DSpark speculative decoding and honors the requested draft limit and
+  policy, including the default rolling policy.
+- C2-C8 draft independently and verify the proposed rows together. Each request
+  owns its accepted prefix, compressor state, support cache, and counters.
+- Rolling draft tails start at three, grow after full acceptance, and shrink
+  below 50% acceptance. The measured ceilings are three for C2/C4/C8 and two
+  for C6.
+- Target-only steps remain available when a request does not propose a tail.
 
-Serializing one DSpark cycle per request was slower than target batching at
-every measured concurrent width and varied with draft acceptance. The scheduler
-therefore marks the entire concurrent wave target-only before its first prefill
-and completes all prefills before decode. This avoids both unused support
-feature capture and an admission-order window in which one request could begin
-drafting before its peers became ready.
+The earlier implementation serialized one DSpark cycle per request and was
+slower than target batching at every measured concurrent width. Its target-only
+policy is superseded by grouped support execution and ragged verification.
 
-Release-package qualification used a 121-token prompt, 64 greedy output tokens,
-one warmup, and two measured rounds:
+The following target-only baseline used a 121-token prompt, 64 greedy output
+tokens, one warmup, and two measured rounds:
 
 | C | Physical plan | Per-request decode tok/s | Combined active decode tok/s | Prefill tok/s | Total processed tok/s |
 | ---: | --- | ---: | ---: | ---: | ---: |
@@ -412,15 +414,16 @@ one warmup, and two measured rounds:
 `C` is the number of active requests and `W` is the number of rows advanced by
 one physical target pass. Each of two C2 users receives 13.86 decode tok/s; the
 GPU advances them at 27.73 tok/s combined. Total processed tok/s also counts all
-prompt tokens and is not a decode-speed measurement. C2-C8 draft zero tokens,
-so speculative acceptance is not defined for those exact target waves.
+prompt tokens and is not a decode-speed measurement. These target-only baseline
+waves draft zero tokens, so speculative acceptance is not defined for them.
 
-C1 retains the same DSpark decisions after the scheduler and memory changes.
-Repeated prompts produced identical text and the same drafted/accepted counts:
-40/16, 80/44, 80/47, and 40/19. The three-prompt quality corpus remains at
+Before the September 9 C1 policy fix, the scheduler and memory changes retained
+the legacy DSpark decisions. Repeated prompts produced identical text and the
+same drafted/accepted counts:
+40/16, 80/44, 80/47, and 40/19. The three-prompt quality corpus scored
 58.5% aggregate acceptance with two of three outputs byte-exact; the remaining
-near-tie trajectory is unchanged from the qualified DSpark baseline.
-A final release-level lifecycle audit forced all eight resident sessions
+near-tie trajectory matched the qualified DSpark baseline.
+An earlier release-level lifecycle audit forced all eight resident sessions
 through exact W8 with zero drafts, then issued the same lone request twice.
 Both C1 requests resumed DSpark immediately, produced byte-identical text and
 the same 40/17 drafted/accepted counts, and decoded at 21.41 tok/s.
@@ -469,7 +472,7 @@ from about 10.63 to 10.73 tok/s per user. Under the normal category scheduler,
 where proposals cover little of the output, median decode moved from 14.13 to
 14.15 tok/s overall and from 14.57 to 14.69 tok/s for summarization. Draft and
 accepted counts were identical, and every per-case completion-hash multiset
-matched. The kernel is therefore the default inside the already opt-in C2
+matched. The kernel became the default inside the opt-in C2
 DSpark route; `GUFO_DEEPSEEK_DSPARK_SUPPORT_HEAD_BATCH=0` restores serial heads
 for qualification.
 
@@ -477,10 +480,204 @@ Wider concurrent support was implemented and measured rather than inferred.
 The custom C4/C6/C8 output kernels preserved the qualified trajectories, but
 the support bodies remained session-local and verification expanded to 24, 36,
 and 48 target rows. Against exact target batching, per-user decode regressed
-56.3%, 65.1%, and 73.4% respectively. Those candidates were removed. C4-C8
-therefore remain exact W4-W8 target batches until a future design can batch the
-support model's routed body and avoid verifying one full six-row block per
-request.
+56.3%, 65.1%, and 73.4% respectively. Those candidates were removed. The current
+implementation batches the support body's routed work and verifies independently
+sized request blocks instead of those fixed six-row blocks.
+
+The September 9 validation found and fixed a state-corruption bug in the
+grouped compressor path. Sessions share the same projection workspace. Copying
+a later request's rows to offset zero overlapped the source when, for example,
+the first request had two rows and the next had three. The corruption could
+remain invisible until the next compressed row was emitted. A repeated baseline
+run first diverged at compressed-attention layer 2, then changed later tokens.
+Request-specific views now keep compressor and indexer scratch writes within
+each request's rows and eliminate those copies. Aligned compressor blocks also
+use the row loop when partial acceptance needs intermediate prefix snapshots.
+
+The new model-backed `deepseek_v4_flash_dspark_down_routes_test` compares
+independent per-request compressor projections and the original Q2 kernel
+against grouped projections and the optimized Q2 kernel. It changes request
+order and token budgets at C1/C2/C4/C6/C8, checks every frontier logit, and requires
+identical emitted tokens, positions, and all speculative counters across 126
+observations. The longer requests cross the ratio-128 compression boundary.
+Finite logits, progress, budget compliance, and actual support proposals are
+hard gates. `GUFO_DEEPSEEK_DSPARK_VALIDATE_DOWN=1` also reruns the original Q2
+kernel on each candidate launch's actual input and compares every F16 output
+bit. This diagnostic adds synchronous readbacks and must be off for timing.
+
+The Q2 change loads each staged activation once for both independent output
+rows. Each row preserves its original dequantization, accumulation order, warp
+reduction, and F16 output boundary. Eight isolated rectangular/ragged shapes
+were bit-exact under the production `-O3 -ffast-math -fno-finite-math-only`
+flags, with 1.19–1.28x kernel speedups. A four-output-row variant was rejected:
+it did not improve throughput and spilled 80 bytes per lane at four tiles.
+
+Release HTTP measurements use the pinned target/support artifacts, context
+2048, eight server slots, rolling drafts, homogeneous `repetition_sequence`,
+64 greedy output tokens, and one warmup per width. Each arm ran three times in
+the order off/on, on/off, off/on. Both arms contain the state fix; only
+`GUFO_DEEPSEEK_DSPARK_DOWN_REUSE_MID=0/1` changes. These measurements preceded
+the C1 policy fix described below: their C1 row is a legacy fixed-width control,
+despite the server being configured for rolling drafts.
+
+| C | Original Q2, per-user tok/s | Reused mid, per-user tok/s | Change | Accepted/drafted per wave |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 18.809 | 18.822 | +0.07% control | 17/40 |
+| 2 | 22.928 | 23.611 | **+2.98%** | 88/100 |
+| 4 | 14.568 | 14.973 | **+2.78%** | 176/192 |
+| 6 | 7.337 | 7.619 | **+3.83%** | 204/276 |
+| 8 | 6.652 | 6.856 | **+3.07%** | 328/416 |
+
+Every completion-hash multiset and accepted/drafted count matches across all
+six runs. These rates measure completion tokens over server decode time.
+They exclude prefill; combined active decode is the per-user rate multiplied
+by C. The optimized route is the default; setting
+`GUFO_DEEPSEEK_DSPARK_DOWN_REUSE_MID=0` restores the original Q2 kernel.
+
+Mixed `distinct` HTTP waves need a separate interpretation. At C2/C8 on the
+ten-case, 32-token corpus, completion hashes were not all stable across the
+off/on runs. Repeating the original kernel reproduced the same three C2 text
+changes (creative, Italian, and JSON); C8 acceptance counts also varied in the
+A/A repeat. This makes HTTP hash equality alone an unsuitable kernel oracle
+for that workload. The deterministic session test and direct same-input Q2
+comparison provide the arithmetic check. These results do not establish
+batch-composition-independent text generation.
+The mixed corpus then completed all 26 C2/C8 requests with direct Q2 validation
+enabled and zero bit mismatches (168/254 and 284/412 accepted/drafted tokens).
+That diagnostic run is correctness evidence only.
+
+Raw per-user samples, in run order:
+
+| C | Original Q2 | Reused mid |
+| ---: | --- | --- |
+| 1 | 18.809, 18.816, 18.766 | 18.821, 18.840, 18.822 |
+| 2 | 22.919, 22.933, 22.928 | 23.611, 23.610, 23.619 |
+| 4 | 14.551, 14.570, 14.568 | 14.951, 14.973, 15.030 |
+| 6 | 7.337, 7.342, 7.325 | 7.619, 7.604, 7.621 |
+| 8 | 6.647, 6.652, 6.653 | 6.861, 6.856, 6.847 |
+
+The original PR head reproduced 22.94/14.49/7.31/6.92 tok/s at C2/C4/C6/C8.
+Its C8 result used a different accepted trajectory (336/400), affected by the
+state bug. The matched table above isolates the kernel gain after that fix.
+It does not establish equivalence to autoregressive decoding or a DSpark win
+over target-only batching on every workload; C6/C8 still need lower verifier
+cost to beat their previously measured target-only rates.
+
+Matched C8 profiles used 32 output tokens and no warmup. Both recorded 197,374
+dispatches; the repeated gate and down kernels each ran 387 times:
+
+| Kernel | Original Q2 run | Reused-mid run | VGPRs before/after | Scratch |
+| --- | ---: | ---: | ---: | ---: |
+| Grouped IQ2 gate/up | 944.61 ms | 947.20 ms | 136/136 | 0 |
+| Grouped Q2 down, four tiles/two rows | 809.15 ms | **665.20 ms** | 64/72 | 0 |
+| All GPU kernels, including prefill | 9,582.48 ms | 9,408.63 ms | — | — |
+
+Q2 down uses 1,024 threads, 16 KiB dynamic LDS, and 128 SGPRs in both runs.
+The isolated production-flag kernel occupancy query admits two workgroups per
+processor (64 wave32 waves), with zero local-memory spills at both two and four
+tiles. The matched full-width C8 cycle medians are:
+
+| Stage | Original Q2 | Reused mid |
+| --- | ---: | ---: |
+| Support draft | 50.03 ms | 49.97 ms |
+| Target verification | 467.50 ms | **452.05 ms** |
+| Commit | 12.12 ms | 12.22 ms |
+
+Verification remains the bottleneck. These traces are separate from the
+unprofiled serving rates above.
+
+A further C6 tile sweep retained three tiles per pass: 7.659 and 7.665 tok/s
+around a four-tile control of 7.624, with identical completion hashes and
+204/276 acceptance. This adds about 0.5% over the reused-mid four-tile route.
+Other widths keep their existing tile counts.
+`GUFO_DEEPSEEK_DSPARK_DOWN_TILES_PER_PASS=4` restores the C6 control.
+
+The C1 investigation found a separate policy wiring bug: HTTP `DecodeStep`
+called the legacy session API, ignoring both `--draft-tokens` and
+`--draft-policy`. It always verified the full five-token support tail, whereas
+concurrent requests honored the configured rolling width. Low C1 acceptance
+then triggered the serial backoff controller. The one-request path now passes
+the same configuration through the model API, keeps the qualified support
+computation, and selects the requested prefix before target verification.
+The legacy session API and explicit fixed/full-width policy remain available.
+
+Three interleaved release repetitions of the same 64-token workload confirm
+the C1 correction:
+
+| C1 policy, requested draft limit 7 | Raw per-user tok/s | Median | Accepted/drafted |
+| --- | --- | ---: | ---: |
+| Fixed, legacy behavior | 18.825, 18.804, 18.813 | 18.813 | 17/40 |
+| Rolling, configuration honored | 31.432, 31.461, 31.454 | **31.454 (+67.2%)** | 45/57 |
+
+Completion hashes and support counts match within each policy across all three
+runs. C1 now exceeds C2's 23.611 tok/s per user on this workload. Exploratory
+C1 controls measured 29.09 tok/s at fixed width 3, 27.81 at width 2, 19.28 at
+width 4, and 29.79 for rolling capped at 3. Disabling backoff was neutral
+(31.41 tok/s, same 45/57), so the existing controller remains enabled.
+
+A separate fresh-process C1 corpus sweep used all ten cases, 64 output tokens,
+no warmup, and one measurement per case. The across-case median rose from
+18.80 to 26.76 tok/s. These are exploratory per-case samples, not repeated
+speed guarantees; expository text was 3.1% slower with rolling.
+
+| Case | Fixed tok/s | Rolling tok/s | Fixed accepted/drafted | Rolling accepted/drafted |
+| --- | ---: | ---: | ---: | ---: |
+| Repetition | 18.79 | 31.37 | 17/40 | 45/57 |
+| Expository | 27.73 | 26.87 | 47/80 | 44/70 |
+| C++ | 25.46 | 27.20 | 45/85 | 44/76 |
+| Reasoning | 18.80 | 28.77 | 19/40 | 46/64 |
+| Summary | 21.97 | 26.84 | 26/55 | 27/44 |
+| Italian | 17.61 | 18.15 | 14/40 | 12/27 |
+| Chinese | 16.68 | 17.56 | 7/30 | 9/20 |
+| JSON | 19.29 | 26.68 | 20/45 | 43/66 |
+| Creative | 16.04 | 17.61 | 2/20 | 9/20 |
+| Instructions | 18.08 | 18.67 | 15/40 | 17/37 |
+
+The new test asserts C1 draft limits of 1/3/7 and exact full-width fixed-policy
+equivalence to the legacy API. It also checks four 32-token chat continuations
+(repetition, JSON, creative writing, and Chinese) by replaying each emitted
+token through a separate scalar target session:
+
+| C1 policy | Scalar top-1 agreement | Worst token rank | Worst frontier RMSE | Minimum cosine | Maximum logit error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Legacy fixed full width | 123/128 | 6 | 0.65 | 0.99 | 3.94 |
+| Rolling | 125/128 | 2 | 0.60 | 0.99 | 3.23 |
+
+These continuations can differ between policies because verification width
+changes numerical routes. The additional test freezes the measured legacy
+agreement floor and preserves the existing full-logit envelope; it does not
+claim byte-identical scalar generation. The separate immutable pinned
+trajectory still scores 116/128 top-1, rank sum 142, and worst rank 3, with
+its original thresholds unchanged.
+
+Reproduce the model-backed checks with the pinned target and support paths:
+
+```sh
+GUFO_DEEPSEEK_V4_FLASH_MODEL="$MODEL" \
+GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL="$SUPPORT" \
+  nix develop -c ctest --preset gpu-full --output-on-failure \
+  -R '^deepseek_v4_flash_dspark_down_routes_test$'
+env -u GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL \
+  GUFO_DEEPSEEK_V4_FLASH_MODEL="$MODEL" \
+  nix develop -c ctest --preset gpu-full --output-on-failure \
+  -R '^deepseek_v4_flash_engine_test$'
+```
+
+For release timing, start a fresh `result/bin/gufo serve` process for each
+policy and keep profiling and validation readbacks disabled:
+
+```sh
+./result/bin/gufo serve --host 127.0.0.1 --port 19229 --sessions 8 llm \
+  --model "$MODEL" --context 2048 --speculative dspark \
+  --dspark-model "$SUPPORT" --draft-tokens 7 --draft-policy rolling
+# In another terminal:
+nix develop -c python3 tools/serving/gufo-serving-bench.py \
+  --base-url http://127.0.0.1:19229 --gufo ./result/bin/gufo \
+  --suite benchmarks/qwen3.8-27b/speculative-corpus.json \
+  --case repetition_sequence --corpus-layout homogeneous \
+  --concurrency 1,2,4,6,8 --max-tokens 64 --warmup 1 \
+  --repetitions 1 --output /tmp/dspark-serving.json
+```
 
 ## Quality and Integration
 
@@ -2011,6 +2208,10 @@ Worth revisiting only together with a rewrite of that producer's LDS budget.
 - Continue improving general-workload DSpark acceptance and verifier cost under
   #156 and #222. The retained fast route exceeds the 24--25 tok/s target on
   sustained high-acceptance decoding; see "DSpark speculative decoding" below.
+- Profile sharing Q8 activation loads between the concurrent IQ2 gate/up dot
+  products while preserving each request's arithmetic. Gate/up is now the
+  largest repeated routed kernel; four-output-row Q2 widening was rejected for
+  spilling, and C6 already uses the measured three-tile down route.
 - Add model-owned offline calibration/imatrix tooling only when a new
   quantization recipe requires it.
 - Continue restart-safe SSD state reuse through the serving milestones.

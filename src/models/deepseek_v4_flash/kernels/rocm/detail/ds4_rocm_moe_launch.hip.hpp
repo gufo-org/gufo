@@ -85,7 +85,7 @@ static uint32_t ds4_rocm_grouped_down_tiles_per_pass(
         getenv("GUFO_DEEPSEEK_DSPARK_DOWN_TILES_PER_PASS");
     const int parsed = value
         ? atoi(value)
-        : (group_count >= 4u ? 4 : 2);
+        : (group_count == 6u ? 3 : group_count >= 4u ? 4 : 2);
     return parsed >= 4 ? 4u : parsed >= 3 ? 3u : 2u;
 }
 
@@ -1742,20 +1742,22 @@ static int routed_moe_launch(
                         (strcmp(down_rows_per_warp_setting, "1") != 0 &&
                          strcmp(down_rows_per_warp_setting, "false") != 0 &&
                          strcmp(down_rows_per_warp_setting, "off") != 0);
-#define DS4_LAUNCH_GROUPED_DOWN(TILES, ROWS)                            \
-                    moe_down_q2K_grouped_expert_float_batch_warp32_kernel \
-                        <TILES, ROWS><<<                                 \
-                            compact_grid, rows_per_block * 32u,         \
-                            (TILES) * 4u * 256u * sizeof(float)>>>(      \
-                            (__half *)down->ptr, down_w,                 \
-                            (const float *)mid->ptr,                     \
-                            grouped_gate_expert_offsets,                 \
-                            grouped_gate_sorted_tiles,                   \
-                            grouped_gate_active_count,                   \
-                            grouped_gate_active_experts,                 \
-                            grouped_gate_tile_pair_counts,               \
-                            grouped_gate_tile_pairs, down_expert_bytes,  \
-                            down_row_bytes, expert_mid_dim, out_dim)
+                    const char* reuse_mid_setting =
+                        getenv("GUFO_DEEPSEEK_DSPARK_DOWN_REUSE_MID");
+                    const bool reuse_mid =
+                        reuse_mid_setting == NULL ||
+                        (strcmp(reuse_mid_setting, "0") != 0 &&
+                         strcmp(reuse_mid_setting, "false") != 0 &&
+                         strcmp(reuse_mid_setting, "off") != 0);
+#define DS4_LAUNCH_GROUPED_DOWN(TILES, ROWS, REUSE)                           \
+    moe_down_q2K_grouped_expert_float_batch_warp32_kernel<TILES, ROWS, REUSE> \
+        <<<compact_grid, rows_per_block * 32u,                                \
+           (TILES) * 4u * 256u * sizeof(float)>>>(                            \
+            (__half*)down->ptr, down_w, (const float*)mid->ptr,               \
+            grouped_gate_expert_offsets, grouped_gate_sorted_tiles,           \
+            grouped_gate_active_count, grouped_gate_active_experts,           \
+            grouped_gate_tile_pair_counts, grouped_gate_tile_pairs,           \
+            down_expert_bytes, down_row_bytes, expert_mid_dim, out_dim)
                     compact_grid.x =
                         (out_dim +
                          rows_per_block *
@@ -1763,20 +1765,59 @@ static int routed_moe_launch(
                              1u) /
                         (rows_per_block *
                          (down_rows_per_warp2 ? 2u : 1u));
-                    if (tiles_per_pass == 4u &&
-                        down_rows_per_warp2) {
-                        DS4_LAUNCH_GROUPED_DOWN(4u, 2u);
+                    if (reuse_mid && down_rows_per_warp2 &&
+                        tiles_per_pass == 4u) {
+                      DS4_LAUNCH_GROUPED_DOWN(4u, 2u, true);
+                    } else if (reuse_mid && down_rows_per_warp2 &&
+                               tiles_per_pass == 3u) {
+                      DS4_LAUNCH_GROUPED_DOWN(3u, 2u, true);
+                    } else if (reuse_mid && down_rows_per_warp2) {
+                      DS4_LAUNCH_GROUPED_DOWN(2u, 2u, true);
+                    } else if (tiles_per_pass == 4u && down_rows_per_warp2) {
+                      DS4_LAUNCH_GROUPED_DOWN(4u, 2u, false);
                     } else if (tiles_per_pass == 4u) {
-                        DS4_LAUNCH_GROUPED_DOWN(4u, 1u);
-                    } else if (tiles_per_pass == 3u &&
-                               down_rows_per_warp2) {
-                        DS4_LAUNCH_GROUPED_DOWN(3u, 2u);
+                      DS4_LAUNCH_GROUPED_DOWN(4u, 1u, false);
+                    } else if (tiles_per_pass == 3u && down_rows_per_warp2) {
+                      DS4_LAUNCH_GROUPED_DOWN(3u, 2u, false);
                     } else if (tiles_per_pass == 3u) {
-                        DS4_LAUNCH_GROUPED_DOWN(3u, 1u);
+                      DS4_LAUNCH_GROUPED_DOWN(3u, 1u, false);
                     } else if (down_rows_per_warp2) {
-                        DS4_LAUNCH_GROUPED_DOWN(2u, 2u);
+                      DS4_LAUNCH_GROUPED_DOWN(2u, 2u, false);
                     } else {
-                        DS4_LAUNCH_GROUPED_DOWN(2u, 1u);
+                      DS4_LAUNCH_GROUPED_DOWN(2u, 1u, false);
+                    }
+                    if (reuse_mid && down_rows_per_warp2 &&
+                        getenv("GUFO_DEEPSEEK_DSPARK_VALIDATE_DOWN") !=
+                            nullptr) {
+                      const size_t values =
+                          static_cast<size_t>(n_tokens) * n_expert * out_dim;
+                      const size_t bytes = values * sizeof(uint16_t);
+                      std::vector<uint16_t> candidate(values);
+                      std::vector<uint16_t> reference(values);
+                      if (!hip_ok(hipMemcpy(candidate.data(), down->ptr, bytes,
+                                            hipMemcpyDeviceToHost),
+                                  "grouped down candidate readback")) {
+                        return 0;
+                      }
+                      if (tiles_per_pass == 4u) {
+                        DS4_LAUNCH_GROUPED_DOWN(4u, 2u, false);
+                      } else if (tiles_per_pass == 3u) {
+                        DS4_LAUNCH_GROUPED_DOWN(3u, 2u, false);
+                      } else {
+                        DS4_LAUNCH_GROUPED_DOWN(2u, 2u, false);
+                      }
+                      if (!hip_ok(hipMemcpy(reference.data(), down->ptr, bytes,
+                                            hipMemcpyDeviceToHost),
+                                  "grouped down reference readback")) {
+                        return 0;
+                      }
+                      if (candidate != reference) {
+                        fprintf(stderr,
+                                "ds4: grouped down validation mismatch "
+                                "rows=%u tiles=%u\n",
+                                n_tokens, tiles_per_pass);
+                        return 0;
+                      }
                     }
 #undef DS4_LAUNCH_GROUPED_DOWN
                 } else {

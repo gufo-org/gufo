@@ -4626,130 +4626,146 @@ __global__ static void moe_down_q2K_grouped_tile4_float_batch_warp32_kernel(
  * block/k order; only the Q2 weight dequantization is shared across two to four
  * tiles from different requests.
  */
-template <uint32_t TILES_PER_PASS, uint32_t ROWS_PER_WARP = 1u>
+template<uint32_t TILES_PER_PASS, uint32_t ROWS_PER_WARP = 1u,
+         bool REUSE_MID = false>
 __global__ static void moe_down_q2K_grouped_expert_float_batch_warp32_kernel(
-        __half *down_out_h,
-        const char *down_base,
-        const float *mid,
-        const uint32_t *expert_offsets,
-        const uint32_t *sorted_tiles,
-        const uint32_t *active_count,
-        const uint32_t *active_experts,
-        const uint32_t *tile_pair_counts,
-        const uint32_t *tile_pairs,
-        uint64_t down_expert_bytes,
-        uint64_t down_row_bytes,
-        uint32_t expert_mid_dim,
-        uint32_t out_dim) {
-    static_assert(TILES_PER_PASS >= 2u && TILES_PER_PASS <= 4u);
-    static_assert(ROWS_PER_WARP == 1u || ROWS_PER_WARP == 2u);
-    constexpr uint32_t PAIRS_PER_PASS = TILES_PER_PASS * 4u;
-    const uint32_t active = blockIdx.y;
-    if (active >= *active_count) return;
+    __half* down_out_h, const char* down_base, const float* mid,
+    const uint32_t* expert_offsets, const uint32_t* sorted_tiles,
+    const uint32_t* active_count, const uint32_t* active_experts,
+    const uint32_t* tile_pair_counts, const uint32_t* tile_pairs,
+    uint64_t down_expert_bytes, uint64_t down_row_bytes,
+    uint32_t expert_mid_dim, uint32_t out_dim) {
+  static_assert(TILES_PER_PASS >= 2u && TILES_PER_PASS <= 4u);
+  static_assert(ROWS_PER_WARP == 1u || ROWS_PER_WARP == 2u);
+  constexpr uint32_t PAIRS_PER_PASS = TILES_PER_PASS * 4u;
+  const uint32_t active = blockIdx.y;
+  if (active >= *active_count)
+    return;
 
-    const uint32_t expert = active_experts[active];
-    const uint32_t first = expert_offsets[expert];
-    const uint32_t count = expert_offsets[expert + 1u] - first;
-    const uint32_t tid = threadIdx.x;
-    const uint32_t lane = tid & 31u;
-    const uint32_t rows_per_block = blockDim.x >> 5u;
-    const uint32_t warp = tid >> 5u;
-    const uint32_t row0 =
-        blockIdx.x * rows_per_block * ROWS_PER_WARP + warp;
-    uint32_t rows[ROWS_PER_WARP] = {};
-    const unsigned char *down_rows[ROWS_PER_WARP] = {};
+  const uint32_t expert = active_experts[active];
+  const uint32_t first = expert_offsets[expert];
+  const uint32_t count = expert_offsets[expert + 1u] - first;
+  const uint32_t tid = threadIdx.x;
+  const uint32_t lane = tid & 31u;
+  const uint32_t rows_per_block = blockDim.x >> 5u;
+  const uint32_t warp = tid >> 5u;
+  const uint32_t row0 = blockIdx.x * rows_per_block * ROWS_PER_WARP + warp;
+  uint32_t rows[ROWS_PER_WARP] = {};
+  const unsigned char* down_rows[ROWS_PER_WARP] = {};
 #pragma unroll
-    for (uint32_t row_slot = 0u; row_slot < ROWS_PER_WARP;
-         ++row_slot) {
-        rows[row_slot] = row0 + row_slot * rows_per_block;
-        down_rows[row_slot] =
-            (const unsigned char *)down_base +
-            (uint64_t)expert * down_expert_bytes +
-            (uint64_t)(rows[row_slot] < out_dim
-                           ? rows[row_slot]
-                           : 0u) *
-                down_row_bytes;
+  for (uint32_t row_slot = 0u; row_slot < ROWS_PER_WARP; ++row_slot) {
+    rows[row_slot] = row0 + row_slot * rows_per_block;
+    down_rows[row_slot] =
+        (const unsigned char*)down_base + (uint64_t)expert * down_expert_bytes +
+        (uint64_t)(rows[row_slot] < out_dim ? rows[row_slot] : 0u) *
+            down_row_bytes;
+  }
+  const uint32_t n_blocks = expert_mid_dim >> 8u;
+  extern __shared__ float shmid[];
+
+  for (uint32_t tile_index = 0u; tile_index < count;
+       tile_index += TILES_PER_PASS) {
+    uint32_t pair[PAIRS_PER_PASS] = {};
+    uint32_t np = 0u;
+#pragma unroll
+    for (uint32_t tile_slot = 0u; tile_slot < TILES_PER_PASS; ++tile_slot) {
+      if (tile_index + tile_slot >= count)
+        break;
+      const uint32_t tile = sorted_tiles[first + tile_index + tile_slot];
+      const uint32_t tile_np = tile_pair_counts[tile];
+#pragma unroll
+      for (uint32_t p = 0u; p < 4u; ++p) {
+        if (p < tile_np) {
+          pair[np++] = tile_pairs[(uint64_t)tile * 4u + p];
+        }
+      }
     }
-    const uint32_t n_blocks = expert_mid_dim >> 8u;
-    extern __shared__ float shmid[];
 
-    for (uint32_t tile_index = 0u; tile_index < count;
-         tile_index += TILES_PER_PASS) {
-        uint32_t pair[PAIRS_PER_PASS] = {};
-        uint32_t np = 0u;
+    float acc[ROWS_PER_WARP][PAIRS_PER_PASS] = {};
+    for (uint32_t b = 0u; b < n_blocks; ++b) {
+      const uint64_t mid_base = (uint64_t)b * 256u;
+      for (uint32_t j = tid; j < np * 256u; j += blockDim.x) {
+        const uint32_t p = j >> 8u;
+        const uint32_t k = j & 255u;
+        shmid[j] = mid[(uint64_t)pair[p] * expert_mid_dim + mid_base + k];
+      }
+      __syncthreads();
+      if constexpr (REUSE_MID) {
+        const unsigned char* weight_blocks[ROWS_PER_WARP] = {};
+        float d[ROWS_PER_WARP] = {};
+        float dmin[ROWS_PER_WARP] = {};
 #pragma unroll
-        for (uint32_t tile_slot = 0u; tile_slot < TILES_PER_PASS;
-             ++tile_slot) {
-            if (tile_index + tile_slot >= count) break;
-            const uint32_t tile =
-                sorted_tiles[first + tile_index + tile_slot];
-            const uint32_t tile_np = tile_pair_counts[tile];
-#pragma unroll
-            for (uint32_t p = 0u; p < 4u; ++p) {
-                if (p < tile_np) {
-                    pair[np++] =
-                        tile_pairs[(uint64_t)tile * 4u + p];
-                }
-            }
+        for (uint32_t r = 0u; r < ROWS_PER_WARP; ++r) {
+          weight_blocks[r] = down_rows[r] + static_cast<uint64_t>(b) * 84u;
+          q2_K_scale_broadcast_w32(weight_blocks[r], &d[r], &dmin[r]);
         }
-
-        float acc[ROWS_PER_WARP][PAIRS_PER_PASS] = {};
-        for (uint32_t b = 0u; b < n_blocks; ++b) {
-            const uint64_t mid_base = (uint64_t)b * 256u;
-            for (uint32_t j = tid; j < np * 256u;
-                 j += blockDim.x) {
-                const uint32_t p = j >> 8u;
-                const uint32_t k = j & 255u;
-                shmid[j] =
-                    mid[(uint64_t)pair[p] * expert_mid_dim +
-                        mid_base + k];
-            }
-            __syncthreads();
+        /*
+         * Load each staged activation once for both output rows.
+         * Each accumulator still visits b/k in the original order,
+         * including the same dequantization and F16 boundary.
+         */
 #pragma unroll
-            for (uint32_t row_slot = 0u;
-                 row_slot < ROWS_PER_WARP; ++row_slot) {
-                if (rows[row_slot] >= out_dim) continue;
-                const unsigned char *weight_block =
-                    down_rows[row_slot] + (uint64_t)b * 84u;
-                float d = 0.0f;
-                float dmin = 0.0f;
-                q2_K_scale_broadcast_w32(
-                    weight_block, &d, &dmin);
+        for (uint32_t k = 0u; k < 8u; ++k) {
+          const uint32_t i = lane + (k << 5u);
+          float weights[ROWS_PER_WARP] = {};
 #pragma unroll
-                for (uint32_t k = 0u; k < 8u; ++k) {
-                    const uint32_t i = lane + (k << 5u);
-                    const float weight =
-                        q2_K_dequant_256_scaled_w32(
-                            weight_block, lane, k, d, dmin);
+          for (uint32_t r = 0u; r < ROWS_PER_WARP; ++r) {
+            weights[r] = q2_K_dequant_256_scaled_w32(weight_blocks[r], lane, k,
+                                                     d[r], dmin[r]);
+          }
 #pragma unroll
-                    for (uint32_t p = 0u; p < PAIRS_PER_PASS; ++p) {
-                        if (p < np) {
-                            acc[row_slot][p] +=
-                                weight * shmid[(p << 8u) + i];
-                        }
-                    }
+          for (uint32_t p = 0u; p < PAIRS_PER_PASS; ++p) {
+            if (p < np) {
+              const float value = shmid[(p << 8u) + i];
+#pragma unroll
+              for (uint32_t r = 0u; r < ROWS_PER_WARP; ++r) {
+                if (rows[r] < out_dim) {
+                  acc[r][p] += weights[r] * value;
                 }
+              }
             }
-            __syncthreads();
+          }
         }
+      } else {
 #pragma unroll
-        for (uint32_t row_slot = 0u;
-             row_slot < ROWS_PER_WARP; ++row_slot) {
+        for (uint32_t row_slot = 0u; row_slot < ROWS_PER_WARP; ++row_slot) {
+          if (rows[row_slot] >= out_dim)
+            continue;
+          const unsigned char* weight_block =
+              down_rows[row_slot] + (uint64_t)b * 84u;
+          float d = 0.0f;
+          float dmin = 0.0f;
+          q2_K_scale_broadcast_w32(weight_block, &d, &dmin);
+#pragma unroll
+          for (uint32_t k = 0u; k < 8u; ++k) {
+            const uint32_t i = lane + (k << 5u);
+            const float weight =
+                q2_K_dequant_256_scaled_w32(weight_block, lane, k, d, dmin);
 #pragma unroll
             for (uint32_t p = 0u; p < PAIRS_PER_PASS; ++p) {
-                if (p < np) {
-                    acc[row_slot][p] =
-                        warp_sum_f32(acc[row_slot][p]);
-                    if (lane == 0u && rows[row_slot] < out_dim) {
-                        down_out_h[
-                            (uint64_t)pair[p] * out_dim +
-                            rows[row_slot]] =
-                                __float2half(acc[row_slot][p]);
-                    }
-                }
+              if (p < np) {
+                acc[row_slot][p] += weight * shmid[(p << 8u) + i];
+              }
             }
+          }
         }
+      }
+      __syncthreads();
     }
+#pragma unroll
+    for (uint32_t row_slot = 0u; row_slot < ROWS_PER_WARP; ++row_slot) {
+#pragma unroll
+      for (uint32_t p = 0u; p < PAIRS_PER_PASS; ++p) {
+        if (p < np) {
+          acc[row_slot][p] = warp_sum_f32(acc[row_slot][p]);
+          if (lane == 0u && rows[row_slot] < out_dim) {
+            down_out_h[(uint64_t)pair[p] * out_dim + rows[row_slot]] =
+                __float2half(acc[row_slot][p]);
+          }
+        }
+      }
+    }
+  }
 }
 
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)

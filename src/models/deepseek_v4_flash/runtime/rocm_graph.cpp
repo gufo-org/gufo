@@ -3283,7 +3283,11 @@ static bool rocm_graph_encode_layer_attention_batch(
             rocm_graph_attn_comp_prefill_target_free(attn_comp_mirror);
             rocm_graph_attn_comp_prefill_target_free(attn_comp_target);
         } else {
+            // Verification may reject an aligned block partway through.
+            // The bulk compressor only saves its final state, so use the
+            // row loop when rollback needs intermediate prefix snapshots.
             const bool aligned_chunk =
+                !g->spec_capture_prefixes &&
                 (pos0 % ratio) == 0u && (n_tokens % ratio) == 0u;
             if (aligned_chunk) {
                 const uint32_t comp_before = g->layer_n_comp[il];
@@ -3569,6 +3573,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                 }
             } else {
                 const bool aligned_chunk =
+                    !g->spec_capture_prefixes &&
                     (pos0 % ratio) == 0u && (n_tokens % ratio) == 0u;
                 if (aligned_chunk) {
                     const uint32_t index_before = g->layer_n_index_comp[il];
@@ -6393,7 +6398,10 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
     auto with_attention_slice =
         [&](ds4_gpu_graph* graph, uint32_t row0, uint32_t rows,
             auto&& operation) {
-          std::array<ds4_gpu_tensor**, 15> slots{{
+          // All sessions share this workspace. Copying a later request's
+          // compressor rows to offset zero can overlap for ragged blocks.
+          // Views also confine the indexer's scratch writes to its request.
+          std::array<ds4_gpu_tensor**, 17> slots{{
               &graph->batch_cur_hc,
               &graph->batch_flat_hc,
               &graph->batch_hc_mix,
@@ -6409,8 +6417,10 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
               &graph->batch_indexer_q,
               &graph->batch_indexer_weights,
               &graph->batch_heads,
+              &graph->batch_comp_kv,
+              &graph->batch_comp_sc,
           }};
-          std::array<ds4_gpu_tensor*, 15> bases{{
+          std::array<ds4_gpu_tensor*, 17> bases{{
               coordinator->batch_cur_hc,
               coordinator->batch_flat_hc,
               coordinator->batch_hc_mix,
@@ -6426,8 +6436,10 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
               coordinator->batch_indexer_q,
               coordinator->batch_indexer_weights,
               coordinator->batch_heads,
+              coordinator->batch_comp_kv,
+              coordinator->batch_comp_sc,
           }};
-          const std::array<uint64_t, 15> row_bytes{{
+          const std::array<uint64_t, 17> row_bytes{{
               hc_row_bytes,
               hc_row_bytes,
               mix_hc * sizeof(float),
@@ -6443,9 +6455,11 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
               indexer_q_dim * sizeof(float),
               (uint64_t)DS4_N_INDEXER_HEAD * sizeof(float),
               q_dim * sizeof(float),
+              (uint64_t)comp_width * sizeof(float),
+              (uint64_t)comp_width * sizeof(float),
           }};
-          std::array<ds4_gpu_tensor*, 15> saved{};
-          std::array<ds4_gpu_tensor*, 15> views{};
+          std::array<ds4_gpu_tensor*, 17> saved{};
+          std::array<ds4_gpu_tensor*, 17> views{};
           bool slice_ok = true;
           for (size_t field = 0; field < slots.size(); ++field) {
             saved[field] = *slots[field];
@@ -6737,24 +6751,6 @@ static bool rocm_graph_verify_sessions_batch(ds4_engine* engine,
         ok = ds4_gpu_tensor_copy(graph->batch_cur_hc, 0,
                                  coordinator->batch_dspark_verify_cur_hc,
                                  block_offset, block_bytes) != 0;
-      }
-      if (ok && combine_attn_f16 && index != 0u) {
-        const uint64_t comp_row_bytes =
-            (uint64_t)comp_width * sizeof(float);
-        const uint64_t comp_offset =
-            (uint64_t)row_offsets[index] * comp_row_bytes;
-        const uint64_t comp_bytes =
-            (uint64_t)items[index].n_tokens * comp_row_bytes;
-        ok = ds4_gpu_tensor_copy(
-                 graph->batch_comp_kv, 0,
-                 coordinator->batch_comp_kv, comp_offset,
-                 comp_bytes) != 0;
-        if (ok) {
-          ok = ds4_gpu_tensor_copy(
-                   graph->batch_comp_sc, 0,
-                   coordinator->batch_comp_sc, comp_offset,
-                   comp_bytes) != 0;
-        }
       }
       if (ok) {
         if (combine_attn_front) {
