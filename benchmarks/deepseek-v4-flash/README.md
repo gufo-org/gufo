@@ -83,19 +83,24 @@ state survive snapshots; a new request reusing a prefix starts fresh statistics.
 
 The 80.76 GiB target weights are only part of the footprint: DSpark adds
 5.58 GiB of support weights, and inference also needs projection caches,
-KV state, and work buffers. The current runtime omits the dense attention
-mask and grows indexer score scratch with actual prefill work.
+KV state, and work buffers. The runtime reuses scratch across consecutive
+attention and FFN stages, omits the dense attention mask, and grows compressed
+KV storage and indexer score scratch with actual context use. Cache precision
+is unchanged; prefill reserves 128 tokens of decode headroom.
 
 | C1 DSpark workload | Previous GPU allocation (GiB) | Current (GiB) | Saved (GiB) |
 | --- | ---: | ---: | ---: |
-| pp2048/4096 + tg128 | 98.79 | 96.81 | 1.99 |
-| 16K prefix, pp4096 + tg128 | 98.79 | 96.91 | 1.88 |
+| pp2048/4096 + tg128 | 98.79 | 90.74 | 8.06 |
+| 16K prefix, pp4096 + tg128 | 98.79 | 91.46 | 7.33 |
 
 These are driver GTT measurements, not whole-system RAM usage. The
 [memory report](memory-c1-262k.json) retains matched release runs, exact output
-hashes and draft counts, timings, and memory observations. The controls found
-no material speed regression. Only up to 20,608
-tokens are used; capacity does not imply filling the window.
+hashes and draft counts, timings, and memory observations. Scratch reuse and
+growing KV save another **6.07 GiB** at pp2048/4096 beyond the earlier indexer
+scratch reduction. The controls found no material speed regression; a separate
+256-token continuation checks growth during generation. Only up to 20,608
+tokens are used; capacity does not imply filling the window. KV storage grows
+with longer inputs.
 
 ## Reproduce
 

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <vector>
 
 #include "../kernels/rocm/resident_api.h"
@@ -103,6 +104,7 @@ struct ds4_rocm_graph {
      * layer compression ratio instead of pessimistically using the ratio-4 cap
      * for every ratio-128 layer. */
     uint32_t layer_comp_cap[DS4_MAX_LAYER];
+    bool managed_kv_cache;
     /* Per-layer work tensors.  They are reused in place by every layer instead
      * of allocating a generic graph arena.  This is why the code is verbose but
      * predictable: each pointer names an actual DS4 stage. */
@@ -146,6 +148,7 @@ struct ds4_rocm_graph {
      * persistent caches used by decode.  Keeping this separate from decode
      * avoids a slow loop of one-token graph steps for long prompts. */
     ds4_gpu_tensor *prefill_tokens;
+    ds4_gpu_tensor* batch_stage_scratch;
     ds4_gpu_tensor *batch_cur_hc;
     ds4_gpu_tensor *batch_next_hc;
     ds4_gpu_tensor* batch_flat_hc;
@@ -392,6 +395,7 @@ static void rocm_graph_bind_batch_workspace(
         ds4_gpu_graph *g,
         const ds4_gpu_graph *workspace) {
     g->prefill_tokens = workspace->prefill_tokens;
+    g->batch_stage_scratch = workspace->batch_stage_scratch;
     g->batch_cur_hc = workspace->batch_cur_hc;
     g->batch_next_hc = workspace->batch_next_hc;
     g->batch_flat_hc = workspace->batch_flat_hc;
@@ -477,6 +481,7 @@ static void rocm_graph_free_batch_workspace(ds4_gpu_graph *g) {
   ds4_gpu_tensor_free(g->batch_next_hc);
   ds4_gpu_tensor_free(g->batch_cur_hc);
   ds4_gpu_tensor_free(g->prefill_tokens);
+  ds4_gpu_tensor_free(g->batch_stage_scratch);
 }
 
 static void rocm_graph_free(ds4_gpu_graph *g) {
@@ -600,6 +605,72 @@ static ds4_gpu_tensor *rocm_graph_alloc_kv_cache_tensor(bool managed, uint64_t b
     return managed ? ds4_gpu_tensor_alloc_managed(bytes) : ds4_gpu_tensor_alloc(bytes);
 }
 
+static bool rocm_graph_reserve_compressed_rows(ds4_gpu_graph* g, uint32_t il,
+                                               uint32_t required) {
+  if (required > g->layer_comp_cap[il])
+    return false;
+  const uint64_t row_bytes = DS4_N_HEAD_DIM * sizeof(float);
+  const uint64_t capacity =
+      ds4_gpu_tensor_bytes(g->layer_attn_comp_cache[il]) / row_bytes;
+  if (required <= capacity)
+    return true;
+
+  const uint64_t next_capacity = std::min<uint64_t>(
+      g->layer_comp_cap[il], std::max<uint64_t>(required, capacity * 2));
+  using Tensor =
+      std::unique_ptr<ds4_gpu_tensor, decltype(&ds4_gpu_tensor_free)>;
+  Tensor attention(rocm_graph_alloc_kv_cache_tensor(g->managed_kv_cache,
+                                                    next_capacity * row_bytes),
+                   ds4_gpu_tensor_free);
+  Tensor mirror(nullptr, ds4_gpu_tensor_free);
+  Tensor indexer(nullptr, ds4_gpu_tensor_free);
+  const bool indexed = ds4_layer_compress_ratio(il) == 4;
+  if (indexed) {
+    mirror.reset(rocm_graph_alloc_kv_cache_tensor(
+        g->managed_kv_cache,
+        next_capacity * DS4_N_HEAD_DIM * sizeof(uint16_t)));
+    indexer.reset(rocm_graph_alloc_kv_cache_tensor(
+        g->managed_kv_cache,
+        next_capacity * DS4_N_INDEXER_HEAD_DIM * sizeof(float)));
+  }
+  if (!attention || (indexed && (!mirror || !indexer)))
+    return false;
+  const auto copy_rows = [](ds4_gpu_tensor* to, const ds4_gpu_tensor* from,
+                            uint64_t bytes) {
+    return bytes == 0 || ds4_gpu_tensor_copy(to, 0, from, 0, bytes) != 0;
+  };
+  if (!copy_rows(attention.get(), g->layer_attn_comp_cache[il],
+                 static_cast<uint64_t>(g->layer_n_comp[il]) * row_bytes) ||
+      (indexed && (!copy_rows(mirror.get(), g->layer_attn_comp_cache_f16[il],
+                              static_cast<uint64_t>(g->layer_n_comp[il]) *
+                                  DS4_N_HEAD_DIM * sizeof(uint16_t)) ||
+                   !copy_rows(indexer.get(), g->layer_index_comp_cache[il],
+                              static_cast<uint64_t>(g->layer_n_index_comp[il]) *
+                                  DS4_N_INDEXER_HEAD_DIM * sizeof(float))))) {
+    return false;
+  }
+  // All replacements and byte-exact copies succeed before releasing any old
+  // cache. These caches have no persistent views; snapshots store live rows.
+  ds4_gpu_tensor_free(g->layer_attn_comp_cache[il]);
+  ds4_gpu_tensor_free(g->layer_attn_comp_cache_f16[il]);
+  ds4_gpu_tensor_free(g->layer_index_comp_cache[il]);
+  g->layer_attn_comp_cache[il] = attention.release();
+  g->layer_attn_comp_cache_f16[il] = mirror.release();
+  g->layer_index_comp_cache[il] = indexer.release();
+  return true;
+}
+
+static bool rocm_graph_reserve_compressed_position(ds4_gpu_graph* g,
+                                                   uint32_t il, uint64_t end) {
+  const uint32_t ratio = ds4_layer_compress_ratio(il);
+  if (ratio == 0)
+    return true;
+  return rocm_graph_reserve_compressed_rows(
+      g, il,
+      static_cast<uint32_t>(
+          std::min<uint64_t>(g->layer_comp_cap[il], end / ratio + 2)));
+}
+
 /* =========================================================================
  * ROCm Release Graph Allocation.
  * ========================================================================= */
@@ -664,6 +735,7 @@ static bool rocm_graph_alloc_raw_cap(
         rocm_graph_context_bytes_for_kv_policy(ctx_size, raw_cap, prefill_cap, &kv_cache_bytes);
     const bool managed_kv_cache =
         ds4_gpu_should_use_managed_kv_cache(kv_cache_bytes, context_bytes) != 0;
+    g->managed_kv_cache = managed_kv_cache;
     if (managed_kv_cache) {
         /*
          * Device allocations are fastest, but very large contexts can exhaust
@@ -673,10 +745,10 @@ static bool rocm_graph_alloc_raw_cap(
          */
         fprintf(stderr,
                 "ds4: ROCm using managed KV cache for ctx=%u "
-                "(kv cache %.2f GiB, context buffers %.2f GiB); "
-                "this may degrade performance but is needed for very large contexts\n",
-                ctx_size,
-                (double)kv_cache_bytes / 1073741824.0,
+                "(maximum KV %.2f GiB, context estimate %.2f GiB); "
+                "this may degrade performance but is needed for very large "
+                "contexts\n",
+                ctx_size, (double)kv_cache_bytes / 1073741824.0,
                 (double)context_bytes / 1073741824.0);
     }
 
@@ -705,19 +777,21 @@ static bool rocm_graph_alloc_raw_cap(
                 (uint64_t)raw_cap * DS4_N_HEAD_DIM * sizeof(float));
         const uint32_t ratio = ds4_layer_compress_ratio(il);
         if (ratio != 0) {
-            const uint32_t coff = ratio == 4 ? 2u : 1u;
-            const uint64_t attn_width = (uint64_t)coff * DS4_N_HEAD_DIM;
-            const uint64_t attn_rows = (uint64_t)coff * ratio;
-            g->layer_attn_comp_cache[il] = rocm_graph_alloc_kv_cache_tensor(
-                    managed_kv_cache,
-                    (uint64_t)g->layer_comp_cap[il] * DS4_N_HEAD_DIM * sizeof(float));
-            if (ratio == 4) {
-                g->layer_attn_comp_cache_f16[il] =
-                    rocm_graph_alloc_kv_cache_tensor(
-                        managed_kv_cache,
-                        (uint64_t)g->layer_comp_cap[il] *
-                            DS4_N_HEAD_DIM * sizeof(uint16_t));
-            }
+          // Reserve the first prompt chunk plus one raw window of decode
+          // headroom. The configured limits stay independent of storage.
+          const uint64_t initial_comp_cap = std::min<uint64_t>(
+              g->layer_comp_cap[il], (pc + DS4_N_SWA) / ratio + 2);
+          const uint32_t coff = ratio == 4 ? 2u : 1u;
+          const uint64_t attn_width = (uint64_t)coff * DS4_N_HEAD_DIM;
+          const uint64_t attn_rows = (uint64_t)coff * ratio;
+          g->layer_attn_comp_cache[il] = rocm_graph_alloc_kv_cache_tensor(
+              managed_kv_cache,
+              initial_comp_cap * DS4_N_HEAD_DIM * sizeof(float));
+          if (ratio == 4) {
+            g->layer_attn_comp_cache_f16[il] = rocm_graph_alloc_kv_cache_tensor(
+                managed_kv_cache,
+                initial_comp_cap * DS4_N_HEAD_DIM * sizeof(uint16_t));
+          }
             g->layer_attn_state_kv[il] = ds4_gpu_tensor_alloc(attn_width * attn_rows * sizeof(float));
             g->layer_attn_state_score[il] = ds4_gpu_tensor_alloc(attn_width * attn_rows * sizeof(float));
             if (g->layer_attn_state_kv[il]) {
@@ -732,9 +806,11 @@ static bool rocm_graph_alloc_raw_cap(
             if (ratio == 4) {
                 const uint64_t index_width = (uint64_t)coff * DS4_N_INDEXER_HEAD_DIM;
                 const uint64_t index_rows = (uint64_t)coff * ratio;
-                g->layer_index_comp_cache[il] = rocm_graph_alloc_kv_cache_tensor(
-                        managed_kv_cache,
-                        (uint64_t)g->layer_comp_cap[il] * DS4_N_INDEXER_HEAD_DIM * sizeof(float));
+                g->layer_index_comp_cache[il] =
+                    rocm_graph_alloc_kv_cache_tensor(
+                        managed_kv_cache, initial_comp_cap *
+                                              DS4_N_INDEXER_HEAD_DIM *
+                                              sizeof(float));
                 g->layer_index_state_kv[il] = ds4_gpu_tensor_alloc(index_width * index_rows * sizeof(float));
                 g->layer_index_state_score[il] = ds4_gpu_tensor_alloc(index_width * index_rows * sizeof(float));
                 if (g->layer_index_state_kv[il]) {
@@ -793,72 +869,83 @@ static bool rocm_graph_alloc_raw_cap(
       }
         rocm_graph_bind_batch_workspace(g, batch_workspace);
     } else {
-        g->prefill_tokens = ds4_gpu_tensor_alloc(pc * sizeof(int32_t));
-        g->batch_cur_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
-        g->batch_next_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
-        g->batch_flat_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
-        g->batch_hc_mix = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
-        g->batch_hc_split = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
-        g->batch_attn_cur =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-        g->batch_attn_norm =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-        g->batch_qr = ds4_gpu_tensor_alloc(pc * q_rank * sizeof(float));
-        g->batch_qr_norm = ds4_gpu_tensor_alloc(pc * q_rank * sizeof(float));
-        g->batch_q = ds4_gpu_tensor_alloc(pc * q_dim * sizeof(float));
-        g->batch_kv_raw =
-            ds4_gpu_tensor_alloc(pc * DS4_N_HEAD_DIM * sizeof(float));
-        g->batch_kv =
-            ds4_gpu_tensor_alloc(pc * DS4_N_HEAD_DIM * sizeof(float));
-        g->batch_comp_kv =
-            ds4_gpu_tensor_alloc(pc * comp_width_max * sizeof(float));
-        g->batch_comp_sc =
-            ds4_gpu_tensor_alloc(pc * comp_width_max * sizeof(float));
-        g->batch_indexer_q =
-            ds4_gpu_tensor_alloc(pc * indexer_q_dim * sizeof(float));
-        g->batch_indexer_weights =
-            ds4_gpu_tensor_alloc(pc * DS4_N_INDEXER_HEAD * sizeof(float));
-        g->batch_heads = ds4_gpu_tensor_alloc(pc * q_dim * sizeof(float));
-        g->batch_attn_low =
-            ds4_gpu_tensor_alloc(pc * low_dim * sizeof(float));
-        g->batch_attn_out =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-        g->batch_group_tmp =
-            ds4_gpu_tensor_alloc(pc * group_dim * sizeof(float));
-        g->batch_low_tmp =
-            ds4_gpu_tensor_alloc(pc * DS4_N_LORA_O * sizeof(float));
-        g->batch_after_attn_hc =
-            ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
-        g->batch_ffn_cur =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-        g->batch_ffn_norm =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-        g->batch_shared_gate =
-            ds4_gpu_tensor_alloc(pc * shared_dim * sizeof(float));
-        g->batch_shared_up =
-            ds4_gpu_tensor_alloc(pc * shared_dim * sizeof(float));
-        g->batch_shared_mid =
-            ds4_gpu_tensor_alloc(pc * shared_dim * sizeof(float));
-        g->batch_shared_out =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
-        g->batch_router_logits =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
-        g->batch_router_probs =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
-        g->batch_router_selected =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(int));
-        g->batch_router_weights =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(float));
-        g->batch_routed_gate = ds4_gpu_tensor_alloc(
-            pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float));
-        g->batch_routed_up = ds4_gpu_tensor_alloc(
-            pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float));
-        g->batch_routed_mid = ds4_gpu_tensor_alloc(
-            pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float));
-        g->batch_routed_down = ds4_gpu_tensor_alloc(
-            pc * DS4_N_EXPERT_USED * DS4_N_EMBD * sizeof(float));
-        g->batch_routed_out =
-            ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+      // These stages run in order, including across grouped requests:
+      // HC normalization -> attention Q/heads -> routed MoE -> shared expert.
+      // Only routed down survives into the shared-expert stage. Keep it
+      // beyond both sets of FFN intermediates, then reuse the other ranges.
+      const uint64_t q_bytes = pc * q_dim * sizeof(float);
+      const uint64_t hc_bytes = pc * hc_dim * sizeof(float);
+      const uint64_t routed_mid_bytes =
+          pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float);
+      const uint64_t routed_down_bytes =
+          pc * DS4_N_EXPERT_USED * DS4_N_EMBD * sizeof(float);
+      const uint64_t shared_mid_bytes = pc * shared_dim * sizeof(float);
+      const uint64_t shared_out_bytes = pc * DS4_N_EMBD * sizeof(float);
+      const uint64_t down_offset = std::max(
+          3 * routed_mid_bytes, 3 * shared_mid_bytes + shared_out_bytes);
+      g->batch_stage_scratch = ds4_gpu_tensor_alloc(
+          std::max({2 * q_bytes, hc_bytes, down_offset + routed_down_bytes}));
+      g->prefill_tokens = ds4_gpu_tensor_alloc(pc * sizeof(int32_t));
+      g->batch_cur_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
+      g->batch_next_hc = ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
+      g->batch_flat_hc =
+          ds4_gpu_tensor_view(g->batch_stage_scratch, 0, hc_bytes);
+      g->batch_hc_mix = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
+      g->batch_hc_split = ds4_gpu_tensor_alloc(pc * mix_hc * sizeof(float));
+      g->batch_attn_cur = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+      g->batch_attn_norm =
+          ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+      g->batch_qr = ds4_gpu_tensor_alloc(pc * q_rank * sizeof(float));
+      g->batch_qr_norm = ds4_gpu_tensor_alloc(pc * q_rank * sizeof(float));
+      g->batch_q = ds4_gpu_tensor_view(g->batch_stage_scratch, 0, q_bytes);
+      g->batch_kv_raw =
+          ds4_gpu_tensor_alloc(pc * DS4_N_HEAD_DIM * sizeof(float));
+      g->batch_kv = ds4_gpu_tensor_alloc(pc * DS4_N_HEAD_DIM * sizeof(float));
+      g->batch_comp_kv =
+          ds4_gpu_tensor_alloc(pc * comp_width_max * sizeof(float));
+      g->batch_comp_sc =
+          ds4_gpu_tensor_alloc(pc * comp_width_max * sizeof(float));
+      g->batch_indexer_q =
+          ds4_gpu_tensor_alloc(pc * indexer_q_dim * sizeof(float));
+      g->batch_indexer_weights =
+          ds4_gpu_tensor_alloc(pc * DS4_N_INDEXER_HEAD * sizeof(float));
+      g->batch_heads =
+          ds4_gpu_tensor_view(g->batch_stage_scratch, q_bytes, q_bytes);
+      g->batch_attn_low = ds4_gpu_tensor_alloc(pc * low_dim * sizeof(float));
+      g->batch_attn_out = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+      g->batch_group_tmp = ds4_gpu_tensor_alloc(pc * group_dim * sizeof(float));
+      g->batch_low_tmp =
+          ds4_gpu_tensor_alloc(pc * DS4_N_LORA_O * sizeof(float));
+      g->batch_after_attn_hc =
+          ds4_gpu_tensor_alloc(pc * hc_dim * sizeof(float));
+      g->batch_ffn_cur = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+      g->batch_ffn_norm = ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
+      g->batch_shared_gate =
+          ds4_gpu_tensor_view(g->batch_stage_scratch, 0, shared_mid_bytes);
+      g->batch_shared_up = ds4_gpu_tensor_view(
+          g->batch_stage_scratch, shared_mid_bytes, shared_mid_bytes);
+      g->batch_shared_mid = ds4_gpu_tensor_view(
+          g->batch_stage_scratch, 2 * shared_mid_bytes, shared_mid_bytes);
+      g->batch_shared_out = ds4_gpu_tensor_view(
+          g->batch_stage_scratch, 3 * shared_mid_bytes, shared_out_bytes);
+      g->batch_router_logits =
+          ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
+      g->batch_router_probs =
+          ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
+      g->batch_router_selected =
+          ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(int));
+      g->batch_router_weights =
+          ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(float));
+      g->batch_routed_gate =
+          ds4_gpu_tensor_view(g->batch_stage_scratch, 0, routed_mid_bytes);
+      g->batch_routed_up = ds4_gpu_tensor_view(
+          g->batch_stage_scratch, routed_mid_bytes, routed_mid_bytes);
+      g->batch_routed_mid = ds4_gpu_tensor_view(
+          g->batch_stage_scratch, 2 * routed_mid_bytes, routed_mid_bytes);
+      g->batch_routed_down = ds4_gpu_tensor_view(
+          g->batch_stage_scratch, down_offset, routed_down_bytes);
+      g->batch_routed_out =
+          ds4_gpu_tensor_alloc(pc * DS4_N_EMBD * sizeof(float));
     }
 
     bool layer_cache_ok = true;
@@ -891,16 +978,16 @@ static bool rocm_graph_alloc_raw_cap(
         g->routed_gate && g->routed_up && g->routed_mid && g->routed_down &&
         g->routed_out && g->after_ffn_hc && g->output_pre &&
         g->output_weights && g->output_embd && g->output_norm && g->logits &&
-        g->prefill_tokens && g->batch_cur_hc && g->batch_next_hc &&
-        g->batch_flat_hc && g->batch_hc_mix && g->batch_hc_split &&
-        g->batch_attn_cur && g->batch_attn_norm && g->batch_qr &&
-        g->batch_qr_norm && g->batch_q && g->batch_kv_raw && g->batch_kv &&
-        g->batch_comp_kv && g->batch_comp_sc && g->batch_indexer_q &&
-        g->batch_indexer_weights && g->batch_heads && g->batch_attn_low &&
-        g->batch_attn_out && g->batch_group_tmp && g->batch_low_tmp &&
-        g->batch_after_attn_hc && g->batch_ffn_cur && g->batch_ffn_norm &&
-        g->batch_shared_gate && g->batch_shared_up && g->batch_shared_mid &&
-        g->batch_shared_out && g->batch_router_logits &&
+        g->prefill_tokens && g->batch_stage_scratch && g->batch_cur_hc &&
+        g->batch_next_hc && g->batch_flat_hc && g->batch_hc_mix &&
+        g->batch_hc_split && g->batch_attn_cur && g->batch_attn_norm &&
+        g->batch_qr && g->batch_qr_norm && g->batch_q && g->batch_kv_raw &&
+        g->batch_kv && g->batch_comp_kv && g->batch_comp_sc &&
+        g->batch_indexer_q && g->batch_indexer_weights && g->batch_heads &&
+        g->batch_attn_low && g->batch_attn_out && g->batch_group_tmp &&
+        g->batch_low_tmp && g->batch_after_attn_hc && g->batch_ffn_cur &&
+        g->batch_ffn_norm && g->batch_shared_gate && g->batch_shared_up &&
+        g->batch_shared_mid && g->batch_shared_out && g->batch_router_logits &&
         g->batch_router_probs && g->batch_router_selected &&
         g->batch_router_weights && g->batch_routed_gate && g->batch_routed_up &&
         g->batch_routed_mid && g->batch_routed_down && g->batch_routed_out;
@@ -1122,27 +1209,31 @@ static bool rocm_graph_encode_decode_layer(
         uint32_t                raw_row,
         uint32_t                n_raw,
         int                     token) {
-    const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
-    const uint64_t mix_hc = 2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
-    const uint64_t q_rank = layer->attn_q_a->dim[1];
-    const uint64_t q_dim = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
-    const uint32_t n_groups = DS4_N_OUT_GROUP;
-    const uint32_t group_heads = DS4_N_HEAD / n_groups;
-    const uint32_t group_dim = DS4_N_HEAD_DIM * group_heads;
-    const uint32_t rank = DS4_N_LORA_O;
-    const uint32_t shared_dim = (uint32_t)layer->ffn_gate_shexp->dim[1];
-    const uint64_t expert_in_dim = layer->ffn_gate_exps->dim[0];
-    const uint64_t expert_mid_dim = layer->ffn_gate_exps->dim[1];
-    const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
-    const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
-    const bool compressed = ds4_layer_compress_ratio(il) != 0;
-    const float freq_base = layer_rope_freq_base(il);
-    const float freq_scale = layer_rope_freq_scale(il);
-    const float ext_factor = compressed && DS4_ROPE_SCALE_FACTOR > 1.0f ? 1.0f : 0.0f;
-    float attn_factor = 1.0f;
-    if (ext_factor != 0.0f && freq_scale > 0.0f) {
-        attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
-    }
+  if (!rocm_graph_reserve_compressed_position(g, il,
+                                              static_cast<uint64_t>(pos) + 1))
+    return false;
+  const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
+  const uint64_t mix_hc = 2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
+  const uint64_t q_rank = layer->attn_q_a->dim[1];
+  const uint64_t q_dim = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
+  const uint32_t n_groups = DS4_N_OUT_GROUP;
+  const uint32_t group_heads = DS4_N_HEAD / n_groups;
+  const uint32_t group_dim = DS4_N_HEAD_DIM * group_heads;
+  const uint32_t rank = DS4_N_LORA_O;
+  const uint32_t shared_dim = (uint32_t)layer->ffn_gate_shexp->dim[1];
+  const uint64_t expert_in_dim = layer->ffn_gate_exps->dim[0];
+  const uint64_t expert_mid_dim = layer->ffn_gate_exps->dim[1];
+  const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
+  const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
+  const bool compressed = ds4_layer_compress_ratio(il) != 0;
+  const float freq_base = layer_rope_freq_base(il);
+  const float freq_scale = layer_rope_freq_scale(il);
+  const float ext_factor =
+      compressed && DS4_ROPE_SCALE_FACTOR > 1.0f ? 1.0f : 0.0f;
+  float attn_factor = 1.0f;
+  if (ext_factor != 0.0f && freq_scale > 0.0f) {
+    attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
+  }
 
     bool ok = true;
     const bool decode_stage_profile = getenv("GUFO_DEEPSEEK_ROCM_DECODE_STAGE_PROFILE") != NULL;
@@ -2051,17 +2142,20 @@ static bool rocm_graph_encode_session_attention_core(
       ((precomputed_comp_kv == nullptr) != (precomputed_comp_sc == nullptr))) {
     return false;
   }
+  if (!rocm_graph_reserve_compressed_position(g, il,
+                                              static_cast<uint64_t>(pos) + 1))
+    return false;
 
-    const uint64_t q_rank = layer->attn_q_a->dim[1];
-    const bool compressed = ds4_layer_compress_ratio(il) != 0;
-    const float freq_base = layer_rope_freq_base(il);
-    const float freq_scale = layer_rope_freq_scale(il);
-    const float ext_factor =
-        compressed && DS4_ROPE_SCALE_FACTOR > 1.0f ? 1.0f : 0.0f;
-    float attn_factor = 1.0f;
-    if (ext_factor != 0.0f && freq_scale > 0.0f) {
-        attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
-    }
+  const uint64_t q_rank = layer->attn_q_a->dim[1];
+  const bool compressed = ds4_layer_compress_ratio(il) != 0;
+  const float freq_base = layer_rope_freq_base(il);
+  const float freq_scale = layer_rope_freq_scale(il);
+  const float ext_factor =
+      compressed && DS4_ROPE_SCALE_FACTOR > 1.0f ? 1.0f : 0.0f;
+  float attn_factor = 1.0f;
+  if (ext_factor != 0.0f && freq_scale > 0.0f) {
+    attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
+  }
 
     const uint32_t raw_row = pos % g->raw_cap;
     const uint32_t n_raw = rocm_graph_raw_span_for_batch(g, pos, 1);
@@ -2415,27 +2509,33 @@ static bool rocm_graph_encode_layer_attention_batch(
       (front_ready && front_only)) {
     return false;
   }
+  if (!rocm_graph_reserve_compressed_position(
+          g, il, static_cast<uint64_t>(pos0) + n_tokens))
+    return false;
 
-    /* Any published F16 activation mirror belongs to the previous layer, whose
-     * buffers this layer reuses. Drop it before anything can overwrite them. */
-    ds4_gpu_clear_f16_input();
+  /* Any published F16 activation mirror belongs to the previous layer, whose
+   * buffers this layer reuses. Drop it before anything can overwrite them. */
+  ds4_gpu_clear_f16_input();
 
-    const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
-    const uint64_t mix_hc = 2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
-    const uint64_t q_rank = layer->attn_q_a->dim[1];
-    const uint64_t q_dim = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
-    const uint32_t n_groups = DS4_N_OUT_GROUP;
-    const uint32_t group_heads = DS4_N_HEAD / n_groups;
-    const uint32_t group_dim = DS4_N_HEAD_DIM * group_heads;
-    const uint32_t rank = DS4_N_LORA_O;
-    const uint32_t ratio = ds4_layer_compress_ratio(il);
-    const bool compressed = ratio != 0;
-    const bool zero_prefix = pos0 == 0;
-    const bool index_stage_profile = getenv("GUFO_DEEPSEEK_ROCM_INDEXER_STAGE_PROFILE") != NULL;
-    const bool layer_stage_profile = getenv("GUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE") != NULL;
-    const bool q_stage_profile = getenv("GUFO_DEEPSEEK_ROCM_Q_STAGE_PROFILE") != NULL;
-    double layer_stage_t0 = layer_stage_profile ? ds4_now_seconds() : 0.0;
-    double q_stage_t0 = q_stage_profile ? ds4_now_seconds() : 0.0;
+  const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
+  const uint64_t mix_hc = 2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
+  const uint64_t q_rank = layer->attn_q_a->dim[1];
+  const uint64_t q_dim = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
+  const uint32_t n_groups = DS4_N_OUT_GROUP;
+  const uint32_t group_heads = DS4_N_HEAD / n_groups;
+  const uint32_t group_dim = DS4_N_HEAD_DIM * group_heads;
+  const uint32_t rank = DS4_N_LORA_O;
+  const uint32_t ratio = ds4_layer_compress_ratio(il);
+  const bool compressed = ratio != 0;
+  const bool zero_prefix = pos0 == 0;
+  const bool index_stage_profile =
+      getenv("GUFO_DEEPSEEK_ROCM_INDEXER_STAGE_PROFILE") != NULL;
+  const bool layer_stage_profile =
+      getenv("GUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE") != NULL;
+  const bool q_stage_profile =
+      getenv("GUFO_DEEPSEEK_ROCM_Q_STAGE_PROFILE") != NULL;
+  double layer_stage_t0 = layer_stage_profile ? ds4_now_seconds() : 0.0;
+  double q_stage_t0 = q_stage_profile ? ds4_now_seconds() : 0.0;
 #define GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE(name) do { \
         if (ok && layer_stage_profile) { \
             ok = rocm_graph_layer_stage_profile_boundary("attn", (name), il, pos0, n_tokens, &layer_stage_t0); \
@@ -4259,6 +4359,14 @@ static bool rocm_graph_prefill_layer_major(
     if (n_tokens == 0 || n_tokens > g->prefill_cap) return false;
     if (start > (uint32_t)prompt->len) return false;
     if (n_tokens > (uint32_t)prompt->len - start) return false;
+
+    // Grow before prefill dispatch and leave one raw window for decoding.
+    // Normal decode only grows when its actual rows exceed the allocation.
+    for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
+      if (!rocm_graph_reserve_compressed_position(
+              g, il, static_cast<uint64_t>(start) + n_tokens + DS4_N_SWA))
+        return false;
+    }
 
     bool ok = rocm_graph_upload_prompt_tokens(g->prefill_tokens, prompt, start, n_tokens);
     if (!ok) return false;
@@ -7598,6 +7706,23 @@ static int rocm_graph_load_payload(ds4_rocm_graph* graph,
     payload_set_err(err, errlen,
                     "failed to synchronize accelerator before KV restore");
     return 1;
+  }
+  for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
+    const uint32_t ratio = ds4_layer_compress_ratio(il);
+    if (ratio == 0)
+      continue;
+    const uint64_t required =
+        static_cast<uint64_t>(std::max(n_comp[il], n_index_comp[il])) +
+        (DS4_N_SWA + ratio - 1) / ratio + 2;
+    if (!rocm_graph_reserve_compressed_rows(
+            graph, il,
+            static_cast<uint32_t>(
+                std::min<uint64_t>(graph->layer_comp_cap[il], required)))) {
+      ds4_tokens_free(&new_checkpoint);
+      payload_set_err(err, errlen,
+                      "failed to reserve compressed cache for KV restore");
+      return 1;
+    }
   }
   auto* buf = static_cast<uint8_t*>(ds4_xmalloc(DS4_SESSION_IO_CHUNK));
   int rc = 0;
