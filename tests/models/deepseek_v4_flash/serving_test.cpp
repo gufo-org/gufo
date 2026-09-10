@@ -70,7 +70,7 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
   std::string error;
   auto model = Model::Load(
       model_path,
-      ModelOptions{.max_context = 4096, .dspark_model_path = support_path},
+      ModelOptions{.max_context = 262144, .dspark_model_path = support_path},
       &error);
   Expect(model != nullptr, error);
   const TextSpeculativeConfig speculative{
@@ -82,7 +82,7 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
                              "", ""}});
   {
     InferenceBackend backend;
-    Expect(backend.load(model, &error, 4096, 1, {}, {}, speculative), error);
+    Expect(backend.load(model, &error, 262144, 1, {}, {}, speculative), error);
     const auto cold = backend.chat(prompt, 32, 0.0F);
     const auto warm = backend.chat(prompt, 32, 0.0F);
     Expect(cold.draft_tokens > 0 && warm.cache_hit && warm.prefill_tokens == 0,

@@ -2,52 +2,61 @@
   "schema": "gufo.ds4-quality-qualification.v1",
   "date": "2026-09-10",
   "candidate": {
-    "source_commit": "eb1b81e1bb03cc2c0969eb3f930d50a22e6271da",
-    "production_source_sha256": "652dbbec8b9b40d74cd70cbf9254e819c1e79f81197749e9ad6be4ef21a7b81e",
-    "nix_output": "/nix/store/nd3grjajfz4p2kjwl6hv8ghxp383byfh-gufo-eb1b81e-dirty",
-    "binary_sha256": "a10f302ff92356abfc83026e5bb0988fd218e11de4dc04340ef8d3d01c546d66",
-    "quality_binary_sha256": "b7e20b38f2edb51bc942ad9177a5c946ec4997dd79d1483be3a3ec123234226c",
-    "serving_binary_sha256": "e8f4a558e26a2f2e41cf8f0c44ed8d5daeba607cc372b610d22109c667fde069",
-    "working_tree_changes": true
+    "source_commit": "56569e85ec4fe1959d1539079cd3e37132ea8536",
+    "working_tree_changes": true,
+    "production_source_sha256": "2717799402e1a3023dae31f0ceeda79051a187313066ee6c38faccc3cc2caecb",
+    "nix_output": "/nix/store/vq7jq24f38awch0yd1wawl3xnzsj9c88-gufo-56569e8-dirty",
+    "binary_sha256": "3fece0e134940dee7101163cd84d6ef80e6336f192b154928a0a0cb4ff94a967",
+    "quality_binary_sha256": "ebd896102dea1d60dc17f0ad06700e97130e51149aa20d4a17481c7154d572cd",
+    "serving_binary_sha256": "e9f06675988fdd8ce09cc19ec342699162ac790382f7f28a86d9098dfe8de6d5"
   },
   "target_sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0",
   "support_sha256": "7e319924541db3f7a163ed7e11d7532a70d48228ab59d36cb81e1d4511885360",
   "checks": [
     {
-      "name": "ds4.attention",
-      "passed": true
+      "name": "ds4.template",
+      "passed": true,
+      "seconds": 0.04
     },
     {
       "name": "ds4.cli",
-      "passed": true
-    },
-    {
-      "name": "ds4.dataset",
-      "passed": true
-    },
-    {
-      "name": "ds4.dspark",
-      "passed": true
-    },
-    {
-      "name": "ds4.eval",
-      "passed": true
-    },
-    {
-      "name": "ds4.projections",
-      "passed": true
-    },
-    {
-      "name": "ds4.serving",
-      "passed": true
+      "passed": true,
+      "seconds": 0.04
     },
     {
       "name": "ds4.target",
-      "passed": true
+      "passed": true,
+      "seconds": 99.43
     },
     {
-      "name": "ds4.template",
-      "passed": true
+      "name": "ds4.dspark",
+      "passed": true,
+      "seconds": 374.74
+    },
+    {
+      "name": "ds4.serving",
+      "passed": true,
+      "seconds": 85.21
+    },
+    {
+      "name": "ds4.projections",
+      "passed": true,
+      "seconds": 0.46
+    },
+    {
+      "name": "ds4.attention",
+      "passed": true,
+      "seconds": 0.6
+    },
+    {
+      "name": "ds4.dataset",
+      "passed": true,
+      "seconds": 0.04
+    },
+    {
+      "name": "ds4.eval",
+      "passed": true,
+      "seconds": 0.05
     }
   ],
   "scalar_replay": [
@@ -112,30 +121,35 @@
   "snapshots": "Exact support/controller continuation through 16384 tokens; serving prefix and disk reuse passed.",
   "memory": {
     "reserve_gib": 12,
-    "dspark": {
-      "exit_code": 0,
-      "aborted_for_memory": false,
-      "minimum_available_gib": 13.842823028564453,
-      "reserve_gib": 12.0
-    },
-    "other_checks": {
-      "exit_code": 0,
-      "aborted_for_memory": false,
-      "minimum_available_gib": 21.004940032958984,
-      "reserve_gib": 12.0
-    },
     "target_span_payload_bytes": 86714777636,
     "previous_weight_reservation_bytes": 93952409600,
-    "span_count": 138
+    "span_count": 138,
+    "all_checks": {
+      "exit_code": 0,
+      "aborted_for_memory": false,
+      "minimum_available_gib": 14.729652404785156,
+      "reserve_gib": 12.0
+    }
   },
   "logs_sha256": {
-    "ds4-weight-spans-dspark.log": "106f62e0e78687f2cfeb7999c06d8cd2375312d48b3dcb0735a4923738bc7a59",
-    "ds4-weight-spans-remaining.log": "0bf7be61c748a2bc292df5398e728eb82fbfb3cc840f8a4d21bf9d8410ea5147"
+    "ds4-memory-step21-quality.log": "6d9b22d621f60afb6ca58d160dd89dfcdc580bcab95a3ae73396e450e71b757d"
   },
   "limits": [
     "Correctness checks use Nix gpu-test binaries; speed measurements use the pinned Nix release binary.",
     "DSpark/scalar agreement does not prove official-model equivalence.",
     "Four existing post-prefill differences versus Antirez remain under investigation; neither implementation is ground truth.",
     "The 75-question capability comparison remains pending separate approval."
-  ]
+  ],
+  "capacity_control": {
+    "context_capacities": [
+      4096,
+      262144
+    ],
+    "prefill_tokens": 2048,
+    "continuation_frontiers": 4,
+    "exact_target_logits": true,
+    "dspark_serving_capacity": 262144,
+    "dspark_prefix_repeat_exact": true,
+    "full_context_filled": false
+  }
 }

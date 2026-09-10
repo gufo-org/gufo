@@ -46,8 +46,11 @@ int ds4_gpu_compressor_update_tensor(const ds4_gpu_tensor *kv_cur, const ds4_gpu
 int ds4_gpu_dsv4_fp8_kv_quantize_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t head_dim, uint32_t n_rot);
 int ds4_gpu_dsv4_fp8_kv_quantize_mirror_f16_tensor(ds4_gpu_tensor *x, ds4_gpu_tensor *mirror_f16, uint32_t n_tok, uint32_t head_dim, uint32_t n_rot);
 int ds4_gpu_dsv4_indexer_qat_tensor(ds4_gpu_tensor *x, uint32_t n_rows, uint32_t head_dim);
-int ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(ds4_gpu_tensor *q_out, const ds4_gpu_tensor *q, const void *model_map, uint64_t model_size, uint64_t q_weight_offset, uint32_t q_n, ds4_gpu_tensor *kv_out, const ds4_gpu_tensor *kv, uint64_t kv_weight_offset, uint32_t kv_n, uint32_t rows, float eps);
-int ds4_gpu_dsv4_topk_mask_tensor(ds4_gpu_tensor *mask, const ds4_gpu_tensor *topk, uint32_t n_comp, uint32_t n_tokens, uint32_t top_k);
+int ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(
+    ds4_gpu_tensor* q_out, const ds4_gpu_tensor* q, const void* model_map,
+    uint64_t model_size, uint64_t q_weight_offset, uint32_t q_n,
+    ds4_gpu_tensor* kv_out, const ds4_gpu_tensor* kv, uint64_t kv_weight_offset,
+    uint32_t kv_n, uint32_t rows, float eps);
 int ds4_gpu_embed_token_hc_tensor(ds4_gpu_tensor *out_hc, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n_vocab, uint32_t token, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_embed_tokens_hc_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *tokens, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n_vocab, uint32_t n_tokens, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_end_commands(void);

@@ -151,9 +151,9 @@ void CheckWidePrefill(
   for (std::size_t i = 0; i < tokens.size(); ++i) {
     tokens[i] = pattern[i % pattern.size()];
   }
-  const auto run = [&] {
+  const auto run = [&](std::uint32_t context_capacity) {
     std::string error;
-    auto session = model->CreateSession(4096, &error);
+    auto session = model->CreateSession(context_capacity, &error);
     Expect(session != nullptr, error);
     Expect(session->Sync(tokens, &error), error);
     std::vector<float> trajectory;
@@ -172,9 +172,11 @@ void CheckWidePrefill(
     }
     return trajectory;
   };
-  const auto reference = run();
-  const auto repeat = run();
-  Expect(reference == repeat, "wide prefill and continuation repeat exactly");
+  const auto reference = run(4096);
+  const auto repeat = run(262144);
+  Expect(
+      reference == repeat,
+      "2K prefill and continuation retain exact logits with a 262K capacity");
   const auto* bytes = reinterpret_cast<const std::uint8_t*>(reference.data());
   std::cout << "Wide prefill fingerprint "
             << gufo::crypto::Sha256Hex(
@@ -1273,7 +1275,7 @@ int main(int argc, char** argv) try {
   const auto model =
       Model::Load(model_path,
                   ModelOptions{
-                      .max_context = 20480,
+                      .max_context = 262144,
                       .dspark_model_path =
                           dspark_model_path != nullptr ? dspark_model_path : "",
                   },

@@ -79,6 +79,24 @@ use target decoding while eligible greedy peers retain DSpark batching. Changes
 in concurrency reset the decision history. Complete support state and controller
 state survive snapshots; a new request reusing a prefix starts fresh statistics.
 
+## C1 memory with a 262,144-token capacity
+
+The 80.76 GiB target weights are only part of the footprint: DSpark adds
+5.58 GiB of support weights, and inference also needs projection caches,
+KV state, and work buffers. The current runtime omits the dense attention
+mask and grows indexer score scratch with actual prefill work.
+
+| C1 DSpark workload | Previous GPU allocation (GiB) | Current (GiB) | Saved (GiB) |
+| --- | ---: | ---: | ---: |
+| pp2048/4096 + tg128 | 98.79 | 96.81 | 1.99 |
+| 16K prefix, pp4096 + tg128 | 98.79 | 96.91 | 1.88 |
+
+These are driver GTT measurements, not whole-system RAM usage. The
+[memory report](memory-c1-262k.json) retains matched release runs, exact output
+hashes and draft counts, timings, and memory observations. The controls found
+no material speed regression. Only up to 20,608
+tokens are used; capacity does not imply filling the window.
+
 ## Reproduce
 
 ```sh
@@ -93,6 +111,10 @@ DSPARK=/path/to/DSpark-support.gguf
 # Capture stdout and stderr for each run, then validate the pair:
 nix develop -c tools/ds4/check.py benchmark \
   --ar-log /tmp/ar.log --dspark-log /tmp/dspark.log --output /tmp/bench.json
+
+# Large capacity, single-user server; ordinary prompts suffice for memory checks.
+./result/bin/gufo serve --host 127.0.0.1 --port 19231 --sessions 1 llm \
+  --model "$MODEL" --dspark-model "$DSPARK" --context 262144
 ```
 
 Prefill and generation are separate measurements. The prefix uses a fixed
@@ -130,9 +152,9 @@ The [tools index](../../tools/ds4/README.md) lists the maintained entry points.
 | `ds4.template`, `ds4.cli`, `ds4.dataset`, `ds4.eval` | Official framing, option wiring, pinned fixture integrity, answer grading |
 | `ds4.projections` | 54 Q8/IQ2/F16 shape cases against scalar kernels and independent formulas; two HC cases against the official FP32 projection/RMS formula |
 | `ds4.attention` | 28 target/support arithmetic cases plus 16 official DSpark window cases; double-precision references, poisoned stale rows, ring wrap, masks and sparse causal indices |
-| `ds4.target` | Official token goldens, pinned trajectory, full-logit prefill/decode comparisons, exact 2K repeats, concurrent state isolation, bounds |
+| `ds4.target` | Official token goldens, pinned trajectory, full-logit prefill/decode comparisons, exact 2K logits at 4K/262K capacities, concurrent state isolation, bounds |
 | `ds4.dspark` | Scalar quality; exact tokens/logits/counters at fixed and changing C; short budgets; complete snapshot continuation through 16K; policy backoff and fork isolation |
-| `ds4.serving` | Mixed sampling and actual batch widths, bounded prefill under arrivals, warm-prefix equality, disk identity, cancellation, context exhaustion |
+| `ds4.serving` | Mixed sampling and actual batch widths, bounded prefill under arrivals, C1 warm-prefix equality at 262K capacity, disk identity, cancellation, context exhaustion |
 
 ```sh
 nix develop -c tools/ds4/check.py fast

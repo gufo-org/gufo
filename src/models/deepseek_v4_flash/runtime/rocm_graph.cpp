@@ -110,8 +110,7 @@ struct ds4_rocm_graph {
     ds4_gpu_tensor *comp_sc_cur;
     ds4_gpu_tensor *indexer_q;
     ds4_gpu_tensor *indexer_weights;
-    ds4_gpu_tensor *indexer_scores;
-    ds4_gpu_tensor *comp_mask;
+    ds4_gpu_tensor* indexer_scores;
     ds4_gpu_tensor *comp_selected;
     ds4_gpu_tensor *heads;
     ds4_gpu_tensor *attn_low;
@@ -513,7 +512,6 @@ static void rocm_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->heads);
     ds4_gpu_tensor_free(g->comp_sc_cur);
     ds4_gpu_tensor_free(g->comp_kv_cur);
-    ds4_gpu_tensor_free(g->comp_mask);
     ds4_gpu_tensor_free(g->comp_selected);
     ds4_gpu_tensor_free(g->indexer_scores);
     ds4_gpu_tensor_free(g->indexer_weights);
@@ -595,7 +593,7 @@ static uint64_t rocm_graph_context_bytes_for_kv_policy(
     if (comp_cap < 2u) comp_cap = 2u;
     const uint64_t kv_cache_bytes = rocm_graph_kv_cache_bytes_for_context(ctx_size, raw_cap);
     if (kv_cache_bytes_out) *kv_cache_bytes_out = kv_cache_bytes;
-    return kv_cache_bytes + 2ull * comp_cap * prefill_cap * sizeof(float);
+    return kv_cache_bytes + comp_cap * prefill_cap * sizeof(float);
 }
 
 static ds4_gpu_tensor *rocm_graph_alloc_kv_cache_tensor(bool managed, uint64_t bytes) {
@@ -754,8 +752,13 @@ static bool rocm_graph_alloc_raw_cap(
     g->comp_sc_cur = ds4_gpu_tensor_alloc(comp_width_max * sizeof(float));
     g->indexer_q = ds4_gpu_tensor_alloc(indexer_q_dim * sizeof(float));
     g->indexer_weights = ds4_gpu_tensor_alloc((uint64_t)DS4_N_INDEXER_HEAD * sizeof(float));
-    g->indexer_scores = ds4_gpu_tensor_alloc((uint64_t)g->comp_cap * pc * sizeof(float));
-    g->comp_mask = ds4_gpu_tensor_alloc((uint64_t)g->comp_cap * pc * sizeof(float));
+    // Cover the first prefill chunk and single-token decoding at any depth.
+    // Later chunks grow this disposable scratch to the actual score shape.
+    // A large configured window must not reserve a full-window prefill matrix.
+    const uint64_t initial_score_count = std::max<uint64_t>(
+        g->comp_cap, std::min<uint64_t>(g->comp_cap, pc / min_ratio + 2) * pc);
+    g->indexer_scores =
+        ds4_gpu_tensor_alloc(initial_score_count * sizeof(float));
     g->comp_selected = ds4_gpu_tensor_alloc((uint64_t)(DS4_N_INDEXER_TOP_K ? DS4_N_INDEXER_TOP_K : 1u) *
                                               pc * sizeof(uint32_t));
     g->heads = ds4_gpu_tensor_alloc(q_dim * sizeof(float));
@@ -875,42 +878,32 @@ static bool rocm_graph_alloc_raw_cap(
         }
     }
 
-    const bool ok = state_init_ok && layer_cache_ok &&
-                    g->cur_hc && g->flat_hc && g->hc_mix && g->hc_split &&
-                    g->hc_pre && g->hc_post && g->hc_comb &&
-                    g->attn_cur && g->attn_norm && g->qr && g->qr_norm &&
-                    g->q && g->kv_raw && g->kv &&
-                    g->comp_kv_cur && g->comp_sc_cur &&
-                    g->indexer_q && g->indexer_weights && g->indexer_scores &&
-                    g->comp_mask && g->comp_selected &&
-                    g->heads && g->attn_low && g->attn_out &&
-                    g->after_attn_hc && g->ffn_cur && g->ffn_norm &&
-                    g->shared_gate && g->shared_up && g->shared_mid &&
-                    g->shared_out &&
-                    g->router_logits && g->router_probs && g->router_selected && g->router_weights &&
-                    g->routed_gate && g->routed_up && g->routed_mid &&
-                    g->routed_down && g->routed_out &&
-                    g->after_ffn_hc &&
-                    g->output_pre && g->output_weights && g->output_embd &&
-                    g->output_norm && g->logits &&
-                    g->prefill_tokens &&
-                    g->batch_cur_hc && g->batch_next_hc && g->batch_flat_hc &&
-                    g->batch_hc_mix && g->batch_hc_split &&
-                    g->batch_attn_cur && g->batch_attn_norm &&
-                    g->batch_qr && g->batch_qr_norm && g->batch_q &&
-                    g->batch_kv_raw && g->batch_kv &&
-                    g->batch_comp_kv && g->batch_comp_sc &&
-                    g->batch_indexer_q && g->batch_indexer_weights &&
-                    g->batch_heads && g->batch_attn_low && g->batch_attn_out &&
-                    g->batch_group_tmp && g->batch_low_tmp && g->batch_after_attn_hc &&
-                    g->batch_ffn_cur && g->batch_ffn_norm &&
-                    g->batch_shared_gate && g->batch_shared_up &&
-                    g->batch_shared_mid && g->batch_shared_out &&
-                    g->batch_router_logits && g->batch_router_probs &&
-                    g->batch_router_selected && g->batch_router_weights &&
-                    g->batch_routed_gate && g->batch_routed_up &&
-                    g->batch_routed_mid && g->batch_routed_down &&
-                    g->batch_routed_out;
+    const bool ok =
+        state_init_ok && layer_cache_ok && g->cur_hc && g->flat_hc &&
+        g->hc_mix && g->hc_split && g->hc_pre && g->hc_post && g->hc_comb &&
+        g->attn_cur && g->attn_norm && g->qr && g->qr_norm && g->q &&
+        g->kv_raw && g->kv && g->comp_kv_cur && g->comp_sc_cur &&
+        g->indexer_q && g->indexer_weights && g->indexer_scores &&
+        g->comp_selected && g->heads && g->attn_low && g->attn_out &&
+        g->after_attn_hc && g->ffn_cur && g->ffn_norm && g->shared_gate &&
+        g->shared_up && g->shared_mid && g->shared_out && g->router_logits &&
+        g->router_probs && g->router_selected && g->router_weights &&
+        g->routed_gate && g->routed_up && g->routed_mid && g->routed_down &&
+        g->routed_out && g->after_ffn_hc && g->output_pre &&
+        g->output_weights && g->output_embd && g->output_norm && g->logits &&
+        g->prefill_tokens && g->batch_cur_hc && g->batch_next_hc &&
+        g->batch_flat_hc && g->batch_hc_mix && g->batch_hc_split &&
+        g->batch_attn_cur && g->batch_attn_norm && g->batch_qr &&
+        g->batch_qr_norm && g->batch_q && g->batch_kv_raw && g->batch_kv &&
+        g->batch_comp_kv && g->batch_comp_sc && g->batch_indexer_q &&
+        g->batch_indexer_weights && g->batch_heads && g->batch_attn_low &&
+        g->batch_attn_out && g->batch_group_tmp && g->batch_low_tmp &&
+        g->batch_after_attn_hc && g->batch_ffn_cur && g->batch_ffn_norm &&
+        g->batch_shared_gate && g->batch_shared_up && g->batch_shared_mid &&
+        g->batch_shared_out && g->batch_router_logits &&
+        g->batch_router_probs && g->batch_router_selected &&
+        g->batch_router_weights && g->batch_routed_gate && g->batch_routed_up &&
+        g->batch_routed_mid && g->batch_routed_down && g->batch_routed_out;
     if (!ok) rocm_graph_free(g);
     return ok;
 }
@@ -1093,6 +1086,30 @@ static bool rocm_graph_matmul_plain_tensor(
         uint64_t                out_dim,
         const ds4_gpu_tensor *x,
         uint64_t                n_tok);
+
+static bool rocm_graph_reserve_indexer_scores(ds4_gpu_graph* g, uint32_t n_comp,
+                                              uint32_t n_tokens) {
+  if (n_comp == 0 || n_comp > g->comp_cap || n_tokens == 0 ||
+      n_tokens > g->prefill_cap) {
+    return false;
+  }
+  const uint64_t required =
+      static_cast<uint64_t>(n_comp) * n_tokens * sizeof(float);
+  const uint64_t capacity = ds4_gpu_tensor_bytes(g->indexer_scores);
+  if (required <= capacity)
+    return true;
+  const uint64_t maximum =
+      static_cast<uint64_t>(g->comp_cap) * g->prefill_cap * sizeof(float);
+  auto* replacement =
+      ds4_gpu_tensor_alloc(std::min(maximum, std::max(required, capacity * 2)));
+  if (replacement == nullptr)
+    return false;
+  // Scores are overwritten before use; KV state and snapshots never refer
+  // to this allocation. Geometric growth avoids reallocating each chunk.
+  ds4_gpu_tensor_free(g->indexer_scores);
+  g->indexer_scores = replacement;
+  return true;
+}
 
 static bool rocm_graph_encode_decode_layer(
         ds4_gpu_graph  *g,
@@ -1410,7 +1427,9 @@ static bool rocm_graph_encode_decode_layer(
                     &decode_index_stage_t0);
               }
               if (ok)
-                ok = ds4_gpu_indexer_score_one_tensor(
+                ok = rocm_graph_reserve_indexer_scores(
+                         g, g->layer_n_index_comp[il], 1) &&
+                     ds4_gpu_indexer_score_one_tensor(
                          g->indexer_scores, g->indexer_q, g->indexer_weights,
                          g->layer_index_comp_cache[il],
                          g->layer_n_index_comp[il], DS4_N_INDEXER_HEAD,
@@ -2310,7 +2329,9 @@ static bool rocm_graph_encode_session_attention_core(
                   1.0f /
                   sqrtf((float)(DS4_N_INDEXER_HEAD_DIM * DS4_N_INDEXER_HEAD));
               if (ok) {
-                ok = ds4_gpu_indexer_score_one_tensor(
+                ok = rocm_graph_reserve_indexer_scores(
+                         g, g->layer_n_index_comp[il], 1) &&
+                     ds4_gpu_indexer_score_one_tensor(
                          g->indexer_scores, g->indexer_q, g->indexer_weights,
                          g->layer_index_comp_cache[il],
                          g->layer_n_index_comp[il], DS4_N_INDEXER_HEAD,
@@ -3157,10 +3178,8 @@ static bool rocm_graph_encode_layer_attention_batch(
             const uint32_t n_raw = rocm_graph_raw_span_for_batch(g, pos0, n_tokens);
             /* See the raw-only branch above: batched mixed attention also
              * consumes a logical raw window, linearized out of the ring. */
-            const uint32_t raw_start = rocm_graph_raw_start_for_span(g,
-                                                                      pos0 + n_tokens - 1u,
-                                                                      n_raw);
-            uint32_t use_comp_mask = 0;
+            const uint32_t raw_start =
+                rocm_graph_raw_start_for_span(g, pos0 + n_tokens - 1u, n_raw);
             bool use_indexed_comp = false;
             double index_stage_t0 = 0.0;
 
@@ -3180,17 +3199,14 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                                     n_comp,
                                                                     &index_stage_t0);
                 }
-                ok = ds4_gpu_indexer_scores_decode_batch_tensor(g->indexer_scores,
-                                                                  g->batch_indexer_q,
-                                                                  g->batch_indexer_weights,
-                                                                  g->layer_index_comp_cache[il],
-                                                                  n_comp,
-                                                                  n_tokens,
-                                                                  pos0,
-                                                                  DS4_N_INDEXER_HEAD,
-                                                                  DS4_N_INDEXER_HEAD_DIM,
-                                                                  ratio,
-                                                                  index_scale) != 0;
+                ok =
+                    ok &&
+                    rocm_graph_reserve_indexer_scores(g, n_comp, n_tokens) &&
+                    ds4_gpu_indexer_scores_decode_batch_tensor(
+                        g->indexer_scores, g->batch_indexer_q,
+                        g->batch_indexer_weights, g->layer_index_comp_cache[il],
+                        n_comp, n_tokens, pos0, DS4_N_INDEXER_HEAD,
+                        DS4_N_INDEXER_HEAD_DIM, ratio, index_scale) != 0;
                 if (ok && index_stage_profile) {
                     ok = rocm_graph_indexer_stage_profile_boundary("score",
                                                                     il,
@@ -3211,7 +3227,6 @@ static bool rocm_graph_encode_layer_attention_batch(
                 if (ok) {
                     use_indexed_comp = true;
                 }
-                use_comp_mask = 1;
             }
             if (ok) {
                 if (use_indexed_comp) {
@@ -3246,26 +3261,14 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                                         &index_stage_t0);
                     }
                 } else {
-                    ok = ds4_gpu_attention_decode_mixed_batch_heads_tensor(g->batch_heads,
-                                                                             model->map,
-                                                                             model->size,
-                                                                             layer->attn_sinks->abs_offset,
-                                                                             g->batch_q,
-                                                                             g->layer_raw_cache[il],
-                                                                             g->layer_attn_comp_cache[il],
-                                                                             rocm_graph_attn_comp_cache_is_f16(),
-                                                                             use_comp_mask ? g->comp_mask : NULL,
-                                                                             use_comp_mask,
-                                                                             n_tokens,
-                                                                             pos0,
-                                                                             n_raw,
-                                                                             g->raw_cap,
-                                                                             raw_start,
-                                                                             n_comp,
-                                                                             g->raw_window,
-                                                                             ratio,
-                                                                             DS4_N_HEAD,
-                                                                             DS4_N_HEAD_DIM) != 0;
+                  ok = ds4_gpu_attention_decode_mixed_batch_heads_tensor(
+                           g->batch_heads, model->map, model->size,
+                           layer->attn_sinks->abs_offset, g->batch_q,
+                           g->layer_raw_cache[il], g->layer_attn_comp_cache[il],
+                           rocm_graph_attn_comp_cache_is_f16(), nullptr, 0,
+                           n_tokens, pos0, n_raw, g->raw_cap, raw_start, n_comp,
+                           g->raw_window, ratio, DS4_N_HEAD,
+                           DS4_N_HEAD_DIM) != 0;
                 }
             }
             if (ok) batch_attention_done = true;
@@ -3283,16 +3286,12 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                                 n_comp,
                                                                 &index_stage_t0);
             }
-            ok = ds4_gpu_indexer_scores_prefill_tensor(g->indexer_scores,
-                                                         g->batch_indexer_q,
-                                                         g->batch_indexer_weights,
-                                                         g->layer_index_comp_cache[il],
-                                                         n_comp,
-                                                         n_tokens,
-                                                         DS4_N_INDEXER_HEAD,
-                                                         DS4_N_INDEXER_HEAD_DIM,
-                                                         ratio,
-                                                         index_scale) != 0;
+            ok = ok && rocm_graph_reserve_indexer_scores(g, n_comp, n_tokens) &&
+                 ds4_gpu_indexer_scores_prefill_tensor(
+                     g->indexer_scores, g->batch_indexer_q,
+                     g->batch_indexer_weights, g->layer_index_comp_cache[il],
+                     n_comp, n_tokens, DS4_N_INDEXER_HEAD,
+                     DS4_N_INDEXER_HEAD_DIM, ratio, index_scale) != 0;
             if (ok && index_stage_profile) {
                 ok = rocm_graph_indexer_stage_profile_boundary("score",
                                                                 il,
@@ -3391,7 +3390,6 @@ static bool rocm_graph_encode_layer_attention_batch(
                 const uint32_t cur_comp = comp_counts ? comp_counts[t] : 0u;
                 const uint32_t cur_index = index_counts ? index_counts[t] : 0u;
                 uint32_t n_selected = 0;
-                ds4_gpu_tensor *comp_mask = NULL;
 
                 if (ratio == 4 && cur_comp > DS4_N_INDEXER_TOP_K) {
                     const float index_scale = 1.0f / sqrtf((float)(DS4_N_INDEXER_HEAD_DIM * DS4_N_INDEXER_HEAD));
@@ -3400,31 +3398,21 @@ static bool rocm_graph_encode_layer_attention_batch(
                     ds4_gpu_tensor *indexer_w_view = rocm_graph_tensor_row_view(
                             g->batch_indexer_weights, t, DS4_N_INDEXER_HEAD);
                     ok = indexer_q_view && indexer_w_view &&
-                         ds4_gpu_indexer_score_one_tensor(g->indexer_scores,
-                                                            indexer_q_view,
-                                                            indexer_w_view,
-                                                            g->layer_index_comp_cache[il],
-                                                            cur_index,
-                                                            DS4_N_INDEXER_HEAD,
-                                                            DS4_N_INDEXER_HEAD_DIM,
-                                                            index_scale) != 0 &&
-                         ds4_gpu_indexer_topk_tensor(g->comp_selected,
-                                                       g->indexer_scores,
-                                                       cur_index,
-                                                       1,
-                                                       DS4_N_INDEXER_TOP_K) != 0 &&
-                         ds4_gpu_dsv4_topk_mask_tensor(g->comp_mask,
-                                                         g->comp_selected,
-                                                         cur_index,
-                                                         1,
-                                                         DS4_N_INDEXER_TOP_K) != 0;
+                         rocm_graph_reserve_indexer_scores(g, cur_index, 1) &&
+                         ds4_gpu_indexer_score_one_tensor(
+                             g->indexer_scores, indexer_q_view, indexer_w_view,
+                             g->layer_index_comp_cache[il], cur_index,
+                             DS4_N_INDEXER_HEAD, DS4_N_INDEXER_HEAD_DIM,
+                             index_scale) != 0 &&
+                         ds4_gpu_indexer_topk_tensor(
+                             g->comp_selected, g->indexer_scores, cur_index, 1,
+                             DS4_N_INDEXER_TOP_K) != 0;
                     ds4_gpu_tensor_free(indexer_w_view);
                     ds4_gpu_tensor_free(indexer_q_view);
                     if (ok) {
-                        comp_mask = g->comp_mask;
-                        n_selected = DS4_N_INDEXER_TOP_K < cur_index
-                            ? DS4_N_INDEXER_TOP_K
-                            : cur_index;
+                      n_selected = DS4_N_INDEXER_TOP_K < cur_index
+                                       ? DS4_N_INDEXER_TOP_K
+                                       : cur_index;
                     }
                 }
 
@@ -3439,44 +3427,23 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                        pos % g->raw_cap,
                                                        DS4_N_HEAD_DIM) != 0;
                 }
-                if (ok && comp_mask != NULL && n_selected != 0) {
-                    ok = ds4_gpu_attention_indexed_mixed_batch_heads_tensor(heads_view,
-                                                                              model->map,
-                                                                              model->size,
-                                                                              layer->attn_sinks->abs_offset,
-                                                                              q_view,
-                                                                              g->layer_raw_cache[il],
-                                                                              g->layer_attn_comp_cache[il],
-                                                                              rocm_graph_attn_comp_cache_is_f16(),
-                                                                              g->comp_selected,
-                                                                              1,
-                                                                              pos,
-                                                                              n_raw,
-                                                                              g->raw_cap,
-                                                                              raw_start,
-                                                                              cur_comp,
-                                                                              n_selected,
-                                                                              g->raw_window,
-                                                                              ratio,
-                                                                              DS4_N_HEAD,
-                                                                              DS4_N_HEAD_DIM) != 0;
+                if (ok && n_selected != 0) {
+                  ok = ds4_gpu_attention_indexed_mixed_batch_heads_tensor(
+                           heads_view, model->map, model->size,
+                           layer->attn_sinks->abs_offset, q_view,
+                           g->layer_raw_cache[il], g->layer_attn_comp_cache[il],
+                           rocm_graph_attn_comp_cache_is_f16(),
+                           g->comp_selected, 1, pos, n_raw, g->raw_cap,
+                           raw_start, cur_comp, n_selected, g->raw_window,
+                           ratio, DS4_N_HEAD, DS4_N_HEAD_DIM) != 0;
                 } else if (ok) {
-                    ok = ds4_gpu_attention_decode_heads_tensor(heads_view,
-                                                                 model->map,
-                                                                 model->size,
-                                                                 layer->attn_sinks->abs_offset,
-                                                                 q_view,
-                                                                 g->layer_raw_cache[il],
-                                                                 n_raw,
-                                                                 g->raw_cap,
-                                                                 raw_start,
-                                                                 cur_comp ? g->layer_attn_comp_cache[il] : NULL,
-                                                                 rocm_graph_attn_comp_cache_is_f16(),
-                                                                 cur_comp,
-                                                                 comp_mask,
-                                                                 n_selected,
-                                                                 DS4_N_HEAD,
-                                                                 DS4_N_HEAD_DIM) != 0;
+                  ok = ds4_gpu_attention_decode_heads_tensor(
+                           heads_view, model->map, model->size,
+                           layer->attn_sinks->abs_offset, q_view,
+                           g->layer_raw_cache[il], n_raw, g->raw_cap, raw_start,
+                           cur_comp ? g->layer_attn_comp_cache[il] : NULL,
+                           rocm_graph_attn_comp_cache_is_f16(), cur_comp,
+                           nullptr, 0, DS4_N_HEAD, DS4_N_HEAD_DIM) != 0;
                 }
                 ds4_gpu_tensor_free(heads_view);
                 ds4_gpu_tensor_free(kv_cache_view);
