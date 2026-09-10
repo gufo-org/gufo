@@ -6,11 +6,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <string_view>
 #include <vector>
 
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_decode_attention.hip.hpp"
+#include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_indexer_score.hip.hpp"
 #include "src/models/deepseek_v4_flash/runtime/dspark_internal.h"
 
 namespace {
@@ -19,6 +21,195 @@ void check(hipError_t error) {
     std::fprintf(stderr, "HIP: %s\n", hipGetErrorString(error));
     std::exit(1);
   }
+}
+
+// Historical production kernel, independent of the production implementation.
+// A sampled CPU double calculation below also checks the scoring formula.
+__global__ static void reference_indexer_scores(float* scores, const float* q,
+                                                const float* weights,
+                                                const float* index_comp,
+                                                uint32_t n_comp, uint32_t pos0,
+                                                uint32_t ratio, float scale,
+                                                int causal) {
+  const uint32_t token = blockIdx.y;
+  scores += (uint64_t)token * n_comp;
+  q += (uint64_t)token * 64u * 128u;
+  weights += (uint64_t)token * 64u;
+  pos0 += token;
+  const uint32_t c = blockIdx.x;
+  const uint32_t tid = threadIdx.x;
+  const uint32_t lane = tid & 31u;
+  const uint32_t warp = tid >> 5u;
+  if (c >= n_comp || tid >= 128u)
+    return;
+  if (causal) {
+    const uint32_t visible = ratio ? (pos0 + 1u) / ratio : n_comp;
+    if (c >= visible) {
+      if (tid == 0)
+        scores[c] = -INFINITY;
+      return;
+    }
+  }
+
+  __shared__ float krow[128];
+  __shared__ float partial[4];
+  if (tid < 128u)
+    krow[tid] = index_comp[(uint64_t)c * 128u + tid];
+  __syncthreads();
+
+  float total = 0.0f;
+  for (uint32_t h0 = 0; h0 < 64u; h0 += 4u) {
+    const uint32_t h = h0 + warp;
+    const float4 qv = ((const float4*)(q + (uint64_t)h * 128u))[lane];
+    const float4 kv = ((const float4*)krow)[lane];
+    float dot = qv.x * kv.x + qv.y * kv.y + qv.z * kv.z + qv.w * kv.w;
+    for (int offset = 16; offset > 0; offset >>= 1)
+      dot += __shfl_down(dot, offset, 32);
+    if (lane == 0)
+      partial[warp] = fmaxf(dot, 0.0f) * weights[h] * scale;
+    __syncthreads();
+    if (tid == 0)
+      total += partial[0] + partial[1] + partial[2] + partial[3];
+    __syncthreads();
+  }
+  if (tid == 0)
+    scores[c] = total;
+}
+
+void check_indexer_scores(bool benchmark) {
+  constexpr uint32_t heads = 64, dim = 128, ratio = 4;
+  constexpr float scale = 0.08838834764831845f;
+  std::mt19937 gen(410);
+  std::uniform_real_distribution<float> dist(-1.f, 1.f);
+  for (uint32_t tokens : {1u, 6u}) {
+    for (uint32_t rows : {17u, 513u, 1025u, 4096u}) {
+      for (bool causal : {false, true}) {
+        // The verifier crosses compression boundaries within its block.
+        const uint32_t pos0 = (rows - 2) * ratio - 1;
+        const uint32_t last_visible = (pos0 + tokens) / ratio;
+        std::vector<float> q(tokens * heads * dim), k(rows * dim),
+            weights(tokens * heads), ref(tokens * rows), out(ref.size());
+        for (auto& v : q)
+          v = dist(gen);
+        for (auto& v : k)
+          v = dist(gen);
+        for (auto& v : weights)
+          v = dist(gen);
+        std::fill_n(q.begin(), dim, 0.f);
+        std::copy_n(k.begin(), dim, k.begin() + dim);  // Exact score ties.
+        if (causal) {
+          std::fill(k.begin() + last_visible * dim, k.end(),
+                    std::numeric_limits<float>::quiet_NaN());
+        }
+        float *dq, *dk, *dw, *dr, *dout;
+        check(hipMalloc(&dq, q.size() * sizeof(float)));
+        check(hipMalloc(&dk, k.size() * sizeof(float)));
+        check(hipMalloc(&dw, weights.size() * sizeof(float)));
+        check(hipMalloc(&dr, ref.size() * sizeof(float)));
+        check(hipMalloc(&dout, out.size() * sizeof(float)));
+        check(hipMemcpy(dq, q.data(), q.size() * sizeof(float),
+                        hipMemcpyHostToDevice));
+        check(hipMemcpy(dk, k.data(), k.size() * sizeof(float),
+                        hipMemcpyHostToDevice));
+        check(hipMemcpy(dw, weights.data(), weights.size() * sizeof(float),
+                        hipMemcpyHostToDevice));
+        reference_indexer_scores<<<dim3(rows, tokens), 128>>>(
+            dr, dq, dw, dk, rows, pos0, ratio, scale, causal);
+        check(hipGetLastError());
+        check(hipMemcpy(ref.data(), dr, ref.size() * sizeof(float),
+                        hipMemcpyDeviceToHost));
+        for (int repeat = 0; repeat < 2; ++repeat) {
+          check(hipMemset(dout, 0xff, out.size() * sizeof(float)));
+          indexer_score_one_direct_kernel<<<dim3(rows, tokens), 128>>>(
+              dout, dq, dw, dk, rows, pos0, ratio, scale, causal);
+          check(hipGetLastError());
+          check(hipMemcpy(out.data(), dout, out.size() * sizeof(float),
+                          hipMemcpyDeviceToHost));
+          if (std::memcmp(ref.data(), out.data(), ref.size() * sizeof(float)) !=
+              0) {
+            std::fprintf(stderr,
+                         "Indexer bitwise mismatch: tokens=%u rows=%u "
+                         "causal=%d repeat=%d\n",
+                         tokens, rows, causal, repeat);
+            std::exit(7);
+          }
+        }
+        for (uint32_t t = 0; t < tokens; ++t) {
+          const uint32_t visible = causal ? (pos0 + t + 1) / ratio : rows;
+          for (uint32_t c = 0; c < rows; ++c) {
+            const float score = out[t * rows + c];
+            if ((c < visible && !std::isfinite(score)) ||
+                (c >= visible && score != -INFINITY)) {
+              std::fprintf(stderr,
+                           "Indexer visibility mismatch: token=%u row=%u\n", t,
+                           c);
+              std::exit(7);
+            }
+          }
+          // Bound CPU work independently of context size; cover the mask edge.
+          for (uint32_t c :
+               {0u, 1u, 2u, rows / 2, rows - 3, rows - 2, rows - 1}) {
+            if (c >= visible)
+              continue;
+            double expected = 0.0;
+            for (uint32_t h = 0; h < heads; ++h) {
+              double dot = 0.0;
+              for (uint32_t d = 0; d < dim; ++d)
+                dot += double(q[(t * heads + h) * dim + d]) * k[c * dim + d];
+              expected += std::max(dot, 0.0) * weights[t * heads + h] * scale;
+            }
+            const double error = std::abs(expected - out[t * rows + c]);
+            if (error > 1e-4 + 2e-6 * std::abs(expected)) {
+              std::fprintf(
+                  stderr,
+                  "Indexer CPU formula mismatch: token=%u row=%u error=%g\n", t,
+                  c, error);
+              std::exit(7);
+            }
+          }
+        }
+        if (benchmark) {
+          hipEvent_t begin, end;
+          check(hipEventCreate(&begin));
+          check(hipEventCreate(&end));
+          for (int pass = 0; pass < 2; ++pass) {
+            float us[2]{};
+            for (int order = 0; order < 2; ++order) {
+              const bool candidate = (order + pass) % 2;
+              auto launch = [&] {
+                if (candidate)
+                  indexer_score_one_direct_kernel<<<dim3(rows, tokens), 128>>>(
+                      dout, dq, dw, dk, rows, pos0, ratio, scale, causal);
+                else
+                  reference_indexer_scores<<<dim3(rows, tokens), 128>>>(
+                      dr, dq, dw, dk, rows, pos0, ratio, scale, causal);
+              };
+              for (int i = 0; i < 5; ++i)
+                launch();
+              check(hipEventRecord(begin));
+              for (int i = 0; i < 50; ++i)
+                launch();
+              check(hipEventRecord(end));
+              check(hipEventSynchronize(end));
+              check(hipEventElapsedTime(&us[candidate], begin, end));
+              us[candidate] *= 20.f;
+            }
+            std::printf(
+                "indexer tokens=%u rows=%u causal=%d pass=%d old_us=%.3f "
+                "new_us=%.3f\n",
+                tokens, rows, causal, pass, us[0], us[1]);
+          }
+          check(hipEventDestroy(begin));
+          check(hipEventDestroy(end));
+        }
+        for (auto ptr : {dq, dk, dw, dr, dout})
+          check(hipFree(ptr));
+      }
+    }
+  }
+  std::puts(
+      "Indexer: 16 cases passed bitwise twice and sampled CPU formula, "
+      "including verifier masks and poisoned rows");
 }
 
 // Previous production arithmetic, retained only as the bitwise oracle. The
@@ -479,6 +670,7 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  check_indexer_scores(benchmark);
   check_target_attention();
   check_dspark_window();
   constexpr unsigned heads = 64, dim = 512, cap = 4352;

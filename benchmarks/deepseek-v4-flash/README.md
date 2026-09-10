@@ -6,7 +6,9 @@ prompt tokens** or generates **128 tokens** at each listed context depth.
 
 Results are means of two repetitions. The [full report](speed-matrix.json)
 retains deviations, token hashes, draft counters, and binary/model identities.
-C1 retains the highest per-user generation rate at every depth.
+C1 retains the highest per-user generation rate at every depth. The matrix
+predates the [latest C1 indexer improvement](official-kernel-review.md); its
+focused results and quality checks are recorded separately.
 
 | Artifact | Pin |
 | --- | --- |
@@ -156,7 +158,7 @@ The [tools index](../../tools/ds4/README.md) lists the maintained entry points.
 | --- | --- |
 | `ds4.template`, `ds4.cli`, `ds4.dataset`, `ds4.eval` | Official framing, option wiring, pinned fixture integrity, answer grading |
 | `ds4.projections` | 54 Q8/IQ2/F16 shape cases against scalar kernels and independent formulas; two HC cases against the official FP32 projection/RMS formula |
-| `ds4.attention` | 28 target/support arithmetic cases plus 16 official DSpark window cases; double-precision references, poisoned stale rows, ring wrap, masks and sparse causal indices |
+| `ds4.attention` | 28 target/support arithmetic cases, 16 official DSpark window cases and 16 exact indexer cases; double-precision references, poisoned stale rows, ring wrap, masks and sparse causal indices |
 | `ds4.target` | Official token goldens, pinned trajectory, full-logit prefill/decode comparisons, exact 2K logits at 4K/262K capacities, concurrent state isolation, bounds |
 | `ds4.dspark` | Scalar quality; exact tokens/logits/counters at fixed and changing C; short budgets; complete snapshot continuation through 16K; policy backoff and fork isolation |
 | `ds4.serving` | Mixed sampling and actual batch widths, bounded prefill under arrivals, C1 warm-prefix equality at 262K capacity, disk identity, cancellation, context exhaustion |
@@ -208,6 +210,8 @@ Capability subset results: TODO. Full capability scores remain TODO; see the
 [retained AR evaluation](eval/README.md) for earlier regression samples.
 
 ## Experiments
+
+- Retained: indexer head accumulation removes 31 block barriers per score; C1 tg128 at 16K improves **0.8–1.0%** in repeated release A/B, with identical tokens. [Official-kernel review and next opportunities](official-kernel-review.md).
 
 - Retained: scalar-equivalent verifier projections and attention; exact 736-token replay across the maintained concurrency/depth matrix.
 - Retained: attention ring indexing; removes integer division without changing arithmetic.

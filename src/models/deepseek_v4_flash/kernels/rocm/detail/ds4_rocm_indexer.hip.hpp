@@ -1,3 +1,5 @@
+#include "ds4_rocm_indexer_score.hip.hpp"
+
 template <typename Kernel>
 static hipError_t ds4_hip_set_dynamic_shared_memory(Kernel kernel,
                                                      int bytes) {
@@ -88,56 +90,6 @@ __global__ static void indexer_scores_kernel(
         __syncthreads();
     }
     if (threadIdx.x == 0) scores[(uint64_t)t * n_comp + c] = total * scale;
-}
-
-__global__ static void indexer_score_one_direct_kernel(
-        float *scores,
-        const float *q,
-        const float *weights,
-        const float *index_comp,
-        uint32_t n_comp,
-        uint32_t pos0,
-        uint32_t ratio,
-        float scale,
-        int causal) {
-  const uint32_t token = blockIdx.y;
-  scores += (uint64_t)token * n_comp;
-  q += (uint64_t)token * 64u * 128u;
-  weights += (uint64_t)token * 64u;
-  pos0 += token;
-  const uint32_t c = blockIdx.x;
-  const uint32_t tid = threadIdx.x;
-  const uint32_t lane = tid & 31u;
-  const uint32_t warp = tid >> 5u;
-  if (c >= n_comp || tid >= 128u)
-    return;
-  if (causal) {
-    const uint32_t visible = ratio ? (pos0 + 1u) / ratio : n_comp;
-    if (c >= visible) {
-      if (tid == 0)
-        scores[c] = -INFINITY;
-      return;
-    }
-  }
-
-    __shared__ float krow[128];
-    __shared__ float partial[4];
-    if (tid < 128u) krow[tid] = index_comp[(uint64_t)c * 128u + tid];
-    __syncthreads();
-
-    float total = 0.0f;
-    for (uint32_t h0 = 0; h0 < 64u; h0 += 4u) {
-        const uint32_t h = h0 + warp;
-        const float4 qv = ((const float4 *)(q + (uint64_t)h * 128u))[lane];
-        const float4 kv = ((const float4 *)krow)[lane];
-        float dot = qv.x * kv.x + qv.y * kv.y + qv.z * kv.z + qv.w * kv.w;
-        dot = warp_sum_f32(dot);
-        if (lane == 0) partial[warp] = fmaxf(dot, 0.0f) * weights[h] * scale;
-        __syncthreads();
-        if (tid == 0) total += partial[0] + partial[1] + partial[2] + partial[3];
-        __syncthreads();
-    }
-    if (tid == 0) scores[c] = total;
 }
 
 __global__ static void indexer_scores_wmma128_kernel(
