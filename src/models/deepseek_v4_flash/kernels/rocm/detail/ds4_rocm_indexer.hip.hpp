@@ -100,18 +100,25 @@ __global__ static void indexer_score_one_direct_kernel(
         uint32_t ratio,
         float scale,
         int causal) {
-    const uint32_t c = blockIdx.x;
-    const uint32_t tid = threadIdx.x;
-    const uint32_t lane = tid & 31u;
-    const uint32_t warp = tid >> 5u;
-    if (c >= n_comp || tid >= 128u) return;
-    if (causal) {
-        const uint32_t visible = ratio ? (pos0 + 1u) / ratio : n_comp;
-        if (c >= visible) {
-            if (tid == 0) scores[c] = -INFINITY;
-            return;
-        }
+  const uint32_t token = blockIdx.y;
+  scores += (uint64_t)token * n_comp;
+  q += (uint64_t)token * 64u * 128u;
+  weights += (uint64_t)token * 64u;
+  pos0 += token;
+  const uint32_t c = blockIdx.x;
+  const uint32_t tid = threadIdx.x;
+  const uint32_t lane = tid & 31u;
+  const uint32_t warp = tid >> 5u;
+  if (c >= n_comp || tid >= 128u)
+    return;
+  if (causal) {
+    const uint32_t visible = ratio ? (pos0 + 1u) / ratio : n_comp;
+    if (c >= visible) {
+      if (tid == 0)
+        scores[c] = -INFINITY;
+      return;
     }
+  }
 
     __shared__ float krow[128];
     __shared__ float partial[4];
@@ -998,14 +1005,13 @@ static int indexer_scores_launch(
         return 0;
     }
     if (causal && ratio == 0) return 0;
-    if (n_tokens == 1u && head_dim == 128u && n_head == 64u) {
-        indexer_score_one_direct_kernel<<<n_comp, 128>>>((float *)scores->ptr,
-                                                         (const float *)q->ptr,
-                                                         (const float *)weights->ptr,
-                                                         (const float *)index_comp->ptr,
-                                                         n_comp, pos0, ratio,
-                                                         scale, causal ? 1 : 0);
-        return hip_ok(hipGetLastError(), "indexer score one direct launch");
+    if ((n_tokens == 1u || ds4_rocm_verifier_batch_mode()) &&
+        head_dim == 128u && n_head == 64u) {
+      indexer_score_one_direct_kernel<<<dim3(n_comp, n_tokens), 128>>>(
+          (float*)scores->ptr, (const float*)q->ptr, (const float*)weights->ptr,
+          (const float*)index_comp->ptr, n_comp, pos0, ratio, scale,
+          causal ? 1 : 0);
+      return hip_ok(hipGetLastError(), "indexer score one direct launch");
     }
     if (head_dim == 128u && n_head == 64u) {
         dim3 grid((n_comp + 127u) / 128u, (n_tokens + 15u) / 16u, 1);
@@ -1324,29 +1330,6 @@ extern "C" int ds4_gpu_dsv4_indexer_qat_tensor(ds4_gpu_tensor *x, uint32_t n_row
     return hip_ok(hipGetLastError(), "indexer_hadamard_fp4 launch");
 }
 
-/* Dequantize one Q8_0 row of the DSpark Markov W1 table. The row for the
- * previously selected token is the state consumed by the path selector. */
-__global__ static void dspark_markov_w1_row_kernel(
-        float *out,
-        const unsigned char *w1_row,
-        uint32_t rank_blocks) {
-    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= rank_blocks * 32u) return;
-    const uint32_t block = tid >> 5u;
-    const uint32_t lane = tid & 31u;
-    const unsigned char *qblock = w1_row + (uint64_t)block * 34u;
-    const float scale = __half2float(*(const __half *)qblock);
-    out[tid] = scale * (float)((const int8_t *)(qblock + 2u))[lane];
-}
-
-/*
- * Confidence head over [draft_hidden, W1[previous_token]].
- *
- * Both learned inputs are Q8_0 rows. Decode the W1 value and the matching
- * confidence weight in registers so a rejected proposal costs one small
- * reduction kernel instead of materializing W1 and launching two matmuls.
- */
-
 /* Decode the packed (value, index) key produced by the Markov argmax reduce. */
 __global__ static void dspark_markov_key_decode_kernel(
         int32_t *out_index,
@@ -1363,30 +1346,6 @@ __global__ static void dspark_markov_key_decode_batch_kernel(
     if (row >= n_rows) return;
     out_indices[row] =
         (int32_t)(~(unsigned int)(keys[row] & 0xffffffffull));
-}
-
-extern "C" int ds4_gpu_dspark_markov_w1_row_tensor(
-        ds4_gpu_tensor       *out_state,
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                w1_offset,
-        uint32_t                markov_rank,
-        uint32_t                token) {
-    if (!out_state || !model_map || markov_rank == 0u || markov_rank % 32u != 0u ||
-        !hip_tensor_has_elems(out_state, markov_rank, sizeof(float))) {
-        return 0;
-    }
-    const uint32_t rank_blocks = markov_rank / 32u;
-    const uint64_t row_bytes = (uint64_t)rank_blocks * 34u;
-    uint64_t row_offset = 0;
-    if (!hip_u64_mul_checked(token, row_bytes, &row_offset)) return 0;
-    if (!hip_model_range_fits(model_size, w1_offset + row_offset, row_bytes)) return 0;
-    const unsigned char *row = (const unsigned char *)hip_model_range_ptr(
-            model_map, w1_offset + row_offset, row_bytes, "dspark_markov_w1_row");
-    if (!row) return 0;
-    dspark_markov_w1_row_kernel<<<(markov_rank + 255u) / 256u, 256>>>(
-            (float *)out_state->ptr, row, rank_blocks);
-    return hip_ok(hipGetLastError(), "dspark markov w1 row launch");
 }
 
 /*

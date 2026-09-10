@@ -197,6 +197,11 @@ license.
   agent, evaluator, or disk-cache frontend.
 - **Corresponding-Source Location**:
   https://github.com/antirez/ds4/tree/84cc882352757baf628a1776badf7cc54d584e28
+- **Official continuation fixtures**: The matching 0731 hosted-model
+  continuations and five smoke prompts are imported separately from revision
+  `6289c516273979173abbc062209a81dd3706b804`. The fixture
+  `tests/models/deepseek_v4_flash/fixtures/official-0731.json` retains source
+  hashes and the upstream MIT notice (the ds4.c authors and ggml authors).
 
 ### 1.13 libuuid (util-linux)
 

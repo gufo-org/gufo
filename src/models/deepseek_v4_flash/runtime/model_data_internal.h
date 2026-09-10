@@ -138,7 +138,6 @@ void *ds4_xcalloc(size_t count, size_t size);
 void *ds4_xmalloc(size_t size);
 void *ds4_xrealloc(void *pointer, size_t size);
 double ds4_now_seconds(void);
-void ds4_sleep_seconds(double seconds);
 uint64_t ds4_align_up(uint64_t value, uint64_t alignment);
 const char *ds4_tensor_type_name(uint32_t type);
 uint64_t ds4_routed_expert_row_bytes(const ds4_tensor *tensor);

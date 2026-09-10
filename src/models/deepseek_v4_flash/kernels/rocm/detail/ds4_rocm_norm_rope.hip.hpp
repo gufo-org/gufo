@@ -5,28 +5,17 @@
  * keep its own strided slice, so the second read disappears and a 4,096-wide
  * row costs 16 VGPRs. The accumulation order and the reduction tree are
  * unchanged, so the output is bit-identical. */
-/* Both outputs are optional, and that is load-bearing rather than a convenience.
- *
- * A separate F16 norm kernel with identical source drifted -- the 273-token
- * prefill envelope moved to rmse 0.53 from 0.41 -- because under -ffast-math
- * `rsqrtf` need not lower to the same instruction sequence in two different
- * functions, so the two kernels computed slightly different `scale`. A
- * measurement settled that it was not the projection: running the F32 and
- * F16-activation routes back to back on byte-identical F16 input differs in
- * 0 of 98,304 outputs. Keeping one function for both output forms makes the
- * halves exactly what converting the floats would produce, because it is the
- * same `scale` from the same compiled code. */
-template <uint32_t PER_THREAD>
-__global__ static void rms_norm_plain_regs_kernel(
-        float *out, __half *out_h, const float *x, uint32_t n, uint32_t rows,
-        float eps) {
-    const uint32_t row = blockIdx.x;
-    if (row >= rows) return;
-    const float *xr = x + (uint64_t)row * n;
-    float *orow = out ? out + (uint64_t)row * n : NULL;
-    __half *orow_h = out_h ? out_h + (uint64_t)row * n : NULL;
-    float v[PER_THREAD];
-    float sum = 0.0f;
+template<uint32_t PER_THREAD>
+__global__ static void rms_norm_plain_regs_kernel(float* out, const float* x,
+                                                  uint32_t n, uint32_t rows,
+                                                  float eps) {
+  const uint32_t row = blockIdx.x;
+  if (row >= rows)
+    return;
+  const float* xr = x + (uint64_t)row * n;
+  float* orow = out + (uint64_t)row * n;
+  float v[PER_THREAD];
+  float sum = 0.0f;
 #pragma unroll
     for (uint32_t k = 0; k < PER_THREAD; k++) {
         v[k] = xr[threadIdx.x + k * blockDim.x];
@@ -44,8 +33,7 @@ __global__ static void rms_norm_plain_regs_kernel(
     for (uint32_t k = 0; k < PER_THREAD; k++) {
         const float y = v[k] * scale;
         const uint32_t idx = threadIdx.x + k * blockDim.x;
-        if (orow) orow[idx] = y;
-        if (orow_h) orow_h[idx] = __float2half_rn(y);
+        orow[idx] = y;
     }
 }
 
@@ -160,13 +148,9 @@ __device__ static float rope_yarn_ramp_dev(float low, float high, int i0);
  * The row is `head_dim` floats -- 2 KiB at the 512 this model uses -- so it
  * fits beside the reduction scratch and the second read disappears entirely.
  *
- * Not bit-identical to the norm-then-rope sequence in practice. Every value,
- * the reduction tree, and the per-element arithmetic are written identically,
- * and the tail is still stored and reloaded so the rotation's operands come
- * from memory as before, yet the pinned trajectory still moves (116/128 to
- * 113/128 top-1). Staging the row in LDS changes the schedule enough for
- * -ffast-math to land somewhere else. Kept opt-in for that reason; see the
- * launcher. */
+ * Wide prefill uses this fused route under the model's logit error envelope.
+ * Verification retains separate norm and rotation kernels to preserve scalar
+ * rounding exactly. */
 #define DS4_HEAD_ROPE_LDS_DIM 512u
 
 __global__ static void head_rms_norm_rope_tail_lds_kernel(
@@ -389,29 +373,14 @@ extern "C" int ds4_gpu_rms_norm_plain_rows_tensor(ds4_gpu_tensor *out, const ds4
         !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
     if (n == 0u || rows == 0u) return 1;
     /* The hot caller is the 4-way hyper-connection row, 16,384 floats wide. */
-    if (n == 256u * 64u) {
-        rms_norm_plain_regs_kernel<64u><<<rows, 256>>>(
-                (float *)out->ptr, NULL, (const float *)x->ptr, n, rows, eps);
-        return hip_ok(hipGetLastError(), "rms_norm_plain regs launch");
+    if (n == 256u * 64u && !ds4_rocm_verifier_batch_mode()) {
+      rms_norm_plain_regs_kernel<64u>
+          <<<rows, 256>>>((float*)out->ptr, (const float*)x->ptr, n, rows, eps);
+      return hip_ok(hipGetLastError(), "rms_norm_plain regs launch");
     }
     rms_norm_plain_kernel<<<rows, 256>>>((float *)out->ptr, (const float *)x->ptr, n, rows, eps);
     return hip_ok(hipGetLastError(), "rms_norm_plain launch");
 }
-/* F16-only result from the shared norm kernel, so the halves are exactly what
- * converting its floats would give. Pair with
- * ds4_gpu_matmul_f16_f16_input_tensor, which is byte-identical to the F32 entry's
- * projection on the same halves. Returns 0 when the shape is not the hot
- * hyper-connection row. */
-extern "C" int ds4_gpu_rms_norm_plain_rows_f16_tensor(ds4_gpu_tensor *out_h, const ds4_gpu_tensor *x, uint32_t n, uint32_t rows, float eps) {
-    if (n != 256u * 64u) return 0;
-    if (!hip_tensor_has_elems2(out_h, n, rows, sizeof(__half)) ||
-        !hip_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
-    if (rows == 0u) return 1;
-    rms_norm_plain_regs_kernel<64u><<<rows, 256>>>(
-            NULL, (__half *)out_h->ptr, (const float *)x->ptr, n, rows, eps);
-    return hip_ok(hipGetLastError(), "rms_norm_plain regs f16 launch");
-}
-
 extern "C" int ds4_gpu_rms_norm_weight_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n, float eps) {
     uint64_t weight_bytes = 0;
     if (!model_map || !hip_u64_mul_checked(n, sizeof(float), &weight_bytes) ||
@@ -499,11 +468,7 @@ extern "C" int ds4_gpu_head_rms_norm_rope_tail_tensor(ds4_gpu_tensor *x, uint32_
         return 0;
     }
     if (rows64 == 0u) return 1;
-    /* Opt-in: worth about 250 ms per 4,096-token chunk, but it perturbs the
-     * pinned trajectory (116/128 to 113/128 top-1). Staging the row in LDS
-     * changes what the optimizer can do with the scale multiply even when the
-     * expression is written identically, and this backend builds with
-     * -ffast-math. Enable with GUFO_DEEPSEEK_ROCM_FUSED_QNORM_ROPE=1. */
+    // Restrict fusion to the qualified wide-prefill shapes.
     if (n_tok < DS4_ROCM_ATTENTION_WIDE_ROWS) return 0;
     head_rms_norm_rope_tail_lds_kernel<<<(uint32_t)rows64, 256>>>(
             (float *)x->ptr, n_tok, n_head, head_dim, n_rot, pos0, n_ctx_orig,

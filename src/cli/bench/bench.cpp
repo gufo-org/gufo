@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/testing/compare/logit_comparator.hpp"
@@ -60,6 +61,10 @@ void PrintBenchHelp(std::string_view program_name) {
       "Workload", &opt.model_path);
   parser.AddOption("-d", "--n-depth", "n,n,...",
                    "Context depths prepared before timed region (default: 0)",
+                   "Workload", &opt.model_path);
+  parser.AddOption("-c", "--concurrency", "n,n,...",
+                   "DS4 simultaneous requests, 1..8 (default: 1); pp is "
+                   "aggregate, tg per user",
                    "Workload", &opt.model_path);
   parser.AddOption(
       "-r", "--repetitions", "N",
@@ -303,8 +308,6 @@ int RunDeepSeekBenchmark(
       options.model_path,
       models::deepseek_v4_flash::ModelOptions{
           .max_context = static_cast<std::uint32_t>(required_context),
-          .prefill_chunk = 2048,
-          .power_percent = 100,
           .dspark_model_path = dspark ? options.dspark_model_path : "",
       },
       &error);
@@ -386,153 +389,295 @@ int RunDeepSeekBenchmark(
               << std::flush;
   };
 
-  std::unique_ptr<models::deepseek_v4_flash::Session> prepared_session;
-  std::size_t prepared_depth = 0;
-  for (const std::size_t depth : options.n_depths) {
-    std::unique_ptr<models::deepseek_v4_flash::SessionSnapshot> snapshot;
-    if (depth > 0 && !dspark) {
-      if (prepared_session == nullptr || depth < prepared_depth) {
-        prepared_session = model->CreateSession(
-            static_cast<std::uint32_t>(required_context), &error);
-        prepared_depth = 0;
+  for (const std::size_t concurrency : options.concurrency) {
+    if (concurrency > 1) {
+      using models::deepseek_v4_flash::Session;
+      for (const std::size_t depth : options.n_depths) {
+        auto base = model->CreateSession(
+            static_cast<uint32_t>(required_context), &error);
+        const std::size_t prefix = depth > 0 ? depth : 16;
+        if (!base || !base->Sync(std::span(tokens).first(prefix), &error)) {
+          std::cerr << "Error preparing concurrent depth: " << error << '\n';
+          return 1;
+        }
+        auto snapshot = base->SaveSnapshot(&error);
+        if (!snapshot) {
+          std::cerr << "Error preparing concurrent snapshot: " << error << '\n';
+          return 1;
+        }
+        base.reset();
+        for (const bool generate : {false, true}) {
+          for (const std::size_t count :
+               generate ? options.n_gens : options.n_prompts) {
+            std::vector<double> runs;
+            for (std::size_t repeat = 0; repeat < options.repetitions;
+                 ++repeat) {
+              std::vector<std::unique_ptr<Session>> sessions;
+              std::vector<std::vector<int>> generated(concurrency);
+              for (std::size_t i = 0; i < concurrency; ++i) {
+                auto session = model->CreateSession(
+                    static_cast<uint32_t>(required_context), &error);
+                if (!session ||
+                    ((generate || depth > 0) &&
+                     !session->RestoreSnapshot(*snapshot, &error))) {
+                  std::cerr << "Error restoring concurrent depth: " << error
+                            << '\n';
+                  return 1;
+                }
+                sessions.push_back(std::move(session));
+                generated[i].reserve(count);
+              }
+              const auto start = std::chrono::steady_clock::now();
+              if (!generate) {
+                for (auto& session : sessions) {
+                  if (!session->Sync(std::span(tokens).first(depth + count),
+                                     &error)) {
+                    std::cerr << "Error in concurrent prefill: " << error
+                              << '\n';
+                    return 1;
+                  }
+                }
+              } else if (dspark) {
+                std::vector<std::vector<int>> emitted(concurrency);
+                while (true) {
+                  std::vector<models::deepseek_v4_flash::SessionDsparkBatchItem>
+                      items;
+                  std::vector<std::size_t> active;
+                  for (std::size_t i = 0; i < concurrency; ++i) {
+                    if (generated[i].size() == count)
+                      continue;
+                    active.push_back(i);
+                    items.push_back({.session = sessions[i].get(),
+                                     .max_tokens = count - generated[i].size(),
+                                     .max_draft_tokens = options.draft_tokens,
+                                     .emitted = &emitted[i]});
+                  }
+                  if (items.empty())
+                    break;
+                  if (!model->DsparkStepBatch(items, &error)) {
+                    std::cerr << "Error in concurrent DSpark: " << error
+                              << '\n';
+                    return 1;
+                  }
+                  for (const auto i : active) {
+                    if (emitted[i].empty() ||
+                        emitted[i].size() > count - generated[i].size()) {
+                      std::cerr << "Error: DSpark returned an invalid "
+                                   "benchmark token count\n";
+                      return 1;
+                    }
+                    generated[i].insert(generated[i].end(), emitted[i].begin(),
+                                        emitted[i].end());
+                  }
+                }
+              } else {
+                for (std::size_t step = 0; step < count; ++step) {
+                  std::vector<models::deepseek_v4_flash::SessionBatchItem>
+                      items;
+                  for (std::size_t i = 0; i < concurrency; ++i) {
+                    const int token = sessions[i]->SelectNext(0.0F, nullptr);
+                    generated[i].push_back(token);
+                    items.push_back(
+                        {.session = sessions[i].get(), .token = token});
+                  }
+                  if (!model->EvaluateBatch(items, &error)) {
+                    std::cerr << "Error in concurrent target decode: " << error
+                              << '\n';
+                    return 1;
+                  }
+                }
+              }
+              const double seconds =
+                  std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() - start)
+                      .count();
+              runs.push_back(
+                  static_cast<double>(count) *
+                  (generate ? 1.0 : static_cast<double>(concurrency)) /
+                  seconds);
+              if (options.verbose && generate) {
+                for (std::size_t i = 0; i < concurrency; ++i) {
+                  const auto stats = sessions[i]->DsparkStatistics();
+                  const auto* bytes =
+                      reinterpret_cast<const uint8_t*>(generated[i].data());
+                  std::cerr << "DeepSeek tg C=" << concurrency
+                            << " depth=" << depth << " request=" << i
+                            << " accepted=" << stats.support_accepted
+                            << " drafted=" << stats.support_drafted
+                            << " steps=" << stats.steps
+                            << " skipped=" << stats.skipped << " output_sha256="
+                            << crypto::Sha256Hex(std::span(
+                                   bytes, generated[i].size() * sizeof(int)))
+                            << '\n';
+                }
+              }
+            }
+            print_result(MakeTestName(generate ? "tg" : "pp", count, depth) +
+                             " C" + std::to_string(concurrency),
+                         ComputeStats(runs));
+          }
+        }
       }
-      if (prepared_session == nullptr ||
-          !prepared_session->Sync(std::span(tokens.data(), depth), &error)) {
-        std::cerr << "Error preparing DeepSeek depth " << depth << ": " << error
-                  << '\n';
-        return 1;
-      }
-      prepared_depth = depth;
-      snapshot = prepared_session->SaveSnapshot(&error);
-      if (snapshot == nullptr) {
-        std::cerr << "Error snapshotting DeepSeek depth " << depth << ": "
-                  << error << '\n';
-        return 1;
-      }
-      if (options.verbose) {
-        std::cerr << "Prepared DeepSeek depth " << depth
-                  << " snapshot_bytes=" << snapshot->SizeBytes() << '\n';
-      }
+      continue;
     }
-
-    for (const std::size_t prompt_length : options.n_prompts) {
-      if (depth + prompt_length >= required_context) {
-        std::cerr << "Error: DeepSeek prompt benchmark exceeds context\n";
-        return 1;
-      }
-      std::vector<double> runs;
-      runs.reserve(options.repetitions);
-      for (std::size_t repetition = 0; repetition < options.repetitions;
-           ++repetition) {
-        std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
-        models::deepseek_v4_flash::Session* session = prepared_session.get();
-        if (snapshot == nullptr) {
-          local_session = model->CreateSession(
+    std::unique_ptr<models::deepseek_v4_flash::Session> prepared_session;
+    std::size_t prepared_depth = 0;
+    for (const std::size_t depth : options.n_depths) {
+      std::unique_ptr<models::deepseek_v4_flash::SessionSnapshot> snapshot;
+      if (depth > 0) {
+        if (prepared_session == nullptr || depth < prepared_depth) {
+          prepared_session = model->CreateSession(
               static_cast<std::uint32_t>(required_context), &error);
-          session = local_session.get();
-          if (session != nullptr && depth > 0 &&
-              !session->Sync(std::span(tokens).first(depth), &error)) {
+          prepared_depth = 0;
+        }
+        if (prepared_session == nullptr ||
+            !prepared_session->Sync(std::span(tokens.data(), depth), &error)) {
+          std::cerr << "Error preparing DeepSeek depth " << depth << ": "
+                    << error << '\n';
+          return 1;
+        }
+        prepared_depth = depth;
+        snapshot = prepared_session->SaveSnapshot(&error);
+        if (snapshot == nullptr) {
+          std::cerr << "Error snapshotting DeepSeek depth " << depth << ": "
+                    << error << '\n';
+          return 1;
+        }
+        if (options.verbose) {
+          std::cerr << "Prepared DeepSeek depth " << depth
+                    << " snapshot_bytes=" << snapshot->SizeBytes() << '\n';
+        }
+      }
+
+      for (const std::size_t prompt_length : options.n_prompts) {
+        if (depth + prompt_length >= required_context) {
+          std::cerr << "Error: DeepSeek prompt benchmark exceeds context\n";
+          return 1;
+        }
+        std::vector<double> runs;
+        runs.reserve(options.repetitions);
+        for (std::size_t repetition = 0; repetition < options.repetitions;
+             ++repetition) {
+          std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
+          models::deepseek_v4_flash::Session* session = prepared_session.get();
+          if (snapshot == nullptr) {
+            local_session = model->CreateSession(
+                static_cast<std::uint32_t>(required_context), &error);
+            session = local_session.get();
+            if (session != nullptr && depth > 0 &&
+                !session->Sync(std::span(tokens).first(depth), &error)) {
+              session = nullptr;
+            }
+          } else if (!prepared_session->RestoreSnapshot(*snapshot, &error)) {
+            std::cerr << "Error restoring DeepSeek depth: " << error << '\n';
+            return 1;
+          }
+          if (session == nullptr) {
+            std::cerr << "Error creating DeepSeek session: " << error << '\n';
+            return 1;
+          }
+          const auto start = std::chrono::steady_clock::now();
+          if (!session->Sync(std::span(tokens.data(), depth + prompt_length),
+                             &error)) {
+            std::cerr << "Error running DeepSeek prefill: " << error << '\n';
+            return 1;
+          }
+          const double seconds = std::chrono::duration<double>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count();
+          runs.push_back(static_cast<double>(prompt_length) / seconds);
+          if (options.verbose) {
+            std::cerr << "DeepSeek pp depth=" << depth
+                      << " payload_bytes=" << session->PayloadBytes() << '\n';
+          }
+        }
+        print_result(MakeTestName("pp", prompt_length, depth),
+                     ComputeStats(runs));
+      }
+
+      for (const std::size_t generation_length : options.n_gens) {
+        const std::size_t prefix_length = depth > 0 ? depth : 16;
+        if (prefix_length + generation_length >= required_context) {
+          std::cerr << "Error: DeepSeek generation benchmark exceeds context\n";
+          return 1;
+        }
+        std::vector<double> runs;
+        runs.reserve(options.repetitions);
+        for (std::size_t repetition = 0; repetition < options.repetitions;
+             ++repetition) {
+          std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
+          models::deepseek_v4_flash::Session* session = prepared_session.get();
+          if (snapshot == nullptr) {
+            local_session = model->CreateSession(
+                static_cast<std::uint32_t>(required_context), &error);
+            session = local_session.get();
+            if (session != nullptr &&
+                !session->Sync(std::span(tokens.data(), prefix_length),
+                               &error)) {
+              session = nullptr;
+            }
+          } else if (!prepared_session->RestoreSnapshot(*snapshot, &error)) {
             session = nullptr;
           }
-        } else if (!prepared_session->RestoreSnapshot(*snapshot, &error)) {
-          std::cerr << "Error restoring DeepSeek depth: " << error << '\n';
-          return 1;
-        }
-        if (session == nullptr) {
-          std::cerr << "Error creating DeepSeek session: " << error << '\n';
-          return 1;
-        }
-        const auto start = std::chrono::steady_clock::now();
-        if (!session->Sync(std::span(tokens.data(), depth + prompt_length),
-                           &error)) {
-          std::cerr << "Error running DeepSeek prefill: " << error << '\n';
-          return 1;
-        }
-        const double seconds = std::chrono::duration<double>(
-                                   std::chrono::steady_clock::now() - start)
-                                   .count();
-        runs.push_back(static_cast<double>(prompt_length) / seconds);
-        if (options.verbose) {
-          std::cerr << "DeepSeek pp depth=" << depth
-                    << " payload_bytes=" << session->PayloadBytes() << '\n';
-        }
-      }
-      print_result(MakeTestName("pp", prompt_length, depth),
-                   ComputeStats(runs));
-    }
-
-    for (const std::size_t generation_length : options.n_gens) {
-      const std::size_t prefix_length = depth > 0 ? depth : 16;
-      if (prefix_length + generation_length >= required_context) {
-        std::cerr << "Error: DeepSeek generation benchmark exceeds context\n";
-        return 1;
-      }
-      std::vector<double> runs;
-      runs.reserve(options.repetitions);
-      for (std::size_t repetition = 0; repetition < options.repetitions;
-           ++repetition) {
-        std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
-        models::deepseek_v4_flash::Session* session = prepared_session.get();
-        if (snapshot == nullptr) {
-          local_session = model->CreateSession(
-              static_cast<std::uint32_t>(required_context), &error);
-          session = local_session.get();
-          if (session != nullptr &&
-              !session->Sync(std::span(tokens.data(), prefix_length), &error)) {
-            session = nullptr;
+          if (session == nullptr) {
+            std::cerr << "Error preparing DeepSeek generation: " << error
+                      << '\n';
+            return 1;
           }
-        } else if (!prepared_session->RestoreSnapshot(*snapshot, &error)) {
-          session = nullptr;
-        }
-        if (session == nullptr) {
-          std::cerr << "Error preparing DeepSeek generation: " << error << '\n';
-          return 1;
-        }
 
-        const auto start = std::chrono::steady_clock::now();
-        for (std::size_t step = 0; step < generation_length;) {
-          if (dspark) {
-            std::vector<int> emitted;
-            if (!session->DsparkStep(generation_length - step,
-                                     options.draft_tokens, &emitted, &error) ||
-                emitted.empty()) {
-              std::cerr << "Error running DSpark decode: " << error << '\n';
-              return 1;
+          std::vector<int> generated;
+          generated.reserve(generation_length);
+          const auto start = std::chrono::steady_clock::now();
+          for (std::size_t step = 0; step < generation_length;) {
+            if (dspark) {
+              std::vector<int> emitted;
+              if (!session->DsparkStep(generation_length - step,
+                                       options.draft_tokens, &emitted,
+                                       &error) ||
+                  emitted.empty()) {
+                std::cerr << "Error running DSpark decode: " << error << '\n';
+                return 1;
+              }
+              generated.insert(generated.end(), emitted.begin(), emitted.end());
+              step += emitted.size();
+            } else {
+              const int token = session->SelectNext(0.0F, nullptr);
+              if (token < 0 || !session->Evaluate(token, &error)) {
+                std::cerr << "Error running DeepSeek decode: " << error << '\n';
+                return 1;
+              }
+              generated.push_back(token);
+              ++step;
             }
-            step += emitted.size();
-          } else {
-            const int token = session->SelectNext(0.0F, nullptr);
-            if (token < 0 || !session->Evaluate(token, &error)) {
-              std::cerr << "Error running DeepSeek decode: " << error << '\n';
-              return 1;
-            }
-            ++step;
           }
-        }
-        const double seconds = std::chrono::duration<double>(
-                                   std::chrono::steady_clock::now() - start)
-                                   .count();
-        runs.push_back(static_cast<double>(generation_length) / seconds);
-        if (options.verbose) {
-          std::cerr << "DeepSeek tg depth=" << depth
-                    << " payload_bytes=" << session->PayloadBytes() << '\n';
-          if (dspark) {
+          const double seconds = std::chrono::duration<double>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count();
+          runs.push_back(static_cast<double>(generation_length) / seconds);
+          if (options.verbose) {
             const auto stats = session->DsparkStatistics();
-            std::cerr << "DSpark accepted=" << stats.support_accepted
-                      << " drafted=" << stats.support_drafted << '\n';
+            const auto* bytes =
+                reinterpret_cast<const uint8_t*>(generated.data());
+            std::cerr << "DeepSeek tg C=1 depth=" << depth
+                      << " request=0 accepted=" << stats.support_accepted
+                      << " drafted=" << stats.support_drafted
+                      << " steps=" << stats.steps
+                      << " skipped=" << stats.skipped << " output_sha256="
+                      << crypto::Sha256Hex(
+                             std::span(bytes, generated.size() * sizeof(int)))
+                      << '\n';
           }
         }
+        print_result(MakeTestName("tg", generation_length, depth),
+                     ComputeStats(runs));
       }
-      print_result(MakeTestName("tg", generation_length, depth),
-                   ComputeStats(runs));
-    }
 
-    if (snapshot && !prepared_session->RestoreSnapshot(*snapshot, &error)) {
-      std::cerr << "Error restoring final DeepSeek depth: " << error << '\n';
-      return 1;
+      if (snapshot && !prepared_session->RestoreSnapshot(*snapshot, &error)) {
+        std::cerr << "Error restoring final DeepSeek depth: " << error << '\n';
+        return 1;
+      }
     }
   }
-
   std::cout << '\n';
   return 0;
 }
@@ -604,6 +749,25 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
           return false;
         }
         opt.n_depths = std::move(*sizes);
+        return true;
+      });
+
+  parser.AddCustomOption(
+      "-c", "--concurrency", "n,n,...",
+      "DS4 simultaneous requests, 1..8 (default: 1); pp is aggregate, tg per "
+      "user",
+      "Workload",
+      [&opt](std::string_view, std::string_view value, std::string* error) {
+        auto sizes = ParseCommaSeparatedSizes(value, true);
+        if (!sizes || sizes->empty() ||
+            std::any_of(sizes->begin(), sizes->end(),
+                        [](auto size) { return size < 1 || size > 8; })) {
+          if (error)
+            *error =
+                "--concurrency requires DS4 request counts between 1 and 8";
+          return false;
+        }
+        opt.concurrency = std::move(*sizes);
         return true;
       });
 
@@ -793,6 +957,12 @@ int RunBench(std::span<const char* const> args) {
 #if defined(ENGINE_ENABLE_HIP)
   if (IsDeepSeekV4Flash(*reader)) {
     return RunDeepSeekBenchmark(opt, reader, model_load_start);
+  }
+
+  if (opt.concurrency != std::vector<std::size_t>{1}) {
+    std::cerr << "Error: concurrent model benchmarks currently support DS4 "
+                 "only; use the serving benchmark for Qwen\n";
+    return 1;
   }
 
   int device_count = 0;

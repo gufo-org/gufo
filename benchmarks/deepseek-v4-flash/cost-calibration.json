@@ -1,0 +1,674 @@
+{
+  "schema": "gufo.ds4-cost-calibration.v1",
+  "date": "2026-09-10",
+  "workload": "gfx1151; tg128; fixed repeating prefix; one isolated run per point; cycle cost includes drafting, verification and commit",
+  "limitations": "Some points contain only one or two probes because the previous controller backs off. These are cost estimates; qualify selected defaults with the repeated full release sweep.",
+  "cost_units": "hundredths of one ordinary AR batch decode step, rounded up to five units",
+  "candidate": {
+    "production_source_sha256": "d16c09c46943c884e1a45fd3eb8f1c169a74c4a934fa8989172156a7b164e08f",
+    "binary_sha256": "bcfd95e2ee097bd57ec3d8adb833418711659f1984fb67c22301aa30af0105f5",
+    "nix_output": "jmcn1w7y45fajyjjxkqx24ycjinnhcwk-gufo-eb1b81e-dirty"
+  },
+  "ar_control": {
+    "production_source_sha256": "8bf93c6df8a2940d0780672765855a2651c2d28214f611e4fb8cbd7e0ab3c175",
+    "binary_sha256": "27cc4d07ebcf7aef0321cefc509bc6d2b4128ad7a920b23ecdad01beddd844a5",
+    "log_sha256": "8c8eefce11d50d596a08a261e84eff04c2717fc4c09c032d48053bbbae64c38f"
+  },
+  "target_sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0",
+  "support_sha256": "7e319924541db3f7a163ed7e11d7532a70d48228ab59d36cb81e1d4511885360",
+  "logs_sha256": {
+    "max_tail_1": "8f95dbce49715df9a0d964391dbadb2fdd670d082f62db58855971fbca4779fb",
+    "max_tail_2": "a858fbb6084c31a5baa975b8f5a9bce7f4fe6b435228057a8368a74e9ff21554",
+    "max_tail_3": "ed7ae9392392061a23f20187e1c40bad4aa2a69d269407609337c6ae7154b4ae"
+  },
+  "records": [
+    {
+      "concurrency": 2,
+      "depth": 0,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 16.0,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 24,
+        "median_ms": 100.25399999999999,
+        "cost_hundredths_ar_step": 160.4064,
+        "median_draft_ms": 15.151,
+        "median_verify_ms": 83.3035,
+        "median_commit_ms": 1.7155
+      },
+      "calibrated_cost": 165,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 2,
+      "depth": 0,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 16.0,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 10,
+        "median_ms": 114.59049999999999,
+        "cost_hundredths_ar_step": 183.3448,
+        "median_draft_ms": 11.122,
+        "median_verify_ms": 100.92,
+        "median_commit_ms": 1.834
+      },
+      "calibrated_cost": 185,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 2,
+      "depth": 0,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 16.0,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 5,
+        "median_ms": 134.081,
+        "cost_hundredths_ar_step": 214.5296,
+        "median_draft_ms": 12.908,
+        "median_verify_ms": 118.672,
+        "median_commit_ms": 1.898
+      },
+      "calibrated_cost": 215,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 4,
+      "depth": 0,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 13.84,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 8,
+        "median_ms": 140.144,
+        "cost_hundredths_ar_step": 193.95929600000002,
+        "median_draft_ms": 24.0395,
+        "median_verify_ms": 112.6915,
+        "median_commit_ms": 3.367
+      },
+      "calibrated_cost": 195,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 4,
+      "depth": 0,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 13.84,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 2,
+        "median_ms": 184.794,
+        "cost_hundredths_ar_step": 255.754896,
+        "median_draft_ms": 14.286,
+        "median_verify_ms": 167.1115,
+        "median_commit_ms": 3.3965
+      },
+      "calibrated_cost": 260,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 4,
+      "depth": 0,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 13.84,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 1,
+        "median_ms": 308.966,
+        "cost_hundredths_ar_step": 427.608944,
+        "median_draft_ms": 26.454,
+        "median_verify_ms": 279.116,
+        "median_commit_ms": 3.396
+      },
+      "calibrated_cost": 430,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 6,
+      "depth": 0,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 11.2,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 2,
+        "median_ms": 199.85500000000002,
+        "cost_hundredths_ar_step": 223.83759999999998,
+        "median_draft_ms": 32.975,
+        "median_verify_ms": 161.767,
+        "median_commit_ms": 5.1129999999999995
+      },
+      "calibrated_cost": 225,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 6,
+      "depth": 0,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 11.2,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 1,
+        "median_ms": 244.25300000000001,
+        "cost_hundredths_ar_step": 273.56336,
+        "median_draft_ms": 20.401,
+        "median_verify_ms": 218.82,
+        "median_commit_ms": 5.032
+      },
+      "calibrated_cost": 275,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 6,
+      "depth": 0,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 11.2,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 1,
+        "median_ms": 330.764,
+        "cost_hundredths_ar_step": 370.45568,
+        "median_draft_ms": 40.337,
+        "median_verify_ms": 285.252,
+        "median_commit_ms": 5.175
+      },
+      "calibrated_cost": 375,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 8,
+      "depth": 0,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 10.18,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 2,
+        "median_ms": 249.426,
+        "cost_hundredths_ar_step": 253.91566799999998,
+        "median_draft_ms": 42.3575,
+        "median_verify_ms": 200.24099999999999,
+        "median_commit_ms": 6.827500000000001
+      },
+      "calibrated_cost": 255,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 8,
+      "depth": 0,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 10.18,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 1,
+        "median_ms": 321.331,
+        "cost_hundredths_ar_step": 327.114958,
+        "median_draft_ms": 29.04,
+        "median_verify_ms": 285.642,
+        "median_commit_ms": 6.649
+      },
+      "calibrated_cost": 330,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 8,
+      "depth": 0,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 10.18,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 1,
+        "median_ms": 433.109,
+        "cost_hundredths_ar_step": 440.904962,
+        "median_draft_ms": 50.873,
+        "median_verify_ms": 375.549,
+        "median_commit_ms": 6.687
+      },
+      "calibrated_cost": 445,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+    },
+    {
+      "concurrency": 2,
+      "depth": 4096,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 13.7,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 64,
+        "median_ms": 115.07400000000001,
+        "cost_hundredths_ar_step": 157.65138000000002,
+        "median_draft_ms": 15.238,
+        "median_verify_ms": 98.14,
+        "median_commit_ms": 1.7355
+      },
+      "calibrated_cost": 160,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 2,
+      "depth": 4096,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 13.7,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 42,
+        "median_ms": 135.36399999999998,
+        "cost_hundredths_ar_step": 185.44867999999997,
+        "median_draft_ms": 11.119,
+        "median_verify_ms": 122.455,
+        "median_commit_ms": 1.821
+      },
+      "calibrated_cost": 190,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 2,
+      "depth": 4096,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 13.7,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 32,
+        "median_ms": 159.3625,
+        "cost_hundredths_ar_step": 218.326625,
+        "median_draft_ms": 13.012,
+        "median_verify_ms": 144.3355,
+        "median_commit_ms": 1.8375
+      },
+      "calibrated_cost": 220,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 4,
+      "depth": 4096,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 10.75,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 2,
+        "median_ms": 171.37599999999998,
+        "cost_hundredths_ar_step": 184.2292,
+        "median_draft_ms": 24.857999999999997,
+        "median_verify_ms": 142.9805,
+        "median_commit_ms": 3.5374999999999996
+      },
+      "calibrated_cost": 185,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 4,
+      "depth": 4096,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 10.75,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 42,
+        "median_ms": 223.6985,
+        "cost_hundredths_ar_step": 240.4758875,
+        "median_draft_ms": 13.863,
+        "median_verify_ms": 206.156,
+        "median_commit_ms": 3.7115
+      },
+      "calibrated_cost": 245,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 4,
+      "depth": 4096,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 10.75,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 32,
+        "median_ms": 274.264,
+        "cost_hundredths_ar_step": 294.83380000000005,
+        "median_draft_ms": 17.943,
+        "median_verify_ms": 252.8025,
+        "median_commit_ms": 3.698
+      },
+      "calibrated_cost": 295,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 6,
+      "depth": 4096,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 8.47,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 2,
+        "median_ms": 248.2145,
+        "cost_hundredths_ar_step": 210.2376815,
+        "median_draft_ms": 33.7285,
+        "median_verify_ms": 209.289,
+        "median_commit_ms": 5.197
+      },
+      "calibrated_cost": 215,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 6,
+      "depth": 4096,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 8.47,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 2,
+        "median_ms": 323.33050000000003,
+        "cost_hundredths_ar_step": 273.86093350000004,
+        "median_draft_ms": 20.4215,
+        "median_verify_ms": 297.3845,
+        "median_commit_ms": 5.5245
+      },
+      "calibrated_cost": 275,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 6,
+      "depth": 4096,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 8.47,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 2,
+        "median_ms": 424.4065,
+        "cost_hundredths_ar_step": 359.47230550000006,
+        "median_draft_ms": 40.965,
+        "median_verify_ms": 377.881,
+        "median_commit_ms": 5.560499999999999
+      },
+      "calibrated_cost": 360,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 8,
+      "depth": 4096,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 7.23,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 2,
+        "median_ms": 317.466,
+        "cost_hundredths_ar_step": 229.52791800000003,
+        "median_draft_ms": 42.4615,
+        "median_verify_ms": 267.9675,
+        "median_commit_ms": 7.037
+      },
+      "calibrated_cost": 230,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 8,
+      "depth": 4096,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 7.23,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 2,
+        "median_ms": 421.05600000000004,
+        "cost_hundredths_ar_step": 304.4234880000001,
+        "median_draft_ms": 25.983,
+        "median_verify_ms": 387.7505,
+        "median_commit_ms": 7.3225
+      },
+      "calibrated_cost": 305,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 8,
+      "depth": 4096,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 7.23,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 2,
+        "median_ms": 562.5755,
+        "cost_hundredths_ar_step": 406.7420865,
+        "median_draft_ms": 56.191,
+        "median_verify_ms": 499.07000000000005,
+        "median_commit_ms": 7.3145
+      },
+      "calibrated_cost": 410,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+    },
+    {
+      "concurrency": 2,
+      "depth": 16384,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 12.86,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 64,
+        "median_ms": 123.432,
+        "cost_hundredths_ar_step": 158.733552,
+        "median_draft_ms": 15.405000000000001,
+        "median_verify_ms": 106.4075,
+        "median_commit_ms": 1.744
+      },
+      "calibrated_cost": 160,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 2,
+      "depth": 16384,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 12.86,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 42,
+        "median_ms": 146.9955,
+        "cost_hundredths_ar_step": 189.03621299999998,
+        "median_draft_ms": 11.355,
+        "median_verify_ms": 133.878,
+        "median_commit_ms": 1.853
+      },
+      "calibrated_cost": 190,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 2,
+      "depth": 16384,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 12.86,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 32,
+        "median_ms": 174.8045,
+        "cost_hundredths_ar_step": 224.798587,
+        "median_draft_ms": 13.2725,
+        "median_verify_ms": 159.473,
+        "median_commit_ms": 1.874
+      },
+      "calibrated_cost": 225,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 4,
+      "depth": 16384,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 9.7,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 2,
+        "median_ms": 188.624,
+        "cost_hundredths_ar_step": 182.96527999999998,
+        "median_draft_ms": 24.36,
+        "median_verify_ms": 160.7335,
+        "median_commit_ms": 3.5305
+      },
+      "calibrated_cost": 185,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 4,
+      "depth": 16384,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 9.7,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 42,
+        "median_ms": 245.7665,
+        "cost_hundredths_ar_step": 238.393505,
+        "median_draft_ms": 14.048,
+        "median_verify_ms": 228.2495,
+        "median_commit_ms": 3.7175000000000002
+      },
+      "calibrated_cost": 240,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 4,
+      "depth": 16384,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 9.7,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 32,
+        "median_ms": 305.561,
+        "cost_hundredths_ar_step": 296.39417,
+        "median_draft_ms": 18.0235,
+        "median_verify_ms": 283.991,
+        "median_commit_ms": 3.7145
+      },
+      "calibrated_cost": 300,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 6,
+      "depth": 16384,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 7.61,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 2,
+        "median_ms": 270.796,
+        "cost_hundredths_ar_step": 206.07575599999998,
+        "median_draft_ms": 33.812,
+        "median_verify_ms": 231.837,
+        "median_commit_ms": 5.147
+      },
+      "calibrated_cost": 210,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 6,
+      "depth": 16384,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 7.61,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 2,
+        "median_ms": 353.687,
+        "cost_hundredths_ar_step": 269.15580700000004,
+        "median_draft_ms": 20.5135,
+        "median_verify_ms": 327.65250000000003,
+        "median_commit_ms": 5.521
+      },
+      "calibrated_cost": 270,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 6,
+      "depth": 16384,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 7.61,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 2,
+        "median_ms": 483.12800000000004,
+        "cost_hundredths_ar_step": 367.660408,
+        "median_draft_ms": 41.0495,
+        "median_verify_ms": 436.4875,
+        "median_commit_ms": 5.591
+      },
+      "calibrated_cost": 370,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 8,
+      "depth": 16384,
+      "maximum_draft_tokens": 1,
+      "ar_tok_per_s_per_user": 6.39,
+      "observed_cycle": {
+        "tail": 1,
+        "samples": 2,
+        "median_ms": 342.753,
+        "cost_hundredths_ar_step": 219.01916699999995,
+        "median_draft_ms": 42.823499999999996,
+        "median_verify_ms": 292.96299999999997,
+        "median_commit_ms": 6.9665
+      },
+      "calibrated_cost": 220,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 8,
+      "depth": 16384,
+      "maximum_draft_tokens": 2,
+      "ar_tok_per_s_per_user": 6.39,
+      "observed_cycle": {
+        "tail": 2,
+        "samples": 2,
+        "median_ms": 473.26,
+        "cost_hundredths_ar_step": 302.41313999999994,
+        "median_draft_ms": 30.7295,
+        "median_verify_ms": 435.304,
+        "median_commit_ms": 7.2265
+      },
+      "calibrated_cost": 305,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    },
+    {
+      "concurrency": 8,
+      "depth": 16384,
+      "maximum_draft_tokens": 3,
+      "ar_tok_per_s_per_user": 6.39,
+      "observed_cycle": {
+        "tail": 3,
+        "samples": 2,
+        "median_ms": 608.7570000000001,
+        "cost_hundredths_ar_step": 388.995723,
+        "median_draft_ms": 50.688500000000005,
+        "median_verify_ms": 550.7025,
+        "median_commit_ms": 7.366
+      },
+      "calibrated_cost": 390,
+      "ar_dspark_tokens_equal_for_all_requests": true,
+      "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+    }
+  ]
+}

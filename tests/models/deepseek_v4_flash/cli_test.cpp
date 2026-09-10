@@ -54,5 +54,22 @@ int main() {
   Expect(
       prompt && bench && prompt->draft_tokens == 3 && bench->draft_tokens == 3,
       "both commands retain the requested draft budget");
+  const char* sweep_args[] = {
+      "--concurrency",          "1,2,4,6,8", "-p", "2048", "-n", "128", "-d",
+      "0,4096,8192,12288,16384"};
+  const auto sweep = gufo::cli::ParseBenchOptions(sweep_args);
+  Expect(sweep &&
+             sweep->concurrency == std::vector<std::size_t>{1, 2, 4, 6, 8} &&
+             sweep->n_prompts == std::vector<std::size_t>{2048} &&
+             sweep->n_gens == std::vector<std::size_t>{128} &&
+             sweep->n_depths ==
+                 std::vector<std::size_t>{0, 4096, 8192, 12288, 16384},
+         "DS4 benchmark retains exact concurrency, prompt, generation, and "
+         "depth workload");
+  for (const char* invalid : {"0", "9", "2,0", "-1", ""}) {
+    const char* invalid_args[] = {"--concurrency", invalid};
+    Expect(!gufo::cli::ParseBenchOptions(invalid_args),
+           "invalid DS4 concurrency is rejected");
+  }
   std::cout << "DS4 CLI option contract passed\n";
 }

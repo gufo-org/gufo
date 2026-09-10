@@ -8,24 +8,6 @@ static inline bool hip_hc_vec4_ok(uint32_t n_embd, const void *a, const void *b,
            (((uintptr_t)a | (uintptr_t)b | (uintptr_t)c) & 15u) == 0u;
 }
 
-extern "C" int ds4_gpu_hc_split_sinkhorn_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *mix, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_hc, uint32_t sinkhorn_iters, float eps) {
-    if (!out || !mix || !model_map || n_hc != 4) return 0;
-    const uint64_t mix_bytes = 24ull * sizeof(float);
-    if (!hip_model_range_fits(model_size, scale_offset, 3ull * sizeof(float)) ||
-        !hip_model_range_fits(model_size, base_offset, mix_bytes) ||
-        !hip_tensor_has_bytes(mix, mix_bytes) || !hip_tensor_has_bytes(out, mix_bytes)) return 0;
-    const float *scale = (const float *)hip_model_range_ptr(model_map, scale_offset, 3ull * sizeof(float), "hc_scale");
-    const float *base = (const float *)hip_model_range_ptr(model_map, base_offset, mix_bytes, "hc_base");
-    if (!scale || !base) return 0;
-    uint32_t n_rows = (uint32_t)(mix->bytes / mix_bytes);
-    if (out->bytes / mix_bytes < n_rows) n_rows = (uint32_t)(out->bytes / mix_bytes);
-    hc_split_sinkhorn_kernel<<<(n_rows + 255) / 256, 256>>>(
-        (float *)out->ptr, (const float *)mix->ptr,
-        scale,
-        base,
-        n_rows, sinkhorn_iters, eps);
-    return hip_ok(hipGetLastError(), "hc_split_sinkhorn launch");
-}
 static int hip_hc_flat_token_count(const ds4_gpu_tensor *out, uint32_t n_embd, uint64_t *n_tokens) {
     if (!out || n_embd == 0u || !n_tokens) return 0;
     uint64_t row_bytes = 0;
@@ -66,21 +48,6 @@ extern "C" int ds4_gpu_hc_weighted_sum_tensor(ds4_gpu_tensor *out, const ds4_gpu
         (float *)out->ptr, (const float *)residual_hc->ptr, (const float *)weights->ptr,
         n_embd, n_hc, n_tokens, n_hc);
     return hip_ok(hipGetLastError(), "hc_weighted_sum launch");
-}
-extern "C" int ds4_gpu_hc_weighted_sum_split_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc) {
-    uint64_t n_tokens64 = 0, residual_bytes = 0, split_bytes = 0, mix_hc = 0;
-    if (!out || !residual_hc || !split ||
-        !hip_hc_flat_token_count(out, n_embd, &n_tokens64) ||
-        !hip_hc_mix_width(n_hc, &mix_hc) ||
-        !hip_u64_mul3_checked(n_tokens64, (uint64_t)n_hc * n_embd, sizeof(float), &residual_bytes) ||
-        !hip_u64_mul3_checked(n_tokens64, mix_hc, sizeof(float), &split_bytes) ||
-        residual_hc->bytes < residual_bytes || split->bytes < split_bytes) return 0;
-    uint32_t n_tokens = (uint32_t)n_tokens64;
-    uint32_t stride = (uint32_t)mix_hc;
-    hc_weighted_sum_kernel<<<((uint64_t)n_embd * n_tokens + 255) / 256, 256>>>(
-        (float *)out->ptr, (const float *)residual_hc->ptr, (const float *)split->ptr,
-        n_embd, n_hc, n_tokens, stride);
-    return hip_ok(hipGetLastError(), "hc_weighted_sum_split launch");
 }
 extern "C" int ds4_gpu_hc_split_weighted_sum_tensor(
         ds4_gpu_tensor       *out,
@@ -127,13 +94,9 @@ extern "C" int ds4_gpu_hc_split_weighted_sum_tensor(
             n_embd, n_hc, (uint32_t)n_rows, sinkhorn_iters, eps);
     return hip_ok(hipGetLastError(), "hc split weighted sum launch");
 }
-/* Fused norm + 24-wide mix projection + Sinkhorn split + weighted sum.
- *
- * Replaces three passes over the hyper-connection row with one; see
- * hc4_norm_mix_split_weighted_sum_kernel. Returns 0 when the shape, the F16
- * weight alignment, or the row width does not fit the register tiling, so the
- * caller keeps the separate chain. `mix` and `split` shift by the projection's
- * reassociation, so this is scoped to prompt-chunk width by the caller. */
+/* Fused HC pre-block computation for the supported 4x4096 row and F16 GGUF
+ * weights. Invalid storage or a failed launch is an error; do not silently
+ * change the numerical path. Narrow verification retains scalar arithmetic. */
 extern "C" int ds4_gpu_hc_norm_mix_split_weighted_sum_tensor(
         ds4_gpu_tensor       *out,
         ds4_gpu_tensor       *mix,
@@ -295,29 +258,6 @@ extern "C" int ds4_gpu_output_hc_weights_tensor(
             (uint32_t)n_tokens,
             eps);
     return hip_ok(hipGetLastError(), "output hc weights launch");
-}
-extern "C" int ds4_gpu_hc_expand_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *block_out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *post, const ds4_gpu_tensor *comb, uint32_t n_embd, uint32_t n_hc) {
-    uint64_t n_tokens64 = 0, flat_bytes = 0, hc_bytes = 0, post_bytes = 0, comb_bytes = 0, comb_stride = 0;
-    if (!out_hc || !block_out || !residual_hc || !post || !comb ||
-        !hip_hc_hc_token_count(out_hc, n_embd, n_hc, &n_tokens64) ||
-        !hip_u64_mul3_checked(n_tokens64, n_embd, sizeof(float), &flat_bytes) ||
-        !hip_u64_mul3_checked(n_tokens64, (uint64_t)n_hc * n_embd, sizeof(float), &hc_bytes) ||
-        !hip_u64_mul3_checked(n_tokens64, n_hc, sizeof(float), &post_bytes) ||
-        !hip_u64_mul_checked(n_hc, n_hc, &comb_stride) || comb_stride > UINT32_MAX ||
-        !hip_u64_mul3_checked(n_tokens64, comb_stride, sizeof(float), &comb_bytes) ||
-        block_out->bytes < flat_bytes || residual_hc->bytes < hc_bytes ||
-        post->bytes < post_bytes || comb->bytes < comb_bytes) return 0;
-    uint32_t n_tokens = (uint32_t)n_tokens64;
-    uint64_t n_elem = (uint64_t)n_tokens * n_hc * n_embd;
-    hc_expand_kernel<<<(n_elem + 255) / 256, 256>>>((float *)out_hc->ptr,
-                                                    (const float *)block_out->ptr,
-                                                    (const float *)block_out->ptr,
-                                                    (const float *)residual_hc->ptr,
-                                                    (const float *)post->ptr,
-                                                    (const float *)comb->ptr,
-                                                    n_embd, n_hc, n_tokens,
-                                                    n_hc, (uint32_t)comb_stride, 0);
-    return hip_ok(hipGetLastError(), "hc_expand launch");
 }
 extern "C" int ds4_gpu_hc_expand_split_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *block_out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc) {
     uint64_t n_tokens64 = 0, flat_bytes = 0, hc_bytes = 0, split_bytes = 0, mix_hc64 = 0;
@@ -524,24 +464,4 @@ extern "C" int ds4_gpu_dspark_capture_features_tensor(
             n_hc,
             n_rows);
     return hip_ok(hipGetLastError(), "dspark capture features launch");
-}
-
-extern "C" int ds4_gpu_dspark_repeat_hc_tensor(
-        ds4_gpu_tensor       *out_hc,
-        const ds4_gpu_tensor *x,
-        uint32_t                n_embd,
-        uint32_t                n_hc,
-        uint32_t                n_rows) {
-    if (n_embd == 0u || n_hc == 0u || n_rows == 0u ||
-        !hip_tensor_has_elems3(out_hc, n_rows, n_hc, n_embd, sizeof(float)) ||
-        !hip_tensor_has_elems2(x, n_rows, n_embd, sizeof(float))) {
-        return 0;
-    }
-    const uint64_t n = (uint64_t)n_embd * n_hc * n_rows;
-    dspark_repeat_hc_kernel<<<(n + 255u) / 256u, 256>>>((float *)out_hc->ptr,
-                                                        (const float *)x->ptr,
-                                                        n_embd,
-                                                        n_hc,
-                                                        n_rows);
-    return hip_ok(hipGetLastError(), "dspark repeat hc launch");
 }

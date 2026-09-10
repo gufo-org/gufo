@@ -62,52 +62,16 @@ extern "C" int ds4_gpu_attention_decode_heads_tensor(
     const float *sinks = (const float *)hip_model_range_ptr(
             model_map, sinks_offset, (uint64_t)n_head * sizeof(float), "attn_sinks");
     if (!sinks) return 0;
-    {
-      const uint32_t rows = n_raw + n_comp;
-      const size_t shmem = (size_t)(rows ? rows : 1u) * sizeof(float);
-      attention_decode_mixed_one_fast_oldhip_kernel<<<(unsigned)n_head, 256,
-                                                      shmem>>>(
-          (float*)heads->ptr, (const float*)q->ptr, (const float*)raw_kv->ptr,
-          n_comp ? (const float*)comp_kv->ptr : NULL,
-          use_mask ? (const float*)comp_mask->ptr : NULL, sinks, n_raw, raw_cap,
-          raw_start, n_comp, use_mask, n_head, head_dim,
-          (uint32_t)((head_dim & 3u) == 0u));
-      return hip_ok(hipGetLastError(), "attention decode oldhip fast launch");
-    }
-    if (!hip_attention_score_buffer_fits(n_comp)) {
-        if (!use_mask && head_dim == 512u) {
-            dim3 online_grid(1, (n_head + 7u) / 8u, 1);
-            attention_decode_mixed_heads8_online_kernel<<<online_grid, 256>>>((float *)heads->ptr,
-                                                                              sinks,
-                                                                              (const float *)q->ptr,
-                                                                              (const float *)raw_kv->ptr,
-                                                                              n_comp ? (const float *)comp_kv->ptr : (const float *)raw_kv->ptr,
-                                                                              1,
-                                                                              n_raw - 1u,
-                                                                              n_raw,
-                                                                              raw_cap,
-                                                                              raw_start,
-                                                                              n_comp,
-                                                                              0,
-                                                                              0,
-                                                                              n_head,
-                                                                              head_dim);
-            return hip_ok(hipGetLastError(), "attention decode online launch");
-        }
-        fprintf(stderr, DS4_GPU_LOG_PREFIX "attention score buffer too small for %u compressed rows\n", n_comp);
-        return 0;
-    }
-    dim3 grid(1, n_head, 1);
-    attention_decode_mixed_kernel<<<grid, 256>>>((float *)heads->ptr,
-                                                 sinks,
-                                                 (const float *)q->ptr,
-                                                 (const float *)raw_kv->ptr,
-                                                 n_comp ? (const float *)comp_kv->ptr : (const float *)raw_kv->ptr,
-                                                 use_mask ? (const float *)comp_mask->ptr : NULL,
-                                                 use_mask,
-                                                 1, 0, n_raw, raw_cap, raw_start, n_comp,
-                                                 0, 0, n_head, head_dim);
-    return hip_ok(hipGetLastError(), "attention decode launch");
+    const uint32_t rows = n_raw + n_comp;
+    const size_t shmem = (size_t)rows * sizeof(float);
+    attention_decode_mixed_one_fast_oldhip_kernel<<<(unsigned)n_head, 256,
+                                                    shmem>>>(
+        (float*)heads->ptr, (const float*)q->ptr, (const float*)raw_kv->ptr,
+        n_comp ? (const float*)comp_kv->ptr : NULL,
+        use_mask ? (const float*)comp_mask->ptr : NULL, sinks, n_raw, raw_cap,
+        raw_start, n_comp, use_mask, n_head, head_dim,
+        (uint32_t)((head_dim & 3u) == 0u));
+    return hip_ok(hipGetLastError(), "attention decode oldhip fast launch");
 }
 extern "C" int ds4_gpu_attention_prefill_raw_heads_tensor(ds4_gpu_tensor *heads, const void *model_map, uint64_t model_size, uint64_t sinks_offset, const ds4_gpu_tensor *q, const ds4_gpu_tensor *raw_kv, uint32_t n_tokens, uint32_t window, uint32_t n_head, uint32_t head_dim) {
   if (!heads || !q || !raw_kv || !model_map || sinks_offset > model_size ||
@@ -239,6 +203,35 @@ static int attention_decode_batch_launch(
     const float *sinks = (const float *)hip_model_range_ptr(
             model_map, sinks_offset, (uint64_t)n_head * sizeof(float), "attn_sinks");
     if (!sinks) return 0;
+    if (ds4_rocm_verifier_batch_mode() && n_tokens <= 6u) {
+      const uint32_t first_raw_pos = pos0 + n_tokens - n_raw;
+      const uint64_t row_elements = (uint64_t)n_head * head_dim;
+      for (uint32_t t = 0; t < n_tokens; ++t) {
+        const uint32_t end = pos0 + t + 1u;
+        const uint32_t first = window && end > window
+                                   ? std::max(first_raw_pos, end - window)
+                                   : first_raw_pos;
+        const uint32_t row_raw = end - first;
+        const uint32_t row_start =
+            (raw_start + first - first_raw_pos) % raw_cap;
+        const uint32_t row_comp = ratio ? std::min(n_comp, end / ratio) : 0u;
+        ds4_gpu_tensor row_heads{(float*)heads->ptr + t * row_elements,
+                                 row_elements * sizeof(float), 0};
+        ds4_gpu_tensor row_q{(float*)q->ptr + t * row_elements,
+                             row_elements * sizeof(float), 0};
+        ds4_gpu_tensor row_mask{
+            use_comp_mask ? (float*)comp_mask->ptr + (uint64_t)t * n_comp
+                          : nullptr,
+            (uint64_t)row_comp * sizeof(float), 0};
+        if (!ds4_gpu_attention_decode_heads_tensor(
+                &row_heads, model_map, model_size, sinks_offset, &row_q, raw_kv,
+                row_raw, raw_cap, row_start, comp_kv, 0u, row_comp,
+                use_comp_mask ? &row_mask : nullptr, use_comp_mask, n_head,
+                head_dim))
+          return 0;
+      }
+      return 1;
+    }
     constexpr int fast_window_attention = 1;
     if (!hip_attention_score_buffer_fits(n_comp)) {
         if (!use_comp_mask && head_dim == 512u) {
@@ -413,6 +406,31 @@ extern "C" int ds4_gpu_attention_indexed_mixed_batch_heads_tensor(
         n_tokens >= 128u && n_head == 64u && head_dim == 512u &&
         top_k == 512u && window <= 256u;
     if (comp_kv_f16 && !wmma_supported) return 0;
+    if (ds4_rocm_verifier_batch_mode() && n_tokens > 1u && n_tokens <= 6u) {
+      const uint32_t first_raw_pos = pos0 + n_tokens - n_raw;
+      const uint64_t row_elements = (uint64_t)n_head * head_dim;
+      for (uint32_t t = 0; t < n_tokens; ++t) {
+        const uint32_t end = pos0 + t + 1u;
+        const uint32_t first = window && end > window
+                                   ? std::max(first_raw_pos, end - window)
+                                   : first_raw_pos;
+        const uint32_t row_raw = end - first;
+        const uint32_t row_start =
+            (raw_start + first - first_raw_pos) % raw_cap;
+        const size_t shmem =
+            (size_t)(row_raw + std::min(top_k, n_comp)) * sizeof(float);
+        attention_decode_indexed_mixed_one_fast_oldhip_kernel<<<n_head, 256,
+                                                                shmem>>>(
+            (float*)heads->ptr + t * row_elements,
+            (float*)q->ptr + t * row_elements, (float*)raw_kv->ptr,
+            (float*)comp_kv->ptr, topk_ptr + (uint64_t)t * top_k, sinks,
+            row_raw, raw_cap, row_start, n_comp, top_k, pos0 + t, ratio, n_head,
+            head_dim, (head_dim & 3u) == 0u);
+        if (!hip_ok(hipGetLastError(), "indexed verifier scalar row"))
+          return 0;
+      }
+      return 1;
+    }
     if (n_tokens == 1u) {
       const uint32_t rows = n_raw + (top_k < n_comp ? top_k : n_comp);
       const size_t shmem = (size_t)(rows ? rows : 1u) * sizeof(float);

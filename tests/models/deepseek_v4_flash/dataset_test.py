@@ -118,6 +118,39 @@ class EvalDatasetTest(unittest.TestCase):
             self.assertNotIn("question", case)
             self.assertNotIn("title", case)
 
+    def test_official_continuation_fixture(self) -> None:
+        data = self.path.with_name("official-0731.json").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(),
+            "0ec57ef24cc0cb5838a4c0ccacf806edc12cbe09f27f0c13efdf90eb33591a4d",
+        )
+        document = json.loads(data)
+        self.assertEqual(document["checkpoint"], "0731")
+        self.assertEqual(
+            document["source_revision"],
+            "6289c516273979173abbc062209a81dd3706b804",
+        )
+        self.assertIn("MIT License", document["license"])
+        self.assertEqual(len(document["source_files_sha256"]), 313)
+        cases = document["cases"]
+        self.assertEqual(len({case["id"] for case in cases}), 105)
+        self.assertEqual(
+            Counter(case["group"] for case in cases),
+            Counter({"continuation-100": 100, "smoke-5": 5}),
+        )
+        tokens = Counter()
+        for case in cases:
+            self.assertRegex(case["id"], r"^[a-zA-Z0-9_-]+$")
+            self.assertTrue(case["prompt"])
+            pieces = [bytes.fromhex(value)
+                      for value in case["token_bytes_hex"]]
+            self.assertTrue(all(pieces))
+            self.assertEqual(b"".join(pieces),
+                             case["continuation"].encode("utf-8"))
+            tokens[case["group"]] += len(pieces)
+        self.assertEqual(tokens,
+                         Counter({"continuation-100": 2313, "smoke-5": 14}))
+
 
 if __name__ == "__main__":
     unittest.main()

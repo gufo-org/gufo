@@ -604,6 +604,7 @@ struct TextGenerationScheduler::Impl {
   }
 
   void StepMultiTokenDecode(const std::shared_ptr<ScheduledRequest>& request) {
+    consecutive_active_prefill_chunks = 0;
     try {
       if (CompleteIfStopped(request)) {
         return;
@@ -791,14 +792,20 @@ struct TextGenerationScheduler::Impl {
       return;
     }
 
-    const std::string execution_plan =
-        "dspark-batched-w" + std::to_string(plan.physical_width);
     for (std::size_t index = 0; index < prepared.size(); ++index) {
       const auto& item = prepared[index];
       const auto& step = steps[index];
-      item.request->result.physical_execution_width = std::max(
-          item.request->result.physical_execution_width, plan.physical_width);
-      item.request->result.execution_plan = execution_plan;
+      if (step.execution_plan.physical_width >=
+          item.request->result.physical_execution_width) {
+        item.request->result.physical_execution_width =
+            step.execution_plan.physical_width;
+        item.request->result.execution_plan =
+            step.execution_plan.kind == TextExecutionPlanKind::kBatched
+                ? "batched-w" +
+                      std::to_string(step.execution_plan.physical_width)
+                : (runner_pool->capacity() == 1 ? "serial-c1"
+                                                : "serial-fallback");
+      }
       item.request->result.draft_tokens += step.draft_tokens;
       item.request->result.draft_accepted_tokens += step.draft_accepted_tokens;
 
@@ -913,22 +920,18 @@ struct TextGenerationScheduler::Impl {
           ready->runner_request.PrepareBatchExecution();
         }
       }
-      if (preparing_multi_token_batch && !decoding.empty()) {
-        auto request = std::move(prefilling.front());
-        prefilling.pop_front();
-        StepPrefill(request, true);
-        if (!IsTerminal(request)) {
-          if (request->runner_request.prefill_complete()) {
-            request->decode_due = true;
-            decoding.push_back(std::move(request));
-          } else {
-            prefilling.push_back(std::move(request));
-          }
-        }
-        continue;
-      }
-
-      if (!prefilling.empty() && !decoding.empty() && !due_decoder) {
+      // Give simultaneous new requests one bounded chunk to form their first
+      // batch. Once decoding starts, every due decoder runs before more
+      // prefill.
+      const bool assemble_initial_batch =
+          preparing_multi_token_batch &&
+          consecutive_active_prefill_chunks == 0 &&
+          std::all_of(decoding.begin(), decoding.end(),
+                      [](const auto& request) {
+                        return request->result.tokens.empty();
+                      });
+      if (!prefilling.empty() && !decoding.empty() &&
+          (!due_decoder || assemble_initial_batch)) {
         auto request = std::move(prefilling.front());
         prefilling.pop_front();
         StepPrefill(request, true);

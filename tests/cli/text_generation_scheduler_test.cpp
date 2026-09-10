@@ -147,6 +147,8 @@ struct FakeControl {
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
+  bool batched_multi_token_decode{false};
+  std::size_t actual_batch_width{4};
   bool prefix_reuse{true};
 };
 
@@ -204,6 +206,9 @@ public:
                 .incremental_text_is_exact =
                     control_->incremental_text_is_exact,
                 .multi_token_decode = control_->multi_token_decode,
+                .batched_multi_token_decode =
+                    control_->batched_multi_token_decode,
+                .batched_multi_token_decode_max_width = 4,
                 .prefix_reuse = control_->prefix_reuse,
             },
         .persistence = std::nullopt,
@@ -377,20 +382,29 @@ public:
     TextDecodeStep step;
     step.selections.reserve(count);
     for (std::size_t index = 0; index < count; ++index) {
-      const TextRunnerToken token =
-          *fake.frontier + static_cast<TextRunnerToken>(index);
+      const TextRunnerToken token = *fake.frontier;
       step.selections.push_back({
           .stop = false,
           .token = token,
           .piece = std::to_string(token),
       });
+      Advance(state, token);
     }
     step.draft_tokens = count + 1;
     step.draft_accepted_tokens = count;
-    fake.position += count;
-    fake.decode_count += count;
-    fake.frontier = *fake.frontier + static_cast<TextRunnerToken>(count);
     return step;
+  }
+
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+      std::span<const gufo::server::TextRunnerDecode> decodes) const override {
+    auto steps = TextModelRunner::DecodeBatch(decodes);
+    const auto width = std::min(control_->actual_batch_width, decodes.size());
+    for (auto& step : steps) {
+      step.execution_plan = {.kind = width > 1 ? TextExecutionPlanKind::kBatched
+                                               : TextExecutionPlanKind::kSerial,
+                             .physical_width = width};
+    }
+    return steps;
   }
 
   void AdvanceBatch(
@@ -559,6 +573,29 @@ void TestMultiTokenRunnerCanSwitchToBatchedExecution() {
          "both resident states are prepared before target batching");
 }
 
+void TestModelOwnedBatchMetrics() {
+  for (const std::size_t actual_width : {1U, 2U}) {
+    auto control = std::make_shared<FakeControl>();
+    control->multi_token_decode = true;
+    control->batched_multi_token_decode = true;
+    control->supports_batched_advance = true;
+    control->actual_batch_width = actual_width;
+    control->block_prefill_label = 1;
+    auto scheduler = MakeScheduler(control, 2);
+    auto first = scheduler->Submit({1}, 12, 0.0F);
+    control->WaitForPrefill(1);
+    auto second = scheduler->Submit({2}, 12, 0.0F);
+    control->ReleasePrefill();
+    for (const auto& result : {first.Wait(), second.Wait()}) {
+      Expect(
+          result.physical_execution_width == actual_width &&
+              result.execution_plan ==
+                  (actual_width == 1 ? "serial-fallback" : "batched-w2"),
+          "scheduler reports the runner's actual subgroup or serial execution");
+    }
+  }
+}
+
 void TestMultiResidentPrefillUsesBoundedWorkUnits() {
   auto control = std::make_shared<FakeControl>();
   auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
@@ -579,19 +616,23 @@ void TestMultiResidentPrefillUsesBoundedWorkUnits() {
          "multi-resident prefill yields between bounded work units");
 }
 
-void TestDecodeActivePrefillIsBounded() {
+void TestDecodeActivePrefillIsBounded(bool multi_token, bool batched) {
   auto control = std::make_shared<FakeControl>();
+  control->multi_token_decode = multi_token;
+  control->batched_multi_token_decode = batched;
+  control->supports_batched_advance = multi_token;
   control->block_advance_label = 1;
   auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
 
-  auto request_a = scheduler->Submit({1}, 10, 0.0F);
+  const std::size_t output_tokens = multi_token ? 30 : 10;
+  auto request_a = scheduler->Submit({1}, output_tokens, 0.0F);
   control->WaitForAdvance(1);
   auto request_b = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F);
   control->ReleaseAdvance();
 
   const auto result_a = request_a.Wait();
   const auto result_b = request_b.Wait();
-  Expect(result_a.tokens == ExpectedTokens(1, 10),
+  Expect(result_a.tokens == ExpectedTokens(1, output_tokens),
          "active decoder preserves its isolated trajectory");
   Expect(result_b.tokens == ExpectedTokens(2, 2),
          "chunked prefill preserves the new request trajectory");
@@ -627,13 +668,17 @@ void TestDecodeActivePrefillIsBounded() {
          "chunk metrics capture the selected active-decode policy");
 }
 
-void TestPrefillYieldsToEveryDueDecoder() {
+void TestPrefillYieldsToEveryDueDecoder(bool multi_token, bool batched) {
   auto control = std::make_shared<FakeControl>();
+  control->multi_token_decode = multi_token;
+  control->batched_multi_token_decode = batched;
+  control->supports_batched_advance = multi_token;
   control->block_advance_label = 2;
   auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
 
-  auto request_a = scheduler->Submit({1}, 10, 0.0F);
-  auto request_b = scheduler->Submit({2}, 10, 0.0F);
+  const std::size_t output_tokens = multi_token ? 30 : 10;
+  auto request_a = scheduler->Submit({1}, output_tokens, 0.0F);
+  auto request_b = scheduler->Submit({2}, output_tokens, 0.0F);
   control->WaitForAdvance(2);
   auto request_c = scheduler->Submit({3, 30, 31, 32, 33, 34, 35}, 2, 0.0F);
   control->ReleaseAdvance();
@@ -641,8 +686,8 @@ void TestPrefillYieldsToEveryDueDecoder() {
   const auto result_a = request_a.Wait();
   const auto result_b = request_b.Wait();
   const auto result_c = request_c.Wait();
-  Expect(result_a.tokens == ExpectedTokens(1, 10) &&
-             result_b.tokens == ExpectedTokens(2, 10) &&
+  Expect(result_a.tokens == ExpectedTokens(1, output_tokens) &&
+             result_b.tokens == ExpectedTokens(2, output_tokens) &&
              result_c.tokens == ExpectedTokens(3, 2),
          "all mixed prefill/decode trajectories remain isolated");
 
@@ -1085,9 +1130,16 @@ int main() {
   TestRunnerCanReuseExactIncrementalText();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
   TestMultiTokenRunnerCanSwitchToBatchedExecution();
+  TestModelOwnedBatchMetrics();
   TestMultiResidentPrefillUsesBoundedWorkUnits();
-  TestDecodeActivePrefillIsBounded();
-  TestPrefillYieldsToEveryDueDecoder();
+  for (const bool multi_token : {false, true}) {
+    for (const bool batched : {false, true}) {
+      if (batched && !multi_token)
+        continue;
+      TestDecodeActivePrefillIsBounded(multi_token, batched);
+      TestPrefillYieldsToEveryDueDecoder(multi_token, batched);
+    }
+  }
   TestNonIncrementalRunnerFallsBackSafely();
   TestPendingLimitsRejectBeforeStateAdmission();
   TestPendingClientsAreRoundRobinAndIndividuallyBounded();

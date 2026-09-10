@@ -33,12 +33,6 @@ __global__ static void swiglu_kernel(float *out, const float *gate, const float 
     out[i] = s * u * weight;
 }
 
-__global__ static void add_kernel(float *out, const float *a, const float *b, uint32_t n) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    out[i] = a[i] + b[i];
-}
-
 __global__ static void zero_kernel(float *out, uint64_t n) {
     uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = 0.0f;

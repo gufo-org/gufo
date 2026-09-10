@@ -17,8 +17,6 @@ namespace gufo::models::deepseek_v4_flash {
 
 struct ModelOptions {
   std::uint32_t max_context = 4096;
-  std::uint32_t prefill_chunk = 2048;
-  int power_percent = 100;
   /// Optional DSpark support model. Empty leaves speculative decoding off.
   std::string dspark_model_path;
 };
@@ -38,6 +36,9 @@ struct SessionDsparkBatchItem {
   std::vector<int>* emitted = nullptr;
 };
 
+/// GPU operations, including session creation/destruction, share scratch
+/// storage and must be serialized. Use the batch APIs to advance concurrent
+/// requests; the server scheduler owns and serializes their dispatch.
 class Model final : public std::enable_shared_from_this<Model> {
 public:
   ~Model();
@@ -72,7 +73,6 @@ public:
   [[nodiscard]] int EosToken() const;
   [[nodiscard]] int VocabSize() const;
   [[nodiscard]] std::string ModelName() const;
-  [[nodiscard]] std::uint32_t PrefillChunk() const;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
 
@@ -104,6 +104,8 @@ public:
   [[nodiscard]] bool Evaluate(int token, std::string* error_msg = nullptr);
   /// True when this session has a DSpark drafter attached.
   [[nodiscard]] bool HasDspark() const;
+  /// Reset request statistics and draft policy, retaining a restored prefix.
+  void BeginRequest();
   /// Discards DSpark-only request state before exact multi-session execution.
   void PrepareBatchExecution();
   /// Runs one greedy speculative cycle and appends the emitted tokens.
@@ -128,6 +130,7 @@ public:
     std::uint64_t steps{0};
     std::uint64_t skipped{0};
     std::uint32_t context_tokens{0};
+    bool operator==(const DsparkStats&) const = default;
   };
   [[nodiscard]] DsparkStats DsparkStatistics() const;
   [[nodiscard]] std::vector<float> CopyLogits(
@@ -143,6 +146,7 @@ public:
 
   [[nodiscard]] int Position() const;
   [[nodiscard]] int ContextSize() const;
+  [[nodiscard]] std::uint32_t PrefillCapacity() const;
   [[nodiscard]] std::uint64_t PayloadBytes() const;
 
 private:

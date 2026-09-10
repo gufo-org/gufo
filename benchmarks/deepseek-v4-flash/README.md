@@ -1,84 +1,83 @@
 # DeepSeek V4 Flash on Strix Halo
 
-Status: 2026-09-09. Linux x86-64, AMD Strix Halo `gfx1151`, 128 GB unified
-memory. Use release binaries from `nix build` for every model performance run.
-`C` is simultaneous users. Decode tok/s is **per user**, unless labelled aggregate;
-prompt throughput and whole-request throughput are different measurements.
+Linux x86-64, AMD Strix Halo `gfx1151`, 128 GB unified memory. All model timings
+use Nix release binaries. `C` is simultaneous requests. The sweep adds **2,048
+prompt tokens** or generates **128 tokens** at each listed context depth.
+
+Results are means of two repetitions. The [full report](speed-matrix.json)
+retains deviations, token hashes, draft counters, and binary/model identities.
+C1 retains the highest per-user generation rate at every depth.
 
 | Artifact | Pin |
 | --- | --- |
 | Target | `antirez/deepseek-v4-gguf`, revision `1cd7b564460821938add0475a60b942c409295e0` |
 | Target file | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` (80.76 GiB) |
 | DSpark support | `DeepSeek-V4-Flash-DSpark-support-0731.gguf`, revision `e7f04037032990db0346398d249baf9fb9df1ccc` |
-| Quality reference | `antirez/ds4` revision `84cc882352757baf628a1776badf7cc54d584e28` |
+| Short-trajectory comparison | `antirez/ds4` revision `84cc882352757baf628a1776badf7cc54d584e28` |
+| Official 0731 continuations | `antirez/ds4` revision `6289c516273979173abbc062209a81dd3706b804` |
+| Official computation | `deepseek-ai/DeepSeek-V4-Flash-0731` revision `7872f01b1d1fe23eabc4c98b48bffcef5a386062` |
 
 ## Single user, autoregressive
 
-| Prompt tokens | Prefill tok/s | Decode tok/s |
+| Context depth | pp2048 tok/s | tg128 tok/s |
 | ---: | ---: | ---: |
-| 32 | 66.32 | 16.82 |
-| 64 | 117.28 | 16.73 |
-| 128 | 197.13 | 16.58 |
-| 256 | 270.10 | 16.55 |
-| 512 | 364.38 | 16.47 |
-| 1,024 | 441.59 | 16.22 |
-| 2,048 | 501.68 | 15.80 |
-
-Each row measures prefill from an empty context and 64 generated tokens after
-a prefix of the stated length. These are separate benchmark runs; context
-preparation is excluded from decode timing. Values are means of three runs.
-The CLI uses a fixed repeating token sequence; natural prompt acceptance varies.
+| 0 | 455.16 | 16.72 |
+| 4,096 | 443.34 | 15.06 |
+| 8,192 | 435.44 | 14.80 |
+| 12,288 | 431.90 | 14.62 |
+| 16,384 | 425.92 | 14.52 |
 
 ## Single user, DSpark
 
-| Prompt tokens | Prefill tok/s | Decode tok/s |
+| Context depth | pp2048 tok/s | tg128 tok/s |
 | ---: | ---: | ---: |
-| 32 | 66.55 | 41.38 |
-| 64 | 117.49 | 40.60 |
-| 128 | 196.78 | 32.37 |
-| 256 | 270.45 | 26.07 |
-| 512 | 363.87 | 25.50 |
-| 1,024 | 439.68 | 24.10 |
-| 2,048 | 498.68 | 17.38 |
+| 0 | 452.23 | 16.50 |
+| 4,096 | 440.47 | 39.53 |
+| 8,192 | 432.81 | 38.50 |
+| 12,288 | 427.24 | 37.74 |
+| 16,384 | 420.87 | 36.03 |
 
-DSpark adapts its draft tail from three tokens up to the requested/artifact
-limit. Low acceptance temporarily returns C1 to autoregressive decoding.
-Sampled requests use autoregressive decoding. Attaching the support artifact
-selects DSpark in `prompt`, `chat`, `bench`, and `serve`; explicit
-`--speculative off` takes precedence.
+Warm C1 prefill reaches **468.5 / 464.8 tok/s at pp2048** and
+**492.9 / 487.7 tok/s at pp4096** (AR / DSpark; four warm repetitions).
+The first C1/depth-zero prefill row above includes first-use work, which lowers
+its mean and increases its deviation. The full report retains both measurements.
 
 ## Multiple users, autoregressive
 
-| Users | Per-user decode tok/s | Aggregate request output tok/s |
-| ---: | ---: | ---: |
-| 2 | 14.88 | 29.59 |
-| 4 | 11.98 | 47.48 |
-| 6 | 9.70 | 57.54 |
-| 8 | 9.73 | 76.66 |
+Cells are **aggregate pp2048 / per-user tg128**, in tok/s.
 
-HTTP `repetition_sequence`, 64 output tokens, homogeneous synchronized rounds,
-default server caching, one warmup and three measured repetitions. AR restores
-the warmed 31-token prefix; DSpark rebuilds it because snapshots lack support
-state. Decode is the median per request. Aggregate output includes that prefill
-and measures the complete round; it is not a cache-matched prefill comparison.
-Request-local attention and state are retained while target projections share
-weight reads across active users.
+| Context depth | C2 | C4 | C6 | C8 |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 469.66 / 16.24 | 467.92 / 13.89 | 467.03 / 11.46 | 466.11 / 9.93 |
+| 4,096 | 443.33 / 13.64 | 441.27 / 10.64 | 441.46 / 8.36 | 440.98 / 7.12 |
+| 8,192 | 434.47 / 13.22 | 434.07 / 10.15 | 433.70 / 7.92 | 433.93 / 6.70 |
+| 12,288 | 430.31 / 12.92 | 429.46 / 9.81 | 429.64 / 7.62 | 430.04 / 6.41 |
+| 16,384 | 424.25 / 12.74 | 424.18 / 9.63 | 423.73 / 7.45 | 424.06 / 6.25 |
 
 ## Multiple users, DSpark
 
-| Users | Per-user decode tok/s | Aggregate request output tok/s | Draft acceptance |
-| ---: | ---: | ---: | ---: |
-| 2 | 23.59 | 32.82 | 88.0% |
-| 4 | 15.04 | 38.61 | 91.7% |
-| 6 | 7.66 | 32.23 | 73.9% |
-| 8 | 6.86 | 36.39 | 78.8% |
+Cells are **aggregate pp2048 / per-user tg128**, in tok/s.
 
-Concurrent requests share support computation and verify independently sized
-blocks. The measured draft ceilings are three at C2/C4/C8 and two at C6.
-DSpark speed depends on acceptance; it does not beat autoregressive batching
-on every workload: AR wins decode at C6/C8 and aggregate request throughput from
-C4 because its warmed prefix can be restored. On this same HTTP case, C1 reaches **31.36 tok/s** with DSpark and **17.09 tok/s** without it. C1
-therefore retains the highest per-user performance in the DSpark sweep.
+| Context depth | C2 | C4 | C6 | C8 |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 463.78 / 16.11 | 463.05 / 13.00 | 460.27 / 10.82 | 461.10 / 9.63 |
+| 4,096 | 438.88 / 24.78 | 438.76 / 14.21 | 438.71 / 9.18 | 438.59 / 6.98 |
+| 8,192 | 431.19 / 23.88 | 431.52 / 13.69 | 431.51 / 8.84 | 431.49 / 6.57 |
+| 12,288 | 426.60 / 23.14 | 427.06 / 13.25 | 427.04 / 8.59 | 427.18 / 6.65 |
+| 16,384 | 420.83 / 22.50 | 421.07 / 12.86 | 420.97 / 8.34 | 421.23 / 6.44 |
+
+At 4K–16K, DSpark speeds up generation by **2.48–2.62× at C1,
+1.77–1.82× at C2, 1.34–1.35× at C4, and 1.10–1.13× at C6**.
+C8 is about 2% slower at 4K/8K and 3–4% faster at 12K/16K.
+Depth-zero generation is 0.8–6.4% slower with DSpark on this workload.
+
+DSpark chooses draft lengths from [measured cycle costs](cost-calibration.json)
+and backs off when acceptance is too low. It skips cycles whose verification
+cost cannot be repaid even at full acceptance. Decisions use token history and
+offline calibration; wall-clock timing never changes token decisions. Sampled requests
+use target decoding while eligible greedy peers retain DSpark batching. Changes
+in concurrency reset the decision history. Complete support state and controller
+state survive snapshots; a new request reusing a prefix starts fresh statistics.
 
 ## Reproduce
 
@@ -88,88 +87,109 @@ nix build
 MODEL=/path/to/target.gguf
 DSPARK=/path/to/DSpark-support.gguf
 
-# Omit --dspark-model for autoregressive runs.
+# Omit --dspark-model for autoregressive runs; use -c 1 for single user.
 ./result/bin/gufo bench --model "$MODEL" --dspark-model "$DSPARK" \
-  -p 2048,32,64,128,256,512,1024,2048 -n 0 -r 3
-./result/bin/gufo bench --model "$MODEL" --dspark-model "$DSPARK" \
-  -p 0 -n 64 -d 0,32,64,128,256,512,1024,2048 -r 3
-./result/bin/gufo bench --model "$MODEL" --dspark-model "$DSPARK" \
-  -p 128 -n 16 --validate-prefill 128
-./result/bin/gufo serve --host 127.0.0.1 --port 8080 --sessions 8 llm \
-  --model "$MODEL" --dspark-model "$DSPARK"
-
-# In another terminal, while the server is running:
-nix develop -c tools/serving/gufo-serving-bench.py \
-  --base-url http://127.0.0.1:8080 --gufo ./result/bin/gufo \
-  --suite benchmarks/qwen3.8-27b/speculative-corpus.json \
-  --case repetition_sequence --corpus-layout homogeneous \
-  --concurrency 1,2,4,6,8 --max-tokens 64 --warmup 1 --repetitions 3 \
-  --output /tmp/ds4-serving.json
+  -c 1,2,4,6,8 -p 2048 -n 128 -d 0,4096,8192,12288,16384 -r 2 -v
+# Capture stdout and stderr for each run, then validate the pair:
+nix develop -c tools/ds4/check.py benchmark \
+  --ar-log /tmp/ar.log --dspark-log /tmp/dspark.log --output /tmp/bench.json
 ```
 
-Discard the initial 2K prefill and depth-zero decode rows as warmups. Benchmark
-work is fixed token count, including stop-token IDs, with no EOS resampling.
-DSpark depth prefixes are rebuilt outside timing because target snapshots do
-not contain the support cache. For HTTP sweeps use the shared
-`tools/serving/gufo-serving-bench.py`; keep corpus, output length, cache setting,
-concurrency, warmup, and repetitions identical across comparisons.
+Prefill and generation are separate measurements. The prefix uses a fixed
+repeating token sequence, identical across concurrent requests; generation
+follows the model’s greedy choices. Depth-zero generation uses a 16-token seed. Context preparation and
+snapshot restoration occur outside timing. Prefill runs each request in
+sequence and reports aggregate prompt throughput; decode reports 128 divided
+by the whole batch's elapsed seconds.
+Stop-token IDs count toward the fixed workload. Verbose output records generated
+token hashes and draft counters for every request and repetition. Natural
+prompts can have different acceptance and speed. Run model jobs and builds
+sequentially, including correctness runs; the 128 GB memory is shared by CPU
+and GPU. Keep other CPU/GPU work out of timed runs. HTTP scheduling measurements
+use the shared `tools/serving/gufo-serving-bench.py` with matched prompts, caching,
+output budgets, concurrency, and repetitions.
 
 ## Quality contract
 
-All DS4-owned checks are registered in
-[`tests/models/deepseek_v4_flash/CMakeLists.txt`](../../tests/models/deepseek_v4_flash/CMakeLists.txt).
-Shared sampler, scheduler, and HTTP tests stay with those shared components.
-Formatting and static analysis run once through Nix, outside the runtime suites. The [tools index](../../tools/ds4/README.md) lists maintained runners.
+**Current status:** [all nine checks pass](quality-qualification.json), including
+736 exact DSpark scalar replay choices through C8/16K.
+The repeated speed matrix passes exact output/hash and draft-counter checks:
+53,760 generated tokens across both modes and repetitions. Its DSpark run kept
+at least 13.89 GiB available under a 12 GiB memory guard.
+Full capability qualification remains pending.
+Antirez comparisons flag four post-prefill differences; they do not establish
+which implementation is more accurate.
+See the [scores and limits](eval/README.md).
 
-| Check | Why we maintain it |
+DS4 checks live in [one directory](../../tests/models/deepseek_v4_flash/CMakeLists.txt).
+Shared sampler, scheduler, and HTTP tests remain with their shared components.
+The [tools index](../../tools/ds4/README.md) lists the maintained entry points.
+
+| Check | Required coverage |
 | --- | --- |
-| `ds4.template`, `ds4.cli`, `ds4.dataset`, `ds4.eval` | Official framing, CLI option wiring, pinned dataset integrity, and answer grading |
-| `ds4.q2-down` | Actual production Q2 kernel versus independent reference, bitwise finite output at C2/C4/C6/C8, uniform and ragged groups |
-| `ds4.target` | Official token-ID goldens, pinned 128-token trajectory, full-logit prefill/decode comparison, exact 2K prefill repeats, concurrent state and snapshot restoration |
-| `ds4.dspark` | Scalar replay quality; exact repeated tokens/logits/counters/positions at C1/C2/C4/C6/C8; varied budgets, compression boundaries, prompt seeding, and safe snapshot fallback |
-| `ds4.serving` | Sampling, incremental prefill, scheduler state, prefix reuse, cancellation, and server adapter behavior |
+| `ds4.template`, `ds4.cli`, `ds4.dataset`, `ds4.eval` | Official framing, option wiring, pinned fixture integrity, answer grading |
+| `ds4.projections` | 54 Q8/IQ2/F16 shape cases against scalar kernels and independent formulas; two HC cases against the official FP32 projection/RMS formula |
+| `ds4.attention` | 28 target/support arithmetic cases plus 16 official DSpark window cases; double-precision references, poisoned stale rows, ring wrap, masks and sparse causal indices |
+| `ds4.target` | Official token goldens, pinned trajectory, full-logit prefill/decode comparisons, exact 2K repeats, concurrent state isolation, bounds |
+| `ds4.dspark` | Scalar quality; exact tokens/logits/counters at fixed and changing C; short budgets; complete snapshot continuation through 16K; policy backoff and fork isolation |
+| `ds4.serving` | Mixed sampling and actual batch widths, bounded prefill under arrivals, warm-prefix equality, disk identity, cancellation, context exhaustion |
 
 ```sh
 nix develop -c tools/ds4/check.py fast
 nix develop -c tools/ds4/check.py kernels
 nix develop -c tools/ds4/check.py all --model "$MODEL" --dspark-model "$DSPARK"
+nix develop -c tools/ds4/check.py reference --model "$MODEL" \
+  --upstream /path/to/pinned-antirez-checkout --output /tmp/ds4-reference
 nix build --no-link .#checks.x86_64-linux.pr
-# With a C1 DSpark server running, repeat and compare response/reasoning/grades:
+# Against a C1 DSpark server; repeat and compare response, reasoning and grades:
 ./result/bin/gufo eval --base-url http://127.0.0.1:8080/v1 \
-  --questions 4 --greedy --output /tmp/ds4-quality.json
+  --questions 16 --greedy --output /tmp/ds4-quality.json
 ```
 
-The pinned target trajectory must retain at least 116/128 top-1 choices, rank
-sum at most 142, and worst rank at most 3. State comparisons require finite
-logits, RMSE at most 1.12, cosine at least 0.979, and max error at most 5.
-DSpark C1 scalar replay additionally requires at least 125/128 top-1 choices
-and worst rank at most 2 on four diverse continuations. These bounds qualify
-numerical quality; they do not promise identical AR and DSpark text.
+The pinned target trajectory requires at least 116/128 top-1 choices, rank sum
+at most 142, and worst rank at most 3. State comparisons require finite logits,
+RMSE ≤1.12, cosine ≥0.979, and max error ≤5. DSpark scalar replay requires exact greedy tokens (including tie-breaking)
+and frontier logits. The eight-scenario C1/C2/C4/C6/C8 replay through 16K
+covers **736 token choices** across four diverse continuations. Never weaken these bounds to accept a faster implementation.
+The replay records speculative frontiers, frees those sessions, then checks
+one scalar session at a time, keeping at most C model sessions resident.
 
-Repeatability requires identical inputs, seeds, and execution configuration.
-Batch-size/composition invariance is not established: the fixed-width baseline
-matches C1/C2 text on 7/10 corpus cases. The current homogeneous DSpark HTTP
-sweep repeats exactly at every tested C; asynchronous AR scheduling can change
-batch shapes and text within the same nominal C. Do not hide changed outputs behind a
-throughput average. Every optimization must pass the relevant kernel oracle,
-the retained model gates, and repeated release A/B runs. Compare output hashes
-and draft counters alongside speed; widen coverage when a change affects new
-shapes. Do not weaken quality thresholds to accept a faster candidate.
-
-The current greedy DSpark capability smoke passed the first four pinned cases
-twice: answers `B`, `C`, `70`, `C`, identical visible text and reasoning, 879
-completion tokens per run, no errors or length finishes. This and the
-[retained AR evaluation](eval/README.md) are regression samples, not official
-benchmark scores. Full capability sweeps remain TODO.
+Repeatability means identical inputs, seeds, and execution schedule, including
+prefill boundaries and batch membership. AR/DSpark output equality passes this
+speed workload; general text equality and batch-composition invariance are not
+established. Check repeated output hashes and draft decisions alongside
+speed; throughput alone cannot qualify a change. Retain an optimization only
+after the relevant numerical oracle, model checks, and repeated release A/B
+measurements pass. During iteration, run the affected fast/kernel checks; run
+the complete model/serving suite for retained changes. Extend coverage for newly affected shapes and shared runners.
+AR qualification also requires the external 100-case continuation comparison:
+agreement between DSpark and AR cannot detect a bug shared by both paths.
+The scorer records every reference token; compare likelihood and greedy
+agreement against a matched independent upstream control. The same command
+compares full logits before and after 128 forced tokens at all five depths,
+using matched 2K and 4K prefill calls. It checks exact repeated Gufo output,
+identical input token IDs, and actual prefill capacities.
+It retains the full-logit bounds above and rejects a detectable 100-case NLL
+increase using a paired case bootstrap 95% interval (seed 731).
+Antirez is an independent implementation, not ground truth. Cross-engine logit
+differences require investigation against the official computation and task
+scores; do not add approximations solely to match another implementation.
+Separate GGUF quantization error from additional kernel approximations. The HC
+oracle uses GGUF weight precision with the official FP32 activation formula.
+Repeated-word prompts probe numerical behavior, not long-context task accuracy.
+Capability subset results: TODO. Full capability scores remain TODO; see the
+[retained AR evaluation](eval/README.md) for earlier regression samples.
 
 ## Experiments
 
-- Retained: grouped Q2 activation reuse; matched C2-C8 decode improvement of about 3%, with bitwise kernel agreement.
-- Retained: three Q2 tiles per pass at C6; about 0.5% additional decode improvement.
-- Retained: shared adaptive C1 policy; repetition64 improved from 18.81 to 31.45 tok/s on the preceding release.
-- Rejected: MMQ for speculative verification; numerical agreement fails.
-- Rejected: learned-confidence draft trimming and alternate grouped gate variants; no qualified speed win.
-- Simplified: specialized grouped gate/up arguments; 136→128 VGPRs, no scratch, exact fingerprints, throughput within ±0.1% in three interleaved A/B pairs.
-- Rejected: hardcoding the gate input width; unchanged registers and kernel time (942.6→942.5 ms), no meaningful speed gain.
-- Rejected: two prefill Q2 column fragments instead of four; exact logits, but pp2048 fell 502.09→490.74 tok/s and kernel time rose 1,337→1,535 ms.
-- Profile: 2K prefill spends 37.8% of GPU time in quantized matrix multiplication and 17.8% in MoE down projection. Further TG/PP speedups remain TODO; neutral cleanups are not counted as gains.
+- Retained: scalar-equivalent verifier projections and attention; exact 736-token replay across the maintained concurrency/depth matrix.
+- Retained: attention ring indexing; removes integer division without changing arithmetic.
+- Retained: reusable request scratch and complete DSpark snapshots; exact continuation across changing batch membership and session capacities.
+- Retained: exact-size weight allocations remove 6.74 GiB of arena padding; the complete guarded DSpark suite kept at least 13.84 GiB available.
+- Retained: official DSpark feature injection and 128-row attention window, checked independently across ring boundaries.
+- Retained: direct IQ2 activation reads; C8 verifier gate/up GPU time 140.94→62.29 ms, total verifier 531.08→452.74 ms, exact scalar outputs.
+- Rejected: F16 rounding inside fused HC; closer to Antirez's logits, but adds an approximation absent from the official formula.
+- Retained: concurrent cost policy calibrated at 0/4K/16K; the repeated full sweep passes output equality and reports the gains and losses above.
+- Rejected: speculative MMQ (numerical mismatch), confidence trimming and alternate grouped gate variants (no qualified speed win).
+- Rejected: two prefill Q2 column fragments; exact logits, pp2048 fell 502.09→490.74 tok/s.
+- Prefill profile, pp2048 at 4K: quantized matrix multiplication takes 35.8% of kernel time, MoE down projection 17.1%, and attention 14.1%. Further kernel gains remain TODO.

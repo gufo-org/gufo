@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -17,15 +18,25 @@
 
 namespace gufo::testing::ds4 {
 void CheckTokenGoldens(const models::deepseek_v4_flash::Model& model);
-}
+void ScoreOfficialReference(
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
+    const std::string& output_path);
+void DumpReferenceFrontiers(
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
+    const std::string& output_directory);
+}  // namespace gufo::testing::ds4
 
 namespace {
 
 void Expect(bool condition, const char* message) {
   if (!condition) {
     std::cerr << "FAIL: " << message << '\n';
-    std::abort();
+    std::exit(EXIT_FAILURE);
   }
+}
+
+void Expect(bool condition, const std::string& message) {
+  Expect(condition, message.c_str());
 }
 
 constexpr std::string_view kTrajectoryPrompt =
@@ -55,15 +66,15 @@ void CheckPinnedTrajectory(
   Expect(!prompt.empty(), "trajectory prompt tokenization");
 
   auto session = model->CreateSession(512, &error);
-  Expect(session != nullptr, error.c_str());
-  Expect(session->Sync(prompt, &error), error.c_str());
+  Expect(session != nullptr, error);
+  Expect(session->Sync(prompt, &error), error);
 
   int top1_matches = 0;
   std::uint64_t rank_sum = 0;
   int worst_rank = 0;
   for (const int expected_token : kPinnedDs4Trajectory) {
     const auto logits = session->CopyLogits(&error);
-    Expect(!logits.empty(), error.c_str());
+    Expect(!logits.empty(), error);
     Expect(expected_token >= 0 &&
                static_cast<std::size_t>(expected_token) < logits.size(),
            "trajectory token range");
@@ -80,7 +91,7 @@ void CheckPinnedTrajectory(
     rank_sum += static_cast<std::uint64_t>(rank);
     worst_rank = std::max(worst_rank, rank);
 
-    Expect(session->Evaluate(expected_token, &error), error.c_str());
+    Expect(session->Evaluate(expected_token, &error), error);
   }
 
   std::cout << "Pinned DS4 trajectory: top1=" << top1_matches
@@ -89,6 +100,47 @@ void CheckPinnedTrajectory(
   Expect(top1_matches >= 116, "128-token top-1 agreement");
   Expect(rank_sum <= 142, "128-token aggregate rank");
   Expect(worst_rank <= 3, "128-token worst rank");
+}
+
+void CheckSessionBounds(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  std::string error;
+  auto session = model->CreateSession(32, &error);
+  Expect(session != nullptr, error);
+  Expect(session->PrefillCapacity() > 0 && session->PrefillCapacity() <= 32,
+         "prefill allocation fits the session context");
+  Expect(session->SelectNext(0.0F, nullptr) == -1 &&
+             session->CopyLogits(&error).empty(),
+         "uninitialized checkpoint cannot expose logits");
+  Expect(!session->Evaluate(1, &error),
+         "decode requires initialized target state");
+  if (model->HasDspark()) {
+    std::vector<int> emitted;
+    Expect(!session->DsparkStep(&emitted, &error),
+           "DSpark requires initialized target state");
+  }
+  auto prompt = model->Tokenize(kTrajectoryPrompt);
+  prompt.resize(30);
+  Expect(session->Sync(prompt, &error), error);
+  const auto logits = session->CopyLogits(&error);
+  auto invalid = prompt;
+  invalid[0] = -1;
+  Expect(!session->Sync(invalid, &error) &&
+             !session->Evaluate(model->VocabSize(), &error),
+         "invalid token IDs are rejected before GPU execution");
+  Expect(session->CopyLogits(&error) == logits,
+         "argument rejection preserves the valid checkpoint");
+  while (session->Position() < session->ContextSize()) {
+    Expect(session->Evaluate(session->SelectNext(0.0F, nullptr), &error),
+           error.c_str());
+  }
+  Expect(!session->Evaluate(1, &error) && session->Position() == 32,
+         "decode cannot advance past the allocated context");
+  if (model->HasDspark()) {
+    std::vector<int> emitted;
+    Expect(!session->DsparkStep(&emitted, &error) && session->Position() == 32,
+           "DSpark fallback cannot overrun a full context");
+  }
 }
 
 void CheckWidePrefill(
@@ -102,13 +154,13 @@ void CheckWidePrefill(
   const auto run = [&] {
     std::string error;
     auto session = model->CreateSession(4096, &error);
-    Expect(session != nullptr, error.c_str());
-    Expect(session->Sync(tokens, &error), error.c_str());
+    Expect(session != nullptr, error);
+    Expect(session->Sync(tokens, &error), error);
     std::vector<float> trajectory;
     for (int step = 0; step < 4; ++step) {
       Expect(session->Position() == 2048 + step, "wide prefill frontier");
       const auto logits = session->CopyLogits(&error);
-      Expect(!logits.empty(), error.c_str());
+      Expect(!logits.empty(), error);
       Expect(std::all_of(logits.begin(), logits.end(),
                          [](float value) { return std::isfinite(value); }),
              "wide prefill finite logits");
@@ -144,17 +196,17 @@ void CheckBatchedPrefill(
   }
 
   auto batched = model->CreateSession(4096, &error);
-  Expect(batched != nullptr, error.c_str());
-  Expect(batched->Sync(tokens, &error), error.c_str());
+  Expect(batched != nullptr, error);
+  Expect(batched->Sync(tokens, &error), error);
   const auto batched_logits = batched->CopyLogits(&error);
-  Expect(!batched_logits.empty(), error.c_str());
+  Expect(!batched_logits.empty(), error);
 
   auto sequential = model->CreateSession(4096, &error);
-  Expect(sequential != nullptr, error.c_str());
-  Expect(sequential->Sync(prompt, &error), error.c_str());
+  Expect(sequential != nullptr, error);
+  Expect(sequential->Sync(prompt, &error), error);
   for (int repetition = 0; repetition < kTrajectoryRepetitions; ++repetition) {
     for (const int token : kPinnedDs4Trajectory) {
-      Expect(sequential->Evaluate(token, &error), error.c_str());
+      Expect(sequential->Evaluate(token, &error), error);
     }
   }
   const auto sequential_logits = sequential->CopyLogits(&error);
@@ -230,17 +282,17 @@ void CheckConversationalPrefill(
     }
 
     auto batched = model->CreateSession(512, &error);
-    Expect(batched != nullptr, error.c_str());
-    Expect(batched->Sync(tokens, &error), error.c_str());
+    Expect(batched != nullptr, error);
+    Expect(batched->Sync(tokens, &error), error);
     const auto batched_logits = batched->CopyLogits(&error);
-    Expect(!batched_logits.empty(), error.c_str());
+    Expect(!batched_logits.empty(), error);
 
     auto sequential = model->CreateSession(512, &error);
-    Expect(sequential != nullptr, error.c_str());
+    Expect(sequential != nullptr, error);
     const std::vector<int> first_token{tokens.front()};
-    Expect(sequential->Sync(first_token, &error), error.c_str());
+    Expect(sequential->Sync(first_token, &error), error);
     for (std::size_t index = 1; index < tokens.size(); ++index) {
-      Expect(sequential->Evaluate(tokens[index], &error), error.c_str());
+      Expect(sequential->Evaluate(tokens[index], &error), error);
     }
     const auto sequential_logits = sequential->CopyLogits(&error);
     Expect(sequential_logits.size() == batched_logits.size(),
@@ -343,8 +395,8 @@ void CheckSessionBatch(
     for (std::size_t index = 0; index < kPrompts.size(); ++index) {
       batched[index] = model->CreateSession(512, &error);
       sequential[index] = model->CreateSession(512, &error);
-      Expect(batched[index] != nullptr, error.c_str());
-      Expect(sequential[index] != nullptr, error.c_str());
+      Expect(batched[index] != nullptr, error);
+      Expect(sequential[index] != nullptr, error);
       Expect(batched[index]->Sync(session_prompts[index], &error),
              error.c_str());
       Expect(sequential[index]->Sync(session_prompts[index], &error),
@@ -469,10 +521,10 @@ void CheckSessionBatch(
     items.reserve(members.size());
     for (const std::size_t index : members) {
       const int token = sequential[index]->SelectNext(0.0F, nullptr);
-      Expect(sequential[index]->Evaluate(token, &error), error.c_str());
+      Expect(sequential[index]->Evaluate(token, &error), error);
       items.push_back({.session = batched[index].get(), .token = token});
     }
-    Expect(model->EvaluateBatch(items, &error), error.c_str());
+    Expect(model->EvaluateBatch(items, &error), error);
     for (const std::size_t index : members) {
       Expect(batched[index]->Position() == sequential[index]->Position(),
              "session batch position");
@@ -496,8 +548,8 @@ void CheckSessionBatch(
   advance(kAllEight);
 
   const int token = sequential[0]->SelectNext(0.0F, nullptr);
-  Expect(sequential[0]->Evaluate(token, &error), error.c_str());
-  Expect(batched[0]->Evaluate(token, &error), error.c_str());
+  Expect(sequential[0]->Evaluate(token, &error), error);
+  Expect(batched[0]->Evaluate(token, &error), error);
   compare(0);
 
   std::cout << "DeepSeek V4 session batch quality: top1=" << top1_matches << '/'
@@ -517,14 +569,14 @@ void CheckDsparkPromptSeed(
   Expect(!prompt.empty(), "DSpark seed prompt tokenization");
 
   auto session = model->CreateSession(512, &error);
-  Expect(session != nullptr, error.c_str());
-  Expect(session->Sync(prompt, &error), error.c_str());
+  Expect(session != nullptr, error);
+  Expect(session->Sync(prompt, &error), error);
   auto stats = session->DsparkStatistics();
   Expect(stats.context_tokens >= prompt.size(),
          "DSpark prefill seeds the complete prompt");
 
   std::vector<int> emitted;
-  Expect(session->DsparkStep(&emitted, &error), error.c_str());
+  Expect(session->DsparkStep(&emitted, &error), error);
   Expect(!emitted.empty(), "DSpark first step emitted tokens");
   stats = session->DsparkStatistics();
   Expect(stats.context_tokens >= prompt.size(),
@@ -540,40 +592,121 @@ void CheckDsparkPromptSeed(
   session.reset();
 
   auto extended = model->CreateSession(512, &error);
-  Expect(extended != nullptr, error.c_str());
-  Expect(extended->Sync(prompt, &error), error.c_str());
-  Expect(extended->Sync(short_extension, &error), error.c_str());
+  Expect(extended != nullptr, error);
+  Expect(extended->Sync(prompt, &error), error);
+  Expect(extended->Sync(short_extension, &error), error);
   Expect(extended->DsparkStatistics().context_tokens == short_extension.size(),
          "short checkpoint extension seeds and extends DSpark context");
   emitted.clear();
-  Expect(extended->DsparkStep(&emitted, &error), error.c_str());
+  Expect(extended->DsparkStep(&emitted, &error), error);
   Expect(extended->DsparkStatistics().context_tokens >= short_extension.size(),
          "first draft after extension seeds the captured suffix");
   extended.reset();
 
-  auto snapshot_source = model->CreateSession(512, &error);
-  Expect(snapshot_source != nullptr, error.c_str());
-  Expect(snapshot_source->Sync(prompt, &error), error.c_str());
-  auto snapshot = snapshot_source->SaveSnapshot(&error);
-  Expect(snapshot != nullptr, error.c_str());
-  snapshot_source.reset();
-
-  auto restored = model->CreateSession(512, &error);
-  Expect(restored != nullptr, error.c_str());
-  Expect(restored->RestoreSnapshot(*snapshot, &error), error.c_str());
-  Expect(restored->DsparkStatistics().context_tokens == 0,
-         "snapshot restore does not claim absent DSpark context");
-  emitted.clear();
-  Expect(restored->DsparkStep(&emitted, &error), error.c_str());
-  Expect(emitted.size() == 1,
-         "snapshot restore safely falls back to one token");
-  Expect(restored->DsparkStatistics().steps == 0,
-         "snapshot restore does not draft across a support-cache gap");
+  // A short output budget still permits a shorter useful draft.
+  for (const std::size_t concurrency : {1U, 2U}) {
+    std::vector<std::unique_ptr<gufo::models::deepseek_v4_flash::Session>>
+        sessions;
+    std::vector<std::vector<int>> output(concurrency);
+    std::vector<gufo::models::deepseek_v4_flash::SessionDsparkBatchItem> items;
+    for (std::size_t i = 0; i < concurrency; ++i) {
+      auto member = model->CreateSession(
+          static_cast<uint32_t>(prompt.size() + 5), &error);
+      Expect(member != nullptr && member->Sync(prompt, &error), error);
+      items.push_back({.session = member.get(),
+                       .max_tokens = 4,
+                       .max_draft_tokens = 7,
+                       .emitted = &output[i]});
+      sessions.push_back(std::move(member));
+    }
+    Expect(model->DsparkStepBatch(items, &error), error);
+    for (std::size_t i = 0; i < concurrency; ++i) {
+      Expect(sessions[i]->DsparkStatistics().steps == 1,
+             "short request/context budget still exercises drafting");
+      Expect(!output[i].empty() && output[i].size() <= 4,
+             "short draft stays within output and context bounds");
+    }
+  }
 }
 
-void CheckDsparkSingleQuality(
+void CheckDsparkSnapshots(
     const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
-  using gufo::models::deepseek_v4_flash::SessionDsparkBatchItem;
+  using gufo::models::deepseek_v4_flash::Session;
+  std::string error;
+  const auto pattern = model->Tokenize(kTrajectoryPrompt);
+  for (const std::size_t depth : {53U, 4608U, 16384U}) {
+    std::vector<int> prompt(depth);
+    for (std::size_t i = 0; i < depth; ++i)
+      prompt[i] = pattern[i % pattern.size()];
+    auto source = model->CreateSession(20480, &error);
+    auto fork = model->CreateSession(20480, &error);
+    Expect(source != nullptr && fork != nullptr, error);
+    Expect(source->Sync(prompt, &error), error);
+    // Exercise both a fresh prefix and a controller with acceptance history.
+    if (depth == 53) {
+      for (int cycle = 0; cycle < 8; ++cycle) {
+        std::vector<int> emitted;
+        Expect(source->DsparkStep(8, 7, &emitted, &error), error);
+      }
+    }
+    auto snapshot = source->SaveSnapshot(&error);
+    Expect(snapshot != nullptr, error);
+    Expect(snapshot->SizeBytes() == source->PayloadBytes(),
+           "complete snapshot size accounting");
+    const auto saved_stats = source->DsparkStatistics();
+    const auto saved_logits = source->CopyLogits(&error);
+    Expect(fork->RestoreSnapshot(*snapshot, &error), error);
+    Expect(fork->DsparkStatistics() == saved_stats &&
+               fork->CopyLogits(&error) == saved_logits,
+           "snapshot restores exact support statistics and target frontier");
+    for (int cycle = 0; cycle < 12; ++cycle) {
+      std::vector<int> expected, actual;
+      const std::size_t budget = cycle % 3 == 0 ? 2 : 8;
+      Expect(source->DsparkStep(budget, 7, &expected, &error), error);
+      Expect(fork->DsparkStep(budget, 7, &actual, &error), error);
+      Expect(actual == expected &&
+                 source->CopyLogits(&error) == fork->CopyLogits(&error) &&
+                 source->DsparkStatistics() == fork->DsparkStatistics(),
+             "snapshot continuation repeats tokens, logits, and controller "
+             "outcomes exactly");
+    }
+    const auto source_logits = source->CopyLogits(&error);
+    Expect(fork->RestoreSnapshot(*snapshot, &error), error);
+    fork->BeginRequest();
+    Expect(
+        fork->DsparkStatistics().steps == 0 &&
+            fork->DsparkStatistics().support_drafted == 0 &&
+            fork->DsparkStatistics().context_tokens ==
+                saved_stats.context_tokens,
+        "prefix reuse resets request statistics and retains support coverage");
+    std::vector<int> emitted;
+    Expect(fork->DsparkStep(4, 7, &emitted, &error), error);
+    Expect(fork->DsparkStatistics().steps == 1,
+           "restored prefix drafts immediately");
+    Expect(source->CopyLogits(&error) == source_logits,
+           "snapshot forks own independent caches");
+
+    std::vector<std::uint8_t> bytes(snapshot->SizeBytes());
+    Expect(snapshot->CopyTo(bytes), "snapshot export");
+    Expect(!fork->RestoreSnapshot(std::span(bytes).first(bytes.size() - 1),
+                                  &error),
+           "truncated support state is rejected");
+    auto corrupt = bytes;
+    corrupt[4] = 0;  // unsupported payload version
+    Expect(!fork->RestoreSnapshot(corrupt, &error),
+           "old snapshot layout is rejected");
+    Expect(fork->RestoreSnapshot(bytes, &error), error);
+    Expect(fork->DsparkStatistics() == saved_stats &&
+               fork->CopyLogits(&error) == saved_logits,
+           "valid restore recovers after a rejected snapshot");
+    std::cout << "DSpark exact snapshot continuation at depth " << depth
+              << '\n';
+  }
+}
+
+void CheckDsparkScalarQuality(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  using namespace gufo::models::deepseek_v4_flash;
   constexpr std::array<std::string_view, 4> kPrompts{
       "Continue the pattern for twenty more terms and briefly state the rule: "
       "red, blue, blue, red, blue, blue, red,",
@@ -584,82 +717,320 @@ void CheckDsparkSingleQuality(
       "请用简洁的中文解释什么是推测解码，以及为什么草稿模型的接受率会影响性能"
       "。",
   };
+  struct Scenario {
+    std::size_t concurrency;
+    std::size_t depth;
+  };
+  constexpr std::array<Scenario, 8> scenarios{{{1, 0},
+                                               {1, 2048},
+                                               {1, 4096},
+                                               {2, 4096},
+                                               {4, 4096},
+                                               {6, 4096},
+                                               {8, 16384},
+                                               {2, 16384}}};
   std::string error;
-  {
-    int top1 = 0;
-    int compared = 0;
-    int worst_rank = 0;
-    double worst_rmse = 0;
-    double worst_cosine = 1;
+  const auto pattern = model->Tokenize(kTrajectoryPrompt);
+  Expect(!pattern.empty(), "scalar replay prefix tokenization");
+  bool quality_ok = true;
+  for (const auto [concurrency, depth] : scenarios) {
+    int top1 = 0, greedy_matches = 0, compared = 0, rank_sum = 0,
+        worst_rank = 0;
+    double worst_rmse = 0, worst_cosine = 1;
     float worst_error = 0;
-    for (const auto text : kPrompts) {
-      auto speculative = model->CreateSession(512, &error);
-      auto sequential = model->CreateSession(512, &error);
-      Expect(speculative != nullptr && sequential != nullptr, error.c_str());
-      const auto prompt = model->EncodeChat("", text);
-      Expect(speculative->Sync(prompt, &error), error.c_str());
-      Expect(sequential->Sync(prompt, &error), error.c_str());
-      std::size_t generated = 0;
-      while (generated < 32) {
-        std::vector<int> emitted;
-        const SessionDsparkBatchItem item{
-            .session = speculative.get(),
-            .max_tokens = 32 - generated,
-            .max_draft_tokens = 7,
-            .emitted = &emitted,
-        };
-        Expect(model->DsparkStepBatch(
-                   std::span<const SessionDsparkBatchItem>(&item, 1), &error),
-               error.c_str());
-        Expect(!emitted.empty(), "single-request quality test makes progress");
-        for (const int token : emitted) {
-          const auto logits = sequential->CopyLogits(&error);
-          Expect(token >= 0 && static_cast<std::size_t>(token) < logits.size(),
-                 "single-request token is in the reference vocabulary");
-          const int rank =
-              1 + static_cast<int>(std::count_if(
-                      logits.begin(), logits.end(),
-                      [&](float value) { return value > logits[token]; }));
-          top1 += rank == 1;
-          ++compared;
-          worst_rank = std::max(worst_rank, rank);
-          Expect(sequential->Evaluate(token, &error), error.c_str());
+    const auto context = static_cast<std::uint32_t>(depth + 512);
+    std::vector<int> prefix(depth);
+    for (std::size_t i = 0; i < depth; ++i)
+      prefix[i] = pattern[i % pattern.size()];
+    std::unique_ptr<SessionSnapshot> snapshot;
+    if (depth != 0) {
+      auto base = model->CreateSession(context, &error);
+      Expect(base && base->Sync(prefix, &error), error);
+      snapshot = base->SaveSnapshot(&error);
+      Expect(snapshot != nullptr, error);
+    }
+    const std::size_t groups = concurrency == 1 ? kPrompts.size() : 1;
+    const std::size_t budget = concurrency == 1 ? 32 : 16;
+    for (std::size_t group = 0; group < groups; ++group) {
+      struct Frontier {
+        std::vector<int> tokens;
+        std::vector<float> logits;
+      };
+      std::vector<std::unique_ptr<Session>> speculative;
+      std::vector<std::vector<Frontier>> frontiers(concurrency);
+      std::vector<std::vector<int>> prompts(concurrency);
+      std::vector<std::size_t> generated(concurrency);
+      std::vector<std::vector<int>> emitted(concurrency);
+      const auto make_session = [&](std::size_t member) {
+        auto session = model->CreateSession(context, &error);
+        Expect(session != nullptr, error);
+        if (snapshot)
+          Expect(session->RestoreSnapshot(*snapshot, &error), error);
+        Expect(session->Sync(prompts[member], &error), error);
+        return session;
+      };
+      for (std::size_t i = 0; i < concurrency; ++i) {
+        auto& prompt = prompts[i];
+        prompt = prefix;
+        const auto suffix =
+            model->EncodeChat("", kPrompts[(group + i) % kPrompts.size()]);
+        prompt.insert(prompt.end(), suffix.begin(), suffix.end());
+        speculative.push_back(make_session(i));
+      }
+      while (true) {
+        std::vector<SessionDsparkBatchItem> items;
+        std::vector<std::size_t> active;
+        for (std::size_t i = 0; i < concurrency; ++i) {
+          if (generated[i] == budget)
+            continue;
+          active.push_back(i);
+          items.push_back({.session = speculative[i].get(),
+                           .max_tokens = budget - generated[i],
+                           .max_draft_tokens = 7,
+                           .emitted = &emitted[i]});
         }
-        generated += emitted.size();
-        const auto candidate = speculative->CopyLogits(&error);
-        const auto reference = sequential->CopyLogits(&error);
-        Expect(candidate.size() == reference.size() && !candidate.empty(),
-               "single-request frontier logit shape");
-        double squared = 0, dot = 0, candidate_norm = 0, reference_norm = 0;
-        for (std::size_t i = 0; i < candidate.size(); ++i) {
-          Expect(std::isfinite(candidate[i]) && std::isfinite(reference[i]),
-                 "single-request finite frontier logits");
-          const double delta = static_cast<double>(candidate[i]) - reference[i];
-          squared += delta * delta;
-          dot += static_cast<double>(candidate[i]) * reference[i];
-          candidate_norm += static_cast<double>(candidate[i]) * candidate[i];
-          reference_norm += static_cast<double>(reference[i]) * reference[i];
-          worst_error =
-              std::max(worst_error, std::abs(candidate[i] - reference[i]));
+        if (items.empty())
+          break;
+        Expect(model->DsparkStepBatch(items, &error), error);
+        for (const auto member : active) {
+          Expect(!emitted[member].empty() &&
+                     emitted[member].size() <= budget - generated[member],
+                 "scalar replay makes bounded progress");
+          generated[member] += emitted[member].size();
+          frontiers[member].push_back(
+              {emitted[member], speculative[member]->CopyLogits(&error)});
         }
-        worst_rmse =
-            std::max(worst_rmse, std::sqrt(squared / candidate.size()));
-        worst_cosine = std::min(
-            worst_cosine, dot / std::sqrt(candidate_norm * reference_norm));
+      }
+      Expect(std::any_of(speculative.begin(), speculative.end(),
+                         [](const auto& session) {
+                           return session->DsparkStatistics().support_drafted >
+                                  0;
+                         }),
+             "scalar replay exercises support drafting");
+      // Retain every frontier, then release all speculative KV before replay.
+      // Peak residency is C sessions, not C speculative + C scalar sessions.
+      speculative.clear();
+      for (std::size_t member = 0; member < concurrency; ++member) {
+        auto sequential = make_session(member);
+        std::size_t replayed = 0;
+        for (const auto& frontier : frontiers[member]) {
+          for (const int token : frontier.tokens) {
+            greedy_matches += token == sequential->SelectNext(0.0F, nullptr);
+            const auto logits = sequential->CopyLogits(&error);
+            Expect(
+                token >= 0 && static_cast<std::size_t>(token) < logits.size(),
+                "replayed token is in the reference vocabulary");
+            const int rank =
+                1 + static_cast<int>(std::count_if(
+                        logits.begin(), logits.end(),
+                        [&](float value) { return value > logits[token]; }));
+            top1 += rank == 1;
+            ++compared;
+            rank_sum += rank;
+            worst_rank = std::max(worst_rank, rank);
+            Expect(sequential->Evaluate(token, &error), error);
+            ++replayed;
+          }
+          const auto& candidate = frontier.logits;
+          const auto reference = sequential->CopyLogits(&error);
+          Expect(candidate.size() == reference.size() && !candidate.empty(),
+                 "scalar replay frontier logit shape");
+          double squared = 0, dot = 0, candidate_norm = 0, reference_norm = 0;
+          float frontier_error = 0;
+          std::size_t frontier_worst_token = 0;
+          for (std::size_t i = 0; i < candidate.size(); ++i) {
+            Expect(std::isfinite(candidate[i]) && std::isfinite(reference[i]),
+                   "scalar replay finite frontier logits");
+            const double delta =
+                static_cast<double>(candidate[i]) - reference[i];
+            squared += delta * delta;
+            dot += static_cast<double>(candidate[i]) * reference[i];
+            candidate_norm += static_cast<double>(candidate[i]) * candidate[i];
+            reference_norm += static_cast<double>(reference[i]) * reference[i];
+            const float difference = std::abs(candidate[i] - reference[i]);
+            if (difference > frontier_error) {
+              frontier_error = difference;
+              frontier_worst_token = i;
+            }
+            worst_error = std::max(worst_error, difference);
+          }
+          if (frontier_error != 0.0F) {
+            std::cout << "Replay detail C=" << concurrency << " depth=" << depth
+                      << " member=" << member << " generated=" << replayed
+                      << " error_token=" << frontier_worst_token
+                      << " candidate=" << candidate[frontier_worst_token]
+                      << " reference=" << reference[frontier_worst_token]
+                      << " rmse=" << std::sqrt(squared / candidate.size())
+                      << std::endl;
+          }
+          worst_rmse =
+              std::max(worst_rmse, std::sqrt(squared / candidate.size()));
+          worst_cosine = std::min(
+              worst_cosine, dot / std::sqrt(candidate_norm * reference_norm));
+        }
+        Expect(replayed == budget, "scalar replay checks the complete budget");
       }
     }
-    std::cout << "DSpark C1 adaptive"
-              << " teacher-forced quality: top1=" << top1 << '/' << compared
-              << " worst_rank=" << worst_rank << " rmse=" << worst_rmse
-              << " cosine=" << worst_cosine << " max_error=" << worst_error
-              << '\n';
-    // The scalar replay bounds free-running divergence; the immutable
-    // teacher-forced trajectory separately gates reference-model agreement.
-    Expect(top1 >= 125 && worst_rank <= 2,
-           "single-request policy retains scalar-token agreement");
-    Expect(worst_rmse <= 1.12 && worst_cosine >= 0.979 && worst_error <= 5.0F,
-           "single-request state retains the pinned full-logit envelope");
+    std::cout << "DSpark scalar replay C" << concurrency << " depth=" << depth
+              << ": top1=" << top1 << '/' << compared
+              << " rank_sum=" << rank_sum << " worst_rank=" << worst_rank
+              << " rmse=" << worst_rmse << " cosine=" << worst_cosine
+              << " max_error=" << worst_error << '\n';
+    // Verification now preserves scalar arithmetic. Keep that stronger
+    // contract, including the scalar sampler's tie-breaking rule.
+    const bool token_quality = greedy_matches == compared;
+    const bool logit_quality = worst_error == 0.0F;
+    quality_ok = quality_ok && token_quality && logit_quality;
+    if (!token_quality || !logit_quality)
+      std::cout << "Replay gate C=" << concurrency << " depth=" << depth
+                << " token_quality=" << token_quality
+                << " logit_quality=" << logit_quality << std::endl;
   }
+  Expect(quality_ok,
+         "every scalar replay scenario matches scalar tokens and logits");
+}
+
+void CheckConcurrentPolicySnapshot(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  using namespace gufo::models::deepseek_v4_flash;
+  for (const std::size_t concurrency : {2u, 8u}) {
+    std::string error;
+    std::vector<std::unique_ptr<Session>> sessions(concurrency);
+    std::vector<std::unique_ptr<SessionSnapshot>> snapshots(concurrency);
+    std::vector<std::vector<int>> emitted(concurrency);
+    std::vector<SessionDsparkBatchItem> items(concurrency);
+    for (std::size_t i = 0; i < concurrency; ++i) {
+      sessions[i] = model->CreateSession(512, &error);
+      Expect(sessions[i] != nullptr, error);
+      auto prompt = model->Tokenize(kTrajectoryPrompt);
+      Expect(sessions[i]->Sync(prompt, &error), error);
+      items[i] = {.session = sessions[i].get(),
+                  .max_tokens = 8,
+                  .max_draft_tokens = 7,
+                  .emitted = &emitted[i]};
+    }
+    // C2 snapshots a partial four-cycle window; C8 snapshots a cohort whose
+    // short-context verification cost cannot be repaid even at full acceptance.
+    for (int cycle = 0; cycle < (concurrency == 2 ? 6 : 3); ++cycle)
+      Expect(model->DsparkStepBatch(items, &error), error);
+    for (std::size_t i = 0; i < concurrency; ++i) {
+      snapshots[i] = sessions[i]->SaveSnapshot(&error);
+      Expect(snapshots[i] != nullptr, error);
+    }
+    struct Observation {
+      std::vector<int> tokens;
+      std::vector<float> logits;
+      Session::DsparkStats stats;
+      bool operator==(const Observation&) const = default;
+    };
+    const auto continue_requests = [&] {
+      std::vector<Observation> observations;
+      for (int cycle = 0; cycle < 8; ++cycle) {
+        Expect(model->DsparkStepBatch(items, &error), error);
+        for (std::size_t i = 0; i < concurrency; ++i)
+          observations.push_back({emitted[i], sessions[i]->CopyLogits(&error),
+                                  sessions[i]->DsparkStatistics()});
+      }
+      return observations;
+    };
+    const auto expected = continue_requests();
+    if (concurrency == 8) {
+      Expect(std::all_of(sessions.begin(), sessions.end(),
+                         [](const auto& session) {
+                           const auto stats = session->DsparkStatistics();
+                           return stats.skipped > 0 && stats.steps == 0;
+                         }),
+             "known unprofitable cycles skip without paying for a probe");
+    }
+    for (std::size_t i = 0; i < concurrency; ++i)
+      Expect(sessions[i]->RestoreSnapshot(*snapshots[i], &error), error);
+    Expect(continue_requests() == expected,
+           "snapshot retains the partial concurrent cost window and exact "
+           "backoff continuation");
+    const auto before_single = sessions[0]->DsparkStatistics();
+    Expect(sessions[0]->DsparkStep(8, 7, &emitted[0], &error), error);
+    const auto after_single = sessions[0]->DsparkStatistics();
+    Expect(after_single.steps == before_single.steps + 1 &&
+               after_single.skipped == before_single.skipped,
+           "returning to C1 immediately resumes drafting after concurrent "
+           "backoff");
+    std::cout << "DSpark concurrent controller snapshot C" << concurrency
+              << ": exact window/backoff continuation\n";
+  }
+}
+
+void CheckDsparkChangingMembership(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model) {
+  using gufo::models::deepseek_v4_flash::Session;
+  using gufo::models::deepseek_v4_flash::SessionDsparkBatchItem;
+  struct Observation {
+    std::vector<int> emitted;
+    std::vector<float> logits;
+    Session::DsparkStats stats;
+    int position;
+    bool operator==(const Observation&) const = default;
+  };
+  const auto run = [&] {
+    std::string error;
+    std::array<std::unique_ptr<Session>, 4> sessions;
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+      // Grow shared scratch while older sessions remain live. Their borrowed
+      // buffers must survive; the repeat can reuse the largest cached arena.
+      sessions[i] = model->CreateSession(512 + 256 * i, &error);
+      Expect(sessions[i] != nullptr, error);
+      auto prompt = model->Tokenize(kTrajectoryPrompt);
+      while (prompt.size() < 120 + i)
+        prompt.push_back(kPinnedDs4Trajectory[prompt.size() % 128]);
+      Expect(sessions[i]->Sync(prompt, &error), error);
+    }
+    std::vector<Observation> observations;
+    constexpr std::array<std::size_t, 8> widths{1, 2, 4, 3, 1, 4, 2, 4};
+    for (std::size_t cycle = 0; cycle < widths.size(); ++cycle) {
+      std::array<std::vector<int>, 4> emitted;
+      std::array<int, 4> positions;
+      for (std::size_t i = 0; i < sessions.size(); ++i)
+        positions[i] = sessions[i]->Position();
+      std::vector<SessionDsparkBatchItem> items;
+      for (std::size_t slot = 0; slot < widths[cycle]; ++slot) {
+        const std::size_t index = (slot + cycle) % sessions.size();
+        // A one-token member must not force its eligible peers to draft
+        // serially.
+        const std::size_t budget = widths[cycle] > 2 && slot == 0 ? 1 : 4;
+        items.push_back({.session = sessions[index].get(),
+                         .max_tokens = budget,
+                         .max_draft_tokens = 7,
+                         .emitted = &emitted[index]});
+      }
+      Expect(model->DsparkStepBatch(items, &error), error);
+      for (std::size_t i = 0; i < sessions.size(); ++i) {
+        Expect(sessions[i]->Position() ==
+                   positions[i] + static_cast<int>(emitted[i].size()),
+               "changing membership advances only the selected sessions");
+        observations.push_back(
+            {std::move(emitted[i]), sessions[i]->CopyLogits(&error),
+             sessions[i]->DsparkStatistics(), sessions[i]->Position()});
+      }
+    }
+    return observations;
+  };
+  const auto first = run();
+  const auto repeat = run();
+  for (std::size_t i = 0; i < first.size(); ++i) {
+    if (first[i] != repeat[i]) {
+      std::cerr << "Changing membership mismatch cycle=" << i / 4
+                << " member=" << i % 4
+                << " tokens_equal=" << (first[i].emitted == repeat[i].emitted)
+                << " logits_equal=" << (first[i].logits == repeat[i].logits)
+                << " stats_equal=" << (first[i].stats == repeat[i].stats)
+                << " positions=" << first[i].position << '/'
+                << repeat[i].position << '\n';
+      break;
+    }
+  }
+  Expect(first == repeat,
+         "changing concurrency repeats exact tokens, logits, and state");
+  std::cout << "DSpark changing membership C1/C2/C4/C3: exact repeated "
+               "continuation\n";
 }
 
 void CheckDsparkReproducibility(
@@ -685,10 +1056,10 @@ void CheckDsparkReproducibility(
   for (const std::uint32_t tail : {1U, 3U, 7U}) {
     auto configured = model->CreateSession(512, &error);
     auto legacy = model->CreateSession(512, &error);
-    Expect(configured != nullptr && legacy != nullptr, error.c_str());
+    Expect(configured != nullptr && legacy != nullptr, error);
     const auto prompt = model->Tokenize(kPrompts[0]);
-    Expect(configured->Sync(prompt, &error), error.c_str());
-    Expect(legacy->Sync(prompt, &error), error.c_str());
+    Expect(configured->Sync(prompt, &error), error);
+    Expect(legacy->Sync(prompt, &error), error);
     for (int cycle = 0; cycle < 4; ++cycle) {
       const auto before = configured->DsparkStatistics();
       std::vector<int> emitted;
@@ -723,7 +1094,7 @@ void CheckDsparkReproducibility(
       std::vector<std::unique_ptr<Session>> sessions;
       for (std::size_t i = 0; i < concurrency; ++i) {
         auto session = model->CreateSession(512, &error);
-        Expect(session != nullptr, error.c_str());
+        Expect(session != nullptr, error);
         auto prompt = model->Tokenize(kPrompts[i % kPrompts.size()]);
         Expect(!prompt.empty(), "DSpark repeat prompt tokenization");
         if (i >= kPrompts.size()) {
@@ -735,7 +1106,7 @@ void CheckDsparkReproducibility(
           context.insert(context.end(), prompt.begin(), prompt.end());
           prompt = std::move(context);
         }
-        Expect(session->Sync(prompt, &error), error.c_str());
+        Expect(session->Sync(prompt, &error), error);
         sessions.push_back(std::move(session));
       }
 
@@ -750,14 +1121,13 @@ void CheckDsparkReproducibility(
           const std::size_t budget = cycle == 0 ? 7 : 1 + (index + cycle) % 5;
           items.push_back({.session = sessions[index].get(),
                            .max_tokens = budget,
-                           .max_draft_tokens = static_cast<std::uint32_t>(
-                               std::clamp<std::size_t>(budget - 1, 1, 3)),
+                           .max_draft_tokens = 7,
                            .emitted = &emitted[index]});
         }
-        Expect(model->DsparkStepBatch(items, &error), error.c_str());
+        Expect(model->DsparkStepBatch(items, &error), error);
         for (std::size_t i = 0; i < concurrency; ++i) {
           const auto logits = sessions[i]->CopyLogits(&error);
-          Expect(!logits.empty(), error.c_str());
+          Expect(!logits.empty(), error);
           Expect(std::all_of(logits.begin(), logits.end(),
                              [](float value) { return std::isfinite(value); }),
                  "finite concurrent DSpark frontier logits");
@@ -847,7 +1217,18 @@ void CheckDsparkReproducibility(
         drafted += b.stats.support_drafted;
       }
     }
-    Expect(drafted > 0, "DSpark repeat comparison exercised DSpark proposals");
+    if (concurrency == 8) {
+      Expect(drafted == 0 &&
+                 std::all_of(candidate.end() - concurrency, candidate.end(),
+                             [](const auto& observation) {
+                               return observation.stats.steps == 0 &&
+                                      observation.stats.skipped > 0;
+                             }),
+             "short-context C8 repeats without unprofitable probes");
+    } else {
+      Expect(drafted > 0,
+             "DSpark repeat comparison exercised DSpark proposals");
+    }
     std::cout << "DSpark repeat C" << concurrency << ": " << reference.size()
               << " exact token/logit/state comparisons, drafted=" << drafted
               << '\n';
@@ -856,7 +1237,8 @@ void CheckDsparkReproducibility(
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
+  std::cout << std::unitbuf;
   const char* model_path = std::getenv("GUFO_DEEPSEEK_V4_FLASH_MODEL");
   if (model_path == nullptr || model_path[0] == '\0') {
     std::cout << "SKIP: GUFO_DEEPSEEK_V4_FLASH_MODEL is not set\n";
@@ -866,11 +1248,19 @@ int main(int argc, char** argv) {
   using gufo::models::deepseek_v4_flash::Model;
   using gufo::models::deepseek_v4_flash::ModelOptions;
 
-  const bool dspark = argc == 2 && std::string_view(argv[1]) == "--dspark";
+  const bool dspark_replay =
+      argc == 2 && std::string_view(argv[1]) == "--dspark-replay";
+  const bool dspark =
+      dspark_replay || (argc == 2 && std::string_view(argv[1]) == "--dspark");
   const bool wide_prefill =
       argc == 2 && std::string_view(argv[1]) == "--wide-prefill";
-  if (argc > 1 && !dspark && !wide_prefill) {
-    std::cerr << "usage: ds4_quality_test [--dspark|--wide-prefill]\n";
+  const bool official = argc == 3 && std::string_view(argv[1]) == "--official";
+  const bool frontiers =
+      argc == 3 && std::string_view(argv[1]) == "--reference-frontiers";
+  if (argc > 1 && !dspark && !wide_prefill && !official && !frontiers) {
+    std::cerr << "usage: ds4_quality_test "
+                 "[--dspark|--dspark-replay|--wide-prefill|--official OUT.json|"
+                 "--reference-frontiers OUT-DIR]\n";
     return 2;
   }
   const char* dspark_model_path =
@@ -883,25 +1273,39 @@ int main(int argc, char** argv) {
   const auto model =
       Model::Load(model_path,
                   ModelOptions{
-                      .max_context = 4096,
-                      .prefill_chunk = 2048,
-                      .power_percent = 100,
+                      .max_context = 20480,
                       .dspark_model_path =
                           dspark_model_path != nullptr ? dspark_model_path : "",
                   },
                   &error);
-  Expect(model != nullptr, error.c_str());
+  Expect(model != nullptr, error);
   Expect(model->VocabSize() > 0, "vocabulary size");
   Expect(!model->ModelName().empty(), "model name");
 
+  if (official) {
+    gufo::testing::ds4::ScoreOfficialReference(model, argv[2]);
+    return 0;
+  }
+  if (frontiers) {
+    gufo::testing::ds4::DumpReferenceFrontiers(model, argv[2]);
+    return 0;
+  }
   if (wide_prefill) {
     CheckWidePrefill(model);
     return 0;
   }
+  if (dspark_replay) {
+    CheckDsparkScalarQuality(model);
+    return 0;
+  }
   if (dspark) {
     CheckDsparkReproducibility(model);
-    CheckDsparkSingleQuality(model);
+    CheckDsparkChangingMembership(model);
+    CheckConcurrentPolicySnapshot(model);
+    CheckDsparkScalarQuality(model);
     CheckDsparkPromptSeed(model);
+    CheckDsparkSnapshots(model);
+    CheckSessionBounds(model);
     return 0;
   }
 
@@ -911,13 +1315,13 @@ int main(int argc, char** argv) {
   Expect(!prompt.empty(), "chat prompt tokenization");
 
   auto session = model->CreateSession(4096, &error);
-  Expect(session != nullptr, error.c_str());
-  Expect(session->Sync(prompt, &error), error.c_str());
+  Expect(session != nullptr, error);
+  Expect(session->Sync(prompt, &error), error);
   Expect(session->Position() == static_cast<int>(prompt.size()),
          "prefill position");
 
   const auto logits = session->CopyLogits(&error);
-  Expect(!logits.empty(), error.c_str());
+  Expect(!logits.empty(), error);
   Expect(std::all_of(logits.begin(), logits.end(),
                      [](float value) { return std::isfinite(value); }),
          "finite logits");
@@ -927,17 +1331,17 @@ int main(int argc, char** argv) {
   Expect(first_token >= 0, "first greedy token");
   Expect(!model->DecodeToken(first_token).empty(), "first token text");
   auto snapshot = session->SaveSnapshot(&error);
-  Expect(snapshot != nullptr, error.c_str());
+  Expect(snapshot != nullptr, error);
   Expect(snapshot->SizeBytes() > 0, "snapshot payload");
-  Expect(session->Evaluate(first_token, &error), error.c_str());
+  Expect(session->Evaluate(first_token, &error), error);
 
   const int second_token = session->SelectNext(0.0F, nullptr);
   Expect(second_token >= 0, "second greedy token");
-  Expect(session->Evaluate(second_token, &error), error.c_str());
+  Expect(session->Evaluate(second_token, &error), error);
   Expect(session->Position() == static_cast<int>(prompt.size()) + 2,
          "decode position");
 
-  Expect(session->RestoreSnapshot(*snapshot, &error), error.c_str());
+  Expect(session->RestoreSnapshot(*snapshot, &error), error);
   Expect(session->Position() == checkpoint_position, "restored position");
   Expect(session->SelectNext(0.0F, nullptr) == first_token,
          "restored greedy token");
@@ -955,5 +1359,9 @@ int main(int argc, char** argv) {
   }
 
   std::cout << "DeepSeek V4 Flash model/session test passed\n";
+  CheckSessionBounds(model);
   return 0;
+} catch (const std::exception& error) {
+  std::cerr << "FAIL: " << error.what() << '\n';
+  return EXIT_FAILURE;
 }

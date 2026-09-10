@@ -246,8 +246,6 @@ std::shared_ptr<models::deepseek_v4_flash::Model> LoadDeepSeekModel(
       opt.model_path,
       models::deepseek_v4_flash::ModelOptions{
           .max_context = kDefaultContext,
-          .prefill_chunk = 2048,
-          .power_percent = 100,
           .dspark_model_path = dspark_requested ? opt.dspark_model_path : "",
       },
       &error);

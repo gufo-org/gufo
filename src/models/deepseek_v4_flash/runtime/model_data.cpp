@@ -163,20 +163,6 @@ double ds4_now_seconds(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
 }
 
-void ds4_sleep_seconds(double sec) {
-    if (sec <= 0.0 || !isfinite(sec)) return;
-    struct timespec req;
-    req.tv_sec = (time_t)sec;
-    req.tv_nsec = (long)((sec - (double)req.tv_sec) * 1000000000.0);
-    if (req.tv_nsec < 0) req.tv_nsec = 0;
-    if (req.tv_nsec >= 1000000000L) {
-        req.tv_sec++;
-        req.tv_nsec -= 1000000000L;
-    }
-    /* Do not resume after EINTR: Ctrl+C should cut through throttling sleeps. */
-    (void)nanosleep(&req, &req);
-}
-
 static const char *ds4_log_color_code(ds4_log_type type) {
     switch (type) {
     case ds4_log_type::prefill:
@@ -1589,9 +1575,6 @@ static void dspark_bind(ds4_dspark_model *d) {
         dspark_required_tensor_stage(m, "markov_head.markov_w1.weight", last);
     final_stage->markov_w2 =
         dspark_required_tensor_stage(m, "markov_head.markov_w2.weight", last);
-    final_stage->confidence_proj =
-        dspark_required_tensor_stage(m, "confidence_head.proj.weight", last);
-
     tensor_expect_layout(final_stage->norm, DS4_TENSOR_F32, 1, DS4_N_EMBD, 0, 0);
     tensor_expect_layout(final_stage->hc_head_base, DS4_TENSOR_F32, 1, DS4_N_HC, 0, 0);
     tensor_expect_layout(final_stage->hc_head_fn, DS4_TENSOR_F16, 2, hc_dim, DS4_N_HC, 0);
@@ -1600,8 +1583,11 @@ static void dspark_bind(ds4_dspark_model *d) {
                          d->markov_rank, DS4_N_VOCAB, 0);
     tensor_expect_layout(final_stage->markov_w2, DS4_TENSOR_Q8_0, 2,
                          d->markov_rank, DS4_N_VOCAB, 0);
-    tensor_expect_layout(final_stage->confidence_proj, DS4_TENSOR_Q8_0, 2,
-                         (uint64_t)DS4_N_EMBD + d->markov_rank, 1, 0);
+    // Validate the artifact's confidence head; the runtime controller uses
+    // observed acceptance and does not execute this projection.
+    tensor_expect_layout(
+        dspark_required_tensor_stage(m, "confidence_head.proj.weight", last),
+        DS4_TENSOR_Q8_0, 2, (uint64_t)DS4_N_EMBD + d->markov_rank, 1, 0);
 }
 
 /* Copy every bound DSpark tensor into the support arena. The residency policy
@@ -1743,9 +1729,6 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     e->weights =
         static_cast<ds4_weights *>(ds4_xcalloc(1, sizeof(ds4_weights)));
     e->model->fd = -1;
-    e->power_percent = opt->power_percent > 0 ? opt->power_percent : 100;
-    e->prefill_chunk = opt->prefill_chunk;
-    if (e->power_percent > 100) e->power_percent = 100;
     ds4_acquire_instance_lock();
 
     model_open(e->model, opt->model_path);
@@ -1805,10 +1788,6 @@ int ds4_engine_vocab_size(const ds4_engine *e) {
     return e ? ds4_vocab_size(e->vocab) : 0;
 }
 
-uint32_t ds4_engine_prefill_chunk(const ds4_engine *e) {
-    return e ? e->prefill_chunk : 0;
-}
-
 const char *ds4_engine_model_name(const ds4_engine *e) {
     (void)e;
     return DS4_MODEL_SHAPE_NAME;
@@ -1816,8 +1795,8 @@ const char *ds4_engine_model_name(const ds4_engine *e) {
 
 void ds4_engine_close(ds4_engine *e) {
     if (!e) return;
-    ds4_rocm_graph_destroy(e->dspark_batch_workspace);
-    e->dspark_batch_workspace = NULL;
+    ds4_rocm_graph_destroy(e->batch_workspace);
+    e->batch_workspace = NULL;
     ds4_dspark_close(e->dspark);
     e->dspark = NULL;
     weights_free(e->weights);

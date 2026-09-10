@@ -37,7 +37,6 @@ from dataclasses import dataclass, field
 # Kernel-name substring -> pipeline stage. First match wins, so order matters.
 STAGE_MAPS: dict[str, list[tuple[str, str]]] = {
     "ds4": [
-        ("GroupedQ2Down", "moe: down"),
         ("moe_gate_up", "moe: gate+up"),
         ("moe_down", "moe: down"),
         ("moe_sum", "moe: reduce"),

@@ -1,0 +1,141 @@
+{
+  "schema": "gufo.ds4-quality-qualification.v1",
+  "date": "2026-09-10",
+  "candidate": {
+    "source_commit": "eb1b81e1bb03cc2c0969eb3f930d50a22e6271da",
+    "production_source_sha256": "652dbbec8b9b40d74cd70cbf9254e819c1e79f81197749e9ad6be4ef21a7b81e",
+    "nix_output": "/nix/store/nd3grjajfz4p2kjwl6hv8ghxp383byfh-gufo-eb1b81e-dirty",
+    "binary_sha256": "a10f302ff92356abfc83026e5bb0988fd218e11de4dc04340ef8d3d01c546d66",
+    "quality_binary_sha256": "b7e20b38f2edb51bc942ad9177a5c946ec4997dd79d1483be3a3ec123234226c",
+    "serving_binary_sha256": "e8f4a558e26a2f2e41cf8f0c44ed8d5daeba607cc372b610d22109c667fde069",
+    "working_tree_changes": true
+  },
+  "target_sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0",
+  "support_sha256": "7e319924541db3f7a163ed7e11d7532a70d48228ab59d36cb81e1d4511885360",
+  "checks": [
+    {
+      "name": "ds4.attention",
+      "passed": true
+    },
+    {
+      "name": "ds4.cli",
+      "passed": true
+    },
+    {
+      "name": "ds4.dataset",
+      "passed": true
+    },
+    {
+      "name": "ds4.dspark",
+      "passed": true
+    },
+    {
+      "name": "ds4.eval",
+      "passed": true
+    },
+    {
+      "name": "ds4.projections",
+      "passed": true
+    },
+    {
+      "name": "ds4.serving",
+      "passed": true
+    },
+    {
+      "name": "ds4.target",
+      "passed": true
+    },
+    {
+      "name": "ds4.template",
+      "passed": true
+    }
+  ],
+  "scalar_replay": [
+    {
+      "concurrency": 1,
+      "depth": 0,
+      "choices": 128,
+      "exact_greedy_tokens": true,
+      "exact_frontier_logits": true
+    },
+    {
+      "concurrency": 1,
+      "depth": 2048,
+      "choices": 128,
+      "exact_greedy_tokens": true,
+      "exact_frontier_logits": true
+    },
+    {
+      "concurrency": 1,
+      "depth": 4096,
+      "choices": 128,
+      "exact_greedy_tokens": true,
+      "exact_frontier_logits": true
+    },
+    {
+      "concurrency": 2,
+      "depth": 4096,
+      "choices": 32,
+      "exact_greedy_tokens": true,
+      "exact_frontier_logits": true
+    },
+    {
+      "concurrency": 4,
+      "depth": 4096,
+      "choices": 64,
+      "exact_greedy_tokens": true,
+      "exact_frontier_logits": true
+    },
+    {
+      "concurrency": 6,
+      "depth": 4096,
+      "choices": 96,
+      "exact_greedy_tokens": true,
+      "exact_frontier_logits": true
+    },
+    {
+      "concurrency": 8,
+      "depth": 16384,
+      "choices": 128,
+      "exact_greedy_tokens": true,
+      "exact_frontier_logits": true
+    },
+    {
+      "concurrency": 2,
+      "depth": 16384,
+      "choices": 32,
+      "exact_greedy_tokens": true,
+      "exact_frontier_logits": true
+    }
+  ],
+  "repeatability": "Exact tokens, logits and draft counters at fixed and changing concurrency, including different session capacities.",
+  "snapshots": "Exact support/controller continuation through 16384 tokens; serving prefix and disk reuse passed.",
+  "memory": {
+    "reserve_gib": 12,
+    "dspark": {
+      "exit_code": 0,
+      "aborted_for_memory": false,
+      "minimum_available_gib": 13.842823028564453,
+      "reserve_gib": 12.0
+    },
+    "other_checks": {
+      "exit_code": 0,
+      "aborted_for_memory": false,
+      "minimum_available_gib": 21.004940032958984,
+      "reserve_gib": 12.0
+    },
+    "target_span_payload_bytes": 86714777636,
+    "previous_weight_reservation_bytes": 93952409600,
+    "span_count": 138
+  },
+  "logs_sha256": {
+    "ds4-weight-spans-dspark.log": "106f62e0e78687f2cfeb7999c06d8cd2375312d48b3dcb0735a4923738bc7a59",
+    "ds4-weight-spans-remaining.log": "0bf7be61c748a2bc292df5398e728eb82fbfb3cc840f8a4d21bf9d8410ea5147"
+  },
+  "limits": [
+    "Correctness checks use Nix gpu-test binaries; speed measurements use the pinned Nix release binary.",
+    "DSpark/scalar agreement does not prove official-model equivalence.",
+    "Four existing post-prefill differences versus Antirez remain under investigation; neither implementation is ground truth.",
+    "The 75-question capability comparison remains pending separate approval."
+  ]
+}

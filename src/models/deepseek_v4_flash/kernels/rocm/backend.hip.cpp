@@ -45,8 +45,6 @@ extern "C" int ds4_cuda_q8_fold_take_q81(
 #define M_PI 3.14159265358979323846
 #endif
 
-#define ROCM_QK_K 256
-
 enum {
     /* attention_decode_mixed_kernel stores raw-window scores plus visible
      * compressed scores in shared memory.  The host routes larger unmasked
@@ -61,33 +59,6 @@ struct ds4_gpu_tensor {
     uint64_t bytes;
     int owner;
 };
-
-typedef struct {
-    uint8_t scales[ROCM_QK_K / 16];
-    uint8_t qs[ROCM_QK_K / 4];
-    uint16_t d;
-    uint16_t dmin;
-} hip_block_q2_K;
-
-typedef struct {
-    uint16_t d;
-    uint16_t dmin;
-    uint8_t scales[12];
-    uint8_t qs[ROCM_QK_K / 2];
-} hip_block_q4_K;
-
-typedef struct {
-    float d;
-    int8_t qs[ROCM_QK_K];
-    int16_t bsums[ROCM_QK_K / 16];
-} hip_block_q8_K;
-
-typedef struct {
-    uint16_t d;
-    uint16_t qs[ROCM_QK_K / 8];
-} hip_block_iq2_xxs;
-
-#include "iq2_tables.inc"
 
 #include "detail/ds4_rocm_runtime.hip.hpp"
 

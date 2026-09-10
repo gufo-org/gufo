@@ -49,10 +49,6 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     AssignError(error_msg, "DeepSeek V4 Flash context must be at least 2");
     return nullptr;
   }
-  if (options.power_percent < 1 || options.power_percent > 100) {
-    AssignError(error_msg, "DeepSeek V4 Flash power must be in [1, 100]");
-    return nullptr;
-  }
   if (options.max_context >
       static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
     AssignError(error_msg, "DeepSeek V4 Flash context exceeds engine limits");
@@ -64,9 +60,6 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   engine_options.dspark_model_path = options.dspark_model_path.empty()
                                          ? nullptr
                                          : options.dspark_model_path.c_str();
-  engine_options.context_size = static_cast<int>(options.max_context);
-  engine_options.prefill_chunk = options.prefill_chunk;
-  engine_options.power_percent = options.power_percent;
 
   ds4_engine* engine = nullptr;
   if (ds4_engine_open(&engine, &engine_options) != 0 || engine == nullptr) {
@@ -100,10 +93,9 @@ std::unique_ptr<Session> Model::CreateSession(std::uint32_t max_context,
 
 bool Model::EvaluateBatch(std::span<const SessionBatchItem> items,
                           std::string* error_msg) const {
-  if (items.size() < 2 || items.size() > 8 ||
-      items.size() > options_.prefill_chunk) {
+  if (items.size() < 2 || items.size() > 8) {
     AssignError(error_msg,
-                "DeepSeek batch decode exceeds the configured batch arena");
+                "DeepSeek batch decode requires two to eight sessions");
     return false;
   }
 
@@ -239,10 +231,6 @@ std::string Model::ModelName() const {
   return name != nullptr ? std::string(name) : std::string{};
 }
 
-std::uint32_t Model::PrefillChunk() const {
-  return ds4_engine_prefill_chunk(engine_);
-}
-
 std::uint32_t Model::MaxContext() const noexcept {
   return options_.max_context;
 }
@@ -322,6 +310,10 @@ bool Session::Evaluate(int token, std::string* error_msg) {
 
 bool Session::HasDspark() const {
   return ds4_engine_has_dspark(model_->engine_);
+}
+
+void Session::BeginRequest() {
+  ds4_session_begin_request(session_);
 }
 
 void Session::PrepareBatchExecution() {
@@ -442,6 +434,10 @@ int Session::Position() const {
 
 int Session::ContextSize() const {
   return ds4_session_ctx(session_);
+}
+
+std::uint32_t Session::PrefillCapacity() const {
+  return ds4_session_prefill_capacity(session_);
 }
 
 std::uint64_t Session::PayloadBytes() const {

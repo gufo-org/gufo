@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import the pinned Antirez DS4 capability cases into Gufo's JSON format."""
+"""Import pinned DS4 capability cases or official 0731 continuations."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from typing import Any
 
 DS4_REVISION = "84cc882352757baf628a1776badf7cc54d584e28"
 DS4_EVAL_BLOB = "7aed5d5c5b5cdc74d1b3aa0310161e2b437c1d08"
+OFFICIAL_REVISION = "6289c516273979173abbc062209a81dd3706b804"
 SYSTEM_PROMPT = (
     "You are solving a hard benchmark question. Reason carefully. "
     "The final answer must follow the requested format exactly."
@@ -58,6 +59,8 @@ DATASETS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--suite", choices=("capability", "official"),
+                        default="capability")
     parser.add_argument(
         "--ds4-repository",
         type=Path,
@@ -253,10 +256,74 @@ def build_document(repository: Path) -> dict[str, Any]:
     }
 
 
+def build_official_document(repository: Path) -> dict[str, Any]:
+    revision = git_output(repository, "rev-parse", OFFICIAL_REVISION)
+    if revision != OFFICIAL_REVISION:
+        raise ValueError(f"unexpected official fixture revision: {revision}")
+    source_files: dict[str, str] = {}
+
+    def read(path: str) -> bytes:
+        content = subprocess.check_output(
+            ["git", "-C", str(repository), "show", f"{revision}:{path}"])
+        source_files[path] = hashlib.sha256(content).hexdigest()
+        return content
+
+    cases = []
+    base = "gguf-tools/quality-testing/data/flash"
+    for line in read(f"{base}/manifest.tsv").decode().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name, prompt_path, continuation_path, response_path = line.split("\t")
+        response = json.loads(read(response_path))
+        choice = response["choices"][0]
+        tokens = [bytes(token["bytes"])
+                  for token in choice["logprobs"]["content"]]
+        continuation = read(continuation_path)
+        if b"".join(tokens) != continuation:
+            raise ValueError(f"official token bytes do not reconstruct {name}")
+        cases.append({
+            "id": name, "group": "continuation-100",
+            "prompt": read(prompt_path).decode("utf-8"),
+            "continuation": continuation.decode("utf-8"),
+            "token_bytes_hex": [token.hex() for token in tokens],
+        })
+    if len(cases) != 100 or sum(len(c["token_bytes_hex"]) for c in cases) != 2313:
+        raise ValueError("official continuation fixture coverage changed")
+
+    base = "tests/test-vectors/flash-0731"
+    manifest = json.loads(read(f"{base}/manifest.json"))
+    if manifest["checkpoint"] != "0731" or len(manifest["prompts"]) != 5:
+        raise ValueError("official smoke fixture changed")
+    for item in manifest["prompts"]:
+        response = json.loads(read(f"{base}/{item['official_file']}"))
+        tokens = [bytes(step["token"]["bytes"]) for step in response["steps"]]
+        cases.append({
+            "id": item["id"], "group": "smoke-5",
+            "prompt": read(f"{base}/{item['prompt_file']}").decode("utf-8"),
+            "continuation": b"".join(tokens).decode("utf-8"),
+            "token_bytes_hex": [token.hex() for token in tokens],
+        })
+    return {
+        "schema": "gufo.ds4-official-continuations.v1",
+        "source_repository": "https://github.com/antirez/ds4",
+        "source_revision": revision,
+        "checkpoint": "0731",
+        "license": read("LICENSE").decode("utf-8"),
+        "source_files_sha256": source_files,
+        "measurement": (
+            "Teacher-forced target-token NLL, greedy agreement, and matching "
+            "prefix. Saturated API logprobs are not full-distribution logits."
+        ),
+        "cases": cases,
+    }
+
+
 def main() -> int:
     args = parse_args()
     try:
-        document = build_document(args.ds4_repository)
+        document = (build_official_document(args.ds4_repository)
+                    if args.suite == "official"
+                    else build_document(args.ds4_repository))
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
         print(f"import-ds4-eval: {error}", file=sys.stderr)
         return 1

@@ -757,11 +757,13 @@ static int hip_launch_q8_group_pairs(
  * instead of a batched GEMM.
  *
  * Prompt chunks are hundreds to thousands of rows and amortize hipBLAS macro
- * tiles; a DSpark verification block is a handful of rows and does not. Zero
- * disables the small-batch route entirely, which is how an A/B run isolates it.
+ * tiles; DSpark verification retains decode arithmetic for every independent
+ * row, including flattened concurrent draft blocks.
  */
 static uint32_t ds4_rocm_dense_small_batch_rows(void) {
-    return ds4_rocm_small_batch_limit(24u);
+  // Flattened verification waves can contain eight independent draft blocks.
+  return ds4_rocm_verifier_batch_mode() ? 136u
+                                        : ds4_rocm_small_batch_limit(24u);
 }
 
 static int hip_matmul_q8_0_tensor_f16_gemm(
@@ -998,33 +1000,41 @@ static int hip_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *model
       }
 #endif
         const uint32_t small_batch_rows = ds4_rocm_dense_small_batch_rows();
-        if ((in_dim & 31u) == 0u && n_tok <= small_batch_rows && n_tok <= 16u) {
-            /*
-             * Verification-block width: quantize the activations once and reuse
-             * each weight block across the batch, in the decode kernel's access
-             * order. This both moves the weights once and keeps the result
-             * bitwise equal to ordinary decode.
-             */
-            const uint64_t xq_bytes = (uint64_t)n_tok * blocks * 32u;
-            const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
-            const uint64_t tmp_bytes =
-                scale_offset + (uint64_t)n_tok * blocks * sizeof(float);
-            void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 narrow batch prequant");
-            if (tmp) {
-                int8_t *xq = (int8_t *)tmp;
-                float *xscale = (float *)((char *)tmp + scale_offset);
-                dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1);
-                quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
-                        xq, xscale, (const float *)x->ptr, in_dim, blocks);
-                if (hip_ok(hipGetLastError(),
-                           "matmul_q8_0 narrow batch quantize launch")) {
-                  return hip_launch_q8_batch_reuse(
-                      (float*)out->ptr,
-                      reinterpret_cast<const unsigned char*>(wptr), xq, xscale,
-                      in_dim, out_dim, blocks, (uint32_t)n_tok,
-                      n_tok == 2u ? 2u : 1u);
-                }
+        if ((in_dim & 31u) == 0u && n_tok <= small_batch_rows &&
+            (n_tok <= 16u || ds4_rocm_verifier_batch_mode())) {
+          /*
+           * Verification-block width: quantize the activations once and reuse
+           * each weight block across the batch, in the decode kernel's access
+           * order. This both moves the weights once and keeps the result
+           * bitwise equal to ordinary decode.
+           */
+          const uint64_t xq_bytes = (uint64_t)n_tok * blocks * 32u;
+          const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
+          const uint64_t tmp_bytes =
+              scale_offset + (uint64_t)n_tok * blocks * sizeof(float);
+          void* tmp = hip_tmp_alloc(tmp_bytes, "q8_0 narrow batch prequant");
+          if (tmp) {
+            int8_t* xq = (int8_t*)tmp;
+            float* xscale = (float*)((char*)tmp + scale_offset);
+            dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1);
+            quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
+                xq, xscale, (const float*)x->ptr, in_dim, blocks);
+            if (hip_ok(hipGetLastError(),
+                       "matmul_q8_0 narrow batch quantize launch")) {
+              for (uint32_t first = 0; first < n_tok; first += 16u) {
+                const uint32_t count =
+                    std::min<uint32_t>(16u, (uint32_t)n_tok - first);
+                if (!hip_launch_q8_batch_reuse(
+                        (float*)out->ptr + first * out_dim,
+                        reinterpret_cast<const unsigned char*>(wptr),
+                        xq + (uint64_t)first * blocks * 32u,
+                        xscale + (uint64_t)first * blocks, in_dim, out_dim,
+                        blocks, count, count == 2u ? 2u : 1u))
+                  return 0;
+              }
+              return 1;
             }
+          }
         }
         if ((in_dim & 31u) == 0u && out_dim <= UINT32_MAX && n_tok <= UINT32_MAX) {
             const uint32_t rows_per_block = 32u;
@@ -1233,12 +1243,14 @@ static int ds4_gpu_matmul_q8_0_pair_tensor(
       out0_dim > UINT32_MAX || out1_dim > UINT32_MAX || n_tok > UINT32_MAX) {
     return 0;
   }
-    if (n_tok != 1) {
-        return hip_matmul_q8_0_tensor_labeled(out0, model_map, model_size, weight0_offset,
-                                               in_dim, out0_dim, x, n_tok, "q8_0_pair0") &&
-               hip_matmul_q8_0_tensor_labeled(out1, model_map, model_size, weight1_offset,
-                                               in_dim, out1_dim, x, n_tok, "q8_0_pair1");
-    }
+  if (n_tok > 1 && (out0_dim != out1_dim || n_tok > 136 || (in_dim & 31u))) {
+    return hip_matmul_q8_0_tensor_labeled(out0, model_map, model_size,
+                                          weight0_offset, in_dim, out0_dim, x,
+                                          n_tok, "q8_0_pair0") &&
+           hip_matmul_q8_0_tensor_labeled(out1, model_map, model_size,
+                                          weight1_offset, in_dim, out1_dim, x,
+                                          n_tok, "q8_0_pair1");
+  }
     const uint64_t blocks = (in_dim + 31u) / 32u;
     uint64_t row_bytes = 0, weight0_bytes = 0, weight1_bytes = 0;
     if (weight0_offset > model_size || weight1_offset > model_size ||
@@ -1249,9 +1261,9 @@ static int ds4_gpu_matmul_q8_0_pair_tensor(
     }
     if (weight0_bytes > model_size - weight0_offset ||
         weight1_bytes > model_size - weight1_offset ||
-        x->bytes < in_dim * sizeof(float) ||
-        out0->bytes < out0_dim * sizeof(float) ||
-        out1->bytes < out1_dim * sizeof(float)) {
+        x->bytes < n_tok * in_dim * sizeof(float) ||
+        out0->bytes < n_tok * out0_dim * sizeof(float) ||
+        out1->bytes < n_tok * out1_dim * sizeof(float)) {
       return 0;
     }
     const char *w0 = hip_model_range_ptr(model_map, weight0_offset, weight0_bytes, "q8_0_pair0");
@@ -1259,19 +1271,34 @@ static int ds4_gpu_matmul_q8_0_pair_tensor(
     if (!w0 || !w1)
       return 0;
 
-    const uint64_t xq_bytes = blocks * 32u;
+    const uint64_t xq_bytes = n_tok * blocks * 32u;
     const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
-    const uint64_t tmp_bytes = scale_offset + blocks * sizeof(float);
+    const uint64_t tmp_bytes = scale_offset + n_tok * blocks * sizeof(float);
     void *tmp = hip_tmp_alloc(tmp_bytes, "q8_0 pair prequant");
     if (!tmp) return 0;
     int8_t *xq = (int8_t *)tmp;
     float *xscale = (float *)((char *)tmp + scale_offset);
     const int use_dp4a = 1;
-    dim3 qgrid((unsigned)blocks, 1, 1);
+    dim3 qgrid((unsigned)blocks, (unsigned)n_tok, 1);
     quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
             xq, xscale, (const float *)x->ptr, in_dim, blocks);
     if (!hip_ok(hipGetLastError(), "matmul_q8_0 pair quantize launch")) {
         return 0;
+    }
+    if (n_tok > 1) {
+      for (uint32_t first = 0; first < n_tok; first += 4u) {
+        const uint32_t count =
+            (uint32_t)n_tok - first < 4u ? (uint32_t)n_tok - first : 4u;
+        matmul_q8_0_preq_batch_reuse_w32_kernel<4, false, true>
+            <<<dim3((unsigned)out0_dim, 2), 32>>>(
+                (float*)out0->ptr + first * out0_dim,
+                reinterpret_cast<const unsigned char*>(w0),
+                xq + first * blocks * 32u, xscale + first * blocks, in_dim,
+                out0_dim, blocks, count, 1u,
+                reinterpret_cast<const unsigned char*>(w1),
+                (float*)out1->ptr + first * out1_dim);
+      }
+      return hip_ok(hipGetLastError(), "matmul_q8_0 paired batch reuse launch");
     }
     const uint64_t max_out = out0_dim > out1_dim ? out0_dim : out1_dim;
     matmul_q8_0_pair_preq_warp8_kernel<<<

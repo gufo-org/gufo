@@ -1,4 +1,4 @@
-# All DS4-owned checks are registered here. Shared CLI/parser and scheduler
+# DS4 CTest checks are registered here. Shared CLI/parser and scheduler
 # tests remain with their shared components.
 add_executable(ds4_chat_template_test
   chat_template_test.cpp
@@ -15,8 +15,10 @@ add_test(NAME ds4.cli COMMAND ds4_cli_test)
 set_tests_properties(ds4.cli PROPERTIES LABELS "cpu;ds4;cli")
 
 if(ENGINE_ENABLE_HIP)
-  add_executable(ds4_quality_test quality_test.cpp token_goldens.cpp)
+  add_executable(ds4_quality_test quality_test.cpp token_goldens.cpp
+    official_reference.cpp)
   target_compile_definitions(ds4_quality_test PRIVATE
+    GUFO_DS4_OFFICIAL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/official-0731.json"
     GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
   target_link_libraries(ds4_quality_test PRIVATE gufo_deepseek_v4_flash)
   add_test(NAME ds4.target COMMAND ds4_quality_test)
@@ -43,12 +45,22 @@ if(ENGINE_ENABLE_HIP)
 endif()
 
 if(ENGINE_ENABLE_HIP)
-  add_executable(ds4_q2_down_test q2_down_test.hip)
-  target_include_directories(ds4_q2_down_test PRIVATE ${PROJECT_SOURCE_DIR})
-  target_compile_options(ds4_q2_down_test PRIVATE -O3 -ffast-math -fno-finite-math-only)
-  target_link_libraries(ds4_q2_down_test PRIVATE hip::host)
-  add_test(NAME ds4.q2-down COMMAND ds4_q2_down_test)
-  set_tests_properties(ds4.q2-down PROPERTIES
+  add_executable(ds4_projection_test projection_test.hip)
+  target_include_directories(ds4_projection_test PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(ds4_projection_test PRIVATE -O3 -ffast-math -fno-finite-math-only)
+  target_link_libraries(ds4_projection_test PRIVATE hip::host)
+  add_test(NAME ds4.projections COMMAND ds4_projection_test)
+  set_tests_properties(ds4.projections PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds4;quality"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
+  add_executable(ds4_attention_test attention_test.hip)
+  target_include_directories(ds4_attention_test PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(ds4_attention_test PRIVATE -O3 -ffast-math -fno-finite-math-only)
+  target_link_libraries(ds4_attention_test PRIVATE hip::host)
+  add_test(NAME ds4.attention COMMAND ds4_attention_test)
+  set_tests_properties(ds4.attention PROPERTIES
     LABELS "gpu;hip;gfx1151;ds4;quality"
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)

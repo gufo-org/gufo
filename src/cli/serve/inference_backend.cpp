@@ -44,7 +44,7 @@ void SetError(std::string* error, std::string message) {
 
 #if defined(ENGINE_ENABLE_HIP)
 constexpr std::string_view kDeepSeekStateAbi =
-    "deepseek-v4-flash-gfx1151-state-v1";
+    "deepseek-v4-flash-gfx1151-state-v4";
 constexpr std::array<std::uint8_t, 8> kQwenPersistentSnapshotMagic = {
     'G', 'Q', 'W', 'R', 'U', 'N', '0', '1'};
 constexpr std::uint32_t kQwenPersistentPayloadVersion = 2;
@@ -83,7 +83,8 @@ bool IsSha256Hex(std::string_view value) noexcept {
 }
 
 std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
-    std::string_view artifact_fingerprint, std::uint32_t max_context) {
+    std::string_view artifact_fingerprint, std::string_view support_fingerprint,
+    std::uint32_t max_context, std::uint32_t max_draft_tokens) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "DeepSeek disk cache requires a SHA-256 artifact fingerprint");
@@ -98,11 +99,16 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
            << "chat_template_reference_sha256="
            << models::deepseek_v4_flash::EncoderReferenceSha256() << '\n'
            << "state_abi=" << kDeepSeekStateAbi << '\n'
-           << "payload_layout=ds4-rocm-v2-f32-live-prefix-fp16-mirror\n"
+           << "payload_layout=ds4-rocm-v4-window128-continuation\n"
+           // Cached frontiers also depend on the compiled numerical routes.
+           << "numerics=ds4-scalar-verifier-v1\n"
            << "context_tokens=" << max_context << '\n'
            << "position_policy=absolute-v1\n"
            << "rope_window_policy=deepseek4-compiled-v1\n"
            << "adapters=none\n";
+  identity << "support_sha256=" << support_fingerprint << '\n'
+           << "max_draft_tokens=" << max_draft_tokens << '\n'
+           << "draft_policy=dspark-cost-v5-window128\n";
   const std::string canonical = identity.str();
   return {canonical.begin(), canonical.end()};
 }
@@ -1252,14 +1258,20 @@ class DeepSeekTextRunner final : public TextModelRunner {
 public:
   DeepSeekTextRunner(std::shared_ptr<models::deepseek_v4_flash::Model> model,
                      std::uint32_t max_context, std::uint32_t max_draft_tokens,
-                     std::string artifact_fingerprint = {})
+                     std::string artifact_fingerprint = {},
+                     std::string support_fingerprint = {})
       : model_(std::move(model)),
         max_context_(max_context),
         max_draft_tokens_(std::max(max_draft_tokens, 1u)) {
     if (!artifact_fingerprint.empty()) {
+      if (model_->HasDspark() && !IsSha256Hex(support_fingerprint)) {
+        throw std::invalid_argument(
+            "DSpark disk cache requires a support SHA-256 fingerprint");
+      }
       persistence_ = TextRunnerPersistenceDescriptor{
-          .compatibility_identity =
-              DeepSeekCompatibilityIdentity(artifact_fingerprint, max_context_),
+          .compatibility_identity = DeepSeekCompatibilityIdentity(
+              artifact_fingerprint, support_fingerprint, max_context_,
+              max_draft_tokens_),
           .payload_version = DS4_SESSION_PAYLOAD_VERSION,
       };
     }
@@ -1274,17 +1286,16 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = true,
-                .snapshot = !dspark,
-                .fork = !dspark,
+                .snapshot = true,
+                .fork = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = dspark,
                 .batched_multi_token_decode = dspark,
                 .batched_multi_token_decode_max_width = 8u,
-                .prefix_reuse = !dspark,
+                .prefix_reuse = true,
             },
-        .persistence = dspark ? std::optional<TextRunnerPersistenceDescriptor>{}
-                              : persistence_,
+        .persistence = persistence_,
     };
   }
 
@@ -1313,12 +1324,10 @@ public:
         },
     };
     for (std::size_t width = 2; width <= 8; ++width) {
-      if (width <= model_->PrefillChunk()) {
-        plans.push_back({
-            .kind = TextExecutionPlanKind::kBatched,
-            .physical_width = width,
-        });
-      }
+      plans.push_back({
+          .kind = TextExecutionPlanKind::kBatched,
+          .physical_width = width,
+      });
     }
     return plans;
   }
@@ -1411,6 +1420,17 @@ public:
     return std::make_unique<DeepSeekTextRunnerState>(model_, max_context_);
   }
 
+  void PreparePrefixReuse(
+      TextRunnerState& state,
+      std::span<const TextRunnerToken> prefix) const override {
+    auto& deepseek = RequireDeepSeekState(state);
+    if (deepseek.position() != prefix.size()) {
+      throw std::logic_error(
+          "DeepSeek reused prefix does not match checkpoint");
+    }
+    deepseek.session().BeginRequest();
+  }
+
   [[nodiscard]] TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
@@ -1441,6 +1461,8 @@ public:
   [[nodiscard]] TextDecodeSelection SelectNext(
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     auto& deepseek = RequireDeepSeekState(state);
+    if (deepseek.position() >= max_context_)
+      return {.stop = true, .piece = {}};
     std::string error;
     const auto logits = deepseek.session().CopyLogits(&error);
     if (logits.empty()) {
@@ -1485,6 +1507,8 @@ public:
     }
 
     auto& deepseek = RequireDeepSeekState(state);
+    if (deepseek.position() >= max_context_)
+      return {.selections = {}, .stop = true};
     const auto stats_before = deepseek.session().DsparkStatistics();
     std::vector<int> emitted;
     std::string error;
@@ -1523,10 +1547,78 @@ public:
     if (!model_->HasDspark() || decodes.size() < 2 || decodes.size() > 8) {
       return TextModelRunner::DecodeBatch(decodes);
     }
-    for (const auto& decode : decodes) {
-      if (!decode.sampler.get().config().can_use_unmodified_argmax()) {
-        return TextModelRunner::DecodeBatch(decodes);
+    if (std::any_of(decodes.begin(), decodes.end(), [&](const auto& item) {
+          return RequireDeepSeekState(item.state.get()).position() >=
+                 max_context_;
+        })) {
+      std::vector<TextRunnerDecode> active;
+      std::vector<std::size_t> active_indices;
+      std::vector<TextDecodeStep> steps(decodes.size());
+      for (std::size_t i = 0; i < decodes.size(); ++i) {
+        if (RequireDeepSeekState(decodes[i].state.get()).position() >=
+            max_context_) {
+          steps[i].stop = true;
+        } else {
+          active.push_back(decodes[i]);
+          active_indices.push_back(i);
+        }
       }
+      if (!active.empty()) {
+        auto active_steps = DecodeBatch(active);
+        for (std::size_t i = 0; i < active.size(); ++i)
+          steps[active_indices[i]] = std::move(active_steps[i]);
+      }
+      return steps;
+    }
+    std::vector<TextRunnerDecode> greedy;
+    std::vector<std::size_t> greedy_indices;
+    std::vector<std::size_t> sampled_indices;
+    for (std::size_t index = 0; index < decodes.size(); ++index) {
+      if (decodes[index].sampler.get().config().can_use_unmodified_argmax()) {
+        greedy.push_back(decodes[index]);
+        greedy_indices.push_back(index);
+      } else {
+        sampled_indices.push_back(index);
+      }
+    }
+    if (!sampled_indices.empty()) {
+      std::vector<TextDecodeStep> steps(decodes.size());
+      if (greedy.size() == 1) {
+        const auto& item = greedy.front();
+        steps[greedy_indices.front()] =
+            DecodeStep(item.state.get(), item.max_tokens, item.sampler.get());
+      } else if (!greedy.empty()) {
+        auto greedy_steps = DecodeBatch(greedy);
+        for (std::size_t index = 0; index < greedy.size(); ++index) {
+          steps[greedy_indices[index]] = std::move(greedy_steps[index]);
+        }
+      }
+
+      std::vector<TextRunnerAdvance> advances;
+      std::vector<std::size_t> advanced_indices;
+      for (const std::size_t index : sampled_indices) {
+        const auto& item = decodes[index];
+        auto selection = SelectNext(item.state.get(), item.sampler.get());
+        if (selection.stop) {
+          steps[index].stop = true;
+          continue;
+        }
+        advances.push_back({.state = item.state, .token = selection.token});
+        advanced_indices.push_back(index);
+        steps[index].selections.push_back(std::move(selection));
+      }
+      if (advances.size() == 1) {
+        Advance(advances.front().state.get(), advances.front().token);
+      } else if (!advances.empty()) {
+        AdvanceBatch(advances);
+        for (const std::size_t index : advanced_indices) {
+          steps[index].execution_plan = {
+              .kind = TextExecutionPlanKind::kBatched,
+              .physical_width = advances.size(),
+          };
+        }
+      }
+      return steps;
     }
 
     std::array<models::deepseek_v4_flash::SessionDsparkBatchItem, 8> items{};
@@ -1560,6 +1652,10 @@ public:
         throw std::runtime_error("DeepSeek DSpark batch produced no tokens");
       }
       auto& step = steps[index];
+      step.execution_plan = {
+          .kind = TextExecutionPlanKind::kBatched,
+          .physical_width = decodes.size(),
+      };
       states[index]->set_position(states[index]->position() +
                                   emitted[index].size());
       step.selections.reserve(emitted[index].size());
@@ -1585,10 +1681,9 @@ public:
 
   void AdvanceBatch(
       std::span<const TextRunnerAdvance> advances) const override {
-    if (advances.size() < 2 || advances.size() > 8 ||
-        advances.size() > model_->PrefillChunk()) {
+    if (advances.size() < 2 || advances.size() > 8) {
       throw std::invalid_argument(
-          "DeepSeek batched decode exceeds the configured batch arena");
+          "DeepSeek batched decode requires two to eight sessions");
     }
 
     std::array<models::deepseek_v4_flash::SessionBatchItem, 8> items{};
@@ -1627,8 +1722,12 @@ public:
 
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       const TextRunnerState& state) const override {
-    const std::uint64_t bytes =
-        RequireDeepSeekState(state).session().PayloadBytes();
+    const auto& session = RequireDeepSeekState(state).session();
+    if (model_->HasDspark() && session.DsparkStatistics().context_tokens !=
+                                   static_cast<uint32_t>(session.Position())) {
+      throw std::runtime_error("DSpark prefix lacks complete support state");
+    }
+    const std::uint64_t bytes = session.PayloadBytes();
     if (bytes == 0 || bytes > static_cast<std::uint64_t>(
                                   std::numeric_limits<std::size_t>::max())) {
       throw std::overflow_error("DeepSeek snapshot size is unavailable");
@@ -1846,12 +1945,6 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error, "DeepSeek DSpark HTTP decoding requires --dspark-model");
       return false;
     }
-    if (speculative_config.backend == TextSpeculativeBackend::kDSpark &&
-        DiskCacheEnabled(resolved_disk_cache_config)) {
-      SetError(error,
-               "DeepSeek DSpark HTTP decoding does not support disk snapshots");
-      return false;
-    }
     if (!models::deepseek_v4_flash::ValidateGgufTemplate(*reader,
                                                          &load_error)) {
       SetError(error, "Unsupported DeepSeek chat template: " + load_error);
@@ -1861,8 +1954,6 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         model_path,
         models::deepseek_v4_flash::ModelOptions{
             .max_context = max_context,
-            .prefill_chunk = 2048,
-            .power_percent = 100,
             .dspark_model_path =
                 speculative_config.backend == TextSpeculativeBackend::kDSpark
                     ? speculative_config.draft_model_path
@@ -1880,6 +1971,17 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             crypto::Sha256FileHex(model_path);
       } catch (const std::exception& exception) {
         SetError(error, std::string("Failed to fingerprint DeepSeek GGUF: ") +
+                            exception.what());
+        return false;
+      }
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config) && model->HasDspark() &&
+        resolved_disk_cache_config.draft_model_artifact_fingerprint.empty()) {
+      try {
+        resolved_disk_cache_config.draft_model_artifact_fingerprint =
+            crypto::Sha256FileHex(speculative_config.draft_model_path);
+      } catch (const std::exception& exception) {
+        SetError(error, std::string("Failed to fingerprint DSpark GGUF: ") +
                             exception.what());
         return false;
       }
@@ -2085,6 +2187,8 @@ bool InferenceBackend::load(
   }
   if (DiskCacheEnabled(disk_cache_config) &&
       (!IsSha256Hex(disk_cache_config.model_artifact_fingerprint) ||
+       (model->HasDspark() &&
+        !IsSha256Hex(disk_cache_config.draft_model_artifact_fingerprint)) ||
        disk_cache_config.capacity_bytes == 0 ||
        disk_cache_config.staging_capacity_bytes == 0)) {
     SetError(error, "DeepSeek persistent disk cache configuration is invalid");
@@ -2095,7 +2199,8 @@ bool InferenceBackend::load(
     auto new_state = std::make_shared<Impl::State>();
     auto runner = std::make_shared<DeepSeekTextRunner>(
         std::move(model), max_context, speculative_config.max_draft_tokens,
-        disk_cache_config.model_artifact_fingerprint);
+        disk_cache_config.model_artifact_fingerprint,
+        disk_cache_config.draft_model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
     if (DiskCacheEnabled(disk_cache_config)) {

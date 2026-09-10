@@ -924,6 +924,13 @@ std::vector<TextDecodeStep> TextRunnerPool::DecodeBatch(
   for (std::size_t index = 0; index < requests.size(); ++index) {
     auto& step = steps[index];
     auto& request = *requests[index]->impl_;
+    if (step.execution_plan.physical_width == 0 ||
+        step.execution_plan.physical_width > requests.size() ||
+        (step.execution_plan.kind == TextExecutionPlanKind::kSerial &&
+         step.execution_plan.physical_width != 1)) {
+      throw std::runtime_error(
+          "text runner returned an invalid execution width");
+    }
     if (step.selections.size() > max_tokens[index] ||
         (step.selections.empty() && !step.stop)) {
       throw std::runtime_error(

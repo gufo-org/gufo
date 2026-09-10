@@ -51,12 +51,6 @@ __device__ static void hc4_split_one(float *out, const float *mix, const float *
     for (int i = 0; i < 16; i++) out[8 + i] = c[i];
 }
 
-__global__ static void hc_split_sinkhorn_kernel(float *out, const float *mix, const float *scale, const float *base, uint32_t n_rows, uint32_t sinkhorn_iters, float epsv) {
-    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= n_rows) return;
-    hc4_split_one(out + (uint64_t)row * 24, mix + (uint64_t)row * 24, scale, base, sinkhorn_iters, epsv);
-}
-
 __global__ static void hc_weighted_sum_kernel(float *out, const float *x, const float *w, uint32_t n_embd, uint32_t n_hc, uint32_t n_tokens, uint32_t weight_stride_f32) {
     uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t n = (uint64_t)n_embd * n_tokens;
@@ -417,26 +411,15 @@ __global__ static void hc_split_weighted_sum_norm_fused_kernel(
     }
 }
 
-/* One pass over the hyper-connection row for the whole pre-block chain.
+/* Fuse HC RMS scaling, mix projection, Sinkhorn split and weighted sum.
+ * Each thread retains its columns from all four raw F32 streams, so the final
+ * weighted sum needs no second read of the input. Projection weights stay in
+ * L2.
  *
- * The chain is norm -> mix projection -> Sinkhorn split -> weighted sum, and
- * every stage read the same 16,384-wide row again: the norm read it and wrote a
- * F16 mirror, the 24-wide projection read that mirror back, and the weighted sum
- * read the F32 row a second time. At a 4,096-token chunk that is 268 MiB read,
- * 134 MiB written, 134 MiB read and 268 MiB read for one 67 MiB result, and the
- * projection's own shape -- 24 columns against a 16,384-deep K -- gives the
- * library a tile that reaches 84 GB/s of a 242 GB/s ceiling.
- *
- * Holding the row in registers collapses all of it to one read. A thread owns
- * COLS contiguous embedding columns in all four streams, which is what makes the
- * weighted sum thread-local: the four values it needs for a column are four of
- * its own registers. The projection weight is the only re-read, 24 x 16,384
- * halves per block, and it stays in L2 across the grid.
- *
- * `mix` and therefore `split` are NOT bit-identical to the separate chain: the
- * K reduction is a wave shuffle tree here and a Tensile tile there. The F16
- * rounding of the normalized row is kept, so that reassociation is the only
- * difference. */
+ * DeepSeek's official 0731 Block.hc_pre computes F.linear(x.float(), hc_fn)
+ * and scales the result by the RMS inverse. Do not round normalized activations
+ * to F16: that is an additional approximation in the separate F16 path, not
+ * part of the official formula. This kernel receives F16 projection weights. */
 struct alignas(16) ds4_hc_half8 {
     __half2 p[4];
 };
@@ -505,13 +488,8 @@ __global__ static void hc4_norm_mix_split_weighted_sum_kernel(
     for (uint32_t w = 0; w < WAVES_PER_TOK; w++) rowsum += partial[tl][w];
     const float nscale = rsqrtf(rowsum / (float)hc_dim + norm_eps);
 
-    /* The projection is linear in the row, so the scale comes out of the sum:
-     * mix[j] = nscale * sum_k w[j][k] * x[k]. That skips the separate chain's
-     * F16 rounding of the normalized row entirely -- strictly more accurate than
-     * the mirror it replaces, and it keeps the raw row as the only live copy.
-     *
-     * One output column at a time, reduced across the wave before the next, so
-     * the 24 partial sums are never live together and nothing spills. */
+    /* Apply RMS scaling after projecting the raw F32 row. Reduce one output
+     * column before starting the next to limit live registers. */
     for (uint32_t j = 0; j < MIX_HC; j++) {
         const __half *wrow = mix_w + (uint64_t)j * hc_dim + col0;
         float a = 0.0f;
@@ -592,25 +570,4 @@ __global__ static void dspark_capture_features_kernel(
         acc += hc[(uint64_t)t * n_hc * n_embd + (uint64_t)h * n_embd + d];
     }
     out[(uint64_t)t * out_row_stride + d] = acc / (float)n_hc;
-}
-
-/* Broadcast a plain hidden row into all hyper-connection streams.
- *
- * The DSpark drafter's fused target feature is a single 4096-wide vector, but a
- * stage's attention pre-path consumes hyper-connection form. Replicating the
- * vector across the streams is what lets the injected context row take the same
- * route through the stage as an ordinary token. */
-__global__ static void dspark_repeat_hc_kernel(
-        float       *out_hc,
-        const float *x,
-        uint32_t     n_embd,
-        uint32_t     n_hc,
-        uint32_t     n_rows) {
-    const uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    const uint64_t n = (uint64_t)n_embd * n_hc * n_rows;
-    if (gid >= n) return;
-    const uint32_t d = (uint32_t)(gid % n_embd);
-    const uint64_t rest = gid / n_embd;
-    const uint32_t row = (uint32_t)(rest / n_hc);
-    out_hc[gid] = x[(uint64_t)row * n_embd + d];
 }

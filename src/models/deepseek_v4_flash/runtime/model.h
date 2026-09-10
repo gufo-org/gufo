@@ -20,9 +20,6 @@ struct ds4_engine_options {
   /* Optional DSpark support model. NULL leaves speculative decoding off and
    * the engine byte-for-byte identical to a non-speculative build. */
   const char* dspark_model_path;
-  int context_size;
-  uint32_t prefill_chunk;
-  int power_percent;
 };
 
 struct ds4_session_snapshot {
@@ -45,12 +42,11 @@ struct ds4_session_dspark_batch_item {
 };
 
 inline constexpr int DS4_SESSION_SYNC_INTERRUPTED = 2;
-inline constexpr std::uint32_t DS4_SESSION_PAYLOAD_VERSION = 2;
+inline constexpr std::uint32_t DS4_SESSION_PAYLOAD_VERSION = 4;
 
 int ds4_engine_open(ds4_engine** out, const ds4_engine_options* options);
 void ds4_engine_close(ds4_engine* engine);
 int ds4_engine_vocab_size(const ds4_engine* engine);
-uint32_t ds4_engine_prefill_chunk(const ds4_engine* engine);
 const char* ds4_engine_model_name(const ds4_engine* engine);
 
 void ds4_tokens_free(ds4_tokens* tokens);
@@ -79,6 +75,7 @@ int ds4_session_eval(ds4_session* session, int token, char* error,
 int ds4_sessions_eval_batch(const ds4_session_batch_item* items,
                             size_t item_count, char* error,
                             size_t error_capacity);
+void ds4_session_begin_request(ds4_session* session);
 void ds4_session_prepare_batch_execution(ds4_session* session);
 bool ds4_engine_has_dspark(const ds4_engine* engine);
 int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
@@ -104,6 +101,7 @@ void ds4_session_set_cancel(ds4_session* session,
 void ds4_session_invalidate(ds4_session* session);
 int ds4_session_pos(const ds4_session* session);
 int ds4_session_ctx(const ds4_session* session);
+uint32_t ds4_session_prefill_capacity(const ds4_session* session);
 uint64_t ds4_session_payload_bytes(const ds4_session* session);
 
 #endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_H_

@@ -60,12 +60,6 @@ struct hip_model_range {
     char *device_ptr;
 };
 
-struct hip_model_arena {
-    char *device_ptr;
-    uint64_t bytes;
-    uint64_t used;
-};
-
 struct hip_q8_f16_range {
     const void *host_base;
     uint64_t offset;
@@ -85,7 +79,7 @@ struct hip_q8_f16_transpose_range {
 };
 
 static std::vector<hip_model_range> g_model_ranges;
-static std::vector<hip_model_arena> g_model_arenas;
+static std::vector<void*> g_model_allocations;
 static std::unordered_map<uint64_t, size_t> g_model_range_by_offset;
 
 /*
@@ -237,8 +231,6 @@ __global__ static void dequant_q8_0_to_f16_transpose_tiled_kernel(
         uint64_t in_dim,
         uint64_t out_dim,
         uint64_t blocks);
-
-static void hip_shared_gate_up_async_cleanup(void);
 
 static void *hip_tmp_alloc(uint64_t bytes, const char *what) {
     if (bytes == 0) return NULL;
@@ -857,51 +849,28 @@ static void *hip_model_stage_read_worker(void *opaque) {
     return NULL;
 }
 
-static uint64_t hip_model_cache_limit_bytes(void) {
-    return UINT64_MAX;
-}
-
-static uint64_t hip_model_arena_chunk_bytes(uint64_t need) {
-    uint64_t bytes = 1792ull * 1048576ull;
-    if (bytes < need) {
-        const uint64_t align = 256ull * 1048576ull;
-        bytes = (need + align - 1u) & ~(align - 1u);
-    }
-    return bytes;
-}
-
-static char *hip_model_arena_alloc(uint64_t bytes, const char *what) {
-    if (bytes == 0) return NULL;
-    if (g_model_cache_full) return NULL;
-    const uint64_t align = 256u;
-    const uint64_t aligned = (bytes + align - 1u) & ~(align - 1u);
-
-    for (hip_model_arena &a : g_model_arenas) {
-        const uint64_t used = (a.used + align - 1u) & ~(align - 1u);
-        if (used <= a.bytes && aligned <= a.bytes - used) {
-            char *ptr = a.device_ptr + used;
-            a.used = used + aligned;
-            return ptr;
-        }
-    }
-
-    const uint64_t limit = hip_model_cache_limit_bytes();
-    if (g_model_range_bytes > limit || aligned > limit - g_model_range_bytes) return NULL;
-
-    const uint64_t chunk = hip_model_arena_chunk_bytes(aligned);
-    void *dev = NULL;
-    hipError_t err = hipMalloc(&dev, (size_t)chunk);
-    if (err != hipSuccess) {
-        fprintf(stderr, DS4_GPU_LOG_PREFIX "model arena alloc failed for %s (%.2f MiB chunk): %s\n",
-                what ? what : "weights",
-                (double)chunk / 1048576.0,
-                hipGetErrorString(err));
-        (void)hipGetLastError();
-        g_model_cache_full = 1;
-        return NULL;
-    }
-    g_model_arenas.push_back({(char *)dev, chunk, aligned});
-    return (char *)dev;
+static char* hip_model_range_alloc(uint64_t bytes, const char* what) {
+  if (bytes == 0)
+    return NULL;
+  if (g_model_cache_full)
+    return NULL;
+  // The loader already merges adjacent tensors into large upload spans.
+  // Allocate each span exactly: packing them into larger fixed blocks leaves
+  // several GiB unused, reducing memory available to concurrent sessions.
+  void* dev = NULL;
+  hipError_t err = hipMalloc(&dev, (size_t)bytes);
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            DS4_GPU_LOG_PREFIX
+            "model span alloc failed for %s (%.2f MiB): %s\n",
+            what ? what : "weights", (double)bytes / 1048576.0,
+            hipGetErrorString(err));
+    (void)hipGetLastError();
+    g_model_cache_full = 1;
+    return NULL;
+  }
+  g_model_allocations.push_back(dev);
+  return (char*)dev;
 }
 
 static const char *hip_model_range_ptr_from_fd(
@@ -911,12 +880,7 @@ static const char *hip_model_range_ptr_from_fd(
         const char *what) {
     if (g_model_fd < 0 || bytes == 0) return NULL;
     if (g_model_fd_host_base != NULL && model_map != g_model_fd_host_base) return NULL;
-    const uint64_t limit = hip_model_cache_limit_bytes();
-    if (g_model_range_bytes > limit || bytes > limit - g_model_range_bytes) {
-        return NULL;
-    }
-
-    char *dev = hip_model_arena_alloc(bytes, what);
+    char* dev = hip_model_range_alloc(bytes, what);
     if (!dev) {
         return NULL;
     }
@@ -1033,14 +997,14 @@ static const char *hip_model_range_ptr_from_fd(
 }
 
 static void hip_model_range_release_all(void) {
-    for (const hip_model_arena &a : g_model_arenas) {
-        if (a.device_ptr) (void)hipFree(a.device_ptr);
-    }
-    g_model_arenas.clear();
-    g_model_ranges.clear();
-    g_model_range_by_offset.clear();
-    g_model_range_bytes = 0;
-    hip_model_load_progress_reset();
+  for (void* allocation : g_model_allocations) {
+    (void)hipFree(allocation);
+  }
+  g_model_allocations.clear();
+  g_model_ranges.clear();
+  g_model_range_by_offset.clear();
+  g_model_range_bytes = 0;
+  hip_model_load_progress_reset();
 }
 
 static int hipblas_ok(hipblasStatus_t st, const char *what) {
@@ -1088,7 +1052,6 @@ extern "C" void ds4_gpu_cleanup(void) {
     (void)hipDeviceSynchronize();
     ds4_mmq_cleanup();
     ds4_gpu_release_support_map();
-    hip_shared_gate_up_async_cleanup();
 #ifdef __HIP_PLATFORM_AMD__
     hipblaslt_gemm_plan_clear();
 #endif

@@ -110,6 +110,9 @@ struct TextDecodeStep {
   std::size_t draft_tokens{0};
   std::size_t draft_accepted_tokens{0};
   bool stop{false};
+  /// Execution actually used for this request, including model-owned subgroup
+  /// dispatch. A runner's advertised maximum is not evidence of batching.
+  TextExecutionPlan execution_plan{};
 };
 
 /// Model-private state driven only through TextModelRunner work units.
