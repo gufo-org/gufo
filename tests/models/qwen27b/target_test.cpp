@@ -26,6 +26,7 @@ void Expect(bool condition, const std::string& message) {
 struct Case {
   std::vector<Token> tokens;
   std::vector<std::vector<float>> logits;
+  std::size_t prompt_size;
 };
 
 // Teacher forcing keeps quantization comparisons on identical input prefixes.
@@ -72,8 +73,11 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
          "quality fixture requires Qwen3.8 27B");
   std::vector<Case> cases;
   for (const auto* text : kTexts) {
-    Case row{.tokens = executor->GetTokenizer().Encode(text), .logits = {}};
-    constexpr std::size_t prompt_size = 24;
+    // The middle case crosses the 16-row replay ring after three tokens.
+    Case row{.tokens = executor->GetTokenizer().Encode(text),
+             .logits = {},
+             .prompt_size = cases.size() == 1 ? 29U : 24U};
+    const std::size_t prompt_size = row.prompt_size;
     // Exercise a complete DFlash2 verification block, including the anchor.
     constexpr std::size_t continuation = 8;
     Expect(row.tokens.size() >= prompt_size + continuation,
@@ -107,8 +111,9 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
                "batched verification changed target logits");
       }
       executor->RestoreState();
-      executor->CommitVerificationChunk(suffix.first(2), prompt_size);
-      for (std::size_t index = 2; index < suffix.size(); ++index) {
+      constexpr std::size_t committed = 5;
+      executor->CommitVerificationChunk(suffix.first(committed), prompt_size);
+      for (std::size_t index = committed; index < suffix.size(); ++index) {
         (void)executor->ForwardToken(suffix[index], prompt_size + index);
         Expect(ByteEqual(Logits(*executor), row.logits[index + 1]),
                "rejected draft replay changed target logits");
@@ -175,8 +180,8 @@ void CompareReference(const std::vector<Case>& candidate,
       total_tv += tv;
       top1 += cmp.top1_match;
       ++rows;
-      if (r < 4) {
-        const auto label = reference[c].tokens[24 + r];
+      if (r + 1 < reference[c].logits.size()) {
+        const auto label = reference[c].tokens[reference[c].prompt_size + r];
         total_nll_delta += (log_q - q[label]) - (log_p - p[label]);
         ++labels;
       }

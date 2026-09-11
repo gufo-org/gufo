@@ -359,9 +359,6 @@ if (ENGINE_ENABLE_HIP)
   add_executable(tune_hipblaslt tools/bench/tune_hipblaslt.cpp)
   target_link_libraries(tune_hipblaslt PRIVATE gufo_core hip::host)
 
-  add_executable(benchmark_ssm_replay tools/bench/benchmark_ssm_replay.cpp)
-  target_link_libraries(benchmark_ssm_replay PRIVATE gufo_core hip::host)
-
   option(GUFO_BUILD_DIAG_TOOLS "Build standalone diagnostic tools" OFF)
   if(GUFO_BUILD_DIAG_TOOLS)
     add_executable(gguf_dump_types tools/quant/gguf_dump_types.cpp)
@@ -387,7 +384,7 @@ install(FILES
   tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json
   DESTINATION share/gufo/eval)
 if (ENGINE_ENABLE_HIP)
-  install(TARGETS gufo-kernel-bench tune_hipblaslt benchmark_ssm_replay
+  install(TARGETS gufo-kernel-bench tune_hipblaslt
     DESTINATION bin)
 endif()
 

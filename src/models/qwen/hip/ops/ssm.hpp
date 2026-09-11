@@ -45,7 +45,8 @@ void LaunchFusedSSMInputProjections(
 /// recurrence in a single pair of launches. Each row's arithmetic and its order
 /// are identical to the one-row-per-launch form, so the result is bit-exact;
 /// what it removes is the launch serialization of 2 x rows dispatches per
-/// layer.
+/// layer. A null `out_buf` updates only the recurrent/conv state for replay,
+/// omitting query normalization, output dot products and output normalization.
 void LaunchSSMConvRecurrenceRows(
     const float* qkv_in, const float* conv_weights, float* conv_state,
     float* conv_out, void* deltanet_state, const float* alpha_buf,

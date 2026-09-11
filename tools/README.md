@@ -148,8 +148,12 @@ incomplete or mismatching results. `--baseline-binary` interleaves two releases
 and also requires identical autoregressive token traces between them.
 `qwen27b/dflash_gemm_bench.hip` measures exact matrix-kernel geometries using
 the production templates; build it with `tools/bench/build.sh` inside Nix.
-Its optional final batch argument selects seven proposal rows or eight
-verification rows, for example `q6 248320 5120 24 8`.
+Its optional final batch argument selects seven proposal rows, eight
+verification rows or sixteen BF16 injection rows, for example
+`q6 248320 5120 24 8` or `bf16 5120 25600 24 16`.
+`qwen27b/deltanet_bench.hip` checks exact recurrence and state-only replay
+while rotating the 144 MiB target state; `qwen27b/prefill_deltanet_bench.hip`
+contains the separate prefill ablations. Both use the same fast Nix builder.
 `qwen27b/dflash_reference.py` checks a GPU trace against
 pinned upstream PyTorch operators using the same GGUF weights. See
 `benchmarks/qwen3.8-27b/README.md` and its quality report for commands and evidence.

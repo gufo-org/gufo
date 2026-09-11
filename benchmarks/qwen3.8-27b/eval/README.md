@@ -13,7 +13,7 @@ Run on gfx1151 inside Nix. Model-specific tests live in
 | Suite | Contract |
 | --- | --- |
 | `fast` | NPU packing, GGUF reference decoding and strict result reporting. |
-| `kernels` | Quantized GEMM versus independent/decode controls; DFlash convolution, windowed attention, full-vocabulary top-k, sampled selector and verifier distributions. |
+| `kernels` | Quantized/BF16 GEMM versus independent/decode controls; exact recurrent state and replay; DFlash convolution, windowed attention, full-vocabulary top-k, sampled selector and verifier distributions. |
 | `model` | Target full-logit replay; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt and multi-turn GPU chat token-ID parity across AR/MTP/DFlash. |
 | `serving` | Direct versus served tokens, seeded sampled replay, EOS, bounded prefill, cache forks, persistent restore, concurrency, cancellation and reclamation. |
 | `reference` | Teacher-forced target versus optional BF16: KL, total variation, top-1 agreement, RMSE and NLL difference. Informational quantization measurements. |
@@ -43,11 +43,12 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
-- Q4 and Q8: three fixed 24-token prefixes, eight forced continuation tokens
+- Q4 and Q8: fixed 24/29/24-token prefixes, eight forced continuation tokens
   each. Repeated prefill and snapshot continuation are byte-identical. All
   24 batched-verifier logit rows per target equal scalar decode byte for
-  byte; rejected-prefix replay also preserves subsequent logits. Prefill and
-  scalar decode retain the same top-1 choice on these prefixes.
+  byte; committing five rows across the replay ring's boundary also preserves
+  subsequent logits. Prefill and scalar decode retain the same top-1 choice
+  on these prefixes.
 - MTP: feedback replay equals a fresh teacher-forced committed prefix. The
   regression fails when replay uses the newest target hidden row for the old
   proposal anchor.
@@ -206,8 +207,28 @@ The six-pair release comparison remains within −0.02% to +0.16% of its
 baseline, so these are kernel improvements without a material end-to-end claim.
 All 48 target verification logit rows and all 270 draft trace files match.
 
-Rejected probes: full register-resident DeltaNet state changed FP32 results
-and spilled registers; a smaller recurrence edit had little benefit; four-row
-Q5 projections and the Q8 vocabulary variant were slower. None adds an
-execution switch. Current target bottlenecks are Q5/IQ4 projections on Q4,
-and Q8/BF16 projections on Q8; recurrence is the next largest shared cost.
+The recurrence optimization preserves decode's FMA rounding explicitly and
+bounds compiler load hoisting, allowing FP32 state to stay in registers without
+spilling. Verification uses it for multiple rows; scalar decode keeps its
+existing route. Rejected-prefix replay batches committed rows per layer and
+skips unused output work. Operator checks compare all state/output bits across
+FP32/BF16, scalar/batched and full/state-only execution.
+The optional quantization comparison uses each fixture's actual prefix length
+and scores every forced continuation token.
+
+BF16 feature injection shares weights across sixteen tokens while preserving
+FP32 inputs and accumulation order. All three draft traces and the complete
+serialized history remain byte-identical. The GEMM control covers widths
+1–8 and 16 against scalar decode, including partial matrix tiles.
+
+Rejected probes: the first resident-state recurrence changed FMA rounding;
+explicit rounding fixed it. Thirty-two-row injection, four-row Q5 projections
+and the Q8 vocabulary variant were slower. None adds an execution switch.
+
+The [recurrence/injection record](dflash2-recurrence.json) contains the latest
+short C1 pp2048/tg128 release comparison across all six pairings: generation
+improves 2.7–3.6%, prefill 2.2–3.5%; all twelve speculative traces equal AR.
+Separate C++ chat profiles retain the same tokens and verification steps.
+Recurrence GPU time falls 61–63%, with roughly half as many recurrence/conv
+launches; total target GPU time falls 5.6–6.0%. These profiles explain the
+change and are not throughput measurements.

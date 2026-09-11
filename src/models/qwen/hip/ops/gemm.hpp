@@ -275,9 +275,9 @@ void LaunchBatchedGEMM(const void* A, bool is_bf16, const float* X, float* Y,
                        hipStream_t stream = nullptr);
 
 /// Exact small-batch BF16-weight GEMM with FP32 activations for any width in
-/// 1..8. The per-output accumulation order matches the decode GEMV and does not
-/// depend on the batch width, so narrow batches stay bit-identical to wide ones
-/// while the weight stream is still read exactly once.
+/// 1..8 or 16. The per-output accumulation order matches the decode GEMV and
+/// does not depend on the batch width, so narrow batches stay bit-identical to
+/// wide ones while the weight stream is still read exactly once.
 void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
                                        std::size_t batch_size, std::size_t M,
                                        std::size_t K,

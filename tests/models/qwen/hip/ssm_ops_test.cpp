@@ -123,7 +123,7 @@ void TestBf16RecurrentMemoryAndSnapshot() {
 }
 
 void TestBatchedSSMConvEquivalence() {
-  constexpr std::size_t batch = 4;
+  constexpr std::size_t batch = 8;
   constexpr std::uint32_t num_key_heads = 16;
   constexpr std::uint32_t num_heads = 48;
   constexpr std::uint32_t key_dim = 128;
@@ -281,6 +281,57 @@ void TestBatchedSSMConvEquivalence() {
     std::cerr << "BF16 DeltaNet decode exceeded the storage envelope\n";
     std::abort();
   }
+
+  // Verification and rollback replay must preserve every state bit. Reuse the
+  // existing buffers to cover both storage formats, per-row and whole-block
+  // dispatch, and omission of outputs that replay never consumes.
+  const auto expect_device_equal = [](const void* expected, const void* actual,
+                                      std::size_t bytes) {
+    std::vector<std::uint8_t> reference(bytes), candidate(bytes);
+    HIP_CHECK(
+        hipMemcpy(reference.data(), expected, bytes, hipMemcpyDeviceToHost));
+    HIP_CHECK(
+        hipMemcpy(candidate.data(), actual, bytes, hipMemcpyDeviceToHost));
+    if (reference != candidate) {
+      throw std::runtime_error("SSM verification/replay changed stored bits");
+    }
+  };
+  using Storage = gufo::hip::QwenRecurrentStateStorage;
+  for (const auto storage : {Storage::kFp32, Storage::kBf16}) {
+    const std::size_t state_bytes =
+        delta_size * gufo::hip::QwenRecurrentStateElementBytes(storage);
+    const void* reference_state = storage == Storage::kFp32
+                                      ? static_cast<void*>(d_delta_seq)
+                                      : d_delta_bf16;
+    const float* reference_output =
+        storage == Storage::kFp32 ? d_out_seq : d_out_bf16;
+    for (const bool write_output : {true, false}) {
+      for (const auto rows_per_launch : {std::size_t{1}, batch}) {
+        HIP_CHECK(hipMemset(d_state_batch, 0, qkv_dim * 4 * sizeof(float)));
+        HIP_CHECK(hipMemset(d_delta_batch, 0, state_bytes));
+        for (std::size_t offset = 0; offset < batch;
+             offset += rows_per_launch) {
+          gufo::hip::LaunchSSMConvRecurrenceRows(
+              d_qkv + offset * qkv_dim, d_w, d_state_batch, d_conv_out_batch,
+              d_delta_batch, d_alpha + offset * num_heads,
+              d_beta + offset * num_heads, d_ssm_a, d_ssm_dt, d_ssm_norm,
+              d_gate + offset * inner_size,
+              write_output ? d_out_batch + offset * inner_size : nullptr, 0,
+              qkv_dim, num_key_heads, num_heads, key_dim, val_dim,
+              static_cast<std::uint32_t>(rows_per_launch), num_heads,
+              inner_size, nullptr, {}, storage);
+        }
+        expect_device_equal(reference_state, d_delta_batch, state_bytes);
+        expect_device_equal(d_state_seq, d_state_batch,
+                            qkv_dim * 4 * sizeof(float));
+        if (write_output) {
+          expect_device_equal(reference_output, d_out_batch,
+                              batch * inner_size * sizeof(float));
+        }
+      }
+    }
+  }
+  std::cout << "SSM verification and state-only replay: bit-exact\n";
 
   HIP_CHECK(hipFree(d_qkv));
   HIP_CHECK(hipFree(d_w));

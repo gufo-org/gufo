@@ -143,7 +143,9 @@ dispatch choices, and a privacy-safe machine fingerprint. Collect profiler
 resource data in a separate `rocprofv3` pass.
 
 `tune_hipblaslt` creates an optional hardware/ROCm-bound plan database.
-`benchmark_ssm_replay` compares recurrent rollback at draft lengths 1-16.
+`tools/qwen27b/deltanet_bench.hip` compares exact recurrence and state-only
+replay kernels at block lengths 1-16. Full-logit rollback checks live in the
+Qwen27B model suite.
 Generated databases, traces, and replay reports are local artifacts and are
 not committed. See [Performance Engineering](PERFORMANCE.md) for commands and
 promotion rules.

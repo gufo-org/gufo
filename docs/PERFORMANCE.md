@@ -409,11 +409,13 @@ microbenchmark before acting on the mix.
 GUFO_HIPBLASLT_PLAN_CACHE=/tmp/gufo-hipblaslt-plans.bin \
   ./result/bin/gufo bench ...
 
-./result/bin/benchmark_ssm_replay \
-  --model "$MODEL" \
-  --context 128 \
-  --draft-lengths 1,2,4,8,16
+nix develop -c tools/bench/build.sh tools/qwen27b/deltanet_bench.hip
+/tmp/deltanet_bench 8 48
 ```
+
+The recurrence probe checks exact outputs/state with a rotating 144 MiB state
+working set. The Qwen27B model suite checks full-logit rollback, including
+replay-ring wraparound; `gufo bench` measures actual speculative throughput.
 
 Generated profiler, plan, and replay artifacts stay outside the repository.
 

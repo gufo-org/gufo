@@ -152,7 +152,8 @@ void QwenGpuExecutor::RestoreState() {
   replaying_ssm_state_ = true;
 }
 
-void QwenGpuExecutor::ReplaySsmState(std::uint32_t position) {
+void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
+                                     std::uint32_t count) {
   const auto& config = weights_.config;
   auto scratch = arena_.GetScratchView();
   for (std::uint32_t layer_idx = 0; layer_idx < config.num_layers;
@@ -162,18 +163,29 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position) {
       continue;
     }
 
-    LaunchSSMConvRecurrence(
-        arena_.GetReplayQkv(layer_idx, position),
-        static_cast<const float*>(layer.ssm_conv1d.data),
-        arena_.d_ssm_conv_state, scratch.ssm.conv_out.data(),
-        arena_.d_ssm_deltanet_state, arena_.GetReplayAlpha(layer_idx, position),
-        arena_.GetReplayBeta(layer_idx, position),
-        static_cast<const float*>(layer.ssm_a.data),
-        static_cast<const float*>(layer.ssm_dt.data), nullptr, nullptr,
-        scratch.ssm.out.data(), layer_idx, config.SsmQkvSize(),
-        config.ssm_group_count, config.ssm_time_step_rank,
-        config.ssm_state_size, config.SsmValueSize(), arena_.stream, {},
-        arena_.GetRecurrentStateStorage());
+    // Layers have independent recorded inputs and recurrent state. Replay each
+    // layer's committed rows together, splitting only at ring/scratch bounds.
+    for (std::uint32_t offset = 0; offset < count;) {
+      const auto start = position + offset;
+      const auto until_wrap = static_cast<std::uint32_t>(
+          kSsmReplayCapacity - (start % kSsmReplayCapacity));
+      const auto rows =
+          std::min({count - offset, until_wrap, arena_.GetMaxBatch()});
+      LaunchSSMConvRecurrenceRows(
+          arena_.GetReplayQkv(layer_idx, start),
+          static_cast<const float*>(layer.ssm_conv1d.data),
+          arena_.d_ssm_conv_state, scratch.ssm.conv_out.data(),
+          arena_.d_ssm_deltanet_state, arena_.GetReplayAlpha(layer_idx, start),
+          arena_.GetReplayBeta(layer_idx, start),
+          static_cast<const float*>(layer.ssm_a.data),
+          static_cast<const float*>(layer.ssm_dt.data), nullptr, nullptr,
+          nullptr, layer_idx, config.SsmQkvSize(), config.ssm_group_count,
+          config.ssm_time_step_rank, config.ssm_state_size,
+          config.SsmValueSize(), rows, config.ssm_time_step_rank,
+          config.ssm_inner_size, arena_.stream, {},
+          arena_.GetRecurrentStateStorage());
+      offset += rows;
+    }
   }
 }
 

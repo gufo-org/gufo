@@ -95,7 +95,8 @@ void LaunchBatchedGEMM(const void* A, bool is_bf16, const float* X, float* Y,
 void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
                                        std::size_t batch_size, std::size_t M,
                                        std::size_t K, hipStream_t stream) {
-  if (M == 0 || K == 0 || batch_size == 0 || batch_size > 8) {
+  if (M == 0 || K == 0 || batch_size == 0 ||
+      (batch_size > 8 && batch_size != 16)) {
     return;
   }
   constexpr std::uint32_t kVecWaves = 16;
@@ -113,6 +114,10 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
     return;
   }
   switch (batch_size) {
+    case 16:
+      BatchedExactBf16GEMMFp32VecKernel<kVecWaves, 16, kVecRowsPerWave>
+          <<<vec_blocks, kVecWaves * 32, 0, stream>>>(a_vec, X, Y, M, K);
+      return;
     case 1:
       BatchedExactBf16GEMMFp32VecKernel<kVecWaves, 1, kVecRowsPerWave>
           <<<vec_blocks, kVecWaves * 32, 0, stream>>>(a_vec, X, Y, M, K);

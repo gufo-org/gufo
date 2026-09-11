@@ -689,9 +689,8 @@ void QwenGpuExecutor::CommitVerificationChunk(
                                                static_cast<std::uint32_t>(row));
     }
     if (can_replay) {
-      for (std::size_t row = 0; row < committed_tokens.size(); ++row) {
-        ReplaySsmState(start_pos + static_cast<std::uint32_t>(row));
-      }
+      ReplaySsmState(start_pos,
+                     static_cast<std::uint32_t>(committed_tokens.size()));
       replaying_ssm_state_ = false;
       return;
     }

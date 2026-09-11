@@ -1,7 +1,8 @@
 // DFlash2 exact small-batch GEMM ablations, using the production templates.
-// Build: nix develop -c tools/bench/build.sh
-// tools/qwen27b/dflash_gemm_bench.hip Run: /tmp/dflash_gemm_bench bf16|q8|q4|q6
-// M K [iterations=24] [batch=7 for Q6, otherwise 8]
+// Build inside Nix with tools/bench/build.sh and this source path.
+// Run: /tmp/dflash_gemm_bench bf16|q8|q4|q6 M K [iterations] [batch]
+// Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise.
+// BF16 also accepts batch=16 to compare injection with two batch-8 launches.
 // Rotating matrices keep small shapes from fitting entirely in cache. Each
 // geometry must be bit-exact with the original geometry before timing counts.
 #define ENGINE_ENABLE_HIP 1
@@ -108,6 +109,10 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
         "require bf16|q8|q4|q6, positive M, K divisible by 256, positive "
         "iterations");
   }
+  if constexpr (Batch > 8) {
+    if (type != "bf16")
+      throw std::invalid_argument("wide injection is BF16 only");
+  }
   constexpr std::size_t batch = Batch;
   const std::size_t block_bytes = type == "q8" ? 34 : type == "q4" ? 144 : 210;
   const std::size_t bytes =
@@ -133,61 +138,81 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                                                      batch * columns);
   std::vector<Geometry> geometries;
   if (type == "bf16") {
-    geometries = {{"rows2",
-                   [&](const void* w) {
-                     BatchedExactBf16GEMMFp32VecKernel<16, Batch, 2>
-                         <<<(rows + 31) / 32, 512>>>(
-                             static_cast<const hip_bfloat16*>(w), input.Get(),
-                             output.Get(), rows, columns);
-                   }},
-                  {"rows1", [&](const void* w) {
-                     BatchedExactBf16GEMMFp32VecKernel<16, Batch, 1>
-                         <<<(rows + 15) / 16, 512>>>(
-                             static_cast<const hip_bfloat16*>(w), input.Get(),
-                             output.Get(), rows, columns);
-                   }}};
-  } else if (type == "q8") {
-    geometries = {{"rows2",
-                   [&](const void* w) {
-                     SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, 2>
-                         <<<(rows + 31) / 32, 512>>>(
-                             w, input.Get(), output.Get(), rows, columns);
-                   }},
-                  {"rows3", [&](const void* w) {
-                     SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, 3>
-                         <<<(rows + 47) / 48, 512>>>(
-                             w, input.Get(), output.Get(), rows, columns);
-                   }}};
-  } else if (type == "q4") {
-    geometries = {
-        {"tile1",
-         [&](const void* w) {
-           SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
-                                               core::GgmlType::kQ4_K>
-               <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
-                                           columns);
-         }},
-        {"tile2", [&](const void* w) {
-           SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
-                                               core::GgmlType::kQ4_K, 2>
-               <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
-                                           columns);
-         }}};
-  } else {
-    geometries = {
-        {"rows2_tile1",
-         [&](const void* w) {
-           SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 2,
-                                               core::GgmlType::kQ6_K>
-               <<<(rows + 31) / 32, 512>>>(w, input.Get(), output.Get(), rows,
-                                           columns);
-         }},
-        {"rows3_tile2", [&](const void* w) {
-           SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
-                                               core::GgmlType::kQ6_K, 2, 1>
-               <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
-                                           columns);
-         }}};
+    if constexpr (Batch == 16) {
+      geometries = {{"batch8_chunks",
+                     [&](const void* w) {
+                       for (std::size_t offset = 0; offset < Batch; offset += 8)
+                         BatchedExactBf16GEMMFp32VecKernel<16, 8, 2>
+                             <<<(rows + 31) / 32, 512>>>(
+                                 static_cast<const hip_bfloat16*>(w),
+                                 input.Get() + offset * columns,
+                                 output.Get() + offset * rows, rows, columns);
+                     }},
+                    {"batch16", [&](const void* w) {
+                       BatchedExactBf16GEMMFp32VecKernel<16, 16, 2>
+                           <<<(rows + 31) / 32, 512>>>(
+                               static_cast<const hip_bfloat16*>(w), input.Get(),
+                               output.Get(), rows, columns);
+                     }}};
+    } else {
+      geometries = {{"rows2",
+                     [&](const void* w) {
+                       BatchedExactBf16GEMMFp32VecKernel<16, Batch, 2>
+                           <<<(rows + 31) / 32, 512>>>(
+                               static_cast<const hip_bfloat16*>(w), input.Get(),
+                               output.Get(), rows, columns);
+                     }},
+                    {"rows1", [&](const void* w) {
+                       BatchedExactBf16GEMMFp32VecKernel<16, Batch, 1>
+                           <<<(rows + 15) / 16, 512>>>(
+                               static_cast<const hip_bfloat16*>(w), input.Get(),
+                               output.Get(), rows, columns);
+                     }}};
+    }
+  } else if constexpr (Batch <= 8) {
+    if (type == "q8") {
+      geometries = {{"rows2",
+                     [&](const void* w) {
+                       SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, 2>
+                           <<<(rows + 31) / 32, 512>>>(
+                               w, input.Get(), output.Get(), rows, columns);
+                     }},
+                    {"rows3", [&](const void* w) {
+                       SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, 3>
+                           <<<(rows + 47) / 48, 512>>>(
+                               w, input.Get(), output.Get(), rows, columns);
+                     }}};
+    } else if (type == "q4") {
+      geometries = {
+          {"tile1",
+           [&](const void* w) {
+             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
+                                                 core::GgmlType::kQ4_K>
+                 <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
+                                             columns);
+           }},
+          {"tile2", [&](const void* w) {
+             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
+                                                 core::GgmlType::kQ4_K, 2>
+                 <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
+                                             columns);
+           }}};
+    } else {
+      geometries = {
+          {"rows2_tile1",
+           [&](const void* w) {
+             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 2,
+                                                 core::GgmlType::kQ6_K>
+                 <<<(rows + 31) / 32, 512>>>(w, input.Get(), output.Get(), rows,
+                                             columns);
+           }},
+          {"rows3_tile2", [&](const void* w) {
+             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
+                                                 core::GgmlType::kQ6_K, 2, 1>
+                 <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
+                                             columns);
+           }}};
+    }
   }
   geometries.front().launch(weights.Get());
   Check(hipMemcpy(reference.Get(), output.Get(), batch * rows * sizeof(float),
@@ -232,7 +257,7 @@ int main(int argc, char** argv) {
     if (argc < 4 || argc > 6)
       throw std::invalid_argument(
           "usage: dflash_gemm_bench bf16|q8|q4|q6 M K [iterations] "
-          "[batch=7|8]");
+          "[batch=7|8|16 (16 is BF16 injection only)]");
     const int batch = argc == 6                      ? std::stoi(argv[5])
                       : std::string(argv[1]) == "q6" ? 7
                                                      : 8;
@@ -241,9 +266,12 @@ int main(int argc, char** argv) {
       Run<7>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else if (batch == 8) {
       Run<8>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 16) {
+      Run<16>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else {
       throw std::invalid_argument(
-          "batch must be seven proposals or eight verification rows");
+          "batch must be seven proposals, eight verification rows or sixteen "
+          "injection rows");
     }
     return 0;
   } catch (const std::exception& error) {

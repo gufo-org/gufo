@@ -32,7 +32,7 @@
 // and 3e-7 on the carried state at batch 512 through 8192).
 //
 // Measured against the previous kernel at 48 heads / 16 key heads / dk = dv =
-// 128 (tools/bench/deltanet_bench.hip, one layer pass):
+// 128 (tools/qwen27b/prefill_deltanet_bench.hip, one layer pass):
 //
 //   batch    before    after   speedup   cycles/token after
 //     512    1.913    0.428     4.47x    2209
@@ -80,7 +80,7 @@ __global__ void BatchedSSMPostNormGateKernel(
 constexpr int kRowSplitDim = 128;
 
 // Crossover between the two register tiles, measured in
-// tools/bench/deltanet_bench.hip.
+// tools/qwen27b/prefill_deltanet_bench.hip.
 constexpr std::size_t kRowSplitSmallBatch = 2048;
 
 // One wave per (token, key head). 128 keys is exactly four values per lane, so

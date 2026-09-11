@@ -6,8 +6,8 @@
 // are ported into src/models/qwen/hip/kernels/ssm_recurrence.hip and validated
 // through `nix build` plus the CTest oracles.
 //
-//   nix develop -c tools/bench/build.sh deltanet_bench
-//   /tmp/deltanet_bench -b 2048 -i 3
+// Build inside Nix with tools/bench/build.sh and this source path.
+// Run: /tmp/prefill_deltanet_bench -b 2048 -i 3
 //
 // Shapes are the production Qwen3.8-27B linear-attention layer: 48 value heads
 // over 16 key heads, key_dim = val_dim = 128, so the carried state is

@@ -74,7 +74,7 @@ void AllocateBuffer(T*& pointer, std::size_t elements) {
   pointer = static_cast<T*>(detail::AllocateDevice(elements * sizeof(T)));
 }
 
-/// Widest batch the shared small-batch GEMM routes accept.
+/// Widest proposal block; BF16 context injection also uses sixteen rows.
 constexpr std::size_t kDFlashMaxSharedBatch = 8;
 
 void TraceTensor(const DFlashTrace& trace, std::string_view name,
@@ -411,11 +411,9 @@ void QwenDFlashGpuExecutor::RunInjectGemm(const models::QwenTensorRef& weight,
   if (weight.data == nullptr || num_tokens == 0) {
     return;
   }
-  // The dense batched GEMM reads every weight row once per token because its
-  // grid carries the batch on the y axis. Injection therefore streams the
-  // encoder and K/V matrices `num_tokens` times. Feeding the shared small-batch
-  // kernels in chunks reads them once per chunk instead, which is the same
-  // arithmetic per row but up to eight times less weight traffic.
+  // Share weight reads across tokens without rounding the FP32 features.
+  // Sixteen rows amortize the large BF16 feature projection best; quantized
+  // projections and tails use the existing kernels for up to eight rows.
   const bool is_bf16 = weight.type == core::GgmlType::kBF16;
   const bool is_packed_quant = weight.type == core::GgmlType::kQ8_0 ||
                                detail::IsNativeWmmaQuant(weight.type);
@@ -425,10 +423,11 @@ void QwenDFlashGpuExecutor::RunInjectGemm(const models::QwenTensorRef& weight,
     return;
   }
 
-  for (std::size_t offset = 0; offset < num_tokens;
-       offset += kDFlashMaxSharedBatch) {
+  for (std::size_t offset = 0; offset < num_tokens;) {
     const std::size_t chunk =
-        std::min(kDFlashMaxSharedBatch, num_tokens - offset);
+        is_bf16 && num_tokens - offset >= 16
+            ? 16
+            : std::min(kDFlashMaxSharedBatch, num_tokens - offset);
     const float* chunk_input = input + (offset * input_size);
     float* chunk_output = output + (offset * output_size);
     if (is_bf16) {
@@ -440,6 +439,7 @@ void QwenDFlashGpuExecutor::RunInjectGemm(const models::QwenTensorRef& weight,
                                  chunk_output, chunk, output_size, input_size,
                                  stream_);
     }
+    offset += chunk;
   }
 }
 

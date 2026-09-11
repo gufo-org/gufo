@@ -499,7 +499,7 @@ public:
   void RestoreState();
 
 private:
-  void ReplaySsmState(std::uint32_t position);
+  void ReplaySsmState(std::uint32_t position, std::uint32_t count = 1);
   void EnsureVerificationLogits(std::size_t batch_size);
   [[nodiscard]] GpuSamplingParameters PrepareGpuSamplingParameters(
       const sampling::SamplerState& sampler);

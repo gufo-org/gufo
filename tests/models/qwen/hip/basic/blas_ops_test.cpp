@@ -186,8 +186,7 @@ void TestBatchedGEMM() {
   HIP_CHECK(hipFree(d_Y));
 }
 
-void TestExactBf16Batch8GEMM() {
-  constexpr std::size_t batch = 8;
+void TestExactBf16SmallBatchGEMM(std::size_t batch) {
   constexpr std::size_t M = 65;
   constexpr std::size_t K = 264;
 
@@ -200,7 +199,7 @@ void TestExactBf16Batch8GEMM() {
   }
   for (std::size_t index = 0; index < h_X.size(); ++index) {
     h_X[index] =
-        0.015625F * static_cast<float>(static_cast<int>(index % 37) - 18);
+        0.01563F * static_cast<float>(static_cast<int>(index % 37) - 18);
   }
 
   void* d_A = nullptr;
@@ -216,7 +215,8 @@ void TestExactBf16Batch8GEMM() {
   HIP_CHECK(hipMemcpy(d_X, h_X.data(), h_X.size() * sizeof(float),
                       hipMemcpyHostToDevice));
 
-  gufo::hip::LaunchExactBf16GEMMFp32Batch8(d_A, d_X, d_batched, M, K);
+  gufo::hip::LaunchExactBf16GEMMFp32SmallBatch(d_A, d_X, d_batched, batch, M,
+                                               K);
   for (std::size_t token = 0; token < batch; ++token) {
     gufo::hip::LaunchGEMV(d_A, gufo::core::GgmlType::kBF16, d_X + (token * K),
                           d_sequential + (token * M), M, K);
@@ -230,9 +230,10 @@ void TestExactBf16Batch8GEMM() {
   HIP_CHECK(hipMemcpy(h_sequential.data(), d_sequential,
                       h_sequential.size() * sizeof(float),
                       hipMemcpyDeviceToHost));
-  gufo::test::Expect(std::memcmp(h_batched.data(), h_sequential.data(),
-                                 h_batched.size() * sizeof(float)) == 0,
-                     "exact BF16 batch-8 GEMM differs from sequential decode");
+  gufo::test::Expect(
+      std::memcmp(h_batched.data(), h_sequential.data(),
+                  h_batched.size() * sizeof(float)) == 0,
+      "exact BF16 small-batch GEMM differs from sequential decode");
 
   HIP_CHECK(hipFree(d_sequential));
   HIP_CHECK(hipFree(d_batched));
@@ -415,7 +416,9 @@ int main() {
 
   TestGpuGEMV();
   TestBatchedGEMM();
-  TestExactBf16Batch8GEMM();
+  for (std::size_t batch : {1, 2, 3, 4, 5, 6, 7, 8, 16}) {
+    TestExactBf16SmallBatchGEMM(batch);
+  }
   TestHipblasGEMM();
   TestHipblasLtGEMM();
   std::cout << "Qwen dense GEMM and BLAS ops test passed on gfx1151.\n";

@@ -67,34 +67,32 @@ speculative serving is being qualified before these numbers are published.
 | 12,288 | TODO | TODO | TODO | TODO |
 | 16,384 | TODO | TODO | TODO | TODO |
 
-## Draft choice
+## Draft choice and latest optimization
 
-Compare companions against the **same target and chat-framed prompts**.
-Q4 and Q8 targets can generate different continuations, so their acceptance
-rates do not directly rank the companions. Each pairing must reproduce its
-own target's greedy token IDs before its speed qualifies.
+All three drafts pass the pinned upstream operator comparison. Final precision
+selection remains open: compare companions against the same target and prompts,
+since acceptance depends on the target's continuation. Controller comparisons
+follow kernel optimization.
 
-Three chat prompts × 128 generated tokens × two interleaved repetitions.
-All **72/72 baseline/candidate cases reproduce every target token ID**. These are chat
-generation rates including prompt processing, separate from the depth sweep.
+Latest short release A/B against `85b9994`: **C1, pp2048, tg128, depth 0**,
+one timed repetition after warmup. Values are baseline → candidate, in tok/s.
+This is separate from the earlier full depth sweep above.
 
-| Target | DFlash2 Q4_K_M (tok/s) | DFlash2 Q8_0 (tok/s) | DFlash2 BF16 (tok/s) |
-| --- | --- | --- | --- |
-| Q4_K_XL | 25.53 | 25.64 | 24.53 |
-| Q8_K_XL | 24.05 | 23.77 | 23.06 |
+| Target | Draft | Prefill | Generation |
+| --- | --- | ---: | ---: |
+| Q4 | Q4_K_M | 388.6 → 397.9 | 19.40 → 19.92 |
+| Q4 | Q8_0 | 387.8 → 397.4 | 16.33 → 16.79 |
+| Q4 | BF16 | 388.2 → 396.7 | 15.63 → 16.05 |
+| Q8 | Q4_K_M | 451.8 → 464.4 | 21.61 → 22.30 |
+| Q8 | Q8_0 | 448.2 → 464.0 | 21.42 → 22.17 |
+| Q8 | BF16 | 452.1 → 466.2 | 20.49 → 21.22 |
 
-All three drafts pass the pinned upstream operator comparison. The retained
-kernel and launch changes reduce draft GPU time by about **4%** across all
-three formats; measured end-to-end improvement is **0.2–0.7%** because target
-verification dominates. Q4's artifact is 0.85 GiB smaller than Q8's. Final
-selection remains open while draft and verification kernels are optimized;
-controller comparisons follow that work.
-The [optimization record](eval/dflash2-optimization.json) contains interleaved
-samples, artifact/token hashes, kernel ablations and before/after profiles.
-
-Further verification-head and embedding changes retain exact outputs. Their
-additional end-to-end effect is below 0.2% in a short interleaved probe; see
-the [verification optimization record](eval/dflash2-verification.json).
+Recurrence state stays in registers across verification rows; committed replay
+batches rows per layer and skips unused output work. Feature injection shares
+BF16 weights across sixteen FP32 rows. Generation improves **2.7–3.6%** and
+prefill **2.2–3.5%** in this probe; all twelve speculative traces match AR.
+Full logits, recurrent state and all 270 upstream-qualified draft trace files
+remain byte-identical. [Measurements, profiles and quality evidence](eval/dflash2-recurrence.json).
 
 ## Reproduce
 
@@ -130,7 +128,7 @@ acceptance on useful workloads. Report both without combining their rates.
 The [quality report](eval/README.md) records the maintained checks, pinned
 DFlash2 formulas, evidence and remaining gaps. Start with
 `nix develop -c python3 tools/qwen27b/check.py fast`, then run only the affected
-kernel/model suites. Release speed qualifies only after complete quality runs.
+kernel/model suites. Publish speed only after the affected quality checks pass; label short probes explicitly.
 
 Production execution has one implementation per supported shape/weight type;
 Qwen kernel, precision and verification environment switches are removed,
