@@ -1,10 +1,6 @@
 # Command-Line Interface
 
-Status: design draft, 2026-08-11
-
-## Purpose
-
-The `gufo` executable also provides terminal interfaces for:
+The `gufo` executable provides terminal interfaces for:
 
 - Interactive conversations.
 - One-shot prompt testing.
@@ -15,6 +11,191 @@ The `gufo` executable also provides terminal interfaces for:
 The CLI is a transport adapter over the same request, scheduler, tokenizer,
 sampling, and model implementations used by the HTTP server. It must not
 contain a second inference path.
+
+## Functionalities
+
+This is an exhaustive list of functionalities and features offered by the gufo cli, the mapping between features and flags is not documented here and should be discovered using the `--help` command to avoid divergences between the implementation and the documentation.
+
+The current supported modality are: llm, video, audio (tts, asr).
+
+### LLM or text
+
+**Model identity**
+
+- `servedModelName` — the name the server reports to clients (for example in
+  `/v1/models`). In practice: what your client's "model" field should say.
+  Purely cosmetic, it does not change which weights are loaded.
+
+**Size and memory**
+
+- `context` (alias `batchSize`) — how many tokens of conversation the model
+  keeps in memory. In practice: bigger means longer chats fit without the
+  model "forgetting" the start, but prefill gets slower and more memory is
+  used.
+- `prefillChunk` (alias `ubatchSize`) — how many prompt tokens are processed
+  per GPU pass while ingesting your prompt. In practice: a speed/memory knob
+  for prefill; you rarely need to touch it.
+- `maxTokens` — maximum number of tokens a request may generate. In practice:
+  stops a model that rambles forever.
+
+**Sampling (how the next token is picked)**
+
+- `temperature` (alias `temp`) — randomness of the choice. Low (for example
+  0.2) gives predictable, repetitive answers; high (1.0+) gives varied,
+  creative ones. Greedy decoding is the low extreme.
+- `topP` — only consider the smallest set of tokens whose probabilities add
+  up to P (nucleus sampling). In practice: a "keep only plausible tokens"
+  filter; lower means safer output.
+- `topK` — only consider the K most likely tokens. The same idea as `topP` but
+  with a fixed count instead of a probability mass.
+- `minP` — discard tokens whose probability is below a fraction of the best
+  token's probability. A modern alternative to `topP`/`topK` that stays
+  consistent across models.
+- `minKeep` — always keep at least N candidates after those filters. In
+  practice: prevents the filters from ever leaving just one choice, so the
+  sampler keeps working as intended.
+- `seed` — fixed random seed. Same seed plus same prompt gives the same output,
+  which makes runs reproducible.
+- `repeatPenalty` — makes tokens that already appeared less likely. In
+  practice: the anti-loop knob, stops "the the the the".
+- `repeatLastN` — how far back the repeat penalty looks. Larger windows catch
+  loops that build up over long outputs.
+- `frequencyPenalty` — a penalty that grows the more often a token has already
+  been used. Reduces word-for-word repetition.
+- `presencePenalty` — a flat penalty for any token used at least once. Pushes
+  the model toward new words and topics even if it used each only once.
+
+**Reasoning models**
+
+- `think` (`"on"` / `"off"` / `"auto"`) — whether the model produces its
+  visible thinking before answering. In practice: off for quick chats, on
+  for hard problems, auto lets the model decide per request.
+- `reasoningEffort` (`"auto"`, `"minimal"`, `"low"`, `"medium"`, `"high"`,
+  `"xhigh"`, `"max"`) — how long the model is allowed to reason before
+  answering. More effort usually means better answers on hard tasks, at the
+  cost of slower responses and more generated tokens.
+- `preserveThinking` (`"on"` / `"off"` / `"auto"`) — whether earlier turns'
+  thinking is kept in the conversation history. In practice: keeping it can
+  help follow-up questions that build on the previous reasoning, at the cost
+  of eating context.
+
+**Disk cache**
+
+- `cacheDisk` — enable an on-disk cache of computed prompt state, reused
+  across requests and restarts. In practice: repeated or shared prompts get
+  much faster; costs disk space.
+- `cacheDiskBytes` — the maximum size of that cache on disk.
+- `cacheDiskStagingBytes` — scratch space used while writing new cache
+  entries. Must fit alongside `cacheDiskBytes`.
+
+**Speculative decoding (a small draft model guesses ahead, the big model
+verifies; output is identical, just faster)**
+
+- `speculative` (alias `specType`) — which draft scheme to use: `dflash` /
+  `dflash2` (z-lab companion for Qwen), `mtp` / `mtp-npu` (multi-token
+  prediction, optionally offloaded to the NPU), `npu`, `pld` (prompt lookup
+  decoding: drafts by reusing matching text from the prompt itself, great for
+  summarizing or editing), `self` (the model drafts from itself, no extra
+  file), or `off`.
+- `draftModel` — generic path for a draft model; use this when your scheme
+  has no dedicated flag.
+- `dflashModel` — path to the DFlash2 companion draft.
+- `mtpModel` — path to the MTP draft model.
+- `draftTokens` (alias `specDraftNMax`) — maximum tokens drafted per step. In
+  practice: wider drafts go faster when the guesses are accepted and waste
+  work when they are rejected.
+- `draftPolicy` (`"fixed"` / `"rolling"` / `"accepted-ema"`) — how the draft
+  length is chosen each step: always the maximum, a sliding range, or
+  adaptive based on recent acceptance.
+- `minDraftTokens` — never draft fewer than this, even when the adaptive
+  policy wants to collapse.
+- `specDraftPMin` — confidence floor: don't draft tokens whose probability is
+  below this. In practice: stops the drafter from guessing garbage.
+
+**Server limits (protecting the machine from clients)**
+
+- `maxPending` — maximum requests waiting in the queue. Over the limit,
+  clients wait or are refused rather than exhausting memory.
+- `maxPendingPerClient` — the same cap but per client, so one client cannot
+  hog the whole queue.
+- `requestTimeoutMs` — requests are killed after this many milliseconds. In
+  practice: prevents stuck requests from holding GPU sessions forever.
+- `maxOutputBytes` — maximum response size per request.
+- `maxBufferedOutputBytes` — maximum generated-but-not-yet-delivered output
+  buffered for one request; protects against slow clients.
+- `maxBufferedOutputTotal` — the same buffer budget across all requests.
+
+**Hardware**
+
+- `cpu` — force CPU-only execution. In practice: very slow, useful only for
+  debugging when no GPU is available.
+
+### Video
+
+TODO
+
+### Audio (TTS and ASR)
+
+One `gufo serve audio` server can host Qwen3-TTS synthesis, Qwen3-ASR
+transcription, or both at once. `tts`, `asr`, and `stt` are accepted as
+alternative spellings of the same subcommand; `asr` and `stt` additionally
+route a bare `--model` to the ASR service instead of the TTS default.
+
+**Models**
+
+- `ttsModel` — path to the Qwen3-TTS safetensors directory (Base,
+  CustomVoice, or VoiceDesign). In practice: enables
+  `POST /v1/audio/speech`, text to spoken audio.
+- `asrModel` — path to the Qwen3-ASR-1.7B safetensors directory. In
+  practice: enables `POST /v1/audio/transcriptions`, audio to text.
+- Set both on one server and the same port offers speech in and speech out.
+
+**Size and memory**
+
+- `ttsContext` — the context budget reserved for TTS. In practice: how long
+  a script you can synthesize in one request; bigger costs memory.
+- `asrContext` — the context budget reserved for ASR. In practice: caps how
+  long an audio file can be in one transcription request.
+
+**Voices**
+
+- `voices` — named voice presets built from reference WAVs. Each entry is
+  either a bare reference WAV (its transcript is read from a `.txt` sidecar
+  file beside it) or the `--voice` / `--voice-text` / `--voice-lang` triple:
+  the reference WAV, its transcript (inline text or a path to a file holding
+  it), and an optional default language for that voice. In practice: clients
+  pick a voice by name in the request, for example `{"voice":
+"narrator_ita"}`, without shipping audio; the optional language means the
+  caller does not need to repeat it. Voices require a TTS checkpoint.
+
+```sh
+gufo serve audio \
+  --tts-model models/Qwen3-TTS-12Hz-1.7B-Base \
+  --voice narrator_eng=/audio/clear-english-voice.wav \
+  --voice-text narrator_eng=/audio/clear-english-voice.txt \
+  --voice narrator_ita=/audio/clear-italian-voice.wav \
+  --voice-text narrator_ita="Questo racconto e' cresciuto..." \
+  --voice-lang narrator_ita=italian
+```
+
+### Server options (all modalities)
+
+These apply to every modality, before the subcommand:
+
+- `host` / `port` — where to listen (`-i` / `-p`). In practice: set
+  `--host 0.0.0.0` if you serve from inside a container, or the published
+  port will not answer.
+- `sessions` (`-j`) — preallocated GPU request sessions. In practice: more
+  sessions means more requests can compute at once, at the cost of memory
+  per session.
+- `maxConnections` — maximum simultaneous HTTP connections. In practice:
+  clients beyond the limit queue or are refused instead of piling up.
+- `maxRequestBytes` — maximum request body size. In practice: matters mostly
+  for ASR, since requests carry whole audio files (the audio benchmark used
+  32 MiB).
+- `apiKey` — if set, clients must present this key. In practice: minimal
+  authentication for a home server.
+- `verbose` — chattier logs.
 
 ## Commands
 
@@ -39,425 +220,33 @@ non-interactive system and hardware diagnostics.
 All commands support `--help` and `--version`. Unknown options and invalid
 combinations return an error instead of being ignored.
 
-### Reasoning
+### Server mode
 
-`prompt`, `chat`, and `serve llm` expose the implemented model controls:
+Gufo can be run as a server exposing OpenAI-compatible API HTTP endpoints, activated based on the model served.
 
-```bash
-gufo prompt --model model.gguf --think on --reasoning-effort high \
-  --preserve-thinking off --prompt "Check this result."
+```sh
+gufo serve --host 0.0.0.0 --port 8080 llm --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf
+# or
+gufo serve audio \
+  --tts-model ./models/Qwen3-TTS-12Hz-1.7B-Base \
+  --voice narrator_ita=./audio/clear-italian-voice.wav \
+  --voice-text "narrator_ita=Questo racconto e' cresciuto..." \
+  --voice narrator_eng=./audio/clear-english-voice.wav \
+  --voice-text narrator_eng=./audio/clear-english-voice.txt
 ```
 
-`--think` accepts `on`, `off`, or `auto`; the default is `off`.
-`--reasoning-effort` accepts `auto`, `minimal`, `low`, `medium`, `high`,
-`xhigh`, or `max`. `--preserve-thinking` accepts `on`, `off`, or `auto`.
-Each model card under `src/models/` documents how provider-neutral levels map
-to the model's native effort set.
+Several flags are offered by the command, they won't be documented here to avoid having the out of sync. If you need more information please use the help command
 
-The CLI does not accept arbitrary Jinja templates. `--raw` remains available
-only for one-shot direct prompts. A reasoning-token budget is not exposed
-because decode-time budget enforcement is not implemented.
-
-### Speech transcription
-
-`transcribe` loads one resident Qwen3-ASR runtime and accepts PCM16, PCM24,
-PCM32, or float32 RIFF WAV:
-
-```bash
-gufo transcribe \
-  --model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision> \
-  --audio recording.wav \
-  --format json
+```sh
+gufo serve --help
+# or
+gufo serve llm --help
 ```
 
-Use `--language` to force a supported language, `--context` for optional
-transcription context, and `--repeat` plus `--warmup` for resident-runtime
-benchmarks. The `asr` command is an alias.
+### Diagnose
 
-## Execution Modes
+Gufo can self detect if everything is correctly configured to be able to run, such as drivers, groups, permissions, etc.
 
-`chat` and `prompt` support two mutually exclusive execution modes.
+### Benchmarks and Evaluations
 
-### Direct mode
-
-Direct mode loads the configured model in the current process:
-
-```bash
-gufo prompt \
-  --config gufo.toml \
-  --model qwen-current-27b \
-  --prompt "Explain wave32 in three sentences."
-```
-
-The CLI constructs the same internal `GenerationRequest` used by the server and
-submits it to the same scheduler. Direct mode is useful for kernel development,
-logit checks, and isolating HTTP from inference failures.
-
-### Client mode
-
-Client mode sends a request to a running gufo server:
-
-```bash
-gufo prompt \
-  --connect http://127.0.0.1:8080 \
-  --model qwen-current-27b \
-  --prompt "Explain wave32 in three sentences."
-```
-
-Client mode uses `/v1/responses` by default. It validates the public API,
-streaming behavior, cancellation, and usage accounting.
-
-`--config` and `--connect` are mutually exclusive. A configured default may be
-used, but the effective mode must be printed by verbose diagnostics.
-
-## One-Shot Prompts
-
-The prompt may be supplied as a named option:
-
-```bash
-gufo prompt --config gufo.toml --model qwen-current-27b \
-  --prompt "Write a JSON object with the keys name and value."
-```
-
-It may also be the final positional argument:
-
-```bash
-gufo prompt --config gufo.toml --model qwen-current-27b \
-  "Summarize how paged KV caches work."
-```
-
-The two forms are mutually exclusive.
-
-Additional input forms:
-
-```bash
-gufo prompt --config gufo.toml --model qwen-current-27b \
-  --prompt-file prompt.txt
-
-printf '%s\n' "Explain INT4 zero points." |
-  gufo prompt --config gufo.toml --model qwen-current-27b --stdin
-```
-
-Exactly one of the following may provide the user prompt:
-
-- `--prompt`
-- One positional prompt
-- `--prompt-file`
-- `--stdin`
-
-An empty prompt is rejected unless `--allow-empty-prompt` is explicitly used
-for a model-specific test.
-
-## Interactive Chat
-
-Start a direct interactive session:
-
-```bash
-gufo chat --config gufo.toml --model qwen-current-27b
-```
-
-Or connect to a running server:
-
-```bash
-gufo chat \
-  --connect http://127.0.0.1:8080 \
-  --model qwen-current-27b
-```
-
-The terminal displays a small prompt marker and streams assistant text as it is
-generated. The complete conversation history is submitted on subsequent turns
-unless the selected server capability provides an explicitly compatible
-session mechanism.
-
-Initial interactive commands:
-
-| Command | Behavior |
-| --- | --- |
-| `/help` | Show available terminal commands |
-| `/clear` | Clear conversation history and reset local session state |
-| `/system TEXT` | Replace the system instruction for future turns |
-| `/stats` | Show timing, token, route, and cache statistics for the last turn |
-| `/model` | Show the selected model and capabilities |
-| `/save PATH` | Save the conversation as UTF-8 JSON |
-| `/load PATH` | Load a compatible saved conversation |
-| `/cancel` | Cancel an active generation when input handling permits it |
-| `/exit` | End the session cleanly |
-
-`Ctrl-C` cancels the current generation. A second `Ctrl-C` exits. End-of-file
-exits after flushing the terminal without adding a synthetic user message.
-
-Terminal commands are handled only when entered as the first non-whitespace
-content of a new input turn. User text can escape a leading slash with `//`.
-
-## Common Generation Options
-
-Both `chat` and `prompt` support:
-
-```text
---model ALIAS
---system TEXT
---max-output-tokens N
---temperature VALUE
---top-p VALUE
---top-k N
---seed N
---stop TEXT
---greedy
---json-schema PATH
---no-stream
-```
-
-Rules:
-
-- `--greedy` selects the canonical greedy sampling contract and rejects
-  conflicting sampling options.
-- Repeated `--stop` options create multiple stop sequences.
-- `--json-schema` uses the same bounded structured-output implementation as
-  the server.
-- Unsupported model capabilities fail before generation.
-- Defaults come from the same validated configuration types as HTTP requests.
-
-The CLI does not execute model-generated tool calls. It may display their
-structured representation.
-
-## Capability Evaluation
-
-`gufo eval` is always an HTTP client; it never loads a model directly:
-
-```bash
-gufo eval --questions 4 --output /tmp/gufo-eval.json
-```
-
-It discovers the sole model from `/v1/models`, then sends the pinned DS4 cases
-sequentially to `/v1/chat/completions`. Every request uses
-`max_completion_tokens: 16000`. Temperature and thinking controls are omitted
-by default so the server policy applies; `--greedy` sends `temperature: 0`.
-
-The initial surface is `--base-url`, `--questions`, `--greedy`, and the
-required `--output`. See [EVAL.md](EVAL.md) for dataset provenance, grading,
-artifact fields, and sanitization.
-
-## Output Modes
-
-### Human terminal
-
-When stdout is an interactive terminal:
-
-- Stream assistant text by default.
-- Keep diagnostics and statistics on stderr.
-- Use color only when enabled and supported.
-- Never allow ANSI styling to enter saved conversations or model input.
-- Finish generated text with one terminal newline without changing the
-  underlying token output.
-
-### Plain text
-
-`--output text` writes only generated text to stdout. This is the default when
-stdout is redirected.
-
-### JSON
-
-`--output json` emits one complete JSON object containing:
-
-```json
-{
-  "model": "qwen-current-27b",
-  "text": "Generated output",
-  "finish_reason": "stop",
-  "usage": {
-    "input_tokens": 12,
-    "output_tokens": 8
-  },
-  "gufo": {
-    "route": "GPU_ONLY",
-    "time_to_first_token_ms": 18.2,
-    "tokens_per_second": 21.4
-  }
-}
-```
-
-`--output jsonl` emits bounded streaming events as one JSON object per line.
-Machine-readable output never contains progress bars, terminal control
-sequences, or human diagnostics.
-
-## Diagnostics
-
-Optional flags:
-
-```text
---verbose
---stats
---show-token-ids
---show-logprobs N
---trace-output PATH
-```
-
-Diagnostics are sent to stderr or the explicitly selected trace file.
-`--show-logprobs` is enabled only when the selected implementation exposes the
-required logits without changing the normal sampling result.
-
-Direct mode reports:
-
-- Model artifact and implementation IDs.
-- GPU, NPU, or heterogeneous route.
-- Prompt evaluation time.
-- Time to first token.
-- Inter-token latency and output tokens per second.
-- Peak and current memory by relevant class.
-- Prefix-cache and graph hits.
-- Speculative acceptance statistics when applicable.
-
-## System Diagnostics
-
-`gufo diagnose` executes non-interactive platform, system, toolchain,
-GPU, and NPU diagnostics without starting a server or loading a model:
-
-```bash
-gufo diagnose
-gufo diagnose --json
-gufo diagnose --json --section inventory
-gufo diagnose --fingerprint --json --output /tmp/gufo-fingerprint.json
-gufo diagnose --validate-artifact /tmp/gufo-fingerprint.json
-gufo diagnose --benchmark bandwidth --backends cpu,hip,xrt --output /tmp/gufo-bandwidth.json
-gufo diagnose --smoke xrt --iterations 100 --timeout-ms 30000 \
-  --json --output /tmp/gufo-xrt-smoke.json
-```
-
-### Machine Fingerprint and Artifact Validation
-
-- `--fingerprint`: Emits a canonical machine fingerprint object with a 64-character SHA-256 identity hash computed over CPU topology, gfx1151 GPU identity, XDNA2 NPU identity, kernel drivers, and pinned toolchain versions.
-- `--validate-artifact <path>`: Validates a benchmark or diagnostic JSON artifact against schema v1.0.0, verifies fingerprint SHA-256 integrity, and checks architecture requirements (`gfx1151`, `XDNA2`).
-- `--output <path>`: Writes command output to the specified file path.
-- `--benchmark <name>`: Runs a diagnostic benchmark suite (`bandwidth`).
-- `--backends <csv>`: Comma-separated list of backends to benchmark (`cpu`, `hip`, `xrt`).
-- `--warmup <n>`: Number of warmup iterations (default: `3`).
-- `--repetitions <n>`: Number of benchmark repetitions (default: `10`).
-- `--duration-ms <ms>`: Target duration per test in milliseconds (default: `2000`).
-- `--smoke xrt`: Executes the packaged deterministic XDNA2 program.
-- `--iterations <n>`: Number of command/completion cycles (default: `100`).
-- `--timeout-ms <n>`: Per-command timeout; a timeout fails and quarantines the context.
-
-### JSON Output Schema (v1.0.0)
-
-When `--json` is supplied, `diagnose` emits structured JSON output to stdout:
-
-```json
-{
-  "schemaVersion": "1.0.0",
-  "engineRevision": "0.1.0",
-  "timestamp": "2026-08-17T20:00:00Z",
-  "status": "PASS",
-  "fingerprintId": "e124845f98b4db093157486a779156beabb0dd32438945d5aa0e0c4c0baf89e5",
-  "inventory": {
-    "cpu": {
-      "modelName": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
-      "architecture": "x86_64",
-      "logicalCores": 32,
-      "physicalCores": 16
-    },
-    "gpu": {
-      "name": "AMD Radeon 8060S Graphics",
-      "architecture": "gfx1151",
-      "computeUnits": 40,
-      "driverName": "amdgpu"
-    },
-    "npu": {
-      "identity": "AMD XDNA2 NPU",
-      "architecture": "XDNA2",
-      "pciDeviceId": "1022:17f0",
-      "driverName": "amdxdna"
-    }
-  },
-  "compatibility": {
-    "overallVerdict": "supported",
-    "items": []
-  },
-  "checks": [
-    {
-      "name": "platform",
-      "status": "PASS",
-      "message": "Supported architecture: Linux x86-64",
-      "details": {
-        "targetArchitecture": "x86_64-linux"
-      }
-    }
-  ],
-  "warnings": [],
-  "errors": []
-}
-```
-
-The top-level `status` reflects overall health: `PASS` when all checks pass,
-`WARN` when non-fatal hardware/device warnings exist, and `FAIL` when a critical
-platform/system failure occurs.
-
-Diagnostic sections can be selected using `--section <name>` (`all`, `inventory`,
-`platform`, `gpu`, `npu`).
-
-## Conversation Files
-
-Saved conversations use versioned UTF-8 JSON and contain logical messages, not
-raw KV data:
-
-```json
-{
-  "format": "gufo-conversation-v1",
-  "model": "qwen-current-27b",
-  "chat_template_id": "qwen38-chat-v1",
-  "system": "You are concise.",
-  "messages": [
-    {"role": "user", "content": "Hello"},
-    {"role": "assistant", "content": "Hello."}
-  ]
-}
-```
-
-Loading validates:
-
-- Format version.
-- Roles and content limits.
-- Model and chat-template compatibility.
-- UTF-8 validity.
-- Maximum file and conversation size.
-
-Conversation files are untrusted input. They cannot contain executable
-templates, tools, plugins, device programs, or filesystem directives.
-
-KV snapshots remain governed by the separate KV persistence format. A
-conversation JSON file is portable but requires prompt re-evaluation.
-
-## Exit Codes
-
-```text
-0   completed successfully
-2   command-line or configuration error
-3   model or capability unavailable
-4   request rejected by admission control
-5   generation or backend failure
-6   API, connection, or authentication failure
-7   incompatible or corrupt input artifact
-130 cancelled by interrupt
-```
-
-Partial generated text may already have been written before a streaming
-failure. JSON output includes an error object when it can still remain valid;
-otherwise the nonzero exit status is authoritative.
-
-## Tests
-
-- Named, positional, file, and stdin prompt input.
-- Rejection of multiple prompt sources.
-- Direct CLI versus direct runtime exact-token parity.
-- Client CLI versus HTTP fixture parity.
-- Greedy direct mode versus client mode parity.
-- Interactive history and `/clear`.
-- System-instruction replacement.
-- UTF-8 split across streaming chunks.
-- Stop strings spanning token boundaries.
-- `Ctrl-C` cancellation and resource reclamation.
-- TTY, redirected text, JSON, and JSONL output.
-- Broken pipe handling when a downstream process exits.
-- Conversation save/load validation and corruption.
-- Stable exit codes.
-- Secret and prompt redaction in diagnostics.
-- Single-user latency equivalent to the server fast path.
+Two utilities are shipped with gufo to quickly verify the speed of a model (`bench`) and the accuracy of it (`eval`).
