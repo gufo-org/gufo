@@ -3,6 +3,7 @@
 import copy
 import importlib.util
 from pathlib import Path
+import struct
 import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -11,8 +12,18 @@ spec = importlib.util.spec_from_file_location(
 drafts = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(drafts)
 
+gguf_spec = importlib.util.spec_from_file_location(
+    "gufo_gguf", ROOT / "tools/quant/gufo-gguf.py")
+gguf = importlib.util.module_from_spec(gguf_spec)
+gguf_spec.loader.exec_module(gguf)
+
 
 class QualificationTest(unittest.TestCase):
+    def test_bf16_reference_reader_is_little_endian(self):
+        payload = struct.pack("<5H", 0x3F80, 0xC000, 0x3F00, 0x3B80, 0x0000)
+        self.assertEqual(gguf.DEQUANT[30](payload).tolist(),
+                         [1.0, -2.0, 0.5, 0.00390625, 0.0])
+
     def setUp(self):
         self.report = {
             "prompt_mode": "chat",

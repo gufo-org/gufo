@@ -21,7 +21,6 @@ struct DraftProposal {
   std::vector<tokenization::TokenId> candidate_ids;
   std::vector<float> candidate_probabilities;
   std::size_t candidates_per_token{0};
-  float confidence{1.0F};
   std::uint32_t start_pos{0};
 };
 
@@ -74,7 +73,10 @@ public:
       std::uint32_t current_pos, std::uint32_t max_tokens) = 0;
 
   /// Samples proposals from the draft distribution and returns each sparse
-  /// proposal row needed by lossless speculative rejection sampling.
+  /// proposal row needed by lossless speculative rejection sampling. A row
+  /// must describe the distribution actually sampled, conditional on earlier
+  /// proposals. Do not discard a sampled token based on its own probability:
+  /// that conditions the proposal without updating its reported distribution.
   [[nodiscard]] virtual DraftProposal ProposeSampled(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,

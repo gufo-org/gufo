@@ -26,7 +26,6 @@ struct SpeculativeOptions {
   std::uint32_t initial_draft_tokens{3};
   std::size_t rolling_window{16};
   float target_acceptance_rate{0.70F};
-  float draft_p_min{0.0F};
   bool enable_adaptive_draft_length{true};
   bool use_batched_verification{false};
   bool use_batched_lm_head{false};
@@ -101,6 +100,10 @@ public:
   }
   [[nodiscard]] virtual bool SupportsDeviceResidentSampling() const noexcept {
     return false;
+  }
+  /// Zero is reserved for synthetic executors without a fixed vocabulary.
+  [[nodiscard]] virtual std::size_t VocabularySize() const noexcept {
+    return 0;
   }
   [[nodiscard]] virtual tokenization::TokenId SampleLastLogits(
       sampling::SamplerState& sampler) {

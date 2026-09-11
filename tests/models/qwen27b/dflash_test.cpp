@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -13,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/cli/serve/json.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen/dflash_reference.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -25,6 +28,71 @@ void Expect(bool condition, std::string_view message) {
   if (!condition) {
     throw std::runtime_error(std::string(message));
   }
+}
+
+void CaptureReferenceTrace(
+    const std::shared_ptr<const gufo::hip::QwenGpuModel>& target_model,
+    const std::shared_ptr<const gufo::hip::QwenDFlashGpuModel>& draft_model,
+    const std::filesystem::path& directory) {
+  Expect(std::filesystem::create_directories(directory),
+         "trace destination must be new");
+  const gufo::hip::DFlashTrace write = [&](std::string_view name,
+                                           std::span<const float> data) {
+    std::ofstream file(directory / (std::string(name) + ".f32"),
+                       std::ios::binary);
+    file.write(reinterpret_cast<const char*>(data.data()),
+               static_cast<std::streamsize>(data.size_bytes()));
+    Expect(file.good(), "write draft trace");
+  };
+  std::string error;
+  auto target = gufo::hip::QwenGpuExecutor::Create(target_model, &error, 128);
+  Expect(target != nullptr, error);
+  const auto& config = draft_model->GetDFlashConfig();
+  auto tokens = target->GetTokenizer().Encode(
+      "Virtual memory gives each process its own address space. The operating "
+      "system maps virtual pages to physical memory and handles page faults.");
+  tokens.resize(std::min<std::size_t>(tokens.size(), 24));
+  target->SetPromptHiddenCapture(true, config.target_layer_ids);
+  const auto anchor = target->ForwardPromptBatch(tokens);
+  const auto features = target->GetPromptHiddenStates();
+  write("target_features", features);
+  auto draft =
+      gufo::hip::QwenDFlashGpuExecutor::Create(draft_model, 128, &error);
+  Expect(draft != nullptr, error);
+  Expect(draft->InjectTargetContext(features, 0, tokens.size(), write),
+         "inject real target features");
+  std::vector<float> probabilities, confidences;
+  std::vector<gufo::tokenization::TokenId> candidates;
+  const std::array<float, 7> uniforms{0.13F, 0.37F, 0.71F, 0.21F,
+                                      0.59F, 0.83F, 0.43F};
+  const auto proposed =
+      draft->ForwardBlock(anchor, tokens.size(), 7, 0.8F, uniforms,
+                          &confidences, &candidates, &probabilities, write);
+  write("probabilities", probabilities);
+  write("selected_probabilities", confidences);
+  write("uniforms", uniforms);
+  auto metadata = gufo::server::json::Value::object();
+  const auto array = [&](const char* key, const auto& values) {
+    auto& result = metadata[key];
+    result = gufo::server::json::Value::array();
+    for (const auto value : values)
+      result.push_back(static_cast<double>(value));
+  };
+  array("prompt_tokens", tokens);
+  array("target_layer_ids", config.target_layer_ids);
+  array("proposed", proposed);
+  array("candidates", candidates);
+  metadata["anchor"] = static_cast<double>(anchor);
+  metadata["position"] = tokens.size();
+  metadata["draft_count"] = proposed.size();
+  metadata["temperature"] = 0.8;
+  metadata["block_activation_dtype"] = "fp32";
+  metadata["head_type"] =
+      static_cast<double>(draft_model->GetWeights().output.type);
+  std::ofstream file(directory / "trace.json");
+  file << metadata.dump() << '\n';
+  Expect(file.good(), "write trace manifest");
+  std::cout << "DFlash reference trace: " << directory << '\n';
 }
 
 }  // namespace
@@ -59,6 +127,11 @@ int main(int argc, const char* const* argv) {
     auto dflash_model = gufo::hip::QwenDFlashGpuModel::Create(
         dflash_reader, target_model, &error);
     Expect(dflash_model != nullptr, error);
+
+    if (argc == 5 && std::string_view(argv[3]) == "--trace") {
+      CaptureReferenceTrace(target_model, dflash_model, argv[4]);
+      return 0;
+    }
 
     gufo::hip::QwenDFlashGpuDraftConfig config{
         .max_context = 512,

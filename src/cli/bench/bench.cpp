@@ -112,13 +112,6 @@ void PrintBenchHelp(std::string_view program_name) {
   parser.AddOption("", "--spec-draft-n-min", "N",
                    "llama.cpp-compatible alias for --min-draft-tokens",
                    "Speculative", &opt.min_draft_tokens);
-  parser.AddOption(
-      "", "--spec-draft-p-min", "P",
-      "Stop at the first draft token below confidence P; 0 disables "
-      "(default: 0)",
-      "Speculative", &opt.draft_p_min);
-  parser.AddOption("", "--draft-p-min", "P", "Alias for --spec-draft-p-min",
-                   "Speculative", &opt.draft_p_min);
   parser.AddOption("", "--temperature", "T",
                    "DeepSeek generation temperature; 0 is greedy (default: 0)",
                    "Workload", &opt.temperature);
@@ -310,10 +303,9 @@ int RunDeepSeekBenchmark(
     std::cerr << "Error: --speculative dspark requires --dspark-model\n";
     return 1;
   }
-  if (dspark &&
-      (options.min_draft_tokens != 1 || options.draft_p_min != 0.0F)) {
+  if (dspark && options.min_draft_tokens != 1) {
     std::cerr << "Error: DSpark uses model-owned adaptive drafting; custom "
-                 "draft floors and confidence thresholds are unsupported\n";
+                 "draft floors are unsupported\n";
     return 1;
   }
 
@@ -1196,13 +1188,6 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
                    "Qwen3.8-Flash-Next: score MTP drafts over the first N "
                    "token ids only (default: 0 = full vocabulary)",
                    "Speculative", &opt.draft_vocab);
-  parser.AddOption(
-      "", "--spec-draft-p-min", "P",
-      "Stop at the first draft token below confidence P; 0 disables "
-      "(default: 0)",
-      "Speculative", &opt.draft_p_min);
-  parser.AddOption("", "--draft-p-min", "P", "Alias for --spec-draft-p-min",
-                   "Speculative", &opt.draft_p_min);
   parser.AddOption("", "--temperature", "T",
                    "DeepSeek generation temperature; 0 is greedy (default: 0)",
                    "Workload", &opt.temperature);
@@ -1248,13 +1233,6 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       opt.min_draft_tokens > opt.draft_tokens) {
     if (error_msg != nullptr) {
       *error_msg = "min-draft-tokens cannot exceed draft-tokens";
-    }
-    return std::nullopt;
-  }
-  if (!std::isfinite(opt.draft_p_min) || opt.draft_p_min < 0.0F ||
-      opt.draft_p_min > 1.0F) {
-    if (error_msg != nullptr) {
-      *error_msg = "spec-draft-p-min must be in [0, 1]";
     }
     return std::nullopt;
   }
@@ -1578,7 +1556,6 @@ int RunBench(std::span<const char* const> args) {
           hip::QwenDFlashGpuDraftConfig cfg{
               .max_context = static_cast<std::uint32_t>(required_context),
               .max_draft_tokens = opt.draft_tokens,
-              .draft_p_min = opt.draft_p_min,
           };
           draft_backend = hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
               dflash_path, gpu_exec->GetSharedModel(), cfg, &err);

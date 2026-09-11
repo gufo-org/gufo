@@ -164,7 +164,6 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
         << "draft_min_tokens=" << speculative_options.min_draft_tokens << '\n'
         << "draft_initial_tokens=" << speculative_options.initial_draft_tokens
         << '\n'
-        << "draft_p_min=" << speculative_options.draft_p_min << '\n'
         << "draft_rolling_window=" << speculative_options.rolling_window << '\n'
         << std::setprecision(std::numeric_limits<float>::max_digits10)
         << "draft_target_acceptance="
@@ -333,7 +332,6 @@ public:
           hip::QwenDFlashGpuDraftConfig{
               .max_context = max_context,
               .max_draft_tokens = speculative_options.max_draft_tokens,
-              .draft_p_min = speculative_options.draft_p_min,
           },
           &error);
       if (draft_backend == nullptr) {
@@ -493,10 +491,12 @@ public:
         stats_after.total_accepted_tokens - stats_before.total_accepted_tokens;
 
     for (const TextRunnerToken token : verification.emitted_tokens) {
+      // Each prediction consumes one input, including a terminal prediction.
+      // EOS itself remains the unconsumed frontier and is not published.
+      ++position_;
       if (!append_selection(token)) {
         break;
       }
-      ++position_;
     }
     frontier_ = verification.next_token;
     frontier_logits_ = verification.next_token_logits;
@@ -2461,10 +2461,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
   if (speculative_config.max_draft_tokens == 0 ||
       speculative_config.min_draft_tokens == 0 ||
       speculative_config.min_draft_tokens >
-          speculative_config.max_draft_tokens ||
-      !std::isfinite(speculative_config.draft_p_min) ||
-      speculative_config.draft_p_min < 0.0F ||
-      speculative_config.draft_p_min > 1.0F) {
+          speculative_config.max_draft_tokens) {
     SetError(error, "HTTP speculative draft limits are invalid");
     return false;
   }
@@ -2513,7 +2510,6 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
           speculative_config.min_draft_tokens;
       speculative_options.initial_draft_tokens =
           speculative_config.max_draft_tokens;
-      speculative_options.draft_p_min = speculative_config.draft_p_min;
       speculative_options.use_batched_verification = true;
       speculative_options.use_batched_lm_head = true;
       speculative_options.retain_frontier_logits = true;
@@ -2575,11 +2571,10 @@ bool InferenceBackend::load(
     SetError(error, "DeepSeek DSpark draft limits are invalid");
     return false;
   }
-  if (model->HasDspark() && (speculative_config.min_draft_tokens != 1 ||
-                             speculative_config.draft_p_min != 0.0F)) {
+  if (model->HasDspark() && speculative_config.min_draft_tokens != 1) {
     SetError(error,
              "DSpark uses model-owned adaptive drafting; custom draft "
-             "floors and confidence thresholds are unsupported");
+             "floors are unsupported");
     return false;
   }
   if (DiskCacheEnabled(disk_cache_config) &&

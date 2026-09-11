@@ -24,8 +24,6 @@ void TestDefaultOptions() {
   Expect(options->repetitions == 1, "default is one repetition");
   Expect(options->draft_tokens == 7, "default draft ceiling is seven");
   Expect(options->min_draft_tokens == 1, "default minimum draft is one");
-  Expect(options->draft_p_min == 0.0F,
-         "default draft confidence threshold is disabled");
 }
 
 void TestDepthOptions() {
@@ -46,7 +44,7 @@ void TestDepthOptions() {
 }
 
 void TestHybridMtpOptions() {
-  const std::array<const char*, 12> args = {"--speculative",
+  const std::array<const char*, 10> args = {"--speculative",
                                             "mtp-npu",
                                             "--mtp-model",
                                             "mtp.gguf",
@@ -54,8 +52,6 @@ void TestHybridMtpOptions() {
                                             "2",
                                             "--spec-draft-n-min",
                                             "2",
-                                            "--spec-draft-p-min",
-                                            "0.75",
                                             "--n-gen",
                                             "128"};
   const auto options = gufo::cli::ParseBenchOptions(args);
@@ -64,8 +60,6 @@ void TestHybridMtpOptions() {
   Expect(options->mtp_model_path == "mtp.gguf", "MTP model path parsed");
   Expect(options->draft_tokens == 2, "draft token count parsed");
   Expect(options->min_draft_tokens == 2, "minimum draft count parsed");
-  Expect(options->draft_p_min > 0.74F && options->draft_p_min < 0.76F,
-         "draft confidence threshold parsed");
 }
 
 void TestInvalidDepth() {
@@ -80,10 +74,11 @@ void TestInvalidDepth() {
   Expect(!gufo::cli::ParseBenchOptions(range_args, &error).has_value(),
          "invalid draft range rejected");
 
-  const std::array<const char*, 2> probability_args = {"--spec-draft-p-min",
-                                                       "1.1"};
-  Expect(!gufo::cli::ParseBenchOptions(probability_args, &error).has_value(),
-         "invalid draft confidence threshold rejected");
+  for (const char* flag : {"--spec-draft-p-min", "--draft-p-min"}) {
+    const std::array<const char*, 2> removed = {flag, "0.75"};
+    Expect(!gufo::cli::ParseBenchOptions(removed, &error).has_value(),
+           "removed confidence policy is rejected");
+  }
 }
 
 void TestInvalidWorkload() {

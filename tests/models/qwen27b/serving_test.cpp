@@ -239,14 +239,27 @@ int main(int argc, const char* const* argv) {
       Expect(!http_spec.cache_hit,
              "first DFlash HTTP request must be a cache miss");
 
+      const gufo::sampling::SamplingConfig sampling{
+          .temperature = 0.8F,
+          .top_k = 40,
+          .top_p = 0.9F,
+          .min_p = 0.01F,
+          .seed = 73,
+          .repeat_penalty = 1.05F,
+      };
       const auto sampled_spec = speculative_backend.complete(
-          "Choose an unusual English noun:", 8, 1.0F);
+          "Choose an unusual English noun:", 8, sampling);
       Expect(sampled_spec.completion_tokens > 0,
              "sampled DFlash-enabled request produced no tokens");
       Expect(sampled_spec.draft_tokens > 0,
              "nonzero-temperature DFlash request bypassed drafting");
       Expect(sampled_spec.draft_accepted_tokens <= sampled_spec.draft_tokens,
              "sampled DFlash acceptance metrics are invalid");
+      const auto sampled_replay = speculative_backend.complete(
+          "Choose an unusual English noun:", 8, sampling);
+      Expect(sampled_replay.cache_hit &&
+                 sampled_replay.tokens == sampled_spec.tokens,
+             "seeded DFlash cached replay differs from the cold request");
 
       const std::vector<gufo::tokenization::ChatMessage> spec_messages = {
           {gufo::tokenization::ChatRole::kSystem,
@@ -255,7 +268,16 @@ int main(int argc, const char* const* argv) {
            ""},
       };
       const auto first_spec_chat =
-          speculative_backend.chat(spec_messages, 2, {});
+          speculative_backend.chat(spec_messages, 32, {});
+      const auto stop_prompt =
+          gufo::tokenization::QwenChatTemplate::Render(spec_messages);
+      Expect(stop_prompt.has_value(), "DFlash stop prompt rendering");
+      const auto first_ar_tokens = GenerateDirect(
+          *direct, model->GetTokenizer().Encode(*stop_prompt), 32);
+      Expect(first_spec_chat.finish_reason ==
+                     gufo::server::TextGenerationBackend::FinishReason::kStop &&
+                 first_spec_chat.tokens == first_ar_tokens,
+             "DFlash must reach EOS with the same published tokens as AR");
       Expect(!first_spec_chat.cache_hit,
              "first DFlash chat request must be a cache miss");
       Expect(first_spec_chat.cache_snapshot_bytes > 0,

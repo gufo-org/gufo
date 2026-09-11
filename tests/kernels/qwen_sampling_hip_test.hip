@@ -198,6 +198,34 @@ void TestFilteredSpeculativeResidualSampling() {
          "filtered speculative correction stays in the target support");
 }
 
+void TestSamplingBoundaryValues() {
+  // Includes empty GPU segments and a finite logit whose probability
+  // underflows to zero. A zero uniform must still choose nonzero mass.
+  const std::vector<float> logits = {-1000.0F, -2.0F, 3.0F};
+  for (const int top_k : {0, 2}) {
+    gufo::hip::GpuSamplingParameters parameters;
+    parameters.temperature = 1e-38F;
+    parameters.top_k = top_k;
+    for (const float uniform : {0.0F, 0.5F, 0.99999994F}) {
+      parameters.uniform = uniform;
+      Expect(Sample(logits, parameters) == 2,
+             "cold sampling must remain finite and skip zero probability");
+    }
+    parameters.temperature = 1.0F;
+    parameters.uniform = 0.0F;
+    Expect(Sample(logits, parameters) == (top_k == 0 ? 1U : 2U),
+           "zero uniform must skip empty segments and zero weights");
+    const std::vector<std::uint32_t> ids{0, 1};
+    const std::vector<float> probabilities{0.8F, 0.2F};
+    parameters.temperature = 1e-38F;
+    const auto result = SampleSpeculatively(logits, parameters, 0, 0.8F, ids,
+                                            probabilities, 0.5F, 0.0F);
+    Expect(!result.accepted && result.token == 2,
+           "cold residual sampling must recover target mass outside draft "
+           "support");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -211,6 +239,7 @@ int main() {
   TestTopKOneIsDeterministic();
   TestSpeculativeResidualSampling();
   TestFilteredSpeculativeResidualSampling();
+  TestSamplingBoundaryValues();
   std::cout << "All Qwen GPU sampling tests passed.\n";
   return 0;
 }

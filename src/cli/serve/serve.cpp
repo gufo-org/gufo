@@ -348,7 +348,6 @@ void PrintServeHelp(std::string_view program_name,
     std::string mtp_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
-    float draft_p_min = 0.0F;
     std::size_t draft_vocab = 0;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
@@ -429,13 +428,6 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--spec-draft-n-min", "N",
                      "llama.cpp-compatible alias for --min-draft-tokens",
                      "Speculative", &min_draft_tokens);
-    parser.AddOption(
-        "", "--spec-draft-p-min", "P",
-        "Stop at the first draft token below confidence P; 0 disables "
-        "(default: 0)",
-        "Speculative", &draft_p_min);
-    parser.AddOption("", "--draft-p-min", "P", "Alias for --spec-draft-p-min",
-                     "Speculative", &draft_p_min);
     parser.AddOption("", "--draft-vocab", "N",
                      "Qwen3.8-Flash-Next MTP: score drafts over the first N "
                      "token ids only (default: 0 = full vocabulary)",
@@ -913,7 +905,6 @@ int RunServe(std::span<const char* const> args) {
     std::string mtp_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
-    float draft_p_min = 0.0F;
     std::size_t draft_vocab = 0;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
@@ -989,14 +980,6 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--spec-draft-n-min", "N",
                          "llama.cpp-compatible alias for --min-draft-tokens",
                          "Speculative", &min_draft_tokens);
-    llm_parser.AddOption(
-        "", "--spec-draft-p-min", "P",
-        "Stop at the first draft token below confidence P; 0 disables "
-        "(default: 0)",
-        "Speculative", &draft_p_min);
-    llm_parser.AddOption("", "--draft-p-min", "P",
-                         "Alias for --spec-draft-p-min", "Speculative",
-                         &draft_p_min);
     llm_parser.AddOption("", "--draft-vocab", "N",
                          "Qwen3.8-Flash-Next MTP: score drafts over the first "
                          "N token ids only (default: 0 = full vocabulary)",
@@ -1072,9 +1055,7 @@ int RunServe(std::span<const char* const> args) {
     }
     if (draft_tokens == 0 || min_draft_tokens == 0 ||
         min_draft_tokens > draft_tokens ||
-        draft_tokens > std::numeric_limits<std::uint32_t>::max() ||
-        !std::isfinite(draft_p_min) || draft_p_min < 0.0F ||
-        draft_p_min > 1.0F) {
+        draft_tokens > std::numeric_limits<std::uint32_t>::max()) {
       std::cerr << "Error: speculative draft limits are invalid\n";
       return 2;
     }
@@ -1119,7 +1100,6 @@ int RunServe(std::span<const char* const> args) {
         static_cast<std::uint32_t>(draft_tokens);
     speculative_config.min_draft_tokens =
         static_cast<std::uint32_t>(min_draft_tokens);
-    speculative_config.draft_p_min = draft_p_min;
     std::string err;
     backend = std::make_shared<server::InferenceBackend>();
     if (!backend->load(model, &err, max_context, session_count,
@@ -1154,7 +1134,7 @@ int RunServe(std::span<const char* const> args) {
       std::cout << "[Speculative]: DFlash enabled (max_draft_tokens="
                 << speculative_config.max_draft_tokens
                 << ", min_draft_tokens=" << speculative_config.min_draft_tokens
-                << ", draft_p_min=" << speculative_config.draft_p_min << ")\n";
+                << ")\n";
     } else if (speculative_config.backend ==
                server::TextSpeculativeBackend::kDSpark) {
       std::cout << "[Speculative]: DSpark enabled\n";

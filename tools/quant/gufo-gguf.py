@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mmap
 import numpy as np
 import os
 from pathlib import Path
@@ -98,7 +99,7 @@ def _fp16_to_fp32(u):
 
 
 def _bf16_to_fp32(u):
-    a = np.frombuffer(u, dtype=">u2").astype(np.uint32) << 16
+    a = np.frombuffer(u, dtype="<u2").astype(np.uint32) << 16
     return a.view("float32")
 
 
@@ -309,7 +310,12 @@ class Reader:
 
 
 def parse_gguf(path):
-    data = Path(path).read_bytes()
+    with Path(path).open("rb") as source:
+        with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            return _parse_gguf_data(data)
+
+
+def _parse_gguf_data(data):
     assert data[0:4] == b"GGUF", "not a GGUF file"
     r = Reader(data)
     r.pos = 4

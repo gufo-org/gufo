@@ -71,7 +71,6 @@
   draftTokens ? null,
   specDraftNMax ? null, # alias for draftTokens
   minDraftTokens ? null,
-  specDraftPMin ? null, # alias for speculative confidence / floor
   prefillChunk ? null,
   ubatchSize ? null, # alias for prefillChunk
   maxPending ? null,
@@ -322,10 +321,6 @@ let
       ++ lib.optionals (minDraftTokens != null) [
         "--min-draft-tokens"
         (toString minDraftTokens)
-      ]
-      ++ lib.optionals (specDraftPMin != null) [
-        "--spec-draft-p-min"
-        (toString specDraftPMin)
       ]
       ++ lib.optionals (finalPrefillChunk != null) [
         "--prefill-chunk"

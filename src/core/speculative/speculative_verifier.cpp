@@ -177,6 +177,10 @@ public:
     return executor_.GetTokenizer().GetEosTokenId();
   }
 
+  std::size_t VocabularySize() const noexcept override {
+    return executor_.GetConfig().vocab_size;
+  }
+
   std::string_view DecodeToken(
       tokenization::TokenId token_id) const noexcept override {
     return executor_.GetTokenizer().DecodeToken(token_id);
@@ -428,6 +432,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
     }
 
     while (accepted_count < num_draft &&
+           !IsStopToken(proposal.tokens[accepted_count], eos_id) &&
            verification.predictions[accepted_count] ==
                proposal.tokens[accepted_count]) {
       ++accepted_count;
@@ -492,7 +497,8 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
           target_executor_->ForwardToken(input_token, eval_pos);
       append_target_hidden(tentative_target_hidden);
       target_predictions.push_back(target_prediction);
-      if (target_prediction != proposal.tokens[index]) {
+      if (target_prediction != proposal.tokens[index] ||
+          IsStopToken(target_prediction, eos_id)) {
         break;
       }
       input_token = proposal.tokens[index];
@@ -500,6 +506,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
     }
 
     while (accepted_count < target_predictions.size() &&
+           !IsStopToken(proposal.tokens[accepted_count], eos_id) &&
            target_predictions[accepted_count] ==
                proposal.tokens[accepted_count]) {
       ++accepted_count;
@@ -629,7 +636,10 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
     return target_only_step();
   }
   const std::size_t num_draft = proposal.tokens.size();
-  if (num_draft > max_draft_tokens || proposal.candidates_per_token == 0 ||
+  if (num_draft > max_draft_tokens || proposal.start_pos != cur_pos ||
+      proposal.candidates_per_token == 0 ||
+      proposal.candidates_per_token >
+          proposal.candidate_ids.size() / num_draft ||
       proposal.candidate_ids.size() !=
           num_draft * proposal.candidates_per_token ||
       proposal.candidate_probabilities.size() !=
@@ -650,20 +660,24 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
   };
   const auto draft_token_probability = [&](std::size_t row) {
     const auto [ids, probabilities] = proposal_row(row);
+    const auto vocab_size = target_executor_->VocabularySize();
     double row_sum = 0.0;
     double token_probability = 0.0;
     for (std::size_t index = 0; index < ids.size(); ++index) {
       const float probability = probabilities[index];
-      if (!std::isfinite(probability) || probability < 0.0F) {
+      if (!std::isfinite(probability) || probability < 0.0F ||
+          probability > 1.0F || (vocab_size != 0 && ids[index] >= vocab_size) ||
+          std::find(ids.begin(), ids.begin() + index, ids[index]) !=
+              ids.begin() + index) {
         throw std::runtime_error(
-            "draft backend returned an invalid sampled probability");
+            "draft backend returned an invalid sampled candidate");
       }
       row_sum += probability;
       if (ids[index] == proposal.tokens[row]) {
         token_probability += probability;
       }
     }
-    constexpr double probability_tolerance = 1e-3;
+    constexpr double probability_tolerance = 1e-5;
     if (std::abs(row_sum - 1.0) > probability_tolerance ||
         !(token_probability > 0.0)) {
       throw std::runtime_error(
@@ -671,6 +685,11 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
     }
     return token_probability;
   };
+  // Validate every row before advancing target state, including rows that
+  // would otherwise go unchecked after an early rejection.
+  std::vector<double> token_probabilities(num_draft);
+  for (std::size_t row = 0; row < num_draft; ++row)
+    token_probabilities[row] = draft_token_probability(row);
 
   std::vector<tokenization::TokenId> verification_inputs;
   verification_inputs.reserve(num_draft + 1);
@@ -704,7 +723,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
   std::size_t accepted_count = 0;
   tokenization::TokenId correction_token = 0;
   for (; accepted_count < num_draft; ++accepted_count) {
-    const double draft_probability = draft_token_probability(accepted_count);
+    const double draft_probability = token_probabilities[accepted_count];
     const auto [candidate_ids, candidate_probabilities] =
         proposal_row(accepted_count);
     if (device_resident_sampling) {
@@ -712,6 +731,10 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
           accepted_count, proposal.tokens[accepted_count], candidate_ids,
           candidate_probabilities, draft_probability, working_sampler);
       if (decision.accepted) {
+        if (IsStopToken(proposal.tokens[accepted_count], eos_id)) {
+          correction_token = proposal.tokens[accepted_count];
+          break;
+        }
         continue;
       }
       correction_token = decision.token;
@@ -726,6 +749,10 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
         target_distribution.probability(proposal.tokens[accepted_count]);
     if (working_sampler.Uniform() * draft_probability < target_probability) {
       working_sampler.Accept(proposal.tokens[accepted_count]);
+      if (IsStopToken(proposal.tokens[accepted_count], eos_id)) {
+        correction_token = proposal.tokens[accepted_count];
+        break;
+      }
       continue;
     }
     correction_token = target_distribution.SampleResidual(
@@ -1058,11 +1085,9 @@ std::vector<tokenization::TokenId> SpeculativeVerifier::Generate(
   // Speculative decode generation loop.
   while (output_tokens.size() < options.max_new_tokens) {
     const auto remaining = options.max_new_tokens - output_tokens.size();
-    const std::uint32_t verification_budget =
-        options.sampling.can_use_unmodified_argmax()
-            ? std::numeric_limits<std::uint32_t>::max()
-            : static_cast<std::uint32_t>(std::min<std::size_t>(
-                  remaining, std::numeric_limits<std::uint32_t>::max()));
+    const auto verification_budget =
+        static_cast<std::uint32_t>(std::min<std::size_t>(
+            remaining, std::numeric_limits<std::uint32_t>::max()));
     StepResult step_res = VerifyStep(current_sequence, cur_pos, next_token,
                                      eos_id, verification_budget, sampler);
 

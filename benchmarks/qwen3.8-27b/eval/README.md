@@ -13,9 +13,9 @@ Run on gfx1151 inside Nix. Model-specific tests live in
 | Suite | Contract |
 | --- | --- |
 | `fast` | DFlash metadata/layout validation, NPU packing, strict result reporting. |
-| `kernels` | Quantized GEMM versus independent/decode controls; DFlash causal grouped convolution, windowed attention and sparse selector probabilities versus CPU equations. |
+| `kernels` | Quantized GEMM versus independent/decode controls; DFlash convolution, windowed attention, full-vocabulary top-k, sampled selector and verifier distributions. |
 | `model` | Target full-logit replay; MTP committed-feature alignment; DFlash ring/snapshot/restore; prompt and multi-turn GPU chat token-ID parity across AR/MTP/DFlash. |
-| `serving` | Direct versus served tokens, sampled DFlash, bounded prefill, cache forks, persistent restore, concurrency, cancellation and reclamation. |
+| `serving` | Direct versus served tokens, seeded sampled replay, EOS, bounded prefill, cache forks, persistent restore, concurrency, cancellation and reclamation. |
 | `reference` | Teacher-forced target versus optional BF16: KL, total variation, top-1 agreement, RMSE and NLL difference. Informational quantization measurements. |
 
 ```sh
@@ -48,12 +48,12 @@ Artifact variables `GUFO_QWEN27B_*_MODEL` are test inputs, not execution switche
   at a 262,144-token logical context. Ring wrap, persistent restore and replay
   retain proposals and confidence values. Scratch ingestion is bounded to
   256 rows.
-- DFlash operators: CPU equations cover both convolution coefficient planes,
-  attention window boundaries and partial-top-k partitions. Top-k 1, 7 and 16
-  check greedy selection and sampled probabilities, including poisoned unused
-  scratch slots. This catches the former unwritten-slot merge for top-k <16.
-- Release companion comparison: both targets × both draft quants × three
-  chat prompts × two repetitions: all 24 cases match all 128 target token IDs.
+- DFlash operators: independent equations cover both convolution coefficient
+  planes, attention window boundaries and partial-top-k partitions. Top-k
+  1, 7 and 16 run through the full 248,320-token vocabulary, including poisoned
+  scratch, zero random draws, zero-mass candidates and tiny temperatures.
+- Release companion comparison: both targets × Q4/Q8/BF16 drafts × three
+  chat prompts: all 18 cases match all 128 target token IDs.
   See [the measurement record](draft-selection.json). This is a development
   corpus, not a capability evaluation or proof across arbitrary contexts.
 - `prompt` and `chat` share GPU/speculative setup. Their first-turn tokens
@@ -67,36 +67,112 @@ Artifact variables `GUFO_QWEN27B_*_MODEL` are test inputs, not execution switche
 Run the affected operator check first, then model replay on both target quants.
 Require complete speculative corpus results before comparing release speed.
 Compare token IDs and full logits, not just decoded text or acceptance.
-Use `tools/qwen27b/drafts.py` for matched Q4/Q8 companion comparisons; do not
-rank draft acceptance across different target-generated continuations.
+Use `tools/qwen27b/drafts.py` for matched companion comparisons; optional
+`--draft-bf16` adds the reference. Do not rank acceptance across different
+target-generated continuations.
 
 ## Original DFlash2 source
 
 Pinned upstream: `z-lab/dflash` commit
-`07ebd93db9f472af339b644bb70221ad8428328a`, `dflash/model_mlx.py`.
+`07ebd93db9f472af339b644bb70221ad8428328a`, `dflash/model.py`.
 Its SHA-256 is
-`2f8598eaca4cb814e63ea69e791c1bdf55ba82280bfd299f9141906356b7cb87`.
-The upstream README identifies MLX as the Qwen implementation.
+`f55b7fe0a4c0b3073e0f9cdce547cce29f4b8e2168c4d2818760007c43b7651e`.
+The reference imports its unmodified `DFlash2DraftModel` and `CandidateSelector`.
+PyTorch runs FP32 operations over independently decoded copies of the same
+GGUF weights, including Gufo's documented BF16 weight packing.
 
 | Operation | Source contract checked |
 | --- | --- |
-| Target taps | Concatenate selected target layer outputs; normalize GGUF layer-input indices once on load. |
+| Target taps | Layer outputs 5/19/33/47/61, after the FFN residual; normalize GGUF layer-input indices once on load. |
+| Embeddings | Independently decode the target anchor and mask-token embedding rows. |
 | Context injection | Shared feature projection/norm, per-layer K/V projection, per-head K norm, absolute-position RoPE. |
 | Attention | All proposal keys visible; historical keys satisfy query minus key < window; 32 query heads, 8 KV heads, dimension 128. |
 | Dynamic convolution | Causal zero padding; static and dynamic grouped coefficients; separate prepare/finish planes. |
 | Selector | Unary top-k then predecessor × projected hidden × successor score; selected token becomes the next predecessor; report the probability actually sampled. |
 
-Gufo uses FP32 draft activations and packed weights; upstream may use BF16.
-Equivalent formulas do not imply identical draft probability distributions.
-The target verifier must preserve the target distribution independently of
-proposal quality. Full original-target equivalence, an independent MTP source
-audit, the optional BF16 comparison, and the longer capability/depth corpus
-remain TODO.
+The trace checks every layer twice: accumulated forward execution, then a
+teacher-forced layer with Gufo's input. It also isolates the output head and
+selector, compares conditional distributions by token ID, and checks that each
+random draw selected the reported token and probability. Candidate order can
+differ from upstream's unsorted top-k without changing the distribution.
+
+One real 24-token prefix from the Q4 target, seven proposals at temperature
+0.8; all three draft artifacts pass. All 21 candidate sets and random draws
+match. Full [per-stage evidence](dflash-upstream.json):
+
+| Draft | Worst stage relative RMSE | Full-logit max error | Proposal max total variation |
+| --- | ---: | ---: | ---: |
+| Q4_K_M | 5.83e-6 | 7.72e-5 | 1.60e-5 |
+| Q8_0 | 5.74e-6 | 9.54e-5 | 1.25e-5 |
+| BF16 | 6.16e-6 | 1.13e-4 | 7.01e-6 |
+
+```sh
+# Fetch this small source file explicitly; no model download is implicit.
+gh api 'repos/z-lab/dflash/contents/dflash/model.py?ref=07ebd93db9f472af339b644bb70221ad8428328a' \
+  -H 'Accept: application/vnd.github.raw' > /tmp/dflash-model.py
+nix develop -c cmake --build --preset gpu-test --target qwen_dflash_gpu_test
+nix develop -c build/gpu-test/tests/models/qwen27b/qwen_dflash_gpu_test \
+  "$MODEL" "$DRAFT" --trace /tmp/dflash-trace
+nix develop -c python3 tools/qwen27b/dflash_reference.py \
+  --upstream /tmp/dflash-model.py --config "$ORIGINAL_DFLASH_CONFIG" \
+  --target "$MODEL" --draft "$DRAFT" --trace /tmp/dflash-trace \
+  --output /tmp/dflash-reference.json
+```
+
+Use a new trace directory and run artifacts sequentially. Gates are fixed:
+stage relative RMSE ≤1e-4, full-logit maximum error ≤1e-3, proposal total
+variation ≤1e-4, and isolated selector probability error ≤5e-6.
+This checks execution over packed weights and captured target features.
+It does not validate GGUF conversion against original safetensors, establish
+original-target correctness, or promise native BF16/MLX bitwise equality.
+
+## Token generation and verification policy
+
+- DFlash2 uses one anchor plus up to seven proposals. Block length is selected
+  before drawing tokens and bounded by the context and remaining output budget.
+  Unary top-16 candidates receive the predecessor/hidden/successor transition
+  score; the temperature softmax is the proposal distribution `q`.
+- The verifier uses the same target distribution `p` as AR, including committed
+  repetition history. It accepts proposal `y` with probability `min(1,p(y)/q(y))`.
+  Rejection samples normalized `max(p-q,0)` across the **whole target
+  vocabulary**, including tokens outside the draft's top-16.
+- Every candidate row is validated before target execution: dimensions, unique
+  in-range IDs, finite nonnegative normalized probabilities, and positive mass
+  for the proposed token. Verification restores rejected state and commits only
+  the consumed prefix. EOS and output limits stop further commits.
+- The sample-dependent confidence cutoff and its CLI/Nix wiring are removed:
+  discarding a token based on its sampled probability changes `q`. Greedy
+  diagnostics report the actual one-hot proposal distribution.
+- Seeded runs must reproduce token IDs within a fixed Gufo configuration,
+  including cached replay. AR and speculation consume different random draws,
+  so equal seeds do not imply equal sampled continuations. Greedy runs must
+  match AR exactly.
+
+The GPU test enumerates acceptance branches and residual CDF intervals using
+the GPU selector's probabilities, then reconstructs the target distribution
+(tolerance 2e-6). It covers filtered and unfiltered targets, including mass
+outside the candidate set. This is stronger than checking acceptance rate or
+running a noisy frequency test.
+
+Gufo applies penalties → top-k → top-p → min-p → temperature in both AR and
+verification. Upstream applies temperature before top-p. Matching CLI values
+therefore need not define the same target distribution; the preservation
+contract here is Gufo AR's distribution.
+
+Remaining: original checkpoint/conversion and MTP qualification, optional BF16
+target comparison, and longer capability/depth coverage.
 
 Experiment: removing symmetric-format activation corrections, including explicit
 rounded multiply/add, failed bitwise GEMM verification. Rejected; the production
 reduction remains unchanged.
 
-Short TG profile: exact quantized verifier projections account for about 73%
-of kernel time, recurrent updates about 9%. Prioritize those before minor
-launches such as draft RoPE (0.1% in that trace).
+Retained: FP32 activations for small BF16-weight draft GEMMs reduce the worst
+BF16 forward-stage relative error from 5.25e-3 to 6.16e-6 against FP32 upstream
+formulas. Short release probes retain exact greedy output; BF16 companion
+rates improve from 23.60/22.43 to 24.43/22.97 tok/s on Q4/Q8 targets.
+
+The [TG profile](draft-profile.json) separates executors by HIP stream.
+Target work takes 90% of Q4/Q8 companion kernel time, primarily exact quantized
+projections. Draft GPU work per step is 17.2 ms (Q4), 18.2 ms (Q8) and 26.1 ms
+(BF16); target work is approximately 155 ms. These are one profiled C++ corpus
+case per companion, with initial prefill excluded.

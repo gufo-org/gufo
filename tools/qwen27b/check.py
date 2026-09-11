@@ -12,7 +12,8 @@ SUITES = {
     "fast": ["qwen_dflash_reference_test", "qwen_aie2p_w4a8_pack_test"],
     "kernels": ["qwen_dflash_noncausal_attention_ops_test",
                 "qwen_prefill_quant_gemm_ops_test", "qwen_q4kxl_quant_ops_test",
-                "qwen_quant_gemv_ops_test"],
+                "qwen_quant_gemv_ops_test", "qwen_sampling_hip_test",
+                "speculative_verification_test"],
     "serving": ["inference_backend_gpu_test"],
     "model": ["qwen27b_target_test", "qwen_mtp_gpu_test", "qwen_dflash_gpu_test"],
 }

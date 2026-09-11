@@ -120,13 +120,7 @@ static void PrintTextHelp(std::string_view program_name,
   parser.AddOption("", "--spec-draft-n-min", "N",
                    "llama.cpp-compatible alias for --min-draft-tokens",
                    "Speculative", &opt.min_draft_tokens);
-  parser.AddOption(
-      "", "--spec-draft-p-min", "P",
-      "Stop at the first draft token below confidence P; 0 disables "
-      "(default: 0)",
-      "Speculative", &opt.draft_p_min);
-  parser.AddOption("", "--draft-p-min", "P", "Alias for --spec-draft-p-min",
-                   "Speculative", &opt.draft_p_min);
+
   parser.AddFlag("", "--cpu",
                  "Force CPU OpenMP execution fallback instead of GPU ROCm",
                  "Hardware", &opt.force_cpu);
@@ -250,10 +244,9 @@ std::shared_ptr<models::deepseek_v4_flash::Model> LoadDeepSeekModel(
     PrintModelLoadTime(load_start, false);
     return nullptr;
   }
-  if (dspark_requested &&
-      (opt.min_draft_tokens != 1 || opt.draft_p_min != 0.0F)) {
+  if (dspark_requested && opt.min_draft_tokens != 1) {
     std::cerr << "DSpark uses model-owned adaptive drafting; "
-                 "--min-draft-tokens and --spec-draft-p-min are unsupported\n";
+                 "--min-draft-tokens is unsupported\n";
     return nullptr;
   }
 
@@ -544,7 +537,6 @@ std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
     hip::QwenDFlashGpuDraftConfig cfg{
         .max_context = executor.GetMaxContext(),
         .max_draft_tokens = static_cast<std::uint32_t>(opt.draft_tokens),
-        .draft_p_min = opt.draft_p_min,
     };
     draft_backend = hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
         dflash_path, executor.GetSharedModel(), cfg, &err);
@@ -787,13 +779,7 @@ std::optional<PromptOptions> ParsePromptOptions(
   parser.AddOption("", "--spec-draft-n-min", "N",
                    "llama.cpp-compatible alias for --min-draft-tokens",
                    "Speculative", &opt.min_draft_tokens);
-  parser.AddOption(
-      "", "--spec-draft-p-min", "P",
-      "Stop at the first draft token below confidence P; 0 disables "
-      "(default: 0)",
-      "Speculative", &opt.draft_p_min);
-  parser.AddOption("", "--draft-p-min", "P", "Alias for --spec-draft-p-min",
-                   "Speculative", &opt.draft_p_min);
+
   parser.AddFlag("", "--cpu",
                  "Force CPU OpenMP execution fallback instead of GPU ROCm",
                  "Hardware", &opt.force_cpu);
@@ -845,13 +831,6 @@ std::optional<PromptOptions> ParsePromptOptions(
       opt.min_draft_tokens > opt.draft_tokens) {
     if (error_msg != nullptr) {
       *error_msg = "min-draft-tokens cannot exceed draft-tokens";
-    }
-    return std::nullopt;
-  }
-  if (!std::isfinite(opt.draft_p_min) || opt.draft_p_min < 0.0F ||
-      opt.draft_p_min > 1.0F) {
-    if (error_msg != nullptr) {
-      *error_msg = "spec-draft-p-min must be in [0, 1]";
     }
     return std::nullopt;
   }

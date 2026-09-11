@@ -20,7 +20,6 @@ void TestDefaultOptions() {
   assert(!opt->verbose);
   assert(opt->draft_tokens == 7);
   assert(opt->min_draft_tokens == 1);
-  assert(opt->draft_p_min == 0.0F);
 }
 
 void TestExplicitFlags() {
@@ -39,24 +38,21 @@ void TestExplicitFlags() {
 }
 
 void TestHybridMtpFlags() {
-  const std::array<const char*, 11> args = {"--speculative",
-                                            "mtp-npu",
-                                            "--mtp-model",
-                                            "mtp.gguf",
-                                            "--spec-draft-n-max",
-                                            "2",
-                                            "--spec-draft-n-min",
-                                            "2",
-                                            "--spec-draft-p-min",
-                                            "0.75",
-                                            "Prompt"};
+  const std::array<const char*, 9> args = {"--speculative",
+                                           "mtp-npu",
+                                           "--mtp-model",
+                                           "mtp.gguf",
+                                           "--spec-draft-n-max",
+                                           "2",
+                                           "--spec-draft-n-min",
+                                           "2",
+                                           "Prompt"};
   const auto opt = gufo::cli::ParsePromptOptions(args);
   assert(opt.has_value());
   assert(opt->speculative_backend == "mtp-npu");
   assert(opt->mtp_model_path == "mtp.gguf");
   assert(opt->draft_tokens == 2);
   assert(opt->min_draft_tokens == 2);
-  assert(opt->draft_p_min > 0.74F && opt->draft_p_min < 0.76F);
 }
 
 void TestInvalidFlags() {
@@ -78,8 +74,10 @@ void TestInvalidFlags() {
   const std::array<const char*, 2> args6 = {"--top-p", "0"};
   assert(!gufo::cli::ParsePromptOptions(args6, &err).has_value());
 
-  const std::array<const char*, 2> args7 = {"--spec-draft-p-min", "-0.1"};
-  assert(!gufo::cli::ParsePromptOptions(args7, &err).has_value());
+  for (const char* flag : {"--spec-draft-p-min", "--draft-p-min"}) {
+    const std::array<const char*, 2> removed = {flag, "0.75"};
+    assert(!gufo::cli::ParsePromptOptions(removed, &err).has_value());
+  }
 
   const std::array<const char*, 2> args8 = {"--chat-template", "qwen"};
   assert(!gufo::cli::ParsePromptOptions(args8, &err).has_value());

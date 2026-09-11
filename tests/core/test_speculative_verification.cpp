@@ -239,6 +239,11 @@ public:
 
   std::span<const float> CopyLastLogits() override { return last_logits_; }
 
+  std::size_t VocabularySize() const noexcept override {
+    return target_logits_.size();
+  }
+  std::size_t StateSize() const noexcept { return state_.size(); }
+
   TokenId GetEosTokenId() const noexcept override { return 99; }
 
   std::string_view DecodeToken(TokenId) const noexcept override {
@@ -294,6 +299,30 @@ public:
 
 private:
   std::array<float, 2> probabilities_;
+};
+
+class FixedSampledDraftBackend final : public gufo::speculative::IDraftBackend {
+public:
+  explicit FixedSampledDraftBackend(gufo::speculative::DraftProposal proposal)
+      : proposal_(std::move(proposal)) {}
+  std::string_view Name() const noexcept override {
+    return "FixedSampledDraft";
+  }
+  gufo::speculative::DraftProposal Propose(std::span<const TokenId>,
+                                           std::uint32_t,
+                                           std::uint32_t) override {
+    return proposal_;
+  }
+  gufo::speculative::DraftProposal ProposeSampled(std::span<const TokenId>,
+                                                  std::uint32_t, std::uint32_t,
+                                                  float,
+                                                  std::uint64_t*) override {
+    return proposal_;
+  }
+  bool SupportsSampledProposals() const noexcept override { return true; }
+
+private:
+  gufo::speculative::DraftProposal proposal_;
 };
 
 class PersistentDraftSnapshot final
@@ -527,9 +556,12 @@ void TestPartialRejectionRestoresAndReplaysState() {
   gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend));
   const std::vector<TokenId> prompt = {1, 2, 3};
 
-  const auto output = verifier.Generate(prompt, GenerationOptions(3, eos_id));
+  const auto current = verifier.Prime(prompt);
+  std::vector<TokenId> sequence{1, 2, 3, current};
+  const auto step = verifier.VerifyStep(sequence, 3, current, eos_id, 3);
 
-  Expect(output == std::vector<TokenId>({10, 11, 12}),
+  Expect(step.emitted_tokens == std::vector<TokenId>({11, 12}) &&
+             step.accepted_count == 1 && step.draft_count == 2,
          "partial rejection must match greedy output");
   Expect(target.State() == std::vector<TokenId>({1, 2, 3, 10, 11}),
          "partial rejection target state");
@@ -544,9 +576,12 @@ void TestImmediateRejectionRestoresGreedyState() {
   gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend));
   const std::vector<TokenId> prompt = {1, 2, 3};
 
-  const auto output = verifier.Generate(prompt, GenerationOptions(2, eos_id));
+  const auto current = verifier.Prime(prompt);
+  std::vector<TokenId> sequence{1, 2, 3, current};
+  const auto step = verifier.VerifyStep(sequence, 3, current, eos_id, 3);
 
-  Expect(output == std::vector<TokenId>({10, 11}),
+  Expect(step.emitted_tokens == std::vector<TokenId>({11}) &&
+             step.accepted_count == 0 && step.draft_count == 2,
          "immediate rejection must match greedy output");
   Expect(target.State() == std::vector<TokenId>({1, 2, 3, 10}),
          "immediate rejection target state");
@@ -683,6 +718,120 @@ void TestFilteredSampledSpeculationMatchesTargetDistribution() {
          "top-k/top-p/min-p/penalty requests continue to use drafts");
 }
 
+void TestMalformedProposalDoesNotAdvanceTarget() {
+  for (int kind = 0; kind < 7; ++kind) {
+    SampledTargetExecutor target({-INFINITY, std::log(0.25F), std::log(0.75F)});
+    gufo::speculative::DraftProposal proposal{
+        .tokens = {1, 2},
+        .candidate_ids = {1, 2, 1, 2},
+        .candidate_probabilities = {0.8F, 0.2F, 0.8F, 0.2F},
+        .candidates_per_token = 2,
+        .start_pos = 1,
+    };
+    // Corrupt the second row: validation must happen even when verification
+    // could reject the first token and never consume this row.
+    switch (kind) {
+      case 0:
+        proposal.candidate_ids[2] = 2;
+        break;
+      case 1:
+        proposal.candidate_ids[2] = 3;
+        break;
+      case 2:
+        proposal.candidate_probabilities[2] = NAN;
+        break;
+      case 3:
+        proposal.candidate_probabilities[2] = 0.799F;
+        break;
+      case 4:
+        proposal.candidate_probabilities[2] = 1.0F;
+        proposal.candidate_probabilities[3] = 0.0F;
+        break;
+      case 5:
+        proposal.start_pos = 2;
+        break;
+      case 6:
+        proposal.candidate_ids.pop_back();
+        break;
+    }
+    gufo::speculative::SpeculativeOptions options;
+    options.max_draft_tokens = 2;
+    options.initial_draft_tokens = 2;
+    options.enable_adaptive_draft_length = false;
+    gufo::speculative::SpeculativeVerifier verifier(
+        target, std::make_unique<FixedSampledDraftBackend>(std::move(proposal)),
+        options);
+    const std::vector<TokenId> prompt{0};
+    const auto current = verifier.Prime(prompt);
+    std::vector<TokenId> sequence{0, current};
+    std::uint64_t rng = 42;
+    bool rejected = false;
+    try {
+      (void)verifier.VerifyStep(sequence, 1, current, 99, 3, 1.0F, &rng);
+    } catch (const std::runtime_error&) {
+      rejected = true;
+    }
+    Expect(rejected && target.StateSize() == prompt.size(),
+           "malformed sparse proposal must fail before target execution");
+  }
+}
+
+void TestStopAndBudgetKeepExactFrontier() {
+  for (const bool batched : {false, true}) {
+    ScriptedTargetExecutor target({10, 11, 900, 12}, 900);
+    auto backend = std::make_unique<gufo::speculative::MockDraftBackend>(
+        std::vector<TokenId>{11, 900, 12});
+    gufo::speculative::SpeculativeOptions options;
+    options.use_batched_verification = batched;
+    gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend),
+                                                    options);
+    const std::vector<TokenId> prompt{1, 2, 3};
+    const auto current = verifier.Prime(prompt);
+    std::vector<TokenId> sequence{1, 2, 3, current};
+    const auto result = verifier.VerifyStep(sequence, 3, current, 900, 4);
+    Expect(result.emitted_tokens == std::vector<TokenId>({11, 900}) &&
+               result.next_token == 900 && result.hit_eos,
+           "greedy speculation must end at the first stop token");
+    Expect(target.State() == std::vector<TokenId>({1, 2, 3, 10, 11}),
+           "a stop token and its suffix must remain uncommitted");
+  }
+  {
+    SampledTargetExecutor target({-INFINITY, -INFINITY, 0});
+    gufo::speculative::DraftProposal proposal{
+        .tokens = {2, 1},
+        .candidate_ids = {2, 1, 1, 2},
+        .candidate_probabilities = {1, 0, 1, 0},
+        .candidates_per_token = 2,
+        .start_pos = 1,
+    };
+    gufo::speculative::SpeculativeOptions options;
+    options.max_draft_tokens = options.initial_draft_tokens = 2;
+    gufo::speculative::SpeculativeVerifier verifier(
+        target, std::make_unique<FixedSampledDraftBackend>(proposal), options);
+    const std::vector<TokenId> prompt{0};
+    const auto current = verifier.Prime(prompt);
+    std::vector<TokenId> sequence{0, current};
+    std::uint64_t rng = 42;
+    const auto result =
+        verifier.VerifyStep(sequence, 1, current, 2, 3, 1.0F, &rng);
+    Expect(result.emitted_tokens == std::vector<TokenId>({2}) &&
+               result.next_token == 2 && result.hit_eos &&
+               target.StateSize() == 2,
+           "sampled speculation must stop before committing EOS or its suffix");
+  }
+  {
+    ScriptedTargetExecutor target({10, 11, 12, 13, 14}, 900);
+    auto backend = std::make_unique<gufo::speculative::MockDraftBackend>(
+        std::vector<TokenId>{11, 12, 13});
+    gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend));
+    const std::vector<TokenId> prompt{1, 2, 3};
+    const auto output = verifier.Generate(prompt, GenerationOptions(2, 900));
+    Expect(output == std::vector<TokenId>({10, 11}) &&
+               target.State() == std::vector<TokenId>({1, 2, 3, 10}),
+           "greedy generation must not commit beyond its output budget");
+  }
+}
+
 void TestPersistentVerifierSnapshotRoundTrip() {
   constexpr TokenId eos_id = 900;
   const std::vector<TokenId> prompt = {1, 2, 3};
@@ -772,6 +921,8 @@ int main() {
   TestFirstPrefillEosIsNotEmitted();
   TestSampledSpeculationMatchesTargetDistribution();
   TestFilteredSampledSpeculationMatchesTargetDistribution();
+  TestMalformedProposalDoesNotAdvanceTarget();
+  TestStopAndBudgetKeepExactFrontier();
   TestPersistentVerifierSnapshotRoundTrip();
   std::cout << "All speculative verification tests passed.\n";
   return 0;

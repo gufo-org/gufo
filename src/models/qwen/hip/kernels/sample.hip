@@ -2,6 +2,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -101,7 +102,7 @@ __global__ void LinearSamplingKernel(const float* __restrict__ logits,
   const float maximum = shared_max[0];
   const float min_p_threshold =
       min_p > 0.0F ? maximum + logf(min_p) : -INFINITY;
-  const float inverse_temperature = 1.0F / temperature;
+  const float inverse_temperature = 1.0F / fmaxf(temperature, FLT_MIN);
   float local_sum = 0.0F;
   for (std::size_t index = begin; index < end; ++index) {
     const float value = logits[index];
@@ -121,7 +122,7 @@ __global__ void LinearSamplingKernel(const float* __restrict__ logits,
     float threshold = fminf(fmaxf(uniform, 0.0F), 0.99999994F) * total;
     selected_segment = static_cast<std::uint32_t>(blockDim.x - 1U);
     for (std::size_t segment = 0; segment < blockDim.x; ++segment) {
-      if (threshold <= segment_prefix[segment] + segment_sums[segment]) {
+      if (threshold < segment_prefix[segment] + segment_sums[segment]) {
         selected_segment = static_cast<std::uint32_t>(segment);
         break;
       }
@@ -141,7 +142,7 @@ __global__ void LinearSamplingKernel(const float* __restrict__ logits,
       }
       threshold -= expf((value - maximum) * inverse_temperature);
       selected = static_cast<std::uint32_t>(index);
-      if (threshold <= 0.0F) {
+      if (threshold < 0.0F) {
         break;
       }
     }
@@ -205,7 +206,7 @@ __global__ void SortedSamplingKernel(
     std::size_t keep = top_p_end;
     for (std::size_t index = top_p_begin; index < top_p_end; ++index) {
       threshold -= expf(sorted_logits[index] - maximum);
-      if (threshold <= 0.0F) {
+      if (threshold < 0.0F) {
         keep = index + 1U;
         break;
       }
@@ -241,7 +242,7 @@ __global__ void SortedSamplingKernel(
 
   const std::size_t sample_begin = (final_keep * tid) / blockDim.x;
   const std::size_t sample_end = (final_keep * (tid + 1U)) / blockDim.x;
-  const float inverse_temperature = 1.0F / temperature;
+  const float inverse_temperature = 1.0F / fmaxf(temperature, FLT_MIN);
   local_sum = 0.0F;
   for (std::size_t index = sample_begin; index < sample_end; ++index) {
     local_sum += expf((sorted_logits[index] - maximum) * inverse_temperature);
@@ -258,7 +259,7 @@ __global__ void SortedSamplingKernel(
     const float threshold = fminf(fmaxf(uniform, 0.0F), 0.99999994F) * total;
     selected_segment = static_cast<std::uint32_t>(blockDim.x - 1U);
     for (std::size_t segment = 0; segment < blockDim.x; ++segment) {
-      if (threshold <= segment_prefix[segment] + segment_sums[segment]) {
+      if (threshold < segment_prefix[segment] + segment_sums[segment]) {
         selected_segment = static_cast<std::uint32_t>(segment);
         break;
       }
@@ -273,7 +274,7 @@ __global__ void SortedSamplingKernel(
     for (std::size_t index = sample_begin; index < sample_end; ++index) {
       threshold -= expf((sorted_logits[index] - maximum) * inverse_temperature);
       selected = sorted_token_ids[index];
-      if (threshold <= 0.0F) {
+      if (threshold < 0.0F) {
         break;
       }
     }
@@ -324,7 +325,7 @@ __global__ void LinearSpeculativeSamplingKernel(
   const float maximum = shared_max[0];
   const float min_p_threshold =
       min_p > 0.0F ? maximum + logf(min_p) : -INFINITY;
-  const float inverse_temperature = 1.0F / temperature;
+  const float inverse_temperature = 1.0F / fmaxf(temperature, FLT_MIN);
   float local_sum = 0.0F;
   float local_draft_weight = 0.0F;
   for (std::size_t index = begin; index < end; ++index) {
@@ -417,7 +418,7 @@ __global__ void LinearSpeculativeSamplingKernel(
     selected_segment = static_cast<std::uint32_t>(blockDim.x - 1U);
     for (std::size_t segment = 0; segment < blockDim.x; ++segment) {
       if (segment_sums[segment] > 0.0F &&
-          threshold <= segment_prefix[segment] + segment_sums[segment]) {
+          threshold < segment_prefix[segment] + segment_sums[segment]) {
         selected_segment = static_cast<std::uint32_t>(segment);
         break;
       }
@@ -450,7 +451,7 @@ __global__ void LinearSpeculativeSamplingKernel(
       }
       threshold -= weight;
       selected = static_cast<std::uint32_t>(index);
-      if (threshold <= 0.0F) {
+      if (threshold < 0.0F) {
         break;
       }
     }
@@ -524,7 +525,7 @@ __global__ void SortedSpeculativeSamplingKernel(
     std::size_t keep = top_p_end;
     for (std::size_t index = top_p_begin; index < top_p_end; ++index) {
       threshold -= expf(sorted_logits[index] - maximum);
-      if (threshold <= 0.0F) {
+      if (threshold < 0.0F) {
         keep = index + 1U;
         break;
       }
@@ -554,7 +555,7 @@ __global__ void SortedSpeculativeSamplingKernel(
 
   const std::size_t sample_begin = (final_keep * tid) / blockDim.x;
   const std::size_t sample_end = (final_keep * (tid + 1U)) / blockDim.x;
-  const float inverse_temperature = 1.0F / temperature;
+  const float inverse_temperature = 1.0F / fmaxf(temperature, FLT_MIN);
   local_sum = 0.0F;
   float local_draft_weight = 0.0F;
   for (std::size_t index = sample_begin; index < sample_end; ++index) {
@@ -637,7 +638,7 @@ __global__ void SortedSpeculativeSamplingKernel(
     selected_segment = static_cast<std::uint32_t>(blockDim.x - 1U);
     for (std::size_t segment = 0; segment < blockDim.x; ++segment) {
       if (segment_sums[segment] > 0.0F &&
-          threshold <= segment_prefix[segment] + segment_sums[segment]) {
+          threshold < segment_prefix[segment] + segment_sums[segment]) {
         selected_segment = static_cast<std::uint32_t>(segment);
         break;
       }
@@ -665,7 +666,7 @@ __global__ void SortedSpeculativeSamplingKernel(
       }
       threshold -= weight;
       selected = sorted_token_ids[index];
-      if (threshold <= 0.0F) {
+      if (threshold < 0.0F) {
         break;
       }
     }

@@ -30,7 +30,6 @@ struct BenchOptions {
   /// Qwen3.8-Flash-Next: vocabulary prefix the MTP draft scores (0 = full).
   std::uint32_t draft_vocab{0};
   std::uint32_t min_draft_tokens{1};
-  float draft_p_min{0.0F};
   /// DeepSeek generation sampling; 0 keeps greedy decoding.
   float temperature{0.0F};
   std::uint32_t seed{0};

@@ -141,8 +141,10 @@ Whole-model Qwen3.5-0.8B (158 tensors, G64) rough timings on this box:
 minutes and choked imatrix; this is ~20x faster and scales memory-bounded.)
 # Qwen27B
 
-`qwen27b/check.py` owns the focused model checks (`fast`, `kernels`, `model`).
+`qwen27b/check.py` owns the focused checks (`fast`, `kernels`, `model`, `serving`).
 Its optional `reference` suite compares target logits with an explicitly
 provided BF16 artifact. `qwen27b/drafts.py` compares production Q4/Q8 DFlash2
-companions and refuses incomplete or mismatching results. See
-`benchmarks/qwen3.8-27b/README.md` for commands and current measurements.
+companions, optionally includes a BF16 reference, and refuses incomplete or
+mismatching results. `qwen27b/dflash_reference.py` checks a GPU trace against
+pinned upstream PyTorch operators using the same GGUF weights. See
+`benchmarks/qwen3.8-27b/README.md` and its quality report for commands and evidence.

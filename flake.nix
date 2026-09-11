@@ -522,7 +522,6 @@
                 repeatLastN = 32;
                 frequencyPenalty = 0.25;
                 presencePenalty = 0.5;
-                specDraftPMin = 0.75;
                 reasoningEffort = "high";
                 preserveThinking = "auto";
                 cacheDisk = "/var/cache/gufo";
@@ -556,7 +555,6 @@
               echo "$cmd_str" | grep -F -- "--repeat-last-n 32"
               echo "$cmd_str" | grep -F -- "--frequency-penalty 0.250000"
               echo "$cmd_str" | grep -F -- "--presence-penalty 0.500000"
-              echo "$cmd_str" | grep -F -- "--spec-draft-p-min 0.750000"
               echo "$cmd_str" | grep -F -- "--reasoning-effort high"
               echo "$cmd_str" | grep -F -- "--preserve-thinking auto"
               echo "$cmd_str" | grep -F -- "--cache-disk /var/cache/gufo"

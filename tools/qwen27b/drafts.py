@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare Q4/Q8 DFlash2 companions against each Qwen27B target."""
+"""Compare DFlash2 companions against each Qwen27B target; BF16 is optional reference."""
 from __future__ import annotations
 
 import argparse
@@ -41,6 +41,8 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, default=ROOT / "result/bin/gufo")
     for name in ("target-q4", "target-q8", "draft-q4", "draft-q8"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--draft-bf16", type=Path,
+                        help="optional BF16 reference companion; not a production recommendation")
     parser.add_argument("--output", type=Path, required=True,
                         help="new output directory; existing reports are never silently reused")
     parser.add_argument("--max-tokens", type=int, default=128)
@@ -52,7 +54,10 @@ def main() -> int:
     if args.max_tokens < 8 or args.repetitions < 1:
         parser.error("need at least eight tokens and one repetition")
     artifacts = {}
-    for name in ("binary", "target_q4", "target_q8", "draft_q4", "draft_q8"):
+    names = ["binary", "target_q4", "target_q8", "draft_q4", "draft_q8"]
+    if args.draft_bf16 is not None:
+        names.append("draft_bf16")
+    for name in names:
         path = getattr(args, name).resolve()
         if not path.is_file():
             parser.error(f"{name} does not exist: {path}")
@@ -62,9 +67,11 @@ def main() -> int:
     manifest = {name: identity(path) for name, path in artifacts.items()}
     (args.output / "artifacts.json").write_text(json.dumps(manifest, indent=2) + "\n")
     results: dict[tuple[str, str], list[dict]] = {}
+    drafts = ["q4", "q8"] + (["bf16"] if args.draft_bf16 else [])
     for repetition in range(args.repetitions):
         for target in ("q4", "q8"):
-            order = ("q4", "q8") if repetition % 2 == 0 else ("q8", "q4")
+            offset = repetition % len(drafts)
+            order = drafts[offset:] + drafts[:offset]
             for draft in order:
                 label = f"{target}-{draft}-r{repetition + 1}"
                 report_path = (args.output / f"{label}.json").resolve()

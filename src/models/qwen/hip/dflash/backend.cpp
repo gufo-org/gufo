@@ -174,9 +174,7 @@ QwenDFlashGpuDraftBackend::QwenDFlashGpuDraftBackend(
 std::unique_ptr<QwenDFlashGpuDraftBackend> QwenDFlashGpuDraftBackend::Create(
     std::shared_ptr<const QwenDFlashGpuModel> model,
     QwenDFlashGpuDraftConfig config, std::string* error_msg) {
-  if (model == nullptr || config.max_draft_tokens == 0 ||
-      !std::isfinite(config.draft_p_min) || config.draft_p_min < 0.0F ||
-      config.draft_p_min > 1.0F) {
+  if (model == nullptr || config.max_draft_tokens == 0) {
     if (error_msg != nullptr) {
       *error_msg = "DFlash GPU draft configuration is invalid";
     }
@@ -348,36 +346,11 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
     proposal.candidates_per_token =
         executor_->GetModel().GetDFlashConfig().selector_top_k;
   }
-  std::vector<float> confidences;
   proposed_tokens_ = executor_->ForwardBlock(
       proposal_input_, current_pos, count, temperature, sample_uniforms,
-      config_.draft_p_min > 0.0F ? &confidences : nullptr,
-      temperature > 0.0F ? &proposal.candidate_ids : nullptr,
+      nullptr, temperature > 0.0F ? &proposal.candidate_ids : nullptr,
       temperature > 0.0F ? &proposal.candidate_probabilities : nullptr);
 
-  if (config_.draft_p_min > 0.0F) {
-    if (confidences.size() != proposed_tokens_.size()) {
-      throw std::runtime_error("DFlash GPU confidence capture is incomplete");
-    }
-    std::size_t keep = 0;
-    while (keep < confidences.size() &&
-           confidences[keep] >= config_.draft_p_min) {
-      ++keep;
-    }
-    if (keep > 0) {
-      proposal.confidence = *std::min_element(
-          confidences.begin(),
-          confidences.begin() + static_cast<std::ptrdiff_t>(keep));
-    } else if (!confidences.empty()) {
-      proposal.confidence = confidences.front();
-    }
-    proposed_tokens_.resize(keep);
-    if (temperature > 0.0F) {
-      const std::size_t candidate_count = keep * proposal.candidates_per_token;
-      proposal.candidate_ids.resize(candidate_count);
-      proposal.candidate_probabilities.resize(candidate_count);
-    }
-  }
   proposal.tokens = proposed_tokens_;
   proposal_active_ = !proposal.tokens.empty();
   return proposal;

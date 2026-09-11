@@ -2,6 +2,7 @@
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
@@ -591,14 +592,13 @@ __global__ void dflash_selector_finalize_kernel(
   }
 
   if (temperature > 0.0F) {
-    float scaled_max = -INFINITY;
-    for (uint32_t index = 0; index < selector_top_k; ++index) {
-      scaled_max = fmaxf(scaled_max, path_scores[index] / temperature);
-    }
+    const float divisor = fmaxf(temperature, FLT_MIN);
     float denominator = 0.0F;
     for (uint32_t index = 0; index < selector_top_k; ++index) {
+      // Subtract before division so a finite, very small temperature cannot
+      // overflow both logits and their maximum to infinity.
       const float probability_weight =
-          expf((path_scores[index] / temperature) - scaled_max);
+          expf((path_scores[index] - best_score) / divisor);
       path_scores[index] = probability_weight;
       denominator += probability_weight;
     }
@@ -612,7 +612,7 @@ __global__ void dflash_selector_finalize_kernel(
         candidate_probabilities[index] = probability;
       }
       threshold -= path_scores[index];
-      if (threshold <= 0.0F && sampled_index == selector_top_k - 1U) {
+      if (threshold < 0.0F && sampled_index == selector_top_k - 1U) {
         sampled_index = index;
       }
     }
@@ -622,12 +622,12 @@ __global__ void dflash_selector_finalize_kernel(
     }
   } else {
     *output_token = top_ids[best_index];
+    if (candidate_probabilities != nullptr) {
+      for (uint32_t index = 0; index < selector_top_k; ++index)
+        candidate_probabilities[index] = index == best_index ? 1.0F : 0.0F;
+    }
     if (output_confidence != nullptr) {
-      float denominator = 0.0F;
-      for (uint32_t index = 0; index < selector_top_k; ++index) {
-        denominator += expf(path_scores[index] - best_score);
-      }
-      *output_confidence = 1.0F / fmaxf(denominator, 1e-30F);
+      *output_confidence = 1.0F;
     }
   }
 }

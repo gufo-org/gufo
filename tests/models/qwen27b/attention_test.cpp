@@ -1,17 +1,21 @@
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <numeric>
+#include <span>
 #include <vector>
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
 #include "src/core/hip/hip_utils.hpp"
+#include "src/core/sampling.hpp"
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
+#include "src/models/qwen/hip/ops/token.hpp"
 #include "tests/models/qwen/hip/support/comparisons.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 #include "tests/models/qwen/hip/support/device_buffer.hpp"
@@ -71,10 +75,100 @@ void TestDynamicConvolution() {
   }
 }
 
-void TestSelector() {
+void TestProposalVerification(std::span<const std::uint32_t> ids,
+                              std::span<const float> q, std::uint32_t vocab) {
+  using gufo::test::DeviceBuffer;
+  using gufo::test::Expect;
+  Expect(std::ranges::find(ids, 0U) == ids.end() &&
+             std::ranges::find(ids, 1U) == ids.end(),
+         "residual fixture must include tokens outside draft top-k");
+  std::vector<float> logits(vocab, -INFINITY);
+  logits[0] = std::log(0.55F);
+  logits[1] = std::log(0.10F);
+  logits[ids[0]] = std::log(0.13F);
+  logits[ids[1]] = std::log(0.07F);
+  logits[ids[2]] = std::log(0.15F);
+  DeviceBuffer<float> d_logits(logits);
+  DeviceBuffer<std::uint32_t> d_token(1), d_accepted(1);
+  gufo::hip::GpuSamplingWorkspace workspace;
+  gufo::hip::AllocateGpuSamplingWorkspace(&workspace, vocab, ids.size());
+  for (const bool filtered : {false, true}) {
+    gufo::sampling::SamplingConfig config;
+    config.temperature = filtered ? 0.8F : 1.0F;
+    config.top_k = filtered ? 4 : 0;
+    config.top_p = filtered ? 0.95F : 1.0F;
+    config.min_p = filtered ? 0.05F : 0.0F;
+    config.repeat_penalty = filtered ? 1.2F : 1.0F;
+    const std::vector<std::uint32_t> history = {ids[0], ids[0]};
+    const auto p = gufo::sampling::BuildDistribution(logits, config, history);
+    std::vector<gufo::sampling::Probability> residual;
+    double rejection_mass = 0;
+    for (const auto& entry : p.entries()) {
+      const auto found = std::ranges::find(ids, entry.token);
+      const double draft_p = found == ids.end() ? 0 : q[found - ids.begin()];
+      const double mass = std::max(entry.value - draft_p, 0.0);
+      if (mass > 0) {
+        residual.push_back({entry.token, mass});
+        rejection_mass += mass;
+      }
+    }
+    // Linear GPU sampling walks token IDs; the filtered route walks sorted
+    // target logits. Select a midpoint in every nonempty residual interval.
+    if (!filtered)
+      std::ranges::sort(residual, {}, &gufo::sampling::Probability::token);
+    gufo::hip::GpuSamplingParameters parameters{
+        .temperature = config.temperature,
+        .top_k = config.top_k,
+        .top_p = config.top_p,
+        .min_p = config.min_p,
+        .repeat_penalty = config.repeat_penalty,
+    };
+    const std::array<std::uint32_t, 1> penalty_ids{ids[0]}, counts{2};
+    const auto verify = [&](std::size_t candidate, double accept_u,
+                            double residual_u, bool accepted,
+                            std::uint32_t expected) {
+      gufo::hip::LaunchGPUSpeculativeSampling(
+          d_logits.data(), d_token.data(), d_accepted.data(), vocab, parameters,
+          ids[candidate], q[candidate], ids.data(), q.data(), ids.size(),
+          accept_u, residual_u, penalty_ids.data(), counts.data(),
+          filtered ? 1 : 0, &workspace);
+      Expect(
+          d_accepted.CopyToHost()[0] == static_cast<std::uint32_t>(accepted) &&
+              d_token.CopyToHost()[0] == expected,
+          "GPU verifier differs from independent p/q and residual equations");
+    };
+    std::vector<double> emitted(vocab, 0);
+    for (std::size_t candidate = 0; candidate < ids.size(); ++candidate) {
+      if (q[candidate] == 0)
+        continue;
+      const double acceptance =
+          std::min(1.0, p.probability(ids[candidate]) / q[candidate]);
+      if (acceptance > 0)
+        verify(candidate, acceptance * 0.5, 0.5, true, ids[candidate]);
+      emitted[ids[candidate]] += q[candidate] * acceptance;
+      if (acceptance < 1) {
+        double cumulative = 0;
+        for (const auto& entry : residual) {
+          const double probability = entry.value / rejection_mass;
+          verify(candidate, (1 + acceptance) * 0.5,
+                 cumulative + probability * 0.5, false, entry.token);
+          emitted[entry.token] += q[candidate] * (1 - acceptance) * probability;
+          cumulative += probability;
+        }
+      }
+    }
+    for (std::uint32_t token = 0; token < vocab; ++token)
+      Expect(std::abs(emitted[token] - p.probability(token)) < 2e-6,
+             "selector plus verifier must recover the complete target "
+             "distribution");
+  }
+  gufo::hip::FreeGpuSamplingWorkspace(&workspace);
+}
+
+void TestSelector(std::uint32_t vocab) {
   using gufo::test::DeviceBuffer;
   // Cross a partial-top-k partition boundary and leave a short final partition.
-  constexpr std::uint32_t vocab = 2065, rank = 256, anchor = 3;
+  constexpr std::uint32_t rank = 256, anchor = 3;
   std::vector<float> logits(vocab), projected(rank);
   std::vector<std::uint16_t> predecessors(vocab * rank),
       successors(vocab * rank);
@@ -87,7 +181,7 @@ void TestSelector() {
   };
   for (std::size_t i = 0; i < logits.size(); ++i) {
     // Distinct unary scores, deliberately scattered across both partitions.
-    logits[i] = static_cast<float>((i * 193) % vocab) / 512.0F;
+    logits[i] = static_cast<float>((i * 193) % vocab) / vocab * 4.0F;
   }
   for (std::size_t i = 0; i < rank; ++i)
     projected[i] = Sample(i, 17);
@@ -121,7 +215,7 @@ void TestSelector() {
             projected[r] * fp32(successors[sorted[c] * rank + r]);
       }
     }
-    for (const float temperature : {0.0F, 0.8F}) {
+    for (const float temperature : {0.0F, 0.8F, 1e-38F}) {
       // Unwritten partial slots must never enter the candidate set.
       d_scores.CopyFrom(std::vector<float>(scratch_size, 1e20F));
       d_ids.CopyFrom(std::vector<std::uint32_t>(scratch_size, vocab - 1));
@@ -148,6 +242,13 @@ void TestSelector() {
         for (std::size_t c = 0; c < top_k; ++c) {
           const double p =
               std::exp((scores[c] - maximum) / divisor) / denominator;
+          if (!std::isfinite(probabilities[c]) ||
+              std::abs(probabilities[c] - p) >= 2e-6) {
+            std::cerr << "selector vocab=" << vocab << " k=" << top_k
+                      << " temperature=" << temperature << " candidate=" << c
+                      << " actual=" << probabilities[c] << " expected=" << p
+                      << '\n';
+          }
           gufo::test::Expect(std::isfinite(probabilities[c]) &&
                                  std::abs(probabilities[c] - p) < 2e-6,
                              "DFlash sparse proposal probability is incorrect");
@@ -160,12 +261,49 @@ void TestSelector() {
       gufo::test::Expect(d_selected.CopyToHost()[0] == sorted[selected],
                          "DFlash selector chose the wrong candidate");
       const double confidence =
-          std::exp((scores[selected] - maximum) / divisor) / denominator;
+          temperature > 0
+              ? std::exp((scores[selected] - maximum) / divisor) / denominator
+              : 1.0;
+      if (temperature == 0) {
+        for (std::size_t c = 0; c < top_k; ++c)
+          gufo::test::Expect(probabilities[c] == (c == selected ? 1.0F : 0.0F),
+                             "greedy proposal probabilities must be one-hot");
+      }
       gufo::test::Expect(
           std::abs(d_confidence.CopyToHost()[0] - confidence) < 2e-6,
           "DFlash selected-token probability is incorrect");
+      if (vocab == 2065 && top_k == 16 && temperature == 0.8F)
+        TestProposalVerification(candidates, probabilities, vocab);
     }
   }
+}
+
+void TestSelectorZeroUniform() {
+  using gufo::test::DeviceBuffer;
+  const auto bf16 = [](float value) {
+    return static_cast<std::uint16_t>(std::bit_cast<std::uint32_t>(value) >>
+                                      16);
+  };
+  // Reranking makes the first unary candidate have zero sampling mass.
+  DeviceBuffer<float> logits(std::vector<float>{1, 0, -2000}),
+      projected(std::vector<float>{1}), uniform(std::vector<float>{0}),
+      confidence(1), probabilities(2);
+  DeviceBuffer<std::uint16_t> predecessors(
+      std::vector<std::uint16_t>{bf16(0), bf16(0), bf16(1)}),
+      successors(std::vector<std::uint16_t>{bf16(-1000), bf16(0), bf16(0)});
+  DeviceBuffer<std::uint32_t> anchor(std::vector<std::uint32_t>{2}),
+      selected(1), candidates(2);
+  const auto size = gufo::hip::kernels::DFlashSelectorScratchElements(3);
+  DeviceBuffer<float> scores(size);
+  DeviceBuffer<std::uint32_t> ids(size);
+  gufo::hip::kernels::LaunchDFlashSelectorStep(
+      logits.data(), projected.data(), predecessors.data(), successors.data(),
+      anchor.data(), selected.data(), confidence.data(), scores.data(),
+      ids.data(), 1.0F, uniform.data(), candidates.data(), probabilities.data(),
+      3, 1, 2, nullptr);
+  gufo::test::Expect(
+      selected.CopyToHost()[0] == 1 && confidence.CopyToHost()[0] == 1.0F,
+      "a zero random draw must not select zero probability");
 }
 
 /// Runs the reference and one candidate route over the same operands and
@@ -349,7 +487,9 @@ int main() {
   }
 
   TestDynamicConvolution();
-  TestSelector();
+  TestSelectorZeroUniform();
+  TestSelector(2065);
+  TestSelector(248320);
   // No injected history at all: only the eight in-block keys are attended.
   TestRouteEquivalence(0, 0, "empty history");
   // Shallow: the whole history is inside the sliding window.

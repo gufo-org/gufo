@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -19,6 +20,11 @@
 #include <hip/hip_runtime.h>
 
 namespace gufo::hip {
+
+/// Optional synchronous host observation for the independent reference test.
+/// The span is valid only during the callback; production leaves it empty.
+using DFlashTrace =
+    std::function<void(std::string_view, std::span<const float>)>;
 
 class QwenDFlashGpuSnapshot final {
 public:
@@ -118,7 +124,8 @@ public:
   /// Ingests target multi-layer hidden states and injects K/V into the draft
   /// cache.
   bool InjectTargetContext(std::span<const float> target_features,
-                           std::uint32_t position, std::uint32_t num_tokens);
+                           std::uint32_t position, std::uint32_t num_tokens,
+                           const DFlashTrace& trace = {});
 
   /// Executes non-causal parallel block diffusion drafting.
   [[nodiscard]] std::vector<tokenization::TokenId> ForwardBlock(
@@ -127,7 +134,8 @@ public:
       std::span<const float> sample_uniforms = {},
       std::vector<float>* out_confidences = nullptr,
       std::vector<tokenization::TokenId>* out_candidate_ids = nullptr,
-      std::vector<float>* out_candidate_probabilities = nullptr);
+      std::vector<float>* out_candidate_probabilities = nullptr,
+      const DFlashTrace& trace = {});
 
   [[nodiscard]] std::unique_ptr<QwenDFlashGpuSnapshot> SaveSnapshot() const;
   void RestoreSnapshot(const QwenDFlashGpuSnapshot& snapshot);
@@ -154,7 +162,8 @@ private:
 
   bool InjectTargetContextChunk(std::span<const float> target_features,
                                 std::uint32_t position,
-                                std::uint32_t num_tokens);
+                                std::uint32_t num_tokens,
+                                const DFlashTrace& trace);
   void Allocate();
   void Free() noexcept;
   void PrewarmBlockGemms();
@@ -207,9 +216,6 @@ private:
 struct QwenDFlashGpuDraftConfig {
   std::uint32_t max_context{4096};
   std::uint32_t max_draft_tokens{16};
-  /// Stop the proposal at the first draft token whose selected probability is
-  /// below this confidence threshold. Zero disables confidence filtering.
-  float draft_p_min{0.0F};
 };
 
 /// Adapts the GPU DFlash executor to the repository's IDraftBackend speculative

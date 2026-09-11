@@ -21,8 +21,8 @@ that number. Draft precision is selected separately from target precision.
 
 ## Single user, speculative
 
-Prefill / generation in tok/s. DFlash2 uses the Q4_K_M companion; MTP uses
-the separate Q4_0 artifact.
+Prefill / generation in tok/s. DFlash2 companion selection is provisional;
+MTP uses the separate Q4_0 artifact.
 
 | Context depth | Q4 + DFlash2 | Q8 + DFlash2 | Q4 + MTP | Q8 + MTP |
 | ---: | ---: | ---: | ---: | ---: |
@@ -64,17 +64,22 @@ Q4 and Q8 targets can generate different continuations, so their acceptance
 rates do not directly rank the companions. Each pairing must reproduce its
 own target's greedy token IDs before its speed qualifies.
 
-Three chat prompts × 128 generated tokens × two repetitions, rotated draft
-order. All **24/24 cases reproduce every target token ID**. These are chat
+Three chat prompts × 128 generated tokens × one repetition per pairing.
+All **18/18 cases reproduce every target token ID**. These are chat
 generation rates including prompt processing, separate from the depth sweep.
 
-| Target | DFlash2 Q4_K_M (tok/s) | DFlash2 Q8_0 (tok/s) | Recommended |
+| Target | DFlash2 Q4_K_M (tok/s) | DFlash2 Q8_0 (tok/s) | BF16 reference (tok/s) |
 | --- | --- | --- | --- |
-| Q4_K_XL | 25.51 | 25.62 | Q4_K_M |
-| Q8_K_XL | 24.35 | 24.08 | Q4_K_M |
+| Q4_K_XL | 25.46 | 25.63 | 24.43 |
+| Q8_K_XL | 23.96 | 23.69 | 22.97 |
 
-Q4 is effectively tied on speed and its artifact is 0.85 GiB smaller.
-Keep Q8 for quality/performance comparisons; BF16 remains a reference.
+All three drafts pass the pinned upstream operator comparison. Q4 is the
+practical starting point: its current speed is close to Q8 and its artifact is
+0.85 GiB smaller. Keep Q8/BF16 for explicit comparisons; this short probe does
+not establish each precision's optimized potential.
+The TG profile measures 17.2/18.2/26.1 ms of draft GPU work per verification
+step for Q4/Q8/BF16, versus roughly 155 ms in the target. Optimize target
+verification first. Profile timings are separate from throughput measurements.
 The [measurement record](eval/draft-selection.json) includes artifact hashes,
 per-case token hashes, acceptance and repetitions.
 
