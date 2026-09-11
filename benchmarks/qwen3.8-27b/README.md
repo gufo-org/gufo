@@ -13,24 +13,34 @@ that number. Draft precision is selected separately from target precision.
 
 | Context depth | Q4 pp / tg (tok/s) | Q8 pp / tg (tok/s) |
 | ---: | ---: | ---: |
-| 0 | TODO | TODO |
-| 4,096 | TODO | TODO |
-| 8,192 | TODO | TODO |
-| 12,288 | TODO | TODO |
-| 16,384 | TODO | TODO |
+| 0 | 427.8 / 11.50 | 491.1 / 7.07 |
+| 4,096 | 406.8 / 11.33 | 470.9 / 7.01 |
+| 8,192 | 390.8 / 11.15 | 451.2 / 6.95 |
+| 12,288 | 375.1 / 10.96 | 434.2 / 6.88 |
+| 16,384 | 362.0 / 10.77 | 414.4 / 6.81 |
 
 ## Single user, speculative
 
-Prefill / generation in tok/s. DFlash2 companion selection is provisional;
-MTP uses the separate Q4_0 artifact.
+Prefill / generation in tok/s; fixed blocks of seven proposed tokens. Each
+pairing matches all 128 AR token IDs at every depth. MTP performance: **TODO**.
 
-| Context depth | Q4 + DFlash2 | Q8 + DFlash2 | Q4 + MTP | Q8 + MTP |
-| ---: | ---: | ---: | ---: | ---: |
-| 0 | TODO | TODO | TODO | TODO |
-| 4,096 | TODO | TODO | TODO | TODO |
-| 8,192 | TODO | TODO | TODO | TODO |
-| 12,288 | TODO | TODO | TODO | TODO |
-| 16,384 | TODO | TODO | TODO | TODO |
+| Target | Depth | DFlash2 Q4_K_M | DFlash2 Q8_0 | DFlash2 BF16 |
+| --- | ---: | ---: | ---: | ---: |
+| Q4 | 0 | 386.3 / 19.24 | 386.6 / 16.22 | 386.7 / 15.53 |
+| Q4 | 4,096 | 372.8 / 12.94 | 372.5 / 12.63 | 374.0 / 12.11 |
+| Q4 | 8,192 | 361.1 / 35.81 | 360.6 / 35.65 | 360.6 / 34.35 |
+| Q4 | 12,288 | 348.0 / 33.09 | 347.3 / 32.11 | 348.2 / 30.95 |
+| Q4 | 16,384 | 334.7 / 13.53 | 335.1 / 13.79 | 332.6 / 13.31 |
+| Q8 | 0 | 450.1 / 21.57 | 448.4 / 21.38 | 451.3 / 20.46 |
+| Q8 | 4,096 | 432.6 / 14.87 | 432.0 / 14.46 | 431.9 / 13.90 |
+| Q8 | 8,192 | 415.0 / 33.63 | 416.1 / 33.49 | 414.5 / 32.29 |
+| Q8 | 12,288 | 398.2 / 34.91 | 396.9 / 34.81 | 396.9 / 33.64 |
+| Q8 | 16,384 | 373.9 / 31.38 | 381.5 / 31.26 | 379.5 / 30.24 |
+
+These are single timed repetitions after warmup at revision `023a13a`, not
+estimates of measurement variance. Acceptance varies with the synthetic
+continuation, so generation speed need not decrease monotonically with depth.
+[Raw measurements and token hashes](eval/dflash2-depths.json).
 
 ## Multiple users, autoregressive
 
@@ -77,9 +87,14 @@ All three drafts pass the pinned upstream operator comparison. The retained
 kernel and launch changes reduce draft GPU time by about **4%** across all
 three formats; measured end-to-end improvement is **0.2–0.7%** because target
 verification dominates. Q4's artifact is 0.85 GiB smaller than Q8's. Final
-selection follows the dynamic-block policy comparison.
+selection remains open while draft and verification kernels are optimized;
+controller comparisons follow that work.
 The [optimization record](eval/dflash2-optimization.json) contains interleaved
 samples, artifact/token hashes, kernel ablations and before/after profiles.
+
+Further verification-head and embedding changes retain exact outputs. Their
+additional end-to-end effect is below 0.2% in a short interleaved probe; see
+the [verification optimization record](eval/dflash2-verification.json).
 
 ## Reproduce
 
@@ -124,5 +139,5 @@ DFlash2 retains FP32 values in a bounded history ring. MTP replay uses the
 committed target features. The optimized correctness build keeps assertions
 and symbols; benchmark only the Nix release binaries.
 
-Remaining: independent original-target/MTP qualification, matched speed
-matrices, and speculative serving parity for C>1.
+Remaining: independent original-target/MTP qualification, MTP and C>1 speed
+measurements, and speculative serving parity for C>1.

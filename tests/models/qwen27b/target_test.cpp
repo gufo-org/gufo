@@ -74,7 +74,8 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
   for (const auto* text : kTexts) {
     Case row{.tokens = executor->GetTokenizer().Encode(text), .logits = {}};
     constexpr std::size_t prompt_size = 24;
-    constexpr std::size_t continuation = 4;
+    // Exercise a complete DFlash2 verification block, including the anchor.
+    constexpr std::size_t continuation = 8;
     Expect(row.tokens.size() >= prompt_size + continuation,
            "quality fixture has too few tokens");
     row.tokens.resize(prompt_size + continuation);

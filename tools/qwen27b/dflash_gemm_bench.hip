@@ -1,9 +1,9 @@
 // DFlash2 exact small-batch GEMM ablations, using the production templates.
 // Build: nix develop -c tools/bench/build.sh
 // tools/qwen27b/dflash_gemm_bench.hip Run: /tmp/dflash_gemm_bench bf16|q8|q4|q6
-// M K [iterations=24] Rotating matrices keep small shapes from fitting entirely
-// in cache. Each geometry must be bit-exact with the original geometry before
-// timing counts.
+// M K [iterations=24] [batch=7 for Q6, otherwise 8]
+// Rotating matrices keep small shapes from fitting entirely in cache. Each
+// geometry must be bit-exact with the original geometry before timing counts.
 #define ENGINE_ENABLE_HIP 1
 #include <algorithm>
 #include <cmath>
@@ -97,6 +97,7 @@ struct Geometry {
   std::function<void(const void*)> launch;
 };
 
+template<std::size_t Batch>
 void Run(const std::string& type, std::size_t rows, std::size_t columns,
          int iterations) {
   using namespace gufo;
@@ -107,7 +108,7 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
         "require bf16|q8|q4|q6, positive M, K divisible by 256, positive "
         "iterations");
   }
-  const std::size_t batch = type == "q6" ? 7 : 8;
+  constexpr std::size_t batch = Batch;
   const std::size_t block_bytes = type == "q8" ? 34 : type == "q4" ? 144 : 210;
   const std::size_t bytes =
       type == "bf16" ? rows * columns * 2
@@ -134,13 +135,13 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
   if (type == "bf16") {
     geometries = {{"rows2",
                    [&](const void* w) {
-                     BatchedExactBf16GEMMFp32VecKernel<16, 8, 2>
+                     BatchedExactBf16GEMMFp32VecKernel<16, Batch, 2>
                          <<<(rows + 31) / 32, 512>>>(
                              static_cast<const hip_bfloat16*>(w), input.Get(),
                              output.Get(), rows, columns);
                    }},
                   {"rows1", [&](const void* w) {
-                     BatchedExactBf16GEMMFp32VecKernel<16, 8, 1>
+                     BatchedExactBf16GEMMFp32VecKernel<16, Batch, 1>
                          <<<(rows + 15) / 16, 512>>>(
                              static_cast<const hip_bfloat16*>(w), input.Get(),
                              output.Get(), rows, columns);
@@ -148,12 +149,12 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
   } else if (type == "q8") {
     geometries = {{"rows2",
                    [&](const void* w) {
-                     SmallBatchQ8_0ExactFp32VecGEMMKernel<16, 8, 2>
+                     SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, 2>
                          <<<(rows + 31) / 32, 512>>>(
                              w, input.Get(), output.Get(), rows, columns);
                    }},
                   {"rows3", [&](const void* w) {
-                     SmallBatchQ8_0ExactFp32VecGEMMKernel<16, 8, 3>
+                     SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, 3>
                          <<<(rows + 47) / 48, 512>>>(
                              w, input.Get(), output.Get(), rows, columns);
                    }}};
@@ -161,27 +162,31 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
     geometries = {
         {"tile1",
          [&](const void* w) {
-           SmallBatchKQuantExactFp32GEMMKernel<16, 8, 3, core::GgmlType::kQ4_K>
+           SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
+                                               core::GgmlType::kQ4_K>
                <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
                                            columns);
          }},
         {"tile2", [&](const void* w) {
-           SmallBatchKQuantExactFp32GEMMKernel<16, 8, 3, core::GgmlType::kQ4_K,
-                                               2><<<(rows + 47) / 48, 512>>>(
-               w, input.Get(), output.Get(), rows, columns);
+           SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
+                                               core::GgmlType::kQ4_K, 2>
+               <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
+                                           columns);
          }}};
   } else {
     geometries = {
         {"rows2_tile1",
          [&](const void* w) {
-           SmallBatchKQuantExactFp32GEMMKernel<16, 7, 2, core::GgmlType::kQ6_K>
+           SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 2,
+                                               core::GgmlType::kQ6_K>
                <<<(rows + 31) / 32, 512>>>(w, input.Get(), output.Get(), rows,
                                            columns);
          }},
         {"rows3_tile2", [&](const void* w) {
-           SmallBatchKQuantExactFp32GEMMKernel<16, 7, 3, core::GgmlType::kQ6_K,
-                                               2, 1><<<(rows + 47) / 48, 512>>>(
-               w, input.Get(), output.Get(), rows, columns);
+           SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
+                                               core::GgmlType::kQ6_K, 2, 1>
+               <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
+                                           columns);
          }}};
   }
   geometries.front().launch(weights.Get());
@@ -224,11 +229,22 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 4 || argc > 5)
+    if (argc < 4 || argc > 6)
       throw std::invalid_argument(
-          "usage: dflash_gemm_bench bf16|q8|q4|q6 M K [iterations]");
-    Run(argv[1], std::stoull(argv[2]), std::stoull(argv[3]),
-        argc == 5 ? std::stoi(argv[4]) : 24);
+          "usage: dflash_gemm_bench bf16|q8|q4|q6 M K [iterations] "
+          "[batch=7|8]");
+    const int batch = argc == 6                      ? std::stoi(argv[5])
+                      : std::string(argv[1]) == "q6" ? 7
+                                                     : 8;
+    const int iterations = argc >= 5 ? std::stoi(argv[4]) : 24;
+    if (batch == 7) {
+      Run<7>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 8) {
+      Run<8>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else {
+      throw std::invalid_argument(
+          "batch must be seven proposals or eight verification rows");
+    }
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "%s\n", error.what());

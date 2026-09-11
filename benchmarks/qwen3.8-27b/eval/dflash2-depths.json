@@ -1,0 +1,790 @@
+{
+  "schema": 1,
+  "binary": {
+    "path": "/nix/store/bjsgln1xqmc2qkg601sn06b7k16zmp71-gufo-340c33e-dirty/bin/gufo",
+    "sha256": "03d8c5bff3bffd3fa3ab1b1bf62e022878b8e28e17a9db54086bc00b6d446183"
+  },
+  "artifacts": {
+    "target_q4": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+      "bytes": 17559178144,
+      "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+    },
+    "target_q8": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+      "bytes": 31457991680,
+      "sha256": "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
+    },
+    "draft_q4": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "bytes": 1143006816,
+      "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+    },
+    "draft_q8": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf",
+      "bytes": 2056414816,
+      "sha256": "c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e"
+    },
+    "draft_bf16": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf",
+      "bytes": 3860293216,
+      "sha256": "26d47ca20ab07688327a63d912acad222d924eaaa92a980cc488de3c67e736bc"
+    }
+  },
+  "workload": "C1, pp2048, tg128, depths0/4096/8192/12288/16384. One timed repetition following warmup. DFlash2 prefill includes target features and draft context injection. Each depth TG stream must equal its target AR stream.",
+  "results": [
+    {
+      "target": "q4",
+      "draft": "ar",
+      "command": [
+        "/nix/store/bjsgln1xqmc2qkg601sn06b7k16zmp71-gufo-340c33e-dirty/bin/gufo",
+        "bench",
+        "--model",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "-p",
+        "2048",
+        "-n",
+        "128",
+        "-d",
+        "0,4096,8192,12288,16384",
+        "-c",
+        "1",
+        "-r",
+        "1",
+        "--verbose"
+      ],
+      "wall_seconds": 155.4689686010097,
+      "rows": [
+        {
+          "test": "pp2048",
+          "tokens_per_second": 427.81
+        },
+        {
+          "test": "tg128",
+          "tokens_per_second": 11.5
+        },
+        {
+          "test": "pp2048 @ d4096",
+          "tokens_per_second": 406.83
+        },
+        {
+          "test": "tg128 @ d4096",
+          "tokens_per_second": 11.33
+        },
+        {
+          "test": "pp2048 @ d8192",
+          "tokens_per_second": 390.79
+        },
+        {
+          "test": "tg128 @ d8192",
+          "tokens_per_second": 11.15
+        },
+        {
+          "test": "pp2048 @ d12288",
+          "tokens_per_second": 375.15
+        },
+        {
+          "test": "tg128 @ d12288",
+          "tokens_per_second": 10.96
+        },
+        {
+          "test": "pp2048 @ d16384",
+          "tokens_per_second": 362.02
+        },
+        {
+          "test": "tg128 @ d16384",
+          "tokens_per_second": 10.77
+        }
+      ],
+      "traces": [
+        {
+          "depth": 0,
+          "count": 128,
+          "sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+        },
+        {
+          "depth": 4096,
+          "count": 128,
+          "sha256": "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+        },
+        {
+          "depth": 8192,
+          "count": 128,
+          "sha256": "07eb27c93c3aa098510e137a07607bda8572b61f5a3f1dfd564c994deb1a846b"
+        },
+        {
+          "depth": 12288,
+          "count": 128,
+          "sha256": "4749f5d1424526ed1a70967c93a956b8acff682f304cce0395a8748521b5a61b"
+        },
+        {
+          "depth": 16384,
+          "count": 128,
+          "sha256": "3718d6dcd55277a021c373b80e21b910099660f6c5f0dd97dc71373a6aeb122d"
+        }
+      ]
+    },
+    {
+      "target": "q4",
+      "draft": "q4",
+      "command": [
+        "/nix/store/bjsgln1xqmc2qkg601sn06b7k16zmp71-gufo-340c33e-dirty/bin/gufo",
+        "bench",
+        "--model",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "-p",
+        "2048",
+        "-n",
+        "128",
+        "-d",
+        "0,4096,8192,12288,16384",
+        "-c",
+        "1",
+        "-r",
+        "1",
+        "--verbose",
+        "--speculative",
+        "dflash2",
+        "--dflash-model",
+        "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+      ],
+      "wall_seconds": 139.44746681000106,
+      "rows": [
+        {
+          "test": "pp2048",
+          "tokens_per_second": 386.28
+        },
+        {
+          "test": "tg128-dflash2",
+          "tokens_per_second": 19.24
+        },
+        {
+          "test": "pp2048 @ d4096",
+          "tokens_per_second": 372.84
+        },
+        {
+          "test": "tg128 @ d4096-dflash2",
+          "tokens_per_second": 12.94
+        },
+        {
+          "test": "pp2048 @ d8192",
+          "tokens_per_second": 361.08
+        },
+        {
+          "test": "tg128 @ d8192-dflash2",
+          "tokens_per_second": 35.81
+        },
+        {
+          "test": "pp2048 @ d12288",
+          "tokens_per_second": 348.0
+        },
+        {
+          "test": "tg128 @ d12288-dflash2",
+          "tokens_per_second": 33.09
+        },
+        {
+          "test": "pp2048 @ d16384",
+          "tokens_per_second": 334.66
+        },
+        {
+          "test": "tg128 @ d16384-dflash2",
+          "tokens_per_second": 13.53
+        }
+      ],
+      "traces": [
+        {
+          "depth": 0,
+          "count": 128,
+          "sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+        },
+        {
+          "depth": 4096,
+          "count": 128,
+          "sha256": "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+        },
+        {
+          "depth": 8192,
+          "count": 128,
+          "sha256": "07eb27c93c3aa098510e137a07607bda8572b61f5a3f1dfd564c994deb1a846b"
+        },
+        {
+          "depth": 12288,
+          "count": 128,
+          "sha256": "4749f5d1424526ed1a70967c93a956b8acff682f304cce0395a8748521b5a61b"
+        },
+        {
+          "depth": 16384,
+          "count": 128,
+          "sha256": "3718d6dcd55277a021c373b80e21b910099660f6c5f0dd97dc71373a6aeb122d"
+        }
+      ]
+    },
+    {
+      "target": "q4",
+      "draft": "q8",
+      "command": [
+        "/nix/store/bjsgln1xqmc2qkg601sn06b7k16zmp71-gufo-340c33e-dirty/bin/gufo",
+        "bench",
+        "--model",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "-p",
+        "2048",
+        "-n",
+        "128",
+        "-d",
+        "0,4096,8192,12288,16384",
+        "-c",
+        "1",
+        "-r",
+        "1",
+        "--verbose",
+        "--speculative",
+        "dflash2",
+        "--dflash-model",
+        "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf"
+      ],
+      "wall_seconds": 139.97986211100942,
+      "rows": [
+        {
+          "test": "pp2048",
+          "tokens_per_second": 386.58
+        },
+        {
+          "test": "tg128-dflash2",
+          "tokens_per_second": 16.22
+        },
+        {
+          "test": "pp2048 @ d4096",
+          "tokens_per_second": 372.52
+        },
+        {
+          "test": "tg128 @ d4096-dflash2",
+          "tokens_per_second": 12.63
+        },
+        {
+          "test": "pp2048 @ d8192",
+          "tokens_per_second": 360.63
+        },
+        {
+          "test": "tg128 @ d8192-dflash2",
+          "tokens_per_second": 35.65
+        },
+        {
+          "test": "pp2048 @ d12288",
+          "tokens_per_second": 347.34
+        },
+        {
+          "test": "tg128 @ d12288-dflash2",
+          "tokens_per_second": 32.11
+        },
+        {
+          "test": "pp2048 @ d16384",
+          "tokens_per_second": 335.07
+        },
+        {
+          "test": "tg128 @ d16384-dflash2",
+          "tokens_per_second": 13.79
+        }
+      ],
+      "traces": [
+        {
+          "depth": 0,
+          "count": 128,
+          "sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+        },
+        {
+          "depth": 4096,
+          "count": 128,
+          "sha256": "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+        },
+        {
+          "depth": 8192,
+          "count": 128,
+          "sha256": "07eb27c93c3aa098510e137a07607bda8572b61f5a3f1dfd564c994deb1a846b"
+        },
+        {
+          "depth": 12288,
+          "count": 128,
+          "sha256": "4749f5d1424526ed1a70967c93a956b8acff682f304cce0395a8748521b5a61b"
+        },
+        {
+          "depth": 16384,
+          "count": 128,
+          "sha256": "3718d6dcd55277a021c373b80e21b910099660f6c5f0dd97dc71373a6aeb122d"
+        }
+      ]
+    },
+    {
+      "target": "q4",
+      "draft": "bf16",
+      "command": [
+        "/nix/store/bjsgln1xqmc2qkg601sn06b7k16zmp71-gufo-340c33e-dirty/bin/gufo",
+        "bench",
+        "--model",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "-p",
+        "2048",
+        "-n",
+        "128",
+        "-d",
+        "0,4096,8192,12288,16384",
+        "-c",
+        "1",
+        "-r",
+        "1",
+        "--verbose",
+        "--speculative",
+        "dflash2",
+        "--dflash-model",
+        "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf"
+      ],
+      "wall_seconds": 142.11732109200966,
+      "rows": [
+        {
+          "test": "pp2048",
+          "tokens_per_second": 386.72
+        },
+        {
+          "test": "tg128-dflash2",
+          "tokens_per_second": 15.53
+        },
+        {
+          "test": "pp2048 @ d4096",
+          "tokens_per_second": 374.02
+        },
+        {
+          "test": "tg128 @ d4096-dflash2",
+          "tokens_per_second": 12.11
+        },
+        {
+          "test": "pp2048 @ d8192",
+          "tokens_per_second": 360.62
+        },
+        {
+          "test": "tg128 @ d8192-dflash2",
+          "tokens_per_second": 34.35
+        },
+        {
+          "test": "pp2048 @ d12288",
+          "tokens_per_second": 348.22
+        },
+        {
+          "test": "tg128 @ d12288-dflash2",
+          "tokens_per_second": 30.95
+        },
+        {
+          "test": "pp2048 @ d16384",
+          "tokens_per_second": 332.63
+        },
+        {
+          "test": "tg128 @ d16384-dflash2",
+          "tokens_per_second": 13.31
+        }
+      ],
+      "traces": [
+        {
+          "depth": 0,
+          "count": 128,
+          "sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+        },
+        {
+          "depth": 4096,
+          "count": 128,
+          "sha256": "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+        },
+        {
+          "depth": 8192,
+          "count": 128,
+          "sha256": "07eb27c93c3aa098510e137a07607bda8572b61f5a3f1dfd564c994deb1a846b"
+        },
+        {
+          "depth": 12288,
+          "count": 128,
+          "sha256": "4749f5d1424526ed1a70967c93a956b8acff682f304cce0395a8748521b5a61b"
+        },
+        {
+          "depth": 16384,
+          "count": 128,
+          "sha256": "3718d6dcd55277a021c373b80e21b910099660f6c5f0dd97dc71373a6aeb122d"
+        }
+      ]
+    },
+    {
+      "target": "q8",
+      "draft": "ar",
+      "command": [
+        "/nix/store/bjsgln1xqmc2qkg601sn06b7k16zmp71-gufo-340c33e-dirty/bin/gufo",
+        "bench",
+        "--model",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "-p",
+        "2048",
+        "-n",
+        "128",
+        "-d",
+        "0,4096,8192,12288,16384",
+        "-c",
+        "1",
+        "-r",
+        "1",
+        "--verbose"
+      ],
+      "wall_seconds": 177.8419249370054,
+      "rows": [
+        {
+          "test": "pp2048",
+          "tokens_per_second": 491.09
+        },
+        {
+          "test": "tg128",
+          "tokens_per_second": 7.07
+        },
+        {
+          "test": "pp2048 @ d4096",
+          "tokens_per_second": 470.86
+        },
+        {
+          "test": "tg128 @ d4096",
+          "tokens_per_second": 7.01
+        },
+        {
+          "test": "pp2048 @ d8192",
+          "tokens_per_second": 451.16
+        },
+        {
+          "test": "tg128 @ d8192",
+          "tokens_per_second": 6.95
+        },
+        {
+          "test": "pp2048 @ d12288",
+          "tokens_per_second": 434.21
+        },
+        {
+          "test": "tg128 @ d12288",
+          "tokens_per_second": 6.88
+        },
+        {
+          "test": "pp2048 @ d16384",
+          "tokens_per_second": 414.38
+        },
+        {
+          "test": "tg128 @ d16384",
+          "tokens_per_second": 6.81
+        }
+      ],
+      "traces": [
+        {
+          "depth": 0,
+          "count": 128,
+          "sha256": "6971f2de5116be10e2da362bed7115a2148936e0b88f5f9f900d3f474ff786c7"
+        },
+        {
+          "depth": 4096,
+          "count": 128,
+          "sha256": "e7ded1d4e8f928e73666cb7841aac148f88fffab79cd5310729f64de23a88f69"
+        },
+        {
+          "depth": 8192,
+          "count": 128,
+          "sha256": "07eb27c93c3aa098510e137a07607bda8572b61f5a3f1dfd564c994deb1a846b"
+        },
+        {
+          "depth": 12288,
+          "count": 128,
+          "sha256": "fa60ceef703b13673b12dd5c675b5256b549b14a607627112e766f711312f32a"
+        },
+        {
+          "depth": 16384,
+          "count": 128,
+          "sha256": "538b6e6dd5150c8a20ee7a75234bef4d80b72b5bc7bd912d7ff387a52af71db6"
+        }
+      ]
+    },
+    {
+      "target": "q8",
+      "draft": "q4",
+      "command": [
+        "/nix/store/bjsgln1xqmc2qkg601sn06b7k16zmp71-gufo-340c33e-dirty/bin/gufo",
+        "bench",
+        "--model",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "-p",
+        "2048",
+        "-n",
+        "128",
+        "-d",
+        "0,4096,8192,12288,16384",
+        "-c",
+        "1",
+        "-r",
+        "1",
+        "--verbose",
+        "--speculative",
+        "dflash2",
+        "--dflash-model",
+        "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+      ],
+      "wall_seconds": 119.32163862000743,
+      "rows": [
+        {
+          "test": "pp2048",
+          "tokens_per_second": 450.13
+        },
+        {
+          "test": "tg128-dflash2",
+          "tokens_per_second": 21.57
+        },
+        {
+          "test": "pp2048 @ d4096",
+          "tokens_per_second": 432.55
+        },
+        {
+          "test": "tg128 @ d4096-dflash2",
+          "tokens_per_second": 14.87
+        },
+        {
+          "test": "pp2048 @ d8192",
+          "tokens_per_second": 415.03
+        },
+        {
+          "test": "tg128 @ d8192-dflash2",
+          "tokens_per_second": 33.63
+        },
+        {
+          "test": "pp2048 @ d12288",
+          "tokens_per_second": 398.21
+        },
+        {
+          "test": "tg128 @ d12288-dflash2",
+          "tokens_per_second": 34.91
+        },
+        {
+          "test": "pp2048 @ d16384",
+          "tokens_per_second": 373.95
+        },
+        {
+          "test": "tg128 @ d16384-dflash2",
+          "tokens_per_second": 31.38
+        }
+      ],
+      "traces": [
+        {
+          "depth": 0,
+          "count": 128,
+          "sha256": "6971f2de5116be10e2da362bed7115a2148936e0b88f5f9f900d3f474ff786c7"
+        },
+        {
+          "depth": 4096,
+          "count": 128,
+          "sha256": "e7ded1d4e8f928e73666cb7841aac148f88fffab79cd5310729f64de23a88f69"
+        },
+        {
+          "depth": 8192,
+          "count": 128,
+          "sha256": "07eb27c93c3aa098510e137a07607bda8572b61f5a3f1dfd564c994deb1a846b"
+        },
+        {
+          "depth": 12288,
+          "count": 128,
+          "sha256": "fa60ceef703b13673b12dd5c675b5256b549b14a607627112e766f711312f32a"
+        },
+        {
+          "depth": 16384,
+          "count": 128,
+          "sha256": "538b6e6dd5150c8a20ee7a75234bef4d80b72b5bc7bd912d7ff387a52af71db6"
+        }
+      ]
+    },
+    {
+      "target": "q8",
+      "draft": "q8",
+      "command": [
+        "/nix/store/bjsgln1xqmc2qkg601sn06b7k16zmp71-gufo-340c33e-dirty/bin/gufo",
+        "bench",
+        "--model",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "-p",
+        "2048",
+        "-n",
+        "128",
+        "-d",
+        "0,4096,8192,12288,16384",
+        "-c",
+        "1",
+        "-r",
+        "1",
+        "--verbose",
+        "--speculative",
+        "dflash2",
+        "--dflash-model",
+        "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf"
+      ],
+      "wall_seconds": 118.54569771100068,
+      "rows": [
+        {
+          "test": "pp2048",
+          "tokens_per_second": 448.44
+        },
+        {
+          "test": "tg128-dflash2",
+          "tokens_per_second": 21.38
+        },
+        {
+          "test": "pp2048 @ d4096",
+          "tokens_per_second": 432.02
+        },
+        {
+          "test": "tg128 @ d4096-dflash2",
+          "tokens_per_second": 14.46
+        },
+        {
+          "test": "pp2048 @ d8192",
+          "tokens_per_second": 416.11
+        },
+        {
+          "test": "tg128 @ d8192-dflash2",
+          "tokens_per_second": 33.49
+        },
+        {
+          "test": "pp2048 @ d12288",
+          "tokens_per_second": 396.93
+        },
+        {
+          "test": "tg128 @ d12288-dflash2",
+          "tokens_per_second": 34.81
+        },
+        {
+          "test": "pp2048 @ d16384",
+          "tokens_per_second": 381.47
+        },
+        {
+          "test": "tg128 @ d16384-dflash2",
+          "tokens_per_second": 31.26
+        }
+      ],
+      "traces": [
+        {
+          "depth": 0,
+          "count": 128,
+          "sha256": "6971f2de5116be10e2da362bed7115a2148936e0b88f5f9f900d3f474ff786c7"
+        },
+        {
+          "depth": 4096,
+          "count": 128,
+          "sha256": "e7ded1d4e8f928e73666cb7841aac148f88fffab79cd5310729f64de23a88f69"
+        },
+        {
+          "depth": 8192,
+          "count": 128,
+          "sha256": "07eb27c93c3aa098510e137a07607bda8572b61f5a3f1dfd564c994deb1a846b"
+        },
+        {
+          "depth": 12288,
+          "count": 128,
+          "sha256": "fa60ceef703b13673b12dd5c675b5256b549b14a607627112e766f711312f32a"
+        },
+        {
+          "depth": 16384,
+          "count": 128,
+          "sha256": "538b6e6dd5150c8a20ee7a75234bef4d80b72b5bc7bd912d7ff387a52af71db6"
+        }
+      ]
+    },
+    {
+      "target": "q8",
+      "draft": "bf16",
+      "command": [
+        "/nix/store/bjsgln1xqmc2qkg601sn06b7k16zmp71-gufo-340c33e-dirty/bin/gufo",
+        "bench",
+        "--model",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "-p",
+        "2048",
+        "-n",
+        "128",
+        "-d",
+        "0,4096,8192,12288,16384",
+        "-c",
+        "1",
+        "-r",
+        "1",
+        "--verbose",
+        "--speculative",
+        "dflash2",
+        "--dflash-model",
+        "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf"
+      ],
+      "wall_seconds": 120.30434599200089,
+      "rows": [
+        {
+          "test": "pp2048",
+          "tokens_per_second": 451.33
+        },
+        {
+          "test": "tg128-dflash2",
+          "tokens_per_second": 20.46
+        },
+        {
+          "test": "pp2048 @ d4096",
+          "tokens_per_second": 431.85
+        },
+        {
+          "test": "tg128 @ d4096-dflash2",
+          "tokens_per_second": 13.9
+        },
+        {
+          "test": "pp2048 @ d8192",
+          "tokens_per_second": 414.49
+        },
+        {
+          "test": "tg128 @ d8192-dflash2",
+          "tokens_per_second": 32.29
+        },
+        {
+          "test": "pp2048 @ d12288",
+          "tokens_per_second": 396.88
+        },
+        {
+          "test": "tg128 @ d12288-dflash2",
+          "tokens_per_second": 33.64
+        },
+        {
+          "test": "pp2048 @ d16384",
+          "tokens_per_second": 379.47
+        },
+        {
+          "test": "tg128 @ d16384-dflash2",
+          "tokens_per_second": 30.24
+        }
+      ],
+      "traces": [
+        {
+          "depth": 0,
+          "count": 128,
+          "sha256": "6971f2de5116be10e2da362bed7115a2148936e0b88f5f9f900d3f474ff786c7"
+        },
+        {
+          "depth": 4096,
+          "count": 128,
+          "sha256": "e7ded1d4e8f928e73666cb7841aac148f88fffab79cd5310729f64de23a88f69"
+        },
+        {
+          "depth": 8192,
+          "count": 128,
+          "sha256": "07eb27c93c3aa098510e137a07607bda8572b61f5a3f1dfd564c994deb1a846b"
+        },
+        {
+          "depth": 12288,
+          "count": 128,
+          "sha256": "fa60ceef703b13673b12dd5c675b5256b549b14a607627112e766f711312f32a"
+        },
+        {
+          "depth": 16384,
+          "count": 128,
+          "sha256": "538b6e6dd5150c8a20ee7a75234bef4d80b72b5bc7bd912d7ff387a52af71db6"
+        }
+      ]
+    }
+  ],
+  "revision": "023a13a"
+}

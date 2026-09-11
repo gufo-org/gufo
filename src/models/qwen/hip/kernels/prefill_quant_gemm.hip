@@ -1720,6 +1720,14 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
   constexpr std::size_t RowsPerWave = 3;
   switch (type) {
     case core::GgmlType::kQ4_K:
+      // The full DFlash2 block reuses each gate/up activation tile twice.
+      // Other shapes do not consistently benefit from the larger LDS stage.
+      if (batch == 8 && m == 17408 && k == 5120) {
+        SmallBatchKQuantExactFp32GEMMKernel<
+            kKQuantSmallBatchWarps, 8, RowsPerWave, core::GgmlType::kQ4_K, 2>
+            <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
+        return;
+      }
       LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ4_K>(
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
@@ -1728,16 +1736,24 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     case core::GgmlType::kQ6_K: {
-      // DFlash2's seven proposal logits share a large vocabulary projection.
+      // DFlash2's seven proposals and eight target verification rows share
+      // a large vocabulary projection.
       // Stage two consecutive tiles and reuse activations across three rows;
       // the lower occupancy hint avoids spills and preserves accumulation
       // order.
-      if (batch == 7 && m >= 65536) {
+      if ((batch == 7 || batch == 8) && m >= 65536) {
         constexpr std::size_t kHeadRows = kKQuantSmallBatchWarps * 3;
-        SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, 7, 3,
-                                            core::GgmlType::kQ6_K, 2, 1>
-            <<<(m + kHeadRows - 1) / kHeadRows, block, 0, stream>>>(w, fp32_x,
-                                                                    y, m, k);
+        const auto launch_head = [&]<std::size_t Batch>() {
+          SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch, 3,
+                                              core::GgmlType::kQ6_K, 2, 1>
+              <<<(m + kHeadRows - 1) / kHeadRows, block, 0, stream>>>(w, fp32_x,
+                                                                      y, m, k);
+        };
+        if (batch == 7) {
+          launch_head.template operator()<7>();
+        } else {
+          launch_head.template operator()<8>();
+        }
         return;
       }
       // Other shapes retain two rows to bound register pressure.

@@ -147,6 +147,9 @@ provided BF16 artifact. `qwen27b/drafts.py` compares Q4/Q8/BF16 DFlash2 companio
 incomplete or mismatching results. `--baseline-binary` interleaves two releases
 and also requires identical autoregressive token traces between them.
 `qwen27b/dflash_gemm_bench.hip` measures exact matrix-kernel geometries using
-the production templates; build it with `tools/bench/build.sh` inside Nix. `qwen27b/dflash_reference.py` checks a GPU trace against
+the production templates; build it with `tools/bench/build.sh` inside Nix.
+Its optional final batch argument selects seven proposal rows or eight
+verification rows, for example `q6 248320 5120 24 8`.
+`qwen27b/dflash_reference.py` checks a GPU trace against
 pinned upstream PyTorch operators using the same GGUF weights. See
 `benchmarks/qwen3.8-27b/README.md` and its quality report for commands and evidence.

@@ -43,9 +43,9 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
-- Q4 and Q8: three fixed 24-token prefixes, four forced continuation tokens
+- Q4 and Q8: three fixed 24-token prefixes, eight forced continuation tokens
   each. Repeated prefill and snapshot continuation are byte-identical. All
-  twelve batched-verifier logit rows per target equal scalar decode byte for
+  24 batched-verifier logit rows per target equal scalar decode byte for
   byte; rejected-prefix replay also preserves subsequent logits. Prefill and
   scalar decode retain the same top-1 choice on these prefixes.
 - MTP: feedback replay equals a fresh teacher-forced committed prefix. The
@@ -64,6 +64,10 @@ injection; the complete serialized history must remain byte-identical.
   cases match all 128 target token IDs.
   See [the optimization record](dflash2-optimization.json). This is a development
   corpus, not a capability evaluation or proof across arbitrary contexts.
+- Fixed-block depth sweep: both targets × three drafts × five depths; all
+  30 speculative TG128 traces match their target AR IDs. pp2048 includes
+  DFlash2 context preparation. One timed repetition after warmup; see
+  [the depth record](dflash2-depths.json).
 - `prompt` and `chat` share GPU/speculative setup. Their first-turn tokens
   match, and two chat turns reproduce AR with both draft backends. Verbose
   generation emits a SHA-256 over little-endian token IDs; the corpus rejects
@@ -72,8 +76,10 @@ injection; the complete serialized history must remain byte-identical.
   fusion/prefetch branches and their kernels/tests are deleted; production
   arithmetic and independent operator controls remain.
 
-Run the affected operator check first, then model replay on both target quants.
-Require complete speculative corpus results before comparing release speed.
+Use kernel ablations and short release probes during iteration. Run the
+affected operator check first, then model replay on both target quants for a
+retained change. Reserve full corpus/depth sweeps for qualification milestones;
+label short measurements with their actual scope.
 Compare token IDs and full logits, not just decoded text or acceptance.
 Benchmarks retain independent target/draft prefix snapshots, separate from
 verification rollback. Repeated cached-depth TG must reproduce AR token hashes;
@@ -191,3 +197,17 @@ Target work takes 90% of Q4/Q8 companion kernel time, primarily exact quantized
 projections. Draft GPU work per step is 17.2 ms (Q4), 18.2 ms (Q8) and 26.1 ms
 (BF16); target work is approximately 155 ms. These are one profiled C++ corpus
 case per companion, with initial prefill excluded.
+
+The [verification optimization record](dflash2-verification.json) adds
+short probes after the depth sweep: Q6 vocabulary projection time falls
+5.1% for eight verification rows, and the Q4 gate/up projection falls 3.5%.
+Both are bit-exact; batched embedding lookup replaces eight launches with one.
+The six-pair release comparison remains within −0.02% to +0.16% of its
+baseline, so these are kernel improvements without a material end-to-end claim.
+All 48 target verification logit rows and all 270 draft trace files match.
+
+Rejected probes: full register-resident DeltaNet state changed FP32 results
+and spilled registers; a smaller recurrence edit had little benefit; four-row
+Q5 projections and the Q8 vocabulary variant were slower. None adds an
+execution switch. Current target bottlenecks are Q5/IQ4 projections on Q4,
+and Q8/BF16 projections on Q8; recurrence is the next largest shared cost.

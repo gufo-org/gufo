@@ -883,19 +883,19 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
   }
   const std::uint32_t block_count = draft_count + 1U;
 
-  {
-    // Slot zero is the committed anchor; all proposal slots are masks.
-    if (weights.token_embedding.data != nullptr) {
-      LaunchEmbeddingLookup(weights.token_embedding.data,
-                            weights.token_embedding.type, anchor_token,
-                            d_block_hidden_, hidden_size, stream_);
-      for (std::size_t t = 1; t < block_count; ++t) {
-        LaunchEmbeddingLookup(
-            weights.token_embedding.data, weights.token_embedding.type,
-            df_cfg.mask_token_id, d_block_hidden_ + t * hidden_size,
-            hidden_size, stream_);
-      }
-    }
+  // Slot zero stays the selector's predecessor until its first step. Proposal
+  // slots start as masks and are overwritten only after the embedding lookup.
+  // Keep the upload source alive through the final stream synchronization.
+  std::vector<tokenization::TokenId> block_tokens(block_count,
+                                                  df_cfg.mask_token_id);
+  block_tokens.front() = anchor_token;
+  HIP_CHECK(hipMemcpyAsync(d_out_token_, block_tokens.data(),
+                           block_tokens.size() * sizeof(block_tokens.front()),
+                           hipMemcpyHostToDevice, stream_));
+  if (weights.token_embedding.data != nullptr) {
+    LaunchBatchedEmbeddingLookup(
+        weights.token_embedding.data, weights.token_embedding.type,
+        d_out_token_, d_block_hidden_, block_count, hidden_size, stream_);
   }
   TraceTensor(trace, "embedding", d_block_hidden_, block_count * hidden_size,
               stream_);
@@ -1026,12 +1026,6 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
                draft_count, vocab_size, hidden_size);
   TraceTensor(trace, "logits", d_logits_, draft_count * vocab_size, stream_);
 
-  const auto anchor_copy =
-      hipMemcpyAsync(d_out_token_, &anchor_token, sizeof(anchor_token),
-                     hipMemcpyHostToDevice, stream_);
-  if (anchor_copy != hipSuccess) {
-    throw std::runtime_error("DFlash GPU anchor upload failed");
-  }
   if (temperature > 0.0F) {
     const auto uniform_copy = hipMemcpyAsync(
         d_selector_uniforms_, sample_uniforms.data(),
