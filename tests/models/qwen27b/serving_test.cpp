@@ -132,14 +132,16 @@ void RunPromptReuseSmoke(
 
 int main(int argc, const char* const* argv) {
   try {
-    if (argc < 2) {
+    const char* model_path =
+        argc > 1 ? argv[1] : std::getenv("GUFO_QWEN27B_MODEL");
+    if (model_path == nullptr) {
       std::cout << "SKIP: pass a Qwen GGUF path for the gfx1151 server test; "
                    "append --full for the exhaustive suite\n";
       return 77;
     }
 
-    bool run_full_suite = false;
-    const char* draft_model_path = nullptr;
+    const char* draft_model_path = std::getenv("GUFO_QWEN27B_DFLASH_MODEL");
+    bool run_full_suite = draft_model_path != nullptr;
     for (int index = 2; index < argc; ++index) {
       const std::string_view argument = argv[index];
       if (argument == "--full") {
@@ -155,7 +157,7 @@ int main(int argc, const char* const* argv) {
     }
 
     std::string error;
-    auto reader_owner = gufo::core::GgufReader::OpenFile(argv[1], &error);
+    auto reader_owner = gufo::core::GgufReader::OpenFile(model_path, &error);
     Expect(reader_owner != nullptr, error);
     const std::shared_ptr<const gufo::core::GgufReader> reader(
         std::move(reader_owner));
@@ -218,7 +220,7 @@ int main(int argc, const char* const* argv) {
     if (draft_model_path != nullptr) {
       gufo::server::InferenceBackend speculative_backend;
       Expect(speculative_backend.load(
-                 model, &error, context, 2, {}, {},
+                 model, &error, context, 2, {.decode_active_tokens = 8}, {},
                  gufo::server::TextSpeculativeConfig{
                      .backend = gufo::server::TextSpeculativeBackend::kDFlash,
                      .draft_model_path = draft_model_path,
@@ -567,14 +569,23 @@ int main(int argc, const char* const* argv) {
     Expect(http_fork.tokens == direct_fork,
            "forked Qwen continuation differs from cold full prefill");
 
+    // Both prompts must generate enough tokens to exercise an actual decode
+    // batch. The old "complete this phrase" fixtures ended after one token.
+    // Small chunks also cover bounded prefill before the concurrent decode.
+    Expect(backend.load(model, &error, context, 2, {.decode_active_tokens = 8}),
+           error);
     gufo::server::ChatRequest concurrent_a({
         {gufo::tokenization::ChatRole::kUser,
-         "Continue this sequence with a few words: one, two, three,", "", ""},
+         "The quick brown fox jumps over the lazy dog. Explain why this "
+         "sentence is commonly used.",
+         "", ""},
     });
     concurrent_a.client_id = "batch-a";
     gufo::server::ChatRequest concurrent_b({
         {gufo::tokenization::ChatRole::kUser,
-         "Complete this phrase with a few words: red, green, blue,", "", ""},
+         "Write a concise C++20 implementation of a fixed-capacity ring buffer "
+         "with push, pop, front, and size. Explain the invariants.",
+         "", ""},
     });
     concurrent_b.client_id = "batch-b";
     const auto rendered_a =
@@ -584,18 +595,33 @@ int main(int argc, const char* const* argv) {
     Expect(rendered_a.has_value() && rendered_b.has_value(),
            "concurrent chat prompt rendering");
     const auto direct_a =
-        GenerateDirect(*direct, model->GetTokenizer().Encode(*rendered_a), 4);
+        GenerateDirect(*direct, model->GetTokenizer().Encode(*rendered_a), 8);
     const auto direct_b =
-        GenerateDirect(*direct, model->GetTokenizer().Encode(*rendered_b), 4);
+        GenerateDirect(*direct, model->GetTokenizer().Encode(*rendered_b), 8);
+    Expect(direct_a.size() == 8 && direct_b.size() == 8,
+           "concurrency fixtures must retain eight generated tokens");
 
-    auto pending_a = backend.start_chat(concurrent_a, 4, 0.0F);
-    auto pending_b = backend.start_chat(concurrent_b, 4, 0.0F);
+    auto pending_a = backend.start_chat(concurrent_a, 8, 0.0F);
+    auto pending_b = backend.start_chat(concurrent_b, 8, 0.0F);
     const auto concurrent_result_a = pending_a->Wait();
     const auto concurrent_result_b = pending_b->Wait();
     Expect(concurrent_result_a.tokens == direct_a,
            "concurrent Qwen request A differs from isolated execution");
     Expect(concurrent_result_b.tokens == direct_b,
            "concurrent Qwen request B differs from isolated execution");
+    for (const auto* result : {&concurrent_result_a, &concurrent_result_b}) {
+      Expect(
+          result->prefill_chunks > 1 && result->max_prefill_chunk_tokens <= 8,
+          "concurrent Qwen prompts must use bounded prefill");
+    }
+    std::cout << "concurrency tokens=" << concurrent_result_a.tokens.size()
+              << ',' << concurrent_result_b.tokens.size()
+              << " widths=" << concurrent_result_a.physical_execution_width
+              << ',' << concurrent_result_b.physical_execution_width
+              << " plans=" << concurrent_result_a.execution_plan << ','
+              << concurrent_result_b.execution_plan
+              << " queue_ms=" << concurrent_result_a.queue_ms << ','
+              << concurrent_result_b.queue_ms << '\n';
     Expect(concurrent_result_a.physical_execution_width == 2 &&
                concurrent_result_b.physical_execution_width == 2,
            "concurrent Qwen requests did not execute through W=2");

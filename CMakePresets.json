@@ -68,10 +68,10 @@
     {
       "name": "gpu-test",
       "displayName": "gfx1151 GPU Tests",
-      "description": "Build enabling ROCm/HIP for gfx1151 GPU without XRT",
+      "description": "Optimized correctness build with debug symbols and active test assertions",
       "inherits": "base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "BUILD_TESTING": "ON",
         "ENGINE_ENABLE_HIP": "ON",
         "ENGINE_ENABLE_XRT": "OFF",
@@ -81,10 +81,10 @@
     {
       "name": "hardware-test",
       "displayName": "gfx1151 and XDNA2 Hardware Tests",
-      "description": "Build enabling the pinned HIP and XRT stacks for gfx1151 and XDNA2",
+      "description": "Optimized correctness build with debug symbols and active test assertions",
       "inherits": "base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "BUILD_TESTING": "ON",
         "ENGINE_ENABLE_HIP": "ON",
         "ENGINE_ENABLE_XRT": "ON",

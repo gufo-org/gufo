@@ -9,9 +9,6 @@
 
 namespace gufo::hip::kernels {
 
-void LaunchDFlashRMSNorm(const float* input, const float* weight, float* output,
-                         std::uint32_t dim, float eps, hipStream_t stream);
-
 void LaunchDFlashGroupedDynamicConv(
     const float* input, const float* dynamic_coefficients,
     const float* base_kernel, float* output, std::uint32_t num_tokens,
@@ -27,7 +24,8 @@ void LaunchDFlashNonCausalAttention(
     std::uint32_t current_pos, std::uint32_t history_length,
     std::uint32_t block_count, std::uint32_t sliding_window,
     std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
-    std::uint32_t head_dim, float scale, hipStream_t stream);
+    std::uint32_t head_dim, float scale, hipStream_t stream,
+    std::uint32_t history_capacity);
 
 /// Thread-per-key reference route of the call above. Exposed so an equivalence
 /// test can run both routes in one process; the production entry point picks
@@ -38,7 +36,8 @@ void LaunchDFlashNonCausalAttentionScalar(
     std::uint32_t current_pos, std::uint32_t history_length,
     std::uint32_t block_count, std::uint32_t sliding_window,
     std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
-    std::uint32_t head_dim, float scale, hipStream_t stream);
+    std::uint32_t head_dim, float scale, hipStream_t stream,
+    std::uint32_t history_capacity);
 
 /// Wave-per-key route of the call above. Requires `head_dim` to be a multiple
 /// of four so a K row can be read as `float4`.
@@ -48,28 +47,8 @@ void LaunchDFlashNonCausalAttentionWave(
     std::uint32_t current_pos, std::uint32_t history_length,
     std::uint32_t block_count, std::uint32_t sliding_window,
     std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
-    std::uint32_t head_dim, float scale, hipStream_t stream);
-
-/// Whether the group-query route can run this shape. It keeps one score row
-/// per query head of a group in shared memory and the whole group live in
-/// registers, so a wide group or a long draft window falls back.
-[[nodiscard]] bool DFlashNonCausalAttentionGqaSupported(
-    std::uint32_t current_pos, std::uint32_t history_length,
-    std::uint32_t block_count, std::uint32_t sliding_window,
-    std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
-    std::uint32_t head_dim) noexcept;
-
-/// Group-query route of the call above: one workgroup per (draft token,
-/// key/value head), so each K and V row is read once for the whole group
-/// instead of once per query head. Only valid where
-/// `DFlashNonCausalAttentionGqaSupported` holds.
-void LaunchDFlashNonCausalAttentionGqa(
-    const float* q, const float* injected_k, const float* injected_v,
-    const float* block_k, const float* block_v, float* out,
-    std::uint32_t current_pos, std::uint32_t history_length,
-    std::uint32_t block_count, std::uint32_t sliding_window,
-    std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
-    std::uint32_t head_dim, float scale, hipStream_t stream);
+    std::uint32_t head_dim, float scale, hipStream_t stream,
+    std::uint32_t history_capacity);
 
 /// Quantizes a BF16 weight matrix into a Q8_0 copy for the draft-only LM head.
 /// `total_elements` must be a multiple of the Q8_0 block size.

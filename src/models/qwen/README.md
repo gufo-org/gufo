@@ -244,38 +244,19 @@ fingerprint, and a bitmask explaining requested routes that were masked by mode
 or layer kind. Shape/format launch eligibility is still checked at the launch
 boundary, so policy intent cannot force an unsupported kernel.
 
-Production Qwen sessions use one canonical FP16 attention KV plane. Attention
-scores, online softmax, and output reduction remain FP32. The independent FP32
-state route is retained for validation and can be selected with
-`GUFO_QWEN_KV_CACHE=fp32`; it allocates only FP32 KV and may use slower fallback
-prefill routes that require that representation. A server runner resolves this
-choice once, then uses it for every state, its resource claim, graph identity,
-and the precision-specific continuation ABI. Plain Qwen FP16 state is
-`qwen-gfx1151-state-v2-fp16-kv`; DFlash target state is
-`qwen-gfx1151-dflash-state-v3-fp16-kv`.
+Production Qwen sessions use canonical FP16 attention KV and FP32 DeltaNet
+recurrent state. Attention scores, softmax, and output reductions remain FP32.
+Tests can construct explicit policies to compare storage formats; production
+entrypoints always use `QwenExecutionPolicy::Production()`.
 
-DeltaNet's carried recurrent matrix remains FP32 in production. The
-`GUFO_QWEN_RECURRENT_STATE=bf16` experiment stores only that matrix in BF16
-while keeping updates and reductions in FP32, and uses distinct
-`bf16-recurrent` continuation ABIs. It materially reduces resident-state
-memory but is not production-safe: full-logit agreement widens and a
-200-token greedy completion diverges from the FP32 route. Explicit `fp32` or
-`float` selects the canonical route.
+Execution paths depend on supported shapes and weight types. There are no Qwen
+kernel, precision, speculative verification, or graph opt-in/opt-out environment
+switches. Retired K-quant conversion, split-prefill, and draft selector variants
+are removed. Profile release binaries with `tools/prof/prof.py`.
 
-The telemetry implementation is in
-[`dispatch_telemetry.hpp`](../../core/hip/detail/dispatch_telemetry.hpp). These
-environment variables are read by the current source:
-
-| Variable | Current meaning |
-|---|---|
-| `GUFO_DISPATCH_TELEMETRY` | Enables JSON-line dispatch events unless set to `0`, `false`, `OFF`, or `off`. Events include Qwen policy, per-layer route/rejection mask, graph eligibility, graph cache identity, attention, GEMV, and hipBLASLt data. |
-| `GUFO_ENABLE_HIP_GRAPH` | Graph capture is enabled by default; the same false spellings disable it. |
-| `GUFO_QWEN_KV_CACHE` | `fp16`/`half` selects canonical production KV (the default); `fp32`/`float` selects the independent validation fallback. |
-| `GUFO_QWEN_RECURRENT_STATE` | `fp32`/`float` selects canonical production DeltaNet state (the default); `bf16`/`bfloat16` selects the rejected, validation-only compact-state experiment. |
-| `GUFO_PROFILE` | Presence enables prefill timing output. It is diagnostic output, not a stable benchmark harness. |
-| `GUFO_DISABLE_SSM_REPLAY` | Presence with a value other than `0`, `false`, or `off` disables SSM replay. |
-| `GUFO_HIPBLASLT_PLAN_CACHE` | Path used by hipBLASLt plan persistence when its caller has not supplied one. |
-| `GUFO_FFN_SWIGLU_EPILOGUE` | Selects the FFN up-projection epilogue (`opt-c192-swiglu-epilogue`). Default: fused SwiGLU + tiled Q8_1 emitted from the up GEMM's accumulator on Q8_0 weights. `0`/`false`/`off` pins the separate `BatchedFusedSwiGLUQuantizeQ8_1` pass as the bit-identical reference; `all` also fuses the K-quant instantiations, which measured slower on UD-Q4_K_XL and is kept only so that rejection stays re-measurable. |
+Shared infrastructure still accepts `GUFO_DISPATCH_TELEMETRY` for diagnostic
+JSON events and `GUFO_HIPBLASLT_PLAN_CACHE` for the plan-cache file location.
+Neither selects a Qwen numerical implementation.
 
 Record the policy fingerprint, resolved route fingerprints/rejections, graph
 identity, model/shape, device, and revision with experiment results. Numeric

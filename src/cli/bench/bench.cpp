@@ -1365,10 +1365,8 @@ int RunBench(std::span<const char* const> args) {
       opt.speculative_backend == "mtp-npu") {
     std::string mtp_path = opt.mtp_model_path;
     if (mtp_path.empty()) {
-      if (const char* environment = std::getenv("GUFO_MTP_MODEL");
-          environment != nullptr) {
-        mtp_path = environment;
-      }
+      std::cerr << "MTP requires --mtp-model\n";
+      return 1;
     }
     auto mtp_reader_owner = core::GgufReader::OpenFile(mtp_path, &err);
     if (mtp_reader_owner == nullptr) {
@@ -1574,13 +1572,8 @@ int RunBench(std::span<const char* const> args) {
             opt.speculative_backend == "dflash-2") {
           std::string dflash_path = opt.dflash_model_path;
           if (dflash_path.empty()) {
-            if (const char* env = std::getenv("GUFO_DFLASH_MODEL");
-                env != nullptr) {
-              dflash_path = env;
-            }
-          }
-          if (dflash_path.empty()) {
-            dflash_path = opt.model_path;
+            std::cerr << "DFlash2 requires --dflash-model\n";
+            return 1;
           }
           hip::QwenDFlashGpuDraftConfig cfg{
               .max_context = static_cast<std::uint32_t>(required_context),

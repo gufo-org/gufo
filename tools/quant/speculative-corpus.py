@@ -24,20 +24,6 @@ SPECULATIVE_FIELD_RE = re.compile(
     r"(?P<key>[a-z_]+)=(?P<value>[0-9.eE+-]+)"
 )
 DSPARK_REFERENCE_SYSTEM_PROMPT = "You are a helpful assistant"
-CONTROLLED_ENV = {
-    "GUFO_BF16_SMALL_BATCH_EXACT_LDS8",
-    "GUFO_DFLASH_GEMM",
-    "GUFO_DFLASH_PREWARM",
-    "GUFO_DFLASH_SELECTOR",
-    "GUFO_PREFILL_SMALL_BATCH_BF16_FROM_LAYER",
-    "GUFO_PREFILL_SMALL_BATCH_BF16_TILE",
-    "GUFO_PREFILL_SMALL_BATCH_FP32_FROM_LAYER",
-    "GUFO_PREFILL_SMALL_BATCH_QUANT",
-    "GUFO_PREFILL_SMALL_BATCH_W8A8_TILE",
-    "GUFO_SPEC_BATCH_LM_HEAD",
-    "GUFO_SPEC_BATCH_VERIFY",
-    "GUFO_SPEC_BATCH_VERIFY_CHECK",
-}
 
 
 def parse_speculative_stats(stderr: str) -> dict[str, int | float]:
@@ -158,7 +144,6 @@ def autoregressive_key(args: argparse.Namespace, prompt: str) -> str:
         "environment": {
             key: value for key, value in os.environ.items()
             if key.startswith(("GUFO_", "HIP_", "ROCR_", "HSA_"))
-            and key not in CONTROLLED_ENV
         },
     }
     return hashlib.sha256(
@@ -186,38 +171,6 @@ def store_autoregressive_cache(path: Path | None, cache: dict[str, dict]) -> Non
     )
 
 
-def verification_environment(profile: str, backend: str) -> dict[str, str]:
-    result: dict[str, str] = {}
-    if profile == "production" or backend == "dspark":
-        return result
-    if backend.startswith("dflash"):
-        result["GUFO_DFLASH_GEMM"] = "hipblaslt"
-        result["GUFO_DFLASH_PREWARM"] = "1"
-    if profile == "sequential":
-        result["GUFO_SPEC_BATCH_VERIFY"] = "0"
-        return result
-    result["GUFO_SPEC_BATCH_VERIFY"] = "1"
-    result["GUFO_SPEC_BATCH_LM_HEAD"] = "1"
-    if profile == "bf16":
-        result["GUFO_PREFILL_SMALL_BATCH_QUANT"] = "bf16"
-    elif profile == "fp32":
-        result["GUFO_PREFILL_SMALL_BATCH_QUANT"] = "fp32"
-    elif profile == "fp32-tail":
-        result["GUFO_PREFILL_SMALL_BATCH_FP32_FROM_LAYER"] = "62"
-    elif profile == "w8a8":
-        result["GUFO_PREFILL_SMALL_BATCH_BF16_FROM_LAYER"] = "64"
-    return result
-
-
-def parse_environment(values: list[str]) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for value in values:
-        key, separator, setting = value.partition("=")
-        if not separator or not key:
-            raise ValueError(f"invalid --env value: {value!r}")
-        result[key] = setting
-    return result
-
 
 def extract_completion(stdout: str) -> str:
     marker = "--- Generation Output ---\n"
@@ -242,8 +195,6 @@ def run_prompt(
     command = build_prompt_command(args, prompt, speculative)
 
     environment = os.environ.copy()
-    for key in CONTROLLED_ENV:
-        environment.pop(key, None)
     if speculative:
         environment.update(extra_environment)
 
@@ -332,18 +283,6 @@ def main() -> int:
         "--backend", choices=("dflash2", "mtp", "dspark"), default="dflash2"
     )
     parser.add_argument(
-        "--profile",
-        choices=(
-            "production",
-            "sequential",
-            "w8a8",
-            "bf16",
-            "fp32",
-            "fp32-tail",
-        ),
-        default="production",
-    )
-    parser.add_argument(
         "--suite",
         default="benchmarks/qwen3.8-27b/speculative-corpus.json",
     )
@@ -373,7 +312,6 @@ def main() -> int:
         help="reject sparse per-prompt samples (DSpark defaults to 8)",
     )
     parser.add_argument("--allow-sparse", action="store_true")
-    parser.add_argument("--env", action="append", default=[])
     parser.add_argument(
         "--ar-cache",
         default="",
@@ -403,11 +341,7 @@ def main() -> int:
         parser.error("token counts and repetitions must be positive")
 
     prompts = load_prompts(Path(args.suite), args.quick, args.limit, args.case)
-    environment = verification_environment(args.profile, args.backend)
-    try:
-        environment.update(parse_environment(args.env))
-    except ValueError as error:
-        parser.error(str(error))
+    environment: dict[str, str] = {}
     print(
         "| prompt | category | exact | AR tok/s | speculative tok/s | "
         "speedup | support acceptance | positional | full blocks | attempts | "
@@ -637,7 +571,7 @@ def main() -> int:
                         "draft": artifact_identity(args.draft_model),
                     },
                     "backend": args.backend,
-                    "profile": args.profile,
+                    "profile": "production",
                     "prompt_mode": prompt_mode,
                     "suite": str(args.suite),
                     "suite_hash": suite_hash,

@@ -218,58 +218,12 @@ void TestDecodeSplitPolicy() {
         "fused Q/K norm rejects larger head dimensions");
 }
 
-void TestKQuantSmallBatchRowsPolicy() {
-  using gufo::hip::detail::KQuantSmallBatchRows;
-  using gufo::hip::detail::ResolveKQuantSmallBatchRows;
-
-  Check(ResolveKQuantSmallBatchRows(nullptr) == KQuantSmallBatchRows::kThree,
-        "K-quant small-batch rows default to the retained three-row route");
-  Check(ResolveKQuantSmallBatchRows("2") == KQuantSmallBatchRows::kTwo,
-        "the explicit two-row setting selects the reference");
-  Check(ResolveKQuantSmallBatchRows("3") == KQuantSmallBatchRows::kThree,
-        "the numeric three-row setting selects the retained route");
-  Check(ResolveKQuantSmallBatchRows("4") == KQuantSmallBatchRows::kFour,
-        "the numeric four-row setting selects the rejected alternative");
-  Check(ResolveKQuantSmallBatchRows("rows4") == KQuantSmallBatchRows::kFour,
-        "the named four-row setting selects the candidate");
-}
-
-void TestKQuantActivationSumsPolicy() {
-  using gufo::hip::detail::KQuantActivationSumMode;
-  using gufo::hip::detail::ResolveKQuantActivationSums;
-
-  // Retained default: the staged sidecar (opt-q4kxl-actsum, +0.53% pp2048 over
-  // the in-kernel sudot4 reference across 4/4 interleaved pairs).
-  Check(
-      ResolveKQuantActivationSums(nullptr) == KQuantActivationSumMode::kStaged,
-      "K-quant activation sums default to the staged sidecar");
-  Check(ResolveKQuantActivationSums("0") == KQuantActivationSumMode::kReference,
-        "zero disables the activation-sum sidecar");
-  Check(ResolveKQuantActivationSums("false") ==
-            KQuantActivationSumMode::kReference,
-        "false disables the activation-sum sidecar");
-  Check(ResolveKQuantActivationSums("1") == KQuantActivationSumMode::kStaged,
-        "one selects the staged activation-sum sidecar");
-  Check(ResolveKQuantActivationSums("sidecar") ==
-            KQuantActivationSumMode::kStaged,
-        "the sidecar setting selects LDS staging");
-  Check(
-      ResolveKQuantActivationSums("direct") == KQuantActivationSumMode::kDirect,
-      "the direct setting selects per-wave sidecar reads");
-}
-
-static_assert(!gufo::hip::detail::ShouldAttemptOptimizedAttention(1023));
-static_assert(gufo::hip::detail::ShouldAttemptOptimizedAttention(1024));
-static_assert(gufo::hip::detail::SelectDecodeAttentionSplitCount(32768) == 32);
-
 }  // namespace
 
 int main() {
   TestDispatchThresholdAndFallbackOrder();
   TestBackendSupportPredicates();
   TestDecodeSplitPolicy();
-  TestKQuantSmallBatchRowsPolicy();
-  TestKQuantActivationSumsPolicy();
   if (failures != 0) {
     std::cerr << failures << " Qwen attention policy test(s) failed.\n";
     return 1;

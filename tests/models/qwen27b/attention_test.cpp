@@ -1,0 +1,370 @@
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <numeric>
+#include <vector>
+
+#if defined(ENGINE_ENABLE_HIP)
+#include <hip/hip_runtime.h>
+
+#include "src/core/hip/hip_utils.hpp"
+#include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
+#include "tests/models/qwen/hip/support/comparisons.hpp"
+#include "tests/models/qwen/hip/support/device.hpp"
+#include "tests/models/qwen/hip/support/device_buffer.hpp"
+
+namespace {
+
+// Official DFlash2 config: 32 query heads, 8 KV heads, head dimension 128.
+constexpr std::uint32_t kNumQueryHeads = 32;
+constexpr std::uint32_t kNumKvHeads = 8;
+constexpr std::uint32_t kHeadDim = 128;
+constexpr std::uint32_t kBlockCount = 8;
+constexpr std::uint32_t kSlidingWindow = 2048;
+
+float Sample(std::size_t index, std::size_t salt) {
+  return std::sin(static_cast<float>((index * 7U) + (salt * 13U) + 1U)) * 0.5F;
+}
+
+enum class Route { kScalar, kWave };
+
+// Independent equations from z-lab/dflash model_mlx.py, pinned in eval/README.
+// Keep these small operator checks with the ring/attention checks.
+void TestDynamicConvolution() {
+  using gufo::test::DeviceBuffer;
+  constexpr std::uint32_t tokens = 8, hidden = 5120, taps = 2, group_size = 16;
+  constexpr std::uint32_t groups = hidden / group_size;
+  std::vector<float> input(tokens * hidden),
+      dynamic(tokens * 2 * taps * groups), base(2 * taps * hidden);
+  for (std::size_t i = 0; i < input.size(); ++i)
+    input[i] = Sample(i, 11);
+  for (std::size_t i = 0; i < dynamic.size(); ++i)
+    dynamic[i] = Sample(i, 12);
+  for (std::size_t i = 0; i < base.size(); ++i)
+    base[i] = Sample(i, 13);
+  DeviceBuffer<float> d_input(input), d_dynamic(dynamic), d_base(base),
+      d_output(input.size());
+  for (std::uint32_t side = 0; side < 2; ++side) {
+    gufo::hip::kernels::LaunchDFlashGroupedDynamicConv(
+        d_input.data(), d_dynamic.data(), d_base.data(), d_output.data(),
+        tokens, hidden, taps, group_size, side, nullptr);
+    const auto output = d_output.CopyToHost();
+    for (std::uint32_t token = 0; token < tokens; ++token) {
+      for (std::uint32_t channel = 0; channel < hidden; ++channel) {
+        double reference = 0;
+        for (std::uint32_t tap = 0; tap < taps && tap <= token; ++tap) {
+          const double value = input[(token - tap) * hidden + channel];
+          reference += base[(side * taps + tap) * hidden + channel] * value;
+          reference += dynamic[((token * 2 + side) * taps + tap) * groups +
+                               channel / group_size] *
+                       value;
+        }
+        gufo::test::Expect(
+            std::isfinite(output[token * hidden + channel]) &&
+                std::abs(output[token * hidden + channel] - reference) < 2e-7,
+            "DFlash grouped convolution differs from the causal equation");
+      }
+    }
+  }
+}
+
+void TestSelector() {
+  using gufo::test::DeviceBuffer;
+  // Cross a partial-top-k partition boundary and leave a short final partition.
+  constexpr std::uint32_t vocab = 2065, rank = 256, anchor = 3;
+  std::vector<float> logits(vocab), projected(rank);
+  std::vector<std::uint16_t> predecessors(vocab * rank),
+      successors(vocab * rank);
+  const auto bf16 = [](float value) {
+    return static_cast<std::uint16_t>(std::bit_cast<std::uint32_t>(value) >>
+                                      16);
+  };
+  const auto fp32 = [](std::uint16_t value) {
+    return std::bit_cast<float>(static_cast<std::uint32_t>(value) << 16);
+  };
+  for (std::size_t i = 0; i < logits.size(); ++i) {
+    // Distinct unary scores, deliberately scattered across both partitions.
+    logits[i] = static_cast<float>((i * 193) % vocab) / 512.0F;
+  }
+  for (std::size_t i = 0; i < rank; ++i)
+    projected[i] = Sample(i, 17);
+  for (std::size_t i = 0; i < predecessors.size(); ++i) {
+    predecessors[i] = bf16(Sample(i, 18));
+    successors[i] = bf16(Sample(i, 19));
+  }
+  DeviceBuffer<float> d_logits(logits), d_projected(projected), d_confidence(1),
+      d_uniform(std::vector<float>{0.37F});
+  DeviceBuffer<std::uint16_t> d_predecessors(predecessors),
+      d_successors(successors);
+  DeviceBuffer<std::uint32_t> d_anchor(std::vector<std::uint32_t>{anchor}),
+      d_selected(1);
+  const auto scratch_size =
+      gufo::hip::kernels::DFlashSelectorScratchElements(vocab);
+  DeviceBuffer<float> d_scores(scratch_size);
+  DeviceBuffer<std::uint32_t> d_ids(scratch_size);
+  std::vector<std::uint32_t> sorted(vocab);
+  std::iota(sorted.begin(), sorted.end(), 0U);
+  std::ranges::sort(sorted,
+                    [&](auto a, auto b) { return logits[a] > logits[b]; });
+  for (const std::uint32_t top_k : {1U, 7U, 16U}) {
+    DeviceBuffer<std::uint32_t> d_candidates(top_k);
+    DeviceBuffer<float> d_probabilities(top_k);
+    std::vector<double> scores(top_k);
+    for (std::size_t c = 0; c < top_k; ++c) {
+      scores[c] = logits[sorted[c]];
+      for (std::size_t r = 0; r < rank; ++r) {
+        scores[c] +=
+            static_cast<double>(fp32(predecessors[anchor * rank + r])) *
+            projected[r] * fp32(successors[sorted[c] * rank + r]);
+      }
+    }
+    for (const float temperature : {0.0F, 0.8F}) {
+      // Unwritten partial slots must never enter the candidate set.
+      d_scores.CopyFrom(std::vector<float>(scratch_size, 1e20F));
+      d_ids.CopyFrom(std::vector<std::uint32_t>(scratch_size, vocab - 1));
+      gufo::hip::kernels::LaunchDFlashSelectorStep(
+          d_logits.data(), d_projected.data(), d_predecessors.data(),
+          d_successors.data(), d_anchor.data(), d_selected.data(),
+          d_confidence.data(), d_scores.data(), d_ids.data(), temperature,
+          d_uniform.data(), d_candidates.data(), d_probabilities.data(), vocab,
+          rank, top_k, nullptr);
+      const auto candidates = d_candidates.CopyToHost();
+      gufo::test::Expect(
+          std::equal(candidates.begin(), candidates.end(), sorted.begin()),
+          "DFlash selector top-k differs from full vocabulary sort");
+      const auto probabilities = d_probabilities.CopyToHost();
+      const double maximum = *std::ranges::max_element(scores);
+      const double divisor = temperature > 0 ? temperature : 1.0;
+      double denominator = 0;
+      for (const double value : scores)
+        denominator += std::exp((value - maximum) / divisor);
+      std::size_t selected = std::ranges::max_element(scores) - scores.begin();
+      if (temperature > 0) {
+        double cumulative = 0;
+        selected = top_k - 1;
+        for (std::size_t c = 0; c < top_k; ++c) {
+          const double p =
+              std::exp((scores[c] - maximum) / divisor) / denominator;
+          gufo::test::Expect(std::isfinite(probabilities[c]) &&
+                                 std::abs(probabilities[c] - p) < 2e-6,
+                             "DFlash sparse proposal probability is incorrect");
+          const double previous = cumulative;
+          cumulative += p;
+          if (previous < 0.37 && cumulative >= 0.37)
+            selected = c;
+        }
+      }
+      gufo::test::Expect(d_selected.CopyToHost()[0] == sorted[selected],
+                         "DFlash selector chose the wrong candidate");
+      const double confidence =
+          std::exp((scores[selected] - maximum) / divisor) / denominator;
+      gufo::test::Expect(
+          std::abs(d_confidence.CopyToHost()[0] - confidence) < 2e-6,
+          "DFlash selected-token probability is incorrect");
+    }
+  }
+}
+
+/// Runs the reference and one candidate route over the same operands and
+/// reports the largest absolute difference. The kernels accumulate the QK dot
+/// product in a different order -- the reference walks head_dim in one thread,
+/// the candidates reduce across a wave -- so the comparison is a float
+/// tolerance, not bit equality.
+float MaxRouteDifference(Route route, std::uint32_t current_pos,
+                         std::uint32_t history_length) {
+  const std::size_t q_dim = static_cast<std::size_t>(kNumQueryHeads) * kHeadDim;
+  const std::size_t kv_dim = static_cast<std::size_t>(kNumKvHeads) * kHeadDim;
+  const std::size_t q_elements = kBlockCount * q_dim;
+  const std::size_t block_elements = kBlockCount * kv_dim;
+  const std::size_t history_elements =
+      static_cast<std::size_t>(current_pos + kBlockCount) * kv_dim;
+
+  std::vector<float> h_q(q_elements);
+  std::vector<float> h_block_k(block_elements);
+  std::vector<float> h_block_v(block_elements);
+  std::vector<float> h_injected_k(history_elements);
+  std::vector<float> h_injected_v(history_elements);
+  for (std::size_t index = 0; index < q_elements; ++index) {
+    h_q[index] = Sample(index, 1);
+  }
+  for (std::size_t index = 0; index < block_elements; ++index) {
+    h_block_k[index] = Sample(index, 2);
+    h_block_v[index] = Sample(index, 3);
+  }
+  for (std::size_t index = 0; index < history_elements; ++index) {
+    h_injected_k[index] = Sample(index, 4);
+    h_injected_v[index] = Sample(index, 5);
+  }
+
+  const auto upload = [](const std::vector<float>& host) {
+    float* device = nullptr;
+    HIP_CHECK(hipMalloc(&device, host.size() * sizeof(float)));
+    HIP_CHECK(hipMemcpy(device, host.data(), host.size() * sizeof(float),
+                        hipMemcpyHostToDevice));
+    return device;
+  };
+
+  // Store only live history in a wrapped ring. Poison all other slots so an
+  // off-by-one mask or addressing error cannot accidentally compare equal.
+  std::vector<float> ring_k(kSlidingWindow * kv_dim, NAN);
+  std::vector<float> ring_v(kSlidingWindow * kv_dim, NAN);
+  const auto first =
+      history_length > kSlidingWindow ? history_length - kSlidingWindow : 0U;
+  for (auto pos = first; pos < history_length; ++pos) {
+    std::copy_n(h_injected_k.data() + pos * kv_dim, kv_dim,
+                ring_k.data() + (pos % kSlidingWindow) * kv_dim);
+    std::copy_n(h_injected_v.data() + pos * kv_dim, kv_dim,
+                ring_v.data() + (pos % kSlidingWindow) * kv_dim);
+  }
+  float* d_ring_k = upload(ring_k);
+  float* d_ring_v = upload(ring_v);
+  float* d_q = upload(h_q);
+  float* d_block_k = upload(h_block_k);
+  float* d_block_v = upload(h_block_v);
+  float* d_injected_k = upload(h_injected_k);
+  float* d_injected_v = upload(h_injected_v);
+  float* d_scalar_out = nullptr;
+  float* d_wave_out = nullptr;
+  HIP_CHECK(hipMalloc(&d_scalar_out, q_elements * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_wave_out, q_elements * sizeof(float)));
+  HIP_CHECK(hipMemset(d_scalar_out, 0, q_elements * sizeof(float)));
+  HIP_CHECK(hipMemset(d_wave_out, 0, q_elements * sizeof(float)));
+
+  const float scale = 1.0F / std::sqrt(static_cast<float>(kHeadDim));
+  gufo::hip::kernels::LaunchDFlashNonCausalAttentionScalar(
+      d_q, d_injected_k, d_injected_v, d_block_k, d_block_v, d_scalar_out,
+      current_pos, history_length, kBlockCount, kSlidingWindow, kNumQueryHeads,
+      kNumKvHeads, kHeadDim, scale, nullptr, current_pos + kBlockCount);
+  if (route == Route::kWave) {
+    gufo::hip::kernels::LaunchDFlashNonCausalAttentionWave(
+        d_q, d_ring_k, d_ring_v, d_block_k, d_block_v, d_wave_out, current_pos,
+        history_length, kBlockCount, kSlidingWindow, kNumQueryHeads,
+        kNumKvHeads, kHeadDim, scale, nullptr, kSlidingWindow);
+  }
+  if (route == Route::kScalar) {
+    gufo::hip::kernels::LaunchDFlashNonCausalAttentionScalar(
+        d_q, d_ring_k, d_ring_v, d_block_k, d_block_v, d_wave_out, current_pos,
+        history_length, kBlockCount, kSlidingWindow, kNumQueryHeads,
+        kNumKvHeads, kHeadDim, scale, nullptr, kSlidingWindow);
+  }
+  HIP_CHECK(hipDeviceSynchronize());
+
+  std::vector<float> scalar_out(q_elements);
+  std::vector<float> wave_out(q_elements);
+  HIP_CHECK(hipMemcpy(scalar_out.data(), d_scalar_out,
+                      q_elements * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(wave_out.data(), d_wave_out, q_elements * sizeof(float),
+                      hipMemcpyDeviceToHost));
+
+  HIP_CHECK(hipFree(d_ring_k));
+  HIP_CHECK(hipFree(d_ring_v));
+  HIP_CHECK(hipFree(d_q));
+  HIP_CHECK(hipFree(d_block_k));
+  HIP_CHECK(hipFree(d_block_v));
+  HIP_CHECK(hipFree(d_injected_k));
+  HIP_CHECK(hipFree(d_injected_v));
+  HIP_CHECK(hipFree(d_scalar_out));
+  HIP_CHECK(hipFree(d_wave_out));
+
+  float max_difference = 0.0F;
+  for (std::size_t index = 0; index < q_elements; ++index) {
+    gufo::test::Expect(std::isfinite(wave_out[index]),
+                       "DFlash candidate attention produced a non-finite "
+                       "output");
+    max_difference =
+        std::max(max_difference, std::abs(scalar_out[index] - wave_out[index]));
+  }
+  // Independent double-precision softmax for the first/last query and GQA
+  // group. All proposal keys are visible; only historical keys are windowed.
+  for (const auto query : {0U, kBlockCount - 1}) {
+    for (const auto head : {0U, kNumQueryHeads - 1}) {
+      const auto kv_head = head / (kNumQueryHeads / kNumKvHeads);
+      const auto q_offset = query * q_dim + head * kHeadDim;
+      std::vector<double> scores(history_length + kBlockCount, -INFINITY);
+      double maximum = -INFINITY;
+      for (std::size_t key = 0; key < scores.size(); ++key) {
+        if (key < history_length && current_pos + query - key >= kSlidingWindow)
+          continue;
+        const auto* keys =
+            key < history_length ? h_injected_k.data() : h_block_k.data();
+        const auto row = key < history_length ? key : key - history_length;
+        double dot = 0;
+        for (std::size_t d = 0; d < kHeadDim; ++d) {
+          dot += static_cast<double>(h_q[q_offset + d]) *
+                 keys[row * kv_dim + kv_head * kHeadDim + d];
+        }
+        scores[key] = dot * scale;
+        maximum = std::max(maximum, scores[key]);
+      }
+      double denominator = 0;
+      for (auto& score : scores) {
+        score = std::exp(score - maximum);
+        denominator += score;
+      }
+      for (std::size_t d = 0; d < kHeadDim; ++d) {
+        double reference = 0;
+        for (std::size_t key = 0; key < scores.size(); ++key) {
+          const auto* values =
+              key < history_length ? h_injected_v.data() : h_block_v.data();
+          const auto row = key < history_length ? key : key - history_length;
+          reference +=
+              scores[key] * values[row * kv_dim + kv_head * kHeadDim + d];
+        }
+        gufo::test::Expect(
+            std::abs(wave_out[q_offset + d] - reference / denominator) < 1e-5,
+            "DFlash attention differs from the windowed softmax equation");
+      }
+    }
+  }
+  return max_difference;
+}
+
+void TestRouteEquivalence(std::uint32_t current_pos,
+                          std::uint32_t history_length, const char* label) {
+  gufo::test::Expect(
+      MaxRouteDifference(Route::kScalar, current_pos, history_length) == 0.0F,
+      "ring addressing must preserve scalar attention exactly");
+  const float wave =
+      MaxRouteDifference(Route::kWave, current_pos, history_length);
+  std::cout << "DFlash non-causal attention " << label
+            << ": max |scalar - wave| = " << wave << "\n";
+  gufo::test::Expect(wave < 1e-5F,
+                     "DFlash wave attention diverges from the reference");
+}
+
+}  // namespace
+
+#endif  // defined(ENGINE_ENABLE_HIP)
+
+int main() {
+#if defined(ENGINE_ENABLE_HIP)
+  const int device_status =
+      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
+                                "Qwen DFlash non-causal attention ops test");
+  if (device_status != gufo::test::kHipTestSuccess) {
+    return device_status;
+  }
+
+  TestDynamicConvolution();
+  TestSelector();
+  // No injected history at all: only the eight in-block keys are attended.
+  TestRouteEquivalence(0, 0, "empty history");
+  // Shallow: the whole history is inside the sliding window.
+  TestRouteEquivalence(128, 128, "128-token history");
+  // Deep enough that the window clips the history, which is the case the
+  // coalesced route exists for.
+  TestRouteEquivalence(2047, 2047, "window minus one");
+  TestRouteEquivalence(2048, 2048, "window boundary");
+  TestRouteEquivalence(2051, 2051, "wrapped window");
+  TestRouteEquivalence(4096, 4096, "4096-token history, window-clipped");
+  std::cout << "Qwen DFlash non-causal attention ops test passed on gfx1151.\n";
+  return 0;
+#else
+  std::cout << "HIP disabled, skipping Qwen DFlash non-causal attention ops "
+               "test.\n";
+  return 77;
+#endif
+}

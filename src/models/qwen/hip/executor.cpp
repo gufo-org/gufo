@@ -3,9 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <stdexcept>
-#include <string_view>
 #include <utility>
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
@@ -13,15 +11,6 @@
 
 namespace gufo::hip {
 namespace {
-
-bool IsSsmReplayEnabled() noexcept {
-  const char* value = std::getenv("GUFO_DISABLE_SSM_REPLAY");
-  if (value == nullptr) {
-    return true;
-  }
-  const std::string_view setting{value};
-  return setting == "0" || setting == "false" || setting == "off";
-}
 
 const QwenGpuModel& RequireModel(
     const std::shared_ptr<const QwenGpuModel>& model) {
@@ -153,14 +142,14 @@ void QwenGpuExecutor::RestoreCompactSnapshot(
 void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
   replaying_ssm_state_ = false;
   arena_.SaveState(valid_context);
-  if (IsSsmReplayEnabled() && arena_.BeginSsmReplayCapture()) {
+  if (arena_.BeginSsmReplayCapture()) {
     graph_executor_.Reset();
   }
 }
 
 void QwenGpuExecutor::RestoreState() {
   arena_.RestoreState();
-  replaying_ssm_state_ = IsSsmReplayEnabled();
+  replaying_ssm_state_ = true;
 }
 
 void QwenGpuExecutor::ReplaySsmState(std::uint32_t position) {

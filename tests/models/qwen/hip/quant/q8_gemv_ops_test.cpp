@@ -167,11 +167,6 @@ void TestQ8KSmallBatchFp32GEMMEquivalence() {
   HIP_CHECK(hipMemcpy(device_inputs, inputs.data(),
                       inputs.size() * sizeof(float), hipMemcpyHostToDevice));
 
-  if (setenv("GUFO_Q8_SMALL_BATCH_EXACT_SHARED", "1", 1) != 0) {
-    std::cerr << "failed to enable shared Q8_K small-batch route\n";
-    std::abort();
-  }
-
   for (const std::size_t batch :
        {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5},
         std::size_t{6}, std::size_t{7}, std::size_t{8}}) {

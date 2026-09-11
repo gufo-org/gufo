@@ -1,11 +1,8 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <iostream>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -36,96 +33,6 @@ constexpr std::size_t kMaxDecodeBatch = 8;
          detail::IsNativeWmmaQuant(type);
 }
 
-[[nodiscard]] bool UseExactBf16Lds8Projection() noexcept {
-  static const bool enabled = [] {
-    const char* value = std::getenv("GUFO_BF16_SMALL_BATCH_EXACT_LDS8");
-    if (value == nullptr) {
-      return true;
-    }
-    const std::string_view setting{value};
-    return setting != "0" && setting != "false" && setting != "off";
-  }();
-  return enabled;
-}
-
-[[nodiscard]] bool VerifyTimingEnabled() noexcept {
-  static const bool enabled = std::getenv("GUFO_VERIFY_TIMING") != nullptr;
-  return enabled;
-}
-
-/// Stage rollup for the decode-equivalent verification chunk, printed at
-/// process exit when GUFO_VERIFY_TIMING is set. Stage boundaries synchronize,
-/// so the accounting is only wired up under the flag.
-struct VerifyStageTimings {
-  double projections_ms{0.0};
-  double ssm_recurrence_ms{0.0};
-  double attention_ms{0.0};
-  double ffn_ms{0.0};
-  double head_ms{0.0};
-  double other_ms{0.0};
-  std::uint64_t chunks{0};
-
-  ~VerifyStageTimings() {
-    if (!VerifyTimingEnabled() || chunks == 0) {
-      return;
-    }
-    const double n = static_cast<double>(chunks);
-    const double total = projections_ms + ssm_recurrence_ms + attention_ms +
-                         ffn_ms + head_ms + other_ms;
-    std::cerr << "\n[VERIFY_TIMING] chunks=" << chunks << '\n'
-              << "  total          " << total << " ms  (" << (total / n)
-              << " ms/chunk)\n"
-              << "    projections  " << projections_ms << " ms  ("
-              << (projections_ms / n) << ")\n"
-              << "    ssm recur    " << ssm_recurrence_ms << " ms  ("
-              << (ssm_recurrence_ms / n) << ")\n"
-              << "    attention    " << attention_ms << " ms  ("
-              << (attention_ms / n) << ")\n"
-              << "    ffn          " << ffn_ms << " ms  (" << (ffn_ms / n)
-              << ")\n"
-              << "    lm head      " << head_ms << " ms  (" << (head_ms / n)
-              << ")\n"
-              << "    other        " << other_ms << " ms  (" << (other_ms / n)
-              << ")\n";
-  }
-};
-
-[[nodiscard]] VerifyStageTimings& VerifyTimings() {
-  static VerifyStageTimings timings;
-  return timings;
-}
-
-class VerifyStageTimer {
-public:
-  VerifyStageTimer(double* sink, hipStream_t stream)
-      : sink_(VerifyTimingEnabled() ? sink : nullptr), stream_(stream) {
-    if (sink_ != nullptr) {
-      (void)hipStreamSynchronize(stream_);
-      start_ = std::chrono::steady_clock::now();
-    }
-  }
-
-  VerifyStageTimer(const VerifyStageTimer&) = delete;
-  VerifyStageTimer& operator=(const VerifyStageTimer&) = delete;
-  VerifyStageTimer(VerifyStageTimer&&) = delete;
-  VerifyStageTimer& operator=(VerifyStageTimer&&) = delete;
-
-  ~VerifyStageTimer() {
-    if (sink_ == nullptr) {
-      return;
-    }
-    (void)hipStreamSynchronize(stream_);
-    *sink_ += std::chrono::duration<double, std::milli>(
-                  std::chrono::steady_clock::now() - start_)
-                  .count();
-  }
-
-private:
-  double* sink_{nullptr};
-  hipStream_t stream_{nullptr};
-  std::chrono::steady_clock::time_point start_{};
-};
-
 void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
                       float* output, std::size_t batch_size,
                       std::size_t output_size, std::size_t input_size,
@@ -135,8 +42,7 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
                                batch_size, output_size, input_size, stream);
     return;
   }
-  if (weight.type == core::GgmlType::kBF16 && batch_size <= kMaxDecodeBatch &&
-      UseExactBf16Lds8Projection()) {
+  if (weight.type == core::GgmlType::kBF16 && batch_size <= kMaxDecodeBatch) {
     LaunchExactBf16GEMMFp32SmallBatch(weight.data, input, output, batch_size,
                                       output_size, input_size, stream);
     return;
@@ -486,10 +392,6 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
 
   replaying_ssm_state_ = false;
   last_verification_rows_ = batch_size;
-  auto& stages = VerifyTimings();
-  if (VerifyTimingEnabled()) {
-    ++stages.chunks;
-  }
   h_verification_hidden_.clear();
   h_verification_logits_.clear();
 
@@ -552,7 +454,6 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
     bool ssm_residual_folded = false;
     if (layer.is_full_attention) {
       {
-        VerifyStageTimer timer(&stages.projections_ms, arena_.stream);
         LaunchProjection(layer.attn_q, scratch.decode.normed.data(),
                          scratch.ssm.qkv.data(), batch_size, q_projection_size,
                          hidden_size, arena_.stream);
@@ -595,7 +496,6 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
         }
       }
 
-      VerifyStageTimer attention_timer(&stages.attention_ms, arena_.stream);
       for (std::size_t row = 0; row < batch_size; ++row) {
         float* const query =
             scratch.attention.q.data() + (row * attention_size);
@@ -647,7 +547,6 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                        attention_size, arena_.stream);
     } else {
       {
-        VerifyStageTimer timer(&stages.projections_ms, arena_.stream);
         LaunchProjection(layer.attn_qkv, scratch.decode.normed.data(),
                          scratch.ssm.qkv.data(), batch_size, ssm_qkv_size,
                          hidden_size, arena_.stream);
@@ -667,7 +566,6 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
         // still applied in order with identical arithmetic, so this is
         // bit-exact; it removes 2 x batch_size dispatches per SSM layer, which
         // dominated the stage at width 8.
-        VerifyStageTimer ssm_timer(&stages.ssm_recurrence_ms, arena_.stream);
         auto replay_capture = arena_.GetSsmReplayCapture();
         replay_capture.position = scratch.decode.prompt_tokens.data();
         LaunchSSMConvRecurrenceRows(
@@ -732,7 +630,6 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
     }
 
     {
-      VerifyStageTimer ffn_timer(&stages.ffn_ms, arena_.stream);
       if (fuse_ffn_norm_swiglu) {
         for (std::size_t row = 0; row < batch_size; ++row) {
           LaunchFusedRMSNormSwiGLUGEMV(
@@ -790,7 +687,6 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
   }
   last_hidden_offset_ = (batch_size - 1) * hidden_size;
 
-  VerifyStageTimer head_timer(&stages.head_ms, arena_.stream);
   LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
                        static_cast<const float*>(weights_.output_norm.data),
                        scratch.decode.normed.data(), nullptr, batch_size,

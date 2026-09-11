@@ -94,6 +94,25 @@ bool QwenMtpGpuDraftBackend::PrimeTargetContext(
   }
 }
 
+bool QwenMtpGpuDraftBackend::AppendTargetContext(
+    const speculative::DraftTargetContext& context, std::uint32_t position) {
+  if (!primed_ || proposal_active_ ||
+      executor_->GetNextPosition() + 1 != position ||
+      context.hidden_size != target_hidden_.size() ||
+      context.prompt_hidden_states.size() !=
+          context.prompt_tokens.size() * context.hidden_size) {
+    return false;
+  }
+  for (std::size_t row = 0; row < context.prompt_tokens.size(); ++row) {
+    (void)executor_->ForwardTargetHidden(
+        context.prompt_tokens[row], target_hidden_,
+        position + static_cast<std::uint32_t>(row) - 1, false);
+    UpdateTargetHidden(context.prompt_hidden_states.subspan(
+        row * context.hidden_size, context.hidden_size));
+  }
+  return true;
+}
+
 speculative::DraftProposal QwenMtpGpuDraftBackend::Propose(
     std::span<const tokenization::TokenId> prompt_tokens,
     std::uint32_t current_pos, std::uint32_t max_tokens) {
@@ -116,6 +135,8 @@ speculative::DraftProposal QwenMtpGpuDraftBackend::Propose(
 
   proposal_checkpoint_ = executor_->GetNextPosition();
   proposal_input_ = prompt_tokens.back();
+  proposal_target_hidden_ = target_hidden_;
+  committed_target_hidden_.clear();
   proposed_tokens_.clear();
   proposed_tokens_.reserve(count);
 
@@ -139,22 +160,38 @@ void QwenMtpGpuDraftBackend::AcceptFeedback(
   if (!proposal_active_ || accepted.size() > proposed_tokens_.size()) {
     throw std::logic_error("MTP GPU proposal feedback is invalid");
   }
+  if (committed_target_hidden_.size() !=
+      (accepted.size() + 1) * target_hidden_.size()) {
+    throw std::logic_error("MTP feedback requires each committed target row");
+  }
 
+  // Pair input t+1 with target hidden t, as during prompt priming. Verification
+  // has already updated target_hidden_ to the final committed row; it cannot
+  // be reused for the earlier anchor. Accepted rows also need target features,
+  // rather than the tentative draft hidden states used while proposing.
   executor_->Rewind(proposal_checkpoint_);
-  (void)executor_->ForwardTargetHidden(proposal_input_, target_hidden_,
+  (void)executor_->ForwardTargetHidden(proposal_input_, proposal_target_hidden_,
                                        proposal_checkpoint_, false);
   for (std::size_t index = 0; index < accepted.size(); ++index) {
-    (void)executor_->ForwardFeedback(
+    (void)executor_->ForwardTargetHidden(
         accepted[index],
+        std::span<const float>(committed_target_hidden_)
+            .subspan(index * target_hidden_.size(), target_hidden_.size()),
         proposal_checkpoint_ + static_cast<std::uint32_t>(index) + 1, false);
   }
   proposal_active_ = false;
   proposed_tokens_.clear();
+  proposal_target_hidden_.clear();
+  committed_target_hidden_.clear();
 }
 
 void QwenMtpGpuDraftBackend::UpdateTargetHidden(std::span<const float> hidden) {
   if (hidden.size() != target_hidden_.size()) {
     throw std::invalid_argument("MTP target hidden-state shape is invalid");
+  }
+  if (proposal_active_) {
+    committed_target_hidden_.insert(committed_target_hidden_.end(),
+                                    hidden.begin(), hidden.end());
   }
   std::ranges::copy(hidden, target_hidden_.begin());
 }
@@ -163,6 +200,8 @@ void QwenMtpGpuDraftBackend::Reset() noexcept {
   executor_->Reset();
   std::ranges::fill(target_hidden_, 0.0F);
   proposed_tokens_.clear();
+  proposal_target_hidden_.clear();
+  committed_target_hidden_.clear();
   proposal_input_ = 0;
   proposal_checkpoint_ = 0;
   primed_ = false;

@@ -394,10 +394,13 @@ endif()
 # CTest integration
 include(CTest)
 
+# Test assertions remain active when model code uses production optimization.
 if (BUILD_TESTING)
+  add_compile_options(-UNDEBUG)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
   add_subdirectory(tests/models/qwen)
+  add_subdirectory(tests/models/qwen27b)
   gufo_qwen3_asr_register_tests()
 
   add_test(NAME gufo_version COMMAND gufo --version)
@@ -993,22 +996,6 @@ if (BUILD_TESTING)
     add_test(NAME persistent_deltanet_test COMMAND persistent_deltanet_test)
     set_tests_properties(persistent_deltanet_test PROPERTIES
       LABELS "hip;gpu;kernels;deltanet;speculative")
-
-    add_executable(inference_backend_gpu_test
-      tests/cli/inference_backend_gpu_test.cpp
-      src/cli/serve/continuation_cache.cpp
-      src/cli/serve/continuation_disk_store.cpp
-      src/cli/serve/text_model_runner.cpp
-      src/cli/serve/text_generation_scheduler.cpp
-      src/cli/serve/inference_backend.cpp
-      src/cli/serve/logging.cpp)
-    target_link_libraries(inference_backend_gpu_test PRIVATE
-      gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next hip::host)
-    add_test(NAME inference_backend_gpu_test COMMAND inference_backend_gpu_test)
-    set_tests_properties(inference_backend_gpu_test PROPERTIES
-      LABELS "hip;gpu;server;correctness"
-      SKIP_RETURN_CODE 77)
-
 
     add_executable(gfx1151_acceptance_test tests/benchmarks/gfx1151_acceptance_test.cpp)
     target_link_libraries(gfx1151_acceptance_test PRIVATE gufo_core hip::host roc::hipblas roc::rocblas)

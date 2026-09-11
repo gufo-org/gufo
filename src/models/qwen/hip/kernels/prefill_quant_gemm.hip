@@ -7,7 +7,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <string_view>
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
@@ -19,44 +18,6 @@ namespace gufo::hip {
 
 using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
-
-[[nodiscard]] bool UseCompactBf16SmallBatchTile() noexcept {
-  static const bool enabled = [] {
-    const char* value = std::getenv("GUFO_PREFILL_SMALL_BATCH_BF16_TILE");
-    if (value == nullptr) {
-      return true;
-    }
-    const std::string_view setting{value};
-    return setting != "fixed8" && setting != "baseline" && setting != "0" &&
-           setting != "false" && setting != "off";
-  }();
-  return enabled;
-}
-
-[[nodiscard]] bool UseCompactW8A8SmallBatchTile() noexcept {
-  static const bool enabled = [] {
-    const char* value = std::getenv("GUFO_PREFILL_SMALL_BATCH_W8A8_TILE");
-    if (value == nullptr) {
-      return true;
-    }
-    const std::string_view setting{value};
-    return setting != "fixed64" && setting != "baseline" && setting != "0" &&
-           setting != "false" && setting != "off";
-  }();
-  return enabled;
-}
-
-[[nodiscard]] bool UseExactSharedQ8SmallBatchFp32() noexcept {
-  static const bool enabled = [] {
-    const char* value = std::getenv("GUFO_Q8_SMALL_BATCH_EXACT_SHARED");
-    if (value == nullptr) {
-      return true;
-    }
-    const std::string_view setting{value};
-    return setting != "0" && setting != "false" && setting != "off";
-  }();
-  return enabled;
-}
 
 // Tiled Q8_1 activation layout (opt-c163-blocked-w8a8).
 //
@@ -871,30 +832,19 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
 // inner loop to hit the register target costs more than the extra wave returns,
 // so this kernel is latency-bound rather than occupancy-bound.
 template<int BM, int BN, int BK, int WM, int WN, core::GgmlType WType,
-         bool UsePrecomputedSums, bool StagePrecomputedSums,
-         bool ForceOccupancy = false, bool DropOffsetProbe = false,
-         bool FuseOffsetTerm = false, bool FusedSwiGluQuant = false>
-// `ForceOccupancy` asks the allocator for eight wave32s per SIMD instead of
-// letting it settle. It exists only so the 512-thread tile can be measured at
-// two workgroups per CU as well as one; see the opt-q4kxl-wide write-up.
-__launch_bounds__(WM * WN * 32, ForceOccupancy ? 8 : 1) __global__
-    void WKQuantA8BlockedWmmaGEMMKernel(
-        const void* __restrict__ w, const void* __restrict__ x_blocks,
-        float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
-        const float* __restrict__ swiglu_gate = nullptr,
-        void* __restrict__ q8_out = nullptr) {
+         bool UsePrecomputedSums, bool StagePrecomputedSums>
+__launch_bounds__(WM * WN * 32, 1) __global__
+    void WKQuantA8BlockedWmmaGEMMKernel(const void* __restrict__ w,
+                                        const void* __restrict__ x_blocks,
+                                        float* __restrict__ y,
+                                        std::size_t batch, std::size_t m,
+                                        std::size_t k) {
   // Q6_K and Q3_K carry one scale per sixteen elements; Q4_K and Q5_K carry an
   // explicit minimum. The two properties never co-occur.
   constexpr bool PerHalfScale =
       WType == core::GgmlType::kQ6_K || WType == core::GgmlType::kQ3_K;
-  // `DropOffsetProbe` deletes the Q4_K/Q5_K minimum correction outright. The
-  // result is WRONG -- `w = scale*q - offset` is not `scale*q` -- and it exists
-  // only to measure what a hypothetical free correction would be worth, which
-  // is the upper bound on any exact reformulation. It is never a production
-  // route and the correctness gate rejects it.
   constexpr bool HasOffset =
-      (WType == core::GgmlType::kQ4_K || WType == core::GgmlType::kQ5_K) &&
-      !DropOffsetProbe;
+      WType == core::GgmlType::kQ4_K || WType == core::GgmlType::kQ5_K;
   static_assert(!StagePrecomputedSums || UsePrecomputedSums);
   // The block is WM*WN waves of 32 lanes. Eight waves (256 threads) is the
   // production shape; sixteen waves (512 threads) is what makes BN=256
@@ -1227,29 +1177,12 @@ __launch_bounds__(WM * WN * 32, ForceOccupancy ? 8 : 1) __global__
             int32x8_t c = {0, 0, 0, 0, 0, 0, 0, 0};
             c = Wmma_16x16x16_iu8<true>(a0[i], b0, c);
             c = Wmma_16x16x16_iu8<true>(a1[i], b1, c);
-            // opt-q4kxl-fuse: with the minimum correction applied as a second
-            // accumulate, `acc` takes two dependent FMAs per K block and the
-            // scheduler pays for it -- an ISA dump puts the correction at +131
-            // fp32 FMAs and +115 `s_delay_alu` against the same kernel with the
-            // term compiled out. Folding the correction into the main term
-            // first leaves one accumulate, so the chain on `acc` is half as
-            // long, at the cost of one extra multiply per output.
-            if constexpr (HasOffset && FuseOffsetTerm) {
 #pragma unroll
-              for (int l = 0; l < 8; ++l) {
-                const float term =
-                    ((dw0[i][l] * dx) * static_cast<float>(c[l])) -
-                    (off[i][l] * sx);
-                acc[i][j][l] += term;
-              }
-            } else {
-#pragma unroll
-              for (int l = 0; l < 8; ++l) {
-                acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c[l]);
-              }
+            for (int l = 0; l < 8; ++l) {
+              acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c[l]);
             }
           }
-          if constexpr (HasOffset && !(FuseOffsetTerm && !PerHalfScale)) {
+          if constexpr (HasOffset) {
 #pragma unroll
             for (int l = 0; l < 8; ++l) {
               acc[i][j][l] -= off[i][l] * sx;
@@ -1262,23 +1195,6 @@ __launch_bounds__(WM * WN * 32, ForceOccupancy ? 8 : 1) __global__
   }
 
   __syncthreads();
-  if constexpr (FusedSwiGluQuant) {
-    static_assert(!FusedSwiGluQuant || kWaveRowTiles == 2,
-                  "the fused SwiGLU epilogue needs a wave to own one whole "
-                  "32-element quantization block");
-    static_assert(
-        !FusedSwiGluQuant || (sizeof(s_a) >= kWaves * 256 * sizeof(float) &&
-                              sizeof(s_b) >= kWaves * 256 * sizeof(float)),
-        "the fused epilogue stages two output tiles per wave");
-    BlockedSwiGluQuantEpilogue<kWaveTokTiles, UsePrecomputedSums>(
-        acc[0], acc[1],
-        reinterpret_cast<float*>(&s_a[0][0][0]) + (wave_id * 256),
-        reinterpret_cast<float*>(&s_b[0][0][0]) + (wave_id * 256), swiglu_gate,
-        q8_out, batch, m, r_block + static_cast<std::size_t>(wave_row * 32),
-        t_block + static_cast<std::size_t>(wave_tok * kWaveTokTiles * 16),
-        lane_id);
-    return;
-  }
   // Each wave stages its 16x16 output tile through 256 floats of LDS. `s_a` is
   // BK*kRowTiles*512 bytes, which is exactly kWaves*1024 at 256 threads; the
   // 512-thread shape needs 16 KB, which is what `s_b` is at BK=2 with BN=256.
@@ -1807,17 +1723,10 @@ void LaunchQuantizeActivationQ8_1(const void* bf16_x, void* q8_1_out,
   constexpr unsigned int warps_per_tb = quant_threads / 32;
   const std::size_t quant_grid =
       (total_x_blocks + warps_per_tb - 1) / warps_per_tb;
-  if (detail::ShouldStoreKQuantActivationSums()) {
-    QuantizeActivationToQ8_1Kernel<true>
-        <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
-            reinterpret_cast<const hip_bfloat16*>(bf16_x), q8_1_out, batch, k);
-    LaunchZeroQ8ActTail<true>(q8_1_out, batch, k, stream);
-  } else {
-    QuantizeActivationToQ8_1Kernel<false>
-        <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
-            reinterpret_cast<const hip_bfloat16*>(bf16_x), q8_1_out, batch, k);
-    LaunchZeroQ8ActTail<false>(q8_1_out, batch, k, stream);
-  }
+  QuantizeActivationToQ8_1Kernel<true>
+      <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
+          reinterpret_cast<const hip_bfloat16*>(bf16_x), q8_1_out, batch, k);
+  LaunchZeroQ8ActTail<true>(q8_1_out, batch, k, stream);
 }
 
 bool IsFusedSSMEpilogueQuantizeQ8_1Supported(std::uint32_t val_dim,
@@ -1837,17 +1746,10 @@ void LaunchBatchedFusedSSMPostNormGateQuantizeQ8_1(
     return;
   }
   const dim3 grid(num_heads, static_cast<unsigned int>(batch_size));
-  if (detail::ShouldStoreKQuantActivationSums()) {
-    BatchedFusedSSMPostNormGateQuantizeQ8_1Kernel<true>
-        <<<grid, 128, 0, stream>>>(raw_out, ssm_norm, gate, q8_1_out,
-                                   batch_size, inner_size, num_heads, val_dim);
-    LaunchZeroQ8ActTail<true>(q8_1_out, batch_size, inner_size, stream);
-  } else {
-    BatchedFusedSSMPostNormGateQuantizeQ8_1Kernel<false>
-        <<<grid, 128, 0, stream>>>(raw_out, ssm_norm, gate, q8_1_out,
-                                   batch_size, inner_size, num_heads, val_dim);
-    LaunchZeroQ8ActTail<false>(q8_1_out, batch_size, inner_size, stream);
-  }
+  BatchedFusedSSMPostNormGateQuantizeQ8_1Kernel<true>
+      <<<grid, 128, 0, stream>>>(raw_out, ssm_norm, gate, q8_1_out, batch_size,
+                                 inner_size, num_heads, val_dim);
+  LaunchZeroQ8ActTail<true>(q8_1_out, batch_size, inner_size, stream);
 }
 
 bool IsFusedRMSNormQuantizeQ8_1Supported(std::size_t dim) noexcept {
@@ -1865,17 +1767,10 @@ void LaunchBatchedFusedRMSNormQuantizeQ8_1(
     return;
   }
   const unsigned int lds_bytes = static_cast<unsigned int>(dim * sizeof(float));
-  if (detail::ShouldStoreKQuantActivationSums()) {
-    BatchedFusedRMSNormQuantizeQ8_1Kernel<true>
-        <<<static_cast<unsigned int>(batch_size), 256, lds_bytes, stream>>>(
-            x, residual, weight, sum_out, q8_1_out, batch_size, dim, eps);
-    LaunchZeroQ8ActTail<true>(q8_1_out, batch_size, dim, stream);
-  } else {
-    BatchedFusedRMSNormQuantizeQ8_1Kernel<false>
-        <<<static_cast<unsigned int>(batch_size), 256, lds_bytes, stream>>>(
-            x, residual, weight, sum_out, q8_1_out, batch_size, dim, eps);
-    LaunchZeroQ8ActTail<false>(q8_1_out, batch_size, dim, stream);
-  }
+  BatchedFusedRMSNormQuantizeQ8_1Kernel<true>
+      <<<static_cast<unsigned int>(batch_size), 256, lds_bytes, stream>>>(
+          x, residual, weight, sum_out, q8_1_out, batch_size, dim, eps);
+  LaunchZeroQ8ActTail<true>(q8_1_out, batch_size, dim, stream);
 }
 
 void LaunchQuantizeActivationQ8_1FromFp32(const float* fp32_x, void* q8_1_out,
@@ -1890,17 +1785,10 @@ void LaunchQuantizeActivationQ8_1FromFp32(const float* fp32_x, void* q8_1_out,
   constexpr unsigned int warps_per_tb = quant_threads / 32;
   const std::size_t quant_grid =
       (total_x_blocks + warps_per_tb - 1) / warps_per_tb;
-  if (detail::ShouldStoreKQuantActivationSums()) {
-    QuantizeActivationToQ8_1Kernel<true>
-        <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
-            fp32_x, q8_1_out, batch, k);
-    LaunchZeroQ8ActTail<true>(q8_1_out, batch, k, stream);
-  } else {
-    QuantizeActivationToQ8_1Kernel<false>
-        <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
-            fp32_x, q8_1_out, batch, k);
-    LaunchZeroQ8ActTail<false>(q8_1_out, batch, k, stream);
-  }
+  QuantizeActivationToQ8_1Kernel<true>
+      <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
+          fp32_x, q8_1_out, batch, k);
+  LaunchZeroQ8ActTail<true>(q8_1_out, batch, k, stream);
 }
 
 void LaunchBatchedFusedSwiGLUQuantizeQ8_1(const float* gate, const float* up,
@@ -1915,17 +1803,10 @@ void LaunchBatchedFusedSwiGLUQuantizeQ8_1(const float* gate, const float* up,
   constexpr unsigned int warps_per_tb = quant_threads / 32;
   const std::size_t quant_grid =
       (total_x_blocks + warps_per_tb - 1) / warps_per_tb;
-  if (detail::ShouldStoreKQuantActivationSums()) {
-    BatchedFusedSwiGLUQuantizeQ8_1Kernel<true>
-        <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
-            gate, up, q8_1_out, batch, k);
-    LaunchZeroQ8ActTail<true>(q8_1_out, batch, k, stream);
-  } else {
-    BatchedFusedSwiGLUQuantizeQ8_1Kernel<false>
-        <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
-            gate, up, q8_1_out, batch, k);
-    LaunchZeroQ8ActTail<false>(q8_1_out, batch, k, stream);
-  }
+  BatchedFusedSwiGLUQuantizeQ8_1Kernel<true>
+      <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
+          gate, up, q8_1_out, batch, k);
+  LaunchZeroQ8ActTail<true>(q8_1_out, batch, k, stream);
 }
 
 std::size_t QuantizedActivationBytes(std::size_t batch, std::size_t k) {
@@ -1974,10 +1855,8 @@ std::size_t QuantizedActivationBytes(std::size_t batch, std::size_t k) {
 // whole game, while the blocked GEMM is latency bound inside its own
 // dependency chain and lost 11% when the same kind of hint was applied to it.
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
-         std::size_t RowsPerWave, core::GgmlType WType,
-         std::uint32_t MinWavesPerSimd = 10, bool HoistWeightDecode = false,
-         bool DropOffsetProbe = false>
-__launch_bounds__(WavesPerBlock * 32, MinWavesPerSimd) __global__
+         std::size_t RowsPerWave, core::GgmlType WType>
+__launch_bounds__(WavesPerBlock * 32, 12) __global__
     void SmallBatchKQuantExactFp32GEMMKernel(const void* __restrict__ w,
                                              const float* __restrict__ x,
                                              float* __restrict__ y,
@@ -2007,27 +1886,6 @@ __launch_bounds__(WavesPerBlock * 32, MinWavesPerSimd) __global__
   for (std::size_t tile_base = 0; tile_base < num_sub;
        tile_base += kSubsPerTile) {
     const std::size_t sub = tile_base + lane;
-    // opt-q4kxl-hoist: the weight fetch reads nothing the activation stage
-    // produces, so it need not wait behind the stage's barrier. This branch
-    // issues it first, putting the lane's weight loads in flight while the
-    // block is still reading activations. It is a rejected route kept
-    // selectable; it lives in its own array so that with the flag off the
-    // retained ordering below compiles exactly as it did before the flag
-    // existed.
-    QuantSub16 hoisted[HoistWeightDecode ? RowsPerWave : 1];
-    if constexpr (HoistWeightDecode) {
-      if (sub < num_sub) {
-#pragma unroll
-        for (std::size_t r = 0; r < RowsPerWave; ++r) {
-          const std::size_t row = row_base + r;
-          const std::size_t safe_row = row < m ? row : m - 1;
-          DecodeQuantSub16(
-              WType,
-              static_cast<const std::uint8_t*>(w) + (safe_row * row_bytes), sub,
-              hoisted[r]);
-        }
-      }
-    }
     // One thread stages a whole (token, sub-block) so it can accumulate that
     // sub-block's activation sum sequentially while it has the values.
     for (std::size_t flat = threadIdx.x; flat < Batch * kSubsPerTile;
@@ -2059,16 +1917,11 @@ __launch_bounds__(WavesPerBlock * 32, MinWavesPerSimd) __global__
       QuantSub16 decoded[RowsPerWave];
 #pragma unroll
       for (std::size_t r = 0; r < RowsPerWave; ++r) {
-        if constexpr (HoistWeightDecode) {
-          decoded[r] = hoisted[r];
-        } else {
-          const std::size_t row = row_base + r;
-          const std::size_t safe_row = row < m ? row : m - 1;
-          DecodeQuantSub16(
-              WType,
-              static_cast<const std::uint8_t*>(w) + (safe_row * row_bytes), sub,
-              decoded[r]);
-        }
+        const std::size_t row = row_base + r;
+        const std::size_t safe_row = row < m ? row : m - 1;
+        DecodeQuantSub16(
+            WType, static_cast<const std::uint8_t*>(w) + (safe_row * row_bytes),
+            sub, decoded[r]);
       }
       float dots[RowsPerWave][Batch] = {};
 #pragma unroll
@@ -2100,16 +1953,9 @@ __launch_bounds__(WavesPerBlock * 32, MinWavesPerSimd) __global__
           // differed). Exactness is the contract here; the saved adds are not
           // worth it.
           //
-          // opt-dflash2-verify-marginal: `DropOffsetProbe` removes the term
-          // outright, which is numerically WRONG for Q4_K and Q5_K. It bounds
-          // what an exact cheaper correction could be worth per verified row.
-          if constexpr (DropOffsetProbe) {
-            sums[r][token] += decoded[r].scale * dots[r][token];
-          } else {
-            sums[r][token] += (decoded[r].scale * dots[r][token]) -
-                              (decoded[r].offset *
-                               staged_sums[(token * kSubsPerTile) + lane]);
-          }
+          sums[r][token] +=
+              (decoded[r].scale * dots[r][token]) -
+              (decoded[r].offset * staged_sums[(token * kSubsPerTile) + lane]);
         }
       }
     }
@@ -2150,19 +1996,16 @@ __launch_bounds__(WavesPerBlock * 32, MinWavesPerSimd) __global__
 constexpr std::size_t kKQuantSmallBatchWarps = 16;
 constexpr std::size_t kKQuantSmallBatchRowsPerWave = 2;
 
-template<std::size_t RowsPerWave, core::GgmlType WType,
-         std::uint32_t MinWavesPerSimd, bool HoistWeightDecode,
-         bool DropOffsetProbe>
+template<std::size_t RowsPerWave, core::GgmlType WType>
 void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                  std::size_t batch, std::size_t m,
                                  std::size_t k, dim3 grid, dim3 block,
                                  hipStream_t stream) {
-#define GUFO_KQUANT_SMALL_BATCH(N)                                           \
-  case N:                                                                    \
-    SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, N,           \
-                                        RowsPerWave, WType, MinWavesPerSimd, \
-                                        HoistWeightDecode, DropOffsetProbe>  \
-        <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);                    \
+#define GUFO_KQUANT_SMALL_BATCH(N)                                 \
+  case N:                                                          \
+    SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, N, \
+                                        RowsPerWave, WType>        \
+        <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);          \
     return;
   switch (batch) {
     GUFO_KQUANT_SMALL_BATCH(1)
@@ -2179,69 +2022,47 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
 #undef GUFO_KQUANT_SMALL_BATCH
 }
 
-template<std::size_t RowsPerWave, std::uint32_t MinWavesPerSimd,
-         bool HoistWeightDecode, bool DropOffsetProbe>
 void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
                                   const float* fp32_x, float* y,
                                   std::size_t batch, std::size_t m,
                                   std::size_t k, dim3 grid, dim3 block,
                                   hipStream_t stream) {
+  constexpr std::size_t RowsPerWave = 3;
   switch (type) {
     case core::GgmlType::kQ4_K:
-      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ4_K,
-                                  MinWavesPerSimd, HoistWeightDecode,
-                                  DropOffsetProbe>(w, fp32_x, y, batch, m, k,
-                                                   grid, block, stream);
+      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ4_K>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     case core::GgmlType::kQ5_K:
-      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ5_K,
-                                  MinWavesPerSimd, HoistWeightDecode,
-                                  DropOffsetProbe>(w, fp32_x, y, batch, m, k,
-                                                   grid, block, stream);
+      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ5_K>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
-    case core::GgmlType::kQ6_K:
-      if constexpr (RowsPerWave == 3) {
-        // Q6_K's extra per-half scale state spills 12 bytes/lane with three
-        // rows. Keep it on the zero-scratch two-row reference while the other
-        // formats use the candidate geometry.
-        constexpr std::size_t kRowsPerBlock =
-            kKQuantSmallBatchWarps * kKQuantSmallBatchRowsPerWave;
-        const dim3 reference_grid(
-            static_cast<unsigned int>((m + kRowsPerBlock - 1) / kRowsPerBlock));
-        LaunchKQuantSmallBatchTyped<kKQuantSmallBatchRowsPerWave,
-                                    core::GgmlType::kQ6_K, MinWavesPerSimd,
-                                    HoistWeightDecode, DropOffsetProbe>(
-            w, fp32_x, y, batch, m, k, reference_grid, block, stream);
-      } else {
-        LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ6_K,
-                                    MinWavesPerSimd, HoistWeightDecode,
-                                    DropOffsetProbe>(w, fp32_x, y, batch, m, k,
-                                                     grid, block, stream);
-      }
+    case core::GgmlType::kQ6_K: {
+      // Q6_K needs two rows to avoid spilling its extra scale state.
+      constexpr std::size_t kRowsPerBlock =
+          kKQuantSmallBatchWarps * kKQuantSmallBatchRowsPerWave;
+      const dim3 q6_grid(
+          static_cast<unsigned int>((m + kRowsPerBlock - 1) / kRowsPerBlock));
+      LaunchKQuantSmallBatchTyped<kKQuantSmallBatchRowsPerWave,
+                                  core::GgmlType::kQ6_K>(
+          w, fp32_x, y, batch, m, k, q6_grid, block, stream);
+    }
       return;
     case core::GgmlType::kQ3_K:
-      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ3_K,
-                                  MinWavesPerSimd, HoistWeightDecode,
-                                  DropOffsetProbe>(w, fp32_x, y, batch, m, k,
-                                                   grid, block, stream);
+      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ3_K>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     case core::GgmlType::kIQ4_NL:
-      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ4_NL,
-                                  MinWavesPerSimd, HoistWeightDecode,
-                                  DropOffsetProbe>(w, fp32_x, y, batch, m, k,
-                                                   grid, block, stream);
+      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ4_NL>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     case core::GgmlType::kIQ4_XS:
-      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ4_XS,
-                                  MinWavesPerSimd, HoistWeightDecode,
-                                  DropOffsetProbe>(w, fp32_x, y, batch, m, k,
-                                                   grid, block, stream);
+      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ4_XS>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     case core::GgmlType::kIQ3_S:
-      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ3_S,
-                                  MinWavesPerSimd, HoistWeightDecode,
-                                  DropOffsetProbe>(w, fp32_x, y, batch, m, k,
-                                                   grid, block, stream);
+      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ3_S>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     default:
       return;
@@ -2256,7 +2077,7 @@ template<core::GgmlType WType, bool UsePrecomputedSums,
 void LaunchKQuantWmmaGEMMTypedImpl(const void* w, const void* q8_1_x, float* y,
                                    std::size_t batch, std::size_t m,
                                    std::size_t k, hipStream_t stream) {
-  if (batch <= 8 && UseCompactW8A8SmallBatchTile()) {
+  if (batch <= 8) {
     constexpr int kBM = 128;
     const dim3 grid(1, static_cast<unsigned int>((m + kBM - 1) / kBM));
     if (m >= (3 * k)) {
@@ -2272,70 +2093,6 @@ void LaunchKQuantWmmaGEMMTypedImpl(const void* w, const void* q8_1_x, float* y,
   }
   if (batch >= 96) {
     constexpr int kBM = 128;
-    // opt-q4kxl-wide: 128x256 over sixteen waves. Same 64-register accumulator
-    // as the 256-thread tile, half the weight re-decode count.
-    const auto tile = detail::KQuantPrefillTileFromEnv();
-    if (tile == detail::KQuantPrefillTile::kNarrowRows) {
-      // opt-q4kxl-wide, second shape: BN=256 with BM=64 keeps BM*BN/256 = 64
-      // accumulator registers and the eight-wave workgroup, so the CU can
-      // still hold three blocks. BK has to drop to 1 because a 256-token
-      // activation stage is 8 KB per K block.
-      constexpr int kNarrowBM = 64;
-      constexpr int kNarrowBN = 256;
-      const dim3 narrow_grid(
-          static_cast<unsigned int>((batch + kNarrowBN - 1) / kNarrowBN),
-          static_cast<unsigned int>((m + kNarrowBM - 1) / kNarrowBM));
-      WKQuantA8BlockedWmmaGEMMKernel<kNarrowBM, kNarrowBN, 1, 2, 4, WType,
-                                     UsePrecomputedSums, StagePrecomputedSums>
-          <<<narrow_grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
-      return;
-    }
-    if (tile == detail::KQuantPrefillTile::kFusedOffset) {
-      constexpr int kBN = 128;
-      const dim3 fused_grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
-                            static_cast<unsigned int>((m + kBM - 1) / kBM));
-      WKQuantA8BlockedWmmaGEMMKernel<kBM, kBN, 2, 4, 2, WType,
-                                     UsePrecomputedSums, StagePrecomputedSums,
-                                     false, false, true>
-          <<<fused_grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
-      return;
-    }
-    if (tile == detail::KQuantPrefillTile::kSingleKBlock) {
-      constexpr int kBN = 128;
-      const dim3 bk1_grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
-                          static_cast<unsigned int>((m + kBM - 1) / kBM));
-      WKQuantA8BlockedWmmaGEMMKernel<kBM, kBN, 1, 4, 2, WType,
-                                     UsePrecomputedSums, StagePrecomputedSums>
-          <<<bk1_grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
-      return;
-    }
-    if (tile == detail::KQuantPrefillTile::kDropOffsetProbe) {
-      constexpr int kBN = 128;
-      const dim3 probe_grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
-                            static_cast<unsigned int>((m + kBM - 1) / kBM));
-      WKQuantA8BlockedWmmaGEMMKernel<kBM, kBN, 2, 4, 2, WType,
-                                     UsePrecomputedSums, StagePrecomputedSums,
-                                     false, true>
-          <<<probe_grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
-      return;
-    }
-    if (tile != detail::KQuantPrefillTile::kDefault) {
-      constexpr int kWideBN = 256;
-      const dim3 wide_grid(
-          static_cast<unsigned int>((batch + kWideBN - 1) / kWideBN),
-          static_cast<unsigned int>((m + kBM - 1) / kBM));
-      if (tile == detail::KQuantPrefillTile::kWideForcedOccupancy) {
-        WKQuantA8BlockedWmmaGEMMKernel<kBM, kWideBN, 2, 4, 4, WType,
-                                       UsePrecomputedSums, StagePrecomputedSums,
-                                       true>
-            <<<wide_grid, 512, 0, stream>>>(w, q8_1_x, y, batch, m, k);
-        return;
-      }
-      WKQuantA8BlockedWmmaGEMMKernel<kBM, kWideBN, 2, 4, 4, WType,
-                                     UsePrecomputedSums, StagePrecomputedSums>
-          <<<wide_grid, 512, 0, stream>>>(w, q8_1_x, y, batch, m, k);
-      return;
-    }
     constexpr int kBN = 128;
     const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
                     static_cast<unsigned int>((m + kBM - 1) / kBM));
@@ -2361,20 +2118,8 @@ template<core::GgmlType WType>
 void LaunchKQuantWmmaGEMMTyped(const void* w, const void* q8_1_x, float* y,
                                std::size_t batch, std::size_t m, std::size_t k,
                                hipStream_t stream) {
-  switch (detail::KQuantActivationSumModeFromEnv()) {
-    case detail::KQuantActivationSumMode::kStaged:
-      LaunchKQuantWmmaGEMMTypedImpl<WType, true, true>(w, q8_1_x, y, batch, m,
-                                                       k, stream);
-      return;
-    case detail::KQuantActivationSumMode::kDirect:
-      LaunchKQuantWmmaGEMMTypedImpl<WType, true, false>(w, q8_1_x, y, batch, m,
-                                                        k, stream);
-      return;
-    case detail::KQuantActivationSumMode::kReference:
-      LaunchKQuantWmmaGEMMTypedImpl<WType, false, false>(w, q8_1_x, y, batch, m,
-                                                         k, stream);
-      return;
-  }
+  LaunchKQuantWmmaGEMMTypedImpl<WType, true, true>(w, q8_1_x, y, batch, m, k,
+                                                   stream);
 }
 
 void LaunchKQuantWmmaGEMM(core::GgmlType type, const void* w,
@@ -2431,7 +2176,7 @@ void LaunchBatchedQuantGEMMPreQuantized(core::GgmlType type, const void* w,
     }
     return;
   }
-  if (batch <= 8 && UseCompactW8A8SmallBatchTile()) {
+  if (batch <= 8) {
     constexpr int kBM = 128;
     const dim3 grid(1, static_cast<unsigned int>((m + kBM - 1) / kBM));
     if (m >= (3 * k)) {
@@ -2492,67 +2237,15 @@ namespace {
 /// kernel `type` uses. The row-block base has to be a whole 32-element
 /// quantization block for every block in the grid, which is what pins BM here.
 template<int BN>
-void LaunchFusedSwiGluTile(core::GgmlType type, const void* w_up,
-                           const void* q8_1_x, const float* gate,
-                           void* q8_1_out, std::size_t batch, std::size_t m,
-                           std::size_t k, hipStream_t stream) {
+void LaunchFusedSwiGluTile(const void* w_up, const void* q8_1_x,
+                           const float* gate, void* q8_1_out, std::size_t batch,
+                           std::size_t m, std::size_t k, hipStream_t stream) {
   constexpr int kBM = 128;
   const dim3 grid(static_cast<unsigned int>((batch + BN - 1) / BN),
                   static_cast<unsigned int>(m / kBM));
-  const bool sums = detail::ShouldStoreKQuantActivationSums();
-  if (type == core::GgmlType::kQ8_0) {
-    if (sums) {
-      W8A8BlockedWmmaGEMMKernel<kBM, BN, 2, 4, 2, true, true>
-          <<<grid, 256, 0, stream>>>(w_up, q8_1_x, nullptr, batch, m, k, gate,
-                                     q8_1_out);
-    } else {
-      W8A8BlockedWmmaGEMMKernel<kBM, BN, 2, 4, 2, true, false>
-          <<<grid, 256, 0, stream>>>(w_up, q8_1_x, nullptr, batch, m, k, gate,
-                                     q8_1_out);
-    }
-    return;
-  }
-  // The K-quant kernel's sidecar flag is the same bit: `UsePrecomputedSums` is
-  // true exactly when the sidecar exists, so the epilogue that writes it and
-  // the fetch that reads it can never disagree.
-  const auto launch = [&]<core::GgmlType WType>() {
-    if (sums) {
-      WKQuantA8BlockedWmmaGEMMKernel<kBM, BN, 2, 4, 2, WType, true, true, false,
-                                     false, false, true>
-          <<<grid, 256, 0, stream>>>(w_up, q8_1_x, nullptr, batch, m, k, gate,
-                                     q8_1_out);
-    } else {
-      WKQuantA8BlockedWmmaGEMMKernel<kBM, BN, 2, 4, 2, WType, false, false,
-                                     false, false, false, true>
-          <<<grid, 256, 0, stream>>>(w_up, q8_1_x, nullptr, batch, m, k, gate,
-                                     q8_1_out);
-    }
-  };
-  switch (type) {
-    case core::GgmlType::kQ4_K:
-      launch.template operator()<core::GgmlType::kQ4_K>();
-      return;
-    case core::GgmlType::kQ5_K:
-      launch.template operator()<core::GgmlType::kQ5_K>();
-      return;
-    case core::GgmlType::kQ6_K:
-      launch.template operator()<core::GgmlType::kQ6_K>();
-      return;
-    case core::GgmlType::kQ3_K:
-      launch.template operator()<core::GgmlType::kQ3_K>();
-      return;
-    case core::GgmlType::kIQ4_NL:
-      launch.template operator()<core::GgmlType::kIQ4_NL>();
-      return;
-    case core::GgmlType::kIQ4_XS:
-      launch.template operator()<core::GgmlType::kIQ4_XS>();
-      return;
-    case core::GgmlType::kIQ3_S:
-      launch.template operator()<core::GgmlType::kIQ3_S>();
-      return;
-    default:
-      return;
-  }
+  W8A8BlockedWmmaGEMMKernel<kBM, BN, 2, 4, 2, true, true>
+      <<<grid, 256, 0, stream>>>(w_up, q8_1_x, nullptr, batch, m, k, gate,
+                                 q8_1_out);
 }
 
 }  // namespace
@@ -2560,37 +2253,9 @@ void LaunchFusedSwiGluTile(core::GgmlType type, const void* w_up,
 bool IsFusedSwiGluGemmEpilogueSupported(core::GgmlType type, std::size_t batch,
                                         std::size_t m,
                                         std::size_t q8_out_bytes) noexcept {
-  const auto mode = detail::FusedSwiGluEpilogueFromEnv();
-  if (mode == detail::FusedSwiGluEpilogue::kOff) {
-    return false;
-  }
-  // Only the large-batch blocked route has the 128-row macro tile the
-  // epilogue's "one wave owns one whole quantization block" argument depends
-  // on, and only an m that the tile divides keeps every block's rows inside the
-  // matrix.
-  if (batch < 96 || m == 0 || (m % 128) != 0) {
-    return false;
-  }
-  // The fused instantiation carries the retained staged activation-sum fetch
-  // and the retained 128x128 macro tile: the epilogue needs two 256-float slots
-  // per wave, which only the two 8 KiB staging arrays of that tile cover.
-  // Rather than duplicate every K-quant instantiation for the alternative pins,
-  // hand them the unfused chain so an A/B against them still measures the tile
-  // or the sum route on its own.
-  if (detail::KQuantPrefillTileFromEnv() !=
-          detail::KQuantPrefillTile::kDefault ||
-      detail::KQuantActivationSumModeFromEnv() ==
-          detail::KQuantActivationSumMode::kDirect) {
-    return false;
-  }
-  if (Q8ActTiledBytes(batch, m) + Q8ActSumBytes(batch, m) > q8_out_bytes) {
-    return false;
-  }
-  if (type == core::GgmlType::kQ8_0) {
-    return true;
-  }
-  return mode == detail::FusedSwiGluEpilogue::kAll &&
-         detail::IsNativeWmmaQuant(type);
+  return type == core::GgmlType::kQ8_0 && batch >= 96 && m != 0 &&
+         m % 128 == 0 &&
+         Q8ActTiledBytes(batch, m) + Q8ActSumBytes(batch, m) <= q8_out_bytes;
 }
 
 void LaunchBatchedDualQuantGEMMSwiGLUQuantizeQ8_1(
@@ -2602,13 +2267,9 @@ void LaunchBatchedDualQuantGEMMSwiGLUQuantizeQ8_1(
   }
   LaunchBatchedQuantGEMMPreQuantized(type, w_gate, q8_1_x, y_gate, batch, m, k,
                                      stream);
-  LaunchFusedSwiGluTile<128>(type, w_up, q8_1_x, y_gate, q8_1_out, batch, m, k,
+  LaunchFusedSwiGluTile<128>(w_up, q8_1_x, y_gate, q8_1_out, batch, m, k,
                              stream);
-  if (detail::ShouldStoreKQuantActivationSums()) {
-    LaunchZeroQ8ActTail<true>(q8_1_out, batch, m, stream);
-  } else {
-    LaunchZeroQ8ActTail<false>(q8_1_out, batch, m, stream);
-  }
+  LaunchZeroQ8ActTail<true>(q8_1_out, batch, m, stream);
 }
 
 void LaunchBatchedQuantGEMM(core::GgmlType type, const void* w,
@@ -2663,9 +2324,7 @@ void LaunchBatchedQuantGEMMBf16(core::GgmlType type, const void* w,
   constexpr std::size_t kWarpsPerBlock = 8;
   if (type == core::GgmlType::kQ8_0 && batch <= 8) {
     constexpr std::size_t kRowsPerWave = 4;
-    const std::size_t tokens_per_wave =
-        UseCompactBf16SmallBatchTile() ? (batch <= 2 ? 2 : (batch <= 4 ? 4 : 8))
-                                       : 8;
+    const std::size_t tokens_per_wave = batch <= 2 ? 2 : (batch <= 4 ? 4 : 8);
     const dim3 grid(
         static_cast<unsigned int>((m + (kWarpsPerBlock * kRowsPerWave) - 1) /
                                   (kWarpsPerBlock * kRowsPerWave)),
@@ -2711,56 +2370,17 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     // activations that no output consumes.
     constexpr std::size_t kKWarpsPerBlock = kKQuantSmallBatchWarps;
     const dim3 block(static_cast<unsigned int>(kWarp * kKWarpsPerBlock));
-    // The four-row route stays on the ten-wave hint. It is a rejected geometry
-    // kept selectable, and at twelve waves the allocator caps it at 120 VGPR
-    // and spills 12-88 private bytes/lane for every format; the two- and
-    // three-row geometries reach 96-112 VGPR with no scratch.
-    const bool twelve_waves = detail::KQuantSmallBatchOccupancyFromEnv() ==
-                              detail::KQuantSmallBatchOccupancy::kTwelveWaves;
-    const bool hoist = detail::KQuantSmallBatchFetchFromEnv() ==
-                       detail::KQuantSmallBatchFetch::kHoisted;
-    // Measurement-only: deletes the Q4_K/Q5_K minimum correction, which makes
-    // the result wrong. It bounds what an exact cheaper correction is worth in
-    // the speculative verifier.
-    const bool drop_offset = detail::KQuantSmallBatchOffsetFromEnv() ==
-                             detail::KQuantSmallBatchOffset::kDropProbe;
-    const auto dispatch_rows = [&]<std::size_t RowsPerWave>() {
-      constexpr std::size_t kRowsPerBlock = kKWarpsPerBlock * RowsPerWave;
-      const dim3 grid(
-          static_cast<unsigned int>((m + kRowsPerBlock - 1) / kRowsPerBlock));
-      const auto launch = [&]<std::uint32_t Waves, bool Hoist>() {
-        if (drop_offset) {
-          LaunchKQuantSmallBatchByType<RowsPerWave, Waves, Hoist, true>(
-              type, w, fp32_x, y, batch, m, k, grid, block, stream);
-          return;
-        }
-        LaunchKQuantSmallBatchByType<RowsPerWave, Waves, Hoist, false>(
-            type, w, fp32_x, y, batch, m, k, grid, block, stream);
-      };
-      const bool waves12 = twelve_waves && RowsPerWave != 4;
-      if (waves12 && hoist) {
-        launch.template operator()<12, true>();
-      } else if (waves12) {
-        launch.template operator()<12, false>();
-      } else if (hoist) {
-        launch.template operator()<10, true>();
-      } else {
-        launch.template operator()<10, false>();
-      }
-    };
-    if (detail::KQuantSmallBatchRowsFromEnv() ==
-        detail::KQuantSmallBatchRows::kFour) {
-      dispatch_rows.template operator()<4>();
-    } else if (detail::KQuantSmallBatchRowsFromEnv() ==
-               detail::KQuantSmallBatchRows::kThree) {
-      dispatch_rows.template operator()<3>();
-    } else {
-      dispatch_rows.template operator()<kKQuantSmallBatchRowsPerWave>();
-    }
+    // Three rows with twelve waves is the retained geometry. Q6_K dispatches
+    // two rows below because its extra scale state spills with three.
+    constexpr std::size_t kRowsPerBlock = kKWarpsPerBlock * 3;
+    const dim3 grid(
+        static_cast<unsigned int>((m + kRowsPerBlock - 1) / kRowsPerBlock));
+    LaunchKQuantSmallBatchByType(type, w, fp32_x, y, batch, m, k, grid, block,
+                                 stream);
     return;
   }
   if ((type == core::GgmlType::kQ8_0 || type == core::GgmlType::kQ8_K) &&
-      batch >= 1 && batch <= 8 && UseExactSharedQ8SmallBatchFp32()) {
+      batch >= 1 && batch <= 8) {
     const dim3 block(static_cast<unsigned int>(kWarp * kWarpsPerBlock));
     // The LDS-staged route streams each weight row once for the whole batch, so
     // it is the fastest option at every width. Narrow batches used to fall back

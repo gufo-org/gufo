@@ -31,16 +31,20 @@ void Expect(bool condition, std::string_view message) {
 
 int main(int argc, const char* const* argv) {
   try {
-    if (argc < 3) {
+    const char* base_path =
+        argc > 1 ? argv[1] : std::getenv("GUFO_QWEN27B_MODEL");
+    const char* draft_path =
+        argc > 2 ? argv[2] : std::getenv("GUFO_QWEN27B_DFLASH_MODEL");
+    if (base_path == nullptr || draft_path == nullptr) {
       std::cout << "qwen_dflash_gpu_test: skipped "
                    "(pass base and DFlash GGUF paths)\n";
       return kSkipped;
     }
 
     std::string error;
-    auto base_owner = gufo::core::GgufReader::OpenFile(argv[1], &error);
+    auto base_owner = gufo::core::GgufReader::OpenFile(base_path, &error);
     Expect(base_owner != nullptr, error);
-    auto dflash_owner = gufo::core::GgufReader::OpenFile(argv[2], &error);
+    auto dflash_owner = gufo::core::GgufReader::OpenFile(draft_path, &error);
     Expect(dflash_owner != nullptr, error);
 
     std::shared_ptr<const gufo::core::GgufReader> base_reader(
@@ -128,6 +132,68 @@ int main(int argc, const char* const* argv) {
         {}, uninterrupted.tokens.empty() ? 0 : uninterrupted.tokens.front());
     restored->AcceptFeedback(
         {}, restarted.tokens.empty() ? 0 : restarted.tokens.front());
+
+    // A large logical context must not reserve or serialize expired history.
+    // Restore at the window boundary, overwrite wrapped slots, and replay.
+    const auto window = dflash_model->GetDFlashConfig().sliding_window;
+    const auto capacity = std::min<std::uint32_t>(
+        262144, dflash_model->GetConfig().context_length);
+    auto executor = gufo::hip::QwenDFlashGpuExecutor::Create(dflash_model,
+                                                             capacity, &error);
+    Expect(executor != nullptr, error);
+    const auto& draft_config = dflash_model->GetConfig();
+    const std::size_t expected_history_bytes =
+        2ULL * dflash_model->GetDFlashConfig().num_layers * window *
+        draft_config.num_key_value_heads * draft_config.head_dim *
+        sizeof(float);
+    Expect(executor->StateBytes() == expected_history_bytes,
+           "draft history allocation is bounded by its attention window");
+    std::vector<float> features((window + 7ULL) * feature_width);
+    for (std::size_t index = 0; index < features.size(); ++index) {
+      features[index] =
+          static_cast<float>(static_cast<int>(index % 37U) - 18) / 128.0F;
+    }
+    const std::span<const float> rows(features);
+    Expect(executor->InjectTargetContext(rows.first(window * feature_width), 0,
+                                         window),
+           "inject through window boundary");
+    auto boundary = executor->SaveSnapshot();
+    Expect(executor->InjectTargetContext(rows.subspan(window * feature_width),
+                                         window, 7),
+           "inject across ring wrap");
+    auto wrapped = executor->SaveSnapshot();
+    Expect(wrapped->PayloadBytes() == expected_history_bytes,
+           "snapshot excludes expired history");
+    std::vector<std::uint8_t> wrapped_payload(
+        wrapped->PersistentPayloadBytes());
+    Expect(
+        wrapped->SerializePersistent(wrapped_payload) == wrapped_payload.size(),
+        "serialize wrapped history");
+    std::vector<float> confidences;
+    const auto wrapped_proposal =
+        executor->ForwardBlock(4, window + 7, 4, 0.0F, {}, &confidences);
+    executor->RestoreSnapshot(*boundary);
+    Expect(executor->InjectTargetContext(rows.subspan(window * feature_width),
+                                         window, 7),
+           "replay after in-memory restore");
+    auto replay = executor->SaveSnapshot();
+    std::vector<std::uint8_t> replay_payload(replay->PersistentPayloadBytes());
+    Expect(replay->SerializePersistent(replay_payload) == replay_payload.size(),
+           "serialize replayed history");
+    Expect(replay_payload == wrapped_payload,
+           "wrapped KV replay is byte exact");
+    executor->Reset();
+    executor->RestorePersistentSnapshot(wrapped_payload);
+    std::vector<float> replay_confidences;
+    Expect(executor->ForwardBlock(4, window + 7, 4, 0.0F, {},
+                                  &replay_confidences) == wrapped_proposal &&
+               confidences == replay_confidences,
+           "persistent ring restore preserves proposals and confidence");
+    Expect(!executor->InjectTargetContext({}, capacity + 1, 0),
+           "reject out-of-range injection");
+    std::cout << "draft context=" << capacity
+              << " history_bytes=" << executor->StateBytes()
+              << " snapshot_bytes=" << wrapped->PayloadBytes() << '\n';
 
     std::cout << "qwen_dflash_gpu_test: ALL TESTS PASSED\n";
     return 0;

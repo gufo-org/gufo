@@ -3,8 +3,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <string_view>
 
 namespace gufo::hip {
 
@@ -22,30 +20,6 @@ enum class QwenRecurrentStateStorage : std::uint8_t {
     QwenRecurrentStateStorage storage) noexcept {
   return storage == QwenRecurrentStateStorage::kBf16 ? sizeof(std::uint16_t)
                                                      : sizeof(float);
-}
-
-[[nodiscard]] inline QwenKvCacheStorage ResolveQwenKvCacheStorage(
-    const char* value) noexcept {
-  if (value == nullptr) {
-    return QwenKvCacheStorage::kFp16;
-  }
-  const std::string_view storage{value};
-  if (storage == "fp32" || storage == "float") {
-    return QwenKvCacheStorage::kFp32;
-  }
-  return QwenKvCacheStorage::kFp16;
-}
-
-[[nodiscard]] inline QwenRecurrentStateStorage ResolveQwenRecurrentStateStorage(
-    const char* value) noexcept {
-  if (value == nullptr) {
-    return QwenRecurrentStateStorage::kFp32;
-  }
-  const std::string_view storage{value};
-  if (storage == "bf16" || storage == "bfloat16") {
-    return QwenRecurrentStateStorage::kBf16;
-  }
-  return QwenRecurrentStateStorage::kFp32;
 }
 
 /// Immutable route policy for one Qwen GPU executor. Resolve this before HIP
@@ -70,15 +44,6 @@ struct QwenExecutionPolicy {
 
   [[nodiscard]] static constexpr QwenExecutionPolicy Production() noexcept {
     return {};
-  }
-
-  [[nodiscard]] static QwenExecutionPolicy Runtime() noexcept {
-    auto policy = Production();
-    policy.kv_cache_storage =
-        ResolveQwenKvCacheStorage(std::getenv("GUFO_QWEN_KV_CACHE"));
-    policy.recurrent_state_storage = ResolveQwenRecurrentStateStorage(
-        std::getenv("GUFO_QWEN_RECURRENT_STATE"));
-    return policy;
   }
 
   [[nodiscard]] constexpr bool UsesFp16AttentionKv() const noexcept {

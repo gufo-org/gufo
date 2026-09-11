@@ -1,3 +1,5 @@
+#include "src/models/qwen/dflash_reference.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -8,8 +10,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include "src/models/qwen/dflash_reference.hpp"
 
 namespace {
 

@@ -49,6 +49,7 @@ private:
   std::uint32_t kv_width_{0};
   std::uint32_t max_context_{0};
   std::uint32_t valid_context_{0};
+  std::uint32_t history_capacity_{0};
   std::size_t payload_bytes_{0};
 
   friend class QwenDFlashGpuExecutor;
@@ -151,6 +152,9 @@ private:
   QwenDFlashGpuExecutor(std::shared_ptr<const QwenDFlashGpuModel> model,
                         std::uint32_t max_context);
 
+  bool InjectTargetContextChunk(std::span<const float> target_features,
+                                std::uint32_t position,
+                                std::uint32_t num_tokens);
   void Allocate();
   void Free() noexcept;
   void PrewarmBlockGemms();
@@ -164,6 +168,8 @@ private:
   std::shared_ptr<const QwenDFlashGpuModel> model_;
   std::uint32_t max_context_{4096};
   std::uint32_t injected_context_len_{0};
+  std::uint32_t history_capacity_{0};
+  std::uint32_t injection_capacity_{0};
   hipStream_t stream_{nullptr};
   hipblasHandle_t hipblas_handle_{nullptr};
   std::unique_ptr<HipblasLtGemm> hipblaslt_gemm_;
@@ -196,10 +202,6 @@ private:
   float* d_confidences_{nullptr};
   std::uint32_t* d_out_token_{nullptr};
   hip_bfloat16* d_bf16_input_{nullptr};
-
-  // Host buffers for asynchronous synchronization
-  std::vector<float> h_target_features_;
-  std::vector<float> h_logits_;
 };
 
 struct QwenDFlashGpuDraftConfig {
@@ -241,6 +243,9 @@ public:
 
   [[nodiscard]] bool PrimeTargetContext(
       const speculative::DraftTargetContext& context) override;
+  [[nodiscard]] bool AppendTargetContext(
+      const speculative::DraftTargetContext& context,
+      std::uint32_t position) override;
 
   void UpdateTargetHidden(std::span<const float> hidden) override;
 
@@ -269,6 +274,7 @@ public:
   void Reset() noexcept override;
 
 private:
+  void InjectPendingFeatures(std::uint32_t position);
   QwenDFlashGpuDraftBackend(std::unique_ptr<QwenDFlashGpuExecutor> executor,
                             QwenDFlashGpuDraftConfig config);
   [[nodiscard]] speculative::DraftProposal ProposeImpl(

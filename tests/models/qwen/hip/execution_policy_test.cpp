@@ -69,31 +69,7 @@ static_assert(
 void TestFusionToggleValues() {
   Check(gufo::hip::QwenExecutionPolicy::Production().kv_cache_storage ==
         gufo::hip::QwenKvCacheStorage::kFp16);
-  Check(gufo::hip::ResolveQwenKvCacheStorage(nullptr) ==
-        gufo::hip::QwenKvCacheStorage::kFp16);
-  Check(gufo::hip::ResolveQwenKvCacheStorage("fp16") ==
-        gufo::hip::QwenKvCacheStorage::kFp16);
-  Check(gufo::hip::ResolveQwenKvCacheStorage("half") ==
-        gufo::hip::QwenKvCacheStorage::kFp16);
-  Check(gufo::hip::ResolveQwenKvCacheStorage("fp32") ==
-        gufo::hip::QwenKvCacheStorage::kFp32);
-  Check(gufo::hip::ResolveQwenKvCacheStorage("float") ==
-        gufo::hip::QwenKvCacheStorage::kFp32);
-  Check(gufo::hip::ResolveQwenKvCacheStorage("invalid") ==
-        gufo::hip::QwenKvCacheStorage::kFp16);
   Check(gufo::hip::QwenExecutionPolicy::Production().recurrent_state_storage ==
-        gufo::hip::QwenRecurrentStateStorage::kFp32);
-  Check(gufo::hip::ResolveQwenRecurrentStateStorage(nullptr) ==
-        gufo::hip::QwenRecurrentStateStorage::kFp32);
-  Check(gufo::hip::ResolveQwenRecurrentStateStorage("fp32") ==
-        gufo::hip::QwenRecurrentStateStorage::kFp32);
-  Check(gufo::hip::ResolveQwenRecurrentStateStorage("float") ==
-        gufo::hip::QwenRecurrentStateStorage::kFp32);
-  Check(gufo::hip::ResolveQwenRecurrentStateStorage("bf16") ==
-        gufo::hip::QwenRecurrentStateStorage::kBf16);
-  Check(gufo::hip::ResolveQwenRecurrentStateStorage("bfloat16") ==
-        gufo::hip::QwenRecurrentStateStorage::kBf16);
-  Check(gufo::hip::ResolveQwenRecurrentStateStorage("invalid") ==
         gufo::hip::QwenRecurrentStateStorage::kFp32);
   Check(gufo::hip::QwenRecurrentStateElementBytes(
             gufo::hip::QwenRecurrentStateStorage::kFp32) == sizeof(float));

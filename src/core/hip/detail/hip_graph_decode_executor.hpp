@@ -4,9 +4,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
-#include <cstdlib>
 #include <optional>
-#include <string_view>
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 
@@ -22,15 +20,7 @@ struct HipGraphCaptureKey {
 
 class HipGraphDecodeExecutor {
 public:
-  HipGraphDecodeExecutor() {
-    const char* env = std::getenv("GUFO_ENABLE_HIP_GRAPH");
-    if (env != nullptr) {
-      const std::string_view val(env);
-      if (val == "0" || val == "false" || val == "OFF" || val == "off") {
-        is_enabled_ = false;
-      }
-    }
-  }
+  HipGraphDecodeExecutor() = default;
 
   ~HipGraphDecodeExecutor() { Reset(); }
 

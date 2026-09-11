@@ -94,18 +94,16 @@ acceptance on useful workloads. Report both without combining their rates.
 
 ## Quality and feature parity
 
-- Check operators against pinned official formulas and independent CPU
-  equations. Comparing two Gufo paths alone can miss a shared error.
-- Compare prefill and decode logits, finite values, greedy choices, and
-  repeated output on each quantization. BF16 comparisons isolate quantization
-  effects and stay in optional reference tests.
-- Require speculative output and token counts to match ordinary decoding.
-  Include short budgets, rejection/rollback, context boundaries, snapshots,
-  prefix reuse, and concurrent requests. Failed or missing cases fail the run.
-- Exercise `prompt`, `chat`, `bench` and HTTP serving consistently. Check
-  sampling, bounded prefill, cancellation, context exhaustion and disk-cache
-  identity against the same service contract used by DS4.
+The [quality report](eval/README.md) records the maintained checks, pinned
+DFlash2 formulas, evidence and remaining gaps. Start with
+`nix develop -c python3 tools/qwen27b/check.py fast`, then run only the affected
+kernel/model suites. Release speed qualifies only after complete quality runs.
 
-Remaining qualification: official MTP/DFlash2 audit, Q4/Q8 draft selection,
-entrypoint parity, and matched C1/C>1 performance. The BF16 reference cannot
-by itself establish equivalence to the original unquantized checkpoint.
+Production execution has one implementation per supported shape/weight type;
+Qwen kernel, precision and verification environment switches are removed.
+DFlash2 retains FP32 values in a bounded history ring. MTP replay uses the
+committed target features. The optimized correctness build keeps assertions
+and symbols; benchmark only the Nix release binaries.
+
+Remaining: independent original-target/MTP qualification, final Q4/Q8 draft
+selection, matched speed matrices, and speculative serving parity for C>1.

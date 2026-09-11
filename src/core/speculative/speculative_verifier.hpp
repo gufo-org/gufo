@@ -70,6 +70,14 @@ public:
   virtual void Reset() noexcept = 0;
   [[nodiscard]] virtual tokenization::TokenId ForwardPromptBatch(
       std::span<const tokenization::TokenId> prompt_tokens) = 0;
+  [[nodiscard]] virtual tokenization::TokenId ForwardPromptSuffix(
+      std::span<const tokenization::TokenId> tokens, std::uint32_t position,
+      bool compute_logits = true) {
+    (void)compute_logits;
+    if (position == 0)
+      return ForwardPromptBatch(tokens);
+    throw std::logic_error("target does not support batched prompt extension");
+  }
   [[nodiscard]] virtual tokenization::TokenId ForwardToken(
       tokenization::TokenId token_id, std::uint32_t pos,
       bool compute_logits = true) = 0;
@@ -238,7 +246,11 @@ public:
   /// Resets target and draft state, prefills the prompt, and returns the first
   /// target token. This setup is outside benchmarked decode regions.
   [[nodiscard]] tokenization::TokenId Prime(
-      std::span<const tokenization::TokenId> prompt_tokens);
+      std::span<const tokenization::TokenId> prompt_tokens,
+      bool compute_logits = true);
+  [[nodiscard]] tokenization::TokenId ExtendPrompt(
+      std::span<const tokenization::TokenId> tokens, std::uint32_t position,
+      bool compute_logits = true);
 
   /// Commits one externally supplied continuation token through the target
   /// model and updates draft-provider state with the matching target features.
@@ -299,7 +311,6 @@ public:
 private:
   void ConfigureAdaptiveDraftPolicy();
   void ResetAdaptiveDraftLength() noexcept;
-  void UpdateDraftTargetHidden();
   void UpdateAdaptiveDraftLength(std::size_t accepted, std::size_t drafted);
   [[nodiscard]] StepResult VerifySampledStep(
       std::vector<tokenization::TokenId>& current_sequence,

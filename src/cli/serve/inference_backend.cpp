@@ -159,7 +159,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
         << "draft_backend=dflash2-gfx1151-v1\n"
         << "draft_artifact_id=" << core::kGgufSampledIdentityScheme << ':'
         << draft_artifact_fingerprint << '\n'
-        << "draft_state_layout=dflash-live-kv-and-frontier-v1\n"
+        << "draft_state_layout=dflash-window-kv-and-frontier-v2\n"
         << "draft_max_tokens=" << speculative_options.max_draft_tokens << '\n'
         << "draft_min_tokens=" << speculative_options.min_draft_tokens << '\n'
         << "draft_initial_tokens=" << speculative_options.initial_draft_tokens
@@ -373,13 +373,17 @@ public:
     return verifier_ != nullptr;
   }
 
-  void PrimeSpeculative(std::span<const TextRunnerToken> prompt) {
+  void PrimeSpeculative(std::span<const TextRunnerToken> prompt,
+                        bool decode_ready) {
     if (verifier_ == nullptr) {
       throw std::logic_error("Qwen state has no speculative verifier");
     }
-    frontier_ = verifier_->Prime(prompt);
-    const auto logits = verifier_->CopyLastTargetLogits();
-    frontier_logits_.assign(logits.begin(), logits.end());
+    frontier_ = verifier_->Prime(prompt, decode_ready);
+    frontier_logits_.clear();
+    if (decode_ready) {
+      const auto logits = verifier_->CopyLastTargetLogits();
+      frontier_logits_.assign(logits.begin(), logits.end());
+    }
     sequence_.assign(prompt.begin(), prompt.end());
     position_ = prompt.size();
     frontier_published_ = false;
@@ -397,7 +401,8 @@ public:
     frontier_published_ = false;
   }
 
-  void ExtendSpeculative(std::span<const TextRunnerToken> suffix) {
+  void ExtendSpeculative(std::span<const TextRunnerToken> suffix,
+                         bool decode_ready) {
     if (verifier_ == nullptr || !frontier_.has_value()) {
       throw std::logic_error("Qwen speculative prefix is not initialized");
     }
@@ -405,11 +410,12 @@ public:
       throw std::logic_error(
           "Qwen speculative sequence does not match retained position");
     }
-    for (const TextRunnerToken token : suffix) {
-      frontier_ = verifier_->AdvanceCommittedToken(
-          token, static_cast<std::uint32_t>(position_));
-      sequence_.push_back(token);
-      ++position_;
+    frontier_ = verifier_->ExtendPrompt(
+        suffix, static_cast<std::uint32_t>(position_), decode_ready);
+    sequence_.insert(sequence_.end(), suffix.begin(), suffix.end());
+    position_ += suffix.size();
+    frontier_logits_.clear();
+    if (decode_ready) {
       const auto logits = verifier_->CopyLastTargetLogits();
       frontier_logits_.assign(logits.begin(), logits.end());
     }
@@ -633,7 +639,7 @@ public:
         dflash_model_(std::move(dflash_model)),
         max_context_(max_context),
         speculative_options_(speculative_options),
-        execution_policy_(hip::QwenExecutionPolicy::Runtime()) {
+        execution_policy_(hip::QwenExecutionPolicy::Production()) {
     if (!artifact_fingerprint.empty()) {
       const bool speculative = dflash_model_ != nullptr;
       persistence_ = TextRunnerPersistenceDescriptor{
@@ -655,7 +661,7 @@ public:
         .max_context = max_context_,
         .capabilities =
             TextRunnerCapabilities{
-                .incremental_prefill = !speculative_enabled,
+                .incremental_prefill = true,
                 .snapshot = true,
                 .fork = true,
                 .final_token_advance_required = !speculative_enabled,
@@ -787,15 +793,15 @@ public:
     }
     if (qwen.speculative()) {
       if (offset == 0) {
-        if (max_input_tokens < prompt.size()) {
+        const auto consumed = std::min(max_input_tokens, prompt.size());
+        if (consumed == 0) {
           throw std::logic_error(
-              "Qwen DFlash cold prefill requires the complete prompt");
+              "Qwen prefill requires a nonzero token budget");
         }
-        qwen.PrimeSpeculative(prompt);
-        return {
-            .consumed_tokens = prompt.size(),
-            .decode_ready = true,
-        };
+        qwen.PrimeSpeculative(prompt.first(consumed),
+                              consumed == prompt.size());
+        return {.consumed_tokens = consumed,
+                .decode_ready = consumed == prompt.size()};
       }
       const std::size_t consumed =
           std::min(max_input_tokens, prompt.size() - offset);
@@ -803,7 +809,8 @@ public:
         throw std::logic_error(
             "Qwen DFlash retained prefix has no suffix to prefill");
       }
-      qwen.ExtendSpeculative(prompt.subspan(offset, consumed));
+      qwen.ExtendSpeculative(prompt.subspan(offset, consumed),
+                             offset + consumed == prompt.size());
       return {
           .consumed_tokens = consumed,
           .decode_ready = offset + consumed == prompt.size(),
@@ -2466,12 +2473,6 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model;
     speculative::SpeculativeOptions speculative_options;
     if (speculative_config.backend == TextSpeculativeBackend::kDFlash) {
-      if (speculative_config.draft_model_path.empty()) {
-        if (const char* environment = std::getenv("GUFO_DFLASH_MODEL");
-            environment != nullptr && *environment != '\0') {
-          speculative_config.draft_model_path = environment;
-        }
-      }
       if (speculative_config.draft_model_path.empty()) {
         SetError(error, "DFlash HTTP decoding requires --dflash-model");
         return false;

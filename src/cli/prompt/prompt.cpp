@@ -841,13 +841,8 @@ int RunPrompt(std::span<const char* const> args) {
             opt.speculative_backend == "dflash-2") {
           std::string dflash_path = opt.dflash_model_path;
           if (dflash_path.empty()) {
-            if (const char* environment = std::getenv("GUFO_DFLASH_MODEL");
-                environment != nullptr) {
-              dflash_path = environment;
-            }
-          }
-          if (dflash_path.empty()) {
-            dflash_path = opt.model_path;
+            std::cerr << "DFlash2 requires --dflash-model\n";
+            return 1;
           }
           hip::QwenDFlashGpuDraftConfig cfg{
               .max_context = gpu_exec->GetMaxContext(),
@@ -875,10 +870,8 @@ int RunPrompt(std::span<const char* const> args) {
                    opt.speculative_backend == "mtp-npu") {
           std::string mtp_path = opt.mtp_model_path;
           if (mtp_path.empty()) {
-            if (const char* environment = std::getenv("GUFO_MTP_MODEL");
-                environment != nullptr) {
-              mtp_path = environment;
-            }
+            std::cerr << "MTP requires --mtp-model\n";
+            return 1;
           }
           hip::QwenMtpGpuDraftConfig cfg{
               .max_context = gpu_exec->GetMaxContext(),

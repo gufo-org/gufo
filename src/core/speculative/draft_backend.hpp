@@ -113,6 +113,23 @@ public:
     return true;
   }
 
+  /// Appends externally supplied tokens and their target features to an
+  /// already primed draft. Position is the first new target input position.
+  [[nodiscard]] virtual bool AppendTargetContext(
+      const DraftTargetContext& context, std::uint32_t position) {
+    (void)position;
+    if (context.hidden_size == 0 ||
+        context.prompt_hidden_states.size() !=
+            context.prompt_tokens.size() * context.hidden_size) {
+      return false;
+    }
+    for (std::size_t row = 0; row < context.prompt_tokens.size(); ++row) {
+      UpdateTargetHidden(context.prompt_hidden_states.subspan(
+          row * context.hidden_size, context.hidden_size));
+    }
+    return true;
+  }
+
   /// Supplies the target hidden state paired with the next correction token.
   virtual void UpdateTargetHidden(std::span<const float> hidden) {
     (void)hidden;

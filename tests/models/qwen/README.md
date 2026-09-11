@@ -7,11 +7,12 @@ validation target:
 - `modules/` — narrow contracts for extracted norm, FFN, and SSM modules.
 - `hip/` — pure route-policy tests plus gfx1151 kernel and integration tests,
   grouped by attention, FFN, quant, and basic operation ownership.
-- `mtp/` — multi-token-prediction reference behavior.
 - `tokenization/` — tokenizer and chat-template behavior.
-- `xdna2/` — MTP kernels executed through the XDNA2 runtime.
 - `support/` — deterministic Qwen-only fixtures; repository-wide assertions
   and random helpers remain in `tests/testing/test_common.hpp`.
+
+Qwen27B MTP, DFlash2, model replay and optional BF16 reference checks live in
+`tests/models/qwen27b` and run through `tools/qwen27b/check.py`.
 
 Compatibility CTest names remain attached to their primary route.
 `qwen_gpu_ops_test` now owns dense GEMM/BLAS coverage, while focused targets
@@ -59,5 +60,5 @@ the supported gfx1151 target.
 The module-seam integration test does not yet cover the complete production
 executor: embedding, fused attention/SSM composition, unembedding, sampling,
 and real executor/logit parity remain separate acceptance work. Production
-model and performance validation must use the optimized `nix build` binaries,
-not the unoptimized `build/gpu-test` preset.
+performance validation uses the release `nix build` binaries. The `gpu-test`
+preset uses optimized code with symbols and keeps test assertions enabled.

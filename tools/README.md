@@ -139,3 +139,10 @@ Whole-model Qwen3.5-0.8B (158 tensors, G64) rough timings on this box:
 
 (The 4-thread row is the default. The prior per-block Python-loop version took
 minutes and choked imatrix; this is ~20x faster and scales memory-bounded.)
+# Qwen27B
+
+`qwen27b/check.py` owns the focused model checks (`fast`, `kernels`, `model`).
+Its optional `reference` suite compares target logits with an explicitly
+provided BF16 artifact. `qwen27b/drafts.py` compares production Q4/Q8 DFlash2
+companions and refuses incomplete or mismatching results. See
+`benchmarks/qwen3.8-27b/README.md` for commands and current measurements.

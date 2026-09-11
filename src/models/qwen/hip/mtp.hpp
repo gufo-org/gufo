@@ -211,6 +211,9 @@ public:
 
   [[nodiscard]] bool PrimeTargetContext(
       const speculative::DraftTargetContext& context) override;
+  [[nodiscard]] bool AppendTargetContext(
+      const speculative::DraftTargetContext& context,
+      std::uint32_t position) override;
 
   [[nodiscard]] speculative::DraftProposal Propose(
       std::span<const tokenization::TokenId> prompt_tokens,
@@ -236,6 +239,8 @@ private:
   std::unique_ptr<QwenMtpGpuExecutor> executor_;
   QwenMtpGpuDraftConfig config_;
   std::vector<float> target_hidden_;
+  std::vector<float> proposal_target_hidden_;
+  std::vector<float> committed_target_hidden_;
   std::vector<tokenization::TokenId> proposed_tokens_;
   tokenization::TokenId proposal_input_{0};
   std::uint32_t proposal_checkpoint_{0};

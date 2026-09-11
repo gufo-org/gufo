@@ -73,16 +73,20 @@ Comparison Compare(std::span<const float> actual,
 
 int main(int argc, const char* const* argv) {
   try {
-    if (argc < 3) {
+    const char* base_path =
+        argc > 1 ? argv[1] : std::getenv("GUFO_QWEN27B_MODEL");
+    const char* draft_path =
+        argc > 2 ? argv[2] : std::getenv("GUFO_QWEN27B_MTP_MODEL");
+    if (base_path == nullptr || draft_path == nullptr) {
       std::cout << "qwen_mtp_gpu_test: skipped "
                    "(pass base and MTP GGUF paths)\n";
       return kSkipped;
     }
 
     std::string error;
-    auto base_owner = gufo::core::GgufReader::OpenFile(argv[1], &error);
+    auto base_owner = gufo::core::GgufReader::OpenFile(base_path, &error);
     Expect(base_owner != nullptr, error);
-    auto mtp_owner = gufo::core::GgufReader::OpenFile(argv[2], &error);
+    auto mtp_owner = gufo::core::GgufReader::OpenFile(draft_path, &error);
     Expect(mtp_owner != nullptr, error);
     std::shared_ptr<const gufo::core::GgufReader> base_reader(
         std::move(base_owner));
@@ -208,20 +212,42 @@ int main(int argc, const char* const* argv) {
                                                       prompt_tokens[1], token};
     const auto first_proposal = draft_backend->Propose(sequence, 2, 2);
     Expect(first_proposal.tokens.size() == 2, "first GPU MTP proposal size");
+    // Verification publishes committed target rows before feedback. Rebuilding
+    // from a fresh teacher-forced prefix must produce the same next proposal.
+    std::vector<float> committed_hidden(target_hidden);
+    std::vector<float> anchor_hidden(target_hidden);
+    for (auto& value : anchor_hidden)
+      value *= -2.0F;
+    for (auto& value : committed_hidden)
+      value *= 0.5F;
+    draft_backend->UpdateTargetHidden(anchor_hidden);
+    draft_backend->UpdateTargetHidden(committed_hidden);
     draft_backend->AcceptFeedback(std::span<const gufo::tokenization::TokenId>(
                                       first_proposal.tokens.data(), 1),
                                   42);
-
-    std::vector<float> committed_hidden(target_hidden);
-    for (auto& value : committed_hidden) {
-      value *= 0.5F;
-    }
-    draft_backend->UpdateTargetHidden(committed_hidden);
     sequence.push_back(first_proposal.tokens.front());
+    const auto committed_sequence = sequence;
     sequence.push_back(42);
-    const auto second_proposal = draft_backend->Propose(sequence, 4, 1);
-    Expect(second_proposal.tokens.size() == 1, "second GPU MTP proposal size");
-    draft_backend->AcceptFeedback({}, 7);
+    const auto second_proposal = draft_backend->Propose(sequence, 4, 2);
+    auto teacher_forced = gufo::hip::QwenMtpGpuDraftBackend::Create(
+        mtp_model, draft_config, &error);
+    Expect(teacher_forced != nullptr, error);
+    std::vector<float> committed_features(prompt_hidden);
+    committed_features.insert(committed_features.end(), anchor_hidden.begin(),
+                              anchor_hidden.end());
+    committed_features.insert(committed_features.end(),
+                              committed_hidden.begin(), committed_hidden.end());
+    Expect(teacher_forced->PrimeTargetContext({
+               .prompt_tokens = committed_sequence,
+               .prompt_hidden_states = committed_features,
+               .hidden_size = target_hidden.size(),
+               .first_token = 42,
+           }),
+           "teacher-forced MTP replay");
+    const auto expected_proposal = teacher_forced->Propose(sequence, 4, 2);
+    Expect(
+        second_proposal.tokens == expected_proposal.tokens,
+        "feedback replay must match teacher-forced committed target features");
     draft_backend->Reset();
 
     std::cout << "qwen_mtp_gpu_test: token=" << token

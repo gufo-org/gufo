@@ -272,17 +272,12 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeSampled(
                      rng_state);
 }
 
-speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
-    std::span<const tokenization::TokenId> prompt_tokens,
-    std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
-    std::uint64_t* rng_state) {
-  if (!primed_ || prompt_tokens.empty() || current_pos == 0) {
-    throw std::logic_error("DFlash GPU draft backend is not primed");
+void QwenDFlashGpuDraftBackend::InjectPendingFeatures(
+    std::uint32_t current_pos) {
+  if (current_pos < executor_->GetInjectedContextLength()) {
+    throw std::logic_error(
+        "DFlash committed position precedes injected history");
   }
-  if (proposal_active_) {
-    throw std::logic_error("DFlash GPU proposal feedback is pending");
-  }
-
   // Inject newly committed target tokens into DFlash draft KV cache
   if (current_pos > executor_->GetInjectedContextLength()) {
     const std::uint32_t start_p = executor_->GetInjectedContextLength();
@@ -303,6 +298,34 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
     throw std::logic_error(
         "DFlash has target features without a matching committed position");
   }
+}
+
+bool QwenDFlashGpuDraftBackend::AppendTargetContext(
+    const speculative::DraftTargetContext& context, std::uint32_t position) {
+  if (!primed_ || proposal_active_ ||
+      context.hidden_size != executor_->GetTargetFeaturesSize() ||
+      context.prompt_hidden_states.size() !=
+          context.prompt_tokens.size() * context.hidden_size) {
+    return false;
+  }
+  InjectPendingFeatures(position);
+  return executor_->InjectTargetContext(
+      context.prompt_hidden_states, position,
+      static_cast<std::uint32_t>(context.prompt_tokens.size()));
+}
+
+speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
+    std::span<const tokenization::TokenId> prompt_tokens,
+    std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+    std::uint64_t* rng_state) {
+  if (!primed_ || prompt_tokens.empty() || current_pos == 0) {
+    throw std::logic_error("DFlash GPU draft backend is not primed");
+  }
+  if (proposal_active_) {
+    throw std::logic_error("DFlash GPU proposal feedback is pending");
+  }
+
+  InjectPendingFeatures(current_pos);
 
   speculative::DraftProposal proposal;
   proposal.start_pos = current_pos;

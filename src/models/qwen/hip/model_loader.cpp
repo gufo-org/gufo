@@ -1,5 +1,4 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include <cstdlib>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -200,91 +199,6 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     }
     return nullptr;
   }
-
-  // opt-q4kxl: whether this shard runs its K-quants natively.
-  //
-  // Q6_K, Q5_K and Q8_K used to be dequantized to BF16 at load, because they
-  // had no in-kernel decoder. They have had one since `opt-q4kxl`, and keeping
-  // them packed is now better on all three axes:
-  //
-  //  - **Exactness.** The dequantized copies land on the BF16 projection route,
-  //    whose batched spelling (`LaunchExactBf16GEMMFp32SmallBatch`, used by the
-  //    speculative verifier) does not reproduce the dense BF16 GEMV that
-  //    single-token decode uses. A drafted token is only acceptable if the
-  //    verifier reproduces decode exactly, so on any shard that hit this path
-  //    speculation silently stopped being greedy-faithful: UD-Q8_K_L was 0/10
-  //    exact against UD-Q4_K_XL's 10/10, diverging first at the earliest layer
-  //    whose `ffn_down` was converted. The packed routes are bit-exact against
-  //    the decode GEMV and covered by `qwen_q4kxl_quant_ops_test` and
-  //    `qwen_quant_gemv_ops_test`.
-  //  - **Speed.** Q6_K is 0.82 bytes per element against BF16's two, and decode
-  //    is bandwidth bound. Interleaved `tg128` on UD-Q8_K_L, six pairs:
-  //    dequantized 5.65/4.44/5.89/6.29/4.33/6.28 (median 5.77), packed
-  //    5.39/5.50/6.83/6.94/6.99/6.53 (median 6.68), **+15.8%**, five pairs of
-  //    six.
-  //  - **Footprint.** The conversion allocated a device-resident BF16 copy of
-  //    every converted projection, roughly 3 GB on this shard.
-  //
-  // UD-Q4_K_XL never took this path -- it carries Q4_K/IQ4_XS/IQ3_S, which the
-  // old heuristic already recognized as native-only -- which is exactly why it
-  // was bit-exact while the Q8 shard was not.
-  // GUFO_QUANT_NATIVE_KQUANT=0 restores the dequantizing behaviour.
-  bool native_kquant = true;
-  if (const char* forced = std::getenv("GUFO_QUANT_NATIVE_KQUANT");
-      forced != nullptr) {
-    const std::string_view setting{forced};
-    native_kquant = setting != "0" && setting != "false" && setting != "off";
-  }
-
-  const auto pre_dequantize = [&](models::QwenTensorRef& tensor) {
-    if (tensor.empty() || native_kquant) {
-      return true;
-    }
-    if (tensor.type == core::GgmlType::kQ6_K ||
-        tensor.type == core::GgmlType::kQ5_K ||
-        tensor.type == core::GgmlType::kQ8_K) {
-      void* d_bf16 = nullptr;
-      const std::size_t n_bytes = tensor.num_elements * sizeof(hip_bfloat16);
-      if (hipMalloc(&d_bf16, n_bytes) != hipSuccess) {
-        return false;
-      }
-      LaunchDequantizeToBf16(tensor.type, tensor.data,
-                             static_cast<hip_bfloat16*>(d_bf16),
-                             tensor.num_elements, nullptr);
-      weight_regions.push_back({
-          .host_data = nullptr,
-          .device_data = d_bf16,
-          .size = n_bytes,
-          .owns_device_memory = true,
-          .host_registered = false,
-      });
-      tensor.data = d_bf16;
-      tensor.type = core::GgmlType::kBF16;
-      tensor.available_bytes = n_bytes;
-    }
-    return true;
-  };
-
-  bool dequant_ok = pre_dequantize(weights_opt->output);
-  for (auto& layer : weights_opt->layers) {
-    dequant_ok =
-        dequant_ok && pre_dequantize(layer.attn_q) &&
-        pre_dequantize(layer.attn_k) && pre_dequantize(layer.attn_v) &&
-        pre_dequantize(layer.attn_output) && pre_dequantize(layer.attn_qkv) &&
-        pre_dequantize(layer.attn_gate) && pre_dequantize(layer.ssm_out) &&
-        pre_dequantize(layer.ssm_alpha) && pre_dequantize(layer.ssm_beta) &&
-        pre_dequantize(layer.ffn_gate) && pre_dequantize(layer.ffn_up) &&
-        pre_dequantize(layer.ffn_down);
-  }
-  if (!dequant_ok) {
-    ReleaseWeightRegions(weight_regions);
-    if (error_msg != nullptr) {
-      *error_msg =
-          "Failed to pre-dequantize non-Q8_0 weight tensors to GPU BF16";
-    }
-    return nullptr;
-  }
-  (void)hipDeviceSynchronize();
 
   std::shared_ptr<const tokenization::QwenTokenizer> shared_tokenizer(
       std::move(tokenizer));

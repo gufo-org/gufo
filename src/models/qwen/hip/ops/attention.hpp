@@ -133,27 +133,6 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
     hipStream_t stream = nullptr, float* lse_out = nullptr,
     std::uint32_t key_begin = 0, bool skip_kv_write = false);
 
-[[nodiscard]] bool LaunchQwenAotritonPrefixAttention(
-    const __half* q_half, const void* k_cache_f16, const void* v_cache_f16,
-    __half* out_prefix, float* lse_prefix, std::size_t batch_size,
-    std::uint32_t prefix_length, std::uint32_t num_heads,
-    std::uint32_t num_kv_heads, std::uint32_t head_dim,
-    hipStream_t stream = nullptr);
-
-/// Converts FP32 queries to FP16 in place-compatible [token][head][dim] order.
-void LaunchConvertQueriesToHalf(const float* q, void* q_half,
-                                std::size_t num_elements,
-                                hipStream_t stream = nullptr);
-
-/// Combines the prefix and diagonal partial attentions by log-sum-exp and
-/// applies the SiLU gate to the merged result.
-void LaunchMergeSplitAttention(const void* out_prefix, const float* lse_prefix,
-                               const float* out_diag, const float* lse_diag,
-                               const float* gate, float* out,
-                               std::size_t batch_size, std::uint32_t num_heads,
-                               std::uint32_t head_dim,
-                               hipStream_t stream = nullptr);
-
 /// Causal GQA through ROCm Composable Kernel. Inputs and outputs remain FP32
 /// at the executor boundary; the fused attention operator uses FP16 tiles with
 /// FP32 accumulation and online softmax. Returns false for unsupported shapes.

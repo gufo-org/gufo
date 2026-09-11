@@ -4,8 +4,7 @@
 
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
-#include <string_view>
+#include <stdexcept>
 
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/quant_ops.hpp"
@@ -57,40 +56,6 @@ void LaunchDFlashQuantizeBf16ToQ8_0(const void* bf16_source,
                                         kThreads, 0, stream>>>(
       static_cast<const hip_bfloat16*>(bf16_source),
       static_cast<Q8_0Block*>(q8_destination), total_blocks);
-}
-
-__global__ void dflash_rmsnorm_kernel(const float* __restrict__ input,
-                                      const float* __restrict__ weight,
-                                      float* __restrict__ output, uint32_t dim,
-                                      float eps) {
-  const uint32_t row = blockIdx.x;
-  const float* row_in = input + (uint64_t)row * dim;
-  float* row_out = output + (uint64_t)row * dim;
-
-  __shared__ float s_sum[256];
-  const uint32_t tid = threadIdx.x;
-
-  float local_sum_sq = 0.0F;
-  for (uint32_t i = tid; i < dim; i += blockDim.x) {
-    const float val = row_in[i];
-    local_sum_sq += val * val;
-  }
-  s_sum[tid] = local_sum_sq;
-  __syncthreads();
-
-  for (uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
-    if (tid < stride) {
-      s_sum[tid] += s_sum[tid + stride];
-    }
-    __syncthreads();
-  }
-
-  const float rms = rsqrtf((s_sum[0] / (float)dim) + eps);
-
-  for (uint32_t i = tid; i < dim; i += blockDim.x) {
-    const float w = (weight != nullptr) ? weight[i] : 1.0F;
-    row_out[i] = row_in[i] * rms * w;
-  }
 }
 
 __global__ void dflash_grouped_dynamic_conv_kernel(
@@ -146,7 +111,6 @@ __global__ void dflash_silu_mul_kernel(float* __restrict__ gate,
 /// live in registers. The shipped DFlash-2 topology has sixteen query heads
 /// over four key/value heads; the launcher rejects anything wider or any width
 /// it has no instantiation for.
-constexpr uint32_t kDFlashMaxGqaGroup = 8;
 
 /// Wave-per-key variant of the QK stage below.
 ///
@@ -164,7 +128,7 @@ __global__ void dflash_noncausal_attention_wave_kernel(
     const float* __restrict__ block_v, float* __restrict__ out,
     uint32_t current_pos, uint32_t history_length, uint32_t block_count,
     uint32_t sliding_window, uint32_t num_q_heads, uint32_t num_kv_heads,
-    uint32_t head_dim, float scale) {
+    uint32_t head_dim, float scale, uint32_t history_capacity) {
   const uint32_t tok = blockIdx.x;
   const uint32_t h = blockIdx.y;
   if (tok >= block_count || h >= num_q_heads)
@@ -196,7 +160,8 @@ __global__ void dflash_noncausal_attention_wave_kernel(
   for (uint32_t local = wave; local < history_count; local += waves) {
     const uint32_t position = history_start + local;
     const float4* k_vec = reinterpret_cast<const float4*>(
-        injected_k + ((uint64_t)position * kv_dim + (uint64_t)kv_h * head_dim));
+        injected_k + ((uint64_t)(position % history_capacity) * kv_dim +
+                      (uint64_t)kv_h * head_dim));
     float dot = 0.0F;
     for (uint32_t d = lane; d < num_vec; d += 32U) {
       const float4 qv = q_vec[d];
@@ -280,8 +245,9 @@ __global__ void dflash_noncausal_attention_wave_kernel(
     float acc = 0.0F;
     for (uint32_t local = 0; local < history_count; ++local) {
       const uint32_t position = history_start + local;
-      const float* v_ptr = injected_v + ((uint64_t)position * kv_dim +
-                                         (uint64_t)kv_h * head_dim);
+      const float* v_ptr =
+          injected_v + ((uint64_t)(position % history_capacity) * kv_dim +
+                        (uint64_t)kv_h * head_dim);
       acc += s_scores[local] * v_ptr[d];
     }
     for (uint32_t p = 0; p < block_count; ++p) {
@@ -293,179 +259,13 @@ __global__ void dflash_noncausal_attention_wave_kernel(
   }
 }
 
-/// Group-query variant of the wave route above.
-///
-/// Both routes above give one workgroup to every (draft token, query head)
-/// pair, so the gqa_group query heads that share a key/value head each fetch
-/// that head's K and V rows for themselves -- at the 2,048-key draft window
-/// the history dominates the draft step and it is read gqa_group times over.
-/// This variant gives one workgroup to every (draft token, key/value head)
-/// pair and keeps all gqa_group query heads of that group in the same
-/// workgroup, so a K row is loaded once into registers and dotted against
-/// every query head, and the PV stage accumulates gqa_group outputs from one
-/// read of each V element. The arithmetic per output is unchanged.
-///
-/// Shared memory holds gqa_group score rows instead of one, so the launcher
-/// only selects this route while that fits.
-template<uint32_t kGqaGroup>
-__global__ void dflash_noncausal_attention_gqa_kernel(
-    const float* __restrict__ q, const float* __restrict__ injected_k,
-    const float* __restrict__ injected_v, const float* __restrict__ block_k,
-    const float* __restrict__ block_v, float* __restrict__ out,
-    uint32_t current_pos, uint32_t history_length, uint32_t block_count,
-    uint32_t sliding_window, uint32_t num_q_heads, uint32_t num_kv_heads,
-    uint32_t head_dim, float scale) {
-  const uint32_t tok = blockIdx.x;
-  const uint32_t kv_h = blockIdx.y;
-  if (tok >= block_count || kv_h >= num_kv_heads)
-    return;
-
-  constexpr uint32_t gqa_group = kGqaGroup;
-  const uint32_t q_dim = num_q_heads * head_dim;
-  const uint32_t kv_dim = num_kv_heads * head_dim;
-  const uint32_t query_position = current_pos + tok;
-  const uint32_t history_start = current_pos + 1U > sliding_window
-                                     ? current_pos + 1U - sliding_window
-                                     : 0U;
-  const uint32_t history_count =
-      history_length > history_start ? history_length - history_start : 0U;
-  const uint32_t total_k = history_count + block_count;
-  const uint32_t num_vec = head_dim / 4U;
-
-  extern __shared__ float s_scores[];
-  __shared__ float s_reduce[256];
-
-  const uint32_t lane = threadIdx.x & 31U;
-  const uint32_t wave = threadIdx.x >> 5U;
-  const uint32_t waves = blockDim.x >> 5U;
-
-  // Every query head of the group is resident for the whole key sweep, so a K
-  // row is dotted against all of them while it is still in registers.
-  const float4* q_vec[kGqaGroup];
-  for (uint32_t g = 0; g < gqa_group; ++g) {
-    const uint32_t h = (kv_h * gqa_group) + g;
-    q_vec[g] = reinterpret_cast<const float4*>(
-        q + ((uint64_t)tok * q_dim + (uint64_t)h * head_dim));
-  }
-
-  for (uint32_t key = wave; key < total_k; key += waves) {
-    const bool from_history = key < history_count;
-    const uint32_t key_position = from_history
-                                      ? history_start + key
-                                      : current_pos + (key - history_count);
-    const float* key_row =
-        from_history ? injected_k + ((uint64_t)key_position * kv_dim +
-                                     (uint64_t)kv_h * head_dim)
-                     : block_k + ((uint64_t)(key - history_count) * kv_dim +
-                                  (uint64_t)kv_h * head_dim);
-    const float4* k_vec = reinterpret_cast<const float4*>(key_row);
-
-    float dot[kGqaGroup];
-    for (uint32_t g = 0; g < gqa_group; ++g) {
-      dot[g] = 0.0F;
-    }
-    for (uint32_t d = lane; d < num_vec; d += 32U) {
-      const float4 kv = k_vec[d];
-      for (uint32_t g = 0; g < gqa_group; ++g) {
-        const float4 qv = q_vec[g][d];
-        dot[g] += (qv.x * kv.x) + (qv.y * kv.y) + (qv.z * kv.z) + (qv.w * kv.w);
-      }
-    }
-    for (int offset = 16; offset > 0; offset >>= 1) {
-      for (uint32_t g = 0; g < gqa_group; ++g) {
-        dot[g] += __shfl_xor(dot[g], offset);
-      }
-    }
-    if (lane == 0U) {
-      const uint32_t distance = query_position > key_position
-                                    ? query_position - key_position
-                                    : key_position - query_position;
-      const bool inside = distance < sliding_window;
-      for (uint32_t g = 0; g < gqa_group; ++g) {
-        s_scores[(g * total_k) + key] = inside ? dot[g] * scale : -1e20F;
-      }
-    }
-  }
-  __syncthreads();
-
-  // One softmax per query head over that head's score row.
-  for (uint32_t g = 0; g < gqa_group; ++g) {
-    float* row = s_scores + ((uint64_t)g * total_k);
-    float local_max = -1e20F;
-    for (uint32_t p = threadIdx.x; p < total_k; p += blockDim.x) {
-      local_max = fmaxf(local_max, row[p]);
-    }
-    s_reduce[threadIdx.x] = local_max;
-    __syncthreads();
-    for (uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
-      if (threadIdx.x < stride) {
-        s_reduce[threadIdx.x] =
-            fmaxf(s_reduce[threadIdx.x], s_reduce[threadIdx.x + stride]);
-      }
-      __syncthreads();
-    }
-    const float max_val = s_reduce[0];
-    __syncthreads();
-
-    float local_sum = 0.0F;
-    for (uint32_t p = threadIdx.x; p < total_k; p += blockDim.x) {
-      const float exp_score = expf(row[p] - max_val);
-      row[p] = exp_score;
-      local_sum += exp_score;
-    }
-    s_reduce[threadIdx.x] = local_sum;
-    __syncthreads();
-    for (uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
-      if (threadIdx.x < stride) {
-        s_reduce[threadIdx.x] += s_reduce[threadIdx.x + stride];
-      }
-      __syncthreads();
-    }
-    const float inv_sum = 1.0F / (s_reduce[0] + 1e-9F);
-    __syncthreads();
-    for (uint32_t p = threadIdx.x; p < total_k; p += blockDim.x) {
-      row[p] *= inv_sum;
-    }
-    __syncthreads();
-  }
-
-  // PV: one pass over V per workgroup, accumulating every query head of the
-  // group from the same element.
-  for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
-    float acc[kGqaGroup];
-    for (uint32_t g = 0; g < gqa_group; ++g) {
-      acc[g] = 0.0F;
-    }
-    for (uint32_t local = 0; local < history_count; ++local) {
-      const uint32_t position = history_start + local;
-      const float value =
-          injected_v[((uint64_t)position * kv_dim + (uint64_t)kv_h * head_dim) +
-                     d];
-      for (uint32_t g = 0; g < gqa_group; ++g) {
-        acc[g] += s_scores[(g * total_k) + local] * value;
-      }
-    }
-    for (uint32_t p = 0; p < block_count; ++p) {
-      const float value =
-          block_v[((uint64_t)p * kv_dim + (uint64_t)kv_h * head_dim) + d];
-      for (uint32_t g = 0; g < gqa_group; ++g) {
-        acc[g] += s_scores[(g * total_k) + history_count + p] * value;
-      }
-    }
-    for (uint32_t g = 0; g < gqa_group; ++g) {
-      const uint32_t h = (kv_h * gqa_group) + g;
-      out[((uint64_t)tok * q_dim + (uint64_t)h * head_dim) + d] = acc[g];
-    }
-  }
-}
-
 __global__ void dflash_noncausal_attention_kernel(
     const float* __restrict__ q, const float* __restrict__ injected_k,
     const float* __restrict__ injected_v, const float* __restrict__ block_k,
     const float* __restrict__ block_v, float* __restrict__ out,
     uint32_t current_pos, uint32_t history_length, uint32_t block_count,
     uint32_t sliding_window, uint32_t num_q_heads, uint32_t num_kv_heads,
-    uint32_t head_dim, float scale) {
+    uint32_t head_dim, float scale, uint32_t history_capacity) {
   const uint32_t tok = blockIdx.x;
   const uint32_t h = blockIdx.y;
   if (tok >= block_count || h >= num_q_heads)
@@ -492,7 +292,8 @@ __global__ void dflash_noncausal_attention_kernel(
        local += blockDim.x) {
     const uint32_t position = history_start + local;
     const float* k_ptr =
-        injected_k + ((uint64_t)position * kv_dim + (uint64_t)kv_h * head_dim);
+        injected_k + ((uint64_t)(position % history_capacity) * kv_dim +
+                      (uint64_t)kv_h * head_dim);
     float dot = 0.0F;
     for (uint32_t d = 0; d < head_dim; ++d) {
       dot += q_ptr[d] * k_ptr[d];
@@ -566,8 +367,9 @@ __global__ void dflash_noncausal_attention_kernel(
     float acc = 0.0F;
     for (uint32_t local = 0; local < history_count; ++local) {
       const uint32_t position = history_start + local;
-      const float* v_ptr = injected_v + ((uint64_t)position * kv_dim +
-                                         (uint64_t)kv_h * head_dim);
+      const float* v_ptr =
+          injected_v + ((uint64_t)(position % history_capacity) * kv_dim +
+                        (uint64_t)kv_h * head_dim);
       acc += s_scores[local] * v_ptr[d];
     }
     for (uint32_t p = 0; p < block_count; ++p) {
@@ -677,7 +479,7 @@ __global__ void dflash_selector_partial_topk_kernel(
 
   MergeSelectorLists(shared_scores, shared_ids, selector_top_k);
 
-  const uint32_t output_offset = blockIdx.x * kMaxSelectorTopK;
+  const uint32_t output_offset = blockIdx.x * selector_top_k;
   for (uint32_t index = threadIdx.x; index < selector_top_k;
        index += blockDim.x) {
     partial_scores[output_offset + index] = shared_scores[index];
@@ -709,7 +511,7 @@ __global__ void dflash_selector_finalize_kernel(
     local_scores[index] = -INFINITY;
     local_ids[index] = 0;
   }
-  const uint32_t candidate_count = partial_count * kMaxSelectorTopK;
+  const uint32_t candidate_count = partial_count * selector_top_k;
   for (uint32_t index = threadIdx.x; index < candidate_count;
        index += blockDim.x) {
     InsertSelectorCandidate(partial_scores[index], partial_ids[index],
@@ -830,155 +632,6 @@ __global__ void dflash_selector_finalize_kernel(
   }
 }
 
-__global__ void dflash_selector_step_kernel(
-    const float* __restrict__ logits,
-    const float* __restrict__ projected_hidden,
-    const hip_bfloat16* __restrict__ predecessor_codebook,
-    const hip_bfloat16* __restrict__ successor_codebook,
-    const uint32_t* __restrict__ predecessor_token,
-    uint32_t* __restrict__ output_token, float* __restrict__ output_confidence,
-    float temperature, const float* __restrict__ sample_uniform,
-    uint32_t* __restrict__ candidate_ids,
-    float* __restrict__ candidate_probabilities, uint32_t vocab_size,
-    uint32_t selector_rank, uint32_t selector_top_k) {
-  __shared__ float shared_scores[kSelectorThreads * kMaxSelectorTopK];
-  __shared__ uint32_t shared_ids[kSelectorThreads * kMaxSelectorTopK];
-
-  float local_scores[kMaxSelectorTopK];
-  uint32_t local_ids[kMaxSelectorTopK];
-  for (uint32_t index = 0; index < selector_top_k; ++index) {
-    local_scores[index] = -INFINITY;
-    local_ids[index] = 0;
-  }
-
-  for (uint32_t token = threadIdx.x; token < vocab_size; token += blockDim.x) {
-    const float score = logits[token];
-    if (score <= local_scores[selector_top_k - 1U]) {
-      continue;
-    }
-    uint32_t insertion = selector_top_k - 1U;
-    while (insertion > 0U && score > local_scores[insertion - 1U]) {
-      local_scores[insertion] = local_scores[insertion - 1U];
-      local_ids[insertion] = local_ids[insertion - 1U];
-      --insertion;
-    }
-    local_scores[insertion] = score;
-    local_ids[insertion] = token;
-  }
-
-  const uint32_t shared_offset = threadIdx.x * kMaxSelectorTopK;
-  for (uint32_t index = 0; index < selector_top_k; ++index) {
-    shared_scores[shared_offset + index] = local_scores[index];
-    shared_ids[shared_offset + index] = local_ids[index];
-  }
-  __syncthreads();
-
-  if (threadIdx.x != 0U) {
-    return;
-  }
-
-  float top_scores[kMaxSelectorTopK];
-  uint32_t top_ids[kMaxSelectorTopK];
-  for (uint32_t index = 0; index < selector_top_k; ++index) {
-    top_scores[index] = -INFINITY;
-    top_ids[index] = 0;
-  }
-  for (uint32_t thread = 0; thread < kSelectorThreads; ++thread) {
-    for (uint32_t index = 0; index < selector_top_k; ++index) {
-      const uint32_t shared_index = thread * kMaxSelectorTopK + index;
-      const float score = shared_scores[shared_index];
-      if (score <= top_scores[selector_top_k - 1U]) {
-        continue;
-      }
-      uint32_t insertion = selector_top_k - 1U;
-      while (insertion > 0U && score > top_scores[insertion - 1U]) {
-        top_scores[insertion] = top_scores[insertion - 1U];
-        top_ids[insertion] = top_ids[insertion - 1U];
-        --insertion;
-      }
-      top_scores[insertion] = score;
-      top_ids[insertion] = shared_ids[shared_index];
-    }
-  }
-
-  const uint32_t predecessor = *predecessor_token;
-  const hip_bfloat16* predecessor_row =
-      predecessor_codebook + (uint64_t)predecessor * selector_rank;
-  float best_score = -INFINITY;
-  uint32_t best_index = 0;
-  float path_scores[kMaxSelectorTopK];
-  for (uint32_t candidate_index = 0; candidate_index < selector_top_k;
-       ++candidate_index) {
-    const uint32_t candidate = top_ids[candidate_index];
-    const hip_bfloat16* successor_row =
-        successor_codebook + (uint64_t)candidate * selector_rank;
-    float transition = 0.0F;
-    for (uint32_t rank = 0; rank < selector_rank; ++rank) {
-      transition += static_cast<float>(predecessor_row[rank]) *
-                    projected_hidden[rank] *
-                    static_cast<float>(successor_row[rank]);
-    }
-    const float score = top_scores[candidate_index] + transition;
-    path_scores[candidate_index] = score;
-    if (score > best_score) {
-      best_score = score;
-      best_index = candidate_index;
-    }
-  }
-
-  if (candidate_ids != nullptr) {
-    for (uint32_t index = 0; index < selector_top_k; ++index) {
-      candidate_ids[index] = top_ids[index];
-    }
-  }
-
-  if (temperature > 0.0F) {
-    float scaled_max = -INFINITY;
-    for (uint32_t index = 0; index < selector_top_k; ++index) {
-      scaled_max = fmaxf(scaled_max, path_scores[index] / temperature);
-    }
-    float denominator = 0.0F;
-    for (uint32_t index = 0; index < selector_top_k; ++index) {
-      const float probability_weight =
-          expf((path_scores[index] / temperature) - scaled_max);
-      path_scores[index] = probability_weight;
-      denominator += probability_weight;
-    }
-    const float inverse_denominator = 1.0F / fmaxf(denominator, 1e-30F);
-    float threshold =
-        fminf(fmaxf(*sample_uniform, 0.0F), 0.99999994F) * denominator;
-    uint32_t sampled_index = selector_top_k - 1U;
-    for (uint32_t index = 0; index < selector_top_k; ++index) {
-      const float probability = path_scores[index] * inverse_denominator;
-      if (candidate_probabilities != nullptr) {
-        candidate_probabilities[index] = probability;
-      }
-      threshold -= path_scores[index];
-      if (threshold <= 0.0F && sampled_index == selector_top_k - 1U) {
-        sampled_index = index;
-      }
-    }
-    *output_token = top_ids[sampled_index];
-    if (output_confidence != nullptr) {
-      *output_confidence = path_scores[sampled_index] * inverse_denominator;
-    }
-  } else {
-    *output_token = top_ids[best_index];
-    if (output_confidence != nullptr) {
-      float denominator = 0.0F;
-      for (uint32_t index = 0; index < selector_top_k; ++index) {
-        denominator += expf(path_scores[index] - best_score);
-      }
-      *output_confidence = 1.0F / fmaxf(denominator, 1e-30F);
-    }
-  }
-}
-
-void LaunchDFlashRMSNorm(const float* input, const float* weight, float* output,
-                         std::uint32_t dim, float eps, hipStream_t stream) {
-  dflash_rmsnorm_kernel<<<1, 256, 0, stream>>>(input, weight, output, dim, eps);
-}
-
 void LaunchDFlashGroupedDynamicConv(
     const float* input, const float* dynamic_coefficients,
     const float* base_kernel, float* output, std::uint32_t num_tokens,
@@ -1009,7 +662,6 @@ struct DFlashAttentionLaunch {
 /// Dynamic shared-memory ceiling the group-query route stays under. It holds
 /// one score row per query head in the group instead of one row in total, so
 /// it is the route that can outgrow LDS; the others cannot.
-constexpr std::size_t kDFlashGqaMaxSharedBytes = 49152;
 
 [[nodiscard]] DFlashAttentionLaunch DFlashAttentionGeometry(
     std::uint32_t current_pos, std::uint32_t history_length,
@@ -1032,14 +684,15 @@ void LaunchDFlashNonCausalAttentionScalar(
     std::uint32_t current_pos, std::uint32_t history_length,
     std::uint32_t block_count, std::uint32_t sliding_window,
     std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
-    std::uint32_t head_dim, float scale, hipStream_t stream) {
+    std::uint32_t head_dim, float scale, hipStream_t stream,
+    std::uint32_t history_capacity) {
   const auto geometry = DFlashAttentionGeometry(
       current_pos, history_length, block_count, sliding_window, num_q_heads);
   dflash_noncausal_attention_kernel<<<geometry.grid, 256, geometry.shared_bytes,
                                       stream>>>(
       q, injected_k, injected_v, block_k, block_v, out, current_pos,
       history_length, block_count, sliding_window, num_q_heads, num_kv_heads,
-      head_dim, scale);
+      head_dim, scale, history_capacity);
 }
 
 void LaunchDFlashNonCausalAttentionWave(
@@ -1048,87 +701,15 @@ void LaunchDFlashNonCausalAttentionWave(
     std::uint32_t current_pos, std::uint32_t history_length,
     std::uint32_t block_count, std::uint32_t sliding_window,
     std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
-    std::uint32_t head_dim, float scale, hipStream_t stream) {
+    std::uint32_t head_dim, float scale, hipStream_t stream,
+    std::uint32_t history_capacity) {
   const auto geometry = DFlashAttentionGeometry(
       current_pos, history_length, block_count, sliding_window, num_q_heads);
   dflash_noncausal_attention_wave_kernel<<<geometry.grid, 256,
                                            geometry.shared_bytes, stream>>>(
       q, injected_k, injected_v, block_k, block_v, out, current_pos,
       history_length, block_count, sliding_window, num_q_heads, num_kv_heads,
-      head_dim, scale);
-}
-
-bool DFlashNonCausalAttentionGqaSupported(std::uint32_t current_pos,
-                                          std::uint32_t history_length,
-                                          std::uint32_t block_count,
-                                          std::uint32_t sliding_window,
-                                          std::uint32_t num_q_heads,
-                                          std::uint32_t num_kv_heads,
-                                          std::uint32_t head_dim) noexcept {
-  if (num_kv_heads == 0U || head_dim % 4U != 0U ||
-      num_q_heads % num_kv_heads != 0U) {
-    return false;
-  }
-  const std::uint32_t gqa_group = num_q_heads / num_kv_heads;
-  if (gqa_group != 1U && gqa_group != 2U && gqa_group != 4U &&
-      gqa_group != 8U) {
-    return false;
-  }
-  static_assert(kDFlashMaxGqaGroup == 8U,
-                "the instantiated group widths must cover the declared "
-                "maximum");
-  const auto geometry = DFlashAttentionGeometry(
-      current_pos, history_length, block_count, sliding_window, num_q_heads);
-  return geometry.shared_bytes * gqa_group <= kDFlashGqaMaxSharedBytes;
-}
-
-void LaunchDFlashNonCausalAttentionGqa(
-    const float* q, const float* injected_k, const float* injected_v,
-    const float* block_k, const float* block_v, float* out,
-    std::uint32_t current_pos, std::uint32_t history_length,
-    std::uint32_t block_count, std::uint32_t sliding_window,
-    std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
-    std::uint32_t head_dim, float scale, hipStream_t stream) {
-  const auto geometry = DFlashAttentionGeometry(
-      current_pos, history_length, block_count, sliding_window, num_q_heads);
-  const std::uint32_t gqa_group = num_q_heads / num_kv_heads;
-  const dim3 grid(block_count, num_kv_heads);
-  const std::size_t shared_bytes = geometry.shared_bytes * gqa_group;
-  // The group width is a template parameter so the per-query-head score,
-  // accumulator and pointer arrays stay in registers; indexing them with a
-  // runtime bound would put every one of them in scratch.
-  switch (gqa_group) {
-    case 1U:
-      dflash_noncausal_attention_gqa_kernel<1U>
-          <<<grid, 256, shared_bytes, stream>>>(
-              q, injected_k, injected_v, block_k, block_v, out, current_pos,
-              history_length, block_count, sliding_window, num_q_heads,
-              num_kv_heads, head_dim, scale);
-      return;
-    case 2U:
-      dflash_noncausal_attention_gqa_kernel<2U>
-          <<<grid, 256, shared_bytes, stream>>>(
-              q, injected_k, injected_v, block_k, block_v, out, current_pos,
-              history_length, block_count, sliding_window, num_q_heads,
-              num_kv_heads, head_dim, scale);
-      return;
-    case 4U:
-      dflash_noncausal_attention_gqa_kernel<4U>
-          <<<grid, 256, shared_bytes, stream>>>(
-              q, injected_k, injected_v, block_k, block_v, out, current_pos,
-              history_length, block_count, sliding_window, num_q_heads,
-              num_kv_heads, head_dim, scale);
-      return;
-    case 8U:
-      dflash_noncausal_attention_gqa_kernel<8U>
-          <<<grid, 256, shared_bytes, stream>>>(
-              q, injected_k, injected_v, block_k, block_v, out, current_pos,
-              history_length, block_count, sliding_window, num_q_heads,
-              num_kv_heads, head_dim, scale);
-      return;
-    default:
-      break;
-  }
+      head_dim, scale, history_capacity);
 }
 
 void LaunchDFlashNonCausalAttention(
@@ -1137,39 +718,20 @@ void LaunchDFlashNonCausalAttention(
     std::uint32_t current_pos, std::uint32_t history_length,
     std::uint32_t block_count, std::uint32_t sliding_window,
     std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
-    std::uint32_t head_dim, float scale, hipStream_t stream) {
-  // The coalesced wave-per-key route is the default: it is within 2e-7 of the
-  // reference, +6.7% `tg128@d4096` and +6.4% `tg128@d8192` over it on
-  // UD-Q4_K_XL, and neutral at shallow depth. GUFO_DFLASH_ATTENTION=scalar
-  // pins the thread-per-key reference and =gqa selects the group-query route.
-  // Both faster routes need head_dim to be a multiple of four so a K row can
-  // be read as float4, which every shipped DFlash-2 topology satisfies
-  // (head_dim 256).
-  static const std::string_view route = [] {
-    const char* value = std::getenv("GUFO_DFLASH_ATTENTION");
-    return std::string_view(value != nullptr ? value : "");
-  }();
-  if (route == "gqa" &&
-      DFlashNonCausalAttentionGqaSupported(
-          current_pos, history_length, block_count, sliding_window, num_q_heads,
-          num_kv_heads, head_dim)) {
-    LaunchDFlashNonCausalAttentionGqa(q, injected_k, injected_v, block_k,
-                                      block_v, out, current_pos, history_length,
-                                      block_count, sliding_window, num_q_heads,
-                                      num_kv_heads, head_dim, scale, stream);
-    return;
-  }
-  if (route != "scalar" && (head_dim % 4U) == 0U) {
+    std::uint32_t head_dim, float scale, hipStream_t stream,
+    std::uint32_t history_capacity) {
+  // Coalesced float4 reads cover all shipped DFlash2 head dimensions.
+  if ((head_dim % 4U) == 0U) {
     LaunchDFlashNonCausalAttentionWave(
         q, injected_k, injected_v, block_k, block_v, out, current_pos,
         history_length, block_count, sliding_window, num_q_heads, num_kv_heads,
-        head_dim, scale, stream);
+        head_dim, scale, stream, history_capacity);
     return;
   }
   LaunchDFlashNonCausalAttentionScalar(
       q, injected_k, injected_v, block_k, block_v, out, current_pos,
       history_length, block_count, sliding_window, num_q_heads, num_kv_heads,
-      head_dim, scale, stream);
+      head_dim, scale, stream, history_capacity);
 }
 
 std::size_t DFlashSelectorScratchElements(std::uint32_t vocab_size) noexcept {
@@ -1188,37 +750,22 @@ void LaunchDFlashSelectorStep(
     std::uint32_t* candidate_ids, float* candidate_probabilities,
     std::uint32_t vocab_size, std::uint32_t selector_rank,
     std::uint32_t selector_top_k, hipStream_t stream) {
-  static const bool use_parallel = [] {
-    const char* value = std::getenv("GUFO_DFLASH_SELECTOR");
-    if (value == nullptr) {
-      return true;
-    }
-    const std::string_view setting{value};
-    return setting != "serial" && setting != "baseline" && setting != "0" &&
-           setting != "false" && setting != "off";
-  }();
-  if (use_parallel && partial_scores != nullptr && partial_ids != nullptr &&
-      selector_top_k > 0 && selector_top_k <= kMaxSelectorTopK) {
-    const std::uint32_t partial_count =
-        (vocab_size + kSelectorTokensPerBlock - 1U) / kSelectorTokensPerBlock;
-    dflash_selector_partial_topk_kernel<<<partial_count, kSelectorThreads, 0,
-                                          stream>>>(
-        logits, partial_scores, partial_ids, vocab_size, selector_top_k);
-    dflash_selector_finalize_kernel<<<1, kSelectorThreads, 0, stream>>>(
-        partial_scores, partial_ids, projected_hidden,
-        static_cast<const hip_bfloat16*>(predecessor_codebook_bf16),
-        static_cast<const hip_bfloat16*>(successor_codebook_bf16),
-        predecessor_token, output_token, output_confidence, temperature,
-        sample_uniform, candidate_ids, candidate_probabilities, partial_count,
-        selector_rank, selector_top_k);
-    return;
+  if (partial_scores == nullptr || partial_ids == nullptr || vocab_size == 0 ||
+      selector_top_k == 0 || selector_top_k > kMaxSelectorTopK ||
+      selector_top_k > vocab_size) {
+    throw std::invalid_argument("invalid DFlash selector shape or scratch");
   }
-  dflash_selector_step_kernel<<<1, kSelectorThreads, 0, stream>>>(
-      logits, projected_hidden,
+  const std::uint32_t partial_count =
+      (vocab_size + kSelectorTokensPerBlock - 1U) / kSelectorTokensPerBlock;
+  dflash_selector_partial_topk_kernel<<<partial_count, kSelectorThreads, 0,
+                                        stream>>>(
+      logits, partial_scores, partial_ids, vocab_size, selector_top_k);
+  dflash_selector_finalize_kernel<<<1, kSelectorThreads, 0, stream>>>(
+      partial_scores, partial_ids, projected_hidden,
       static_cast<const hip_bfloat16*>(predecessor_codebook_bf16),
       static_cast<const hip_bfloat16*>(successor_codebook_bf16),
       predecessor_token, output_token, output_confidence, temperature,
-      sample_uniform, candidate_ids, candidate_probabilities, vocab_size,
+      sample_uniform, candidate_ids, candidate_probabilities, partial_count,
       selector_rank, selector_top_k);
 }
 

@@ -228,7 +228,7 @@ class QwenGpuArena {
 public:
   explicit QwenGpuArena(
       const core::ModelConfig& config, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   ~QwenGpuArena();
 
   QwenGpuArena(const QwenGpuArena&) = delete;
@@ -294,13 +294,6 @@ public:
   hip_bfloat16* d_weights_bf16{nullptr};
   hip_bfloat16* d_weights_bf16_aux{nullptr};
   void* d_scratch_q8_act{nullptr};
-  // opt-c165-attn-split scratch: FP16 queries, the FP16 prefix attention
-  // result, and the two partial log-sum-exp planes.
-  void* d_attn_q_f16{nullptr};
-  void* d_attn_prefix_f16{nullptr};
-  float* d_attn_prefix_out{nullptr};
-  float* d_attn_lse_prefix{nullptr};
-  float* d_attn_lse_diag{nullptr};
 
   [[nodiscard]] std::uint32_t GetMaxBatch() const noexcept {
     return max_batch_;
@@ -314,7 +307,7 @@ public:
   }
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
       const core::ModelConfig& config, std::uint32_t max_context,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   [[nodiscard]] std::unique_ptr<QwenGpuSnapshot> SaveSnapshot(
       std::uint32_t valid_context);
@@ -360,18 +353,18 @@ public:
   explicit QwenGpuExecutor(
       std::shared_ptr<const QwenGpuModel> model,
       std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   ~QwenGpuExecutor();
 
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> Create(
       std::shared_ptr<const QwenGpuModel> model,
       std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
 
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
 
   /// Generates tokens auto-regressively on GPU with streaming callback.
   std::vector<tokenization::TokenId> Generate(
@@ -491,7 +484,7 @@ public:
   }
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
       const core::ModelConfig& config, std::uint32_t max_context,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Runtime()) {
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production()) {
     return QwenGpuArena::EstimateMemoryUsage(config, max_context, policy);
   }
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const {

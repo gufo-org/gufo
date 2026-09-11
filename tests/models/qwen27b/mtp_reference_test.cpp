@@ -1,3 +1,5 @@
+#include "src/models/qwen/mtp_reference.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -11,7 +13,6 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen/mtp_reference.hpp"
 
 namespace {
 
@@ -59,10 +60,10 @@ std::vector<float> MakeTargetHidden(std::size_t size) {
 }  // namespace
 
 int main() {
-  const char* model_path = std::getenv("GUFO_MTP_MODEL");
+  const char* model_path = std::getenv("GUFO_QWEN27B_MTP_MODEL");
   if (model_path == nullptr || std::string_view(model_path).empty()) {
     std::cout << "qwen_mtp_reference_test: skipped "
-                 "(GUFO_MTP_MODEL not set)\n";
+                 "(GUFO_QWEN27B_MTP_MODEL not set)\n";
     return kSkipped;
   }
 

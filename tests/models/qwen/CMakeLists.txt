@@ -1,37 +1,3 @@
-if (ENGINE_ENABLE_XRT)
-  add_executable(qwen_mtp_xdna2_rmsnorm_test
-    ${PROJECT_SOURCE_DIR}/tests/models/qwen/xdna2/mtp_rmsnorm_test.cpp)
-  target_compile_definitions(qwen_mtp_xdna2_rmsnorm_test PRIVATE
-    GUFO_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR="${GUFO_AIE_QWEN_MTP_RMSNORM_PROGRAM_DIR}")
-  target_link_libraries(qwen_mtp_xdna2_rmsnorm_test PRIVATE
-    gufo_core
-    gufo_diagnostics)
-  add_test(NAME qwen_mtp_xdna2_rmsnorm_test
-    COMMAND qwen_mtp_xdna2_rmsnorm_test)
-  set_tests_properties(qwen_mtp_xdna2_rmsnorm_test PROPERTIES
-    LABELS "npu;xdna2;xrt;xrt-hardware;qwen;mtp;rmsnorm")
-
-  add_executable(qwen_mtp_xdna2_eh_proj_test
-    ${PROJECT_SOURCE_DIR}/tests/models/qwen/xdna2/mtp_eh_proj_test.cpp)
-  target_compile_definitions(qwen_mtp_xdna2_eh_proj_test PRIVATE
-    GUFO_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR="${GUFO_AIE_QWEN_MTP_EH_PROJ_PROGRAM_DIR}")
-  target_link_libraries(qwen_mtp_xdna2_eh_proj_test PRIVATE
-    gufo_core
-    gufo_diagnostics)
-  add_test(NAME qwen_mtp_xdna2_eh_proj_test
-    COMMAND qwen_mtp_xdna2_eh_proj_test)
-  set_tests_properties(qwen_mtp_xdna2_eh_proj_test PROPERTIES
-    LABELS "npu;xdna2;xrt;xrt-hardware;qwen;mtp;gemv")
-endif()
-
-add_executable(qwen_aie2p_w4a8_pack_test
-  ${PROJECT_SOURCE_DIR}/tests/kernels/qwen38_27b/test_aie2p_w4a8.cpp)
-target_link_libraries(qwen_aie2p_w4a8_pack_test PRIVATE gufo_core)
-add_test(NAME qwen_aie2p_w4a8_pack_test
-  COMMAND qwen_aie2p_w4a8_pack_test)
-set_tests_properties(qwen_aie2p_w4a8_pack_test PROPERTIES
-  LABELS "cpu;qwen;mtp;w4a8;quantization")
-
 function(add_qwen_cpu_test target source labels)
   add_executable(${target} ${PROJECT_SOURCE_DIR}/${source})
   target_link_libraries(${target} PRIVATE gufo_core)
@@ -41,11 +7,6 @@ endfunction()
 
 # Qwen tests mirror src/models/qwen so focused module, policy, and runtime
 # changes have an obvious validation target while preserving CTest names.
-add_qwen_cpu_test(qwen_mtp_reference_test
-  tests/models/qwen/mtp/reference_test.cpp
-  "cpu;core;qwen;mtp;external-model")
-set_tests_properties(qwen_mtp_reference_test PROPERTIES SKIP_RETURN_CODE 77)
-
 add_qwen_cpu_test(qwen_tokenizer_test
   tests/models/qwen/tokenization/tokenizer_test.cpp
   "cpu;tokenization;qwen")
@@ -91,27 +52,7 @@ add_qwen_cpu_test(qwen_gemm_route_test
   tests/models/qwen/gemm_route_test.cpp
   "cpu;models;qwen;gemm;dispatch")
 
-add_qwen_cpu_test(qwen_dflash_reference_test
-  tests/models/qwen/dflash/reference_test.cpp
-  "cpu;core;qwen;dflash;dflash2")
-
 if (ENGINE_ENABLE_HIP)
-  add_executable(qwen_mtp_gpu_test
-    ${PROJECT_SOURCE_DIR}/tests/models/qwen/hip/mtp_test.cpp)
-  target_link_libraries(qwen_mtp_gpu_test PRIVATE gufo_core)
-  add_test(NAME qwen_mtp_gpu_test COMMAND qwen_mtp_gpu_test)
-  set_tests_properties(qwen_mtp_gpu_test PROPERTIES
-    LABELS "gpu;hip;gfx1151;qwen;mtp;external-model"
-    SKIP_RETURN_CODE 77)
-
-  add_executable(qwen_dflash_gpu_test
-    ${PROJECT_SOURCE_DIR}/tests/models/qwen/hip/dflash_test.cpp)
-  target_link_libraries(qwen_dflash_gpu_test PRIVATE gufo_core)
-  add_test(NAME qwen_dflash_gpu_test COMMAND qwen_dflash_gpu_test)
-  set_tests_properties(qwen_dflash_gpu_test PROPERTIES
-    LABELS "gpu;hip;gfx1151;qwen;dflash;dflash2;external-model"
-    SKIP_RETURN_CODE 77)
-
   function(add_qwen_hip_test target source labels)
     add_executable(${target} ${PROJECT_SOURCE_DIR}/${source})
     target_link_libraries(${target} PRIVATE
@@ -148,19 +89,12 @@ if (ENGINE_ENABLE_HIP)
   add_qwen_hip_test(qwen_attention_wmma_prefill_ops_test
     tests/models/qwen/hip/attention/wmma_prefill_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;prefill;opt-c177-attn-wmma")
-  add_qwen_hip_test(qwen_attention_split_prefill_ops_test
-    tests/models/qwen/hip/attention/split_prefill_ops_test.cpp
-    "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;prefill;opt-c165-attn-split")
   add_qwen_hip_test(qwen_attention_projection_ops_test
     tests/models/qwen/hip/attention/projection_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;ssm;projection;opt-c010-rmsnorm-projection")
   add_qwen_hip_test(qwen_attention_component_ops_test
     tests/models/qwen/hip/attention/component_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;component")
-
-  add_qwen_hip_test(qwen_dflash_noncausal_attention_ops_test
-    tests/models/qwen/hip/dflash/noncausal_attention_ops_test.cpp
-    "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;attention;dflash;dflash2;opt-dflash2-attn-wave")
 
   add_qwen_hip_test(qwen_ssm_ops_test
     tests/models/qwen/hip/ssm_ops_test.cpp
@@ -181,86 +115,9 @@ if (ENGINE_ENABLE_HIP)
   add_qwen_hip_test(qwen_prefill_quant_gemm_ops_test
     tests/models/qwen/hip/quant/prefill_quant_gemm_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;prefill;q8;opt-c163-blocked-w8a8;opt-c192-swiglu-epilogue")
-  # opt-c192-swiglu-epilogue: the fused epilogue is bit-identical to the separate
-  # SwiGLU pass, so the same byte comparison has to hold with the K-quant
-  # instantiations forced on, where the route is rejected only on speed.
-  add_test(NAME qwen_prefill_quant_gemm_swiglu_kquant_ops_test
-    COMMAND qwen_prefill_quant_gemm_ops_test)
-  set_tests_properties(qwen_prefill_quant_gemm_swiglu_kquant_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;prefill;k-quant;opt-c192-swiglu-epilogue"
-    ENVIRONMENT "GUFO_FFN_SWIGLU_EPILOGUE=all"
-    SKIP_RETURN_CODE 77)
   add_qwen_hip_test(qwen_q4kxl_quant_ops_test
     tests/models/qwen/hip/quant/q4kxl_quant_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemv;gemm;k-quant;iquant;opt-q4kxl")
-  add_test(NAME qwen_q4kxl_quant_rows4_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_rows4_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-rows4"
-    ENVIRONMENT "GUFO_KQUANT_SMALL_BATCH_ROWS=4"
-    SKIP_RETURN_CODE 77)
-  add_test(NAME qwen_q4kxl_quant_rows2_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_rows2_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-rows2"
-    ENVIRONMENT "GUFO_KQUANT_SMALL_BATCH_ROWS=2"
-    SKIP_RETURN_CODE 77)
-  # The default route is now the staged sidecar, so this pins the independent
-  # in-kernel sudot4 reference that the sidecar is validated against.
-  add_test(NAME qwen_q4kxl_quant_activation_sums_reference_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_activation_sums_reference_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-actsum"
-    ENVIRONMENT "GUFO_KQUANT_ACTIVATION_SUMS=0"
-    SKIP_RETURN_CODE 77)
-  # opt-q4kxl-wide: the 128x256 sixteen-wave prefill macro tile.
-  add_test(NAME qwen_q4kxl_quant_wide_tile_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_wide_tile_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-wide"
-    ENVIRONMENT "GUFO_KQUANT_PREFILL_TILE=wide"
-    SKIP_RETURN_CODE 77)
-  # opt-q4kxl-occ12: `10` pins the previously retained occupancy hint for the
-  # exact small-batch verifier; the default is now twelve waves per SIMD.
-  add_test(NAME qwen_q4kxl_quant_small_batch_waves10_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_small_batch_waves10_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-occ12"
-    ENVIRONMENT "GUFO_KQUANT_SMALL_BATCH_WAVES=10"
-    SKIP_RETURN_CODE 77)
-  # opt-q4kxl-hoist: the rejected weight-fetch ordering stays covered.
-  add_test(NAME qwen_q4kxl_quant_small_batch_hoist_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_small_batch_hoist_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-hoist"
-    ENVIRONMENT "GUFO_KQUANT_SMALL_BATCH_FETCH=hoist"
-    SKIP_RETURN_CODE 77)
-  # opt-q4kxl-bk1: the rejected single-K-block stage depth stays covered.
-  add_test(NAME qwen_q4kxl_quant_bk1_tile_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_bk1_tile_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-bk1"
-    ENVIRONMENT "GUFO_KQUANT_PREFILL_TILE=bk1"
-    SKIP_RETURN_CODE 77)
-  # opt-q4kxl-fuse: the rejected fused-correction ordering stays covered.
-  add_test(NAME qwen_q4kxl_quant_fused_offset_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_fused_offset_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-fuse"
-    ENVIRONMENT "GUFO_KQUANT_PREFILL_TILE=fuse"
-    SKIP_RETURN_CODE 77)
-  add_test(NAME qwen_q4kxl_quant_narrow_tile_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_narrow_tile_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-wide"
-    ENVIRONMENT "GUFO_KQUANT_PREFILL_TILE=narrow"
-    SKIP_RETURN_CODE 77)
-  add_test(NAME qwen_q4kxl_quant_activation_sums_direct_ops_test
-    COMMAND qwen_q4kxl_quant_ops_test)
-  set_tests_properties(qwen_q4kxl_quant_activation_sums_direct_ops_test PROPERTIES
-    LABELS "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemm;k-quant;iquant;opt-q4kxl;opt-q4kxl-actsum"
-    ENVIRONMENT "GUFO_KQUANT_ACTIVATION_SUMS=direct"
-    SKIP_RETURN_CODE 77)
   add_qwen_hip_test(qwen_kquant_gemv_ops_test
     tests/models/qwen/hip/quant/kquant_gemv_ops_test.cpp
     "hip;gpu;kernels;qwen;qwen-kernel-oracle;slow;quant;gemv;k-quant")
