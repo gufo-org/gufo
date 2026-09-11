@@ -83,9 +83,7 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
 
     if (layer.is_full_attention) {
       // Full attention path
-      const std::size_t total_k = config.FullAttentionLayerCount() *
-                                  config.num_key_value_heads *
-                                  arena.GetMaxContext() * config.head_dim;
+      const std::size_t total_k = arena.GetAttentionKvPlaneElements();
       const std::uint32_t attn_layer_idx = l / config.full_attention_interval;
 
       LaunchFusedQKVProjections(

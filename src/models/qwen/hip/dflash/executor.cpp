@@ -77,6 +77,34 @@ void AllocateBuffer(T*& pointer, std::size_t elements) {
 /// Widest proposal block; BF16 context injection also uses sixteen rows.
 constexpr std::size_t kDFlashMaxSharedBatch = 8;
 
+void NormalizeAndRotateQK(float* query, float* key, const float* query_weight,
+                          const float* key_weight,
+                          const core::ModelConfig& config,
+                          std::uint32_t query_heads, std::size_t rows,
+                          std::uint32_t position, hipStream_t stream) {
+  // The target's fused kernel has the same reduction and RoPE arithmetic.
+  // DFlash2 keeps its own ring cache, so only the in-place Q/K outputs are
+  // used.
+  if (config.head_dim <= 256) {
+    LaunchBatchedFusedQKNormRoPEKvWrite(
+        query, key, key, query_weight, key_weight, query, key, nullptr, nullptr,
+        nullptr, nullptr, 0, position, rows, 0, query_heads,
+        config.num_key_value_heads, config.head_dim, config.rotary_dim,
+        config.rope_theta, 1e-6F, stream);
+    return;
+  }
+  if (query_heads != 0) {
+    LaunchBatchedPerHeadRMSNorm(query, query_weight, query, rows, query_heads,
+                                config.head_dim, 1e-6F, stream);
+  }
+  LaunchBatchedPerHeadRMSNorm(key, key_weight, key, rows,
+                              config.num_key_value_heads, config.head_dim,
+                              1e-6F, stream);
+  LaunchBatchedRoPE(query, key, rows, query_heads, config.num_key_value_heads,
+                    config.head_dim, config.rotary_dim, position,
+                    config.rope_theta, stream);
+}
+
 void TraceTensor(const DFlashTrace& trace, std::string_view name,
                  const float* device, std::size_t count, hipStream_t stream) {
   if (!trace)
@@ -793,15 +821,15 @@ bool QwenDFlashGpuExecutor::InjectTargetContextChunk(
     }
 
     if (layer.attn_k_norm.data != nullptr) {
-      LaunchBatchedPerHeadRMSNorm(
-          d_k_block_, static_cast<const float*>(layer.attn_k_norm.data),
-          d_k_block_, num_tokens, cfg.num_key_value_heads, cfg.head_dim, 1e-6F,
-          stream_);
+      NormalizeAndRotateQK(nullptr, d_k_block_, nullptr,
+                           static_cast<const float*>(layer.attn_k_norm.data),
+                           cfg, 0, num_tokens, position, stream_);
+    } else {
+      LaunchBatchedRoPE(nullptr, d_k_block_, num_tokens, 0,
+                        cfg.num_key_value_heads, cfg.head_dim, cfg.rotary_dim,
+                        position, cfg.rope_theta, stream_);
     }
 
-    LaunchBatchedRoPE(nullptr, d_k_block_, num_tokens, 0,
-                      cfg.num_key_value_heads, cfg.head_dim, cfg.rotary_dim,
-                      position, cfg.rope_theta, stream_);
     if (trace) {
       const auto layer_prefix = prefix + std::to_string(i) + ".";
       TraceTensor(trace, layer_prefix + "k", d_k_block_, num_tokens * kv_dim,
@@ -934,16 +962,10 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     RunBlockGemm(layer.attn_v, d_conv_hidden_, d_v_block_, block_count, kv_dim,
                  hidden_size);
 
-    LaunchBatchedPerHeadRMSNorm(
-        d_q_, static_cast<const float*>(layer.attn_q_norm.data), d_q_,
-        block_count, num_q_heads, head_dim, 1e-6F, stream_);
-    LaunchBatchedPerHeadRMSNorm(
-        d_k_block_, static_cast<const float*>(layer.attn_k_norm.data),
-        d_k_block_, block_count, num_kv_heads, head_dim, 1e-6F, stream_);
-
-    LaunchBatchedRoPE(d_q_, d_k_block_, block_count, num_q_heads, num_kv_heads,
-                      head_dim, cfg.rotary_dim, current_pos, cfg.rope_theta,
-                      stream_);
+    NormalizeAndRotateQK(d_q_, d_k_block_,
+                         static_cast<const float*>(layer.attn_q_norm.data),
+                         static_cast<const float*>(layer.attn_k_norm.data), cfg,
+                         num_q_heads, block_count, current_pos, stream_);
     emit("q", d_q_, q_dim);
     emit("k", d_k_block_, kv_dim);
     emit("v", d_v_block_, kv_dim);

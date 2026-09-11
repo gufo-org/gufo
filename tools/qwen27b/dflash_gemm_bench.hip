@@ -208,6 +208,14 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                    <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(),
                                                rows, columns);
              }}};
+        if constexpr (Batch == 8 && Type == core::GgmlType::kQ4_K) {
+          geometries.push_back(
+              {"groups4", [&](const void* w) {
+                 SmallBatchKQuantExactFp32GEMMKernel<16, 4, 3, Type, 1, 12, 2>
+                     <<<((rows + 47) / 48) * 2, 512>>>(
+                         w, input.Get(), output.Get(), rows, columns);
+               }});
+        }
       };
       if (type == "q4")
         kquant.template operator()<core::GgmlType::kQ4_K>();

@@ -251,12 +251,15 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
 
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, core::GgmlType WType,
-         std::size_t TilesPerStage = 1, std::uint32_t MinWaves = 12>
+         std::size_t TilesPerStage = 1, std::uint32_t MinWaves = 12,
+         std::size_t TokenGroups = 1>
 __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
     void SmallBatchKQuantExactFp32GEMMKernel(const void* __restrict__ w,
                                              const float* __restrict__ x,
                                              float* __restrict__ y,
                                              std::size_t m, std::size_t k) {
+  x += (blockIdx.x % TokenGroups) * Batch * k;
+  y += (blockIdx.x % TokenGroups) * Batch * m;
   constexpr std::size_t kSubElems = 16;
   constexpr std::size_t kSubsPerTile = 32 * TilesPerStage;
   constexpr std::size_t kVectorsPerSub = kSubElems / 4;
@@ -272,7 +275,7 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
   const std::size_t lane = threadIdx.x & 31u;
   const std::size_t warp_id = threadIdx.x >> 5u;
   const std::size_t row_base =
-      ((blockIdx.x * WavesPerBlock) + warp_id) * RowsPerWave;
+      (((blockIdx.x / TokenGroups) * WavesPerBlock) + warp_id) * RowsPerWave;
   const std::size_t num_sub = k / kSubElems;
   const std::size_t row_bytes = QuantRowBytes(WType, k);
   float sums[RowsPerWave][Batch] = {};

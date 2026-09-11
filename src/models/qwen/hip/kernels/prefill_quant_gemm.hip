@@ -1720,6 +1720,13 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
   constexpr std::size_t RowsPerWave = 3;
   switch (type) {
     case core::GgmlType::kQ4_K:
+      if (batch == 8 && k == 5120 && m == 1280) {
+        SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, 4,
+                                            RowsPerWave, core::GgmlType::kQ4_K,
+                                            1, 12, 2>
+            <<<((m + 47) / 48) * 2, block, 0, stream>>>(w, fp32_x, y, m, k);
+        return;
+      }
       // The full DFlash2 block reuses each gate/up activation tile twice.
       // Other shapes do not consistently benefit from the larger LDS stage.
       if (batch == 8 && m == 17408 && k == 5120) {

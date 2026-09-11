@@ -304,25 +304,25 @@ prints per-kernel VGPR, occupancy, spill, and LDS usage into
 
 ### Kernel design iteration
 
-`tools/bench/` holds self-contained microbenchmarks with no repository headers,
-so a kernel variant compiles in seconds instead of through a full `nix build`.
-Each one carries an ablation harness: variants are measured against a reference
-implementation in the same binary and report both throughput and correctness, so
-a change is never promoted on speed alone.
+Fast probes live in `tools/bench/` and model-specific tool folders. The Qwen27B
+probes use production kernels; standalone design experiments keep their own
+references. Each reports correctness beside component timings. Use release
+model comparisons before retaining a change: a microbenchmark can improve
+while the model gets slower.
 
 ```sh
-nix develop -c tools/bench/build.sh w8a8_gemm_bench
-/tmp/w8a8_gemm_bench -b 2048 -i 5            # all shapes
-/tmp/w8a8_gemm_bench -b 2048 -c ffn_gate/up  # one shape
+nix develop -c tools/bench/build.sh tools/qwen27b/prefill_gemm_bench.hip
+/tmp/prefill_gemm_bench 2048 12
 
 /tmp/bf16_gemm_bench -b 2048     # hipBLAS / hipBLASLt bar to beat
 /tmp/aotriton_attn_bench -i 5    # AOTriton flash-attention capability probe
 /tmp/asr_decode_gemv_bench       # batch-one decode GEMV vs the DRAM ceiling
 ```
 
-The `maxrel` column is relative error against the production kernel in the same
-run; `0.0e+00` means bit-identical. Winning variants are then ported into
-`src/` and re-validated through `nix build` plus their CTest oracle.
+The Qwen prefill probe calls the production kernels and requires exact bytes,
+including quantization scales and sums. Other probes report their numerical
+error beside timings. Retained changes are validated with Nix release model
+measurements and the affected operator checks.
 
 **Size the working set like the model does.** Strix Halo has a 32 MB MALL, and a
 single decoder projection is 4-25 MB. Timing one shape in a repeat loop leaves it
@@ -387,9 +387,9 @@ and wait/barrier categories:
 
 ```sh
 nix develop -c hipcc -O3 --offload-arch=gfx1151 -std=c++20 \
-  --cuda-device-only -S -o /tmp/k.s tools/bench/w8a8_gemm_bench.hip
+  -I. --cuda-device-only -S -o /tmp/k.s tools/qwen27b/prefill_gemm_bench.hip
 nix develop -c python3 tools/prof/isa_mix.py /tmp/k.s            # list kernels
-nix develop -c python3 tools/prof/isa_mix.py /tmp/k.s BlockedW8A8 # one kernel
+nix develop -c python3 tools/prof/isa_mix.py /tmp/k.s W8A8BlockedWmmaGEMMKernel
 ```
 
 Read the counts with care: the listing covers a whole kernel, so a once-per-block
@@ -414,6 +414,7 @@ nix develop -c tools/bench/build.sh tools/qwen27b/deltanet_bench.hip
 
 nix develop -c tools/bench/build.sh tools/qwen27b/attention_bench.hip
 /tmp/attention_bench
+/tmp/attention_bench rope
 ```
 
 The recurrence probe checks exact outputs/state with a rotating 144 MiB state

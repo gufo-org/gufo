@@ -337,11 +337,11 @@ void TestPrefillGemm(const FormatCase& format, std::size_t batch) {
 /// only if the verifier reproduces exactly what the unspeculated decode would
 /// have emitted, so any reassociation at batch > 1 silently changes which
 /// tokens are accepted.
-void TestSmallBatchExactness(const FormatCase& format, std::size_t batch) {
-  constexpr std::size_t kM = 64;
-  const auto weights = MakeWeights(format.type, kM, kK, 0x2468ACE0U);
+void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
+                             std::size_t rows = 64, std::size_t columns = kK) {
+  const auto weights = MakeWeights(format.type, rows, columns, 0x2468ACE0U);
 
-  std::vector<float> x(batch * kK);
+  std::vector<float> x(batch * columns);
   std::uint32_t state = 0x13579BDFU;
   for (auto& value : x) {
     value = static_cast<float>(static_cast<int>(NextRandom(state) & 0xFFFFU) -
@@ -355,8 +355,8 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch) {
   void* d_single = nullptr;
   HIP_CHECK(hipMalloc(&d_w, weights.size()));
   HIP_CHECK(hipMalloc(&d_x, x.size() * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_batched, batch * kM * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_single, kM * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_batched, batch * rows * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_single, rows * sizeof(float)));
   HIP_CHECK(
       hipMemcpy(d_w, weights.data(), weights.size(), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(d_x, x.data(), x.size() * sizeof(float),
@@ -364,23 +364,23 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch) {
 
   gufo::hip::LaunchBatchedQuantGEMMFp32(
       format.type, d_w, static_cast<const float*>(d_x),
-      static_cast<float*>(d_batched), batch, kM, kK, nullptr);
+      static_cast<float*>(d_batched), batch, rows, columns, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
-  std::vector<float> batched(batch * kM);
+  std::vector<float> batched(batch * rows);
   HIP_CHECK(hipMemcpy(batched.data(), d_batched, batched.size() * sizeof(float),
                       hipMemcpyDeviceToHost));
 
   std::size_t mismatches = 0;
-  std::vector<float> single(kM);
+  std::vector<float> single(rows);
   for (std::size_t token = 0; token < batch; ++token) {
     gufo::hip::LaunchQ8KBlockGEMV(
-        d_w, format.type, static_cast<const float*>(d_x) + (token * kK),
-        static_cast<float*>(d_single), kM, kK, nullptr);
+        d_w, format.type, static_cast<const float*>(d_x) + (token * columns),
+        static_cast<float*>(d_single), rows, columns, nullptr);
     HIP_CHECK(hipDeviceSynchronize());
-    HIP_CHECK(hipMemcpy(single.data(), d_single, kM * sizeof(float),
+    HIP_CHECK(hipMemcpy(single.data(), d_single, rows * sizeof(float),
                         hipMemcpyDeviceToHost));
-    for (std::size_t row = 0; row < kM; ++row) {
-      if (batched[(token * kM) + row] != single[row]) {
+    for (std::size_t row = 0; row < rows; ++row) {
+      if (batched[(token * rows) + row] != single[row]) {
         ++mismatches;
       }
     }
@@ -388,7 +388,7 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch) {
 
   std::cout << (mismatches == 0 ? "[ OK ] " : "[FAIL] ") << "batch " << batch
             << " bit-exact vs decode GEMV " << format.name << " mismatches "
-            << mismatches << " of " << (batch * kM) << "\n";
+            << mismatches << " of " << (batch * rows) << "\n";
   if (mismatches != 0) {
     g_failed = true;
   }
@@ -422,6 +422,7 @@ int main() {
       TestSmallBatchExactness(format, batch);
     }
   }
+  TestSmallBatchExactness({gufo::core::GgmlType::kQ4_K, "Q4_K"}, 8, 1280, 5120);
   if (g_failed) {
     std::cerr << "q4kxl quant equivalence FAILED\n";
     return 1;

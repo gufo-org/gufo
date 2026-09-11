@@ -773,8 +773,7 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
   HIP_CHECK(
       hipMalloc(&d_weights_bf16, max_weight_elems * sizeof(hip_bfloat16)));
 
-  const std::size_t total_kv = config_.FullAttentionLayerCount() *
-                               num_kv_heads * max_context_ * head_dim;
+  const std::size_t total_kv = GetAttentionKvPlaneElements();
   if (policy_.UsesFp16AttentionKv()) {
     HIP_CHECK(
         hipMalloc(&d_attention_kv_f16, total_kv * sizeof(std::uint16_t) * 2));
@@ -1085,10 +1084,7 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
 
 void QwenGpuArena::Reset() noexcept {
   const std::size_t num_layers = config_.num_layers;
-  const std::size_t num_kv_heads = config_.num_key_value_heads;
-  const std::size_t head_dim = config_.head_dim;
-  const std::size_t total_kv = config_.FullAttentionLayerCount() *
-                               num_kv_heads * max_context_ * head_dim * 2;
+  const std::size_t total_kv = GetAttentionKvPlaneElements() * 2;
   const std::size_t total_conv =
       num_layers * config_.SsmQkvSize() * config_.ssm_conv_kernel;
   const std::size_t total_deltanet = num_layers * config_.ssm_time_step_rank *

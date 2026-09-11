@@ -29,18 +29,18 @@ matches all 128 AR token IDs. MTP performance: **TODO**.
 
 | Target | Depth | DFlash2 Q4_K_M | DFlash2 Q8_0 | DFlash2 BF16 |
 | --- | ---: | ---: | ---: | ---: |
-| Q4 | 0 | 403.1 / 20.92 | 398.6 / 17.64 | 397.4 / 16.85 |
-| Q4 | 4,096 | 384.7 / 13.95 | TODO | TODO |
+| Q4 | 0 | 395.1 / 20.91 | 396.5 / 17.67 | 397.5 / 16.90 |
+| Q4 | 4,096 | 383.7 / 13.99 | TODO | TODO |
 | Q4 | 8,192 | TODO | TODO | TODO |
 | Q4 | 12,288 | TODO | TODO | TODO |
 | Q4 | 16,384 | TODO | TODO | TODO |
-| Q8 | 0 | 464.8 / 22.90 | 464.1 / 22.73 | 466.7 / 21.82 |
-| Q8 | 4,096 | 444.3 / 15.76 | TODO | TODO |
+| Q8 | 0 | 466.2 / 22.99 | 464.6 / 22.82 | 466.8 / 21.90 |
+| Q8 | 4,096 | 445.9 / 15.84 | TODO | TODO |
 | Q8 | 8,192 | TODO | TODO | TODO |
 | Q8 | 12,288 | TODO | TODO | TODO |
 | Q8 | 16,384 | TODO | TODO | TODO |
 
-[Current measurements and quality checks](eval/dflash2-attention.json).
+[Measurements and quality checks](eval/dflash2-rollback.json).
 Unmeasured cells await refresh; the [previous full depth sweep](eval/dflash2-depths.json)
 remains available as a historical reference. Acceptance varies with the
 continuation, so generation speed need not decrease monotonically with depth.
@@ -76,12 +76,14 @@ All three drafts pass the pinned upstream operator comparison. Precision
 selection remains open because acceptance depends on the target and prompt.
 Controller comparisons follow kernel optimization.
 
-The latest pass adds **3.2–3.5%** in a C1 C++ chat probe across all six pairings
-(two interleaved repetitions, 128 tokens), versus `8bfd8cd`. Prefill has no
-material change. Verification batches attention and QK/RoPE writes, reuses
-existing scratch for split-K, and distributes narrow SSM projections across
-token rows. All 48 target logit rows and 270 draft trace files remain byte-exact.
-[Measurements, profiles and rejected experiments](eval/dflash2-attention.json).
+The latest pass saves **50.5 MiB per speculative session** with compact
+rollback, fuses draft normalization/RoPE and speeds up Q4 convolution
+projections. Final profiles reduce copy time by 19%, draft QK/RoPE by
+17–20%, and those Q4 projections by 7%; total generation changes remain small.
+Q5/IQ4 prefill fusion and Q8 token grouping were slower or inconsistent in
+model tests and are removed. Cache addressing now preserves exact logits across
+mixed session capacities and at a 262,144-token logical context.
+[Measurements, quality checks and rejected experiments](eval/dflash2-rollback.json).
 
 ## Reproduce
 

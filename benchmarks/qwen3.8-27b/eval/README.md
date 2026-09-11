@@ -47,7 +47,12 @@ injection; the complete serialized history must remain byte-identical.
   each. Repeated prefill and snapshot continuation are byte-identical. All
   24 batched-verifier logit rows per target equal scalar decode byte for
   byte; committing five rows across the replay ring's boundary also preserves
-  subsequent logits. Prefill and scalar decode retain the same top-1 choice
+  subsequent logits. Independent sessions with 32/64-token cache capacities
+  retain all logits and returned IDs in either batch order, with FP16 and
+  FP32 caches. A 262,144-token logical cache with only a 24-token prefix
+  matches a small cache for prefill, scalar decode and verification. Both
+  cache-addressing regressions failed before their fixes.
+  Prefill and scalar decode retain the same top-1 choice
   on these prefixes.
 - MTP: feedback replay equals a fresh teacher-forced committed prefix. The
   regression fails when replay uses the newest target hidden row for the old
@@ -184,77 +189,37 @@ contract here is Gufo AR's distribution.
 Remaining: original checkpoint/conversion and MTP qualification, optional BF16
 target comparison, and longer capability/depth coverage.
 
-Experiment: removing symmetric-format activation corrections, including explicit
-rounded multiply/add, failed bitwise GEMM verification. Rejected; the production
-reduction remains unchanged.
+## Optimization evidence
 
-Retained: FP32 activations for small BF16-weight draft GEMMs reduce the worst
-BF16 forward-stage relative error from 5.25e-3 to 6.16e-6 against FP32 upstream
-formulas. Short release probes retain exact greedy output; BF16 companion
-rates improve from 23.60/22.43 to 24.43/22.97 tok/s on Q4/Q8 targets.
+Each record contains its own workload, artifact hashes and measurements.
+Gains from different workloads must not be added together.
 
-The [TG profile](draft-profile.json) separates executors by HIP stream.
-Target work takes 90% of Q4/Q8 companion kernel time, primarily exact quantized
-projections. Draft GPU work per step is 17.2 ms (Q4), 18.2 ms (Q8) and 26.1 ms
-(BF16); target work is approximately 155 ms. These are one profiled C++ corpus
-case per companion, with initial prefill excluded.
+| Record | Retained result |
+| --- | --- |
+| [Draft operators](dflash2-optimization.json) | FP32 draft activations preserve the pinned packed-weight reference; exact projection geometry and bounded injection. |
+| [Initial profile](draft-profile.json) | Target projections dominate; draft precision alone does not predict total speed. |
+| [Verification](dflash2-verification.json) | Exact Q6 vocabulary/Q4 projections and batched embedding; no material total-speed gain. |
+| [Recurrence/injection](dflash2-recurrence.json) | Register-resident FP32 recurrence, batched state-only replay, sixteen-row BF16 injection; C1 generation +2.7–3.6%. |
+| [Projection follow-up](dflash2-projections.json) | Compact Q5 staging, two-tile IQ4 projection and BF16 grouping; Q4 +1.4–2.1%, Q8 within noise. |
+| [Attention](dflash2-attention.json) | Exact batched attention/QK/cache writes and narrow SSM projections; C1 chat +3.2–3.5%. |
+| [Rollback and cache addressing](dflash2-rollback.json) | Compact rollback, fused draft normalization/RoPE and Q4 convolution projections; fixes mixed-capacity and 32-bit cache offsets. |
 
-The [verification optimization record](dflash2-verification.json) adds
-short probes after the depth sweep: Q6 vocabulary projection time falls
-5.1% for eight verification rows, and the Q4 gate/up projection falls 3.5%.
-Both are bit-exact; batched embedding lookup replaces eight launches with one.
-The six-pair release comparison remains within −0.02% to +0.16% of its
-baseline, so these are kernel improvements without a material end-to-end claim.
-All 48 target verification logit rows and all 270 draft trace files match.
+Rollback snapshots omit unused attention-layer rows: **202 → 151.5 MiB**
+per speculative session, preserving every live state byte. Existing operator
+checks cover FP32/BF16 storage, incomplete layer groups and repeated saves.
+The cache fixes use each session's capacity and size_t arithmetic; the large
+logical-context test exercises only 27 tokens and does not fill the cache.
 
-The recurrence optimization preserves decode's FMA rounding explicitly and
-bounds compiler load hoisting, allowing FP32 state to stay in registers without
-spilling. Verification uses it for multiple rows; scalar decode keeps its
-existing route. Rejected-prefix replay batches committed rows per layer and
-skips unused output work. Operator checks compare all state/output bits across
-FP32/BF16, scalar/batched and full/state-only execution.
-The optional quantization comparison uses each fixture's actual prefix length
-and scores every forced continuation token.
+Draft normalization/RoPE shares the target's existing fused kernel, including
+cacheless in-place execution. The Q4 convolution coefficient projection splits
+eight rows into two groups of four. Tests compare complete outputs with the
+existing scalar/ungrouped controls. Final target replay and all 270 draft
+trace files remain byte-identical.
 
-BF16 feature injection shares weights across sixteen tokens while preserving
-FP32 inputs and accumulation order. All three draft traces and the complete
-serialized history remain byte-identical. The GEMM control covers widths
-1–8 and 16 against scalar decode, including partial matrix tiles.
-
-Rejected probes: the first resident-state recurrence changed FMA rounding;
-explicit rounding fixed it. Thirty-two-row injection, four-row Q5 projections
-and the Q8 vocabulary variant were slower. None adds an execution switch.
-
-The [recurrence/injection record](dflash2-recurrence.json) contains the latest
-short C1 pp2048/tg128 release comparison across all six pairings: generation
-improves 2.7–3.6%, prefill 2.2–3.5%; all twelve speculative traces equal AR.
-Separate C++ chat profiles retain the same tokens and verification steps.
-Recurrence GPU time falls 61–63%, with roughly half as many recurrence/conv
-launches; total target GPU time falls 5.6–6.0%. These profiles explain the
-change and are not throughput measurements.
-
-The [projection follow-up](dflash2-projections.json) retains compact Q5
-activation staging, two-tile IQ4 projection and BF16 row grouping. Final
-release comparisons preserve every target token ID across all 24 cases; Q4
-throughput improves 1.4–2.1%, while Q8 remains within measurement noise.
-Compact Q8 staging and its proposed output grouping were slower in the full
-model and are removed. Compact 32-row BF16 injection also remains slower than
-the retained 16-row chunks. No execution switches or extra test binaries remain.
-
-
-The [attention/SSM-control pass](dflash2-attention.json) batches consecutive
-verification queries with the same per-row reductions, causal endpoints and
-split-K partitions. It batches QK/RoPE/cache writes and reuses idle weight
-scratch for split-K; threshold straddles and small scratch spans retain the
-scalar fallback. Narrow 48x5120 Q8 SSM projections use independent token rows.
-Full-model profiles reduce attention GPU time by about 78% and SSM-control
-projection time by 62–65%. Two interleaved C1 chat repetitions improve all six
-pairings by 3.2–3.5%; prefill has no material change. Final checks retain all
-48 full-logit rows, all 270 draft traces, 24 chat traces and 10 benchmark traces.
-The shared KV test covers exact FP16/FP32 attention, gating, causal boundaries
-and scratch fallback; the existing Q8 test covers the narrow shape at widths 1–8.
-
-Residual/RMSNorm fusion was byte-exact but increased full-model normalization
-and residual GPU time by 6–8%. Its kernel, API and test extension are removed.
-The maintained attention and GEMM tools use production kernels; no environment
-switches or additional test executables were introduced.
+Rejected experiments remain evidence, not production routes: symmetric-format
+correction removal changed bits; 32-row BF16 injection, Q8 token grouping,
+residual/RMSNorm fusion and Q5/IQ4 prefill epilogues failed performance checks.
+The prefill epilogues won isolated probes but did not produce a consistent
+model gain. Their implementations and switches are absent. Maintained GEMM,
+attention and recurrence tools call production kernels; the duplicate standalone
+W8A8 benchmark is removed. No new test executable is introduced.

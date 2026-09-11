@@ -165,13 +165,11 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
             config.head_dim, 1e-6F, arena.stream);
       }
 
-      const std::size_t total_k = config.FullAttentionLayerCount() *
-                                  config.num_key_value_heads *
-                                  arena.GetMaxContext() * config.head_dim;
       const std::uint32_t attention_layer =
           layer_index / config.full_attention_interval;
       for (std::size_t row = 0; row < batch_size; ++row) {
         auto& state_arena = items[row].executor->arena_;
+        const std::size_t total_k = state_arena.GetAttentionKvPlaneElements();
         float* query = scratch.attention.q.data() + (row * attention_size);
         float* key = scratch.attention.k.data() + (row * kv_size);
         float* value = scratch.attention.v.data() + (row * kv_size);
@@ -407,9 +405,7 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                             config.num_attention_heads, config.head_dim,
                             arena_.stream);
 
-      const std::size_t total_k = config.FullAttentionLayerCount() *
-                                  config.num_key_value_heads *
-                                  arena_.GetMaxContext() * config.head_dim;
+      const std::size_t total_k = arena_.GetAttentionKvPlaneElements();
       const std::uint32_t attention_layer =
           layer_index / config.full_attention_interval;
       const bool fused_qknorm_rope_kv =

@@ -155,7 +155,11 @@ verification rows or sixteen BF16 injection rows, for example
 while rotating the 144 MiB target state; `qwen27b/prefill_deltanet_bench.hip`
 contains the separate prefill ablations. Both use the same fast Nix builder.
 `qwen27b/attention_bench.hip` compares scalar and batched attention. It checks exact outputs
-beside component timings, including the 4K split-K boundary.
+beside component timings, including the 4K split-K boundary; its `rope` mode
+compares separate and fused draft normalization/RoPE.
+`qwen27b/prefill_gemm_bench.hip` compares production Q8_0 gate/up GEMM
+with separate or fused SwiGLU, including every activation byte and scale.
+It replaces the old standalone W8A8 kernel copies.
 `qwen27b/dflash_reference.py` checks a GPU trace against
 pinned upstream PyTorch operators using the same GGUF weights. See
 `benchmarks/qwen3.8-27b/README.md` and its quality report for commands and evidence.

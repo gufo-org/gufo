@@ -298,6 +298,11 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }
+  [[nodiscard]] std::size_t GetAttentionKvPlaneElements() const noexcept {
+    // Qwen27B reaches 2^32 elements per plane at context 262144.
+    return static_cast<std::size_t>(config_.FullAttentionLayerCount()) *
+           config_.num_key_value_heads * max_context_ * config_.head_dim;
+  }
   [[nodiscard]] QwenRecurrentStateStorage GetRecurrentStateStorage()
       const noexcept {
     return policy_.recurrent_state_storage;

@@ -229,9 +229,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                             batch_size, config.num_attention_heads,
                             config.head_dim, arena_.stream);
 
-      const std::size_t total_k = config.FullAttentionLayerCount() *
-                                  config.num_key_value_heads *
-                                  arena_.GetMaxContext() * config.head_dim;
+      const std::size_t total_k = arena_.GetAttentionKvPlaneElements();
       const std::uint32_t attn_layer_idx = l / config.full_attention_interval;
 
       // QK-Norm + RoPE + KV-cache write fused into one kernel

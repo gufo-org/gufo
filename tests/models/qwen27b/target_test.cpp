@@ -60,6 +60,100 @@ bool ByteEqual(std::span<const float> a, std::span<const float> b) {
          std::memcmp(a.data(), b.data(), a.size_bytes()) == 0;
 }
 
+void CheckMixedContextBatch(const Executor& owner) {
+  for (const auto storage : {gufo::hip::QwenKvCacheStorage::kFp16,
+                             gufo::hip::QwenKvCacheStorage::kFp32}) {
+    auto policy = gufo::hip::QwenExecutionPolicy::Production();
+    policy.kv_cache_storage = storage;
+    Executor short_session(owner.GetSharedModel(), 32, policy);
+    Executor long_session(owner.GetSharedModel(), 64, policy);
+    const std::array<Executor*, 2> sessions{&short_session, &long_session};
+    constexpr std::array<std::uint32_t, 2> prefix_sizes{5, 9};
+    constexpr std::uint32_t continuation = 3;
+    std::array<std::vector<Token>, 2> tokens;
+    std::array<std::vector<std::vector<float>>, 2> expected;
+    for (std::size_t row = 0; row < sessions.size(); ++row) {
+      auto& session = *sessions[row];
+      tokens[row] = owner.GetTokenizer().Encode(kTexts[row]);
+      Expect(tokens[row].size() >= prefix_sizes[row] + continuation,
+             "mixed-context fixture has too few tokens");
+      session.Reset();
+      (void)session.ForwardPromptBatch(
+          std::span(tokens[row]).first(prefix_sizes[row]));
+      auto snapshot = session.SaveSnapshot(prefix_sizes[row]);
+      for (std::uint32_t step = 0; step < continuation; ++step) {
+        const auto position = prefix_sizes[row] + step;
+        (void)session.ForwardToken(tokens[row][position], position);
+        expected[row].push_back(Logits(session));
+      }
+      session.RestoreSnapshot(*snapshot);
+    }
+    for (std::uint32_t step = 0; step < continuation; ++step) {
+      std::array<gufo::hip::QwenGpuBatchItem, 2> items;
+      for (std::size_t row = 0; row < sessions.size(); ++row) {
+        const auto position = prefix_sizes[row] + step;
+        items[row] = {sessions[row], tokens[row][position], position};
+      }
+      // Both cache capacities must work as the shared-projection coordinator.
+      if (step % 2 != 0)
+        std::swap(items[0], items[1]);
+      const auto predictions = Executor::ForwardTokenBatch(items);
+      Expect(predictions.size() == sessions.size(),
+             "mixed-context batch returned the wrong number of rows");
+      for (std::size_t row = 0; row < sessions.size(); ++row) {
+        Expect(ByteEqual(Logits(*sessions[row]), expected[row][step]),
+               "mixed-context batching changed target logits");
+        const auto& logits = expected[row][step];
+        const auto next = static_cast<Token>(std::ranges::max_element(logits) -
+                                             logits.begin());
+        Expect(predictions[step % 2 != 0 ? 1 - row : row] == next,
+               "mixed-context batch returned a different token");
+      }
+    }
+    std::cout << "mixed-context batch: storage=" << static_cast<int>(storage)
+              << " all 6 full-logit rows exact\n";
+  }
+}
+
+void CheckWideCache(Executor& reference) {
+  // Exercise the 2^32-element K/V boundary without filling the context.
+  Executor wide(reference.GetSharedModel(), 262144);
+  auto tokens = reference.GetTokenizer().Encode(kTexts[0]);
+  constexpr std::size_t prefix = 24;
+  constexpr std::size_t continuation = 3;
+  Expect(tokens.size() >= prefix + continuation,
+         "wide-cache fixture has too few tokens");
+  reference.Reset();
+  (void)reference.ForwardPromptBatch(std::span(tokens).first(prefix));
+  auto expected_prefill = Logits(reference);
+  std::array<std::vector<float>, continuation> expected;
+  for (std::size_t step = 0; step < continuation; ++step) {
+    (void)reference.ForwardToken(tokens[prefix + step], prefix + step);
+    expected[step] = Logits(reference);
+  }
+  wide.Reset();
+  (void)wide.ForwardPromptBatch(std::span(tokens).first(prefix));
+  Expect(ByteEqual(Logits(wide), expected_prefill),
+         "wide-cache prefill changed target logits");
+  wide.SaveState(prefix);
+  for (std::size_t step = 0; step < continuation; ++step) {
+    (void)wide.ForwardToken(tokens[prefix + step], prefix + step);
+    Expect(ByteEqual(Logits(wide), expected[step]),
+           "wide-cache scalar decode changed target logits");
+  }
+  wide.RestoreState();
+  const auto predictions = wide.ForwardVerificationChunk(
+      std::span(tokens).subspan(prefix, continuation), prefix, true);
+  Expect(predictions.size() == continuation,
+         "wide-cache verifier returned the wrong number of rows");
+  for (std::size_t step = 0; step < continuation; ++step) {
+    Expect(ByteEqual(wide.CopyVerificationLogits(step), expected[step]),
+           "wide-cache verification changed target logits");
+  }
+  std::cout
+      << "context=262144: prefill, scalar and verification logits exact\n";
+}
+
 std::vector<Case> Capture(const char* path, bool check_replay) {
   std::string error;
   auto owner = gufo::core::GgufReader::OpenFile(path, &error);
@@ -144,6 +238,10 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
              "prefill/scalar target choice differs");
     }
     cases.push_back(std::move(row));
+  }
+  if (check_replay) {
+    CheckMixedContextBatch(*executor);
+    CheckWideCache(*executor);
   }
   return cases;
 }

@@ -27,6 +27,54 @@
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
+#include "tests/models/qwen/hip/support/device_buffer.hpp"
+
+// DFlash2 uses in-place Q/K and no target KV-cache outputs. Context injection
+// also uses the key-only path with no query heads.
+void TestNormRoPEWithoutCache() {
+  using gufo::test::DeviceBuffer;
+  for (const unsigned dim : {128U, 256U}) {
+    for (const unsigned rows : {1U, 7U, 8U, 16U}) {
+      for (const unsigned position : {0U, 4096U, 16384U}) {
+        for (const unsigned heads : {0U, 32U}) {
+          constexpr unsigned kv_heads = 8;
+          std::vector<float> q(rows * 32 * dim), k(rows * kv_heads * dim),
+              weights(dim);
+          for (std::size_t i = 0; i < q.size(); ++i)
+            q[i] = 0.4F * std::sin(static_cast<float>(i) * 0.021F);
+          for (std::size_t i = 0; i < k.size(); ++i)
+            k[i] = 0.3F * std::cos(static_cast<float>(i) * 0.031F);
+          for (std::size_t i = 0; i < weights.size(); ++i)
+            weights[i] = 0.5F + static_cast<float>(i) * 0.001F;
+          DeviceBuffer<float> q_ref(q), k_ref(k), q_fused(q), k_fused(k),
+              weight(weights);
+          if (heads != 0) {
+            gufo::hip::LaunchBatchedPerHeadRMSNorm(
+                q_ref.data(), weight.data(), q_ref.data(), rows, heads, dim);
+          }
+          gufo::hip::LaunchBatchedPerHeadRMSNorm(
+              k_ref.data(), weight.data(), k_ref.data(), rows, kv_heads, dim);
+          gufo::hip::LaunchBatchedRoPE(q_ref.data(), k_ref.data(), rows, heads,
+                                       kv_heads, dim, 64, position,
+                                       10000000.0F);
+          gufo::hip::LaunchBatchedFusedQKNormRoPEKvWrite(
+              heads != 0 ? q_fused.data() : nullptr, k_fused.data(),
+              k_fused.data(), weight.data(), weight.data(), q_fused.data(),
+              k_fused.data(), nullptr, nullptr, nullptr, nullptr, 0, position,
+              rows, 0, heads, kv_heads, dim, 64, 10000000.0F);
+          const auto check = [](const auto& expected, const auto& actual) {
+            const auto a = expected.CopyToHost(), b = actual.CopyToHost();
+            if (std::memcmp(a.data(), b.data(), a.size() * sizeof(float))) {
+              throw std::runtime_error("DFlash2 QK norm/RoPE bits differ");
+            }
+          };
+          check(q_ref, q_fused);
+          check(k_ref, k_fused);
+        }
+      }
+    }
+  }
+}
 
 void TestFusedQKNormRoPEKvWriteEquivalence() {
   constexpr std::uint32_t num_heads = 4;
@@ -501,6 +549,7 @@ int main() {
 
   TestFusedQKNormRoPEKvWriteEquivalence();
   TestBatchedFusedQKNormRoPEKvWriteEquivalence();
+  TestNormRoPEWithoutCache();
   std::cout
       << "Qwen QK norm, RoPE, and KV fusion ops test passed on gfx1151.\n";
   return 0;

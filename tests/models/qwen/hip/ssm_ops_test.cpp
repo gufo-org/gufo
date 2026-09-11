@@ -32,6 +32,68 @@
 #include "tests/models/qwen/hip/support/device.hpp"
 #include "tests/models/qwen/support/synthetic_weights.hpp"
 
+void TestRecurrentRollbackRows() {
+  using gufo::hip::QwenRecurrentStateStorage;
+  for (const auto storage :
+       {QwenRecurrentStateStorage::kFp32, QwenRecurrentStateStorage::kBf16}) {
+    for (const auto [layers, interval] : {std::pair{4U, 4U},
+                                          {7U, 4U},
+                                          {3U, 4U},
+                                          {4U, 2U},
+                                          {4U, 1U},
+                                          {4U, 0U}}) {
+      auto config = gufo::models::qwen::make_small_qwen_config();
+      config.num_layers = layers;
+      config.full_attention_interval = interval;
+      auto policy = gufo::hip::QwenExecutionPolicy::Production();
+      policy.recurrent_state_storage = storage;
+      gufo::hip::QwenGpuArena arena(config, 16, policy);
+      const std::size_t conv_row =
+          config.SsmQkvSize() * config.ssm_conv_kernel * sizeof(float);
+      const std::size_t delta_row =
+          config.ssm_time_step_rank * config.ssm_state_size *
+          config.SsmValueSize() *
+          gufo::hip::QwenRecurrentStateElementBytes(storage);
+      std::vector<std::uint8_t> conv(layers * conv_row),
+          delta(layers * delta_row);
+      // A second save must replace the first snapshot, including a tail group.
+      for (unsigned generation = 0; generation < 2; ++generation) {
+        for (auto* values : {&conv, &delta}) {
+          for (std::size_t i = 0; i < values->size(); ++i) {
+            (*values)[i] = (i * 17U + i / 13U + generation * 23U) % 256U;
+          }
+        }
+        HIP_CHECK(hipMemcpy(arena.d_ssm_conv_state, conv.data(), conv.size(),
+                            hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(arena.d_ssm_deltanet_state, delta.data(),
+                            delta.size(), hipMemcpyHostToDevice));
+        arena.SaveState(7);
+        HIP_CHECK(hipMemset(arena.d_ssm_conv_state, 0x5A, conv.size()));
+        HIP_CHECK(hipMemset(arena.d_ssm_deltanet_state, 0x5A, delta.size()));
+        arena.RestoreState();
+        const auto check = [&](const void* device,
+                               const std::vector<std::uint8_t>& expected,
+                               std::size_t row_bytes) {
+          std::vector<std::uint8_t> actual(expected.size());
+          HIP_CHECK(hipMemcpy(actual.data(), device, actual.size(),
+                              hipMemcpyDeviceToHost));
+          for (unsigned layer = 0; layer < layers; ++layer) {
+            const bool recurrent = interval == 0 || (layer + 1) % interval;
+            for (std::size_t i = layer * row_bytes; i < (layer + 1) * row_bytes;
+                 ++i) {
+              if (actual[i] != (recurrent ? expected[i] : 0x5A)) {
+                throw std::runtime_error("rollback changed recurrent state");
+              }
+            }
+          }
+        };
+        check(arena.d_ssm_conv_state, conv, conv_row);
+        check(arena.d_ssm_deltanet_state, delta, delta_row);
+      }
+    }
+  }
+}
+
 void TestBf16RecurrentMemoryAndSnapshot() {
   gufo::core::ModelConfig production;
   production.model_name = "qwen3.8-27b";
@@ -665,6 +727,7 @@ int main() {
   }
 
   TestBatchedSSMConvEquivalence();
+  TestRecurrentRollbackRows();
   TestBf16RecurrentMemoryAndSnapshot();
   TestBatchedSSMRowSplitRecurrenceEquivalence(96);
   // Above the launcher's 2048-token crossover, so the two-row prefetching tile
