@@ -232,3 +232,11 @@ Separate C++ chat profiles retain the same tokens and verification steps.
 Recurrence GPU time falls 61–63%, with roughly half as many recurrence/conv
 launches; total target GPU time falls 5.6–6.0%. These profiles explain the
 change and are not throughput measurements.
+
+The [projection follow-up](dflash2-projections.json) retains compact Q5
+activation staging, two-tile IQ4 projection and BF16 row grouping. Final
+release comparisons preserve every target token ID across all 24 cases; Q4
+throughput improves 1.4–2.1%, while Q8 remains within measurement noise.
+Compact Q8 staging and its proposed output grouping were slower in the full
+model and are removed. Compact 32-row BF16 injection also remains slower than
+the retained 16-row chunks. No execution switches or extra test binaries remain.

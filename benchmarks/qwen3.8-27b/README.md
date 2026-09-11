@@ -74,7 +74,7 @@ selection remains open: compare companions against the same target and prompts,
 since acceptance depends on the target's continuation. Controller comparisons
 follow kernel optimization.
 
-Latest short release A/B against `85b9994`: **C1, pp2048, tg128, depth 0**,
+Release A/B (`85b9994` → `e17744a`): **C1, pp2048, tg128, depth 0**,
 one timed repetition after warmup. Values are baseline → candidate, in tok/s.
 This is separate from the earlier full depth sweep above.
 
@@ -93,6 +93,12 @@ BF16 weights across sixteen FP32 rows. Generation improves **2.7–3.6%** and
 prefill **2.2–3.5%** in this probe; all twelve speculative traces match AR.
 Full logits, recurrent state and all 270 upstream-qualified draft trace files
 remain byte-identical. [Measurements, profiles and quality evidence](eval/dflash2-recurrence.json).
+
+Further projection tuning adds **1.4–2.1% on Q4** across the three drafts in
+a short C++ chat probe (128 tokens, two interleaved repetitions). Q8 ranges
+from −0.17% to +0.39%, so no material extra Q8 gain is claimed. This is a
+separate workload, not an update to the depth rates above.
+[Projection measurements and rejected experiments](eval/dflash2-projections.json).
 
 ## Reproduce
 

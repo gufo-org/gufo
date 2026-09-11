@@ -14,7 +14,7 @@ namespace gufo::hip {
 // Exact FP32-activation kernels shared by decoding, speculative verification,
 // DFlash2 and the focused microbenchmark. Each lane visits its input groups in
 // the same order at every batch width; tile geometry never changes arithmetic.
-// Padded float4-aligned LDS rows amortize activation loads across output rows.
+// Float4-aligned LDS rows amortize activation loads across output rows.
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave>
 __launch_bounds__(WavesPerBlock * 32, 1) __global__
@@ -257,7 +257,9 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
   constexpr std::size_t kSubElems = 16;
   constexpr std::size_t kSubsPerTile = 32 * TilesPerStage;
   constexpr std::size_t kVectorsPerSub = kSubElems / 4;
-  constexpr std::size_t kStride = kSubElems + 4;
+  constexpr bool kCompact =
+      Batch == 8 && WType == core::GgmlType::kQ5_K && TilesPerStage == 1;
+  constexpr std::size_t kStride = kSubElems + (kCompact ? 0 : 4);
   constexpr std::size_t kTileStride = kSubsPerTile * kStride;
   __shared__ float staged_x[Batch * kTileStride];
   // Every output row uses the same activation sum for each token/sub-block.
@@ -290,7 +292,11 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
           value = *reinterpret_cast<const float4*>(
               x + (token * k) + (source_sub * kSubElems) + (vector * 4));
         }
-        *reinterpret_cast<float4*>(dst + (vector * 4)) = value;
+        // Compact Q5 staging needs 17 KiB including sums, instead of 21 KiB.
+        // Both reads and writes permute float4 groups; arithmetic is unchanged.
+        const std::size_t group =
+            kCompact ? vector ^ ((sub >> 1U) & 3U) : vector;
+        *reinterpret_cast<float4*>(dst + (group * 4)) = value;
         // Left to right, term by term, matching the GEMV's scalar loop.
         total += value.x;
         total += value.y;
@@ -320,9 +326,11 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
         for (std::size_t group = 0; group < kVectorsPerSub; ++group) {
 #pragma unroll
           for (std::size_t token = 0; token < Batch; ++token) {
+            const std::size_t input_group =
+                kCompact ? group ^ ((slot >> 1U) & 3U) : group;
             const float4 xv = *reinterpret_cast<const float4*>(
                 staged_x + (token * kTileStride) + (slot * kStride) +
-                (group * 4));
+                (input_group * 4));
 #pragma unroll
             for (std::size_t r = 0; r < RowsPerWave; ++r) {
               const std::int8_t* q = decoded[r].q + (group * 4);

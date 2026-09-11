@@ -146,8 +146,8 @@ Its optional `reference` suite compares target logits with an explicitly
 provided BF16 artifact. `qwen27b/drafts.py` compares Q4/Q8/BF16 DFlash2 companions and refuses
 incomplete or mismatching results. `--baseline-binary` interleaves two releases
 and also requires identical autoregressive token traces between them.
-`qwen27b/dflash_gemm_bench.hip` measures exact matrix-kernel geometries using
-the production templates; build it with `tools/bench/build.sh` inside Nix.
+`qwen27b/dflash_gemm_bench.hip` measures exact BF16, Q4/Q5/Q6/Q8 and IQ4_XS
+matrix geometries using the production templates; build it with `tools/bench/build.sh` inside Nix.
 Its optional final batch argument selects seven proposal rows, eight
 verification rows or sixteen BF16 injection rows, for example
 `q6 248320 5120 24 8` or `bf16 5120 25600 24 16`.

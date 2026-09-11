@@ -1,6 +1,6 @@
 // DFlash2 exact small-batch GEMM ablations, using the production templates.
 // Build inside Nix with tools/bench/build.sh and this source path.
-// Run: /tmp/dflash_gemm_bench bf16|q8|q4|q6 M K [iterations] [batch]
+// Run: /tmp/dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] [batch]
 // Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise.
 // BF16 also accepts batch=16 to compare injection with two batch-8 launches.
 // Rotating matrices keep small shapes from fitting entirely in cache. Each
@@ -104,9 +104,11 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
   using namespace gufo;
   using namespace gufo::hip;
   if (rows == 0 || columns == 0 || columns % 256 != 0 || iterations < 1 ||
-      (type != "bf16" && type != "q8" && type != "q4" && type != "q6")) {
+      (type != "bf16" && type != "q8" && type != "q4" && type != "q5" &&
+       type != "iq4" && type != "q6")) {
     throw std::invalid_argument(
-        "require bf16|q8|q4|q6, positive M, K divisible by 256, positive "
+        "require bf16|q8|q4|q5|iq4|q6, positive M, K divisible by 256, "
+        "positive "
         "iterations");
   }
   if constexpr (Batch > 8) {
@@ -114,7 +116,11 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
       throw std::invalid_argument("wide injection is BF16 only");
   }
   constexpr std::size_t batch = Batch;
-  const std::size_t block_bytes = type == "q8" ? 34 : type == "q4" ? 144 : 210;
+  const std::size_t block_bytes = type == "q8"    ? 34
+                                  : type == "q4"  ? 144
+                                  : type == "q5"  ? 176
+                                  : type == "iq4" ? 136
+                                                  : 210;
   const std::size_t bytes =
       type == "bf16" ? rows * columns * 2
                      : rows * columns / (type == "q8" ? 32 : 256) * block_bytes;
@@ -132,7 +138,7 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
     InitBytes<<<(physical + 255) / 256, 256>>>(weights.Get(), physical);
     InitScales<<<(physical / block_bytes + 255) / 256, 256>>>(
         weights.Get(), physical / block_bytes, block_bytes,
-        type == "q6" ? 208 : 0, type == "q4");
+        type == "q6" ? 208 : 0, type == "q4" || type == "q5");
   }
   InitValues<<<(batch * columns + 255) / 256, 256>>>(input.Get(),
                                                      batch * columns);
@@ -182,21 +188,27 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                            <<<(rows + 47) / 48, 512>>>(
                                w, input.Get(), output.Get(), rows, columns);
                      }}};
-    } else if (type == "q4") {
-      geometries = {
-          {"tile1",
-           [&](const void* w) {
-             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
-                                                 core::GgmlType::kQ4_K>
-                 <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
-                                             columns);
-           }},
-          {"tile2", [&](const void* w) {
-             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
-                                                 core::GgmlType::kQ4_K, 2>
-                 <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
-                                             columns);
-           }}};
+    } else if (type == "q4" || type == "q5" || type == "iq4") {
+      const auto kquant = [&]<core::GgmlType Type>() {
+        geometries = {
+            {"tile1",
+             [&](const void* w) {
+               SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3, Type>
+                   <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(),
+                                               rows, columns);
+             }},
+            {"tile2", [&](const void* w) {
+               SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3, Type, 2>
+                   <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(),
+                                               rows, columns);
+             }}};
+      };
+      if (type == "q4")
+        kquant.template operator()<core::GgmlType::kQ4_K>();
+      else if (type == "q5")
+        kquant.template operator()<core::GgmlType::kQ5_K>();
+      else
+        kquant.template operator()<core::GgmlType::kIQ4_XS>();
     } else {
       geometries = {
           {"rows2_tile1",
@@ -256,7 +268,7 @@ int main(int argc, char** argv) {
   try {
     if (argc < 4 || argc > 6)
       throw std::invalid_argument(
-          "usage: dflash_gemm_bench bf16|q8|q4|q6 M K [iterations] "
+          "usage: dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] "
           "[batch=7|8|16 (16 is BF16 injection only)]");
     const int batch = argc == 6                      ? std::stoi(argv[5])
                       : std::string(argv[1]) == "q6" ? 7

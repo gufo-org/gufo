@@ -105,9 +105,10 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
   const unsigned int vec_blocks =
       static_cast<unsigned int>((M + kVecRowsPerBlock - 1) / kVecRowsPerBlock);
   const auto* a_vec = static_cast<const hip_bfloat16*>(A);
-  // DFlash2's attention output has a power-of-two weight-row stride. One
-  // row per wave spreads those reads better: 0.38 -> 0.32 ms at width eight.
-  if (batch_size == 8 && M == 5120 && K == 4096) {
+  // One row per wave wins on DFlash2's attention output/FFN and the target's
+  // large BF16 query projection; each preserves the same accumulation order.
+  if (batch_size == 8 &&
+      ((M == 5120 && K == 4096) || (K == 5120 && (M == 12288 || M == 17408)))) {
     BatchedExactBf16GEMMFp32VecKernel<kVecWaves, 8, 1>
         <<<(M + kVecWaves - 1) / kVecWaves, kVecWaves * 32, 0, stream>>>(
             a_vec, X, Y, M, K);

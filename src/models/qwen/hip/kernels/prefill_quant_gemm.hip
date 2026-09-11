@@ -1775,6 +1775,12 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     case core::GgmlType::kIQ4_XS:
+      if (batch == 8 && m == 17408 && k == 5120) {
+        SmallBatchKQuantExactFp32GEMMKernel<
+            kKQuantSmallBatchWarps, 8, RowsPerWave, core::GgmlType::kIQ4_XS, 2>
+            <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
+        return;
+      }
       LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ4_XS>(
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;

@@ -1,0 +1,6628 @@
+{
+  "schema": 1,
+  "date": "2026-09-11",
+  "baseline_revision": "e17744a",
+  "scope": "Further exact projection optimization before controller work. Short cpp_ring_buffer chat128 release A/B; no repeated pp/depth sweep.",
+  "candidate_source_sha256": {
+    "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "9aa7c6932fd1a722b9147ff715d0b2be0cd103ad6b594b64cd75cc642f09bbf2",
+    "src/models/qwen/hip/kernels/prefill_quant_gemm.hip": "7968cf8c10a739b544d9f1ced19573c21255331add9ef6a57a8b320512b492c4",
+    "src/models/qwen/hip/kernels/prefill_gemm.hip": "acc485f1fbcc609ca5687aa783c8b026b7d978bdb34e907637ff4185bd0516db"
+  },
+  "model_artifacts": {
+    "binary": {
+      "path": "/nix/store/ksksafm23lkmlac06jvbv01hb8b7kgvy-gufo-340c33e-dirty/bin/gufo",
+      "bytes": 15950576,
+      "sha256": "5bb22ed04dc15380efa4c45f7e6e46ec9d12c1f6497628c6f99fa2658bd0994a"
+    },
+    "target_q4": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+      "bytes": 17559178144,
+      "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+    },
+    "target_q8": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+      "bytes": 31457991680,
+      "sha256": "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
+    },
+    "draft_q4": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "bytes": 1143006816,
+      "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+    },
+    "draft_q8": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf",
+      "bytes": 2056414816,
+      "sha256": "c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e"
+    },
+    "draft_bf16": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf",
+      "bytes": 3860293216,
+      "sha256": "26d47ca20ab07688327a63d912acad222d924eaaa92a980cc488de3c67e736bc"
+    },
+    "baseline_binary": {
+      "path": "/nix/store/ar1hc4cavzaw8d8hq8chgbipq3zj1249-gufo-3baecbb-dirty/bin/gufo",
+      "bytes": 15923080,
+      "sha256": "86282fc1c22b9ab07432961f139d5b05f45c3bf8376ebd7e40a873f3cc3a8e11"
+    }
+  },
+  "retained": [
+    "Q5_K batch8/one-tile activation staging uses compact XOR addressing:17KiB including sums versus21KiB. Arithmetic and accumulation order are unchanged; other formats and widths keep their original layout.",
+    "IQ4_XS batch8 M17408 K5120 uses two staged tiles with its original padded layout.",
+    "BF16 batch8 M12288 or17408 K5120 uses one row per wave, extending the existing DFlash2 attention-output geometry.",
+    "The maintained production-template GEMM probe adds Q5_K and IQ4_XS types. No new test binaries or runtime/environment switches."
+  ],
+  "quality": {
+    "operator_checks": [
+      {
+        "test": "qwen_quant_gemv_ops_test",
+        "seconds": 0.57,
+        "result": "pass"
+      },
+      {
+        "test": "qwen_q4kxl_quant_ops_test",
+        "seconds": 0.36,
+        "result": "pass"
+      }
+    ],
+    "target_and_draft_checks": [
+      {
+        "target": "Q4",
+        "verification_rows": 24,
+        "all_logits_byte_exact": true,
+        "snapshot_and_rejected_prefix_replay": "pass"
+      },
+      {
+        "target": "Q8",
+        "verification_rows": 24,
+        "all_logits_byte_exact": true,
+        "snapshot_and_rejected_prefix_replay": "pass"
+      },
+      {
+        "draft": "q4",
+        "identical_trace_files": 90,
+        "reference": "/tmp/qwen27b-dflash-q4-source-trace",
+        "trace": "/tmp/qwen27b-projection-final-q4-trace"
+      },
+      {
+        "draft": "q8",
+        "identical_trace_files": 90,
+        "reference": "/tmp/qwen27b-dflash-q8-source-trace",
+        "trace": "/tmp/qwen27b-projection-final-q8-trace"
+      },
+      {
+        "draft": "bf16",
+        "identical_trace_files": 90,
+        "reference": "/tmp/qwen27b-dflash-fp32-trace",
+        "trace": "/tmp/qwen27b-projection-final-bf16-trace"
+      }
+    ],
+    "scope": "Final code passes all48 full target-logit rows, rejected-prefix replay/snapshots, and270 draft trace files. Final release checks pass all24 greedy token traces against qualified AR."
+  },
+  "microbenchmark_scope": "Production-shape probes rotate at least128MiB of weights, with four interleaved rounds. Long probes use96 iterations per round. Every output must be bit-identical to the original geometry before timing counts. Prototype layout variants live outside production.",
+  "microbenchmarks": [
+    {
+      "artifact": "qwen-inject32-fc.csv",
+      "median_ms": {
+        "b8_r2_w16": 4.7172095,
+        "b16_r1_w16": 3.7855945,
+        "b16_r2_w16": 2.8337565,
+        "b16_r2_w8": 3.8286195000000003,
+        "b32_r1_w16": 4.137822,
+        "b32_r2_w16": 3.1632505,
+        "b32_r1_w8": 5.84471,
+        "compact_b32_r1": 3.0751869999999997,
+        "compact_b32_r2": 3.2196265
+      },
+      "samples": [
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 0,
+          "geometry": "b8_r2_w16",
+          "ms": 4.697009,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 0,
+          "geometry": "b16_r1_w16",
+          "ms": 3.849137,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 0,
+          "geometry": "b16_r2_w16",
+          "ms": 2.852645,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 0,
+          "geometry": "b16_r2_w8",
+          "ms": 3.832798,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 0,
+          "geometry": "b32_r1_w16",
+          "ms": 4.157405,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 0,
+          "geometry": "b32_r2_w16",
+          "ms": 3.208112,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 0,
+          "geometry": "b32_r1_w8",
+          "ms": 5.892673,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 0,
+          "geometry": "compact_b32_r1",
+          "ms": 3.100929,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 0,
+          "geometry": "compact_b32_r2",
+          "ms": 3.21637,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 1,
+          "geometry": "compact_b32_r2",
+          "ms": 3.222883,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 1,
+          "geometry": "compact_b32_r1",
+          "ms": 3.049445,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 1,
+          "geometry": "b32_r1_w8",
+          "ms": 5.842486,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 1,
+          "geometry": "b32_r2_w16",
+          "ms": 3.167531,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 1,
+          "geometry": "b32_r1_w16",
+          "ms": 4.164303,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 1,
+          "geometry": "b16_r2_w8",
+          "ms": 3.814807,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 1,
+          "geometry": "b16_r2_w16",
+          "ms": 2.823706,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 1,
+          "geometry": "b16_r1_w16",
+          "ms": 3.765433,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 1,
+          "geometry": "b8_r2_w16",
+          "ms": 4.713108,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 2,
+          "geometry": "b8_r2_w16",
+          "ms": 4.724311,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 2,
+          "geometry": "b16_r1_w16",
+          "ms": 3.734532,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 2,
+          "geometry": "b16_r2_w16",
+          "ms": 2.843807,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 2,
+          "geometry": "b16_r2_w8",
+          "ms": 3.860216,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 2,
+          "geometry": "b32_r1_w16",
+          "ms": 4.118239,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 2,
+          "geometry": "b32_r2_w16",
+          "ms": 3.15897,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 2,
+          "geometry": "b32_r1_w8",
+          "ms": 5.806388,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 2,
+          "geometry": "compact_b32_r1",
+          "ms": 3.044836,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 2,
+          "geometry": "compact_b32_r2",
+          "ms": 3.209244,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 3,
+          "geometry": "compact_b32_r2",
+          "ms": 3.22383,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 3,
+          "geometry": "compact_b32_r1",
+          "ms": 3.19193,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 3,
+          "geometry": "b32_r1_w8",
+          "ms": 5.846934,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 3,
+          "geometry": "b32_r2_w16",
+          "ms": 3.155902,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 3,
+          "geometry": "b32_r1_w16",
+          "ms": 4.107457,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 3,
+          "geometry": "b16_r2_w8",
+          "ms": 3.824441,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 3,
+          "geometry": "b16_r2_w16",
+          "ms": 2.816325,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 3,
+          "geometry": "b16_r1_w16",
+          "ms": 3.805756,
+          "mismatches": 0
+        },
+        {
+          "m": 5120,
+          "k": 25600,
+          "batch": 32,
+          "round": 3,
+          "geometry": "b8_r2_w16",
+          "ms": 4.721311,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-bf16-fc.csv",
+      "median_ms": {
+        "base_r2_t1": 1.430276,
+        "swizzle_r2_t1": 1.4120374999999998
+      },
+      "samples": [
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 1.425358,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 1.411883,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 1.412192,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 1.427494,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 1.433058,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 1.409268,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 1.448722,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 1.457177,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-bf16-kv.csv",
+      "median_ms": {
+        "base_r2_t1": 0.0623905,
+        "swizzle_r2_t1": 0.060433,
+        "base_r1_t1": 0.062230999999999995,
+        "swizzle_r1_t1": 0.0616115
+      },
+      "samples": [
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.067655,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.060518,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r1_t1",
+          "ms": 0.060926,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.061866,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.061357,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r1_t1",
+          "ms": 0.062277,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.060111,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.062731,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.061183,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.061732,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r1_t1",
+          "ms": 0.062287,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.062631,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.061153,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r1_t1",
+          "ms": 0.062185,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.060348,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.06205,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-bf16-o.csv",
+      "median_ms": {
+        "base_r2_t1": 0.3828235,
+        "swizzle_r2_t1": 0.352342,
+        "base_r1_t1": 0.319294,
+        "swizzle_r1_t1": 0.31342250000000005
+      },
+      "samples": [
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.387205,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.358585,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r1_t1",
+          "ms": 0.3194,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.31357,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.315239,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r1_t1",
+          "ms": 0.319188,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.353593,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.37965,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.385997,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.350459,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r1_t1",
+          "ms": 0.320818,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.312669,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.313275,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r1_t1",
+          "ms": 0.318345,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.351091,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.375639,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-bf16-q-long.csv",
+      "median_ms": {
+        "base_r2_t1": 0.5998985,
+        "swizzle_r2_t1": 0.5821970000000001,
+        "base_r1_t1": 0.572522,
+        "swizzle_r1_t1": 0.572885
+      },
+      "samples": [
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.600136,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.583589,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r1_t1",
+          "ms": 0.57129,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.572765,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.576633,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r1_t1",
+          "ms": 0.573754,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.580805,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.599195,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.599661,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.580789,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r1_t1",
+          "ms": 0.570287,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.568612,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.573005,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r1_t1",
+          "ms": 0.576415,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.585241,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.600304,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-bf16-q.csv",
+      "median_ms": {
+        "base_r2_t1": 0.6021955,
+        "swizzle_r2_t1": 0.5841115,
+        "base_r1_t1": 0.566239,
+        "swizzle_r1_t1": 0.5678375
+      },
+      "samples": [
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.607034,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.587259,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r1_t1",
+          "ms": 0.577481,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.570603,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.566352,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r1_t1",
+          "ms": 0.565795,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.582628,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.600797,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.603594,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.583748,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r1_t1",
+          "ms": 0.566683,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.568314,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.567361,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r1_t1",
+          "ms": 0.565157,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.584475,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.599792,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-bf16-up-long.csv",
+      "median_ms": {
+        "base_r2_t1": 0.831929,
+        "swizzle_r2_t1": 0.8175955,
+        "base_r1_t1": 0.792511,
+        "swizzle_r1_t1": 0.7931414999999999
+      },
+      "samples": [
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.827338,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.817795,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r1_t1",
+          "ms": 0.799267,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.808547,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.793894,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r1_t1",
+          "ms": 0.791178,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.811121,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.830936,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.832922,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.819824,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r1_t1",
+          "ms": 0.793844,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.792389,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.788644,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r1_t1",
+          "ms": 0.788191,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.817396,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.835682,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-bf16-up.csv",
+      "median_ms": {
+        "base_r2_t1": 0.831567,
+        "swizzle_r2_t1": 0.8194159999999999,
+        "base_r1_t1": 0.8012705,
+        "swizzle_r1_t1": 0.799338
+      },
+      "samples": [
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.830464,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.812036,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r1_t1",
+          "ms": 0.789446,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.791944,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.795142,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r1_t1",
+          "ms": 0.800368,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.82175,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.83267,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.830152,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.817082,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r1_t1",
+          "ms": 0.802173,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.803534,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r1_t1",
+          "ms": 0.809154,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r1_t1",
+          "ms": 0.803198,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.822666,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.83887,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-iq4-down-long.csv",
+      "median_ms": {
+        "base_r3_t1": 0.37144600000000005,
+        "swizzle_r3_t1": 0.36490599999999995,
+        "base_r3_t2": 0.36499400000000004,
+        "swizzle_r3_t2": 0.410443
+      },
+      "samples": [
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.37058,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.367175,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.369333,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.421393,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.41484,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.377719,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.364733,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.372252,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.37064,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.361088,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.360655,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.406046,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.405615,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.3605,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.365079,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.372553,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-iq4-down.csv",
+      "median_ms": {
+        "base_r3_t1": 0.39068,
+        "swizzle_r3_t1": 0.376849,
+        "base_r3_t2": 0.3753615,
+        "swizzle_r3_t2": 0.4218145
+      },
+      "samples": [
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.367768,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.373103,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.376001,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.420518,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.416614,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.374722,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.373389,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.391373,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.389987,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.380309,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.385933,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.430655,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.423111,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.372229,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.381482,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.401456,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-iq4-up-long.csv",
+      "median_ms": {
+        "base_r3_t1": 0.39637849999999997,
+        "swizzle_r3_t1": 0.3813495,
+        "base_r3_t2": 0.3742485,
+        "swizzle_r3_t2": 0.4122225
+      },
+      "samples": [
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.394067,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.379944,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.37579,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.41283,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.411615,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.372707,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.382755,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.39869,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.405323,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.39968,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.383874,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.41296,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.407012,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.368111,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.37579,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.393181,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-iq4-up.csv",
+      "median_ms": {
+        "base_r3_t1": 0.4104915,
+        "swizzle_r3_t1": 0.39160300000000003,
+        "base_r3_t2": 0.386506,
+        "swizzle_r3_t2": 0.4250535
+      },
+      "samples": [
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.395161,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.383577,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.385843,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.425768,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.420705,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.381816,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.393127,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.411115,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.409868,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.390079,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.387169,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.424339,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.428917,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.387384,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.394512,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.414537,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q5-down.csv",
+      "median_ms": {
+        "base_r3_t1": 0.473225,
+        "swizzle_r3_t1": 0.43503800000000004,
+        "base_r3_t2": 0.4620465,
+        "swizzle_r3_t2": 0.452639
+      },
+      "samples": [
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.473034,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.452938,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.476587,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.457422,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.457478,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.466694,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.437749,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.480774,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.473416,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.432327,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.457399,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.447856,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.447809,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.453854,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.429578,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.4672,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q5-square.csv",
+      "median_ms": {
+        "base_r3_t1": 0.1458525,
+        "swizzle_r3_t1": 0.13176,
+        "base_r3_t2": 0.142976,
+        "swizzle_r3_t2": 0.14090249999999999
+      },
+      "samples": [
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.140378,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.126283,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.142271,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.140373,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.140819,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.143335,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.13244,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.149959,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.143452,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.131548,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.142647,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.141547,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.140986,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.143305,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.131972,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.148253,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q5-ssm-gate.csv",
+      "median_ms": {
+        "base_r3_t1": 0.1749505,
+        "swizzle_r3_t1": 0.16360249999999998,
+        "base_r3_t2": 0.1715465,
+        "swizzle_r3_t2": 0.1702765
+      },
+      "samples": [
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.166141,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.159511,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.171278,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.171628,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.170653,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.170326,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.16466,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.175778,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.174123,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.162545,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.171976,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.1699,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.168093,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.171815,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.165737,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.17683,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q5-ssm-long.csv",
+      "median_ms": {
+        "base_r3_t1": 0.172728,
+        "swizzle_r3_t1": 0.1585675,
+        "base_r3_t2": 0.168238,
+        "swizzle_r3_t2": 0.16494599999999998,
+        "swizzle_r2_t1": 0.17112850000000002,
+        "swizzle_r4_min1": 0.1735915,
+        "swizzle_r3_min1": 0.18463400000000002
+      },
+      "samples": [
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.170733,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.160321,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.168574,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.16473,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.170702,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r4_min1",
+          "ms": 0.173088,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_min1",
+          "ms": 0.183861,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_min1",
+          "ms": 0.184181,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r4_min1",
+          "ms": 0.170941,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.169613,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.164485,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.166306,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.156365,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.172263,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.173193,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.156814,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.167902,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.165162,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.171555,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r4_min1",
+          "ms": 0.174095,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_min1",
+          "ms": 0.185087,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_min1",
+          "ms": 0.186141,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r4_min1",
+          "ms": 0.175651,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.181071,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.169579,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.169791,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.160686,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.176295,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q5-ssm-out.csv",
+      "median_ms": {
+        "base_r3_t1": 0.1779175,
+        "swizzle_r3_t1": 0.1578715,
+        "base_r3_t2": 0.171357,
+        "swizzle_r3_t2": 0.1672185
+      },
+      "samples": [
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.165377,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.152867,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.171911,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.168791,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.166691,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.169235,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.158579,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.179444,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.178488,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.157164,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.172162,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.166811,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.167626,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.170803,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.159517,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.177347,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q5-up-long.csv",
+      "median_ms": {
+        "base_r3_t1": 0.44500850000000003,
+        "swizzle_r3_t1": 0.42084750000000004,
+        "base_r3_t2": 0.43861649999999996,
+        "swizzle_r3_t2": 0.43106500000000003,
+        "swizzle_r2_t1": 0.463229,
+        "swizzle_r4_min1": 0.4622495,
+        "swizzle_r3_min1": 0.47455749999999997
+      },
+      "samples": [
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.440532,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.424285,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.44337,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.436485,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.489112,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r4_min1",
+          "ms": 0.47998,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_min1",
+          "ms": 0.484502,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_min1",
+          "ms": 0.481037,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r4_min1",
+          "ms": 0.466783,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.466895,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.428884,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.433863,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.417557,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.44696,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.443057,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.424138,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.44808,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.433246,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.459563,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r4_min1",
+          "ms": 0.457716,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_min1",
+          "ms": 0.468078,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_min1",
+          "ms": 0.467344,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r4_min1",
+          "ms": 0.452224,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.454558,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.422224,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.430496,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.417482,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.447928,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q5-up.csv",
+      "median_ms": {
+        "base_r3_t1": 0.445737,
+        "swizzle_r3_t1": 0.421134,
+        "base_r3_t2": 0.4398925,
+        "swizzle_r3_t2": 0.43304149999999997
+      },
+      "samples": [
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.438298,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.430139,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t2",
+          "ms": 0.458882,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.438584,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.437201,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t2",
+          "ms": 0.437073,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.422035,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.447915,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.444033,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.420233,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t2",
+          "ms": 0.442514,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.428882,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t2",
+          "ms": 0.42882,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t2",
+          "ms": 0.437271,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.417866,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.447441,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q8-down.csv",
+      "median_ms": {
+        "base_r2_t1": 0.4602275,
+        "swizzle_r2_t1": 0.4707205,
+        "base_r3_t1": 0.440036,
+        "swizzle_r3_t1": 0.487637
+      },
+      "samples": [
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.463702,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.471058,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.451906,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.500561,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.491321,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.440181,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.472536,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.462063,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.458392,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.470383,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.439891,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.483407,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.483953,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.438675,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.465561,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.456565,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q8-head.csv",
+      "median_ms": {
+        "base_r2_t1": 5.950335,
+        "swizzle_r2_t1": 5.964672,
+        "base_r3_t1": 6.2389795,
+        "swizzle_r3_t1": 6.5322130000000005
+      },
+      "samples": [
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 5.948955,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 5.99461,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 6.23583,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 6.58037,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 6.568836,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 6.232191,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 5.944321,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 5.951715,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 5.9572,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 5.958402,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 6.242129,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 6.444052,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 6.49559,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 6.254498,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 5.970942,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 248320,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 5.928217,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q8-qkv.csv",
+      "median_ms": {
+        "base_r2_t1": 0.2772055,
+        "swizzle_r2_t1": 0.270521,
+        "base_r3_t1": 0.2812075,
+        "swizzle_r3_t1": 0.296797
+      },
+      "samples": [
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.267216,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.269984,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.280193,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.295487,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.300168,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.283276,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.269287,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.277535,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.276876,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.271058,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.282222,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.293216,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.298107,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.279315,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.271976,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 10240,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.277824,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q8-ssm-gate.csv",
+      "median_ms": {
+        "base_r2_t1": 0.1710585,
+        "swizzle_r2_t1": 0.16345,
+        "base_r3_t1": 0.1764215,
+        "swizzle_r3_t1": 0.19242399999999998
+      },
+      "samples": [
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.163606,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.163199,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.178063,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.192635,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.192213,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.17478,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.163227,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.171767,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.171357,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.16537,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.180934,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.191692,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.192641,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.174118,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.163673,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 6144,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.17076,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q8-ssm-out.csv",
+      "median_ms": {
+        "base_r2_t1": 0.16903849999999998,
+        "swizzle_r2_t1": 0.16791650000000002,
+        "base_r3_t1": 0.16410550000000002,
+        "swizzle_r3_t1": 0.1787975
+      },
+      "samples": [
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.162256,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.167975,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.1641,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.179228,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.181128,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.165293,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.171724,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.170067,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.169974,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.167092,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.164111,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.176617,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.178367,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.160559,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.167858,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.168103,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen-swizzle-q8-up.csv",
+      "median_ms": {
+        "base_r2_t1": 0.44294100000000003,
+        "swizzle_r2_t1": 0.43949950000000004,
+        "base_r3_t1": 0.4572965,
+        "swizzle_r3_t1": 0.4852085
+      },
+      "samples": [
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r2_t1",
+          "ms": 0.43754,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.439101,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "base_r3_t1",
+          "ms": 0.454954,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.481444,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.48471,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r3_t1",
+          "ms": 0.454445,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.435155,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "base_r2_t1",
+          "ms": 0.442309,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r2_t1",
+          "ms": 0.443975,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.439898,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "base_r3_t1",
+          "ms": 0.459639,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.487565,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r3_t1",
+          "ms": 0.485707,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r3_t1",
+          "ms": 0.460842,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "swizzle_r2_t1",
+          "ms": 0.44018,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "base_r2_t1",
+          "ms": 0.443573,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen27b-projection-bf16.csv",
+      "median_ms": {
+        "rows2": 0.601368,
+        "rows1": 0.570324
+      },
+      "samples": [
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "rows2",
+          "ms": 0.607408,
+          "GBps": 207.16,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "rows1",
+          "ms": 0.582875,
+          "GBps": 215.88,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "rows1",
+          "ms": 0.572297,
+          "GBps": 219.87,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "rows2",
+          "ms": 0.601552,
+          "GBps": 209.17,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "rows2",
+          "ms": 0.599905,
+          "GBps": 209.75,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "rows1",
+          "ms": 0.568351,
+          "GBps": 221.39,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "rows1",
+          "ms": 0.568082,
+          "GBps": 221.5,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "rows2",
+          "ms": 0.601184,
+          "GBps": 209.3,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen27b-projection-iq4.csv",
+      "median_ms": {
+        "tile1": 0.4112595,
+        "tile2": 0.387255
+      },
+      "samples": [
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "tile1",
+          "ms": 0.397499,
+          "GBps": 119.12,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "tile2",
+          "ms": 0.386789,
+          "GBps": 122.42,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "tile2",
+          "ms": 0.387721,
+          "GBps": 122.12,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "tile1",
+          "ms": 0.412835,
+          "GBps": 114.69,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "tile1",
+          "ms": 0.409858,
+          "GBps": 115.53,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "tile2",
+          "ms": 0.386394,
+          "GBps": 122.54,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "tile2",
+          "ms": 0.389732,
+          "GBps": 121.49,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "tile1",
+          "ms": 0.412661,
+          "GBps": 114.74,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen27b-projection-q5.csv",
+      "median_ms": {
+        "tile1": 0.15862,
+        "tile2": 0.170026
+      },
+      "samples": [
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "tile1",
+          "ms": 0.151664,
+          "GBps": 142.6,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "tile2",
+          "ms": 0.167367,
+          "GBps": 129.22,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "tile2",
+          "ms": 0.170293,
+          "GBps": 127.0,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "tile1",
+          "ms": 0.160231,
+          "GBps": 134.97,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "tile1",
+          "ms": 0.162644,
+          "GBps": 132.97,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "tile2",
+          "ms": 0.173872,
+          "GBps": 124.38,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "tile2",
+          "ms": 0.169759,
+          "GBps": 127.4,
+          "mismatches": 0
+        },
+        {
+          "type": "q5",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "tile1",
+          "ms": 0.157009,
+          "GBps": 137.74,
+          "mismatches": 0
+        }
+      ]
+    },
+    {
+      "artifact": "qwen27b-projection-q8.csv",
+      "median_ms": {
+        "rows2": 0.16633199999999998,
+        "rows3": 0.163713
+      },
+      "samples": [
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "rows2",
+          "ms": 0.165067,
+          "GBps": 202.48,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 0,
+          "geometry": "rows3",
+          "ms": 0.163607,
+          "GBps": 204.29,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "rows3",
+          "ms": 0.161345,
+          "GBps": 207.16,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 1,
+          "geometry": "rows2",
+          "ms": 0.166232,
+          "GBps": 201.06,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "rows2",
+          "ms": 0.166634,
+          "GBps": 200.58,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 2,
+          "geometry": "rows3",
+          "ms": 0.16538,
+          "GBps": 202.1,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "rows3",
+          "ms": 0.163819,
+          "GBps": 204.03,
+          "mismatches": 0
+        },
+        {
+          "type": "q8",
+          "m": 5120,
+          "k": 6144,
+          "batch": 8,
+          "round": 3,
+          "geometry": "rows2",
+          "ms": 0.166432,
+          "GBps": 200.82,
+          "mismatches": 0
+        }
+      ]
+    }
+  ],
+  "release": {
+    "workload": "cpp_ring_buffer chat, 128 generated tokens, fixed seven proposals, two interleaved repetitions; timing includes prompt processing. Short development probe, not a full corpus or depth sweep.",
+    "binaries": {
+      "baseline": {
+        "path": "/nix/store/hjv7klfmnab79sppsp56afdw8g8dgipi-gufo-85b9994-dirty/bin/gufo",
+        "sha256": "3088e86bc1da90610f8a405313cd287679b3d8d0b33b8b88f9b9435c4d1ebcf4"
+      },
+      "candidate": {
+        "path": "/nix/store/npyvd19qbagdlqcl5kd6dmy0pga35200-gufo-e17744a-dirty/bin/gufo",
+        "sha256": "1604d99f06d4af6df7c24542c8d3a66f52aa6afe4a7b8d11dc102abd84efc95d"
+      }
+    },
+    "references": {
+      "q4": {
+        "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be greater than zero\");\n\n    std::array<T, Capacity> data_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of elements",
+        "tokens": 128,
+        "seconds": 11.4264,
+        "tps": 11.2021,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7"
+      },
+      "q8": {
+        "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be at least 1\");\n\n    std::array<T, Capacity> storage_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of",
+        "tokens": 128,
+        "seconds": 18.51,
+        "tps": 6.92,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8"
+      }
+    },
+    "results": [
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.14985,
+        "tps": 30.8445,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.631902,
+        "drafted": 163,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.08126,
+        "tps": 31.3629,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.631902,
+        "drafted": 163,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.86022,
+        "tps": 33.1587,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.80639,
+        "tps": 33.6276,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.0429,
+        "tps": 31.6605,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.96151,
+        "tps": 32.3109,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.77,
+        "tps": 26.86,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.60355,
+        "drafted": 169,
+        "accepted": 102,
+        "steps": 25
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.78,
+        "tps": 26.78,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.60355,
+        "drafted": 169,
+        "accepted": 102,
+        "steps": 25
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.63,
+        "tps": 27.65,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.62,
+        "tps": 27.71,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.81,
+        "tps": 26.61,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.79,
+        "tps": 26.7,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.94319,
+        "tps": 32.461,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.02545,
+        "tps": 31.7977,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.08707,
+        "tps": 31.3183,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.631902,
+        "drafted": 163,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.1666,
+        "tps": 30.7205,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.631902,
+        "drafted": 163,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.79994,
+        "tps": 33.6848,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.85561,
+        "tps": 33.1984,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.79,
+        "tps": 26.73,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.81,
+        "tps": 26.61,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.76,
+        "tps": 26.89,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.60355,
+        "drafted": 169,
+        "accepted": 102,
+        "steps": 25
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.76,
+        "tps": 26.9,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.60355,
+        "drafted": 169,
+        "accepted": 102,
+        "steps": 25
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.62,
+        "tps": 27.71,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.63,
+        "tps": 27.65,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      }
+    ]
+  },
+  "profiles": {
+    "baseline": {
+      "workload": "One diagnostic profile per target, Q4_K_M draft, cpp_ring_buffer chat, 128 tokens. TG begins at the first draft embedding; excludes initial prefill and draft injection. Executors are separated by HIP stream. Profile timings are not throughput estimates.",
+      "binary": {
+        "path": "/nix/store/hjv7klfmnab79sppsp56afdw8g8dgipi-gufo-85b9994-dirty/bin/gufo",
+        "sha256": "3088e86bc1da90610f8a405313cd287679b3d8d0b33b8b88f9b9435c4d1ebcf4"
+      },
+      "reports": {
+        "q4": {
+          "tokens": 128,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "verification_steps": 24,
+          "gpu_kernel_ms": {
+            "draft": 393.2946229999997,
+            "target": 3517.2964170000196
+          },
+          "gpu_ms_per_step": {
+            "draft": 16.387275958333323,
+            "target": 146.55401737500083
+          },
+          "top_kernels": [
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 1404.4119740000035,
+              "count": 4393
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)23, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 620.6659410000007,
+              "count": 1610
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 274.714039,
+              "count": 1127
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 200.0644070000003,
+              "count": 1127
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 170.48115100000012,
+              "count": 437
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 138.95274799999999,
+              "count": 2992
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 131.948501,
+              "count": 23
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 7ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 120.62299399999999,
+              "count": 23
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 83.62696100000004,
+              "count": 230
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 83.28293599999998,
+              "count": 1152
+            },
+            {
+              "domain": "target",
+              "kernel": "__amd_rocclr_copyBuffer",
+              "ms": 77.23686699999993,
+              "count": 272
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 62.72242100000003,
+              "count": 529
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 60.12012199999986,
+              "count": 2484
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)20, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 48.833307999999995,
+              "count": 138
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 3ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 47.036606,
+              "count": 191
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 46.544527,
+              "count": 672
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 40.39949999999999,
+              "count": 3096
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)11, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 31.876072999999998,
+              "count": 69
+            }
+          ]
+        },
+        "q8": {
+          "tokens": 128,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "verification_steps": 25,
+          "gpu_kernel_ms": {
+            "draft": 425.83773600000075,
+            "target": 3972.6091560000414
+          },
+          "gpu_ms_per_step": {
+            "draft": 17.03350944000003,
+            "target": 158.90436624000165
+          },
+          "top_kernels": [
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 2136.219912000004,
+              "count": 9216
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 3ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 674.9814730000012,
+              "count": 1536
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 549.0744950000001,
+              "count": 1176
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 148.35444800000002,
+              "count": 3104
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 7ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 143.46324199999995,
+              "count": 24
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 2ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 110.32293100000011,
+              "count": 448
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 88.35941200000003,
+              "count": 1200
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 86.73567099999997,
+              "count": 240
+            },
+            {
+              "domain": "target",
+              "kernel": "__amd_rocclr_copyBuffer",
+              "ms": 79.05201500000004,
+              "count": 282
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 64.498497,
+              "count": 552
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 48.37613299999997,
+              "count": 768
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 40.255803999999834,
+              "count": 3225
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 29.677679999999974,
+              "count": 328
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::SSMConvKernel(float const*, float const*, float*, float*, unsigned long, unsigned int, gufo::hip::SsmReplayCapture, unsigned int, unsigned long)",
+              "ms": 27.538677000000053,
+              "count": 2160
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 2ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 21.898210000000002,
+              "count": 49
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 19.511136000000008,
+              "count": 48
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedResidualAddKernel(float const*, float const*, float*, unsigned long)",
+              "ms": 12.088859000000005,
+              "count": 3200
+            },
+            {
+              "domain": "draft",
+              "kernel": "gufo::hip::kernels::dflash_selector_partial_topk_kernel(float const*, float*, unsigned int*, unsigned int, unsigned int)",
+              "ms": 11.329885000000006,
+              "count": 169
+            }
+          ]
+        }
+      }
+    },
+    "candidate": {
+      "workload": "One diagnostic profile per target, Q4_K_M draft, cpp_ring_buffer chat, 128 tokens. TG begins at the first draft embedding; excludes initial prefill and draft injection. Executors are separated by HIP stream. Profile timings are not throughput estimates.",
+      "binary": {
+        "path": "/nix/store/npyvd19qbagdlqcl5kd6dmy0pga35200-gufo-e17744a-dirty/bin/gufo",
+        "sha256": "1604d99f06d4af6df7c24542c8d3a66f52aa6afe4a7b8d11dc102abd84efc95d"
+      },
+      "reports": {
+        "q4": {
+          "tokens": 128,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "verification_steps": 24,
+          "gpu_kernel_ms": {
+            "draft": 391.83029899999997,
+            "target": 3417.6897010000293
+          },
+          "gpu_ms_per_step": {
+            "draft": 16.326262458333332,
+            "target": 142.40373754166788
+          },
+          "top_kernels": [
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 1336.6303139999943,
+              "count": 4393
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)23, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 404.0138350000001,
+              "count": 1058
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 274.67611799999986,
+              "count": 1127
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 200.29390800000007,
+              "count": 1127
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)23, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 184.49253400000012,
+              "count": 552
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 170.6615209999998,
+              "count": 437
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 139.74759200000022,
+              "count": 2992
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 130.77388500000004,
+              "count": 23
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 7ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 119.87291499999999,
+              "count": 23
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 83.40931000000006,
+              "count": 230
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 83.26133700000003,
+              "count": 1152
+            },
+            {
+              "domain": "target",
+              "kernel": "__amd_rocclr_copyBuffer",
+              "ms": 77.26045799999999,
+              "count": 272
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 62.365928000000004,
+              "count": 529
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 61.35480799999995,
+              "count": 2484
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)20, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 48.58762100000002,
+              "count": 138
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 3ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 47.123713999999964,
+              "count": 191
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 45.35528199999999,
+              "count": 672
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 40.3381759999999,
+              "count": 3096
+            }
+          ]
+        },
+        "q8": {
+          "tokens": 128,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "verification_steps": 25,
+          "gpu_kernel_ms": {
+            "draft": 424.74277399999886,
+            "target": 3961.96382800001
+          },
+          "gpu_ms_per_step": {
+            "draft": 16.989710959999954,
+            "target": 158.47855312000038
+          },
+          "top_kernels": [
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 2134.6919010000015,
+              "count": 9216
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 3ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 674.9288730000005,
+              "count": 1536
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 317.455033,
+              "count": 792
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 1ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 224.419671,
+              "count": 384
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 147.6089730000003,
+              "count": 3104
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 7ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 143.436912,
+              "count": 24
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 2ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 110.69833100000012,
+              "count": 448
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 88.03990099999997,
+              "count": 1200
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 86.42592600000008,
+              "count": 240
+            },
+            {
+              "domain": "target",
+              "kernel": "__amd_rocclr_copyBuffer",
+              "ms": 79.00335100000001,
+              "count": 282
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 64.45691400000007,
+              "count": 552
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 47.254474000000016,
+              "count": 768
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 40.10340400000002,
+              "count": 3225
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 29.523428000000003,
+              "count": 328
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::SSMConvKernel(float const*, float const*, float*, float*, unsigned long, unsigned int, gufo::hip::SsmReplayCapture, unsigned int, unsigned long)",
+              "ms": 28.788834,
+              "count": 2160
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 2ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 22.022189,
+              "count": 49
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 19.225143999999997,
+              "count": 48
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedResidualAddKernel(float const*, float const*, float*, unsigned long)",
+              "ms": 12.016359999999997,
+              "count": 3200
+            }
+          ]
+        }
+      }
+    }
+  },
+  "rejected_q8_candidate": {
+    "reason": "Compact Q8 staging and moving the6144-wide output to three rows did not help full-model execution. Both were removed rather than retained behind switches.",
+    "paired_kernel_profile": {
+      "remaining_rows2": {
+        "count": 7680,
+        "baseline_ms": 1876.7905079999991,
+        "candidate_ms": 1889.5685239999927
+      },
+      "SSM_attention_output": {
+        "count": 1536,
+        "baseline_ms": 259.4294039999997,
+        "candidate_ms": 261.980665
+      },
+      "FFN_down": {
+        "count": 1536,
+        "baseline_ms": 674.9814730000012,
+        "candidate_ms": 672.7061839999986
+      }
+    },
+    "release": {
+      "workload": "cpp_ring_buffer chat, 128 generated tokens, fixed seven proposals, two interleaved repetitions; timing includes prompt processing. Short development probe, not a full corpus or depth sweep.",
+      "binaries": {
+        "baseline": {
+          "path": "/nix/store/hjv7klfmnab79sppsp56afdw8g8dgipi-gufo-85b9994-dirty/bin/gufo",
+          "sha256": "3088e86bc1da90610f8a405313cd287679b3d8d0b33b8b88f9b9435c4d1ebcf4"
+        },
+        "candidate": {
+          "path": "/nix/store/amvwcgf9w3vyfs4lpbpba6j740mv7a02-gufo-e17744a-dirty/bin/gufo",
+          "sha256": "64bb3e79dbacbdca24bf0b656e8b0727dbe3d4c46967cda2801eac6ea8f32f60"
+        }
+      },
+      "references": {
+        "q4": {
+          "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be greater than zero\");\n\n    std::array<T, Capacity> data_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of elements",
+          "tokens": 128,
+          "seconds": 11.4264,
+          "tps": 11.2021,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7"
+        },
+        "q8": {
+          "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be at least 1\");\n\n    std::array<T, Capacity> storage_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of",
+          "tokens": 128,
+          "seconds": 18.51,
+          "tps": 6.92,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8"
+        }
+      },
+      "results": [
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.12566,
+          "tps": 31.0254,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.06624,
+          "tps": 31.4787,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "q8",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.84535,
+          "tps": 33.287,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "q8",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.78109,
+          "tps": 33.8527,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "bf16",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.01756,
+          "tps": 31.8601,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "bf16",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.95116,
+          "tps": 32.3955,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.76,
+          "tps": 26.89,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.78,
+          "tps": 26.75,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        },
+        {
+          "target": "q8",
+          "draft": "q8",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.62,
+          "tps": 27.72,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "q8",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.63,
+          "tps": 27.64,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "bf16",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.8,
+          "tps": 26.66,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "bf16",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.8,
+          "tps": 26.67,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "bf16",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 3.95864,
+          "tps": 32.3343,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "bf16",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.04241,
+          "tps": 31.6642,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.09158,
+          "tps": 31.2838,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.17885,
+          "tps": 30.6304,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "q8",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 3.79645,
+          "tps": 33.7157,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "q8",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 3.86252,
+          "tps": 33.139,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q8",
+          "draft": "bf16",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.8,
+          "tps": 26.67,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "bf16",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.8,
+          "tps": 26.64,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.77,
+          "tps": 26.81,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.76,
+          "tps": 26.87,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        },
+        {
+          "target": "q8",
+          "draft": "q8",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.63,
+          "tps": 27.66,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "q8",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.62,
+          "tps": 27.71,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        }
+      ]
+    },
+    "profile": {
+      "workload": "One diagnostic profile per target, Q4_K_M draft, cpp_ring_buffer chat, 128 tokens. TG begins at the first draft embedding; excludes initial prefill and draft injection. Executors are separated by HIP stream. Profile timings are not throughput estimates.",
+      "binary": {
+        "path": "/nix/store/amvwcgf9w3vyfs4lpbpba6j740mv7a02-gufo-e17744a-dirty/bin/gufo",
+        "sha256": "64bb3e79dbacbdca24bf0b656e8b0727dbe3d4c46967cda2801eac6ea8f32f60"
+      },
+      "reports": {
+        "q4": {
+          "tokens": 128,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "verification_steps": 24,
+          "gpu_kernel_ms": {
+            "draft": 392.0047669999996,
+            "target": 3417.74700900002
+          },
+          "gpu_ms_per_step": {
+            "draft": 16.333531958333317,
+            "target": 142.40612537500084
+          },
+          "top_kernels": [
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 1336.2855439999983,
+              "count": 4393
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)23, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 403.42042900000007,
+              "count": 1058
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 274.080397,
+              "count": 1127
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 200.01021900000026,
+              "count": 1127
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)23, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 184.66567300000008,
+              "count": 552
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 170.52912700000007,
+              "count": 437
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 139.41159000000016,
+              "count": 2992
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 131.07766600000005,
+              "count": 23
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 7ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 119.833852,
+              "count": 23
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 83.43045300000006,
+              "count": 230
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 83.19778899999997,
+              "count": 1152
+            },
+            {
+              "domain": "target",
+              "kernel": "__amd_rocclr_copyBuffer",
+              "ms": 77.13008299999997,
+              "count": 272
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 62.27712300000003,
+              "count": 529
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 58.74850300000002,
+              "count": 2461
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)20, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 48.526744,
+              "count": 138
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 3ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 47.03183200000001,
+              "count": 191
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 46.150530999999994,
+              "count": 672
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 40.56265500000005,
+              "count": 3096
+            }
+          ]
+        },
+        "q8": {
+          "tokens": 128,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "verification_steps": 25,
+          "gpu_kernel_ms": {
+            "draft": 425.3678430000012,
+            "target": 3975.8255680000516
+          },
+          "gpu_ms_per_step": {
+            "draft": 17.014713720000046,
+            "target": 159.03302272000207
+          },
+          "top_kernels": [
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 1889.5685239999927,
+              "count": 7680
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 3ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 934.686848999999,
+              "count": 3072
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 317.191564,
+              "count": 792
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 1ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 224.298334,
+              "count": 384
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 147.41058699999994,
+              "count": 3104
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 7ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 143.41463800000002,
+              "count": 24
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 2ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 110.29387100000001,
+              "count": 448
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 87.99051499999989,
+              "count": 1200
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 86.49607300000001,
+              "count": 240
+            },
+            {
+              "domain": "target",
+              "kernel": "__amd_rocclr_copyBuffer",
+              "ms": 79.09329599999998,
+              "count": 282
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 64.440584,
+              "count": 552
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 47.885936000000044,
+              "count": 768
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 39.943940000000005,
+              "count": 3225
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 29.61901200000001,
+              "count": 328
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::SSMConvKernel(float const*, float const*, float*, float*, unsigned long, unsigned int, gufo::hip::SsmReplayCapture, unsigned int, unsigned long)",
+              "ms": 27.70247899999994,
+              "count": 2160
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 2ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 22.165544000000004,
+              "count": 49
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 19.426166,
+              "count": 48
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedResidualAddKernel(float const*, float const*, float*, unsigned long)",
+              "ms": 12.14507000000004,
+              "count": 3200
+            }
+          ]
+        }
+      }
+    }
+  },
+  "other_rejected": "Compact IQ4 two-tile staging, four Q5 rows and relaxed occupancy hints were slower. BF16 compact staging had no useful improvement over the chosen row geometry. Compact batch32 feature injection remained slower than two batch16 chunks.",
+  "limits": [
+    "Two repetitions of one chat prompt per pairing; not a corpus/depth sweep or a capability evaluation.",
+    "Final Q4 gains are1.4..2.1%; Q8 varies-0.17..+0.39%, so no material Q8 throughput gain is claimed.",
+    "These rates include prompt processing and cannot be added to the earlier pp2048/tg128 depth0 improvements.",
+    "Original-target/conversion and MTP qualification, C>1 work, and controller comparison remain separate."
+  ]
+}
