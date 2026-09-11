@@ -1,0 +1,2798 @@
+{
+  "date": "2026-09-11",
+  "platform": "Linux x86-64 AMD Strix Halo gfx1151, 128 GB unified memory",
+  "baseline_commit": "282c3b419b09d7ed5791d7439865eafe3ea6d69a",
+  "baseline_production_sha256": "1bd9b9b09576ef587377903c10e74cb7a3c71e96f87d393c4fbfd210650b3126",
+  "candidate_production_sha256": "3f9aee31fa75ac5cd699f8a847b33621b69bd81002c5c0f1e238c9e7379103e8",
+  "target_sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0",
+  "support_sha256": "7e319924541db3f7a163ed7e11d7532a70d48228ab59d36cb81e1d4511885360",
+  "method": {
+    "concurrency": 1,
+    "prefill_tokens": 4096,
+    "generation_tokens": 128,
+    "depths": [
+      0,
+      4096,
+      8192,
+      12288,
+      16384
+    ],
+    "repetitions": 2,
+    "run_order": [
+      "baseline",
+      "candidate"
+    ],
+    "execution": "Sequential Nix releases, no concurrent build or GPU work; 12 GiB memory guard",
+    "precision": "Same model/cache/activation precision and floating-point reduction order; no new runtime selectors"
+  },
+  "release": {
+    "baseline": {
+      "binary": {
+        "path": "/home/fbozzo/projects/strix-halo.cpp/result-ds4-selection-norm/bin/gufo",
+        "sha256": "7cda6b698aa7b6baddc983547b85f0a6015d95687ec2c335003500be9e6455d0"
+      },
+      "resolved_binary": "/nix/store/wcg4hh800ysj4pdhpvkjsby2iffgq0k0-gufo-a760f81-dirty/bin/gufo",
+      "log": {
+        "path": "/tmp/ds4-official-bulk-baseline.log",
+        "sha256": "3bbf2cebd1bb55540edff8700e52d29677cb83fc3987adfd23200c4a1f531e19"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.695438385009766,
+        "reserve_gib": 12.0
+      },
+      "rows": [
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 0,
+          "tok_s": 488.5,
+          "sd": 9.65
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 0,
+          "tok_s": 17.79,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 4096,
+          "tok_s": 481.09,
+          "sd": 0.3
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 4096,
+          "tok_s": 15.91,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 8192,
+          "tok_s": 470.38,
+          "sd": 0.9
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 8192,
+          "tok_s": 15.76,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 12288,
+          "tok_s": 465.3,
+          "sd": 0.66
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 12288,
+          "tok_s": 15.62,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 16384,
+          "tok_s": 456.69,
+          "sd": 1.41
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 16384,
+          "tok_s": 15.48,
+          "sd": 0.0
+        }
+      ],
+      "outputs": [
+        {
+          "C": "1",
+          "depth": "0",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": "1",
+          "depth": "0",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "8192",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "6165964e5ffc5d20ec56d1003524a519aa18b3b0fbabbcc63e2cf33698744bd2"
+        },
+        {
+          "C": "1",
+          "depth": "8192",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "6165964e5ffc5d20ec56d1003524a519aa18b3b0fbabbcc63e2cf33698744bd2"
+        },
+        {
+          "C": "1",
+          "depth": "12288",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "174d078c81d6fe311849ff77d03f7cdca66da83055dd4e39a5e2843a61d4f3dc"
+        },
+        {
+          "C": "1",
+          "depth": "12288",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "174d078c81d6fe311849ff77d03f7cdca66da83055dd4e39a5e2843a61d4f3dc"
+        },
+        {
+          "C": "1",
+          "depth": "16384",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        },
+        {
+          "C": "1",
+          "depth": "16384",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        }
+      ]
+    },
+    "candidate": {
+      "binary": {
+        "path": "/home/fbozzo/projects/strix-halo.cpp/result-ds4-bulk/bin/gufo",
+        "sha256": "93b290a925f620e8ca9beabc3d8ccbc3de6f7606e527c20c0e1ea4f93f35d780"
+      },
+      "resolved_binary": "/nix/store/lyb2c8ck869fgz9ly3z2xp96dxp3s6l3-gufo-282c3b4-dirty/bin/gufo",
+      "log": {
+        "path": "/tmp/ds4-official-bulk-candidate.log",
+        "sha256": "529ec159c464a3af060bc909bcc90843fd2eb70da72b39b6159434ed120ccead"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.70777130126953,
+        "reserve_gib": 12.0
+      },
+      "rows": [
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 0,
+          "tok_s": 490.03,
+          "sd": 10.55
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 0,
+          "tok_s": 17.73,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 4096,
+          "tok_s": 482.87,
+          "sd": 0.42
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 4096,
+          "tok_s": 15.9,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 8192,
+          "tok_s": 471.78,
+          "sd": 0.6
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 8192,
+          "tok_s": 15.75,
+          "sd": 0.01
+        },
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 12288,
+          "tok_s": 465.62,
+          "sd": 1.19
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 12288,
+          "tok_s": 15.57,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 16384,
+          "tok_s": 457.08,
+          "sd": 0.11
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 16384,
+          "tok_s": 15.44,
+          "sd": 0.0
+        }
+      ],
+      "outputs": [
+        {
+          "C": "1",
+          "depth": "0",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": "1",
+          "depth": "0",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "8192",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "6165964e5ffc5d20ec56d1003524a519aa18b3b0fbabbcc63e2cf33698744bd2"
+        },
+        {
+          "C": "1",
+          "depth": "8192",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "6165964e5ffc5d20ec56d1003524a519aa18b3b0fbabbcc63e2cf33698744bd2"
+        },
+        {
+          "C": "1",
+          "depth": "12288",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "174d078c81d6fe311849ff77d03f7cdca66da83055dd4e39a5e2843a61d4f3dc"
+        },
+        {
+          "C": "1",
+          "depth": "12288",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "174d078c81d6fe311849ff77d03f7cdca66da83055dd4e39a5e2843a61d4f3dc"
+        },
+        {
+          "C": "1",
+          "depth": "16384",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        },
+        {
+          "C": "1",
+          "depth": "16384",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        }
+      ]
+    },
+    "comparisons": [
+      {
+        "mode": "pp",
+        "depth": 0,
+        "baseline_tok_s": 488.5,
+        "candidate_tok_s": 490.03,
+        "change_percent": 0.313
+      },
+      {
+        "mode": "tg",
+        "depth": 0,
+        "baseline_tok_s": 17.79,
+        "candidate_tok_s": 17.73,
+        "change_percent": -0.337
+      },
+      {
+        "mode": "pp",
+        "depth": 4096,
+        "baseline_tok_s": 481.09,
+        "candidate_tok_s": 482.87,
+        "change_percent": 0.37
+      },
+      {
+        "mode": "tg",
+        "depth": 4096,
+        "baseline_tok_s": 15.91,
+        "candidate_tok_s": 15.9,
+        "change_percent": -0.063
+      },
+      {
+        "mode": "pp",
+        "depth": 8192,
+        "baseline_tok_s": 470.38,
+        "candidate_tok_s": 471.78,
+        "change_percent": 0.298
+      },
+      {
+        "mode": "tg",
+        "depth": 8192,
+        "baseline_tok_s": 15.76,
+        "candidate_tok_s": 15.75,
+        "change_percent": -0.063
+      },
+      {
+        "mode": "pp",
+        "depth": 12288,
+        "baseline_tok_s": 465.3,
+        "candidate_tok_s": 465.62,
+        "change_percent": 0.069
+      },
+      {
+        "mode": "tg",
+        "depth": 12288,
+        "baseline_tok_s": 15.62,
+        "candidate_tok_s": 15.57,
+        "change_percent": -0.32
+      },
+      {
+        "mode": "pp",
+        "depth": 16384,
+        "baseline_tok_s": 456.69,
+        "candidate_tok_s": 457.08,
+        "change_percent": 0.085
+      },
+      {
+        "mode": "tg",
+        "depth": 16384,
+        "baseline_tok_s": 15.48,
+        "candidate_tok_s": 15.44,
+        "change_percent": -0.258
+      }
+    ],
+    "exact_paired_token_positions": 1280
+  },
+  "reversed_control": {
+    "baseline": {
+      "binary": {
+        "path": "/home/fbozzo/projects/strix-halo.cpp/result-ds4-selection-norm/bin/gufo",
+        "sha256": "7cda6b698aa7b6baddc983547b85f0a6015d95687ec2c335003500be9e6455d0"
+      },
+      "resolved_binary": "/nix/store/wcg4hh800ysj4pdhpvkjsby2iffgq0k0-gufo-a760f81-dirty/bin/gufo",
+      "log": {
+        "path": "/tmp/ds4-official-bulk-control-baseline.log",
+        "sha256": "4d69f8164366248503616fe490b3be0450a70ff5f94906e1a7c601ef82c06c09"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 29.032211303710938,
+        "reserve_gib": 12.0
+      },
+      "rows": [
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 4096,
+          "tok_s": 480.78,
+          "sd": 0.22
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 4096,
+          "tok_s": 15.91,
+          "sd": 0.0
+        }
+      ],
+      "outputs": [
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        }
+      ]
+    },
+    "candidate": {
+      "binary": {
+        "path": "/home/fbozzo/projects/strix-halo.cpp/result-ds4-bulk/bin/gufo",
+        "sha256": "93b290a925f620e8ca9beabc3d8ccbc3de6f7606e527c20c0e1ea4f93f35d780"
+      },
+      "resolved_binary": "/nix/store/lyb2c8ck869fgz9ly3z2xp96dxp3s6l3-gufo-282c3b4-dirty/bin/gufo",
+      "log": {
+        "path": "/tmp/ds4-official-bulk-control-candidate.log",
+        "sha256": "a679de93bf764487ec6e9ab0164c517ca73040d3e8544d59490fa5305c4ec4d8"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.975120544433594,
+        "reserve_gib": 12.0
+      },
+      "rows": [
+        {
+          "mode": "pp",
+          "tokens": 4096,
+          "depth": 4096,
+          "tok_s": 483.78,
+          "sd": 0.39
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 4096,
+          "tok_s": 15.9,
+          "sd": 0.0
+        }
+      ],
+      "outputs": [
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": "1",
+          "depth": "4096",
+          "request": "0",
+          "accepted": "0",
+          "drafted": "0",
+          "steps": "0",
+          "skipped": "0",
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        }
+      ]
+    },
+    "repetitions": 4,
+    "depth": 4096,
+    "run_order": [
+      "candidate",
+      "baseline"
+    ],
+    "exact_paired_token_positions": 512
+  },
+  "decode_profile": {
+    "baseline": {
+      "database": {
+        "path": "/tmp/ds4-followup-profile/prof_results.db",
+        "sha256": "84460ca22ee3380b700e6c1e93963e773bd1733f66a96a7aeddd54b6fbfcbcbb"
+      },
+      "gpu_ms": 965.514878,
+      "dispatches": 29109,
+      "kernels": [
+        {
+          "kernel": "matmul_q8_0_preq_rows_w32_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned int, int)",
+          "calls": 2080,
+          "gpu_ms": 167.5381,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "matmul_q8_0_hc_expand_preq_rows_w32_kernel(float*, float*, float const*, float const*, float const*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned long, unsigned int, int, int)",
+          "calls": 1376,
+          "gpu_ms": 158.143615,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_gate_up_mid_decode_lut_qwarp32_kernel(float*, float*, float*, char const*, char const*, hip_block_q8_K const*, int const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 123.350411,
+          "vgpr": 80,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 6848
+        },
+        {
+          "kernel": "grouped_q8_0_a_preq_warp8_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned long, int)",
+          "calls": 688,
+          "gpu_ms": 107.958559,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "matmul_f16_pair_f32_sharedx_warp_rows_w32_kernel(float*, float*, __half const*, __half const*, float const*, unsigned int, unsigned long)",
+          "calls": 992,
+          "gpu_ms": 90.183572,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "matmul_q8_0_pair_preq_warp8_kernel(float*, float*, unsigned char const*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned long, int)",
+          "calls": 688,
+          "gpu_ms": 59.94501,
+          "vgpr": 48,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_down_sum6_qwarp32_kernel(float*, char const*, hip_block_q8_K const*, int const*, unsigned long, unsigned long, unsigned int, unsigned int)",
+          "calls": 688,
+          "gpu_ms": 53.502379,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "attention_decode_indexed_mixed_one_fast_oldhip_kernel(float*, float const*, float const*, float const*, int const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 336,
+          "gpu_ms": 49.652413,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 6916
+        },
+        {
+          "kernel": "matmul_f16_f32_sharedx_warp_rows_w32_kernel(float*, __half const*, float const*, unsigned int, unsigned long)",
+          "calls": 672,
+          "gpu_ms": 34.329688,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "void matmul_f16_ordered_batch_reuse_kernel<1u>(float*, __half const*, float const*, unsigned long, unsigned long)",
+          "calls": 2080,
+          "gpu_ms": 32.391663,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 128
+        },
+        {
+          "kernel": "hc_split_weighted_sum_norm_fused_kernel(float*, float*, float*, float const*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, float, float)",
+          "calls": 1376,
+          "gpu_ms": 18.675459,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "attention_decode_mixed_one_fast_oldhip_kernel(float*, float const*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 352,
+          "gpu_ms": 14.543617,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 896
+        },
+        {
+          "kernel": "router_select_warp_topk_kernel(int*, float*, float*, float const*, int const*, float const*, int const*, int, unsigned int, unsigned int, int, int)",
+          "calls": 688,
+          "gpu_ms": 8.727314,
+          "vgpr": 56,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4096
+        },
+        {
+          "kernel": "indexer_score_one_direct_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, float, int)",
+          "calls": 336,
+          "gpu_ms": 7.49972,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 768
+        },
+        {
+          "kernel": "quantize_q8_0_f32_kernel(signed char*, float*, float const*, unsigned long, unsigned long)",
+          "calls": 4832,
+          "gpu_ms": 7.016578,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void indexer_partial_topk_kernel<8192u>(unsigned int*, float const*, unsigned int, unsigned int)",
+          "calls": 273,
+          "gpu_ms": 4.711575,
+          "vgpr": 120,
+          "sgpr": 128,
+          "private_bytes": 272,
+          "lds_bytes": 17096
+        },
+        {
+          "kernel": "void rms_norm_plain_regs_kernel<64u>(float*, float const*, unsigned int, unsigned int, float)",
+          "calls": 1391,
+          "gpu_ms": 3.993142,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "rope_tail_kernel(float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float)",
+          "calls": 2568,
+          "gpu_ms": 3.982474,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "q8_K_quantize_kernel(hip_block_q8_K*, float const*, unsigned int, unsigned int)",
+          "calls": 1376,
+          "gpu_ms": 3.94617,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 2052
+        },
+        {
+          "kernel": "compressor_store_kernel(float const*, float const*, float*, float*, void const*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 992,
+          "gpu_ms": 3.466891,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "dsv4_qkv_rms_norm_rows_kernel(float*, float const*, float const*, unsigned int, float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 2.734089,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "head_rms_norm_kernel(float*, unsigned int, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 1.688399,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "fp8_kv_quantize_kernel(float*, __half*, unsigned int, unsigned int, unsigned int)",
+          "calls": 772,
+          "gpu_ms": 1.595484,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 256
+        },
+        {
+          "kernel": "swiglu_kernel(float*, float const*, float const*, unsigned int, float, float)",
+          "calls": 688,
+          "gpu_ms": 1.510234,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "store_raw_kv_batch_kernel(float*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 688,
+          "gpu_ms": 1.216787,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "indexer_hadamard_fp4_kernel(float*, unsigned int, unsigned int)",
+          "calls": 420,
+          "gpu_ms": 0.945039,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "indexer_topk_1024_kernel(unsigned int*, float const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 63,
+          "gpu_ms": 0.628582,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 8192
+        },
+        {
+          "kernel": "rms_norm_weight_kernel(float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 184,
+          "gpu_ms": 0.545218,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "compressor_update_pool_kernel(float*, float const*, float const*, unsigned int, unsigned int)",
+          "calls": 168,
+          "gpu_ms": 0.521781,
+          "vgpr": 32,
+          "sgpr": 128,
+          "private_bytes": 1040,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "compressor_shift_ratio4_kernel(float*, float*, unsigned int)",
+          "calls": 168,
+          "gpu_ms": 0.196851,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "f32_to_f16_vec4_kernel(__half*, float const*, unsigned long)",
+          "calls": 21,
+          "gpu_ms": 0.147079,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "__amd_rocclr_copyBuffer",
+          "calls": 42,
+          "gpu_ms": 0.093055,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "embed_token_hc_kernel(float*, unsigned short const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 15,
+          "gpu_ms": 0.063359,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "hc_weighted_sum_kernel(float*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 16,
+          "gpu_ms": 0.044402,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "output_hc_weights_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 16,
+          "gpu_ms": 0.026169,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        }
+      ]
+    },
+    "candidate": {
+      "database": {
+        "path": "/tmp/ds4-bulk-decode-profile/prof_results.db",
+        "sha256": "ce3c17825927d3a9704a1482f22d7d4faeddb4c89aa770b64e01da20925700aa"
+      },
+      "gpu_ms": 964.505241,
+      "dispatches": 29109,
+      "kernels": [
+        {
+          "kernel": "matmul_q8_0_preq_rows_w32_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned int, int)",
+          "calls": 2080,
+          "gpu_ms": 167.692845,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "matmul_q8_0_hc_expand_preq_rows_w32_kernel(float*, float*, float const*, float const*, float const*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned long, unsigned int, int, int)",
+          "calls": 1376,
+          "gpu_ms": 158.091481,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_gate_up_mid_decode_lut_qwarp32_kernel(float*, float*, float*, char const*, char const*, hip_block_q8_K const*, int const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 122.633884,
+          "vgpr": 80,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 6720
+        },
+        {
+          "kernel": "grouped_q8_0_a_preq_warp8_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned long, int)",
+          "calls": 688,
+          "gpu_ms": 107.891462,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "matmul_f16_pair_f32_sharedx_warp_rows_w32_kernel(float*, float*, __half const*, __half const*, float const*, unsigned int, unsigned long)",
+          "calls": 992,
+          "gpu_ms": 90.098226,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "matmul_q8_0_pair_preq_warp8_kernel(float*, float*, unsigned char const*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned long, int)",
+          "calls": 688,
+          "gpu_ms": 60.084471,
+          "vgpr": 48,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_down_sum6_qwarp32_kernel(float*, char const*, hip_block_q8_K const*, int const*, unsigned long, unsigned long, unsigned int, unsigned int)",
+          "calls": 688,
+          "gpu_ms": 53.600017,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "attention_decode_indexed_mixed_one_fast_oldhip_kernel(float*, float const*, float const*, float const*, int const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 336,
+          "gpu_ms": 49.451997,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 6916
+        },
+        {
+          "kernel": "matmul_f16_f32_sharedx_warp_rows_w32_kernel(float*, __half const*, float const*, unsigned int, unsigned long)",
+          "calls": 672,
+          "gpu_ms": 34.153386,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "void matmul_f16_ordered_batch_reuse_kernel<1u>(float*, __half const*, float const*, unsigned long, unsigned long)",
+          "calls": 2080,
+          "gpu_ms": 32.280322,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 128
+        },
+        {
+          "kernel": "hc_split_weighted_sum_norm_fused_kernel(float*, float*, float*, float const*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, float, float)",
+          "calls": 1376,
+          "gpu_ms": 18.247775,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "attention_decode_mixed_one_fast_oldhip_kernel(float*, float const*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 352,
+          "gpu_ms": 14.328959,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 896
+        },
+        {
+          "kernel": "router_select_warp_topk_kernel(int*, float*, float*, float const*, int const*, float const*, int const*, int, unsigned int, unsigned int, int, int)",
+          "calls": 688,
+          "gpu_ms": 8.625072,
+          "vgpr": 56,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4096
+        },
+        {
+          "kernel": "indexer_score_one_direct_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, float, int)",
+          "calls": 336,
+          "gpu_ms": 7.459111,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 768
+        },
+        {
+          "kernel": "quantize_q8_0_f32_kernel(signed char*, float*, float const*, unsigned long, unsigned long)",
+          "calls": 4832,
+          "gpu_ms": 7.068575,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "q8_K_quantize_kernel(hip_block_q8_K*, float const*, unsigned int, unsigned int)",
+          "calls": 1376,
+          "gpu_ms": 5.021074,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 2052
+        },
+        {
+          "kernel": "void indexer_partial_topk_kernel<8192u>(unsigned int*, float const*, unsigned int, unsigned int)",
+          "calls": 273,
+          "gpu_ms": 4.689934,
+          "vgpr": 120,
+          "sgpr": 128,
+          "private_bytes": 272,
+          "lds_bytes": 17096
+        },
+        {
+          "kernel": "rope_tail_kernel(float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float)",
+          "calls": 2568,
+          "gpu_ms": 4.02225,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void rms_norm_plain_regs_kernel<64u>(float*, float const*, unsigned int, unsigned int, float)",
+          "calls": 1391,
+          "gpu_ms": 3.9596,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "compressor_store_kernel(float const*, float const*, float*, float*, void const*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 992,
+          "gpu_ms": 3.485427,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "dsv4_qkv_rms_norm_rows_kernel(float*, float const*, float const*, unsigned int, float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 2.6482,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "head_rms_norm_kernel(float*, unsigned int, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 1.688251,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "fp8_kv_quantize_kernel(float*, __half*, unsigned int, unsigned int, unsigned int)",
+          "calls": 772,
+          "gpu_ms": 1.428461,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 256
+        },
+        {
+          "kernel": "swiglu_kernel(float*, float const*, float const*, unsigned int, float, float)",
+          "calls": 688,
+          "gpu_ms": 1.424193,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "store_raw_kv_batch_kernel(float*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 688,
+          "gpu_ms": 1.228273,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "indexer_hadamard_fp4_kernel(float*, unsigned int, unsigned int)",
+          "calls": 420,
+          "gpu_ms": 0.934248,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "indexer_topk_1024_kernel(unsigned int*, float const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 63,
+          "gpu_ms": 0.609749,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 8192
+        },
+        {
+          "kernel": "rms_norm_weight_kernel(float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 184,
+          "gpu_ms": 0.55878,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "compressor_update_pool_kernel(float*, float const*, float const*, unsigned int, unsigned int)",
+          "calls": 168,
+          "gpu_ms": 0.530959,
+          "vgpr": 32,
+          "sgpr": 128,
+          "private_bytes": 1040,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "compressor_shift_ratio4_kernel(float*, float*, unsigned int)",
+          "calls": 168,
+          "gpu_ms": 0.196763,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "f32_to_f16_vec4_kernel(__half*, float const*, unsigned long)",
+          "calls": 21,
+          "gpu_ms": 0.145476,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "__amd_rocclr_copyBuffer",
+          "calls": 42,
+          "gpu_ms": 0.092336,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "embed_token_hc_kernel(float*, unsigned short const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 15,
+          "gpu_ms": 0.062995,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "hc_weighted_sum_kernel(float*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 16,
+          "gpu_ms": 0.044601,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "output_hc_weights_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 16,
+          "gpu_ms": 0.026088,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        }
+      ]
+    },
+    "scope": "First scalar HC projection onward; excludes prefix preparation and initial norm",
+    "depth": 4096,
+    "tokens": 16
+  },
+  "prefill_profile": {
+    "baseline": {
+      "database": {
+        "path": "/tmp/ds4-bulk-pp-baseline-profile/prof_results.db",
+        "sha256": "9ff978c0db844c6ede60b44a939221eead8b192622cf125a128bacd98f042d64"
+      },
+      "gpu_ms": 8407.610337,
+      "dispatches": 3710,
+      "kernels": [
+        {
+          "kernel": "void mul_mat_q<(ggml_type)16, 80, false, false, true>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float)",
+          "calls": 86,
+          "gpu_ms": 2029.67207,
+          "vgpr": 176,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 31552
+        },
+        {
+          "kernel": "void moe_down_q2K_hotlist_wmma_wide_kernel<4, 16, 16, 16, 4, true, true, false>(float*, __half*, char const*, float const*, __half const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long, unsigned int, unsigned int const*)",
+          "calls": 43,
+          "gpu_ms": 1283.313146,
+          "vgpr": 112,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 11776
+        },
+        {
+          "kernel": "void mul_mat_q<(ggml_type)8, 80, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float)",
+          "calls": 215,
+          "gpu_ms": 970.62304,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 31552
+        },
+        {
+          "kernel": "void attention_mixed_heads32_wmma_kernel<true, true>(float*, float const*, float const*, float const*, void const*, int const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 21,
+          "gpu_ms": 662.226449,
+          "vgpr": 88,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 59908
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HHS_BH_MT128x128x32_MI16x16x16x1_SN_1LDSB0_APM1_ABV0_ACED0_AF0EM1_AF1EM1_AMAS3_ASE_ASGT_ASLT_ASM_ASAE01_ASCE01_ASEM1_AAC0_BL1_BS1_CLR0_DTLA0_DTLB0_DTVA0_DTVB0_DVO0_ETSP_EPS1_ELFLR0_EMLL0_FSSC10_FL0_GLVWA8_GLVWB8_GRCGA1_GRCGB1_GRPM1_GRVW8_GSU1_GSUASB_GLS0_ISA1151_IU1_K1_KLA_LBSPPA128_LBSPPB128_LPA8_LPB8_LDL1_LRVW16_LWPMn1_LDW0_FMA_MIAV1_MDA2_MO40_MMFGLC_MKFGSU256_NTA0_NTB0_NTC0_NTD0_NEPBS0_NLCA1_NLCB1_ONLL1_OPLV0_PK0_PAP0_PGR1_PLR0_PKA0_SIA1_SLW1_SS1_SU32_SUM0_SUS256_SCIUI1_SPO0_SRVW0_SSO0_SVW2_SNLL0_TSGRA0_TSGRB0_TT4_64_TLDS1_UMLDSA1_UMLDSB1_U64SL1_USFGROn1_VAW2_VSn1_VW2_VWB2_VFLRP0_WSGRA1_WSGRB1_WS32_WG32_4_1_WGM8",
+          "calls": 43,
+          "gpu_ms": 558.066996,
+          "vgpr": 256,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 51200
+        },
+        {
+          "kernel": "void ds4_gemm_f16_wmma_kernel<256u, 128u, 32u, 4u, 2u, 2u, false, float>(float*, __half const*, __half const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long, unsigned long)",
+          "calls": 43,
+          "gpu_ms": 531.93255,
+          "vgpr": 104,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 24576
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_HA_S_SAV_UserArgs_MT96x96x32_MI16x16x1_SN_LDSB0_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA0_DTLB0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA1151_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPM0_LPA16_LPB16_LPM0_LRVW16_LWPMn1_MIAV1_MIWT3_3_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG32_4_1",
+          "calls": 236,
+          "gpu_ms": 375.895117,
+          "vgpr": 256,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 31744
+        },
+        {
+          "kernel": "head_rms_norm_rope_tail_lds_kernel(float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float, float)",
+          "calls": 43,
+          "gpu_ms": 243.182136,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 3072
+        },
+        {
+          "kernel": "void attention_mixed_heads32_wmma_kernel<false, false>(float*, float const*, float const*, float const*, void const*, int const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 20,
+          "gpu_ms": 214.01273,
+          "vgpr": 88,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 57860
+        },
+        {
+          "kernel": "void hc4_norm_mix_split_weighted_sum_kernel<4u, 256u, 16u>(float*, float*, float*, float const*, __half const*, float const*, float const*, unsigned int, unsigned int, unsigned int, float, float)",
+          "calls": 86,
+          "gpu_ms": 197.679006,
+          "vgpr": 120,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 3968
+        },
+        {
+          "kernel": "void quantize_mmq_q8_1<(mmq_q8_1_ds_layout)0>(float const*, int const*, void*, long, long, long, long, long, int, int)",
+          "calls": 258,
+          "gpu_ms": 196.073582,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "hc_expand4_add_moesum_vec4_kernel(float*, __half const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 163.353924,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "attention_pack_group_heads_rope_f16_vec4_kernel(__half*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float)",
+          "calls": 43,
+          "gpu_ms": 159.243065,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "hc_expand4_vec4_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 116.77566,
+          "vgpr": 32,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void moe_down_q2K_expert_batch_sharedmid_kernel<4u, false, true, false>(float*, __half*, char const*, float const*, __half const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long, unsigned int, unsigned int const*)",
+          "calls": 40,
+          "gpu_ms": 102.160808,
+          "vgpr": 80,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4096
+        },
+        {
+          "kernel": "attention_static_mixed_heads8_online_kernel(float*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 2,
+          "gpu_ms": 79.946304,
+          "vgpr": 48,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 32768
+        },
+        {
+          "kernel": "indexer_scores_wmma128_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, float, int)",
+          "calls": 21,
+          "gpu_ms": 72.088283,
+          "vgpr": 168,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 41984
+        },
+        {
+          "kernel": "rms_norm_weight_kernel(float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 149,
+          "gpu_ms": 62.154276,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "f32_to_f16_vec4_kernel(__half*, float const*, unsigned long)",
+          "calls": 235,
+          "gpu_ms": 52.346907,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "dequant_q8_0_to_f16_kernel(__half*, unsigned char const*, unsigned long, unsigned long, unsigned long)",
+          "calls": 86,
+          "gpu_ms": 47.381037,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "dequant_q8_0_to_f16_transpose_tiled_kernel(__half*, unsigned char const*, unsigned long, unsigned long, unsigned long)",
+          "calls": 43,
+          "gpu_ms": 43.177704,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4608
+        },
+        {
+          "kernel": "indexer_hadamard_fp4_kernel(float*, unsigned int, unsigned int)",
+          "calls": 42,
+          "gpu_ms": 35.581453,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "rope_tail_kernel(float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float)",
+          "calls": 126,
+          "gpu_ms": 26.90432,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void moe_down_q2K_expert_batch_sharedmid_kernel<1u, false, true, false>(float*, __half*, char const*, float const*, __half const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long, unsigned int, unsigned int const*)",
+          "calls": 40,
+          "gpu_ms": 26.472832,
+          "vgpr": 56,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "indexer_topk_1024_kernel(unsigned int*, float const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 21,
+          "gpu_ms": 25.651851,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 8192
+        },
+        {
+          "kernel": "fp8_kv_quantize_kernel(float*, __half*, unsigned int, unsigned int, unsigned int)",
+          "calls": 84,
+          "gpu_ms": 22.092677,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 256
+        },
+        {
+          "kernel": "void mm_ids_helper<6>(int const*, int*, int*, int*, int, int, int, int, int)",
+          "calls": 43,
+          "gpu_ms": 19.018534,
+          "vgpr": 32,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "swiglu_kernel(float*, float const*, float const*, unsigned int, float, float)",
+          "calls": 43,
+          "gpu_ms": 18.682733,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "compressor_prefill_pool_kernel(float*, float const*, float const*, float const*, float const*, void const*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 62,
+          "gpu_ms": 14.722091,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 1040,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_MT128x32x16_SE_1LDSB0_APM1_ABV0_ACED0_AF0EM1_AF1EM1_AMAS0_ASE_ASGT_ASLT_ASM_ASAE01_ASCE01_ASEM1_AAC0_BL1_BS1_CLR0_DTLA0_DTLB0_DTVA0_DTVB0_DVO0_ETSP_EPS0_ELFLR0_EMLL0_FSSC10_FL0_GLVWA1_GLVWB1_GRCGA1_GRCGB1_GRPM1_GRVW1_GSU3_GSUAMB_GLS0_ISA000_IU1_K1_KLS_LBSPPA0_LBSPPB0_LPA0_LPB0_LDL1_LRVW1_LWPMn1_LDW0_FMA_MIAV0_MDA2_MO40_MMFSC_MKFGSU256_NTA0_NTB0_NTC0_NTD0_NEPBS0_NLCA1_NLCB1_ONLL1_OPLV0_PK0_PAP0_PGR0_PLR1_PKA0_SIA1_SLW1_SS0_SU32_SUM0_SUS256_SCIUI1_SPO0_SRVW0_SSO0_SVW4_SNLL0_TSGRA0_TSGRB0_TT8_2_TLDS0_UMLDSA0_UMLDSB0_U64SL1_USFGROn1_VAW1_VSn1_VW1_VWB1_VFLRP0_WSGRA0_WSGRB0_WS64_WG16_16_1_WGM8",
+          "calls": 84,
+          "gpu_ms": 14.24672,
+          "vgpr": 96,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 5120
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x32_MI16x16x1_SN_LDSB0_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA0_DTLB0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA1151_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPM0_LPA16_LPB16_LPM0_LRVW16_LWPMn1_MIAV1_MIWT1_1_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG32_4_1",
+          "calls": 24,
+          "gpu_ms": 12.61705,
+          "vgpr": 128,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 13312
+        },
+        {
+          "kernel": "dsv4_qkv_rms_norm_rows_kernel(float*, float const*, float const*, unsigned int, float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 43,
+          "gpu_ms": 9.990309,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "indexed_topk_sort_512_asc_kernel(int*, int const*, unsigned int)",
+          "calls": 21,
+          "gpu_ms": 4.841106,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 2048
+        },
+        {
+          "kernel": "router_select_warp_topk_kernel(int*, float*, float*, float const*, int const*, float const*, int const*, int, unsigned int, unsigned int, int, int)",
+          "calls": 43,
+          "gpu_ms": 2.537857,
+          "vgpr": 56,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4096
+        },
+        {
+          "kernel": "matmul_q8_0_preq_rows_w32_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned int, int)",
+          "calls": 1,
+          "gpu_ms": 2.521744,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "store_raw_kv_batch_kernel(float*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 2.305375,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_scatter_sorted_pairs_deterministic_kernel(unsigned int*, unsigned int const*, int const*, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 1.810363,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "embed_tokens_hc_kernel(float*, int const*, __half const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 1,
+          "gpu_ms": 1.465397,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_build_expert_tile_offsets_kernel(unsigned int*, unsigned int*, unsigned int const*, unsigned int)",
+          "calls": 86,
+          "gpu_ms": 1.179659,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "fill_f32_kernel(float*, unsigned long, float)",
+          "calls": 352,
+          "gpu_ms": 0.928905,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "__amd_rocclr_fillBufferAligned",
+          "calls": 234,
+          "gpu_ms": 0.657921,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_build_expert_tiles_kernel(unsigned int*, unsigned int*, unsigned int const*, unsigned int const*, unsigned int)",
+          "calls": 86,
+          "gpu_ms": 0.586822,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "__amd_rocclr_copyBuffer",
+          "calls": 130,
+          "gpu_ms": 0.549214,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_prefix_sorted_pairs_kernel(unsigned int*, unsigned int*, unsigned int const*)",
+          "calls": 43,
+          "gpu_ms": 0.416623,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "Cijk_S_PostGSU3",
+          "calls": 84,
+          "gpu_ms": 0.182186,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "compressor_set_rows_kernel(float*, float*, float const*, float const*, void const*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 84,
+          "gpu_ms": 0.177534,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_count_sorted_pairs_kernel(unsigned int*, int const*, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 0.138982,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void matmul_f16_ordered_batch_reuse_kernel<1u>(float*, __half const*, float const*, unsigned long, unsigned long)",
+          "calls": 1,
+          "gpu_ms": 0.014868,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 128
+        },
+        {
+          "kernel": "void rms_norm_plain_regs_kernel<64u>(float*, float const*, unsigned int, unsigned int, float)",
+          "calls": 1,
+          "gpu_ms": 0.003968,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "hc_weighted_sum_kernel(float*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 1,
+          "gpu_ms": 0.002846,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "output_hc_weights_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 1,
+          "gpu_ms": 0.002004,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "quantize_q8_0_f32_kernel(signed char*, float*, float const*, unsigned long, unsigned long)",
+          "calls": 1,
+          "gpu_ms": 0.001603,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        }
+      ]
+    },
+    "candidate": {
+      "database": {
+        "path": "/tmp/ds4-bulk-pp-candidate-profile/prof_results.db",
+        "sha256": "0bf5572effd7e9c1dc7d33d84e2836b14fc52a8aac1f98f1ba8188c02d77ccc7"
+      },
+      "gpu_ms": 8392.076649,
+      "dispatches": 3753,
+      "kernels": [
+        {
+          "kernel": "void mul_mat_q<(ggml_type)16, 80, false, false, true>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float)",
+          "calls": 86,
+          "gpu_ms": 2033.867635,
+          "vgpr": 176,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 31552
+        },
+        {
+          "kernel": "void moe_down_q2K_hotlist_wmma_wide_kernel<8, 16, 16, 16, 4, true, true, false>(float*, __half*, char const*, float const*, __half const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long, unsigned int, unsigned int const*)",
+          "calls": 43,
+          "gpu_ms": 1023.281207,
+          "vgpr": 112,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16128
+        },
+        {
+          "kernel": "void mul_mat_q<(ggml_type)8, 80, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float)",
+          "calls": 215,
+          "gpu_ms": 967.394686,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 31552
+        },
+        {
+          "kernel": "void attention_mixed_heads32_wmma_kernel<true, true>(float*, float const*, float const*, float const*, void const*, int const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 21,
+          "gpu_ms": 663.5614,
+          "vgpr": 88,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 59908
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HHS_BH_MT128x128x32_MI16x16x16x1_SN_1LDSB0_APM1_ABV0_ACED0_AF0EM1_AF1EM1_AMAS3_ASE_ASGT_ASLT_ASM_ASAE01_ASCE01_ASEM1_AAC0_BL1_BS1_CLR0_DTLA0_DTLB0_DTVA0_DTVB0_DVO0_ETSP_EPS1_ELFLR0_EMLL0_FSSC10_FL0_GLVWA8_GLVWB8_GRCGA1_GRCGB1_GRPM1_GRVW8_GSU1_GSUASB_GLS0_ISA1151_IU1_K1_KLA_LBSPPA128_LBSPPB128_LPA8_LPB8_LDL1_LRVW16_LWPMn1_LDW0_FMA_MIAV1_MDA2_MO40_MMFGLC_MKFGSU256_NTA0_NTB0_NTC0_NTD0_NEPBS0_NLCA1_NLCB1_ONLL1_OPLV0_PK0_PAP0_PGR1_PLR0_PKA0_SIA1_SLW1_SS1_SU32_SUM0_SUS256_SCIUI1_SPO0_SRVW0_SSO0_SVW2_SNLL0_TSGRA0_TSGRB0_TT4_64_TLDS1_UMLDSA1_UMLDSB1_U64SL1_USFGROn1_VAW2_VSn1_VW2_VWB2_VFLRP0_WSGRA1_WSGRB1_WS32_WG32_4_1_WGM8",
+          "calls": 43,
+          "gpu_ms": 565.795696,
+          "vgpr": 256,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 51200
+        },
+        {
+          "kernel": "void ds4_gemm_f16_wmma_kernel<256u, 128u, 32u, 4u, 2u, 2u, false, float>(float*, __half const*, __half const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long, unsigned long)",
+          "calls": 43,
+          "gpu_ms": 538.643572,
+          "vgpr": 104,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 24576
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_HA_S_SAV_UserArgs_MT96x96x32_MI16x16x1_SN_LDSB0_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA0_DTLB0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA1151_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPM0_LPA16_LPB16_LPM0_LRVW16_LWPMn1_MIAV1_MIWT3_3_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG32_4_1",
+          "calls": 236,
+          "gpu_ms": 374.566422,
+          "vgpr": 256,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 31744
+        },
+        {
+          "kernel": "head_rms_norm_rope_tail_lds_kernel(float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float, float)",
+          "calls": 43,
+          "gpu_ms": 243.509674,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 3072
+        },
+        {
+          "kernel": "void moe_down_q2K_hotlist_wmma_wide_kernel<4, 16, 16, 16, 4, true, true, false>(float*, __half*, char const*, float const*, __half const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long, unsigned int, unsigned int const*)",
+          "calls": 43,
+          "gpu_ms": 229.474537,
+          "vgpr": 112,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 11776
+        },
+        {
+          "kernel": "void attention_mixed_heads32_wmma_kernel<false, false>(float*, float const*, float const*, float const*, void const*, int const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 20,
+          "gpu_ms": 213.018266,
+          "vgpr": 88,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 57860
+        },
+        {
+          "kernel": "void hc4_norm_mix_split_weighted_sum_kernel<4u, 256u, 16u>(float*, float*, float*, float const*, __half const*, float const*, float const*, unsigned int, unsigned int, unsigned int, float, float)",
+          "calls": 86,
+          "gpu_ms": 197.732983,
+          "vgpr": 120,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 3968
+        },
+        {
+          "kernel": "void quantize_mmq_q8_1<(mmq_q8_1_ds_layout)0>(float const*, int const*, void*, long, long, long, long, long, int, int)",
+          "calls": 258,
+          "gpu_ms": 197.054233,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "hc_expand4_add_moesum_vec4_kernel(float*, __half const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 162.852216,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "attention_pack_group_heads_rope_f16_vec4_kernel(__half*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float)",
+          "calls": 43,
+          "gpu_ms": 159.312196,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "hc_expand4_vec4_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 116.797826,
+          "vgpr": 32,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void moe_down_q2K_expert_batch_sharedmid_kernel<4u, false, true, false>(float*, __half*, char const*, float const*, __half const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long, unsigned int, unsigned int const*)",
+          "calls": 40,
+          "gpu_ms": 102.205896,
+          "vgpr": 80,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4096
+        },
+        {
+          "kernel": "attention_static_mixed_heads8_online_kernel(float*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 2,
+          "gpu_ms": 80.173171,
+          "vgpr": 48,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 32768
+        },
+        {
+          "kernel": "indexer_scores_wmma128_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, float, int)",
+          "calls": 21,
+          "gpu_ms": 72.400469,
+          "vgpr": 168,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 41984
+        },
+        {
+          "kernel": "rms_norm_weight_kernel(float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 149,
+          "gpu_ms": 62.437483,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "f32_to_f16_vec4_kernel(__half*, float const*, unsigned long)",
+          "calls": 235,
+          "gpu_ms": 52.646435,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "dequant_q8_0_to_f16_kernel(__half*, unsigned char const*, unsigned long, unsigned long, unsigned long)",
+          "calls": 86,
+          "gpu_ms": 47.48407,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "dequant_q8_0_to_f16_transpose_tiled_kernel(__half*, unsigned char const*, unsigned long, unsigned long, unsigned long)",
+          "calls": 43,
+          "gpu_ms": 43.245467,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4608
+        },
+        {
+          "kernel": "indexer_hadamard_fp4_kernel(float*, unsigned int, unsigned int)",
+          "calls": 42,
+          "gpu_ms": 35.683401,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "rope_tail_kernel(float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float)",
+          "calls": 126,
+          "gpu_ms": 26.759737,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void moe_down_q2K_expert_batch_sharedmid_kernel<1u, false, true, false>(float*, __half*, char const*, float const*, __half const*, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long, unsigned int, unsigned int const*)",
+          "calls": 40,
+          "gpu_ms": 26.520126,
+          "vgpr": 56,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "indexer_topk_1024_kernel(unsigned int*, float const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 21,
+          "gpu_ms": 25.733964,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 8192
+        },
+        {
+          "kernel": "fp8_kv_quantize_kernel(float*, __half*, unsigned int, unsigned int, unsigned int)",
+          "calls": 84,
+          "gpu_ms": 22.110828,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 256
+        },
+        {
+          "kernel": "swiglu_kernel(float*, float const*, float const*, unsigned int, float, float)",
+          "calls": 43,
+          "gpu_ms": 18.428806,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void mm_ids_helper<6>(int const*, int*, int*, int*, int, int, int, int, int)",
+          "calls": 43,
+          "gpu_ms": 18.196947,
+          "vgpr": 32,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "compressor_prefill_pool_kernel(float*, float const*, float const*, float const*, float const*, void const*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 62,
+          "gpu_ms": 14.52973,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 1040,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_MT128x32x16_SE_1LDSB0_APM1_ABV0_ACED0_AF0EM1_AF1EM1_AMAS0_ASE_ASGT_ASLT_ASM_ASAE01_ASCE01_ASEM1_AAC0_BL1_BS1_CLR0_DTLA0_DTLB0_DTVA0_DTVB0_DVO0_ETSP_EPS0_ELFLR0_EMLL0_FSSC10_FL0_GLVWA1_GLVWB1_GRCGA1_GRCGB1_GRPM1_GRVW1_GSU3_GSUAMB_GLS0_ISA000_IU1_K1_KLS_LBSPPA0_LBSPPB0_LPA0_LPB0_LDL1_LRVW1_LWPMn1_LDW0_FMA_MIAV0_MDA2_MO40_MMFSC_MKFGSU256_NTA0_NTB0_NTC0_NTD0_NEPBS0_NLCA1_NLCB1_ONLL1_OPLV0_PK0_PAP0_PGR0_PLR1_PKA0_SIA1_SLW1_SS0_SU32_SUM0_SUS256_SCIUI1_SPO0_SRVW0_SSO0_SVW4_SNLL0_TSGRA0_TSGRB0_TT8_2_TLDS0_UMLDSA0_UMLDSB0_U64SL1_USFGROn1_VAW1_VSn1_VW1_VWB1_VFLRP0_WSGRA0_WSGRB0_WS64_WG16_16_1_WGM8",
+          "calls": 84,
+          "gpu_ms": 14.229889,
+          "vgpr": 96,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 5120
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x32_MI16x16x1_SN_LDSB0_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA0_DTLB0_DTVA0_DTVB0_EPS0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_ISA1151_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPM0_LPA16_LPB16_LPM0_LRVW16_LWPMn1_MIAV1_MIWT1_1_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS0_NLCA1_NLCB1_ONLL1_PGR2_PLR1_PKA0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG32_4_1",
+          "calls": 24,
+          "gpu_ms": 12.021974,
+          "vgpr": 128,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 13312
+        },
+        {
+          "kernel": "dsv4_qkv_rms_norm_rows_kernel(float*, float const*, float const*, unsigned int, float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 43,
+          "gpu_ms": 9.983377,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "indexed_topk_sort_512_asc_kernel(int*, int const*, unsigned int)",
+          "calls": 21,
+          "gpu_ms": 4.866916,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 2048
+        },
+        {
+          "kernel": "router_select_warp_topk_kernel(int*, float*, float*, float const*, int const*, float const*, int const*, int, unsigned int, unsigned int, int, int)",
+          "calls": 43,
+          "gpu_ms": 2.530639,
+          "vgpr": 56,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4096
+        },
+        {
+          "kernel": "matmul_q8_0_preq_rows_w32_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned int, int)",
+          "calls": 1,
+          "gpu_ms": 2.520701,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "store_raw_kv_batch_kernel(float*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 2.373423,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_scatter_sorted_pairs_deterministic_kernel(unsigned int*, unsigned int const*, int const*, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 1.826716,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "embed_tokens_hc_kernel(float*, int const*, __half const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 1,
+          "gpu_ms": 1.462992,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_build_expert_tile_offsets_kernel(unsigned int*, unsigned int*, unsigned int const*, unsigned int)",
+          "calls": 86,
+          "gpu_ms": 1.190322,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "fill_f32_kernel(float*, unsigned long, float)",
+          "calls": 352,
+          "gpu_ms": 0.916439,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "__amd_rocclr_fillBufferAligned",
+          "calls": 234,
+          "gpu_ms": 0.60682,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_build_expert_tiles_kernel(unsigned int*, unsigned int*, unsigned int const*, unsigned int const*, unsigned int)",
+          "calls": 86,
+          "gpu_ms": 0.596071,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "__amd_rocclr_copyBuffer",
+          "calls": 130,
+          "gpu_ms": 0.537866,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_prefix_sorted_pairs_kernel(unsigned int*, unsigned int*, unsigned int const*)",
+          "calls": 43,
+          "gpu_ms": 0.416503,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "Cijk_S_PostGSU3",
+          "calls": 84,
+          "gpu_ms": 0.225742,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "compressor_set_rows_kernel(float*, float*, float const*, float const*, void const*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 84,
+          "gpu_ms": 0.189113,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_count_sorted_pairs_kernel(unsigned int*, int const*, unsigned int)",
+          "calls": 43,
+          "gpu_ms": 0.13718,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void matmul_f16_ordered_batch_reuse_kernel<1u>(float*, __half const*, float const*, unsigned long, unsigned long)",
+          "calls": 1,
+          "gpu_ms": 0.014668,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 128
+        },
+        {
+          "kernel": "void rms_norm_plain_regs_kernel<64u>(float*, float const*, unsigned int, unsigned int, float)",
+          "calls": 1,
+          "gpu_ms": 0.004208,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "hc_weighted_sum_kernel(float*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 1,
+          "gpu_ms": 0.002445,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "output_hc_weights_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 1,
+          "gpu_ms": 0.001923,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "quantize_q8_0_f32_kernel(signed char*, float*, float const*, unsigned long, unsigned long)",
+          "calls": 1,
+          "gpu_ms": 0.001643,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        }
+      ]
+    },
+    "scope": "Complete pp4096 depth-zero process GPU dispatches, including initial setup"
+  },
+  "quality": {
+    "target": {
+      "log": {
+        "path": "/tmp/ds4-bulk-target.log",
+        "sha256": "e43afd08940fd942c65468f3a552204b30594a9e49092ac3e2e3c5d92b0095c7"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.46478271484375,
+        "reserve_gib": 12.0
+      },
+      "evidence": [
+        "Pinned DS4 trajectory: top1=116/128 rank_sum=142 worst_rank=3",
+        "Wide prefill fingerprint 4217e91c730e333a0bdafe11c46a40be7fb753a763af887434174410dc627841",
+        "DeepSeek V4 session batch quality: top1=29/29 worst_rmse=0.00 worst_cosine=1.00 worst_max_error=0.00 worst_sequential_choice_rank=1",
+        "DeepSeek V4 Flash model/session test passed"
+      ]
+    },
+    "dspark": {
+      "log": {
+        "path": "/tmp/ds4-bulk-dspark.log",
+        "sha256": "4877da9ac3bc29e355aa9e631d29343188b70e1fa6ac950f7e0492816d3a89b7"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 15.366920471191406,
+        "reserve_gib": 12.0
+      },
+      "evidence": [
+        "DSpark fingerprint C1 70bb271d920bd6e604a763afaa7cf8cff21dc8c582be0eab2d2fe1484c795fad",
+        "DSpark repeat C1: 6 exact token/logit/state comparisons, drafted=13",
+        "DSpark fingerprint C2 a06b3d58fa0d3e4fd25bd6d26c74fdf6f0d710c1e177d06df06b077ed20757b1",
+        "DSpark repeat C2: 12 exact token/logit/state comparisons, drafted=24",
+        "DSpark fingerprint C4 37c9bff0585e5de1289bc0d5f8ce3d70eaae81cb8e10d8f3e94c49d1354bbc07",
+        "DSpark repeat C4: 24 exact token/logit/state comparisons, drafted=14",
+        "DSpark fingerprint C6 e62e04a725d5b25614fa30131dbf6c5a019fea8c0f083b0b7c3586218ec9d1bd",
+        "DSpark repeat C6: 36 exact token/logit/state comparisons, drafted=18",
+        "DSpark fingerprint C8 40d5a252e69a3a116acf74c0a5d6802bd818d13bf82129fea617dfc1250506b2",
+        "DSpark repeat C8: 48 exact token/logit/state comparisons, drafted=0",
+        "DSpark changing membership C1/C2/C4/C3: exact repeated continuation",
+        "DSpark concurrent controller snapshot C2: exact window/backoff continuation",
+        "DSpark concurrent controller snapshot C8: exact window/backoff continuation",
+        "DSpark scalar replay C1 depth=0: top1=128/128 rank_sum=128 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C1 depth=2048: top1=128/128 rank_sum=128 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C1 depth=4096: top1=128/128 rank_sum=128 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C2 depth=4096: top1=32/32 rank_sum=32 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C4 depth=4096: top1=64/64 rank_sum=64 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C6 depth=4096: top1=96/96 rank_sum=96 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C8 depth=16384: top1=128/128 rank_sum=128 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C2 depth=16384: top1=32/32 rank_sum=32 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark exact snapshot continuation at depth 53",
+        "DSpark exact snapshot continuation at depth 4608",
+        "DSpark exact snapshot continuation at depth 16384"
+      ]
+    },
+    "kernels": {
+      "log": {
+        "path": "/tmp/ds4-bulk-kernels.log",
+        "sha256": "25e3497b072e946024129f68a21b54089af6f3543d4e60e4bc9e73718fca983d"
+      },
+      "results": [
+        "warning: Git tree '/home/fbozzo/projects/strix-halo.cpp' is dirty",
+        "Test project /home/fbozzo/projects/strix-halo.cpp/build/gpu-test",
+        "    Start 152: ds4.projections",
+        "1/2 Test #152: ds4.projections ..................   Passed    0.60 sec",
+        "    Start 153: ds4.attention",
+        "2/2 Test #153: ds4.attention ....................   Passed    0.65 sec",
+        "",
+        "100% tests passed, 0 tests failed out of 2",
+        "",
+        "Label Time Summary:",
+        "ds4        =   1.26 sec*proc (2 tests)",
+        "gfx1151    =   1.26 sec*proc (2 tests)",
+        "gpu        =   1.26 sec*proc (2 tests)",
+        "hip        =   1.26 sec*proc (2 tests)",
+        "quality    =   1.26 sec*proc (2 tests)",
+        "",
+        "Total Test time (real) =   1.26 sec"
+      ]
+    },
+    "limits": [
+      "No new full serving/CLI/external-reference run; previous complete qualification remains separately pinned",
+      "C1 AR speed qualified; concurrent/DSpark speed matrix not repeated",
+      "75-question capability comparison not run; requires separate user approval",
+      "Exact regression checks do not establish official unquantized-model parity or general batch-composition invariance"
+    ]
+  },
+  "experiments": [
+    {
+      "decision": "Reject hot-cache-only evidence; baseline RPB8 differs from actual ordinary RPB1",
+      "log": {
+        "path": "/tmp/ds4-q8-load-ab.log",
+        "sha256": "3f28955a557d3de3407f3fcb36b1601cb657859df4846a85fc584718f50f3c3f"
+      },
+      "results": [
+        "dim=4096 rows=4096 mode=0 pass=0 exact=1 old_us=24.299 new_us=21.796 speedup=1.115",
+        "dim=4096 rows=4096 mode=0 pass=1 exact=1 old_us=25.804 new_us=21.917 speedup=1.177",
+        "dim=4096 rows=4096 mode=1 pass=0 exact=1 old_us=24.532 new_us=22.245 speedup=1.103",
+        "dim=4096 rows=4096 mode=1 pass=1 exact=1 old_us=26.121 new_us=22.156 speedup=1.179",
+        "dim=4096 rows=4096 mode=2 pass=0 exact=1 old_us=24.380 new_us=21.885 speedup=1.114",
+        "dim=4096 rows=4096 mode=2 pass=1 exact=1 old_us=25.824 new_us=21.904 speedup=1.179",
+        "dim=4096 rows=4096 mode=3 pass=0 exact=1 old_us=24.529 new_us=22.179 speedup=1.106",
+        "dim=4096 rows=4096 mode=3 pass=1 exact=1 old_us=26.493 new_us=22.547 speedup=1.175",
+        "dim=4096 rows=4096 mode=4 pass=0 exact=1 old_us=24.462 new_us=21.825 speedup=1.121",
+        "dim=4096 rows=4096 mode=4 pass=1 exact=1 old_us=26.037 new_us=21.884 speedup=1.190",
+        "dim=4096 rows=4096 mode=5 pass=0 exact=1 old_us=24.547 new_us=22.322 speedup=1.100",
+        "dim=4096 rows=4096 mode=5 pass=1 exact=1 old_us=26.355 new_us=22.163 speedup=1.189",
+        "dim=2048 rows=4096 mode=0 pass=0 exact=1 old_us=14.760 new_us=12.038 speedup=1.226",
+        "dim=2048 rows=4096 mode=0 pass=1 exact=1 old_us=15.025 new_us=12.306 speedup=1.221",
+        "dim=2048 rows=4096 mode=1 pass=0 exact=1 old_us=19.816 new_us=11.601 speedup=1.708",
+        "dim=2048 rows=4096 mode=1 pass=1 exact=1 old_us=15.022 new_us=12.306 speedup=1.221",
+        "dim=2048 rows=4096 mode=2 pass=0 exact=1 old_us=15.405 new_us=11.930 speedup=1.291",
+        "dim=2048 rows=4096 mode=2 pass=1 exact=1 old_us=14.993 new_us=12.317 speedup=1.217",
+        "dim=2048 rows=4096 mode=3 pass=0 exact=1 old_us=14.281 new_us=11.903 speedup=1.200",
+        "dim=2048 rows=4096 mode=3 pass=1 exact=1 old_us=15.049 new_us=12.344 speedup=1.219",
+        "dim=2048 rows=4096 mode=4 pass=0 exact=1 old_us=16.602 new_us=11.846 speedup=1.402",
+        "dim=2048 rows=4096 mode=4 pass=1 exact=1 old_us=15.052 new_us=12.290 speedup=1.225",
+        "dim=2048 rows=4096 mode=5 pass=0 exact=1 old_us=14.493 new_us=11.899 speedup=1.218",
+        "dim=2048 rows=4096 mode=5 pass=1 exact=1 old_us=15.058 new_us=12.367 speedup=1.218",
+        "dim=4096 rows=1024 mode=0 pass=0 exact=1 old_us=10.652 new_us=7.089 speedup=1.503",
+        "dim=4096 rows=1024 mode=0 pass=1 exact=1 old_us=7.404 new_us=7.044 speedup=1.051",
+        "dim=4096 rows=1024 mode=1 pass=0 exact=1 old_us=9.534 new_us=7.084 speedup=1.346",
+        "dim=4096 rows=1024 mode=1 pass=1 exact=1 old_us=7.486 new_us=7.133 speedup=1.049",
+        "dim=4096 rows=1024 mode=2 pass=0 exact=1 old_us=15.591 new_us=7.157 speedup=2.178",
+        "dim=4096 rows=1024 mode=2 pass=1 exact=1 old_us=7.491 new_us=7.127 speedup=1.051",
+        "dim=4096 rows=1024 mode=3 pass=0 exact=1 old_us=14.091 new_us=7.130 speedup=1.976",
+        "dim=4096 rows=1024 mode=3 pass=1 exact=1 old_us=7.443 new_us=7.128 speedup=1.044",
+        "dim=4096 rows=1024 mode=4 pass=0 exact=1 old_us=14.004 new_us=7.094 speedup=1.974",
+        "dim=4096 rows=1024 mode=4 pass=1 exact=1 old_us=7.492 new_us=7.132 speedup=1.051",
+        "dim=4096 rows=1024 mode=5 pass=0 exact=1 old_us=13.404 new_us=7.123 speedup=1.882",
+        "dim=4096 rows=1024 mode=5 pass=1 exact=1 old_us=7.492 new_us=7.122 speedup=1.052",
+        "dim=512 rows=1024 mode=0 pass=0 exact=1 old_us=3.092 new_us=2.857 speedup=1.082",
+        "dim=512 rows=1024 mode=0 pass=1 exact=1 old_us=3.014 new_us=2.811 speedup=1.072",
+        "dim=512 rows=1024 mode=1 pass=0 exact=1 old_us=3.043 new_us=2.760 speedup=1.103",
+        "dim=512 rows=1024 mode=1 pass=1 exact=1 old_us=2.967 new_us=2.764 speedup=1.074",
+        "dim=512 rows=1024 mode=2 pass=0 exact=1 old_us=2.966 new_us=7.488 speedup=0.396",
+        "dim=512 rows=1024 mode=2 pass=1 exact=1 old_us=3.102 new_us=5.540 speedup=0.560",
+        "dim=512 rows=1024 mode=3 pass=0 exact=1 old_us=3.074 new_us=6.046 speedup=0.508",
+        "dim=512 rows=1024 mode=3 pass=1 exact=1 old_us=3.023 new_us=6.836 speedup=0.442",
+        "dim=512 rows=1024 mode=4 pass=0 exact=1 old_us=3.022 new_us=2.815 speedup=1.074",
+        "dim=512 rows=1024 mode=4 pass=1 exact=1 old_us=2.968 new_us=2.764 speedup=1.074",
+        "dim=512 rows=1024 mode=5 pass=0 exact=1 old_us=2.967 new_us=2.835 speedup=1.047",
+        "dim=512 rows=1024 mode=5 pass=1 exact=1 old_us=3.019 new_us=2.821 speedup=1.070",
+        "dim=4096 rows=129280 mode=0 pass=0 exact=1 old_us=2485.223 new_us=2440.029 speedup=1.019",
+        "dim=4096 rows=129280 mode=0 pass=1 exact=1 old_us=2489.969 new_us=2439.514 speedup=1.021",
+        "dim=4096 rows=129280 mode=1 pass=0 exact=1 old_us=2492.487 new_us=2439.715 speedup=1.022",
+        "dim=4096 rows=129280 mode=1 pass=1 exact=1 old_us=2493.887 new_us=2440.686 speedup=1.022",
+        "dim=4096 rows=129280 mode=2 pass=0 exact=1 old_us=2496.369 new_us=2440.021 speedup=1.023",
+        "dim=4096 rows=129280 mode=2 pass=1 exact=1 old_us=2488.799 new_us=2439.446 speedup=1.020",
+        "dim=4096 rows=129280 mode=3 pass=0 exact=1 old_us=2488.548 new_us=2439.271 speedup=1.020",
+        "dim=4096 rows=129280 mode=3 pass=1 exact=1 old_us=2492.909 new_us=2439.381 speedup=1.022",
+        "dim=4096 rows=129280 mode=4 pass=0 exact=1 old_us=2494.542 new_us=2439.665 speedup=1.022",
+        "dim=4096 rows=129280 mode=4 pass=1 exact=1 old_us=2491.233 new_us=2439.039 speedup=1.021",
+        "dim=4096 rows=129280 mode=5 pass=0 exact=1 old_us=2493.002 new_us=2439.836 speedup=1.022",
+        "dim=4096 rows=129280 mode=5 pass=1 exact=1 old_us=2494.407 new_us=2440.393 speedup=1.022"
+      ],
+      "source": {
+        "path": "/tmp/ds4-q8-load-ab.hip",
+        "sha256": "e22c8bb2f1d14bd02a0c3e455dcd6236982be20915569ad8e8f1ec31248f62b7"
+      },
+      "binary": {
+        "path": "/tmp/ds4-q8-load-ab",
+        "sha256": "0427fefa9b4645abde697a684f9ec1124c4ad965a4bfd8c6da91695f818f6ed0"
+      },
+      "resources": {
+        "path": "/tmp/ds4-q8-load-ab.res.txt",
+        "sha256": "bd422b7469556341e009d92632656051ea226681f706cd87dc38a301825c3471"
+      }
+    },
+    {
+      "decision": "Reject extra routes: actual RPB1 baseline with rotating >=128MiB weights shows little useful headroom",
+      "log": {
+        "path": "/tmp/ds4-q8-cold-ab.log",
+        "sha256": "c493750927c0cd4f6eefe6d6c4b3d0c79172e6f3f26f1b3f46fd1626ef83c170"
+      },
+      "results": [
+        "dim=4096 rows=4096 mode=0 rpb=1 pass=0 exact=1 old_us=80.585 new_us=80.298 speedup=1.004",
+        "dim=4096 rows=4096 mode=0 rpb=1 pass=1 exact=1 old_us=80.554 new_us=80.286 speedup=1.003",
+        "dim=4096 rows=4096 mode=0 rpb=4 pass=0 exact=1 old_us=81.219 new_us=84.442 speedup=0.962",
+        "dim=4096 rows=4096 mode=0 rpb=4 pass=1 exact=1 old_us=81.233 new_us=84.552 speedup=0.961",
+        "dim=4096 rows=4096 mode=0 rpb=8 pass=0 exact=1 old_us=80.510 new_us=79.752 speedup=1.010",
+        "dim=4096 rows=4096 mode=0 rpb=8 pass=1 exact=1 old_us=80.545 new_us=79.717 speedup=1.010",
+        "dim=4096 rows=4096 mode=0 rpb=16 pass=0 exact=1 old_us=81.032 new_us=80.886 speedup=1.002",
+        "dim=4096 rows=4096 mode=0 rpb=16 pass=1 exact=1 old_us=81.222 new_us=80.929 speedup=1.004",
+        "dim=2048 rows=4096 mode=0 rpb=1 pass=0 exact=1 old_us=40.846 new_us=40.588 speedup=1.006",
+        "dim=2048 rows=4096 mode=0 rpb=1 pass=1 exact=1 old_us=40.920 new_us=40.798 speedup=1.003",
+        "dim=2048 rows=4096 mode=0 rpb=4 pass=0 exact=1 old_us=40.867 new_us=40.340 speedup=1.013",
+        "dim=2048 rows=4096 mode=0 rpb=4 pass=1 exact=1 old_us=40.865 new_us=40.380 speedup=1.012",
+        "dim=2048 rows=4096 mode=0 rpb=8 pass=0 exact=1 old_us=40.776 new_us=40.465 speedup=1.008",
+        "dim=2048 rows=4096 mode=0 rpb=8 pass=1 exact=1 old_us=40.808 new_us=40.461 speedup=1.009",
+        "dim=2048 rows=4096 mode=0 rpb=16 pass=0 exact=1 old_us=40.852 new_us=40.763 speedup=1.002",
+        "dim=2048 rows=4096 mode=0 rpb=16 pass=1 exact=1 old_us=40.835 new_us=40.798 speedup=1.001",
+        "dim=4096 rows=1024 mode=0 rpb=1 pass=0 exact=1 old_us=22.958 new_us=21.906 speedup=1.048",
+        "dim=4096 rows=1024 mode=0 rpb=1 pass=1 exact=1 old_us=22.138 new_us=21.904 speedup=1.011",
+        "dim=4096 rows=1024 mode=0 rpb=4 pass=0 exact=1 old_us=22.994 new_us=24.124 speedup=0.953",
+        "dim=4096 rows=1024 mode=0 rpb=4 pass=1 exact=1 old_us=22.101 new_us=24.160 speedup=0.915",
+        "dim=4096 rows=1024 mode=0 rpb=8 pass=0 exact=1 old_us=23.043 new_us=22.056 speedup=1.045",
+        "dim=4096 rows=1024 mode=0 rpb=8 pass=1 exact=1 old_us=22.203 new_us=22.007 speedup=1.009",
+        "dim=4096 rows=1024 mode=0 rpb=16 pass=0 exact=1 old_us=22.958 new_us=22.563 speedup=1.017",
+        "dim=4096 rows=1024 mode=0 rpb=16 pass=1 exact=1 old_us=22.165 new_us=22.625 speedup=0.980",
+        "dim=512 rows=1024 mode=0 rpb=1 pass=0 exact=1 old_us=6.723 new_us=5.011 speedup=1.342",
+        "dim=512 rows=1024 mode=0 rpb=1 pass=1 exact=1 old_us=5.269 new_us=5.103 speedup=1.033",
+        "dim=512 rows=1024 mode=0 rpb=4 pass=0 exact=1 old_us=6.743 new_us=4.969 speedup=1.357",
+        "dim=512 rows=1024 mode=0 rpb=4 pass=1 exact=1 old_us=5.237 new_us=5.062 speedup=1.035",
+        "dim=512 rows=1024 mode=0 rpb=8 pass=0 exact=1 old_us=6.791 new_us=4.997 speedup=1.359",
+        "dim=512 rows=1024 mode=0 rpb=8 pass=1 exact=1 old_us=5.223 new_us=5.045 speedup=1.035",
+        "dim=512 rows=1024 mode=0 rpb=16 pass=0 exact=1 old_us=6.698 new_us=5.093 speedup=1.315",
+        "dim=512 rows=1024 mode=0 rpb=16 pass=1 exact=1 old_us=5.242 new_us=5.079 speedup=1.032",
+        "dim=4096 rows=129280 mode=0 rpb=1 pass=0 exact=1 old_us=2446.469 new_us=2441.500 speedup=1.002",
+        "dim=4096 rows=129280 mode=0 rpb=1 pass=1 exact=1 old_us=2445.546 new_us=2442.186 speedup=1.001",
+        "dim=4096 rows=129280 mode=0 rpb=4 pass=0 exact=1 old_us=2445.803 new_us=2446.737 speedup=1.000",
+        "dim=4096 rows=129280 mode=0 rpb=4 pass=1 exact=1 old_us=2449.222 new_us=2452.555 speedup=0.999",
+        "dim=4096 rows=129280 mode=0 rpb=8 pass=0 exact=1 old_us=2446.699 new_us=2440.133 speedup=1.003",
+        "dim=4096 rows=129280 mode=0 rpb=8 pass=1 exact=1 old_us=2445.736 new_us=2439.746 speedup=1.002",
+        "dim=4096 rows=129280 mode=0 rpb=16 pass=0 exact=1 old_us=2447.089 new_us=2413.121 speedup=1.014",
+        "dim=4096 rows=129280 mode=0 rpb=16 pass=1 exact=1 old_us=2445.806 new_us=2413.313 speedup=1.013"
+      ],
+      "source": {
+        "path": "/tmp/ds4-q8-cold-ab.hip",
+        "sha256": "d2a66693950184acb71957d907b13dd8a667dda1d4d47a6f66625a47106d6ec4"
+      },
+      "binary": {
+        "path": "/tmp/ds4-q8-cold-ab",
+        "sha256": "c9f27e6801ec793c12cc2cfdf85ad6652311dd0d170e205afbeab44bfbff77b4"
+      },
+      "resources": {
+        "path": "/tmp/ds4-q8-cold-ab.res.txt",
+        "sha256": "abeaaba3c2dceb0ac608f0537ff8fd1f213c0ba2367a6a1acb88c2baad6497e0"
+      }
+    },
+    {
+      "decision": "Reject blanket MT8: tails regress on several bucket distributions",
+      "log": {
+        "path": "/tmp/ds4-down-tiles-ab.log",
+        "sha256": "02fa902c83be32eaccd58927c0f5d8856051607f1a32c646d87b770a1a21e956"
+      },
+      "results": [
+        "tokens=256 experts=128 skew=0 pass=0 exact=1 tiles4=128 tiles8=128 old_ms=7.4884 new_ms=12.6696 speedup=0.5911",
+        "tokens=256 experts=128 skew=0 pass=1 exact=1 tiles4=128 tiles8=128 old_ms=7.4570 new_ms=12.6736 speedup=0.5884",
+        "tokens=256 experts=128 skew=1 pass=0 exact=1 tiles4=140 tiles8=134 old_ms=7.8491 new_ms=12.8038 speedup=0.6130",
+        "tokens=256 experts=128 skew=1 pass=1 exact=1 tiles4=140 tiles8=134 old_ms=7.7663 new_ms=12.7713 speedup=0.6081",
+        "tokens=2048 experts=128 skew=0 pass=0 exact=1 tiles4=256 tiles8=128 old_ms=16.3029 new_ms=15.0210 speedup=1.0853",
+        "tokens=2048 experts=128 skew=0 pass=1 exact=1 tiles4=256 tiles8=128 old_ms=16.0710 new_ms=14.9722 speedup=1.0734",
+        "tokens=2048 experts=128 skew=1 pass=0 exact=1 tiles4=224 tiles8=176 old_ms=14.8865 new_ms=19.1734 speedup=0.7764",
+        "tokens=2048 experts=128 skew=1 pass=1 exact=1 tiles4=224 tiles8=176 old_ms=14.7167 new_ms=19.1673 speedup=0.7678",
+        "tokens=4096 experts=128 skew=0 pass=0 exact=1 tiles4=384 tiles8=256 old_ms=26.6435 new_ms=29.9964 speedup=0.8882",
+        "tokens=4096 experts=128 skew=0 pass=1 exact=1 tiles4=384 tiles8=256 old_ms=26.5570 new_ms=30.1621 speedup=0.8805",
+        "tokens=4096 experts=128 skew=1 pass=0 exact=1 tiles4=448 tiles8=224 old_ms=29.3906 new_ms=27.1907 speedup=1.0809",
+        "tokens=4096 experts=128 skew=1 pass=1 exact=1 tiles4=448 tiles8=224 old_ms=28.9044 new_ms=27.1852 speedup=1.0632"
+      ],
+      "source": {
+        "path": "/tmp/ds4-down-tiles-ab.hip",
+        "sha256": "c7e869de67e25768dbdb03e31d7e2a4e8f586714a075d991bf669ab1c8f61e4f"
+      },
+      "binary": {
+        "path": "/tmp/ds4-down-tiles-ab",
+        "sha256": "664b90713d84200dc24c956ab8cab44d5352c2e329478527bf5cb427127e5307"
+      },
+      "resources": {
+        "path": "/tmp/ds4-down-tiles-ab.res.txt",
+        "sha256": "baaee71512a68e946376ba38a081c8d240f7a770255d27d0802a8f7210ba128b"
+      }
+    },
+    {
+      "decision": "Retain MT8 plus MT4 tails for >=1024 prompt tokens; exact output and independent CPU samples",
+      "log": {
+        "path": "/tmp/ds4-down-mixed-ab.log",
+        "sha256": "0dc80c09e0dc8f7012d8c7372e8b8f794af002e738d940a2db760711d25d5dce"
+      },
+      "results": [
+        "tokens=256 experts=128 skew=0 pass=0 exact=1 tiles4=128 tiles8=0 tail4=128 old_ms=7.4838 new_ms=7.4838 speedup=1.0000",
+        "tokens=256 experts=128 skew=0 pass=1 exact=1 tiles4=128 tiles8=0 tail4=128 old_ms=7.4547 new_ms=7.4799 speedup=0.9966",
+        "tokens=256 experts=128 skew=1 pass=0 exact=1 tiles4=140 tiles8=6 tail4=128 old_ms=7.8869 new_ms=7.9259 speedup=0.9951",
+        "tokens=256 experts=128 skew=1 pass=1 exact=1 tiles4=140 tiles8=6 tail4=128 old_ms=7.7821 new_ms=7.8594 speedup=0.9902",
+        "tokens=2048 experts=128 skew=0 pass=0 exact=1 tiles4=256 tiles8=128 tail4=0 old_ms=16.4010 new_ms=15.1701 speedup=1.0811",
+        "tokens=2048 experts=128 skew=0 pass=1 exact=1 tiles4=256 tiles8=128 tail4=0 old_ms=16.1540 new_ms=15.0664 speedup=1.0722",
+        "tokens=2048 experts=128 skew=1 pass=0 exact=1 tiles4=224 tiles8=48 tail4=128 old_ms=14.9856 new_ms=14.5483 speedup=1.0301",
+        "tokens=2048 experts=128 skew=1 pass=1 exact=1 tiles4=224 tiles8=48 tail4=128 old_ms=14.6571 new_ms=14.4577 speedup=1.0138",
+        "tokens=4096 experts=128 skew=0 pass=0 exact=1 tiles4=384 tiles8=128 tail4=128 old_ms=26.1047 new_ms=26.0497 speedup=1.0021",
+        "tokens=4096 experts=128 skew=0 pass=1 exact=1 tiles4=384 tiles8=128 tail4=128 old_ms=26.6048 new_ms=26.5887 speedup=1.0006",
+        "tokens=4096 experts=128 skew=1 pass=0 exact=1 tiles4=448 tiles8=224 tail4=0 old_ms=29.2641 new_ms=27.2986 speedup=1.0720",
+        "tokens=4096 experts=128 skew=1 pass=1 exact=1 tiles4=448 tiles8=224 tail4=0 old_ms=29.0508 new_ms=27.4309 speedup=1.0591"
+      ],
+      "source": {
+        "path": "/tmp/ds4-down-mixed-ab.hip",
+        "sha256": "98d6176d0c048d46d963662623afed8f10eaf1fcfcf2b1012f3a2c388bf69916"
+      },
+      "binary": {
+        "path": "/tmp/ds4-down-mixed-ab",
+        "sha256": "0e849dbf0a48d32b1c6f2eaac9bb1bfa14f2b2eb2b85c4469a45343e0fe68535"
+      },
+      "resources": {
+        "path": "/tmp/ds4-down-mixed-ab.res.txt",
+        "sha256": "baaee71512a68e946376ba38a081c8d240f7a770255d27d0802a8f7210ba128b"
+      }
+    },
+    {
+      "decision": "Arithmetic signs M0 retained; extra shared-mask table M1 unnecessary; split integer chains M2 slower",
+      "log": {
+        "path": "/tmp/ds4-iq2-signs-ab.log",
+        "sha256": "39d913758b63d49b9cb8964f452018b6b445481b68a221a47c238db2d9532e90"
+      },
+      "results": [
+        "IQ2 tokens=1 blocks=4 mode=0 pass=0 exact=1 old_us=69.599 new_us=52.809 speedup=1.318",
+        "IQ2 tokens=1 blocks=4 mode=0 pass=1 exact=1 old_us=70.798 new_us=53.267 speedup=1.329",
+        "IQ2 blocks=4 tokens=1: exact scalar/batch gate/up/activation",
+        "IQ2 tokens=1 blocks=4 mode=1 pass=0 exact=1 old_us=68.088 new_us=56.072 speedup=1.214",
+        "IQ2 tokens=1 blocks=4 mode=1 pass=1 exact=1 old_us=70.034 new_us=55.349 speedup=1.265",
+        "IQ2 blocks=4 tokens=1: exact scalar/batch gate/up/activation",
+        "IQ2 tokens=1 blocks=4 mode=2 pass=0 exact=1 old_us=69.239 new_us=72.978 speedup=0.949",
+        "IQ2 tokens=1 blocks=4 mode=2 pass=1 exact=1 old_us=70.357 new_us=71.909 speedup=0.978",
+        "IQ2 blocks=4 tokens=1: exact scalar/batch gate/up/activation",
+        "IQ2 tokens=1 blocks=16 mode=0 pass=0 exact=1 old_us=193.369 new_us=185.161 speedup=1.044",
+        "IQ2 tokens=1 blocks=16 mode=0 pass=1 exact=1 old_us=195.636 new_us=184.715 speedup=1.059",
+        "IQ2 blocks=16 tokens=1: exact scalar/batch gate/up/activation",
+        "IQ2 tokens=1 blocks=16 mode=1 pass=0 exact=1 old_us=195.036 new_us=184.630 speedup=1.056",
+        "IQ2 tokens=1 blocks=16 mode=1 pass=1 exact=1 old_us=197.232 new_us=183.189 speedup=1.077",
+        "IQ2 blocks=16 tokens=1: exact scalar/batch gate/up/activation",
+        "IQ2 tokens=1 blocks=16 mode=2 pass=0 exact=1 old_us=192.393 new_us=238.272 speedup=0.807",
+        "IQ2 tokens=1 blocks=16 mode=2 pass=1 exact=1 old_us=193.458 new_us=237.271 speedup=0.815",
+        "IQ2 blocks=16 tokens=1: exact scalar/batch gate/up/activation"
+      ],
+      "source": {
+        "path": "/tmp/ds4-iq2-signs-ab.hip",
+        "sha256": "85a1391da59868c950c3b008ff1fd19bb3a09455cf659c98c0a27e1e0d92bea2"
+      },
+      "binary": {
+        "path": "/tmp/ds4-iq2-signs-ab",
+        "sha256": "a591bf46210167aaa58bcba2f5af0675e5741cac9dc109c107cb6f29a7649fc7"
+      },
+      "resources": {
+        "path": "/tmp/ds4-iq2-signs-ab.res.txt",
+        "sha256": "b716d7b91c76266763d7bbc4826030901f9d807abb717e152158332b0366c561"
+      }
+    },
+    {
+      "decision": "Retain arithmetic signs M0; cooperative activation staging M3 slower at actual width",
+      "log": {
+        "path": "/tmp/ds4-iq2-coop-ab.log",
+        "sha256": "4fba83c8bd88ce66349cd3fdfd79fc96f4d4edcd63482d21b102f1be8f3af689"
+      },
+      "results": [
+        "IQ2 tokens=1 blocks=4 mode=0 pass=0 exact=1 old_us=66.520 new_us=52.261 speedup=1.273",
+        "IQ2 tokens=1 blocks=4 mode=0 pass=1 exact=1 old_us=68.094 new_us=52.072 speedup=1.308",
+        "IQ2 blocks=4 tokens=1: exact scalar/batch gate/up/activation",
+        "IQ2 tokens=1 blocks=4 mode=3 pass=0 exact=1 old_us=65.892 new_us=52.152 speedup=1.263",
+        "IQ2 tokens=1 blocks=4 mode=3 pass=1 exact=1 old_us=68.426 new_us=52.067 speedup=1.314",
+        "IQ2 blocks=4 tokens=1: exact scalar/batch gate/up/activation",
+        "IQ2 tokens=1 blocks=16 mode=0 pass=0 exact=1 old_us=194.366 new_us=184.609 speedup=1.053",
+        "IQ2 tokens=1 blocks=16 mode=0 pass=1 exact=1 old_us=195.737 new_us=184.310 speedup=1.062",
+        "IQ2 blocks=16 tokens=1: exact scalar/batch gate/up/activation",
+        "IQ2 tokens=1 blocks=16 mode=3 pass=0 exact=1 old_us=196.114 new_us=188.016 speedup=1.043",
+        "IQ2 tokens=1 blocks=16 mode=3 pass=1 exact=1 old_us=198.949 new_us=187.745 speedup=1.060",
+        "IQ2 blocks=16 tokens=1: exact scalar/batch gate/up/activation"
+      ],
+      "source": {
+        "path": "/tmp/ds4-iq2-coop-ab.hip",
+        "sha256": "9c544fc0d3eb51f5ee943b4a0bc8e3aee443767eb5fb2aa82aa84f9027cce871"
+      },
+      "binary": {
+        "path": "/tmp/ds4-iq2-coop-ab",
+        "sha256": "fd2193a4302be1d2f91411332aa70399e94463549389219988f24c91e4d5db22"
+      },
+      "resources": {
+        "path": "/tmp/ds4-iq2-coop-ab.res.txt",
+        "sha256": "b49f40a5ac1bb4cfdf2d55dfbb75667109df03b6a988118577e993eb48117abc"
+      }
+    }
+  ],
+  "probe_headers": {
+    "q2_down_baseline_extract": {
+      "path": "/tmp/ds4-down-kernel.h",
+      "sha256": "0ccc48d63f53801e8268659b7182d77b38262be5f31dcc38a8064081c6864c4f"
+    },
+    "iq2_candidates": {
+      "path": "/tmp/ds4-iq2-candidates.h",
+      "sha256": "d0256b39922610c0fcfff45054d9278acd858ab507dabf810f1e2ae941cc6b61"
+    },
+    "note": "IQ2 header also contains the later cooperative-copy M3 variant. M0/M1/M2 arithmetic was not changed by that addition; archived executable hashes identify the measured builds."
+  },
+  "mmq_rows": {
+    "64": {
+      "decision": "Keep Y64; global Y32/Y128 lose on four of five shapes",
+      "log": {
+        "path": "/tmp/ds4-mmq-y64.log",
+        "sha256": "98700658458d91555a50e3f7358aaebb26a004f40ad0b1a865fdb7444eaf2545"
+      },
+      "results": [
+        "type=8 M=4096 N=2048 K=4096 rep=0 hash=58072b73d97d9bf3 elements=8388608 ms=3.30758",
+        "type=8 M=4096 N=2048 K=4096 rep=1 hash=58072b73d97d9bf3 elements=8388608 ms=3.30313",
+        "type=8 M=4096 N=2048 K=4096 rep=2 hash=58072b73d97d9bf3 elements=8388608 ms=3.32308",
+        "type=8 M=4096 N=4096 K=4096 rep=0 hash=b7ee5c779a488f44 elements=16777216 ms=6.43658",
+        "type=8 M=4096 N=4096 K=4096 rep=1 hash=b7ee5c779a488f44 elements=16777216 ms=6.49157",
+        "type=8 M=4096 N=4096 K=4096 rep=2 hash=b7ee5c779a488f44 elements=16777216 ms=6.46868",
+        "type=2 M=2048 N=64 K=4096 rep=0 hash=e448eb94b470e18d elements=131072 ms=0.08266",
+        "type=2 M=2048 N=64 K=4096 rep=1 hash=e448eb94b470e18d elements=131072 ms=0.08128",
+        "type=2 M=2048 N=64 K=4096 rep=2 hash=e448eb94b470e18d elements=131072 ms=0.08179",
+        "type=2 M=2048 N=128 K=4096 rep=0 hash=92fa0a481bd813d0 elements=262144 ms=0.11335",
+        "type=2 M=2048 N=128 K=4096 rep=1 hash=92fa0a481bd813d0 elements=262144 ms=0.11539",
+        "type=2 M=2048 N=128 K=4096 rep=2 hash=92fa0a481bd813d0 elements=262144 ms=0.11535",
+        "type=2 M=2048 N=1024 K=4096 rep=0 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.88397",
+        "type=2 M=2048 N=1024 K=4096 rep=1 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.84773",
+        "type=2 M=2048 N=1024 K=4096 rep=2 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.85003",
+        "type=8 M=4096 N=2048 K=4096 rep=0 hash=58072b73d97d9bf3 elements=8388608 ms=3.36651",
+        "type=8 M=4096 N=2048 K=4096 rep=1 hash=58072b73d97d9bf3 elements=8388608 ms=3.35658",
+        "type=8 M=4096 N=2048 K=4096 rep=2 hash=58072b73d97d9bf3 elements=8388608 ms=3.35145",
+        "type=8 M=4096 N=4096 K=4096 rep=0 hash=b7ee5c779a488f44 elements=16777216 ms=6.49354",
+        "type=8 M=4096 N=4096 K=4096 rep=1 hash=b7ee5c779a488f44 elements=16777216 ms=6.52609",
+        "type=8 M=4096 N=4096 K=4096 rep=2 hash=b7ee5c779a488f44 elements=16777216 ms=6.51920",
+        "type=2 M=2048 N=64 K=4096 rep=0 hash=e448eb94b470e18d elements=131072 ms=0.08293",
+        "type=2 M=2048 N=64 K=4096 rep=1 hash=e448eb94b470e18d elements=131072 ms=0.08161",
+        "type=2 M=2048 N=64 K=4096 rep=2 hash=e448eb94b470e18d elements=131072 ms=0.08193",
+        "type=2 M=2048 N=128 K=4096 rep=0 hash=92fa0a481bd813d0 elements=262144 ms=0.11306",
+        "type=2 M=2048 N=128 K=4096 rep=1 hash=92fa0a481bd813d0 elements=262144 ms=0.11378",
+        "type=2 M=2048 N=128 K=4096 rep=2 hash=92fa0a481bd813d0 elements=262144 ms=0.11581",
+        "type=2 M=2048 N=1024 K=4096 rep=0 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.89721",
+        "type=2 M=2048 N=1024 K=4096 rep=1 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.84763",
+        "type=2 M=2048 N=1024 K=4096 rep=2 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.84664"
+      ],
+      "binary": {
+        "path": "/tmp/ds4-mmq-y64",
+        "sha256": "44e5f7a4f99ffa8d6323c9d7615a430ddfd654b7d0b06b091304896755d876ec"
+      }
+    },
+    "32": {
+      "decision": "Keep Y64; global Y32/Y128 lose on four of five shapes",
+      "log": {
+        "path": "/tmp/ds4-mmq-y32.log",
+        "sha256": "5345713edf2794b1f67f9107b540dd5178d1163b30dd4fae0fefefed39515133"
+      },
+      "results": [
+        "type=8 M=4096 N=2048 K=4096 rep=0 hash=58072b73d97d9bf3 elements=8388608 ms=3.72506",
+        "type=8 M=4096 N=2048 K=4096 rep=1 hash=58072b73d97d9bf3 elements=8388608 ms=3.73851",
+        "type=8 M=4096 N=2048 K=4096 rep=2 hash=58072b73d97d9bf3 elements=8388608 ms=3.72901",
+        "type=8 M=4096 N=4096 K=4096 rep=0 hash=b7ee5c779a488f44 elements=16777216 ms=7.38638",
+        "type=8 M=4096 N=4096 K=4096 rep=1 hash=b7ee5c779a488f44 elements=16777216 ms=7.42423",
+        "type=8 M=4096 N=4096 K=4096 rep=2 hash=b7ee5c779a488f44 elements=16777216 ms=7.39746",
+        "type=2 M=2048 N=64 K=4096 rep=0 hash=e448eb94b470e18d elements=131072 ms=0.07518",
+        "type=2 M=2048 N=64 K=4096 rep=1 hash=e448eb94b470e18d elements=131072 ms=0.07355",
+        "type=2 M=2048 N=64 K=4096 rep=2 hash=e448eb94b470e18d elements=131072 ms=0.07270",
+        "type=2 M=2048 N=128 K=4096 rep=0 hash=92fa0a481bd813d0 elements=262144 ms=0.13162",
+        "type=2 M=2048 N=128 K=4096 rep=1 hash=92fa0a481bd813d0 elements=262144 ms=0.13209",
+        "type=2 M=2048 N=128 K=4096 rep=2 hash=92fa0a481bd813d0 elements=262144 ms=0.13678",
+        "type=2 M=2048 N=1024 K=4096 rep=0 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.94426",
+        "type=2 M=2048 N=1024 K=4096 rep=1 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.92996",
+        "type=2 M=2048 N=1024 K=4096 rep=2 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.93185",
+        "type=8 M=4096 N=2048 K=4096 rep=0 hash=58072b73d97d9bf3 elements=8388608 ms=3.74896",
+        "type=8 M=4096 N=2048 K=4096 rep=1 hash=58072b73d97d9bf3 elements=8388608 ms=3.75087",
+        "type=8 M=4096 N=2048 K=4096 rep=2 hash=58072b73d97d9bf3 elements=8388608 ms=3.75986",
+        "type=8 M=4096 N=4096 K=4096 rep=0 hash=b7ee5c779a488f44 elements=16777216 ms=7.36720",
+        "type=8 M=4096 N=4096 K=4096 rep=1 hash=b7ee5c779a488f44 elements=16777216 ms=7.38556",
+        "type=8 M=4096 N=4096 K=4096 rep=2 hash=b7ee5c779a488f44 elements=16777216 ms=7.39766",
+        "type=2 M=2048 N=64 K=4096 rep=0 hash=e448eb94b470e18d elements=131072 ms=0.07368",
+        "type=2 M=2048 N=64 K=4096 rep=1 hash=e448eb94b470e18d elements=131072 ms=0.07233",
+        "type=2 M=2048 N=64 K=4096 rep=2 hash=e448eb94b470e18d elements=131072 ms=0.07231",
+        "type=2 M=2048 N=128 K=4096 rep=0 hash=92fa0a481bd813d0 elements=262144 ms=0.13172",
+        "type=2 M=2048 N=128 K=4096 rep=1 hash=92fa0a481bd813d0 elements=262144 ms=0.13344",
+        "type=2 M=2048 N=128 K=4096 rep=2 hash=92fa0a481bd813d0 elements=262144 ms=0.13263",
+        "type=2 M=2048 N=1024 K=4096 rep=0 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.96180",
+        "type=2 M=2048 N=1024 K=4096 rep=1 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.92977",
+        "type=2 M=2048 N=1024 K=4096 rep=2 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.93241"
+      ],
+      "binary": {
+        "path": "/tmp/ds4-mmq-y32",
+        "sha256": "15d08e88254f7c74ae7f939f576b5ec84d55c6ed69c8c88ba1297be8e24f6309"
+      }
+    },
+    "128": {
+      "decision": "Keep Y64; global Y32/Y128 lose on four of five shapes",
+      "log": {
+        "path": "/tmp/ds4-mmq-y128.log",
+        "sha256": "a3b24cd95683534d0986a4a1de33ab88f8bf27e5d477e7b705223c43730fe77b"
+      },
+      "results": [
+        "type=8 M=4096 N=2048 K=4096 rep=0 hash=58072b73d97d9bf3 elements=8388608 ms=3.56582",
+        "type=8 M=4096 N=2048 K=4096 rep=1 hash=58072b73d97d9bf3 elements=8388608 ms=3.58914",
+        "type=8 M=4096 N=2048 K=4096 rep=2 hash=58072b73d97d9bf3 elements=8388608 ms=3.59309",
+        "type=8 M=4096 N=4096 K=4096 rep=0 hash=b7ee5c779a488f44 elements=16777216 ms=6.97943",
+        "type=8 M=4096 N=4096 K=4096 rep=1 hash=b7ee5c779a488f44 elements=16777216 ms=7.01537",
+        "type=8 M=4096 N=4096 K=4096 rep=2 hash=b7ee5c779a488f44 elements=16777216 ms=7.03095",
+        "type=2 M=2048 N=64 K=4096 rep=0 hash=e448eb94b470e18d elements=131072 ms=0.08329",
+        "type=2 M=2048 N=64 K=4096 rep=1 hash=e448eb94b470e18d elements=131072 ms=0.08212",
+        "type=2 M=2048 N=64 K=4096 rep=2 hash=e448eb94b470e18d elements=131072 ms=0.08196",
+        "type=2 M=2048 N=128 K=4096 rep=0 hash=92fa0a481bd813d0 elements=262144 ms=0.12637",
+        "type=2 M=2048 N=128 K=4096 rep=1 hash=92fa0a481bd813d0 elements=262144 ms=0.12761",
+        "type=2 M=2048 N=128 K=4096 rep=2 hash=92fa0a481bd813d0 elements=262144 ms=0.12804",
+        "type=2 M=2048 N=1024 K=4096 rep=0 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.96326",
+        "type=2 M=2048 N=1024 K=4096 rep=1 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.94758",
+        "type=2 M=2048 N=1024 K=4096 rep=2 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.94933",
+        "type=8 M=4096 N=2048 K=4096 rep=0 hash=58072b73d97d9bf3 elements=8388608 ms=3.60487",
+        "type=8 M=4096 N=2048 K=4096 rep=1 hash=58072b73d97d9bf3 elements=8388608 ms=3.58546",
+        "type=8 M=4096 N=2048 K=4096 rep=2 hash=58072b73d97d9bf3 elements=8388608 ms=3.61258",
+        "type=8 M=4096 N=4096 K=4096 rep=0 hash=b7ee5c779a488f44 elements=16777216 ms=7.03988",
+        "type=8 M=4096 N=4096 K=4096 rep=1 hash=b7ee5c779a488f44 elements=16777216 ms=7.04619",
+        "type=8 M=4096 N=4096 K=4096 rep=2 hash=b7ee5c779a488f44 elements=16777216 ms=7.01746",
+        "type=2 M=2048 N=64 K=4096 rep=0 hash=e448eb94b470e18d elements=131072 ms=0.08342",
+        "type=2 M=2048 N=64 K=4096 rep=1 hash=e448eb94b470e18d elements=131072 ms=0.08213",
+        "type=2 M=2048 N=64 K=4096 rep=2 hash=e448eb94b470e18d elements=131072 ms=0.08225",
+        "type=2 M=2048 N=128 K=4096 rep=0 hash=92fa0a481bd813d0 elements=262144 ms=0.12700",
+        "type=2 M=2048 N=128 K=4096 rep=1 hash=92fa0a481bd813d0 elements=262144 ms=0.12677",
+        "type=2 M=2048 N=128 K=4096 rep=2 hash=92fa0a481bd813d0 elements=262144 ms=0.12617",
+        "type=2 M=2048 N=1024 K=4096 rep=0 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.96912",
+        "type=2 M=2048 N=1024 K=4096 rep=1 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.95348",
+        "type=2 M=2048 N=1024 K=4096 rep=2 hash=cbdf188d48a6bcc6 elements=2097152 ms=0.94448"
+      ],
+      "binary": {
+        "path": "/tmp/ds4-mmq-y128",
+        "sha256": "e61513db2e79ae0f668754ccf4b06c52b857603bb128e8e1eac225af189eda69"
+      }
+    },
+    "harness": {
+      "path": "/tmp/ds4-mmq-rows.hip",
+      "sha256": "71d9900f47b8e6ea996b421da621e5b0ddd4845ac0b6aae56d14a98f9d66d165"
+    },
+    "build_script": {
+      "path": "/tmp/ds4-build-mmq-rows.sh",
+      "sha256": "d7d836c3137742766103425fba28c2b1775a79334853fef12d92403149d910ae"
+    }
+  },
+  "roofline": {
+    "log": {
+      "path": "/tmp/ds4-bulk-roofline.log",
+      "sha256": "3ef1a80fec1147c7ad07b91d03403767b766aac290b2fd138afcb3ef50f014de"
+    },
+    "read_gb_s": 240.93,
+    "write_gb_s": 221.3,
+    "copy_gb_s": 209.54,
+    "limitation": "Only bulk memory bandwidth used. Existing tool EPI/LDS figures are implausible and excluded; likely compiler elimination."
+  }
+}

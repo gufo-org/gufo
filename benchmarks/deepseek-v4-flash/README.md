@@ -1,11 +1,11 @@
 # DeepSeek V4 Flash on Strix Halo
 
 Linux x86-64, AMD Strix Halo `gfx1151`, 128 GB unified memory. All model timings
-use Nix release binaries. `C` is simultaneous requests. The sweep adds **2,048
-prompt tokens** or generates **128 tokens** at each listed context depth.
+use Nix release binaries. `C` is simultaneous requests. Prefill payloads are shown in each table; generation uses **128 tokens** at each
+listed context depth.
 
 Results are means of two repetitions. The C1 autoregressive table uses the
-[latest projection/selection sweep](selection-projection.md); DSpark and
+[latest bulk-kernel sweep](bulk-kernels.md); DSpark and
 multiple-user tables retain the earlier [full matrix](speed-matrix.json).
 Both reports retain deviations, token hashes and binary/model identities.
 C1 has the highest per-user generation rate at every depth.
@@ -21,13 +21,18 @@ C1 has the highest per-user generation rate at every depth.
 
 ## Single user, autoregressive
 
-| Context depth | pp2048 tok/s | tg128 tok/s |
+| Context depth | pp4096 tok/s | tg128 tok/s |
 | ---: | ---: | ---: |
-| 0 | 458.84 | 17.78 |
-| 4,096 | 443.65 | 15.90 |
-| 8,192 | 436.20 | 15.75 |
-| 12,288 | 431.58 | 15.61 |
-| 16,384 | 423.78 | 15.47 |
+| 0 | 490.03 | 17.73 |
+| 4,096 | 482.87 | 15.90 |
+| 8,192 | 471.78 | 15.75 |
+| 12,288 | 465.62 | 15.57 |
+| 16,384 | 457.08 | 15.44 |
+
+The matched 4K control confirms about **0.6% faster prefill** from mixed MoE
+row tiles. Generation has no qualified gain from this round. See the
+[comparison and limits](bulk-kernels.md); the earlier projection/selection
+change delivered the larger [5.4–6.2% generation gain](selection-projection.md).
 
 ## Single user, DSpark
 
@@ -142,10 +147,14 @@ output budgets, concurrency, and repetitions.
 
 **Qualification:** the [prior complete run](quality-qualification.json) passes
 all nine checks, including 736 exact DSpark scalar replay choices through C8/16K.
-The [latest kernel changes](selection-projection.md) retain the pinned target
+The [projection/selection changes](selection-projection.md) retain the pinned target
 trajectory and all 1,280 paired token positions in the repeated C1 speed sweep.
 Their projection, attention, target and full DSpark checks pass, including all
 736 scalar replay choices and exact frontier logits through C8/16K.
+The [bulk-kernel follow-up](bulk-kernels.md) also passes projection/attention,
+target and full DSpark checks, including the same 736 exact replay choices.
+Its C1 pp4096/tg128 sweep and reversed control retain all 1,792 paired token
+positions; the DSpark check retained at least 15.37 GiB available.
 The repeated speed matrix passes exact output/hash and draft-counter checks:
 53,760 generated tokens across both modes and repetitions. Its DSpark run kept
 at least 13.89 GiB available under a 12 GiB memory guard.
@@ -161,7 +170,7 @@ The [tools index](../../tools/ds4/README.md) lists the maintained entry points.
 | Check | Required coverage |
 | --- | --- |
 | `ds4.template`, `ds4.cli`, `ds4.dataset`, `ds4.eval` | Official framing, option wiring, pinned fixture integrity, answer grading |
-| `ds4.projections` | 57 Q8/IQ2/F16 shape cases; 16 exact cached-RMS cases; two HC cases against the official FP32 projection/RMS formula |
+| `ds4.projections` | Q8/IQ2/F16 shapes and batch widths; all 32,768 IQ2 grid/sign combinations; cached and uncached activation widths; exact MoE tile ownership/output at 64/128-row boundaries; cached RMS and the official FP32 HC formula |
 | `ds4.attention` | 28 target/support arithmetic cases, 16 official DSpark window cases, 16 exact score cases and 72 repeated top-k cases; independent references, poisoned rows, ring wrap, causal masks and score ties |
 | `ds4.target` | Official token goldens, pinned trajectory, full-logit prefill/decode comparisons, exact 2K logits at 4K/262K capacities, concurrent state isolation, bounds |
 | `ds4.dspark` | Scalar quality; exact tokens/logits/counters at fixed and changing C; short budgets; complete snapshot continuation through 16K; policy backoff and fork isolation |
@@ -215,6 +224,7 @@ Capability subset results: TODO. Full capability scores remain TODO; see the
 
 ## Experiments
 
+- Retained: simpler IQ2 signs and mixed MoE down row tiles; **about 0.6% faster pp4096** in the matched 4K control, no qualified generation gain. Q8 load variants and global MMQ row-tile changes did not justify new routes. [Results](bulk-kernels.md).
 - Retained: vector C1 projections, cached RMS and exact partial top-k; **5.4–6.2% faster C1 tg128** across 0–16K with identical tokens. Full norm/projection fusion was slower and removed. [Results and profile](selection-projection.md).
 - Retained: indexer head accumulation removes 31 block barriers per score; C1 tg128 at 16K improves **0.8–1.0%** in repeated release A/B, with identical tokens. [Official-kernel review and next opportunities](official-kernel-review.md).
 - Retained: scalar-equivalent verifier projections and attention; exact 736-token replay across the maintained concurrency/depth matrix.
@@ -227,4 +237,4 @@ Capability subset results: TODO. Full capability scores remain TODO; see the
 - Retained: concurrent cost policy calibrated at 0/4K/16K; the repeated full sweep passes output equality and reports the gains and losses above.
 - Rejected: speculative MMQ (numerical mismatch), confidence trimming and alternate grouped gate variants (no qualified speed win).
 - Rejected: two prefill Q2 column fragments; exact logits, pp2048 fell 502.09→490.74 tok/s.
-- Prefill profile, pp2048 at 4K: quantized matrix multiplication takes 35.8% of kernel time, MoE down projection 17.1%, and attention 14.1%. Further kernel gains remain TODO.
+- Current profiles: Q8 projections remain about 51% of generation GPU time; quantized matrix multiplication takes about 36% of pp4096 GPU time. [Profile and rejected experiments](bulk-kernels.md).

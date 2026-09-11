@@ -18,6 +18,8 @@
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_norm.hip.hpp"
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_q8_decode.hip.hpp"
 
+void test_q2_down();
+
 namespace {
 void check(hipError_t error) {
   if (error != hipSuccess) {
@@ -173,6 +175,47 @@ void run(unsigned dim, std::mt19937& random) {
   compare("attention output A", expected.size());
   std::printf("Q8 dim=%u rows=%u: exact scalar/batch projections\n", dim,
               Tokens);
+}
+
+__global__ void unpack_iq2(uint64_t* output) {
+  const unsigned index = blockIdx.x * blockDim.x + threadIdx.x;
+  int32_t low, high;
+  dev_iq2_i8x8_lut(hip_iq2xxs_grid, index / 128, index % 128, &low, &high);
+  output[index] = uint64_t(uint32_t(low)) | (uint64_t(uint32_t(high)) << 32);
+}
+
+void iq2_signs() {
+  std::array<uint64_t, 256> grid{};
+  check(hipMemcpyFromSymbol(grid.data(), HIP_SYMBOL(hip_iq2xxs_grid),
+                            sizeof(grid), 0, hipMemcpyDeviceToHost));
+  std::vector<uint64_t> actual(256 * 128);
+  Device<uint64_t> output(actual.size());
+  unpack_iq2<<<128, 256>>>(output.data);
+  check(hipGetLastError());
+  check(hipMemcpy(actual.data(), output.data, actual.size() * sizeof(uint64_t),
+                  hipMemcpyDeviceToHost));
+  for (unsigned g = 0; g < grid.size(); ++g) {
+    for (unsigned sign7 = 0; sign7 < 128; ++sign7) {
+      const unsigned signs = sign7 | ((std::popcount(sign7) & 1) << 7);
+      uint64_t expected = 0;
+      for (unsigned byte = 0; byte < 8; ++byte) {
+        const int magnitude = (grid[g] >> (8 * byte)) & 255;
+        if (magnitude == 0 || magnitude > 127) {
+          std::fprintf(stderr,
+                       "IQ2 packed negation requires nonzero int8 grid\n");
+          std::exit(2);
+        }
+        const int value = signs & (1U << byte) ? -magnitude : magnitude;
+        expected |= uint64_t(uint8_t(value)) << (8 * byte);
+      }
+      if (actual[g * 128 + sign7] != expected) {
+        std::fprintf(stderr, "IQ2 sign expansion differs: grid=%u sign=%u\n", g,
+                     sign7);
+        std::exit(2);
+      }
+    }
+  }
+  std::puts("IQ2: all 32768 grid/sign combinations exact");
 }
 
 void iq2_gate(unsigned tokens, unsigned blocks, std::mt19937& random) {
@@ -491,6 +534,7 @@ int main() {
     std::puts("SKIP: no HIP device for DS4 projections");
     return 77;
   }
+  test_q2_down();
   std::mt19937 random(29);
   for (unsigned dim : {1024U, 4096U, 8192U}) {
     run<2>(dim, random);
@@ -504,7 +548,8 @@ int main() {
     run<24>(dim, random);
     run<32>(dim, random);
   }
-  for (unsigned blocks : {8U, 16U})
+  iq2_signs();
+  for (unsigned blocks : {8U, 16U, 32U})
     for (unsigned tokens : {1U, 2U, 3U, 4U, 8U})
       iq2_gate(tokens, blocks, random);
   for (const auto [dim, rows] :

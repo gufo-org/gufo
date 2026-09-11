@@ -9,25 +9,6 @@ static size_t ds4_rocm_q2_down_wmma_shmem(uint32_t mtiles, uint32_t bm,
     return ab > c ? ab : c;
 }
 
-/* Dynamic LDS for the wide-N variant.
- *
- * The A and B staging halves, then the raw Q2_K slab window that the staged
- * dequantizer reads. The epilogue's single-fragment C page aliases A and B, so
- * only the larger of those two counts, but the raw window has to sit beyond
- * both because the K loop still needs it. */
-static size_t ds4_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
-                                          uint32_t bn, uint32_t bk,
-                                          uint32_t nfrag) {
-    /* Two mid-tile buffers: the kernel prefetches the next K step's tile while
-     * the current one still feeds the matrix ops. */
-    const size_t ab = (2u * (size_t)mtiles * bm * bk +
-                       (size_t)nfrag * bk * bn) * sizeof(__half);
-    const size_t c = ((size_t)mtiles * bm * bn) * sizeof(float);
-    const size_t raw = (size_t)nfrag * bn * (84u / sizeof(uint32_t)) *
-                       sizeof(uint32_t);
-    return (ab > c ? ab : c) + raw;
-}
-
 /* Smallest row group used by the wide Q2-down kernel. Scratch is sized for
  * this case; the wider 64-row route therefore only over-allocates. */
 #define DS4_ROCM_WIDE_DOWN_MIN_TILE_M 32u
@@ -329,28 +310,37 @@ static int routed_moe_q2_float_down_launch(
            */
           uint32_t* tile_map = NULL;
           uint32_t wide_tiles = 0u;
+          uint32_t paired_tiles = 0u;
           if (wide_tile_map_dev) {
             const uint32_t cap =
                 n_tokens * n_expert / DS4_ROCM_WIDE_DOWN_MIN_TILE_M +
                 DS4_ROCM_N_EXPERT + 1u;
             static std::vector<uint32_t> h_map;
-            h_map.clear();
             h_map.reserve(cap);
-            for (uint32_t h = 0; h < hot_count && h_map.size() < cap; h++) {
-              const uint32_t groups =
-                  (h_counts[h_active[h]] + wide_tile_m - 1u) / wide_tile_m;
-              for (uint32_t g = 0; g < groups && h_map.size() < cap; g++) {
-                h_map.push_back((h << 16) | g);
-              }
-            }
-            if (!h_map.empty() &&
+            const uint32_t paired =
+                ds4_rocm_q2_down_tile_map(h_map, h_counts, h_active, hot_count,
+                                          wide_mtiles, n_tokens >= 1024u);
+            if (!h_map.empty() && h_map.size() <= cap &&
                 hip_ok(hipMemcpy(wide_tile_map_dev, h_map.data(),
                                  h_map.size() * sizeof(uint32_t),
                                  hipMemcpyHostToDevice),
                        "routed_moe wide down tile map copy")) {
               tile_map = wide_tile_map_dev;
-              wide_tiles = (uint32_t)h_map.size();
+              paired_tiles = paired;
+              wide_tiles = (uint32_t)h_map.size() - paired;
             }
+          }
+          if (paired_tiles != 0u) {
+            moe_down_q2K_hotlist_wmma_wide_kernel<8, 16, 16, 16, wide_nfrag,
+                                                  true, true>
+                <<<dim3(out_dim / (wide_nfrag * bn), paired_tiles), 256,
+                   ds4_rocm_q2_down_wide_shmem(8, bm, bn, bk, wide_nfrag)>>>(
+                    NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
+                    sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
+                    out_dim, down_expert_bytes, down_row_bytes, 0u, tile_map);
+            if (!hip_ok(hipGetLastError(), "routed_moe paired down launch"))
+              return 0;
+            tile_map += paired_tiles;
           }
           const dim3 grid(out_dim / (wide_nfrag * bn),
                           tile_map ? wide_tiles
@@ -365,7 +355,7 @@ static int routed_moe_q2_float_down_launch(
                     NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
                     sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
                     out_dim, down_expert_bytes, down_row_bytes, 0u, tile_map);
-          } else {
+          } else if (!tile_map || wide_tiles != 0u) {
             moe_down_q2K_hotlist_wmma_wide_kernel<4, 16, 16, 16, wide_nfrag,
                                                   true, true>
                 <<<grid, block, shmem>>>(
