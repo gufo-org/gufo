@@ -4,11 +4,11 @@ Linux x86-64, AMD Strix Halo `gfx1151`, 128 GB unified memory. All model timings
 use Nix release binaries. `C` is simultaneous requests. The sweep adds **2,048
 prompt tokens** or generates **128 tokens** at each listed context depth.
 
-Results are means of two repetitions. The [full report](speed-matrix.json)
-retains deviations, token hashes, draft counters, and binary/model identities.
-C1 retains the highest per-user generation rate at every depth. The matrix
-predates the [latest C1 indexer improvement](official-kernel-review.md); its
-focused results and quality checks are recorded separately.
+Results are means of two repetitions. The C1 autoregressive table uses the
+[latest projection/selection sweep](selection-projection.md); DSpark and
+multiple-user tables retain the earlier [full matrix](speed-matrix.json).
+Both reports retain deviations, token hashes and binary/model identities.
+C1 has the highest per-user generation rate at every depth.
 
 | Artifact | Pin |
 | --- | --- |
@@ -23,11 +23,11 @@ focused results and quality checks are recorded separately.
 
 | Context depth | pp2048 tok/s | tg128 tok/s |
 | ---: | ---: | ---: |
-| 0 | 455.16 | 16.72 |
-| 4,096 | 443.34 | 15.06 |
-| 8,192 | 435.44 | 14.80 |
-| 12,288 | 431.90 | 14.62 |
-| 16,384 | 425.92 | 14.52 |
+| 0 | 458.84 | 17.78 |
+| 4,096 | 443.65 | 15.90 |
+| 8,192 | 436.20 | 15.75 |
+| 12,288 | 431.58 | 15.61 |
+| 16,384 | 423.78 | 15.47 |
 
 ## Single user, DSpark
 
@@ -68,7 +68,7 @@ Cells are **aggregate pp2048 / per-user tg128**, in tok/s.
 | 12,288 | 426.60 / 23.14 | 427.06 / 13.25 | 427.04 / 8.59 | 427.18 / 6.65 |
 | 16,384 | 420.83 / 22.50 | 421.07 / 12.86 | 420.97 / 8.34 | 421.23 / 6.44 |
 
-At 4K–16K, DSpark speeds up generation by **2.48–2.62× at C1,
+In the earlier matched matrix, DSpark speeds up generation at 4K–16K by **2.48–2.62× at C1,
 1.77–1.82× at C2, 1.34–1.35× at C4, and 1.10–1.13× at C6**.
 C8 is about 2% slower at 4K/8K and 3–4% faster at 12K/16K.
 Depth-zero generation is 0.8–6.4% slower with DSpark on this workload.
@@ -140,8 +140,12 @@ output budgets, concurrency, and repetitions.
 
 ## Quality contract
 
-**Current status:** [all nine checks pass](quality-qualification.json), including
-736 exact DSpark scalar replay choices through C8/16K.
+**Qualification:** the [prior complete run](quality-qualification.json) passes
+all nine checks, including 736 exact DSpark scalar replay choices through C8/16K.
+The [latest kernel changes](selection-projection.md) retain the pinned target
+trajectory and all 1,280 paired token positions in the repeated C1 speed sweep.
+Their projection, attention, target and full DSpark checks pass, including all
+736 scalar replay choices and exact frontier logits through C8/16K.
 The repeated speed matrix passes exact output/hash and draft-counter checks:
 53,760 generated tokens across both modes and repetitions. Its DSpark run kept
 at least 13.89 GiB available under a 12 GiB memory guard.
@@ -157,8 +161,8 @@ The [tools index](../../tools/ds4/README.md) lists the maintained entry points.
 | Check | Required coverage |
 | --- | --- |
 | `ds4.template`, `ds4.cli`, `ds4.dataset`, `ds4.eval` | Official framing, option wiring, pinned fixture integrity, answer grading |
-| `ds4.projections` | 54 Q8/IQ2/F16 shape cases against scalar kernels and independent formulas; two HC cases against the official FP32 projection/RMS formula |
-| `ds4.attention` | 28 target/support arithmetic cases, 16 official DSpark window cases and 16 exact indexer cases; double-precision references, poisoned stale rows, ring wrap, masks and sparse causal indices |
+| `ds4.projections` | 57 Q8/IQ2/F16 shape cases; 16 exact cached-RMS cases; two HC cases against the official FP32 projection/RMS formula |
+| `ds4.attention` | 28 target/support arithmetic cases, 16 official DSpark window cases, 16 exact score cases and 72 repeated top-k cases; independent references, poisoned rows, ring wrap, causal masks and score ties |
 | `ds4.target` | Official token goldens, pinned trajectory, full-logit prefill/decode comparisons, exact 2K logits at 4K/262K capacities, concurrent state isolation, bounds |
 | `ds4.dspark` | Scalar quality; exact tokens/logits/counters at fixed and changing C; short budgets; complete snapshot continuation through 16K; policy backoff and fork isolation |
 | `ds4.serving` | Mixed sampling and actual batch widths, bounded prefill under arrivals, C1 warm-prefix equality at 262K capacity, disk identity, cancellation, context exhaustion |
@@ -211,8 +215,8 @@ Capability subset results: TODO. Full capability scores remain TODO; see the
 
 ## Experiments
 
+- Retained: vector C1 projections, cached RMS and exact partial top-k; **5.4–6.2% faster C1 tg128** across 0–16K with identical tokens. Full norm/projection fusion was slower and removed. [Results and profile](selection-projection.md).
 - Retained: indexer head accumulation removes 31 block barriers per score; C1 tg128 at 16K improves **0.8–1.0%** in repeated release A/B, with identical tokens. [Official-kernel review and next opportunities](official-kernel-review.md).
-
 - Retained: scalar-equivalent verifier projections and attention; exact 736-token replay across the maintained concurrency/depth matrix.
 - Retained: attention ring indexing; removes integer division without changing arithmetic.
 - Retained: reusable request scratch and complete DSpark snapshots; exact continuation across changing batch membership and session capacities.

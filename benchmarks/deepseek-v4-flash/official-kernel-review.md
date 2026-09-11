@@ -73,6 +73,9 @@ The candidate reduces the indexer's 336 launches from **8.77 to 7.56 ms**
 LDS grows from 528 to 768 bytes per block. These traced timings identify
 bottlenecks; the table above uses unprofiled runs.
 
+The [selection/projection follow-up](selection-projection.md) evaluates the
+partial selector, C1 projection and HC normalization opportunities below.
+
 ## Next opportunities
 
 - **Exact partial top-k:** DeepSelect's bounded candidate buffer is portable as

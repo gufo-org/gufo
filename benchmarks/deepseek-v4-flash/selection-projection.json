@@ -1,0 +1,1960 @@
+{
+  "date": "2026-09-11",
+  "platform": "Linux x86-64 AMD Strix Halo gfx1151, 128 GB unified memory",
+  "baseline_commit": "a760f818aa68974c31a7a689171c698ef1a4aff2",
+  "vector_production_sha256": "73edfab907322a70f7da9a1714193e25022e2c300aa6f1a63c7d2d41d9cc75ce",
+  "combined_production_sha256": "1bd9b9b09576ef587377903c10e74cb7a3c71e96f87d393c4fbfd210650b3126",
+  "baseline_production_sha256": "aeced627cc1680262dbf2046a6bcdbeafd9dd4a400a8f3d6e79f0f7f85682eab",
+  "target_sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0",
+  "support_sha256": "7e319924541db3f7a163ed7e11d7532a70d48228ab59d36cb81e1d4511885360",
+  "method": {
+    "concurrency": 1,
+    "prefill_tokens": 2048,
+    "generation_tokens": 128,
+    "repetitions": 2,
+    "depths": [
+      0,
+      4096,
+      8192,
+      12288,
+      16384
+    ],
+    "execution": "Sequential immutable Nix releases; no concurrent build or GPU jobs during timings",
+    "run_order": [
+      "vector baseline",
+      "vector candidate",
+      "combined candidate",
+      "combined baseline"
+    ],
+    "arithmetic": "FP32 activation/score arithmetic and ordered reductions retained; GGUF and cache precision unchanged",
+    "ties": "Both signs of zero canonicalized in radix keys to match numeric score equality and lower-index tie rule",
+    "tokens": "Hashes cover little-endian generated token IDs; stop-token IDs count toward the fixed workload"
+  },
+  "vector_control": {
+    "baseline": {
+      "binary": {
+        "path": "/home/fbozzo/projects/strix-halo.cpp/result-ds4-official-indexer/bin/gufo",
+        "sha256": "e76f8384a5f6754e5dd1863e6bb0df2ba772b4c7ade652255fc7b21a5a808752"
+      },
+      "resolved_binary": "/nix/store/lxdx9r58s1xbhvr70pr7wz3hsii7jhvh-gufo-3e202c0-dirty/bin/gufo",
+      "log": {
+        "path": "/tmp/ds4-official-vector-baseline-a.log",
+        "sha256": "d59c2a6d3513ff630d5eb7bfe47d34806149c5e97158e623da6b5ab54ee20726"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.75731658935547,
+        "reserve_gib": 12.0
+      },
+      "rows": [
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 0,
+          "tok_s": 456.91,
+          "sd": 20.96
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 0,
+          "tok_s": 16.75,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 16384,
+          "tok_s": 423.89,
+          "sd": 2.37
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 16384,
+          "tok_s": 14.64,
+          "sd": 0.0
+        }
+      ],
+      "outputs": [
+        {
+          "C": 1,
+          "depth": 0,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": 1,
+          "depth": 0,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": 1,
+          "depth": 16384,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        },
+        {
+          "C": 1,
+          "depth": 16384,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        }
+      ]
+    },
+    "candidate": {
+      "binary": {
+        "path": "/home/fbozzo/projects/strix-halo.cpp/result-ds4-vector-c1/bin/gufo",
+        "sha256": "4a4e851cd2b9d7eb1137e567d2613d7db412f4f7dcc1930588c8c7dacfb7327d"
+      },
+      "resolved_binary": "/nix/store/8qr0ydyghdllma4zr4b3fi3g1708sg14-gufo-a760f81-dirty/bin/gufo",
+      "log": {
+        "path": "/tmp/ds4-official-vector-candidate-a.log",
+        "sha256": "e5a465306e288503bb07836da6a22721bcceb31a0aac8dbb417760f28508ef2c"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.72043228149414,
+        "reserve_gib": 12.0
+      },
+      "rows": [
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 0,
+          "tok_s": 458.96,
+          "sd": 20.06
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 0,
+          "tok_s": 17.3,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 16384,
+          "tok_s": 424.73,
+          "sd": 2.08
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 16384,
+          "tok_s": 15.01,
+          "sd": 0.0
+        }
+      ],
+      "outputs": [
+        {
+          "C": 1,
+          "depth": 0,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": 1,
+          "depth": 0,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": 1,
+          "depth": 16384,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        },
+        {
+          "C": 1,
+          "depth": 16384,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        }
+      ]
+    },
+    "comparisons": [
+      {
+        "mode": "pp",
+        "depth": 0,
+        "baseline_tok_s": 456.91,
+        "candidate_tok_s": 458.96,
+        "change_percent": 0.449
+      },
+      {
+        "mode": "tg",
+        "depth": 0,
+        "baseline_tok_s": 16.75,
+        "candidate_tok_s": 17.3,
+        "change_percent": 3.284
+      },
+      {
+        "mode": "pp",
+        "depth": 16384,
+        "baseline_tok_s": 423.89,
+        "candidate_tok_s": 424.73,
+        "change_percent": 0.198
+      },
+      {
+        "mode": "tg",
+        "depth": 16384,
+        "baseline_tok_s": 14.64,
+        "candidate_tok_s": 15.01,
+        "change_percent": 2.527
+      }
+    ],
+    "exact_paired_token_positions": 512
+  },
+  "combined": {
+    "baseline": {
+      "binary": {
+        "path": "/home/fbozzo/projects/strix-halo.cpp/result-ds4-official-indexer/bin/gufo",
+        "sha256": "e76f8384a5f6754e5dd1863e6bb0df2ba772b4c7ade652255fc7b21a5a808752"
+      },
+      "resolved_binary": "/nix/store/lxdx9r58s1xbhvr70pr7wz3hsii7jhvh-gufo-3e202c0-dirty/bin/gufo",
+      "log": {
+        "path": "/tmp/ds4-official-followup-baseline.log",
+        "sha256": "f764f189655450b6d13fe4ecd11f8401286885b7740a64e111c1604cad1bcb4c"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.786434173583984,
+        "reserve_gib": 12.0
+      },
+      "rows": [
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 0,
+          "tok_s": 458.4,
+          "sd": 21.35
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 0,
+          "tok_s": 16.74,
+          "sd": 0.01
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 4096,
+          "tok_s": 444.03,
+          "sd": 0.22
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 4096,
+          "tok_s": 15.08,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 8192,
+          "tok_s": 435.26,
+          "sd": 1.5
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 8192,
+          "tok_s": 14.84,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 12288,
+          "tok_s": 431.68,
+          "sd": 0.53
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 12288,
+          "tok_s": 14.73,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 16384,
+          "tok_s": 423.62,
+          "sd": 0.61
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 16384,
+          "tok_s": 14.64,
+          "sd": 0.0
+        }
+      ],
+      "outputs": [
+        {
+          "C": 1,
+          "depth": 0,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": 1,
+          "depth": 0,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": 1,
+          "depth": 4096,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": 1,
+          "depth": 4096,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": 1,
+          "depth": 8192,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "6165964e5ffc5d20ec56d1003524a519aa18b3b0fbabbcc63e2cf33698744bd2"
+        },
+        {
+          "C": 1,
+          "depth": 8192,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "6165964e5ffc5d20ec56d1003524a519aa18b3b0fbabbcc63e2cf33698744bd2"
+        },
+        {
+          "C": 1,
+          "depth": 12288,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "174d078c81d6fe311849ff77d03f7cdca66da83055dd4e39a5e2843a61d4f3dc"
+        },
+        {
+          "C": 1,
+          "depth": 12288,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "174d078c81d6fe311849ff77d03f7cdca66da83055dd4e39a5e2843a61d4f3dc"
+        },
+        {
+          "C": 1,
+          "depth": 16384,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        },
+        {
+          "C": 1,
+          "depth": 16384,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        }
+      ]
+    },
+    "candidate": {
+      "binary": {
+        "path": "/home/fbozzo/projects/strix-halo.cpp/result-ds4-selection-norm/bin/gufo",
+        "sha256": "7cda6b698aa7b6baddc983547b85f0a6015d95687ec2c335003500be9e6455d0"
+      },
+      "resolved_binary": "/nix/store/wcg4hh800ysj4pdhpvkjsby2iffgq0k0-gufo-a760f81-dirty/bin/gufo",
+      "log": {
+        "path": "/tmp/ds4-official-followup-candidate.log",
+        "sha256": "4f09c1b57a0a29862bd363eb2858f5742a2dfc88e5dc069331aa21e815f42606"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.7606201171875,
+        "reserve_gib": 12.0
+      },
+      "rows": [
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 0,
+          "tok_s": 458.84,
+          "sd": 20.86
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 0,
+          "tok_s": 17.78,
+          "sd": 0.01
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 4096,
+          "tok_s": 443.65,
+          "sd": 0.45
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 4096,
+          "tok_s": 15.9,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 8192,
+          "tok_s": 436.2,
+          "sd": 1.06
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 8192,
+          "tok_s": 15.75,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 12288,
+          "tok_s": 431.58,
+          "sd": 1.15
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 12288,
+          "tok_s": 15.61,
+          "sd": 0.0
+        },
+        {
+          "mode": "pp",
+          "tokens": 2048,
+          "depth": 16384,
+          "tok_s": 423.78,
+          "sd": 3.65
+        },
+        {
+          "mode": "tg",
+          "tokens": 128,
+          "depth": 16384,
+          "tok_s": 15.47,
+          "sd": 0.0
+        }
+      ],
+      "outputs": [
+        {
+          "C": 1,
+          "depth": 0,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": 1,
+          "depth": 0,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "193e361ef6ba105df171c400e053ed095c044e9a959cd15eaf0b1b25874ed823"
+        },
+        {
+          "C": 1,
+          "depth": 4096,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": 1,
+          "depth": 4096,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "f9ed0ce91cf9c9af24cd7fa8ff46deb06f8f3d902fd8bfa2ba977c096cce19e0"
+        },
+        {
+          "C": 1,
+          "depth": 8192,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "6165964e5ffc5d20ec56d1003524a519aa18b3b0fbabbcc63e2cf33698744bd2"
+        },
+        {
+          "C": 1,
+          "depth": 8192,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "6165964e5ffc5d20ec56d1003524a519aa18b3b0fbabbcc63e2cf33698744bd2"
+        },
+        {
+          "C": 1,
+          "depth": 12288,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "174d078c81d6fe311849ff77d03f7cdca66da83055dd4e39a5e2843a61d4f3dc"
+        },
+        {
+          "C": 1,
+          "depth": 12288,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "174d078c81d6fe311849ff77d03f7cdca66da83055dd4e39a5e2843a61d4f3dc"
+        },
+        {
+          "C": 1,
+          "depth": 16384,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        },
+        {
+          "C": 1,
+          "depth": 16384,
+          "request": 0,
+          "accepted": 0,
+          "drafted": 0,
+          "steps": 0,
+          "skipped": 0,
+          "output_sha256": "ca746b11372cb6facda97fd9a87b7c3da079740dab7b440b1b690331f7cb8ecd"
+        }
+      ]
+    },
+    "comparisons": [
+      {
+        "mode": "pp",
+        "depth": 0,
+        "baseline_tok_s": 458.4,
+        "candidate_tok_s": 458.84,
+        "change_percent": 0.096
+      },
+      {
+        "mode": "tg",
+        "depth": 0,
+        "baseline_tok_s": 16.74,
+        "candidate_tok_s": 17.78,
+        "change_percent": 6.213
+      },
+      {
+        "mode": "pp",
+        "depth": 4096,
+        "baseline_tok_s": 444.03,
+        "candidate_tok_s": 443.65,
+        "change_percent": -0.086
+      },
+      {
+        "mode": "tg",
+        "depth": 4096,
+        "baseline_tok_s": 15.08,
+        "candidate_tok_s": 15.9,
+        "change_percent": 5.438
+      },
+      {
+        "mode": "pp",
+        "depth": 8192,
+        "baseline_tok_s": 435.26,
+        "candidate_tok_s": 436.2,
+        "change_percent": 0.216
+      },
+      {
+        "mode": "tg",
+        "depth": 8192,
+        "baseline_tok_s": 14.84,
+        "candidate_tok_s": 15.75,
+        "change_percent": 6.132
+      },
+      {
+        "mode": "pp",
+        "depth": 12288,
+        "baseline_tok_s": 431.68,
+        "candidate_tok_s": 431.58,
+        "change_percent": -0.023
+      },
+      {
+        "mode": "tg",
+        "depth": 12288,
+        "baseline_tok_s": 14.73,
+        "candidate_tok_s": 15.61,
+        "change_percent": 5.974
+      },
+      {
+        "mode": "pp",
+        "depth": 16384,
+        "baseline_tok_s": 423.62,
+        "candidate_tok_s": 423.78,
+        "change_percent": 0.038
+      },
+      {
+        "mode": "tg",
+        "depth": 16384,
+        "baseline_tok_s": 14.64,
+        "candidate_tok_s": 15.47,
+        "change_percent": 5.669
+      }
+    ],
+    "exact_paired_token_positions": 1280
+  },
+  "decode_profile": {
+    "depth": 4096,
+    "generation_tokens": 16,
+    "scope": "First decode HC projection onward, excluding prefix preparation and first norm kernel",
+    "baseline": {
+      "database": {
+        "path": "/tmp/ds4-official-c1-candidate-profile/prof_results.db",
+        "sha256": "e5be066fa7eeeac9664f9a8d632586cd755752cffd8d1ad5ed48db0da5ee3db4"
+      },
+      "gpu_ms": 1016.538587,
+      "calls": 29109,
+      "kernels": [
+        {
+          "kernel": "matmul_q8_0_preq_rows_w32_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned int, int)",
+          "calls": 2080,
+          "gpu_ms": 167.452704,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "matmul_q8_0_hc_expand_preq_rows_w32_kernel(float*, float*, float const*, float const*, float const*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned long, unsigned int, int, int)",
+          "calls": 1376,
+          "gpu_ms": 158.725476,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_gate_up_mid_decode_lut_qwarp32_kernel(float*, float*, float*, char const*, char const*, hip_block_q8_K const*, int const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 124.075217,
+          "vgpr": 80,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 6848
+        },
+        {
+          "kernel": "grouped_q8_0_a_preq_warp8_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned long, int)",
+          "calls": 688,
+          "gpu_ms": 108.168483,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "matmul_f16_pair_f32_sharedx_warp_rows_w32_kernel(float*, float*, __half const*, __half const*, float const*, unsigned int, unsigned long)",
+          "calls": 992,
+          "gpu_ms": 90.498545,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "matmul_q8_0_pair_preq_warp8_kernel(float*, float*, unsigned char const*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned long, int)",
+          "calls": 688,
+          "gpu_ms": 59.914253,
+          "vgpr": 48,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "matmul_f16_ordered_chunks_kernel(float*, __half const*, float const*, unsigned long, unsigned long, unsigned long)",
+          "calls": 2080,
+          "gpu_ms": 55.833895,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 128
+        },
+        {
+          "kernel": "moe_down_sum6_qwarp32_kernel(float*, char const*, hip_block_q8_K const*, int const*, unsigned long, unsigned long, unsigned int, unsigned int)",
+          "calls": 688,
+          "gpu_ms": 53.300089,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "attention_decode_indexed_mixed_one_fast_oldhip_kernel(float*, float const*, float const*, float const*, int const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 336,
+          "gpu_ms": 50.456858,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 6916
+        },
+        {
+          "kernel": "matmul_f16_f32_sharedx_warp_rows_w32_kernel(float*, __half const*, float const*, unsigned int, unsigned long)",
+          "calls": 672,
+          "gpu_ms": 34.179758,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "rms_norm_plain_kernel(float*, float const*, unsigned int, unsigned int, float)",
+          "calls": 1391,
+          "gpu_ms": 28.457573,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "hc_split_weighted_sum_norm_fused_kernel(float*, float*, float*, float const*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, float, float)",
+          "calls": 1376,
+          "gpu_ms": 19.240648,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "attention_decode_mixed_one_fast_oldhip_kernel(float*, float const*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 352,
+          "gpu_ms": 14.407601,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 896
+        },
+        {
+          "kernel": "router_select_warp_topk_kernel(int*, float*, float*, float const*, int const*, float const*, int const*, int, unsigned int, unsigned int, int, int)",
+          "calls": 688,
+          "gpu_ms": 8.742565,
+          "vgpr": 56,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4096
+        },
+        {
+          "kernel": "indexer_score_one_direct_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, float, int)",
+          "calls": 336,
+          "gpu_ms": 7.563387,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 768
+        },
+        {
+          "kernel": "quantize_q8_0_f32_kernel(signed char*, float*, float const*, unsigned long, unsigned long)",
+          "calls": 4832,
+          "gpu_ms": 7.18548,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void indexer_topk_pow2_kernel<2048u>(unsigned int*, float const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 273,
+          "gpu_ms": 5.119026,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "q8_K_quantize_kernel(hip_block_q8_K*, float const*, unsigned int, unsigned int)",
+          "calls": 1376,
+          "gpu_ms": 4.16982,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 2052
+        },
+        {
+          "kernel": "rope_tail_kernel(float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float)",
+          "calls": 2568,
+          "gpu_ms": 3.844662,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "compressor_store_kernel(float const*, float const*, float*, float*, void const*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 992,
+          "gpu_ms": 3.542684,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "dsv4_qkv_rms_norm_rows_kernel(float*, float const*, float const*, unsigned int, float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 2.568278,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "head_rms_norm_kernel(float*, unsigned int, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 1.751006,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "fp8_kv_quantize_kernel(float*, __half*, unsigned int, unsigned int, unsigned int)",
+          "calls": 772,
+          "gpu_ms": 1.616133,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 256
+        },
+        {
+          "kernel": "swiglu_kernel(float*, float const*, float const*, unsigned int, float, float)",
+          "calls": 688,
+          "gpu_ms": 1.31208,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "store_raw_kv_batch_kernel(float*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 688,
+          "gpu_ms": 1.227249,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "indexer_hadamard_fp4_kernel(float*, unsigned int, unsigned int)",
+          "calls": 420,
+          "gpu_ms": 0.916616,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "indexer_topk_1024_kernel(unsigned int*, float const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 63,
+          "gpu_ms": 0.620246,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 8192
+        },
+        {
+          "kernel": "compressor_update_pool_kernel(float*, float const*, float const*, unsigned int, unsigned int)",
+          "calls": 168,
+          "gpu_ms": 0.541452,
+          "vgpr": 32,
+          "sgpr": 128,
+          "private_bytes": 1040,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "rms_norm_weight_kernel(float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 184,
+          "gpu_ms": 0.526874,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "compressor_shift_ratio4_kernel(float*, float*, unsigned int)",
+          "calls": 168,
+          "gpu_ms": 0.196891,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "f32_to_f16_vec4_kernel(__half*, float const*, unsigned long)",
+          "calls": 21,
+          "gpu_ms": 0.152646,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "__amd_rocclr_copyBuffer",
+          "calls": 42,
+          "gpu_ms": 0.095136,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "embed_token_hc_kernel(float*, unsigned short const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 15,
+          "gpu_ms": 0.064282,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "hc_weighted_sum_kernel(float*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 16,
+          "gpu_ms": 0.044765,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "output_hc_weights_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 16,
+          "gpu_ms": 0.026209,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        }
+      ]
+    },
+    "candidate": {
+      "database": {
+        "path": "/tmp/ds4-followup-profile/prof_results.db",
+        "sha256": "84460ca22ee3380b700e6c1e93963e773bd1733f66a96a7aeddd54b6fbfcbcbb"
+      },
+      "gpu_ms": 965.514878,
+      "calls": 29109,
+      "kernels": [
+        {
+          "kernel": "matmul_q8_0_preq_rows_w32_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned int, int)",
+          "calls": 2080,
+          "gpu_ms": 167.5381,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "matmul_q8_0_hc_expand_preq_rows_w32_kernel(float*, float*, float const*, float const*, float const*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned long, unsigned int, int, int)",
+          "calls": 1376,
+          "gpu_ms": 158.143615,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_gate_up_mid_decode_lut_qwarp32_kernel(float*, float*, float*, char const*, char const*, hip_block_q8_K const*, int const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 123.350411,
+          "vgpr": 80,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 6848
+        },
+        {
+          "kernel": "grouped_q8_0_a_preq_warp8_kernel(float*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned int, unsigned int, unsigned long, int)",
+          "calls": 688,
+          "gpu_ms": 107.958559,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "matmul_f16_pair_f32_sharedx_warp_rows_w32_kernel(float*, float*, __half const*, __half const*, float const*, unsigned int, unsigned long)",
+          "calls": 992,
+          "gpu_ms": 90.183572,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "matmul_q8_0_pair_preq_warp8_kernel(float*, float*, unsigned char const*, unsigned char const*, signed char const*, float const*, unsigned long, unsigned long, unsigned long, unsigned long, int)",
+          "calls": 688,
+          "gpu_ms": 59.94501,
+          "vgpr": 48,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "moe_down_sum6_qwarp32_kernel(float*, char const*, hip_block_q8_K const*, int const*, unsigned long, unsigned long, unsigned int, unsigned int)",
+          "calls": 688,
+          "gpu_ms": 53.502379,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "attention_decode_indexed_mixed_one_fast_oldhip_kernel(float*, float const*, float const*, float const*, int const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 336,
+          "gpu_ms": 49.652413,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 6916
+        },
+        {
+          "kernel": "matmul_f16_f32_sharedx_warp_rows_w32_kernel(float*, __half const*, float const*, unsigned int, unsigned long)",
+          "calls": 672,
+          "gpu_ms": 34.329688,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 16384
+        },
+        {
+          "kernel": "void matmul_f16_ordered_batch_reuse_kernel<1u>(float*, __half const*, float const*, unsigned long, unsigned long)",
+          "calls": 2080,
+          "gpu_ms": 32.391663,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 128
+        },
+        {
+          "kernel": "hc_split_weighted_sum_norm_fused_kernel(float*, float*, float*, float const*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, float, float)",
+          "calls": 1376,
+          "gpu_ms": 18.675459,
+          "vgpr": 40,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "attention_decode_mixed_one_fast_oldhip_kernel(float*, float const*, float const*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 352,
+          "gpu_ms": 14.543617,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 896
+        },
+        {
+          "kernel": "router_select_warp_topk_kernel(int*, float*, float*, float const*, int const*, float const*, int const*, int, unsigned int, unsigned int, int, int)",
+          "calls": 688,
+          "gpu_ms": 8.727314,
+          "vgpr": 56,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 4096
+        },
+        {
+          "kernel": "indexer_score_one_direct_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, unsigned int, float, int)",
+          "calls": 336,
+          "gpu_ms": 7.49972,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 768
+        },
+        {
+          "kernel": "quantize_q8_0_f32_kernel(signed char*, float*, float const*, unsigned long, unsigned long)",
+          "calls": 4832,
+          "gpu_ms": 7.016578,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "void indexer_partial_topk_kernel<8192u>(unsigned int*, float const*, unsigned int, unsigned int)",
+          "calls": 273,
+          "gpu_ms": 4.711575,
+          "vgpr": 120,
+          "sgpr": 128,
+          "private_bytes": 272,
+          "lds_bytes": 17096
+        },
+        {
+          "kernel": "void rms_norm_plain_regs_kernel<64u>(float*, float const*, unsigned int, unsigned int, float)",
+          "calls": 1391,
+          "gpu_ms": 3.993142,
+          "vgpr": 192,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "rope_tail_kernel(float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, int, float, float, float, float, float, float)",
+          "calls": 2568,
+          "gpu_ms": 3.982474,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "q8_K_quantize_kernel(hip_block_q8_K*, float const*, unsigned int, unsigned int)",
+          "calls": 1376,
+          "gpu_ms": 3.94617,
+          "vgpr": 24,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 2052
+        },
+        {
+          "kernel": "compressor_store_kernel(float const*, float const*, float*, float*, void const*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 992,
+          "gpu_ms": 3.466891,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "dsv4_qkv_rms_norm_rows_kernel(float*, float const*, float const*, unsigned int, float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 2.734089,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "head_rms_norm_kernel(float*, unsigned int, unsigned int, unsigned int, float)",
+          "calls": 688,
+          "gpu_ms": 1.688399,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "fp8_kv_quantize_kernel(float*, __half*, unsigned int, unsigned int, unsigned int)",
+          "calls": 772,
+          "gpu_ms": 1.595484,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 256
+        },
+        {
+          "kernel": "swiglu_kernel(float*, float const*, float const*, unsigned int, float, float)",
+          "calls": 688,
+          "gpu_ms": 1.510234,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "store_raw_kv_batch_kernel(float*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 688,
+          "gpu_ms": 1.216787,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "indexer_hadamard_fp4_kernel(float*, unsigned int, unsigned int)",
+          "calls": 420,
+          "gpu_ms": 0.945039,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "indexer_topk_1024_kernel(unsigned int*, float const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 63,
+          "gpu_ms": 0.628582,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 8192
+        },
+        {
+          "kernel": "rms_norm_weight_kernel(float*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 184,
+          "gpu_ms": 0.545218,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 1024
+        },
+        {
+          "kernel": "compressor_update_pool_kernel(float*, float const*, float const*, unsigned int, unsigned int)",
+          "calls": 168,
+          "gpu_ms": 0.521781,
+          "vgpr": 32,
+          "sgpr": 128,
+          "private_bytes": 1040,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "compressor_shift_ratio4_kernel(float*, float*, unsigned int)",
+          "calls": 168,
+          "gpu_ms": 0.196851,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "f32_to_f16_vec4_kernel(__half*, float const*, unsigned long)",
+          "calls": 21,
+          "gpu_ms": 0.147079,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "__amd_rocclr_copyBuffer",
+          "calls": 42,
+          "gpu_ms": 0.093055,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "embed_token_hc_kernel(float*, unsigned short const*, unsigned int, unsigned int, unsigned int)",
+          "calls": 15,
+          "gpu_ms": 0.063359,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "hc_weighted_sum_kernel(float*, float const*, float const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "calls": 16,
+          "gpu_ms": 0.044402,
+          "vgpr": 16,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        },
+        {
+          "kernel": "output_hc_weights_kernel(float*, float const*, float const*, float const*, unsigned int, unsigned int, float)",
+          "calls": 16,
+          "gpu_ms": 0.026169,
+          "vgpr": 8,
+          "sgpr": 128,
+          "private_bytes": 0,
+          "lds_bytes": 0
+        }
+      ]
+    },
+    "guard": {
+      "exit_code": 0,
+      "aborted_for_memory": false,
+      "minimum_available_gib": 28.997352600097656,
+      "reserve_gib": 12.0
+    },
+    "note": "Profiling is diagnostic; release throughput comes from unprofiled runs above. Standalone zero-spill resources do not describe the production selector, whose private segment is 272 bytes."
+  },
+  "quality": {
+    "target": {
+      "log": {
+        "path": "/tmp/ds4-followup-target.log",
+        "sha256": "8bbf442ba723f5f339d9c1266a4098dbb200b7b845b9d7738c90551baf180499"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.45000457763672,
+        "reserve_gib": 12.0
+      },
+      "evidence": [
+        "Pinned DS4 trajectory: top1=116/128 rank_sum=142 worst_rank=3",
+        "Wide prefill fingerprint 4217e91c730e333a0bdafe11c46a40be7fb753a763af887434174410dc627841",
+        "DeepSeek V4 session batch quality: top1=29/29 worst_rmse=0.00 worst_cosine=1.00 worst_max_error=0.00 worst_sequential_choice_rank=1",
+        "DeepSeek V4 Flash model/session test passed"
+      ]
+    },
+    "dspark": {
+      "log": {
+        "path": "/tmp/ds4-followup-dspark.log",
+        "sha256": "4202068b2cae4c9491e5814e699525cbf5e2550f81d91bdbeed1e447fb4be39a"
+      },
+      "guard": {
+        "exit_code": 0,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 15.797908782958984,
+        "reserve_gib": 12.0
+      },
+      "evidence": [
+        "DSpark fingerprint C1 70bb271d920bd6e604a763afaa7cf8cff21dc8c582be0eab2d2fe1484c795fad",
+        "DSpark repeat C1: 6 exact token/logit/state comparisons, drafted=13",
+        "DSpark fingerprint C2 a06b3d58fa0d3e4fd25bd6d26c74fdf6f0d710c1e177d06df06b077ed20757b1",
+        "DSpark repeat C2: 12 exact token/logit/state comparisons, drafted=24",
+        "DSpark fingerprint C4 37c9bff0585e5de1289bc0d5f8ce3d70eaae81cb8e10d8f3e94c49d1354bbc07",
+        "DSpark repeat C4: 24 exact token/logit/state comparisons, drafted=14",
+        "DSpark fingerprint C6 e62e04a725d5b25614fa30131dbf6c5a019fea8c0f083b0b7c3586218ec9d1bd",
+        "DSpark repeat C6: 36 exact token/logit/state comparisons, drafted=18",
+        "DSpark fingerprint C8 40d5a252e69a3a116acf74c0a5d6802bd818d13bf82129fea617dfc1250506b2",
+        "DSpark repeat C8: 48 exact token/logit/state comparisons, drafted=0",
+        "DSpark changing membership C1/C2/C4/C3: exact repeated continuation",
+        "DSpark concurrent controller snapshot C2: exact window/backoff continuation",
+        "DSpark concurrent controller snapshot C8: exact window/backoff continuation",
+        "DSpark scalar replay C1 depth=0: top1=128/128 rank_sum=128 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C1 depth=2048: top1=128/128 rank_sum=128 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C1 depth=4096: top1=128/128 rank_sum=128 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C2 depth=4096: top1=32/32 rank_sum=32 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C4 depth=4096: top1=64/64 rank_sum=64 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C6 depth=4096: top1=96/96 rank_sum=96 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C8 depth=16384: top1=128/128 rank_sum=128 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark scalar replay C2 depth=16384: top1=32/32 rank_sum=32 worst_rank=1 rmse=0.00 cosine=1.00 max_error=0.00",
+        "DSpark exact snapshot continuation at depth 53",
+        "DSpark exact snapshot continuation at depth 4608",
+        "DSpark exact snapshot continuation at depth 16384"
+      ]
+    },
+    "kernels": {
+      "log": {
+        "path": "/tmp/ds4-followup-kernels.log",
+        "sha256": "94c2631e7bd4c04338e8f9d9d0cca69eb9d8d5e791895cd246783cab60ad5301"
+      },
+      "evidence": [
+        "warning: Git tree '/home/fbozzo/projects/strix-halo.cpp' is dirty",
+        "Test project /home/fbozzo/projects/strix-halo.cpp/build/gpu-test",
+        "    Start 152: ds4.projections",
+        "1/2 Test #152: ds4.projections ..................   Passed    0.38 sec",
+        "    Start 153: ds4.attention",
+        "2/2 Test #153: ds4.attention ....................   Passed    0.64 sec",
+        "",
+        "100% tests passed, 0 tests failed out of 2",
+        "",
+        "Label Time Summary:",
+        "ds4        =   1.03 sec*proc (2 tests)",
+        "gfx1151    =   1.03 sec*proc (2 tests)",
+        "gpu        =   1.03 sec*proc (2 tests)",
+        "hip        =   1.03 sec*proc (2 tests)",
+        "quality    =   1.03 sec*proc (2 tests)",
+        "",
+        "Total Test time (real) =   1.03 sec"
+      ]
+    },
+    "limits": [
+      "Full serving/CLI/reference checks were not repeated for this kernel-only change",
+      "Prior all-nine qualification remains separately pinned in quality-qualification.json",
+      "DSpark/concurrency speed matrix not repeated; this report qualifies C1 AR performance",
+      "75-question capability comparison remains pending separate approval",
+      "No claim of official unquantized-model parity or general batch-composition invariance"
+    ]
+  },
+  "experiments": [
+    {
+      "description": "Existing BATCH=1 vector kernel: exact; retain aligned 128-element chunks only",
+      "source": {
+        "path": "/tmp/ds4-ordered-c1-ab.hip",
+        "sha256": "ed6627b9af21d112e55a6ad5ecbfce156649f3729519f572a19673ffc9f74952"
+      },
+      "log": {
+        "path": "/tmp/ds4-ordered-c1-ab.log",
+        "sha256": "6c4c2af0883ea3cff5f0b584fa66f0bf5618c60fb7341c55e7fe05abbb36f986"
+      },
+      "resource_log": {
+        "path": "/tmp/ds4-ordered-c1-ab.res.txt",
+        "sha256": "8ce69668142fc82c9472b88b69e3a2ee26bad44861604c7ec791d257e18a3c96"
+      },
+      "results": [
+        "dim=16384 rows=24 pass=0 exact=true old_us=25.591 new_us=11.684 speedup=2.190",
+        "dim=16384 rows=24 pass=1 exact=true old_us=25.594 new_us=11.693 speedup=2.189",
+        "dim=4096 rows=256 pass=0 exact=true old_us=14.451 new_us=6.352 speedup=2.275",
+        "dim=4096 rows=256 pass=1 exact=true old_us=14.438 new_us=6.328 speedup=2.281",
+        "dim=16384 rows=4 pass=0 exact=true old_us=24.569 new_us=10.659 speedup=2.305",
+        "dim=16384 rows=4 pass=1 exact=true old_us=25.542 new_us=10.703 speedup=2.386",
+        "dim=4096 rows=1 pass=0 exact=true old_us=8.169 new_us=4.462 speedup=1.831",
+        "dim=4096 rows=1 pass=1 exact=true old_us=8.133 new_us=4.439 speedup=1.832",
+        "dim=1056 rows=24 pass=0 exact=true old_us=3.625 new_us=5.493 speedup=0.660",
+        "dim=1056 rows=24 pass=1 exact=true old_us=3.608 new_us=5.468 speedup=0.660"
+      ]
+    },
+    {
+      "description": "Fusion variants 1/2 slower: reject. Variant 4 reuses existing cached RMS: retain. norm_exact on variants 1/2 is a placeholder; only projected output bits were compared there.",
+      "source": {
+        "path": "/tmp/ds4-hc-regs-ab.hip",
+        "sha256": "66c413e8938d26e601f7870f2addad8e95a5f75010b46da7f582de79cb76cde2"
+      },
+      "log": {
+        "path": "/tmp/ds4-hc-regs-ab.log",
+        "sha256": "2e9bcd9bb17ee104dc9100cdbb94bf903b0b92df521e613f1f8134225ec09ed2"
+      },
+      "resource_log": {
+        "path": "/tmp/ds4-hc-regs-ab.res.txt",
+        "sha256": "6b7781fa2840676f161adbb9e4543e7dd8ad48de84bd98349339f83635acf2f7"
+      },
+      "results": [
+        "quality rows=24 mode=0 variant=1 exact=true norm_exact=true max_error=0",
+        "bench rows=24 variant=1 pass=0 old_us=25.401 new_us=32.572 speedup=0.780",
+        "bench rows=24 variant=1 pass=1 old_us=25.369 new_us=32.580 speedup=0.779",
+        "quality rows=24 mode=0 variant=2 exact=true norm_exact=true max_error=0",
+        "bench rows=24 variant=2 pass=0 old_us=25.360 new_us=35.754 speedup=0.709",
+        "bench rows=24 variant=2 pass=1 old_us=25.423 new_us=33.871 speedup=0.751",
+        "quality rows=24 mode=0 variant=3 exact=true norm_exact=true max_error=0",
+        "bench rows=24 variant=3 pass=0 old_us=24.849 new_us=14.436 speedup=1.721",
+        "bench rows=24 variant=3 pass=1 old_us=24.836 new_us=14.452 speedup=1.719",
+        "quality rows=24 mode=0 variant=4 exact=true norm_exact=true max_error=0",
+        "bench rows=24 variant=4 pass=0 old_us=25.054 new_us=14.849 speedup=1.687",
+        "bench rows=24 variant=4 pass=1 old_us=25.055 new_us=14.849 speedup=1.687",
+        "quality rows=24 mode=1 variant=1 exact=true norm_exact=true max_error=0",
+        "quality rows=24 mode=1 variant=2 exact=true norm_exact=true max_error=0",
+        "quality rows=24 mode=1 variant=3 exact=true norm_exact=true max_error=0",
+        "quality rows=24 mode=1 variant=4 exact=true norm_exact=true max_error=0",
+        "quality rows=24 mode=2 variant=1 exact=true norm_exact=true max_error=0",
+        "quality rows=24 mode=2 variant=2 exact=true norm_exact=true max_error=0",
+        "quality rows=24 mode=2 variant=3 exact=true norm_exact=true max_error=0",
+        "quality rows=24 mode=2 variant=4 exact=true norm_exact=true max_error=0",
+        "quality rows=4 mode=0 variant=1 exact=true norm_exact=true max_error=0",
+        "bench rows=4 variant=1 pass=0 old_us=24.368 new_us=32.190 speedup=0.757",
+        "bench rows=4 variant=1 pass=1 old_us=24.357 new_us=32.185 speedup=0.757",
+        "quality rows=4 mode=0 variant=2 exact=true norm_exact=true max_error=0",
+        "bench rows=4 variant=2 pass=0 old_us=24.385 new_us=33.586 speedup=0.726",
+        "bench rows=4 variant=2 pass=1 old_us=24.444 new_us=33.596 speedup=0.728",
+        "quality rows=4 mode=0 variant=3 exact=true norm_exact=true max_error=0",
+        "bench rows=4 variant=3 pass=0 old_us=23.901 new_us=13.508 speedup=1.769",
+        "bench rows=4 variant=3 pass=1 old_us=23.900 new_us=13.509 speedup=1.769",
+        "quality rows=4 mode=0 variant=4 exact=true norm_exact=true max_error=0",
+        "bench rows=4 variant=4 pass=0 old_us=24.030 new_us=13.819 speedup=1.739",
+        "bench rows=4 variant=4 pass=1 old_us=24.034 new_us=13.806 speedup=1.741",
+        "quality rows=4 mode=1 variant=1 exact=true norm_exact=true max_error=0",
+        "quality rows=4 mode=1 variant=2 exact=true norm_exact=true max_error=0",
+        "quality rows=4 mode=1 variant=3 exact=true norm_exact=true max_error=0",
+        "quality rows=4 mode=1 variant=4 exact=true norm_exact=true max_error=0",
+        "quality rows=4 mode=2 variant=1 exact=true norm_exact=true max_error=0",
+        "quality rows=4 mode=2 variant=2 exact=true norm_exact=true max_error=0",
+        "quality rows=4 mode=2 variant=3 exact=true norm_exact=true max_error=0",
+        "quality rows=4 mode=2 variant=4 exact=true norm_exact=true max_error=0"
+      ]
+    },
+    {
+      "description": "Common-prefix compressed exact selector; retain 1025..16384 scores, 1..6 query rows, top512. Timings outside dispatch range describe rejected routes. Original CUB signed-zero mismatch is corrected in production and maintained tests.",
+      "source": {
+        "path": "/tmp/ds4-range-topk-ab.hip",
+        "sha256": "7c6ba71c9d941cbb0eaf969d773eda536ba7c883d38fb6111157817866c4f17c"
+      },
+      "log": {
+        "path": "/tmp/ds4-range-topk-ab.log",
+        "sha256": "636e7ee16cafa0fe92684603c4667d4c9c7d293af17292c449ad9225791751ae"
+      },
+      "resource_log": {
+        "path": "/tmp/ds4-range-topk-ab.res.txt",
+        "sha256": "45ffe2cdcb75add56ec3fcfedf4673c04624ad6f94af1694b32a95f348c85c1c"
+      },
+      "results": [
+        "baseline cub=1 shared=65536 max=65536",
+        "quality tokens=1 n=513 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=513 mode=0 pass=0 old_us=10.065 new_us=12.717 speedup=0.791",
+        "bench tokens=1 n=513 mode=0 pass=1 old_us=10.004 new_us=12.780 speedup=0.783",
+        "quality tokens=1 n=513 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=513 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=513 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=513 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=513 mode=4 pass=0 old_us=9.797 new_us=12.020 speedup=0.815",
+        "bench tokens=1 n=513 mode=4 pass=1 old_us=9.807 new_us=12.031 speedup=0.815",
+        "quality tokens=1 n=513 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=513 mode=5 pass=0 old_us=10.001 new_us=12.412 speedup=0.806",
+        "bench tokens=1 n=513 mode=5 pass=1 old_us=10.026 new_us=12.415 speedup=0.808",
+        "quality tokens=1 n=1024 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=1024 mode=0 pass=0 old_us=10.441 new_us=13.280 speedup=0.786",
+        "bench tokens=1 n=1024 mode=0 pass=1 old_us=10.432 new_us=13.335 speedup=0.782",
+        "quality tokens=1 n=1024 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=1024 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=1024 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=1024 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=1024 mode=4 pass=0 old_us=10.162 new_us=12.506 speedup=0.813",
+        "bench tokens=1 n=1024 mode=4 pass=1 old_us=10.162 new_us=12.518 speedup=0.812",
+        "quality tokens=1 n=1024 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=1024 mode=5 pass=0 old_us=10.429 new_us=13.211 speedup=0.789",
+        "bench tokens=1 n=1024 mode=5 pass=1 old_us=10.418 new_us=13.090 speedup=0.796",
+        "quality tokens=1 n=1025 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=1025 mode=0 pass=0 old_us=19.158 new_us=13.579 speedup=1.411",
+        "bench tokens=1 n=1025 mode=0 pass=1 old_us=19.224 new_us=13.357 speedup=1.439",
+        "quality tokens=1 n=1025 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=1025 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=1025 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=1025 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=1025 mode=4 pass=0 old_us=20.010 new_us=13.364 speedup=1.497",
+        "bench tokens=1 n=1025 mode=4 pass=1 old_us=19.014 new_us=13.165 speedup=1.444",
+        "quality tokens=1 n=1025 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=1025 mode=5 pass=0 old_us=19.218 new_us=13.438 speedup=1.430",
+        "bench tokens=1 n=1025 mode=5 pass=1 old_us=19.215 new_us=13.440 speedup=1.430",
+        "quality tokens=1 n=2048 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=2048 mode=0 pass=0 old_us=19.720 new_us=14.555 speedup=1.355",
+        "bench tokens=1 n=2048 mode=0 pass=1 old_us=19.713 new_us=14.350 speedup=1.374",
+        "quality tokens=1 n=2048 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=2048 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=2048 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=2048 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=2048 mode=4 pass=0 old_us=19.506 new_us=15.484 speedup=1.260",
+        "bench tokens=1 n=2048 mode=4 pass=1 old_us=19.493 new_us=15.366 speedup=1.269",
+        "quality tokens=1 n=2048 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=2048 mode=5 pass=0 old_us=19.726 new_us=16.104 speedup=1.225",
+        "bench tokens=1 n=2048 mode=5 pass=1 old_us=19.712 new_us=15.876 speedup=1.242",
+        "quality tokens=1 n=2049 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=2049 mode=0 pass=0 old_us=39.520 new_us=14.800 speedup=2.670",
+        "bench tokens=1 n=2049 mode=0 pass=1 old_us=38.080 new_us=14.771 speedup=2.578",
+        "quality tokens=1 n=2049 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=2049 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=2049 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=2049 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=2049 mode=4 pass=0 old_us=37.863 new_us=15.827 speedup=2.392",
+        "bench tokens=1 n=2049 mode=4 pass=1 old_us=41.191 new_us=15.706 speedup=2.623",
+        "quality tokens=1 n=2049 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=2049 mode=5 pass=0 old_us=38.070 new_us=16.477 speedup=2.311",
+        "bench tokens=1 n=2049 mode=5 pass=1 old_us=40.246 new_us=16.219 speedup=2.481",
+        "quality tokens=1 n=4095 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=4095 mode=0 pass=0 old_us=40.789 new_us=19.411 speedup=2.101",
+        "bench tokens=1 n=4095 mode=0 pass=1 old_us=46.939 new_us=19.448 speedup=2.414",
+        "quality tokens=1 n=4095 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=4095 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=4095 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=4095 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=4095 mode=4 pass=0 old_us=39.035 new_us=18.621 speedup=2.096",
+        "bench tokens=1 n=4095 mode=4 pass=1 old_us=38.914 new_us=18.423 speedup=2.112",
+        "quality tokens=1 n=4095 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=4095 mode=5 pass=0 old_us=39.435 new_us=23.843 speedup=1.654",
+        "bench tokens=1 n=4095 mode=5 pass=1 old_us=39.430 new_us=23.736 speedup=1.661",
+        "quality tokens=1 n=4096 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=4096 mode=0 pass=0 old_us=36.911 new_us=17.538 speedup=2.105",
+        "bench tokens=1 n=4096 mode=0 pass=1 old_us=34.643 new_us=17.427 speedup=1.988",
+        "quality tokens=1 n=4096 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=4096 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=4096 mode=3 exact=false cpu_correct=true baseline_cpu_correct=false",
+        "quality tokens=1 n=4096 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=4096 mode=4 pass=0 old_us=31.352 new_us=18.610 speedup=1.685",
+        "bench tokens=1 n=4096 mode=4 pass=1 old_us=31.174 new_us=18.415 speedup=1.693",
+        "quality tokens=1 n=4096 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=4096 mode=5 pass=0 old_us=32.403 new_us=23.869 speedup=1.358",
+        "bench tokens=1 n=4096 mode=5 pass=1 old_us=32.487 new_us=23.747 speedup=1.368",
+        "quality tokens=1 n=4097 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=4097 mode=0 pass=0 old_us=36.326 new_us=17.757 speedup=2.046",
+        "bench tokens=1 n=4097 mode=0 pass=1 old_us=34.579 new_us=17.738 speedup=1.949",
+        "quality tokens=1 n=4097 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=4097 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=4097 mode=3 exact=false cpu_correct=true baseline_cpu_correct=false",
+        "quality tokens=1 n=4097 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=4097 mode=4 pass=0 old_us=31.179 new_us=18.950 speedup=1.645",
+        "bench tokens=1 n=4097 mode=4 pass=1 old_us=32.584 new_us=18.745 speedup=1.738",
+        "quality tokens=1 n=4097 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=4097 mode=5 pass=0 old_us=32.318 new_us=24.381 speedup=1.326",
+        "bench tokens=1 n=4097 mode=5 pass=1 old_us=32.421 new_us=24.258 speedup=1.336",
+        "quality tokens=1 n=8192 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=8192 mode=0 pass=0 old_us=51.968 new_us=31.891 speedup=1.630",
+        "bench tokens=1 n=8192 mode=0 pass=1 old_us=56.409 new_us=25.926 speedup=2.176",
+        "quality tokens=1 n=8192 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=8192 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=8192 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=8192 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=8192 mode=4 pass=0 old_us=38.678 new_us=28.707 speedup=1.347",
+        "bench tokens=1 n=8192 mode=4 pass=1 old_us=38.638 new_us=28.485 speedup=1.356",
+        "quality tokens=1 n=8192 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=8192 mode=5 pass=0 old_us=43.697 new_us=37.134 speedup=1.177",
+        "bench tokens=1 n=8192 mode=5 pass=1 old_us=42.247 new_us=33.749 speedup=1.252",
+        "quality tokens=1 n=8193 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=8193 mode=0 pass=0 old_us=76.948 new_us=27.640 speedup=2.784",
+        "bench tokens=1 n=8193 mode=0 pass=1 old_us=80.562 new_us=27.343 speedup=2.946",
+        "quality tokens=1 n=8193 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=8193 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=8193 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=8193 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=8193 mode=4 pass=0 old_us=78.904 new_us=30.614 speedup=2.577",
+        "bench tokens=1 n=8193 mode=4 pass=1 old_us=81.973 new_us=30.118 speedup=2.722",
+        "quality tokens=1 n=8193 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=8193 mode=5 pass=0 old_us=83.127 new_us=35.814 speedup=2.321",
+        "bench tokens=1 n=8193 mode=5 pass=1 old_us=80.077 new_us=39.062 speedup=2.050",
+        "quality tokens=1 n=16384 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=16384 mode=0 pass=0 old_us=77.467 new_us=41.267 speedup=1.877",
+        "bench tokens=1 n=16384 mode=0 pass=1 old_us=78.811 new_us=43.762 speedup=1.801",
+        "quality tokens=1 n=16384 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=16384 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=16384 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=16384 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=16384 mode=4 pass=0 old_us=84.137 new_us=46.253 speedup=1.819",
+        "bench tokens=1 n=16384 mode=4 pass=1 old_us=82.993 new_us=47.592 speedup=1.744",
+        "quality tokens=1 n=16384 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=16384 mode=5 pass=0 old_us=77.609 new_us=57.096 speedup=1.359",
+        "bench tokens=1 n=16384 mode=5 pass=1 old_us=79.143 new_us=59.393 speedup=1.333",
+        "quality tokens=1 n=32768 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=32768 mode=0 pass=0 old_us=84.268 new_us=108.451 speedup=0.777",
+        "bench tokens=1 n=32768 mode=0 pass=1 old_us=80.109 new_us=110.954 speedup=0.722",
+        "quality tokens=1 n=32768 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=32768 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=32768 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=32768 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=32768 mode=4 pass=0 old_us=81.637 new_us=270.449 speedup=0.302",
+        "bench tokens=1 n=32768 mode=4 pass=1 old_us=86.228 new_us=273.480 speedup=0.315",
+        "quality tokens=1 n=32768 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=32768 mode=5 pass=0 old_us=85.696 new_us=172.851 speedup=0.496",
+        "bench tokens=1 n=32768 mode=5 pass=1 old_us=79.211 new_us=176.345 speedup=0.449",
+        "quality tokens=1 n=65536 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=65536 mode=0 pass=0 old_us=125.831 new_us=197.976 speedup=0.636",
+        "bench tokens=1 n=65536 mode=0 pass=1 old_us=123.630 new_us=198.203 speedup=0.624",
+        "quality tokens=1 n=65536 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=65536 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=65536 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=1 n=65536 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=65536 mode=4 pass=0 old_us=119.263 new_us=524.490 speedup=0.227",
+        "bench tokens=1 n=65536 mode=4 pass=1 old_us=123.091 new_us=526.005 speedup=0.234",
+        "quality tokens=1 n=65536 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=1 n=65536 mode=5 pass=0 old_us=125.809 new_us=264.245 speedup=0.476",
+        "bench tokens=1 n=65536 mode=5 pass=1 old_us=124.404 new_us=263.581 speedup=0.472",
+        "quality tokens=6 n=513 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=513 mode=0 pass=0 old_us=10.054 new_us=12.851 speedup=0.782",
+        "bench tokens=6 n=513 mode=0 pass=1 old_us=10.048 new_us=12.842 speedup=0.782",
+        "quality tokens=6 n=513 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=513 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=513 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=513 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=513 mode=4 pass=0 old_us=9.964 new_us=12.386 speedup=0.804",
+        "bench tokens=6 n=513 mode=4 pass=1 old_us=9.958 new_us=12.585 speedup=0.791",
+        "quality tokens=6 n=513 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=513 mode=5 pass=0 old_us=10.051 new_us=12.572 speedup=0.799",
+        "bench tokens=6 n=513 mode=5 pass=1 old_us=10.057 new_us=12.569 speedup=0.800",
+        "quality tokens=6 n=1024 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=1024 mode=0 pass=0 old_us=10.448 new_us=13.323 speedup=0.784",
+        "bench tokens=6 n=1024 mode=0 pass=1 old_us=10.460 new_us=13.424 speedup=0.779",
+        "quality tokens=6 n=1024 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=1024 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=1024 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=1024 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=1024 mode=4 pass=0 old_us=10.295 new_us=13.016 speedup=0.791",
+        "bench tokens=6 n=1024 mode=4 pass=1 old_us=10.309 new_us=13.100 speedup=0.787",
+        "quality tokens=6 n=1024 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=1024 mode=5 pass=0 old_us=10.457 new_us=13.205 speedup=0.792",
+        "bench tokens=6 n=1024 mode=5 pass=1 old_us=10.450 new_us=13.202 speedup=0.792",
+        "quality tokens=6 n=1025 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=1025 mode=0 pass=0 old_us=19.266 new_us=13.659 speedup=1.410",
+        "bench tokens=6 n=1025 mode=0 pass=1 old_us=19.433 new_us=13.650 speedup=1.424",
+        "quality tokens=6 n=1025 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=1025 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=1025 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=1025 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=1025 mode=4 pass=0 old_us=19.159 new_us=13.342 speedup=1.436",
+        "bench tokens=6 n=1025 mode=4 pass=1 old_us=22.074 new_us=13.363 speedup=1.652",
+        "quality tokens=6 n=1025 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=1025 mode=5 pass=0 old_us=19.255 new_us=13.549 speedup=1.421",
+        "bench tokens=6 n=1025 mode=5 pass=1 old_us=19.268 new_us=13.540 speedup=1.423",
+        "quality tokens=6 n=2048 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=2048 mode=0 pass=0 old_us=22.513 new_us=15.132 speedup=1.488",
+        "bench tokens=6 n=2048 mode=0 pass=1 old_us=19.770 new_us=15.126 speedup=1.307",
+        "quality tokens=6 n=2048 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=2048 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=2048 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=2048 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=2048 mode=4 pass=0 old_us=19.639 new_us=15.556 speedup=1.263",
+        "bench tokens=6 n=2048 mode=4 pass=1 old_us=19.740 new_us=15.523 speedup=1.272",
+        "quality tokens=6 n=2048 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=2048 mode=5 pass=0 old_us=19.775 new_us=18.965 speedup=1.043",
+        "bench tokens=6 n=2048 mode=5 pass=1 old_us=19.784 new_us=18.872 speedup=1.048",
+        "quality tokens=6 n=2049 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=2049 mode=0 pass=0 old_us=38.887 new_us=15.349 speedup=2.534",
+        "bench tokens=6 n=2049 mode=0 pass=1 old_us=38.066 new_us=15.346 speedup=2.481",
+        "quality tokens=6 n=2049 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=2049 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=2049 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=2049 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=2049 mode=4 pass=0 old_us=39.599 new_us=15.947 speedup=2.483",
+        "bench tokens=6 n=2049 mode=4 pass=1 old_us=37.950 new_us=15.887 speedup=2.389",
+        "quality tokens=6 n=2049 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=2049 mode=5 pass=0 old_us=38.144 new_us=19.348 speedup=1.971",
+        "bench tokens=6 n=2049 mode=5 pass=1 old_us=41.595 new_us=22.918 speedup=1.815",
+        "quality tokens=6 n=4095 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=4095 mode=0 pass=0 old_us=39.514 new_us=19.578 speedup=2.018",
+        "bench tokens=6 n=4095 mode=0 pass=1 old_us=41.319 new_us=19.676 speedup=2.100",
+        "quality tokens=6 n=4095 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=4095 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=4095 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=4095 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=4095 mode=4 pass=0 old_us=39.859 new_us=20.231 speedup=1.970",
+        "bench tokens=6 n=4095 mode=4 pass=1 old_us=42.410 new_us=20.469 speedup=2.072",
+        "quality tokens=6 n=4095 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=4095 mode=5 pass=0 old_us=39.514 new_us=24.278 speedup=1.628",
+        "bench tokens=6 n=4095 mode=5 pass=1 old_us=39.515 new_us=24.295 speedup=1.627",
+        "quality tokens=6 n=4096 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=4096 mode=0 pass=0 old_us=34.781 new_us=19.546 speedup=1.779",
+        "bench tokens=6 n=4096 mode=0 pass=1 old_us=36.198 new_us=19.622 speedup=1.845",
+        "quality tokens=6 n=4096 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=4096 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=4096 mode=3 exact=false cpu_correct=true baseline_cpu_correct=false",
+        "quality tokens=6 n=4096 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=4096 mode=4 pass=0 old_us=31.421 new_us=18.737 speedup=1.677",
+        "bench tokens=6 n=4096 mode=4 pass=1 old_us=32.869 new_us=18.736 speedup=1.754",
+        "quality tokens=6 n=4096 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=4096 mode=5 pass=0 old_us=35.518 new_us=24.230 speedup=1.466",
+        "bench tokens=6 n=4096 mode=5 pass=1 old_us=34.817 new_us=24.246 speedup=1.436",
+        "quality tokens=6 n=4097 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=4097 mode=0 pass=0 old_us=34.693 new_us=22.265 speedup=1.558",
+        "bench tokens=6 n=4097 mode=0 pass=1 old_us=36.889 new_us=19.990 speedup=1.845",
+        "quality tokens=6 n=4097 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=4097 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=4097 mode=3 exact=false cpu_correct=true baseline_cpu_correct=false",
+        "quality tokens=6 n=4097 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=4097 mode=4 pass=0 old_us=31.389 new_us=19.110 speedup=1.643",
+        "bench tokens=6 n=4097 mode=4 pass=1 old_us=31.228 new_us=19.099 speedup=1.635",
+        "quality tokens=6 n=4097 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=4097 mode=5 pass=0 old_us=37.200 new_us=24.757 speedup=1.503",
+        "bench tokens=6 n=4097 mode=5 pass=1 old_us=32.518 new_us=24.862 speedup=1.308",
+        "quality tokens=6 n=8192 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=8192 mode=0 pass=0 old_us=50.796 new_us=27.326 speedup=1.859",
+        "bench tokens=6 n=8192 mode=0 pass=1 old_us=49.338 new_us=27.319 speedup=1.806",
+        "quality tokens=6 n=8192 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=8192 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=8192 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=8192 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=8192 mode=4 pass=0 old_us=40.160 new_us=30.678 speedup=1.309",
+        "bench tokens=6 n=8192 mode=4 pass=1 old_us=40.263 new_us=30.582 speedup=1.317",
+        "quality tokens=6 n=8192 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=8192 mode=5 pass=0 old_us=44.205 new_us=36.716 speedup=1.204",
+        "bench tokens=6 n=8192 mode=5 pass=1 old_us=47.566 new_us=38.918 speedup=1.222",
+        "quality tokens=6 n=8193 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=8193 mode=0 pass=0 old_us=77.526 new_us=30.002 speedup=2.584",
+        "bench tokens=6 n=8193 mode=0 pass=1 old_us=80.243 new_us=28.530 speedup=2.813",
+        "quality tokens=6 n=8193 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=8193 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=8193 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=8193 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=8193 mode=4 pass=0 old_us=80.646 new_us=32.271 speedup=2.499",
+        "bench tokens=6 n=8193 mode=4 pass=1 old_us=83.539 new_us=32.302 speedup=2.586",
+        "quality tokens=6 n=8193 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=8193 mode=5 pass=0 old_us=81.718 new_us=39.432 speedup=2.072",
+        "bench tokens=6 n=8193 mode=5 pass=1 old_us=79.720 new_us=39.405 speedup=2.023",
+        "quality tokens=6 n=16384 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=16384 mode=0 pass=0 old_us=99.486 new_us=46.098 speedup=2.158",
+        "bench tokens=6 n=16384 mode=0 pass=1 old_us=94.366 new_us=45.784 speedup=2.061",
+        "quality tokens=6 n=16384 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=16384 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=16384 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=16384 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=16384 mode=4 pass=0 old_us=94.261 new_us=50.698 speedup=1.859",
+        "bench tokens=6 n=16384 mode=4 pass=1 old_us=91.742 new_us=51.902 speedup=1.768",
+        "quality tokens=6 n=16384 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=16384 mode=5 pass=0 old_us=94.804 new_us=64.529 speedup=1.469",
+        "bench tokens=6 n=16384 mode=5 pass=1 old_us=97.827 new_us=64.811 speedup=1.509",
+        "quality tokens=6 n=32768 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=32768 mode=0 pass=0 old_us=155.237 new_us=125.057 speedup=1.241",
+        "bench tokens=6 n=32768 mode=0 pass=1 old_us=158.148 new_us=123.998 speedup=1.275",
+        "quality tokens=6 n=32768 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=32768 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=32768 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=32768 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=32768 mode=4 pass=0 old_us=138.026 new_us=318.472 speedup=0.433",
+        "bench tokens=6 n=32768 mode=4 pass=1 old_us=140.131 new_us=318.715 speedup=0.440",
+        "quality tokens=6 n=32768 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=32768 mode=5 pass=0 old_us=157.019 new_us=214.500 speedup=0.732",
+        "bench tokens=6 n=32768 mode=5 pass=1 old_us=155.622 new_us=214.918 speedup=0.724",
+        "quality tokens=6 n=65536 mode=0 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=65536 mode=0 pass=0 old_us=246.301 new_us=237.439 speedup=1.037",
+        "bench tokens=6 n=65536 mode=0 pass=1 old_us=250.297 new_us=236.094 speedup=1.060",
+        "quality tokens=6 n=65536 mode=1 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=65536 mode=2 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=65536 mode=3 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "quality tokens=6 n=65536 mode=4 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=65536 mode=4 pass=0 old_us=240.556 new_us=665.603 speedup=0.361",
+        "bench tokens=6 n=65536 mode=4 pass=1 old_us=236.910 new_us=666.680 speedup=0.355",
+        "quality tokens=6 n=65536 mode=5 exact=true cpu_correct=true baseline_cpu_correct=true",
+        "bench tokens=6 n=65536 mode=5 pass=0 old_us=248.799 new_us=325.760 speedup=0.764",
+        "bench tokens=6 n=65536 mode=5 pass=1 old_us=244.172 new_us=319.927 speedup=0.763"
+      ]
+    },
+    {
+      "description": "Deferred additional 2K/4K template capacities: all 72 cases exact, isolated selection saves about 1-3 microseconds per call. No end-to-end speed win qualified; selector is about 0.5% of the measured decode GPU time.",
+      "source": {
+        "path": "/tmp/ds4-narrow-topk-ab.hip",
+        "sha256": "1a72b371105a09035eaf82e0c2fe4c41709cdc85a69ea72d0c59e1044e51dc6d"
+      },
+      "log": {
+        "path": "/tmp/ds4-narrow-topk-ab.log",
+        "sha256": "8a5d5f83612e067d575cf93b06dd49f0fc87f4d497d9d5f6aa820f5bc3fd932d"
+      },
+      "resource_log": {
+        "path": "/tmp/ds4-narrow-topk-ab.res.txt",
+        "sha256": "fed8bd44c9e381505301211f3b88b43b2f62d3159743635cecfb4910e140da44"
+      },
+      "results": [
+        "warning: Git tree '/home/fbozzo/projects/strix-halo.cpp' is dirty",
+        "selection n=1025 tokens=1 mode=0 pass=0 old_us=13.656 new_us=12.441",
+        "selection n=1025 tokens=1 mode=0 pass=1 old_us=13.646 new_us=12.455",
+        "selection n=1025 tokens=1 mode=2 pass=0 old_us=13.065 new_us=11.853",
+        "selection n=1025 tokens=1 mode=2 pass=1 old_us=13.087 new_us=11.806",
+        "selection n=1025 tokens=1 mode=4 pass=0 old_us=14.504 new_us=12.893",
+        "selection n=1025 tokens=1 mode=4 pass=1 old_us=14.494 new_us=12.878",
+        "selection n=2048 tokens=1 mode=0 pass=0 old_us=14.565 new_us=13.075",
+        "selection n=2048 tokens=1 mode=0 pass=1 old_us=14.378 new_us=13.005",
+        "selection n=2048 tokens=1 mode=2 pass=0 old_us=14.037 new_us=12.388",
+        "selection n=2048 tokens=1 mode=2 pass=1 old_us=13.775 new_us=12.446",
+        "selection n=2048 tokens=1 mode=4 pass=0 old_us=17.311 new_us=14.632",
+        "selection n=2048 tokens=1 mode=4 pass=1 old_us=17.294 new_us=14.482",
+        "selection n=2049 tokens=1 mode=0 pass=0 old_us=15.307 new_us=14.159",
+        "selection n=2049 tokens=1 mode=0 pass=1 old_us=15.306 new_us=14.073",
+        "selection n=2049 tokens=1 mode=2 pass=0 old_us=14.192 new_us=12.974",
+        "selection n=2049 tokens=1 mode=2 pass=1 old_us=14.164 new_us=12.885",
+        "selection n=2049 tokens=1 mode=4 pass=0 old_us=14.683 new_us=13.424",
+        "selection n=2049 tokens=1 mode=4 pass=1 old_us=14.741 new_us=13.414",
+        "selection n=4096 tokens=1 mode=0 pass=0 old_us=17.481 new_us=15.565",
+        "selection n=4096 tokens=1 mode=0 pass=1 old_us=17.447 new_us=15.504",
+        "selection n=4096 tokens=1 mode=2 pass=0 old_us=16.316 new_us=14.171",
+        "selection n=4096 tokens=1 mode=2 pass=1 old_us=16.153 new_us=14.154",
+        "selection n=4096 tokens=1 mode=4 pass=0 old_us=21.482 new_us=18.155",
+        "selection n=4096 tokens=1 mode=4 pass=1 old_us=21.476 new_us=18.063",
+        "selection n=8192 tokens=1 mode=0 pass=0 old_us=26.193 new_us=26.163",
+        "selection n=8192 tokens=1 mode=0 pass=1 old_us=26.075 new_us=26.073",
+        "selection n=8192 tokens=1 mode=2 pass=0 old_us=24.729 new_us=24.501",
+        "selection n=8192 tokens=1 mode=2 pass=1 old_us=24.399 new_us=27.364",
+        "selection n=8192 tokens=1 mode=4 pass=0 old_us=32.580 new_us=29.730",
+        "selection n=8192 tokens=1 mode=4 pass=1 old_us=29.646 new_us=29.823",
+        "selection n=16384 tokens=1 mode=0 pass=0 old_us=40.842 new_us=40.842",
+        "selection n=16384 tokens=1 mode=0 pass=1 old_us=43.026 new_us=40.847",
+        "selection n=16384 tokens=1 mode=2 pass=0 old_us=39.506 new_us=42.065",
+        "selection n=16384 tokens=1 mode=2 pass=1 old_us=43.488 new_us=39.194",
+        "selection n=16384 tokens=1 mode=4 pass=0 old_us=48.688 new_us=48.597",
+        "selection n=16384 tokens=1 mode=4 pass=1 old_us=50.874 new_us=52.415",
+        "selection n=1025 tokens=6 mode=0 pass=0 old_us=13.689 new_us=12.572",
+        "selection n=1025 tokens=6 mode=0 pass=1 old_us=13.699 new_us=12.484",
+        "selection n=1025 tokens=6 mode=2 pass=0 old_us=13.114 new_us=11.915",
+        "selection n=1025 tokens=6 mode=2 pass=1 old_us=13.138 new_us=12.014",
+        "selection n=1025 tokens=6 mode=4 pass=0 old_us=14.434 new_us=13.029",
+        "selection n=1025 tokens=6 mode=4 pass=1 old_us=14.533 new_us=12.983",
+        "selection n=2048 tokens=6 mode=0 pass=0 old_us=14.986 new_us=13.593",
+        "selection n=2048 tokens=6 mode=0 pass=1 old_us=14.997 new_us=13.572",
+        "selection n=2048 tokens=6 mode=2 pass=0 old_us=13.822 new_us=12.390",
+        "selection n=2048 tokens=6 mode=2 pass=1 old_us=13.935 new_us=12.481",
+        "selection n=2048 tokens=6 mode=4 pass=0 old_us=17.417 new_us=14.657",
+        "selection n=2048 tokens=6 mode=4 pass=1 old_us=17.325 new_us=14.507",
+        "selection n=2049 tokens=6 mode=0 pass=0 old_us=16.757 new_us=14.773",
+        "selection n=2049 tokens=6 mode=0 pass=1 old_us=16.750 new_us=14.872",
+        "selection n=2049 tokens=6 mode=2 pass=0 old_us=14.173 new_us=12.949",
+        "selection n=2049 tokens=6 mode=2 pass=1 old_us=14.171 new_us=12.838",
+        "selection n=2049 tokens=6 mode=4 pass=0 old_us=17.703 new_us=15.542",
+        "selection n=2049 tokens=6 mode=4 pass=1 old_us=17.619 new_us=18.435",
+        "selection n=4096 tokens=6 mode=0 pass=0 old_us=19.415 new_us=16.663",
+        "selection n=4096 tokens=6 mode=0 pass=1 old_us=19.338 new_us=16.675",
+        "selection n=4096 tokens=6 mode=2 pass=0 old_us=16.322 new_us=14.324",
+        "selection n=4096 tokens=6 mode=2 pass=1 old_us=16.238 new_us=14.321",
+        "selection n=4096 tokens=6 mode=4 pass=0 old_us=21.893 new_us=18.097",
+        "selection n=4096 tokens=6 mode=4 pass=1 old_us=21.717 new_us=18.097",
+        "selection n=8192 tokens=6 mode=0 pass=0 old_us=27.070 new_us=27.179",
+        "selection n=8192 tokens=6 mode=0 pass=1 old_us=27.177 new_us=27.184",
+        "selection n=8192 tokens=6 mode=2 pass=0 old_us=25.584 new_us=25.582",
+        "selection n=8192 tokens=6 mode=2 pass=1 old_us=25.697 new_us=25.715",
+        "selection n=8192 tokens=6 mode=4 pass=0 old_us=31.966 new_us=33.242",
+        "selection n=8192 tokens=6 mode=4 pass=1 old_us=33.342 new_us=33.352",
+        "selection n=16384 tokens=6 mode=0 pass=0 old_us=55.925 new_us=56.484",
+        "selection n=16384 tokens=6 mode=0 pass=1 old_us=52.899 new_us=54.247",
+        "selection n=16384 tokens=6 mode=2 pass=0 old_us=41.563 new_us=45.179",
+        "selection n=16384 tokens=6 mode=2 pass=1 old_us=43.267 new_us=41.365",
+        "selection n=16384 tokens=6 mode=4 pass=0 old_us=55.556 new_us=55.078",
+        "selection n=16384 tokens=6 mode=4 pass=1 old_us=57.109 new_us=53.522",
+        "Indexer selection: 72 cases exact twice against CPU ordering and fallback kernels, including signed-zero ties and causal masks"
+      ]
+    }
+  ]
+}

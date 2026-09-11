@@ -1552,6 +1552,13 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
     }
     dim3 grid((unsigned)out_dim, (unsigned)n_tok, 1);
     if (ordered_decode) {
+      // Four-wide loads keep the same FMA sequence within each of the 32
+      // chunks. Aligned chunks avoid the scalar peel of irregular widths.
+      if ((in_dim & 127u) == 0u) {
+        matmul_f16_ordered_batch_reuse_kernel<1u><<<grid, 32u>>>(
+            (float*)out->ptr, w, (const float*)x->ptr, in_dim, out_dim);
+        return hip_ok(hipGetLastError(), "f16 ordered vector decode launch");
+      }
         matmul_f16_ordered_chunks_kernel<<<grid, 32>>>((float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim, n_tok);
         return hip_ok(hipGetLastError(), "matmul_f16_ordered_chunks launch");
     }

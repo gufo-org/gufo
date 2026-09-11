@@ -15,6 +15,7 @@
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_f16_decode.hip.hpp"
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_hc.hip.hpp"
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_iq2_gate.hip.hpp"
+#include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_norm.hip.hpp"
 #include "src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_q8_decode.hip.hpp"
 
 namespace {
@@ -369,6 +370,59 @@ void f16_ordered(unsigned dim, unsigned rows, std::mt19937& random) {
               Tokens);
 }
 
+void plain_norm(unsigned rows, std::mt19937& random) {
+  constexpr unsigned width = 16384;
+  constexpr float eps = 1e-6F;
+  std::uniform_real_distribution<float> values(-4.F, 4.F);
+  std::vector<float> input(rows * width), expected(input.size()),
+      actual(input.size());
+  Device<float> x(input.size()), reference(input.size()), output(input.size());
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    for (size_t i = 0; i < input.size(); ++i) {
+      input[i] = values(random);
+      if (mode == 1)
+        input[i] = 0.F;
+      if (mode == 2)
+        input[i] *= 1e-20F;
+      if (mode == 3)
+        input[i] *= (i % 2) ? 1e12F : 1e-12F;
+    }
+    check(hipMemcpy(x.data, input.data(), input.size() * sizeof(float),
+                    hipMemcpyHostToDevice));
+    rms_norm_plain_kernel<<<rows, 256>>>(reference.data, x.data, width, rows,
+                                         eps);
+    rms_norm_plain_regs_kernel<64>
+        <<<rows, 256>>>(output.data, x.data, width, rows, eps);
+    check(hipGetLastError());
+    check(hipMemcpy(expected.data(), reference.data,
+                    expected.size() * sizeof(float), hipMemcpyDeviceToHost));
+    check(hipMemcpy(actual.data(), output.data, actual.size() * sizeof(float),
+                    hipMemcpyDeviceToHost));
+    equal("plain RMS norm", expected.data(), actual.data(), actual.size());
+    for (unsigned row = 0; row < rows; ++row) {
+      double sum = 0;
+      for (unsigned i = 0; i < width; ++i) {
+        const double value = input[row * width + i];
+        sum += value * value;
+      }
+      const double scale = 1.0 / std::sqrt(sum / width + eps);
+      for (unsigned i = 0; i < width; ++i) {
+        const double value = input[row * width + i] * scale;
+        const float observed = actual[row * width + i];
+        if (!std::isfinite(observed) || std::abs(value - observed) > 1e-5) {
+          std::fprintf(stderr,
+                       "plain RMS CPU formula failed: rows=%u mode=%u\n", rows,
+                       mode);
+          std::exit(4);
+        }
+      }
+    }
+  }
+  std::printf(
+      "RMS rows=%u: 4 exact scalar/cache cases and independent CPU formula\n",
+      rows);
+}
+
 void hc_prefill_fp32(unsigned tokens) {
   constexpr unsigned embedding = 4096, width = 4 * embedding, mixes = 24;
   std::vector<__half> weights(mixes * width, __float2half(0.0F));
@@ -455,6 +509,7 @@ int main() {
       iq2_gate(tokens, blocks, random);
   for (const auto [dim, rows] :
        {std::pair{16384U, 24U}, std::pair{4096U, 256U}}) {
+    f16_ordered<1>(dim, rows, random);
     f16_ordered<2>(dim, rows, random);
     f16_ordered<3>(dim, rows, random);
     f16_ordered<4>(dim, rows, random);
@@ -463,6 +518,9 @@ int main() {
     f16_ordered<7>(dim, rows, random);
     f16_ordered<8>(dim, rows, random);
   }
+  f16_ordered<1>(16384, 4, random);
+  for (unsigned rows : {1U, 2U, 6U, 8U})
+    plain_norm(rows, random);
   hc_prefill_fp32(128);
   hc_prefill_fp32(129);
 }

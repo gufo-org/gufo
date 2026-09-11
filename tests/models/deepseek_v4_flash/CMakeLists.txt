@@ -55,8 +55,10 @@ if(ENGINE_ENABLE_HIP)
     RESOURCE_LOCK ds4_model
     SKIP_RETURN_CODE 77)
 
-  add_executable(ds4_attention_test attention_test.hip)
+  add_executable(ds4_attention_test attention_test.hip indexer_test.hip)
   target_include_directories(ds4_attention_test PRIVATE ${PROJECT_SOURCE_DIR})
+  target_include_directories(ds4_attention_test SYSTEM PRIVATE
+    ${HIPCUB_INCLUDE_DIR} ${ROCPRIM_INCLUDE_DIR})
   target_compile_options(ds4_attention_test PRIVATE -O3 -ffast-math -fno-finite-math-only)
   target_link_libraries(ds4_attention_test PRIVATE hip::host)
   add_test(NAME ds4.attention COMMAND ds4_attention_test)
