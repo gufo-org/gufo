@@ -83,7 +83,7 @@ def build_prompt_command(
 ) -> list[str]:
     prompt_mode = args.prompt_mode
     if prompt_mode == "auto":
-        prompt_mode = "chat" if args.backend == "dspark" else "raw"
+        prompt_mode = "chat"
 
     command = [
         args.binary,
@@ -93,6 +93,8 @@ def build_prompt_command(
         args.model,
         "--max-tokens",
         str(args.max_tokens),
+        "--temperature",
+        "0",
     ]
     if prompt_mode == "raw":
         command.append("--raw")
@@ -124,6 +126,19 @@ def build_prompt_command(
     return command
 
 
+def artifact_identity(path: str) -> dict:
+    resolved = Path(path).resolve(strict=True)
+    stat = resolved.stat()
+    return {
+        "path": str(resolved),
+        "bytes": stat.st_size,
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
+    }
+
+
 def autoregressive_key(args: argparse.Namespace, prompt: str) -> str:
     """Identity of an autoregressive reference run.
 
@@ -133,21 +148,22 @@ def autoregressive_key(args: argparse.Namespace, prompt: str) -> str:
     builds or framings, which would score a completion against a reference that
     could not have produced it.
     """
-    digest = hashlib.sha256()
-    prompt_mode = args.prompt_mode
-    if prompt_mode == "auto":
-        prompt_mode = "chat" if args.backend == "dspark" else "raw"
-    for field in (
-        os.path.realpath(args.binary),
-        os.path.realpath(args.model),
-        str(args.max_tokens),
-        prompt_mode,
-        str(args.system_prompt),
-        prompt,
-    ):
-        digest.update(field.encode("utf-8"))
-        digest.update(b"\x00")
-    return digest.hexdigest()
+    # Stat identities invalidate in-place rebuilds/replacements without
+    # rereading a multi-gigabyte target for every prompt. Artifact content
+    # hashes belong in the qualification manifest.
+    identity = {
+        "binary": artifact_identity(args.binary),
+        "model": artifact_identity(args.model),
+        "command": build_prompt_command(args, prompt, speculative=False),
+        "environment": {
+            key: value for key, value in os.environ.items()
+            if key.startswith(("GUFO_", "HIP_", "ROCR_", "HSA_"))
+            and key not in CONTROLLED_ENV
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 def load_autoregressive_cache(path: Path | None) -> dict[str, dict]:
@@ -212,7 +228,9 @@ def extract_completion(stdout: str) -> str:
     generated = GENERATED_RE.search(tail)
     if generated is None:
         raise RuntimeError("generation timing line is missing")
-    return tail[: generated.start()].rstrip("\n")
+    # The CLI adds one separator newline after the completion. Any earlier
+    # trailing newlines were generated and are part of the equality check.
+    return tail[: generated.start()].removesuffix("\n")
 
 
 def run_prompt(
@@ -293,6 +311,8 @@ def load_prompts(
             raise ValueError(f"unknown suite case(s): {', '.join(sorted(missing))}")
     if limit > 0:
         selected = selected[:limit]
+    if not selected:
+        raise ValueError("suite selection contains no prompts")
     for case in selected:
         if not all(
             isinstance(case.get(field), str) and case[field]
@@ -332,7 +352,7 @@ def main() -> int:
         "--prompt-mode",
         choices=("auto", "raw", "chat"),
         default="auto",
-        help="auto uses chat framing for DSpark and raw framing for Qwen",
+        help="auto uses production chat framing; raw is an explicit comparison",
     )
     parser.add_argument(
         "--system-prompt",
@@ -405,6 +425,7 @@ def main() -> int:
     skipped_cases: list[str] = []
     sparse_samples: list[str] = []
     total_tokens = 0
+    total_ar_tokens = 0
     total_ar_seconds = 0.0
     total_spec_seconds = 0.0
     total_drafted = 0
@@ -446,6 +467,7 @@ def main() -> int:
             continue
         exact = all(
             run["completion"] == autoregressive["completion"]
+            and run["tokens"] == autoregressive["tokens"]
             for run in speculative_runs
         )
         spec_seconds = statistics.median(
@@ -485,6 +507,7 @@ def main() -> int:
 
         representative = speculative_runs[0]
         total_tokens += int(representative["tokens"])
+        total_ar_tokens += int(autoregressive["tokens"])
         total_ar_seconds += ar_seconds
         total_spec_seconds += spec_seconds
         total_drafted += int(representative["drafted"])
@@ -527,6 +550,8 @@ def main() -> int:
                 "speedup": speedup,
                 "acceptance": acceptance,
                 "average_draft": average_draft,
+                "reference": autoregressive,
+                "runs": speculative_runs,
             }
         )
         if minimum_steps > 0 and attempts < minimum_steps:
@@ -538,7 +563,10 @@ def main() -> int:
                 str(autoregressive["completion"]),
                 str(representative["completion"]),
             )
-            mismatches.append(f"{case['id']}: {detail}")
+            mismatches.append(
+                f"{case['id']}: {detail}; tokens AR={autoregressive['tokens']} "
+                f"spec={[run['tokens'] for run in speculative_runs]}"
+            )
 
     if not rows:
         print()
@@ -548,9 +576,9 @@ def main() -> int:
         )
         for entry in skipped_cases:
             print(f"skipped: {entry}", file=sys.stderr)
-        return 0 if args.allow_mismatch else 1
+        return 1
 
-    aggregate_ar = total_tokens / total_ar_seconds
+    aggregate_ar = total_ar_tokens / total_ar_seconds
     aggregate_spec = total_tokens / total_spec_seconds
     aggregate_acceptance = (
         total_accepted / total_drafted if total_drafted else 0.0
@@ -594,7 +622,7 @@ def main() -> int:
     if args.json_path:
         prompt_mode = args.prompt_mode
         if prompt_mode == "auto":
-            prompt_mode = "chat" if args.backend == "dspark" else "raw"
+            prompt_mode = "chat"
         Path(args.json_path).write_text(
             json.dumps(
                 {
@@ -603,6 +631,11 @@ def main() -> int:
                     "binary": os.path.realpath(args.binary),
                     "model": os.path.realpath(args.model),
                     "draft_model": os.path.realpath(args.draft_model),
+                    "artifacts": {
+                        "binary": artifact_identity(args.binary),
+                        "model": artifact_identity(args.model),
+                        "draft": artifact_identity(args.draft_model),
+                    },
                     "backend": args.backend,
                     "profile": args.profile,
                     "prompt_mode": prompt_mode,
@@ -638,7 +671,7 @@ def main() -> int:
 
     mismatch_failed = bool(mismatches) and not args.allow_mismatch
     sparse_failed = bool(sparse_samples) and not args.allow_sparse
-    return 1 if mismatch_failed or sparse_failed else 0
+    return 1 if mismatch_failed or sparse_failed or skipped_cases else 0
 
 
 if __name__ == "__main__":
