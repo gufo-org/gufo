@@ -241,17 +241,13 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                        ssm_inner_size, arena.stream);
     }
 
-    {
-      LaunchBatchedResidualAdd(
-          scratch.decode.hidden.data(), scratch.attention.output.data(),
-          scratch.decode.hidden.data(), batch_size, hidden_size, arena.stream);
-      {
-        LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
-                             static_cast<const float*>(layer.ffn_norm.data),
-                             scratch.decode.normed.data(), nullptr, batch_size,
-                             hidden_size, 1e-6F, arena.stream);
-      }
-    }
+    LaunchBatchedResidualAdd(
+        scratch.decode.hidden.data(), scratch.attention.output.data(),
+        scratch.decode.hidden.data(), batch_size, hidden_size, arena.stream);
+    LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
+                         static_cast<const float*>(layer.ffn_norm.data),
+                         scratch.decode.normed.data(), nullptr, batch_size,
+                         hidden_size, 1e-6F, arena.stream);
 
     LaunchProjection(layer.ffn_gate, scratch.decode.normed.data(),
                      scratch.ffn.gate.data(), batch_size, intermediate_size,
@@ -438,51 +434,66 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
         }
       }
 
-      for (std::size_t row = 0; row < batch_size; ++row) {
-        float* const query =
-            scratch.attention.q.data() + (row * attention_size);
-        float* const key = scratch.attention.k.data() + (row * kv_size);
-        float* const value = scratch.attention.v.data() + (row * kv_size);
-        float* const gate = scratch.ssm.gate.data() + (row * attention_size);
-        float* const context = scratch.ssm.out.data() + (row * attention_size);
-        const std::uint32_t position = host_positions[row];
-
-        if (fused_qknorm_rope_kv) {
-          LaunchFusedQKNormRoPEKvWrite(
-              query, key, value,
-              static_cast<const float*>(layer.attn_q_norm.data),
-              static_cast<const float*>(layer.attn_k_norm.data), query, key,
-              arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
-              arena_.d_attention_kv_f16,
-              OffsetIfPresent(
-                  static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
-                  total_k),
-              attention_layer, scratch.decode.prompt_tokens.data() + row,
-              arena_.GetMaxContext(), config.num_attention_heads,
-              config.num_key_value_heads, config.head_dim, config.rotary_dim,
-              config.rope_theta, 1e-6F, arena_.stream);
-        } else {
-          LaunchRoPE(query, key, config.num_attention_heads,
-                     config.num_key_value_heads, config.head_dim,
-                     config.rotary_dim, position, config.rope_theta,
-                     arena_.stream);
-        }
-
-        const bool use_split_k = detail::IsSplitKDecodeAttentionSupported(
-            static_cast<std::size_t>(position) + 1, config.num_attention_heads,
-            config.num_key_value_heads, config.head_dim);
-        LaunchAttention(
-            query, key, value, gate, arena_.d_kv_cache,
-            OffsetIfPresent(arena_.d_kv_cache, total_k),
+      if (fused_qknorm_rope_kv) {
+        LaunchBatchedFusedQKNormRoPEKvWrite(
+            scratch.attention.q.data(), scratch.attention.k.data(),
+            scratch.attention.v.data(),
+            static_cast<const float*>(layer.attn_q_norm.data),
+            static_cast<const float*>(layer.attn_k_norm.data),
+            scratch.attention.q.data(), scratch.attention.k.data(),
+            arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
             arena_.d_attention_kv_f16,
             OffsetIfPresent(
                 static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
                 total_k),
-            context, attention_layer, position, arena_.GetMaxContext(),
+            attention_layer, start_pos, batch_size, arena_.GetMaxContext(),
             config.num_attention_heads, config.num_key_value_heads,
-            config.head_dim, arena_.stream,
-            use_split_k ? arena_.d_split_k_attention : nullptr,
-            fused_qknorm_rope_kv);
+            config.head_dim, config.rotary_dim, config.rope_theta, 1e-6F,
+            arena_.stream);
+        // Exact verification projections do not use weight dequantization
+        // scratch. Reuse it for independent split-K rows without allocating
+        // another buffer or changing the scalar decode workspace.
+        auto attention_scratch = scratch.attention.split_k;
+        if (scratch.decode.weight_bf16.size_bytes() >=
+            batch_size * attention_scratch.size_bytes()) {
+          attention_scratch = {
+              reinterpret_cast<float*>(scratch.decode.weight_bf16.data()),
+              batch_size * attention_scratch.size()};
+        }
+        LaunchCausalDecodeAttention(
+            scratch.attention.q.data(), scratch.ssm.gate.data(),
+            arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
+            arena_.d_attention_kv_f16,
+            OffsetIfPresent(
+                static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                total_k),
+            scratch.ssm.out.data(), attention_layer, start_pos, batch_size,
+            arena_.GetMaxContext(), config.num_attention_heads,
+            config.num_key_value_heads, config.head_dim, arena_.stream,
+            attention_scratch);
+      } else {
+        for (std::size_t row = 0; row < batch_size; ++row) {
+          float* const query =
+              scratch.attention.q.data() + (row * attention_size);
+          float* const key = scratch.attention.k.data() + (row * kv_size);
+          const std::uint32_t position = host_positions[row];
+          LaunchRoPE(query, key, config.num_attention_heads,
+                     config.num_key_value_heads, config.head_dim,
+                     config.rotary_dim, position, config.rope_theta,
+                     arena_.stream);
+          LaunchAttention(
+              query, key, scratch.attention.v.data() + row * kv_size,
+              scratch.ssm.gate.data() + row * attention_size, arena_.d_kv_cache,
+              OffsetIfPresent(arena_.d_kv_cache, total_k),
+              arena_.d_attention_kv_f16,
+              OffsetIfPresent(
+                  static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                  total_k),
+              scratch.ssm.out.data() + row * attention_size, attention_layer,
+              position, arena_.GetMaxContext(), config.num_attention_heads,
+              config.num_key_value_heads, config.head_dim, arena_.stream,
+              arena_.d_split_k_attention);
+        }
       }
       LaunchProjection(layer.attn_output, scratch.ssm.out.data(),
                        scratch.attention.output.data(), batch_size, hidden_size,
@@ -529,17 +540,13 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                        ssm_inner_size, arena_.stream);
     }
 
-    {
-      LaunchBatchedResidualAdd(
-          scratch.decode.hidden.data(), scratch.attention.output.data(),
-          scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);
-      {
-        LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
-                             static_cast<const float*>(layer.ffn_norm.data),
-                             scratch.decode.normed.data(), nullptr, batch_size,
-                             hidden_size, 1e-6F, arena_.stream);
-      }
-    }
+    LaunchBatchedResidualAdd(
+        scratch.decode.hidden.data(), scratch.attention.output.data(),
+        scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);
+    LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
+                         static_cast<const float*>(layer.ffn_norm.data),
+                         scratch.decode.normed.data(), nullptr, batch_size,
+                         hidden_size, 1e-6F, arena_.stream);
 
     LaunchProjection(layer.ffn_gate, scratch.decode.normed.data(),
                      scratch.ffn.gate.data(), batch_size, intermediate_size,

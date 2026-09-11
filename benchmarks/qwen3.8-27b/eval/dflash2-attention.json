@@ -1,0 +1,2236 @@
+{
+  "schema": 1,
+  "date": "2026-09-11",
+  "baseline_revision": "8bfd8cd6c01671b2cc2bb43a19d51e97ca0982ca",
+  "scope": "C1 Qwen3.8 27B Q4/Q8 targets with Q4_K_M, Q8_0 and BF16 DFlash2 drafts. Fixed seven proposals; no precision, distribution, controller or allocation change.",
+  "candidate_source_sha256": {
+    "src/models/qwen/hip/batched_decode.cpp": "5475ce18b1edee5010c8a82722f84b17d3e1d629026d936cff6d928f173ebaa9",
+    "src/models/qwen/hip/kernels/attention_decode.hip": "c49f28009003fcc0469cb62ef648bca8eb93a361864044ccd16ac940de3d782b",
+    "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "ecf0bcd5b518f2d5624a30734b0972203115d6e9dd093f54bfda8041bb6ff56b",
+    "src/models/qwen/hip/kernels/prefill_quant_gemm.hip": "5f18b8cf47b4deb1929577088736edb7c962247bf7daca7a97577512cdb6999e",
+    "src/models/qwen/hip/ops/attention.hpp": "b962a42b15f260844ed480a43dd41516e7148ce7ccb30462a9e87f6cc3dc039a"
+  },
+  "retained": [
+    "Batch consecutive online attention queries with the scalar reduction order and causal endpoint.",
+    "Batch split-K queries using idle weight-dequantization scratch; preserve scalar fallback for threshold straddles and insufficient scratch.",
+    "Use existing batched QK normalization/RoPE/KV-write in verification.",
+    "Dispatch Q8_0 48x5120 SSM controls across independent token rows; keep large projection geometry."
+  ],
+  "quality": {
+    "model": [
+      {
+        "target": "Q4",
+        "verification_rows": 24,
+        "all_logits_byte_exact": true,
+        "snapshot_and_rejected_prefix_replay": "pass"
+      },
+      {
+        "target": "Q8",
+        "verification_rows": 24,
+        "all_logits_byte_exact": true,
+        "snapshot_and_rejected_prefix_replay": "pass"
+      },
+      {
+        "draft": "q4",
+        "identical_trace_files": 90,
+        "reference": "/tmp/qwen27b-dflash-q4-source-trace",
+        "trace": "/tmp/qwen27b-attention-final-q4-trace"
+      },
+      {
+        "draft": "q8",
+        "identical_trace_files": 90,
+        "reference": "/tmp/qwen27b-dflash-q8-source-trace",
+        "trace": "/tmp/qwen27b-attention-final-q8-trace"
+      },
+      {
+        "draft": "bf16",
+        "identical_trace_files": 90,
+        "reference": "/tmp/qwen27b-dflash-fp32-trace",
+        "trace": "/tmp/qwen27b-attention-final-bf16-trace"
+      }
+    ],
+    "operator_checks": [
+      "Existing canonical KV/snapshot test now checks exact consecutive queries with FP16/FP32 caches, gated/ungated, widths 1/3/8, 4K boundary and reduced scratch capacity.",
+      "Existing Q8 GEMV test adds 48x5120 and checks all widths 1..8 against decode."
+    ],
+    "final_chat_token_traces_equal_ar": 24,
+    "final_bench_token_traces_equal_ar": 10
+  },
+  "microbenchmark_scope": "Production template probes; each candidate must be byte-exact before timing. Component costs are not model throughput. Narrow GEMM rotates a 128 MiB weight working set.",
+  "microbenchmarks": {
+    "attention": [
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 127,
+        "rep": 0,
+        "scalar_ms": 0.292026,
+        "batched_ms": 0.037135
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 127,
+        "rep": 1,
+        "scalar_ms": 0.288426,
+        "batched_ms": 0.03703
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 127,
+        "rep": 2,
+        "scalar_ms": 0.294139,
+        "batched_ms": 0.037127
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 2048,
+        "rep": 0,
+        "scalar_ms": 5.16244,
+        "batched_ms": 0.64779
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 2048,
+        "rep": 1,
+        "scalar_ms": 5.1658,
+        "batched_ms": 0.64897
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 2048,
+        "rep": 2,
+        "scalar_ms": 5.166988,
+        "batched_ms": 0.649992
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 4096,
+        "rep": 0,
+        "scalar_ms": 0.564903,
+        "batched_ms": 0.496147
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 4096,
+        "rep": 1,
+        "scalar_ms": 0.591833,
+        "batched_ms": 0.511741
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 4096,
+        "rep": 2,
+        "scalar_ms": 0.605728,
+        "batched_ms": 0.512803
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 8192,
+        "rep": 0,
+        "scalar_ms": 1.47637,
+        "batched_ms": 1.177583
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 8192,
+        "rep": 1,
+        "scalar_ms": 1.457509,
+        "batched_ms": 1.176802
+      },
+      {
+        "fp16": 0,
+        "rows": 8,
+        "start": 8192,
+        "rep": 2,
+        "scalar_ms": 1.463078,
+        "batched_ms": 1.183419
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 127,
+        "rep": 0,
+        "scalar_ms": 0.304683,
+        "batched_ms": 0.039263
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 127,
+        "rep": 1,
+        "scalar_ms": 0.308145,
+        "batched_ms": 0.038257
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 127,
+        "rep": 2,
+        "scalar_ms": 0.307551,
+        "batched_ms": 0.040084
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 2048,
+        "rep": 0,
+        "scalar_ms": 5.257489,
+        "batched_ms": 0.667716
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 2048,
+        "rep": 1,
+        "scalar_ms": 5.262641,
+        "batched_ms": 0.669617
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 2048,
+        "rep": 2,
+        "scalar_ms": 5.264639,
+        "batched_ms": 0.670061
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 4096,
+        "rep": 0,
+        "scalar_ms": 0.553904,
+        "batched_ms": 0.444687
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 4096,
+        "rep": 1,
+        "scalar_ms": 0.601961,
+        "batched_ms": 0.447926
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 4096,
+        "rep": 2,
+        "scalar_ms": 0.589159,
+        "batched_ms": 0.456051
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 8192,
+        "rep": 0,
+        "scalar_ms": 1.072364,
+        "batched_ms": 0.826753
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 8192,
+        "rep": 1,
+        "scalar_ms": 1.06336,
+        "batched_ms": 0.818451
+      },
+      {
+        "fp16": 1,
+        "rows": 8,
+        "start": 8192,
+        "rep": 2,
+        "scalar_ms": 1.065135,
+        "batched_ms": 0.819754
+      }
+    ],
+    "narrow_q8": [
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 0,
+        "geometry": "w16r2bBatch",
+        "ms": 0.019255,
+        "GBps": 13.56,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 0,
+        "geometry": "w16r1bBatch",
+        "ms": 0.015381,
+        "GBps": 16.98,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 0,
+        "geometry": "w8r1bBatch",
+        "ms": 0.016994,
+        "GBps": 15.37,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 0,
+        "geometry": "w4r1bBatch",
+        "ms": 0.017653,
+        "GBps": 14.79,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 0,
+        "geometry": "w4r2bBatch",
+        "ms": 0.017477,
+        "GBps": 14.94,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 0,
+        "geometry": "w4r1b1",
+        "ms": 0.00602,
+        "GBps": 43.37,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 0,
+        "geometry": "w4r1b2",
+        "ms": 0.007509,
+        "GBps": 34.77,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 0,
+        "geometry": "w8r1b1",
+        "ms": 0.005576,
+        "GBps": 46.83,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 0,
+        "geometry": "w8r1b2",
+        "ms": 0.006402,
+        "GBps": 40.79,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 1,
+        "geometry": "w8r1b2",
+        "ms": 0.006562,
+        "GBps": 39.79,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 1,
+        "geometry": "w8r1b1",
+        "ms": 0.005518,
+        "GBps": 47.32,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 1,
+        "geometry": "w4r1b2",
+        "ms": 0.007536,
+        "GBps": 34.65,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 1,
+        "geometry": "w4r1b1",
+        "ms": 0.005906,
+        "GBps": 44.21,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 1,
+        "geometry": "w4r2bBatch",
+        "ms": 0.017451,
+        "GBps": 14.96,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 1,
+        "geometry": "w4r1bBatch",
+        "ms": 0.017665,
+        "GBps": 14.78,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 1,
+        "geometry": "w8r1bBatch",
+        "ms": 0.016991,
+        "GBps": 15.37,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 1,
+        "geometry": "w16r1bBatch",
+        "ms": 0.015327,
+        "GBps": 17.04,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 1,
+        "geometry": "w16r2bBatch",
+        "ms": 0.017357,
+        "GBps": 15.04,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 2,
+        "geometry": "w16r2bBatch",
+        "ms": 0.017541,
+        "GBps": 14.89,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 2,
+        "geometry": "w16r1bBatch",
+        "ms": 0.015337,
+        "GBps": 17.03,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 2,
+        "geometry": "w8r1bBatch",
+        "ms": 0.017,
+        "GBps": 15.36,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 2,
+        "geometry": "w4r1bBatch",
+        "ms": 0.017544,
+        "GBps": 14.88,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 2,
+        "geometry": "w4r2bBatch",
+        "ms": 0.017488,
+        "GBps": 14.93,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 2,
+        "geometry": "w4r1b1",
+        "ms": 0.006022,
+        "GBps": 43.36,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 2,
+        "geometry": "w4r1b2",
+        "ms": 0.007376,
+        "GBps": 35.4,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 2,
+        "geometry": "w8r1b1",
+        "ms": 0.005474,
+        "GBps": 47.71,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 2,
+        "geometry": "w8r1b2",
+        "ms": 0.006408,
+        "GBps": 40.75,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 3,
+        "geometry": "w8r1b2",
+        "ms": 0.006439,
+        "GBps": 40.55,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 3,
+        "geometry": "w8r1b1",
+        "ms": 0.005548,
+        "GBps": 47.06,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 3,
+        "geometry": "w4r1b2",
+        "ms": 0.00758,
+        "GBps": 34.45,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 3,
+        "geometry": "w4r1b1",
+        "ms": 0.005896,
+        "GBps": 44.28,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 3,
+        "geometry": "w4r2bBatch",
+        "ms": 0.017377,
+        "GBps": 15.03,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 3,
+        "geometry": "w4r1bBatch",
+        "ms": 0.017401,
+        "GBps": 15.01,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 3,
+        "geometry": "w8r1bBatch",
+        "ms": 0.01707,
+        "GBps": 15.3,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 3,
+        "geometry": "w16r1bBatch",
+        "ms": 0.015502,
+        "GBps": 16.84,
+        "mismatches": 0
+      },
+      {
+        "type": "q8",
+        "m": 48,
+        "k": 5120,
+        "batch": 8,
+        "round": 3,
+        "geometry": "w16r2bBatch",
+        "ms": 0.017482,
+        "GBps": 14.94,
+        "mismatches": 0
+      }
+    ],
+    "maintained_narrow_probe_csv": "type,m,k,batch,round,geometry,ms,GBps,mismatches\nq8,48,5120,8,0,rows2,0.019188,13.61,0\nq8,48,5120,8,0,token_rows,0.005698,45.83,0\nq8,48,5120,8,0,rows3,0.019834,13.17,0\nq8,48,5120,8,1,rows3,0.019808,13.18,0\nq8,48,5120,8,1,token_rows,0.005539,47.14,0\nq8,48,5120,8,1,rows2,0.017555,14.87,0\nq8,48,5120,8,2,rows2,0.017481,14.94,0\nq8,48,5120,8,2,token_rows,0.005534,47.18,0\nq8,48,5120,8,2,rows3,0.019868,13.14,0\nq8,48,5120,8,3,rows3,0.019868,13.14,0\nq8,48,5120,8,3,token_rows,0.005450,47.91,0\nq8,48,5120,8,3,rows2,0.017471,14.95,0\n"
+  },
+  "compiler_resources": [
+    {
+      "kernel": "_ZN4gufo3hip31QwenDecodeOnlineAttentionKernelEPKfS2_S2_S2_Pfjjjjj",
+      "vgprs": 47,
+      "waves_per_simd": 16,
+      "vgpr_spills": 0,
+      "lds_bytes": 0
+    },
+    {
+      "kernel": "_ZN4gufo3hip35QwenDecodeOnlineAttentionHalfKernelEPKfS2_PK6__halfS5_Pfjjjjj",
+      "vgprs": 45,
+      "waves_per_simd": 16,
+      "vgpr_spills": 0,
+      "lds_bytes": 0
+    },
+    {
+      "kernel": "_ZN4gufo3hip39QwenDecodeSplitKAttentionPartialsKernelEPKfS2_S2_Pfjjjjjj",
+      "vgprs": 48,
+      "waves_per_simd": 16,
+      "vgpr_spills": 0,
+      "lds_bytes": 0
+    },
+    {
+      "kernel": "_ZN4gufo3hip43QwenDecodeSplitKAttentionHalfPartialsKernelEPKfPK6__halfS5_Pfjjjjjj",
+      "vgprs": 46,
+      "waves_per_simd": 16,
+      "vgpr_spills": 0,
+      "lds_bytes": 0
+    },
+    {
+      "kernel": "_ZN4gufo3hip37QwenDecodeSplitKAttentionReduceKernelEPKfS2_Pfjj",
+      "vgprs": 32,
+      "waves_per_simd": 16,
+      "vgpr_spills": 0,
+      "lds_bytes": 0
+    },
+    {
+      "kernel": "_ZN4gufo3hip36SmallBatchQ8_0ExactFp32VecGEMMKernelILj8ELm1ELm1EEEvPKvPKfPfmm",
+      "vgprs": 29,
+      "waves_per_simd": 16,
+      "vgpr_spills": 0,
+      "lds_bytes": 4608
+    }
+  ],
+  "release_chat": {
+    "workload": "cpp_ring_buffer chat, 128 generated tokens, fixed seven proposals, two interleaved repetitions; timing includes prompt processing. Short development probe, not a full corpus or depth sweep.",
+    "binaries": {
+      "baseline": {
+        "path": "/nix/store/npyvd19qbagdlqcl5kd6dmy0pga35200-gufo-e17744a-dirty/bin/gufo",
+        "sha256": "1604d99f06d4af6df7c24542c8d3a66f52aa6afe4a7b8d11dc102abd84efc95d"
+      },
+      "candidate": {
+        "path": "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+        "sha256": "f2c6efe0e7b62ef1310fbe640e7b74563e7758faf5048b523aba80a1a1884c37"
+      }
+    },
+    "references": {
+      "q4": {
+        "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be greater than zero\");\n\n    std::array<T, Capacity> data_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of elements",
+        "tokens": 128,
+        "seconds": 11.4264,
+        "tps": 11.2021,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7"
+      },
+      "q8": {
+        "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be at least 1\");\n\n    std::array<T, Capacity> storage_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of",
+        "tokens": 128,
+        "seconds": 18.51,
+        "tps": 6.92,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8"
+      }
+    },
+    "results": [
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.07293,
+        "tps": 31.427,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.631902,
+        "drafted": 163,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.93798,
+        "tps": 32.504,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.631902,
+        "drafted": 163,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.77594,
+        "tps": 33.8988,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.67209,
+        "tps": 34.8575,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.94103,
+        "tps": 32.4789,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.81558,
+        "tps": 33.5467,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.75,
+        "tps": 26.92,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.60355,
+        "drafted": 169,
+        "accepted": 102,
+        "steps": 25
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.59,
+        "tps": 27.87,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.60355,
+        "drafted": 169,
+        "accepted": 102,
+        "steps": 25
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.62,
+        "tps": 27.71,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.46,
+        "tps": 28.68,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "variant": "baseline",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.78,
+        "tps": 26.75,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "variant": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.64,
+        "tps": 27.57,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.82497,
+        "tps": 33.4643,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.94986,
+        "tps": 32.4062,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.95467,
+        "tps": 32.3668,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.631902,
+        "drafted": 163,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.09403,
+        "tps": 31.2651,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.631902,
+        "drafted": 163,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.67973,
+        "tps": 34.7851,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.80998,
+        "tps": 33.596,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "acceptance": 0.704698,
+        "drafted": 149,
+        "accepted": 105,
+        "steps": 22
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.63,
+        "tps": 27.62,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.8,
+        "tps": 26.69,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.6,
+        "tps": 27.85,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.60355,
+        "drafted": 169,
+        "accepted": 102,
+        "steps": 25
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.76,
+        "tps": 26.91,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.60355,
+        "drafted": 169,
+        "accepted": 102,
+        "steps": 25
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "variant": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.46,
+        "tps": 28.69,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "variant": "baseline",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.62,
+        "tps": 27.74,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "acceptance": 0.635802,
+        "drafted": 162,
+        "accepted": 103,
+        "steps": 24
+      }
+    ]
+  },
+  "release_chat_summary": [
+    {
+      "target": "q4",
+      "draft": "q4",
+      "median_tok_s": {
+        "baseline": 31.346049999999998,
+        "candidate": 32.4354
+      },
+      "gain_percent": 3.475238506925127
+    },
+    {
+      "target": "q4",
+      "draft": "q8",
+      "median_tok_s": {
+        "baseline": 33.7474,
+        "candidate": 34.8213
+      },
+      "gain_percent": 3.1821710709565743
+    },
+    {
+      "target": "q4",
+      "draft": "bf16",
+      "median_tok_s": {
+        "baseline": 32.44255,
+        "candidate": 33.5055
+      },
+      "gain_percent": 3.2764070641795984
+    },
+    {
+      "target": "q8",
+      "draft": "q4",
+      "median_tok_s": {
+        "baseline": 26.915,
+        "candidate": 27.86
+      },
+      "gain_percent": 3.5110533159947943
+    },
+    {
+      "target": "q8",
+      "draft": "q8",
+      "median_tok_s": {
+        "baseline": 27.725,
+        "candidate": 28.685000000000002
+      },
+      "gain_percent": 3.4625788999098406
+    },
+    {
+      "target": "q8",
+      "draft": "bf16",
+      "median_tok_s": {
+        "baseline": 26.72,
+        "candidate": 27.595
+      },
+      "gain_percent": 3.2747005988023936
+    }
+  ],
+  "release_pp2048_tg128_depth0": {
+    "schema": 1,
+    "workload": "Final release measurements: C1, pp2048, tg128, depth0. One timed repetition after warmup for each of the six pairings; every token trace must equal prior qualified AR. Throughput comparison uses the separate interleaved chat probe. Not a depth sweep or variance estimate.",
+    "binaries": {
+      "baseline": {
+        "path": "/nix/store/npyvd19qbagdlqcl5kd6dmy0pga35200-gufo-e17744a-dirty/bin/gufo",
+        "sha256": "1604d99f06d4af6df7c24542c8d3a66f52aa6afe4a7b8d11dc102abd84efc95d"
+      },
+      "candidate": {
+        "path": "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+        "sha256": "f2c6efe0e7b62ef1310fbe640e7b74563e7758faf5048b523aba80a1a1884c37"
+      }
+    },
+    "artifacts": {
+      "binary": {
+        "path": "/nix/store/ksksafm23lkmlac06jvbv01hb8b7kgvy-gufo-340c33e-dirty/bin/gufo",
+        "bytes": 15950576,
+        "sha256": "5bb22ed04dc15380efa4c45f7e6e46ec9d12c1f6497628c6f99fa2658bd0994a"
+      },
+      "target_q4": {
+        "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "bytes": 17559178144,
+        "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+      },
+      "target_q8": {
+        "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "bytes": 31457991680,
+        "sha256": "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
+      },
+      "draft_q4": {
+        "path": "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+        "bytes": 1143006816,
+        "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+      },
+      "draft_q8": {
+        "path": "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf",
+        "bytes": 2056414816,
+        "sha256": "c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e"
+      },
+      "draft_bf16": {
+        "path": "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf",
+        "bytes": 3860293216,
+        "sha256": "26d47ca20ab07688327a63d912acad222d924eaaa92a980cc488de3c67e736bc"
+      },
+      "baseline_binary": {
+        "path": "/nix/store/ar1hc4cavzaw8d8hq8chgbipq3zj1249-gufo-3baecbb-dirty/bin/gufo",
+        "bytes": 15923080,
+        "sha256": "86282fc1c22b9ab07432961f139d5b05f45c3bf8376ebd7e40a873f3cc3a8e11"
+      }
+    },
+    "results": [
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "candidate",
+        "command": [
+          "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "0",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        ],
+        "wall_seconds": 19.54512061200512,
+        "rows": [
+          {
+            "test": "pp2048",
+            "tokens_per_second": 403.14
+          },
+          {
+            "test": "tg128-dflash2",
+            "tokens_per_second": 20.92
+          }
+        ],
+        "traces": [
+          {
+            "depth": 0,
+            "count": 128,
+            "sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+          }
+        ]
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "variant": "candidate",
+        "command": [
+          "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "0",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf"
+        ],
+        "wall_seconds": 19.695187605000683,
+        "rows": [
+          {
+            "test": "pp2048",
+            "tokens_per_second": 398.56
+          },
+          {
+            "test": "tg128-dflash2",
+            "tokens_per_second": 17.64
+          }
+        ],
+        "traces": [
+          {
+            "depth": 0,
+            "count": 128,
+            "sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+          }
+        ]
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "variant": "candidate",
+        "command": [
+          "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "0",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf"
+        ],
+        "wall_seconds": 20.79874553499394,
+        "rows": [
+          {
+            "test": "pp2048",
+            "tokens_per_second": 397.38
+          },
+          {
+            "test": "tg128-dflash2",
+            "tokens_per_second": 16.85
+          }
+        ],
+        "traces": [
+          {
+            "depth": 0,
+            "count": 128,
+            "sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+          }
+        ]
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "candidate",
+        "command": [
+          "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "0",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        ],
+        "wall_seconds": 18.19279608099896,
+        "rows": [
+          {
+            "test": "pp2048",
+            "tokens_per_second": 464.8
+          },
+          {
+            "test": "tg128-dflash2",
+            "tokens_per_second": 22.9
+          }
+        ],
+        "traces": [
+          {
+            "depth": 0,
+            "count": 128,
+            "sha256": "6971f2de5116be10e2da362bed7115a2148936e0b88f5f9f900d3f474ff786c7"
+          }
+        ]
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "variant": "candidate",
+        "command": [
+          "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "0",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf"
+        ],
+        "wall_seconds": 17.141127052003867,
+        "rows": [
+          {
+            "test": "pp2048",
+            "tokens_per_second": 464.14
+          },
+          {
+            "test": "tg128-dflash2",
+            "tokens_per_second": 22.73
+          }
+        ],
+        "traces": [
+          {
+            "depth": 0,
+            "count": 128,
+            "sha256": "6971f2de5116be10e2da362bed7115a2148936e0b88f5f9f900d3f474ff786c7"
+          }
+        ]
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "variant": "candidate",
+        "command": [
+          "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "0",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf"
+        ],
+        "wall_seconds": 18.092310318999807,
+        "rows": [
+          {
+            "test": "pp2048",
+            "tokens_per_second": 466.71
+          },
+          {
+            "test": "tg128-dflash2",
+            "tokens_per_second": 21.82
+          }
+        ],
+        "traces": [
+          {
+            "depth": 0,
+            "count": 128,
+            "sha256": "6971f2de5116be10e2da362bed7115a2148936e0b88f5f9f900d3f474ff786c7"
+          }
+        ]
+      }
+    ]
+  },
+  "release_pp2048_tg128_depth4096": {
+    "schema": 1,
+    "workload": "Short release A/B: C1, pp2048, tg128, depth4096 only, Q4 draft with both targets. One timed repetition after warmup per invocation; alternate release order across pairings. Every baseline/candidate speculative trace must equal prior qualified AR token IDs. Not a depth sweep or variance estimate.",
+    "binaries": {
+      "baseline": {
+        "path": "/nix/store/npyvd19qbagdlqcl5kd6dmy0pga35200-gufo-e17744a-dirty/bin/gufo",
+        "sha256": "1604d99f06d4af6df7c24542c8d3a66f52aa6afe4a7b8d11dc102abd84efc95d"
+      },
+      "candidate": {
+        "path": "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+        "sha256": "f2c6efe0e7b62ef1310fbe640e7b74563e7758faf5048b523aba80a1a1884c37"
+      }
+    },
+    "artifacts": {
+      "binary": {
+        "path": "/nix/store/ksksafm23lkmlac06jvbv01hb8b7kgvy-gufo-340c33e-dirty/bin/gufo",
+        "bytes": 15950576,
+        "sha256": "5bb22ed04dc15380efa4c45f7e6e46ec9d12c1f6497628c6f99fa2658bd0994a"
+      },
+      "target_q4": {
+        "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "bytes": 17559178144,
+        "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+      },
+      "target_q8": {
+        "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "bytes": 31457991680,
+        "sha256": "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
+      },
+      "draft_q4": {
+        "path": "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+        "bytes": 1143006816,
+        "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+      },
+      "draft_q8": {
+        "path": "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf",
+        "bytes": 2056414816,
+        "sha256": "c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e"
+      },
+      "draft_bf16": {
+        "path": "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf",
+        "bytes": 3860293216,
+        "sha256": "26d47ca20ab07688327a63d912acad222d924eaaa92a980cc488de3c67e736bc"
+      },
+      "baseline_binary": {
+        "path": "/nix/store/ar1hc4cavzaw8d8hq8chgbipq3zj1249-gufo-3baecbb-dirty/bin/gufo",
+        "bytes": 15923080,
+        "sha256": "86282fc1c22b9ab07432961f139d5b05f45c3bf8376ebd7e40a873f3cc3a8e11"
+      }
+    },
+    "results": [
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "candidate",
+        "command": [
+          "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "4096",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        ],
+        "wall_seconds": 33.16484409000259,
+        "rows": [
+          {
+            "test": "pp2048 @ d4096",
+            "tokens_per_second": 384.74
+          },
+          {
+            "test": "tg128 @ d4096-dflash2",
+            "tokens_per_second": 13.95
+          }
+        ],
+        "traces": [
+          {
+            "depth": 4096,
+            "count": 128,
+            "sha256": "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+          }
+        ]
+      },
+      {
+        "target": "q4",
+        "draft": "q4",
+        "variant": "baseline",
+        "command": [
+          "/nix/store/npyvd19qbagdlqcl5kd6dmy0pga35200-gufo-e17744a-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "4096",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        ],
+        "wall_seconds": 33.36960651300615,
+        "rows": [
+          {
+            "test": "pp2048 @ d4096",
+            "tokens_per_second": 383.94
+          },
+          {
+            "test": "tg128 @ d4096-dflash2",
+            "tokens_per_second": 13.63
+          }
+        ],
+        "traces": [
+          {
+            "depth": 4096,
+            "count": 128,
+            "sha256": "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+          }
+        ]
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "candidate",
+        "command": [
+          "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "4096",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        ],
+        "wall_seconds": 29.612145684004645,
+        "rows": [
+          {
+            "test": "pp2048 @ d4096",
+            "tokens_per_second": 444.3
+          },
+          {
+            "test": "tg128 @ d4096-dflash2",
+            "tokens_per_second": 15.76
+          }
+        ],
+        "traces": [
+          {
+            "depth": 4096,
+            "count": 128,
+            "sha256": "e7ded1d4e8f928e73666cb7841aac148f88fffab79cd5310729f64de23a88f69"
+          }
+        ]
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "variant": "baseline",
+        "command": [
+          "/nix/store/npyvd19qbagdlqcl5kd6dmy0pga35200-gufo-e17744a-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "4096",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "--verbose",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        ],
+        "wall_seconds": 29.761497282001073,
+        "rows": [
+          {
+            "test": "pp2048 @ d4096",
+            "tokens_per_second": 445.44
+          },
+          {
+            "test": "tg128 @ d4096-dflash2",
+            "tokens_per_second": 15.41
+          }
+        ],
+        "traces": [
+          {
+            "depth": 4096,
+            "count": 128,
+            "sha256": "e7ded1d4e8f928e73666cb7841aac148f88fffab79cd5310729f64de23a88f69"
+          }
+        ]
+      }
+    ]
+  },
+  "profiles": {
+    "workload": "One diagnostic profile per target, Q4_K_M draft, cpp_ring_buffer chat, 128 tokens. TG begins at the first draft embedding; excludes initial prefill and draft injection. Executors are separated by HIP stream. Profile timings are not throughput estimates.",
+    "binary": {
+      "path": "/nix/store/46vqga7gday2qnlihi5dkrzkwqy4gcj1-gufo-8bfd8cd-dirty/bin/gufo",
+      "sha256": "f2c6efe0e7b62ef1310fbe640e7b74563e7758faf5048b523aba80a1a1884c37"
+    },
+    "reports": {
+      "q4": {
+        "tokens": 128,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "verification_steps": 24,
+        "gpu_kernel_ms": {
+          "draft": 390.68839900000006,
+          "target": 3296.786438000007
+        },
+        "gpu_ms_per_step": {
+          "draft": 16.27868329166667,
+          "target": 137.36610158333363
+        },
+        "top_kernels": [
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 1351.0485230000013,
+            "count": 4393
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)23, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 407.16898099999975,
+            "count": 1058
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 277.64227200000016,
+            "count": 1127
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 200.882022,
+            "count": 1127
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)23, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 186.69719200000017,
+            "count": 552
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 172.14470100000008,
+            "count": 437
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 131.81548800000002,
+            "count": 23
+          },
+          {
+            "domain": "draft",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 7ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 119.47124900000001,
+            "count": 23
+          },
+          {
+            "domain": "target",
+            "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+            "ms": 84.11512999999997,
+            "count": 1152
+          },
+          {
+            "domain": "draft",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 83.23690199999999,
+            "count": 230
+          },
+          {
+            "domain": "target",
+            "kernel": "__amd_rocclr_copyBuffer",
+            "ms": 77.25424499999998,
+            "count": 272
+          },
+          {
+            "domain": "draft",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 62.009816,
+            "count": 529
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)20, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 49.24062999999999,
+            "count": 138
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 3ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 47.637538000000006,
+            "count": 191
+          },
+          {
+            "domain": "target",
+            "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+            "ms": 45.65604099999998,
+            "count": 672
+          },
+          {
+            "domain": "target",
+            "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+            "ms": 40.62365499999991,
+            "count": 3096
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)11, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 31.835547000000012,
+            "count": 69
+          },
+          {
+            "domain": "target",
+            "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+            "ms": 30.17206900000002,
+            "count": 384
+          }
+        ]
+      },
+      "q8": {
+        "tokens": 128,
+        "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+        "verification_steps": 25,
+        "gpu_kernel_ms": {
+          "draft": 424.39392499999985,
+          "target": 3811.840086000017
+        },
+        "gpu_ms_per_step": {
+          "draft": 16.975756999999994,
+          "target": 152.4736034400007
+        },
+        "top_kernels": [
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 2090.8692310000015,
+            "count": 6912
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 3ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 674.1599729999997,
+            "count": 1536
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 317.4841929999998,
+            "count": 792
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 1ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 224.23796000000002,
+            "count": 384
+          },
+          {
+            "domain": "draft",
+            "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 7ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 143.42515600000002,
+            "count": 24
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 2ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 108.964263,
+            "count": 352
+          },
+          {
+            "domain": "target",
+            "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+            "ms": 89.27349300000006,
+            "count": 1200
+          },
+          {
+            "domain": "draft",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 86.535879,
+            "count": 240
+          },
+          {
+            "domain": "target",
+            "kernel": "__amd_rocclr_copyBuffer",
+            "ms": 79.10504900000001,
+            "count": 282
+          },
+          {
+            "domain": "draft",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 64.486634,
+            "count": 552
+          },
+          {
+            "domain": "target",
+            "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+            "ms": 48.26979400000002,
+            "count": 768
+          },
+          {
+            "domain": "target",
+            "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+            "ms": 40.89584199999998,
+            "count": 3225
+          },
+          {
+            "domain": "target",
+            "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+            "ms": 31.857909999999972,
+            "count": 400
+          },
+          {
+            "domain": "draft",
+            "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 29.575584,
+            "count": 328
+          },
+          {
+            "domain": "target",
+            "kernel": "gufo::hip::SSMConvKernel(float const*, float const*, float*, float*, unsigned long, unsigned int, gufo::hip::SsmReplayCapture, unsigned int, unsigned long)",
+            "ms": 27.313558999999977,
+            "count": 2160
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 2ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 21.824393999999998,
+            "count": 49
+          },
+          {
+            "domain": "draft",
+            "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 19.300554,
+            "count": 48
+          },
+          {
+            "domain": "target",
+            "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<8u, 1ul, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "ms": 18.389801000000094,
+            "count": 2400
+          }
+        ]
+      }
+    }
+  },
+  "profile_rollup": {
+    "q4": {
+      "baseline": {
+        "target_components_ms": {
+          "normalization_and_residual": 53.37919099999999,
+          "ssm_controls": 49.36255599999996,
+          "qk_norm_rope_cache": 11.920121000000005,
+          "attention": 139.74759200000022
+        },
+        "target_component_launches": {
+          "normalization_and_residual": 6168,
+          "ssm_controls": 2304,
+          "qk_norm_rope_cache": 2992,
+          "attention": 2992
+        },
+        "tg_gpu_busy_ms": 3784.613229,
+        "tg_gpu_span_ms": 3903.510496
+      },
+      "candidate": {
+        "target_components_ms": {
+          "normalization_and_residual": 54.1059049999998,
+          "ssm_controls": 17.412326000000036,
+          "qk_norm_rope_cache": 2.907968999999997,
+          "attention": 30.17206900000002
+        },
+        "target_component_launches": {
+          "normalization_and_residual": 6168,
+          "ssm_controls": 2304,
+          "qk_norm_rope_cache": 384,
+          "attention": 384
+        },
+        "tg_gpu_busy_ms": 3661.912521,
+        "tg_gpu_span_ms": 3772.639336
+      }
+    },
+    "q8": {
+      "baseline": {
+        "target_components_ms": {
+          "normalization_and_residual": 52.1197639999998,
+          "ssm_controls": 48.58015399999997,
+          "qk_norm_rope_cache": 11.001778999999985,
+          "attention": 147.6089730000003
+        },
+        "target_component_launches": {
+          "normalization_and_residual": 6425,
+          "ssm_controls": 2400,
+          "qk_norm_rope_cache": 3104,
+          "attention": 3104
+        },
+        "tg_gpu_busy_ms": 4361.03487,
+        "tg_gpu_span_ms": 4476.189838
+      },
+      "candidate": {
+        "target_components_ms": {
+          "normalization_and_residual": 53.11673999999994,
+          "ssm_controls": 18.389801000000094,
+          "qk_norm_rope_cache": 2.676813999999999,
+          "attention": 31.857909999999972
+        },
+        "target_component_launches": {
+          "normalization_and_residual": 6425,
+          "ssm_controls": 2400,
+          "qk_norm_rope_cache": 400,
+          "attention": 400
+        },
+        "tg_gpu_busy_ms": 4210.849374,
+        "tg_gpu_span_ms": 4311.579078
+      }
+    }
+  },
+  "rejected_residual_rmsnorm_fusion": {
+    "decision": "Removed production kernel/API and dedicated test extension. Standalone improvement reversed in full-model normalization+residual GPU time (about 6\u20138% slower).",
+    "exact": true,
+    "microbenchmarks": [
+      {
+        "rows": 1,
+        "rep": 0,
+        "original_ms": 0.009846,
+        "fused_ms": 0.00848
+      },
+      {
+        "rows": 1,
+        "rep": 1,
+        "original_ms": 0.009988,
+        "fused_ms": 0.008466
+      },
+      {
+        "rows": 1,
+        "rep": 2,
+        "original_ms": 0.009904,
+        "fused_ms": 0.008432
+      },
+      {
+        "rows": 2,
+        "rep": 0,
+        "original_ms": 0.009957,
+        "fused_ms": 0.008347
+      },
+      {
+        "rows": 2,
+        "rep": 1,
+        "original_ms": 0.009797,
+        "fused_ms": 0.008495
+      },
+      {
+        "rows": 2,
+        "rep": 2,
+        "original_ms": 0.010121,
+        "fused_ms": 0.008392
+      },
+      {
+        "rows": 7,
+        "rep": 0,
+        "original_ms": 0.010334,
+        "fused_ms": 0.008758
+      },
+      {
+        "rows": 7,
+        "rep": 1,
+        "original_ms": 0.010216,
+        "fused_ms": 0.008755
+      },
+      {
+        "rows": 7,
+        "rep": 2,
+        "original_ms": 0.010378,
+        "fused_ms": 0.008744
+      },
+      {
+        "rows": 8,
+        "rep": 0,
+        "original_ms": 0.011652,
+        "fused_ms": 0.008766
+      },
+      {
+        "rows": 8,
+        "rep": 1,
+        "original_ms": 0.011591,
+        "fused_ms": 0.008746
+      },
+      {
+        "rows": 8,
+        "rep": 2,
+        "original_ms": 0.011672,
+        "fused_ms": 0.008724
+      },
+      {
+        "rows": 16,
+        "rep": 0,
+        "original_ms": 0.010505,
+        "fused_ms": 0.008845
+      },
+      {
+        "rows": 16,
+        "rep": 1,
+        "original_ms": 0.010648,
+        "fused_ms": 0.008822
+      },
+      {
+        "rows": 16,
+        "rep": 2,
+        "original_ms": 0.010619,
+        "fused_ms": 0.008806
+      },
+      {
+        "rows": 128,
+        "rep": 0,
+        "original_ms": 0.024506,
+        "fused_ms": 0.019926
+      },
+      {
+        "rows": 128,
+        "rep": 1,
+        "original_ms": 0.025219,
+        "fused_ms": 0.020028
+      },
+      {
+        "rows": 128,
+        "rep": 2,
+        "original_ms": 0.025423,
+        "fused_ms": 0.020118
+      }
+    ],
+    "profiles": {
+      "q4": {
+        "baseline": {
+          "residual_norm_pair_count": 2952,
+          "residual_norm_pair_ms": 50.895795,
+          "median_pair_ms": 0.016791,
+          "kernels": [
+            {
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 40.3381759999999,
+              "count": 3096
+            },
+            {
+              "kernel": "gufo::hip::BatchedResidualAddKernel(float const*, float const*, float*, unsigned long)",
+              "ms": 13.041015000000012,
+              "count": 3072
+            },
+            {
+              "kernel": "gufo::hip::(anonymous namespace)::FusedQKNormRoPEKvWriteKernel(float const*, float const*, float const*, float const*, float const*, float*, float*, float*, float*, __half*, __half*, unsigned int, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, float, float)",
+              "ms": 11.920121000000005,
+              "count": 2992
+            },
+            {
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 139.74759200000022,
+              "count": 2992
+            }
+          ]
+        },
+        "candidate": {
+          "residual_norm_pair_count": 1536,
+          "residual_norm_pair_ms": 29.273769,
+          "median_pair_ms": 0.017793,
+          "kernels": [
+            {
+              "kernel": "void gufo::hip::BatchedRMSNormKernel<false>(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float, float const*, float*)",
+              "ms": 21.48593199999997,
+              "count": 1560
+            },
+            {
+              "kernel": "void gufo::hip::BatchedRMSNormKernel<true>(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float, float const*, float*)",
+              "ms": 29.273768999999987,
+              "count": 1536
+            },
+            {
+              "kernel": "gufo::hip::BatchedResidualAddKernel(float const*, float const*, float*, unsigned long)",
+              "ms": 5.833146,
+              "count": 1536
+            },
+            {
+              "kernel": "gufo::hip::BatchedFusedQKNormRoPEKvWriteKernel(float const*, float const*, float const*, float const*, float const*, float*, float*, float*, float*, __half*, __half*, unsigned int, unsigned int, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, float, float)",
+              "ms": 2.9252779999999987,
+              "count": 384
+            },
+            {
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 30.307416999999983,
+              "count": 384
+            }
+          ]
+        }
+      },
+      "q8": {
+        "baseline": {
+          "residual_norm_pair_count": 3075,
+          "residual_norm_pair_ms": 49.752272,
+          "median_pair_ms": 0.01615,
+          "kernels": [
+            {
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 40.10340400000002,
+              "count": 3225
+            },
+            {
+              "kernel": "gufo::hip::BatchedResidualAddKernel(float const*, float const*, float*, unsigned long)",
+              "ms": 12.016359999999997,
+              "count": 3200
+            },
+            {
+              "kernel": "gufo::hip::(anonymous namespace)::FusedQKNormRoPEKvWriteKernel(float const*, float const*, float const*, float const*, float const*, float*, float*, float*, float*, __half*, __half*, unsigned int, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, float, float)",
+              "ms": 11.001778999999985,
+              "count": 3104
+            },
+            {
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 147.6089730000003,
+              "count": 3104
+            }
+          ]
+        },
+        "candidate": {
+          "residual_norm_pair_count": 1600,
+          "residual_norm_pair_ms": 29.253878,
+          "median_pair_ms": 0.018234,
+          "kernels": [
+            {
+              "kernel": "void gufo::hip::BatchedRMSNormKernel<false>(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float, float const*, float*)",
+              "ms": 21.04524899999999,
+              "count": 1625
+            },
+            {
+              "kernel": "void gufo::hip::BatchedRMSNormKernel<true>(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float, float const*, float*)",
+              "ms": 29.253878000000025,
+              "count": 1600
+            },
+            {
+              "kernel": "gufo::hip::BatchedResidualAddKernel(float const*, float const*, float*, unsigned long)",
+              "ms": 6.107763000000005,
+              "count": 1600
+            },
+            {
+              "kernel": "gufo::hip::BatchedFusedQKNormRoPEKvWriteKernel(float const*, float const*, float const*, float const*, float const*, float*, float*, float*, float*, __half*, __half*, unsigned int, unsigned int, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, float, float)",
+              "ms": 2.6870180000000006,
+              "count": 400
+            },
+            {
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 31.718565,
+              "count": 400
+            }
+          ]
+        }
+      }
+    }
+  },
+  "limits": [
+    "Chat uses two interleaved repetitions of one 128-token C++ prompt, not a capability corpus.",
+    "Final standard rates use one timed repetition after warmup. The focused 4K A/B uses the Q4 draft with each target. Other current depths remain TODO.",
+    "Prefill has no material gain. C>1 and MTP qualification, original target-source comparison and controller experiments remain separate work."
+  ]
+}

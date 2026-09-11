@@ -134,6 +134,9 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
                                               const float* __restrict__ x,
                                               float* __restrict__ y,
                                               std::size_t m, std::size_t k) {
+  // A second grid dimension distributes narrow projections across tokens.
+  x += static_cast<std::size_t>(blockIdx.y) * Batch * k;
+  y += static_cast<std::size_t>(blockIdx.y) * Batch * m;
   constexpr std::size_t kBlocksPerTile = 32;
   constexpr std::size_t kVectorsPerBlock = kQ8_0BlockSize / 4;
   constexpr std::size_t kStride = kQ8_0BlockSize + 4;

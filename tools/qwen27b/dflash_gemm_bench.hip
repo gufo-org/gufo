@@ -183,6 +183,12 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                            <<<(rows + 31) / 32, 512>>>(
                                w, input.Get(), output.Get(), rows, columns);
                      }},
+                    {"token_rows",
+                     [&](const void* w) {
+                       SmallBatchQ8_0ExactFp32VecGEMMKernel<8, 1, 1>
+                           <<<dim3((rows + 7) / 8, Batch), 256>>>(
+                               w, input.Get(), output.Get(), rows, columns);
+                     }},
                     {"rows3", [&](const void* w) {
                        SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, 3>
                            <<<(rows + 47) / 48, 512>>>(

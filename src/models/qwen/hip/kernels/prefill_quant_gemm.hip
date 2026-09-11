@@ -2106,11 +2106,17 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
   if ((type == core::GgmlType::kQ8_0 || type == core::GgmlType::kQ8_K) &&
       batch >= 1 && batch <= 8) {
     const dim3 block(static_cast<unsigned int>(kWarp * kWarpsPerBlock));
-    // The LDS-staged route streams each weight row once for the whole batch, so
-    // it is the fastest option at every width. Narrow batches used to fall back
-    // to per-width kernels that re-read the weight stream, which made adaptive
-    // draft widths far more expensive than width 8.
+    // Large projections share each weight row across the batch. Narrow SSM
+    // projections instead distribute token rows across more workgroups.
     if (type == core::GgmlType::kQ8_0) {
+      // The 48-output SSM controls fit in cache. Independent token rows
+      // expose more workgroups than the large-matrix shared-weight geometry.
+      if (m == 48 && k == 5120) {
+        SmallBatchQ8_0ExactFp32VecGEMMKernel<8, 1, 1>
+            <<<dim3((m + 7) / 8, static_cast<unsigned>(batch)), 256, 0,
+               stream>>>(w, fp32_x, y, m, k);
+        return;
+      }
       constexpr std::size_t kVecWarpsPerBlock = 16;
       // Reuse the long FFN-down input across three output rows.
       if (batch == 8 && m == 5120 && k == 17408) {

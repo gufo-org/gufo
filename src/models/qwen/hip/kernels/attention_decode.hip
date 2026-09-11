@@ -284,6 +284,15 @@ __launch_bounds__(32) __global__ void QwenDecodeOnlineAttentionKernel(
   constexpr std::uint32_t vector_width = head_dim / 4;
   constexpr std::uint32_t vectors_per_lane = vector_width / 32;
 
+  const std::size_t row_offset =
+      static_cast<std::size_t>(blockIdx.y) * num_heads * head_dim;
+  q += row_offset;
+  if (gate != nullptr) {
+    gate += row_offset;
+  }
+  out_context += row_offset;
+  pos += blockIdx.y;
+
   const std::uint32_t head = blockIdx.x;
   const std::uint32_t lane = threadIdx.x;
   if (head >= num_heads || lane >= 32) {
@@ -380,6 +389,15 @@ __launch_bounds__(32) __global__ void QwenDecodeOnlineAttentionHalfKernel(
   constexpr std::uint32_t vector_width = head_dim / 4;
   constexpr std::uint32_t vectors_per_lane = vector_width / 32;
 
+  const std::size_t row_offset =
+      static_cast<std::size_t>(blockIdx.y) * num_heads * head_dim;
+  q += row_offset;
+  if (gate != nullptr) {
+    gate += row_offset;
+  }
+  out_context += row_offset;
+  pos += blockIdx.y;
+
   const std::uint32_t head = blockIdx.x;
   const std::uint32_t lane = threadIdx.x;
   if (head >= num_heads || lane >= 32) {
@@ -475,6 +493,12 @@ __launch_bounds__(32) __global__ void QwenDecodeSplitKAttentionPartialsKernel(
   constexpr std::uint32_t head_dim = 256;
   constexpr std::uint32_t vector_width = head_dim / 4;
   constexpr std::uint32_t vectors_per_lane = vector_width / 32;
+
+  const std::size_t row = blockIdx.z;
+  q += row * num_heads * head_dim;
+  scratch += row * num_heads * detail::kSplitKDecodeAttentionMaxSplits *
+             (head_dim + 2);
+  pos += blockIdx.z;
 
   const std::uint32_t head = blockIdx.x;
   const std::uint32_t split = blockIdx.y;
@@ -573,6 +597,12 @@ __launch_bounds__(32) __global__
   constexpr std::uint32_t vector_width = head_dim / 4;
   constexpr std::uint32_t vectors_per_lane = vector_width / 32;
 
+  const std::size_t row = blockIdx.z;
+  q += row * num_heads * head_dim;
+  scratch += row * num_heads * detail::kSplitKDecodeAttentionMaxSplits *
+             (head_dim + 2);
+  pos += blockIdx.z;
+
   const std::uint32_t head = blockIdx.x;
   const std::uint32_t split = blockIdx.y;
   const std::uint32_t lane = threadIdx.x;
@@ -667,6 +697,12 @@ __launch_bounds__(32) __global__ void QwenDecodeSplitKAttentionReduceKernel(
   constexpr std::uint32_t vector_width = head_dim / 4;
   constexpr std::uint32_t vectors_per_lane = vector_width / 32;
   constexpr std::size_t max_splits = detail::kSplitKDecodeAttentionMaxSplits;
+
+  const std::size_t row = blockIdx.y;
+  if (gate != nullptr)
+    gate += row * num_heads * head_dim;
+  out_context += row * num_heads * head_dim;
+  scratch += row * num_heads * max_splits * (head_dim + 2);
 
   const std::uint32_t head = blockIdx.x;
   const std::uint32_t lane = threadIdx.x;
@@ -812,6 +848,70 @@ void LaunchAttention(const float* q, const float* k, const float* v,
           static_cast<const __half*>(v_cache_f16), out_context, layer_idx, pos,
           max_context, num_heads, num_kv_heads, head_dim);
     }
+  }
+}
+
+void LaunchCausalDecodeAttention(
+    const float* q, const float* gate, float* k_cache, float* v_cache,
+    void* k_cache_f16, void* v_cache_f16, float* out_context,
+    std::uint32_t layer_idx, std::uint32_t start_pos, std::size_t batch_size,
+    std::uint32_t max_context, std::uint32_t num_heads,
+    std::uint32_t num_kv_heads, std::uint32_t head_dim, hipStream_t stream,
+    std::span<float> scratch) {
+  const std::size_t row_scratch =
+      detail::DecodeAttentionScratchElements(num_heads, head_dim);
+  float* const split_k_scratch =
+      scratch.size() >= row_scratch ? scratch.data() : nullptr;
+  if (batch_size > 1 && scratch.size() / batch_size >= row_scratch &&
+      split_k_scratch != nullptr &&
+      detail::IsSplitKDecodeAttentionSupported(
+          static_cast<std::size_t>(start_pos) + 1, num_heads, num_kv_heads,
+          head_dim)) {
+    const auto splits = detail::SelectDecodeAttentionSplitCount(
+        static_cast<std::size_t>(start_pos) + 1);
+    const dim3 grid(num_heads, splits, static_cast<unsigned>(batch_size));
+    if (k_cache != nullptr && v_cache != nullptr) {
+      QwenDecodeSplitKAttentionPartialsKernel<<<grid, 32, 0, stream>>>(
+          q, k_cache, v_cache, split_k_scratch, layer_idx, start_pos,
+          max_context, num_heads, num_kv_heads, splits);
+    } else {
+      QwenDecodeSplitKAttentionHalfPartialsKernel<<<grid, 32, 0, stream>>>(
+          q, static_cast<const __half*>(k_cache_f16),
+          static_cast<const __half*>(v_cache_f16), split_k_scratch, layer_idx,
+          start_pos, max_context, num_heads, num_kv_heads, splits);
+    }
+    QwenDecodeSplitKAttentionReduceKernel<<<
+        dim3(num_heads, static_cast<unsigned>(batch_size)), 32, 0, stream>>>(
+        gate, split_k_scratch, out_context, num_heads, splits);
+    return;
+  }
+  // Each query keeps the scalar decode reduction and its own causal endpoint.
+  // Crossing the split-K threshold retains the per-row route and scratch.
+  if (batch_size > 1 && head_dim == 256 && num_kv_heads > 0 &&
+      num_heads % num_kv_heads == 0 &&
+      static_cast<std::size_t>(start_pos) + batch_size <
+          detail::kSplitKDecodeAttentionMinContext) {
+    const dim3 grid(num_heads, static_cast<unsigned>(batch_size));
+    if (k_cache != nullptr && v_cache != nullptr) {
+      QwenDecodeOnlineAttentionKernel<<<grid, 32, 0, stream>>>(
+          q, gate, k_cache, v_cache, out_context, layer_idx, start_pos,
+          max_context, num_heads, num_kv_heads);
+    } else {
+      QwenDecodeOnlineAttentionHalfKernel<<<grid, 32, 0, stream>>>(
+          q, gate, static_cast<const __half*>(k_cache_f16),
+          static_cast<const __half*>(v_cache_f16), out_context, layer_idx,
+          start_pos, max_context, num_heads, num_kv_heads);
+    }
+    return;
+  }
+  const std::size_t width = static_cast<std::size_t>(num_heads) * head_dim;
+  for (std::size_t row = 0; row < batch_size; ++row) {
+    LaunchAttention(
+        q + row * width, nullptr, nullptr,
+        gate == nullptr ? nullptr : gate + row * width, k_cache, v_cache,
+        k_cache_f16, v_cache_f16, out_context + row * width, layer_idx,
+        start_pos + static_cast<std::uint32_t>(row), max_context, num_heads,
+        num_kv_heads, head_dim, stream, split_k_scratch, true);
   }
 }
 

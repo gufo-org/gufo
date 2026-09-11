@@ -240,3 +240,21 @@ throughput improves 1.4–2.1%, while Q8 remains within measurement noise.
 Compact Q8 staging and its proposed output grouping were slower in the full
 model and are removed. Compact 32-row BF16 injection also remains slower than
 the retained 16-row chunks. No execution switches or extra test binaries remain.
+
+
+The [attention/SSM-control pass](dflash2-attention.json) batches consecutive
+verification queries with the same per-row reductions, causal endpoints and
+split-K partitions. It batches QK/RoPE/cache writes and reuses idle weight
+scratch for split-K; threshold straddles and small scratch spans retain the
+scalar fallback. Narrow 48x5120 Q8 SSM projections use independent token rows.
+Full-model profiles reduce attention GPU time by about 78% and SSM-control
+projection time by 62–65%. Two interleaved C1 chat repetitions improve all six
+pairings by 3.2–3.5%; prefill has no material change. Final checks retain all
+48 full-logit rows, all 270 draft traces, 24 chat traces and 10 benchmark traces.
+The shared KV test covers exact FP16/FP32 attention, gating, causal boundaries
+and scratch fallback; the existing Q8 test covers the narrow shape at widths 1–8.
+
+Residual/RMSNorm fusion was byte-exact but increased full-model normalization
+and residual GPU time by 6–8%. Its kernel, API and test extension are removed.
+The maintained attention and GEMM tools use production kernels; no environment
+switches or additional test executables were introduced.

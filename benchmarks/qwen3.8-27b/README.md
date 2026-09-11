@@ -11,6 +11,8 @@ that number. Draft precision is selected separately from target precision.
 
 ## Single user, autoregressive
 
+Reference sweep at `023a13a`; full refresh: TODO.
+
 | Context depth | Q4 pp / tg (tok/s) | Q8 pp / tg (tok/s) |
 | ---: | ---: | ---: |
 | 0 | 427.8 / 11.50 | 491.1 / 7.07 |
@@ -21,26 +23,27 @@ that number. Draft precision is selected separately from target precision.
 
 ## Single user, speculative
 
-Prefill / generation in tok/s; fixed blocks of seven proposed tokens. Each
-pairing matches all 128 AR token IDs at every depth. MTP performance: **TODO**.
+Current qualified prefill / generation in tok/s; fixed blocks of seven
+proposed tokens. One timed repetition after warmup. Every measured pairing
+matches all 128 AR token IDs. MTP performance: **TODO**.
 
 | Target | Depth | DFlash2 Q4_K_M | DFlash2 Q8_0 | DFlash2 BF16 |
 | --- | ---: | ---: | ---: | ---: |
-| Q4 | 0 | 386.3 / 19.24 | 386.6 / 16.22 | 386.7 / 15.53 |
-| Q4 | 4,096 | 372.8 / 12.94 | 372.5 / 12.63 | 374.0 / 12.11 |
-| Q4 | 8,192 | 361.1 / 35.81 | 360.6 / 35.65 | 360.6 / 34.35 |
-| Q4 | 12,288 | 348.0 / 33.09 | 347.3 / 32.11 | 348.2 / 30.95 |
-| Q4 | 16,384 | 334.7 / 13.53 | 335.1 / 13.79 | 332.6 / 13.31 |
-| Q8 | 0 | 450.1 / 21.57 | 448.4 / 21.38 | 451.3 / 20.46 |
-| Q8 | 4,096 | 432.6 / 14.87 | 432.0 / 14.46 | 431.9 / 13.90 |
-| Q8 | 8,192 | 415.0 / 33.63 | 416.1 / 33.49 | 414.5 / 32.29 |
-| Q8 | 12,288 | 398.2 / 34.91 | 396.9 / 34.81 | 396.9 / 33.64 |
-| Q8 | 16,384 | 373.9 / 31.38 | 381.5 / 31.26 | 379.5 / 30.24 |
+| Q4 | 0 | 403.1 / 20.92 | 398.6 / 17.64 | 397.4 / 16.85 |
+| Q4 | 4,096 | 384.7 / 13.95 | TODO | TODO |
+| Q4 | 8,192 | TODO | TODO | TODO |
+| Q4 | 12,288 | TODO | TODO | TODO |
+| Q4 | 16,384 | TODO | TODO | TODO |
+| Q8 | 0 | 464.8 / 22.90 | 464.1 / 22.73 | 466.7 / 21.82 |
+| Q8 | 4,096 | 444.3 / 15.76 | TODO | TODO |
+| Q8 | 8,192 | TODO | TODO | TODO |
+| Q8 | 12,288 | TODO | TODO | TODO |
+| Q8 | 16,384 | TODO | TODO | TODO |
 
-These are single timed repetitions after warmup at revision `023a13a`, not
-estimates of measurement variance. Acceptance varies with the synthetic
+[Current measurements and quality checks](eval/dflash2-attention.json).
+Unmeasured cells await refresh; the [previous full depth sweep](eval/dflash2-depths.json)
+remains available as a historical reference. Acceptance varies with the
 continuation, so generation speed need not decrease monotonically with depth.
-[Raw measurements and token hashes](eval/dflash2-depths.json).
 
 ## Multiple users, autoregressive
 
@@ -69,36 +72,16 @@ speculative serving is being qualified before these numbers are published.
 
 ## Draft choice and latest optimization
 
-All three drafts pass the pinned upstream operator comparison. Final precision
-selection remains open: compare companions against the same target and prompts,
-since acceptance depends on the target's continuation. Controller comparisons
-follow kernel optimization.
+All three drafts pass the pinned upstream operator comparison. Precision
+selection remains open because acceptance depends on the target and prompt.
+Controller comparisons follow kernel optimization.
 
-Release A/B (`85b9994` → `e17744a`): **C1, pp2048, tg128, depth 0**,
-one timed repetition after warmup. Values are baseline → candidate, in tok/s.
-This is separate from the earlier full depth sweep above.
-
-| Target | Draft | Prefill | Generation |
-| --- | --- | ---: | ---: |
-| Q4 | Q4_K_M | 388.6 → 397.9 | 19.40 → 19.92 |
-| Q4 | Q8_0 | 387.8 → 397.4 | 16.33 → 16.79 |
-| Q4 | BF16 | 388.2 → 396.7 | 15.63 → 16.05 |
-| Q8 | Q4_K_M | 451.8 → 464.4 | 21.61 → 22.30 |
-| Q8 | Q8_0 | 448.2 → 464.0 | 21.42 → 22.17 |
-| Q8 | BF16 | 452.1 → 466.2 | 20.49 → 21.22 |
-
-Recurrence state stays in registers across verification rows; committed replay
-batches rows per layer and skips unused output work. Feature injection shares
-BF16 weights across sixteen FP32 rows. Generation improves **2.7–3.6%** and
-prefill **2.2–3.5%** in this probe; all twelve speculative traces match AR.
-Full logits, recurrent state and all 270 upstream-qualified draft trace files
-remain byte-identical. [Measurements, profiles and quality evidence](eval/dflash2-recurrence.json).
-
-Further projection tuning adds **1.4–2.1% on Q4** across the three drafts in
-a short C++ chat probe (128 tokens, two interleaved repetitions). Q8 ranges
-from −0.17% to +0.39%, so no material extra Q8 gain is claimed. This is a
-separate workload, not an update to the depth rates above.
-[Projection measurements and rejected experiments](eval/dflash2-projections.json).
+The latest pass adds **3.2–3.5%** in a C1 C++ chat probe across all six pairings
+(two interleaved repetitions, 128 tokens), versus `8bfd8cd`. Prefill has no
+material change. Verification batches attention and QK/RoPE writes, reuses
+existing scratch for split-K, and distributes narrow SSM projections across
+token rows. All 48 target logit rows and 270 draft trace files remain byte-exact.
+[Measurements, profiles and rejected experiments](eval/dflash2-attention.json).
 
 ## Reproduce
 

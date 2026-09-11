@@ -154,6 +154,8 @@ verification rows or sixteen BF16 injection rows, for example
 `qwen27b/deltanet_bench.hip` checks exact recurrence and state-only replay
 while rotating the 144 MiB target state; `qwen27b/prefill_deltanet_bench.hip`
 contains the separate prefill ablations. Both use the same fast Nix builder.
+`qwen27b/attention_bench.hip` compares scalar and batched attention. It checks exact outputs
+beside component timings, including the 4K split-K boundary.
 `qwen27b/dflash_reference.py` checks a GPU trace against
 pinned upstream PyTorch operators using the same GGUF weights. See
 `benchmarks/qwen3.8-27b/README.md` and its quality report for commands and evidence.

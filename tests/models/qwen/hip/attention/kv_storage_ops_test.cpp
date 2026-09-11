@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
@@ -15,6 +16,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
+#include "tests/models/qwen/hip/support/device_buffer.hpp"
 #include "tests/models/qwen/support/synthetic_weights.hpp"
 #include "tests/testing/test_common.hpp"
 
@@ -61,6 +63,60 @@ gufo::core::ModelConfig ProductionQwen27BConfig() {
   config.rotary_dim = 64;
   config.rope_theta = 10000000.0F;
   return config;
+}
+
+// Verification must preserve every scalar attention bit, including a block
+// straddling the online/split-K boundary and a single-row scratch fallback.
+void TestCausalDecodeRows() {
+  using gufo::test::DeviceBuffer;
+  constexpr unsigned heads = 6, kv_heads = 1, dim = 256, rows = 8;
+  constexpr unsigned context = 8200, layer = 1, width = heads * dim;
+  constexpr std::size_t cache_size = 2U * context * kv_heads * dim;
+  std::vector<float> query(rows * width), gate(query.size()), cache(cache_size);
+  std::vector<__half> cache_half(cache_size);
+  for (std::size_t i = 0; i < query.size(); ++i) {
+    query[i] = 0.3F * std::sin(static_cast<float>(i) * 0.073F);
+    gate[i] = std::cos(static_cast<float>(i) * 0.019F);
+  }
+  for (std::size_t i = 0; i < cache.size(); ++i) {
+    cache[i] = 0.4F * std::sin(static_cast<float>(i) * 0.011F);
+    cache_half[i] = __float2half(cache[i]);
+  }
+  DeviceBuffer<float> q(query), g(gate), kv(cache), expected(query.size()),
+      actual(query.size());
+  DeviceBuffer<__half> kv_half(cache_half);
+  const auto row_scratch =
+      gufo::hip::detail::DecodeAttentionScratchElements(heads, dim);
+  DeviceBuffer<float> scratch(rows * row_scratch);
+  for (bool fp16 : {false, true}) {
+    for (bool gated : {false, true}) {
+      for (unsigned batch : {1U, 3U, rows}) {
+        for (unsigned start : {0U, 17U, 4088U, 4092U, 4095U, 8192U}) {
+          float* const cache32 = fp16 ? nullptr : kv.data();
+          void* const cache16 = fp16 ? kv_half.data() : nullptr;
+          for (unsigned row = 0; row < batch; ++row) {
+            gufo::hip::LaunchAttention(q.data() + row * width, nullptr, nullptr,
+                                       gated ? g.data() + row * width : nullptr,
+                                       cache32, cache32, cache16, cache16,
+                                       expected.data() + row * width, layer,
+                                       start + row, context, heads, kv_heads,
+                                       dim, nullptr, scratch.data(), true);
+          }
+          const auto reference = expected.CopyToHost();
+          for (auto capacity : {row_scratch, scratch.size()}) {
+            gufo::hip::LaunchCausalDecodeAttention(
+                q.data(), gated ? g.data() : nullptr, cache32, cache32, cache16,
+                cache16, actual.data(), layer, start, batch, context, heads,
+                kv_heads, dim, nullptr, {scratch.data(), capacity});
+            const auto result = actual.CopyToHost();
+            Expect(std::memcmp(reference.data(), result.data(),
+                               batch * width * sizeof(float)) == 0,
+                   "causal verification attention changed scalar decode bits");
+          }
+        }
+      }
+    }
+  }
 }
 
 void TestProductionMemoryScaling() {
@@ -534,6 +590,7 @@ int main() {
   if (device_status != 0) {
     return device_status;
   }
+  TestCausalDecodeRows();
   TestProductionMemoryScaling();
   TestCanonicalMemoryAccountingAndSnapshot();
   TestCompactPersistentSnapshotRoundTrip();

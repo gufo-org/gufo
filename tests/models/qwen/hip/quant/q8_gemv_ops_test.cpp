@@ -277,16 +277,10 @@ void TestQ8_0SmallBatchFp32GEMMEquivalence(std::size_t kRows,
   HIP_CHECK(hipMemcpy(device_inputs, inputs.data(),
                       inputs.size() * sizeof(float), hipMemcpyHostToDevice));
 
-  // Every width the speculative verifier can dispatch, not a sample of them.
-  // DFlash-2 runs a fixed draft width of 7, so verification batches are
-  // routinely 8 but drop to 7 and below whenever a block is truncated or the
-  // controller narrows, and a width with no exact route silently stops
-  // reproducing the decode GEMV. Width 1 is excluded because
-  // `ForwardTokenBatch` rejects a batch below two, so it is not a verification
-  // width at all.
+  // Cover every public small-batch width, including a one-row tail.
   for (const std::size_t batch :
-       {std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{5},
-        std::size_t{6}, std::size_t{7}, std::size_t{8}}) {
+       {std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{4},
+        std::size_t{5}, std::size_t{6}, std::size_t{7}, std::size_t{8}}) {
     for (std::size_t token = 0; token < batch; ++token) {
       gufo::hip::LaunchQ8KBlockGEMV(device_weights, gufo::core::GgmlType::kQ8_0,
                                     device_inputs + (token * kColumns),
@@ -445,6 +439,7 @@ int main() {
   TestQ8KBlockGEMVEquivalence();
   TestQ8KSmallBatchFp32GEMMEquivalence();
   TestQ8_0SmallBatchFp32GEMMEquivalence(16, 512);
+  TestQ8_0SmallBatchFp32GEMMEquivalence(48, 5120);
   TestQ8_0SmallBatchFp32GEMMEquivalence(5120, 5120);
   TestQ8_0SmallBatchFp32GEMMEquivalence(17408, 5120);
   TestQ8_0SmallBatchFp32GEMMEquivalence(4096, 17408);

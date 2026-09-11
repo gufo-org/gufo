@@ -411,6 +411,9 @@ GUFO_HIPBLASLT_PLAN_CACHE=/tmp/gufo-hipblaslt-plans.bin \
 
 nix develop -c tools/bench/build.sh tools/qwen27b/deltanet_bench.hip
 /tmp/deltanet_bench 8 48
+
+nix develop -c tools/bench/build.sh tools/qwen27b/attention_bench.hip
+/tmp/attention_bench
 ```
 
 The recurrence probe checks exact outputs/state with a rotating 144 MiB state

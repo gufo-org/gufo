@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SUITES = {
     "fast": ["qwen_aie2p_w4a8_pack_test"],
     "kernels": ["qwen_gpu_ops_test", "qwen_ssm_ops_test",
+                "qwen_attention_kv_storage_ops_test",
                 "qwen_dflash_noncausal_attention_ops_test",
                 "qwen_prefill_quant_gemm_ops_test", "qwen_q4kxl_quant_ops_test",
                 "qwen_quant_gemv_ops_test", "qwen_sampling_hip_test",

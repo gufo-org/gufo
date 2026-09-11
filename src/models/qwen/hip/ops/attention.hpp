@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include "src/core/gguf_reader.hpp"
 
@@ -36,6 +37,18 @@ void LaunchAttention(const float* q, const float* k, const float* v,
                      hipStream_t stream = nullptr,
                      float* split_k_scratch = nullptr,
                      bool skip_kv_write = false);
+
+/// Runs consecutive verification queries with scalar decode arithmetic.
+/// The selected KV cache must already contain all rows. Each row sees only
+/// its causal prefix. Scratch for batch_size rows batches split-K too; a
+/// smaller span retains the scalar split-K fallback.
+void LaunchCausalDecodeAttention(
+    const float* q, const float* gate, float* k_cache, float* v_cache,
+    void* k_cache_f16, void* v_cache_f16, float* out_context,
+    std::uint32_t layer_idx, std::uint32_t start_pos, std::size_t batch_size,
+    std::uint32_t max_context, std::uint32_t num_heads,
+    std::uint32_t num_kv_heads, std::uint32_t head_dim,
+    hipStream_t stream = nullptr, std::span<float> split_k_scratch = {});
 
 /// Computes Grouped-Query Softmax Attention reading position from device memory
 void LaunchAttention(const float* q, const float* k, const float* v,
