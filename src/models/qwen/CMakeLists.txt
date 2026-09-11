@@ -24,7 +24,6 @@ if (ENGINE_ENABLE_HIP)
   target_sources(gufo_core PRIVATE
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/attention.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/batched_ssm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/decode_ops.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_embed.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_gemm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_gemm.hip
@@ -43,14 +42,12 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/gemv.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/gemv_quant.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/fused.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/common.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/qkv.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/ssm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/ssm_decode_recurrence.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/ssm_recurrence.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/ssm_row_split.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/swiglu.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/swiglu_rmsnorm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_batched.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_ck.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode.hip

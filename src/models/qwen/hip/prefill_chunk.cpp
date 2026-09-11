@@ -191,8 +191,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     const bool ffn_feeds_q8_only =
         !use_precise_small_batch_quant &&
         IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
-        !route_plan.fuse_ffn_swiglu && is_q8(layer.ffn_gate) &&
-        is_q8(layer.ffn_up);
+        is_q8(layer.ffn_gate) && is_q8(layer.ffn_up);
 
     // Pre-layer RMSNorm (generates BF16 into d_scratch_bf16 directly)
     if (norm_feeds_q8_only) {
@@ -472,18 +471,6 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
             config.ssm_state_size, config.SsmValueSize(), arena_.stream,
             arena_.GetRecurrentStateStorage());
-      } else if (route_plan.fuse_ssm_epilogue) {
-        LaunchBatchedSSMConvRecurrenceNormGate(
-            arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
-            arena_.d_ssm_conv_state, arena_.d_conv_out,
-            arena_.d_ssm_deltanet_state, arena_.d_alpha_buf, arena_.d_beta_buf,
-            static_cast<const float*>(layer.ssm_a.data),
-            static_cast<const float*>(layer.ssm_dt.data),
-            static_cast<const float*>(layer.ssm_norm.data), arena_.d_ssm_gate,
-            arena_.d_ssm_out, l, batch_size, ssm_qkv_size,
-            config.ssm_group_count, config.ssm_time_step_rank,
-            config.ssm_state_size, config.SsmValueSize(), arena_.stream,
-            arena_.GetRecurrentStateStorage());
       } else {
         LaunchBatchedSSMConvRecurrence(
             arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
@@ -521,15 +508,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                   arena_.d_scratch_q8_act);
     }
 
-    // Residual Add + FFN RMSNorm fused into one kernel
-    // (opt-c010-residual-rmsnorm). The unfused chain stays wired behind the
-    // policy toggle as the independent reference.
-    if (route_plan.fuse_residual_rmsnorm) {
-      LaunchBatchedFusedResidualAddRMSNorm(
-          arena_.d_hidden, arena_.d_attn_out, arena_.d_hidden,
-          static_cast<const float*>(layer.ffn_norm.data), arena_.d_normed,
-          arena_.d_scratch_bf16, batch_size, hidden_size, eps, arena_.stream);
-    } else if (ffn_feeds_q8_only) {
+    if (ffn_feeds_q8_only) {
       // The post-attention residual add folds into the norm: one pass reads the
       // hidden state and the attention output, writes the updated hidden state
       // for the next residual link, and emits the Q8_1 activation.
@@ -549,22 +528,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                            hidden_size, eps, arena_.stream);
     }
 
-    const bool ffn_g_bf16 = layer.ffn_gate.type == core::GgmlType::kBF16;
-    const bool ffn_u_bf16 = layer.ffn_up.type == core::GgmlType::kBF16;
     // Which buffer holds the Q8_1 form of the SwiGLU output ffn_down consumes.
     // The fused epilogue below moves it out of the shared activation scratch.
     const void* ffn_down_q8_act = arena_.d_scratch_q8_act;
 
-    // Fused FFN gate/up projection with SwiGLU activation into one kernel
-    // (opt-c010-ffn-swiglu). The fused kernel supports the BF16 weight route;
-    // the unfused chain stays wired behind the policy toggle as the
-    // independent reference.
-    if (route_plan.fuse_ffn_swiglu && ffn_g_bf16 && ffn_u_bf16) {
-      LaunchBatchedFusedSwiGLUGEMM(
-          layer.ffn_gate.data, true, layer.ffn_up.data, true, arena_.d_normed,
-          arena_.d_ffn_act, arena_.d_scratch_bf16, batch_size,
-          intermediate_size, hidden_size, arena_.stream);
-    } else {
+    {
       if (!use_precise_small_batch_quant && !ffn_feeds_q8_only) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,

@@ -42,7 +42,6 @@ enum class QwenGemmRejection : std::uint8_t {
   kShapeOverflow,
   kUnsupportedFormat,
   kMisalignedQuantK,
-  kQuantResidualEpilogue,
 };
 
 struct QwenGemmFormatCapabilities {
@@ -113,7 +112,6 @@ struct QwenGemmRequest {
   std::size_t k{0};
   QwenGemmMode mode{QwenGemmMode::kCpu};
   QwenGemmCapabilities capabilities{};
-  bool residual_epilogue{false};
 };
 
 [[nodiscard]] constexpr std::string_view QwenGemmRouteName(
@@ -185,9 +183,6 @@ struct QwenGemmResolution {
   if (format.quantized &&
       (format.block_elements == 0 || request.k % format.block_elements != 0)) {
     return RejectQwenGemm(QwenGemmRejection::kMisalignedQuantK);
-  }
-  if (format.quantized && request.residual_epilogue) {
-    return RejectQwenGemm(QwenGemmRejection::kQuantResidualEpilogue);
   }
 
   if (request.mode == QwenGemmMode::kHipPrefill) {

@@ -50,6 +50,10 @@ add_qwen27b_test(qwen_mtp_reference_test mtp_reference_test.cpp
 add_qwen27b_test(qwen_dflash_reference_test dflash_reference_test.cpp
   "cpu;dflash;dflash2")
 if (ENGINE_ENABLE_HIP)
+  add_test(NAME qwen27b.cli COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cli_test.py $<TARGET_FILE:gufo>)
+  set_tests_properties(qwen27b.cli PROPERTIES
+    LABELS "qwen27b;gpu;hip;cli;external-model" SKIP_RETURN_CODE 77)
   add_qwen27b_test(qwen27b_target_test target_test.cpp
     "gpu;hip;target;external-model")
   add_qwen27b_test(qwen_mtp_gpu_test mtp_test.cpp "gpu;hip;mtp;external-model")

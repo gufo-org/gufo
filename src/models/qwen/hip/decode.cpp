@@ -46,8 +46,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
 
   EmitDecodeRouteTelemetry(weights_, policy_);
   const QwenGraphRejection graph_rejections = ResolveQwenGraphRejections(
-      compute_logits, use_split_k_decode, policy_.prefetch_next_layer,
-      graph_executor_.IsEnabled());
+      compute_logits, use_split_k_decode, graph_executor_.IsEnabled());
   detail::EmitQwenGraphEligibility(
       graph_key_.execution_identity, graph_key_.workload_identity,
       static_cast<std::uint32_t>(graph_rejections));

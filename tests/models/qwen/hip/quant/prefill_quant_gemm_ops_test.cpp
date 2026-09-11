@@ -235,7 +235,8 @@ void RunCase(std::size_t batch, std::size_t m, std::size_t k, bool dual) {
   void* d_q8 = nullptr;
   float* d_y = nullptr;
   float* d_y2 = nullptr;
-  const std::size_t q8_bytes = (((batch + 15) / 16) * num_blocks * 576) + 4096;
+  const std::size_t q8_bytes =
+      gufo::hip::QuantizedActivationBytes(batch, k) + 4096;
   HIP_CHECK(hipMalloc(&d_w, h_w.size() * sizeof(HostQ8_0Block)));
   HIP_CHECK(hipMalloc(&d_w2, h_w2.size() * sizeof(HostQ8_0Block)));
   HIP_CHECK(hipMalloc(&d_x_bf16, h_x_bf16.size() * sizeof(std::uint16_t)));
@@ -351,8 +352,10 @@ void RunFusedSwiGluEpilogueCase(gufo::core::GgmlType type, std::size_t batch,
     v = gufo::test::FloatToBf16Bits(rng.Uniform(-1.5F, 1.5F));
   }
 
-  const std::size_t act_bytes = (((batch + 15) / 16) * k_blocks * 576) + 4096;
-  const std::size_t q8_bytes = (((batch + 15) / 16) * m_blocks * 640) + 4096;
+  const std::size_t act_bytes =
+      gufo::hip::QuantizedActivationBytes(batch, k) + 4096;
+  const std::size_t q8_bytes =
+      gufo::hip::QuantizedActivationBytes(batch, m) + 4096;
 
   void* d_gate_w = nullptr;
   void* d_up_w = nullptr;
@@ -458,8 +461,8 @@ void RunFusedNormQuantizeCase(std::size_t batch, std::size_t dim,
     h_w[i] = 0.85F + 0.06F * static_cast<float>(i % 19);
   }
 
-  const std::size_t num_blocks = dim / 32;
-  const std::size_t q8_bytes = (((batch + 15) / 16) * num_blocks * 576) + 4096;
+  const std::size_t q8_bytes =
+      gufo::hip::QuantizedActivationBytes(batch, dim) + 4096;
 
   float* d_x = nullptr;
   float* d_r = nullptr;

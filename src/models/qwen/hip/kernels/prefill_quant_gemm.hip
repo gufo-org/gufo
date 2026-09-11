@@ -31,7 +31,7 @@ using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
 // with tt = token / 16 and kb the 32-element K block. The 576-byte stride keeps
 // every fragment and scale vector 16-byte aligned. For a token count that is a
 // multiple of 16 this is exactly the same total size as the previous row-major
-// block_q8_1 buffer (36 bytes per 32 elements), so arena sizing is unchanged.
+// block_q8_1 payload (36 bytes per 32 elements), followed by the sum sidecar.
 constexpr std::size_t kQ8ActTileTokens = 16;
 constexpr std::size_t kQ8ActTileBytes = 576;
 constexpr std::size_t kQ8ActScaleOffset = 512;
@@ -44,7 +44,7 @@ __host__ __device__ inline std::size_t Q8ActTiledBytes(std::size_t batch,
   return tiles * (k / 32) * kQ8ActTileBytes;
 }
 
-/// Byte size of the optional per-token activation-sum sidecar. Keeping it
+/// Byte size of the per-token activation-sum sidecar. Keeping it
 /// after the tiled payload leaves the Q8_1 layout and every Q8 kernel
 /// unchanged.
 __host__ __device__ inline std::size_t Q8ActSumBytes(std::size_t batch,

@@ -139,48 +139,21 @@ void TestHipGraphDecodeStep() {
   HIP_CHECK(hipStreamDestroy(stream));
 }
 
-void TestLayerWeightPrefetch() {
-  // opt-c014-layer-prefetch: the async page-touch must never modify the buffer
-  // and must be safe on a trailing partial page (bounds-clamped reads).
-  constexpr std::size_t kBytes = 4096U * 3U + 123U;
-  std::vector<unsigned char> h_buf(kBytes);
-  for (std::size_t i = 0; i < kBytes; ++i) {
-    h_buf[i] = static_cast<unsigned char>((i * 31U) & 0xFFU);
-  }
-  void* d_buf = nullptr;
-  HIP_CHECK(hipMalloc(&d_buf, kBytes));
-  HIP_CHECK(hipMemcpy(d_buf, h_buf.data(), kBytes, hipMemcpyHostToDevice));
-
-  gufo::hip::LaunchLayerWeightPrefetch(d_buf, kBytes);
-  gufo::hip::LaunchLayerWeightPrefetch(nullptr, kBytes);
-  gufo::hip::LaunchLayerWeightPrefetch(d_buf, 0);
-  HIP_CHECK(hipDeviceSynchronize());
-
-  std::vector<unsigned char> h_out(kBytes);
-  HIP_CHECK(hipMemcpy(h_out.data(), d_buf, kBytes, hipMemcpyDeviceToHost));
-  gufo::test::Expect(h_out == h_buf,
-                     "layer weight prefetch modified the buffer");
-
-  HIP_CHECK(hipFree(d_buf));
-}
-
 #endif  // defined(ENGINE_ENABLE_HIP)
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
-  const int gate =
-      gufo::test::GateHipDevice(gufo::test::HipDeviceRequirement::kOptional,
-                                "Qwen graph prefetch ops test");
+  const int gate = gufo::test::GateHipDevice(
+      gufo::test::HipDeviceRequirement::kOptional, "Qwen graph ops test");
   if (gate != gufo::test::kHipTestSuccess) {
     return gate;
   }
 
   TestHipGraphDecodeStep();
-  TestLayerWeightPrefetch();
-  std::cout << "Qwen graph prefetch ops test passed on gfx1151.\n";
+  std::cout << "Qwen graph ops test passed on gfx1151.\n";
   return 0;
 #else
-  std::cout << "HIP disabled, skipping Qwen graph prefetch ops test.\n";
+  std::cout << "HIP disabled, skipping Qwen graph ops test.\n";
   return 77;
 #endif
 }

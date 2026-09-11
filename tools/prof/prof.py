@@ -61,6 +61,13 @@ STAGE_MAPS: dict[str, list[tuple[str, str]]] = {
         ("copyBuffer", "runtime: copy"),
     ],
     "qwen": [
+        ("SmallBatchKQuantExact", "gemm: exact k-quant verification"),
+        ("SmallBatchQ8_0Exact", "gemm: exact q8 verification"),
+        ("BatchedExactBf16", "gemm: exact bf16 verification"),
+        ("WKQuantA8Blocked", "gemm: k-quant prefill"),
+        ("dflash_selector", "draft: selector"),
+        ("dflash_noncausal_attention", "draft: attention"),
+        ("dflash_grouped_dynamic_conv", "draft: convolution"),
         ("W8A8Dual", "gemm: ffn gate+up"),
         ("W8A8Blocked", "gemm: blocked w8a8"),
         ("W8A8Wmma", "gemm: w8a8 16-row"),

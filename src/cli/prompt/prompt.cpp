@@ -7,12 +7,14 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/sampling_options.hpp"
+#include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/qwen/chat_template.hpp"
@@ -33,6 +35,20 @@
 #endif
 
 namespace gufo::cli {
+
+// Hash emitted IDs in a portable byte order, after the timed generation.
+// Decoded text alone can hide different token sequences.
+static void PrintTokenTrace(std::span<const tokenization::TokenId> tokens) {
+  std::vector<std::uint8_t> bytes;
+  bytes.reserve(tokens.size() * sizeof(std::uint32_t));
+  for (const auto token : tokens) {
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+      bytes.push_back(static_cast<std::uint8_t>(token >> shift));
+    }
+  }
+  std::cerr << "[TokenTrace]: count=" << tokens.size()
+            << " sha256=" << crypto::Sha256Hex(bytes) << '\n';
+}
 
 static void PrintTextHelp(std::string_view program_name,
                           std::string_view command) {
@@ -321,6 +337,7 @@ int GenerateDeepSeekResponse(
 
   const auto generation_start = std::chrono::steady_clock::now();
   std::size_t generated = 0;
+  std::vector<tokenization::TokenId> generated_ids;
   if (use_dspark) {
     std::vector<int> emitted;
     bool stop = false;
@@ -340,6 +357,8 @@ int GenerateDeepSeekResponse(
         }
         sampler.Accept(static_cast<sampling::TokenId>(token));
         emit(token);
+        if (opt.verbose)
+          generated_ids.push_back(token);
         ++generated;
       }
     }
@@ -357,6 +376,8 @@ int GenerateDeepSeekResponse(
       }
       sampler.Accept(static_cast<sampling::TokenId>(token));
       emit(token);
+      if (opt.verbose)
+        generated_ids.push_back(token);
       if (generated + 1 < opt.max_tokens && !session.Evaluate(token, &error)) {
         std::cerr << "\nDeepSeek V4 Flash decode failed: " << error << '\n';
         return 1;
@@ -402,6 +423,7 @@ int GenerateDeepSeekResponse(
     std::cout << "Generated " << generated << " tokens on ROCm in " << seconds
               << "s (" << static_cast<double>(generated) / seconds
               << " tok/s)\n";
+    PrintTokenTrace(generated_ids);
   }
   return 0;
 }
@@ -505,6 +527,141 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
     std::cout << '\n';
   }
   return 0;
+}
+
+std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
+    const PromptOptions& opt, hip::QwenGpuExecutor& executor) {
+  std::string err;
+  const auto& config = executor.GetConfig();
+  std::unique_ptr<speculative::IDraftBackend> draft_backend;
+  if (opt.speculative_backend == "dflash" ||
+      opt.speculative_backend == "dflash2" ||
+      opt.speculative_backend == "dflash-2") {
+    std::string dflash_path = opt.dflash_model_path;
+    if (dflash_path.empty()) {
+      throw std::invalid_argument("DFlash2 requires --dflash-model");
+    }
+    hip::QwenDFlashGpuDraftConfig cfg{
+        .max_context = executor.GetMaxContext(),
+        .max_draft_tokens = static_cast<std::uint32_t>(opt.draft_tokens),
+        .draft_p_min = opt.draft_p_min,
+    };
+    draft_backend = hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
+        dflash_path, executor.GetSharedModel(), cfg, &err);
+    if (draft_backend == nullptr) {
+      throw std::runtime_error("Failed to initialize DFlash backend: " + err);
+    }
+  } else if (opt.speculative_backend == "npu") {
+    heterogeneous::NpuDrafterConfig cfg;
+    cfg.max_draft_tokens = opt.draft_tokens;
+    cfg.vocab_size = config.vocab_size;
+    draft_backend = std::make_unique<heterogeneous::NpuDraftBackend>(cfg);
+  } else if (opt.speculative_backend == "pld" ||
+             opt.speculative_backend == "lookup") {
+    speculative::PromptLookupConfig cfg;
+    cfg.max_draft_tokens = opt.draft_tokens;
+    draft_backend =
+        std::make_unique<speculative::PromptLookupDraftBackend>(cfg);
+  } else if (opt.speculative_backend == "mtp" ||
+             opt.speculative_backend == "mtp-npu") {
+    std::string mtp_path = opt.mtp_model_path;
+    if (mtp_path.empty()) {
+      throw std::invalid_argument("MTP requires --mtp-model");
+    }
+    hip::QwenMtpGpuDraftConfig cfg{
+        .max_context = executor.GetMaxContext(),
+        .max_draft_tokens = static_cast<std::uint32_t>(opt.draft_tokens),
+        .execution_mode = opt.speculative_backend == "mtp-npu"
+                              ? hip::QwenMtpExecutionMode::kHybridNpuEhProj
+                              : hip::QwenMtpExecutionMode::kGpu,
+    };
+    draft_backend = hip::QwenMtpGpuDraftBackend::CreateFromGguf(
+        mtp_path, executor.GetSharedModel(), cfg, &err);
+    if (draft_backend == nullptr) {
+      throw std::runtime_error("Failed to initialize MTP backend: " + err);
+    }
+  } else if (opt.speculative_backend == "self") {
+    speculative::SelfSpeculativeConfig cfg;
+    cfg.total_layers = config.num_layers;
+    cfg.exit_layer = std::max<std::uint32_t>(4U, config.num_layers / 4);
+    cfg.draft_step_count = opt.draft_tokens;
+    draft_backend = std::make_unique<speculative::SelfSpeculativeBackend>(cfg);
+  } else {
+    throw std::invalid_argument("Unknown speculative backend: " +
+                                opt.speculative_backend);
+  }
+
+  speculative::SpeculativeOptions s_opts;
+  s_opts.max_draft_tokens = opt.draft_tokens;
+  s_opts.min_draft_tokens = opt.min_draft_tokens;
+  s_opts.initial_draft_tokens = opt.draft_tokens;
+  const bool block_diffusion_draft = opt.speculative_backend == "dflash" ||
+                                     opt.speculative_backend == "dflash2" ||
+                                     opt.speculative_backend == "dflash-2";
+  s_opts.enable_adaptive_draft_length = !block_diffusion_draft;
+  if (opt.speculative_backend == "dflash" ||
+      opt.speculative_backend == "dflash2" ||
+      opt.speculative_backend == "dflash-2") {
+    s_opts.use_batched_verification = true;
+    s_opts.use_batched_lm_head = true;
+    s_opts.target_bf16_from_layer = 48;
+  } else if (opt.speculative_backend == "mtp" ||
+             opt.speculative_backend == "mtp-npu") {
+    s_opts.use_batched_verification = true;
+    s_opts.use_batched_lm_head = true;
+    s_opts.target_bf16_from_layer = 0;
+    s_opts.target_fp32_from_layer = 63;
+  }
+  return std::make_unique<speculative::SpeculativeVerifier>(
+      executor, std::move(draft_backend), s_opts);
+}
+
+void GenerateQwenGpuResponse(
+    const PromptOptions& opt, hip::QwenGpuExecutor& executor,
+    speculative::SpeculativeVerifier* verifier,
+    std::span<const tokenization::TokenId> prompt_tokens,
+    std::string* reply = nullptr) {
+  models::GenerationOptions generation;
+  generation.max_new_tokens = opt.max_tokens;
+  generation.sampling = opt.sampling;
+  std::size_t generated_count = 0;
+  std::vector<tokenization::TokenId> generated_ids;
+  if (opt.verbose)
+    generated_ids.reserve(opt.max_tokens);
+  const auto on_token = [&](tokenization::TokenId token,
+                            std::string_view piece) {
+    std::cout << piece << std::flush;
+    if (reply != nullptr)
+      reply->append(piece);
+    ++generated_count;
+    if (opt.verbose)
+      generated_ids.push_back(token);
+    return true;
+  };
+  const auto start = std::chrono::steady_clock::now();
+  if (verifier != nullptr) {
+    (void)verifier->Generate(prompt_tokens, generation, on_token);
+  } else {
+    (void)executor.Generate(prompt_tokens, generation, on_token);
+  }
+  const double seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  std::cout << '\n';
+  if (opt.verbose) {
+    if (verifier != nullptr) {
+      const auto& stats = verifier->GetStats();
+      std::cerr << "[Speculative]: acceptance=" << stats.AcceptanceRate()
+                << " drafted=" << stats.total_draft_tokens
+                << " accepted=" << stats.total_accepted_tokens
+                << " verification_steps=" << stats.total_verification_steps
+                << '\n';
+    }
+    const double rate = seconds > 0 ? generated_count / seconds : 0;
+    std::cout << "Generated " << generated_count << " tokens on GPU in "
+              << seconds << "s (" << rate << " tok/s)\n";
+    PrintTokenTrace(generated_ids);
+  }
 }
 
 #endif
@@ -663,6 +820,26 @@ std::optional<PromptOptions> ParsePromptOptions(
   if (!speculative_explicit && !opt.dspark_model_path.empty()) {
     opt.speculative_backend = "dspark";
   }
+  if (opt.force_cpu && !opt.speculative_backend.empty()) {
+    if (error_msg != nullptr) {
+      *error_msg =
+          "speculative decoding requires the ROCm backend; remove --cpu";
+    }
+    return std::nullopt;
+  }
+  const auto& backend = opt.speculative_backend;
+  if ((backend == "dflash" || backend == "dflash2" || backend == "dflash-2") &&
+      opt.dflash_model_path.empty()) {
+    if (error_msg != nullptr)
+      *error_msg = "DFlash2 requires --dflash-model";
+    return std::nullopt;
+  }
+  if ((backend == "mtp" || backend == "mtp-npu") &&
+      opt.mtp_model_path.empty()) {
+    if (error_msg != nullptr)
+      *error_msg = "MTP requires --mtp-model";
+    return std::nullopt;
+  }
 
   if (opt.draft_tokens == 0 || opt.min_draft_tokens == 0 ||
       opt.min_draft_tokens > opt.draft_tokens) {
@@ -797,6 +974,9 @@ int RunPrompt(std::span<const char* const> args) {
         });
     if (rendered.has_value()) {
       rendered_prompt = *rendered;
+    } else {
+      std::cerr << "Error formatting chat template.\n";
+      return 1;
     }
   }
 
@@ -826,152 +1006,28 @@ int RunPrompt(std::span<const char* const> args) {
                   << "--- Generation Output ---\n";
       }
 
-      models::GenerationOptions gen_opts;
-      gen_opts.max_new_tokens = opt.max_tokens;
-      gen_opts.sampling = opt.sampling;
-
-      auto start_time = std::chrono::steady_clock::now();
-      std::size_t generated_count = 0;
-
-      if (!opt.speculative_backend.empty()) {
-        const auto& config = gpu_exec->GetConfig();
-        std::unique_ptr<speculative::IDraftBackend> draft_backend;
-        if (opt.speculative_backend == "dflash" ||
-            opt.speculative_backend == "dflash2" ||
-            opt.speculative_backend == "dflash-2") {
-          std::string dflash_path = opt.dflash_model_path;
-          if (dflash_path.empty()) {
-            std::cerr << "DFlash2 requires --dflash-model\n";
-            return 1;
-          }
-          hip::QwenDFlashGpuDraftConfig cfg{
-              .max_context = gpu_exec->GetMaxContext(),
-              .max_draft_tokens = static_cast<std::uint32_t>(opt.draft_tokens),
-              .draft_p_min = opt.draft_p_min,
-          };
-          draft_backend = hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
-              dflash_path, gpu_exec->GetSharedModel(), cfg, &err);
-          if (draft_backend == nullptr) {
-            std::cerr << "Failed to initialize DFlash backend: " << err << '\n';
-            return 1;
-          }
-        } else if (opt.speculative_backend == "npu") {
-          heterogeneous::NpuDrafterConfig cfg;
-          cfg.max_draft_tokens = opt.draft_tokens;
-          cfg.vocab_size = config.vocab_size;
-          draft_backend = std::make_unique<heterogeneous::NpuDraftBackend>(cfg);
-        } else if (opt.speculative_backend == "pld" ||
-                   opt.speculative_backend == "lookup") {
-          speculative::PromptLookupConfig cfg;
-          cfg.max_draft_tokens = opt.draft_tokens;
-          draft_backend =
-              std::make_unique<speculative::PromptLookupDraftBackend>(cfg);
-        } else if (opt.speculative_backend == "mtp" ||
-                   opt.speculative_backend == "mtp-npu") {
-          std::string mtp_path = opt.mtp_model_path;
-          if (mtp_path.empty()) {
-            std::cerr << "MTP requires --mtp-model\n";
-            return 1;
-          }
-          hip::QwenMtpGpuDraftConfig cfg{
-              .max_context = gpu_exec->GetMaxContext(),
-              .max_draft_tokens = static_cast<std::uint32_t>(opt.draft_tokens),
-              .execution_mode =
-                  opt.speculative_backend == "mtp-npu"
-                      ? hip::QwenMtpExecutionMode::kHybridNpuEhProj
-                      : hip::QwenMtpExecutionMode::kGpu,
-          };
-          draft_backend = hip::QwenMtpGpuDraftBackend::CreateFromGguf(
-              mtp_path, gpu_exec->GetSharedModel(), cfg, &err);
-          if (draft_backend == nullptr) {
-            std::cerr << "Failed to initialize MTP backend: " << err << '\n';
-            return 1;
-          }
-        } else if (opt.speculative_backend == "self") {
-          speculative::SelfSpeculativeConfig cfg;
-          cfg.total_layers = config.num_layers;
-          cfg.exit_layer = std::max<std::uint32_t>(4U, config.num_layers / 4);
-          cfg.draft_step_count = opt.draft_tokens;
-          draft_backend =
-              std::make_unique<speculative::SelfSpeculativeBackend>(cfg);
-        } else {
-          std::cerr << "Unknown speculative backend: "
-                    << opt.speculative_backend << '\n';
-          return 1;
+      std::unique_ptr<speculative::SpeculativeVerifier> verifier;
+      try {
+        if (!opt.speculative_backend.empty()) {
+          verifier = CreateQwenVerifier(opt, *gpu_exec);
         }
-
-        if (draft_backend) {
-          speculative::SpeculativeOptions s_opts;
-          s_opts.max_draft_tokens = opt.draft_tokens;
-          s_opts.min_draft_tokens = opt.min_draft_tokens;
-          s_opts.initial_draft_tokens = opt.draft_tokens;
-          const bool block_diffusion_draft =
-              opt.speculative_backend == "dflash" ||
-              opt.speculative_backend == "dflash2" ||
-              opt.speculative_backend == "dflash-2";
-          s_opts.enable_adaptive_draft_length = !block_diffusion_draft;
-          if (opt.speculative_backend == "dflash" ||
-              opt.speculative_backend == "dflash2" ||
-              opt.speculative_backend == "dflash-2") {
-            s_opts.use_batched_verification = true;
-            s_opts.use_batched_lm_head = true;
-            s_opts.target_bf16_from_layer = 48;
-          } else if (opt.speculative_backend == "mtp" ||
-                     opt.speculative_backend == "mtp-npu") {
-            s_opts.use_batched_verification = true;
-            s_opts.use_batched_lm_head = true;
-            s_opts.target_bf16_from_layer = 0;
-            s_opts.target_fp32_from_layer = 63;
-          }
-          speculative::SpeculativeVerifier spec_verifier(
-              *gpu_exec, std::move(draft_backend), s_opts);
-
-          start_time = std::chrono::steady_clock::now();
-          (void)spec_verifier.Generate(
-              prompt_tokens, gen_opts,
-              [&](tokenization::TokenId, std::string_view piece) -> bool {
-                std::cout << piece << std::flush;
-                ++generated_count;
-                return true;
-              });
-          if (opt.verbose) {
-            const auto& stats = spec_verifier.GetStats();
-            std::cerr << "\n[Speculative]: acceptance="
-                      << stats.AcceptanceRate()
-                      << " drafted=" << stats.total_draft_tokens
-                      << " accepted=" << stats.total_accepted_tokens
-                      << " verification_steps="
-                      << stats.total_verification_steps << '\n';
-          }
-        }
-      } else {
-        start_time = std::chrono::steady_clock::now();
-        gpu_exec->Generate(
-            prompt_tokens, gen_opts,
-            [&](tokenization::TokenId, std::string_view piece) -> bool {
-              std::cout << piece << std::flush;
-              ++generated_count;
-              return true;
-            });
-      }
-
-      std::cout << "\n";
-
-      if (opt.verbose && generated_count > 0) {
-        const auto elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start_time);
-        const double sec = static_cast<double>(elapsed.count()) / 1000.0;
-        const double tok_per_sec =
-            (sec > 0.0) ? (static_cast<double>(generated_count) / sec) : 0.0;
-        std::cout << "Generated " << generated_count << " tokens on GPU in "
-                  << sec << "s (" << tok_per_sec << " tok/s)\n";
+        GenerateQwenGpuResponse(opt, *gpu_exec, verifier.get(), prompt_tokens);
+      } catch (const std::exception& exception) {
+        std::cerr << exception.what() << '\n';
+        return 1;
       }
       return 0;
     }
+    std::cerr << "Error creating Qwen GPU executor: " << err << '\n';
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
   }
 #endif
 
+  if (!opt.speculative_backend.empty()) {
+    std::cerr << "Qwen speculative decoding requires the ROCm backend\n";
+    return 1;
+  }
   auto generator = models::QwenGenerator::CreateFromGguf(*reader, &err);
   if (!generator) {
     std::cerr << "Error creating Qwen generator: " << err << "\n";
@@ -1038,6 +1094,11 @@ int RunChat(std::span<const char* const> args) {
   }
 
   const auto& opt = *opt_res;
+  if (!opt.use_chat_template) {
+    std::cerr << "Interactive chat requires chat framing; use prompt --raw for "
+                 "raw text\n";
+    return 2;
+  }
   if (opt.model_path.empty()) {
     std::cout << "gufo chat: interactive conversation mode\n"
               << "(Specify --model <PATH.gguf> to load model weights)\n";
@@ -1046,30 +1107,76 @@ int RunChat(std::span<const char* const> args) {
 
   const auto model_load_start = std::chrono::steady_clock::now();
   std::string err;
-  const auto reader = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
-  if (!reader) {
+  auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
+  if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
               << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
+  const std::shared_ptr<const gufo::core::GgufReader> reader(
+      std::move(reader_owner));
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsDeepSeekV4Flash(*reader)) {
     return RunDeepSeekChat(opt, *reader, model_load_start);
   }
+#else
+  if (IsDeepSeekV4Flash(*reader)) {
+    std::cerr << "DeepSeek V4 Flash requires ENGINE_ENABLE_HIP=ON\n";
+    return 1;
+  }
 #endif
 
-  auto generator = models::QwenGenerator::CreateFromGguf(*reader, &err);
-  if (!generator) {
-    std::cerr << "Error creating Qwen generator: " << err << "\n";
-    PrintModelLoadTime(model_load_start, false);
-    return 1;
+  const tokenization::QwenTokenizer* tokenizer = nullptr;
+  std::string architecture;
+  std::unique_ptr<models::QwenGenerator> generator;
+#if defined(ENGINE_ENABLE_HIP)
+  std::unique_ptr<hip::QwenGpuExecutor> gpu_executor;
+  std::unique_ptr<speculative::SpeculativeVerifier> verifier;
+  int device_count = 0;
+  if (!opt.force_cpu && hipGetDeviceCount(&device_count) == hipSuccess &&
+      device_count > 0) {
+    gpu_executor = hip::QwenGpuExecutor::CreateFromGguf(reader, &err);
+    if (!gpu_executor) {
+      std::cerr << "Error creating Qwen GPU executor: " << err << '\n';
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    try {
+      if (!opt.speculative_backend.empty()) {
+        verifier = CreateQwenVerifier(opt, *gpu_executor);
+      }
+    } catch (const std::exception& exception) {
+      std::cerr << exception.what() << '\n';
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    tokenizer = &gpu_executor->GetTokenizer();
+    architecture = gpu_executor->GetConfig().architecture;
+    if (opt.verbose)
+      std::cout << "[Engine]: AMD Strix Halo gfx1151 GPU Executor\n";
+  }
+#endif
+  if (tokenizer == nullptr) {
+    if (!opt.speculative_backend.empty()) {
+      std::cerr << "Qwen speculative decoding requires the ROCm backend\n";
+      return 1;
+    }
+    generator = models::QwenGenerator::CreateFromGguf(*reader, &err);
+    if (!generator) {
+      std::cerr << "Error creating Qwen generator: " << err << '\n';
+      PrintModelLoadTime(model_load_start, false);
+      return 1;
+    }
+    tokenizer = &generator->GetTokenizer();
+    architecture = generator->GetConfig().architecture;
+    if (opt.verbose)
+      std::cout << "[Engine]: CPU (OpenMP Multi-Threaded)\n";
   }
   PrintModelLoadTime(model_load_start);
 
-  std::cout << "=== Gufo Interactive Chat ("
-            << generator->GetConfig().architecture << ") ===\n"
+  std::cout << "=== Gufo Interactive Chat (" << architecture << ") ===\n"
             << "Type 'exit' or Ctrl+D to quit.\n\n";
 
   std::vector<tokenization::ChatMessage> history;
@@ -1080,7 +1187,7 @@ int RunChat(std::span<const char* const> args) {
 
   std::string user_input;
   while (true) {
-    std::cout << ">>> User: ";
+    std::cout << ">>> User: " << std::flush;
     if (!std::getline(std::cin, user_input)) {
       break;
     }
@@ -1103,30 +1210,52 @@ int RunChat(std::span<const char* const> args) {
         });
     if (!rendered_prompt.has_value()) {
       std::cerr << "Error formatting chat template.\n";
-      continue;
+      return 1;
     }
 
-    const auto prompt_tokens =
-        generator->GetTokenizer().Encode(*rendered_prompt);
+    const auto prompt_tokens = tokenizer->Encode(*rendered_prompt);
 
     std::cout << "<<< Assistant: ";
     std::string assistant_reply;
 
-    models::GenerationOptions gen_opts;
-    gen_opts.max_new_tokens = opt.max_tokens > 0 ? opt.max_tokens : 256;
-    gen_opts.sampling = opt.sampling;
+    try {
+#if defined(ENGINE_ENABLE_HIP)
+      if (gpu_executor != nullptr) {
+        GenerateQwenGpuResponse(opt, *gpu_executor, verifier.get(),
+                                prompt_tokens, &assistant_reply);
+      } else
+#endif
+      {
+        models::GenerationOptions generation;
+        generation.max_new_tokens = opt.max_tokens;
+        generation.sampling = opt.sampling;
+        (void)generator->Generate(
+            prompt_tokens, generation,
+            [&](tokenization::TokenId, std::string_view piece) {
+              std::cout << piece << std::flush;
+              assistant_reply += piece;
+              return true;
+            });
+        std::cout << '\n';
+      }
+    } catch (const std::exception& exception) {
+      std::cerr << "Generation failed: " << exception.what() << '\n';
+      return 1;
+    }
 
-    const auto reply_tokens = generator->Generate(
-        prompt_tokens, gen_opts,
-        [&](tokenization::TokenId, std::string_view piece) -> bool {
-          std::cout << piece << std::flush;
-          assistant_reply += piece;
-          return true;
-        });
-
-    std::cout << "\n\n";
-    history.push_back(
-        {tokenization::ChatRole::kAssistant, assistant_reply, "", ""});
+    std::cout << '\n';
+    tokenization::ChatMessage reply{tokenization::ChatRole::kAssistant, ""};
+    if (reasoning.enabled.value_or(false)) {
+      constexpr std::string_view end = "</think>";
+      const auto boundary = assistant_reply.find(end);
+      reply.thought = assistant_reply.substr(0, boundary);
+      if (boundary != std::string::npos) {
+        reply.content = assistant_reply.substr(boundary + end.size());
+      }
+    } else {
+      reply.content = std::move(assistant_reply);
+    }
+    history.push_back(std::move(reply));
   }
 
   return 0;

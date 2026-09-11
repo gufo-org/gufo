@@ -22,10 +22,9 @@ avoid compiling or running unrelated kernels:
 - attention: `qwen_attention_decode_ops_test`,
   `qwen_attention_long_context_ops_test`, `qwen_attention_fusion_ops_test`,
   `qwen_attention_projection_ops_test`, `qwen_attention_component_ops_test`;
-- FFN: `qwen_ffn_fusion_ops_test`, `qwen_ffn_residual_ops_test`;
 - quant: `qwen_quant_gemv_ops_test`, `qwen_kquant_gemv_ops_test`,
   `qwen_dequant_ops_test`;
-- recurrent/runtime: `qwen_ssm_ops_test`, `qwen_graph_prefetch_ops_test`,
+- recurrent/runtime: `qwen_ssm_ops_test`, `qwen_graph_ops_test`,
   `qwen_module_ops_test`.
 
 Small utilities under `hip/support/` provide move-only device allocation,
@@ -33,7 +32,7 @@ host/device copies, explicit device requirements, BF16 conversion, and
 always-on numeric checks. They intentionally do not replace CTest or introduce
 a test registry.
 
-The focused basic, attention, FFN, and quant kernel executables declare HIP
+The focused basic, attention, and quant kernel executables declare HIP
 hardware optional at their device gate. No visible HIP device therefore returns
 CTest skip code 77 rather than success. HIP runtime discovery errors and tests
 that declare hardware required return failure. The shared CMake helper records

@@ -23,16 +23,6 @@ void LaunchPerHeadRMSNorm(const float* x, const float* weight, float* out,
 void LaunchResidualAdd(const float* a, const float* b, float* out,
                        std::size_t dim, hipStream_t stream = nullptr);
 
-/// Fuses the residual add with the subsequent RMSNorm into one launch
-/// (opt-c010-residual-rmsnorm): writes out_sum = a + b in place and
-/// out = (out_sum / sqrt(mean(out_sum^2) + eps)) * weight. Unfused reference:
-/// LaunchResidualAdd followed by LaunchRMSNorm.
-void LaunchFusedResidualAddRMSNorm(const float* a, const float* b,
-                                   float* out_sum, const float* weight,
-                                   float* out, std::size_t dim,
-                                   float eps = 1e-6F,
-                                   hipStream_t stream = nullptr);
-
 /// Batched RMSNorm across B tokens (optional BF16 output in single pass)
 void LaunchBatchedRMSNorm(const float* x, const float* weight, float* out,
                           void* out_bf16, std::size_t batch_size,
@@ -50,16 +40,6 @@ void LaunchBatchedPerHeadRMSNorm(const float* x, const float* weight,
 void LaunchBatchedResidualAdd(const float* a, const float* b, float* out,
                               std::size_t batch_size, std::size_t dim,
                               hipStream_t stream = nullptr);
-
-/// Batched fuse of residual add and RMSNorm across B tokens into one launch
-/// (opt-c010-residual-rmsnorm), with optional BF16 normed output. Unfused
-/// reference: LaunchBatchedResidualAdd followed by LaunchBatchedRMSNorm.
-void LaunchBatchedFusedResidualAddRMSNorm(const float* a, const float* b,
-                                          float* out_sum, const float* weight,
-                                          float* out, void* out_bf16,
-                                          std::size_t batch_size,
-                                          std::size_t dim, float eps = 1e-6F,
-                                          hipStream_t stream = nullptr);
 
 }  // namespace gufo::hip
 

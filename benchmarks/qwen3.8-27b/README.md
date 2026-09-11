@@ -21,8 +21,8 @@ that number. Draft precision is selected separately from target precision.
 
 ## Single user, speculative
 
-Prefill / generation in tok/s. DFlash2 companion selection is pending the
-matched Q4/Q8 comparison; MTP uses the separate Q4_0 artifact.
+Prefill / generation in tok/s. DFlash2 uses the Q4_K_M companion; MTP uses
+the separate Q4_0 artifact.
 
 | Context depth | Q4 + DFlash2 | Q8 + DFlash2 | Q4 + MTP | Q8 + MTP |
 | ---: | ---: | ---: | ---: | ---: |
@@ -62,19 +62,28 @@ speculative serving is being qualified before these numbers are published.
 Compare companions against the **same target and chat-framed prompts**.
 Q4 and Q8 targets can generate different continuations, so their acceptance
 rates do not directly rank the companions. Each pairing must reproduce its
-own target's greedy output and token count before its speed qualifies.
+own target's greedy token IDs before its speed qualifies.
 
-| Target | DFlash2 Q4_K_M | DFlash2 Q8_0 | Production choice |
+Three chat prompts × 128 generated tokens × two repetitions, rotated draft
+order. All **24/24 cases reproduce every target token ID**. These are chat
+generation rates including prompt processing, separate from the depth sweep.
+
+| Target | DFlash2 Q4_K_M (tok/s) | DFlash2 Q8_0 (tok/s) | Recommended |
 | --- | --- | --- | --- |
-| Q4_K_XL | TODO | TODO | TODO |
-| Q8_K_XL | TODO | TODO | TODO |
+| Q4_K_XL | 25.51 | 25.62 | Q4_K_M |
+| Q8_K_XL | 24.35 | 24.08 | Q4_K_M |
+
+Q4 is effectively tied on speed and its artifact is 0.85 GiB smaller.
+Keep Q8 for quality/performance comparisons; BF16 remains a reference.
+The [measurement record](eval/draft-selection.json) includes artifact hashes,
+per-case token hashes, acceptance and repetitions.
 
 ## Reproduce
 
 ```sh
 nix build
 MODEL=/path/to/Qwen3.8-27B-UD-Q4_K_XL.gguf
-DRAFT=/path/to/Qwen3.8-27B-DFlash2-Q8_0.gguf
+DRAFT=/path/to/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
 MTP=/path/to/mtp-Qwen3.8-27B-Q4_0.gguf
 
 ./result/bin/gufo bench --model "$MODEL" \
@@ -100,10 +109,11 @@ DFlash2 formulas, evidence and remaining gaps. Start with
 kernel/model suites. Release speed qualifies only after complete quality runs.
 
 Production execution has one implementation per supported shape/weight type;
-Qwen kernel, precision and verification environment switches are removed.
+Qwen kernel, precision and verification environment switches are removed,
+along with inactive fusion/prefetch policies and their kernels.
 DFlash2 retains FP32 values in a bounded history ring. MTP replay uses the
 committed target features. The optimized correctness build keeps assertions
 and symbols; benchmark only the Nix release binaries.
 
-Remaining: independent original-target/MTP qualification, final Q4/Q8 draft
-selection, matched speed matrices, and speculative serving parity for C>1.
+Remaining: independent original-target/MTP qualification, matched speed
+matrices, and speculative serving parity for C>1.

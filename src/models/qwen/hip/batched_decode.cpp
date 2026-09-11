@@ -18,11 +18,6 @@ namespace {
 
 constexpr std::size_t kMaxDecodeBatch = 8;
 
-[[nodiscard]] constexpr bool SupportsDenseFusedProjection(
-    core::GgmlType type) noexcept {
-  return type == core::GgmlType::kF32 || type == core::GgmlType::kBF16;
-}
-
 [[nodiscard]] constexpr bool SupportsExactSharedProjection(
     core::GgmlType type) noexcept {
   // opt-q4kxl: the K-quant/IQ formats have an exact shared-weight small-batch
@@ -135,20 +130,11 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   for (std::uint32_t layer_index = 0; layer_index < config.num_layers;
        ++layer_index) {
     const auto& layer = weights.layers[layer_index];
-    const auto route_plan =
-        ResolveQwenLayerRoute(coordinator->policy_, QwenExecutionMode::kDecode,
-                              layer.is_full_attention);
-    const bool fuse_ffn_norm_swiglu =
-        route_plan.fuse_ffn_swiglu &&
-        layer.ffn_gate.type == core::GgmlType::kBF16 &&
-        layer.ffn_up.type == core::GgmlType::kBF16;
-
     LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
                          static_cast<const float*>(layer.attn_norm.data),
                          scratch.decode.normed.data(), nullptr, batch_size,
                          hidden_size, 1e-6F, arena.stream);
 
-    bool ssm_residual_folded = false;
     if (layer.is_full_attention) {
       LaunchProjection(layer.attn_q, scratch.decode.normed.data(),
                        scratch.ssm.qkv.data(), batch_size, q_projection_size,
@@ -250,42 +236,16 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
             state_arena.GetRecurrentStateStorage());
       }
 
-      ssm_residual_folded = route_plan.fuse_ssm_epilogue &&
-                            SupportsDenseFusedProjection(layer.ssm_out.type);
-      if (ssm_residual_folded) {
-        for (std::size_t row = 0; row < batch_size; ++row) {
-          float* hidden = scratch.decode.hidden.data() + (row * hidden_size);
-          LaunchGEMVResidual(layer.ssm_out.data, layer.ssm_out.type,
-                             scratch.ssm.out.data() + (row * ssm_inner_size),
-                             hidden, hidden, hidden_size, ssm_inner_size,
-                             arena.stream);
-        }
-      } else {
-        LaunchProjection(layer.ssm_out, scratch.ssm.out.data(),
-                         scratch.attention.output.data(), batch_size,
-                         hidden_size, ssm_inner_size, arena.stream);
-      }
+      LaunchProjection(layer.ssm_out, scratch.ssm.out.data(),
+                       scratch.attention.output.data(), batch_size, hidden_size,
+                       ssm_inner_size, arena.stream);
     }
 
-    if (ssm_residual_folded) {
-      if (!fuse_ffn_norm_swiglu) {
-        LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
-                             static_cast<const float*>(layer.ffn_norm.data),
-                             scratch.decode.normed.data(), nullptr, batch_size,
-                             hidden_size, 1e-6F, arena.stream);
-      }
-    } else if (route_plan.fuse_residual_rmsnorm) {
-      LaunchBatchedFusedResidualAddRMSNorm(
-          scratch.decode.hidden.data(), scratch.attention.output.data(),
-          scratch.decode.hidden.data(),
-          static_cast<const float*>(layer.ffn_norm.data),
-          scratch.decode.normed.data(), nullptr, batch_size, hidden_size, 1e-6F,
-          arena.stream);
-    } else {
+    {
       LaunchBatchedResidualAdd(
           scratch.decode.hidden.data(), scratch.attention.output.data(),
           scratch.decode.hidden.data(), batch_size, hidden_size, arena.stream);
-      if (!fuse_ffn_norm_swiglu) {
+      {
         LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
                              static_cast<const float*>(layer.ffn_norm.data),
                              scratch.decode.normed.data(), nullptr, batch_size,
@@ -293,27 +253,16 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       }
     }
 
-    if (fuse_ffn_norm_swiglu) {
-      for (std::size_t row = 0; row < batch_size; ++row) {
-        LaunchFusedRMSNormSwiGLUGEMV(
-            scratch.decode.hidden.data() + (row * hidden_size),
-            static_cast<const float*>(layer.ffn_norm.data), 1e-6F,
-            layer.ffn_gate.data, layer.ffn_up.data,
-            scratch.ffn.activation.data() + (row * intermediate_size),
-            intermediate_size, hidden_size, arena.stream);
-      }
-    } else {
-      LaunchProjection(layer.ffn_gate, scratch.decode.normed.data(),
-                       scratch.ffn.gate.data(), batch_size, intermediate_size,
-                       hidden_size, arena.stream);
-      LaunchProjection(layer.ffn_up, scratch.decode.normed.data(),
-                       scratch.ffn.up.data(), batch_size, intermediate_size,
-                       hidden_size, arena.stream);
-      LaunchBatchedSwiGLUActivation(
-          scratch.ffn.gate.data(), scratch.ffn.up.data(),
-          scratch.ffn.activation.data(), nullptr,
-          batch_size * intermediate_size, arena.stream);
-    }
+    LaunchProjection(layer.ffn_gate, scratch.decode.normed.data(),
+                     scratch.ffn.gate.data(), batch_size, intermediate_size,
+                     hidden_size, arena.stream);
+    LaunchProjection(layer.ffn_up, scratch.decode.normed.data(),
+                     scratch.ffn.up.data(), batch_size, intermediate_size,
+                     hidden_size, arena.stream);
+    LaunchBatchedSwiGLUActivation(scratch.ffn.gate.data(),
+                                  scratch.ffn.up.data(),
+                                  scratch.ffn.activation.data(), nullptr,
+                                  batch_size * intermediate_size, arena.stream);
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena.stream);
@@ -441,29 +390,22 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
     const auto& layer = weights_.layers[layer_index];
     const auto route_plan = ResolveQwenLayerRoute(
         policy_, QwenExecutionMode::kDecode, layer.is_full_attention);
-    const bool fuse_ffn_norm_swiglu =
-        route_plan.fuse_ffn_swiglu &&
-        layer.ffn_gate.type == core::GgmlType::kBF16 &&
-        layer.ffn_up.type == core::GgmlType::kBF16;
 
     LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
                          static_cast<const float*>(layer.attn_norm.data),
                          scratch.decode.normed.data(), nullptr, batch_size,
                          hidden_size, 1e-6F, arena_.stream);
 
-    bool ssm_residual_folded = false;
     if (layer.is_full_attention) {
-      {
-        LaunchProjection(layer.attn_q, scratch.decode.normed.data(),
-                         scratch.ssm.qkv.data(), batch_size, q_projection_size,
-                         hidden_size, arena_.stream);
-        LaunchProjection(layer.attn_k, scratch.decode.normed.data(),
-                         scratch.attention.k.data(), batch_size, kv_size,
-                         hidden_size, arena_.stream);
-        LaunchProjection(layer.attn_v, scratch.decode.normed.data(),
-                         scratch.attention.v.data(), batch_size, kv_size,
-                         hidden_size, arena_.stream);
-      }
+      LaunchProjection(layer.attn_q, scratch.decode.normed.data(),
+                       scratch.ssm.qkv.data(), batch_size, q_projection_size,
+                       hidden_size, arena_.stream);
+      LaunchProjection(layer.attn_k, scratch.decode.normed.data(),
+                       scratch.attention.k.data(), batch_size, kv_size,
+                       hidden_size, arena_.stream);
+      LaunchProjection(layer.attn_v, scratch.decode.normed.data(),
+                       scratch.attention.v.data(), batch_size, kv_size,
+                       hidden_size, arena_.stream);
       LaunchBatchedUnpackQG(scratch.ssm.qkv.data(), scratch.attention.q.data(),
                             scratch.ssm.gate.data(), batch_size,
                             config.num_attention_heads, config.head_dim,
@@ -546,21 +488,18 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                        scratch.attention.output.data(), batch_size, hidden_size,
                        attention_size, arena_.stream);
     } else {
-      {
-        LaunchProjection(layer.attn_qkv, scratch.decode.normed.data(),
-                         scratch.ssm.qkv.data(), batch_size, ssm_qkv_size,
-                         hidden_size, arena_.stream);
-        LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
-                         scratch.ssm.gate.data(), batch_size, ssm_inner_size,
-                         hidden_size, arena_.stream);
-        LaunchProjection(layer.ssm_alpha, scratch.decode.normed.data(),
-                         scratch.ssm.alpha.data(), batch_size, time_step_rank,
-                         hidden_size, arena_.stream);
-        LaunchProjection(layer.ssm_beta, scratch.decode.normed.data(),
-                         scratch.ssm.beta.data(), batch_size, time_step_rank,
-                         hidden_size, arena_.stream);
-      }
-
+      LaunchProjection(layer.attn_qkv, scratch.decode.normed.data(),
+                       scratch.ssm.qkv.data(), batch_size, ssm_qkv_size,
+                       hidden_size, arena_.stream);
+      LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
+                       scratch.ssm.gate.data(), batch_size, ssm_inner_size,
+                       hidden_size, arena_.stream);
+      LaunchProjection(layer.ssm_alpha, scratch.decode.normed.data(),
+                       scratch.ssm.alpha.data(), batch_size, time_step_rank,
+                       hidden_size, arena_.stream);
+      LaunchProjection(layer.ssm_beta, scratch.decode.normed.data(),
+                       scratch.ssm.beta.data(), batch_size, time_step_rank,
+                       hidden_size, arena_.stream);
       {
         // One pair of launches walks the whole verification batch. The rows are
         // still applied in order with identical arithmetic, so this is
@@ -585,80 +524,39 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
             arena_.GetRecurrentStateStorage());
       }
 
-      ssm_residual_folded = route_plan.fuse_ssm_epilogue &&
-                            SupportsDenseFusedProjection(layer.ssm_out.type);
-      if (ssm_residual_folded) {
-        for (std::size_t row = 0; row < batch_size; ++row) {
-          float* const hidden =
-              scratch.decode.hidden.data() + (row * hidden_size);
-          LaunchGEMVResidual(layer.ssm_out.data, layer.ssm_out.type,
-                             scratch.ssm.out.data() + (row * ssm_inner_size),
-                             hidden, hidden, hidden_size, ssm_inner_size,
-                             arena_.stream);
-        }
-      } else {
-        LaunchProjection(layer.ssm_out, scratch.ssm.out.data(),
-                         scratch.attention.output.data(), batch_size,
-                         hidden_size, ssm_inner_size, arena_.stream);
-      }
-    }
-
-    if (ssm_residual_folded) {
-      if (!fuse_ffn_norm_swiglu) {
-        LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
-                             static_cast<const float*>(layer.ffn_norm.data),
-                             scratch.decode.normed.data(), nullptr, batch_size,
-                             hidden_size, 1e-6F, arena_.stream);
-      }
-    } else if (route_plan.fuse_residual_rmsnorm) {
-      LaunchBatchedFusedResidualAddRMSNorm(
-          scratch.decode.hidden.data(), scratch.attention.output.data(),
-          scratch.decode.hidden.data(),
-          static_cast<const float*>(layer.ffn_norm.data),
-          scratch.decode.normed.data(), nullptr, batch_size, hidden_size, 1e-6F,
-          arena_.stream);
-    } else {
-      LaunchBatchedResidualAdd(
-          scratch.decode.hidden.data(), scratch.attention.output.data(),
-          scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);
-      if (!fuse_ffn_norm_swiglu) {
-        LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
-                             static_cast<const float*>(layer.ffn_norm.data),
-                             scratch.decode.normed.data(), nullptr, batch_size,
-                             hidden_size, 1e-6F, arena_.stream);
-      }
+      LaunchProjection(layer.ssm_out, scratch.ssm.out.data(),
+                       scratch.attention.output.data(), batch_size, hidden_size,
+                       ssm_inner_size, arena_.stream);
     }
 
     {
-      if (fuse_ffn_norm_swiglu) {
-        for (std::size_t row = 0; row < batch_size; ++row) {
-          LaunchFusedRMSNormSwiGLUGEMV(
-              scratch.decode.hidden.data() + (row * hidden_size),
-              static_cast<const float*>(layer.ffn_norm.data), 1e-6F,
-              layer.ffn_gate.data, layer.ffn_up.data,
-              scratch.ffn.activation.data() + (row * intermediate_size),
-              intermediate_size, hidden_size, arena_.stream);
-        }
-      } else {
-        LaunchProjection(layer.ffn_gate, scratch.decode.normed.data(),
-                         scratch.ffn.gate.data(), batch_size, intermediate_size,
-                         hidden_size, arena_.stream);
-        LaunchProjection(layer.ffn_up, scratch.decode.normed.data(),
-                         scratch.ffn.up.data(), batch_size, intermediate_size,
-                         hidden_size, arena_.stream);
-        LaunchBatchedSwiGLUActivation(
-            scratch.ffn.gate.data(), scratch.ffn.up.data(),
-            scratch.ffn.activation.data(), nullptr,
-            batch_size * intermediate_size, arena_.stream);
-      }
-      LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
-                       scratch.ffn.out.data(), batch_size, hidden_size,
-                       intermediate_size, arena_.stream);
       LaunchBatchedResidualAdd(
-          scratch.decode.hidden.data(), scratch.ffn.out.data(),
+          scratch.decode.hidden.data(), scratch.attention.output.data(),
           scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);
+      {
+        LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
+                             static_cast<const float*>(layer.ffn_norm.data),
+                             scratch.decode.normed.data(), nullptr, batch_size,
+                             hidden_size, 1e-6F, arena_.stream);
+      }
     }
 
+    LaunchProjection(layer.ffn_gate, scratch.decode.normed.data(),
+                     scratch.ffn.gate.data(), batch_size, intermediate_size,
+                     hidden_size, arena_.stream);
+    LaunchProjection(layer.ffn_up, scratch.decode.normed.data(),
+                     scratch.ffn.up.data(), batch_size, intermediate_size,
+                     hidden_size, arena_.stream);
+    LaunchBatchedSwiGLUActivation(
+        scratch.ffn.gate.data(), scratch.ffn.up.data(),
+        scratch.ffn.activation.data(), nullptr, batch_size * intermediate_size,
+        arena_.stream);
+    LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
+                     scratch.ffn.out.data(), batch_size, hidden_size,
+                     intermediate_size, arena_.stream);
+    LaunchBatchedResidualAdd(
+        scratch.decode.hidden.data(), scratch.ffn.out.data(),
+        scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);
     if (capture_prompt_hidden_) {
       if (const auto tap = arena_.GetTargetLayerCaptureIndex(layer_index);
           tap.has_value()) {

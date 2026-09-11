@@ -96,18 +96,6 @@ void LaunchGEMV(
     std::size_t M, std::size_t K, hipStream_t stream = nullptr,
     models::qwen::QwenGemmMode mode = models::qwen::QwenGemmMode::kHipDecode);
 
-/// Computes Matrix-Vector Multiplication with a residual-add epilogue:
-/// y = A*x + residual (opt-c010-ssm-gate-residual). The residual is read
-/// before y is written, so residual may alias y (in-place accumulate).
-void LaunchGEMVResidual(const void* A, core::GgmlType a_type, const float* x,
-                        float* y, const float* residual, std::size_t M,
-                        std::size_t K, hipStream_t stream = nullptr);
-
-/// opt-c014-layer-prefetch: asynchronous page-touch of a weight region on the
-/// given stream. Reads one 16B chunk per 4KiB page; never writes.
-void LaunchLayerWeightPrefetch(const void* data, std::size_t bytes,
-                               hipStream_t stream = nullptr);
-
 /// opt-c1xx-q8k-gemv: computes y = A * x where A is stored as block_q8_K
 /// ({ float d; int8_t qs[256]; int16_t bsums[16]; }, QK_K=256). The dot runs
 /// at Q8 (activation quantized to int8, integer MAC, single fp scale at block

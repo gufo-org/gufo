@@ -26,23 +26,19 @@ void Check(bool condition, const char* message) {
 
 auto Resolution(GgmlType type, std::size_t m, std::size_t k, QwenGemmMode mode,
                 QwenGemmCapabilities capabilities = {},
-                bool residual_epilogue = false, std::size_t batch_size = 1) {
+                std::size_t batch_size = 1) {
   return ResolveQwenGemmRoute({.type = type,
                                .batch_size = batch_size,
                                .m = m,
                                .k = k,
                                .mode = mode,
-                               .capabilities = capabilities,
-                               .residual_epilogue = residual_epilogue});
+                               .capabilities = capabilities});
 }
 
 QwenGemmRoute Route(GgmlType type, std::size_t m, std::size_t k,
                     QwenGemmMode mode, QwenGemmCapabilities capabilities = {},
-                    bool residual_epilogue = false,
                     std::size_t batch_size = 1) {
-  return Resolution(type, m, k, mode, capabilities, residual_epilogue,
-                    batch_size)
-      .route;
+  return Resolution(type, m, k, mode, capabilities, batch_size).route;
 }
 
 void TestFormatCapabilities() {
@@ -213,17 +209,17 @@ void TestBackendDimensionBoundaries() {
   Check(Resolution(GgmlType::kBF16, 1, int_max, QwenGemmMode::kHipPrefill)
             .accepted(),
         "hipBLAS K=INT_MAX must remain representable");
-  Check(Resolution(GgmlType::kBF16, 1, 1, QwenGemmMode::kHipPrefill, {}, false,
-                   int_max)
-            .accepted(),
-        "hipBLAS batch=INT_MAX must remain representable");
+  Check(
+      Resolution(GgmlType::kBF16, 1, 1, QwenGemmMode::kHipPrefill, {}, int_max)
+          .accepted(),
+      "hipBLAS batch=INT_MAX must remain representable");
   Check(Resolution(GgmlType::kBF16, int_max + 1U, 1, QwenGemmMode::kHipPrefill)
                 .rejection == QwenGemmRejection::kShapeOverflow,
         "hipBLAS M above INT_MAX must reject");
   Check(Resolution(GgmlType::kBF16, 1, int_max + 1U, QwenGemmMode::kHipPrefill)
                 .rejection == QwenGemmRejection::kShapeOverflow,
         "hipBLAS K above INT_MAX must reject");
-  Check(Resolution(GgmlType::kBF16, 1, 1, QwenGemmMode::kHipPrefill, {}, false,
+  Check(Resolution(GgmlType::kBF16, 1, 1, QwenGemmMode::kHipPrefill, {},
                    int_max + 1U)
                 .rejection == QwenGemmRejection::kShapeOverflow,
         "hipBLAS batch above INT_MAX must reject");
@@ -241,11 +237,11 @@ void TestBackendDimensionBoundaries() {
                 .rejection == QwenGemmRejection::kShapeOverflow,
         "MTP grid M above UINT_MAX must reject");
 
-  Check(Resolution(GgmlType::kQ8_0, 1, 32, QwenGemmMode::kHipPrefill, {}, false,
+  Check(Resolution(GgmlType::kQ8_0, 1, 32, QwenGemmMode::kHipPrefill, {},
                    uint_max)
             .accepted(),
         "quant prefill batch=UINT_MAX must remain representable");
-  Check(Resolution(GgmlType::kQ8_0, 1, 32, QwenGemmMode::kHipPrefill, {}, false,
+  Check(Resolution(GgmlType::kQ8_0, 1, 32, QwenGemmMode::kHipPrefill, {},
                    uint_max + 1U)
                 .rejection == QwenGemmRejection::kShapeOverflow,
         "quant prefill batch above UINT_MAX must reject");
@@ -303,9 +299,6 @@ void TestRejections() {
       {.type = GgmlType::kQ5_K, .batch_size = 1, .m = 1, .k = 255});
   Check(result.rejection == QwenGemmRejection::kMisalignedQuantK,
         "K-quant K=255 rejection");
-  Check(Route(GgmlType::kQ5_K, 1, 256, QwenGemmMode::kHipDecode, {}, true) ==
-            QwenGemmRoute::kRejected,
-        "quantized residual epilogue rejection");
   Check(Route(GgmlType::kQ4_K, 1, 256, QwenGemmMode::kHipDecode) ==
             QwenGemmRoute::kHipQuantDirect,
         "HIP decode Q4_K direct route");

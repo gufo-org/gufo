@@ -14,7 +14,7 @@ Run on gfx1151 inside Nix. Model-specific tests live in
 | --- | --- |
 | `fast` | DFlash metadata/layout validation, NPU packing, strict result reporting. |
 | `kernels` | Quantized GEMM versus independent/decode controls; DFlash causal grouped convolution, windowed attention and sparse selector probabilities versus CPU equations. |
-| `model` | Target full-logit replay and verifier parity; MTP committed-feature alignment; DFlash ring/snapshot/restore. |
+| `model` | Target full-logit replay; MTP committed-feature alignment; DFlash ring/snapshot/restore; prompt and multi-turn GPU chat token-ID parity across AR/MTP/DFlash. |
 | `serving` | Direct versus served tokens, sampled DFlash, bounded prefill, cache forks, persistent restore, concurrency, cancellation and reclamation. |
 | `reference` | Teacher-forced target versus optional BF16: KL, total variation, top-1 agreement, RMSE and NLL difference. Informational quantization measurements. |
 
@@ -52,12 +52,21 @@ Artifact variables `GUFO_QWEN27B_*_MODEL` are test inputs, not execution switche
   attention window boundaries and partial-top-k partitions. Top-k 1, 7 and 16
   check greedy selection and sampled probabilities, including poisoned unused
   scratch slots. This catches the former unwritten-slot merge for top-k <16.
-- Short release corpus: Q4/Q8 targets with Q8 DFlash2 each match all three
-  32-token chat cases in output and token count. This is a development probe,
-  not a capability evaluation or proof across arbitrary contexts.
+- Release companion comparison: both targets × both draft quants × three
+  chat prompts × two repetitions: all 24 cases match all 128 target token IDs.
+  See [the measurement record](draft-selection.json). This is a development
+  corpus, not a capability evaluation or proof across arbitrary contexts.
+- `prompt` and `chat` share GPU/speculative setup. Their first-turn tokens
+  match, and two chat turns reproduce AR with both draft backends. Verbose
+  generation emits a SHA-256 over little-endian token IDs; the corpus rejects
+  missing/incomplete traces and text-only matches.
+- Removed an unused 170 MiB target scratch allocation per session. Inactive
+  fusion/prefetch branches and their kernels/tests are deleted; production
+  arithmetic and independent operator controls remain.
 
 Run the affected operator check first, then model replay on both target quants.
 Require complete speculative corpus results before comparing release speed.
+Compare token IDs and full logits, not just decoded text or acceptance.
 Use `tools/qwen27b/drafts.py` for matched Q4/Q8 companion comparisons; do not
 rank draft acceptance across different target-generated continuations.
 
@@ -83,3 +92,11 @@ The target verifier must preserve the target distribution independently of
 proposal quality. Full original-target equivalence, an independent MTP source
 audit, the optional BF16 comparison, and the longer capability/depth corpus
 remain TODO.
+
+Experiment: removing symmetric-format activation corrections, including explicit
+rounded multiply/add, failed bitwise GEMM verification. Rejected; the production
+reduction remains unchanged.
+
+Short TG profile: exact quantized verifier projections account for about 73%
+of kernel time, recurrent updates about 9%. Prioritize those before minor
+launches such as draft RoPE (0.1% in that trace).

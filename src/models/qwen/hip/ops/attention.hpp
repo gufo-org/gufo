@@ -22,15 +22,6 @@ void LaunchFusedQKVProjections(const void* q_w, core::GgmlType q_type,
                                std::size_t kv_dim, std::size_t hidden_size,
                                hipStream_t stream = nullptr);
 
-/// Fused layer pre-RMSNorm + QKV projections (opt-c010-rmsnorm-projection).
-/// Computes the norm over x and feeds the projections, matching the unfused
-/// RMSNormKernel + LaunchFusedQKVProjections chain bit-for-bit.
-void LaunchFusedRMSNormQKVProjections(
-    const float* x, const float* norm_w, float eps, const void* q_w,
-    bool q_is_bf16, const void* k_w, bool k_is_bf16, const void* v_w,
-    bool v_is_bf16, float* q_out, float* k_out, float* v_out, std::size_t q_dim,
-    std::size_t kv_dim, std::size_t hidden_size, hipStream_t stream = nullptr);
-
 /// Computes Grouped-Query Softmax Attention with KV-cache and optional gating
 /// on GPU. Production supplies canonical FP16 K/V; the independent validation
 /// fallback supplies FP32 K/V. Tests may supply both representations. When

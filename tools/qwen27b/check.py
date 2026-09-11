@@ -47,7 +47,8 @@ def main() -> None:
                SUITES.get(args.suite, [t for group in SUITES.values() for t in group]))
     commands = [
         ["cmake", "--preset", "gpu-test"],
-        ["cmake", "--build", "--preset", "gpu-test", "--target", *targets],
+        ["cmake", "--build", "--preset", "gpu-test", "--target", *targets,
+         *(["gufo"] if args.suite in ("model", "all") else [])],
     ]
     if args.suite == "reference":
         commands.append([
@@ -56,6 +57,8 @@ def main() -> None:
         ])
     else:
         names = targets + (["qwen27b.tools"] if args.suite in ("fast", "all") else [])
+        if args.suite in ("model", "all"):
+            names.append("qwen27b.cli")
         commands.append(["ctest", "--test-dir", "build/gpu-test", "-R",
                          "^(" + "|".join(names) + ")$",
                          "--output-on-failure", "--stop-on-failure", "--no-tests=error"])

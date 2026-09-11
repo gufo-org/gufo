@@ -86,6 +86,18 @@ void TestInvalidFlags() {
 
   const std::array<const char*, 2> args9 = {"--reasoning-budget", "1024"};
   assert(!gufo::cli::ParsePromptOptions(args9, &err).has_value());
+
+  for (const auto* backend : {"dflash2", "mtp"}) {
+    const std::array<const char*, 2> missing_path = {"--speculative", backend};
+    assert(!gufo::cli::ParsePromptOptions(missing_path, &err).has_value());
+    assert(err.find("requires --") != std::string::npos);
+  }
+  const std::array<const char*, 5> cpu_spec = {
+      "--cpu", "--speculative", "dflash2", "--dflash-model", "draft.gguf"};
+  assert(!gufo::cli::ParsePromptOptions(cpu_spec, &err).has_value());
+  assert(err.find("ROCm") != std::string::npos);
+  const std::array<const char*, 3> cpu_ar = {"--cpu", "--speculative", "off"};
+  assert(gufo::cli::ParsePromptOptions(cpu_ar, &err).has_value());
 }
 
 void TestSamplingAndReasoningFlags() {

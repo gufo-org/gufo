@@ -285,14 +285,11 @@ public:
   float* d_target_layer_features{nullptr};
 
   hipStream_t stream{nullptr};
-  hipStream_t prefetch_stream{nullptr};
-  hipEvent_t prefetch_event{nullptr};
   hipblasHandle_t hipblas_handle{nullptr};
   std::unique_ptr<HipblasLtGemm> hipblaslt_gemm;
   void* d_scratch_bf16{nullptr};
   float* d_split_k_attention{nullptr};
   hip_bfloat16* d_weights_bf16{nullptr};
-  hip_bfloat16* d_weights_bf16_aux{nullptr};
   void* d_scratch_q8_act{nullptr};
 
   [[nodiscard]] std::uint32_t GetMaxBatch() const noexcept {

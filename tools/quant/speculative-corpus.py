@@ -20,10 +20,20 @@ GENERATED_RE = re.compile(
     r"(?P<seconds>[0-9.]+)s\s+\((?P<tps>[0-9.]+)\s+tok/s\)"
 )
 SPECULATIVE_LINE_RE = re.compile(r"^\[Speculative\]:\s+(?P<body>.+)$", re.MULTILINE)
+TOKEN_TRACE_RE = re.compile(
+    r"^\[TokenTrace\]: count=(?P<count>\d+) sha256=(?P<sha256>[0-9a-f]{64})$",
+    re.MULTILINE,
+)
 SPECULATIVE_FIELD_RE = re.compile(
     r"(?P<key>[a-z_]+)=(?P<value>[0-9.eE+-]+)"
 )
 DSPARK_REFERENCE_SYSTEM_PROMPT = "You are a helpful assistant"
+
+def parse_token_trace(stderr: str, tokens: int) -> str:
+    trace = TOKEN_TRACE_RE.search(stderr)
+    if trace is None or int(trace.group("count")) != tokens:
+        raise RuntimeError("missing or incomplete emitted-token trace; rebuild gufo")
+    return trace.group("sha256")
 
 
 def parse_speculative_stats(stderr: str) -> dict[str, int | float]:
@@ -220,6 +230,8 @@ def run_prompt(
         "tokens": int(generated.group("tokens")),
         "seconds": float(generated.group("seconds")),
         "tps": float(generated.group("tps")),
+        "token_sha256": parse_token_trace(
+            process.stderr, int(generated.group("tokens"))),
     }
     if speculative:
         try:
@@ -402,6 +414,7 @@ def main() -> int:
         exact = all(
             run["completion"] == autoregressive["completion"]
             and run["tokens"] == autoregressive["tokens"]
+            and run["token_sha256"] == autoregressive["token_sha256"]
             for run in speculative_runs
         )
         spec_seconds = statistics.median(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare production Q4/Q8 DFlash2 companions against each Qwen27B target."""
+"""Compare Q4/Q8 DFlash2 companions against each Qwen27B target."""
 from __future__ import annotations
 
 import argparse

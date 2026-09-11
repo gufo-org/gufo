@@ -141,7 +141,8 @@ with tempfile.TemporaryDirectory() as temporary:
 
     def result(tokens=2):
         return dict(completion="answer", tokens=tokens, seconds=1.0, tps=2.0,
-                    acceptance=0.5, drafted=2, accepted=1, steps=1)
+                    acceptance=0.5, drafted=2, accepted=1, steps=1,
+                    token_sha256="a" * 64)
 
     def failed_case(args, prompt, speculative, environment):
         if prompt == "failed":
@@ -151,14 +152,28 @@ with tempfile.TemporaryDirectory() as temporary:
     def different_token_count(args, prompt, speculative, environment):
         return result(tokens=3 if speculative else 2)
 
-    for run in (failed_case, different_token_count):
+    def different_token_ids(args, prompt, speculative, environment):
+        row = result()
+        if speculative:
+            row["token_sha256"] = "b" * 64
+        return row
+
+    for run in (failed_case, different_token_count, different_token_ids):
         with patch("sys.argv", command), patch.object(
             speculative_corpus, "run_prompt", side_effect=run
         ), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
             io.StringIO()
         ):
             check(speculative_corpus.main() != 0,
-                  "incomplete or token-count-mismatched comparisons fail")
+                  "incomplete or token-mismatched comparisons fail")
+
+    for trace in ("", "[TokenTrace]: count=1 sha256=" + "a" * 64):
+        try:
+            speculative_corpus.parse_token_trace(trace, 2)
+        except RuntimeError:
+            pass
+        else:
+            check(False, "missing or partial token traces must fail")
 
 if FAILURES:
     raise AssertionError("\n".join(FAILURES))

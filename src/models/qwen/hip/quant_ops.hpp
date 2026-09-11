@@ -15,9 +15,7 @@
 namespace gufo::hip {
 
 // Shared quantized block layouts + quant row-dot helpers for the decode and
-// prefill GPU paths. Layouts/values are numerically identical to the
-// historical per-file copies (decode_ops.hip / prefill_ops.hip) and match the
-// CPU oracles in ggml_dequant.cpp.
+// prefill GPU paths, matching the CPU oracles in ggml_dequant.cpp.
 
 // block_q8_0 layout: {__half d; int8_t qs[32];}, 34 bytes, QK=32. Dominant
 // quant in the Q8_K_L model.

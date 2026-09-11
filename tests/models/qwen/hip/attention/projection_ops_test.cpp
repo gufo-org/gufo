@@ -151,115 +151,6 @@ void TestBatchedFusedProjectionsEquivalence() {
   HIP_CHECK(hipFree(d_beta_batch));
 }
 
-void TestFusedRMSNormQKVProjectionsEquivalence() {
-  constexpr std::size_t hidden_size = 1024;
-  constexpr std::size_t q_dim = 512;
-  constexpr std::size_t kv_dim = 128;
-  constexpr float eps = 1e-6F;
-
-  std::vector<float> h_x(hidden_size);
-  std::vector<float> h_w(hidden_size);
-  for (std::size_t i = 0; i < hidden_size; ++i) {
-    h_x[i] = 0.3F * std::sin(static_cast<float>(i) * 0.017F);
-    h_w[i] = 0.9F + 0.05F * static_cast<float>(i % 23);
-  }
-  std::vector<std::uint16_t> h_qw(q_dim * hidden_size);
-  std::vector<std::uint16_t> h_kw(kv_dim * hidden_size);
-  std::vector<std::uint16_t> h_vw(kv_dim * hidden_size);
-  for (std::size_t i = 0; i < q_dim * hidden_size; ++i) {
-    h_qw[i] = gufo::test::FloatToBf16Bits(
-        0.01F * std::sin(static_cast<float>(i) * 0.0021F));
-  }
-  for (std::size_t i = 0; i < kv_dim * hidden_size; ++i) {
-    h_kw[i] = gufo::test::FloatToBf16Bits(
-        0.013F * std::cos(static_cast<float>(i) * 0.0017F));
-    h_vw[i] = gufo::test::FloatToBf16Bits(
-        0.011F * std::sin(static_cast<float>(i) * 0.0013F));
-  }
-
-  float *d_x = nullptr, *d_w = nullptr, *d_normed = nullptr;
-  void *d_qw = nullptr, *d_kw = nullptr, *d_vw = nullptr;
-  float *d_q_ref = nullptr, *d_k_ref = nullptr, *d_v_ref = nullptr;
-  float *d_q_fus = nullptr, *d_k_fus = nullptr, *d_v_fus = nullptr;
-  HIP_CHECK(hipMalloc(&d_x, hidden_size * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_w, hidden_size * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_normed, hidden_size * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_qw, q_dim * hidden_size * sizeof(std::uint16_t)));
-  HIP_CHECK(hipMalloc(&d_kw, kv_dim * hidden_size * sizeof(std::uint16_t)));
-  HIP_CHECK(hipMalloc(&d_vw, kv_dim * hidden_size * sizeof(std::uint16_t)));
-  HIP_CHECK(hipMalloc(&d_q_ref, q_dim * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_k_ref, kv_dim * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_v_ref, kv_dim * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_q_fus, q_dim * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_k_fus, kv_dim * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_v_fus, kv_dim * sizeof(float)));
-  HIP_CHECK(hipMemcpy(d_x, h_x.data(), hidden_size * sizeof(float),
-                      hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_w, h_w.data(), hidden_size * sizeof(float),
-                      hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_qw, h_qw.data(),
-                      q_dim * hidden_size * sizeof(std::uint16_t),
-                      hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_kw, h_kw.data(),
-                      kv_dim * hidden_size * sizeof(std::uint16_t),
-                      hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_vw, h_vw.data(),
-                      kv_dim * hidden_size * sizeof(std::uint16_t),
-                      hipMemcpyHostToDevice));
-
-  gufo::hip::LaunchRMSNorm(d_x, d_w, d_normed, hidden_size, eps);
-  gufo::hip::LaunchFusedQKVProjections(
-      d_qw, gufo::core::GgmlType::kBF16, d_kw, gufo::core::GgmlType::kBF16,
-      d_vw, gufo::core::GgmlType::kBF16, d_normed, d_q_ref, d_k_ref, d_v_ref,
-      q_dim, kv_dim, hidden_size);
-  gufo::hip::LaunchFusedRMSNormQKVProjections(
-      d_x, d_w, eps, d_qw, true, d_kw, true, d_vw, true, d_q_fus, d_k_fus,
-      d_v_fus, q_dim, kv_dim, hidden_size);
-  HIP_CHECK(hipDeviceSynchronize());
-
-  std::vector<float> q_ref(q_dim), k_ref(kv_dim), v_ref(kv_dim);
-  std::vector<float> q_fus(q_dim), k_fus(kv_dim), v_fus(kv_dim);
-  HIP_CHECK(hipMemcpy(q_ref.data(), d_q_ref, q_dim * sizeof(float),
-                      hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(k_ref.data(), d_k_ref, kv_dim * sizeof(float),
-                      hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(v_ref.data(), d_v_ref, kv_dim * sizeof(float),
-                      hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(q_fus.data(), d_q_fus, q_dim * sizeof(float),
-                      hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(k_fus.data(), d_k_fus, kv_dim * sizeof(float),
-                      hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(v_fus.data(), d_v_fus, kv_dim * sizeof(float),
-                      hipMemcpyDeviceToHost));
-
-  float max_diff = 0.0F;
-  for (std::size_t i = 0; i < q_dim; ++i) {
-    max_diff = std::max(max_diff, std::abs(q_ref[i] - q_fus[i]));
-  }
-  for (std::size_t i = 0; i < kv_dim; ++i) {
-    max_diff = std::max(max_diff, std::abs(k_ref[i] - k_fus[i]));
-    max_diff = std::max(max_diff, std::abs(v_ref[i] - v_fus[i]));
-  }
-  std::cout << "Fused RMSNorm+QKV vs unfused max diff: " << max_diff << "\n";
-  if (max_diff != 0.0F) {
-    std::cerr << "Fused RMSNorm+QKV mismatch\n";
-    std::abort();
-  }
-
-  HIP_CHECK(hipFree(d_x));
-  HIP_CHECK(hipFree(d_w));
-  HIP_CHECK(hipFree(d_normed));
-  HIP_CHECK(hipFree(d_qw));
-  HIP_CHECK(hipFree(d_kw));
-  HIP_CHECK(hipFree(d_vw));
-  HIP_CHECK(hipFree(d_q_ref));
-  HIP_CHECK(hipFree(d_k_ref));
-  HIP_CHECK(hipFree(d_v_ref));
-  HIP_CHECK(hipFree(d_q_fus));
-  HIP_CHECK(hipFree(d_k_fus));
-  HIP_CHECK(hipFree(d_v_fus));
-}
-
 #endif  // defined(ENGINE_ENABLE_HIP)
 
 int main() {
@@ -272,7 +163,6 @@ int main() {
   }
 
   TestBatchedFusedProjectionsEquivalence();
-  TestFusedRMSNormQKVProjectionsEquivalence();
   std::cout << "Qwen attention projection ops test passed on gfx1151.\n";
   return 0;
 #else
