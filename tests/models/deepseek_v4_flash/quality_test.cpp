@@ -23,7 +23,7 @@ void ScoreOfficialReference(
     const std::string& output_path);
 void DumpReferenceFrontiers(
     const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
-    const std::string& output_directory);
+    const std::string& output_directory, bool prefill_only);
 }  // namespace gufo::testing::ds4
 
 namespace {
@@ -1257,12 +1257,14 @@ int main(int argc, char** argv) try {
   const bool wide_prefill =
       argc == 2 && std::string_view(argv[1]) == "--wide-prefill";
   const bool official = argc == 3 && std::string_view(argv[1]) == "--official";
-  const bool frontiers =
-      argc == 3 && std::string_view(argv[1]) == "--reference-frontiers";
+  const bool prefill_only =
+      argc == 4 && std::string_view(argv[3]) == "--prefill-only";
+  const bool frontiers = (argc == 3 || prefill_only) &&
+                         std::string_view(argv[1]) == "--reference-frontiers";
   if (argc > 1 && !dspark && !wide_prefill && !official && !frontiers) {
     std::cerr << "usage: ds4_quality_test "
                  "[--dspark|--dspark-replay|--wide-prefill|--official OUT.json|"
-                 "--reference-frontiers OUT-DIR]\n";
+                 "--reference-frontiers OUT-DIR [--prefill-only]]\n";
     return 2;
   }
   const char* dspark_model_path =
@@ -1289,7 +1291,7 @@ int main(int argc, char** argv) try {
     return 0;
   }
   if (frontiers) {
-    gufo::testing::ds4::DumpReferenceFrontiers(model, argv[2]);
+    gufo::testing::ds4::DumpReferenceFrontiers(model, argv[2], prefill_only);
     return 0;
   }
   if (wide_prefill) {

@@ -214,7 +214,7 @@ void ScoreOfficialReference(
 
 void DumpReferenceFrontiers(
     const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
-    const std::string& output_directory) {
+    const std::string& output_directory, bool prefill_only) {
   namespace fs = std::filesystem;
   using models::deepseek_v4_flash::ChatMessage;
   using models::deepseek_v4_flash::RenderChat;
@@ -255,7 +255,8 @@ void DumpReferenceFrontiers(
   report["context_capacity"] = 20480;
   report["prefix"] =
       "repeated x words inside the native no-thinking chat template";
-  report["decode_tokens"] = targets.size();
+  const std::size_t decode_tokens = prefill_only ? 0 : targets.size();
+  report["decode_tokens"] = decode_tokens;
   report["points"] = json::Value::array();
   std::ofstream manifest(directory / "manifest.tsv");
   for (const std::size_t depth : {0u, 4096u, 8192u, 12288u, 16384u}) {
@@ -324,8 +325,9 @@ void DumpReferenceFrontiers(
                 "frontier argmax differs from its full logits");
         if (step == 0)
           point["before_sha256"] = dump("-before", logits);
-        if (step == targets.size()) {
-          point["after_sha256"] = dump("-after", logits);
+        if (step == decode_tokens) {
+          if (!prefill_only)
+            point["after_sha256"] = dump("-after", logits);
           break;
         }
         const double maximum = *maximum_logit;
@@ -341,7 +343,7 @@ void DumpReferenceFrontiers(
       }
       report["points"].push_back(std::move(point));
       std::cerr << "AR frontier prefill=" << prefill_step << " depth=" << depth
-                << " tokens=128 complete\n";
+                << " tokens=" << decode_tokens << " complete\n";
     }
   }
   Require(manifest.good(), "cannot write frontier manifest");

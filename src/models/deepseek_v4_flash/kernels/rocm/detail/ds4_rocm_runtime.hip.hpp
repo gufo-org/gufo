@@ -333,11 +333,6 @@ static void hip_q8_f16_cache_release_all(void) {
     g_q8_f16_bytes = 0;
 }
 
-static int hip_env_present(const char *env) {
-    if (env != NULL) return env[0] != '\0' && strcmp(env, "0") != 0;
-    return 0;
-}
-
 static uint64_t hip_q8_f16_cache_limit_bytes(void) {
     return UINT64_MAX;
 }

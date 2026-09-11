@@ -1,0 +1,698 @@
+{
+  "schema": "gufo.ds4-prefill-formula-audit.v1",
+  "date": "2026-09-11",
+  "decision": "Retain official-formula HC arithmetic. Delete inactive code only. Four independent post-prefill alerts remain unresolved; no official full-distribution parity claim.",
+  "official_source": {
+    "repository": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+    "files": {
+      "model.py": "c0c19e6c9fa439bac7fbb1c5bc1868232dfd5aa2f439a548d0e33dcc2a9edd3f",
+      "kernel.py": "59b325083d7103975cba025bd0d60ea343bb82d8fff53088afb7c04bd380c0c2"
+    },
+    "operators": [
+      "model.py:680 Block.hc_pre raw FP32 projection followed by RMS scaling",
+      "kernel.py:372 hc_split_sinkhorn_kernel sigmoid/softmax/alternating normalization with epsilon",
+      "model.py:690 Block.hc_post combination matrix indexed source,destination"
+    ]
+  },
+  "reference_run": {
+    "schema": "gufo.ds4-independent-ar-comparison.v1",
+    "upstream_revision": "6289c516273979173abbc062209a81dd3706b804",
+    "upstream_build": "/nix/store/5d8sfj44drjkzxqj5qa32dcfxvgg6y74-ds4-independent-reference-6289c516",
+    "model_file": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+    "model_sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0",
+    "fixture_sha256": "0ec57ef24cc0cb5838a4c0ccacf806edc12cbe09f27f0c13efdf90eb33591a4d",
+    "gufo_production_sha256": "0a19eae1a890bffaf2074a208ac9c23243cb6db49f245f43ed6611846e964fec",
+    "gufo_native_test_sha256": "538770a8dd226ff58d022b87c1aad6d28bd457be79d7fe353217d20233beb4e6",
+    "gufo_git_revision": "d5df345a5e1799acaae294434465bf26480a734d",
+    "flake_lock_sha256": "9cc7e436adfeb41106deeb3466ea8e68d335b569439ee5ddd1b1d6199774b66f",
+    "gufo_build_preset": "gpu-test",
+    "scope": "prefill-only",
+    "gates": {
+      "exact_gufo_repeat": true,
+      "full_logits_within_existing_bounds": false
+    }
+  },
+  "retained_prefill_matrix": [
+    {
+      "depth": 0,
+      "phase": "before",
+      "prefill_step": 2048,
+      "rmse": 0.3998782168276267,
+      "cosine": 0.9969186051007402,
+      "max_absolute_error": 2.3684616088867188,
+      "mean_logit_shift": 0.011924175524768318,
+      "centered_rmse": 0.39970039070696056,
+      "jensen_shannon_nats": 0.020683537970803637,
+      "max_probability_difference": 0.13890625194482706,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "depth": 0,
+      "phase": "before",
+      "prefill_step": 4096,
+      "rmse": 0.3998782168276267,
+      "cosine": 0.9969186051007402,
+      "max_absolute_error": 2.3684616088867188,
+      "mean_logit_shift": 0.011924175524768318,
+      "centered_rmse": 0.39970039070696056,
+      "jensen_shannon_nats": 0.020683537970803637,
+      "max_probability_difference": 0.13890625194482706,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "depth": 4096,
+      "phase": "before",
+      "prefill_step": 2048,
+      "rmse": 0.7794263022748609,
+      "cosine": 0.9875119864312488,
+      "max_absolute_error": 4.248594284057617,
+      "mean_logit_shift": -0.04906374824574531,
+      "centered_rmse": 0.7778805237862307,
+      "jensen_shannon_nats": 0.02440107785274507,
+      "max_probability_difference": 0.06909613249803143,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "depth": 4096,
+      "phase": "before",
+      "prefill_step": 4096,
+      "rmse": 0.9691018176756141,
+      "cosine": 0.9800580103082442,
+      "max_absolute_error": 5.338605880737305,
+      "mean_logit_shift": -0.17820759595833985,
+      "centered_rmse": 0.9525756588140011,
+      "jensen_shannon_nats": 0.019924047483170122,
+      "max_probability_difference": 0.0589527100600975,
+      "same_top1": true,
+      "within_existing_vector_bounds": false
+    },
+    {
+      "depth": 8192,
+      "phase": "before",
+      "prefill_step": 2048,
+      "rmse": 0.8416212144478082,
+      "cosine": 0.9848544752101521,
+      "max_absolute_error": 3.9200029373168945,
+      "mean_logit_shift": 0.05144509924350924,
+      "centered_rmse": 0.8400474215021609,
+      "jensen_shannon_nats": 0.08856347474173473,
+      "max_probability_difference": 0.13583090165773254,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "depth": 8192,
+      "phase": "before",
+      "prefill_step": 4096,
+      "rmse": 0.7520574409395689,
+      "cosine": 0.98788328648764,
+      "max_absolute_error": 4.104522705078125,
+      "mean_logit_shift": 0.1519829262290634,
+      "centered_rmse": 0.7365402803699362,
+      "jensen_shannon_nats": 0.041210833989467906,
+      "max_probability_difference": 0.06234614284942239,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "depth": 12288,
+      "phase": "before",
+      "prefill_step": 2048,
+      "rmse": 0.6749447663230316,
+      "cosine": 0.9901513098272391,
+      "max_absolute_error": 3.504833996295929,
+      "mean_logit_shift": -0.1506599261266373,
+      "centered_rmse": 0.6579149065391116,
+      "jensen_shannon_nats": 0.021121913491554914,
+      "max_probability_difference": 0.035313585117448254,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "depth": 12288,
+      "phase": "before",
+      "prefill_step": 4096,
+      "rmse": 1.1819337352605652,
+      "cosine": 0.9693460498762236,
+      "max_absolute_error": 5.4680280685424805,
+      "mean_logit_shift": -0.010263505625817463,
+      "centered_rmse": 1.1818891720458653,
+      "jensen_shannon_nats": 0.14093822848880155,
+      "max_probability_difference": 0.3980792639077598,
+      "same_top1": true,
+      "within_existing_vector_bounds": false
+    },
+    {
+      "depth": 16384,
+      "phase": "before",
+      "prefill_step": 2048,
+      "rmse": 0.8128094916188441,
+      "cosine": 0.9868077130243601,
+      "max_absolute_error": 5.852132797241211,
+      "mean_logit_shift": 0.07839246173798439,
+      "centered_rmse": 0.8090203283035244,
+      "jensen_shannon_nats": 0.018061572552633798,
+      "max_probability_difference": 0.1162771706921677,
+      "same_top1": true,
+      "within_existing_vector_bounds": false
+    },
+    {
+      "depth": 16384,
+      "phase": "before",
+      "prefill_step": 4096,
+      "rmse": 1.347575235734349,
+      "cosine": 0.9621434412775596,
+      "max_absolute_error": 5.803221940994263,
+      "mean_logit_shift": -0.41819182978798913,
+      "centered_rmse": 1.2810443432852197,
+      "jensen_shannon_nats": 0.08516720942989071,
+      "max_probability_difference": 0.09798987805159487,
+      "same_top1": true,
+      "within_existing_vector_bounds": false
+    }
+  ],
+  "cross_prefill": [
+    {
+      "engine": "gufo",
+      "depth": 0,
+      "phase": "before",
+      "rmse": 0.0,
+      "cosine": 1.0,
+      "max_absolute_error": 0.0,
+      "mean_logit_shift": 0.0,
+      "centered_rmse": 0.0,
+      "jensen_shannon_nats": 0.0,
+      "max_probability_difference": 0.0,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "engine": "gufo",
+      "depth": 4096,
+      "phase": "before",
+      "rmse": 0.8406778382387426,
+      "cosine": 0.9854923212538426,
+      "max_absolute_error": 4.869035720825195,
+      "mean_logit_shift": -0.007421813054542785,
+      "centered_rmse": 0.8406450763531236,
+      "jensen_shannon_nats": 0.0441311413518267,
+      "max_probability_difference": 0.20594372793219967,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "engine": "gufo",
+      "depth": 8192,
+      "phase": "before",
+      "rmse": 0.8088372853806511,
+      "cosine": 0.9855286733434242,
+      "max_absolute_error": 4.804956436157227,
+      "mean_logit_shift": -0.12271752422064598,
+      "centered_rmse": 0.7994736790358367,
+      "jensen_shannon_nats": 0.05375636066315791,
+      "max_probability_difference": 0.0796973527067756,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "engine": "gufo",
+      "depth": 12288,
+      "phase": "before",
+      "rmse": 0.7494799219531539,
+      "cosine": 0.9878421614834186,
+      "max_absolute_error": 4.572271347045898,
+      "mean_logit_shift": -0.05663549975724891,
+      "centered_rmse": 0.7473369879633633,
+      "jensen_shannon_nats": 0.08354143427789262,
+      "max_probability_difference": 0.05998404817233014,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "engine": "gufo",
+      "depth": 16384,
+      "phase": "before",
+      "rmse": 0.7973562461046403,
+      "cosine": 0.9873135566235222,
+      "max_absolute_error": 3.788381576538086,
+      "mean_logit_shift": 0.13379405516414156,
+      "centered_rmse": 0.7860509741771321,
+      "jensen_shannon_nats": 0.0903820863960683,
+      "max_probability_difference": 0.32225991240965,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "engine": "upstream",
+      "depth": 0,
+      "phase": "before",
+      "rmse": 0.0,
+      "cosine": 1.0,
+      "max_absolute_error": 0.0,
+      "mean_logit_shift": 0.0,
+      "centered_rmse": 0.0,
+      "jensen_shannon_nats": 0.0,
+      "max_probability_difference": 0.0,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "engine": "upstream",
+      "depth": 4096,
+      "phase": "before",
+      "rmse": 0.753797801144129,
+      "cosine": 0.9880280861008467,
+      "max_absolute_error": 4.857883453369141,
+      "mean_logit_shift": -0.13656566076713733,
+      "centered_rmse": 0.7413237789987307,
+      "jensen_shannon_nats": 0.07316800284377444,
+      "max_probability_difference": 0.3339925704903286,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "engine": "upstream",
+      "depth": 8192,
+      "phase": "before",
+      "rmse": 0.5011687944511846,
+      "cosine": 0.9946482602071385,
+      "max_absolute_error": 3.220311164855957,
+      "mean_logit_shift": -0.02217969723509182,
+      "centered_rmse": 0.5006777622006128,
+      "jensen_shannon_nats": 0.019786564829503177,
+      "max_probability_difference": 0.03950181743009166,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    },
+    {
+      "engine": "upstream",
+      "depth": 12288,
+      "phase": "before",
+      "rmse": 1.1107875745516846,
+      "cosine": 0.9732588077434472,
+      "max_absolute_error": 5.176637172698975,
+      "mean_logit_shift": 0.08376092074357093,
+      "centered_rmse": 1.107625001494009,
+      "jensen_shannon_nats": 0.13389161780949044,
+      "max_probability_difference": 0.4058401735774553,
+      "same_top1": true,
+      "within_existing_vector_bounds": false
+    },
+    {
+      "engine": "upstream",
+      "depth": 16384,
+      "phase": "before",
+      "rmse": 0.9012499789132252,
+      "cosine": 0.9831552422882804,
+      "max_absolute_error": 3.79318904876709,
+      "mean_logit_shift": -0.36279023636183194,
+      "centered_rmse": 0.8250059205191288,
+      "jensen_shannon_nats": 0.013511318686769436,
+      "max_probability_difference": 0.10799286366588745,
+      "same_top1": true,
+      "within_existing_vector_bounds": true
+    }
+  ],
+  "reproducibility": {
+    "same_input_and_call_boundaries": true,
+    "exact_repeated_prefill_vectors": 10,
+    "exact_prefill_vectors_vs_pre_cleanup": 10,
+    "previous_vector_directory": "ds4-step13-frontiers",
+    "note": "Each equality compares every raw F32 byte, not only top-token IDs. The full prefill-only tool also requires identical repeat summaries, prompt IDs and allocated prefill capacities."
+  },
+  "four_alert_experiment": {
+    "change": "In the fused HC projection only, round RMS-normalized activations to F16 before multiplying F16 GGUF weights; omit the post-projection RMS factor. All other inference arithmetic unchanged.",
+    "scope": "Four original alert frontiers only; no decode replay or capability evaluation.",
+    "source": {
+      "production_sha256": "18476f435b272b874e5269aacce3576a2e125492d0894bd40e55ee6e963545c5",
+      "hc_sha256": "270305b42145baf0746e12ec1d25718e6f007f3c0bc5132130127da4008c0649"
+    },
+    "native_binary_sha256": "0f167a0a9cedce5451eb45d63fd4540155286d0f802286572ffd2e683d1b8f80",
+    "official_formula_oracle": {
+      "exit_code": 5,
+      "observed": 0,
+      "expected": 0.000244138585,
+      "result": "rejected"
+    },
+    "execution_memory": {
+      "exit_code": 0,
+      "aborted_for_memory": false,
+      "minimum_available_gib": 28.994068145751953,
+      "reserve_gib": 12.0
+    },
+    "points": [
+      {
+        "prefill_step": 4096,
+        "depth": 4096,
+        "retained": {
+          "rmse": 0.9691018176756141,
+          "cosine": 0.9800580103082442,
+          "max_absolute_error": 5.338605880737305,
+          "mean_logit_shift": -0.17820759595833985,
+          "centered_rmse": 0.9525756588140011,
+          "jensen_shannon_nats": 0.019924047483170122,
+          "max_probability_difference": 0.0589527100600975,
+          "same_top1": true,
+          "within_existing_vector_bounds": false
+        },
+        "normalized_f16_vs_upstream": {
+          "rmse": 0.7112735711632271,
+          "cosine": 0.9896043386204392,
+          "max_absolute_error": 4.534852027893066,
+          "mean_logit_shift": -0.2353826904241203,
+          "centered_rmse": 0.6711967536304038,
+          "jensen_shannon_nats": 0.032938982879127644,
+          "max_probability_difference": 0.20700037846644231,
+          "same_top1": true,
+          "within_existing_vector_bounds": true
+        },
+        "normalized_f16_vs_retained": {
+          "rmse": 0.8261293818265513,
+          "cosine": 0.9859671462918805,
+          "max_absolute_error": 4.457054138183594,
+          "mean_logit_shift": -0.05717509446578045,
+          "centered_rmse": 0.8241485085164862,
+          "jensen_shannon_nats": 0.02864282915238927,
+          "max_probability_difference": 0.1480476684063448,
+          "same_top1": true,
+          "within_existing_vector_bounds": true
+        },
+        "normalized_f16_sha256": "9ae87fa0b77642932b1569c4e594337db56ae9fd330445bcc5719121603bdf5c",
+        "retained_sha256": "152870c764f646580ee348d4299c741f8cb31034c42437daa9a91bc5832dbe92",
+        "upstream_sha256": "49000469ec5dfa646101cd62c244c5f109a1d38952a4a99b2b2400727ca34673"
+      },
+      {
+        "prefill_step": 4096,
+        "depth": 12288,
+        "retained": {
+          "rmse": 1.1819337352605652,
+          "cosine": 0.9693460498762236,
+          "max_absolute_error": 5.4680280685424805,
+          "mean_logit_shift": -0.010263505625817463,
+          "centered_rmse": 1.1818891720458653,
+          "jensen_shannon_nats": 0.14093822848880155,
+          "max_probability_difference": 0.3980792639077598,
+          "same_top1": true,
+          "within_existing_vector_bounds": false
+        },
+        "normalized_f16_vs_upstream": {
+          "rmse": 1.1930998827779422,
+          "cosine": 0.9690174455153117,
+          "max_absolute_error": 5.261624276638031,
+          "mean_logit_shift": -0.07382933602606104,
+          "centered_rmse": 1.1908134024383041,
+          "jensen_shannon_nats": 0.0707170777360281,
+          "max_probability_difference": 0.233117256612838,
+          "same_top1": true,
+          "within_existing_vector_bounds": false
+        },
+        "normalized_f16_vs_retained": {
+          "rmse": 0.7369324726128114,
+          "cosine": 0.9880431652508374,
+          "max_absolute_error": 4.506710052490234,
+          "mean_logit_shift": -0.06356583040024356,
+          "centered_rmse": 0.7341858445902912,
+          "jensen_shannon_nats": 0.05743353699817313,
+          "max_probability_difference": 0.16496200729492178,
+          "same_top1": true,
+          "within_existing_vector_bounds": true
+        },
+        "normalized_f16_sha256": "1632490eab1566fb0f877d10996c961a1ba4d1812ed8a0b5f4baf0b284ad312d",
+        "retained_sha256": "728f55c0712eec44ec0d5cae73a43d82d9ca42e3307528142f8eea28c7306e90",
+        "upstream_sha256": "b973f529c8f4fec1f2f25712f2a2c64ca3deabda6703e26f67e6791604d2891f"
+      },
+      {
+        "prefill_step": 2048,
+        "depth": 16384,
+        "retained": {
+          "rmse": 0.8128094916188441,
+          "cosine": 0.9868077130243601,
+          "max_absolute_error": 5.852132797241211,
+          "mean_logit_shift": 0.07839246173798439,
+          "centered_rmse": 0.8090203283035244,
+          "jensen_shannon_nats": 0.018061572552633798,
+          "max_probability_difference": 0.1162771706921677,
+          "same_top1": true,
+          "within_existing_vector_bounds": false
+        },
+        "normalized_f16_vs_upstream": {
+          "rmse": 0.6166965699021565,
+          "cosine": 0.9923297591490816,
+          "max_absolute_error": 2.924694061279297,
+          "mean_logit_shift": 0.12940619006784088,
+          "centered_rmse": 0.6029665805840413,
+          "jensen_shannon_nats": 0.008720518086937605,
+          "max_probability_difference": 0.0790775672987567,
+          "same_top1": true,
+          "within_existing_vector_bounds": true
+        },
+        "normalized_f16_vs_retained": {
+          "rmse": 0.89180428455565,
+          "cosine": 0.9841314482479484,
+          "max_absolute_error": 4.063843727111816,
+          "mean_logit_shift": 0.051013728329856504,
+          "centered_rmse": 0.8903440242253003,
+          "jensen_shannon_nats": 0.01203936950015008,
+          "max_probability_difference": 0.037199603393410996,
+          "same_top1": true,
+          "within_existing_vector_bounds": true
+        },
+        "normalized_f16_sha256": "13b54c09232cf101c2ca84cfbd56f32e72a9db7a84dc423552e3b3eecb29a80a",
+        "retained_sha256": "d8539b056354d8a4d3031753d698e3c2c57ec19de003f2d0d0f7b5f1e8b6a789",
+        "upstream_sha256": "c872af415a3d2bd99f8d6fca2604fd44632a2e4b28f7ddc48c46f0ee1edafb60"
+      },
+      {
+        "prefill_step": 4096,
+        "depth": 16384,
+        "retained": {
+          "rmse": 1.347575235734349,
+          "cosine": 0.9621434412775596,
+          "max_absolute_error": 5.803221940994263,
+          "mean_logit_shift": -0.41819182978798913,
+          "centered_rmse": 1.2810443432852197,
+          "jensen_shannon_nats": 0.08516720942989071,
+          "max_probability_difference": 0.09798987805159487,
+          "same_top1": true,
+          "within_existing_vector_bounds": false
+        },
+        "normalized_f16_vs_upstream": {
+          "rmse": 0.9499886824984103,
+          "cosine": 0.981183689457057,
+          "max_absolute_error": 4.289792060852051,
+          "mean_logit_shift": -0.2860825694483096,
+          "centered_rmse": 0.9058892097452749,
+          "jensen_shannon_nats": 0.045105640777077016,
+          "max_probability_difference": 0.2115354363668578,
+          "same_top1": true,
+          "within_existing_vector_bounds": true
+        },
+        "normalized_f16_vs_retained": {
+          "rmse": 0.7254994516497888,
+          "cosine": 0.9891439767637538,
+          "max_absolute_error": 3.5668373107910156,
+          "mean_logit_shift": 0.13210926033967949,
+          "centered_rmse": 0.7133698884005737,
+          "jensen_shannon_nats": 0.08010980911903925,
+          "max_probability_difference": 0.30952531441845266,
+          "same_top1": true,
+          "within_existing_vector_bounds": true
+        },
+        "normalized_f16_sha256": "72a73098a451ce6efcf3ed51f8aefb1b8283303907914701f4b485af6fad38f1",
+        "retained_sha256": "cdef2ee17a0a7304c7128e99ae7fd9076aa8044b1b0d8f1234803e4947c273dc",
+        "upstream_sha256": "066495a5abaa58c3e69cdf2c1bb2af2858943b22db0c938c21ae03570b3a5472"
+      }
+    ],
+    "retained": false,
+    "conclusion": "Passing three raw-logit bounds does not qualify the approximation: it fails the official formula and increases maximum probability error in two of four cases. The 12K/4K alert remains."
+  },
+  "retained_layer_trace": {
+    "scope": "Historical 16K prefix, 4096-token calls; last row of final chunk, selected layer boundaries. This is not a trace of every failing frontier.",
+    "final_gufo_prefill_sha256": "cdef2ee17a0a7304c7128e99ae7fd9076aa8044b1b0d8f1234803e4947c273dc",
+    "final_logits_match_current": true,
+    "rows": [
+      {
+        "chunk_position": 12288,
+        "layer": 0,
+        "stage": "hc_attn_post",
+        "rmse": 0.00040365034070665514,
+        "gufo_rms": 0.07052610562688512,
+        "relative_rmse": 0.005723417408613873
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 0,
+        "stage": "hc_ffn_post",
+        "rmse": 0.0005403259214809866,
+        "gufo_rms": 0.10899946371127374,
+        "relative_rmse": 0.004957142935237222
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 8,
+        "stage": "hc_attn_post",
+        "rmse": 0.01674147963600457,
+        "gufo_rms": 0.160716166963858,
+        "relative_rmse": 0.10416798728014344
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 8,
+        "stage": "hc_ffn_post",
+        "rmse": 0.0209129112360129,
+        "gufo_rms": 0.18424923481504063,
+        "relative_rmse": 0.11350338174813271
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 16,
+        "stage": "hc_attn_post",
+        "rmse": 0.05709604494773356,
+        "gufo_rms": 0.33217159462429596,
+        "relative_rmse": 0.1718871988807841
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 16,
+        "stage": "hc_ffn_post",
+        "rmse": 0.07049686509654714,
+        "gufo_rms": 0.38548507370231944,
+        "relative_rmse": 0.1828783263109857
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 24,
+        "stage": "hc_attn_post",
+        "rmse": 0.14956639713323097,
+        "gufo_rms": 1.1359811538242688,
+        "relative_rmse": 0.13166274513421042
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 24,
+        "stage": "hc_ffn_post",
+        "rmse": 0.14986653983358011,
+        "gufo_rms": 1.1345914507021684,
+        "relative_rmse": 0.13208855023615038
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 32,
+        "stage": "hc_attn_post",
+        "rmse": 0.25160517686741807,
+        "gufo_rms": 1.5022404958167008,
+        "relative_rmse": 0.16748661587013844
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 32,
+        "stage": "hc_ffn_post",
+        "rmse": 0.26659684547899976,
+        "gufo_rms": 1.5289843684458357,
+        "relative_rmse": 0.1743620477624549
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 42,
+        "stage": "hc_attn_post",
+        "rmse": 0.994053839410809,
+        "gufo_rms": 4.187111915034262,
+        "relative_rmse": 0.23740799376332763
+      },
+      {
+        "chunk_position": 12288,
+        "layer": 42,
+        "stage": "hc_ffn_post",
+        "rmse": 1.0882346564632894,
+        "gufo_rms": 4.413247092202442,
+        "relative_rmse": 0.2465836681535552
+      }
+    ],
+    "interpretation": "Differences are present after the first attention block and accumulate through later layers. The stage trace alone does not prove which operator causes a quality error."
+  },
+  "maintained_hc_oracles": {
+    "test": "ds4.projections",
+    "cancellation_cases": 2,
+    "dense_cases": [
+      {
+        "rows": 128,
+        "epsilon": 1e-06,
+        "maximum_error_projection_split_reduce_expand": [
+          1.04e-06,
+          2.62e-07,
+          7.81e-07,
+          1.48e-06
+        ]
+      },
+      {
+        "rows": 129,
+        "epsilon": 0.002,
+        "maximum_error_projection_split_reduce_expand": [
+          1.04e-06,
+          2.5e-07,
+          9.86e-07,
+          1.16e-06
+        ]
+      }
+    ],
+    "dense_tolerance": "absolute error <= 1e-5 * (1 + abs(double_reference))",
+    "precision_scope": "Independent double-precision official operator equations on identical F32 inputs and F16 GGUF-format weights; not a full official BF16/FP8 checkpoint execution."
+  },
+  "limitations": [
+    "Antirez is an independent, unofficial implementation; these differential bounds do not identify which model is more accurate.",
+    "Only the HC precision hypothesis was ablated; it does not explain every difference. No production numerical fix is justified by this audit.",
+    "Same top token does not establish equal probability distributions or task accuracy.",
+    "No new speed matrix, 105-case continuation scoring, or 75-question capability evaluation was run."
+  ],
+  "final_validation": {
+    "production_sha256": "2c89c79ce3d6fb4ba99fdda87e18cfafad2943916f6c405a489814b74da758ff",
+    "native_test_sha256": "9e898fa0f4476da4af98670aa6a663d434a7b25f2d8d607d3773c9e15305b780",
+    "projection_test_sha256": "5b29af3c1aa576c63f4d1e8d09079969f00bdac7b59519dc629de3d4671feb96",
+    "tests_passed": [
+      "ds4.template",
+      "ds4.cli",
+      "ds4.dataset",
+      "ds4.eval",
+      "ds4.projections",
+      "ds4.attention",
+      "ds4.target"
+    ],
+    "target_pinned_trajectory": {
+      "top1": 116,
+      "tokens": 128,
+      "rank_sum": 142,
+      "worst_rank": 3
+    },
+    "wide_prefill_sha256": "4217e91c730e333a0bdafe11c46a40be7fb753a763af887434174410dc627841",
+    "concurrent_top1_matches": 29,
+    "concurrent_comparisons": 29,
+    "target_memory": {
+      "exit_code": 0,
+      "aborted_for_memory": false,
+      "minimum_available_gib": 28.450122833251953,
+      "reserve_gib": 12.0
+    },
+    "reference_memory": {
+      "exit_code": 1,
+      "aborted_for_memory": false,
+      "minimum_available_gib": 27.576480865478516,
+      "reserve_gib": 12.0
+    },
+    "log_sha256": {
+      "focused_checks": "a352532f975e924025aa93d785ce2758c2c958ed5683f311454bc0d9c9e8b32c",
+      "target": "15b51ebc04e6d08ff83e9d5d72b2dfa5d9a99459543da11a23081ff694245306",
+      "build": "0fbeeb679801787fd17419e73dbc544ab0e487d6a6be2932d94373595ee6cfff",
+      "ablation_oracle": "0e11c0b8a539294d59788e9f0f6f41ab30be5c43533bfa1d62a09a2f457f6396"
+    },
+    "release_build": {
+      "result_path": "/nix/store/55b8arjr2qv1bf684czlcfqy0bj4ymns-gufo-d5df345-dirty",
+      "binary_sha256": "8b1b3fd1dd5c77d98ec287c82d8a4003ca576d86ee6e548c43c7c9175e570a97",
+      "build_log_sha256": "5ca0de9e2d9d392d37bc2a8432bd9bf24df7c96c733899295b0567fed257c24c",
+      "build_exit_code": 0
+    }
+  },
+  "quality_improvement_demonstrated": false
+}

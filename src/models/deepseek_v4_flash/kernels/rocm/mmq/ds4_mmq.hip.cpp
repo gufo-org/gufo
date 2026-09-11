@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// ds4_mmq.cu - host wrapper around llama.cpp's vendored mul_mat_q kernels.
+// ds4_mmq.hip.cpp - host wrapper around llama.cpp's vendored mul_mat_q kernels.
 //
 // The fused target-prefill MoE dispatcher (ds4_mmq_fused_down,
 // ds4_swiglu_weighted_f32, the fused_down branches of
@@ -10,14 +10,6 @@
 // Implements the public ds4_mmq_* entry points and explicitly instantiates
 // the mul_mat_q_case<T> template for each quant type the caller needs.
 //
-// Status:
-//   Q8_0 dense ............ implemented, parity-tested against CPU reference
-//   Q2_K dense ............ pending (Phase 3)
-//   IQ2_XXS dense ......... pending (Phase 3)
-//   Q8_0 MoE _id .......... pending (Phase 4)
-//   Q2_K MoE _id .......... pending (Phase 4)
-//   IQ2_XXS MoE _id ....... pending (Phase 4)
-
 #include "ds4_mmq.h"
 
 #include "common.cuh"
@@ -31,83 +23,11 @@
 #include <cstring>
 #include <mutex>
 
-#if defined(__has_include)
-#if __has_include(<nvtx3/nvToolsExt.h>)
-#include <nvtx3/nvToolsExt.h>
-#define DS4_MMQ_HAS_NVTX 1
-#endif
-#endif
-#ifndef DS4_MMQ_HAS_NVTX
-#define DS4_MMQ_HAS_NVTX 0
-#endif
-
-/* NVTX ranges are nsys/CUDA tooling; DS4_MMQ_HAS_NVTX is 0 on this HIP build,
- * so the scopes below compile out entirely. */
-static bool ds4_mmq_nvtx_requested() {
-    return false;
-}
-
-static uint64_t ds4_mmq_nvtx_payload(uint32_t first, uint32_t second) {
-    return ((uint64_t)first << 32) | second;
-}
-
-class ds4_mmq_nvtx_scope {
-public:
-    ds4_mmq_nvtx_scope(const char *name, uint64_t payload, bool enabled)
-        : active_(enabled) {
-#if DS4_MMQ_HAS_NVTX
-        if (active_) {
-            nvtxEventAttributes_t attr = {};
-            attr.version = NVTX_VERSION;
-            attr.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
-            attr.payloadType = NVTX_PAYLOAD_TYPE_UNSIGNED_INT64;
-            attr.payload.ullValue = payload;
-            attr.messageType = NVTX_MESSAGE_TYPE_ASCII;
-            attr.message.ascii = name;
-            (void)nvtxRangePushEx(&attr);
-        }
-#else
-        (void)name;
-        (void)payload;
-        active_ = false;
-#endif
-    }
-
-    ~ds4_mmq_nvtx_scope() {
-#if DS4_MMQ_HAS_NVTX
-        if (active_) (void)nvtxRangePop();
-#endif
-    }
-
-    ds4_mmq_nvtx_scope(const ds4_mmq_nvtx_scope &) = delete;
-    ds4_mmq_nvtx_scope &operator=(const ds4_mmq_nvtx_scope &) = delete;
-
-private:
-    bool active_;
-};
-
 // ----------------------------------------------------------------------------
 // Init
 // ----------------------------------------------------------------------------
 
-// Step 7 task #29: experimental persistent Q8_1 scratch buffer.
-//
-// Hypothesis: ggml_cuda_pool_alloc inside ds4_mmq_moe_vec_impl records a
-// cudaMallocAsync graph node into the captured layer graph.  At replay
-// time the alloc node returns a (potentially different) address, but the
-// matvec kernel's pointer argument was baked in at capture time.  Result:
-// the matvec reads stale/wrong memory and produces a different output
-// than eager execution, even with identical inputs.
-//
-// Mitigation under test: pre-allocate a persistent device buffer at
-// startup via plain cudaMalloc (NOT cudaMallocAsync, NOT inside any
-// capture).  When the env flag DS4_CUDA_MMQ_Q81_PERSISTENT=1 is set,
-// ds4_mmq_moe_vec_impl uses this persistent buffer instead of pool_alloc.
-//
-// Sized for V4 Flash decode shapes: gate Q8_1 ~8 KB, down Q8_1 ~14 KB.
-// 256 KB allocation gives generous headroom for short prefill batches.
-static void *g_q81_scratch_ptr   = nullptr;
-static size_t g_q81_scratch_bytes = 0;
+// Reusable Q8_1 scratch supplied by the graph owner.
 static void  *g_aligned_q81_scratch_ptr = nullptr;
 static size_t g_aligned_q81_scratch_bytes = 0;
 static int    g_routed_max_expert_rows = 0;
@@ -214,14 +134,6 @@ extern "C" int ds4_mmq_routed_tile_cols_for_counts(
     return best_cols;
 }
 
-// Read by ds4_mmq_moe_vec_impl; non-zero means use the persistent buffer.
-// Set by ds4_mmq_init once based on env.  (Single-threaded GPU work; no
-// atomicity needed.)
-
-extern "C" void *ds4_mmq_q81_scratch_ptr(void) {
-    return g_q81_scratch_ptr;
-}
-
 // M2-Inc2a: registry of producer-emitted q8_1 activations (ds4_cuda.cu).
 // A hit returns canonical block_q8_1 codes for this exact activation
 // pointer (bit-exact vs quantize_row_q8_1_cuda), letting the caller skip
@@ -243,10 +155,6 @@ static char *ds4_mmq_folded_q81(const float *X_f32, int64_t K, int n_tokens,
     return (char *)(uintptr_t)p;
 }
 
-// The D2R down path is unconditional. It was gated during its rollout
-// (same-boot ABBA 427->493 tok/s at 12k, gsm8k 97.5 / mbpp 90) and the kill
-// switch back to the mul_mat_q SoA-tile down path has not been needed since.
-
 /* flat-pool p5b: the direct fused gate/up path stages its input Q8 through
  * the ids_src1 column->token map inside the D2R kernel, so the activation
  * quantize runs once per TOKEN (n_tokens rows) instead of once per
@@ -257,10 +165,6 @@ static char *ds4_mmq_folded_q81(const float *X_f32, int64_t K, int n_tokens,
  * byte-compared in situ during rollout (bad=0). */
 /* Column floor for the D2R down path. */
 static constexpr int64_t D2R_MIN_COLS = 1024;
-
-extern "C" size_t ds4_mmq_q81_scratch_bytes(void) {
-    return g_q81_scratch_bytes;
-}
 
 extern "C" int ds4_mmq_init(int device) {
     if (device < 0) {
@@ -303,11 +207,7 @@ extern "C" void ds4_mmq_cleanup(void) {
         }
     }
 #endif
-    if (g_q81_scratch_ptr) {
-        (void)cudaFree(g_q81_scratch_ptr);
-        g_q81_scratch_ptr = nullptr;
-        g_q81_scratch_bytes = 0;
-    }
+
     g_aligned_q81_scratch_ptr = nullptr;
     g_aligned_q81_scratch_bytes = 0;
 }
@@ -489,13 +389,14 @@ int ds4_mmq_dense_impl(
         return -1;
     }
 
-    /* Task #22 fix: order the pool's cudaMallocAsync/cudaFreeAsync on the SAME
+    /* Order the pool's cudaMallocAsync/cudaFreeAsync on the SAME
      * stream the kernels below launch on.  The pool defaults to
      * cudaStreamPerThread; with kernels on the legacy stream the RAII free is
      * ordered on an EMPTY stream, so the driver can recycle/remap the scratch
      * while the in-flight quantize/GEMM still reads it -> intermittent illegal
      * access under shape churn (the batched-draft early-step crash).  The vec
-     * impls already do this (graph-capture fix); the batched impls were missed. */
+     * impls already do this (graph-capture fix); the batched impls were missed.
+     */
     ds4_pool_set_stream(stream);
 
     // 1. Quantize F32 activations into the format consumed by MMQ. Blackwell
@@ -627,28 +528,6 @@ extern "C" int ds4_mmq_q8_0_dense(
         const void * W, const float * X, float * out,
         int M, int N, int K, cudaStream_t stream) {
     return ds4_mmq_dense_impl<GGML_TYPE_Q8_0>("ds4_mmq_q8_0_dense", W, X, out, M, N, K, stream);
-}
-
-/* p5a verify instrument: run the REFERENCE quantizer (exact dense_impl
- * parameters) into a caller buffer so producers can be diffed
- * byte-for-byte against it (DS4_CUDA_OUTA_Q8EMIT_VERIFY). */
-extern "C" int ds4_mmq_q8_0_quantize_ref(
-        const float * X, void * y, size_t y_bytes, int N, int K,
-        cudaStream_t stream) {
-    if (!X || !y || N <= 0 || K <= 0 || K % 256 != 0) return -1;
-    const int64_t ne10_padded = GGML_PAD((int64_t)K, MATRIX_ROW_PADDING);
-    const int dev = ggml_cuda_get_device();
-    ggml_backend_cuda_context * ctx = get_ctx_for_device(dev);
-    if (!ctx) return -1;
-    ds4_pool_set_stream(stream);
-    const size_t need = (size_t)N * ne10_padded * sizeof(block_q8_1) / QK8_1;
-    if (y_bytes < need) return -1;
-    cudaMemsetAsync(y, 0, y_bytes, stream);
-    quantize_mmq_q8_1_cuda(
-        X, /*ids=*/nullptr, y, GGML_TYPE_Q8_0,
-        /*ne00=*/K, /*s11=*/(int64_t)K, /*s12=*/0, /*s13=*/0,
-        /*ne0=*/ne10_padded, /*ne1=*/(int64_t)N, /*ne2=*/1, /*ne3=*/1, stream);
-    return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
 /* v0.5 flat-pool p5a: dense Q8_0 mmq consuming a PRODUCER-EMITTED
@@ -934,7 +813,7 @@ int ds4_mmq_moe_impl(
     ggml_cuda_pool_alloc<int32_t> ids_dst(ctx->pool(), ne_get_rows);
     ggml_cuda_pool_alloc<int32_t> expert_bounds(ctx->pool(), n_experts + 1);
 
-    // Task #22 root-cause fix: mm_ids_helper COMPACTS - it only writes ids_src1
+    // mm_ids_helper compacts - it only writes ids_src1
     // entries for in-range router ids and drops invalid ones (the router's NaN
     // path emits -1 by design), so with any dropped id the tail of ids_src1
     // stays unwritten pool memory.  quantize_mmq_q8_1's grid covers all
@@ -1191,113 +1070,90 @@ static __global__ void ds4_swiglu_weighted_f32(
 // structure mirrors ds4_mmq_moe_impl above; the only differences are the
 // two W pointers, the two output pointers, and the second mul_mat_q_case
 // launch with a fresh (x, dst) pair.
-template <
-    ggml_type type,
-    bool profile_fused_prefill = false,
-    bool token_expert_unique = false>
+template<ggml_type type, bool token_expert_unique = false>
 int ds4_mmq_moe_pair_impl(
-        const char    * tag,
-        const void    * W_a,
-        const void    * W_b,
-        const float   * X_f32,
-        const int32_t * ids,
-        float         * out_a,
-        float         * out_b,
-        int             M,
-        int             K,
-        int             n_tokens,
-        int             n_experts,
-        int             n_expert_used,
-        cudaStream_t    stream,
-        /* ds4 (P4 Inc3): optional aligned-SoA artifacts for W_a / W_b (same
-         * shape, so one block count); see ds4_mmq_moe_impl. */
-        const char    * xa_soa     = NULL,
-        const char    * xb_soa     = NULL,
-        int64_t         soa_blocks = 0,
-        /* ds4 (P3): see ds4_mmq_moe_impl. */
-        bool            sanitize_out = true,
-        const ds4_mmq_fused_down *fused_down = nullptr,
-        const ds4_mmq_swiglu_epilogue *swiglu_epilogue = nullptr) {
+    const char* tag, const void* W_a, const void* W_b, const float* X_f32,
+    const int32_t* ids, float* out_a, float* out_b, int M, int K, int n_tokens,
+    int n_experts, int n_expert_used, cudaStream_t stream,
+    /* ds4 (P4 Inc3): optional aligned-SoA artifacts for W_a / W_b (same
+     * shape, so one block count); see ds4_mmq_moe_impl. */
+    const char* xa_soa = NULL, const char* xb_soa = NULL,
+    int64_t soa_blocks = 0,
+    /* ds4 (P3): see ds4_mmq_moe_impl. */
+    bool sanitize_out = true, const ds4_mmq_fused_down* fused_down = nullptr,
+    const ds4_mmq_swiglu_epilogue* swiglu_epilogue = nullptr) {
+  const bool direct_gateup_q8 =
+      fused_down != nullptr && fused_down->direct_gateup_q8;
+  if (!W_a || !W_b || !X_f32 || !ids ||
+      (!direct_gateup_q8 && (!out_a || (!out_b && !swiglu_epilogue)))) {
+    fprintf(stderr, "%s: null pointer\n", tag);
+    return -1;
+  }
+  if (M <= 0 || K <= 0 || n_tokens <= 0 || n_experts <= 0 ||
+      n_expert_used <= 0) {
+    fprintf(stderr, "%s: bad shape M=%d K=%d ntok=%d nexp=%d nused=%d\n", tag,
+            M, K, n_tokens, n_experts, n_expert_used);
+    return -1;
+  }
+  if (K % 256 != 0) {
+    fprintf(stderr, "%s: K=%d must be a multiple of 256\n", tag, K);
+    return -1;
+  }
+  if (n_expert_used > n_experts) {
+    fprintf(stderr, "%s: n_expert_used=%d > n_experts=%d\n", tag, n_expert_used,
+            n_experts);
+    return -1;
+  }
+  if (fused_down &&
+      (type != GGML_TYPE_IQ2_XXS || !fused_down->W ||
+       !fused_down->router_weights ||
+       (!direct_gateup_q8 && !fused_down->mid_f32) ||
+       (direct_gateup_q8 &&
+        (!xa_soa || !xb_soa || !fused_down->W_soa ||
+         !fused_down->input_q8_scratch ||
+         fused_down->input_q8_scratch_bytes == 0 || !fused_down->q8_scratch ||
+         fused_down->q8_scratch_bytes == 0 || !fused_down->work_scratch ||
+         fused_down->work_scratch_bytes == 0)) ||
+       !fused_down->out || fused_down->out_dim <= 0 || M % 256 != 0)) {
+    fprintf(stderr, "%s: invalid fused Q2_K down configuration\n", tag);
+    return -1;
+  }
+  if (swiglu_epilogue &&
+      (type != GGML_TYPE_IQ2_XXS || fused_down ||
+       !swiglu_epilogue->router_weights || !swiglu_epilogue->mid_f32)) {
+    fprintf(stderr, "%s: invalid weighted SwiGLU epilogue\n", tag);
+    return -1;
+  }
 
-    const bool direct_gateup_q8 =
-        fused_down != nullptr && fused_down->direct_gateup_q8;
-    if (!W_a || !W_b || !X_f32 || !ids ||
-        (!direct_gateup_q8 &&
-         (!out_a || (!out_b && !swiglu_epilogue)))) {
-        fprintf(stderr, "%s: null pointer\n", tag);
-        return -1;
-    }
-    if (M <= 0 || K <= 0 || n_tokens <= 0 || n_experts <= 0 || n_expert_used <= 0) {
-        fprintf(stderr, "%s: bad shape M=%d K=%d ntok=%d nexp=%d nused=%d\n",
-                tag, M, K, n_tokens, n_experts, n_expert_used);
-        return -1;
-    }
-    if (K % 256 != 0) {
-        fprintf(stderr, "%s: K=%d must be a multiple of 256\n", tag, K);
-        return -1;
-    }
-    if (n_expert_used > n_experts) {
-        fprintf(stderr, "%s: n_expert_used=%d > n_experts=%d\n", tag, n_expert_used, n_experts);
-        return -1;
-    }
-    if (fused_down &&
-        (type != GGML_TYPE_IQ2_XXS || !fused_down->W ||
-         !fused_down->router_weights ||
-         (!direct_gateup_q8 && !fused_down->mid_f32) ||
-         (direct_gateup_q8 &&
-          (!xa_soa || !xb_soa || !fused_down->W_soa ||
-           !fused_down->input_q8_scratch ||
-           fused_down->input_q8_scratch_bytes == 0 ||
-           !fused_down->q8_scratch || fused_down->q8_scratch_bytes == 0 ||
-           !fused_down->work_scratch || fused_down->work_scratch_bytes == 0)) ||
-         !fused_down->out || fused_down->out_dim <= 0 || M % 256 != 0)) {
-        fprintf(stderr, "%s: invalid fused Q2_K down configuration\n", tag);
-        return -1;
-    }
-    if (swiglu_epilogue &&
-        (type != GGML_TYPE_IQ2_XXS || fused_down ||
-         !swiglu_epilogue->router_weights ||
-         !swiglu_epilogue->mid_f32)) {
-        fprintf(stderr, "%s: invalid weighted SwiGLU epilogue\n", tag);
-        return -1;
-    }
+  const int dev = ggml_cuda_get_device();
+  const int cc = ggml_cuda_info().devices[dev].cc;
+  if (!ds4_mmq_k_tile_supported<type>(tag, K, cc))
+    return -1;
 
-    const bool nvtx_prefill = profile_fused_prefill &&
-                              fused_down != nullptr &&
-                              n_tokens >= 1024 &&
-                              ds4_mmq_nvtx_requested();
-    ds4_mmq_nvtx_scope fused_scope(
-            "ds4/prefill/moe/mmq_fused",
-            ds4_mmq_nvtx_payload((uint32_t)n_tokens, (uint32_t)n_expert_used),
-            nvtx_prefill);
+  ggml_backend_cuda_context* ctx = get_ctx_for_device(dev);
+  if (!ctx) {
+    fprintf(stderr, "%s: failed to get cuda context for device %d\n", tag, dev);
+    return -1;
+  }
 
-    const int dev = ggml_cuda_get_device();
-    const int cc  = ggml_cuda_info().devices[dev].cc;
-    if (!ds4_mmq_k_tile_supported<type>(tag, K, cc)) return -1;
+  ds4_pool_set_stream(stream); /* task #22: pool ops must be stream-ordered with
+                                  the kernels (see ds4_mmq_dense_impl) */
 
-    ggml_backend_cuda_context * ctx = get_ctx_for_device(dev);
-    if (!ctx) {
-        fprintf(stderr, "%s: failed to get cuda context for device %d\n", tag, dev);
-        return -1;
-    }
+  const int64_t ne_get_rows = (int64_t)n_tokens * n_expert_used;
+  const int64_t ne00 = K;
+  const int64_t ne10_padded = GGML_PAD((int64_t)K, MATRIX_ROW_PADDING);
+  const int64_t ne11 = 1;
+  const int64_t ne12 = n_tokens;
+  const int64_t blck = ggml_blck_size(type);
+  const int64_t s01 = (int64_t)K / blck;
+  const int64_t s02 = (int64_t)M * s01;
 
-    ds4_pool_set_stream(stream);  /* task #22: pool ops must be stream-ordered with the kernels (see ds4_mmq_dense_impl) */
-
-    const int64_t ne_get_rows  = (int64_t)n_tokens * n_expert_used;
-    const int64_t ne00         = K;
-    const int64_t ne10_padded  = GGML_PAD((int64_t)K, MATRIX_ROW_PADDING);
-    const int64_t ne11         = 1;
-    const int64_t ne12         = n_tokens;
-    const int64_t blck         = ggml_blck_size(type);
-    const int64_t s01          = (int64_t)K / blck;
-    const int64_t s02          = (int64_t)M * s01;
-
-    ggml_cuda_pool_alloc<int32_t> ids_src1_alloc;
-    ggml_cuda_pool_alloc<int32_t> ids_dst_alloc;
-    ggml_cuda_pool_alloc<int32_t> expert_bounds_alloc;
-    int32_t *ids_src1 = nullptr;
-    int32_t *ids_dst = nullptr;
-    int32_t *expert_bounds = nullptr;
+  ggml_cuda_pool_alloc<int32_t> ids_src1_alloc;
+  ggml_cuda_pool_alloc<int32_t> ids_dst_alloc;
+  ggml_cuda_pool_alloc<int32_t> expert_bounds_alloc;
+  int32_t* ids_src1 = nullptr;
+  int32_t* ids_dst = nullptr;
+  int32_t* expert_bounds = nullptr;
 #if defined(GGML_USE_HIP)
     std::unique_lock<std::mutex> pair_map_scratch_lock;
 #endif
@@ -1398,24 +1254,20 @@ int ds4_mmq_moe_pair_impl(
     // cap the launcher takes the bit-identical global variant (P5).
     cudaError_t err = cudaSuccess;
     {
-        ds4_mmq_nvtx_scope stage(
-                "ds4/prefill/moe/expert_map",
-                ds4_mmq_nvtx_payload((uint32_t)n_tokens, (uint32_t)n_experts),
-                nvtx_prefill);
-        // Task #22 root-cause fix (same as ds4_mmq_moe_impl): zero the id maps
-        // so entries dropped by mm_ids_helper never expose stale pool memory.
-        cudaMemsetAsync(ids_src1, 0, ne_get_rows * sizeof(int32_t), stream);
-        cudaMemsetAsync(ids_dst,  0, ne_get_rows * sizeof(int32_t), stream);
-        ggml_cuda_launch_mm_ids_helper(
-            ids, ids_src1, ids_dst, expert_bounds,
-            n_experts, n_tokens, n_expert_used, /*nchannels_y=*/(int)ne11,
-            si1, sis1, stream);
+      // Zero the ID maps, as in ds4_mmq_moe_impl
+      // so entries dropped by mm_ids_helper never expose stale pool memory.
+      cudaMemsetAsync(ids_src1, 0, ne_get_rows * sizeof(int32_t), stream);
+      cudaMemsetAsync(ids_dst, 0, ne_get_rows * sizeof(int32_t), stream);
+      ggml_cuda_launch_mm_ids_helper(
+          ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens,
+          n_expert_used, /*nchannels_y=*/(int)ne11, si1, sis1, stream);
 
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            fprintf(stderr, "%s: mm_ids_helper failed: %s\n", tag, cudaGetErrorString(err));
-            return -2;
-        }
+      err = cudaGetLastError();
+      if (err != cudaSuccess) {
+        fprintf(stderr, "%s: mm_ids_helper failed: %s\n", tag,
+                cudaGetErrorString(err));
+        return -2;
+      }
     }
 
     const bool use_stream_k =
@@ -1488,30 +1340,26 @@ int ds4_mmq_moe_pair_impl(
     }
     const int64_t quant_rows = moe_yind ? (int64_t)n_tokens : ne_get_rows;
     if (!input_q8_ext) {
-        ds4_mmq_nvtx_scope stage(
-                "ds4/prefill/moe/input_quant_q8_1",
-                ds4_mmq_nvtx_payload((uint32_t)quant_rows, (uint32_t)K),
-                nvtx_prefill);
-        if (use_native_fp4) {
-            quantize_mmq_fp4_cuda(
-                X_f32, moe_yind ? nullptr : ids_src1, (void *)src1_q8_1,
-                type, /*ne00=*/K, s11_src, s12_src, s13_src,
-                /*ne0=*/ne10_padded, /*ne1=*/quant_rows, /*ne2=*/1, /*ne3=*/1,
-                stream);
-        } else {
-            quantize_mmq_q8_1_cuda(
-                X_f32, moe_yind ? nullptr : ids_src1, (void *)src1_q8_1,
-                type, /*ne00=*/K, s11_src, s12_src, s13_src,
-                /*ne0=*/ne10_padded, /*ne1=*/quant_rows, /*ne2=*/1, /*ne3=*/1,
-                stream);
-        }
+      if (use_native_fp4) {
+        quantize_mmq_fp4_cuda(X_f32, moe_yind ? nullptr : ids_src1,
+                              (void*)src1_q8_1, type, /*ne00=*/K, s11_src,
+                              s12_src, s13_src,
+                              /*ne0=*/ne10_padded, /*ne1=*/quant_rows,
+                              /*ne2=*/1, /*ne3=*/1, stream);
+      } else {
+        quantize_mmq_q8_1_cuda(X_f32, moe_yind ? nullptr : ids_src1,
+                               (void*)src1_q8_1, type, /*ne00=*/K, s11_src,
+                               s12_src, s13_src,
+                               /*ne0=*/ne10_padded, /*ne1=*/quant_rows,
+                               /*ne2=*/1, /*ne3=*/1, stream);
+      }
 
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            fprintf(stderr, "%s: MMQ activation quantize failed: %s\n",
-                    tag, cudaGetErrorString(err));
-            return -3;
-        }
+      err = cudaGetLastError();
+      if (err != cudaSuccess) {
+        fprintf(stderr, "%s: MMQ activation quantize failed: %s\n", tag,
+                cudaGetErrorString(err));
+        return -3;
+      }
     }
 
     if (direct_gateup_q8) {
@@ -1531,22 +1379,15 @@ int ds4_mmq_moe_pair_impl(
             return -9;
         }
         {
-            ds4_mmq_nvtx_scope stage(
-                    "ds4/prefill/moe/iq2_gate_up_swiglu_q8_d2r",
-                    ds4_mmq_nvtx_payload((uint32_t)ne_get_rows, (uint32_t)M),
-                    nvtx_prefill);
-            const int d2r_rc = ds4_mmq_iq2_xxs_moe_d2r_fused_launch(
-                    xa_soa, xb_soa, soa_blocks,
-                    src1_q8_1,
-                    moe_yind ? ids_src1 : nullptr,
-                    moe_yind ? n_tokens : 0,
-                    ids_dst, expert_bounds,
-                    fused_down->router_weights, fused_down->q8_scratch,
-                    M, K, ne_get_rows, n_experts, fused_down->clamp,
-                    direct_work, gateup_work_bytes, stream);
-            if (d2r_rc != 0) {
-                return -10;
-            }
+          const int d2r_rc = ds4_mmq_iq2_xxs_moe_d2r_fused_launch(
+              xa_soa, xb_soa, soa_blocks, src1_q8_1,
+              moe_yind ? ids_src1 : nullptr, moe_yind ? n_tokens : 0, ids_dst,
+              expert_bounds, fused_down->router_weights, fused_down->q8_scratch,
+              M, K, ne_get_rows, n_experts, fused_down->clamp, direct_work,
+              gateup_work_bytes, stream);
+          if (d2r_rc != 0) {
+            return -10;
+          }
         }
 
         const size_t down_work_bytes =
@@ -1555,22 +1396,13 @@ int ds4_mmq_moe_pair_impl(
             return -11;
         }
         {
-            ds4_mmq_nvtx_scope stage(
-                    "ds4/prefill/moe/q2_down_d2r",
-                    ds4_mmq_nvtx_payload((uint32_t)ne_get_rows,
-                                         (uint32_t)fused_down->out_dim),
-                    nvtx_prefill);
-            const int down_rc = ds4_mmq_q2_K_moe_d2r_launch(
-                    fused_down->W_soa,
-                    fused_down->soa_blocks,
-                    fused_down->q8_scratch,
-                    ids_dst, expert_bounds,
-                    fused_down->out,
-                    fused_down->out_dim, M, ne_get_rows, n_experts,
-                    direct_work, down_work_bytes, stream);
-            if (down_rc != 0) {
-                return -12;
-            }
+          const int down_rc = ds4_mmq_q2_K_moe_d2r_launch(
+              fused_down->W_soa, fused_down->soa_blocks, fused_down->q8_scratch,
+              ids_dst, expert_bounds, fused_down->out, fused_down->out_dim, M,
+              ne_get_rows, n_experts, direct_work, down_work_bytes, stream);
+          if (down_rc != 0) {
+            return -12;
+          }
         }
         return 0;
     }
@@ -1596,10 +1428,7 @@ int ds4_mmq_moe_pair_impl(
                 ds4_mmq_iq2_xxs_moe_d2r_pair_scratch_bytes(ne_get_rows, n_experts);
             if (d2r_work_bytes != 0) {
                 ggml_cuda_pool_alloc<char> d2r_work(ctx->pool(), d2r_work_bytes);
-                ds4_mmq_nvtx_scope stage(
-                        "ds4/prefill/moe/iq2_gate_up_d2r",
-                        ds4_mmq_nvtx_payload((uint32_t)ne_get_rows, (uint32_t)M),
-                        nvtx_prefill);
+
                 const int d2r_rc = ds4_mmq_iq2_xxs_moe_d2r_pair_launch(
                         xa_soa, xb_soa, soa_blocks, src1_q8_1, ids_dst,
                         expert_bounds, out_a, out_b, M, K, ne_get_rows, n_experts,
@@ -1644,16 +1473,13 @@ int ds4_mmq_moe_pair_impl(
     args.mmq_x_request = g_routed_tile_cols;
 
     {
-        ds4_mmq_nvtx_scope stage(
-                "ds4/prefill/moe/iq2_gate",
-                ds4_mmq_nvtx_payload((uint32_t)ne_get_rows, (uint32_t)M),
-                nvtx_prefill);
-        mul_mat_q_case<type>(*ctx, args, stream);
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            fprintf(stderr, "%s: mul_mat_q_case (pair a) launch failed: %s\n", tag, cudaGetErrorString(err));
-            return -4;
-        }
+      mul_mat_q_case<type>(*ctx, args, stream);
+      err = cudaGetLastError();
+      if (err != cudaSuccess) {
+        fprintf(stderr, "%s: mul_mat_q_case (pair a) launch failed: %s\n", tag,
+                cudaGetErrorString(err));
+        return -4;
+      }
     }
 
     // Second matmul over the same activation buffer and same routing map.
@@ -1668,16 +1494,13 @@ int ds4_mmq_moe_pair_impl(
         args.epilogue_clamp = swiglu_epilogue->clamp;
     }
     {
-        ds4_mmq_nvtx_scope stage(
-                "ds4/prefill/moe/iq2_up",
-                ds4_mmq_nvtx_payload((uint32_t)ne_get_rows, (uint32_t)M),
-                nvtx_prefill);
-        mul_mat_q_case<type>(*ctx, args, stream);
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            fprintf(stderr, "%s: mul_mat_q_case (pair b) launch failed: %s\n", tag, cudaGetErrorString(err));
-            return -5;
-        }
+      mul_mat_q_case<type>(*ctx, args, stream);
+      err = cudaGetLastError();
+      if (err != cudaSuccess) {
+        fprintf(stderr, "%s: mul_mat_q_case (pair b) launch failed: %s\n", tag,
+                cudaGetErrorString(err));
+        return -5;
+      }
     }
     }
     }
@@ -1693,33 +1516,29 @@ int ds4_mmq_moe_pair_impl(
 
         const uint64_t mid_values = (uint64_t)ne_get_rows * (uint64_t)M;
         {
-            ds4_mmq_nvtx_scope stage(
-                    "ds4/prefill/moe/swiglu_down_quant",
-                    ds4_mmq_nvtx_payload((uint32_t)ne_get_rows, (uint32_t)M),
-                    nvtx_prefill);
-            ds4_swiglu_weighted_f32<<<
-                (uint32_t)((mid_values + 255u) / 256u), 256, 0, stream>>>(
-                    out_a, out_b, fused_down->router_weights,
-                    fused_down->mid_f32, mid_values, M, fused_down->clamp);
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                fprintf(stderr, "%s: weighted SwiGLU launch failed: %s\n",
-                        tag, cudaGetErrorString(err));
-                return -6;
-            }
+          ds4_swiglu_weighted_f32<<<(uint32_t)((mid_values + 255u) / 256u), 256,
+                                    0, stream>>>(
+              out_a, out_b, fused_down->router_weights, fused_down->mid_f32,
+              mid_values, M, fused_down->clamp);
+          err = cudaGetLastError();
+          if (err != cudaSuccess) {
+            fprintf(stderr, "%s: weighted SwiGLU launch failed: %s\n", tag,
+                    cudaGetErrorString(err));
+            return -6;
+          }
 
-            quantize_mmq_q8_1_cuda(
-                fused_down->mid_f32, ids_dst, (void *)down_q8_1.get(),
-                GGML_TYPE_Q2_K, /*ne00=*/M, /*s01=*/M,
-                /*s02=*/(int64_t)M, /*s03=*/(int64_t)M * ne_get_rows,
-                /*ne0=*/down_ne10_padded, /*ne1=*/ne_get_rows,
-                /*ne2=*/1, /*ne3=*/1, stream);
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                fprintf(stderr, "%s: down quantize_mmq_q8_1_cuda failed: %s\n",
-                        tag, cudaGetErrorString(err));
-                return -7;
-            }
+          quantize_mmq_q8_1_cuda(
+              fused_down->mid_f32, ids_dst, (void*)down_q8_1.get(),
+              GGML_TYPE_Q2_K, /*ne00=*/M, /*s01=*/M,
+              /*s02=*/(int64_t)M, /*s03=*/(int64_t)M * ne_get_rows,
+              /*ne0=*/down_ne10_padded, /*ne1=*/ne_get_rows,
+              /*ne2=*/1, /*ne3=*/1, stream);
+          err = cudaGetLastError();
+          if (err != cudaSuccess) {
+            fprintf(stderr, "%s: down quantize_mmq_q8_1_cuda failed: %s\n", tag,
+                    cudaGetErrorString(err));
+            return -7;
+          }
         }
 
         const int64_t down_s01 = (int64_t)M / ggml_blck_size(GGML_TYPE_Q2_K);
@@ -1763,11 +1582,7 @@ int ds4_mmq_moe_pair_impl(
                 ds4_mmq_q2_K_moe_d2r_scratch_bytes(ne_get_rows, n_experts);
             if (work_bytes != 0u) {
                 ggml_cuda_pool_alloc<char> work(ctx->pool(), work_bytes);
-                ds4_mmq_nvtx_scope stage(
-                        "ds4/prefill/moe/q2_down_d2r",
-                        ds4_mmq_nvtx_payload((uint32_t)ne_get_rows,
-                                             (uint32_t)fused_down->out_dim),
-                        nvtx_prefill);
+
                 down_done = ds4_mmq_q2_K_moe_d2r_launch(
                         fused_down->W_soa,
                         fused_down->soa_blocks,
@@ -1785,18 +1600,13 @@ int ds4_mmq_moe_pair_impl(
             }
         }
         if (!down_done) {
-            ds4_mmq_nvtx_scope stage(
-                    "ds4/prefill/moe/q2_down",
-                    ds4_mmq_nvtx_payload((uint32_t)ne_get_rows,
-                                         (uint32_t)fused_down->out_dim),
-                    nvtx_prefill);
-            mul_mat_q_case<GGML_TYPE_Q2_K>(*ctx, down_args, stream);
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                fprintf(stderr, "%s: fused Q2_K down launch failed: %s\n",
-                        tag, cudaGetErrorString(err));
-                return -8;
-            }
+          mul_mat_q_case<GGML_TYPE_Q2_K>(*ctx, down_args, stream);
+          err = cudaGetLastError();
+          if (err != cudaSuccess) {
+            fprintf(stderr, "%s: fused Q2_K down launch failed: %s\n", tag,
+                    cudaGetErrorString(err));
+            return -8;
+          }
         }
     }
     if (sanitize_out && !swiglu_epilogue) {
@@ -1885,10 +1695,9 @@ extern "C" int ds4_mmq_iq2_xxs_moe_pair_token_bound(
         const float * X, const int32_t * ids, float * out_a, float * out_b,
         int M, int K, int n_tokens, int n_experts, int n_expert_used,
         cudaStream_t stream) {
-    return ds4_mmq_moe_pair_impl<GGML_TYPE_IQ2_XXS, false, true>(
-        "ds4_mmq_iq2_xxs_moe_pair_token_bound",
-        W_a, W_b, X, ids, out_a, out_b,
-        M, K, n_tokens, n_experts, n_expert_used, stream);
+  return ds4_mmq_moe_pair_impl<GGML_TYPE_IQ2_XXS, true>(
+      "ds4_mmq_iq2_xxs_moe_pair_token_bound", W_a, W_b, X, ids, out_a, out_b, M,
+      K, n_tokens, n_experts, n_expert_used, stream);
 }
 
 extern "C" int ds4_mmq_iq2_xxs_moe_pair_token_bound_swiglu(
@@ -1903,10 +1712,9 @@ extern "C" int ds4_mmq_iq2_xxs_moe_pair_token_bound_swiglu(
         (half *)mid_f16,
         clamp,
     };
-    return ds4_mmq_moe_pair_impl<GGML_TYPE_IQ2_XXS, false, true>(
-        "ds4_mmq_iq2_xxs_moe_pair_token_bound_swiglu",
-        W_gate, W_up, X, ids, gate, discard,
-        M, K, n_tokens, n_experts, n_expert_used, stream,
+    return ds4_mmq_moe_pair_impl<GGML_TYPE_IQ2_XXS, true>(
+        "ds4_mmq_iq2_xxs_moe_pair_token_bound_swiglu", W_gate, W_up, X, ids,
+        gate, discard, M, K, n_tokens, n_experts, n_expert_used, stream,
         nullptr, nullptr, 0, /*sanitize_out=*/false, nullptr, &epilogue);
 }
 
@@ -1973,12 +1781,10 @@ extern "C" int ds4_mmq_iq2_xxs_q2_K_moe_fused_soa(
         nullptr,
         0,
     };
-    return ds4_mmq_moe_pair_impl<GGML_TYPE_IQ2_XXS, true>(
-        "ds4_mmq_iq2_xxs_q2_K_moe_fused_soa",
-        W_gate, W_up, X, ids, gate, up,
+    return ds4_mmq_moe_pair_impl<GGML_TYPE_IQ2_XXS>(
+        "ds4_mmq_iq2_xxs_q2_K_moe_fused_soa", W_gate, W_up, X, ids, gate, up,
         expert_mid_dim, expert_in_dim, n_tokens, n_experts, n_expert_used,
-        stream,
-        (const char *)W_gate, (const char *)W_up, iq2_blocks,
+        stream, (const char*)W_gate, (const char*)W_up, iq2_blocks,
         /*sanitize_out=*/false, &fused_down);
 }
 
@@ -2052,12 +1858,11 @@ extern "C" int ds4_mmq_iq2_xxs_q2_K_moe_fused_direct_soa(
         input_q8_ext,
         input_q8_ext_bytes,
     };
-    return ds4_mmq_moe_pair_impl<GGML_TYPE_IQ2_XXS, true>(
-        "ds4_mmq_iq2_xxs_q2_K_moe_fused_direct_soa",
-        W_gate, W_up, X, ids, nullptr, nullptr,
-        expert_mid_dim, expert_in_dim, n_tokens, n_experts, n_expert_used,
-        stream,
-        (const char *)W_gate, (const char *)W_up, iq2_blocks,
+    return ds4_mmq_moe_pair_impl<GGML_TYPE_IQ2_XXS>(
+        "ds4_mmq_iq2_xxs_q2_K_moe_fused_direct_soa", W_gate, W_up, X, ids,
+        nullptr, nullptr, expert_mid_dim, expert_in_dim, n_tokens, n_experts,
+        n_expert_used, stream, (const char*)W_gate, (const char*)W_up,
+        iq2_blocks,
         /*sanitize_out=*/false, &fused_down);
 }
 
@@ -2082,7 +1887,7 @@ extern "C" int ds4_mmq_mxfp4_moe_pair(
 }
 
 // ----------------------------------------------------------------------------
-// mmvq-backed entry points (Step 6 of the optimization plan).
+// MMVQ entry points.
 //
 // mmvq is upstream's matrix-vector matmul family, optimised for the
 // n_tokens <= MMVQ_MAX_BATCH_SIZE=8 regime. Unlike mmq it consumes the
@@ -2153,26 +1958,18 @@ int ds4_mmq_moe_vec_impl(
     }
 
     // Route the pool's cudaMallocAsync / cudaFreeAsync through the same
-    // stream the caller uses for kernel launches.  Required for Step 8
-    // (CUDA Graph capture): pool allocations on a different stream than
-    // the capture stream would invalidate the capture.
+    // stream the caller uses for kernel launches so allocations do not
+    // invalidate graph capture.
     ds4_pool_set_stream(stream);
 
     // 1. Quantize X into CANONICAL Q8_1 (NOT the MMQ-interleaved variant).
     //    Layout: [ne13=1, ne12=n_tokens, ne11=1, ne10_padded blocks].
     const int64_t ne10_padded = GGML_PAD((int64_t)K, MATRIX_ROW_PADDING);
-    const size_t  nbytes_q8_1 = (size_t)n_tokens * ne10_padded *
-                                sizeof(block_q8_1) / QK8_1;
-    // Step 7 task #29: experimental persistent Q8_1 scratch.  Avoids
-    // pool_alloc (cudaMallocAsync) graph nodes whose pointer baked at
-    // capture time may not match the address resolved at replay.  When
-    // disabled (default) or when the persistent buffer is too small,
-    // fall back to the pool path.  See ds4_mmq_init for setup.
+    const size_t nbytes_q8_1 =
+        (size_t)n_tokens * ne10_padded * sizeof(block_q8_1) / QK8_1;
     ggml_cuda_pool_alloc<char> src1_q8_1_pool;
-    char *src1_q8_1_ptr = nullptr;
-        src1_q8_1_pool.alloc(ctx->pool(), nbytes_q8_1);
-        src1_q8_1_ptr = src1_q8_1_pool.get();
-    
+    src1_q8_1_pool.alloc(ctx->pool(), nbytes_q8_1);
+    char* src1_q8_1_ptr = src1_q8_1_pool.get();
 
     // s11 = stride between rows of an src1 channel in source-float units.
     //       Logical src1 [K, ne11=1, ne12=n_tokens, ne13=1] - K innermost.
@@ -2840,7 +2637,7 @@ int ds4_mmq_moe_pair_vec_impl(
     }
 
     // Route the pool's cudaMallocAsync through the caller-supplied stream
-    // for Step 8 / CUDA Graph compatibility.  See ds4_mmq_moe_vec_impl.
+    // for graph capture compatibility.  See ds4_mmq_moe_vec_impl.
     ds4_pool_set_stream(stream);
 
     const int n_tokens = 1;  // fusion only supported at ncols_dst=1.
@@ -2949,7 +2746,7 @@ int ds4_mmq_dense_vec_impl(
     }
 
     // Route the pool's cudaMallocAsync through the caller-supplied stream
-    // for Step 8 / CUDA Graph compatibility.  See ds4_mmq_moe_vec_impl.
+    // for graph capture compatibility.  See ds4_mmq_moe_vec_impl.
     ds4_pool_set_stream(stream);
 
     // Dense: no MoE, ids=null. Layout [K, N, 1, 1] for src1.

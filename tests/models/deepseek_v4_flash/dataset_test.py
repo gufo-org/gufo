@@ -1,13 +1,55 @@
 #!/usr/bin/env python3
-"""Validate the pinned DS4 evaluation data and its row-level audit records."""
+"""Validate pinned DS4 evaluation data, provenance, and comparison metrics."""
 
 from __future__ import annotations
 
 from collections import Counter
 import hashlib
 import json
+import math
 from pathlib import Path
+import struct
+import sys
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools/ds4"))
+from reference import compare_logits
+
+
+class ReferenceMetricsTest(unittest.TestCase):
+    @staticmethod
+    def compare(a, b):
+        return compare_logits(struct.pack(f"<{len(a)}f", *a),
+                              struct.pack(f"<{len(b)}f", *b), len(a))
+
+    def test_common_shift_preserves_probabilities(self):
+        result = self.compare([1, 2, 3], [17, 18, 19])
+        self.assertFalse(result["within_existing_vector_bounds"])
+        self.assertEqual(result["mean_logit_shift"], -16)
+        self.assertEqual(result["centered_rmse"], 0)
+        self.assertEqual(result["jensen_shannon_nats"], 0)
+        self.assertEqual(result["max_probability_difference"], 0)
+        self.assertTrue(result["same_top1"])
+
+    def test_distribution_difference_is_symmetric_and_bounded(self):
+        a, b = [1000, -1000, 0], [-1000, 1000, 0]
+        forward, backward = self.compare(a, b), self.compare(b, a)
+        self.assertAlmostEqual(forward["jensen_shannon_nats"], math.log(2))
+        self.assertEqual(forward["jensen_shannon_nats"],
+                         backward["jensen_shannon_nats"])
+        self.assertEqual(forward["max_probability_difference"], 1)
+        self.assertFalse(forward["same_top1"])
+        self.assertEqual(self.compare(a, a)["jensen_shannon_nats"], 0)
+        # One probability is a subnormal, the other underflows to zero.
+        self.assertTrue(math.isfinite(
+            self.compare([0, -745], [0, -1000])["jensen_shannon_nats"]))
+
+    def test_nonfinite_and_incomplete_logits_are_rejected(self):
+        for value in (float("nan"), float("inf"), -float("inf")):
+            with self.assertRaises(RuntimeError):
+                self.compare([value, 1], [1, 2])
+        with self.assertRaises(RuntimeError):
+            self.compare([1, 2], [1])
 
 
 class EvalDatasetTest(unittest.TestCase):

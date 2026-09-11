@@ -1,7 +1,8 @@
-# DS4 capability regression reports
+# DS4 quality reports
 
-These are Gufo regression samples from the pinned Antirez suite, not complete
-official dataset scores. Requests use the real `gufo serve` HTTP route.
+Independent operator checks, AR comparisons, and capability samples. These
+are not complete official dataset scores. Capability requests use the real
+`gufo serve` HTTP route.
 
 ## Official continuation comparison
 
@@ -50,14 +51,57 @@ These are differential alerts, not proof that Gufo is less correct. Antirez's
 implementation is also unofficial and can contain errors. DSpark/AR equality
 alone cannot detect shared errors either.
 
+### Post-prefill formula audit
+
+The [2026-09-11 audit](prefill-formula-audit.json) reproduces all four alerts.
+**No model-quality improvement is demonstrated; production arithmetic is retained.**
+All ten Gufo prefill vectors repeat exactly and match the retained pre-cleanup
+vectors byte for byte. These are actual distribution differences: subtracting
+mean logit shifts does not eliminate them. Both engines choose the same top
+token at these four frontiers.
+
+| Context / call size | RMSE | Cosine | Max logit error | Max probability difference |
+| --- | ---: | ---: | ---: | ---: |
+| 4K / 4K | 0.9691 | 0.98006 | 5.3386 | 5.90 percentage points |
+| 12K / 4K | 1.1819 | 0.96935 | 5.4680 | 39.81 percentage points |
+| 16K / 2K | 0.8128 | 0.98681 | 5.8521 | 11.63 percentage points |
+| 16K / 4K | 1.3476 | 0.96214 | 5.8032 | 9.80 percentage points |
+
 The official [0731 computation](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/7872f01b1d1fe23eabc4c98b48bffcef5a386062/inference/model.py#L680)
-casts HC activations to FP32, projects them, then applies RMS scaling.
-It does not round normalized activations to F16. Gufo's fused prefill follows
-that formulation with the F16 HC weights stored in this GGUF. Adding the extra
-activation rounding moved the worst 16K comparison within the existing bounds,
-but was rejected: agreement with Antirez did not justify that approximation.
-Two maintained kernel cases check the official formula independently in double
-precision and detect this extra rounding.
+projects raw FP32 HC activations, then applies RMS scaling. Gufo's fused
+prefill follows this formula using the GGUF's F16 weights. The pinned
+[Antirez ROCm path](https://github.com/antirez/ds4/blob/6289c516273979173abbc062209a81dd3706b804/ds4.c#L29171)
+normalizes first; its wide F16 GEMM also rounds the activations to F16.
+At 12K, changing only the call size changes Antirez's probabilities by up to
+40.58 percentage points, versus 6.00 for Gufo. This is evidence of sensitivity
+in the comparator too; it does not establish official-model parity.
+
+A temporary rounding experiment fails the independent official-formula oracle.
+It passes three of four raw-logit checks, but **worsens** maximum probability
+differences at 4K (5.90 → 20.70 percentage points) and 16K/4K (9.80 → 21.15).
+The 12K raw-logit alert remains. The experiment is rejected. This precision
+difference contributes to the discrepancy but does not explain every alert or
+establish which model has better task accuracy.
+
+The retained 16K layer trace shows post-attention RMSE growing from 0.000404
+at layer 0 to 0.994 at layer 42. Its final logits match the current run.
+This shows accumulated divergence, without isolating a single faulty operator.
+Two cancellation cases reject extra F16 rounding. Two dense HC cases independently
+check projection/RMS, the official Sinkhorn epsilon placement, weighted reduction,
+and residual-matrix orientation in double precision; maximum error is 1.5e-6.
+The larger-epsilon case exposes misplaced epsilons, and asymmetric data exposes
+transposition. These checks join `ds4.projections`; no new executable is added.
+Raw-logit limits remain unchanged. The four alerts remain open quality evidence,
+not a reason to imitate an unofficial implementation.
+
+The next investigation starts with the smallest failing frontier, 4K/4K:
+capture real operator inputs and compare their outputs with the official
+formulas using the same dequantized GGUF weights and explicit precision.
+Locate the first unexplained deviation before comparing downstream layers.
+Any demonstrated fix needs a captured-input regression, all four frontier
+checks, repeatability, and the pinned official-continuation likelihood check.
+An alert can also be explained by a proven approximation in the comparator;
+agreement with Antirez or relaxed thresholds alone cannot close it.
 
 The IQ2 projection check also independently unpacks weights and derives sign
 parity on the CPU. It catches a corrupted sign lookup even when the scalar and

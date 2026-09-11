@@ -126,8 +126,31 @@ def compare_logits(ours: bytes, old: bytes, vocabulary: int) -> dict:
     require(norm > 0, "zero-norm full logits")
     cosine = sum(x * y for x, y in zip(a, b)) / norm
     maximum = max(abs(x - y) for x, y in zip(a, b))
+    shift = statistics.mean(x - y for x, y in zip(a, b))
+    centered_rmse = math.sqrt(
+        sum((x - y - shift) ** 2 for x, y in zip(a, b)) / len(a))
+    probabilities = []
+    for vector in vectors:
+        maximum_logit = max(vector)
+        weights = [math.exp(value - maximum_logit) for value in vector]
+        total = sum(weights)
+        probabilities.append([value / total for value in weights])
+    pa, pb = probabilities
+    js = 0.0
+    for x, y in zip(pa, pb):
+        total = x + y
+        if x:
+            js += x * math.log(2 * x / total) / 2
+        if y:
+            js += y * math.log(2 * y / total) / 2
     return {
         "rmse": rmse, "cosine": cosine, "max_absolute_error": maximum,
+        # Softmax is invariant to a common logit shift. Keep the old gates,
+        # but also report differences in the actual probability distribution.
+        "mean_logit_shift": shift, "centered_rmse": centered_rmse,
+        "jensen_shannon_nats": js,
+        "max_probability_difference": max(abs(x - y) for x, y in zip(pa, pb)),
+        "same_top1": a.index(max(a)) == b.index(max(b)),
         "within_existing_vector_bounds":
             rmse <= 1.12 and cosine >= 0.979 and maximum <= 5,
     }
@@ -142,8 +165,11 @@ def compare_frontiers(directory: Path) -> dict:
     require([(point["prefill_step"], point["depth"]) for point in report["points"]]
             == [(step, depth) for depth in DEPTHS for step in PREFILL_STEPS],
             "incomplete frontier prefill/depth matrix")
+    decode_tokens = report["decode_tokens"]
+    require(decode_tokens in (0, 128), "unsupported frontier decode length")
+    phases = ("before", "after") if decode_tokens else ("before",)
     rows = tsv(upstream / "steps.tsv")
-    require(len(rows) == 1280, "incomplete independent decode matrix")
+    require(len(rows) == 10 * decode_tokens, "incomplete independent decode matrix")
     targets = [int(value) for value in (base / "targets.txt").read_text().split()]
     require(len(targets) == 128, "incomplete forced continuation")
     result = {"exact_repeat": True, "vectors": [], "decode": [],
@@ -153,7 +179,7 @@ def compare_frontiers(directory: Path) -> dict:
         prefill_step = point["prefill_step"]
         selected = [row for row in rows if int(row["depth"]) == depth and
                     int(row["prefill_step"]) == prefill_step]
-        require(len(selected) == 128, f"incomplete decode at {prefill_step}/{depth}")
+        require(len(selected) == decode_tokens, f"incomplete decode at {prefill_step}/{depth}")
         errors, matches = [], 0
         for index, row in enumerate(selected):
             require(int(row["step"]) == index and int(row["target"]) == targets[index],
@@ -167,15 +193,16 @@ def compare_frontiers(directory: Path) -> dict:
                     "non-finite frontier likelihood")
             errors.append(after - before)
             matches += int(row["greedy"]) == point["greedy"][index]
-        result["decode"].append({
-            "depth": depth, "prefill_step": prefill_step,
-            "prefill_capacity": point["prefill_capacity"],
-            "greedy_matches": matches, "tokens": 128,
-            "mean_signed_target_logprob_difference": statistics.mean(errors),
-            "mean_absolute_target_logprob_difference": statistics.mean(map(abs, errors)),
-            "max_absolute_target_logprob_difference": max(map(abs, errors)),
-        })
-        for phase in ("before", "after"):
+        if decode_tokens:
+            result["decode"].append({
+                "depth": depth, "prefill_step": prefill_step,
+                "prefill_capacity": point["prefill_capacity"],
+                "greedy_matches": matches, "tokens": 128,
+                "mean_signed_target_logprob_difference": statistics.mean(errors),
+                "mean_absolute_target_logprob_difference": statistics.mean(map(abs, errors)),
+                "max_absolute_target_logprob_difference": max(map(abs, errors)),
+            })
+        for phase in phases:
             name = f"{prefill_step}-{depth}-{phase}.f32"
             ours, old = (base / name).read_bytes(), (upstream / name).read_bytes()
             require(ours == (repeat / name).read_bytes(),
@@ -186,12 +213,12 @@ def compare_frontiers(directory: Path) -> dict:
             })
     # At depth zero both budgets make the identical single 16-token call.
     first, second = report["points"][:2]
-    for field in ("greedy", "target_logprobs", "before_sha256", "after_sha256"):
+    for field in ("greedy", "target_logprobs", *(phase + "_sha256" for phase in phases)):
         require(first[field] == second[field],
                 "identical short-prefill calls changed output")
     for engine, location in (("gufo", base), ("upstream", upstream)):
         for depth in DEPTHS:
-            for phase in ("before", "after"):
+            for phase in phases:
                 a = (location / f"2048-{depth}-{phase}.f32").read_bytes()
                 b = (location / f"4096-{depth}-{phase}.f32").read_bytes()
                 result["cross_prefill"].append({
@@ -201,7 +228,8 @@ def compare_frontiers(directory: Path) -> dict:
     return result
 
 
-def run(model: Path, output: Path, upstream: Path, environment: dict) -> None:
+def run(model: Path, output: Path, upstream: Path, environment: dict,
+        prefill_only: bool = False) -> None:
     """Score both engines, retaining inputs, full logits, scores and provenance."""
     revision = subprocess.check_output(
         ["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
@@ -227,7 +255,7 @@ def run(model: Path, output: Path, upstream: Path, environment: dict) -> None:
     fixture_path = TESTS / "fixtures/official-0731.json"
     fixture = load(fixture_path)
     manifests = {}
-    for group in ("continuation-100", "smoke-5"):
+    for group in (() if prefill_only else ("continuation-100", "smoke-5")):
         directory = output / group
         directory.mkdir()
         manifest = directory / "manifest.tsv"
@@ -246,18 +274,20 @@ def run(model: Path, output: Path, upstream: Path, environment: dict) -> None:
     native = ROOT / "build/gpu-test/tests/models/deepseek_v4_flash/ds4_quality_test"
     native_hash = sha256(native)
     control = output / "upstream-build/bin"
+    if not prefill_only:
+        for repeat in (1, 2):
+            execute([native, "--official", output / f"gufo-{repeat}.json"],
+                    f"gufo-{repeat}")
+        for group, context in (("continuation-100", 4096), ("smoke-5", 16384)):
+            execute([control / "score_official", model, manifests[group],
+                     output / f"upstream-{group}.tsv", context], f"upstream-{group}")
+    frontier_options = ["--prefill-only"] if prefill_only else []
     for repeat in (1, 2):
-        execute([native, "--official", output / f"gufo-{repeat}.json"],
-                f"gufo-{repeat}")
-    for group, context in (("continuation-100", 4096), ("smoke-5", 16384)):
-        execute([control / "score_official", model, manifests[group],
-                 output / f"upstream-{group}.tsv", context], f"upstream-{group}")
-    for repeat in (1, 2):
-        execute([native, "--reference-frontiers", output / f"frontiers-gufo-{repeat}"],
+        execute([native, "--reference-frontiers", output / f"frontiers-gufo-{repeat}", *frontier_options],
                 f"frontiers-gufo-{repeat}")
     (output / "frontiers-upstream").mkdir()
     execute([control / "frontier_reference", model, output / "frontiers-gufo-1",
-             output / "frontiers-upstream"], "frontiers-upstream")
+             output / "frontiers-upstream", *frontier_options], "frontiers-upstream")
     require(source_hash == production_sha256(),
             "production sources changed during the reference comparison")
     require(native_hash == sha256(native),
@@ -274,19 +304,21 @@ def run(model: Path, output: Path, upstream: Path, environment: dict) -> None:
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "flake_lock_sha256": sha256(ROOT / "flake.lock"),
         "gufo_build_preset": "gpu-test",
-        "official": compare_official(output),
+        "scope": "prefill-only" if prefill_only else "full",
         "frontiers": compare_frontiers(output),
     }
-    continuation = report["official"]["groups"]["continuation-100"]["summary"]
     report["gates"] = {
         "exact_gufo_repeat": True,
         "full_logits_within_existing_bounds": all(
             vector["within_existing_vector_bounds"]
             for vector in report["frontiers"]["vectors"]),
-        "no_detected_official_nll_regression":
-            continuation["paired_case_bootstrap_delta_nll_95pct"][0]
-            <= UPSTREAM_NLL_ROUNDING,
     }
+    if not prefill_only:
+        report["official"] = compare_official(output)
+        continuation = report["official"]["groups"]["continuation-100"]["summary"]
+        report["gates"]["no_detected_official_nll_regression"] = (
+            continuation["paired_case_bootstrap_delta_nll_95pct"][0]
+            <= UPSTREAM_NLL_ROUNDING)
     report["upstream_nll_rounding_bound"] = UPSTREAM_NLL_ROUNDING
     (output / "comparison.json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"Comparison recorded in {output / 'comparison.json'}.", flush=True)

@@ -2040,46 +2040,6 @@ __device__ __forceinline__ static float q2_K_dequant_256_scaled_w32(
 }
 
 template <int BN, int BK>
-__device__ __forceinline__ static void q2_K_dequant_tile_half_rowwise(
-        __half *shB,
-        const unsigned char *base,
-        uint64_t row_bytes,
-        uint32_t n0,
-        uint32_t k0,
-        uint32_t out_dim,
-        uint32_t tid) {
-    const uint32_t g = (k0 & 255u) >> 4u;
-    const uint32_t within = g & 7u;
-    const uint32_t qbase = (g >> 3u) * 32u + (within & 1u) * 16u;
-    const uint32_t shift = (within >> 1u) * 2u;
-    constexpr uint32_t KG = 2u;
-    for (uint32_t j = tid; j < (uint32_t)(BN * (BK / KG)); j += blockDim.x) {
-        const uint32_t nn = j / (uint32_t)(BK / KG);
-        const uint32_t kk0 = (j - nn * (uint32_t)(BK / KG)) * KG;
-        const uint32_t row = n0 + nn;
-        if (row < out_dim) {
-            const unsigned char *blk = base + (uint64_t)row * row_bytes + (uint64_t)(k0 >> 8u) * 84u;
-            const float d = dev_f16_to_f32((uint16_t)blk[80] | ((uint16_t)blk[81] << 8));
-            const float dm = dev_f16_to_f32((uint16_t)blk[82] | ((uint16_t)blk[83] << 8));
-            const float s = (float)(blk[g] & 0x0fu);
-            const float m = (float)(blk[g] >> 4u);
-#pragma unroll
-            for (uint32_t u = 0; u < KG; u++) {
-                const uint32_t kk = kk0 + u;
-                const float q = (float)((blk[16u + qbase + kk] >> shift) & 3u);
-                shB[kk * (uint32_t)BN + nn] = __float2half(d * s * q - dm * m);
-            }
-        } else {
-#pragma unroll
-            for (uint32_t u = 0; u < KG; u++) {
-                const uint32_t kk = kk0 + u;
-                shB[kk * (uint32_t)BN + nn] = __float2half(0.0f);
-            }
-        }
-    }
-}
-
-template <int BN, int BK>
 __device__ __forceinline__ static void q2_K_dequant_pair_tile_half_rowwise(
         __half *shB0,
         __half *shB1,
@@ -2974,86 +2934,6 @@ __global__ static void moe_gate_up_mid_q2K_hotlist_wmma_n2_kernel(
                 if (OUT_F16) mid_out_h[(uint64_t)pair * expert_mid_dim + row1] = __float2half(v);
                 else mid_out[(uint64_t)pair * expert_mid_dim + row1] = v;
             }
-        }
-    }
-}
-
-template <int MTILES=8, int BM=16, int BN=16, int BK=16>
-__global__ static void moe_down_q2K_hotlist_wmma_kernel(
-        float *down_out,
-        const char *down_base,
-        const float *mid,
-        const uint32_t *counts,
-        const uint32_t *offsets,
-        const uint32_t *pairs,
-        const uint32_t *hot_experts,
-        uint32_t hot_count,
-        uint32_t expert_mid_dim,
-        uint32_t out_dim,
-        uint64_t down_expert_bytes,
-        uint64_t down_row_bytes) {
-    extern __shared__ unsigned char raw_sh[];
-    __half *shA = reinterpret_cast<__half *>(raw_sh);
-    __half *shB = shA + MTILES * BM * BK;
-    float *shC = reinterpret_cast<float *>(shB + BK * BN);
-    const uint32_t hot_idx = (uint32_t)blockIdx.z;
-    if (hot_idx >= hot_count) return;
-    const uint32_t expert = hot_experts[hot_idx];
-    if (expert >= 256u) return;
-    const uint32_t count = counts[expert];
-    const uint32_t m_group0 = (uint32_t)blockIdx.y * MTILES * BM;
-    if (m_group0 >= count) return;
-    const uint32_t n0 = (uint32_t)blockIdx.x * BN;
-    const uint32_t tid = threadIdx.x;
-    const uint32_t wave = tid >> 5u;
-    const uint32_t first = offsets[expert];
-
-    using frag_a = rocwmma::fragment<rocwmma::matrix_a, BM, BN, BK, __half, rocwmma::row_major>;
-    using frag_b = rocwmma::fragment<rocwmma::matrix_b, BM, BN, BK, __half, rocwmma::row_major>;
-    using frag_c = rocwmma::fragment<rocwmma::accumulator, BM, BN, BK, float>;
-    frag_a a;
-    frag_b b;
-    frag_c acc;
-    if (wave < MTILES) rocwmma::fill_fragment(acc, 0.0f);
-
-    const unsigned char *dew = (const unsigned char *)down_base + (uint64_t)expert * down_expert_bytes;
-    for (uint32_t k0 = 0; k0 < expert_mid_dim; k0 += BK) {
-        for (uint32_t j = tid; j < MTILES * BM * BK; j += blockDim.x) {
-            const uint32_t mt = j / (BM * BK);
-            const uint32_t rem = j - mt * BM * BK;
-            const uint32_t mm = rem / BK;
-            const uint32_t kk = rem - mm * BK;
-            const uint32_t bucket_row = m_group0 + mt * BM + mm;
-            if (bucket_row < count) {
-                const uint32_t pair = pairs[first + bucket_row];
-                shA[j] = __float2half(mid[(uint64_t)pair * expert_mid_dim + k0 + kk]);
-            } else {
-                shA[j] = __float2half(0.0f);
-            }
-        }
-        q2_K_dequant_tile_half_rowwise<BN, BK>(
-                shB, dew, down_row_bytes, n0, k0, out_dim, tid);
-        __syncthreads();
-        if (wave < MTILES) {
-            rocwmma::load_matrix_sync(a, shA + wave * BM * BK, BK);
-            rocwmma::load_matrix_sync(b, shB, BN);
-            rocwmma::mma_sync(acc, a, b, acc);
-        }
-        __syncthreads();
-    }
-
-    if (wave < MTILES) rocwmma::store_matrix_sync(shC + wave * BM * BN, acc, BN, rocwmma::mem_row_major);
-    __syncthreads();
-    for (uint32_t j = tid; j < MTILES * BM * BN; j += blockDim.x) {
-        const uint32_t mt = j / (BM * BN);
-        const uint32_t rem = j - mt * BM * BN;
-        const uint32_t mm = rem / BN;
-        const uint32_t nn = rem - mm * BN;
-        const uint32_t bucket_row = m_group0 + mt * BM + mm;
-        const uint32_t row = n0 + nn;
-        if (bucket_row < count && row < out_dim) {
-            const uint32_t pair = pairs[first + bucket_row];
-            down_out[(uint64_t)pair * out_dim + row] = shC[j];
         }
     }
 }

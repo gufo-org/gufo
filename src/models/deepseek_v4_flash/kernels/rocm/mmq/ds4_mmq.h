@@ -135,16 +135,6 @@ int ds4_mmq_q8_0_dense_preq(
     int           K,
     cudaStream_t  stream);
 
-// p5a verify instrument: reference quantize (dense_impl parameters) into a
-// caller buffer, for byte-diffing producer emits.
-int ds4_mmq_q8_0_quantize_ref(
-    const float * X,
-    void        * y,
-    size_t        y_bytes,
-    int           N,
-    int           K,
-    cudaStream_t  stream);
-
 // Dense Q8_0 D2R on the kind-5 aligned artifact (weight server
 // --repack-q8-aligned).  Same in/out contract as ds4_mmq_q8_0_dense but W is
 // the ALIGNED artifact base ([half dq[nblk]][pad64][int8 qs]), and the shape
@@ -489,7 +479,7 @@ int ds4_mmq_mxfp4_moe_pair(
     int             n_expert_used,
     cudaStream_t    stream);
 
-// MoE vector matmul entries (Step 6). Same signature and semantics as the
+// MoE vector matmul entries. Same signature and semantics as the
 // ds4_mmq_<type>_moe entries above, but route through llama.cpp's mmvq
 // kernels instead of mmq. mmvq is structurally optimised for small batch
 // counts (single-token decode, short prefill), where mmq's tile-based
@@ -833,7 +823,7 @@ int ds4_mmq_mxfp4_moe_gate_up_mid_vec(
     float           clamp,
     cudaStream_t    stream);
 
-// Pair-fused MoE vector matmul entries (Step 6). Computes
+// Pair-fused MoE vector matmul entries. Computes
 //
 //   out[col, row] = (W_a[ids, row, :] @ X[token, :])
 //                 * silu(W_b[ids, row, :] @ X[token, :])
@@ -915,7 +905,7 @@ int ds4_mmq_q4_K_moe_pair_raw_vec(
     int             n_expert_used,
     cudaStream_t    stream);
 
-// Dense vector matmul entry (Step 6). Same shape semantics as
+// Dense vector matmul entry. Same shape semantics as
 // ds4_mmq_q8_0_dense but routed through mmvq for batch counts that
 // favour the vec path (n_tokens <= 8 on Blackwell).
 //
@@ -932,7 +922,7 @@ int ds4_mmq_q8_0_dense_vec(
 
 // Set the thread-local stream that the internal cuda pool uses for
 // cudaMallocAsync / cudaFreeAsync.  Defaults to cudaStreamPerThread.
-// Step 8 (CUDA Graphs) calls this with the capture stream so pool
+// Use the graph capture stream so pool
 // allocations land on the captured stream and don't invalidate capture.
 // Pass NULL to reset to cudaStreamPerThread.
 void ds4_pool_set_stream(cudaStream_t stream);

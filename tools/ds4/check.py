@@ -27,12 +27,16 @@ def main() -> None:
                         help="new reference directory or benchmark report file")
     parser.add_argument("--upstream", type=Path,
                         help="clean antirez/ds4 checkout at the pinned reference revision")
+    parser.add_argument("--prefill-only", action="store_true",
+                        help="reference: compare post-prefill logits, skipping continuations")
     parser.add_argument("--ar-log", type=Path)
     parser.add_argument("--dspark-log", type=Path)
     parser.add_argument("--repetitions", type=int, default=2)
     args = parser.parse_args()
     if not os.environ.get("IN_NIX_SHELL"):
         parser.error("run with nix develop -c tools/ds4/check.py")
+    if args.prefill_only and args.suite != "reference":
+        parser.error("--prefill-only requires the reference suite")
     if args.suite == "benchmark":
         if not args.ar_log or not args.dspark_log or not args.output:
             parser.error("benchmark requires --ar-log, --dspark-log and --output")
@@ -78,7 +82,7 @@ def main() -> None:
     if reference:
         from reference import run
         run(Path(environment["GUFO_DEEPSEEK_V4_FLASH_MODEL"]),
-            args.output.resolve(), args.upstream.resolve(), environment)
+            args.output.resolve(), args.upstream.resolve(), environment, args.prefill_only)
 
 
 if __name__ == "__main__":

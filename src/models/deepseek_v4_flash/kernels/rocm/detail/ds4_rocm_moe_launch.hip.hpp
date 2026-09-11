@@ -289,221 +289,108 @@ static int routed_moe_q2_float_down_launch(
     if (!hip_ok(hipGetLastError(), "routed_moe iq2/q2 float-down scalar launch")) return 0;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
     if (use_wmma_hot && hot_count != 0u) {
-        constexpr uint32_t bm = 16u, bn = 16u, bk = 16u;
-        const int no_n2 = 0;
-        const uint32_t wmma_mtiles = 4u;
-        // Four column fragments amortize activation staging without excessive
-        // LDS use. Narrow chunks use two row tiles to limit bucket padding.
-        constexpr uint32_t wide_nfrag = 4u;
-        const uint32_t wide_mtiles = n_tokens <= 128u ? 2u : 4u;
-        if (wmma_mtiles == 4u && use_f16_down && hot_mid_f16 && mid_h_hot &&
-            (out_dim % (wide_nfrag * bn)) == 0u) {
-          const uint32_t wide_tile_m = wide_mtiles * bm;
-          const dim3 block(32u * wide_mtiles, 1u, 1u);
-          /*
-           * A rectangular (row group, hot expert) grid has to be sized by the
-           * largest bucket, and the router skew at a 4,096-token chunk puts
-           * that near 3,500 rows while the mean bucket is 96. Every block past
-           * its own expert's bucket exits immediately, but it still reserves
-           * the full dynamic LDS tile, and that reservation is what caps
-           * residency. Compact the pairs that have rows into one list instead.
-           */
-          uint32_t* tile_map = NULL;
-          uint32_t wide_tiles = 0u;
-          uint32_t paired_tiles = 0u;
-          if (wide_tile_map_dev) {
-            const uint32_t cap =
-                n_tokens * n_expert / DS4_ROCM_WIDE_DOWN_MIN_TILE_M +
-                DS4_ROCM_N_EXPERT + 1u;
-            static std::vector<uint32_t> h_map;
-            h_map.reserve(cap);
-            const uint32_t paired =
-                ds4_rocm_q2_down_tile_map(h_map, h_counts, h_active, hot_count,
-                                          wide_mtiles, n_tokens >= 1024u);
-            if (!h_map.empty() && h_map.size() <= cap &&
-                hip_ok(hipMemcpy(wide_tile_map_dev, h_map.data(),
-                                 h_map.size() * sizeof(uint32_t),
-                                 hipMemcpyHostToDevice),
-                       "routed_moe wide down tile map copy")) {
-              tile_map = wide_tile_map_dev;
-              paired_tiles = paired;
-              wide_tiles = (uint32_t)h_map.size() - paired;
-            }
+      constexpr uint32_t bm = 16u, bn = 16u, bk = 16u;
+      // Four column fragments amortize activation staging without excessive
+      // LDS use. Narrow chunks use two row tiles to limit bucket padding.
+      constexpr uint32_t wide_nfrag = 4u;
+      const uint32_t wide_mtiles = n_tokens <= 128u ? 2u : 4u;
+      if (use_f16_down && hot_mid_f16 && mid_h_hot &&
+          (out_dim % (wide_nfrag * bn)) == 0u) {
+        const uint32_t wide_tile_m = wide_mtiles * bm;
+        const dim3 block(32u * wide_mtiles, 1u, 1u);
+        /*
+         * A rectangular (row group, hot expert) grid has to be sized by the
+         * largest bucket, and the router skew at a 4,096-token chunk puts
+         * that near 3,500 rows while the mean bucket is 96. Every block past
+         * its own expert's bucket exits immediately, but it still reserves
+         * the full dynamic LDS tile, and that reservation is what caps
+         * residency. Compact the pairs that have rows into one list instead.
+         */
+        uint32_t* tile_map = NULL;
+        uint32_t wide_tiles = 0u;
+        uint32_t paired_tiles = 0u;
+        if (wide_tile_map_dev) {
+          const uint32_t cap =
+              n_tokens * n_expert / DS4_ROCM_WIDE_DOWN_MIN_TILE_M +
+              DS4_ROCM_N_EXPERT + 1u;
+          static std::vector<uint32_t> h_map;
+          h_map.reserve(cap);
+          const uint32_t paired =
+              ds4_rocm_q2_down_tile_map(h_map, h_counts, h_active, hot_count,
+                                        wide_mtiles, n_tokens >= 1024u);
+          if (!h_map.empty() && h_map.size() <= cap &&
+              hip_ok(hipMemcpy(wide_tile_map_dev, h_map.data(),
+                               h_map.size() * sizeof(uint32_t),
+                               hipMemcpyHostToDevice),
+                     "routed_moe wide down tile map copy")) {
+            tile_map = wide_tile_map_dev;
+            paired_tiles = paired;
+            wide_tiles = (uint32_t)h_map.size() - paired;
           }
-          if (paired_tiles != 0u) {
-            moe_down_q2K_hotlist_wmma_wide_kernel<8, 16, 16, 16, wide_nfrag,
-                                                  true, true>
-                <<<dim3(out_dim / (wide_nfrag * bn), paired_tiles), 256,
-                   ds4_rocm_q2_down_wide_shmem(8, bm, bn, bk, wide_nfrag)>>>(
-                    NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
-                    sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
-                    out_dim, down_expert_bytes, down_row_bytes, 0u, tile_map);
-            if (!hip_ok(hipGetLastError(), "routed_moe paired down launch"))
-              return 0;
-            tile_map += paired_tiles;
-          }
-          const dim3 grid(out_dim / (wide_nfrag * bn),
-                          tile_map ? wide_tiles
-                                   : (hot_max + wide_tile_m - 1u) / wide_tile_m,
-                          tile_map ? 1u : hot_count);
-          const size_t shmem =
-              ds4_rocm_q2_down_wide_shmem(wide_mtiles, bm, bn, bk, wide_nfrag);
-          if (wide_mtiles == 2u) {
-            moe_down_q2K_hotlist_wmma_wide_kernel<2, 16, 16, 16, wide_nfrag,
-                                                  true, true>
-                <<<grid, block, shmem>>>(
-                    NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
-                    sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
-                    out_dim, down_expert_bytes, down_row_bytes, 0u, tile_map);
-          } else if (!tile_map || wide_tiles != 0u) {
-            moe_down_q2K_hotlist_wmma_wide_kernel<4, 16, 16, 16, wide_nfrag,
-                                                  true, true>
-                <<<grid, block, shmem>>>(
-                    NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
-                    sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
-                    out_dim, down_expert_bytes, down_row_bytes, 0u, tile_map);
-          }
-        } else if (!no_n2) {
-          if (wmma_mtiles == 4u) {
-            constexpr uint32_t mt = 4u;
-            const dim3 block(32u * mt, 1u, 1u);
-            const dim3 grid((out_dim + 2u * bn - 1u) / (2u * bn),
-                            (hot_max + mt * bm - 1u) / (mt * bm), hot_count);
-            const size_t shmem_n2 = ds4_rocm_q2_down_wmma_shmem(mt, bm, bn, bk);
-            if (use_f16_down && hot_mid_f16 && mid_h_hot) {
-              moe_down_q2K_hotlist_wmma_n2_kernel<4, 16, 16, 16, true, true>
-                  <<<grid, block, shmem_n2>>>(
-                      NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
-                      sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
-                      out_dim, down_expert_bytes, down_row_bytes);
-            } else if (use_f16_down) {
-              moe_down_q2K_hotlist_wmma_n2_kernel<4, 16, 16, 16, false, true>
-                  <<<grid, block, shmem_n2>>>(
-                      NULL, down_h, down_w, (const float*)mid->ptr, NULL,
-                      counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
-                      expert_mid_dim, out_dim, down_expert_bytes,
-                      down_row_bytes);
-            } else if (hot_mid_f16 && mid_h_hot) {
-              moe_down_q2K_hotlist_wmma_n2_kernel<4, 16, 16, 16, true, false>
-                  <<<grid, block, shmem_n2>>>(
-                      (float*)down->ptr, NULL, down_w, NULL, mid_h_hot, counts,
-                      offsets, sorted_pairs, hot_experts_dev, hot_count,
-                      expert_mid_dim, out_dim, down_expert_bytes,
-                      down_row_bytes);
-            } else {
-              moe_down_q2K_hotlist_wmma_n2_kernel<4, 16, 16, 16>
-                  <<<grid, block, shmem_n2>>>(
-                      (float*)down->ptr, NULL, down_w, (const float*)mid->ptr,
-                      NULL, counts, offsets, sorted_pairs, hot_experts_dev,
-                      hot_count, expert_mid_dim, out_dim, down_expert_bytes,
-                      down_row_bytes);
-            }
-          } else if (wmma_mtiles == 16u) {
-            constexpr uint32_t mt = 16u;
-            const dim3 block(32u * mt, 1u, 1u);
-            const dim3 grid((out_dim + 2u * bn - 1u) / (2u * bn),
-                            (hot_max + mt * bm - 1u) / (mt * bm), hot_count);
-            const size_t shmem_n2 = ds4_rocm_q2_down_wmma_shmem(mt, bm, bn, bk);
-            if (use_f16_down && hot_mid_f16 && mid_h_hot) {
-              moe_down_q2K_hotlist_wmma_n2_kernel<16, 16, 16, 16, true, true>
-                  <<<grid, block, shmem_n2>>>(
-                      NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
-                      sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
-                      out_dim, down_expert_bytes, down_row_bytes);
-            } else if (use_f16_down) {
-              moe_down_q2K_hotlist_wmma_n2_kernel<16, 16, 16, 16, false, true>
-                  <<<grid, block, shmem_n2>>>(
-                      NULL, down_h, down_w, (const float*)mid->ptr, NULL,
-                      counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
-                      expert_mid_dim, out_dim, down_expert_bytes,
-                      down_row_bytes);
-            } else if (hot_mid_f16 && mid_h_hot) {
-              moe_down_q2K_hotlist_wmma_n2_kernel<16, 16, 16, 16, true, false>
-                  <<<grid, block, shmem_n2>>>(
-                      (float*)down->ptr, NULL, down_w, NULL, mid_h_hot, counts,
-                      offsets, sorted_pairs, hot_experts_dev, hot_count,
-                      expert_mid_dim, out_dim, down_expert_bytes,
-                      down_row_bytes);
-            } else {
-              moe_down_q2K_hotlist_wmma_n2_kernel<16, 16, 16, 16>
-                  <<<grid, block, shmem_n2>>>(
-                      (float*)down->ptr, NULL, down_w, (const float*)mid->ptr,
-                      NULL, counts, offsets, sorted_pairs, hot_experts_dev,
-                      hot_count, expert_mid_dim, out_dim, down_expert_bytes,
-                      down_row_bytes);
-            }
-          } else {
-            constexpr uint32_t mt = 8u;
-            const dim3 block(32u * mt, 1u, 1u);
-            const dim3 grid((out_dim + 2u * bn - 1u) / (2u * bn),
-                            (hot_max + mt * bm - 1u) / (mt * bm), hot_count);
-            const size_t shmem_n2 = ds4_rocm_q2_down_wmma_shmem(mt, bm, bn, bk);
-            if (use_f16_down && hot_mid_f16 && mid_h_hot) {
-              moe_down_q2K_hotlist_wmma_n2_kernel<8, 16, 16, 16, true, true>
-                  <<<grid, block, shmem_n2>>>(
-                      NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
-                      sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
-                      out_dim, down_expert_bytes, down_row_bytes);
-            } else if (use_f16_down) {
-              moe_down_q2K_hotlist_wmma_n2_kernel<8, 16, 16, 16, false, true>
-                  <<<grid, block, shmem_n2>>>(
-                      NULL, down_h, down_w, (const float*)mid->ptr, NULL,
-                      counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
-                      expert_mid_dim, out_dim, down_expert_bytes,
-                      down_row_bytes);
-            } else if (hot_mid_f16 && mid_h_hot) {
-              moe_down_q2K_hotlist_wmma_n2_kernel<8, 16, 16, 16, true, false>
-                  <<<grid, block, shmem_n2>>>(
-                      (float*)down->ptr, NULL, down_w, NULL, mid_h_hot, counts,
-                      offsets, sorted_pairs, hot_experts_dev, hot_count,
-                      expert_mid_dim, out_dim, down_expert_bytes,
-                      down_row_bytes);
-            } else {
-              moe_down_q2K_hotlist_wmma_n2_kernel<8, 16, 16, 16>
-                  <<<grid, block, shmem_n2>>>(
-                      (float*)down->ptr, NULL, down_w, (const float*)mid->ptr,
-                      NULL, counts, offsets, sorted_pairs, hot_experts_dev,
-                      hot_count, expert_mid_dim, out_dim, down_expert_bytes,
-                      down_row_bytes);
-            }
-          }
-        } else if (wmma_mtiles == 16u) {
-          constexpr uint32_t mt = 16u;
-          const dim3 block(32u * mt, 1u, 1u);
-          const dim3 grid(out_dim / bn, (hot_max + mt * bm - 1u) / (mt * bm),
-                          hot_count);
-          const size_t shmem = (mt * bm * bk + bk * bn) * sizeof(__half) +
-                               (mt * bm * bn) * sizeof(float);
-          moe_down_q2K_hotlist_wmma_kernel<16, 16, 16, 16>
-              <<<grid, block, shmem>>>(
-                  (float*)down->ptr, down_w, (const float*)mid->ptr, counts,
+        }
+        if (paired_tiles != 0u) {
+          moe_down_q2K_hotlist_wmma_wide_kernel<8, 16, 16, 16, wide_nfrag, true,
+                                                true>
+              <<<dim3(out_dim / (wide_nfrag * bn), paired_tiles), 256,
+                 ds4_rocm_q2_down_wide_shmem(8, bm, bn, bk, wide_nfrag)>>>(
+                  NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
+                  sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
+                  out_dim, down_expert_bytes, down_row_bytes, 0u, tile_map);
+          if (!hip_ok(hipGetLastError(), "routed_moe paired down launch"))
+            return 0;
+          tile_map += paired_tiles;
+        }
+        const dim3 grid(
+            out_dim / (wide_nfrag * bn),
+            tile_map ? wide_tiles : (hot_max + wide_tile_m - 1u) / wide_tile_m,
+            tile_map ? 1u : hot_count);
+        const size_t shmem =
+            ds4_rocm_q2_down_wide_shmem(wide_mtiles, bm, bn, bk, wide_nfrag);
+        if (wide_mtiles == 2u) {
+          moe_down_q2K_hotlist_wmma_wide_kernel<2, 16, 16, 16, wide_nfrag, true,
+                                                true><<<grid, block, shmem>>>(
+              NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
+              sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim, out_dim,
+              down_expert_bytes, down_row_bytes, 0u, tile_map);
+        } else if (!tile_map || wide_tiles != 0u) {
+          moe_down_q2K_hotlist_wmma_wide_kernel<4, 16, 16, 16, wide_nfrag, true,
+                                                true><<<grid, block, shmem>>>(
+              NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
+              sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim, out_dim,
+              down_expert_bytes, down_row_bytes, 0u, tile_map);
+        }
+      } else {
+        constexpr uint32_t mt = 4u;
+        const dim3 block(32u * mt, 1u, 1u);
+        const dim3 grid((out_dim + 2u * bn - 1u) / (2u * bn),
+                        (hot_max + mt * bm - 1u) / (mt * bm), hot_count);
+        const size_t shmem_n2 = ds4_rocm_q2_down_wmma_shmem(mt, bm, bn, bk);
+        if (use_f16_down && hot_mid_f16 && mid_h_hot) {
+          moe_down_q2K_hotlist_wmma_n2_kernel<4, 16, 16, 16, true, true>
+              <<<grid, block, shmem_n2>>>(
+                  NULL, down_h, down_w, NULL, mid_h_hot, counts, offsets,
+                  sorted_pairs, hot_experts_dev, hot_count, expert_mid_dim,
+                  out_dim, down_expert_bytes, down_row_bytes);
+        } else if (use_f16_down) {
+          moe_down_q2K_hotlist_wmma_n2_kernel<4, 16, 16, 16, false, true>
+              <<<grid, block, shmem_n2>>>(
+                  NULL, down_h, down_w, (const float*)mid->ptr, NULL, counts,
                   offsets, sorted_pairs, hot_experts_dev, hot_count,
                   expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes);
-        } else if (wmma_mtiles == 4u) {
-          constexpr uint32_t mt = 4u;
-          const dim3 block(32u * mt, 1u, 1u);
-          const dim3 grid(out_dim / bn, (hot_max + mt * bm - 1u) / (mt * bm),
-                          hot_count);
-          const size_t shmem = (mt * bm * bk + bk * bn) * sizeof(__half) +
-                               (mt * bm * bn) * sizeof(float);
-          moe_down_q2K_hotlist_wmma_kernel<4, 16, 16, 16>
-              <<<grid, block, shmem>>>(
-                  (float*)down->ptr, down_w, (const float*)mid->ptr, counts,
+        } else if (hot_mid_f16 && mid_h_hot) {
+          moe_down_q2K_hotlist_wmma_n2_kernel<4, 16, 16, 16, true, false>
+              <<<grid, block, shmem_n2>>>(
+                  (float*)down->ptr, NULL, down_w, NULL, mid_h_hot, counts,
                   offsets, sorted_pairs, hot_experts_dev, hot_count,
                   expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes);
         } else {
-          constexpr uint32_t mt = 8u;
-          const dim3 block(32u * mt, 1u, 1u);
-          const dim3 grid(out_dim / bn, (hot_max + mt * bm - 1u) / (mt * bm),
-                          hot_count);
-          const size_t shmem = (mt * bm * bk + bk * bn) * sizeof(__half) +
-                               (mt * bm * bn) * sizeof(float);
-          moe_down_q2K_hotlist_wmma_kernel<8, 16, 16, 16>
-              <<<grid, block, shmem>>>(
-                  (float*)down->ptr, down_w, (const float*)mid->ptr, counts,
-                  offsets, sorted_pairs, hot_experts_dev, hot_count,
+          moe_down_q2K_hotlist_wmma_n2_kernel<4, 16, 16, 16>
+              <<<grid, block, shmem_n2>>>(
+                  (float*)down->ptr, NULL, down_w, (const float*)mid->ptr, NULL,
+                  counts, offsets, sorted_pairs, hot_experts_dev, hot_count,
                   expert_mid_dim, out_dim, down_expert_bytes, down_row_bytes);
         }
+      }
         if (!hip_ok(hipGetLastError(), "routed_moe iq2/q2 float-down wmma launch")) return 0;
     }
 #endif
@@ -1169,73 +1056,53 @@ static int routed_moe_launch(
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
             if (ok && use_iq2_gate_wmma && iq2_gate_hot_count != 0u) {
                 constexpr uint32_t bm = 16u, bn = 16u, bk = 16u;
-                const uint32_t wmma_mtiles = 4u;
-                if (wmma_mtiles == 4u) {
-                    constexpr uint32_t mt = 4u;
-                    const dim3 block(32u * mt, 1u, 1u);
-                    const dim3 grid((expert_mid_dim + 2u * bn - 1u) / (2u * bn),
-                                    (iq2_gate_hot_max + mt * bm - 1u) / (mt * bm),
-                                    iq2_gate_hot_count);
-                    const size_t shmem_n2 = (mt * bm * bk + 4u * bk * bn) * sizeof(__half) +
-                                            (4u * mt * bm * bn) * sizeof(float);
-                    if (use_iq2_hot_f16_mid && use_iq2_x_f16) {
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16,true,true><<<grid, block, shmem_n2>>>(
-                                NULL, iq2_hot_mid_h, gate_w, up_w, (const float *)x->ptr, iq2_x_h,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else if (use_iq2_hot_f16_mid) {
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16,true><<<grid, block, shmem_n2>>>(
-                                NULL, iq2_hot_mid_h, gate_w, up_w, (const float *)x->ptr, NULL,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else if (use_iq2_x_f16) {
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16,false,true><<<grid, block, shmem_n2>>>(
-                                (float *)mid->ptr, NULL, gate_w, up_w, (const float *)x->ptr, iq2_x_h,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else {
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16><<<grid, block, shmem_n2>>>(
-                                (float *)mid->ptr, NULL, gate_w, up_w, (const float *)x->ptr, NULL,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    }
+                constexpr uint32_t mt = 4u;
+                const dim3 block(32u * mt, 1u, 1u);
+                const dim3 grid((expert_mid_dim + 2u * bn - 1u) / (2u * bn),
+                                (iq2_gate_hot_max + mt * bm - 1u) / (mt * bm),
+                                iq2_gate_hot_count);
+                const size_t shmem_n2 =
+                    (mt * bm * bk + 4u * bk * bn) * sizeof(__half) +
+                    (4u * mt * bm * bn) * sizeof(float);
+                if (use_iq2_hot_f16_mid && use_iq2_x_f16) {
+                  moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4, 16, 16, 16,
+                                                             true, true>
+                      <<<grid, block, shmem_n2>>>(
+                          NULL, iq2_hot_mid_h, gate_w, up_w,
+                          (const float*)x->ptr, iq2_x_h,
+                          (const float*)weights->ptr, sorted_counts,
+                          sorted_offsets, sorted_pairs, iq2_gate_hot_dev,
+                          iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
+                          gate_expert_bytes, gate_row_bytes, clamp);
+                } else if (use_iq2_hot_f16_mid) {
+                  moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4, 16, 16, 16,
+                                                             true>
+                      <<<grid, block, shmem_n2>>>(
+                          NULL, iq2_hot_mid_h, gate_w, up_w,
+                          (const float*)x->ptr, NULL,
+                          (const float*)weights->ptr, sorted_counts,
+                          sorted_offsets, sorted_pairs, iq2_gate_hot_dev,
+                          iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
+                          gate_expert_bytes, gate_row_bytes, clamp);
+                } else if (use_iq2_x_f16) {
+                  moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4, 16, 16, 16,
+                                                             false, true>
+                      <<<grid, block, shmem_n2>>>(
+                          (float*)mid->ptr, NULL, gate_w, up_w,
+                          (const float*)x->ptr, iq2_x_h,
+                          (const float*)weights->ptr, sorted_counts,
+                          sorted_offsets, sorted_pairs, iq2_gate_hot_dev,
+                          iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
+                          gate_expert_bytes, gate_row_bytes, clamp);
                 } else {
-                    constexpr uint32_t mt = 8u;
-                    const dim3 block(32u * mt, 1u, 1u);
-                    const dim3 grid((expert_mid_dim + 2u * bn - 1u) / (2u * bn),
-                                    (iq2_gate_hot_max + mt * bm - 1u) / (mt * bm),
-                                    iq2_gate_hot_count);
-                    const size_t shmem_n2 = (mt * bm * bk + 4u * bk * bn) * sizeof(__half) +
-                                            (4u * mt * bm * bn) * sizeof(float);
-                    if (use_iq2_hot_f16_mid && use_iq2_x_f16) {
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16,true,true><<<grid, block, shmem_n2>>>(
-                                NULL, iq2_hot_mid_h, gate_w, up_w, (const float *)x->ptr, iq2_x_h,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else if (use_iq2_hot_f16_mid) {
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16,true><<<grid, block, shmem_n2>>>(
-                                NULL, iq2_hot_mid_h, gate_w, up_w, (const float *)x->ptr, NULL,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else if (use_iq2_x_f16) {
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16,false,true><<<grid, block, shmem_n2>>>(
-                                (float *)mid->ptr, NULL, gate_w, up_w, (const float *)x->ptr, iq2_x_h,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else {
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16><<<grid, block, shmem_n2>>>(
-                                (float *)mid->ptr, NULL, gate_w, up_w, (const float *)x->ptr, NULL,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    }
+                  moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4, 16, 16, 16>
+                      <<<grid, block, shmem_n2>>>(
+                          (float*)mid->ptr, NULL, gate_w, up_w,
+                          (const float*)x->ptr, NULL,
+                          (const float*)weights->ptr, sorted_counts,
+                          sorted_offsets, sorted_pairs, iq2_gate_hot_dev,
+                          iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
+                          gate_expert_bytes, gate_row_bytes, clamp);
                 }
                 ok = hip_ok(hipGetLastError(), "routed_moe iq2 wmma hot gate/up launch");
             }

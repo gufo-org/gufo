@@ -43,7 +43,11 @@ static void dump(const char* directory, unsigned prefill_step,
 }
 
 int main(int argc, char** argv) {
-  require(argc == 4, "usage: frontier_reference MODEL INPUT-DIR OUTPUT-DIR");
+  const int prefill_only =
+      argc == 5 && strcmp(argv[4], "--prefill-only") == 0;
+  require(argc == 4 || prefill_only,
+          "usage: frontier_reference MODEL INPUT-DIR OUTPUT-DIR [--prefill-only]");
+  const int decode_tokens = prefill_only ? 0 : 128;
   ds4_engine_options options = {.model_path = argv[1],
                                 .backend = DS4_BACKEND_CUDA,
                                 .context_size = 20480,
@@ -129,8 +133,9 @@ int main(int argc, char** argv) {
       }
       if (step == 0)
         dump(argv[3], prefill_step, depth, "before", logits, vocabulary);
-      if (step == 128) {
-        dump(argv[3], prefill_step, depth, "after", logits, vocabulary);
+      if (step == decode_tokens) {
+        if (!prefill_only)
+          dump(argv[3], prefill_step, depth, "after", logits, vocabulary);
         break;
       }
       const double maximum = logits[greedy];
@@ -150,8 +155,8 @@ int main(int argc, char** argv) {
     ds4_session_free(session);
     ++points;
     fprintf(stderr,
-            "Independent frontier prefill=%u depth=%lu tokens=128 complete\n",
-            prefill_step, depth);
+            "Independent frontier prefill=%u depth=%lu tokens=%d complete\n",
+            prefill_step, depth, decode_tokens);
     fflush(output);
   }
   require(points == 10, "complete frontier matrix");

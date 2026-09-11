@@ -169,8 +169,8 @@ The [tools index](../../tools/ds4/README.md) lists the maintained entry points.
 
 | Check | Required coverage |
 | --- | --- |
-| `ds4.template`, `ds4.cli`, `ds4.dataset`, `ds4.eval` | Official framing, option wiring, pinned fixture integrity, answer grading |
-| `ds4.projections` | Q8/IQ2/F16 shapes and batch widths; all 32,768 IQ2 grid/sign combinations; cached and uncached activation widths; exact MoE tile ownership/output at 64/128-row boundaries; cached RMS and the official FP32 HC formula |
+| `ds4.template`, `ds4.cli`, `ds4.dataset`, `ds4.eval` | Official framing, option wiring, pinned fixture integrity, probability-metric invariants, answer grading |
+| `ds4.projections` | Q8/IQ2/F16 shapes and batch widths; all 32,768 IQ2 grid/sign combinations; cached and uncached activation widths; exact MoE tile ownership/output at 64/128-row boundaries; cached RMS; official HC projection, Sinkhorn epsilon placement, weighted reduction and residual-matrix orientation |
 | `ds4.attention` | 28 target/support arithmetic cases, 16 official DSpark window cases, 16 exact score cases and 72 repeated top-k cases; independent references, poisoned rows, ring wrap, causal masks and score ties |
 | `ds4.target` | Official token goldens, pinned trajectory, full-logit prefill/decode comparisons, exact 2K logits at 4K/262K capacities, concurrent state isolation, bounds |
 | `ds4.dspark` | Scalar quality; exact tokens/logits/counters at fixed and changing C; short budgets; complete snapshot continuation through 16K; policy backoff and fork isolation |

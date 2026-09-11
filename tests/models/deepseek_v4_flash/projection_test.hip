@@ -526,6 +526,150 @@ void hc_prefill_fp32(unsigned tokens) {
   }
   std::printf("HC tokens=%u: official FP32 projection/RMS formula\n", tokens);
 }
+
+void hc_complete_formula(unsigned tokens, float epsilon, std::mt19937& random) {
+  constexpr unsigned embedding = 4096, width = 4 * embedding, mixes = 24;
+  std::uniform_real_distribution<float> sample(-1.0F, 1.0F);
+  std::vector<__half> weights(mixes * width);
+  std::vector<float> input(tokens * width), block(tokens * embedding),
+      bases(mixes);
+  const std::array<float, 3> scales{0.3F, -0.7F, 1.1F};
+  for (auto& value : weights)
+    value = __float2half(sample(random) * 0.02F);
+  for (auto& value : input)
+    value = sample(random) * 3.0F;
+  for (auto& value : block)
+    value = sample(random);
+  for (auto& value : bases)
+    value = sample(random);
+  Device<__half> w(weights.size());
+  Device<float> x(input.size()), s(scales.size()), b(bases.size()),
+      y(block.size()), output(block.size()), mix(tokens * mixes),
+      split(tokens * mixes), expanded(input.size());
+  check(hipMemcpy(w.data, weights.data(), weights.size() * sizeof(__half),
+                  hipMemcpyHostToDevice));
+  check(hipMemcpy(x.data, input.data(), input.size() * sizeof(float),
+                  hipMemcpyHostToDevice));
+  check(hipMemcpy(s.data, scales.data(), scales.size() * sizeof(float),
+                  hipMemcpyHostToDevice));
+  check(hipMemcpy(b.data, bases.data(), bases.size() * sizeof(float),
+                  hipMemcpyHostToDevice));
+  check(hipMemcpy(y.data, block.data(), block.size() * sizeof(float),
+                  hipMemcpyHostToDevice));
+  hc4_norm_mix_split_weighted_sum_kernel<4, 256, 16>
+      <<<(tokens + 3) / 4, 1024>>>(output.data, mix.data, split.data, x.data,
+                                   w.data, s.data, b.data, embedding, tokens,
+                                   20, epsilon, 1e-6F);
+  hc_expand4_vec4_kernel<<<(block.size() / 4 + 255) / 256, 256>>>(
+      expanded.data, y.data, x.data, split.data, embedding, tokens);
+  check(hipGetLastError());
+  std::vector<float> actual_mix(tokens * mixes), actual_split(tokens * mixes),
+      actual_output(block.size()), actual_expanded(input.size());
+  for (const auto& [host, device] : {std::pair{&actual_mix, mix.data},
+                                     {&actual_split, split.data},
+                                     {&actual_output, output.data},
+                                     {&actual_expanded, expanded.data}})
+    check(hipMemcpy(host->data(), device, host->size() * sizeof(float),
+                    hipMemcpyDeviceToHost));
+
+  // Independent double-precision equations from official 0731 model.py
+  // Block.hc_pre/hc_post and kernel.py hc_split_sinkhorn_kernel. Deliberately
+  // asymmetric dense inputs expose combination-matrix transposition; the
+  // larger epsilon case exposes misplaced/omitted normalization epsilons.
+  std::array<double, 4> maximum_error{};
+  auto compare = [&](unsigned stage, double expected, float observed) {
+    const double error = std::abs(expected - observed);
+    if (!std::isfinite(observed) || error > 1e-5 * (1.0 + std::abs(expected))) {
+      std::fprintf(stderr, "HC complete formula stage=%u: %.9g != %.9g\n",
+                   stage, observed, expected);
+      std::exit(5);
+    }
+    maximum_error[stage] = std::max(maximum_error[stage], error);
+  };
+  for (unsigned token = 0; token < tokens; ++token) {
+    const float* row = input.data() + token * width;
+    double squares = 0;
+    for (unsigned column = 0; column < width; ++column)
+      squares += double(row[column]) * row[column];
+    const double inverse = 1.0 / std::sqrt(squares / width + double(1e-6F));
+    std::array<double, mixes> projected{}, coefficients{};
+    for (unsigned j = 0; j < mixes; ++j) {
+      for (unsigned column = 0; column < width; ++column)
+        projected[j] +=
+            double(row[column]) * __half2float(weights[j * width + column]);
+      projected[j] *= inverse;
+      compare(0, projected[j], actual_mix[token * mixes + j]);
+    }
+    for (unsigned h = 0; h < 4; ++h) {
+      coefficients[h] =
+          1.0 / (1.0 + std::exp(-(projected[h] * scales[0] + bases[h]))) +
+          epsilon;
+      coefficients[4 + h] =
+          2.0 /
+          (1.0 + std::exp(-(projected[4 + h] * scales[1] + bases[4 + h])));
+    }
+    double matrix[4][4];
+    for (unsigned source = 0; source < 4; ++source) {
+      double maximum = -INFINITY, sum = 0;
+      for (unsigned destination = 0; destination < 4; ++destination) {
+        const unsigned j = 8 + source * 4 + destination;
+        matrix[source][destination] = projected[j] * scales[2] + bases[j];
+        maximum = std::max(maximum, matrix[source][destination]);
+      }
+      for (double& value : matrix[source]) {
+        value = std::exp(value - maximum);
+        sum += value;
+      }
+      for (double& value : matrix[source])
+        value = value / sum + epsilon;
+    }
+    for (unsigned iteration = 0; iteration < 20; ++iteration) {
+      if (iteration != 0) {
+        for (auto& row_values : matrix) {
+          double sum = epsilon;
+          for (double value : row_values)
+            sum += value;
+          for (double& value : row_values)
+            value /= sum;
+        }
+      }
+      for (unsigned destination = 0; destination < 4; ++destination) {
+        double sum = epsilon;
+        for (auto& row_values : matrix)
+          sum += row_values[destination];
+        for (auto& row_values : matrix)
+          row_values[destination] /= sum;
+      }
+    }
+    for (unsigned source = 0; source < 4; ++source)
+      for (unsigned destination = 0; destination < 4; ++destination)
+        coefficients[8 + source * 4 + destination] =
+            matrix[source][destination];
+    for (unsigned j = 0; j < mixes; ++j)
+      compare(1, coefficients[j], actual_split[token * mixes + j]);
+    for (unsigned column = 0; column < embedding; ++column) {
+      double reduced = 0;
+      for (unsigned h = 0; h < 4; ++h)
+        reduced += coefficients[h] * row[h * embedding + column];
+      compare(2, reduced, actual_output[token * embedding + column]);
+      for (unsigned destination = 0; destination < 4; ++destination) {
+        double value =
+            coefficients[4 + destination] * block[token * embedding + column];
+        for (unsigned source = 0; source < 4; ++source)
+          value +=
+              matrix[source][destination] * row[source * embedding + column];
+        compare(
+            3, value,
+            actual_expanded[token * width + destination * embedding + column]);
+      }
+    }
+  }
+  std::printf(
+      "HC complete tokens=%u eps=%g: projection/split/reduce/expand "
+      "max error %.3g/%.3g/%.3g/%.3g\n",
+      tokens, epsilon, maximum_error[0], maximum_error[1], maximum_error[2],
+      maximum_error[3]);
+}
 }  // namespace
 
 int main() {
@@ -568,4 +712,6 @@ int main() {
     plain_norm(rows, random);
   hc_prefill_fp32(128);
   hc_prefill_fp32(129);
+  hc_complete_formula(128, 1e-6F, random);
+  hc_complete_formula(129, 0.002F, random);
 }
