@@ -12,7 +12,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/speculative/draft_backend.hpp"
-#include "src/models/qwen/dflash_reference.hpp"
+#include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 

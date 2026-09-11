@@ -17,7 +17,7 @@
 
 #include "src/cli/serve/json.hpp"
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen/dflash_reference.hpp"
+#include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
 namespace {

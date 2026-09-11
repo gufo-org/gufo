@@ -12,9 +12,9 @@ Run on gfx1151 inside Nix. Model-specific tests live in
 
 | Suite | Contract |
 | --- | --- |
-| `fast` | DFlash metadata/layout validation, NPU packing, strict result reporting. |
+| `fast` | NPU packing, GGUF reference decoding and strict result reporting. |
 | `kernels` | Quantized GEMM versus independent/decode controls; DFlash convolution, windowed attention, full-vocabulary top-k, sampled selector and verifier distributions. |
-| `model` | Target full-logit replay; MTP committed-feature alignment; DFlash ring/snapshot/restore; prompt and multi-turn GPU chat token-ID parity across AR/MTP/DFlash. |
+| `model` | Target full-logit replay; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt and multi-turn GPU chat token-ID parity across AR/MTP/DFlash. |
 | `serving` | Direct versus served tokens, seeded sampled replay, EOS, bounded prefill, cache forks, persistent restore, concurrency, cancellation and reclamation. |
 | `reference` | Teacher-forced target versus optional BF16: KL, total variation, top-1 agreement, RMSE and NLL difference. Informational quantization measurements. |
 
@@ -33,6 +33,10 @@ nix develop -c python3 tools/qwen27b/check.py reference \
 The GPU correctness preset uses optimized code with symbols; test assertions
 remain enabled. Performance measurements always use Nix release binaries.
 Artifact variables `GUFO_QWEN27B_*_MODEL` are test inputs, not execution switches.
+The unused in-tree CPU DFlash forward pipeline and its duplicate operator
+tests are removed. The pinned upstream runner owns the full reference.
+All three draft artifacts pass loading and state tests after this removal;
+all 90 Q4 trace files remain byte-identical to the qualified implementation.
 
 ## Current evidence
 

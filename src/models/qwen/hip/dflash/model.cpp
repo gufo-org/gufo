@@ -67,24 +67,8 @@ void ReadMatrixRow(const models::QwenTensorRef& tensor, std::size_t row,
     case core::GgmlType::kQ4_K:
       quant::DequantizeQ4_K(source, output, columns);
       return;
-    case core::GgmlType::kQ5_K:
-      quant::DequantizeQ5_K(source, output, columns);
-      return;
     case core::GgmlType::kQ6_K:
       quant::DequantizeQ6_K(source, output, columns);
-      return;
-    // opt-q4kxl: the Q4_K_M DFlash-2 companion adds these alongside Q4_K/Q6_K.
-    case core::GgmlType::kQ3_K:
-      quant::DequantizeQ3_K(source, output, columns);
-      return;
-    case core::GgmlType::kIQ4_NL:
-      quant::DequantizeIQ4_NL(source, output, columns);
-      return;
-    case core::GgmlType::kIQ4_XS:
-      quant::DequantizeIQ4_XS(source, output, columns);
-      return;
-    case core::GgmlType::kIQ3_S:
-      quant::DequantizeIQ3_S(source, output, columns);
       return;
     default:
       throw std::runtime_error("unsupported DFlash tensor format for packing");
@@ -165,18 +149,11 @@ models::QwenTensorRef PackBlockMatrix(const models::QwenTensorRef& source,
                                       std::size_t rows, std::size_t columns,
                                       std::vector<void*>& allocations,
                                       std::size_t& packed_bytes) {
-  // opt-q4kxl: keep any format the decode kernels can read in place. The
-  // Q4_K_M DFlash-2 companion is 1.14 GB packed and 3.85 GB as BF16, and the
-  // draft matrices are re-read on every speculation step, so expanding them
-  // would cost more bandwidth per step than the whole draft saves.
+  // Keep the quantized formats accepted by the DFlash loader packed: draft
+  // matrices are read on every speculation step.
   const bool native_block = source.type == core::GgmlType::kQ8_0 ||
                             source.type == core::GgmlType::kQ4_K ||
-                            source.type == core::GgmlType::kQ5_K ||
-                            source.type == core::GgmlType::kQ6_K ||
-                            source.type == core::GgmlType::kQ3_K ||
-                            source.type == core::GgmlType::kIQ4_NL ||
-                            source.type == core::GgmlType::kIQ4_XS ||
-                            source.type == core::GgmlType::kIQ3_S;
+                            source.type == core::GgmlType::kQ6_K;
   if (!native_block) {
     return PackMatrixBf16(source, rows, columns, allocations, packed_bytes);
   }
@@ -370,9 +347,6 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
     // weights
     weights.token_embedding = target_model->GetWeights().token_embd;
     weights.output = target_model->GetWeights().output;
-    if (weights.output_norm.empty()) {
-      weights.output_norm = target_model->GetWeights().output_norm;
-    }
     if (weights.output.type == core::GgmlType::kBF16 &&
         weights.output.num_elements %
                 quant::QuantizedBlockElements(core::GgmlType::kQ8_0) ==

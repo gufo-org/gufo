@@ -66,7 +66,7 @@ layer-64 graph, and feeds proposed tokens through the speculative backend.
 | [`hip/kernels/`](hip/kernels/) | HIP implementations split by launch/experiment boundary; graph-pointer attention, decode recurrence, quant GEMV, and fused RMSNorm+SwiGLU have independent translation units. |
 | [`mtp_reference.hpp`](mtp_reference.hpp), [`mtp_reference.cpp`](mtp_reference.cpp) | Stateful CPU oracle for the single-layer MTP graph. |
 | [`hip/mtp/`](hip/mtp/), [`hip/mtp.hpp`](hip/mtp.hpp) | GPU MTP model conversion, executor, and speculative draft backend; optional hybrid NPU EH projection. |
-| [`dflash_reference.hpp`](dflash_reference.hpp), [`dflash_reference.cpp`](dflash_reference.cpp) | Stateful CPU reference and oracle for DFlash (v1) and DFlash-2 block-diffusion drafting. |
+| [`dflash_weights.hpp`](dflash_weights.hpp), [`dflash_weights.cpp`](dflash_weights.cpp) | DFlash2 GGUF configuration, tensor binding and validation. The independent operator reference is in `tools/qwen27b/dflash_reference.py`. |
 | [`hip/dflash/`](hip/dflash/), [`hip/dflash.hpp`](hip/dflash.hpp), [`hip/kernels/dflash_kernels.*`](hip/kernels/dflash_kernels.hip) | GPU DFlash / DFlash-2 model, non-causal block attention kernels, 2-tap dynamic convs, bilinear path selector, and speculative draft backend. |
 | [`xdna2/`](xdna2/) | XRT sessions, packing contracts, and AIE2P programs for Qwen MTP operations. |
 | [`tokenizer.*`](tokenizer.hpp), [`chat_template.*`](chat_template.hpp) | BPE vocabulary/merge handling and bounded deterministic Qwen ChatML formatting. |

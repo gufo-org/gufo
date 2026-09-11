@@ -18,7 +18,7 @@ target_sources(gufo_core PRIVATE
   ${PROJECT_SOURCE_DIR}/src/models/qwen/modules/unembed.cpp
    ${PROJECT_SOURCE_DIR}/src/models/qwen/generator.cpp
    ${PROJECT_SOURCE_DIR}/src/models/qwen/mtp_reference.cpp
-   ${PROJECT_SOURCE_DIR}/src/models/qwen/dflash_reference.cpp)
+   ${PROJECT_SOURCE_DIR}/src/models/qwen/dflash_weights.cpp)
 
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_core PRIVATE

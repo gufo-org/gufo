@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/dflash_reference.hpp"
+#include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
