@@ -1,0 +1,978 @@
+{
+  "schema": "gufo.ds4-captured-operator-audit.v1",
+  "date": "2026-09-11",
+  "baseline_revision": "abb23960a51094df0cbf3f31ccb5a9b10be75de8",
+  "decision": "Retain baseline production arithmetic. All three precision prototypes fail qualification. Four post-prefill differential alerts remain open.",
+  "quality_improvement_demonstrated": false,
+  "official_source": {
+    "repository": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+    "files": {
+      "model.py": "c0c19e6c9fa439bac7fbb1c5bc1868232dfd5aa2f439a548d0e33dcc2a9edd3f",
+      "kernel.py": "59b325083d7103975cba025bd0d60ea343bb82d8fff53088afb7c04bd380c0c2"
+    },
+    "operators": [
+      "inference/model.py:285 Compressor, forward casts inputs to FP32 at line 330",
+      "inference/model.py:569 Gate.forward uses FP32 linear projection",
+      "inference/model.py:680 Block.hc_pre projects raw FP32 inputs, then RMS scales",
+      "inference/model.py:690 Block.hc_post casts its result back to the activation dtype",
+      "inference/kernel.py:372 hc_split_sinkhorn_kernel"
+    ]
+  },
+  "model": {
+    "file": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+    "sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0"
+  },
+  "official_continuation_fixture": {
+    "source_revision": "6289c516273979173abbc062209a81dd3706b804",
+    "sha256": "0ec57ef24cc0cb5838a4c0ccacf806edc12cbe09f27f0c13efdf90eb33591a4d",
+    "scope": "100 cases / 2313 tokens and 5 smoke cases / 14 tokens; saturated hosted API probabilities do not establish full-distribution parity"
+  },
+  "baseline": {
+    "official_continuations": {
+      "continuation-100": {
+        "cases": 100,
+        "tokens": 2313,
+        "nll": 0.3994233339397123,
+        "first_matches": 56,
+        "mean_greedy_prefix": 5.47,
+        "greedy_matches": 1997
+      },
+      "smoke-5": {
+        "cases": 5,
+        "tokens": 14,
+        "nll": 0.03436304632229792,
+        "first_matches": 5,
+        "mean_greedy_prefix": 2.8,
+        "greedy_matches": 14
+      }
+    },
+    "official_scores_reproduce_prior_summary": true,
+    "score_artifact": {
+      "sha256": "89719d6f3e99eb935eb3bbf9e073e543e9bf066c5e47e5ba75d00314fb1115f4",
+      "bytes": 165586
+    },
+    "memory": {
+      "exit_code": 0,
+      "aborted_for_memory": false,
+      "minimum_available_gib": 29.433700561523438,
+      "reserve_gib": 12.0
+    },
+    "prefill_4096_depth_4096_vs_antirez": {
+      "rmse": 0.9691018176756141,
+      "cosine": 0.9800580103082442,
+      "max_absolute_error": 5.338605880737305,
+      "mean_logit_shift": -0.17820759595833985,
+      "centered_rmse": 0.9525756588140011,
+      "jensen_shannon_nats": 0.019924047483170122,
+      "max_probability_difference": 0.0589527100600975,
+      "same_top1": true,
+      "within_existing_vector_bounds": false
+    },
+    "captured_frontier_sha256": "152870c764f646580ee348d4299c741f8cb31034c42437daa9a91bc5832dbe92",
+    "captured_frontier_matches_retained_baseline_bytes": true
+  },
+  "capture": {
+    "baseline_attention": {
+      "depth": 4096,
+      "prefill_step": 4096,
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "rows": "last 128 attention rows; full compressor/cache buffers where needed",
+      "identity": {
+        "sha256": "691ca21ec4edf1acc23e6ce1a568c1c3d7d4c46e3cc7f61e5b43c279383f0667",
+        "files": 127,
+        "bytes": 774327523,
+        "hash_recipe": "sorted relative path + NUL + byte count + NUL + file bytes + NUL"
+      }
+    },
+    "router": {
+      "source": "compressor-only prototype, not the retained baseline",
+      "depth": 4096,
+      "prefill_step": 4096,
+      "layers": "3 through 42",
+      "rows_per_layer": 128,
+      "total_rows": 5120,
+      "identity": {
+        "sha256": "69df89511647eeba4e9481c6af3dd2107993b247ba4dc64029e54eeccd84e451",
+        "files": 280,
+        "bytes": 178544640,
+        "hash_recipe": "sorted relative path + NUL + byte count + NUL + file bytes + NUL"
+      }
+    },
+    "independent_replay": "CPU double precision, same captured Gufo inputs and dequantized GGUF weights; explicit Q8 activation, F16 and FP8 conversion variants",
+    "official_precision_caveat": "The official network generally carries BF16 activations and casts these to FP32 inside its compressor/router. Local FP32 fidelity on Gufo inputs does not recreate the full official BF16/FP8 network."
+  },
+  "operator_summaries": {
+    "hc_projection_fp32": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 8.891335380667442e-05,
+      "elements": 12288,
+      "relative_l2_range": [
+        3.3921359261944034e-08,
+        7.10277109998552e-08
+      ]
+    },
+    "hc_upstream_f16_approximation": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.015883446168686532,
+      "elements": 12288,
+      "relative_l2_range": [
+        1.6218581702092483e-05,
+        2.3272544627827886e-05
+      ]
+    },
+    "hc_split": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 1.8126550271890807e-07,
+      "elements": 12288,
+      "relative_l2_range": [
+        4.740149948183563e-08,
+        7.629056408793922e-08
+      ]
+    },
+    "hc_reduction": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 9.761997006307865e-07,
+      "elements": 2097152,
+      "relative_l2_range": [
+        2.875032400754441e-08,
+        4.386180492054769e-08
+      ]
+    },
+    "attn_norm": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 2.010115014439151e-07,
+      "elements": 2097152,
+      "relative_l2_range": [
+        4.053470387063858e-08,
+        5.460755555379984e-08
+      ]
+    },
+    "qa_fp32_projection": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.0036481821966812683,
+      "elements": 524288,
+      "relative_l2_range": [
+        0.003145501493756159,
+        0.0058737928330767405
+      ]
+    },
+    "qa_q8_activation_projection": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 7.862271223769979e-05,
+      "elements": 524288,
+      "relative_l2_range": [
+        1.8748553432523576e-07,
+        2.558384908441014e-05
+      ]
+    },
+    "qa_f16_projection": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.003661026668851264,
+      "elements": 524288,
+      "relative_l2_range": [
+        0.0031473797469138095,
+        0.005872710510167928
+      ]
+    },
+    "kv_raw_fp32_projection": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.0038455505877082463,
+      "elements": 262144,
+      "relative_l2_range": [
+        0.0026206240482369372,
+        0.005353726075488632
+      ]
+    },
+    "kv_raw_q8_activation_projection": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 9.391869634500782e-05,
+      "elements": 262144,
+      "relative_l2_range": [
+        1.7903511037876657e-07,
+        2.2725334645600693e-05
+      ]
+    },
+    "kv_raw_f16_projection": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.0038581279202958285,
+      "elements": 262144,
+      "relative_l2_range": [
+        0.002624133102743456,
+        0.005355244536669115
+      ]
+    },
+    "qb_fp32_projection": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.0019210952716878782,
+      "elements": 16777216,
+      "relative_l2_range": [
+        0.004461784647198538,
+        0.005027010995580716
+      ]
+    },
+    "qb_q8_activation_projection": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 1.82789933855787e-07,
+      "elements": 16777216,
+      "relative_l2_range": [
+        1.1242916449365446e-07,
+        1.1478152807879271e-07
+      ]
+    },
+    "qb_f16_projection": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.0018962216836371226,
+      "elements": 16777216,
+      "relative_l2_range": [
+        0.004464557743481044,
+        0.005030600779283969
+      ]
+    },
+    "qa_norm": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 2.3963622725053924e-08,
+      "elements": 524288,
+      "relative_l2_range": [
+        4.68397291677114e-08,
+        5.682210975009331e-08
+      ]
+    },
+    "kv_norm": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 1.2155397257629375e-06,
+      "elements": 262144,
+      "relative_l2_range": [
+        3.860423922938244e-08,
+        5.041797317611518e-08
+      ]
+    },
+    "q_norm_rope": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.004278297424652244,
+      "elements": 16777216,
+      "relative_l2_range": [
+        3.550966085668015e-05,
+        6.33235061968814e-05
+      ]
+    },
+    "kv_rope_tail": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.0016452298251006248,
+      "elements": 32768,
+      "relative_l2_range": [
+        8.2663640996472e-05,
+        0.0001248587077975185
+      ]
+    },
+    "kv_fp8_nope": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.0,
+      "elements": 229376,
+      "relative_l2_range": [
+        0.0,
+        0.0
+      ]
+    },
+    "attention_fp32": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.004048452054510876,
+      "elements": 131072,
+      "relative_l2_range": [
+        1.243033148454076e-07,
+        0.00019958786212269
+      ]
+    },
+    "attention_f16_query": {
+      "layers": [
+        0,
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.0012474004023703689,
+      "elements": 131072,
+      "relative_l2_range": [
+        5.905609287519013e-05,
+        8.228461126736111e-05
+      ]
+    },
+    "compressor_kv_fp32": {
+      "layers": [
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.00020844627375091185,
+      "elements": 327680,
+      "relative_l2_range": [
+        0.0001320814330852762,
+        0.00017611982296538572
+      ]
+    },
+    "compressor_kv_f16": {
+      "layers": [
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 1.3794691767543554e-05,
+      "elements": 327680,
+      "relative_l2_range": [
+        1.1030487618277009e-05,
+        1.1691736510585874e-05
+      ]
+    },
+    "compressor_sc_fp32": {
+      "layers": [
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.0006668481892351252,
+      "elements": 327680,
+      "relative_l2_range": [
+        3.549982266848954e-05,
+        0.0001267131615855609
+      ]
+    },
+    "compressor_sc_f16": {
+      "layers": [
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 4.2353372009529267e-05,
+      "elements": 327680,
+      "relative_l2_range": [
+        1.0526352892610013e-05,
+        1.312949712228395e-05
+      ]
+    },
+    "compressor_cache": {
+      "layers": [
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 0.03125,
+      "elements": 1064960,
+      "relative_l2_range": [
+        1.9836114382598497e-07,
+        5.848197132967837e-05
+      ]
+    },
+    "compressor_cache_rope": {
+      "layers": [
+        2,
+        3,
+        42
+      ],
+      "maximum_absolute_error": 6.228059917813555e-05,
+      "elements": 133120,
+      "relative_l2_range": [
+        5.520991680170678e-07,
+        6.0084870796810115e-06
+      ]
+    },
+    "index_scores": {
+      "layers": [
+        2,
+        42
+      ],
+      "maximum_absolute_error": 5.488407885945179e-07,
+      "elements": 2048,
+      "relative_l2_range": [
+        5.090429848151272e-08,
+        7.515730027997072e-08
+      ]
+    },
+    "topk_from_captured_scores": {
+      "layers": [
+        2,
+        42
+      ],
+      "exact_indices": true
+    }
+  },
+  "router_precision_cases": [
+    {
+      "layer": 6,
+      "position": 4043,
+      "actual": [
+        59,
+        235,
+        236,
+        12,
+        189,
+        117
+      ],
+      "fp32": [
+        59,
+        235,
+        236,
+        12,
+        189,
+        148
+      ],
+      "fp32_sixth_seventh_margin": 2.6596652618948724e-05,
+      "two_experts": [
+        117,
+        148
+      ],
+      "fp32_logits": [
+        5.081524886844636,
+        5.125920848985429
+      ],
+      "rounded_input_logits": [
+        5.0815948124527495,
+        5.1258241091109085
+      ],
+      "fp32_scores": [
+        10.741620523119078,
+        10.741647119771697
+      ],
+      "rounded_input_scores": [
+        10.741635927867721,
+        10.741625893764267
+      ],
+      "fixture_sha256": "cf33019f93943d1832b8bf66eca7a7b447ae7f41015b531af4e0f7b3099883c4"
+    },
+    {
+      "layer": 18,
+      "position": 4071,
+      "actual": [
+        113,
+        8,
+        168,
+        73,
+        96,
+        205
+      ],
+      "fp32": [
+        113,
+        8,
+        168,
+        73,
+        96,
+        48
+      ],
+      "fp32_sixth_seventh_margin": 4.572855967666101e-06,
+      "two_experts": [
+        205,
+        48
+      ],
+      "fp32_logits": [
+        4.151409035157644,
+        4.167363154895991
+      ],
+      "rounded_input_logits": [
+        4.151319244334445,
+        4.167159816324784
+      ],
+      "fp32_scores": [
+        11.543649449164224,
+        11.543654022020192
+      ],
+      "rounded_input_scores": [
+        11.543627796705866,
+        11.543605068149578
+      ]
+    },
+    {
+      "layer": 31,
+      "position": 4044,
+      "actual": [
+        240,
+        78,
+        196,
+        243,
+        56,
+        96
+      ],
+      "fp32": [
+        240,
+        78,
+        196,
+        243,
+        56,
+        83
+      ],
+      "fp32_sixth_seventh_margin": 1.5111104783471774e-05,
+      "two_experts": [
+        96,
+        83
+      ],
+      "fp32_logits": [
+        4.403851327727815,
+        4.379326706323671
+      ],
+      "rounded_input_logits": [
+        4.404389785751391,
+        4.379229230235069
+      ],
+      "fp32_scores": [
+        13.864398837533003,
+        13.864413948637786
+      ],
+      "rounded_input_scores": [
+        13.864525403235193,
+        13.864390979733816
+      ]
+    },
+    {
+      "layer": 35,
+      "position": 4002,
+      "actual": [
+        103,
+        237,
+        203,
+        73,
+        96,
+        226
+      ],
+      "fp32": [
+        103,
+        237,
+        203,
+        73,
+        96,
+        163
+      ],
+      "fp32_sixth_seventh_margin": 3.662769817225353e-06,
+      "two_experts": [
+        226,
+        163
+      ],
+      "fp32_logits": [
+        2.2479215610465335,
+        2.2458627367850337
+      ],
+      "rounded_input_logits": [
+        2.248254372192605,
+        2.246097657698556
+      ],
+      "fp32_scores": [
+        14.349649536430721,
+        14.349653199200539
+      ],
+      "rounded_input_scores": [
+        14.349747751089227,
+        14.349722540015595
+      ]
+    }
+  ],
+  "router_interpretation": "4/5120 captured rows change expert set when F16 input rounding is removed. CPU rounding reverses sixth/seventh ordering in all four cases. The production selector follows its actual scores exactly in all 5120 rows. No claim that these four routing cases are the four full-logit alerts.",
+  "experiments": {
+    "compressor": {
+      "decision": "rejected; prototype and its temporary API/tests removed",
+      "change": "FP32 activation GEMM with exact F16-to-FP32 weight expansion in compressor prefill projections; scalar/verifier routes unchanged",
+      "official_continuations": {
+        "continuation-100": {
+          "candidate": {
+            "cases": 100,
+            "tokens": 2313,
+            "nll": 0.40845397845403714,
+            "first_matches": 56,
+            "mean_greedy_prefix": 4.92,
+            "greedy_matches": 1994
+          },
+          "delta_nll": 0.009030644514324837,
+          "paired_case_bootstrap_delta_nll_95pct": [
+            0.0011305855744498617,
+            0.017302082334527777
+          ],
+          "cases_improved": 43,
+          "cases_worsened": 57
+        },
+        "smoke-5": {
+          "candidate": {
+            "cases": 5,
+            "tokens": 14,
+            "nll": 0.0561477609201135,
+            "first_matches": 5,
+            "mean_greedy_prefix": 2.8,
+            "greedy_matches": 14
+          },
+          "delta_nll": 0.02178471459781558,
+          "paired_case_bootstrap_delta_nll_95pct": [
+            -0.01573430072602862,
+            0.06254238812186334
+          ],
+          "cases_improved": 1,
+          "cases_worsened": 4
+        }
+      },
+      "prefill_4096_depth_4096_vs_antirez": {
+        "rmse": 0.6675529138574369,
+        "cosine": 0.990791473316661,
+        "max_absolute_error": 3.6408753395080566,
+        "mean_logit_shift": -0.11003329550073998,
+        "centered_rmse": 0.6584220277912954,
+        "jensen_shannon_nats": 0.015540388196245796,
+        "max_probability_difference": 0.0553590168743634,
+        "same_top1": true,
+        "within_existing_vector_bounds": true
+      },
+      "legacy_antirez_trajectory": {
+        "tokens": 128,
+        "top1_matches": 109,
+        "rank_sum": 149,
+        "worst_rank": 3,
+        "passed": false
+      },
+      "memory": {
+        "exit_code": 1,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 29.199352264404297,
+        "reserve_gib": 12.0
+      },
+      "score_artifact": {
+        "sha256": "6d9f399eecb85f08b69a99391fc9cf1df343cd2f4bb57896902fcf57405e97c7",
+        "bytes": 165591
+      },
+      "frontier_artifact": {
+        "sha256": "490b3b0ba841404a9e01f4df027cb774140b29c958a06443522cc4e5a8b8cd97",
+        "bytes": 517120
+      }
+    },
+    "router": {
+      "decision": "rejected; prototype and its temporary API/tests removed",
+      "change": "FP32 activation GEMM with exact F16-to-FP32 weight expansion in router prefill projections; scalar/verifier routes unchanged",
+      "official_continuations": {
+        "continuation-100": {
+          "candidate": {
+            "cases": 100,
+            "tokens": 2313,
+            "nll": 0.4039252467312743,
+            "first_matches": 55,
+            "mean_greedy_prefix": 5.06,
+            "greedy_matches": 1982
+          },
+          "delta_nll": 0.004501912791561979,
+          "paired_case_bootstrap_delta_nll_95pct": [
+            -0.003925039929662983,
+            0.013449902561422065
+          ],
+          "cases_improved": 49,
+          "cases_worsened": 51
+        },
+        "smoke-5": {
+          "candidate": {
+            "cases": 5,
+            "tokens": 14,
+            "nll": 0.13382629991798492,
+            "first_matches": 4,
+            "mean_greedy_prefix": 2,
+            "greedy_matches": 13
+          },
+          "delta_nll": 0.099463253595687,
+          "paired_case_bootstrap_delta_nll_95pct": [
+            -0.03400252261925794,
+            0.2643563851149286
+          ],
+          "cases_improved": 2,
+          "cases_worsened": 3
+        }
+      },
+      "prefill_4096_depth_4096_vs_antirez": {
+        "rmse": 0.9309736913812598,
+        "cosine": 0.9815704473741412,
+        "max_absolute_error": 4.749603271484375,
+        "mean_logit_shift": -0.17551537061785577,
+        "centered_rmse": 0.9142791525135668,
+        "jensen_shannon_nats": 0.09222285790848149,
+        "max_probability_difference": 0.34877992344003494,
+        "same_top1": true,
+        "within_existing_vector_bounds": true
+      },
+      "legacy_antirez_trajectory": {
+        "tokens": 128,
+        "top1_matches": 110,
+        "rank_sum": 166,
+        "worst_rank": 8,
+        "passed": false
+      },
+      "memory": {
+        "exit_code": 1,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 29.19525146484375,
+        "reserve_gib": 12.0
+      },
+      "score_artifact": {
+        "sha256": "7f3614cec71851c1e83aae1f139374fdd62623be3016439df4bf43e370c1891a",
+        "bytes": 165559
+      },
+      "frontier_artifact": {
+        "sha256": "20f8a3413e7a9459c7dc928de540762fd0cd8ce69fb9d8374bb546638fc14d73",
+        "bytes": 517120
+      }
+    },
+    "compressor_and_router": {
+      "decision": "rejected; prototype and its temporary API/tests removed",
+      "change": "FP32 activation GEMM with exact F16-to-FP32 weight expansion in compressor and router prefill projections; scalar/verifier routes unchanged",
+      "official_continuations": {
+        "continuation-100": {
+          "candidate": {
+            "cases": 100,
+            "tokens": 2313,
+            "nll": 0.4073244561909102,
+            "first_matches": 53,
+            "mean_greedy_prefix": 5.24,
+            "greedy_matches": 1985
+          },
+          "delta_nll": 0.007901122251197878,
+          "paired_case_bootstrap_delta_nll_95pct": [
+            -0.000672631632287008,
+            0.017169409033548192
+          ],
+          "cases_improved": 37,
+          "cases_worsened": 63
+        },
+        "smoke-5": {
+          "candidate": {
+            "cases": 5,
+            "tokens": 14,
+            "nll": 0.03761196090361553,
+            "first_matches": 5,
+            "mean_greedy_prefix": 2.8,
+            "greedy_matches": 14
+          },
+          "delta_nll": 0.0032489145813176107,
+          "paired_case_bootstrap_delta_nll_95pct": [
+            -0.03908001927563376,
+            0.027784801636531017
+          ],
+          "cases_improved": 2,
+          "cases_worsened": 3
+        }
+      },
+      "prefill_4096_depth_4096_vs_antirez": {
+        "rmse": 0.8133797110799135,
+        "cosine": 0.9864426816747381,
+        "max_absolute_error": 5.679965972900391,
+        "mean_logit_shift": -0.2360538269924507,
+        "centered_rmse": 0.778373397000862,
+        "jensen_shannon_nats": 0.09315627427670667,
+        "max_probability_difference": 0.3685193104048222,
+        "same_top1": true,
+        "within_existing_vector_bounds": false
+      },
+      "legacy_antirez_trajectory": {
+        "tokens": 128,
+        "top1_matches": 117,
+        "rank_sum": 143,
+        "worst_rank": 6,
+        "passed": false
+      },
+      "memory": {
+        "exit_code": 1,
+        "aborted_for_memory": false,
+        "minimum_available_gib": 28.98702621459961,
+        "reserve_gib": 12.0
+      },
+      "score_artifact": {
+        "sha256": "768f8db39d281703aab3e68aab8c647adda41130a64c3cd435e0f6a52289b1b3",
+        "bytes": 165538
+      },
+      "frontier_artifact": {
+        "sha256": "f858318f2078c15e55802f4f0f1a13ba78d41b2698b34ecd84afa1b73ad5a45b",
+        "bytes": 517120
+      }
+    }
+  },
+  "statistics": {
+    "method": "paired case bootstrap, token-weighted mean NLL delta, 10000 resamples, random.Random seed 731, sorted quantiles at indices 250 and 9749",
+    "case_differences_artifact": {
+      "sha256": "2ad40a88e65aa171e0f0aff2722c5ef9ea8ff87524a1a06a21999595ffccfde9",
+      "bytes": 108958
+    },
+    "interpretation": "Compressor-only 100-case NLL interval excludes zero on the worse side. Router and combined 100-case intervals include zero. All prototypes fail unchanged trajectory guards; router also reduces smoke greedy agreement."
+  },
+  "local_checks": {
+    "red": "F16 prefill discards 2^-12 cancellation residual at width 17; temporary oracle fails",
+    "green": "FP32 prototype preserves residual and agrees with sampled double projections to maximum error 1.46e-6; captured router ordering also preserved",
+    "scope": "Temporary regressions accompanied rejected prototype APIs and were removed with those APIs; no new maintained test executable or production switch"
+  },
+  "secondary_experiments": [
+    {
+      "name": "FP32 compressor microbenchmark",
+      "result": "37-158x lower projection RMSE on captured inputs, approximately 2x projection runtime; end-to-end quality does not improve",
+      "scope": "isolated HIP microbenchmark, not release model throughput",
+      "artifact": {
+        "sha256": "92cfdfcd37bce4e4a4618cfe6effafd20876f60842372264ab45e2adef9c0802",
+        "bytes": 4374
+      }
+    },
+    {
+      "name": "RoPE direct/double frequency calculation",
+      "result": "Small local numerical changes without a demonstrated end-to-end fix; no production RoPE edits",
+      "scope": "microbenchmark against a double formula; official RoPE also uses FP32 frequency/angle operations"
+    }
+  ],
+  "remaining_work": [
+    "Explain all four post-prefill alerts with controlled operator/layer ablations; this capture examines only the smallest frontier.",
+    "The sampled Q8 replay retains small rounding residuals, and mixed attention uses reduced precision. There is no exhaustive proof that every operator matches its intended precision semantics.",
+    "The routing examples show sensitivity to a local precision change. They do not isolate the cause of all downstream or comparator differences.",
+    "A retained numerical change requires captured-input coverage, all four frontiers, repeatability and official continuations before larger qualification.",
+    "Full official checkpoint distribution parity and full task-level capability parity remain unestablished."
+  ],
+  "final_validation": {
+    "production_sha256": "2c89c79ce3d6fb4ba99fdda87e18cfafad2943916f6c405a489814b74da758ff",
+    "native_test_sha256": "9e898fa0f4476da4af98670aa6a663d434a7b25f2d8d607d3773c9e15305b780",
+    "projection_test_sha256": "5b29af3c1aa576c63f4d1e8d09079969f00bdac7b59519dc629de3d4671feb96",
+    "source_identical_to_baseline": true,
+    "tests_passed": [
+      "ds4.template",
+      "ds4.cli",
+      "ds4.dataset",
+      "ds4.eval",
+      "ds4.projections",
+      "ds4.attention"
+    ],
+    "test_log": {
+      "sha256": "32a5247e77afdf1228d58115a847ce2e861989d621ec2ed28130e52a59ffc8c5",
+      "bytes": 1321
+    },
+    "baseline_native_and_projection_binaries_match_previous_audit": true,
+    "no_new_release_speed_matrix": true,
+    "no_new_75_question_capability_run": true
+  },
+  "evidence_archive": {
+    "file": "captured-operators-2026-09-11.tar.gz",
+    "sha256": "9a3f84a4472dae0a92dde42314ae5646411030610a467c4ce8eb314b0748d951",
+    "bytes": 841385791,
+    "storage": "remote ds4-audit-artifacts directory, outside the source checkout"
+  },
+  "replay_artifacts": {
+    "ds4-replay-operators.py": {
+      "sha256": "96589ea05276cbc66eca5e4b3c8b693b0dbf5cb95dec8aa566a5275d9af655fe",
+      "bytes": 7581
+    },
+    "ds4-operators-replay.json": {
+      "sha256": "eefa1c2b71cdd7b1cc09e64edbd69cb804c24cd61765ef58188a8e29332e492f",
+      "bytes": 24983
+    },
+    "ds4-replay-router.py": {
+      "sha256": "a2235c5f36a9166f2649e91343c10d99b5e3a2e39b947a02211a56537724a23e",
+      "bytes": 2257
+    },
+    "ds4-router-replay.json": {
+      "sha256": "a519f21e5ba83badf8ed118cb2a40b9644a83633b0a1fa41490c9828809342da",
+      "bytes": 20035
+    },
+    "ds4-fp32-frontier-comparison.json": {
+      "sha256": "fda936eb4da5e243eb2415003e241a8bbbc951ffea0a941130a6e8fad0f0bfbb",
+      "bytes": 1578
+    },
+    "ds4-fp32-router-rejected.patch": {
+      "sha256": "c21a3fb63defec4e1739e1b4a99e324e95f3f7152518b5e36aebba1092229be4",
+      "bytes": 63350
+    }
+  }
+}

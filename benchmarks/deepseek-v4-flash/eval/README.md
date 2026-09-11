@@ -94,14 +94,43 @@ transposition. These checks join `ds4.projections`; no new executable is added.
 Raw-logit limits remain unchanged. The four alerts remain open quality evidence,
 not a reason to imitate an unofficial implementation.
 
-The next investigation starts with the smallest failing frontier, 4K/4K:
-capture real operator inputs and compare their outputs with the official
-formulas using the same dequantized GGUF weights and explicit precision.
-Locate the first unexplained deviation before comparing downstream layers.
-Any demonstrated fix needs a captured-input regression, all four frontier
-checks, repeatability, and the pinned official-continuation likelihood check.
-An alert can also be explained by a proven approximation in the comparator;
-agreement with Antirez or relaxed thresholds alone cannot close it.
+The [captured-operator follow-up](captured-operator-audit.json) examines the
+smallest failing frontier, 4K/4K. Its baseline logits match the retained vector
+byte for byte. Replays use real inputs and GGUF weights from layers 0, 2, 3
+and 42. HC projection, Sinkhorn, reduction and RMS normalization agree closely
+with independent equations. Explicit Q8 activation quantization explains most
+of the apparent projection error. Raw KV FP8 values match exactly; the sampled
+index selectors return the correct indices for their input scores. These
+samples do not cover every operator, layer or precision boundary.
+
+F16 input rounding in the compressor and router is measurable. In a separate
+capture from the compressor-only prototype, it changes the expert set in
+4/5,120 router rows. Each change crosses a nearly tied sixth/seventh score;
+the selector follows its actual scores correctly. More accurate local
+projections nevertheless fail end-to-end qualification:
+
+| Arithmetic | Official 100-case NLL ↓ | Smoke NLL ↓ | Smoke greedy matches | 4K raw-logit bounds |
+| --- | ---: | ---: | ---: | --- |
+| Retained baseline | 0.399423 | 0.034363 | 14/14 | Fail |
+| FP32 compressor | 0.408454 | 0.056148 | 14/14 | Pass |
+| FP32 router | 0.403925 | 0.133826 | 13/14 | Pass |
+| Both FP32 | 0.407324 | 0.037612 | 14/14 | Fail |
+
+All three prototypes are rejected and removed. The compressor's paired
+100-case NLL delta is +0.009031, with a 95% case-bootstrap interval of
+[+0.001131, +0.017302]. The other two intervals include zero; the router also
+loses a previously correct long-memory token. Every prototype fails the
+unchanged legacy trajectory guard. Passing Antirez's raw-logit bounds is
+therefore insufficient evidence of retained quality.
+
+Small changes can accumulate or cancel across layers; expert selection can
+amplify them discontinuously. A same-input FP32 oracle isolates local numerical
+error, while the official network also carries BF16 activations and quantized
+weights. These replays do not recreate that full execution. The four alerts
+remain open. A further correction needs a controlled operator/layer ablation,
+a captured-input regression, all four frontiers, repeatability and official
+continuation checks. Rejected prototypes do not justify a speed sweep or a
+75-question capability run.
 
 The IQ2 projection check also independently unpacks weights and derives sign
 parity on the CPU. It catches a corrupted sign lookup even when the scalar and
