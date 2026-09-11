@@ -1,0 +1,1838 @@
+{
+  "schema": 1,
+  "date_utc": "2026-09-11",
+  "baseline_revision": "26d0dc725b3ae5428257ddbf1206055a8286ec51",
+  "scope": "Qwen3.8 27B UD-Q4_K_XL / UD-Q8_K_XL; Q4_K_M, Q8_0 and BF16 DFlash2 drafts; C1 and fixed seven proposals. Short development probes, not a depth/capability sweep or a controller comparison.",
+  "candidate_source_sha256": {
+    "src/cli/bench/bench.cpp": "7a87ec79631058f5f381442c5c4bd2b4c24880d1e51370c9a065f266f6064afb",
+    "src/cli/prompt/prompt.cpp": "0e9a6f0f32d123a5d491670dbbf22a9c3062322ea8e3379e933ffc7d8b1bb351",
+    "src/cli/serve/inference_backend.cpp": "ea53eb14d2d99722e48df74aeeb3db79f31470342c73d85719f8ef791d13086f",
+    "src/core/speculative/speculative_verifier.cpp": "d1bb60cf73147734bad2458669454478a564024484e142369ad311ced6221f21",
+    "src/core/speculative/speculative_verifier.hpp": "ccdb020bbcb787bd3a2415d22dcb0751cadc9c023bd3f7462bada040dc61c459",
+    "src/models/qwen/hip/executor.cpp": "a906ba5d4d06bc6f1c41a165c687cb4b26b0849c25ae966136ff59bbdf96d0cc",
+    "src/models/qwen/hip/executor.hpp": "4fdb47925377e12ef4980e451ee39529080c3317f2ad92ef6d56ac2b847afea0",
+    "src/models/qwen/hip/kernels/prefill_gemm.hip": "87ecd735cf8b8073e029f2ac7221a5bed41f174a386c08ff50117e0a87eb1258",
+    "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "677bd1ca02b6a11f996388860f4da4aac9b446b0bd0364f4ea422722314c703f",
+    "src/models/qwen/hip/prefill_chunk.cpp": "03f675819e19b7c1b44d6bf98f1a25dee01dfc91046dc3a2765e5cde789ba0a5",
+    "tools/qwen27b/dflash_gemm_bench.hip": "785e3c9a95050b174e97f265a65203fa12fe94c13c311f6dedb21cca4e3e69c5"
+  },
+  "retained": [
+    "Stream BF16 weights for decode and the large context feature projection. Cache the repeated B16/M1024/K5120 K/V projection; choose the kernel specialization at host dispatch.",
+    "Symmetric K-quant/IQ projections omit affine activation sums and offset scratch. A scoped clang fp contract(off) keeps the scaled dot rounded before accumulation; original dot-product FMAs remain.",
+    "Remove unreachable verification precision and LM-head settings, their setter and dead prefill branches. Qwen speculative disk-cache identity now records decode-equivalent-v1 and invalidates the previous identity.",
+    "The existing GEMM benchmark models matrix reuse for batch-16 injection and applies its production cache hint. Decode ablations rotate at least 128 MiB of weights. No new benchmark executable, test executable or production environment switch."
+  ],
+  "final_binaries": {
+    "baseline": {
+      "path": "/nix/store/zcn50a75x4xcqvpvgdavf8k1ylhncwhw-gufo-a9b8e3d-dirty/bin/gufo",
+      "sha256": "8bbc19b37d1a263ecf49b4fee27d1b9cc4f8152667df4d17b1c3a385f8fa2630"
+    },
+    "candidate": {
+      "path": "/nix/store/ib3is5g9077ikip7y1ssmmh774ndgw4a-gufo-26d0dc7-dirty/bin/gufo",
+      "sha256": "33ce8720c01ffcc3197a3a74f03867537ee7b854cfee751dc7c3aa3e675f242d"
+    }
+  },
+  "model_artifacts_reference": "dflash2-rollback.json: artifacts (same model files and hashes)",
+  "quality": {
+    "target_arithmetic_checkpoint": [
+      {
+        "target": "Q4",
+        "verification_rows": 24,
+        "all_logits_byte_exact": true,
+        "snapshot_and_rejected_prefix_replay": "pass",
+        "mixed_context_rows": 12,
+        "mixed_context_capacities": [
+          32,
+          64
+        ],
+        "mixed_context_fp16_and_fp32": "byte_exact",
+        "logical_context_262144": "prefill_scalar_and_verification_byte_exact"
+      },
+      {
+        "target": "Q8",
+        "verification_rows": 24,
+        "all_logits_byte_exact": true,
+        "snapshot_and_rejected_prefix_replay": "pass",
+        "mixed_context_rows": 12,
+        "mixed_context_capacities": [
+          32,
+          64
+        ],
+        "mixed_context_fp16_and_fp32": "byte_exact",
+        "logical_context_262144": "prefill_scalar_and_verification_byte_exact"
+      }
+    ],
+    "target_scope": "After the symmetric arithmetic change: 48 verifier full-logit rows match scalar decode; snapshots/rejected-prefix replay, mixed 32/64-capacity batches and logical context 262144 pass. The final change only specializes BF16 injection cache hints; scalar/verification arithmetic is unchanged.",
+    "final_draft_replay": [
+      {
+        "draft": "q4",
+        "identical_trace_files": 90,
+        "reference": "/tmp/qwen27b-dflash-q4-source-trace",
+        "trace": "/tmp/qwen27b-dispatch-q4-trace"
+      },
+      {
+        "draft": "q8",
+        "identical_trace_files": 90,
+        "reference": "/tmp/qwen27b-dflash-q8-source-trace",
+        "trace": "/tmp/qwen27b-dispatch-q8-trace"
+      },
+      {
+        "draft": "bf16",
+        "identical_trace_files": 90,
+        "reference": "/tmp/qwen27b-dflash-fp32-trace",
+        "trace": "/tmp/qwen27b-dispatch-bf16-trace"
+      }
+    ],
+    "operators": [
+      "qwen_q4kxl_quant_ops_test: all supported formats against scalar/reference controls after symmetric rounding change",
+      "qwen_gpu_ops_test: BF16 widths 1 through 8 and 16 bit-exact with scalar decode; rerun after final dispatch specialization"
+    ],
+    "final_serving": "inference_backend_gpu_test with Q4 target and Q4 draft: direct/served parity, seeded sampling, bounded prefill, cache forks and persistent restore, concurrency, cancellation and reclamation pass.",
+    "chat": "All 24 cases in the two-repetition projection comparison, all 12 cases in the runtime-cache checkpoint control, and all four final dispatch controls preserve all 128 qualified AR token IDs. All three draft traces remain byte-identical (90 each).",
+    "upstream_reference": "The unchanged 270 traces are the pinned upstream-qualified references documented in README.md; this preserves that qualification.",
+    "remaining": "Original target/checkpoint-conversion and MTP qualification, capability/deeper-context refresh, controller comparison and complete C>1 qualification remain open."
+  },
+  "speed": {
+    "interpretation": "Gains are small: the two-repetition chat probe shows Q4 +0.5 to +0.7% and Q8 +0.2 to +0.4%. Final Q4-draft controls show +0.42% / +0.25%. pp2048 is within observed run variation; do not claim an end-to-end prefill speedup. Component gains from different workloads are not additive.",
+    "two_repetition_projection_summary": [
+      {
+        "target": "q4",
+        "draft": "q4",
+        "baseline": 32.70555,
+        "candidate": 32.870549999999994,
+        "percent": 0.5045015295568778
+      },
+      {
+        "target": "q4",
+        "draft": "q8",
+        "baseline": 35.32285,
+        "candidate": 35.5072,
+        "percent": 0.5219001298026438
+      },
+      {
+        "target": "q4",
+        "draft": "bf16",
+        "baseline": 33.8759,
+        "candidate": 34.1254,
+        "percent": 0.7365117974725388
+      },
+      {
+        "target": "q8",
+        "draft": "q4",
+        "baseline": 28.134999999999998,
+        "candidate": 28.235,
+        "percent": 0.3554291807357446
+      },
+      {
+        "target": "q8",
+        "draft": "q8",
+        "baseline": 29.035,
+        "candidate": 29.085,
+        "percent": 0.17220595832616592
+      },
+      {
+        "target": "q8",
+        "draft": "bf16",
+        "baseline": 27.9,
+        "candidate": 28.005,
+        "percent": 0.37634408602149616
+      }
+    ],
+    "two_repetition_projection_comparison": {
+      "workload": "cpp_ring_buffer chat, 128 generated tokens, fixed seven proposals, two interleaved repetitions; timing includes prompt processing. Short development probe, not a full corpus or depth sweep.",
+      "binaries": {
+        "baseline": {
+          "path": "/nix/store/zcn50a75x4xcqvpvgdavf8k1ylhncwhw-gufo-a9b8e3d-dirty/bin/gufo",
+          "sha256": "8bbc19b37d1a263ecf49b4fee27d1b9cc4f8152667df4d17b1c3a385f8fa2630"
+        },
+        "candidate": {
+          "path": "/nix/store/vk1bpbrz0azw3mw9ky777b2crqk5jrzl-gufo-26d0dc7-dirty/bin/gufo",
+          "sha256": "a013f3b29afd2324253995e98920b83031145a13b4e1b6ce634ed5eddf95f3b2"
+        }
+      },
+      "references": {
+        "q4": {
+          "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be greater than zero\");\n\n    std::array<T, Capacity> data_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of elements",
+          "tokens": 128,
+          "seconds": 11.4264,
+          "tps": 11.2021,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7"
+        },
+        "q8": {
+          "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be at least 1\");\n\n    std::array<T, Capacity> storage_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of",
+          "tokens": 128,
+          "seconds": 18.51,
+          "tps": 6.92,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8"
+        }
+      },
+      "results": [
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.92593,
+          "tps": 32.6037,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.89988,
+          "tps": 32.8216,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "q8",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.6286,
+          "tps": 35.2753,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "q8",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.60954,
+          "tps": 35.4615,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "bf16",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.77604,
+          "tps": 33.8979,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "bf16",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.75605,
+          "tps": 34.0783,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.55,
+          "tps": 28.13,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.54,
+          "tps": 28.22,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        },
+        {
+          "target": "q8",
+          "draft": "q8",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.41,
+          "tps": 29.02,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "q8",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.4,
+          "tps": 29.07,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "bf16",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.59,
+          "tps": 27.91,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "bf16",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.57,
+          "tps": 27.99,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "bf16",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 3.7457,
+          "tps": 34.1725,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "bf16",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 3.78096,
+          "tps": 33.8539,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 3.88827,
+          "tps": 32.9195,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 3.90156,
+          "tps": 32.8074,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "q8",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 3.60027,
+          "tps": 35.5529,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q4",
+          "draft": "q8",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 3.61885,
+          "tps": 35.3704,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.704698,
+          "drafted": 149,
+          "accepted": 105,
+          "steps": 22
+        },
+        {
+          "target": "q8",
+          "draft": "bf16",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.57,
+          "tps": 28.02,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "bf16",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.59,
+          "tps": 27.89,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.53,
+          "tps": 28.25,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.55,
+          "tps": 28.14,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        },
+        {
+          "target": "q8",
+          "draft": "q8",
+          "variant": "candidate",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.4,
+          "tps": 29.1,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "q8",
+          "variant": "baseline",
+          "repetition": 2,
+          "tokens": 128,
+          "seconds": 4.41,
+          "tps": 29.05,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.635802,
+          "drafted": 162,
+          "accepted": 103,
+          "steps": 24
+        }
+      ]
+    },
+    "final_dispatch_chat_control": {
+      "workload": "cpp_ring_buffer chat, 128 generated tokens, fixed seven proposals, one paired repetition for both targets with Q4 draft after specializing the injection cache hint; timing includes prompt processing. Short development probe, not a full corpus or depth sweep.",
+      "binaries": {
+        "baseline": {
+          "path": "/nix/store/zcn50a75x4xcqvpvgdavf8k1ylhncwhw-gufo-a9b8e3d-dirty/bin/gufo",
+          "sha256": "8bbc19b37d1a263ecf49b4fee27d1b9cc4f8152667df4d17b1c3a385f8fa2630"
+        },
+        "candidate": {
+          "path": "/nix/store/ib3is5g9077ikip7y1ssmmh774ndgw4a-gufo-26d0dc7-dirty/bin/gufo",
+          "sha256": "33ce8720c01ffcc3197a3a74f03867537ee7b854cfee751dc7c3aa3e675f242d"
+        }
+      },
+      "references": {
+        "q4": {
+          "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be greater than zero\");\n\n    std::array<T, Capacity> data_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of elements",
+          "tokens": 128,
+          "seconds": 11.4264,
+          "tps": 11.2021,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7"
+        },
+        "q8": {
+          "completion": "```cpp\n#include <cstddef>\n#include <stdexcept>\n#include <array>\n\ntemplate <typename T, std::size_t Capacity>\nclass RingBuffer {\n    static_assert(Capacity > 0, \"Capacity must be at least 1\");\n\n    std::array<T, Capacity> storage_{};\n    std::size_t head_ = 0;  // Index of the next element to read (front)\n    std::size_t tail_ = 0;  // Index of the next slot to write\n    std::size_t count_ = 0; // Number of",
+          "tokens": 128,
+          "seconds": 18.51,
+          "tps": 6.92,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8"
+        }
+      },
+      "results": [
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.90807,
+          "tps": 32.7527,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q4",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 3.89159,
+          "tps": 32.8914,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "acceptance": 0.631902,
+          "drafted": 163,
+          "accepted": 103,
+          "steps": 24
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "baseline",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.55,
+          "tps": 28.12,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        },
+        {
+          "target": "q8",
+          "draft": "q4",
+          "variant": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 4.54,
+          "tps": 28.19,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "acceptance": 0.60355,
+          "drafted": 169,
+          "accepted": 102,
+          "steps": 25
+        }
+      ]
+    },
+    "final_dispatch_prefill_control": {
+      "workload": "C1 DFlash2 Q4 draft prefill-only, pp2048, 3 timed repetitions after warmup. Includes target feature capture and context injection. Baseline before candidate on both targets, reversing the first prefill control. No depth sweep.",
+      "results": [
+        {
+          "target": "q4",
+          "variant": "baseline",
+          "binary": "/nix/store/zcn50a75x4xcqvpvgdavf8k1ylhncwhw-gufo-a9b8e3d-dirty/bin/gufo",
+          "sha256": "8bbc19b37d1a263ecf49b4fee27d1b9cc4f8152667df4d17b1c3a385f8fa2630",
+          "command": [
+            "/nix/store/zcn50a75x4xcqvpvgdavf8k1ylhncwhw-gufo-a9b8e3d-dirty/bin/gufo",
+            "bench",
+            "--model",
+            "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+            "--speculative",
+            "dflash2",
+            "--dflash-model",
+            "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+            "-p",
+            "2048",
+            "-n",
+            "0",
+            "-r",
+            "3",
+            "--verbose"
+          ],
+          "row": "| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |          pp2048 |        403.31 \u00b1 4.14 |"
+        },
+        {
+          "target": "q4",
+          "variant": "candidate",
+          "binary": "/nix/store/ib3is5g9077ikip7y1ssmmh774ndgw4a-gufo-26d0dc7-dirty/bin/gufo",
+          "sha256": "33ce8720c01ffcc3197a3a74f03867537ee7b854cfee751dc7c3aa3e675f242d",
+          "command": [
+            "/nix/store/ib3is5g9077ikip7y1ssmmh774ndgw4a-gufo-26d0dc7-dirty/bin/gufo",
+            "bench",
+            "--model",
+            "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+            "--speculative",
+            "dflash2",
+            "--dflash-model",
+            "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+            "-p",
+            "2048",
+            "-n",
+            "0",
+            "-r",
+            "3",
+            "--verbose"
+          ],
+          "row": "| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |          pp2048 |        399.88 \u00b1 0.24 |"
+        },
+        {
+          "target": "q8",
+          "variant": "baseline",
+          "binary": "/nix/store/zcn50a75x4xcqvpvgdavf8k1ylhncwhw-gufo-a9b8e3d-dirty/bin/gufo",
+          "sha256": "8bbc19b37d1a263ecf49b4fee27d1b9cc4f8152667df4d17b1c3a385f8fa2630",
+          "command": [
+            "/nix/store/zcn50a75x4xcqvpvgdavf8k1ylhncwhw-gufo-a9b8e3d-dirty/bin/gufo",
+            "bench",
+            "--model",
+            "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+            "--speculative",
+            "dflash2",
+            "--dflash-model",
+            "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+            "-p",
+            "2048",
+            "-n",
+            "0",
+            "-r",
+            "3",
+            "--verbose"
+          ],
+          "row": "| Qwen3.8-27B Q8_0               |  29.30 GiB |    27.32 B | ROCm (HIP) |  99 |          pp2048 |        468.09 \u00b1 1.47 |"
+        },
+        {
+          "target": "q8",
+          "variant": "candidate",
+          "binary": "/nix/store/ib3is5g9077ikip7y1ssmmh774ndgw4a-gufo-26d0dc7-dirty/bin/gufo",
+          "sha256": "33ce8720c01ffcc3197a3a74f03867537ee7b854cfee751dc7c3aa3e675f242d",
+          "command": [
+            "/nix/store/ib3is5g9077ikip7y1ssmmh774ndgw4a-gufo-26d0dc7-dirty/bin/gufo",
+            "bench",
+            "--model",
+            "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+            "--speculative",
+            "dflash2",
+            "--dflash-model",
+            "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+            "-p",
+            "2048",
+            "-n",
+            "0",
+            "-r",
+            "3",
+            "--verbose"
+          ],
+          "row": "| Qwen3.8-27B Q8_0               |  29.30 GiB |    27.32 B | ROCm (HIP) |  99 |          pp2048 |        470.17 \u00b1 1.41 |"
+        }
+      ]
+    },
+    "scope_note": "The broad chat comparison precedes the final B16 cache-hint specialization. Final controls cover both targets with Q4 draft, and all three drafts repeat full trace/state qualification. Prefill uses pp2048, three timed repetitions after warmup; generation probes use one chat prompt and 128 tokens."
+  },
+  "prefill_profile": {
+    "workload": "Q8 target, Q4 draft, pp2048/n0/r1. Totals include warmup plus the timed prefill: 256 feature projection calls and 2560 K/V calls. Profile durations are diagnostics, not throughput estimates.",
+    "baseline": [
+      {
+        "stream": 2,
+        "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 16ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+        "gx": 81920,
+        "wgx": 512,
+        "count": 256,
+        "ms": 362.816735
+      },
+      {
+        "stream": 2,
+        "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 16ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+        "gx": 16384,
+        "wgx": 512,
+        "count": 2560,
+        "ms": 131.33126
+      }
+    ],
+    "rejected_stream_all": [
+      {
+        "stream": 2,
+        "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 16ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+        "gx": 81920,
+        "wgx": 512,
+        "count": 256,
+        "ms": 346.893397
+      },
+      {
+        "stream": 2,
+        "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 16ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+        "gx": 16384,
+        "wgx": 512,
+        "count": 2560,
+        "ms": 220.220999
+      }
+    ],
+    "final_dispatch": [
+      {
+        "stream": 2,
+        "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 16ul, 2ul, true>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+        "gx": 81920,
+        "wgx": 512,
+        "count": 256,
+        "ms": 341.645242
+      },
+      {
+        "stream": 2,
+        "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 16ul, 2ul, false>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+        "gx": 16384,
+        "wgx": 512,
+        "count": 2560,
+        "ms": 133.24377
+      }
+    ],
+    "finding": "Streaming every B16 projection raised repeated K/V time from 131.33 to 220.22 ms. A uniform GPU-loop branch also slowed the large feature projection to 464.25 ms. Dispatch specialization restores K/V to 133.24 ms and reduces the large projection from 362.82 to 341.65 ms."
+  },
+  "generation_profiles": {
+    "baseline_reference": "dflash2-rollback.json and /tmp/qwen27b-cache-final-profile-summary.json",
+    "projection_checkpoint": {
+      "workload": "One diagnostic profile per target, Q4_K_M draft, cpp_ring_buffer chat, 128 tokens. TG begins at the first draft embedding; excludes initial prefill and draft injection. Executors are separated by HIP stream. Profile timings are not throughput estimates.",
+      "binary": {
+        "path": "/nix/store/vk1bpbrz0azw3mw9ky777b2crqk5jrzl-gufo-26d0dc7-dirty/bin/gufo",
+        "sha256": "a013f3b29afd2324253995e98920b83031145a13b4e1b6ce634ed5eddf95f3b2"
+      },
+      "reports": {
+        "q4": {
+          "tokens": 128,
+          "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+          "verification_steps": 24,
+          "gpu_kernel_ms": {
+            "draft": 383.48043499999903,
+            "target": 3253.0466080000233
+          },
+          "gpu_ms_per_step": {
+            "draft": 15.978351458333293,
+            "target": 135.54360866666764
+          },
+          "top_kernels": [
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 1344.7355280000033,
+              "count": 4393
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)23, 2ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 396.6388810000005,
+              "count": 1058
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 276.13897700000007,
+              "count": 1127
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 209.26241400000012,
+              "count": 1127
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)23, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 180.6514690000001,
+              "count": 552
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 171.24905199999995,
+              "count": 437
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 130.6689,
+              "count": 23
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 7ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 116.68279799999999,
+              "count": 23
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 83.36486399999995,
+              "count": 1152
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 83.32622100000002,
+              "count": 230
+            },
+            {
+              "domain": "target",
+              "kernel": "__amd_rocclr_copyBufferRectAligned",
+              "ms": 62.111888,
+              "count": 80
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 52.132599,
+              "count": 299
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 47.00987200000009,
+              "count": 672
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 3ul, 3ul, (gufo::core::GgmlType)13, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 46.85729399999998,
+              "count": 191
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)20, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 41.476081000000015,
+              "count": 138
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 40.310608999999936,
+              "count": 3096
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)11, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 32.177530999999995,
+              "count": 69
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 29.66958499999998,
+              "count": 384
+            }
+          ]
+        },
+        "q8": {
+          "tokens": 128,
+          "token_sha256": "5e45bb5d8feccfb97577fe7f7f79d918c1c535ff4763d440916ead1946fb73a8",
+          "verification_steps": 25,
+          "gpu_kernel_ms": {
+            "draft": 419.43366199999963,
+            "target": 3765.93702400002
+          },
+          "gpu_ms_per_step": {
+            "draft": 16.777346479999984,
+            "target": 150.6374809600008
+          },
+          "top_kernels": [
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 2079.2337889999935,
+              "count": 6912
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 8ul, 3ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 669.6776440000002,
+              "count": 1536
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 312.49778800000036,
+              "count": 792
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 1ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 220.77980599999995,
+              "count": 384
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 7ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 142.557557,
+              "count": 24
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<16u, 2ul, 2ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 109.43528399999994,
+              "count": 352
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb1EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 88.58433199999992,
+              "count": 1200
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 2ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 86.90593499999994,
+              "count": 240
+            },
+            {
+              "domain": "target",
+              "kernel": "__amd_rocclr_copyBufferRectAligned",
+              "ms": 63.92673499999999,
+              "count": 82
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)12, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 54.29404099999997,
+              "count": 312
+            },
+            {
+              "domain": "target",
+              "kernel": "_ZN4gufo3hip24DeltaNetRecurrenceKernelITkNS0_6detail25QwenRecurrentStateElementEfLb1ELb0EEEvPKfPT_S4_S4_S4_S4_S4_S4_PfjjjjjNS0_16SsmReplayCaptureEjmmm",
+              "ms": 48.24930900000001,
+              "count": 768
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::BatchedRMSNormKernel(float const*, float const*, float*, hip_bfloat16*, unsigned long, unsigned long, float)",
+              "ms": 40.37926,
+              "count": 3225
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::QwenDecodeOnlineAttentionHalfKernel(float const*, float const*, __half const*, __half const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+              "ms": 31.756627000000005,
+              "count": 400
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 8ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 28.752790999999984,
+              "count": 328
+            },
+            {
+              "domain": "target",
+              "kernel": "gufo::hip::SSMConvKernel(float const*, float const*, float*, float*, unsigned long, unsigned int, gufo::hip::SsmReplayCapture, unsigned int, unsigned long)",
+              "ms": 24.73253300000006,
+              "count": 2160
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::BatchedExactBf16GEMMFp32VecKernel<16u, 2ul, 2ul>(hip_bfloat16 const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 21.750138999999997,
+              "count": 49
+            },
+            {
+              "domain": "draft",
+              "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 2ul, (gufo::core::GgmlType)14, 1ul, 12u, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 18.664676,
+              "count": 48
+            },
+            {
+              "domain": "target",
+              "kernel": "void gufo::hip::SmallBatchQ8_0ExactFp32VecGEMMKernel<8u, 1ul, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+              "ms": 18.275488000000077,
+              "count": 2400
+            }
+          ]
+        }
+      }
+    },
+    "finding": "Affected IQ4_XS target kernels improve about 3 to 4%; BF16 target kernels about 2%. Some shapes vary or regress, so retention is based on the complete qualified workload, not summing the largest kernel wins."
+  },
+  "microbenchmarks": {
+    "builder": "nix develop -c tools/bench/build.sh <probe.hip>; HIP -O3 gfx1151, FP32 activations, bit comparisons before timing.",
+    "scope": "Four alternating geometry rounds. Streaming/ordered-symmetric probes compare the old production kernel with a temporary candidate. Final dispatch ablations compare production batch8 chunks and batch16 injection, with repeated weights; that comparison is not a new gain over the prior batch16 implementation.",
+    "rows": {
+      "qwen27b-dispatch-injection": [
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 0,
+          "geometry": "batch8_chunks",
+          "ms": 2.301494,
+          "GBps": 113.9,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 0,
+          "geometry": "batch16",
+          "ms": 1.33054,
+          "GBps": 197.02,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 1,
+          "geometry": "batch16",
+          "ms": 1.324962,
+          "GBps": 197.85,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 1,
+          "geometry": "batch8_chunks",
+          "ms": 2.296105,
+          "GBps": 114.17,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 2,
+          "geometry": "batch8_chunks",
+          "ms": 2.298954,
+          "GBps": 114.03,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 2,
+          "geometry": "batch16",
+          "ms": 1.323771,
+          "GBps": 198.03,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 3,
+          "geometry": "batch16",
+          "ms": 1.333458,
+          "GBps": 196.59,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 3,
+          "geometry": "batch8_chunks",
+          "ms": 2.295875,
+          "GBps": 114.18,
+          "mismatches": 0
+        }
+      ],
+      "qwen27b-dispatch-kv": [
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 16,
+          "round": 0,
+          "geometry": "batch8_chunks",
+          "ms": 0.108242,
+          "GBps": 96.87,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 16,
+          "round": 0,
+          "geometry": "batch16",
+          "ms": 0.046088,
+          "GBps": 227.51,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 16,
+          "round": 1,
+          "geometry": "batch16",
+          "ms": 0.046204,
+          "GBps": 226.95,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 16,
+          "round": 1,
+          "geometry": "batch8_chunks",
+          "ms": 0.106352,
+          "GBps": 98.6,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 16,
+          "round": 2,
+          "geometry": "batch8_chunks",
+          "ms": 0.106818,
+          "GBps": 98.17,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 16,
+          "round": 2,
+          "geometry": "batch16",
+          "ms": 0.046035,
+          "GBps": 227.78,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 16,
+          "round": 3,
+          "geometry": "batch16",
+          "ms": 0.045859,
+          "GBps": 228.65,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 16,
+          "round": 3,
+          "geometry": "batch8_chunks",
+          "ms": 0.109145,
+          "GBps": 96.07,
+          "mismatches": 0
+        }
+      ],
+      "qwen27b-stream-bf16-inject": [
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 0,
+          "geometry": "baseline",
+          "ms": 1.410518,
+          "GBps": 185.85,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 0,
+          "geometry": "stream",
+          "ms": 1.35086,
+          "GBps": 194.06,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 1,
+          "geometry": "stream",
+          "ms": 1.355401,
+          "GBps": 193.41,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 1,
+          "geometry": "baseline",
+          "ms": 1.425098,
+          "GBps": 183.95,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 2,
+          "geometry": "baseline",
+          "ms": 1.415578,
+          "GBps": 185.19,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 2,
+          "geometry": "stream",
+          "ms": 1.318644,
+          "GBps": 198.8,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 3,
+          "geometry": "stream",
+          "ms": 1.323236,
+          "GBps": 198.11,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 25600,
+          "batch": 16,
+          "round": 3,
+          "geometry": "baseline",
+          "ms": 1.417269,
+          "GBps": 184.96,
+          "mismatches": 0
+        }
+      ],
+      "qwen27b-stream-bf16-kv": [
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "baseline",
+          "ms": 0.067617,
+          "GBps": 155.08,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "stream",
+          "ms": 0.055652,
+          "GBps": 188.41,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "stream",
+          "ms": 0.062093,
+          "GBps": 168.87,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "baseline",
+          "ms": 0.065359,
+          "GBps": 160.43,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "baseline",
+          "ms": 0.061471,
+          "GBps": 170.58,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "stream",
+          "ms": 0.055927,
+          "GBps": 187.49,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "stream",
+          "ms": 0.061325,
+          "GBps": 170.99,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 1024,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "baseline",
+          "ms": 0.061688,
+          "GBps": 169.98,
+          "mismatches": 0
+        }
+      ],
+      "qwen27b-stream-rows1-ffn": [
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "baseline",
+          "ms": 0.785858,
+          "GBps": 226.83,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "stream",
+          "ms": 0.769642,
+          "GBps": 231.61,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "stream",
+          "ms": 0.769364,
+          "GBps": 231.7,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "baseline",
+          "ms": 0.789446,
+          "GBps": 225.8,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "baseline",
+          "ms": 0.788203,
+          "GBps": 226.16,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "stream",
+          "ms": 0.768998,
+          "GBps": 231.81,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "stream",
+          "ms": 0.769879,
+          "GBps": 231.54,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "baseline",
+          "ms": 0.788684,
+          "GBps": 226.02,
+          "mismatches": 0
+        }
+      ],
+      "qwen27b-stream-rows1-output": [
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 0,
+          "geometry": "baseline",
+          "ms": 0.318133,
+          "GBps": 131.84,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 0,
+          "geometry": "stream",
+          "ms": 0.302332,
+          "GBps": 138.73,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 1,
+          "geometry": "stream",
+          "ms": 0.307234,
+          "GBps": 136.52,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 1,
+          "geometry": "baseline",
+          "ms": 0.320855,
+          "GBps": 130.72,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 2,
+          "geometry": "baseline",
+          "ms": 0.320285,
+          "GBps": 130.96,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 2,
+          "geometry": "stream",
+          "ms": 0.301612,
+          "GBps": 139.06,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 3,
+          "geometry": "stream",
+          "ms": 0.306787,
+          "GBps": 136.72,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 5120,
+          "k": 4096,
+          "batch": 8,
+          "round": 3,
+          "geometry": "baseline",
+          "ms": 0.322338,
+          "GBps": 130.12,
+          "mismatches": 0
+        }
+      ],
+      "qwen27b-stream-rows1-query": [
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "baseline",
+          "ms": 0.565488,
+          "GBps": 222.51,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "stream",
+          "ms": 0.554228,
+          "GBps": 227.03,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "stream",
+          "ms": 0.553964,
+          "GBps": 227.14,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "baseline",
+          "ms": 0.568286,
+          "GBps": 221.42,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "baseline",
+          "ms": 0.570158,
+          "GBps": 220.69,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "stream",
+          "ms": 0.553813,
+          "GBps": 227.21,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "stream",
+          "ms": 0.554402,
+          "GBps": 226.96,
+          "mismatches": 0
+        },
+        {
+          "type": "bf16",
+          "m": 12288,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "baseline",
+          "ms": 0.568666,
+          "GBps": 221.27,
+          "mismatches": 0
+        }
+      ],
+      "qwen27b-symmetric-ordered-iq4": [
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "baseline",
+          "ms": 0.361592,
+          "GBps": 130.95,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 0,
+          "geometry": "rounded_symmetric",
+          "ms": 0.367087,
+          "GBps": 128.99,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "rounded_symmetric",
+          "ms": 0.368041,
+          "GBps": 128.65,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 1,
+          "geometry": "baseline",
+          "ms": 0.382478,
+          "GBps": 123.8,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "baseline",
+          "ms": 0.378826,
+          "GBps": 124.99,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 2,
+          "geometry": "rounded_symmetric",
+          "ms": 0.367001,
+          "GBps": 129.02,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "rounded_symmetric",
+          "ms": 0.365849,
+          "GBps": 129.42,
+          "mismatches": 0
+        },
+        {
+          "type": "iq4",
+          "m": 17408,
+          "k": 5120,
+          "batch": 8,
+          "round": 3,
+          "geometry": "baseline",
+          "ms": 0.381266,
+          "GBps": 124.19,
+          "mismatches": 0
+        }
+      ],
+      "qwen27b-symmetric-ordered-q6": [
+        {
+          "type": "q6",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "baseline",
+          "ms": 0.42805,
+          "GBps": 170.81,
+          "mismatches": 0
+        },
+        {
+          "type": "q6",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 0,
+          "geometry": "rounded_symmetric",
+          "ms": 0.439892,
+          "GBps": 166.21,
+          "mismatches": 0
+        },
+        {
+          "type": "q6",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "rounded_symmetric",
+          "ms": 0.439039,
+          "GBps": 166.53,
+          "mismatches": 0
+        },
+        {
+          "type": "q6",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 1,
+          "geometry": "baseline",
+          "ms": 0.443225,
+          "GBps": 164.96,
+          "mismatches": 0
+        },
+        {
+          "type": "q6",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "baseline",
+          "ms": 0.445294,
+          "GBps": 164.19,
+          "mismatches": 0
+        },
+        {
+          "type": "q6",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 2,
+          "geometry": "rounded_symmetric",
+          "ms": 0.440295,
+          "GBps": 166.06,
+          "mismatches": 0
+        },
+        {
+          "type": "q6",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "rounded_symmetric",
+          "ms": 0.439781,
+          "GBps": 166.25,
+          "mismatches": 0
+        },
+        {
+          "type": "q6",
+          "m": 5120,
+          "k": 17408,
+          "batch": 8,
+          "round": 3,
+          "geometry": "baseline",
+          "ms": 0.44396,
+          "GBps": 164.69,
+          "mismatches": 0
+        }
+      ]
+    }
+  },
+  "rejected": [
+    "Q8/BF16 token-slab staging: exact, but increased register pressure; Q8 remained 15 to 60% slower after occupancy constraints, BF16 neutral/slower.",
+    "Q8 non-temporal weights: exact but neutral. K-quant streaming: Q5 about 8% slower and IQ4 about 30% slower.",
+    "Paired gate/up fusion: Q8 gain only about 0.5%; BF16 loses against the retained row geometry. No fused route retained.",
+    "Removing the symmetric offset with ordinary/HIP rounding intrinsics permits contraction and changed 94795 of 139264 outputs. Only the scoped non-contracting epilogue is retained.",
+    "Streaming reused B16 K/V weights and selecting the cache hint with a runtime GPU-loop branch both regress prefill. Both are replaced by host-selected cache specializations."
+  ]
+}

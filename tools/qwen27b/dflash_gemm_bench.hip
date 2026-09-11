@@ -3,8 +3,9 @@
 // Run: /tmp/dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] [batch]
 // Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise.
 // BF16 also accepts batch=16 to compare injection with two batch-8 launches.
-// Rotating matrices keep small shapes from fitting entirely in cache. Each
-// geometry must be bit-exact with the original geometry before timing counts.
+// Decode rotates matrices to exceed cache capacity. Batch-16 context injection
+// repeats one matrix across chunks, including the production K/V cache hint.
+// Every geometry must be bit-exact with the reference before timing counts.
 #define ENGINE_ENABLE_HIP 1
 #include <algorithm>
 #include <cmath>
@@ -125,7 +126,9 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
       type == "bf16" ? rows * columns * 2
                      : rows * columns / (type == "q8" ? 32 : 256) * block_bytes;
   const std::size_t copies =
-      std::max<std::size_t>(1, (128ULL * 1024 * 1024 + bytes - 1) / bytes);
+      Batch == 16 ? 1
+                  : std::max<std::size_t>(
+                        1, (128ULL * 1024 * 1024 + bytes - 1) / bytes);
   const std::size_t physical = bytes * copies;
   Buffer<unsigned char> weights(physical);
   Buffer<float> input(batch * columns), output(batch * rows),
@@ -145,21 +148,28 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
   std::vector<Geometry> geometries;
   if (type == "bf16") {
     if constexpr (Batch == 16) {
-      geometries = {{"batch8_chunks",
-                     [&](const void* w) {
-                       for (std::size_t offset = 0; offset < Batch; offset += 8)
-                         BatchedExactBf16GEMMFp32VecKernel<16, 8, 2>
-                             <<<(rows + 31) / 32, 512>>>(
-                                 static_cast<const hip_bfloat16*>(w),
-                                 input.Get() + offset * columns,
-                                 output.Get() + offset * rows, rows, columns);
-                     }},
-                    {"batch16", [&](const void* w) {
-                       BatchedExactBf16GEMMFp32VecKernel<16, 16, 2>
-                           <<<(rows + 31) / 32, 512>>>(
-                               static_cast<const hip_bfloat16*>(w), input.Get(),
-                               output.Get(), rows, columns);
-                     }}};
+      geometries = {
+          {"batch8_chunks",
+           [&](const void* w) {
+             for (std::size_t offset = 0; offset < Batch; offset += 8)
+               BatchedExactBf16GEMMFp32VecKernel<16, 8, 2>
+                   <<<(rows + 31) / 32, 512>>>(
+                       static_cast<const hip_bfloat16*>(w),
+                       input.Get() + offset * columns,
+                       output.Get() + offset * rows, rows, columns);
+           }},
+          {"batch16", [&](const void* w) {
+             const auto launch = [&]<bool StreamWeights>() {
+               BatchedExactBf16GEMMFp32VecKernel<16, 16, 2, StreamWeights>
+                   <<<(rows + 31) / 32, 512>>>(
+                       static_cast<const hip_bfloat16*>(w), input.Get(),
+                       output.Get(), rows, columns);
+             };
+             if (rows == 1024 && columns == 5120)
+               launch.template operator()<false>();
+             else
+               launch.template operator()<true>();
+           }}};
     } else {
       geometries = {{"rows2",
                      [&](const void* w) {

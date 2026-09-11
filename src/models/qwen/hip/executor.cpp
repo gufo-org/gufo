@@ -351,19 +351,6 @@ void QwenGpuExecutor::SetPromptHiddenCapture(
                                        : std::span<const std::uint32_t>{});
 }
 
-void QwenGpuExecutor::SetVerificationPolicy(
-    QwenVerificationPolicy policy) noexcept {
-  if (policy.bf16_from_layer < 0 ||
-      policy.bf16_from_layer > static_cast<int>(weights_.config.num_layers)) {
-    policy.bf16_from_layer = -1;
-  }
-  if (policy.fp32_from_layer < 0 ||
-      policy.fp32_from_layer > static_cast<int>(weights_.config.num_layers)) {
-    policy.fp32_from_layer = -1;
-  }
-  verification_policy_ = policy;
-}
-
 std::span<const float> QwenGpuExecutor::CopyLastHidden() {
   const std::size_t hidden_size = weights_.config.hidden_size;
   const std::size_t target_layer_count = arena_.GetTargetLayerCapture().size();

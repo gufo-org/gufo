@@ -16,7 +16,7 @@ namespace gufo::hip {
 // the same order at every batch width; tile geometry never changes arithmetic.
 // Float4-aligned LDS rows amortize activation loads across output rows.
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
-         std::size_t RowsPerWave>
+         std::size_t RowsPerWave, bool StreamWeights = true>
 __launch_bounds__(WavesPerBlock * 32, 1) __global__
     void BatchedExactBf16GEMMFp32VecKernel(const hip_bfloat16* __restrict__ A,
                                            const float* __restrict__ X,
@@ -62,7 +62,19 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
       for (std::size_t r = 0; r < RowsPerWave; ++r) {
         const std::size_t row = row_base + r;
         const std::size_t safe_row = row < M ? row : M - 1;
-        packed[r] = reinterpret_cast<const uint4*>(A + (safe_row * K))[vector];
+        // Select the cache hint at dispatch: a runtime branch here makes
+        // the large feature projection slower, even when it is uniform.
+        if constexpr (!StreamWeights) {
+          packed[r] =
+              reinterpret_cast<const uint4*>(A + (safe_row * K))[vector];
+        } else {
+          typedef std::uint32_t PackedWeights
+              __attribute__((ext_vector_type(4), may_alias));
+          const auto words = __builtin_nontemporal_load(
+              reinterpret_cast<const PackedWeights*>(A + (safe_row * K)) +
+              vector);
+          packed[r] = {words[0], words[1], words[2], words[3]};
+        }
       }
 #pragma unroll
       for (std::size_t token = 0; token < Batch; ++token) {
@@ -267,10 +279,12 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
       Batch == 8 && WType == core::GgmlType::kQ5_K && TilesPerStage == 1;
   constexpr std::size_t kStride = kSubElems + (kCompact ? 0 : 4);
   constexpr std::size_t kTileStride = kSubsPerTile * kStride;
+  constexpr bool kHasOffset =
+      WType == core::GgmlType::kQ4_K || WType == core::GgmlType::kQ5_K;
   __shared__ float staged_x[Batch * kTileStride];
-  // Every output row uses the same activation sum for each token/sub-block.
+  // Affine formats use the same activation sum for every output row.
   // Compute it once during staging, in the decode GEMV's left-to-right order.
-  __shared__ float staged_sums[Batch * kSubsPerTile];
+  __shared__ float staged_sums[kHasOffset ? Batch * kSubsPerTile : 1];
 
   const std::size_t lane = threadIdx.x & 31u;
   const std::size_t warp_id = threadIdx.x >> 5u;
@@ -303,13 +317,17 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
         const std::size_t group =
             kCompact ? vector ^ ((sub >> 1U) & 3U) : vector;
         *reinterpret_cast<float4*>(dst + (group * 4)) = value;
-        // Left to right, term by term, matching the GEMV's scalar loop.
-        total += value.x;
-        total += value.y;
-        total += value.z;
-        total += value.w;
+        if constexpr (kHasOffset) {
+          // Left to right, term by term, matching the GEMV's scalar loop.
+          total += value.x;
+          total += value.y;
+          total += value.z;
+          total += value.w;
+        }
       }
-      staged_sums[(token * kSubsPerTile) + sub] = total;
+      if constexpr (kHasOffset) {
+        staged_sums[(token * kSubsPerTile) + sub] = total;
+      }
     }
     __syncthreads();
 
@@ -351,17 +369,18 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
         for (std::size_t r = 0; r < RowsPerWave; ++r) {
 #pragma unroll
           for (std::size_t token = 0; token < Batch; ++token) {
-            // The subtraction stays even for the symmetric formats, where
-            // `offset` is zero. Dropping it lets the compiler contract
-            // `sums += scale * dot` into a single-rounding FMA, while the
-            // decode GEMV rounds the product and the sum separately -- which
-            // broke bit-exactness for all five symmetric formats (33 of 64 rows
-            // differed). Exactness is the contract here; the saved adds are not
-            // worth it.
-            //
-            sums[r][token] += (decoded[r].scale * dots[r][token]) -
-                              (decoded[r].offset *
-                               staged_sums[(token * kSubsPerTile) + slot]);
+            if constexpr (kHasOffset) {
+              sums[r][token] += (decoded[r].scale * dots[r][token]) -
+                                (decoded[r].offset *
+                                 staged_sums[(token * kSubsPerTile) + slot]);
+            } else {
+              // Decode rounds the scaled dot before accumulating it. Keep
+              // contraction disabled only here; the dot above still uses its
+              // original FMAs. Symmetric formats need no activation sums.
+#pragma clang fp contract(off)
+              const float contribution = decoded[r].scale * dots[r][token];
+              sums[r][token] += contribution;
+            }
           }
         }
       }

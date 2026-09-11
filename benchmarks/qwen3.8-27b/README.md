@@ -23,7 +23,7 @@ Reference sweep at `023a13a`; full refresh: TODO.
 
 ## Single user, speculative
 
-Current qualified prefill / generation in tok/s; fixed blocks of seven
+Last pp2048/tg128 qualification (`26d0dc7`), in tok/s; fixed blocks of seven
 proposed tokens. One timed repetition after warmup. Every measured pairing
 matches all 128 AR token IDs. MTP performance: **TODO**.
 
@@ -76,14 +76,14 @@ All three drafts pass the pinned upstream operator comparison. Precision
 selection remains open because acceptance depends on the target and prompt.
 Controller comparisons follow kernel optimization.
 
-The latest pass saves **50.5 MiB per speculative session** with compact
-rollback, fuses draft normalization/RoPE and speeds up Q4 convolution
-projections. Final profiles reduce copy time by 19%, draft QK/RoPE by
-17–20%, and those Q4 projections by 7%; total generation changes remain small.
-Q5/IQ4 prefill fusion and Q8 token grouping were slower or inconsistent in
-model tests and are removed. Cache addressing now preserves exact logits across
-mixed session capacities and at a 262,144-token logical context.
-[Measurements, quality checks and rejected experiments](eval/dflash2-rollback.json).
+Exact projections now stream large BF16 weights, cache reused injection K/V
+weights, and skip symmetric-quant offset work while preserving decode rounding.
+Unused verification precision settings are removed. All three drafts retain
+their qualified trace bytes. Short paired C1 chat controls (128 tokens, Q4 draft)
+gain about **0.4% on Q4 and 0.3% on Q8**; pp2048 remains within observed run variation.
+[Measurements and rejected experiments](eval/dflash2-exact-gemm.json).
+The earlier [rollback pass](eval/dflash2-rollback.json) saves **50.5 MiB per session**
+and fixes cache addressing across mixed capacities and at logical context 262,144.
 
 ## Reproduce
 

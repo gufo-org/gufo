@@ -208,11 +208,6 @@ SpeculativeVerifier::SpeculativeVerifier(
       options_(options),
       current_draft_length_(options_.initial_draft_tokens),
       use_batched_verification_(options_.use_batched_verification) {
-  target_executor.SetVerificationPolicy({
-      .batched_lm_head = options_.use_batched_lm_head,
-      .bf16_from_layer = options_.target_bf16_from_layer,
-      .fp32_from_layer = options_.target_fp32_from_layer,
-  });
   ConfigureAdaptiveDraftPolicy();
 }
 

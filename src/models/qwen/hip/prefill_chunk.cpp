@@ -56,13 +56,6 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       scratch.decode.prompt_tokens.data(), scratch.decode.hidden.data(),
       batch_size, hidden_size, arena_.stream);
 
-  const int bf16_small_batch_start_layer =
-      verification_chunk_active_ ? verification_policy_.bf16_from_layer : -1;
-  const int fp32_small_batch_start_layer =
-      verification_chunk_active_ ? verification_policy_.fp32_from_layer : -1;
-  bool use_bf16_small_batch_quant = false;
-  bool use_fp32_small_batch_quant = false;
-
   // Execute the pure Qwen route decision while keeping hipBLASLt failure as a
   // runtime fallback to hipBLAS, not as resolver state.
   const auto gemm_weight = [&](const models::QwenTensorRef& w,
@@ -97,14 +90,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                           arena_.stream);
         return;
       case models::qwen::QwenGemmRoute::kHipPrefillQuantDirect: {
-        if (use_fp32_small_batch_quant) {
-          LaunchBatchedQuantGEMMFp32(w.type, w.data, fp32_input, output,
-                                     batch_size, m, k, arena_.stream);
-        } else if (use_bf16_small_batch_quant) {
-          LaunchBatchedQuantGEMMBf16(w.type, w.data, bf16_input, output,
-                                     batch_size, m, k, arena_.stream);
-        } else if (w.type == core::GgmlType::kQ8_0 ||
-                   detail::IsNativeWmmaQuant(w.type)) {
+        if (w.type == core::GgmlType::kQ8_0 ||
+            detail::IsNativeWmmaQuant(w.type)) {
           // Route Q8_0 and every K-quant/IQ format the UD-Q4_K_XL shard uses
           // through the native W-quant x A8 WMMA matrix-core kernel with zero
           // scratch dequantization. Without the second half of this condition
@@ -143,16 +130,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     }
   };
 
-  // 3. Layer stack across all 32 layers
+  // 3. Layer stack
   for (std::uint32_t l = 0; l < config.num_layers; ++l) {
-    use_bf16_small_batch_quant =
-        (bf16_small_batch_start_layer >= 0 &&
-         l >= static_cast<std::uint32_t>(bf16_small_batch_start_layer));
-    use_fp32_small_batch_quant =
-        (fp32_small_batch_start_layer >= 0 &&
-         l >= static_cast<std::uint32_t>(fp32_small_batch_start_layer));
-    const bool use_precise_small_batch_quant =
-        use_fp32_small_batch_quant || use_bf16_small_batch_quant;
     const auto& layer = weights_.layers[l];
     const auto route_resolution = ResolveQwenLayerRouteWithReasons(
         policy_, QwenExecutionMode::kPrefill, layer.is_full_attention);
@@ -177,7 +156,6 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // FP32 normed row and the BF16 staging copy are both dead, so the norm can
     // write the tiled Q8_1 activation directly and skip two round trips.
     const bool norm_feeds_q8_only =
-        !use_precise_small_batch_quant &&
         IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
         (layer.is_full_attention
              ? (is_q8(layer.attn_q) && is_q8(layer.attn_k) &&
@@ -189,7 +167,6 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // activation, and the flags are exactly the condition that every consumer
     // is Q8_0, so no route can reach them.
     const bool ffn_feeds_q8_only =
-        !use_precise_small_batch_quant &&
         IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
         is_q8(layer.ffn_gate) && is_q8(layer.ffn_up);
 
@@ -210,7 +187,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // The quantized activation is read only by Q8_0 projections; when q/k/v
       // are all BF16 (as in the Q8_K_XL artifact) nothing consumes it, and when
       // they are all Q8_0 the fused norm already wrote it.
-      if (!use_precise_small_batch_quant && !norm_feeds_q8_only &&
+      if (!norm_feeds_q8_only &&
           (reads_q8_act(layer.attn_q) || reads_q8_act(layer.attn_k) ||
            reads_q8_act(layer.attn_v))) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
@@ -390,14 +367,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // at batch 2048) and keeps the activation's full precision going into the
       // Q8_1 codes instead of rounding to BF16 first.
       if (reads_q8_act(layer.attn_output)) {
-        if (use_bf16_small_batch_quant) {
-          LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
-                                batch_size * attention_size, arena_.stream);
-        } else if (!use_fp32_small_batch_quant) {
-          LaunchQuantizeActivationQ8_1FromFp32(
-              arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
-              attention_size, arena_.stream);
-        }
+        LaunchQuantizeActivationQ8_1FromFp32(
+            arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
+            attention_size, arena_.stream);
       } else {
         LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
                               batch_size * attention_size, arena_.stream);
@@ -409,7 +381,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                   arena_.d_attn_out, hidden_size, attention_size,
                   arena_.d_scratch_q8_act);
     } else {
-      if (!use_precise_small_batch_quant && !norm_feeds_q8_only) {
+      if (!norm_feeds_q8_only) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
@@ -446,8 +418,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // opt-c174-ssm-epilogue-quant: the gated SSM row feeds only the Q8_0
       // ssm_out projection, so the epilogue can emit the quantized activation
       // and skip the FP32 round trip.
-      const bool ssm_epilogue_q8 = !use_precise_small_batch_quant &&
-                                   reads_q8_act(layer.ssm_out) &&
+      const bool ssm_epilogue_q8 = reads_q8_act(layer.ssm_out) &&
                                    IsFusedSSMEpilogueQuantizeQ8_1Supported(
                                        config.SsmValueSize(), ssm_inner_size);
       const bool ssm_row_split = detail::ShouldUseSsmRowSplitRecurrence(
@@ -486,14 +457,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       if (ssm_row_split && ssm_epilogue_q8) {
         // The recurrence epilogue already wrote the quantized activation.
       } else if (reads_q8_act(layer.ssm_out)) {
-        if (use_bf16_small_batch_quant) {
-          LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
-                                batch_size * ssm_inner_size, arena_.stream);
-        } else if (!use_fp32_small_batch_quant) {
-          LaunchQuantizeActivationQ8_1FromFp32(
-              arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
-              ssm_inner_size, arena_.stream);
-        }
+        LaunchQuantizeActivationQ8_1FromFp32(
+            arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
+            ssm_inner_size, arena_.stream);
       } else {
         LaunchFloatToBfloat16(arena_.d_ssm_out, arena_.d_scratch_bf16,
                               batch_size * ssm_inner_size, arena_.stream);
@@ -531,7 +497,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     const void* ffn_down_q8_act = arena_.d_scratch_q8_act;
 
     {
-      if (!use_precise_small_batch_quant && !ffn_feeds_q8_only) {
+      if (!ffn_feeds_q8_only) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
@@ -545,8 +511,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // and avoids writing the [batch, k] activation the same kernel is
       // reading.
       const bool fused_dual_swiglu =
-          !use_precise_small_batch_quant && reads_q8_act(layer.ffn_gate) &&
-          reads_q8_act(layer.ffn_up) &&
+          reads_q8_act(layer.ffn_gate) && reads_q8_act(layer.ffn_up) &&
           layer.ffn_gate.type == layer.ffn_up.type &&
           reads_q8_act(layer.ffn_down) &&
           IsFusedSwiGluGemmEpilogueSupported(
@@ -558,8 +523,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             arena_.d_scratch_q8_act, arena_.d_ffn_gate, arena_.d_ffn_up,
             batch_size, intermediate_size, hidden_size, arena_.stream);
         ffn_down_q8_act = arena_.d_ffn_up;
-      } else if (!use_precise_small_batch_quant &&
-                 reads_q8_act(layer.ffn_gate) && reads_q8_act(layer.ffn_up) &&
+      } else if (reads_q8_act(layer.ffn_gate) && reads_q8_act(layer.ffn_up) &&
                  layer.ffn_gate.type == layer.ffn_up.type) {
         LaunchBatchedDualQuantGEMMPreQuantized(
             layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
@@ -583,8 +547,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // unfused chain.
       if (fused_dual_swiglu) {
         // The up projection's epilogue already wrote the quantized activation.
-      } else if (!use_precise_small_batch_quant &&
-                 reads_q8_act(layer.ffn_down)) {
+      } else if (reads_q8_act(layer.ffn_down)) {
         LaunchBatchedFusedSwiGLUQuantizeQ8_1(
             arena_.d_ffn_gate, arena_.d_ffn_up, arena_.d_scratch_q8_act,
             batch_size, intermediate_size, arena_.stream);
@@ -593,11 +556,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                       arena_.d_ffn_act, arena_.d_scratch_bf16,
                                       batch_size * intermediate_size,
                                       arena_.stream);
-        if (!use_precise_small_batch_quant) {
-          LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
-                                       arena_.d_scratch_q8_act, batch_size,
-                                       intermediate_size, arena_.stream);
-        }
+        LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
+                                     arena_.d_scratch_q8_act, batch_size,
+                                     intermediate_size, arena_.stream);
       }
     }
 

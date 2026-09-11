@@ -174,12 +174,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
         << "draft_batched_verification="
         << (speculative_options.use_batched_verification ? "true" : "false")
         << '\n'
-        << "draft_batched_lm_head="
-        << (speculative_options.use_batched_lm_head ? "true" : "false") << '\n'
-        << "draft_target_bf16_from_layer="
-        << speculative_options.target_bf16_from_layer << '\n'
-        << "draft_target_fp32_from_layer="
-        << speculative_options.target_fp32_from_layer << '\n';
+        << "draft_target_verification=decode-equivalent-v1\n";
   }
   const std::string canonical = identity.str();
   return {canonical.begin(), canonical.end()};
@@ -2516,9 +2511,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
       speculative_options.initial_draft_tokens =
           speculative_config.max_draft_tokens;
       speculative_options.use_batched_verification = true;
-      speculative_options.use_batched_lm_head = true;
       speculative_options.retain_frontier_logits = true;
-      speculative_options.target_bf16_from_layer = 48;
       speculative_options.enable_adaptive_draft_length = false;
     }
 

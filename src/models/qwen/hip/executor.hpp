@@ -39,12 +39,6 @@ struct QwenGpuBatchItem {
   std::uint32_t position{0};
 };
 
-struct QwenVerificationPolicy {
-  bool batched_lm_head{false};
-  int bf16_from_layer{-1};
-  int fp32_from_layer{-1};
-};
-
 struct QwenSampledVerificationResult {
   tokenization::TokenId token{0};
   bool accepted{false};
@@ -476,8 +470,6 @@ public:
   /// Copies the final-layer hidden state from the most recent forward pass.
   [[nodiscard]] std::span<const float> CopyLastHidden();
 
-  void SetVerificationPolicy(QwenVerificationPolicy policy) noexcept;
-
   [[nodiscard]] std::uint32_t GetMaxPromptBatch() const noexcept {
     return arena_.GetMaxBatch();
   }
@@ -537,10 +529,8 @@ private:
   GpuSamplingWorkspace sampling_workspace_;
   std::vector<std::uint32_t> h_penalty_tokens_;
   std::vector<std::uint32_t> h_penalty_counts_;
-  QwenVerificationPolicy verification_policy_;
   std::optional<tokenization::TokenId> next_token_;
   bool capture_prompt_hidden_{false};
-  bool verification_chunk_active_{false};
   bool replaying_ssm_state_{false};
 };
 

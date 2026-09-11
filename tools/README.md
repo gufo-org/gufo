@@ -151,6 +151,8 @@ matrix geometries using the production templates; build it with `tools/bench/bui
 Its optional final batch argument selects seven proposal rows, eight
 verification rows or sixteen BF16 injection rows, for example
 `q6 248320 5120 24 8` or `bf16 5120 25600 24 16`.
+Injection repeats one weight matrix and uses the production cache hint
+(`bf16 1024 5120 24 16` covers K/V); decoding rotates at least 128 MiB of weights.
 `qwen27b/deltanet_bench.hip` checks exact recurrence and state-only replay
 while rotating the 144 MiB target state; `qwen27b/prefill_deltanet_bench.hip`
 contains the separate prefill ablations. Both use the same fast Nix builder.

@@ -1393,8 +1393,6 @@ int RunBench(std::span<const char* const> args) {
     options.initial_draft_tokens = opt.draft_tokens;
     options.enable_adaptive_draft_length = false;
     options.use_batched_verification = true;
-    options.use_batched_lm_head = true;
-    options.target_bf16_from_layer = 48;
     dflash_verifier = std::make_unique<speculative::SpeculativeVerifier>(
         *gpu_exec, std::move(draft), options);
   }
@@ -1656,9 +1654,6 @@ int RunBench(std::span<const char* const> args) {
           if (opt.speculative_backend == "mtp" ||
               opt.speculative_backend == "mtp-npu") {
             s_opts.use_batched_verification = true;
-            s_opts.use_batched_lm_head = true;
-            s_opts.target_bf16_from_layer = 0;
-            s_opts.target_fp32_from_layer = 63;
           }
           owned_spec_verifier =
               std::make_unique<speculative::SpeculativeVerifier>(

@@ -594,14 +594,9 @@ std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
       opt.speculative_backend == "dflash2" ||
       opt.speculative_backend == "dflash-2") {
     s_opts.use_batched_verification = true;
-    s_opts.use_batched_lm_head = true;
-    s_opts.target_bf16_from_layer = 48;
   } else if (opt.speculative_backend == "mtp" ||
              opt.speculative_backend == "mtp-npu") {
     s_opts.use_batched_verification = true;
-    s_opts.use_batched_lm_head = true;
-    s_opts.target_bf16_from_layer = 0;
-    s_opts.target_fp32_from_layer = 63;
   }
   return std::make_unique<speculative::SpeculativeVerifier>(
       executor, std::move(draft_backend), s_opts);

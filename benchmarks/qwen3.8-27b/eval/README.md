@@ -90,6 +90,11 @@ Compare token IDs and full logits, not just decoded text or acceptance.
 Benchmarks retain independent target/draft prefix snapshots, separate from
 verification rollback. Repeated cached-depth TG must reproduce AR token hashes;
 DFlash2 prefill-only invocations must load and initialize the companion.
+Check both streamed decode weights and reused context-injection weights:
+cache hints can reverse their relative performance. Symmetric quantized
+projections must round the scaled dot before adding it, matching scalar decode;
+the existing exact GEMM checks guard this against compiler FMA contraction.
+Verification and its persistent-cache identity use that decode-equivalent contract.
 
 Use `tools/qwen27b/drafts.py` for matched companion comparisons; optional
 `--draft-bf16` includes BF16. `--baseline-binary` interleaves release A/B runs
@@ -203,6 +208,7 @@ Gains from different workloads must not be added together.
 | [Projection follow-up](dflash2-projections.json) | Compact Q5 staging, two-tile IQ4 projection and BF16 grouping; Q4 +1.4–2.1%, Q8 within noise. |
 | [Attention](dflash2-attention.json) | Exact batched attention/QK/cache writes and narrow SSM projections; C1 chat +3.2–3.5%. |
 | [Rollback and cache addressing](dflash2-rollback.json) | Compact rollback, fused draft normalization/RoPE and Q4 convolution projections; fixes mixed-capacity and 32-bit cache offsets. |
+| [Exact projections](dflash2-exact-gemm.json) | BF16 streaming with cached K/V injection; symmetric projections omit offset scratch while retaining scalar rounding; dead verification settings removed. |
 
 Rollback snapshots omit unused attention-layer rows: **202 → 151.5 MiB**
 per speculative session, preserving every live state byte. Existing operator

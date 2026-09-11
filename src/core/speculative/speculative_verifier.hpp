@@ -28,10 +28,7 @@ struct SpeculativeOptions {
   float target_acceptance_rate{0.70F};
   bool enable_adaptive_draft_length{true};
   bool use_batched_verification{false};
-  bool use_batched_lm_head{false};
   bool retain_frontier_logits{false};
-  int target_bf16_from_layer{-1};
-  int target_fp32_from_layer{-1};
 };
 
 struct SpeculativeStats {

@@ -105,6 +105,14 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
   const unsigned int vec_blocks =
       static_cast<unsigned int>((M + kVecRowsPerBlock - 1) / kVecRowsPerBlock);
   const auto* a_vec = static_cast<const hip_bfloat16*>(A);
+  // Injection reuses each 10 MiB K/V matrix across sixteen-row chunks.
+  // Keep it cached; the much larger feature projection and decode weights
+  // use streaming loads. Specialize the hint to keep it out of the GPU loop.
+  if (batch_size == 16 && M == 1024 && K == 5120) {
+    BatchedExactBf16GEMMFp32VecKernel<kVecWaves, 16, kVecRowsPerWave, false>
+        <<<vec_blocks, kVecWaves * 32, 0, stream>>>(a_vec, X, Y, M, K);
+    return;
+  }
   // One row per wave wins on DFlash2's attention output/FFN and the target's
   // large BF16 query projection; each preserves the same accumulation order.
   if (batch_size == 8 &&
