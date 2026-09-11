@@ -143,8 +143,10 @@ minutes and choked imatrix; this is ~20x faster and scales memory-bounded.)
 
 `qwen27b/check.py` owns the focused checks (`fast`, `kernels`, `model`, `serving`).
 Its optional `reference` suite compares target logits with an explicitly
-provided BF16 artifact. `qwen27b/drafts.py` compares production Q4/Q8 DFlash2
-companions, optionally includes a BF16 reference, and refuses incomplete or
-mismatching results. `qwen27b/dflash_reference.py` checks a GPU trace against
+provided BF16 artifact. `qwen27b/drafts.py` compares Q4/Q8/BF16 DFlash2 companions and refuses
+incomplete or mismatching results. `--baseline-binary` interleaves two releases
+and also requires identical autoregressive token traces between them.
+`qwen27b/dflash_gemm_bench.hip` measures exact matrix-kernel geometries using
+the production templates; build it with `tools/bench/build.sh` inside Nix. `qwen27b/dflash_reference.py` checks a GPU trace against
 pinned upstream PyTorch operators using the same GGUF weights. See
 `benchmarks/qwen3.8-27b/README.md` and its quality report for commands and evidence.

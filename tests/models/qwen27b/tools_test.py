@@ -53,6 +53,20 @@ class QualificationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             drafts.qualified(self.report)
 
+    def test_release_comparison_uses_token_count_and_digest(self):
+        report = {"cases": [{"id": "one", "reference": {
+            "tokens": 128, "token_sha256": "a" * 64}}]}
+        original = drafts.reference_tokens(report)
+        self.assertEqual(original, {"one": (128, "a" * 64)})
+        for field, value in (("tokens", 127), ("token_sha256", "b" * 64)):
+            changed = copy.deepcopy(report)
+            changed["cases"][0]["reference"][field] = value
+            with self.subTest(field=field):
+                self.assertNotEqual(original, drafts.reference_tokens(changed))
+        report["cases"][0]["reference"]["token_sha256"] = ""
+        with self.assertRaises(ValueError):
+            drafts.reference_tokens(report)
+
 
 if __name__ == "__main__":
     unittest.main()

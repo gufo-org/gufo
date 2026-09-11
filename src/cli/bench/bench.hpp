@@ -13,7 +13,7 @@ namespace gufo::cli {
 
 struct BenchOptions {
   std::string model_path{"models/Qwen3.5-4B-BF16.gguf"};
-  std::vector<std::size_t> n_prompts{64, 128, 512};
+  std::vector<std::size_t> n_prompts{2048};
   std::vector<std::size_t> n_gens{128};
   std::vector<std::size_t> n_depths{0};
   std::vector<std::size_t> concurrency{1};

@@ -11,8 +11,8 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
+#include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
-#include "src/models/qwen/hip/quant_ops.hpp"
 
 namespace gufo::hip {
 
@@ -1498,143 +1498,6 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 }
 
-// opt-c18x-q8-vec-smallbatch: exact Q8_0 GEMM for widths 2..8, staging the
-// whole activation batch in LDS.
-//
-// Two layout choices carry this kernel, and the version it replaced got both
-// wrong. Its activation stride was 33 floats, which is not 16-byte aligned, so
-// each group of four activations cost four `ds_read_b32`; and with one output
-// row per warp those reads were amortized over only 34 bytes of weight. That
-// made the kernel LDS-instruction bound rather than DRAM bound, and it read
-// 134 GB/s at width 8 against 228 GB/s at width 2. Padding the stride to 36
-// floats makes every group one `ds_read_b128`, and two output rows per warp
-// halves the reads per weight byte again: width 8 reaches 220 GB/s on the FFN
-// shapes, the same bandwidth as width 2 and as batch-1 decode. See
-// tools/bench/q8_small_batch_gemm_bench.hip.
-//
-// The accumulation order for a given (row, token) does not depend on the batch
-// width -- blocks in lane, lane+32, ... order, groups ascending, four products
-// per group in ascending element order -- so every width is bit-exact with the
-// decode GEMV, which is what speculative verification requires.
-template<std::uint32_t WavesPerBlock, std::size_t Batch,
-         std::size_t RowsPerWave>
-__launch_bounds__(WavesPerBlock * 32, 1) __global__
-    void SmallBatchQ8_0ExactFp32VecGEMMKernel(const void* __restrict__ w,
-                                              const float* __restrict__ x,
-                                              float* __restrict__ y,
-                                              std::size_t m, std::size_t k) {
-  constexpr std::size_t kBlocksPerTile = 32;
-  constexpr std::size_t kVectorsPerBlock = kQ8_0BlockSize / 4;
-  constexpr std::size_t kStride = kQ8_0BlockSize + 4;
-  constexpr std::size_t kTileStride = kBlocksPerTile * kStride;
-  __shared__ float staged_x[Batch * kTileStride];
-
-  const std::size_t lane = threadIdx.x & 31u;
-  const std::size_t warp_id = threadIdx.x >> 5u;
-  const std::size_t row_base =
-      ((blockIdx.x * WavesPerBlock) + warp_id) * RowsPerWave;
-  const std::size_t num_blocks = k / kQ8_0BlockSize;
-  const auto* base = static_cast<const Q8_0Block*>(w);
-  float sums[RowsPerWave][Batch] = {};
-
-  for (std::size_t tile_base = 0; tile_base < num_blocks;
-       tile_base += kBlocksPerTile) {
-    constexpr std::size_t kTileVectors =
-        Batch * kBlocksPerTile * kVectorsPerBlock;
-    for (std::size_t flat = threadIdx.x; flat < kTileVectors;
-         flat += blockDim.x) {
-      const std::size_t token = flat / (kBlocksPerTile * kVectorsPerBlock);
-      const std::size_t within = flat % (kBlocksPerTile * kVectorsPerBlock);
-      const std::size_t block = within / kVectorsPerBlock;
-      const std::size_t vector = within % kVectorsPerBlock;
-      const std::size_t source_block = tile_base + block;
-      float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
-      if (source_block < num_blocks) {
-        value = *reinterpret_cast<const float4*>(
-            x + (token * k) + (source_block * kQ8_0BlockSize) + (vector * 4));
-      }
-      *reinterpret_cast<float4*>(staged_x + (token * kTileStride) +
-                                 (block * kStride) + (vector * 4)) = value;
-    }
-    __syncthreads();
-
-    const std::size_t block = tile_base + lane;
-    if (block < num_blocks) {
-      const Q8_0Block* rows[RowsPerWave];
-      float scale[RowsPerWave];
-#pragma unroll
-      for (std::size_t r = 0; r < RowsPerWave; ++r) {
-        const std::size_t row = row_base + r;
-        const std::size_t safe_row = row < m ? row : m - 1;
-        rows[r] = &base[(safe_row * num_blocks) + block];
-        scale[r] = __half2float(rows[r]->d);
-      }
-      float block_dots[RowsPerWave][Batch] = {};
-#pragma unroll
-      for (std::size_t group = 0; group < kVectorsPerBlock; ++group) {
-        std::uint32_t packed[RowsPerWave];
-#pragma unroll
-        for (std::size_t r = 0; r < RowsPerWave; ++r) {
-          __builtin_memcpy(&packed[r], rows[r]->qs + (group * 4),
-                           sizeof(std::uint32_t));
-        }
-#pragma unroll
-        for (std::size_t token = 0; token < Batch; ++token) {
-          const float4 xv = *reinterpret_cast<const float4*>(
-              staged_x + (token * kTileStride) + (lane * kStride) +
-              (group * 4));
-#pragma unroll
-          for (std::size_t r = 0; r < RowsPerWave; ++r) {
-            const std::uint32_t p = packed[r];
-            block_dots[r][token] +=
-                static_cast<float>(static_cast<std::int8_t>(p & 0xFFU)) * xv.x;
-            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
-                                        (p >> 8U) & 0xFFU)) *
-                                    xv.y;
-            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
-                                        (p >> 16U) & 0xFFU)) *
-                                    xv.z;
-            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
-                                        (p >> 24U) & 0xFFU)) *
-                                    xv.w;
-          }
-        }
-      }
-#pragma unroll
-      for (std::size_t r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-        for (std::size_t token = 0; token < Batch; ++token) {
-          sums[r][token] += scale[r] * block_dots[r][token];
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-#pragma unroll
-  for (std::size_t r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-    for (std::size_t token = 0; token < Batch; ++token) {
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        sums[r][token] += __shfl_xor(sums[r][token], offset);
-      }
-    }
-  }
-  if (lane == 0) {
-#pragma unroll
-    for (std::size_t r = 0; r < RowsPerWave; ++r) {
-      const std::size_t row = row_base + r;
-      if (row >= m) {
-        continue;
-      }
-#pragma unroll
-      for (std::size_t token = 0; token < Batch; ++token) {
-        y[(token * m) + row] = sums[r][token];
-      }
-    }
-  }
-}
-
 template<std::uint32_t WavesPerBlock, std::size_t TokensPerWave>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
     void SmallBatchQ8KFp32GEMMKernel(const void* __restrict__ w,
@@ -1813,179 +1676,6 @@ std::size_t QuantizedActivationBytes(std::size_t batch, std::size_t k) {
   return Q8ActTiledBytes(batch, k) + Q8ActSumBytes(batch, k);
 }
 
-// opt-q4kxl: exact small-batch K-quant GEMM for speculative verification.
-//
-// Without this, every K-quant projection at draft width fell through to
-// BatchedQuantGEMVKernel, whose grid carries the batch on the y axis and so
-// re-reads the entire weight matrix once per token. At the Q4_K_XL shard's
-// 17.5 GB that is catastrophic: tg128-dflash2 measured 1.32 t/s against 11.6
-// unspeculated.
-//
-// The shape is the one opt-c18x-q8-vec-smallbatch arrived at for Q8_0, for the
-// same reasons. A tile of 32 sub-blocks (one per lane) of the activation batch
-// is staged in LDS so the batch is read from global once per block rather than
-// once per warp; the staging stride is padded from 16 to 20 floats so every
-// group of four activations is one 16-byte `ds_read_b128` instead of four
-// 32-bit reads; and each warp owns two output rows so those LDS reads are
-// amortized over twice the weight bytes.
-//
-// Lane `l` owns sub-block `tile_base + l`, walking tiles in ascending order,
-// which is exactly the `sb = lane_id, lane_id + 32, ...` sequence
-// QuantWarpBlockDot uses. Within a sub-block the products and the activation
-// sum are accumulated strictly left to right, matching the GEMV's scalar loop
-// term for term. The per-(row, token) accumulation order therefore does not
-// depend on the batch width, and the kernel is bit-exact with the single-token
-// decode GEMV -- which is what speculative verification requires, since a
-// drafted token is accepted only if the verifier reproduces exactly what the
-// unspeculated decode would have emitted.
-//
-// Weight type is a template parameter for the same reason it is in the blocked
-// WMMA kernel: DecodeQuantSub16 is a switch over every supported format, and a
-// runtime type puts all eight decode bodies in the instruction stream and makes
-// the allocator size for the worst one. The activation sum is accumulated for
-// every format even though only Q4_K and Q5_K consume it: see the note in the
-// epilogue on why specializing it away breaks bit-exactness.
-//
-// The occupancy hint is load bearing, and note that it points the OPPOSITE way
-// from the blocked WMMA kernel above. Left unhinted this kernel settles at
-// 128-176 VGPRs against its Q8_0 counterpart's 80-104; asking for ten wave32s
-// per SIMD brings it to ~100 with no scratch and measured tg128-dflash2
-// 17.2 -> 18.2. The two kernels differ because this one streams weights at
-// draft width and is memory-latency bound, where more waves in flight is the
-// whole game, while the blocked GEMM is latency bound inside its own
-// dependency chain and lost 11% when the same kind of hint was applied to it.
-template<std::uint32_t WavesPerBlock, std::size_t Batch,
-         std::size_t RowsPerWave, core::GgmlType WType>
-__launch_bounds__(WavesPerBlock * 32, 12) __global__
-    void SmallBatchKQuantExactFp32GEMMKernel(const void* __restrict__ w,
-                                             const float* __restrict__ x,
-                                             float* __restrict__ y,
-                                             std::size_t m, std::size_t k) {
-  constexpr std::size_t kSubElems = 16;
-  constexpr std::size_t kSubsPerTile = 32;
-  constexpr std::size_t kVectorsPerSub = kSubElems / 4;
-  constexpr std::size_t kStride = kSubElems + 4;
-  constexpr std::size_t kTileStride = kSubsPerTile * kStride;
-  __shared__ float staged_x[Batch * kTileStride];
-  // Per-(token, sub-block) activation sums, which only Q4_K and Q5_K consume
-  // but every warp in the block used to recompute identically: all eight warps
-  // walk the same sub-blocks and differ only in which rows they own, so the sum
-  // was being derived eight times over. Computing it once during staging, in
-  // the same left-to-right order, keeps it bit-exact and removes a third of the
-  // inner loop's arithmetic.
-  __shared__ float staged_sums[Batch * kSubsPerTile];
-
-  const std::size_t lane = threadIdx.x & 31u;
-  const std::size_t warp_id = threadIdx.x >> 5u;
-  const std::size_t row_base =
-      ((blockIdx.x * WavesPerBlock) + warp_id) * RowsPerWave;
-  const std::size_t num_sub = k / kSubElems;
-  const std::size_t row_bytes = QuantRowBytes(WType, k);
-  float sums[RowsPerWave][Batch] = {};
-
-  for (std::size_t tile_base = 0; tile_base < num_sub;
-       tile_base += kSubsPerTile) {
-    const std::size_t sub = tile_base + lane;
-    // One thread stages a whole (token, sub-block) so it can accumulate that
-    // sub-block's activation sum sequentially while it has the values.
-    for (std::size_t flat = threadIdx.x; flat < Batch * kSubsPerTile;
-         flat += blockDim.x) {
-      const std::size_t token = flat / kSubsPerTile;
-      const std::size_t sub = flat % kSubsPerTile;
-      const std::size_t source_sub = tile_base + sub;
-      float* dst = staged_x + (token * kTileStride) + (sub * kStride);
-      float total = 0.0F;
-#pragma unroll
-      for (std::size_t vector = 0; vector < kVectorsPerSub; ++vector) {
-        float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
-        if (source_sub < num_sub) {
-          value = *reinterpret_cast<const float4*>(
-              x + (token * k) + (source_sub * kSubElems) + (vector * 4));
-        }
-        *reinterpret_cast<float4*>(dst + (vector * 4)) = value;
-        // Left to right, term by term, matching the GEMV's scalar loop.
-        total += value.x;
-        total += value.y;
-        total += value.z;
-        total += value.w;
-      }
-      staged_sums[(token * kSubsPerTile) + sub] = total;
-    }
-    __syncthreads();
-
-    if (sub < num_sub) {
-      QuantSub16 decoded[RowsPerWave];
-#pragma unroll
-      for (std::size_t r = 0; r < RowsPerWave; ++r) {
-        const std::size_t row = row_base + r;
-        const std::size_t safe_row = row < m ? row : m - 1;
-        DecodeQuantSub16(
-            WType, static_cast<const std::uint8_t*>(w) + (safe_row * row_bytes),
-            sub, decoded[r]);
-      }
-      float dots[RowsPerWave][Batch] = {};
-#pragma unroll
-      for (std::size_t group = 0; group < kVectorsPerSub; ++group) {
-#pragma unroll
-        for (std::size_t token = 0; token < Batch; ++token) {
-          const float4 xv = *reinterpret_cast<const float4*>(
-              staged_x + (token * kTileStride) + (lane * kStride) +
-              (group * 4));
-#pragma unroll
-          for (std::size_t r = 0; r < RowsPerWave; ++r) {
-            const std::int8_t* q = decoded[r].q + (group * 4);
-            dots[r][token] += static_cast<float>(q[0]) * xv.x;
-            dots[r][token] += static_cast<float>(q[1]) * xv.y;
-            dots[r][token] += static_cast<float>(q[2]) * xv.z;
-            dots[r][token] += static_cast<float>(q[3]) * xv.w;
-          }
-        }
-      }
-#pragma unroll
-      for (std::size_t r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-        for (std::size_t token = 0; token < Batch; ++token) {
-          // The subtraction stays even for the symmetric formats, where
-          // `offset` is zero. Dropping it lets the compiler contract
-          // `sums += scale * dot` into a single-rounding FMA, while the decode
-          // GEMV rounds the product and the sum separately -- which broke
-          // bit-exactness for all five symmetric formats (33 of 64 rows
-          // differed). Exactness is the contract here; the saved adds are not
-          // worth it.
-          //
-          sums[r][token] +=
-              (decoded[r].scale * dots[r][token]) -
-              (decoded[r].offset * staged_sums[(token * kSubsPerTile) + lane]);
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-#pragma unroll
-  for (std::size_t r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-    for (std::size_t token = 0; token < Batch; ++token) {
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        sums[r][token] += __shfl_xor(sums[r][token], offset);
-      }
-    }
-  }
-  if (lane == 0) {
-#pragma unroll
-    for (std::size_t r = 0; r < RowsPerWave; ++r) {
-      const std::size_t row = row_base + r;
-      if (row >= m) {
-        continue;
-      }
-#pragma unroll
-      for (std::size_t token = 0; token < Batch; ++token) {
-        y[(token * m) + row] = sums[r][token];
-      }
-    }
-  }
-}
-
 // opt-q4kxl: two-level dispatch for SmallBatchKQuantExactFp32GEMMKernel --
 // exact batch width (a padded width would stage and multiply activations no
 // output consumes) crossed with weight format.
@@ -2038,7 +1728,19 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     case core::GgmlType::kQ6_K: {
-      // Q6_K needs two rows to avoid spilling its extra scale state.
+      // DFlash2's seven proposal logits share a large vocabulary projection.
+      // Stage two consecutive tiles and reuse activations across three rows;
+      // the lower occupancy hint avoids spills and preserves accumulation
+      // order.
+      if (batch == 7 && m >= 65536) {
+        constexpr std::size_t kHeadRows = kKQuantSmallBatchWarps * 3;
+        SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, 7, 3,
+                                            core::GgmlType::kQ6_K, 2, 1>
+            <<<(m + kHeadRows - 1) / kHeadRows, block, 0, stream>>>(w, fp32_x,
+                                                                    y, m, k);
+        return;
+      }
+      // Other shapes retain two rows to bound register pressure.
       constexpr std::size_t kRowsPerBlock =
           kKQuantSmallBatchWarps * kKQuantSmallBatchRowsPerWave;
       const dim3 q6_grid(
@@ -2388,6 +2090,14 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     // draft widths far more expensive than width 8.
     if (type == core::GgmlType::kQ8_0) {
       constexpr std::size_t kVecWarpsPerBlock = 16;
+      // Reuse the long FFN-down input across three output rows.
+      if (batch == 8 && m == 5120 && k == 17408) {
+        constexpr std::size_t kDownRows = kVecWarpsPerBlock * 3;
+        SmallBatchQ8_0ExactFp32VecGEMMKernel<kVecWarpsPerBlock, 8, 3>
+            <<<(m + kDownRows - 1) / kDownRows, kVecWarpsPerBlock * 32, 0,
+               stream>>>(w, fp32_x, y, m, k);
+        return;
+      }
       constexpr std::size_t kVecRowsPerWave = 2;
       constexpr std::size_t kVecRowsPerBlock =
           kVecWarpsPerBlock * kVecRowsPerWave;

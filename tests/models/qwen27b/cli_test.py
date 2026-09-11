@@ -9,6 +9,9 @@ import sys
 TRACE = re.compile(r"^\[TokenTrace\]: count=(\d+) sha256=([0-9a-f]{64})$",
                    re.MULTILINE)
 STEPS = re.compile(r"verification_steps=(\d+)")
+BENCH_TRACE = re.compile(
+    r"^\[QwenBenchTrace\]: depth=(\d+) count=(\d+) sha256=([0-9a-f]{64})$",
+    re.MULTILINE)
 PROMPTS = [
     "Write a short story about a robot who learns to paint.",
     "Continue the story with the robot's first exhibition.",
@@ -35,6 +38,32 @@ def run(binary, model, mode, backend):
     return traces
 
 
+def check_bench(binary, model, draft):
+    common = [binary, "bench", "--model", model, "--verbose",
+              "-p", "16", "-n", "8", "-d", "0,32", "-r", "2"]
+    baseline = None
+    for backend in ([], ["--speculative", "dflash2", "--dflash-model", draft]):
+        result = subprocess.run(common + backend, text=True, capture_output=True,
+                                timeout=180, check=True)
+        traces = BENCH_TRACE.findall(result.stderr)
+        if [(int(depth), int(count)) for depth, count, _ in traces] != [
+                (0, 8), (0, 8), (32, 8), (32, 8)]:
+            raise AssertionError(f"incomplete benchmark: {result.stderr}")
+        if traces[0] != traces[1] or traces[2] != traces[3]:
+            raise AssertionError(f"benchmark prefix restore changed token IDs: {backend} {traces}")
+        if baseline is None:
+            baseline = traces
+        elif baseline != traces:
+            raise AssertionError("DFlash2 benchmark diverged from AR")
+    invalid = subprocess.run(
+        [binary, "bench", "--model", model, "-p", "16", "-n", "0",
+         "--speculative", "dflash2", "--dflash-model", "/dev/null"],
+        text=True, capture_output=True, timeout=180)
+    if invalid.returncode == 0 or "DFlash2 initialization failed" not in invalid.stderr:
+        raise AssertionError("prefill-only benchmark ignored the DFlash2 artifact")
+    print("DFlash2 benchmark: prefill, cached depth and repeated TG match AR")
+
+
 def main():
     artifacts = [os.environ.get("GUFO_QWEN27B_" + name + "_MODEL", "")
                  for name in ("MTP", "DFLASH")]
@@ -58,6 +87,7 @@ def main():
         elif chat != baseline:
             raise AssertionError(f"multi-turn target/speculative mismatch: {backend}")
         print(f"{backend[1] if backend else 'AR'}: prompt and both chat turns exact")
+    check_bench(binary, model, artifacts[1])
     return 0
 
 

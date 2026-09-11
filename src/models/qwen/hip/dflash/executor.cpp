@@ -725,7 +725,14 @@ bool QwenDFlashGpuExecutor::InjectTargetContext(
       target_features.size() != static_cast<std::size_t>(num_tokens) * width) {
     return false;
   }
-  for (std::uint32_t offset = 0; offset < num_tokens;) {
+  // Only the final attention window survives this injection. Skip complete
+  // scratch chunks that it overwrites, keeping the original batch boundaries
+  // and absolute RoPE positions for every surviving row.
+  const auto expired =
+      num_tokens > history_capacity_ ? num_tokens - history_capacity_ : 0U;
+  const auto first_chunk =
+      (expired / injection_capacity_) * injection_capacity_;
+  for (std::uint32_t offset = first_chunk; offset < num_tokens;) {
     const auto count = std::min(injection_capacity_, num_tokens - offset);
     if (!InjectTargetContextChunk(
             target_features.subspan(static_cast<std::size_t>(offset) * width,
@@ -792,13 +799,9 @@ bool QwenDFlashGpuExecutor::InjectTargetContextChunk(
           stream_);
     }
 
-    // Apply RoPE across injected tokens
-    for (std::size_t t = 0; t < num_tokens; ++t) {
-      LaunchRoPE(nullptr, d_k_block_ + t * kv_dim, 0, cfg.num_key_value_heads,
-                 cfg.head_dim, cfg.rotary_dim,
-                 position + static_cast<std::uint32_t>(t), cfg.rope_theta,
-                 stream_);
-    }
+    LaunchBatchedRoPE(nullptr, d_k_block_, num_tokens, 0,
+                      cfg.num_key_value_heads, cfg.head_dim, cfg.rotary_dim,
+                      position, cfg.rope_theta, stream_);
     if (trace) {
       const auto layer_prefix = prefix + std::to_string(i) + ".";
       TraceTensor(trace, layer_prefix + "k", d_k_block_, num_tokens * kv_dim,
@@ -938,12 +941,9 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
         d_k_block_, static_cast<const float*>(layer.attn_k_norm.data),
         d_k_block_, block_count, num_kv_heads, head_dim, 1e-6F, stream_);
 
-    for (std::size_t t = 0; t < block_count; ++t) {
-      LaunchRoPE(d_q_ + t * q_dim, d_k_block_ + t * kv_dim, num_q_heads,
-                 num_kv_heads, head_dim, cfg.rotary_dim,
-                 current_pos + static_cast<std::uint32_t>(t), cfg.rope_theta,
-                 stream_);
-    }
+    LaunchBatchedRoPE(d_q_, d_k_block_, block_count, num_q_heads, num_kv_heads,
+                      head_dim, cfg.rotary_dim, current_pos, cfg.rope_theta,
+                      stream_);
     emit("q", d_q_, q_dim);
     emit("k", d_k_block_, kv_dim);
     emit("v", d_v_block_, kv_dim);

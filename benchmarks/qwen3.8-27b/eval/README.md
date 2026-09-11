@@ -35,8 +35,11 @@ remain enabled. Performance measurements always use Nix release binaries.
 Artifact variables `GUFO_QWEN27B_*_MODEL` are test inputs, not execution switches.
 The unused in-tree CPU DFlash forward pipeline and its duplicate operator
 tests are removed. The pinned upstream runner owns the full reference.
-All three draft artifacts pass loading and state tests after this removal;
-all 90 Q4 trace files remain byte-identical to the qualified implementation.
+All three draft artifacts pass loading and state tests. The optimized
+implementation preserves all 270 trace files (90 per draft) byte for byte,
+including intermediate layers, logits and sampled proposal distributions.
+A long-injection control compares discarded-chunk execution with incremental
+injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
@@ -52,13 +55,14 @@ all 90 Q4 trace files remain byte-identical to the qualified implementation.
   at a 262,144-token logical context. Ring wrap, persistent restore and replay
   retain proposals and confidence values. Scratch ingestion is bounded to
   256 rows.
-- DFlash operators: independent equations cover both convolution coefficient
+- DFlash2 operators: independent equations cover both convolution coefficient
   planes, attention window boundaries and partial-top-k partitions. Top-k
   1, 7 and 16 run through the full 248,320-token vocabulary, including poisoned
   scratch, zero random draws, zero-mass candidates and tiny temperatures.
 - Release companion comparison: both targets × Q4/Q8/BF16 drafts × three
-  chat prompts: all 18 cases match all 128 target token IDs.
-  See [the measurement record](draft-selection.json). This is a development
+  chat prompts × two interleaved repetitions: all 72 baseline/candidate
+  cases match all 128 target token IDs.
+  See [the optimization record](dflash2-optimization.json). This is a development
   corpus, not a capability evaluation or proof across arbitrary contexts.
 - `prompt` and `chat` share GPU/speculative setup. Their first-turn tokens
   match, and two chat turns reproduce AR with both draft backends. Verbose
@@ -71,8 +75,13 @@ all 90 Q4 trace files remain byte-identical to the qualified implementation.
 Run the affected operator check first, then model replay on both target quants.
 Require complete speculative corpus results before comparing release speed.
 Compare token IDs and full logits, not just decoded text or acceptance.
+Benchmarks retain independent target/draft prefix snapshots, separate from
+verification rollback. Repeated cached-depth TG must reproduce AR token hashes;
+DFlash2 prefill-only invocations must load and initialize the companion.
+
 Use `tools/qwen27b/drafts.py` for matched companion comparisons; optional
-`--draft-bf16` adds the reference. Do not rank acceptance across different
+`--draft-bf16` includes BF16. `--baseline-binary` interleaves release A/B runs
+and rejects changed autoregressive token streams between releases. Do not rank acceptance across different
 target-generated continuations.
 
 ## Original DFlash2 source
@@ -134,7 +143,7 @@ original-target correctness, or promise native BF16/MLX bitwise equality.
 
 - DFlash2 uses one anchor plus up to seven proposals. Block length is selected
   before drawing tokens and bounded by the context and remaining output budget.
-  DFlash has no adaptive floor; `prompt`, `bench` and serving reject nondefault
+  DFlash2 currently uses fixed blocks; `prompt`, `bench` and serving reject nondefault
   `--min-draft-tokens` values for this backend.
   Unary top-16 candidates receive the predecessor/hidden/successor transition
   score; the temperature softmax is the proposal distribution `q`.

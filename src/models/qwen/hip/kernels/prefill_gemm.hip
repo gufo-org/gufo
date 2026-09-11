@@ -8,8 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
-#include "src/models/qwen/hip/quant_ops.hpp"
 
 namespace gufo::hip {
 
@@ -92,130 +92,6 @@ void LaunchBatchedGEMM(const void* A, bool is_bf16, const float* X, float* Y,
   BatchedGEMMKernel<kWaves>
       <<<grid, kWaves * 32, 0, stream>>>(A, is_bf16, X, Y, batch_size, M, K);
 }
-
-// opt-c18x-bf16-vec-smallbatch: exact BF16 GEMM for widths 1..8, the same
-// finding as the Q8_0 small-batch kernel. The version it replaced used a
-// 9-float activation stride, which is not 16-byte aligned, so every 8-value
-// vector cost eight `ds_read_b32`, and with one output row per warp those reads
-// were amortized over only 16 bytes of weight. Padding the stride to 12 floats
-// makes each vector two `ds_read_b128`, and two rows per warp halves the reads
-// per weight byte.
-//
-// Per (row, token) the eight products are still summed as one expression per
-// vector and vectors are still visited in lane, lane+32, ... order, independent
-// of the batch width, so results stay bit-exact with the decode GEMV.
-template<std::uint32_t WavesPerBlock, std::size_t Batch,
-         std::size_t RowsPerWave>
-__launch_bounds__(WavesPerBlock * 32, 1) __global__
-    void BatchedExactBf16GEMMFp32VecKernel(const hip_bfloat16* __restrict__ A,
-                                           const float* __restrict__ X,
-                                           float* __restrict__ Y, std::size_t M,
-                                           std::size_t K) {
-  constexpr std::size_t kValuesPerVector = 8;
-  constexpr std::size_t kVectorsPerTile = 32;
-  constexpr std::size_t kStride = kValuesPerVector + 4;
-  constexpr std::size_t kTileStride = kVectorsPerTile * kStride;
-  __shared__ float staged_x[Batch * kTileStride];
-
-  const std::size_t lane = threadIdx.x & 31u;
-  const std::size_t warp_id = threadIdx.x >> 5u;
-  const std::size_t row_base =
-      ((blockIdx.x * WavesPerBlock) + warp_id) * RowsPerWave;
-  const std::size_t vector_count = K / kValuesPerVector;
-  float sums[RowsPerWave][Batch] = {};
-
-  for (std::size_t tile_base = 0; tile_base < vector_count;
-       tile_base += kVectorsPerTile) {
-    constexpr std::size_t kTileHalves = Batch * kVectorsPerTile * 2;
-    for (std::size_t flat = threadIdx.x; flat < kTileHalves;
-         flat += blockDim.x) {
-      const std::size_t token = flat / (kVectorsPerTile * 2);
-      const std::size_t within = flat % (kVectorsPerTile * 2);
-      const std::size_t vector = within >> 1U;
-      const std::size_t half = within & 1U;
-      const std::size_t source_vector = tile_base + vector;
-      float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
-      if (source_vector < vector_count) {
-        value = *reinterpret_cast<const float4*>(
-            X + (token * K) + (source_vector * kValuesPerVector) + (half * 4));
-      }
-      *reinterpret_cast<float4*>(staged_x + (token * kTileStride) +
-                                 (vector * kStride) + (half * 4)) = value;
-    }
-    __syncthreads();
-
-    const std::size_t vector = tile_base + lane;
-    if (vector < vector_count) {
-      uint4 packed[RowsPerWave];
-#pragma unroll
-      for (std::size_t r = 0; r < RowsPerWave; ++r) {
-        const std::size_t row = row_base + r;
-        const std::size_t safe_row = row < M ? row : M - 1;
-        packed[r] = reinterpret_cast<const uint4*>(A + (safe_row * K))[vector];
-      }
-#pragma unroll
-      for (std::size_t token = 0; token < Batch; ++token) {
-        const float* input =
-            staged_x + (token * kTileStride) + (lane * kStride);
-        const float4 x0 = *reinterpret_cast<const float4*>(input);
-        const float4 x1 = *reinterpret_cast<const float4*>(input + 4);
-#pragma unroll
-        for (std::size_t r = 0; r < RowsPerWave; ++r) {
-          const auto* weights =
-              reinterpret_cast<const hip_bfloat16*>(&packed[r]);
-          sums[r][token] += (static_cast<float>(weights[0]) * x0.x) +
-                            (static_cast<float>(weights[1]) * x0.y) +
-                            (static_cast<float>(weights[2]) * x0.z) +
-                            (static_cast<float>(weights[3]) * x0.w) +
-                            (static_cast<float>(weights[4]) * x1.x) +
-                            (static_cast<float>(weights[5]) * x1.y) +
-                            (static_cast<float>(weights[6]) * x1.z) +
-                            (static_cast<float>(weights[7]) * x1.w);
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  // Tail elements outside the vectorized span, matching the GEMV epilogue.
-  for (std::size_t k = (vector_count * kValuesPerVector) + lane; k < K;
-       k += 32) {
-#pragma unroll
-    for (std::size_t r = 0; r < RowsPerWave; ++r) {
-      const std::size_t row = row_base + r;
-      const std::size_t safe_row = row < M ? row : M - 1;
-      const float weight = static_cast<float>(A[(safe_row * K) + k]);
-#pragma unroll
-      for (std::size_t token = 0; token < Batch; ++token) {
-        sums[r][token] += weight * X[(token * K) + k];
-      }
-    }
-  }
-
-#pragma unroll
-  for (std::size_t r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-    for (std::size_t token = 0; token < Batch; ++token) {
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        sums[r][token] += __shfl_xor(sums[r][token], offset);
-      }
-    }
-  }
-  if (lane == 0) {
-#pragma unroll
-    for (std::size_t r = 0; r < RowsPerWave; ++r) {
-      const std::size_t row = row_base + r;
-      if (row >= M) {
-        continue;
-      }
-#pragma unroll
-      for (std::size_t token = 0; token < Batch; ++token) {
-        Y[(token * M) + row] = sums[r][token];
-      }
-    }
-  }
-}
-
 void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
                                        std::size_t batch_size, std::size_t M,
                                        std::size_t K, hipStream_t stream) {
@@ -228,6 +104,14 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
   const unsigned int vec_blocks =
       static_cast<unsigned int>((M + kVecRowsPerBlock - 1) / kVecRowsPerBlock);
   const auto* a_vec = static_cast<const hip_bfloat16*>(A);
+  // DFlash2's attention output has a power-of-two weight-row stride. One
+  // row per wave spreads those reads better: 0.38 -> 0.32 ms at width eight.
+  if (batch_size == 8 && M == 5120 && K == 4096) {
+    BatchedExactBf16GEMMFp32VecKernel<kVecWaves, 8, 1>
+        <<<(M + kVecWaves - 1) / kVecWaves, kVecWaves * 32, 0, stream>>>(
+            a_vec, X, Y, M, K);
+    return;
+  }
   switch (batch_size) {
     case 1:
       BatchedExactBf16GEMMFp32VecKernel<kVecWaves, 1, kVecRowsPerWave>

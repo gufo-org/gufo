@@ -221,7 +221,10 @@ int main(int argc, const char* const* argv) {
         sizeof(float);
     Expect(executor->StateBytes() == expected_history_bytes,
            "draft history allocation is bounded by its attention window");
-    std::vector<float> features((window + 7ULL) * feature_width);
+    // A full scratch chunk expires, with an uneven final chunk.
+    const auto tail_tokens = 263U;
+    const auto context_tokens = window + tail_tokens;
+    std::vector<float> features(context_tokens * feature_width);
     for (std::size_t index = 0; index < features.size(); ++index) {
       features[index] =
           static_cast<float>(static_cast<int>(index % 37U) - 18) / 128.0F;
@@ -232,7 +235,7 @@ int main(int argc, const char* const* argv) {
            "inject through window boundary");
     auto boundary = executor->SaveSnapshot();
     Expect(executor->InjectTargetContext(rows.subspan(window * feature_width),
-                                         window, 7),
+                                         window, tail_tokens),
            "inject across ring wrap");
     auto wrapped = executor->SaveSnapshot();
     Expect(wrapped->PayloadBytes() == expected_history_bytes,
@@ -244,10 +247,10 @@ int main(int argc, const char* const* argv) {
         "serialize wrapped history");
     std::vector<float> confidences;
     const auto wrapped_proposal =
-        executor->ForwardBlock(4, window + 7, 4, 0.0F, {}, &confidences);
+        executor->ForwardBlock(4, context_tokens, 4, 0.0F, {}, &confidences);
     executor->RestoreSnapshot(*boundary);
     Expect(executor->InjectTargetContext(rows.subspan(window * feature_width),
-                                         window, 7),
+                                         window, tail_tokens),
            "replay after in-memory restore");
     auto replay = executor->SaveSnapshot();
     std::vector<std::uint8_t> replay_payload(replay->PersistentPayloadBytes());
@@ -256,9 +259,20 @@ int main(int argc, const char* const* argv) {
     Expect(replay_payload == wrapped_payload,
            "wrapped KV replay is byte exact");
     executor->Reset();
+    Expect(executor->InjectTargetContext(rows, 0, context_tokens),
+           "inject a prompt with expired chunks");
+    auto complete = executor->SaveSnapshot();
+    std::vector<std::uint8_t> complete_payload(
+        complete->PersistentPayloadBytes());
+    Expect(
+        complete->SerializePersistent(complete_payload) ==
+                complete_payload.size() &&
+            complete_payload == wrapped_payload,
+        "skipping expired chunks preserves the complete history byte for byte");
+    executor->Reset();
     executor->RestorePersistentSnapshot(wrapped_payload);
     std::vector<float> replay_confidences;
-    Expect(executor->ForwardBlock(4, window + 7, 4, 0.0F, {},
+    Expect(executor->ForwardBlock(4, context_tokens, 4, 0.0F, {},
                                   &replay_confidences) == wrapped_proposal &&
                confidences == replay_confidences,
            "persistent ring restore preserves proposals and confidence");

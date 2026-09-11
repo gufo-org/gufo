@@ -92,14 +92,13 @@ static void PrintTextHelp(std::string_view program_name,
   parser.AddOption("", "--preserve-thinking", "MODE",
                    "Replay prior reasoning: on, off, or auto", "Reasoning",
                    &opt.preserve_thinking);
-  parser.AddOption(
-      "", "--speculative", "MODE",
-      "Draft backend: dspark (DeepSeek V4 Flash), dflash, dflash2, "
-      "mtp, mtp-npu, npu, pld, self, or off",
-      "Speculative", &opt.speculative_backend);
+  parser.AddOption("", "--speculative", "MODE",
+                   "Draft backend: dspark (DeepSeek V4 Flash), dflash2, "
+                   "mtp, mtp-npu, npu, pld, self, or off",
+                   "Speculative", &opt.speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
-                   "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
-                   "Speculative", &opt.dflash_model_path);
+                   "Path to Qwen DFlash2 GGUF file", "Speculative",
+                   &opt.dflash_model_path);
   parser.AddOption("", "--dspark-model", "PATH",
                    "Path to the DeepSeek V4 Flash DSpark support GGUF file",
                    "Speculative", &opt.dspark_model_path);
@@ -719,15 +718,15 @@ std::optional<PromptOptions> ParsePromptOptions(
   };
   parser.AddCustomOption(
       "", "--speculative", "MODE",
-      "Draft backend: dspark (DeepSeek V4 Flash), dflash, dflash2, mtp, "
+      "Draft backend: dspark (DeepSeek V4 Flash), dflash2, mtp, "
       "mtp-npu, npu, pld, self, or off",
       "Speculative", parse_speculative_backend);
   parser.AddCustomOption("", "--speculative-decoding", "MODE",
                          "Alias for --speculative", "Speculative",
                          parse_speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
-                   "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
-                   "Speculative", &opt.dflash_model_path);
+                   "Path to Qwen DFlash2 GGUF file", "Speculative",
+                   &opt.dflash_model_path);
   parser.AddOption("", "--dspark-model", "PATH",
                    "Path to the DeepSeek V4 Flash DSpark support GGUF file",
                    "Speculative", &opt.dspark_model_path);

@@ -402,11 +402,11 @@ void PrintServeHelp(std::string_view program_name,
 
     // Speculative & Hardware
     parser.AddOption("", "--speculative", "MODE",
-                     "HTTP draft backend: dspark, dflash, dflash2, mtp, or off",
+                     "HTTP draft backend: dspark, dflash2, mtp, or off",
                      "Speculative", &speculative_backend);
     parser.AddOption("", "--dflash-model", "PATH",
-                     "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
-                     "Speculative", &dflash_model_path);
+                     "Path to Qwen DFlash2 GGUF file", "Speculative",
+                     &dflash_model_path);
     parser.AddOption("", "--dspark-model", "PATH",
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
@@ -954,11 +954,11 @@ int RunServe(std::span<const char* const> args) {
                          "Reasoning Defaults", &preserve_thinking);
     llm_parser.AddOption(
         "", "--speculative", "MODE",
-        "HTTP draft backend: dspark, dflash, dflash2, mtp, or off",
+        "HTTP draft backend: dspark, dflash2, mtp, or off",
         "Speculative", &speculative_backend);
     llm_parser.AddOption("", "--dflash-model", "PATH",
-                         "Path to quantized Qwen DFlash/DFlash-2 GGUF file",
-                         "Speculative", &dflash_model_path);
+                         "Path to Qwen DFlash2 GGUF file", "Speculative",
+                         &dflash_model_path);
     llm_parser.AddOption("", "--dspark-model", "PATH",
                          "Path to DeepSeek V4 Flash DSpark support GGUF file",
                          "Speculative", &dspark_model_path);

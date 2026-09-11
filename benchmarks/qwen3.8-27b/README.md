@@ -1,11 +1,11 @@
 # Qwen3.8 27B on Strix Halo
 
 Production targets are **UD-Q4_K_XL and UD-Q8_K_XL**. Optional speculative
-routes are MTP and DFlash2. BF16 is a quality reference, not a production
-configuration. Linux x86-64, gfx1151, 128 GB unified memory; Nix release builds.
+routes are MTP and DFlash2. BF16 targets are quality references; DFlash2
+drafts in Q4_K_M, Q8_0 and BF16 are being compared. Linux x86-64, gfx1151, 128 GB unified memory; Nix release builds.
 
 Qualification is in progress. `TODO` means no current qualified measurement.
-Prefill uses **pp4096**, generation uses **tg128**, and `C` means concurrent
+Prefill defaults to **pp2048** (`-p 4096` remains available), generation uses **tg128**, and `C` means concurrent
 requests. Generation rates below are per user; aggregate rate is `C` times
 that number. Draft precision is selected separately from target precision.
 
@@ -64,24 +64,22 @@ Q4 and Q8 targets can generate different continuations, so their acceptance
 rates do not directly rank the companions. Each pairing must reproduce its
 own target's greedy token IDs before its speed qualifies.
 
-Three chat prompts × 128 generated tokens × one repetition per pairing.
-All **18/18 cases reproduce every target token ID**. These are chat
+Three chat prompts × 128 generated tokens × two interleaved repetitions.
+All **72/72 baseline/candidate cases reproduce every target token ID**. These are chat
 generation rates including prompt processing, separate from the depth sweep.
 
-| Target | DFlash2 Q4_K_M (tok/s) | DFlash2 Q8_0 (tok/s) | BF16 reference (tok/s) |
+| Target | DFlash2 Q4_K_M (tok/s) | DFlash2 Q8_0 (tok/s) | DFlash2 BF16 (tok/s) |
 | --- | --- | --- | --- |
-| Q4_K_XL | 25.46 | 25.63 | 24.43 |
-| Q8_K_XL | 23.96 | 23.69 | 22.97 |
+| Q4_K_XL | 25.53 | 25.64 | 24.53 |
+| Q8_K_XL | 24.05 | 23.77 | 23.06 |
 
-All three drafts pass the pinned upstream operator comparison. Q4 is the
-practical starting point: its current speed is close to Q8 and its artifact is
-0.85 GiB smaller. Keep Q8/BF16 for explicit comparisons; this short probe does
-not establish each precision's optimized potential.
-The TG profile measures 17.2/18.2/26.1 ms of draft GPU work per verification
-step for Q4/Q8/BF16, versus roughly 155 ms in the target. Optimize target
-verification first. Profile timings are separate from throughput measurements.
-The [measurement record](eval/draft-selection.json) includes artifact hashes,
-per-case token hashes, acceptance and repetitions.
+All three drafts pass the pinned upstream operator comparison. The retained
+kernel and launch changes reduce draft GPU time by about **4%** across all
+three formats; measured end-to-end improvement is **0.2–0.7%** because target
+verification dominates. Q4's artifact is 0.85 GiB smaller than Q8's. Final
+selection follows the dynamic-block policy comparison.
+The [optimization record](eval/dflash2-optimization.json) contains interleaved
+samples, artifact/token hashes, kernel ablations and before/after profiles.
 
 ## Reproduce
 
@@ -92,14 +90,20 @@ DRAFT=/path/to/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
 MTP=/path/to/mtp-Qwen3.8-27B-Q4_0.gguf
 
 ./result/bin/gufo bench --model "$MODEL" \
-  -p 4096 -n 128 -d 0,4096,8192,12288,16384 -c 1 -r 2 -v
+  -p 2048 -n 128 -d 0,4096,8192,12288,16384 -c 1 -r 2 -v
 ./result/bin/gufo bench --model "$MODEL" \
   --speculative dflash2 --dflash-model "$DRAFT" \
-  -p 4096 -n 128 -d 0,4096,8192,12288,16384 -c 1 -r 2 -v
+  -p 2048 -n 128 -d 0,4096,8192,12288,16384 -c 1 -r 2 -v
 ./result/bin/gufo bench --model "$MODEL" \
   --speculative mtp --mtp-model "$MTP" \
-  -p 4096 -n 128 -d 0,4096,8192,12288,16384 -c 1 -r 2 -v
+  -p 2048 -n 128 -d 0,4096,8192,12288,16384 -c 1 -r 2 -v
 ```
+
+Only DFlash2 is implemented; the legacy `dflash` and `dflash-2` CLI spellings
+select the same backend. The GGUF architecture name remains `dflash`.
+
+DFlash2 prefill includes target feature capture and draft context injection.
+The verbose depth traces must match AR token IDs for the same target.
 
 Use short probes while developing. Run hardware jobs sequentially, profile in
 a separate pass, and alternate baseline/candidate release measurements.

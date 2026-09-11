@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare DFlash2 companions against each Qwen27B target; BF16 is optional reference."""
+"""Compare DFlash2 precisions and optionally interleave baseline/candidate releases."""
 from __future__ import annotations
 
 import argparse
@@ -36,13 +36,28 @@ def identity(path: Path) -> dict:
     return {"path": str(path), "bytes": path.stat().st_size, "sha256": digest}
 
 
+def reference_tokens(report: dict) -> dict:
+    """Compare releases against the same complete autoregressive token stream."""
+    tokens = {}
+    for case in report["cases"]:
+        reference = case["reference"]
+        digest = reference["token_sha256"]
+        if (reference["tokens"] <= 0 or len(digest) != 64 or
+                any(char not in "0123456789abcdef" for char in digest)):
+            raise ValueError("missing or invalid autoregressive token trace")
+        tokens[case["id"]] = (reference["tokens"], digest)
+    return tokens
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "result/bin/gufo")
+    parser.add_argument("--baseline-binary", type=Path,
+                        help="interleave another release; both must reproduce the same AR tokens")
     for name in ("target-q4", "target-q8", "draft-q4", "draft-q8"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--draft-bf16", type=Path,
-                        help="optional BF16 reference companion; not a production recommendation")
+                        help="include the BF16 companion in the matched comparison")
     parser.add_argument("--output", type=Path, required=True,
                         help="new output directory; existing reports are never silently reused")
     parser.add_argument("--max-tokens", type=int, default=128)
@@ -57,6 +72,8 @@ def main() -> int:
     names = ["binary", "target_q4", "target_q8", "draft_q4", "draft_q8"]
     if args.draft_bf16 is not None:
         names.append("draft_bf16")
+    if args.baseline_binary is not None:
+        names.append("baseline_binary")
     for name in names:
         path = getattr(args, name).resolve()
         if not path.is_file():
@@ -66,41 +83,50 @@ def main() -> int:
     args.output.mkdir(parents=True, exist_ok=False)
     manifest = {name: identity(path) for name, path in artifacts.items()}
     (args.output / "artifacts.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    results: dict[tuple[str, str], list[dict]] = {}
+    results: dict[tuple[str, str, str], list[dict]] = {}
+    references = {}
     drafts = ["q4", "q8"] + (["bf16"] if args.draft_bf16 else [])
+    binaries = ([("baseline", args.baseline_binary), ("candidate", args.binary)]
+                if args.baseline_binary else [("candidate", args.binary)])
     for repetition in range(args.repetitions):
         for target in ("q4", "q8"):
             offset = repetition % len(drafts)
             order = drafts[offset:] + drafts[:offset]
             for draft in order:
-                label = f"{target}-{draft}-r{repetition + 1}"
-                report_path = (args.output / f"{label}.json").resolve()
-                command = [
-                    sys.executable, str(ROOT / "tools/quant/speculative-corpus.py"),
-                    "--binary", str(args.binary),
-                    "--model", str(artifacts[f"target_{target}"]),
-                    "--draft-model", str(artifacts[f"draft_{draft}"]),
-                    "--backend", "dflash2", "--prompt-mode", "chat",
-                    "--max-tokens", str(args.max_tokens), "--draft-tokens", "7",
-                    "--ar-cache", str((args.output / f"ar-{target}.json").resolve()),
-                    "--json", str(report_path), "--label", label,
-                ]
-                if args.quick:
-                    command.append("--quick")
-                with (args.output / f"{label}.log").open("w") as log:
-                    subprocess.run(command, cwd=ROOT, stdout=log,
-                                   stderr=subprocess.STDOUT, check=True)
-                report = json.loads(report_path.read_text())
-                results.setdefault((target, draft), []).append(qualified(report))
-                print(f"{label}: exact corpus", flush=True)
+                for variant, binary in binaries[::1 if repetition % 2 == 0 else -1]:
+                    prefix = f"{variant}-" if args.baseline_binary else ""
+                    label = f"{prefix}{target}-{draft}-r{repetition + 1}"
+                    report_path = (args.output / f"{label}.json").resolve()
+                    command = [
+                        sys.executable, str(ROOT / "tools/quant/speculative-corpus.py"),
+                        "--binary", str(binary),
+                        "--model", str(artifacts[f"target_{target}"]),
+                        "--draft-model", str(artifacts[f"draft_{draft}"]),
+                        "--backend", "dflash2", "--prompt-mode", "chat",
+                        "--max-tokens", str(args.max_tokens), "--draft-tokens", "7",
+                        "--ar-cache", str((args.output / f"ar-{prefix}{target}.json").resolve()),
+                        "--json", str(report_path), "--label", label,
+                    ]
+                    if args.quick:
+                        command.append("--quick")
+                    with (args.output / f"{label}.log").open("w") as log:
+                        subprocess.run(command, cwd=ROOT, stdout=log,
+                                       stderr=subprocess.STDOUT, check=True)
+                    report = json.loads(report_path.read_text())
+                    aggregate = qualified(report)
+                    current = reference_tokens(report)
+                    if references.setdefault(target, current) != current:
+                        raise ValueError(f"{label}: autoregressive token stream changed")
+                    results.setdefault((variant, target, draft), []).append(aggregate)
+                    print(f"{label}: exact corpus", flush=True)
     lines = [
-        "| Target | Draft | tok/s | Acceptance |",
-        "| --- | --- | ---: | ---: |",
+        "| Release | Target | Draft | tok/s | Acceptance |",
+        "| --- | --- | --- | ---: | ---: |",
     ]
-    for (target, draft), rows in results.items():
+    for (variant, target, draft), rows in results.items():
         speed = statistics.median(row["spec_tps"] for row in rows)
         acceptance = statistics.median(row["acceptance"] for row in rows)
-        lines.append(f"| {target} | {draft} | {speed:.2f} | {acceptance:.1%} |")
+        lines.append(f"| {variant} | {target} | {draft} | {speed:.2f} | {acceptance:.1%} |")
     text = "\n".join(lines) + "\n"
     (args.output / "README.md").write_text(text)
     print(text)
