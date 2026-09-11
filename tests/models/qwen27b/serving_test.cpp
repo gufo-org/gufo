@@ -169,6 +169,12 @@ int main(int argc, const char* const* argv) {
     const std::uint32_t context = run_full_suite ? 256U : 64U;
     const std::size_t state_count = run_full_suite ? 2U : 1U;
     gufo::server::InferenceBackend backend;
+    Expect(
+        !backend.load(model, &error, context, state_count, {}, {},
+                      {.backend = gufo::server::TextSpeculativeBackend::kDFlash,
+                       .min_draft_tokens = 2}) &&
+            error.find("fixed blocks") != std::string::npos,
+        "DFlash must reject an unused adaptive draft floor");
     Expect(backend.load(model, &error, context, state_count), error);
     Expect(backend.model_id() == model->GetConfig().model_name,
            "HTTP model identifier");

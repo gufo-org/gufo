@@ -134,6 +134,8 @@ original-target correctness, or promise native BF16/MLX bitwise equality.
 
 - DFlash2 uses one anchor plus up to seven proposals. Block length is selected
   before drawing tokens and bounded by the context and remaining output budget.
+  DFlash has no adaptive floor; `prompt`, `bench` and serving reject nondefault
+  `--min-draft-tokens` values for this backend.
   Unary top-16 candidates receive the predecessor/hidden/successor transition
   score; the temperature softmax is the proposal distribution `q`.
 - The verifier uses the same target distribution `p` as AR, including committed

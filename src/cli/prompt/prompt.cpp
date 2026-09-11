@@ -834,6 +834,12 @@ std::optional<PromptOptions> ParsePromptOptions(
     }
     return std::nullopt;
   }
+  if (opt.min_draft_tokens != 1 &&
+      (backend == "dflash" || backend == "dflash2" || backend == "dflash-2")) {
+    if (error_msg != nullptr)
+      *error_msg = "DFlash2 uses fixed blocks; --min-draft-tokens must be 1";
+    return std::nullopt;
+  }
   if (opt.reasoning_mode != "on" && opt.reasoning_mode != "off" &&
       opt.reasoning_mode != "auto") {
     if (error_msg != nullptr) {

@@ -1242,6 +1242,13 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
     }
     return std::nullopt;
   }
+  if (opt.min_draft_tokens != 1 && (opt.speculative_backend == "dflash" ||
+                                    opt.speculative_backend == "dflash2" ||
+                                    opt.speculative_backend == "dflash-2")) {
+    if (error_msg != nullptr)
+      *error_msg = "DFlash2 uses fixed blocks; --min-draft-tokens must be 1";
+    return std::nullopt;
+  }
 
   return opt;
 }

@@ -78,6 +78,11 @@ void TestInvalidFlags() {
     const std::array<const char*, 2> removed = {flag, "0.75"};
     assert(!gufo::cli::ParsePromptOptions(removed, &err).has_value());
   }
+  const std::array<const char*, 6> fixed_block = {
+      "--speculative",      "dflash2", "--dflash-model", "draft.gguf",
+      "--min-draft-tokens", "2"};
+  assert(!gufo::cli::ParsePromptOptions(fixed_block, &err).has_value());
+  assert(err.find("fixed blocks") != std::string::npos);
 
   const std::array<const char*, 2> args8 = {"--chat-template", "qwen"};
   assert(!gufo::cli::ParsePromptOptions(args8, &err).has_value());

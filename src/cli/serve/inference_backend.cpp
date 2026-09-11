@@ -2465,6 +2465,11 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     SetError(error, "HTTP speculative draft limits are invalid");
     return false;
   }
+  if (speculative_config.backend == TextSpeculativeBackend::kDFlash &&
+      speculative_config.min_draft_tokens != 1) {
+    SetError(error, "DFlash2 uses fixed blocks; --min-draft-tokens must be 1");
+    return false;
+  }
 
   try {
     std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model;

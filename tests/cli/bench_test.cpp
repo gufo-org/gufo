@@ -79,6 +79,11 @@ void TestInvalidDepth() {
     Expect(!gufo::cli::ParseBenchOptions(removed, &error).has_value(),
            "removed confidence policy is rejected");
   }
+  const std::array<const char*, 4> fixed_block = {"--speculative", "dflash2",
+                                                  "--spec-draft-n-min", "2"};
+  Expect(!gufo::cli::ParseBenchOptions(fixed_block, &error).has_value() &&
+             error.find("fixed blocks") != std::string::npos,
+         "DFlash rejects an unused adaptive draft floor");
 }
 
 void TestInvalidWorkload() {
