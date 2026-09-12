@@ -1698,12 +1698,19 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                  std::size_t k, dim3 grid, dim3 block,
                                  hipStream_t stream) {
   const auto launch = [&]<std::size_t Batch>() {
+    if constexpr (WType == core::GgmlType::kIQ4_XS && Batch == 8) {
+      if ((m == 17408 && k == 5120) || (m == 5120 && k == 17408)) {
+        SmallBatchKQuantExactFp32GEMMKernel<8, Batch, 4, WType, 1, 4, 1, true>
+            <<<(m + 31) / 32, 256, 0, stream>>>(w, fp32_x, y, m, k);
+        return;
+      }
+    }
     if constexpr (Batch >= 3 &&
                   (WType == core::GgmlType::kQ4_K ||
                    WType == core::GgmlType::kQ5_K)) {
       if (FitsSmallBatch32BitIndices(
               Batch, m, k, quant::QuantizedRowBytes(WType, k))) {
-        if constexpr (WType == core::GgmlType::kQ5_K && Batch == 8) {
+        if constexpr (WType == core::GgmlType::kQ5_K && Batch >= 7) {
           // Four output rows amortize staging; eight waves leave enough
           // registers for the packed decoder without spilling.
           SmallBatchKQuantExactFp32GEMMKernel<8, Batch, 4, WType, 1, 4, 1,
@@ -1713,7 +1720,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
         } else {
           constexpr bool kDoubleStage =
               (WType == core::GgmlType::kQ4_K && Batch >= 5) ||
-              (WType == core::GgmlType::kQ5_K && Batch >= 5 && Batch <= 7);
+              (WType == core::GgmlType::kQ5_K && Batch >= 5 && Batch <= 6);
           if constexpr (kDoubleStage) {
             if ((m == 17408 && k == 5120) || (m == 5120 && k == 17408)) {
               SmallBatchKQuantExactFp32GEMMKernel<

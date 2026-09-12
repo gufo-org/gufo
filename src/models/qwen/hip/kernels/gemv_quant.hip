@@ -31,13 +31,19 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 }
 
-template<std::uint32_t WavesPerBlock>
+template<std::uint32_t WavesPerBlock,
+         core::GgmlType StaticType = core::GgmlType::kF32>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
     void Q8KBlockGEMVKernel_2Rows(const void* __restrict__ A,
                                   core::GgmlType type,
                                   const float* __restrict__ x,
                                   float* __restrict__ y, std::size_t M,
                                   std::size_t K) {
+  // F32 denotes runtime format dispatch here; the common packed formats
+  // specialize this same arithmetic body to remove per-block type branches.
+  if constexpr (StaticType != core::GgmlType::kF32) {
+    type = StaticType;
+  }
   const std::size_t tid = threadIdx.x;
   const std::size_t lane_id = tid & 31u;
   const std::size_t warp_id = tid >> 5u;
@@ -162,8 +168,24 @@ void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
   if (M >= 2 && (M % 2 == 0)) {
     const std::size_t num_pairs = M / 2;
     const std::size_t grid = (num_pairs + kWavesPerBlock - 1U) / kWavesPerBlock;
-    Q8KBlockGEMVKernel_2Rows<kWavesPerBlock>
-        <<<grid, kBlockThreads, 0, stream>>>(A, type, x, y, M, K);
+    const auto launch = [&]<core::GgmlType StaticType>() {
+      Q8KBlockGEMVKernel_2Rows<kWavesPerBlock, StaticType>
+          <<<grid, kBlockThreads, 0, stream>>>(A, type, x, y, M, K);
+    };
+    switch (type) {
+      case core::GgmlType::kQ4_K:
+        launch.template operator()<core::GgmlType::kQ4_K>();
+        break;
+      case core::GgmlType::kQ5_K:
+        launch.template operator()<core::GgmlType::kQ5_K>();
+        break;
+      case core::GgmlType::kIQ4_XS:
+        launch.template operator()<core::GgmlType::kIQ4_XS>();
+        break;
+      default:
+        launch.template operator()<core::GgmlType::kF32>();
+        break;
+    }
     return;
   }
 

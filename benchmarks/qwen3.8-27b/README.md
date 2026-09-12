@@ -11,12 +11,13 @@ that number. Draft precision is selected separately from target precision.
 
 ## Single user, autoregressive
 
-Reference sweep at `023a13a`; full refresh: TODO.
+Q4 depths 0/4096 have a bounded refresh; other rows remain the reference
+sweep at `023a13a`. Full refresh: TODO.
 
 | Context depth | Q4 pp / tg (tok/s) | Q8 pp / tg (tok/s) |
 | ---: | ---: | ---: |
-| 0 | 427.8 / 11.50 | 491.1 / 7.07 |
-| 4,096 | 406.8 / 11.33 | 470.9 / 7.01 |
+| 0 | 419.5 / 11.68 | 491.1 / 7.07 |
+| 4,096 | 405.0 / 11.51 | 470.9 / 7.01 |
 | 8,192 | 390.8 / 11.15 | 451.2 / 6.95 |
 | 12,288 | 375.1 / 10.96 | 434.2 / 6.88 |
 | 16,384 | 362.0 / 10.77 | 414.4 / 6.81 |
@@ -29,13 +30,13 @@ Latest bounded refresh covers depths 0 and 4096.
 
 | Context depth | Q4 pp / tg | Q8 pp / tg |
 | ---: | ---: | ---: |
-| 0 | 403.1 / 23.63 | 466.2 / 24.14 |
-| 4,096 | 384.2 / 16.62 | 447.3 / 16.30 |
+| 0 | 396.3 / 23.85 | 466.2 / 24.14 |
+| 4,096 | 383.4 / 16.76 | 447.3 / 16.30 |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-[Latest Q4 measurements](eval/dflash2-packed-decode.json);
+[Latest Q4 measurements](eval/dflash2-scalar-row-reuse.json);
 [preceding Q8 measurements](eval/dflash2-batch-widths.json).
 The [controller comparison](eval/dflash2-controllers.json) remains separate.
 Earlier [fixed-block precision results](eval/dflash2-rollback.json) and the
@@ -95,16 +96,17 @@ ABBA order, including prefill. Repetition asks for 1,000 space-separated
 
 | Workload | Before tok/s | Current tok/s | Gain |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 48.19 | **51.53** | 6.9% |
-| JSON, tg300, adaptive | 42.78 | **46.02** | 7.6% |
-| Prose, tg300, adaptive | 19.51 | **21.49** | 10.1% |
+| Repetition, tg128, AR | 11.17 | **11.39** | 2.0% |
+| Repetition, tg128, fixed-7 | 51.34 | **51.94** | 1.2% |
+| JSON, tg300, adaptive | 45.99 | **46.70** | 1.6% |
+| Prose, tg300, adaptive | 21.48 | **21.67** | 0.9% |
 
 Every token ID and acceptance statistic is unchanged; repetition accepts
 111/111 proposals. These short paired probes have no separate warmup.
-Packed Q4/Q5 scale decoding, bounded 32-bit indexing and Q5/Q6 row reuse
-accelerate exact verification at widths 3–8. All 24 new kernel variants have
-zero register scratch. The depth check gains 9.7%/8.8% TG at 0/4K, with no
-consistent prefill change. [Measurements, quality checks and experiments](eval/dflash2-packed-decode.json).
+Static Q4/Q5/IQ4 scalar dispatch and Q5 batch-7/IQ4 batch-8 row reuse add
+these gains to the preceding [7–10% verification improvement](eval/dflash2-packed-decode.json).
+All eight new variants have zero private scratch. Prefill has no consistent
+change. [Measurements and quality checks](eval/dflash2-scalar-row-reuse.json).
 
 The upstream headline uses different artifacts/power and excludes prefill;
 it is not a matched engine comparison. [Source audit and comparison limits](eval/llama-comparison.json).

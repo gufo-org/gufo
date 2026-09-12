@@ -1,8 +1,10 @@
 // DFlash2 exact small-batch GEMM ablations, using the production templates.
 // Build inside Nix with tools/bench/build.sh and this source path.
 // Run: /tmp/dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] [batch]
+// Scalar Q4/Q5/IQ4/Q6 comparisons use batch=1; append swiglu for gate/up.
 // Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise; widths 3–8 supported.
 // BF16 also accepts batch=16 to compare injection with two batch-8 launches.
+// Weights use read-only host registration, matching production GGUF mapping.
 // Decode rotates matrices to exceed cache capacity. Batch-16 context injection
 // repeats one matrix across chunks, including the production K/V cache hint.
 // Every geometry must be bit-exact with the reference before timing counts.
@@ -13,9 +15,14 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <sys/mman.h>
 #include <vector>
 
 #include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
+// Embed the scalar implementation so ablations use its actual templates and
+// arithmetic without linking the complete model runtime.
+#include "src/models/qwen/hip/kernels/gemv_quant.hip"
+#include "src/models/qwen/hip/kernels/swiglu.hip"
 
 namespace {
 
@@ -37,6 +44,43 @@ public:
 
 private:
   T* data_{};
+};
+
+class MappedWeights {
+public:
+  MappedWeights(const void* source, std::size_t bytes) : bytes_(bytes) {
+    host_ = mmap(nullptr, bytes_, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (host_ == MAP_FAILED)
+      throw std::runtime_error("weight mmap failed");
+    try {
+      Check(hipMemcpy(host_, source, bytes_, hipMemcpyDeviceToHost));
+      Check(hipHostRegister(host_, bytes_,
+                            hipHostRegisterMapped | hipHostRegisterReadOnly));
+      registered_ = true;
+      Check(hipHostGetDevicePointer(&device_, host_, 0));
+    } catch (...) {
+      Release();
+      throw;
+    }
+  }
+  ~MappedWeights() { Release(); }
+  MappedWeights(const MappedWeights&) = delete;
+  MappedWeights& operator=(const MappedWeights&) = delete;
+  const unsigned char* Get() const {
+    return static_cast<const unsigned char*>(device_);
+  }
+
+private:
+  void Release() {
+    if (registered_)
+      (void)hipHostUnregister(host_);
+    (void)munmap(host_, bytes_);
+  }
+  void* host_{};
+  void* device_{};
+  std::size_t bytes_{};
+  bool registered_{};
 };
 
 class Event {
@@ -101,7 +145,7 @@ struct Geometry {
 
 template<std::size_t Batch>
 void Run(const std::string& type, std::size_t rows, std::size_t columns,
-         int iterations) {
+         int iterations, bool fused = false) {
   using namespace gufo;
   using namespace gufo::hip;
   if (rows == 0 || columns == 0 || columns % 256 != 0 || iterations < 1 ||
@@ -116,17 +160,22 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
     if (type != "bf16")
       throw std::invalid_argument("wide injection is BF16 only");
   }
+  if constexpr (Batch == 1) {
+    if (type == "bf16" || type == "q8")
+      throw std::invalid_argument("scalar ablations require q4|q5|iq4|q6");
+  }
   constexpr std::size_t batch = Batch;
   const std::size_t block_bytes = type == "q8"    ? 34
                                   : type == "q4"  ? 144
                                   : type == "q5"  ? 176
                                   : type == "iq4" ? 136
                                                   : 210;
-  const std::size_t bytes =
+  const std::size_t matrix_bytes =
       type == "bf16" ? rows * columns * 2
                      : rows * columns / (type == "q8" ? 32 : 256) * block_bytes;
-  if (type != "bf16" && type != "q8" &&
-      !FitsSmallBatch32BitIndices(batch, rows, columns, bytes / rows)) {
+  const std::size_t bytes = matrix_bytes * (fused ? 2 : 1);
+  if (Batch != 1 && type != "bf16" && type != "q8" &&
+      !FitsSmallBatch32BitIndices(batch, rows, columns, matrix_bytes / rows)) {
     throw std::invalid_argument("K-quant ablations require 32-bit offsets");
   }
   const std::size_t copies =
@@ -150,7 +199,36 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
   InitValues<<<(batch * columns + 255) / 256, 256>>>(input.Get(),
                                                      batch * columns);
   std::vector<Geometry> geometries;
-  if (type == "bf16") {
+  if constexpr (Batch == 1) {
+    const auto scalar = [&]<core::GgmlType Type>() {
+      const auto launch = [&]<core::GgmlType StaticType>(const void* w) {
+        if (fused) {
+          Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4, StaticType>
+              <<<(rows + 7) / 8, 128>>>(
+                  w, Type, static_cast<const unsigned char*>(w) + matrix_bytes,
+                  Type, input.Get(), output.Get(), rows, columns);
+        } else {
+          Q8KBlockGEMVKernel_2Rows<4, StaticType><<<(rows + 7) / 8, 128>>>(
+              w, Type, input.Get(), output.Get(), rows, columns);
+        }
+      };
+      geometries = {
+          {"generic", [&, launch](const void* w) {
+             launch.template operator()<core::GgmlType::kF32>(w);
+           }},
+          {"typed", [&, launch](const void* w) {
+             launch.template operator()<Type>(w);
+           }}};
+    };
+    if (type == "q4")
+      scalar.template operator()<core::GgmlType::kQ4_K>();
+    else if (type == "q5")
+      scalar.template operator()<core::GgmlType::kQ5_K>();
+    else if (type == "iq4")
+      scalar.template operator()<core::GgmlType::kIQ4_XS>();
+    else
+      scalar.template operator()<core::GgmlType::kQ6_K>();
+  } else if (type == "bf16") {
     if constexpr (Batch == 16) {
       geometries = {
           {"batch8_chunks",
@@ -244,7 +322,8 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
         };
         narrow.template operator()<1>("narrow_tile1");
         narrow.template operator()<2>("narrow_tile2");
-        if constexpr (Batch == 8 && Type == core::GgmlType::kQ5_K) {
+        if constexpr ((Batch >= 7 && Type == core::GgmlType::kQ5_K) ||
+                      (Batch == 8 && Type == core::GgmlType::kIQ4_XS)) {
           geometries.push_back(
               {"narrow_rows4", [&](const void* w) {
                  SmallBatchKQuantExactFp32GEMMKernel<8, Batch, 4, Type, 1, 4, 1,
@@ -307,7 +386,8 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
            }}};
     }
   }
-  geometries.front().launch(weights.Get());
+  MappedWeights mapped_weights(weights.Get(), physical);
+  geometries.front().launch(mapped_weights.Get());
   Check(hipMemcpy(reference.Get(), output.Get(), batch * rows * sizeof(float),
                   hipMemcpyDeviceToDevice));
   Event start, stop;
@@ -317,7 +397,7 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
       const auto& geometry =
           geometries[round % 2 == 0 ? index : geometries.size() - index - 1];
       Check(hipMemset(mismatch.Get(), 0, sizeof(unsigned)));
-      geometry.launch(weights.Get());
+      geometry.launch(mapped_weights.Get());
       Check(hipGetLastError());
       Compare<<<(batch * rows + 255) / 256, 256>>>(
           reference.Get(), output.Get(), batch * rows, mismatch.Get());
@@ -329,7 +409,7 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                                  " outputs");
       Check(hipEventRecord(start.Get()));
       for (int iteration = 0; iteration < iterations; ++iteration) {
-        geometry.launch(weights.Get() + (iteration % copies) * bytes);
+        geometry.launch(mapped_weights.Get() + (iteration % copies) * bytes);
       }
       Check(hipEventRecord(stop.Get()));
       Check(hipEventSynchronize(stop.Get()));
@@ -347,15 +427,21 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 4 || argc > 6)
+    if (argc < 4 || argc > 7)
       throw std::invalid_argument(
           "usage: dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] "
-          "[batch=3..8|16 (16 is BF16 injection only)]");
-    const int batch = argc == 6                      ? std::stoi(argv[5])
+          "[batch=1|3..8|16 (16 is BF16 injection only)] [swiglu]");
+    const bool fused = argc == 7;
+    const int batch = argc >= 6                      ? std::stoi(argv[5])
                       : std::string(argv[1]) == "q6" ? 7
                                                      : 8;
     const int iterations = argc >= 5 ? std::stoi(argv[4]) : 24;
-    if (batch == 3) {
+    if (fused && (batch != 1 || std::string(argv[6]) != "swiglu"))
+      throw std::invalid_argument("swiglu requires batch=1");
+    if (batch == 1) {
+      Run<1>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations,
+             fused);
+    } else if (batch == 3) {
       Run<3>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else if (batch == 4) {
       Run<4>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
@@ -371,7 +457,8 @@ int main(int argc, char** argv) {
       Run<16>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else {
       throw std::invalid_argument(
-          "batch must be 3–8 verification rows or sixteen injection rows");
+          "batch must be one scalar row, 3–8 verification rows or sixteen "
+          "injection rows");
     }
     return 0;
   } catch (const std::exception& error) {
