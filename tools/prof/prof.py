@@ -116,7 +116,17 @@ def short(name: str) -> str:
     # hiding it -- the fix belongs in the kernel, not here.
     if not name or not name.strip():
         return "<unnamed: internal-linkage kernel>"
-    name = name.split("(")[0]
+    # Enum template arguments contain casts such as "(GgmlType)12".
+    # Cutting at that parenthesis merges different quantizations and widths.
+    depth = 0
+    for index, character in enumerate(name):
+        if character == "<":
+            depth += 1
+        elif character == ">":
+            depth = max(0, depth - 1)
+        elif character == "(" and depth == 0:
+            name = name[:index]
+            break
     for prefix in ("void ", "gufo::hip::", "gufo::"):
         name = name.replace(prefix, "")
     return name

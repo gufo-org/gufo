@@ -1691,11 +1691,29 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                  std::size_t batch, std::size_t m,
                                  std::size_t k, dim3 grid, dim3 block,
                                  hipStream_t stream) {
-#define GUFO_KQUANT_SMALL_BATCH(N)                                 \
-  case N:                                                          \
-    SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, N, \
-                                        RowsPerWave, WType>        \
-        <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);          \
+  const auto launch = [&]<std::size_t Batch>() {
+    // At the large FFN shapes, two tiles halve staging barriers. Select only
+    // the widths/formats that benefit: notably Q4 batch 7 also avoids spills.
+    constexpr bool kDoubleStage =
+        (WType == core::GgmlType::kQ4_K && Batch >= 5) ||
+        (WType == core::GgmlType::kQ5_K && (Batch == 6 || Batch == 7)) ||
+        (WType == core::GgmlType::kIQ4_XS &&
+         (Batch == 5 || Batch == 6 || Batch == 8));
+    if constexpr (kDoubleStage) {
+      if ((m == 17408 && k == 5120) || (m == 5120 && k == 17408)) {
+        SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch,
+                                           RowsPerWave, WType, 2>
+            <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
+        return;
+      }
+    }
+    SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch,
+                                       RowsPerWave, WType>
+        <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
+  };
+#define GUFO_KQUANT_SMALL_BATCH(N) \
+  case N:                         \
+    launch.template operator()<N>(); \
     return;
   switch (batch) {
     GUFO_KQUANT_SMALL_BATCH(1)
@@ -1725,14 +1743,6 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
                                             RowsPerWave, core::GgmlType::kQ4_K,
                                             1, 12, 2>
             <<<((m + 47) / 48) * 2, block, 0, stream>>>(w, fp32_x, y, m, k);
-        return;
-      }
-      // The full DFlash2 block reuses each gate/up activation tile twice.
-      // Other shapes do not consistently benefit from the larger LDS stage.
-      if (batch == 8 && m == 17408 && k == 5120) {
-        SmallBatchKQuantExactFp32GEMMKernel<
-            kKQuantSmallBatchWarps, 8, RowsPerWave, core::GgmlType::kQ4_K, 2>
-            <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
         return;
       }
       LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ4_K>(
@@ -1782,12 +1792,6 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     case core::GgmlType::kIQ4_XS:
-      if (batch == 8 && m == 17408 && k == 5120) {
-        SmallBatchKQuantExactFp32GEMMKernel<
-            kKQuantSmallBatchWarps, 8, RowsPerWave, core::GgmlType::kIQ4_XS, 2>
-            <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
-        return;
-      }
       LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ4_XS>(
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
@@ -2125,6 +2129,13 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
         return;
       }
       constexpr std::size_t kVecWarpsPerBlock = 16;
+      // Batch 7 shares its 31.5 KiB activation stage across twice as many
+      // waves. Batch 8 instead benefits from three rows per wave below.
+      if (batch == 7 && m == 5120 && k == 17408) {
+        SmallBatchQ8_0ExactFp32VecGEMMKernel<32, 7, 2>
+            <<<(m + 63) / 64, 1024, 0, stream>>>(w, fp32_x, y, m, k);
+        return;
+      }
       // Reuse the long FFN-down input across three output rows.
       if (batch == 8 && m == 5120 && k == 17408) {
         constexpr std::size_t kDownRows = kVecWarpsPerBlock * 3;

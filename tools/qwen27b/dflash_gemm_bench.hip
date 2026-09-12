@@ -1,7 +1,7 @@
 // DFlash2 exact small-batch GEMM ablations, using the production templates.
 // Build inside Nix with tools/bench/build.sh and this source path.
 // Run: /tmp/dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] [batch]
-// Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise.
+// Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise; widths 3–8 supported.
 // BF16 also accepts batch=16 to compare injection with two batch-8 launches.
 // Decode rotates matrices to exceed cache capacity. Batch-16 context injection
 // repeats one matrix across chunks, including the production K/V cache hint.
@@ -204,6 +204,18 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                            <<<(rows + 47) / 48, 512>>>(
                                w, input.Get(), output.Get(), rows, columns);
                      }}};
+      const auto waves = [&]<std::uint32_t Waves, std::size_t Rows>(
+                             const char* name) {
+        geometries.push_back({name, [&](const void* w) {
+                                SmallBatchQ8_0ExactFp32VecGEMMKernel<Waves,
+                                                                    Batch, Rows>
+                                    <<<(rows + Waves * Rows - 1) / (Waves * Rows),
+                                       Waves * 32>>>(w, input.Get(),
+                                                     output.Get(), rows,
+                                                     columns);
+                              }});
+      };
+      waves.template operator()<32, 2>("waves32_rows2");
     } else if (type == "q4" || type == "q5" || type == "iq4") {
       const auto kquant = [&]<core::GgmlType Type>() {
         geometries = {
@@ -293,12 +305,20 @@ int main(int argc, char** argv) {
     if (argc < 4 || argc > 6)
       throw std::invalid_argument(
           "usage: dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] "
-          "[batch=7|8|16 (16 is BF16 injection only)]");
+          "[batch=3..8|16 (16 is BF16 injection only)]");
     const int batch = argc == 6                      ? std::stoi(argv[5])
                       : std::string(argv[1]) == "q6" ? 7
                                                      : 8;
     const int iterations = argc >= 5 ? std::stoi(argv[4]) : 24;
-    if (batch == 7) {
+    if (batch == 3) {
+      Run<3>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 4) {
+      Run<4>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 5) {
+      Run<5>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 6) {
+      Run<6>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 7) {
       Run<7>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else if (batch == 8) {
       Run<8>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
@@ -306,8 +326,7 @@ int main(int argc, char** argv) {
       Run<16>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else {
       throw std::invalid_argument(
-          "batch must be seven proposals, eight verification rows or sixteen "
-          "injection rows");
+          "batch must be 3–8 verification rows or sixteen injection rows");
     }
     return 0;
   } catch (const std::exception& error) {

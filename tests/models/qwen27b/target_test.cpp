@@ -188,8 +188,25 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
     }
     if (check_replay) {
       executor->RestoreSnapshot(*snapshot);
-      executor->SaveState(prompt_size);
       const auto suffix = std::span(row.tokens).subspan(prompt_size);
+      // Adaptive drafting exercises every width. Reuse one scalar oracle
+      // and snapshot instead of loading another model or adding a suite.
+      if (cases.empty()) {
+        for (std::size_t width = 3; width < suffix.size(); ++width) {
+          executor->RestoreSnapshot(*snapshot);
+          const auto predictions = executor->ForwardVerificationChunk(
+              suffix.first(width), prompt_size, true);
+          Expect(predictions.size() == width, "verification width mismatch");
+          for (std::size_t index = 0; index < width; ++index) {
+            Expect(ByteEqual(executor->CopyVerificationLogits(index),
+                             row.logits[index + 1]),
+                   "adaptive-width verification changed target logits");
+          }
+          std::cout << "verification width=" << width << " exact=1\n";
+        }
+        executor->RestoreSnapshot(*snapshot);
+      }
+      executor->SaveState(prompt_size);
       const auto predictions =
           executor->ForwardVerificationChunk(suffix, prompt_size, true);
       Expect(predictions.size() == suffix.size(),

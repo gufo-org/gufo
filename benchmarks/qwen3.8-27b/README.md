@@ -25,17 +25,18 @@ Reference sweep at `023a13a`; full refresh: TODO.
 
 Recommended **Q4_K_M draft, adaptive controller**, pp2048/tg128, in tok/s.
 One timed repetition after warmup; every measured row matches all 128 AR IDs.
-The bounded 4K check gains 7.0% / 2.3% TG over fixed blocks on Q4 / Q8.
+Latest bounded refresh covers depths 0 and 4096.
 
 | Context depth | Q4 pp / tg | Q8 pp / tg |
 | ---: | ---: | ---: |
-| 0 | TODO | TODO |
-| 4,096 | 385.1 / 15.08 | 447.2 / 16.21 |
+| 0 | 396.7 / 21.49 | 466.2 / 24.14 |
+| 4,096 | 383.1 / 15.27 | 447.3 / 16.30 |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-[Current measurements](eval/dflash2-controllers.json).
+[Current measurements](eval/dflash2-batch-widths.json).
+The [controller comparison](eval/dflash2-controllers.json) remains separate.
 Earlier [fixed-block precision results](eval/dflash2-rollback.json) and the
 [full depth sweep](eval/dflash2-depths.json) remain historical references.
 Other depths with the new default and MTP performance: **TODO**.
@@ -117,10 +118,13 @@ The Q8 draft reaches **43.06 / 18.74 tok/s**, also matching every AR ID.
 
 Exact projections now stream large BF16 weights, cache reused injection K/V
 weights, and skip symmetric-quant offset work while preserving decode rounding.
-Unused verification precision settings are removed. All three drafts retain
-their qualified trace bytes. Short paired C1 chat controls (128 tokens, Q4 draft)
-gain about **0.4% on Q4 and 0.3% on Q8**; pp2048 remains within observed run variation.
-[Measurements and rejected experiments](eval/dflash2-exact-gemm.json).
+Verification widths 3–8 are checked against scalar logits. Larger staging tiles
+remove Q4 batch-7 spills; selected Q4/Q5/IQ4 and Q8 kernels are **2.5–15.6% faster**
+in isolated probes. Paired C1 JSON/tg128 gains **0.35–0.63% on Q4** across all three
+drafts; **Q8 is effectively flat**. The bounded depth check gains 0.2–0.7% TG;
+no consistent prefill gain. All 270 draft trace files remain byte-identical.
+[Current evidence and rejected experiments](eval/dflash2-batch-widths.json);
+[earlier projection work](eval/dflash2-exact-gemm.json).
 The earlier [rollback pass](eval/dflash2-rollback.json) saves **50.5 MiB per session**
 and fixes cache addressing across mixed capacities and at logical context 262,144.
 

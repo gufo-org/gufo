@@ -442,7 +442,7 @@ int main() {
   TestQ8_0SmallBatchFp32GEMMEquivalence(48, 5120);
   TestQ8_0SmallBatchFp32GEMMEquivalence(5120, 5120);
   TestQ8_0SmallBatchFp32GEMMEquivalence(17408, 5120);
-  TestQ8_0SmallBatchFp32GEMMEquivalence(4096, 17408);
+  TestQ8_0SmallBatchFp32GEMMEquivalence(5120, 17408);
   TestQ8_0BlockGEMVEquivalence();
   std::cout << "Qwen Q8 GEMV ops test passed on gfx1151.\n";
   return 0;

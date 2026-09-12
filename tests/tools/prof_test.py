@@ -19,6 +19,15 @@ prof = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = prof
 SPEC.loader.exec_module(prof)
 
+for quant in (12, 13, 23):
+    symbol = (
+        f"SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, "
+        f"(gufo::core::GgmlType){quant}, 1ul, 12u, 1ul>"
+    )
+    assert prof.short(f"void gufo::hip::{symbol}(void const*, float*)") == (
+        symbol.replace("gufo::", "")
+    )
+
 
 with tempfile.TemporaryDirectory() as directory:
     database = Path(directory) / "profile.db"

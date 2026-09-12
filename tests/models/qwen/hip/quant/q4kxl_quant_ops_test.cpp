@@ -418,7 +418,8 @@ int main() {
       continue;  // Q8_0 keeps its own long-standing exact kernels.
     }
     for (const std::size_t batch :
-         {std::size_t{1}, std::size_t{3}, std::size_t{8}}) {
+         {std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{4},
+          std::size_t{5}, std::size_t{6}, std::size_t{7}, std::size_t{8}}) {
       TestSmallBatchExactness(format, batch);
     }
   }

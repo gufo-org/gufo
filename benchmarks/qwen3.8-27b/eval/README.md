@@ -14,7 +14,7 @@ Run on gfx1151 inside Nix. Model-specific tests live in
 | --- | --- |
 | `fast` | Sampling/verifier and HTTP parser regressions, executable option validation, NPU packing, GGUF reference decoding and strict result reporting. |
 | `kernels` | Quantized/BF16 GEMM versus independent/decode controls; exact recurrent state and replay; DFlash convolution, windowed attention, full-vocabulary top-k, sampled selector and verifier distributions. |
-| `model` | Target full-logit replay; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt/chat/bench parity, seeded multi-turn replay and HTTP adapter sampling. |
+| `model` | Target full-logit replay at verification widths 3–8; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt/chat/bench parity, seeded multi-turn replay and HTTP adapter sampling. |
 | `serving` | Direct versus served tokens, seeded sampled replay, EOS, bounded prefill, cache forks, persistent restore, concurrency, cancellation and reclamation. |
 | `reference` | Teacher-forced target versus optional BF16: KL, total variation, top-1 agreement, RMSE and NLL difference. Informational quantization measurements. |
 
@@ -134,9 +134,10 @@ injection; the complete serialized history must remain byte-identical.
   for Q4 AR and Q8/BF16 adaptive DFlash2. These are correctness probes, not
   new speed measurements.
 - Q4 and Q8: fixed 24/29/24-token prefixes, eight forced continuation tokens
-  each. Repeated prefill and snapshot continuation are byte-identical. All
-  24 batched-verifier logit rows per target equal scalar decode byte for
-  byte; committing five rows across the replay ring's boundary also preserves
+  each, plus widths 3–7 from the first snapshot. Repeated prefill and snapshot
+  continuation are byte-identical. All 49 batched-verifier logit rows per
+  target equal scalar decode byte for byte; committing five rows across the
+  replay ring's boundary also preserves
   subsequent logits. Independent sessions with 32/64-token cache capacities
   retain all logits and returned IDs in either batch order, with FP16 and
   FP32 caches. A 262,144-token logical cache with only a 24-token prefix
@@ -311,6 +312,7 @@ Gains from different workloads must not be added together.
 | [Attention](dflash2-attention.json) | Exact batched attention/QK/cache writes and narrow SSM projections; C1 chat +3.2–3.5%. |
 | [Rollback and cache addressing](dflash2-rollback.json) | Compact rollback, fused draft normalization/RoPE and Q4 convolution projections; fixes mixed-capacity and 32-bit cache offsets. |
 | [Exact projections](dflash2-exact-gemm.json) | BF16 streaming with cached K/V injection; symmetric projections omit offset scratch while retaining scalar rounding; dead verification settings removed. |
+| [Verification widths 3–8](dflash2-batch-widths.json) | Selected Q4/Q5/IQ4 staging tiles and Q8 batch-7 workgroups; Q4 batch-7 spills removed. Full target logits and all 270 draft trace files remain exact. |
 | [Greedy sampling controls](dflash2-sampling.json) | Penalty-enabled requests retain DFlash2 and exact AR output; one C1 chat probe reaches 30.25–31.43 tok/s on Q4 and 25.89–27.03 on Q8 across the three drafts. |
 | [Controllers](dflash2-controllers.json) | With Q4 draft, adaptive gains 3.3% on the pilot and 2.0% on three other prompts for the Q4 target; Q8 target is effectively unchanged. Q8/BF16 drafts can favor fixed. Accepted-length-only and positional predictors were slower overall. |
 | [Sampling and executable wiring](dflash2-wiring.json) | Six target/draft HTTP pairings pass; fixed/adaptive terminal, cached benchmark and backend checks cover both targets. The sampling-floor regression fails before the fix; 576 GPU/reference comparisons pass afterward. Pure repetition reaches 100% acceptance across all six pairings. |
