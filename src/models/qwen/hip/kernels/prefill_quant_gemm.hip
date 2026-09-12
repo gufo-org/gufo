@@ -1711,11 +1711,26 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
       if (FitsSmallBatch32BitIndices(
               Batch, m, k, quant::QuantizedRowBytes(WType, k))) {
         if constexpr (WType == core::GgmlType::kQ5_K && Batch >= 7) {
-          // Four output rows amortize staging; eight waves leave enough
-          // registers for the packed decoder without spilling.
-          SmallBatchKQuantExactFp32GEMMKernel<8, Batch, 4, WType, 1, 4, 1,
-                                             true>
-              <<<(m + 31) / 32, 256, 0, stream>>>(w, fp32_x, y, m, k);
+          const auto launch_rows =
+              [&]<std::uint32_t Waves, std::size_t TokensPerStep = Batch>() {
+            SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, 4, WType, 1, 4,
+                                               1, true, TokensPerStep>
+                <<<(m + Waves * 4 - 1) / (Waves * 4), Waves * 32, 0,
+                   stream>>>(w, fp32_x, y, m, k);
+          };
+          // Large batch-8 FFNs finish one token's dots at a time. The long
+          // down projection also amortizes staging across more waves.
+          if constexpr (Batch == 8) {
+            if (m == 5120 && k == 17408) {
+              launch_rows.template operator()<16, 1>();
+              return;
+            }
+            if (m == 17408 && k == 5120) {
+              launch_rows.template operator()<8, 1>();
+              return;
+            }
+          }
+          launch_rows.template operator()<8>();
           return;
         } else {
           constexpr bool kDoubleStage =

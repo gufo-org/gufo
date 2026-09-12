@@ -332,6 +332,26 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                          w, input.Get(), output.Get(), rows, columns);
                }});
         }
+        if constexpr (Batch == 8 && Type == core::GgmlType::kQ5_K) {
+          geometries.push_back(
+              {"waves16_rows4", [&](const void* w) {
+                 SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, Type, 1, 4,
+                                                     1, true>
+                     <<<(rows + 63) / 64, 512>>>(
+                         w, input.Get(), output.Get(), rows, columns);
+               }});
+          const auto token_major = [&]<std::uint32_t Waves>(const char* name) {
+            geometries.push_back(
+                {name, [&](const void* w) {
+                   SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, 4, Type,
+                                                       1, 4, 1, true, 1>
+                       <<<(rows + Waves * 4 - 1) / (Waves * 4), Waves * 32>>>(
+                           w, input.Get(), output.Get(), rows, columns);
+                 }});
+          };
+          token_major.template operator()<8>("token_major_rows4");
+          token_major.template operator()<16>("token_major_waves16_rows4");
+        }
         if constexpr (Batch == 8 && Type == core::GgmlType::kQ4_K) {
           geometries.push_back(
               {"groups4", [&](const void* w) {

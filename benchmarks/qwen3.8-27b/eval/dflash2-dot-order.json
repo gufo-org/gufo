@@ -1,0 +1,1070 @@
+{
+  "schema": "gufo.qwen27b-dot-order.v1",
+  "date_utc": "2026-09-12T18:05:04.856319+00:00",
+  "baseline_revision": "087e9fc9e90e8989ce73c9ceefd6be64a71a5424",
+  "scope": "C1 Q4 target/Q4 DFlash2 draft. Exact Q5 batch-8 FFN dot scheduling and workgroup layout, plus compact IQ4 batch-8 staging. Weights, sampling and controller are unchanged.",
+  "model_artifacts_reference": "dflash2-rollback.json: artifacts (unchanged paths and hashes)",
+  "source_sha256": {
+    "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "b2287d2eafffa1d082bce3f9f607c05d0f08a3ccb61ed2ff95d865a3299d8491",
+    "src/models/qwen/hip/kernels/prefill_quant_gemm.hip": "a637ce2633d544241f4831c0bdc40c8344f23019dd3a7f279aee69b84339a610",
+    "tools/qwen27b/dflash_gemm_bench.hip": "e1866d2d81e8a7d8f54a9cadfa652f6e49a24e37acbbdc0059c9bbaa67517275"
+  },
+  "retained": [
+    "Q5 batch-8 FFNs complete one token of independent dot products at a time while preserving every output's floating-point products, accumulation order and final wave reduction. Eight waves handle 17408x5120; sixteen waves handle 5120x17408.",
+    "The common kernel expresses token grouping through a compile-time geometry parameter. Other dispatches retain full-batch grouping. The existing microbenchmark compares geometries using the same production body; no runtime switch or new executable.",
+    "IQ4_XS batch-8 FFN staging uses the existing compact float4 permutation: 16384 shared bytes instead of 20480, with identical staged values and arithmetic."
+  ],
+  "release": {
+    "date_utc": "2026-09-12T17:54:41.950837+00:00",
+    "binary": {
+      "baseline": {
+        "path": "/nix/store/hcx2qv3lsrfmpf463ilisz2mh8z2r4bg-gufo-0850a72-dirty/bin/gufo",
+        "sha256": "1a94b3e87c90fd9f02f373c1af50fd2b298c11aa2d1a4748715108325b3250c1"
+      },
+      "candidate": {
+        "path": "/nix/store/r9f80ly67rclyj8xr4llgpncv3j6bb0l-gufo-087e9fc-dirty/bin/gufo",
+        "sha256": "a7da404ae373449f15bdd301e6c5373b5b3e86b656a8ae14058be7ba67f411ad"
+      }
+    },
+    "method": "Q4 target/Q4 draft; C1, greedy. Fixed7 DFlash2 repetition chat TG128; adaptive7 raw JSON/prose TG300. ABBA per prompt/mode, no separate warmup. Includes prefill, excludes model loading. All IDs are checked against the preceding qualified AR references; scalar code is unchanged.",
+    "rows": [
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 2.43455,
+        "tps": 52.5765,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 2.38146,
+        "tps": 53.7485,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 2.40437,
+        "tps": 53.2363,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 128,
+        "seconds": 2.45541,
+        "tps": 52.1298,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 6.43617,
+        "tps": 46.6116,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 6.2947,
+        "tps": 47.6591,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 6.29608,
+        "tps": 47.6487,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 6.43679,
+        "tps": 46.6071,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 13.847,
+        "tps": 21.6654,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 13.8157,
+        "tps": 21.7145,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 13.8261,
+        "tps": 21.6981,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 13.8561,
+        "tps": 21.6512,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      }
+    ],
+    "summary": [
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "baseline": 52.35315,
+        "candidate": 53.4924,
+        "percent": 2.176086825721102,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "baseline": 46.609350000000006,
+        "candidate": 47.6539,
+        "percent": 2.241073947609218,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      },
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "baseline": 21.6583,
+        "candidate": 21.7063,
+        "percent": 0.22162404251486745,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      }
+    ]
+  },
+  "depth_probe": {
+    "method": "Candidate Q4 target/Q4 draft, adaptive, C1, pp2048/tg128 at depths 0/4096, one timed repetition after warmup. All 128 IDs compared with the preceding qualified AR depth hashes. Bounded control; not a paired variance estimate.",
+    "command": [
+      "/home/fbozzo/projects/strix-halo.cpp/result/bin/gufo",
+      "bench",
+      "--model",
+      "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+      "--speculative",
+      "dflash2",
+      "--dflash-model",
+      "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "--draft-policy",
+      "adaptive",
+      "-p",
+      "2048",
+      "-n",
+      "128",
+      "-d",
+      "0,4096",
+      "-c",
+      "1",
+      "-r",
+      "1",
+      "-v"
+    ],
+    "traces": [
+      [
+        "0",
+        "128",
+        "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+      ],
+      [
+        "4096",
+        "128",
+        "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+      ]
+    ],
+    "stdout": "ggml_cuda_init: found 1 ROCm devices (Total VRAM: 126976 MiB):\n  Device 0: AMD Radeon 8060S Graphics, gfx1151, Wave Size: 32, VRAM: 126976 MiB\n[Model Load]: 0.731616 s\n| model                          |       size |     params | backend    | ngl |            test |                   t/s |\n| ------------------------------ | ---------- | ---------- | ---------- | --- | --------------- | --------------------- |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |          pp2048 |        399.76 \u00b1 0.00 |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |   tg128-dflash2 |         23.98 \u00b1 0.00 |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |  pp2048 @ d4096 |        384.61 \u00b1 0.00 |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 | tg128 @ d4096-dflash2 |         16.80 \u00b1 0.00 |\n\n",
+    "all_128_ids_unchanged": true
+  },
+  "kernel_probe": {
+    "method": "Final maintained microbenchmark, production templates and read-only registered host mappings. At least 128 MiB rotating weights; four forward/reverse rounds of 32 launches per geometry. Finite bit-exact outputs required before timing. Median times and per-geometry raw rounds.",
+    "results": [
+      {
+        "format": "q5",
+        "m": 17408,
+        "k": 5120,
+        "batch": 8,
+        "baseline_geometry": "narrow_rows4",
+        "candidate_geometry": "token_major_rows4",
+        "gain_percent": 5.946874180198414,
+        "all_finite_bit_exact": true,
+        "baseline_ms": 0.3957815,
+        "candidate_ms": 0.373566,
+        "baseline_rounds_ms": [
+          0.393317,
+          0.395251,
+          0.396312,
+          0.406904
+        ],
+        "candidate_rounds_ms": [
+          0.373792,
+          0.372524,
+          0.37334,
+          0.384562
+        ]
+      },
+      {
+        "format": "q5",
+        "m": 5120,
+        "k": 17408,
+        "batch": 8,
+        "baseline_geometry": "narrow_rows4",
+        "candidate_geometry": "token_major_waves16_rows4",
+        "gain_percent": 8.446737829041684,
+        "all_finite_bit_exact": true,
+        "baseline_ms": 0.38586,
+        "candidate_ms": 0.35580599999999996,
+        "baseline_rounds_ms": [
+          0.382868,
+          0.382961,
+          0.388759,
+          0.39808
+        ],
+        "candidate_rounds_ms": [
+          0.349311,
+          0.34616,
+          0.362301,
+          0.364362
+        ]
+      },
+      {
+        "format": "iq4",
+        "m": 17408,
+        "k": 5120,
+        "batch": 8,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_rows4",
+        "gain_percent": 7.987568783414645,
+        "all_finite_bit_exact": true,
+        "baseline_ms": 0.40063550000000003,
+        "candidate_ms": 0.3710015,
+        "baseline_rounds_ms": [
+          0.398145,
+          0.397328,
+          0.403126,
+          0.410613
+        ],
+        "candidate_rounds_ms": [
+          0.36407,
+          0.36663,
+          0.375373,
+          0.380687
+        ],
+        "baseline_note": "Older two-tile geometry, before the preceding row-reuse pass; not the baseline release for this change. The fresh profile below isolates the incremental compact-tile gain."
+      },
+      {
+        "format": "iq4",
+        "m": 5120,
+        "k": 17408,
+        "batch": 8,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_rows4",
+        "gain_percent": 12.687832238081299,
+        "all_finite_bit_exact": true,
+        "baseline_ms": 0.3769115,
+        "candidate_ms": 0.334474,
+        "baseline_rounds_ms": [
+          0.376917,
+          0.376906,
+          0.374519,
+          0.382074
+        ],
+        "candidate_rounds_ms": [
+          0.332117,
+          0.336831,
+          0.330943,
+          0.337186
+        ],
+        "baseline_note": "Older two-tile geometry, before the preceding row-reuse pass; not the baseline release for this change. The fresh profile below isolates the incremental compact-tile gain."
+      }
+    ]
+  },
+  "quality": {
+    "kernel_suites": [
+      "qwen_kquant_gemv_ops_test",
+      "qwen_quant_gemv_ops_test",
+      "qwen_q4kxl_quant_ops_test"
+    ],
+    "target": "Both target suites pass: 49 full-vocabulary verifier rows per Q4/Q8 target equal scalar decoding, plus snapshot/ring replay, mixed-capacity FP16/FP32 caches and logical context 262144 with a short prefix.",
+    "draft": "All 267 float arrays and 3 manifests match the preceding qualified release byte for byte across Q4/Q8/BF16 drafts, after the final common-kernel refactoring.",
+    "release": "All 12 final baseline/candidate prompt runs match every qualified AR token ID: TG128 repetition and TG300 JSON/prose. Every acceptance/drafted/accepted/step count is unchanged within each workload. Both depth traces match all 128 IDs.",
+    "build": "Focused optimized GPU test build and Nix release build passed. No full CI or capability sweep."
+  },
+  "profile": {
+    "method": "Separate rocprofv3 passes on fixed7 repetition/TG128 and adaptive raw prose/TG300. Repetition baseline was collected before the dot-order change, on the same baseline binary used by the paired release timing. Totals include prefill and initialization.",
+    "data": {
+      "selected_resources": [
+        {
+          "name": "_ZN4gufo3hip35SmallBatchKQuantExactFp32GEMMKernelILj16ELm8ELm4ELNS_4core8GgmlTypeE13ELm1ELj4ELm1ELb1ELm1EEEvPKvPKfPfmm",
+          "scratch_bytes": 0,
+          "vgpr": 155
+        },
+        {
+          "name": "_ZN4gufo3hip35SmallBatchKQuantExactFp32GEMMKernelILj8ELm8ELm4ELNS_4core8GgmlTypeE13ELm1ELj4ELm1ELb1ELm1EEEvPKvPKfPfmm",
+          "scratch_bytes": 0,
+          "vgpr": 155
+        },
+        {
+          "name": "_ZN4gufo3hip35SmallBatchKQuantExactFp32GEMMKernelILj8ELm8ELm4ELNS_4core8GgmlTypeE23ELm1ELj4ELm1ELb1ELm8EEEvPKvPKfPfmm",
+          "scratch_bytes": 0,
+          "vgpr": 147
+        }
+      ],
+      "compiled_kquant_count": 93,
+      "nonzero_scratch": [
+        {
+          "name": "_ZN4gufo3hip35SmallBatchKQuantExactFp32GEMMKernelILj16ELm6ELm3ELNS_4core8GgmlTypeE11ELm1ELj12ELm1ELb0ELm6EEEvPKvPKfPfmm",
+          "scratch_bytes": 12,
+          "vgpr": 120
+        }
+      ],
+      "repetition": {
+        "baseline": {
+          "total_ms": 2415.5507509999998,
+          "q5_batch8_ms": 758.916182,
+          "iq4_rows4_ms": 325.059786
+        },
+        "candidate": {
+          "total_ms": 2368.941277,
+          "q5_batch8_ms": 720.118597,
+          "iq4_rows4_ms": 313.81429
+        }
+      },
+      "prose_total_ms": 13793.55186,
+      "prose_groups": [
+        {
+          "type": 13,
+          "batch": 4,
+          "ms": 1338.174861,
+          "count": 6494,
+          "share_percent": 9.701452349489337
+        },
+        {
+          "type": 13,
+          "batch": 5,
+          "ms": 1148.531212,
+          "count": 5157,
+          "share_percent": 8.32658059111397
+        },
+        {
+          "type": 13,
+          "batch": 6,
+          "ms": 768.601118,
+          "count": 3438,
+          "share_percent": 5.572176954863024
+        },
+        {
+          "type": 23,
+          "batch": 4,
+          "ms": 591.624523,
+          "count": 2380,
+          "share_percent": 4.289138352505531
+        },
+        {
+          "type": 14,
+          "batch": 4,
+          "ms": 586.410908,
+          "count": 1795,
+          "share_percent": 4.251340872545935
+        },
+        {
+          "type": 13,
+          "batch": 3,
+          "ms": 580.528366,
+          "count": 2865,
+          "share_percent": 4.208693829494908
+        },
+        {
+          "type": 12,
+          "batch": 4,
+          "ms": 547.511749,
+          "count": 3541,
+          "share_percent": 3.969331137890107
+        },
+        {
+          "type": 23,
+          "batch": 5,
+          "ms": 480.397464,
+          "count": 1890,
+          "share_percent": 3.482768389722066
+        },
+        {
+          "type": 14,
+          "batch": 5,
+          "ms": 455.68355899999995,
+          "count": 1422,
+          "share_percent": 3.3035984032614496
+        },
+        {
+          "type": 12,
+          "batch": 5,
+          "ms": 454.79515100000003,
+          "count": 2745,
+          "share_percent": 3.2971576546492214
+        },
+        {
+          "type": 13,
+          "batch": 7,
+          "ms": 392.708944,
+          "count": 1719,
+          "share_percent": 2.8470472869197594
+        },
+        {
+          "type": 13,
+          "batch": 8,
+          "ms": 385.649336,
+          "count": 1528,
+          "share_percent": 2.7958667927899468
+        },
+        {
+          "type": 14,
+          "batch": 3,
+          "ms": 366.12908,
+          "count": 814,
+          "share_percent": 2.654349537494688
+        },
+        {
+          "type": 12,
+          "batch": 6,
+          "ms": 342.540466,
+          "count": 1827,
+          "share_percent": 2.4833376455656433
+        },
+        {
+          "type": 23,
+          "batch": 6,
+          "ms": 334.83644100000004,
+          "count": 1260,
+          "share_percent": 2.427485280067668
+        },
+        {
+          "type": 14,
+          "batch": 6,
+          "ms": 292.682886,
+          "count": 945,
+          "share_percent": 2.1218819414363663
+        },
+        {
+          "type": 23,
+          "batch": 3,
+          "ms": 247.604147,
+          "count": 1050,
+          "share_percent": 1.795071708238026
+        },
+        {
+          "type": 12,
+          "batch": 3,
+          "ms": 233.203964,
+          "count": 1549,
+          "share_percent": 1.6906737754491614
+        },
+        {
+          "type": 23,
+          "batch": 7,
+          "ms": 200.248901,
+          "count": 630,
+          "share_percent": 1.4517573358367757
+        },
+        {
+          "type": 12,
+          "batch": 7,
+          "ms": 192.675085,
+          "count": 917,
+          "share_percent": 1.3968489549000036
+        },
+        {
+          "type": 13,
+          "batch": 2,
+          "ms": 182.028069,
+          "count": 764,
+          "share_percent": 1.319660598281899
+        },
+        {
+          "type": 23,
+          "batch": 8,
+          "ms": 181.535414,
+          "count": 560,
+          "share_percent": 1.3160889656451404
+        },
+        {
+          "type": 12,
+          "batch": 8,
+          "ms": 177.534516,
+          "count": 728,
+          "share_percent": 1.28708339811179
+        },
+        {
+          "type": 14,
+          "batch": 7,
+          "ms": 166.121038,
+          "count": 476,
+          "share_percent": 1.2043383726401564
+        },
+        {
+          "type": 14,
+          "batch": 2,
+          "ms": 125.543394,
+          "count": 223,
+          "share_percent": 0.9101600173343606
+        },
+        {
+          "type": 14,
+          "batch": 8,
+          "ms": 119.105981,
+          "count": 416,
+          "share_percent": 0.8634902903101855
+        },
+        {
+          "type": 12,
+          "batch": 2,
+          "ms": 78.479898,
+          "count": 419,
+          "share_percent": 0.5689607636709172
+        },
+        {
+          "type": 23,
+          "batch": 2,
+          "ms": 64.388236,
+          "count": 280,
+          "share_percent": 0.4667995354171236
+        },
+        {
+          "type": 20,
+          "batch": 4,
+          "ms": 46.912763,
+          "count": 204,
+          "share_percent": 0.3401064749395157
+        },
+        {
+          "type": 20,
+          "batch": 5,
+          "ms": 39.349045,
+          "count": 162,
+          "share_percent": 0.28527130212275864
+        },
+        {
+          "type": 11,
+          "batch": 4,
+          "ms": 34.346288,
+          "count": 102,
+          "share_percent": 0.24900249296630406
+        },
+        {
+          "type": 11,
+          "batch": 5,
+          "ms": 29.808078,
+          "count": 81,
+          "share_percent": 0.21610154007134752
+        },
+        {
+          "type": 20,
+          "batch": 6,
+          "ms": 28.288336,
+          "count": 108,
+          "share_percent": 0.20508376875744025
+        },
+        {
+          "type": 11,
+          "batch": 6,
+          "ms": 20.650588,
+          "count": 54,
+          "share_percent": 0.14971189588872144
+        },
+        {
+          "type": 20,
+          "batch": 3,
+          "ms": 20.293964,
+          "count": 90,
+          "share_percent": 0.14712645594098633
+        },
+        {
+          "type": 14,
+          "batch": 1,
+          "ms": 19.472501,
+          "count": 4,
+          "share_percent": 0.14117104280057424
+        },
+        {
+          "type": 20,
+          "batch": 8,
+          "ms": 14.963029,
+          "count": 48,
+          "share_percent": 0.10847843363239439
+        },
+        {
+          "type": 20,
+          "batch": 7,
+          "ms": 14.957742,
+          "count": 54,
+          "share_percent": 0.1084401041284808
+        },
+        {
+          "type": 11,
+          "batch": 3,
+          "ms": 14.167617,
+          "count": 45,
+          "share_percent": 0.10271188410205463
+        },
+        {
+          "type": 11,
+          "batch": 7,
+          "ms": 11.93077,
+          "count": 27,
+          "share_percent": 0.08649527055172866
+        },
+        {
+          "type": 11,
+          "batch": 8,
+          "ms": 11.691486,
+          "count": 24,
+          "share_percent": 0.08476051794827558
+        },
+        {
+          "type": 21,
+          "batch": 4,
+          "ms": 9.781895,
+          "count": 34,
+          "share_percent": 0.07091643326739194
+        },
+        {
+          "type": 21,
+          "batch": 5,
+          "ms": 9.157645,
+          "count": 27,
+          "share_percent": 0.06639076789609431
+        },
+        {
+          "type": 21,
+          "batch": 6,
+          "ms": 7.059019,
+          "count": 18,
+          "share_percent": 0.051176224018633594
+        },
+        {
+          "type": 20,
+          "batch": 2,
+          "ms": 5.297952,
+          "count": 24,
+          "share_percent": 0.038408903332314004
+        },
+        {
+          "type": 21,
+          "batch": 7,
+          "ms": 4.001036,
+          "count": 9,
+          "share_percent": 0.02900656800082528
+        },
+        {
+          "type": 21,
+          "batch": 3,
+          "ms": 3.973984,
+          "count": 15,
+          "share_percent": 0.028810447376677355
+        },
+        {
+          "type": 21,
+          "batch": 8,
+          "ms": 3.931225,
+          "count": 8,
+          "share_percent": 0.028500454704492625
+        },
+        {
+          "type": 11,
+          "batch": 2,
+          "ms": 3.559726,
+          "count": 12,
+          "share_percent": 0.02580717451262767
+        },
+        {
+          "type": 21,
+          "batch": 2,
+          "ms": 0.998998,
+          "count": 4,
+          "share_percent": 0.007242500047409834
+        },
+        {
+          "type": 12,
+          "batch": 1,
+          "ms": 0.082235,
+          "count": 4,
+          "share_percent": 0.0005961843681356196
+        }
+      ],
+      "isa": {
+        "8": {
+          "op_counts": {
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "s_clause": 12,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_dual_mov_b32": 80,
+            "v_and_or_b32": 25,
+            "v_dual_and_b32": 6,
+            "v_or_b32_e32": 7,
+            "v_mov_b32_e32": 23,
+            "s_waitcnt": 134,
+            "s_cmp_lt_u32": 1,
+            "v_cmp_gt_u32_e32": 3,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 2,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "v_dual_cndmask_b32": 3,
+            "v_dual_lshlrev_b32": 9,
+            "v_cmp_gt_u32_e64": 4,
+            "s_mulk_i32": 1,
+            "v_mul_lo_u32": 5,
+            "v_cndmask_b32_e64": 3,
+            "s_delay_alu": 130,
+            "v_lshl_or_b32": 3,
+            "v_xor_b32_e32": 8,
+            "v_dual_add_nc_u32": 12,
+            "s_mov_b32": 7,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_cmp_ge_u32": 1,
+            "s_barrier": 2,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 12,
+            "s_load_b32": 1,
+            "s_and_b32": 2,
+            "v_dual_add_f32": 100,
+            "v_add_f32_e32": 108,
+            "v_cmp_lt_u32_e64": 1,
+            "v_xad_u32": 3,
+            "v_add_nc_u32_e32": 22,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 34,
+            "v_lshlrev_b32_e32": 20,
+            "v_add_co_u32": 58,
+            "v_add_co_ci_u32_e64": 58,
+            "v_cmpx_gt_u32_e64": 4,
+            "v_bfe_u32": 3,
+            "v_mad_u64_u32": 1,
+            "v_and_b32_e32": 33,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_fma_f32": 64,
+            "v_dual_fmac_f32": 79,
+            "v_fmac_f32_e32": 401,
+            "v_sub_nc_u32_e32": 1,
+            "v_bfi_b32": 8,
+            "v_cvt_f32_f16_e32": 8,
+            "v_mul_f32_e32": 33,
+            "v_dual_mul_f32": 7,
+            "v_mbcnt_lo_u32_b32": 1,
+            "v_cmp_gt_i32_e32": 5,
+            "v_cndmask_b32_e32": 3,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          },
+          "total_valu": 1367,
+          "dual_fp32_fma": 79,
+          "single_fp32_fma": 465
+        },
+        "1": {
+          "op_counts": {
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "s_clause": 12,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_dual_mov_b32": 80,
+            "v_and_or_b32": 25,
+            "v_dual_and_b32": 7,
+            "v_or_b32_e32": 7,
+            "v_mov_b32_e32": 23,
+            "s_waitcnt": 137,
+            "s_cmp_lt_u32": 1,
+            "v_cmp_gt_u32_e32": 3,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 2,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "v_dual_cndmask_b32": 3,
+            "v_dual_lshlrev_b32": 6,
+            "v_cmp_gt_u32_e64": 4,
+            "s_mulk_i32": 1,
+            "v_mul_lo_u32": 5,
+            "v_cndmask_b32_e64": 3,
+            "s_delay_alu": 117,
+            "v_lshl_or_b32": 3,
+            "v_xor_b32_e32": 8,
+            "v_dual_add_nc_u32": 12,
+            "s_mov_b32": 7,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_cmp_ge_u32": 1,
+            "s_barrier": 2,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 12,
+            "s_load_b32": 1,
+            "s_and_b32": 2,
+            "v_dual_add_f32": 89,
+            "v_add_f32_e32": 119,
+            "v_cmp_lt_u32_e64": 1,
+            "v_xad_u32": 3,
+            "v_add_nc_u32_e32": 22,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 34,
+            "v_lshlrev_b32_e32": 23,
+            "v_add_co_u32": 58,
+            "v_add_co_ci_u32_e64": 58,
+            "v_cmpx_gt_u32_e64": 4,
+            "v_bfe_u32": 3,
+            "v_mad_u64_u32": 1,
+            "v_and_b32_e32": 32,
+            "v_sub_nc_u32_e32": 1,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_fma_f32": 64,
+            "v_fmac_f32_e32": 411,
+            "v_dual_fmac_f32": 69,
+            "v_bfi_b32": 8,
+            "v_cvt_f32_f16_e64": 1,
+            "v_mul_f32_e32": 28,
+            "v_cvt_f32_f16_e32": 7,
+            "v_dual_mul_f32": 12,
+            "v_mbcnt_lo_u32_b32": 1,
+            "v_cmp_gt_i32_e32": 5,
+            "v_cndmask_b32_e32": 3,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          },
+          "total_valu": 1367,
+          "dual_fp32_fma": 69,
+          "single_fp32_fma": 475
+        }
+      }
+    },
+    "interpretation": "Q5 batch-8 aggregate kernel time decreases 758.92->720.12ms; compact IQ4 decreases 325.06->313.81ms. Total repetition kernel time decreases 2415.55->2368.94ms. All 3 selected variants have zero private scratch. The only nonzero K-quant private segment is the pre-existing Q3 batch-6 wide fallback (12 bytes).",
+    "register_hypothesis": "Completing tokens earlier does not reduce allocated registers: Q5 rises from 146 to155 compiler-reported VGPRs. Static VALU instruction count is unchanged. Timing demonstrates a benefit from the changed independent-work order; these observations do not identify a lower register count or instruction count as its cause."
+  },
+  "rejected_experiments": [
+    {
+      "experiment": "One-token dot grouping at Q5 batch7",
+      "result": "Slower 3\u20137% at both FFN shapes; retain full-batch grouping."
+    },
+    {
+      "experiment": "One-token dot grouping at Q5 batch4",
+      "result": "Small/inconsistent gains across shapes; no production change."
+    },
+    {
+      "experiment": "Three output rows with one-token grouping at Q5 batch8",
+      "result": "Slower 16\u201322%; retain four output rows."
+    },
+    {
+      "experiment": "One-token grouping for Q4/IQ4 batch8",
+      "result": "Q4 was slightly slower; IQ4 gained only 0.5\u20131.3%. Retain their grouping."
+    },
+    {
+      "experiment": "Fused SSM two-row and static-format prototypes",
+      "result": "All four common QKV/gate format pairs were bit-exact. Two rows were slower; one-row specialization gained less than 1%. No production SSM changes.",
+      "probes": [
+        {
+          "qkv": "q4",
+          "gate": "q4",
+          "median_ms": {
+            "baseline": 0.2512405,
+            "generic_rows2": 0.2612505,
+            "typed_rows1": 0.249307,
+            "typed_rows2": 0.2578865
+          },
+          "gains_percent": {
+            "baseline": 0.0,
+            "generic_rows2": -3.831571614217011,
+            "typed_rows1": 0.7755498241124315,
+            "typed_rows2": -2.5771027176684447
+          },
+          "all_finite_bit_exact": true
+        },
+        {
+          "qkv": "q5",
+          "gate": "q5",
+          "median_ms": {
+            "baseline": 0.2862695,
+            "generic_rows2": 0.29214850000000003,
+            "typed_rows1": 0.28470300000000004,
+            "typed_rows2": 0.2897635
+          },
+          "gains_percent": {
+            "baseline": 0.0,
+            "generic_rows2": -2.01233276912256,
+            "typed_rows1": 0.550222512583276,
+            "typed_rows2": -1.2058109458230604
+          },
+          "all_finite_bit_exact": true
+        },
+        {
+          "qkv": "q4",
+          "gate": "q5",
+          "median_ms": {
+            "baseline": 0.2688805,
+            "generic_rows2": 0.27585550000000003,
+            "typed_rows1": 0.2670855,
+            "typed_rows2": 0.274817
+          },
+          "gains_percent": {
+            "baseline": 0.0,
+            "generic_rows2": -2.528497709851718,
+            "typed_rows1": 0.6720694309500397,
+            "typed_rows2": -2.1601647641885213
+          },
+          "all_finite_bit_exact": true
+        },
+        {
+          "qkv": "q5",
+          "gate": "q4",
+          "median_ms": {
+            "baseline": 0.2740165,
+            "generic_rows2": 0.283009,
+            "typed_rows1": 0.27297000000000005,
+            "typed_rows2": 0.280393
+          },
+          "gains_percent": {
+            "baseline": 0.0,
+            "generic_rows2": -3.1774607874661243,
+            "typed_rows1": 0.3833754625050201,
+            "typed_rows2": -2.2741295253447813
+          },
+          "all_finite_bit_exact": true
+        }
+      ]
+    }
+  ],
+  "follow_up": [
+    "The prose profile is dominated by Q5 verification at widths 4, 5, 6 (23.6% of total kernel time together). Focus subsequent kernel probes on those widths using mapped weights.",
+    "The acceptance-cost controller's per-row estimate was fitted before these kernel changes. Re-evaluate it only with decisions made before proposals and unchanged verification/sampling rules."
+  ],
+  "limits": [
+    "Two timed samples per binary/prompt, no separate warmup: short paired probes, not confidence intervals. Prose's 0.2% change is too small to treat as a meaningful gain.",
+    "No new full-depth/C>1/capability sweep or independent original-target qualification.",
+    "The upstream headline uses different artifacts/power and decode-only timing. The performance goal remains open; see llama-comparison.json."
+  ]
+}

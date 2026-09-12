@@ -11,7 +11,7 @@ that number. Draft precision is selected separately from target precision.
 
 ## Single user, autoregressive
 
-Q4 depths 0/4096 have a bounded refresh; other rows remain the reference
+Q4 depths 0/4096 have a [bounded AR refresh](eval/dflash2-scalar-row-reuse.json); other rows remain the reference
 sweep at `023a13a`. Full refresh: TODO.
 
 | Context depth | Q4 pp / tg (tok/s) | Q8 pp / tg (tok/s) |
@@ -30,13 +30,13 @@ Latest bounded refresh covers depths 0 and 4096.
 
 | Context depth | Q4 pp / tg | Q8 pp / tg |
 | ---: | ---: | ---: |
-| 0 | 396.3 / 23.85 | 466.2 / 24.14 |
-| 4,096 | 383.4 / 16.76 | 447.3 / 16.30 |
+| 0 | 399.8 / 23.98 | 466.2 / 24.14 |
+| 4,096 | 384.6 / 16.80 | 447.3 / 16.30 |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-[Latest Q4 measurements](eval/dflash2-scalar-row-reuse.json);
+[Latest Q4 measurements](eval/dflash2-dot-order.json);
 [preceding Q8 measurements](eval/dflash2-batch-widths.json).
 The [controller comparison](eval/dflash2-controllers.json) remains separate.
 Earlier [fixed-block precision results](eval/dflash2-rollback.json) and the
@@ -96,17 +96,18 @@ ABBA order, including prefill. Repetition asks for 1,000 space-separated
 
 | Workload | Before tok/s | Current tok/s | Gain |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, AR | 11.17 | **11.39** | 2.0% |
-| Repetition, tg128, fixed-7 | 51.34 | **51.94** | 1.2% |
-| JSON, tg300, adaptive | 45.99 | **46.70** | 1.6% |
-| Prose, tg300, adaptive | 21.48 | **21.67** | 0.9% |
+| Repetition, tg128, fixed-7 | 52.35 | **53.49** | 2.2% |
+| JSON, tg300, adaptive | 46.61 | **47.65** | 2.2% |
+| Prose, tg300, adaptive | 21.66 | **21.71** | 0.2% |
 
 Every token ID and acceptance statistic is unchanged; repetition accepts
 111/111 proposals. These short paired probes have no separate warmup.
-Static Q4/Q5/IQ4 scalar dispatch and Q5 batch-7/IQ4 batch-8 row reuse add
-these gains to the preceding [7–10% verification improvement](eval/dflash2-packed-decode.json).
-All eight new variants have zero private scratch. Prefill has no consistent
-change. [Measurements and quality checks](eval/dflash2-scalar-row-reuse.json).
+Q5 batch-8 FFNs finish one token's dot products at a time; IQ4 batch-8 uses
+16 KiB of shared memory instead of 20 KiB. All three selected variants have
+zero private scratch. Prose and prefill remain essentially unchanged.
+[Measurements and quality checks](eval/dflash2-dot-order.json).
+Earlier gains cover [scalar/row reuse](eval/dflash2-scalar-row-reuse.json) and
+[packed verification](eval/dflash2-packed-decode.json).
 
 The upstream headline uses different artifacts/power and excludes prefill;
 it is not a matched engine comparison. [Source audit and comparison limits](eval/llama-comparison.json).

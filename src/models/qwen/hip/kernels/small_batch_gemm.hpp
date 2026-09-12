@@ -277,13 +277,15 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, core::GgmlType WType,
          std::size_t TilesPerStage = 1, std::uint32_t MinWaves = 12,
-         std::size_t TokenGroups = 1, bool NarrowIndex = false>
+         std::size_t TokenGroups = 1, bool NarrowIndex = false,
+         std::size_t TokensPerStep = Batch>
 __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
     void SmallBatchKQuantExactFp32GEMMKernel(const void* __restrict__ w,
                                              const float* __restrict__ x,
                                              float* __restrict__ y,
                                              std::size_t wide_m,
                                              std::size_t wide_k) {
+  static_assert(TokensPerStep > 0 && Batch % TokensPerStep == 0);
   using Index = std::conditional_t<NarrowIndex, std::uint32_t, std::size_t>;
   const Index m = static_cast<Index>(wide_m);
   const Index k = static_cast<Index>(wide_k);
@@ -293,7 +295,9 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
   constexpr Index kSubsPerTile = 32 * TilesPerStage;
   constexpr Index kVectorsPerSub = kSubElems / 4;
   constexpr bool kCompact =
-      Batch == 8 && WType == core::GgmlType::kQ5_K && TilesPerStage == 1;
+      Batch == 8 && TilesPerStage == 1 &&
+      (WType == core::GgmlType::kQ5_K ||
+       (WType == core::GgmlType::kIQ4_XS && RowsPerWave == 4 && NarrowIndex));
   constexpr Index kStride = kSubElems + (kCompact ? 0 : 4);
   constexpr Index kTileStride = kSubsPerTile * kStride;
   constexpr bool kHasOffset =
@@ -329,7 +333,7 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
           value = *reinterpret_cast<const float4*>(
               x + (token * k) + (source_sub * kSubElems) + (vector * 4));
         }
-        // Compact Q5 staging needs 17 KiB including sums, instead of 21 KiB.
+        // Compact staging uses 16 KiB, plus 1 KiB of sums for affine Q5.
         // Both reads and writes permute float4 groups; arithmetic is unchanged.
         const Index group =
             kCompact ? vector ^ ((sub >> 1U) & 3U) : vector;
@@ -362,41 +366,52 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
               static_cast<const std::uint8_t*>(w) + (safe_row * row_bytes), sub,
               decoded[r]);
         }
-        float dots[RowsPerWave][Batch] = {};
+        // Group independent token dots without reordering an output's sums.
 #pragma unroll
-        for (Index group = 0; group < kVectorsPerSub; ++group) {
+        for (Index token_base = 0; token_base < Batch;
+             token_base += TokensPerStep) {
+          float dots[RowsPerWave][TokensPerStep] = {};
 #pragma unroll
-          for (Index token = 0; token < Batch; ++token) {
-            const Index input_group =
-                kCompact ? group ^ ((slot >> 1U) & 3U) : group;
-            const float4 xv = *reinterpret_cast<const float4*>(
-                staged_x + (token * kTileStride) + (slot * kStride) +
-                (input_group * 4));
+          for (Index group = 0; group < kVectorsPerSub; ++group) {
 #pragma unroll
-            for (Index r = 0; r < RowsPerWave; ++r) {
-              const std::int8_t* q = decoded[r].q + (group * 4);
-              dots[r][token] += static_cast<float>(q[0]) * xv.x;
-              dots[r][token] += static_cast<float>(q[1]) * xv.y;
-              dots[r][token] += static_cast<float>(q[2]) * xv.z;
-              dots[r][token] += static_cast<float>(q[3]) * xv.w;
+            for (Index local_token = 0; local_token < TokensPerStep;
+                 ++local_token) {
+              const Index token = token_base + local_token;
+              const Index input_group =
+                  kCompact ? group ^ ((slot >> 1U) & 3U) : group;
+              const float4 xv = *reinterpret_cast<const float4*>(
+                  staged_x + (token * kTileStride) + (slot * kStride) +
+                  (input_group * 4));
+#pragma unroll
+              for (Index r = 0; r < RowsPerWave; ++r) {
+                const std::int8_t* q = decoded[r].q + (group * 4);
+                dots[r][local_token] += static_cast<float>(q[0]) * xv.x;
+                dots[r][local_token] += static_cast<float>(q[1]) * xv.y;
+                dots[r][local_token] += static_cast<float>(q[2]) * xv.z;
+                dots[r][local_token] += static_cast<float>(q[3]) * xv.w;
+              }
             }
           }
-        }
 #pragma unroll
-        for (Index r = 0; r < RowsPerWave; ++r) {
+          for (Index r = 0; r < RowsPerWave; ++r) {
 #pragma unroll
-          for (Index token = 0; token < Batch; ++token) {
-            if constexpr (kHasOffset) {
-              sums[r][token] += (decoded[r].scale * dots[r][token]) -
-                                (decoded[r].offset *
-                                 staged_sums[(token * kSubsPerTile) + slot]);
-            } else {
-              // Decode rounds the scaled dot before accumulating it. Keep
-              // contraction disabled only here; the dot above still uses its
-              // original FMAs. Symmetric formats need no activation sums.
+            for (Index local_token = 0; local_token < TokensPerStep;
+                 ++local_token) {
+              const Index token = token_base + local_token;
+              if constexpr (kHasOffset) {
+                sums[r][token] +=
+                    (decoded[r].scale * dots[r][local_token]) -
+                    (decoded[r].offset *
+                     staged_sums[(token * kSubsPerTile) + slot]);
+              } else {
+                // Decode rounds the scaled dot before accumulating it. Keep
+                // contraction disabled only here; the dot above still uses its
+                // original FMAs. Symmetric formats need no activation sums.
 #pragma clang fp contract(off)
-              const float contribution = decoded[r].scale * dots[r][token];
-              sums[r][token] += contribution;
+                const float contribution =
+                    decoded[r].scale * dots[r][local_token];
+                sums[r][token] += contribution;
+              }
             }
           }
         }
