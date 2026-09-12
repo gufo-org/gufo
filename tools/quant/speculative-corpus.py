@@ -104,6 +104,8 @@ def build_prompt_command(
     if speculative:
         command.extend(["--speculative", args.backend])
         command.extend(["--draft-tokens", str(args.draft_tokens)])
+        if getattr(args, "draft_policy", None) is not None:
+            command.extend(["--draft-policy", args.draft_policy])
         if args.backend != "dspark":
             command.extend(
                 [
@@ -310,6 +312,8 @@ def main() -> int:
         help="chat-mode system prompt; DSpark auto mode uses the upstream default",
     )
     parser.add_argument("--draft-tokens", type=int, default=7)
+    parser.add_argument("--draft-policy", choices=("fixed", "adaptive"),
+                        help="DFlash2 controller; omitted uses the binary default")
     parser.add_argument("--min-draft-tokens", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=180.0)
@@ -341,6 +345,8 @@ def main() -> int:
         help="Free-form tag recorded in the JSON report",
     )
     args = parser.parse_args()
+    if args.draft_policy is not None and not args.backend.startswith("dflash"):
+        parser.error("--draft-policy requires a DFlash2 backend")
 
     if (
         args.max_tokens <= 0

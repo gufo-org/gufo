@@ -71,6 +71,16 @@ dflash_command = speculative_corpus.build_prompt_command(
 check("--raw" not in dflash_command, "DFlash2 auto mode uses production chat framing")
 check("--system" not in dflash_command, "Qwen keeps its normal system prompt")
 check("--dflash-model" in dflash_command, "DFlash2 model argument")
+controller_args = make_args("dflash2")
+controller_args.draft_policy = "adaptive"
+controller_command = speculative_corpus.build_prompt_command(
+    controller_args, "Continue this text.", speculative=True
+)
+check(controller_command[controller_command.index("--draft-policy") + 1] ==
+      "adaptive", "DFlash2 corpus runs the requested controller")
+check("--draft-policy" not in speculative_corpus.build_prompt_command(
+    controller_args, "Continue this text.", speculative=False
+), "controller choice never changes the autoregressive reference command")
 
 dspark_stats = speculative_corpus.parse_speculative_stats(
     "[Speculative]: acceptance=0.511111 drafted=45 accepted=23 "

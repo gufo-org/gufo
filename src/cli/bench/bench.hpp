@@ -25,6 +25,7 @@ struct BenchOptions {
   std::string speculative_backend{""};
   std::string mtp_model_path;
   std::string dflash_model_path;
+  std::string draft_policy;
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   /// Qwen3.8-Flash-Next: vocabulary prefix the MTP draft scores (0 = full).

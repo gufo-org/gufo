@@ -42,7 +42,11 @@ def check_bench(binary, model, draft):
     common = [binary, "bench", "--model", model, "--verbose",
               "-p", "16", "-n", "8", "-d", "0,32", "-r", "2"]
     baseline = None
-    for backend in ([], ["--speculative", "dflash2", "--dflash-model", draft]):
+    backends = [[]] + [
+        ["--speculative", "dflash2", "--dflash-model", draft,
+         "--draft-policy", policy] for policy in ("fixed", "adaptive")
+    ]
+    for backend in backends:
         result = subprocess.run(common + backend, text=True, capture_output=True,
                                 timeout=180, check=True)
         traces = BENCH_TRACE.findall(result.stderr)
@@ -76,7 +80,10 @@ def main():
     for backend in (
         [],
         ["--speculative", "mtp", "--mtp-model", artifacts[0]],
-        ["--speculative", "dflash2", "--dflash-model", artifacts[1]],
+        ["--speculative", "dflash2", "--dflash-model", artifacts[1],
+         "--draft-policy", "fixed"],
+        ["--speculative", "dflash2", "--dflash-model", artifacts[1],
+         "--draft-policy", "adaptive"],
     ):
         prompt = run(binary, model, "prompt", backend)
         chat = run(binary, model, "chat", backend)

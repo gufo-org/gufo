@@ -21,8 +21,8 @@ namespace {
 
 constexpr std::array<std::uint8_t, 8> kDFlashDraftPersistentMagic = {
     'G', 'D', 'F', 'D', 'R', 'F', '0', '1'};
-constexpr std::uint32_t kDFlashDraftPersistentVersion = 1;
-constexpr std::size_t kDFlashDraftPersistentHeaderBytes = 64;
+constexpr std::uint32_t kDFlashDraftPersistentVersion = 2;
+constexpr std::size_t kDFlashDraftPersistentHeaderBytes = 80;
 constexpr std::uint32_t kDFlashDraftPrimedFlag = 1U << 0U;
 
 template<typename T>
@@ -73,16 +73,19 @@ public:
   QwenDFlashDraftSnapshot(std::unique_ptr<QwenDFlashGpuSnapshot> gpu_snapshot,
                           std::vector<float> pending_target_features,
                           std::size_t target_feature_width,
-                          std::uint32_t max_context, bool primed)
+                          QwenDFlashGpuDraftConfig config,
+                          float controller_state, bool primed)
       : gpu_snapshot(std::move(gpu_snapshot)),
         pending_target_features(std::move(pending_target_features)),
         target_feature_width(target_feature_width),
-        max_context(max_context),
+        config(config),
+        controller_state(controller_state),
         primed(primed) {}
 
   [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
     return (gpu_snapshot != nullptr ? gpu_snapshot->PayloadBytes() : 0) +
-           pending_target_features.size() * sizeof(float);
+           pending_target_features.size() * sizeof(float) +
+           sizeof(controller_state);
   }
 
   [[nodiscard]] std::size_t PersistentPayloadBytes() const override {
@@ -132,7 +135,12 @@ public:
                                    static_cast<std::uint64_t>(expected_bytes));
     PutLittleEndian<std::uint32_t>(destination, 48,
                                    gpu_snapshot->ValidContext());
-    PutLittleEndian<std::uint32_t>(destination, 52, max_context);
+    PutLittleEndian<std::uint32_t>(destination, 52, config.max_context);
+    PutLittleEndian<std::uint32_t>(
+        destination, 56, std::bit_cast<std::uint32_t>(controller_state));
+    PutLittleEndian<std::uint32_t>(destination, 60,
+                                   static_cast<std::uint32_t>(config.policy));
+    PutLittleEndian<std::uint32_t>(destination, 64, config.max_draft_tokens);
 
     const std::size_t gpu_offset = kDFlashDraftPersistentHeaderBytes;
     const std::size_t pending_offset =
@@ -160,7 +168,8 @@ public:
   std::unique_ptr<QwenDFlashGpuSnapshot> gpu_snapshot;
   std::vector<float> pending_target_features;
   std::size_t target_feature_width{0};
-  std::uint32_t max_context{0};
+  QwenDFlashGpuDraftConfig config;
+  float controller_state{0.0F};
   bool primed{false};
 };
 
@@ -169,17 +178,31 @@ public:
 QwenDFlashGpuDraftBackend::QwenDFlashGpuDraftBackend(
     std::unique_ptr<QwenDFlashGpuExecutor> executor,
     QwenDFlashGpuDraftConfig config)
-    : executor_(std::move(executor)), config_(config) {}
+    : executor_(std::move(executor)),
+      config_(config),
+      controller_(
+          config.policy, config.max_draft_tokens,
+          // The tied output tensor distinguishes the qualified Q8 target
+          // (Q8_0 head) from Q4 (Q6_K head). Q8 verification is more bandwidth
+          // bound, so short blocks save less work in the fixed-length pilot.
+          executor_->GetModel().GetWeights().output.type ==
+                  core::GgmlType::kQ8_0
+              ? 0.02F
+              : 0.08F) {}
 
 std::unique_ptr<QwenDFlashGpuDraftBackend> QwenDFlashGpuDraftBackend::Create(
     std::shared_ptr<const QwenDFlashGpuModel> model,
     QwenDFlashGpuDraftConfig config, std::string* error_msg) {
-  if (model == nullptr || config.max_draft_tokens == 0) {
+  if (model == nullptr || config.max_draft_tokens == 0 ||
+      model->GetDFlashConfig().block_size < 2) {
     if (error_msg != nullptr) {
       *error_msg = "DFlash GPU draft configuration is invalid";
     }
     return nullptr;
   }
+  config.max_draft_tokens = std::min(
+      {config.max_draft_tokens, model->GetDFlashConfig().block_size - 1U,
+       speculative::DFlashLengthController::kMaxDraftTokens});
   auto executor = QwenDFlashGpuExecutor::Create(std::move(model),
                                                 config.max_context, error_msg);
   if (executor == nullptr) {
@@ -218,7 +241,6 @@ bool QwenDFlashGpuDraftBackend::PrimeTargetContext(
     const speculative::DraftTargetContext& context) {
   Reset();
   if (context.prompt_tokens.empty()) {
-    last_error_ = "DFlash prompt context is empty";
     return false;
   }
 
@@ -227,7 +249,6 @@ bool QwenDFlashGpuDraftBackend::PrimeTargetContext(
 
   if (context.hidden_size != enc_in_dim ||
       context.prompt_hidden_states.size() != num_tokens * enc_in_dim) {
-    last_error_ = "DFlash target features dimension mismatch";
     return false;
   }
 
@@ -236,14 +257,11 @@ bool QwenDFlashGpuDraftBackend::PrimeTargetContext(
         executor_->InjectTargetContext(context.prompt_hidden_states, 0,
                                        static_cast<std::uint32_t>(num_tokens));
     if (!ok) {
-      last_error_ = "DFlash target context injection failed";
       return false;
     }
-    proposal_input_ = context.prompt_tokens.back();
     primed_ = true;
     return true;
-  } catch (const std::exception& ex) {
-    last_error_ = ex.what();
+  } catch (const std::exception&) {
     Reset();
     return false;
   }
@@ -327,13 +345,15 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
 
   speculative::DraftProposal proposal;
   proposal.start_pos = current_pos;
-  const std::uint32_t count = std::min(max_tokens, config_.max_draft_tokens);
+  const std::uint32_t context_budget =
+      current_pos < config_.max_context ? config_.max_context - current_pos - 1U
+                                        : 0;
+  const std::uint32_t count =
+      controller_.Choose(std::min(max_tokens, context_budget));
   if (count == 0) {
     return proposal;
   }
 
-  proposal_checkpoint_ = current_pos;
-  proposal_input_ = prompt_tokens.back();
   proposed_tokens_.clear();
 
   std::vector<float> sample_uniforms;
@@ -347,7 +367,7 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
         executor_->GetModel().GetDFlashConfig().selector_top_k;
   }
   proposed_tokens_ = executor_->ForwardBlock(
-      proposal_input_, current_pos, count, temperature, sample_uniforms,
+      prompt_tokens.back(), current_pos, count, temperature, sample_uniforms,
       nullptr, temperature > 0.0F ? &proposal.candidate_ids : nullptr,
       temperature > 0.0F ? &proposal.candidate_probabilities : nullptr);
 
@@ -364,6 +384,7 @@ void QwenDFlashGpuDraftBackend::AcceptFeedback(
     throw std::logic_error("DFlash GPU proposal feedback is invalid");
   }
 
+  controller_.Observe(accepted.size(), proposed_tokens_.size());
   proposal_active_ = false;
   proposed_tokens_.clear();
 }
@@ -380,7 +401,8 @@ void QwenDFlashGpuDraftBackend::UpdateTargetHidden(
 }
 
 std::size_t QwenDFlashGpuDraftBackend::SnapshotPayloadBytes() const {
-  const std::size_t gpu_bytes = executor_->SnapshotPayloadBytes();
+  const std::size_t gpu_bytes =
+      CheckedPersistentAdd(executor_->SnapshotPayloadBytes(), sizeof(float));
   if (pending_target_features_.size() >
       (std::numeric_limits<std::size_t>::max() - gpu_bytes) / sizeof(float)) {
     throw std::overflow_error("DFlash snapshot size overflows");
@@ -396,7 +418,8 @@ QwenDFlashGpuDraftBackend::Snapshot() const {
   }
   return std::make_unique<QwenDFlashDraftSnapshot>(
       executor_->SaveSnapshot(), pending_target_features_,
-      executor_->GetTargetFeaturesSize(), config_.max_context, primed_);
+      executor_->GetTargetFeaturesSize(), config_, controller_.State(),
+      primed_);
 }
 
 void QwenDFlashGpuDraftBackend::RestoreSnapshot(
@@ -409,20 +432,21 @@ void QwenDFlashGpuDraftBackend::RestoreSnapshot(
   }
   const std::size_t feature_width = executor_->GetTargetFeaturesSize();
   if (feature_width == 0 ||
+      dflash_snapshot->config.max_context != config_.max_context ||
+      dflash_snapshot->config.max_draft_tokens != config_.max_draft_tokens ||
+      dflash_snapshot->config.policy != config_.policy ||
       dflash_snapshot->pending_target_features.size() % feature_width != 0) {
     throw std::invalid_argument(
         "DFlash draft snapshot has malformed pending target features");
   }
+  auto controller = controller_;
+  controller.Restore(dflash_snapshot->controller_state);
   executor_->RestoreSnapshot(*dflash_snapshot->gpu_snapshot);
+  controller_ = controller;
   pending_target_features_ = dflash_snapshot->pending_target_features;
   proposed_tokens_.clear();
-  proposal_checkpoint_ = executor_->GetInjectedContextLength() +
-                         static_cast<std::uint32_t>(
-                             pending_target_features_.size() / feature_width);
-  proposal_input_ = 0;
   primed_ = dflash_snapshot->primed;
   proposal_active_ = false;
-  last_error_.clear();
 }
 
 void QwenDFlashGpuDraftBackend::RestorePersistentSnapshot(
@@ -434,7 +458,8 @@ void QwenDFlashGpuDraftBackend::RestorePersistentSnapshot(
           kDFlashDraftPersistentVersion ||
       GetLittleEndian<std::uint32_t>(payload, 12) !=
           kDFlashDraftPersistentHeaderBytes ||
-      GetLittleEndian<std::uint64_t>(payload, 56) != 0) {
+      GetLittleEndian<std::uint32_t>(payload, 68) != 0 ||
+      GetLittleEndian<std::uint64_t>(payload, 72) != 0) {
     throw std::invalid_argument("DFlash draft persistent header is invalid");
   }
   const std::uint32_t flags = GetLittleEndian<std::uint32_t>(payload, 16);
@@ -448,6 +473,10 @@ void QwenDFlashGpuDraftBackend::RestorePersistentSnapshot(
   const std::uint32_t injected_context =
       GetLittleEndian<std::uint32_t>(payload, 48);
   const std::uint32_t max_context = GetLittleEndian<std::uint32_t>(payload, 52);
+  const float controller_state =
+      std::bit_cast<float>(GetLittleEndian<std::uint32_t>(payload, 56));
+  const auto policy = GetLittleEndian<std::uint32_t>(payload, 60);
+  const auto max_draft_tokens = GetLittleEndian<std::uint32_t>(payload, 64);
   const std::size_t expected_feature_width = executor_->GetTargetFeaturesSize();
 
   if ((flags & ~kDFlashDraftPrimedFlag) != 0 || feature_width == 0 ||
@@ -456,6 +485,8 @@ void QwenDFlashGpuDraftBackend::RestorePersistentSnapshot(
           std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t) ||
       pending_count % feature_width != 0 ||
       max_context != config_.max_context ||
+      policy != static_cast<std::uint32_t>(config_.policy) ||
+      max_draft_tokens != config_.max_draft_tokens ||
       injected_context > config_.max_context ||
       pending_count / feature_width >
           static_cast<std::size_t>(config_.max_context - injected_context) ||
@@ -463,6 +494,8 @@ void QwenDFlashGpuDraftBackend::RestorePersistentSnapshot(
     throw std::invalid_argument(
         "DFlash draft persistent metadata is incompatible");
   }
+  auto controller = controller_;
+  controller.Restore(controller_state);
   const bool primed = (flags & kDFlashDraftPrimedFlag) != 0;
   if (!primed && (injected_context != 0 || pending_count != 0)) {
     throw std::invalid_argument("DFlash draft unprimed payload contains state");
@@ -491,24 +524,19 @@ void QwenDFlashGpuDraftBackend::RestorePersistentSnapshot(
         "DFlash draft persistent context length is inconsistent");
   }
   pending_target_features_ = std::move(pending_target_features);
+  controller_ = controller;
   proposed_tokens_.clear();
-  proposal_checkpoint_ = injected_context + static_cast<std::uint32_t>(
-                                                pending_count / feature_width);
-  proposal_input_ = 0;
   primed_ = primed;
   proposal_active_ = false;
-  last_error_.clear();
 }
 
 void QwenDFlashGpuDraftBackend::Reset() noexcept {
   executor_->Reset();
+  controller_.Reset();
   pending_target_features_.clear();
   proposed_tokens_.clear();
-  proposal_input_ = 0;
-  proposal_checkpoint_ = 0;
   primed_ = false;
   proposal_active_ = false;
-  last_error_.clear();
 }
 
 }  // namespace gufo::hip

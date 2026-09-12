@@ -219,6 +219,18 @@ tokenization::TokenId QwenGpuExecutor::SampleLastLogits(
   return token;
 }
 
+tokenization::TokenId QwenGpuExecutor::SampleCachedLogits(
+    std::span<const float> logits, sampling::SamplerState& sampler) {
+  if (logits.size() != weights_.config.vocab_size)
+    throw std::invalid_argument(
+        "cached Qwen frontier has the wrong vocabulary");
+  auto scratch = arena_.GetScratchView();
+  HIP_CHECK(hipMemcpyAsync(scratch.decode.logits.data(), logits.data(),
+                           logits.size_bytes(), hipMemcpyHostToDevice,
+                           arena_.stream));
+  return SampleLastLogits(sampler);
+}
+
 GpuSamplingParameters QwenGpuExecutor::PrepareGpuSamplingParameters(
     const sampling::SamplerState& sampler) {
   const auto& config = sampler.config();

@@ -23,27 +23,22 @@ Reference sweep at `023a13a`; full refresh: TODO.
 
 ## Single user, speculative
 
-Last pp2048/tg128 qualification (`26d0dc7`), in tok/s; fixed blocks of seven
-proposed tokens. One timed repetition after warmup. Every measured pairing
-matches all 128 AR token IDs. MTP performance: **TODO**.
+Recommended **Q4_K_M draft, adaptive controller**, pp2048/tg128, in tok/s.
+One timed repetition after warmup; every measured row matches all 128 AR IDs.
+The bounded 4K check gains 7.0% / 2.3% TG over fixed blocks on Q4 / Q8.
 
-| Target | Depth | DFlash2 Q4_K_M | DFlash2 Q8_0 | DFlash2 BF16 |
-| --- | ---: | ---: | ---: | ---: |
-| Q4 | 0 | 395.1 / 20.91 | 396.5 / 17.67 | 397.5 / 16.90 |
-| Q4 | 4,096 | 383.7 / 13.99 | TODO | TODO |
-| Q4 | 8,192 | TODO | TODO | TODO |
-| Q4 | 12,288 | TODO | TODO | TODO |
-| Q4 | 16,384 | TODO | TODO | TODO |
-| Q8 | 0 | 466.2 / 22.99 | 464.6 / 22.82 | 466.8 / 21.90 |
-| Q8 | 4,096 | 445.9 / 15.84 | TODO | TODO |
-| Q8 | 8,192 | TODO | TODO | TODO |
-| Q8 | 12,288 | TODO | TODO | TODO |
-| Q8 | 16,384 | TODO | TODO | TODO |
+| Context depth | Q4 pp / tg | Q8 pp / tg |
+| ---: | ---: | ---: |
+| 0 | TODO | TODO |
+| 4,096 | 385.1 / 15.08 | 447.2 / 16.21 |
+| 8,192 | TODO | TODO |
+| 12,288 | TODO | TODO |
+| 16,384 | TODO | TODO |
 
-[Measurements and quality checks](eval/dflash2-rollback.json).
-Unmeasured cells await refresh; the [previous full depth sweep](eval/dflash2-depths.json)
-remains available as a historical reference. Acceptance varies with the
-continuation, so generation speed need not decrease monotonically with depth.
+[Current measurements](eval/dflash2-controllers.json).
+Earlier [fixed-block precision results](eval/dflash2-rollback.json) and the
+[full depth sweep](eval/dflash2-depths.json) remain historical references.
+Other depths with the new default and MTP performance: **TODO**.
 
 ## Multiple users, autoregressive
 
@@ -72,9 +67,31 @@ speculative serving is being qualified before these numbers are published.
 
 ## Draft choice and latest optimization
 
-All three drafts pass the pinned upstream operator comparison. Precision
-selection remains open because acceptance depends on the target and prompt.
-Controller comparisons follow kernel optimization.
+**Q4_K_M is the recommended draft; adaptive is the default controller.**
+All three drafts pass the pinned upstream operator comparison. A short C1
+comparison on three chat prompts (explanation, code, reasoning), tg128,
+one repetition per pairing, includes prefill:
+
+| Target | Draft | Fixed tok/s | Adaptive tok/s |
+| --- | --- | ---: | ---: |
+| Q4 | Q4_K_M | 28.85 | **29.44** |
+| Q4 | Q8_0 | 28.98 | 28.39 |
+| Q4 | BF16 | 27.77 | 27.09 |
+| Q8 | Q4_K_M | **26.36** | **26.36** |
+| Q8 | Q8_0 | 26.16 | 26.12 |
+| Q8 | BF16 | 25.48 | 25.50 |
+
+Every continuation matches all 128 AR token IDs. Q8 still wins the coding
+prompt; fixed can be faster with Q8/BF16 drafts. Draft files occupy
+1.06 / 1.92 / 3.60 GiB respectively; BF16 has no measured production speed
+advantage here. These short chat results do not replace the synthetic depth
+table. [Controller and precision comparison](eval/dflash2-controllers.json).
+
+Greedy requests with repetition/frequency/presence penalties retain DFlash2
+and reproduce AR. A short C1 chat probe with these penalties reaches
+**30.25–31.43 tok/s on Q4** and **25.89–27.03 on Q8** across the three drafts.
+These include prefill and are separate from the synthetic table above.
+[Sampling measurements](eval/dflash2-sampling.json).
 
 Exact projections now stream large BF16 weights, cache reused injection K/V
 weights, and skip symmetric-quant offset work while preserving decode rounding.

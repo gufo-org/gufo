@@ -12,6 +12,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/speculative/draft_backend.hpp"
+#include "src/models/qwen/dflash_policy.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/tokenizer.hpp"
@@ -215,7 +216,9 @@ private:
 
 struct QwenDFlashGpuDraftConfig {
   std::uint32_t max_context{4096};
-  std::uint32_t max_draft_tokens{16};
+  std::uint32_t max_draft_tokens{7};
+  speculative::DFlashDraftPolicy policy{
+      speculative::DFlashDraftPolicy::kAdaptive};
 };
 
 /// Adapts the GPU DFlash executor to the repository's IDraftBackend speculative
@@ -278,6 +281,7 @@ public:
       std::span<const std::uint8_t> payload) override;
 
   void Reset() noexcept override;
+  void BeginRequest() noexcept override { controller_.Reset(); }
 
 private:
   void InjectPendingFeatures(std::uint32_t position);
@@ -290,13 +294,11 @@ private:
 
   std::unique_ptr<QwenDFlashGpuExecutor> executor_;
   QwenDFlashGpuDraftConfig config_;
+  speculative::DFlashLengthController controller_;
   std::vector<float> pending_target_features_;
   std::vector<tokenization::TokenId> proposed_tokens_;
-  std::uint32_t proposal_checkpoint_{0};
-  tokenization::TokenId proposal_input_{0};
   bool primed_{false};
   bool proposal_active_{false};
-  std::string last_error_;
 };
 
 }  // namespace gufo::hip

@@ -443,6 +443,11 @@ public:
   [[nodiscard]] tokenization::TokenId SampleLastLogits(
       sampling::SamplerState& sampler);
 
+  /// Restores a saved frontier row and samples with the same GPU operations
+  /// as a fresh autoregressive request.
+  [[nodiscard]] tokenization::TokenId SampleCachedLogits(
+      std::span<const float> logits, sampling::SamplerState& sampler);
+
   /// Samples one row from the most recent verification batch without copying
   /// its vocabulary-sized logits to the host.
   [[nodiscard]] tokenization::TokenId SampleVerificationLogits(

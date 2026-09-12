@@ -99,6 +99,10 @@ static void PrintTextHelp(std::string_view program_name,
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to Qwen DFlash2 GGUF file", "Speculative",
                    &opt.dflash_model_path);
+  parser.AddOption(
+      "", "--draft-policy", "POLICY",
+      "DFlash2 block length: fixed or adaptive (default: adaptive)",
+      "Speculative", &opt.draft_policy);
   parser.AddOption("", "--dspark-model", "PATH",
                    "Path to the DeepSeek V4 Flash DSpark support GGUF file",
                    "Speculative", &opt.dspark_model_path);
@@ -536,6 +540,7 @@ std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
     hip::QwenDFlashGpuDraftConfig cfg{
         .max_context = executor.GetMaxContext(),
         .max_draft_tokens = static_cast<std::uint32_t>(opt.draft_tokens),
+        .policy = speculative::ParseDFlashDraftPolicy(opt.draft_policy),
     };
     draft_backend = hip::QwenDFlashGpuDraftBackend::CreateFromGguf(
         dflash_path, executor.GetSharedModel(), cfg, &err);
@@ -722,6 +727,10 @@ std::optional<PromptOptions> ParsePromptOptions(
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to Qwen DFlash2 GGUF file", "Speculative",
                    &opt.dflash_model_path);
+  parser.AddOption(
+      "", "--draft-policy", "POLICY",
+      "DFlash2 block length: fixed or adaptive (default: adaptive)",
+      "Speculative", &opt.draft_policy);
   parser.AddOption("", "--dspark-model", "PATH",
                    "Path to the DeepSeek V4 Flash DSpark support GGUF file",
                    "Speculative", &opt.dspark_model_path);
@@ -828,10 +837,21 @@ std::optional<PromptOptions> ParsePromptOptions(
     }
     return std::nullopt;
   }
+  if (!opt.draft_policy.empty() &&
+      ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
+       (opt.speculative_backend != "dflash" &&
+        opt.speculative_backend != "dflash2" &&
+        opt.speculative_backend != "dflash-2"))) {
+    if (error_msg != nullptr)
+      *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
+    return std::nullopt;
+  }
   if (opt.min_draft_tokens != 1 &&
       (backend == "dflash" || backend == "dflash2" || backend == "dflash-2")) {
     if (error_msg != nullptr)
-      *error_msg = "DFlash2 uses fixed blocks; --min-draft-tokens must be 1";
+      *error_msg =
+          "DFlash2 requires --min-draft-tokens 1; bound blocks with "
+          "--draft-tokens";
     return std::nullopt;
   }
   if (opt.reasoning_mode != "on" && opt.reasoning_mode != "off" &&

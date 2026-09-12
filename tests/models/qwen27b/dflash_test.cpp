@@ -30,6 +30,41 @@ void Expect(bool condition, std::string_view message) {
   }
 }
 
+void TestLengthController() {
+  using gufo::speculative::DFlashDraftPolicy;
+  using gufo::speculative::DFlashLengthController;
+  DFlashLengthController fixed(DFlashDraftPolicy::kFixed, 7);
+  fixed.Observe(0, 7);
+  Expect(fixed.Choose(100) == 7 && fixed.Choose(3) == 3 && fixed.Choose(0) == 0,
+         "fixed blocks obey only the configured and remaining budgets");
+  DFlashLengthController adaptive(DFlashDraftPolicy::kAdaptive, 7);
+  for (int round = 0; round < 32; ++round)
+    adaptive.Observe(0, adaptive.Choose(7));
+  Expect(adaptive.Choose(7) == 1, "rejections reduce wasted verification");
+  for (int round = 0; round < 32; ++round) {
+    const auto drafted = adaptive.Choose(7);
+    adaptive.Observe(drafted, drafted);
+  }
+  Expect(adaptive.Choose(7) == 7,
+         "censored full acceptance probes upward instead of getting stuck");
+  const auto saved = adaptive.State();
+  adaptive.Reset();
+  Expect(adaptive.State() != saved, "new requests reset learned acceptance");
+  adaptive.Restore(saved);
+  Expect(adaptive.Choose(7) == 7 && adaptive.Choose(2) == 2,
+         "restored decisions retain history and obey the output budget");
+  for (const float invalid : {-1.0F, 8.0F, INFINITY, NAN}) {
+    bool rejected = false;
+    try {
+      adaptive.Restore(invalid);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    Expect(rejected && adaptive.State() == saved,
+           "malformed controller state cannot mutate the decision history");
+  }
+}
+
 void CaptureReferenceTrace(
     const std::shared_ptr<const gufo::hip::QwenGpuModel>& target_model,
     const std::shared_ptr<const gufo::hip::QwenDFlashGpuModel>& draft_model,
@@ -99,6 +134,7 @@ void CaptureReferenceTrace(
 
 int main(int argc, const char* const* argv) {
   try {
+    TestLengthController();
     const char* base_path =
         argc > 1 ? argv[1] : std::getenv("GUFO_QWEN27B_MODEL");
     const char* draft_path =
@@ -136,6 +172,7 @@ int main(int argc, const char* const* argv) {
     gufo::hip::QwenDFlashGpuDraftConfig config{
         .max_context = 512,
         .max_draft_tokens = 8,
+        .policy = gufo::speculative::DFlashDraftPolicy::kAdaptive,
     };
     auto backend = gufo::hip::QwenDFlashGpuDraftBackend::Create(dflash_model,
                                                                 config, &error);
@@ -205,6 +242,89 @@ int main(int argc, const char* const* argv) {
         {}, uninterrupted.tokens.empty() ? 0 : uninterrupted.tokens.front());
     restored->AcceptFeedback(
         {}, restarted.tokens.empty() ? 0 : restarted.tokens.front());
+
+    // Learn from another rejection, then compare both snapshot forms with a
+    // sampled continuation. A reset-on-restore bug would change the block size,
+    // the proposal distribution and the RNG frontier.
+    backend->UpdateTargetHidden(pending_features);
+    const std::vector<gufo::tokenization::TokenId> next_prompt{1, 2, 3, 4, 5};
+    const auto rejected = backend->Propose(next_prompt, next_prompt.size(), 7);
+    Expect(!rejected.tokens.empty(), "adaptive controller continues drafting");
+    backend->AcceptFeedback({}, 6);
+    backend->UpdateTargetHidden(pending_features);
+    const auto learned = backend->Snapshot();
+    std::vector<std::uint8_t> learned_payload(
+        learned->PersistentPayloadBytes());
+    Expect(
+        learned->SerializePersistent(learned_payload) == learned_payload.size(),
+        "serialize learned controller state");
+    const auto persistent_bytes_for =
+        [](const gufo::hip::QwenDFlashGpuDraftBackend& source) {
+          const auto saved = source.Snapshot();
+          std::vector<std::uint8_t> bytes(saved->PersistentPayloadBytes());
+          Expect(saved->SerializePersistent(bytes) == bytes.size(),
+                 "serialize complete controller snapshot");
+          return bytes;
+        };
+    const std::vector<gufo::tokenization::TokenId> final_prompt{1, 2, 3,
+                                                                4, 5, 6};
+    std::uint64_t source_rng = 73;
+    const auto expected = backend->ProposeSampled(
+        final_prompt, final_prompt.size(), 7, 0.8F, &source_rng);
+    Expect(!expected.tokens.empty(),
+           "learned adaptive controller continues sampled drafting");
+    for (const bool persistent : {false, true}) {
+      if (persistent)
+        restored->RestorePersistentSnapshot(learned_payload);
+      else
+        restored->RestoreSnapshot(*learned);
+      Expect(persistent_bytes_for(*restored) == learned_payload,
+             "both snapshot forms preserve every controller state byte");
+      std::uint64_t replay_rng = 73;
+      const auto replayed = restored->ProposeSampled(
+          final_prompt, final_prompt.size(), 7, 0.8F, &replay_rng);
+      Expect(replayed.tokens == expected.tokens &&
+                 replayed.candidate_ids == expected.candidate_ids &&
+                 replayed.candidate_probabilities ==
+                     expected.candidate_probabilities &&
+                 replay_rng == source_rng,
+             "controller snapshots preserve sampled proposals and RNG state");
+      restored->AcceptFeedback({}, 7);
+    }
+
+    restored->RestoreSnapshot(*learned);
+    restored->BeginRequest();
+    std::uint64_t reused_rng = 73;
+    const auto reused = restored->ProposeSampled(
+        final_prompt, final_prompt.size(), 7, 0.8F, &reused_rng);
+    auto cold = gufo::hip::QwenDFlashGpuDraftBackend::Create(dflash_model,
+                                                             config, &error);
+    Expect(cold != nullptr, error);
+    auto complete_features = prompt_features;
+    for (int row = 0; row < 3; ++row)
+      complete_features.insert(complete_features.end(),
+                               pending_features.begin(),
+                               pending_features.end());
+    Expect(cold->PrimeTargetContext({
+               .prompt_tokens = final_prompt,
+               .prompt_hidden_states = complete_features,
+               .hidden_size = feature_width,
+               .first_token = 7,
+           }),
+           "prime cold reference for reused request");
+    std::uint64_t cold_rng = 73;
+    const auto cold_proposal = cold->ProposeSampled(
+        final_prompt, final_prompt.size(), 7, 0.8F, &cold_rng);
+    Expect(reused.tokens == cold_proposal.tokens &&
+               reused.candidate_ids == cold_proposal.candidate_ids &&
+               reused.candidate_probabilities ==
+                   cold_proposal.candidate_probabilities &&
+               reused_rng == cold_rng,
+           "new cached requests reproduce cold proposals and RNG state");
+    restored->AcceptFeedback({}, 7);
+    cold->AcceptFeedback({}, 7);
+    Expect(persistent_bytes_for(*restored) == persistent_bytes_for(*cold),
+           "new cached requests retain the same future policy and model state");
 
     // A large logical context must not reserve or serialize expired history.
     // Restore at the window boundary, overwrite wrapped slots, and replay.

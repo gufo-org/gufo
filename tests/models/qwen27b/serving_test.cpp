@@ -173,7 +173,7 @@ int main(int argc, const char* const* argv) {
         !backend.load(model, &error, context, state_count, {}, {},
                       {.backend = gufo::server::TextSpeculativeBackend::kDFlash,
                        .min_draft_tokens = 2}) &&
-            error.find("fixed blocks") != std::string::npos,
+            error.find("min-draft-tokens") != std::string::npos,
         "DFlash must reject an unused adaptive draft floor");
     Expect(backend.load(model, &error, context, state_count), error);
     Expect(backend.model_id() == model->GetConfig().model_name,
@@ -232,6 +232,8 @@ int main(int argc, const char* const* argv) {
                      .draft_model_path = draft_model_path,
                      .max_draft_tokens = 7,
                      .min_draft_tokens = 1,
+                     .dflash_policy =
+                         gufo::speculative::DFlashDraftPolicy::kAdaptive,
                  }),
              error);
       const auto direct_spec = GenerateDirect(*direct, raw_prompt_tokens, 8);
@@ -266,6 +268,53 @@ int main(int argc, const char* const* argv) {
       Expect(sampled_replay.cache_hit &&
                  sampled_replay.tokens == sampled_spec.tokens,
              "seeded DFlash cached replay differs from the cold request");
+
+      // Before any proposal draws, AR and DFlash must use exactly the same
+      // sampler, including when a saved host frontier replaces device logits.
+      const std::string first_token_prompt =
+          "Cobalt ribbons decorate the stage. Continue the sentence:";
+      for (const bool filtered : {false, true}) {
+        for (const auto seed : {1, 73, 808}) {
+          auto first_token_sampling = sampling;
+          first_token_sampling.seed = seed;
+          if (!filtered) {
+            first_token_sampling.top_k = 0;
+            first_token_sampling.top_p = 1.0F;
+            first_token_sampling.min_p = 0.0F;
+            first_token_sampling.repeat_penalty = 1.0F;
+          }
+          const auto ar_first =
+              backend.complete(first_token_prompt, 1, first_token_sampling);
+          const auto spec_first = speculative_backend.complete(
+              first_token_prompt, 1, first_token_sampling);
+          Expect(ar_first.tokens == spec_first.tokens &&
+                     spec_first.completion_tokens == 1 &&
+                     spec_first.draft_tokens == 0,
+                 "AR and speculative cold/cached first-token sampling differ");
+        }
+      }
+
+      const gufo::sampling::SamplingConfig greedy_penalties{
+          .temperature = 0.0F,
+          .seed = 73,
+          .repeat_penalty = 1.1F,
+          .repeat_last_n = 8,
+          .frequency_penalty = 0.15F,
+          .presence_penalty = 0.1F,
+      };
+      const auto penalized_ar =
+          backend.complete(raw_prompt, 16, greedy_penalties);
+      const auto penalized_spec =
+          speculative_backend.complete(raw_prompt, 16, greedy_penalties);
+      Expect(penalized_spec.tokens == penalized_ar.tokens,
+             "greedy penalized DFlash tokens differ from AR");
+      Expect(penalized_spec.draft_tokens > 0,
+             "greedy penalties bypassed DFlash drafting");
+      const auto penalized_replay =
+          speculative_backend.complete(raw_prompt, 16, greedy_penalties);
+      Expect(penalized_replay.cache_hit &&
+                 penalized_replay.tokens == penalized_spec.tokens,
+             "greedy penalized DFlash cached replay changed tokens");
 
       const std::vector<gufo::tokenization::ChatMessage> spec_messages = {
           {gufo::tokenization::ChatRole::kSystem,

@@ -170,6 +170,10 @@ public:
 
   /// Resets internal draft generator state
   virtual void Reset() noexcept {}
+
+  /// Starts a new generation over retained model state. Request-local proposal
+  /// policies must reset so cache reuse does not change seeded generation.
+  virtual void BeginRequest() noexcept {}
 };
 
 /// Mock / test draft backend for deterministic verification testing

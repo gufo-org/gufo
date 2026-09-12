@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "src/core/speculative/draft_backend.hpp"
+#include "src/models/qwen/dflash_policy.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
@@ -29,6 +30,7 @@ struct SpeculativeOptions {
   bool enable_adaptive_draft_length{true};
   bool use_batched_verification{false};
   bool retain_frontier_logits{false};
+  DFlashDraftPolicy dflash_policy{DFlashDraftPolicy::kAdaptive};
 };
 
 struct SpeculativeStats {
@@ -229,6 +231,7 @@ private:
 /// management
 class SpeculativeVerifier {
 public:
+  void BeginRequest() noexcept;
   SpeculativeVerifier(hip::QwenGpuExecutor& target_executor,
                       std::unique_ptr<IDraftBackend> draft_backend,
                       SpeculativeOptions options = {});

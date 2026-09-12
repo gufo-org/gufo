@@ -160,8 +160,14 @@ original-target correctness, or promise native BF16/MLX bitwise equality.
 
 - DFlash2 uses one anchor plus up to seven proposals. Block length is selected
   before drawing tokens and bounded by the context and remaining output budget.
-  DFlash2 currently uses fixed blocks; `prompt`, `bench` and serving reject nondefault
-  `--min-draft-tokens` values for this backend.
+  `--draft-policy fixed|adaptive` is wired through prompt, chat, bench and serving.
+  Adaptive is the default for the recommended Q4_K_M draft. It tracks an EMA
+  of accepted lengths and maximizes expected emitted tokens per estimated
+  verification cost. Full acceptance raises the estimate because the observed
+  length is censored. Its state is saved within a request and reset for a new
+  request, including prefix-cache hits. Decisions never use wall-clock timings
+  or the current sampled proposal. `--draft-tokens` bounds either policy;
+  nondefault `--min-draft-tokens` values remain unsupported for DFlash2.
   Unary top-16 candidates receive the predecessor/hidden/successor transition
   score; the temperature softmax is the proposal distribution `q`.
 - The verifier uses the same target distribution `p` as AR, including committed
@@ -178,7 +184,13 @@ original-target correctness, or promise native BF16/MLX bitwise equality.
 - Seeded runs must reproduce token IDs within a fixed Gufo configuration,
   including cached replay. AR and speculation consume different random draws,
   so equal seeds do not imply equal sampled continuations. Greedy runs must
-  match AR exactly.
+  match AR exactly. Fresh, speculative and restored-frontier first tokens use
+  the same GPU target sampler; saved logits are uploaded before sampling.
+- Greedy requests with penalties also use drafting. Each row is compared with
+  the target's penalty-adjusted argmax after earlier accepted tokens update
+  tentative history. Rejection and EOS commit only that prefix; the RNG does
+  not advance. [Release checks](dflash2-sampling.json) cover both targets and
+  all three drafts; the serving regression checks AR equality and cached replay.
 
 The GPU test enumerates acceptance branches and residual CDF intervals using
 the GPU selector's probabilities, then reconstructs the target distribution
@@ -209,6 +221,8 @@ Gains from different workloads must not be added together.
 | [Attention](dflash2-attention.json) | Exact batched attention/QK/cache writes and narrow SSM projections; C1 chat +3.2–3.5%. |
 | [Rollback and cache addressing](dflash2-rollback.json) | Compact rollback, fused draft normalization/RoPE and Q4 convolution projections; fixes mixed-capacity and 32-bit cache offsets. |
 | [Exact projections](dflash2-exact-gemm.json) | BF16 streaming with cached K/V injection; symmetric projections omit offset scratch while retaining scalar rounding; dead verification settings removed. |
+| [Greedy sampling controls](dflash2-sampling.json) | Penalty-enabled requests retain DFlash2 and exact AR output; one C1 chat probe reaches 30.25–31.43 tok/s on Q4 and 25.89–27.03 on Q8 across the three drafts. |
+| [Controllers](dflash2-controllers.json) | With Q4 draft, adaptive gains 3.3% on the pilot and 2.0% on three other prompts for the Q4 target; Q8 target is effectively unchanged. Q8/BF16 drafts can favor fixed. Accepted-length-only and positional predictors were slower overall. |
 
 Rollback snapshots omit unused attention-layer rows: **202 → 151.5 MiB**
 per speculative session, preserving every live state byte. Existing operator

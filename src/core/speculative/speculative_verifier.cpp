@@ -230,6 +230,13 @@ void SpeculativeVerifier::Reset() noexcept {
   }
 }
 
+void SpeculativeVerifier::BeginRequest() noexcept {
+  stats_ = {};
+  ResetAdaptiveDraftLength();
+  if (draft_backend_ != nullptr)
+    draft_backend_->BeginRequest();
+}
+
 void SpeculativeVerifier::ConfigureAdaptiveDraftPolicy() {
   options_.max_draft_tokens = std::max(options_.max_draft_tokens, 1U);
   options_.min_draft_tokens =
@@ -614,9 +621,9 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
     };
   };
 
+  const bool random_sampling = sampler.config().uses_random_sampling();
   const std::uint32_t max_draft_tokens =
-      max_emitted_tokens > 1 && sampler.config().uses_random_sampling() &&
-              draft_backend_ != nullptr &&
+      max_emitted_tokens > 1 && draft_backend_ != nullptr &&
               draft_backend_->SupportsSampledProposals()
           ? std::min(current_draft_length_, max_emitted_tokens - 1)
           : 0;
@@ -624,21 +631,27 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
     return target_only_step();
   }
 
-  const auto proposal = draft_backend_->ProposeSampled(
-      current_sequence, cur_pos, max_draft_tokens, sampler.config().temperature,
-      working_sampler.mutable_rng_state());
+  const auto proposal = random_sampling
+                            ? draft_backend_->ProposeSampled(
+                                  current_sequence, cur_pos, max_draft_tokens,
+                                  sampler.config().temperature,
+                                  working_sampler.mutable_rng_state())
+                            : draft_backend_->Propose(current_sequence, cur_pos,
+                                                      max_draft_tokens);
   if (proposal.tokens.empty()) {
     return target_only_step();
   }
   const std::size_t num_draft = proposal.tokens.size();
-  if (num_draft > max_draft_tokens || proposal.start_pos != cur_pos ||
-      proposal.candidates_per_token == 0 ||
-      proposal.candidates_per_token >
-          proposal.candidate_ids.size() / num_draft ||
-      proposal.candidate_ids.size() !=
-          num_draft * proposal.candidates_per_token ||
-      proposal.candidate_probabilities.size() !=
-          proposal.candidate_ids.size()) {
+  if (num_draft > max_draft_tokens || proposal.start_pos != cur_pos) {
+    throw std::runtime_error("draft backend returned a malformed proposal");
+  }
+  if (random_sampling && (proposal.candidates_per_token == 0 ||
+                          proposal.candidates_per_token >
+                              proposal.candidate_ids.size() / num_draft ||
+                          proposal.candidate_ids.size() !=
+                              num_draft * proposal.candidates_per_token ||
+                          proposal.candidate_probabilities.size() !=
+                              proposal.candidate_ids.size())) {
     throw std::runtime_error(
         "draft backend returned a malformed sampled proposal");
   }
@@ -683,8 +696,10 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
   // Validate every row before advancing target state, including rows that
   // would otherwise go unchecked after an early rejection.
   std::vector<double> token_probabilities(num_draft);
-  for (std::size_t row = 0; row < num_draft; ++row)
-    token_probabilities[row] = draft_token_probability(row);
+  if (random_sampling) {
+    for (std::size_t row = 0; row < num_draft; ++row)
+      token_probabilities[row] = draft_token_probability(row);
+  }
 
   std::vector<tokenization::TokenId> verification_inputs;
   verification_inputs.reserve(num_draft + 1);
@@ -718,6 +733,26 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySampledStep(
   std::size_t accepted_count = 0;
   tokenization::TokenId correction_token = 0;
   for (; accepted_count < num_draft; ++accepted_count) {
+    if (!random_sampling) {
+      // Penalties change the target argmax after each committed token. Draft
+      // proposals remain useful: verify against that same evolving AR history,
+      // without drawing random numbers or constructing a proposal distribution.
+      const auto target_token =
+          device_resident_sampling
+              ? target_executor_->SampleVerificationLogits(accepted_count,
+                                                           working_sampler)
+              : working_sampler.Sample(std::span<const float>(
+                    verification.logits.data() +
+                        accepted_count * verification.vocab_size,
+                    verification.vocab_size));
+      if (target_token != proposal.tokens[accepted_count] ||
+          IsStopToken(target_token, eos_id)) {
+        correction_token = target_token;
+        break;
+      }
+      working_sampler.Accept(target_token);
+      continue;
+    }
     const double draft_probability = token_probabilities[accepted_count];
     const auto [candidate_ids, candidate_probabilities] =
         proposal_row(accepted_count);
@@ -1054,8 +1089,7 @@ std::vector<tokenization::TokenId> SpeculativeVerifier::Generate(
   tokenization::TokenId first_token = Prime(prompt_tokens);
   sampling::SamplerState sampler(options.sampling, prompt_tokens);
   if (!options.sampling.can_use_unmodified_argmax()) {
-    const auto logits = target_executor_->CopyLastLogits();
-    first_token = sampler.Sample(logits);
+    first_token = target_executor_->SampleLastLogits(sampler);
   }
   const auto eos_id = target_executor_->GetEosTokenId();
   if (options.max_new_tokens == 0 || IsStopToken(first_token, eos_id)) {

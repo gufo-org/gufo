@@ -84,8 +84,22 @@ void TestInvalidDepth() {
   const std::array<const char*, 4> fixed_block = {"--speculative", "dflash2",
                                                   "--spec-draft-n-min", "2"};
   Expect(!gufo::cli::ParseBenchOptions(fixed_block, &error).has_value() &&
-             error.find("fixed blocks") != std::string::npos,
+             error.find("min-draft-tokens") != std::string::npos,
          "DFlash rejects an unused adaptive draft floor");
+  for (const char* policy : {"fixed", "adaptive", "unknown"}) {
+    const std::array<const char*, 4> args = {"--speculative", "dflash2",
+                                             "--draft-policy", policy};
+    const auto parsed = gufo::cli::ParseBenchOptions(args, &error);
+    Expect(parsed.has_value() == (std::string_view(policy) != "unknown"),
+           "DFlash benchmark validates its controller");
+    if (parsed)
+      Expect(parsed->draft_policy == policy,
+             "DFlash benchmark retains the requested controller");
+  }
+  const std::array<const char*, 2> policy_without_backend = {"--draft-policy",
+                                                             "adaptive"};
+  Expect(!gufo::cli::ParseBenchOptions(policy_without_backend, &error),
+         "a DFlash controller requires its backend");
 }
 
 void TestInvalidWorkload() {

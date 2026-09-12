@@ -159,7 +159,10 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
         << "draft_backend=dflash2-gfx1151-v1\n"
         << "draft_artifact_id=" << core::kGgufSampledIdentityScheme << ':'
         << draft_artifact_fingerprint << '\n'
-        << "draft_state_layout=dflash-window-kv-and-frontier-v2\n"
+        << "draft_state_layout=dflash-window-kv-and-frontier-v3\n"
+        << "draft_policy="
+        << speculative::DFlashDraftPolicyName(speculative_options.dflash_policy)
+        << "-v2\n"
         << "draft_max_tokens=" << speculative_options.max_draft_tokens << '\n'
         << "draft_min_tokens=" << speculative_options.min_draft_tokens << '\n'
         << "draft_initial_tokens=" << speculative_options.initial_draft_tokens
@@ -327,6 +330,7 @@ public:
           hip::QwenDFlashGpuDraftConfig{
               .max_context = max_context,
               .max_draft_tokens = speculative_options.max_draft_tokens,
+              .policy = speculative_options.dflash_policy,
           },
           &error);
       if (draft_backend == nullptr) {
@@ -390,6 +394,7 @@ public:
       throw std::logic_error(
           "Qwen DFlash retained prefix does not match its target state");
     }
+    verifier_->BeginRequest();
     sequence_.assign(prefix.begin(), prefix.end());
     frontier_published_ = false;
   }
@@ -426,7 +431,7 @@ public:
     if (frontier_logits_.empty()) {
       return executor_->SampleLastLogits(sampler);
     }
-    return sampler.Sample(frontier_logits_);
+    return executor_->SampleCachedLogits(frontier_logits_, sampler);
   }
 
   [[nodiscard]] TextDecodeStep DecodeSpeculative(
@@ -2462,7 +2467,9 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
   }
   if (speculative_config.backend == TextSpeculativeBackend::kDFlash &&
       speculative_config.min_draft_tokens != 1) {
-    SetError(error, "DFlash2 uses fixed blocks; --min-draft-tokens must be 1");
+    SetError(error,
+             "DFlash2 requires --min-draft-tokens 1; bound blocks with "
+             "--draft-tokens");
     return false;
   }
 
@@ -2504,6 +2511,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
         return false;
       }
 
+      speculative_options.dflash_policy = speculative_config.dflash_policy;
       speculative_options.max_draft_tokens =
           speculative_config.max_draft_tokens;
       speculative_options.min_draft_tokens =

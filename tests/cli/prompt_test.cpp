@@ -82,7 +82,19 @@ void TestInvalidFlags() {
       "--speculative",      "dflash2", "--dflash-model", "draft.gguf",
       "--min-draft-tokens", "2"};
   assert(!gufo::cli::ParsePromptOptions(fixed_block, &err).has_value());
-  assert(err.find("fixed blocks") != std::string::npos);
+  assert(err.find("min-draft-tokens") != std::string::npos);
+  for (const char* policy : {"fixed", "adaptive", "unknown"}) {
+    const std::array<const char*, 6> args = {"--speculative",  "dflash2",
+                                             "--dflash-model", "draft.gguf",
+                                             "--draft-policy", policy};
+    const auto parsed = gufo::cli::ParsePromptOptions(args, &err);
+    assert(parsed.has_value() == (std::string_view(policy) != "unknown"));
+    if (parsed)
+      assert(parsed->draft_policy == policy);
+  }
+  const std::array<const char*, 2> policy_without_backend = {"--draft-policy",
+                                                             "adaptive"};
+  assert(!gufo::cli::ParsePromptOptions(policy_without_backend, &err));
 
   const std::array<const char*, 2> args8 = {"--chat-template", "qwen"};
   assert(!gufo::cli::ParsePromptOptions(args8, &err).has_value());

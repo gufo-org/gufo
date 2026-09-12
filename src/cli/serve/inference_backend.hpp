@@ -12,6 +12,7 @@
 
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
+#include "src/models/qwen/dflash_policy.hpp"
 
 namespace gufo::hip {
 class QwenGpuModel;
@@ -45,6 +46,8 @@ struct TextSpeculativeConfig {
   std::uint32_t min_draft_tokens{1};
   /// MTP: vocabulary prefix the draft block scores (0 = full vocabulary).
   std::uint32_t draft_vocab{0};
+  speculative::DFlashDraftPolicy dflash_policy{
+      speculative::DFlashDraftPolicy::kAdaptive};
 };
 
 struct TextDiskCacheConfig {

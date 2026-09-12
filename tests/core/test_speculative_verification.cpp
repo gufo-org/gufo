@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -204,8 +205,10 @@ private:
 class SampledTargetExecutor final
     : public gufo::speculative::ISpeculativeTargetExecutor {
 public:
-  explicit SampledTargetExecutor(std::vector<float> target_logits)
-      : target_logits_(std::move(target_logits)) {}
+  explicit SampledTargetExecutor(std::vector<float> target_logits,
+                                 bool repeat_logits = false)
+      : target_logits_(std::move(target_logits)),
+        repeat_logits_(repeat_logits) {}
 
   void Reset() noexcept override {
     state_.clear();
@@ -224,7 +227,7 @@ public:
     (void)compute_logits;
     Expect(pos == state_.size(), "sampled target position");
     state_.push_back(token_id);
-    last_logits_ = state_.size() == 2
+    last_logits_ = state_.size() == 2 || repeat_logits_
                        ? target_logits_
                        : std::vector<float>{0.0F, -INFINITY, -INFINITY};
     return gufo::sampling::SampleLogits(last_logits_, 0.0F, nullptr);
@@ -239,6 +242,12 @@ public:
 
   std::span<const float> CopyLastLogits() override { return last_logits_; }
 
+  TokenId SampleLastLogits(gufo::sampling::SamplerState& sampler) override {
+    ++sample_calls_;
+    return ISpeculativeTargetExecutor::SampleLastLogits(sampler);
+  }
+  std::size_t SampleCalls() const noexcept { return sample_calls_; }
+
   std::size_t VocabularySize() const noexcept override {
     return target_logits_.size();
   }
@@ -252,6 +261,8 @@ public:
 
 private:
   std::vector<float> target_logits_;
+  bool repeat_logits_{false};
+  std::size_t sample_calls_{0};
   std::vector<float> last_logits_;
   std::vector<TokenId> state_;
   std::vector<TokenId> saved_state_;
@@ -631,6 +642,18 @@ void TestFirstPrefillEosIsNotEmitted() {
   Expect(target.State() == prompt, "prefill EOS target state");
 }
 
+void TestFirstTokenUsesTargetSampler() {
+  SampledTargetExecutor target({0.0F, -INFINITY, -INFINITY});
+  gufo::speculative::SpeculativeVerifier verifier(target, nullptr);
+  auto options = GenerationOptions(1, 99);
+  options.sampling.temperature = 0.8F;
+  options.sampling.seed = 73;
+  const std::vector<TokenId> prompt{1};
+  const auto output = verifier.Generate(prompt, options);
+  Expect(output == std::vector<TokenId>{0} && target.SampleCalls() == 1,
+         "speculative prefill delegates to the same sampler as target decode");
+}
+
 void TestSampledSpeculationMatchesTargetDistribution() {
   constexpr std::size_t trials = 4096;
   constexpr double expected_second_probability = 0.75;
@@ -716,6 +739,63 @@ void TestFilteredSampledSpeculationMatchesTargetDistribution() {
          "filtered rejection sampling preserves the target distribution");
   Expect(drafted_count == trials,
          "top-k/top-p/min-p/penalty requests continue to use drafts");
+}
+
+void TestGreedyPenaltiesRetainSpeculationAndHistory() {
+  for (int scenario = 0; scenario < 5; ++scenario) {
+    const std::vector<float> logits = {-INFINITY, 2.0F, 1.8F};
+    SampledTargetExecutor target(logits, true);
+    gufo::speculative::DraftProposal proposal{
+        .tokens = scenario == 0   ? std::vector<TokenId>{2, 1}
+                  : scenario == 1 ? std::vector<TokenId>{1, 1}
+                                  : std::vector<TokenId>{1, 2},
+        .candidate_ids = {},
+        .candidate_probabilities = {},
+        .start_pos = 1,
+    };
+    gufo::speculative::SpeculativeOptions options;
+    options.max_draft_tokens = 2;
+    options.initial_draft_tokens = 2;
+    options.enable_adaptive_draft_length = false;
+    gufo::speculative::SpeculativeVerifier verifier(
+        target, std::make_unique<FixedSampledDraftBackend>(proposal), options);
+    const std::vector<TokenId> prompt{0};
+    const TokenId current = verifier.Prime(prompt);
+    std::vector<TokenId> sequence{0, current};
+    gufo::sampling::SamplingConfig config;
+    config.seed = 73;
+    config.frequency_penalty = 0.6F;
+    config.repeat_last_n = 2;
+    gufo::sampling::SamplerState sampler(config, sequence);
+    auto reference = sampler;
+    const auto initial_rng = sampler.rng_state();
+    const TokenId eos = scenario == 3 ? 2 : 99;
+    const std::uint32_t budget = scenario == 4 ? 1 : 3;
+    const auto result =
+        verifier.VerifyStep(sequence, 1, current, eos, budget, sampler);
+    const std::size_t accepted = scenario == 0 || scenario == 4   ? 0
+                                 : scenario == 1 || scenario == 3 ? 1
+                                                                  : 2;
+    Expect(result.draft_count == (scenario == 4 ? 0 : 2),
+           "greedy penalties retain drafting unless the output budget is one");
+    Expect(result.accepted_count == accepted,
+           "penalty-adjusted argmax determines the accepted prefix");
+    Expect(result.emitted_tokens.size() == accepted + 1,
+           "greedy penalties emit accepted tokens and one correction");
+    for (const auto token : result.emitted_tokens) {
+      Expect(token == reference.Sample(logits),
+             "every penalized speculative token equals sequential AR");
+      reference.Accept(token);
+    }
+    Expect(result.hit_eos == (scenario == 3),
+           "penalized verification stops at EOS");
+    Expect(target.StateSize() == 2 + accepted,
+           "rejected tokens and EOS are not committed to target state");
+    Expect(sampler.rng_state() == initial_rng,
+           "greedy penalized verification consumes no random draws");
+    Expect(std::ranges::equal(sampler.history(), sequence),
+           "tentative history is committed only by the caller");
+  }
 }
 
 void TestMalformedProposalDoesNotAdvanceTarget() {
@@ -919,8 +999,10 @@ int main() {
   TestRetainedPrefixAdvanceUpdatesTargetAndDraftState();
   TestFirstPrefillTokenHonorsBudgetAndCallback();
   TestFirstPrefillEosIsNotEmitted();
+  TestFirstTokenUsesTargetSampler();
   TestSampledSpeculationMatchesTargetDistribution();
   TestFilteredSampledSpeculationMatchesTargetDistribution();
+  TestGreedyPenaltiesRetainSpeculationAndHistory();
   TestMalformedProposalDoesNotAdvanceTarget();
   TestStopAndBudgetKeepExactFrontier();
   TestPersistentVerifierSnapshotRoundTrip();

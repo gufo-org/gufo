@@ -344,6 +344,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string preserve_thinking = "auto";
     std::string speculative_backend;
     std::string dflash_model_path;
+    std::string draft_policy;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::size_t draft_tokens = 7;
@@ -407,6 +408,10 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--dflash-model", "PATH",
                      "Path to Qwen DFlash2 GGUF file", "Speculative",
                      &dflash_model_path);
+    parser.AddOption(
+        "", "--draft-policy", "POLICY",
+        "DFlash2 block length: fixed or adaptive (default: adaptive)",
+        "Speculative", &draft_policy);
     parser.AddOption("", "--dspark-model", "PATH",
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
@@ -901,6 +906,7 @@ int RunServe(std::span<const char* const> args) {
     std::string preserve_thinking = "auto";
     std::string speculative_backend;
     std::string dflash_model_path;
+    std::string draft_policy;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::size_t draft_tokens = 7;
@@ -959,6 +965,10 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--dflash-model", "PATH",
                          "Path to Qwen DFlash2 GGUF file", "Speculative",
                          &dflash_model_path);
+    llm_parser.AddOption(
+        "", "--draft-policy", "POLICY",
+        "DFlash2 block length: fixed or adaptive (default: adaptive)",
+        "Speculative", &draft_policy);
     llm_parser.AddOption("", "--dspark-model", "PATH",
                          "Path to DeepSeek V4 Flash DSpark support GGUF file",
                          "Speculative", &dspark_model_path);
@@ -1085,6 +1095,11 @@ int RunServe(std::span<const char* const> args) {
                 << "' is not supported by the HTTP server\n";
       return 2;
     }
+    if (!draft_policy.empty() &&
+        speculative_config.backend != server::TextSpeculativeBackend::kDFlash)
+      throw std::invalid_argument("--draft-policy requires DFlash2");
+    speculative_config.dflash_policy =
+        speculative::ParseDFlashDraftPolicy(draft_policy);
     speculative_config.draft_model_path =
         speculative_config.backend == server::TextSpeculativeBackend::kDSpark
             ? dspark_model_path

@@ -61,12 +61,15 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True,
                         help="new output directory; existing reports are never silently reused")
     parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument("--draft-tokens", type=int, default=7)
+    parser.add_argument("--draft-policy", choices=("fixed", "adaptive"),
+                        help="override each binary's default DFlash2 controller")
     parser.add_argument("--repetitions", type=int, default=2)
     parser.add_argument("--quick", action="store_true", help="three prompts instead of ten")
     args = parser.parse_args()
     if not os.environ.get("IN_NIX_SHELL"):
         parser.error("run inside nix develop")
-    if args.max_tokens < 8 or args.repetitions < 1:
+    if args.max_tokens < 8 or args.repetitions < 1 or args.draft_tokens < 1:
         parser.error("need at least eight tokens and one repetition")
     artifacts = {}
     names = ["binary", "target_q4", "target_q8", "draft_q4", "draft_q8"]
@@ -103,10 +106,13 @@ def main() -> int:
                         "--model", str(artifacts[f"target_{target}"]),
                         "--draft-model", str(artifacts[f"draft_{draft}"]),
                         "--backend", "dflash2", "--prompt-mode", "chat",
-                        "--max-tokens", str(args.max_tokens), "--draft-tokens", "7",
+                        "--max-tokens", str(args.max_tokens),
+                        "--draft-tokens", str(args.draft_tokens),
                         "--ar-cache", str((args.output / f"ar-{prefix}{target}.json").resolve()),
                         "--json", str(report_path), "--label", label,
                     ]
+                    if args.draft_policy:
+                        command += ["--draft-policy", args.draft_policy]
                     if args.quick:
                         command.append("--quick")
                     with (args.output / f"{label}.log").open("w") as log:
