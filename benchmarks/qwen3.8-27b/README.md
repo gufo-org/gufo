@@ -91,27 +91,31 @@ advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
 **Latest Q4 target/Q4 draft:** greedy C1, including prefill. Two timed
-samples per binary in ABBA order, with no separate warmup. JSON/prose use
-upstream raw prompts; repetition asks for 1,000 space-separated `red` words.
+samples per binary in ABBA order; fixed-seven repetition has four.
+No separate warmup. JSON/prose use upstream raw prompts; repetition asks
+for 1,000 space-separated `red` words.
 
 | Workload | Current tok/s | Change in paired probe |
 | --- | ---: | ---: |
-| Repetition, tg128, fixed-7 | **53.98** | +0.6% |
-| JSON, tg300, adaptive | **48.43** | +0.4% |
-| Prose, tg300, adaptive | **22.11** | +0.4% |
+| Repetition, tg128, fixed-7 | **53.79** | −0.1%, within noise |
+| JSON, tg300, adaptive | **48.50** | +0.2% |
+| Prose, tg300, adaptive | **22.17** | +0.3% |
+| Repetition, tg128, fixed-1 control | **18.83** | +12.6% |
 
 Every token ID and acceptance statistic is unchanged; repetition accepts
-111/111 proposals. Compact Q4 staging and four-row reuse improve ten FFN
-cases at verification widths 3–8 by 2.7–19.3% on actual GGUF tensors.
-Outputs remain bit-identical, with no spills. These kernel gains translate
-to the smaller paired model gains above.
-[Measurements and quality checks](eval/dflash2-q4-staging.json).
+111/111 proposals at fixed-7 and 63/63 at fixed-1. One proposal requires
+two target rows: anchor plus proposal. Reusing activations across four
+output rows and enabling branchless decoding cuts that verification from
+101.4 to 88.8 ms in the profile, with bit-identical output and no spills.
+Adaptive workloads mostly use larger blocks, so their total gain is smaller.
+[Measurements and quality checks](eval/dflash2-width2.json).
 
-Early Q5 weight loads and vector headers did not improve speed. Rounded EMA
-and a smaller initial controller prior regress prose; the cost-aware
-controller remains the default.
+Partial token groups, transposed staging, repacked Q5 headers and streaming
+loads did not improve speed. Rounded EMA and a smaller initial controller
+prior regress prose; the cost-aware controller remains the default.
 
-Preceding work covers [medium Q5 projections and controller trials](eval/dflash2-middle-projections.json),
+Preceding work covers [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json),
+[medium Q5 projections and controller trials](eval/dflash2-middle-projections.json),
 [batch-eight scheduling](eval/dflash2-row-scheduling.json),
 [IQ4/vocabulary projections](eval/dflash2-head-iq4.json),
 [widths 4–6](eval/dflash2-midbatch.json),

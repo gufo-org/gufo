@@ -192,7 +192,7 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
       // Adaptive drafting exercises every width. Reuse one scalar oracle
       // and snapshot instead of loading another model or adding a suite.
       if (cases.empty()) {
-        for (std::size_t width = 3; width < suffix.size(); ++width) {
+        for (std::size_t width = 2; width < suffix.size(); ++width) {
           executor->RestoreSnapshot(*snapshot);
           const auto predictions = executor->ForwardVerificationChunk(
               suffix.first(width), prompt_size, true);

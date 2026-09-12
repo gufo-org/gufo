@@ -2,7 +2,7 @@
 // Build inside Nix with tools/bench/build.sh and this source path.
 // Run: /tmp/dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] [batch]
 // Scalar Q4/Q5/IQ4/Q6 comparisons use batch=1; append swiglu for gate/up.
-// Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise; widths 3–8 supported.
+// Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise; widths 2–8 supported.
 // BF16 also accepts batch=16 to compare injection with two batch-8 launches.
 // Weights use read-only host registration, matching production GGUF mapping.
 // Decode rotates matrices to exceed cache capacity. Batch-16 context injection
@@ -322,11 +322,11 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
         };
         narrow.template operator()<1>("narrow_tile1");
         narrow.template operator()<2>("narrow_tile2");
-        if constexpr ((Type == core::GgmlType::kQ4_K && Batch >= 3) ||
-                      (Type == core::GgmlType::kQ5_K && Batch >= 3 &&
+        if constexpr ((Type == core::GgmlType::kQ4_K && Batch >= 2) ||
+                      (Type == core::GgmlType::kQ5_K && Batch >= 2 &&
                        Batch <= 6) ||
                       (Type == core::GgmlType::kIQ4_XS &&
-                       (Batch == 3 || Batch == 4 || Batch == 5 ||
+                       (Batch == 2 || Batch == 3 || Batch == 4 || Batch == 5 ||
                         Batch == 7))) {
           const auto rows4 =
               [&]<std::size_t Tiles, std::size_t TokensPerStep = Batch>(
@@ -476,7 +476,7 @@ int main(int argc, char** argv) {
     if (argc < 4 || argc > 7)
       throw std::invalid_argument(
           "usage: dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] "
-          "[batch=1|3..8|16 (16 is BF16 injection only)] [swiglu]");
+          "[batch=1..8|16 (16 is BF16 injection only)] [swiglu]");
     const bool fused = argc == 7;
     const int batch = argc >= 6                      ? std::stoi(argv[5])
                       : std::string(argv[1]) == "q6" ? 7
@@ -487,6 +487,8 @@ int main(int argc, char** argv) {
     if (batch == 1) {
       Run<1>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations,
              fused);
+    } else if (batch == 2) {
+      Run<2>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else if (batch == 3) {
       Run<3>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else if (batch == 4) {
@@ -503,7 +505,7 @@ int main(int argc, char** argv) {
       Run<16>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else {
       throw std::invalid_argument(
-          "batch must be one scalar row, 3–8 verification rows or sixteen "
+          "batch must be one scalar row, 2–8 verification rows or sixteen "
           "injection rows");
     }
     return 0;

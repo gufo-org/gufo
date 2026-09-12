@@ -14,7 +14,7 @@ Run on gfx1151 inside Nix. Model-specific tests live in
 | --- | --- |
 | `fast` | Sampling/verifier and HTTP parser regressions, executable option validation, NPU packing, GGUF reference decoding and strict result reporting. |
 | `kernels` | Quantized/BF16 GEMM versus independent/decode controls; exact recurrent state and replay; DFlash convolution, windowed attention, full-vocabulary top-k, sampled selector and verifier distributions. |
-| `model` | Target full-logit replay at verification widths 3–8; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt/chat/bench parity, seeded multi-turn replay and HTTP adapter sampling. |
+| `model` | Target full-logit replay at verification widths 2–8; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt/chat/bench parity, seeded multi-turn replay and HTTP adapter sampling. |
 | `serving` | Direct versus served tokens, seeded sampled replay, EOS, bounded prefill, cache forks, persistent restore, concurrency, cancellation and reclamation. |
 | `reference` | Teacher-forced target versus optional BF16: KL, total variation, top-1 agreement, RMSE and NLL difference. Informational quantization measurements. |
 
@@ -125,12 +125,15 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
-- [Latest exact verification](dflash2-q4-staging.json): compact Q4 FFN staging
-  at widths 3–8 preserves 49 verifier/scalar full-logit rows, mixed-capacity
-  and logical-context controls, all 90 Q4 draft trace files and every measured
-  AR token ID/acceptance statistic. Three kernel suites and partial-row/tile
-  controls pass. Ten actual-GGUF cases gain 2.7–19.3%; paired model gains are
-  0.4–0.6%, with zero scratch. Q8/BF16 qualification remains in the
+- [Latest exact verification](dflash2-width2.json): two-token Q4/Q5/IQ4/Q6
+  projections preserve 51 verifier/scalar full-logit rows on each target,
+  mixed-capacity and logical-context controls, all 90 Q4 draft trace files,
+  and every measured AR ID/acceptance statistic. Three kernel suites and
+  partial-row/tile controls pass. One-proposal repetition improves 12.6%;
+  adaptive JSON/prose improve 0.2–0.3%. The affected projection union takes
+  14.3% less GPU time with zero scratch. The maintained suite now covers
+  every width 2–8. [Compact Q4 staging](dflash2-q4-staging.json) covers the
+  preceding widths 3–8 work. Q8/BF16 draft qualification remains in the
   [preceding Q5 pass](dflash2-middle-projections.json), which also documents
   the rejected controller trials. Earlier [batch-eight scheduling](dflash2-row-scheduling.json),
   [IQ4/vocabulary work](dflash2-head-iq4.json),
@@ -152,8 +155,8 @@ injection; the complete serialized history must remain byte-identical.
   for Q4 AR and Q8/BF16 adaptive DFlash2. These are correctness probes, not
   new speed measurements.
 - Q4 and Q8: fixed 24/29/24-token prefixes, eight forced continuation tokens
-  each, plus widths 3–7 from the first snapshot. Repeated prefill and snapshot
-  continuation are byte-identical. All 49 batched-verifier logit rows per
+  each, plus widths 2–7 from the first snapshot. Repeated prefill and snapshot
+  continuation are byte-identical. All 51 batched-verifier logit rows per
   target equal scalar decode byte for byte; committing five rows across the
   replay ring's boundary also preserves
   subsequent logits. Independent sessions with 32/64-token cache capacities

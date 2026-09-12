@@ -1688,6 +1688,10 @@ constexpr std::size_t kKQuantSmallBatchRowsPerWave = 2;
 
 static_assert(FitsSmallBatch32BitIndices(8, 17408, 5120, 3520));
 static_assert(FitsSmallBatch32BitIndices(8, 248320, 5120, 4200));
+static_assert(FitsSmallBatch32BitIndices(2, 17408, 5120, 3520));
+static_assert(FitsSmallBatch32BitIndices(2, 248320, 5120, 4200));
+static_assert(!FitsSmallBatch32BitIndices(2, 1, 1ULL << 31, 1));
+static_assert(!FitsSmallBatch32BitIndices(2, 1ULL << 31, 1, 1));
 static_assert(!FitsSmallBatch32BitIndices(8, 1, 1ULL << 29, 1));
 static_assert(!FitsSmallBatch32BitIndices(8, 1ULL << 29, 1, 1));
 static_assert(!FitsSmallBatch32BitIndices(8, 65536, 131072, 90112));
@@ -1700,7 +1704,8 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                  hipStream_t stream) {
   const auto launch = [&]<std::size_t Batch>() {
     if constexpr (WType == core::GgmlType::kIQ4_XS &&
-                  (Batch == 3 || Batch == 4 || Batch == 5 || Batch == 7)) {
+                  (Batch == 2 || Batch == 3 || Batch == 4 || Batch == 5 ||
+                   Batch == 7)) {
       const bool up = m == 17408 && k == 5120;
       const bool down = m == 5120 && k == 17408;
       if (up || (Batch != 4 && down)) {
@@ -1728,7 +1733,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
         return;
       }
     }
-    if constexpr (Batch >= 3 &&
+    if constexpr (Batch >= 2 &&
                   (WType == core::GgmlType::kQ4_K ||
                    WType == core::GgmlType::kQ5_K)) {
       if (FitsSmallBatch32BitIndices(
@@ -1736,8 +1741,8 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
         if constexpr (WType == core::GgmlType::kQ4_K) {
           const bool up = m == 17408 && k == 5120;
           const bool down = m == 5120 && k == 17408;
-          // Four rows share compact staging across two tiles. Widths five
-          // and six benefit only for the longer down projection.
+          // Four rows share two staged tiles. Widths five and six benefit
+          // only for the longer down projection.
           if (down || (up && Batch != 5 && Batch != 6)) {
             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, 2, 4, 1,
                                                true>
@@ -1745,16 +1750,21 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
             return;
           }
         }
-        if constexpr (WType == core::GgmlType::kQ5_K && Batch >= 3 &&
-                      Batch <= 6) {
+        if constexpr (WType == core::GgmlType::kQ5_K && Batch <= 6) {
           const auto launch_rows =
               [&]<std::size_t Tiles, std::size_t TokensPerStep = Batch>() {
             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, Tiles, 4,
                                                1, true, TokensPerStep>
                 <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
           };
-          // Four output rows amortize staging for the FFNs and these two
-          // smaller projections. The latter benefit at verification width 4.
+          // Reuse four output rows for the FFNs and selected smaller
+          // projections, including the shortest speculative blocks.
+          if constexpr (Batch == 2) {
+            if ((m == 5120 && k == 6144) || (m == 10240 && k == 5120)) {
+              launch_rows.template operator()<2>();
+              return;
+            }
+          }
           if constexpr (Batch == 4) {
             if (m == 5120 && k == 6144) {
               launch_rows.template operator()<1, 2>();
@@ -1775,7 +1785,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
             }
             return;
           }
-          if constexpr (Batch == 3 || Batch == 5) {
+          if constexpr (Batch == 2 || Batch == 3 || Batch == 5) {
             if (m == 17408 && k == 5120) {
               launch_rows.template operator()<2>();
               return;
@@ -1915,7 +1925,7 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
       // The vocabulary projection reuses activations across three output
       // rows and two consecutive tiles, retaining the scalar sum order.
       // The Qwen27B head also benefits at shorter verification widths.
-      if (((batch >= 3 && batch <= 6) && m == 248320 && k == 5120) ||
+      if (((batch >= 2 && batch <= 6) && m == 248320 && k == 5120) ||
           ((batch == 7 || batch == 8) && m >= 65536)) {
         constexpr std::size_t kHeadRows = kKQuantSmallBatchWarps * 3;
         const auto launch_head = [&]<std::size_t Batch>() {
@@ -1938,6 +1948,9 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
           }
         };
         switch (batch) {
+          case 2:
+            launch_head.template operator()<2>();
+            break;
           case 3:
             launch_head.template operator()<3>();
             break;

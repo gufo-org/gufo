@@ -15,12 +15,12 @@ namespace gufo::hip {
 
 // Bound weight byte offsets and activation/output element offsets before
 // selecting 32-bit device indexing. Division avoids overflow in the check.
-// Batch >= 3 also leaves room for the rounded-up final row/tile indices.
+// Batch >= 2 also leaves room for the rounded-up final row/tile indices.
 constexpr bool FitsSmallBatch32BitIndices(std::size_t batch, std::size_t m,
                                           std::size_t k,
                                           std::size_t row_bytes) noexcept {
   constexpr auto limit = std::numeric_limits<std::uint32_t>::max();
-  return batch >= 3 && batch <= 8 && m != 0 && k != 0 && row_bytes != 0 &&
+  return batch >= 2 && batch <= 8 && m != 0 && k != 0 && row_bytes != 0 &&
          m <= limit / batch && k <= limit / batch && m <= limit / row_bytes;
 }
 

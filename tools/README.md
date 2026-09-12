@@ -148,13 +148,14 @@ incomplete or mismatching results. `--baseline-binary` interleaves two releases
 and also requires identical autoregressive token traces between them.
 `qwen27b/dflash_gemm_bench.hip` measures exact BF16, Q4/Q5/Q6/Q8 and IQ4_XS
 matrix geometries using the production templates; build it with `tools/bench/build.sh` inside Nix.
-Its optional batch argument selects 3–8 projection rows or sixteen
+Its optional batch argument selects 2–8 projection rows or sixteen
 BF16 injection rows, for example `q4 17408 5120 24 7`,
 `q8 5120 17408 24 7` or `bf16 5120 25600 24 16`.
 Batch 1 compares scalar Q4/Q5/Q6/IQ4 dispatch; append `swiglu` for fused
 gate/up projections, for example `q5 17408 5120 32 1 swiglu`.
-Q4/Q5/IQ4 comparisons include four-row FFN layouts. The Q4 variant uses
-compact two-tile staging; `q4 67 768 4 8` checks partial rows and tiles.
+Q4/Q5/IQ4 comparisons include four-row FFN layouts. Q4 uses compact
+two-tile staging at widths 3–8; width 2 retains padding.
+`q4 67 768 4 2` checks partial rows and tiles for the shortest verification.
 Q5 also covers
 the smaller projections, for example `q5 6144 5120 24 4` and
 `q5 5120 6144 24 8`. Q6 compares
