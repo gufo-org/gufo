@@ -90,28 +90,30 @@ prompt; fixed can be faster with Q8/BF16 drafts. Draft files occupy
 advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
-**Latest Q4 target/Q4 draft:** greedy C1, including prefill. JSON/prose use
-upstream raw prompts, with two timed samples per binary in ABBA order and
-no separate warmup. Repetition is one candidate smoke run, asking for
-1,000 space-separated `red` words.
+**Latest Q4 target/Q4 draft:** greedy C1, including prefill. Two timed
+samples per binary in ABBA order, with no separate warmup. JSON/prose use
+upstream raw prompts; repetition asks for 1,000 space-separated `red` words.
 
 | Workload | Current tok/s | Change in paired probe |
 | --- | ---: | ---: |
-| Repetition, tg128, fixed-7 | **53.27** | Smoke only |
-| JSON, tg300, adaptive | **47.73** | +0.2% |
-| Prose, tg300, adaptive | **21.97** | +0.7% |
+| Repetition, tg128, fixed-7 | **53.39** | +0.5% |
+| JSON, tg300, adaptive | **47.83** | +0.3% |
+| Prose, tg300, adaptive | **21.99** | Flat |
 
 Every token ID and acceptance statistic is unchanged; repetition accepts
-111/111 proposals. Selected Q5/IQ4 FFNs and shorter Q6 vocabulary projections
-gain 2.6–15.8% in mapped-weight controls. All ten selected variants have zero
-private scratch. Prose improves modestly; prefill has no established gain.
-[Measurements and quality checks](eval/dflash2-head-iq4.json).
-The short fixed-length pilot supports the current controller cost estimate.
-Memory copies and broad loop reordering were not retained.
-Preceding work covers [widths 4–6](eval/dflash2-midbatch.json),
-[batch-eight scheduling](eval/dflash2-dot-order.json),
+111/111 proposals. Batch-eight Q5 FFN scheduling gains 1.5–2.3% on real mapped
+GGUF tensors, with bit-identical outputs and no spills. The paired model
+improvement is small; prefill has no established gain.
+[Measurements and quality checks](eval/dflash2-row-scheduling.json).
+The repaired peak calibrator checks its work before reporting rates.
+
+Preceding work covers [IQ4 and vocabulary projections](eval/dflash2-head-iq4.json),
+[widths 4–6](eval/dflash2-midbatch.json),
+[batch-eight token grouping](eval/dflash2-dot-order.json),
 [scalar/row reuse](eval/dflash2-scalar-row-reuse.json) and
 [packed verification](eval/dflash2-packed-decode.json).
+The fixed-length pilot supports the current controller cost estimate;
+copying weights and broader loop reordering were not retained.
 
 The upstream headline uses different artifacts/power and excludes prefill;
 it is not a matched engine comparison. [Source audit and comparison limits](eval/llama-comparison.json).

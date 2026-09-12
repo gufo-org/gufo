@@ -288,13 +288,17 @@ nix develop -c tools/bench/build.sh gfx1151_peak # or one by name
 /tmp/gfx1151_peak
 ```
 
-It reports WMMA INT8/BF16 matrix rates, the VALU FP32 FMA rate, LDS read
-bandwidth, and DRAM read/write/copy, all from register-resident loops so the
-numbers reflect sustained clocks. The current values are recorded in
-[`benchmarks/qwen3.8-27b/README.md`](../benchmarks/qwen3.8-27b/README.md). The
-one that most often surprises: on RDNA3.5 **INT8 WMMA runs at the same rate as
-BF16**, so an INT8 kernel gets no matrix-rate advantage, only half the weight
-bytes.
+It reports sustained WMMA INT8/BF16/FP16 and VALU FP32 FMA rates, a mixed
+WMMA/epilogue instruction probe, LDS reads, and DRAM read/write/copy bandwidth.
+Every thread writes a checksum covering every accumulator; host references
+check them before timing. Distinct WMMA chains and volatile LDS reads keep
+the measured work live. Compute loops use registers; memory probes read the
+named memory space.
+
+Record calibration beside the model experiment, with its power state and
+compiler. When changing this tool, inspect the emitted instruction counts as
+well as the checksums: a correct result alone cannot detect hoisted work.
+Calibration from the earlier gated-sink implementation is invalid.
 
 `tools/bench/build.sh` exists because `hipcc` invokes the raw HIP clang++ rather
 than the Nix cc wrapper, so it forwards the include and library paths that

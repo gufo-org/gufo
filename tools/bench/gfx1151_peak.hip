@@ -1,27 +1,26 @@
 // Achievable-peak calibration for gfx1151 (Strix Halo).
 //
-// Establishes the roofline constants every kernel experiment is scored
-// against: VALU FP32 FMA rate, WMMA INT8/BF16/FP16 matrix rates, LDS read
-// bandwidth, and DRAM read/write/copy bandwidth. Compute loops are register
-// resident with no memory traffic, so the numbers are issue-rate limited and
-// reflect the clocks the part actually sustains rather than a spec sheet.
+// Build: nix develop -c tools/bench/build.sh gfx1151_peak
+// Run: /tmp/gfx1151_peak
 //
-//   nix develop -c hipcc -O3 --offload-arch=gfx1151 -std=c++20 \
-//       tools/bench/gfx1151_peak.hip -o /tmp/gfx1151_peak
-//
-#include <hip/hip_bf16.h>
-#include <hip/hip_fp16.h>
+// Every accumulator is consumed, every thread has a separate checksum, and
+// host references validate the work outside the timed region. Compute probes
+// measure sustained issue rates; their only global traffic is the final
+// checksum. These are measured ceilings, not model throughput predictions.
 #include <hip/hip_runtime.h>
 
+#include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <string>
+#include <type_traits>
 #include <vector>
 
 #define HIP_OK(expr)                                                    \
   do {                                                                  \
-    hipError_t err_ = (expr);                                           \
+    const hipError_t err_ = (expr);                                     \
     if (err_ != hipSuccess) {                                           \
       std::fprintf(stderr, "%s:%d hip error: %s\n", __FILE__, __LINE__, \
                    hipGetErrorString(err_));                            \
@@ -29,185 +28,207 @@
     }                                                                   \
   } while (0)
 
-using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
-using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
-using bf16x16_t = __attribute__((__vector_size__(16 * sizeof(short)))) short;
-using f16x16_t = __attribute__((__vector_size__(16 * sizeof(short)))) short;
-using f32x8_t = __attribute__((__vector_size__(8 * sizeof(float)))) float;
+using u32x4 = __attribute__((__vector_size__(16))) std::uint32_t;
+using i32x4 = __attribute__((__vector_size__(16))) int;
+using i32x8 = __attribute__((__vector_size__(32))) int;
+using bf16x16 = __attribute__((__vector_size__(32))) short;
+using f16x16 = __attribute__((__vector_size__(32))) _Float16;
+using f32x8 = __attribute__((__vector_size__(32))) float;
 
 constexpr int kIters = 4096;
+constexpr int kThreads = 256;
+constexpr std::uint32_t kHashSeed = 2166136261U;
 
-// --- WMMA INT8: 16x16x16 per instruction, 4 independent chains for ILP -------
-__global__ void PeakWmmaI8(int* sink, int reps, int gate) {
-  int32x4_t a = {1, 2, 3, 4};
-  int32x4_t b = {5, 6, 7, 8};
-  a[0] += static_cast<int>(threadIdx.x);
-  int32x8_t c0 = {0, 0, 0, 0, 0, 0, 0, 0};
-  int32x8_t c1 = c0;
-  int32x8_t c2 = c0;
-  int32x8_t c3 = c0;
+__host__ __device__ std::uint32_t Fold(std::uint32_t hash,
+                                       std::uint32_t value) {
+  return (hash ^ value) * 16777619U;
+}
+
+template<typename T>
+__host__ __device__ std::uint32_t Word(T value) {
+  static_assert(sizeof(T) == sizeof(std::uint32_t));
+  return std::bit_cast<std::uint32_t>(value);
+}
+
+template<typename Vector>
+__device__ std::uint32_t HashVector(std::uint32_t hash, Vector value) {
+#pragma unroll
+  for (unsigned i = 0; i < sizeof(Vector) / sizeof(value[0]); ++i)
+    hash = Fold(hash, Word(value[i]));
+  return hash;
+}
+
+__device__ unsigned ThreadIndex() {
+  return blockIdx.x * blockDim.x + threadIdx.x;
+}
+
+// Distinct seeds keep all four dependency chains live. Uniform matrix inputs
+// give exact integer-valued reference results for every output component.
+__global__ void PeakWmmaI8(std::uint32_t* sink, int reps) {
+  const i32x4 a = {0x01010101, 0x01010101, 0x01010101, 0x01010101};
+  const i32x4 b = a;
+  i32x8 c0 = {0, 1, 2, 3, 4, 5, 6, 7};
+  i32x8 c1 = {8, 9, 10, 11, 12, 13, 14, 15};
+  i32x8 c2 = {16, 17, 18, 19, 20, 21, 22, 23};
+  i32x8 c3 = {24, 25, 26, 27, 28, 29, 30, 31};
   for (int r = 0; r < reps; ++r) {
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
-      c0 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c0, true);
-      c1 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c1, true);
-      c2 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c2, true);
-      c3 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c3, true);
+      c0 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c0,
+                                                      true);
+      c1 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c1,
+                                                      true);
+      c2 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c2,
+                                                      true);
+      c3 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c3,
+                                                      true);
     }
   }
-  if (static_cast<int>(threadIdx.x) == gate) {
-    *sink = c0[0] + c1[0] + c2[0] + c3[0];
-  }
+  sink[ThreadIndex()] =
+      HashVector(HashVector(HashVector(HashVector(kHashSeed, c0), c1), c2), c3);
 }
 
-// --- WMMA BF16: 16x16x16, fp32 accumulate -----------------------------------
-__global__ void PeakWmmaBf16(float* sink, int reps, int gate) {
-  bf16x16_t a;
-  bf16x16_t b;
+template<bool Bf16>
+__global__ void PeakWmmaFloat(std::uint32_t* sink, int reps) {
+  using Input = std::conditional_t<Bf16, bf16x16, f16x16>;
+  Input a;
+  Input b;
 #pragma unroll
   for (int i = 0; i < 16; ++i) {
-    a[i] = static_cast<short>(0x3f80 + (int)threadIdx.x % 3);
-    b[i] = static_cast<short>(0x3f00);
+    if constexpr (Bf16) {
+      a[i] = 0x3f80;
+      b[i] = 0x3f00;
+    } else {
+      a[i] = 1.0F;
+      b[i] = 0.5F;
+    }
   }
-  f32x8_t c0 = {0, 0, 0, 0, 0, 0, 0, 0};
-  f32x8_t c1 = c0;
-  f32x8_t c2 = c0;
-  f32x8_t c3 = c0;
+  const auto wmma = [&](f32x8 c) {
+    if constexpr (Bf16)
+      return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, b, c);
+    else
+      return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
+  };
+  f32x8 c0 = {0, 1, 2, 3, 4, 5, 6, 7};
+  f32x8 c1 = {8, 9, 10, 11, 12, 13, 14, 15};
+  f32x8 c2 = {16, 17, 18, 19, 20, 21, 22, 23};
+  f32x8 c3 = {24, 25, 26, 27, 28, 29, 30, 31};
   for (int r = 0; r < reps; ++r) {
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
-      c0 = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, b, c0);
-      c1 = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, b, c1);
-      c2 = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, b, c2);
-      c3 = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, b, c3);
+      c0 = wmma(c0);
+      c1 = wmma(c1);
+      c2 = wmma(c2);
+      c3 = wmma(c3);
     }
   }
-  if (static_cast<int>(threadIdx.x) == gate) {
-    *sink = c0[0] + c1[0] + c2[0] + c3[0];
-  }
+  sink[ThreadIndex()] =
+      HashVector(HashVector(HashVector(HashVector(kHashSeed, c0), c1), c2), c3);
 }
 
-// --- VALU FP32 FMA ----------------------------------------------------------
-__global__ void PeakFmaF32(float* sink, int reps, int gate) {
-  float a0 = static_cast<float>(threadIdx.x) * 1.0001F;
-  float a1 = a0 + 1.0F;
-  float a2 = a0 + 2.0F;
-  float a3 = a0 + 3.0F;
-  float a4 = a0 + 4.0F;
-  float a5 = a0 + 5.0F;
-  float a6 = a0 + 6.0F;
-  float a7 = a0 + 7.0F;
-  const float m = 1.0000001F;
-  const float b = 0.0000001F;
+__global__ void PeakFmaF32(std::uint32_t* sink, int reps) {
+  f32x8 acc;
+#pragma unroll
+  for (int i = 0; i < 8; ++i)
+    acc[i] = 1.0F + i + 0.5F * (threadIdx.x & 1U);
   for (int r = 0; r < reps; ++r) {
 #pragma unroll
     for (int i = 0; i < 32; ++i) {
-      a0 = fmaf(a0, m, b);
-      a1 = fmaf(a1, m, b);
-      a2 = fmaf(a2, m, b);
-      a3 = fmaf(a3, m, b);
-      a4 = fmaf(a4, m, b);
-      a5 = fmaf(a5, m, b);
-      a6 = fmaf(a6, m, b);
-      a7 = fmaf(a7, m, b);
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+        acc[j] = fmaf(acc[j], 1.0000001F, 0.0000001F);
     }
   }
-  if (static_cast<int>(threadIdx.x) == gate) {
-    *sink = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7;
-  }
+  sink[ThreadIndex()] = HashVector(kHashSeed, acc);
 }
 
-// --- Mixed WMMA-INT8 + FP32 epilogue, the shape the Q8 GEMM inner loop has --
-// `EpiPerWmma` FP32 ops (cvt + mul + fma triples) per 2 WMMA instructions.
+// Two persistent WMMA updates plus N cvt/mul/fma triples. Keeping C across
+// iterations prevents hoisting invariant matrix products out of the loop.
+// This measures an instruction mix, not the complete Q8 dequantization loop.
 template<int EpiTriples>
-__global__ void PeakWmmaI8WithEpilogue(float* sink, int reps, int gate) {
-  int32x4_t a = {1, 2, 3, 4};
-  int32x4_t b = {5, 6, 7, 8};
-  a[0] += static_cast<int>(threadIdx.x);
-  float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-  const float dw = 1.0000001F;
-  const float dx = 0.9999999F;
+__global__ void PeakWmmaI8WithEpilogue(std::uint32_t* sink, int reps, float dw,
+                                       float dx) {
+  const i32x4 a = {0x01010101, 0x01010101, 0x01010101, 0x01010101};
+  const i32x4 b = a;
+  i32x8 c = {0, 1, 2, 3, 4, 5, 6, 7};
+  f32x8 acc{};
   for (int r = 0; r < reps; ++r) {
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
-      int32x8_t c = {0, 0, 0, 0, 0, 0, 0, 0};
       c = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
       c = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
 #pragma unroll
-      for (int l = 0; l < EpiTriples; ++l) {
-        acc[l] += (dw * dx) * static_cast<float>(c[l]);
-      }
+      for (int j = 0; j < EpiTriples; ++j)
+        acc[j] = fmaf(dw * static_cast<float>(c[j]), dx, acc[j]);
     }
   }
-  if (static_cast<int>(threadIdx.x) == gate) {
-    *sink = acc[0] + acc[1] + acc[2] + acc[3];
-  }
+  sink[ThreadIndex()] = HashVector(HashVector(kHashSeed, c), acc);
 }
 
-// --- DRAM bandwidth ---------------------------------------------------------
-__global__ void StreamRead(const int32x4_t* __restrict__ src, int* sink,
-                           std::size_t n, int gate) {
+__global__ void StreamRead(const u32x4* __restrict__ src, std::uint32_t* sink,
+                           std::size_t n) {
   const std::size_t stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-  int32x4_t acc = {0, 0, 0, 0};
-  for (std::size_t i = (blockIdx.x * blockDim.x) + threadIdx.x; i < n;
-       i += stride) {
-    acc += src[i];
-  }
-  if (static_cast<int>(threadIdx.x) == gate) {
-    *sink = acc[1];
-  }
+  u32x4 acc{};
+  for (std::size_t i = ThreadIndex(); i < n; i += stride)
+    acc += src[i];  // Unsigned wraparound is intentional and defined.
+  sink[ThreadIndex()] = HashVector(kHashSeed, acc);
 }
 
-__global__ void StreamWrite(int32x4_t* __restrict__ dst, std::size_t n) {
+__global__ void StreamWrite(u32x4* __restrict__ dst, std::size_t n) {
   const std::size_t stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-  const int32x4_t v = {1, 2, 3, 4};
-  for (std::size_t i = (blockIdx.x * blockDim.x) + threadIdx.x; i < n;
-       i += stride) {
-    dst[i] = v;
-  }
+  for (std::size_t i = ThreadIndex(); i < n; i += stride)
+    dst[i] = u32x4{1, 2, 3, 4};
 }
 
-__global__ void StreamCopy(const int32x4_t* __restrict__ src,
-                           int32x4_t* __restrict__ dst, std::size_t n) {
+__global__ void StreamCopy(const u32x4* __restrict__ src,
+                           u32x4* __restrict__ dst, std::size_t n) {
   const std::size_t stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-  for (std::size_t i = (blockIdx.x * blockDim.x) + threadIdx.x; i < n;
-       i += stride) {
+  for (std::size_t i = ThreadIndex(); i < n; i += stride)
     dst[i] = src[i];
-  }
 }
 
-// --- LDS read bandwidth -----------------------------------------------------
-__global__ void PeakLdsRead(int* sink, int reps, int gate) {
-  __shared__ int32x4_t buf[1024];
-  for (unsigned i = threadIdx.x; i < 1024; i += blockDim.x) {
-    buf[i] = int32x4_t{static_cast<int>(i), 1, 2, 3};
-  }
+__global__ void PeakLdsRead(std::uint32_t* sink, int reps) {
+  // Volatile keeps repeated LDS loads in the timed loop.
+  __shared__ volatile u32x4 buf[1024];
+  for (unsigned i = threadIdx.x; i < 1024; i += blockDim.x)
+    buf[i] = u32x4{i, i ^ 0x1234U, i * 3U + 7U, ~i};
   __syncthreads();
-  int32x4_t acc = {0, 0, 0, 0};
-  const unsigned base = threadIdx.x & 1023u;
+  u32x4 acc{};
   for (int r = 0; r < reps; ++r) {
 #pragma unroll
-    for (int i = 0; i < 32; ++i) {
-      acc += buf[(base + (i * 37u)) & 1023u];
-    }
+    for (unsigned i = 0; i < 32; ++i)
+      acc += buf[(threadIdx.x + i * 37U) & 1023U];
   }
-  if (static_cast<int>(threadIdx.x) == gate) {
-    *sink = acc[1];
+  sink[ThreadIndex()] = HashVector(kHashSeed, acc);
+}
+
+template<typename Expected>
+void Validate(const char* name, const std::uint32_t* sink, std::size_t count,
+              Expected&& expected) {
+  std::vector<std::uint32_t> actual(count);
+  HIP_OK(hipGetLastError());
+  HIP_OK(hipMemcpy(actual.data(), sink, count * sizeof(actual[0]),
+                   hipMemcpyDeviceToHost));
+  for (std::size_t i = 0; i < count; ++i) {
+    if (actual[i] != expected(i)) {
+      std::fprintf(stderr, "%s: thread %zu checksum %08x != %08x\n", name, i,
+                   actual[i], expected(i));
+      std::exit(1);
+    }
   }
 }
 
 template<typename Launch>
-static double BenchSeconds(Launch&& launch, int iters) {
+double BenchSeconds(Launch&& launch, int iters = 3) {
   launch();
   HIP_OK(hipDeviceSynchronize());
-  hipEvent_t a = nullptr;
-  hipEvent_t b = nullptr;
+  hipEvent_t a{};
+  hipEvent_t b{};
   HIP_OK(hipEventCreate(&a));
   HIP_OK(hipEventCreate(&b));
   HIP_OK(hipEventRecord(a));
-  for (int i = 0; i < iters; ++i) {
+  for (int i = 0; i < iters; ++i)
     launch();
-  }
   HIP_OK(hipEventRecord(b));
   HIP_OK(hipEventSynchronize(b));
   float ms = 0.0F;
@@ -220,100 +241,156 @@ static double BenchSeconds(Launch&& launch, int iters) {
 int main() {
   hipDeviceProp_t prop{};
   HIP_OK(hipGetDeviceProperties(&prop, 0));
-  std::printf("device: %s  arch=%s  WGPs=%d (CUs=%d)  clock=%.2f GHz\n",
+  std::printf("device: %s  arch=%s  HIP multiprocessors=%d  clock=%.2f GHz\n",
               prop.name, prop.gcnArchName, prop.multiProcessorCount,
-              prop.multiProcessorCount * 2, prop.clockRate / 1e6);
+              prop.clockRate / 1e6);
+  const int blocks = prop.multiProcessorCount * 16;
+  const int stream_blocks = blocks * 2;
+  const std::size_t compute_threads = blocks * kThreads;
+  const std::size_t stream_threads = stream_blocks * kThreads;
+  const double waves = static_cast<double>(compute_threads) / 32;
+  std::uint32_t* sink{};
+  HIP_OK(hipMalloc(&sink, stream_threads * sizeof(*sink)));
 
-  const int cus = prop.multiProcessorCount * 2;  // HIP reports WGPs on RDNA
-  // 8 waves per CU x 4 blocks to saturate every SIMD.
-  const int blocks = cus * 8;
-  const int threads = 256;
-  const double waves = static_cast<double>(blocks) * threads / 32.0;
+  const auto measure = [&](const char* name, auto launch, auto expected,
+                           double work, const char* unit, std::size_t count) {
+    HIP_OK(hipMemset(sink, 0, stream_threads * sizeof(*sink)));
+    launch();
+    Validate(name, sink, count, expected);
+    const double seconds = BenchSeconds(launch);
+    std::printf("  %-24s %10.2f %s  [checksums verified]\n", name,
+                work / seconds, unit);
+    return work / seconds;
+  };
 
-  int* d_i = nullptr;
-  float* d_f = nullptr;
-  HIP_OK(hipMalloc(&d_i, sizeof(int)));
-  HIP_OK(hipMalloc(&d_f, sizeof(float)));
-
-  std::printf("\n-- compute peaks (register resident, no memory traffic) --\n");
-  {
-    const double s = BenchSeconds(
-        [&] { PeakWmmaI8<<<blocks, threads>>>(d_i, kIters, -1); }, 3);
-    // 4 chains x 16 unrolled x kIters instructions, each 16x16x16 MACs = 8192 ops
-    const double ops = waves * 4.0 * 16.0 * kIters * 8192.0;
-    std::printf("  WMMA int8  16x16x16 : %8.2f TOPS\n", ops / s / 1e12);
+  std::uint32_t i8_hash = kHashSeed;
+  std::uint32_t float_hash = kHashSeed;
+  for (int i = 0; i < 32; ++i) {
+    i8_hash = Fold(i8_hash, Word(i + 16 * 16 * kIters));
+    float_hash =
+        Fold(float_hash, Word(static_cast<float>(i + 8 * 16 * kIters)));
   }
-  {
-    const double s = BenchSeconds(
-        [&] { PeakWmmaBf16<<<blocks, threads>>>(d_f, kIters, -1); }, 3);
-    const double ops = waves * 4.0 * 16.0 * kIters * 8192.0;
-    std::printf("  WMMA bf16  16x16x16 : %8.2f TFLOPS\n", ops / s / 1e12);
-  }
-  {
-    const double s = BenchSeconds(
-        [&] { PeakFmaF32<<<blocks, threads>>>(d_f, kIters, -1); }, 3);
-    const double ops = waves * 32.0 * 8.0 * 32.0 * kIters * 2.0;
-    std::printf("  VALU fp32 fma       : %8.2f TFLOPS\n", ops / s / 1e12);
-  }
-  std::printf("\n-- WMMA int8 with the Q8 dequant epilogue (per 2 WMMA) --\n");
-#define EPI(N)                                                              \
-  {                                                                         \
-    const double s = BenchSeconds(                                          \
-        [&] { PeakWmmaI8WithEpilogue<N><<<blocks, threads>>>(d_f, kIters, -1); }, \
-        3);                                                                 \
-    const double ops = waves * 16.0 * kIters * 2.0 * 8192.0;                \
-    std::printf("  %2d fp32 triples / 2 WMMA : %8.2f TOPS  (%.0f%% of pure)\n", \
-                N, ops / s / 1e12, 100.0 * (ops / s / 1e12) / pure_i8);      \
-  }
-  {
-    const double s = BenchSeconds(
-        [&] { PeakWmmaI8<<<blocks, threads>>>(d_i, kIters, -1); }, 3);
-    const double pure_i8 = waves * 4.0 * 16.0 * kIters * 8192.0 / s / 1e12;
-    EPI(0)
-    EPI(2)
-    EPI(4)
-    EPI(8)
-  }
-#undef EPI
-
-  std::printf("\n-- LDS --\n");
-  {
-    const double s =
-        BenchSeconds([&] { PeakLdsRead<<<blocks, threads>>>(d_i, kIters, -1); }, 3);
-    const double bytes = waves * 32.0 * 32.0 * kIters * 16.0;
-    std::printf("  LDS read            : %8.2f GB/s\n", bytes / s / 1e9);
-  }
-
-  std::printf("\n-- DRAM (unified memory) --\n");
-  {
-    const std::size_t bytes = 2ULL << 30;  // 2 GiB
-    const std::size_t n = bytes / sizeof(int32x4_t);
-    int32x4_t* a = nullptr;
-    int32x4_t* b = nullptr;
-    HIP_OK(hipMalloc(&a, bytes));
-    HIP_OK(hipMalloc(&b, bytes));
-    HIP_OK(hipMemset(a, 1, bytes));
-    const int g = cus * 16;
-    {
-      const double s =
-          BenchSeconds([&] { StreamRead<<<g, 256>>>(a, d_i, n, -1); }, 5);
-      std::printf("  read                : %8.2f GB/s\n", bytes / s / 1e9);
+  std::printf("\n-- sustained compute issue rates --\n");
+  measure(
+      "WMMA int8", [&] { PeakWmmaI8<<<blocks, kThreads>>>(sink, kIters); },
+      [&](auto) { return i8_hash; }, waves * 4 * 16 * kIters * 8192 / 1e12,
+      "TOPS", compute_threads);
+  const auto floating = [&]<bool Bf16>(const char* name) {
+    measure(
+        name, [&] { PeakWmmaFloat<Bf16><<<blocks, kThreads>>>(sink, kIters); },
+        [&](auto) { return float_hash; }, waves * 4 * 16 * kIters * 8192 / 1e12,
+        "TFLOPS", compute_threads);
+  };
+  floating.template operator()<true>("WMMA bf16");
+  floating.template operator()<false>("WMMA fp16");
+  std::array<std::uint32_t, 2> fma_hash{};
+  for (unsigned parity = 0; parity < 2; ++parity) {
+    auto& hash = fma_hash[parity];
+    hash = kHashSeed;
+    for (int j = 0; j < 8; ++j) {
+      float acc = 1.0F + j + 0.5F * parity;
+      for (int i = 0; i < kIters * 32; ++i)
+        acc = std::fma(acc, 1.0000001F, 0.0000001F);
+      hash = Fold(hash, Word(acc));
     }
-    {
-      const double s = BenchSeconds([&] { StreamWrite<<<g, 256>>>(b, n); }, 5);
-      std::printf("  write               : %8.2f GB/s\n", bytes / s / 1e9);
-    }
-    {
-      const double s =
-          BenchSeconds([&] { StreamCopy<<<g, 256>>>(a, b, n); }, 5);
-      std::printf("  copy (r+w)          : %8.2f GB/s\n",
-                  2.0 * bytes / s / 1e9);
-    }
-    HIP_OK(hipFree(a));
-    HIP_OK(hipFree(b));
   }
+  measure(
+      "VALU fp32 fma", [&] { PeakFmaF32<<<blocks, kThreads>>>(sink, kIters); },
+      [&](auto i) { return fma_hash[i & 1U]; },
+      static_cast<double>(compute_threads) * 8 * 32 * kIters * 2 / 1e12,
+      "TFLOPS", compute_threads);
 
-  HIP_OK(hipFree(d_i));
-  HIP_OK(hipFree(d_f));
-  return 0;
+  std::printf(
+      "\n-- two dependent INT8 WMMA updates plus cvt/mul/fma triples --\n");
+  const auto epilogue = [&]<int Triples>() {
+    constexpr float dw = 0.00390625F;
+    constexpr float dx = 0.0078125F;
+    std::uint32_t hash = kHashSeed;
+    for (int j = 0; j < 8; ++j)
+      hash = Fold(hash, Word(j + kIters * 16 * 32));
+    for (int j = 0; j < 8; ++j) {
+      float acc = 0;
+      if (j < Triples)
+        for (int i = 1; i <= kIters * 16; ++i)
+          acc = std::fma(dw * static_cast<float>(j + i * 32), dx, acc);
+      hash = Fold(hash, Word(acc));
+    }
+    char name[32];
+    std::snprintf(name, sizeof(name), "%d fp32 triples", Triples);
+    measure(
+        name,
+        [&] {
+          PeakWmmaI8WithEpilogue<Triples>
+              <<<blocks, kThreads>>>(sink, kIters, dw, dx);
+        },
+        [&](auto) { return hash; }, waves * 16 * kIters * 2 * 8192 / 1e12,
+        "TOPS", compute_threads);
+  };
+  epilogue.template operator()<0>();
+  epilogue.template operator()<2>();
+  epilogue.template operator()<4>();
+  epilogue.template operator()<8>();
+
+  std::printf("\n-- memory bandwidth --\n");
+  std::array<std::uint32_t, kThreads> lds_hash{};
+  for (unsigned lane = 0; lane < kThreads; ++lane) {
+    std::array<std::uint32_t, 4> sum{};
+    for (unsigned i = 0; i < 32; ++i) {
+      const unsigned index = (lane + i * 37U) & 1023U;
+      sum[0] += index;
+      sum[1] += index ^ 0x1234U;
+      sum[2] += index * 3U + 7U;
+      sum[3] += ~index;
+    }
+    lds_hash[lane] = kHashSeed;
+    for (auto value : sum)
+      lds_hash[lane] = Fold(lds_hash[lane], value * kIters);
+  }
+  measure(
+      "LDS read", [&] { PeakLdsRead<<<blocks, kThreads>>>(sink, kIters); },
+      [&](auto i) { return lds_hash[i % kThreads]; },
+      static_cast<double>(compute_threads) * 32 * kIters * 16 / 1e9, "GB/s",
+      compute_threads);
+
+  constexpr std::size_t bytes = 2ULL << 30;
+  constexpr std::size_t n = bytes / sizeof(u32x4);
+  u32x4* a{};
+  u32x4* b{};
+  HIP_OK(hipMalloc(&a, bytes));
+  HIP_OK(hipMalloc(&b, bytes));
+  HIP_OK(hipMemset(a, 1, bytes));
+  const auto stream_hash = [&](std::size_t id, bool sequence) {
+    const auto count = static_cast<std::uint32_t>(
+        id < n ? 1 + (n - id - 1) / stream_threads : 0);
+    auto hash = kHashSeed;
+    for (unsigned j = 0; j < 4; ++j)
+      hash = Fold(hash, count * (sequence ? j + 1 : 0x01010101U));
+    return hash;
+  };
+  measure(
+      "DRAM read", [&] { StreamRead<<<stream_blocks, kThreads>>>(a, sink, n); },
+      [&](auto i) { return stream_hash(i, false); }, bytes / 1e9, "GB/s",
+      stream_threads);
+  // Validate the entire written/copied buffer through the checked read kernel.
+  HIP_OK(hipMemset(b, 0, bytes));
+  StreamWrite<<<stream_blocks, kThreads>>>(b, n);
+  StreamRead<<<stream_blocks, kThreads>>>(b, sink, n);
+  Validate("DRAM write", sink, stream_threads,
+           [&](auto i) { return stream_hash(i, true); });
+  const double write_s =
+      BenchSeconds([&] { StreamWrite<<<stream_blocks, kThreads>>>(b, n); });
+  std::printf("  %-24s %10.2f GB/s  [checksums verified]\n", "DRAM write",
+              bytes / write_s / 1e9);
+  HIP_OK(hipMemset(b, 0, bytes));
+  StreamCopy<<<stream_blocks, kThreads>>>(a, b, n);
+  StreamRead<<<stream_blocks, kThreads>>>(b, sink, n);
+  Validate("DRAM copy", sink, stream_threads,
+           [&](auto i) { return stream_hash(i, false); });
+  const double copy_s =
+      BenchSeconds([&] { StreamCopy<<<stream_blocks, kThreads>>>(a, b, n); });
+  std::printf("  %-24s %10.2f GB/s  [checksums verified]\n",
+              "DRAM copy (read+write)", 2.0 * bytes / copy_s / 1e9);
+  HIP_OK(hipFree(a));
+  HIP_OK(hipFree(b));
+  HIP_OK(hipFree(sink));
 }

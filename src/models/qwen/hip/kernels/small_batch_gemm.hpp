@@ -371,24 +371,56 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
         for (Index token_base = 0; token_base < Batch;
              token_base += TokensPerStep) {
           float dots[RowsPerWave][TokensPerStep] = {};
+          if constexpr (WType == core::GgmlType::kQ5_K && Batch == 8 &&
+                        RowsPerWave == 4 && NarrowIndex && TokensPerStep == 1) {
+            // Convert each row's four coefficients before its dependent FMAs.
+            // This schedule is faster for the batch-eight Q5 FFN geometries;
+            // each output retains the scalar dot product's accumulation order.
 #pragma unroll
-          for (Index group = 0; group < kVectorsPerSub; ++group) {
-#pragma unroll
-            for (Index local_token = 0; local_token < TokensPerStep;
-                 ++local_token) {
-              const Index token = token_base + local_token;
-              const Index input_group =
-                  kCompact ? group ^ ((slot >> 1U) & 3U) : group;
-              const float4 xv = *reinterpret_cast<const float4*>(
-                  staged_x + (token * kTileStride) + (slot * kStride) +
-                  (input_group * 4));
+            for (Index group = 0; group < kVectorsPerSub; ++group) {
 #pragma unroll
               for (Index r = 0; r < RowsPerWave; ++r) {
-                const std::int8_t* q = decoded[r].q + (group * 4);
-                dots[r][local_token] += static_cast<float>(q[0]) * xv.x;
-                dots[r][local_token] += static_cast<float>(q[1]) * xv.y;
-                dots[r][local_token] += static_cast<float>(q[2]) * xv.z;
-                dots[r][local_token] += static_cast<float>(q[3]) * xv.w;
+                const std::int8_t* q = decoded[r].q + group * 4;
+                const float q0 = static_cast<float>(q[0]);
+                const float q1 = static_cast<float>(q[1]);
+                const float q2 = static_cast<float>(q[2]);
+                const float q3 = static_cast<float>(q[3]);
+#pragma unroll
+                for (Index local_token = 0; local_token < TokensPerStep;
+                     ++local_token) {
+                  const Index token = token_base + local_token;
+                  const Index input_group =
+                      kCompact ? group ^ ((slot >> 1U) & 3U) : group;
+                  const float4 xv = *reinterpret_cast<const float4*>(
+                      staged_x + token * kTileStride + slot * kStride +
+                      input_group * 4);
+                  dots[r][local_token] += q0 * xv.x;
+                  dots[r][local_token] += q1 * xv.y;
+                  dots[r][local_token] += q2 * xv.z;
+                  dots[r][local_token] += q3 * xv.w;
+                }
+              }
+            }
+          } else {
+#pragma unroll
+            for (Index group = 0; group < kVectorsPerSub; ++group) {
+#pragma unroll
+              for (Index local_token = 0; local_token < TokensPerStep;
+                   ++local_token) {
+                const Index token = token_base + local_token;
+                const Index input_group =
+                    kCompact ? group ^ ((slot >> 1U) & 3U) : group;
+                const float4 xv = *reinterpret_cast<const float4*>(
+                    staged_x + (token * kTileStride) + (slot * kStride) +
+                    (input_group * 4));
+#pragma unroll
+                for (Index r = 0; r < RowsPerWave; ++r) {
+                  const std::int8_t* q = decoded[r].q + (group * 4);
+                  dots[r][local_token] += static_cast<float>(q[0]) * xv.x;
+                  dots[r][local_token] += static_cast<float>(q[1]) * xv.y;
+                  dots[r][local_token] += static_cast<float>(q[2]) * xv.z;
+                  dots[r][local_token] += static_cast<float>(q[3]) * xv.w;
+                }
               }
             }
           }

@@ -1,0 +1,581 @@
+{
+  "schema": "gufo.qwen27b.dflash2-row-scheduling.v1",
+  "date_utc": "2026-09-12T19:11:55.350759+00:00",
+  "baseline_commit": "390300f5a23955e153c744aa033e5e4027966ead",
+  "scope": "Exact Q5 batch-eight FFN scheduling for the existing Q4 target/Q4 DFlash2 draft. Calibration repair is tooling only.",
+  "artifacts_reference": "dflash2-rollback.json",
+  "source_sha256": {
+    "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "cde8f7316d857f8d7b1aef22361dfe9255677b4152419c67abb9dfebc8fd82a0",
+    "tools/bench/gfx1151_peak.hip": "4bd561b109023ab42a485132f01e2d587a9cde3ecf97585b04729951a9d2c5a8"
+  },
+  "quality": {
+    "release_nix_build": true,
+    "kernel_suites": [
+      "qwen_kquant_gemv_ops_test",
+      "qwen_quant_gemv_ops_test",
+      "qwen_q4kxl_quant_ops_test"
+    ],
+    "target_suites": [
+      "Q4",
+      "Q8"
+    ],
+    "full_vocabulary_verifier_scalar_rows": 98,
+    "draft_trace_files_byte_identical": 270,
+    "draft_types": [
+      "Q4_K_M",
+      "Q8_0",
+      "BF16"
+    ],
+    "reference_trace_record": "dflash2-head-iq4.json",
+    "snapshot_ring_mixed_capacity_and_logical_context_262144_passed": true,
+    "paired_model_runs": 12,
+    "all_measured_ids_and_acceptance_unchanged": true
+  },
+  "micro": {
+    "method": "Actual Q4-target Q5 GGUF matrices; up/down batch8 production launch geometries. Six alternating rounds of six rotations through up to16 tensors. Entire GGUF registered read-only; identical input and weight bytes; every tensor output checked finite and bit-exact before timing.",
+    "cases": [
+      {
+        "format": "Q5_K",
+        "batch": 8,
+        "shape": [
+          17408,
+          5120
+        ],
+        "tensor_count": 16,
+        "weight_bytes": 980418560,
+        "median_ms": {
+          "production": 0.34743250000000003,
+          "row_first": 0.342394
+        },
+        "gain_percent": 1.471550319222903,
+        "all_finite_bit_exact": true,
+        "raw": [
+          {
+            "variant": "production",
+            "round": "0",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.351140",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "0",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.343209",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "1",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.341564",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "1",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.346375",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "2",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.346496",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "2",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.341579",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "3",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.341284",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "3",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.347370",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "4",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.347495",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "4",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.350638",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "5",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.351076",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "5",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.364223",
+            "mismatches": "0"
+          }
+        ]
+      },
+      {
+        "format": "Q5_K",
+        "batch": 8,
+        "shape": [
+          5120,
+          17408
+        ],
+        "tensor_count": 16,
+        "weight_bytes": 980418560,
+        "median_ms": {
+          "production": 0.334003,
+          "row_first": 0.326338
+        },
+        "gain_percent": 2.34879174352971,
+        "all_finite_bit_exact": true,
+        "raw": [
+          {
+            "variant": "production",
+            "round": "0",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.338148",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "0",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.329470",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "1",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.326656",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "1",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.333895",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "2",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.334111",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "2",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.325850",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "3",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.326020",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "3",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.332477",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "4",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.331452",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "4",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.325242",
+            "mismatches": "0"
+          },
+          {
+            "variant": "row_first",
+            "round": "5",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.327273",
+            "mismatches": "0"
+          },
+          {
+            "variant": "production",
+            "round": "5",
+            "matrices": "16",
+            "weight_bytes": "980418560",
+            "ms_per_matrix": "0.334212",
+            "mismatches": "0"
+          }
+        ]
+      }
+    ]
+  },
+  "speed": {
+    "date_utc": "2026-09-12T19:07:49.561387+00:00",
+    "binary": {
+      "baseline": {
+        "sha256": "0a278baaf5fd604e1e5a6f9650eb80a11416355bb3379d75a189a425264a1993"
+      },
+      "candidate": {
+        "sha256": "b60b16f53c7b8afd322fe1def4d34e57a890f4394c832c59f3a34a4a19bbd6bb"
+      }
+    },
+    "method": "Q4 target/Q4 draft, C1, greedy. Raw JSON/prose TG300 adaptive and repetitive chat TG128 fixed-7. Two timed samples per binary in ABBA order, no separate warmup. Includes prefill, excludes loading. All IDs match the preceding qualified AR references; all acceptance statistics are unchanged.",
+    "rows": [
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 13.6428,
+        "tps": 21.9896,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 13.6399,
+        "tps": 21.9943,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 13.6406,
+        "tps": 21.9932,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 13.6487,
+        "tps": 21.9801,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 6.29255,
+        "tps": 47.6754,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 6.27075,
+        "tps": 47.8412,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 6.27259,
+        "tps": 47.8271,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 6.2909,
+        "tps": 47.6879,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 2.40749,
+        "tps": 53.1675,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 2.3941,
+        "tps": 53.4649,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 2.40125,
+        "tps": 53.3056,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 128,
+        "seconds": 2.4135,
+        "tps": 53.0349,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      }
+    ],
+    "summary": [
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "baseline": 21.98485,
+        "candidate": 21.99375,
+        "percent": 0.04048242312317818,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "baseline": 47.681650000000005,
+        "candidate": 47.83415,
+        "percent": 0.3198295361003689,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      },
+      {
+        "workload": "repetition",
+        "baseline": 53.1012,
+        "candidate": 53.38525,
+        "percent": 0.5349219979962738,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      }
+    ]
+  },
+  "profile": {
+    "method": "Separate raw-JSON TG300 adaptive baseline/candidate rocprofv3 runs. Profile timings are diagnostic; headline rates come from the unprofiled ABBA runs.",
+    "total_gpu_ms": {
+      "baseline": 6244.853749,
+      "candidate": 6250.055475
+    },
+    "q5_batch8": {
+      "baseline": {
+        "calls": 3354,
+        "ms": 1163.682448,
+        "kernels": [
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "count": 1989,
+            "ms": 710.574361,
+            "vgpr": 160,
+            "lds": 17408,
+            "scratch": 0
+          },
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "count": 1365,
+            "ms": 453.108087,
+            "vgpr": 160,
+            "lds": 17408,
+            "scratch": 0
+          }
+        ]
+      },
+      "candidate": {
+        "calls": 3354,
+        "ms": 1152.960315,
+        "kernels": [
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "count": 1989,
+            "ms": 705.120236,
+            "vgpr": 160,
+            "lds": 17408,
+            "scratch": 0
+          },
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "count": 1365,
+            "ms": 447.840079,
+            "vgpr": 160,
+            "lds": 17408,
+            "scratch": 0
+          }
+        ]
+      }
+    },
+    "affected_kernel_time_reduction_percent": 0.9213968139184292
+  },
+  "calibration": {
+    "run_output": "device: AMD Radeon 8060S Graphics  arch=gfx1151  HIP multiprocessors=20  clock=2.90 GHz\n\n-- sustained compute issue rates --\n  WMMA int8                     56.91 TOPS  [checksums verified]\n  WMMA bf16                     55.15 TFLOPS  [checksums verified]\n  WMMA fp16                     55.06 TFLOPS  [checksums verified]\n  VALU fp32 fma                 23.22 TFLOPS  [checksums verified]\n\n-- two dependent INT8 WMMA updates plus cvt/mul/fma triples --\n  0 fp32 triples                56.64 TOPS  [checksums verified]\n  2 fp32 triples                52.30 TOPS  [checksums verified]\n  4 fp32 triples                48.18 TOPS  [checksums verified]\n  8 fp32 triples                41.21 TOPS  [checksums verified]\n\n-- memory bandwidth --\n  LDS read                    6356.78 GB/s  [checksums verified]\n  DRAM read                    240.18 GB/s  [checksums verified]\n  DRAM write                   215.19 GB/s  [checksums verified]\n  DRAM copy (read+write)       208.18 GB/s  [checksums verified]\n",
+    "binary_sha256": "6371ce87ed8ba524259091a7631aae2d5e2d050a77a43e51b18ee6de9b9aceac",
+    "all_thread_checksums_verified": true,
+    "isa_counts_verified": true,
+    "loop_counts": {
+      "int8_bf16_fp16_wmma_per_outer_iteration": 64,
+      "fp32_fma_per_outer_iteration": 256,
+      "mixed_wmma_per_outer_iteration": 32,
+      "mixed_cvt_mul_fma_each_per_outer_iteration": "16 * triples",
+      "lds_16byte_loads_per_outer_iteration": 32
+    },
+    "notes": [
+      "Distinct WMMA seeds retain four chains; all outputs are consumed and independently checked on the host.",
+      "No gated sink, racing checksum, signed stream overflow or hoisted invariant WMMA product. LDS loads are volatile and all four vector words are consumed.",
+      "The LDS loop emits 32 flat loads from its shared-memory allocation. FMA uses 128 dual instructions for 256 FMAs. ISA counts include both halves of dual VALU instructions.",
+      "Compiler is nixpkgs AMD clang 22.0.0, ROCm 7.2.3 / HIP 7.2.53211. This is a sustained-rate probe under the existing power setup, not a model throughput prediction; power controls were not changed or independently resampled."
+    ]
+  },
+  "limits": [
+    "Short paired probes; JSON +0.32%, repetition +0.53%, prose effectively unchanged. No prefill or deep-context speed gain claimed.",
+    "Affected profiled kernels improve 0.92%; total profiled GPU time is effectively flat (6244.85 to 6250.06 ms).",
+    "The broader row-first experiment regressed other formats/widths; only batch-eight Q5 FFN layouts are retained.",
+    "Model weights, floating-point accumulation order, proposal probabilities, sampling and controller are unchanged. No production execution switch was added.",
+    "The upstream headline uses different FP4 artifacts, power and decode-only timing. This increment does not close that gap."
+  ]
+}
