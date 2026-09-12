@@ -1341,5 +1341,1530 @@
     "Quality is retained against qualified Gufo AR and existing upstream draft references; this is not independent original-target/checkpoint proof.",
     "No new full depth matrix, C>1 or capability result. The prior speculative table remains the better-sampled dflash2-width2.json measurement.",
     "The upstream performance goal remains open. Artifact, power and timing differences are documented in llama-comparison.json."
-  ]
+  ],
+  "follow_up_probes": {
+    "date_utc": "2026-09-12T21:54:56.441753+00:00",
+    "production_commit": "8cb1f2496886f330b71cfb87e86a680a2a4a9098",
+    "production_changes": false,
+    "source_review": "Pinned ROCMFPX-NOTES.md was re-read through remote gh; its SHA256 matches the existing llama-comparison.json audit. Whole-block scale amortization and hoisting decode out of the token loop already exist in Gufo verification. The following probes test additional exact transformations.",
+    "experiments": [
+      {
+        "experiment": "uniform",
+        "decision": "rejected",
+        "reason": "Wave-uniform row indexing is flat on Q5 up and slower on down/medium; explicit two-superblock scalar d/dmin header loads are 8.8-15.0% slower. Register reductions do not produce a throughput win.",
+        "method": "Actual Q5 GGUF batch8 projections. Whole-file read-only registration; six rotated-order rounds x six rotations of up to16 same-shape tensors. Baseline versus explicit wave-uniform row indexing and a second variant with uniform two-superblock d/dmin header loads. Every output finite and bit-identical.",
+        "probe_source_sha256": {
+          "qwen_uniform_probe.hip": "a6c3450b392edc92f62a5eba2e35f8fb8eb4803050a0b35701c34dd5ec3086b9",
+          "qwen_uniform_probe.hpp": "064875fa9312491e0200be5b8d925b8245008aebfe7bd82c166b35cdcc988517"
+        },
+        "cases": {
+          "q5-17408-5120": {
+            "median_ms": {
+              "production": 0.355862,
+              "uniform_row": 0.355287,
+              "uniform_row_scalar_header": 0.390255
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "uniform_row": 0.16184099052314327,
+              "uniform_row_scalar_header": -8.812955631574226
+            },
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.360908",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "0",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.371079",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "0",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.407464",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "1",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.367597",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "1",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.396122",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.356696",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "2",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.385077",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.352300",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "2",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.348645",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.352048",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "3",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.347719",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "3",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.384336",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "4",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.348659",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "4",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.385537",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.355028",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "5",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.394973",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.369134",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "5",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.361915",
+                "mismatches": "0"
+              }
+            ]
+          },
+          "q5-5120-17408": {
+            "median_ms": {
+              "production": 0.335922,
+              "uniform_row": 0.340992,
+              "uniform_row_scalar_header": 0.3732445
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "uniform_row": -1.4868384009009028,
+              "uniform_row_scalar_header": -9.99947755425733
+            },
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.339690",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "0",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.346200",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "0",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.383011",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "1",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.357161",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "1",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.382767",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.348098",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "2",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.373865",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.333978",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "2",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.335784",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.333770",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "3",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.335724",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "3",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.370595",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "4",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.335356",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "4",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.371207",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.334986",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "5",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.372624",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.336858",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "5",
+                "matrices": "16",
+                "weight_bytes": "980418560",
+                "ms_per_matrix": "0.349397",
+                "mismatches": "0"
+              }
+            ]
+          },
+          "q5-5120-6144": {
+            "median_ms": {
+              "production": 0.1304715,
+              "uniform_row": 0.14343099999999998,
+              "uniform_row_scalar_header": 0.1535215
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "uniform_row": -9.03535497904915,
+              "uniform_row_scalar_header": -15.01418368111308
+            },
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.132533",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "0",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.144477",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "0",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.154596",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "1",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.143055",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "1",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.153488",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.130517",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "2",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.154073",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.130426",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "2",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.143137",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.129470",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "3",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.143725",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "3",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.153305",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "4",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.144935",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "4",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.153371",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.128350",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row_scalar_header",
+                "round": "5",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.153555",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.131018",
+                "mismatches": "0"
+              },
+              {
+                "variant": "uniform_row",
+                "round": "5",
+                "matrices": "16",
+                "weight_bytes": "346030080",
+                "ms_per_matrix": "0.142714",
+                "mismatches": "0"
+              }
+            ]
+          }
+        },
+        "compiler_resources": [
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 155,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1662
+          },
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 155,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1662
+          },
+          {
+            "name": "void gufo::hip::UniformKQuantKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, true, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 138,
+              "sgpr_count": 25,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1645
+          },
+          {
+            "name": "void gufo::hip::UniformKQuantKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, true, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 138,
+              "sgpr_count": 25,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1645
+          },
+          {
+            "name": "void gufo::hip::UniformKQuantKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, true, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 144,
+              "sgpr_count": 28,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1713
+          },
+          {
+            "name": "void gufo::hip::UniformKQuantKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, true, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 144,
+              "sgpr_count": 28,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1713
+          }
+        ]
+      },
+      {
+        "experiment": "expanded_unsigned",
+        "decision": "rejected",
+        "reason": "Expanding Q5 integer codes from176 to272bytes per block preserves every coefficient but adds54.55% weight bytes. Even with unsigned-byte conversions it reduces throughput22.6-31.2%; the signed-pointer control is slower still. An identical-byte copy control distinguishes packing from mapping differences. Packing/loading time is excluded, so this is already favorable to expansion.",
+        "method": "Actual Q5 GGUF batch8, original read-only mapping versus identical-byte anonymous copy versus expanded 272-byte blocks (original16-byte scales/header +256exact integer codes). All are read-only registered. Six rotated-order rounds x six rotations of up to8 same-shape tensors, all outputs finite/bit-identical. Copy/unpack time excluded; expanded weight bytes are 54.5% greater, printed per variant. Unsigned-code variant exposes the known0..31 range to the compiler; signed-code control retains the baseline pointer type. No production format or path is changed.",
+        "probe_source_sha256": {
+          "qwen_expanded_unsigned_probe.hip": "03c6c6c0df6ebdd388186df5218158be2215453452d9f711e72c434eb8c39946",
+          "qwen_expanded_unsigned_probe.hpp": "bbb6fca84c3f514011b465c7d153e571c55d14390e6632068188bac8f3ecb5a1"
+        },
+        "cases": {
+          "17408-5120": {
+            "median_ms": {
+              "production": 0.3379225,
+              "copied_original": 0.34375100000000003,
+              "expanded_signed": 0.5012905,
+              "expanded_unsigned": 0.4910755
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "copied_original": -1.6955587038292252,
+              "expanded_signed": -32.58948653525251,
+              "expanded_unsigned": -31.18726142925069
+            },
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.336419",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.344146",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.502274",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.491765",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.339823",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.500307",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.490386",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.338413",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.513062",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.493152",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.342624",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.357044",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.492416",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.340928",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.349558",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.502486",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.337432",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.343356",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.498746",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.488768",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.339675",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.497877",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.487630",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.337069",
+                "mismatches": "0"
+              }
+            ]
+          },
+          "5120-17408": {
+            "median_ms": {
+              "production": 0.3188305,
+              "copied_original": 0.32338100000000003,
+              "expanded_signed": 0.448539,
+              "expanded_unsigned": 0.4459165
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "copied_original": -1.4071636861782255,
+              "expanded_signed": -28.91799821197265,
+              "expanded_unsigned": -28.499954587910516
+            },
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.317360",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.319664",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.448600",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.447044",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.319612",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.447242",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.443968",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.314273",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.448478",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.444038",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.326993",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.335317",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.453949",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.320301",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.333776",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.456767",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.321982",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.327069",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.448988",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.445571",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.319693",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.446340",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "757596160",
+                "ms_per_matrix": "0.446262",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.313525",
+                "mismatches": "0"
+              }
+            ]
+          },
+          "5120-6144": {
+            "median_ms": {
+              "production": 0.127561,
+              "copied_original": 0.1307575,
+              "expanded_signed": 0.168599,
+              "expanded_unsigned": 0.16477350000000002
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "copied_original": -2.4446016480890176,
+              "expanded_signed": -24.34059513994744,
+              "expanded_unsigned": -22.58403201971191
+            },
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.125425",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.126459",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.165763",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.162915",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.125431",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.168340",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.164533",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.128956",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.169327",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.163623",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.126672",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.134805",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.171093",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.131024",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.134106",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.168858",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.127700",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.130745",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.167547",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.168149",
+                "mismatches": "0"
+              },
+              {
+                "variant": "copied_original",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.130770",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_signed",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.172364",
+                "mismatches": "0"
+              },
+              {
+                "variant": "expanded_unsigned",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "267386880",
+                "ms_per_matrix": "0.165014",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.127422",
+                "mismatches": "0"
+              }
+            ]
+          }
+        },
+        "compiler_resources": [
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 155,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1662
+          },
+          {
+            "name": "void gufo::hip::ExpandedQ5Kernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 150,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1578
+          },
+          {
+            "name": "void gufo::hip::ExpandedQ5Kernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 150,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1441
+          },
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 155,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1662
+          },
+          {
+            "name": "void gufo::hip::ExpandedQ5Kernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 150,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1578
+          },
+          {
+            "name": "void gufo::hip::ExpandedQ5Kernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 150,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 17408
+            },
+            "static_instructions": 1441
+          }
+        ]
+      },
+      {
+        "experiment": "q6_convert",
+        "decision": "rejected",
+        "reason": "Keeping Q6 codes0..63 until unsigned float conversion, then subtracting32 exactly, preserves all outputs. Batch4 is flat (-0.20%) and batch8 loses8.16%. No format, geometry or output arithmetic changes are retained.",
+        "method": "Actual1GB Q6 vocabulary head, batch4/8, whole-GGUF read-only registration. Same retained W16/R3/T2 geometry and FP32 sums. Candidate keeps decoded codes0..63, converts unsigned bytes then subtracts32 exactly in float, avoiding packed signed-byte subtraction. Six alternating-order rounds, six launches each; every output finite/bit-identical before timing. No production changes.",
+        "probe_source_sha256": {
+          "qwen_q6_convert_probe.hip": "7ffc878d941929423789306fe414cadaded6d99795f3f93e97637beda9384c98",
+          "qwen_q6_convert_probe.hpp": "95c94b9a18f1dd7f0145f3bb1018d2c0a8aeb2b3765b82f433051d817ecfe355"
+        },
+        "cases": {
+          "q6-b4": {
+            "median_ms": {
+              "production": 4.8552800000000005,
+              "unsigned_float_bias": 4.865138
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "unsigned_float_bias": -0.2026252903822967
+            },
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.782526",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.832206",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.867452",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.865603",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.847329",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.861021",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.862824",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.837877",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.863231",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.888298",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.886675",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.916364",
+                "mismatches": "0"
+              }
+            ]
+          },
+          "q6-b8": {
+            "median_ms": {
+              "production": 5.399039,
+              "unsigned_float_bias": 5.878687
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "unsigned_float_bias": -8.159100833230282
+            },
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.650091",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "6.153418",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "6.111773",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.512352",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.422323",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.939648",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.817726",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.372729",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.368942",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.797936",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_float_bias",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.790148",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.375755",
+                "mismatches": "0"
+              }
+            ]
+          }
+        },
+        "compiler_resources": [
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 4ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 4ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 137,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 20480
+            },
+            "static_instructions": 1404
+          },
+          {
+            "name": "void gufo::hip::Q6ConvertKernel<16u, 4ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 4ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 102,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 20480
+            },
+            "static_instructions": 997
+          },
+          {
+            "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 8ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 134,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 40960
+            },
+            "static_instructions": 1260
+          },
+          {
+            "name": "void gufo::hip::Q6ConvertKernel<16u, 8ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 8ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+            "resources": {
+              "vgpr_count": 134,
+              "sgpr_count": 20,
+              "private_segment_fixed_size": 0,
+              "group_segment_fixed_size": 40960
+            },
+            "static_instructions": 1344
+          }
+        ]
+      }
+    ],
+    "limits": "Standalone actual-weight probes, not model speed claims. No production code or additional maintained test/tool is added. All have zero private scratch. Lower VGPR counts alone are not evidence of higher throughput. No model suites are repeated for rejected paths."
+  }
 }
