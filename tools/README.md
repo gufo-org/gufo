@@ -153,7 +153,8 @@ BF16 injection rows, for example `q4 17408 5120 24 7`,
 `q8 5120 17408 24 7` or `bf16 5120 25600 24 16`.
 Batch 1 compares scalar Q4/Q5/Q6/IQ4 dispatch; append `swiglu` for fused
 gate/up projections, for example `q5 17408 5120 32 1 swiglu`.
-Q5 batches 4–6 compare four-row FFN layouts; batch 8 also compares grouped
+Q5/IQ4 comparisons include the selected four-row FFN layouts. Q6 compares
+two- and three-row vocabulary projections; Q5 batch 8 also compares grouped
 dots with completing one token at a time.
 Weights use read-only host registration, matching production GGUF mapping.
 Injection repeats one weight matrix and uses the production cache hint

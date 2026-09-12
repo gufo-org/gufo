@@ -1687,6 +1687,7 @@ constexpr std::size_t kKQuantSmallBatchWarps = 16;
 constexpr std::size_t kKQuantSmallBatchRowsPerWave = 2;
 
 static_assert(FitsSmallBatch32BitIndices(8, 17408, 5120, 3520));
+static_assert(FitsSmallBatch32BitIndices(8, 248320, 5120, 4200));
 static_assert(!FitsSmallBatch32BitIndices(8, 1, 1ULL << 29, 1));
 static_assert(!FitsSmallBatch32BitIndices(8, 1ULL << 29, 1, 1));
 static_assert(!FitsSmallBatch32BitIndices(8, 65536, 131072, 90112));
@@ -1698,6 +1699,28 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                  std::size_t k, dim3 grid, dim3 block,
                                  hipStream_t stream) {
   const auto launch = [&]<std::size_t Batch>() {
+    if constexpr (WType == core::GgmlType::kIQ4_XS &&
+                  (Batch == 3 || Batch == 4 || Batch == 5 || Batch == 7)) {
+      const bool up = m == 17408 && k == 5120;
+      const bool down = m == 5120 && k == 17408;
+      if (up || (Batch != 4 && down)) {
+        const auto launch_rows = [&]<std::size_t Tiles>() {
+          SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, Tiles, 4, 1,
+                                             true>
+              <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
+        };
+        if constexpr (Batch == 3) {
+          if (up) {
+            launch_rows.template operator()<1>();
+          } else {
+            launch_rows.template operator()<2>();
+          }
+        } else {
+          launch_rows.template operator()<2>();
+        }
+        return;
+      }
+    }
     if constexpr (WType == core::GgmlType::kIQ4_XS && Batch == 8) {
       if ((m == 17408 && k == 5120) || (m == 5120 && k == 17408)) {
         SmallBatchKQuantExactFp32GEMMKernel<8, Batch, 4, WType, 1, 4, 1, true>
@@ -1710,7 +1733,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                    WType == core::GgmlType::kQ5_K)) {
       if (FitsSmallBatch32BitIndices(
               Batch, m, k, quant::QuantizedRowBytes(WType, k))) {
-        if constexpr (WType == core::GgmlType::kQ5_K && Batch >= 4 &&
+        if constexpr (WType == core::GgmlType::kQ5_K && Batch >= 3 &&
                       Batch <= 6) {
           const auto launch_rows =
               [&]<std::size_t Tiles, std::size_t TokensPerStep = Batch>() {
@@ -1729,7 +1752,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
             }
             return;
           }
-          if constexpr (Batch == 5) {
+          if constexpr (Batch == 3 || Batch == 5) {
             if (m == 17408 && k == 5120) {
               launch_rows.template operator()<2>();
               return;
@@ -1864,32 +1887,52 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
             break;
         }
       }
-      // DFlash2's seven proposals and eight target verification rows share
-      // a large vocabulary projection.
-      // Stage two consecutive tiles and reuse activations across three rows;
-      // the lower occupancy hint avoids spills and preserves accumulation
-      // order.
-      if ((batch == 7 || batch == 8) && m >= 65536) {
+      // The vocabulary projection reuses activations across three output
+      // rows and two consecutive tiles, retaining the scalar sum order.
+      // The Qwen27B head also benefits at shorter verification widths.
+      if (((batch >= 3 && batch <= 6) && m == 248320 && k == 5120) ||
+          ((batch == 7 || batch == 8) && m >= 65536)) {
         constexpr std::size_t kHeadRows = kKQuantSmallBatchWarps * 3;
         const auto launch_head = [&]<std::size_t Batch>() {
-          if (FitsSmallBatch32BitIndices(
-                  Batch, m, k,
-                  quant::QuantizedRowBytes(core::GgmlType::kQ6_K, k))) {
+          const auto launch_indices = [&]<bool Narrow>() {
             SmallBatchKQuantExactFp32GEMMKernel<
                 kKQuantSmallBatchWarps, Batch, 3, core::GgmlType::kQ6_K, 2, 1,
-                1, true><<<(m + kHeadRows - 1) / kHeadRows, block, 0, stream>>>(
-                w, fp32_x, y, m, k);
-            return;
+                1, Narrow>
+                <<<(m + kHeadRows - 1) / kHeadRows, block, 0, stream>>>(
+                    w, fp32_x, y, m, k);
+          };
+          if constexpr (Batch <= 6) {
+            // These widths enter only for the bounded Qwen27B head above.
+            launch_indices.template operator()<true>();
+          } else if (FitsSmallBatch32BitIndices(
+                         Batch, m, k,
+                         quant::QuantizedRowBytes(core::GgmlType::kQ6_K, k))) {
+            launch_indices.template operator()<true>();
+          } else {
+            launch_indices.template operator()<false>();
           }
-          SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch, 3,
-                                              core::GgmlType::kQ6_K, 2, 1>
-              <<<(m + kHeadRows - 1) / kHeadRows, block, 0, stream>>>(w, fp32_x,
-                                                                      y, m, k);
         };
-        if (batch == 7) {
-          launch_head.template operator()<7>();
-        } else {
-          launch_head.template operator()<8>();
+        switch (batch) {
+          case 3:
+            launch_head.template operator()<3>();
+            break;
+          case 4:
+            launch_head.template operator()<4>();
+            break;
+          case 5:
+            launch_head.template operator()<5>();
+            break;
+          case 6:
+            launch_head.template operator()<6>();
+            break;
+          case 7:
+            launch_head.template operator()<7>();
+            break;
+          case 8:
+            launch_head.template operator()<8>();
+            break;
+          default:
+            break;
         }
         return;
       }

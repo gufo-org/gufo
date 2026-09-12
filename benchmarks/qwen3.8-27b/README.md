@@ -30,13 +30,13 @@ Latest bounded refresh covers depths 0 and 4096.
 
 | Context depth | Q4 pp / tg | Q8 pp / tg |
 | ---: | ---: | ---: |
-| 0 | 400.6 / 24.10 | 466.2 / 24.14 |
-| 4,096 | 386.2 / 16.86 | 447.3 / 16.30 |
+| 0 | 398.1 / 24.18 | 466.2 / 24.14 |
+| 4,096 | 384.9 / 17.00 | 447.3 / 16.30 |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-[Latest Q4 measurements](eval/dflash2-midbatch.json);
+[Latest Q4 measurements](eval/dflash2-head-iq4.json);
 [preceding Q8 measurements](eval/dflash2-batch-widths.json).
 The [controller comparison](eval/dflash2-controllers.json) remains separate.
 Earlier [fixed-block precision results](eval/dflash2-rollback.json) and the
@@ -97,17 +97,19 @@ no separate warmup. Repetition is one candidate smoke run, asking for
 
 | Workload | Current tok/s | Change in paired probe |
 | --- | ---: | ---: |
-| Repetition, tg128, fixed-7 | **53.02** | Smoke only |
-| JSON, tg300, adaptive | **47.58** | −0.2% |
-| Prose, tg300, adaptive | **21.87** | +0.6% |
+| Repetition, tg128, fixed-7 | **53.27** | Smoke only |
+| JSON, tg300, adaptive | **47.73** | +0.2% |
+| Prose, tg300, adaptive | **21.97** | +0.7% |
 
 Every token ID and acceptance statistic is unchanged; repetition accepts
-111/111 proposals. Four Q5 FFN layouts at widths 4–6 gain 3.6–14.3% in
-mapped-weight kernel controls, with zero private scratch. This gives a small
-prose gain; prefill has no established improvement.
-[Measurements and quality checks](eval/dflash2-midbatch.json).
-Packed-bit lane sharing was bit-exact but reduced throughput by 10–32%: rejected.
-Preceding retained work covers [batch-eight scheduling](eval/dflash2-dot-order.json),
+111/111 proposals. Selected Q5/IQ4 FFNs and shorter Q6 vocabulary projections
+gain 2.6–15.8% in mapped-weight controls. All ten selected variants have zero
+private scratch. Prose improves modestly; prefill has no established gain.
+[Measurements and quality checks](eval/dflash2-head-iq4.json).
+The short fixed-length pilot supports the current controller cost estimate.
+Memory copies and broad loop reordering were not retained.
+Preceding work covers [widths 4–6](eval/dflash2-midbatch.json),
+[batch-eight scheduling](eval/dflash2-dot-order.json),
 [scalar/row reuse](eval/dflash2-scalar-row-reuse.json) and
 [packed verification](eval/dflash2-packed-decode.json).
 

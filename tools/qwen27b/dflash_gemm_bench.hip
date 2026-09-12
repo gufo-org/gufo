@@ -322,8 +322,11 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
         };
         narrow.template operator()<1>("narrow_tile1");
         narrow.template operator()<2>("narrow_tile2");
-        if constexpr (Type == core::GgmlType::kQ5_K && Batch >= 4 &&
-                      Batch <= 6) {
+        if constexpr ((Type == core::GgmlType::kQ5_K && Batch >= 3 &&
+                       Batch <= 6) ||
+                      (Type == core::GgmlType::kIQ4_XS &&
+                       (Batch == 3 || Batch == 4 || Batch == 5 ||
+                        Batch == 7))) {
           const auto rows4 =
               [&]<std::size_t Tiles, std::size_t TokensPerStep = Batch>(
                   const char* name) {
@@ -334,11 +337,12 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                           w, input.Get(), output.Get(), rows, columns);
                 }});
               };
-          if constexpr (Batch == 4) {
+          if constexpr (Type == core::GgmlType::kQ5_K && Batch == 4) {
             rows4.template operator()<1, 2>("rows4_tile1_step2");
           } else {
             rows4.template operator()<2>("rows4_tile2");
-            if constexpr (Batch == 5)
+            if constexpr ((Type == core::GgmlType::kQ5_K && Batch == 5) ||
+                          (Type == core::GgmlType::kIQ4_XS && Batch == 3))
               rows4.template operator()<1>("rows4_tile1");
           }
         }
