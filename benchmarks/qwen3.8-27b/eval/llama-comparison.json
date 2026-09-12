@@ -1,0 +1,529 @@
+{
+  "schema": "gufo.qwen27b-upstream-comparison.v1",
+  "date_utc": "2026-09-12T14:36:06.241079+00:00",
+  "gufo_commit": "d829068064afc02b72db1869bd1db499cd88b0d9",
+  "gufo_binary_sha256": "1702d1ac76318c63ef248048ae64c7f23dca2a7cb91bb731206f2ed9db69c8b5",
+  "upstream_repository": "LaurentZuijdwijk/llama.cpp",
+  "upstream_commit": "11bfe8a633fa02bac251db6cf21bd5ddab282a64",
+  "upstream_executed_locally": false,
+  "upstream_sources": [
+    {
+      "path": "README.md",
+      "sha256": "2bbf042f72226fc409c0b765310e03cb7096c6ca3929710b3caa99634b3586d9",
+      "url": "https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/README.md"
+    },
+    {
+      "path": "bench/RESULTS.md",
+      "sha256": "2d80c0cbf61f82343104dba160ac76972509dd6fc867a5041bfb3578c43a0f66",
+      "url": "https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/bench/RESULTS.md"
+    },
+    {
+      "path": "bench/spec_bench.py",
+      "sha256": "c7bac3a3893b2f5d4c2a9b140dc41db9938398a5adde189aa494a6dc1d65748d",
+      "url": "https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/bench/spec_bench.py"
+    },
+    {
+      "path": "bench/results-fp4-headline.jsonl",
+      "sha256": "aa79fba800ac0a2d9ad8751f85e713373b6e0a47eaca3e01f7d4893c7ea87a07",
+      "url": "https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/bench/results-fp4-headline.jsonl"
+    },
+    {
+      "path": "bench/results-spec-depth.jsonl",
+      "sha256": "8f68e50531729e4ae665d245c910ece0e09e73409716cf083eea73b7bf6162e9",
+      "url": "https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/bench/results-spec-depth.jsonl"
+    },
+    {
+      "path": "common/speculative.cpp",
+      "sha256": "200ff265d73d575f074fc6dd0c1c6c06c5c94dd5352982432159f6f01bab9144",
+      "url": "https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/common/speculative.cpp"
+    },
+    {
+      "path": "common/sampling.cpp",
+      "sha256": "67170da839541b58cadb183a6bb4361406b5fc8c929c9eb65311115fdaf07843",
+      "url": "https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/common/sampling.cpp"
+    },
+    {
+      "path": "tools/server/server-context.cpp",
+      "sha256": "2ea355040244fdf7e5d0783d3e24d7bd06b136bcb42c42bcfad696acd0efd298",
+      "url": "https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/tools/server/server-context.cpp"
+    },
+    {
+      "path": "ROCMFPX-NOTES.md",
+      "sha256": "02b8422a7e6f107954ba7d5ce5aaa4566370cbc934bd039b9e7497cb0b23c6de",
+      "url": "https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/ROCMFPX-NOTES.md"
+    }
+  ],
+  "scope": "One C1 raw-prompt TG300 pass, exact upstream JSON/prose prompts. Gufo Q4 target/Q4 draft; includes prefill. Different artifacts and power profile from upstream FP4; not an engine A/B. A final Q8-draft adaptive pass matches the draft precision of the published K-quant comparison; exact artifact equality is still unverified.",
+  "method": {
+    "runner": "tools/quant/speculative-corpus.py",
+    "prompt_mode": "raw",
+    "temperature": 0,
+    "max_tokens": 300,
+    "repetitions": 1,
+    "concurrency": 1,
+    "run_order": [
+      "fixed-7",
+      "adaptive-7",
+      "fixed-3",
+      "adaptive-7-q8-draft"
+    ],
+    "ar_reference": "One AR run per prompt, reused by validated artifact/command cache.",
+    "warmup": "No separate warmup; short exploratory probe, not a variance estimate.",
+    "timing": "Gufo Generate duration includes prefill/decode and token callbacks, excludes model loading. Upstream headline rates exclude prefill.",
+    "input_prompts": "TASKS literal read with ast.literal_eval from pinned bench/spec_bench.py; upstream script was not executed.",
+    "quality": "All eight speculative continuations equal all 300 AR token IDs and decoded text for the same Gufo target."
+  },
+  "gufo_artifacts": {
+    "target_q4": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+      "bytes": 17559178144,
+      "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+    },
+    "draft_q4": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "bytes": 1143006816,
+      "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+    },
+    "draft_q8": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf",
+      "bytes": 2056414816,
+      "sha256": "c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e"
+    }
+  },
+  "artifact_hash_note": "Model hashes reused from the existing rollback qualification; no weight download or quantization changes.",
+  "system_before": {
+    "/sys/class/drm/card1/device/power_dpm_force_performance_level": "auto",
+    "/sys/class/drm/card1/device/power_dpm_state": "performance",
+    "/sys/class/drm/card1/device/pp_dpm_sclk": "0: 600Mhz *\n1: 1100Mhz \n2: 2900Mhz",
+    "/sys/class/drm/card1/device/pp_dpm_mclk": "0: 400Mhz \n1: 800Mhz \n2: 1000Mhz *",
+    "/sys/class/drm/card1/device/hwmon/hwmon1/power1_average": "24007000",
+    "/sys/class/drm/card1/device/hwmon/hwmon1/temp1_input": "47000"
+  },
+  "system_after": {
+    "/sys/class/drm/card1/device/power_dpm_force_performance_level": "auto",
+    "/sys/class/drm/card1/device/power_dpm_state": "performance",
+    "/sys/class/drm/card1/device/pp_dpm_sclk": "0: 600Mhz \n1: 2260Mhz *\n2: 2900Mhz",
+    "/sys/class/drm/card1/device/pp_dpm_mclk": "0: 400Mhz \n1: 800Mhz \n2: 1000Mhz *",
+    "/sys/class/drm/card1/device/hwmon/hwmon1/power1_average": "80116000",
+    "/sys/class/drm/card1/device/hwmon/hwmon1/temp1_input": "47000"
+  },
+  "power_note": "Read-only snapshots before/after the probe, not sampled in-run power averages. No power or clock settings changed.",
+  "prompts": {
+    "prose": "Write a continuous, flowing essay of several paragraphs about how tidal patterns shaped the settlement of coastal towns. Do not use lists or headings.",
+    "json": "Return ONLY a JSON array of 12 objects, no prose. Each object must have exactly the keys \"id\" (integer), \"name\" (string), \"category\" (string), \"score\" (number) and \"active\" (boolean). Begin your reply with [ and end it with ]."
+  },
+  "gufo_autoregressive": {
+    "prose": {
+      "completion": "\n\n<think>\nThe user wants a continuous, flowing essay about how tidal patterns shaped the settlement of coastal towns. Requirements:\n- Several paragraphs\n- Continuous and flowing (no lists, no headings)\n- About tidal patterns and their influence on coastal town settlement\n\nLet me think about what to cover:\n- How tides created natural harbors and safe anchorage\n- How tidal ranges influenced where people could build (above the high tide line)\n- How tides affected fishing, trade, and economic activity\n- How specific tidal patterns (spring tides, neap tides) influenced seasonal rhythms\n- How towns grew around tidal features like estuaries, mudflats, tidal creeks\n- How the rhythm of tides structured daily life\n- How some towns were literally built on or around tidal features\n- The relationship between tidal knowledge and settlement planning\n- How tidal patterns created natural defenses\n- How some settlements failed or were abandoned due to tidal changes\n\nLet me write this as a flowing, literary essay with good transitions between paragraphs. No headings, no lists. Just continuous prose that moves naturally from one idea to the next.\n</think>\n\nLong before cartographers drew their careful coastlines or engineers calculated the precise amplitude of the lunar pull, the people who first walked along the shore read the sea as a kind of clock. The tide, rising and falling in its patient rhythm, told them where the water would be at any given hour, and in that",
+      "tokens": 300,
+      "seconds": 26.6734,
+      "tps": 11.2472,
+      "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8"
+    },
+    "json": {
+      "completion": "\n\n[\n  {\"id\": 1, \"name\": \"Alpha\", \"category\": \"A\", \"score\": 95.5, \"active\": true},\n  {\"id\": 2, \"name\": \"Beta\", \"category\": \"B\", \"score\": 87.2, \"active\": false},\n  {\"id\": 3, \"name\": \"Gamma\", \"category\": \"A\", \"score\": 92.1, \"active\": true},\n  {\"id\": 4, \"name\": \"Delta\", \"category\": \"C\", \"score\": 78.9, \"active\": true},\n  {\"id\": 5, \"name\": \"Epsilon\", \"category\": \"B\", \"score\": 85.0, \"active\": false},\n  {\"id\": 6, \"name\": \"Zeta\", \"category\": \"C\", \"score\": 91.3, \"active\": true},\n  {\"id\": 7, \"name\": \"Eta\", \"category\": \"A\", \"score\": 88.7, \"active\": true},\n  {\"id\": 8, \"name\": \"Theta\", \"category\": \"B\", \"score\": 76.4, \"active\": false},\n  {\"id\": 9, \"name\": \"Iota\", \"category\": \"C\", \"score\":",
+      "tokens": 300,
+      "seconds": 26.6902,
+      "tps": 11.2401,
+      "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb"
+    }
+  },
+  "gufo_speculative": [
+    {
+      "policy": "fixed-7",
+      "workload": "prose",
+      "tokens": 300,
+      "seconds": 16.9095,
+      "tps": 17.7416,
+      "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+      "acceptance": 0.255689,
+      "drafted": 747,
+      "accepted": 191,
+      "steps": 108,
+      "exact_ar_token_ids": true
+    },
+    {
+      "policy": "fixed-7",
+      "workload": "json",
+      "tokens": 300,
+      "seconds": 6.93656,
+      "tps": 43.2491,
+      "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+      "acceptance": 0.844371,
+      "drafted": 302,
+      "accepted": 255,
+      "steps": 44,
+      "exact_ar_token_ids": true
+    },
+    {
+      "policy": "adaptive-7",
+      "workload": "prose",
+      "tokens": 300,
+      "seconds": 15.4788,
+      "tps": 19.3814,
+      "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+      "acceptance": 0.414414,
+      "drafted": 444,
+      "accepted": 184,
+      "steps": 115,
+      "exact_ar_token_ids": true
+    },
+    {
+      "policy": "adaptive-7",
+      "workload": "json",
+      "tokens": 300,
+      "seconds": 7.02521,
+      "tps": 42.7034,
+      "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+      "acceptance": 0.84106,
+      "drafted": 302,
+      "accepted": 254,
+      "steps": 45,
+      "exact_ar_token_ids": true
+    },
+    {
+      "policy": "fixed-3",
+      "workload": "prose",
+      "tokens": 300,
+      "seconds": 15.7479,
+      "tps": 19.0502,
+      "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+      "acceptance": 0.479564,
+      "drafted": 367,
+      "accepted": 176,
+      "steps": 123,
+      "exact_ar_token_ids": true
+    },
+    {
+      "policy": "fixed-3",
+      "workload": "json",
+      "tokens": 300,
+      "seconds": 9.91966,
+      "tps": 30.243,
+      "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+      "acceptance": 0.952586,
+      "drafted": 232,
+      "accepted": 221,
+      "steps": 78,
+      "exact_ar_token_ids": true
+    },
+    {
+      "policy": "adaptive-7-q8-draft",
+      "workload": "prose",
+      "tokens": 300,
+      "seconds": 16.0099,
+      "tps": 18.7384,
+      "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+      "acceptance": 0.402655,
+      "drafted": 452,
+      "accepted": 182,
+      "steps": 117,
+      "exact_ar_token_ids": true
+    },
+    {
+      "policy": "adaptive-7-q8-draft",
+      "workload": "json",
+      "tokens": 300,
+      "seconds": 6.9671,
+      "tps": 43.0595,
+      "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+      "acceptance": 0.864407,
+      "drafted": 295,
+      "accepted": 255,
+      "steps": 44,
+      "exact_ar_token_ids": true
+    }
+  ],
+  "upstream_reported_headline": [
+    {
+      "suite": "spec",
+      "preset": "fp4",
+      "policy": "bare-decode",
+      "workload": "prose",
+      "depth": 0,
+      "power": "auto/performance",
+      "gpu_temp_c": 0,
+      "target": "Qwen3.8-27B-ROCmFP4-FAST.gguf",
+      "target_quant": "Q4_0_ROCMFP4_FAST",
+      "draft": null,
+      "draft_quant": null,
+      "spec_method": "none",
+      "prompt_n": 27,
+      "prompt_per_second": 118.00596148635064,
+      "predicted_n": 300,
+      "predicted_per_second": 14.074519828221192,
+      "accept_pct": null,
+      "degenerate": false,
+      "recorded_at": "2026-08-24T20:51:00.699295+00:00"
+    },
+    {
+      "suite": "spec",
+      "preset": "fp4",
+      "policy": "bare-decode",
+      "workload": "json",
+      "depth": 0,
+      "power": "auto/performance",
+      "gpu_temp_c": 0,
+      "target": "Qwen3.8-27B-ROCmFP4-FAST.gguf",
+      "target_quant": "Q4_0_ROCMFP4_FAST",
+      "draft": null,
+      "draft_quant": null,
+      "spec_method": "none",
+      "prompt_n": 62,
+      "prompt_per_second": 199.57702546538468,
+      "predicted_n": 300,
+      "predicted_per_second": 13.990870559226325,
+      "accept_pct": null,
+      "degenerate": false,
+      "recorded_at": "2026-08-24T20:51:22.461480+00:00"
+    },
+    {
+      "suite": "spec",
+      "preset": "fp4",
+      "policy": "fixed-n3",
+      "workload": "prose",
+      "depth": 0,
+      "power": "auto/performance",
+      "gpu_temp_c": 0,
+      "target": "Qwen3.8-27B-ROCmFP4-FAST.gguf",
+      "target_quant": "Q4_0_ROCMFP4_FAST",
+      "draft": "Qwen3.8-27B-DFlash2-Q4_0_ROCMFP4_FAST.gguf",
+      "draft_quant": "Q4_0_ROCMFP4_FAST",
+      "spec_method": "draft-dflash",
+      "prompt_n": 27,
+      "prompt_per_second": 84.53720576355882,
+      "predicted_n": 300,
+      "predicted_per_second": 25.35226290991917,
+      "accept_pct": 44.38642297650131,
+      "degenerate": false,
+      "recorded_at": "2026-08-24T20:51:48.801394+00:00"
+    },
+    {
+      "suite": "spec",
+      "preset": "fp4",
+      "policy": "fixed-n3",
+      "workload": "json",
+      "depth": 0,
+      "power": "auto/performance",
+      "gpu_temp_c": 0,
+      "target": "Qwen3.8-27B-ROCmFP4-FAST.gguf",
+      "target_quant": "Q4_0_ROCMFP4_FAST",
+      "draft": "Qwen3.8-27B-DFlash2-Q4_0_ROCMFP4_FAST.gguf",
+      "draft_quant": "Q4_0_ROCMFP4_FAST",
+      "spec_method": "draft-dflash",
+      "prompt_n": 62,
+      "prompt_per_second": 173.11569154134392,
+      "predicted_n": 300,
+      "predicted_per_second": 41.620464239390884,
+      "accept_pct": 95.25862068965517,
+      "degenerate": false,
+      "recorded_at": "2026-08-24T20:51:56.421877+00:00"
+    },
+    {
+      "suite": "spec",
+      "preset": "fp4",
+      "policy": "fixed-n7",
+      "workload": "prose",
+      "depth": 0,
+      "power": "auto/performance",
+      "gpu_temp_c": 0,
+      "target": "Qwen3.8-27B-ROCmFP4-FAST.gguf",
+      "target_quant": "Q4_0_ROCMFP4_FAST",
+      "draft": "Qwen3.8-27B-DFlash2-Q4_0_ROCMFP4_FAST.gguf",
+      "draft_quant": "Q4_0_ROCMFP4_FAST",
+      "spec_method": "draft-dflash",
+      "prompt_n": 27,
+      "prompt_per_second": 81.31427969100574,
+      "predicted_n": 300,
+      "predicted_per_second": 24.81825401673896,
+      "accept_pct": 24.670184696569923,
+      "degenerate": false,
+      "recorded_at": "2026-08-24T20:52:23.079333+00:00"
+    },
+    {
+      "suite": "spec",
+      "preset": "fp4",
+      "policy": "fixed-n7",
+      "workload": "json",
+      "depth": 0,
+      "power": "auto/performance",
+      "gpu_temp_c": 0,
+      "target": "Qwen3.8-27B-ROCmFP4-FAST.gguf",
+      "target_quant": "Q4_0_ROCMFP4_FAST",
+      "draft": "Qwen3.8-27B-DFlash2-Q4_0_ROCMFP4_FAST.gguf",
+      "draft_quant": "Q4_0_ROCMFP4_FAST",
+      "spec_method": "draft-dflash",
+      "prompt_n": 62,
+      "prompt_per_second": 171.8522624904719,
+      "predicted_n": 300,
+      "predicted_per_second": 20.17145330531188,
+      "accept_pct": 17.59656652360515,
+      "degenerate": false,
+      "recorded_at": "2026-08-24T20:52:38.340525+00:00"
+    },
+    {
+      "suite": "spec",
+      "preset": "fp4",
+      "policy": "adaptive",
+      "workload": "prose",
+      "depth": 0,
+      "power": "auto/performance",
+      "gpu_temp_c": 0,
+      "target": "Qwen3.8-27B-ROCmFP4-FAST.gguf",
+      "target_quant": "Q4_0_ROCMFP4_FAST",
+      "draft": "Qwen3.8-27B-DFlash2-Q4_0_ROCMFP4_FAST.gguf",
+      "draft_quant": "Q4_0_ROCMFP4_FAST",
+      "spec_method": "draft-dflash",
+      "prompt_n": 27,
+      "prompt_per_second": 84.7053508683867,
+      "predicted_n": 300,
+      "predicted_per_second": 26.13503860818245,
+      "accept_pct": 44.16243654822335,
+      "degenerate": false,
+      "recorded_at": "2026-08-24T20:53:04.378139+00:00"
+    },
+    {
+      "suite": "spec",
+      "preset": "fp4",
+      "policy": "adaptive",
+      "workload": "json",
+      "depth": 0,
+      "power": "auto/performance",
+      "gpu_temp_c": 0,
+      "target": "Qwen3.8-27B-ROCmFP4-FAST.gguf",
+      "target_quant": "Q4_0_ROCMFP4_FAST",
+      "draft": "Qwen3.8-27B-DFlash2-Q4_0_ROCMFP4_FAST.gguf",
+      "draft_quant": "Q4_0_ROCMFP4_FAST",
+      "spec_method": "draft-dflash",
+      "prompt_n": 62,
+      "prompt_per_second": 175.12936976024224,
+      "predicted_n": 300,
+      "predicted_per_second": 65.57226052144202,
+      "accept_pct": 95.88014981273409,
+      "degenerate": false,
+      "recorded_at": "2026-08-24T20:53:09.369270+00:00"
+    }
+  ],
+  "upstream_reported_kquant": [
+    {
+      "suite": "spec-depth",
+      "policy": "DFlash adaptive",
+      "method": "dflash",
+      "workload": "prose",
+      "depth": 0,
+      "prompt_n": 27,
+      "prompt_per_second": 66.46366529882802,
+      "predicted_n": 300,
+      "predicted_per_second": 21.131439461641598,
+      "draft_n": null,
+      "draft_n_accepted": null,
+      "accept_pct": 44.35897435897436,
+      "target": "Qwen3.8-27B-UD-Q4_K_XL",
+      "draft": "Qwen3.8-27B-DFlash2-Q8_0",
+      "power": "auto/performance",
+      "recorded_at": "2026-08-24T20:56:30.621189+00:00",
+      "degenerate": false
+    },
+    {
+      "suite": "spec-depth",
+      "policy": "DFlash adaptive",
+      "method": "dflash",
+      "workload": "json",
+      "depth": 0,
+      "prompt_n": 62,
+      "prompt_per_second": 152.8561919084835,
+      "predicted_n": 300,
+      "predicted_per_second": 49.26347805097864,
+      "draft_n": null,
+      "draft_n_accepted": null,
+      "accept_pct": 94.42379182156134,
+      "target": "Qwen3.8-27B-UD-Q4_K_XL",
+      "draft": "Qwen3.8-27B-DFlash2-Q8_0",
+      "power": "auto/performance",
+      "recorded_at": "2026-08-24T20:56:37.178881+00:00",
+      "degenerate": false
+    }
+  ],
+  "timing_normalization": {
+    "formula": "N / (P / pp_tps + N / tg_tps)",
+    "meaning": "Calculated model prefill-plus-decode duration; not full HTTP latency or a same-artifact/same-host engine A/B.",
+    "rows": [
+      {
+        "source": "FP4 headline",
+        "workload": "prose",
+        "gufo_policy": "adaptive-7",
+        "prefill_seconds": 0.31875200000000004,
+        "decode_seconds": 11.478842809364549,
+        "prefill_plus_decode_tps": 25.42891198143792,
+        "gufo_prefill_plus_decode_tps": 19.3814,
+        "reported_over_gufo_ratio": 1.3120265812293188
+      },
+      {
+        "source": "FP4 headline",
+        "workload": "json",
+        "gufo_policy": "adaptive-7",
+        "prefill_seconds": 0.354024,
+        "decode_seconds": 4.575105351170569,
+        "prefill_plus_decode_tps": 60.86267545986718,
+        "gufo_prefill_plus_decode_tps": 42.7034,
+        "reported_over_gufo_ratio": 1.4252419118821258
+      },
+      {
+        "source": "K-quant depth-zero",
+        "workload": "prose",
+        "gufo_policy": "adaptive-7-q8-draft",
+        "prefill_seconds": 0.406237,
+        "decode_seconds": 14.196855852842807,
+        "prefill_plus_decode_tps": 20.543593266381137,
+        "gufo_prefill_plus_decode_tps": 18.7384,
+        "reported_over_gufo_ratio": 1.0963365744343774
+      },
+      {
+        "source": "K-quant depth-zero",
+        "workload": "json",
+        "gufo_policy": "adaptive-7-q8-draft",
+        "prefill_seconds": 0.40561,
+        "decode_seconds": 6.089704013377926,
+        "prefill_plus_decode_tps": 46.18714343634685,
+        "gufo_prefill_plus_decode_tps": 43.0595,
+        "reported_over_gufo_ratio": 1.0726353867635912
+      }
+    ]
+  },
+  "source_review": [
+    {
+      "path": "common/speculative.cpp:191-222,1315-1376",
+      "finding": "Adaptive length uses prior accepted-token EMA, alpha 0.25 and additive upward probing after full acceptance. DFlash2 chooses the block before greedy selector proposals. It does not relax target verification."
+    },
+    {
+      "path": "common/sampling.cpp:692-719; tools/server/server-context.cpp:3899-3917",
+      "finding": "Normal greedy verification samples the target at each row and continues only while its token equals the draft. Published headline command contains no synthetic acceptance option."
+    },
+    {
+      "path": "tools/server/server-context.cpp:3903-3912",
+      "finding": "Checkpoint replay trusts tokens verified before restore; its comment acknowledges batch-shape-dependent logits. This is a reason to qualify scalar/batched parity, not evidence that the headline used this branch or emitted incorrect tokens."
+    },
+    {
+      "path": "bench/spec_bench.py:177-182,251-274",
+      "finding": "Probe returns response timings only; logs contain throughput, counts and acceptance, but no output tokens or AR/speculative equality checks. This does not establish lossless target equivalence."
+    },
+    {
+      "path": "ROCMFPX-NOTES.md:74-163",
+      "finding": "Reported FP4 gains include batched matvec/dequantization tuning for widths 3-8. These concern different weight formats and numerics; their quality cannot be assumed identical to Gufo K-quants."
+    }
+  ],
+  "interpretation": [
+    "Headlines combine a smaller FP4 target/draft, a structured raw prompt, and a short higher-power burst. README reports 55 tok/s on its everyday profile versus the 65.6 tok/s peak.",
+    "Closer K-quant published rows, adjusted with their recorded prefill time, are about 7-10% faster than the Gufo Q8-draft adaptive probe. Quant classes now match, but exact model artifacts, host/power and timing boundaries still differ.",
+    "Acceptance percentage is not throughput: Gufo fixed-3 JSON accepts 95.3% but runs at 30.24 tok/s; fixed-7 accepts 84.4% and runs at 43.25 tok/s.",
+    "The existing controller qualification evaluated the upstream EMA algorithm on a different short chat corpus; it did not reproduce the full FP4 headline setup.",
+    "The remaining performance investigation should measure draft and target verification costs at widths 3-8 on identical artifacts and token continuations, retaining scalar/batched logit and AR token parity."
+  ],
+  "limits": [
+    "Only the Q4 target was probed, with Q4 and Q8 drafts; Q8 target and BF16 draft results were not rerun.",
+    "No local execution of the upstream fork or independent validation of its reported speed/quality.",
+    "Upstream headline JSONL lacks the build_commit field now emitted by its script; inspected current source is pinned separately.",
+    "Different quants/checkpoints can produce different greedy continuations on the same prompt. Upstream outputs are not recorded.",
+    "No independent original-target capability or quantization-quality conclusion follows from this comparison."
+  ]
+}

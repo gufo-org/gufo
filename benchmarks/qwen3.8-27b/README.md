@@ -109,6 +109,12 @@ and reproduce AR. A short C1 chat probe with these penalties reaches
 These include prefill and are separate from the synthetic table above.
 [Sampling measurements](eval/dflash2-sampling.json).
 
+Matched upstream JSON/prose prompts, raw framing, C1/tg300: **42.70 / 19.38
+tok/s** with Q4 target/Q4 draft and adaptive, including prefill. One pass;
+fixed-3, fixed-7 and adaptive all match 300 AR IDs per prompt.
+The Q8 draft reaches **43.06 / 18.74 tok/s**, also matching every AR ID.
+[Fork comparison, timing differences and source audit](eval/llama-comparison.json).
+
 Exact projections now stream large BF16 weights, cache reused injection K/V
 weights, and skip symmetric-quant offset work while preserving decode rounding.
 Unused verification precision settings are removed. All three drafts retain
