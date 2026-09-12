@@ -11,12 +11,13 @@ that number. Draft precision is selected separately from target precision.
 
 ## Single user, autoregressive
 
-Q4 depths 0/4096 have a [bounded AR refresh](eval/dflash2-scalar-row-reuse.json); other rows remain the reference
-sweep at `023a13a`. Full refresh: TODO.
+Q4 depth 0 has a [paired AR refresh](eval/dflash2-mixed-formats.json);
+depth 4096 uses the [preceding refresh](eval/dflash2-scalar-row-reuse.json).
+Other rows remain the reference sweep at `023a13a`. Full refresh: TODO.
 
 | Context depth | Q4 pp / tg (tok/s) | Q8 pp / tg (tok/s) |
 | ---: | ---: | ---: |
-| 0 | 419.5 / 11.68 | 491.1 / 7.07 |
+| 0 | 420.2 / 11.74 | 491.1 / 7.07 |
 | 4,096 | 405.0 / 11.51 | 470.9 / 7.01 |
 | 8,192 | 390.8 / 11.15 | 451.2 / 6.95 |
 | 12,288 | 375.1 / 10.96 | 434.2 / 6.88 |
@@ -90,7 +91,7 @@ prompt; fixed can be faster with Q8/BF16 drafts. Draft files occupy
 advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
-**Latest Q4 target/Q4 draft:** greedy C1, including prefill. Two timed
+**Q4 target/Q4 draft at `941e4bc`:** greedy C1, including prefill. Two timed
 samples per binary in ABBA order; fixed-seven repetition has four.
 No separate warmup. JSON/prose use upstream raw prompts; repetition asks
 for 1,000 space-separated `red` words.
@@ -110,9 +111,16 @@ output rows and enabling branchless decoding cuts that verification from
 Adaptive workloads mostly use larger blocks, so their total gain is smaller.
 [Measurements and quality checks](eval/dflash2-width2.json).
 
+The latest [mixed-format scalar specialization](eval/dflash2-mixed-formats.json)
+raises depth-zero AR generation from 11.685 to **11.74 tok/s** (+0.5%).
+Two samples per binary retain every token ID. One-pair JSON/prose DFlash2
+controls are unchanged within noise; the speculative table above remains
+the preceding measurement. Prefill is not optimized by this change.
+
 Partial token groups, transposed staging, repacked Q5 headers and streaming
-loads did not improve speed. Rounded EMA and a smaller initial controller
-prior regress prose; the cost-aware controller remains the default.
+loads did not improve speed. Splitting batch-eight verification between
+workgroups was slower. Rounded EMA and a smaller initial controller prior
+regress prose; the cost-aware controller remains the default.
 
 Preceding work covers [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json),
 [medium Q5 projections and controller trials](eval/dflash2-middle-projections.json),

@@ -1,0 +1,1345 @@
+{
+  "schema": "gufo.qwen27b.dflash2-mixed-formats.v1",
+  "date_utc": "2026-09-12T21:45:21.899449+00:00",
+  "baseline_commit": "941e4bcc3ea1bd3ccc04cf907b628147d446276d",
+  "scope": "Scalar fused gate/up projections on the mixed-format Q4 target. The existing two-row kernel now specializes each weight format independently; no floating-point operation/order, weights, sampler, controller or batched verification changes.",
+  "artifacts_reference": "dflash2-rollback.json",
+  "source_sha256": {
+    "src/models/qwen/hip/kernels/swiglu.hip": "0380fd9b5a6e61f1264eea39ca0fb0ed30d87b7a64ae15101fc982cccc4af3fc",
+    "tests/models/qwen/hip/quant/kquant_gemv_ops_test.cpp": "0ac628ba9369401bdbbc160b2cb38c87e37a19b42772d6a32249dcbb73268b0b",
+    "tests/models/qwen/hip/quant/q4kxl_quant_ops_test.cpp": "660b8f5d647c5616811270e9cb7b2b11de84e7c1c00bf0dd4fec67b0924997a0",
+    "tools/qwen27b/dflash_gemm_bench.hip": "f7e8da0b6f0e0e2fb4b8de6edb400a992bb61352e3d20b18b4fa76a160402910",
+    "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "4be2f993437e986a9ca3f81ee0fb7976da28f7a35df139a367955439a98a14c7",
+    "src/models/qwen/dflash_policy.hpp": "98f47d066ef3f67c13bafd44515bf056d29fdb45ff0cd53e31e186c937a77e28"
+  },
+  "retained": [
+    "Four format pairs: Q4_K/Q5_K, Q4_K/IQ4_XS, IQ4_XS/Q4_K and IQ4_XS/Q5_K. Existing same-format specializations and generic fallback remain. No runtime options.",
+    "One consolidated fused-versus-verification test replaces the older same-format-only helper; existing independent decode controls remain. The maintained geometry tool accepts an optional scalar up-format."
+  ],
+  "actual_weight_confirmation": {
+    "q4-q5-17408-5120": {
+      "tensors": [
+        {
+          "name": "blk.3.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 2560895616
+        },
+        {
+          "name": "blk.6.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 3251421568
+        },
+        {
+          "name": "blk.20.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 6257923200
+        },
+        {
+          "name": "blk.36.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 10134765184
+        },
+        {
+          "name": "blk.37.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 10379287040
+        },
+        {
+          "name": "blk.38.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 10625447296
+        },
+        {
+          "name": "blk.43.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 11917906816
+        }
+      ],
+      "median_ms": {
+        "production": 0.544764,
+        "pair_typed": 0.5234755
+      },
+      "gain_percent": {
+        "production": 0.0,
+        "pair_typed": 4.066761481673931
+      },
+      "raw": [
+        {
+          "variant": "production",
+          "round": "0",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.543549",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "0",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.522459",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "1",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.519880",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "1",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.543645",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "2",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.545883",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "2",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.524492",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "3",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.526838",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "3",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.547198",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "4",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.546256",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "4",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.529401",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "5",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.518793",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "5",
+          "matrices": "7",
+          "weight_bytes": "779878400",
+          "ms_per_matrix": "0.539284",
+          "mismatches": "0"
+        }
+      ]
+    },
+    "iq4-q4-17408-5120": {
+      "tensors": [
+        {
+          "name": "blk.4.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 23,
+          "type_name": "IQ4_XS",
+          "offset": 2784742016
+        },
+        {
+          "name": "blk.32.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 23,
+          "type_name": "IQ4_XS",
+          "offset": 9205081088
+        },
+        {
+          "name": "blk.34.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 23,
+          "type_name": "IQ4_XS",
+          "offset": 9662012160
+        }
+      ],
+      "median_ms": {
+        "production": 0.5101475,
+        "pair_typed": 0.46411749999999996
+      },
+      "gain_percent": {
+        "production": 0.0,
+        "pair_typed": 9.917747122226594
+      },
+      "raw": [
+        {
+          "variant": "production",
+          "round": "0",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.498718",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "0",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.464180",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "1",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.463278",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "1",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.512163",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "2",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.510391",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "2",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.464236",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "3",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.464227",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "3",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.509561",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "4",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.511086",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "4",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.464055",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "5",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.463917",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "5",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.509904",
+          "mismatches": "0"
+        }
+      ]
+    },
+    "iq4-q5-17408-5120": {
+      "tensors": [
+        {
+          "name": "blk.7.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 23,
+          "type_name": "IQ4_XS",
+          "offset": 3500942592
+        },
+        {
+          "name": "blk.22.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 23,
+          "type_name": "IQ4_XS",
+          "offset": 6743280512
+        },
+        {
+          "name": "blk.48.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 23,
+          "type_name": "IQ4_XS",
+          "offset": 13015977472
+        },
+        {
+          "name": "blk.49.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 23,
+          "type_name": "IQ4_XS",
+          "offset": 13260990848
+        }
+      ],
+      "median_ms": {
+        "production": 0.5487365,
+        "pair_typed": 0.509432
+      },
+      "gain_percent": {
+        "production": 0.0,
+        "pair_typed": 7.7153574961918325
+      },
+      "raw": [
+        {
+          "variant": "production",
+          "round": "0",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.545402",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "0",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.504248",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "1",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.502547",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "1",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.543631",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "2",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.545922",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "2",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.508513",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "3",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.510351",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "3",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.554636",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "4",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.565393",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "4",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.518338",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "5",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.512557",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "5",
+          "matrices": "4",
+          "weight_bytes": "434503680",
+          "ms_per_matrix": "0.551551",
+          "mismatches": "0"
+        }
+      ]
+    },
+    "q4-iq4-17408-5120": {
+      "tensors": [
+        {
+          "name": "blk.10.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 4137974784
+        },
+        {
+          "name": "blk.30.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 8757928064
+        },
+        {
+          "name": "blk.46.ffn_gate.weight",
+          "shape": [
+            17408,
+            5120
+          ],
+          "type": 12,
+          "type_name": "Q4_K",
+          "offset": 12566571648
+        }
+      ],
+      "median_ms": {
+        "production": 0.5169334999999999,
+        "pair_typed": 0.4681025
+      },
+      "gain_percent": {
+        "production": 0.0,
+        "pair_typed": 10.431689640623576
+      },
+      "raw": [
+        {
+          "variant": "production",
+          "round": "0",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.510496",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "0",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.468561",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "1",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.469200",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "1",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.516240",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "2",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.517340",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "2",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.469055",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "3",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.467582",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "3",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.516527",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "4",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.518016",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "4",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.466871",
+          "mismatches": "0"
+        },
+        {
+          "variant": "pair_typed",
+          "round": "5",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.467644",
+          "mismatches": "0"
+        },
+        {
+          "variant": "production",
+          "round": "5",
+          "matrices": "3",
+          "weight_bytes": "292454400",
+          "ms_per_matrix": "0.518606",
+          "mismatches": "0"
+        }
+      ]
+    },
+    "method": "Actual mixed-format target gate/up pairs, read-only whole GGUF registration. Existing runtime-format fused kernel versus the same arithmetic specialized independently for gate/up formats. Six alternating-order rounds, six rotations of all matching pairs; outputs finite and bit-identical."
+  },
+  "quality": {
+    "release_nix_build": true,
+    "kernel_suites": [
+      "qwen_kquant_gemv_ops_test",
+      "qwen_q4kxl_quant_ops_test"
+    ],
+    "fused_contract": {
+      "suite": "qwen_q4kxl_quant_ops_test",
+      "cases": [
+        {
+          "case": "Q4_K/Q4_K 66x768",
+          "finite_bit_exact_outputs": 132
+        },
+        {
+          "case": "Q5_K/Q5_K 66x768",
+          "finite_bit_exact_outputs": 132
+        },
+        {
+          "case": "IQ4_XS/IQ4_XS 66x768",
+          "finite_bit_exact_outputs": 132
+        },
+        {
+          "case": "Q4_K/Q5_K 66x768",
+          "finite_bit_exact_outputs": 132
+        },
+        {
+          "case": "IQ4_XS/Q4_K 66x768",
+          "finite_bit_exact_outputs": 132
+        },
+        {
+          "case": "IQ4_XS/Q5_K 66x768",
+          "finite_bit_exact_outputs": 132
+        },
+        {
+          "case": "Q4_K/IQ4_XS 66x768",
+          "finite_bit_exact_outputs": 132
+        },
+        {
+          "case": "Q4_K/Q5_K 65x768",
+          "finite_bit_exact_outputs": 130
+        },
+        {
+          "case": "Q8_0/Q8_0 17408x5120",
+          "finite_bit_exact_outputs": 34816
+        },
+        {
+          "case": "Q6_K/Q6_K 17408x5120",
+          "finite_bit_exact_outputs": 34816
+        }
+      ],
+      "total_outputs": 70686,
+      "note": "One shared fused-versus-verification test replaces the older same-format-only function. Two distinct inputs, finite bitwise comparisons, mixed formats, partial row groups, and the full-size Q8/Q6 controls."
+    },
+    "target_suites": [
+      "Q4"
+    ],
+    "full_vocabulary_verifier_scalar_rows": 51,
+    "mixed_capacity_fp16_fp32_and_logical_context_262144_passed": true,
+    "prefill_metrics_equal_baseline": [
+      "prefill case=0 top1_match=1 rmse=0.0352181 max_abs=0.143674",
+      "prefill case=1 top1_match=1 rmse=0.0238825 max_abs=0.115072",
+      "prefill case=2 top1_match=1 rmse=0.0248176 max_abs=0.123336"
+    ],
+    "draft_trace_files_byte_identical": 90,
+    "trace_baseline": "dflash2-width2.json",
+    "maintained_tail_controls": [
+      {
+        "gate": "q4",
+        "up": "q5",
+        "m": 67,
+        "k": 768,
+        "batch": 1,
+        "rounds": 4,
+        "geometries": [
+          "generic",
+          "typed"
+        ],
+        "finite_bit_exact": true
+      },
+      {
+        "gate": "q4",
+        "up": "iq4",
+        "m": 67,
+        "k": 768,
+        "batch": 1,
+        "rounds": 4,
+        "geometries": [
+          "generic",
+          "typed"
+        ],
+        "finite_bit_exact": true
+      },
+      {
+        "gate": "iq4",
+        "up": "q4",
+        "m": 67,
+        "k": 768,
+        "batch": 1,
+        "rounds": 4,
+        "geometries": [
+          "generic",
+          "typed"
+        ],
+        "finite_bit_exact": true
+      },
+      {
+        "gate": "iq4",
+        "up": "q5",
+        "m": 67,
+        "k": 768,
+        "batch": 1,
+        "rounds": 4,
+        "geometries": [
+          "generic",
+          "typed"
+        ],
+        "finite_bit_exact": true
+      }
+    ],
+    "q8_scope": {
+      "full_model_rerun": false,
+      "gate_up_ggml_type_counts": [
+        {
+          "gate": 8,
+          "up": 8,
+          "tensor_pairs": 65
+        }
+      ],
+      "reason": "No Q8-target FFN tensor pair selects any new specialization, including auxiliary tensors. Full-size Q8 and Q6 fused operators pass the consolidated suite; prior Q8 target qualification remains in dflash2-width2.json."
+    },
+    "paired_release_runs_with_qualified_ar_ids": 8,
+    "other_drafts": "Q8/BF16 draft code is unchanged; preceding qualification is linked from dflash2-width2.json. No new full-model run for those drafts."
+  },
+  "speed": {
+    "date_utc": "2026-09-12T21:34:07.827423+00:00",
+    "binary": {
+      "baseline": {
+        "path": "/nix/store/gsa2amlv70cchzbb12vkqarzhm1pqrz3-gufo-efbed18-dirty/bin/gufo",
+        "sha256": "0b166185748169fb5fe192285e1f312059a213c4a6bfff22a4eaeef473f056bf"
+      },
+      "candidate": {
+        "path": "/nix/store/13wk4x76r8ksjahxysdvv0jm359105b6-gufo-941e4bc-dirty/bin/gufo",
+        "sha256": "23969606c7863564246e28a7b41763b84257a72b66fcc39ccf0020151f861215"
+      }
+    },
+    "method": "Q4 target, C1. AR pp2048/tg128 at depth0, one timed repetition per invocation after the built-in32-token warmup, two samples per binary in ABBA order. Separate Q4 draft DFlash2 raw JSON/prose TG300 controls, one baseline/candidate pair per workload; includes prefill, excludes model loading. Compare each continuation against existing qualified AR IDs. AR prefill and generation are separate benchmark phases; depth-zero generation has the benchmark 16-token seed, not a 2048-token prefix.",
+    "ar_bench": [
+      {
+        "binary": "baseline",
+        "index": 0,
+        "pp2048": 425.7,
+        "tg128": 11.69,
+        "token_sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+      },
+      {
+        "binary": "candidate",
+        "index": 1,
+        "pp2048": 420.32,
+        "tg128": 11.74,
+        "token_sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+      },
+      {
+        "binary": "candidate",
+        "index": 2,
+        "pp2048": 420.15,
+        "tg128": 11.74,
+        "token_sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+      },
+      {
+        "binary": "baseline",
+        "index": 3,
+        "pp2048": 420.78,
+        "tg128": 11.68,
+        "token_sha256": "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+      }
+    ],
+    "dflash2": [
+      {
+        "workload": "prose",
+        "binary": "baseline",
+        "tokens": 300,
+        "seconds": 13.5848,
+        "tps": 22.0835,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "binary": "candidate",
+        "tokens": 300,
+        "seconds": 13.5773,
+        "tps": 22.0956,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "json",
+        "binary": "baseline",
+        "tokens": 300,
+        "seconds": 6.20988,
+        "tps": 48.3101,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "binary": "candidate",
+        "tokens": 300,
+        "seconds": 6.21347,
+        "tps": 48.2822,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      }
+    ],
+    "summary": {
+      "pp2048": {
+        "baseline": 423.24,
+        "candidate": 420.235,
+        "percent": -0.7099990549097379
+      },
+      "tg128": {
+        "baseline": 11.684999999999999,
+        "candidate": 11.74,
+        "percent": 0.4706889174155071
+      }
+    },
+    "limits": "Bounded probe: two AR samples per binary, one DFlash2 sample per binary/workload. AR prefill mean changes -0.71%; first baseline is 425.70 and the other three rows are 420.15-420.78 tok/s. The scalar specialization does not affect prefill kernels; no prefill improvement is claimed. DFlash2 controls are flat within noise."
+  },
+  "profile": {
+    "baseline": {
+      "total_gpu_ms": 11111.675355,
+      "all_fused_ms": 4337.551326,
+      "all_fused_calls": 8192,
+      "selected_union_ms": 1920.790445,
+      "selected_union_calls": 3456,
+      "kernels": [
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)0>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 3456,
+          "ms": 1920.790445,
+          "vgpr": 96,
+          "lds": 0,
+          "scratch": 8
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)13>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 2304,
+          "ms": 1316.586922,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)23>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 2048,
+          "ms": 909.392842,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)12>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 384,
+          "ms": 190.781117,
+          "vgpr": 56,
+          "lds": 0,
+          "scratch": 0
+        }
+      ],
+      "specialized": []
+    },
+    "candidate": {
+      "total_gpu_ms": 11053.489548,
+      "all_fused_ms": 4271.140318,
+      "all_fused_calls": 8192,
+      "selected_union_ms": 1852.498219,
+      "selected_union_calls": 3456,
+      "kernels": [
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)13, (gufo::core::GgmlType)13>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 2304,
+          "ms": 1317.520145,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)23, (gufo::core::GgmlType)23>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 2048,
+          "ms": 910.030199,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)0, (gufo::core::GgmlType)0>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 1280,
+          "ms": 745.693359,
+          "vgpr": 96,
+          "lds": 0,
+          "scratch": 8
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)12, (gufo::core::GgmlType)13>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 896,
+          "ms": 476.605205,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)23, (gufo::core::GgmlType)13>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 512,
+          "ms": 262.435539,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)12, (gufo::core::GgmlType)12>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 384,
+          "ms": 191.091755,
+          "vgpr": 56,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)12, (gufo::core::GgmlType)23>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 384,
+          "ms": 184.647907,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)23, (gufo::core::GgmlType)12>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 384,
+          "ms": 183.116209,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        }
+      ],
+      "specialized": [
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)12, (gufo::core::GgmlType)13>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 896,
+          "ms": 476.605205,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)23, (gufo::core::GgmlType)13>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 512,
+          "ms": 262.435539,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)12, (gufo::core::GgmlType)23>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 384,
+          "ms": 184.647907,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        },
+        {
+          "name": "void gufo::hip::Wave32FusedQuantSwiGLUGEMVKernel_2Rows<4u, (gufo::core::GgmlType)23, (gufo::core::GgmlType)12>(void const*, gufo::core::GgmlType, void const*, gufo::core::GgmlType, float const*, float*, unsigned long, unsigned long)",
+          "grid_x": 278528,
+          "block_x": 128,
+          "count": 384,
+          "ms": 183.116209,
+          "vgpr": 64,
+          "lds": 0,
+          "scratch": 0
+        }
+      ]
+    },
+    "selected_time_reduction_percent": 3.5554230383523233,
+    "method": "Separate baseline/candidate Nix release AR repetition TG128 profiles. Compare the old runtime-format fused kernel with the candidate union of its remaining runtime-format calls and four new mixed-format variants; unchanged mixed formats remain in both unions. Call counts match, and all four new variants have zero private scratch. Trace timings are diagnostic; use the unprofiled benchmark for throughput."
+  },
+  "profile_limits": "The selected union contains 27 FFNs per AR token: 17 new mixed specializations and 10 unchanged runtime-format calls. Its 3.56% time reduction is not isolated timing of the 17 affected FFNs. The four specialized kernels have VGPR64 and zero scratch; the remaining generic kernel still has scratch8.",
+  "rejected_experiments": [
+    {
+      "experiment": "Scalar activation staging",
+      "method": "Scalar launch dispatcher versus staged exact FP32 kernels, actual target GGUF, read-only whole-file registration. Six rotated-order rounds, six rotations each, up to16 same-shape tensors or one1GB head; all outputs checked finite and bit-identical.",
+      "decision": "Standalone Q4 up/down improve 9.6/8.8%, but AR gate/up are fused and only five target down FFNs are Q4. Not integrated; other formats flat or slower.",
+      "all_finite_bit_exact": true,
+      "shapes": {
+        "q5-17408-5120": {
+          "median_ms": {
+            "scalar_production": 0.2782255,
+            "scalar_typed": 0.2807425,
+            "w16_r2_t1": 0.287335,
+            "w16_r3_t1": 0.2857565,
+            "w16_r4_t2": 0.2801665,
+            "w8_r4_t1": 0.2890185,
+            "w8_r4_t2": 0.28625849999999997
+          },
+          "gain_percent": {
+            "scalar_production": 0.0,
+            "scalar_typed": -0.8965511100029411,
+            "w16_r2_t1": -3.1703412393199515,
+            "w16_r3_t1": -2.635460610694773,
+            "w16_r4_t2": -0.6928023157657948,
+            "w8_r4_t1": -3.734363025204268,
+            "w8_r4_t2": -2.8062048812524165
+          }
+        },
+        "q5-5120-17408": {
+          "median_ms": {
+            "scalar_production": 0.283852,
+            "scalar_typed": 0.28060850000000004,
+            "w16_r2_t1": 0.28098650000000003,
+            "w16_r3_t1": 0.30547100000000005,
+            "w16_r4_t2": 0.286705,
+            "w8_r4_t1": 0.30346399999999996,
+            "w8_r4_t2": 0.293266
+          },
+          "gain_percent": {
+            "scalar_production": 0.0,
+            "scalar_typed": 1.1558808803011855,
+            "w16_r2_t1": 1.0197998836242839,
+            "w16_r3_t1": -7.077267563860412,
+            "w16_r4_t2": -0.9950994925097212,
+            "w8_r4_t1": -6.462710568634156,
+            "w8_r4_t2": -3.210055035360404
+          }
+        },
+        "q4-17408-5120": {
+          "median_ms": {
+            "scalar_production": 0.245731,
+            "scalar_typed": 0.246537,
+            "w16_r2_t1": 0.24030200000000002,
+            "w16_r3_t1": 0.237908,
+            "w16_r4_t2": 0.2242695,
+            "w8_r4_t1": 0.239108,
+            "w8_r4_t2": 0.23005399999999998
+          },
+          "gain_percent": {
+            "scalar_production": 0.0,
+            "scalar_typed": -0.3269286151774353,
+            "w16_r2_t1": 2.2592404557598256,
+            "w16_r3_t1": 3.2882458765573164,
+            "w16_r4_t2": 9.569513464826906,
+            "w8_r4_t1": 2.7698780467403816,
+            "w8_r4_t2": 6.814487033479111
+          }
+        },
+        "q4-5120-17408": {
+          "median_ms": {
+            "scalar_production": 0.24507299999999999,
+            "scalar_typed": 0.246535,
+            "w16_r2_t1": 0.26503849999999995,
+            "w16_r3_t1": 0.235739,
+            "w16_r4_t2": 0.22528399999999998,
+            "w8_r4_t1": 0.253774,
+            "w8_r4_t2": 0.240814
+          },
+          "gain_percent": {
+            "scalar_production": 0.0,
+            "scalar_typed": -0.593019246760107,
+            "w16_r2_t1": -7.533056518203951,
+            "w16_r3_t1": 3.95946364411488,
+            "w16_r4_t2": 8.784023721169731,
+            "w8_r4_t1": -3.428641231962304,
+            "w8_r4_t2": 1.7685848829386952
+          }
+        },
+        "iq4-17408-5120": {
+          "median_ms": {
+            "scalar_production": 0.2186805,
+            "scalar_typed": 0.2185155,
+            "w16_r2_t1": 0.2493985,
+            "w16_r3_t1": 0.243533,
+            "w16_r4_t2": 0.236951,
+            "w8_r4_t1": 0.2475865,
+            "w8_r4_t2": 0.24044
+          },
+          "gain_percent": {
+            "scalar_production": 0.0,
+            "scalar_typed": 0.07550951763146685,
+            "w16_r2_t1": -12.316834303333824,
+            "w16_r3_t1": -10.204982486973012,
+            "w16_r4_t2": -7.710665918270021,
+            "w8_r4_t1": -11.675111526678549,
+            "w8_r4_t2": -9.049866910663773
+          }
+        },
+        "iq4-5120-17408": {
+          "median_ms": {
+            "scalar_production": 0.2187585,
+            "scalar_typed": 0.21922199999999997,
+            "w16_r2_t1": 0.2183925,
+            "w16_r3_t1": 0.25605049999999996,
+            "w16_r4_t2": 0.234147,
+            "w8_r4_t1": 0.24632900000000002,
+            "w8_r4_t2": 0.23124450000000002
+          },
+          "gain_percent": {
+            "scalar_production": 0.0,
+            "scalar_typed": -0.21142950981196673,
+            "w16_r2_t1": 0.16758817267077397,
+            "w16_r3_t1": -14.56431446140506,
+            "w16_r4_t2": -6.572153390818592,
+            "w8_r4_t1": -11.192551425126563,
+            "w8_r4_t2": -5.399479771410787
+          }
+        },
+        "q6-248320-5120": {
+          "median_ms": {
+            "scalar_production": 4.691965,
+            "scalar_typed": 4.6814725,
+            "w16_r2_t1": 4.79059,
+            "w16_r3_t1": 4.775752,
+            "w16_r4_t2": 4.8184885,
+            "w8_r4_t1": 4.8726205,
+            "w8_r4_t2": 4.8723705
+          },
+          "gain_percent": {
+            "scalar_production": 0.0,
+            "scalar_typed": 0.22412819898012248,
+            "w16_r2_t1": -2.058723455774758,
+            "w16_r3_t1": -1.7544252716640285,
+            "w16_r4_t2": -2.6257922998052186,
+            "w8_r4_t1": -3.7075635174132704,
+            "w8_r4_t2": -3.7026227787890886
+          }
+        }
+      }
+    },
+    {
+      "experiment": "Fused same-format scalar staging",
+      "method": "Actual same-format target gate/up pairs, read-only whole GGUF registration. Exact scalar fused SwiGLU versus staged interleaved gate/up rows, same FP32 operation order and expf epilogue. Six rotated-order rounds, six rotations of up to16 pairs; all outputs finite and bit-identical.",
+      "decision": "Q4 same-format improves 4.9% in isolation but covers only three FFN pairs; not retained because it adds a separate kernel for a small total opportunity. Q5 flat, IQ4 slower.",
+      "all_finite_bit_exact": true,
+      "shapes": {
+        "q4-17408-5120": {
+          "median_ms": {
+            "fused_production": 0.482456,
+            "w8_pairs2_t1": 0.477723,
+            "w16_pairs2_t1": 0.4704035,
+            "w16_pairs2_t2": 0.460011,
+            "w16_pairs4_t2": 0.4658405
+          },
+          "gain_percent": {
+            "fused_production": 0.0,
+            "w8_pairs2_t1": 0.9907414966413564,
+            "w16_pairs2_t1": 2.5621620587432004,
+            "w16_pairs2_t2": 4.879231148820362,
+            "w16_pairs4_t2": 3.5667787579654497
+          }
+        },
+        "q5-17408-5120": {
+          "median_ms": {
+            "fused_production": 0.5556965,
+            "w8_pairs2_t1": 0.5888184999999999,
+            "w16_pairs2_t1": 0.5835695,
+            "w16_pairs2_t2": 0.581881,
+            "w16_pairs4_t2": 0.5516595
+          },
+          "gain_percent": {
+            "fused_production": 0.0,
+            "w8_pairs2_t1": -5.625162932210836,
+            "w16_pairs2_t1": -4.7762948543403905,
+            "w16_pairs2_t2": -4.499975080815489,
+            "w16_pairs4_t2": 0.7317919840046372
+          }
+        },
+        "iq4-17408-5120": {
+          "median_ms": {
+            "fused_production": 0.432363,
+            "w8_pairs2_t1": 0.49691050000000003,
+            "w16_pairs2_t1": 0.5146895,
+            "w16_pairs2_t2": 0.49083,
+            "w16_pairs4_t2": 0.47696700000000003
+          },
+          "gain_percent": {
+            "fused_production": 0.0,
+            "w8_pairs2_t1": -12.989763750212568,
+            "w16_pairs2_t1": -15.995371966982042,
+            "w16_pairs2_t2": -11.911863578020899,
+            "w16_pairs4_t2": -9.351590361597351
+          }
+        }
+      }
+    },
+    {
+      "experiment": "Independent workgroups for batch-eight verification",
+      "method": "Actual Q5 GGUF projections at total verification batch8, whole-file read-only registration. Qualified all-eight-token kernel versus two/four independently scheduled token groups, using existing TokenGroups templates and preserving each dot/reduction order. Six rotated-order rounds with six rotations of up to16 same-shape tensors; all outputs finite and bit-identical.",
+      "decision": "Splitting total batch8 into two/four groups preserves exact outputs but reduces throughput by 22-50% on all three Q5 projection shapes. No production change. This duplicates weight decoding/staging; no cache-counter attribution is claimed.",
+      "all_finite_bit_exact": true,
+      "shapes": {
+        "q5-17408-5120": {
+          "median_ms": {
+            "production": 0.347791,
+            "g2_w8_r4_t1_s1": 0.445216,
+            "g2_w8_r4_t1_s2": 0.4544285,
+            "g2_w16_r3_t1_s4": 0.45869,
+            "g2_w16_r4_t1_s2": 0.44928049999999997,
+            "g4_w8_r4_t2_s2": 0.6181380000000001,
+            "g4_w16_r4_t2_s2": 0.6169985
+          },
+          "gain_percent": {
+            "production": 0.0,
+            "g2_w8_r4_t1_s1": -21.882636742614814,
+            "g2_w8_r4_t1_s2": -23.466287875870464,
+            "g2_w16_r3_t1_s4": -24.177331095075093,
+            "g2_w16_r4_t1_s2": -22.589340067062768,
+            "g4_w8_r4_t2_s2": -43.735703030714824,
+            "g4_w16_r4_t2_s2": -43.631791649412435
+          }
+        },
+        "q5-5120-17408": {
+          "median_ms": {
+            "production": 0.3245825,
+            "g2_w8_r4_t1_s1": 0.47157899999999997,
+            "g2_w8_r4_t1_s2": 0.4892965,
+            "g2_w16_r3_t1_s4": 0.4840905,
+            "g2_w16_r4_t1_s2": 0.4586385,
+            "g4_w8_r4_t2_s2": 0.652165,
+            "g4_w16_r4_t2_s2": 0.643359
+          },
+          "gain_percent": {
+            "production": 0.0,
+            "g2_w8_r4_t1_s1": -31.171129333579316,
+            "g2_w8_r4_t1_s2": -33.66343311264234,
+            "g2_w16_r3_t1_s4": -32.95003723477324,
+            "g2_w16_r4_t1_s2": -29.229120538288868,
+            "g4_w8_r4_t2_s2": -50.23000314337629,
+            "g4_w16_r4_t2_s2": -49.54877447894566
+          }
+        },
+        "q5-5120-6144": {
+          "median_ms": {
+            "production": 0.125618,
+            "g2_w8_r4_t1_s1": 0.1637155,
+            "g2_w8_r4_t1_s2": 0.1672815,
+            "g2_w16_r3_t1_s4": 0.175317,
+            "g2_w16_r4_t1_s2": 0.16940349999999998,
+            "g4_w8_r4_t2_s2": 0.218195,
+            "g4_w16_r4_t2_s2": 0.22013349999999998
+          },
+          "gain_percent": {
+            "production": 0.0,
+            "g2_w8_r4_t1_s1": -23.270551658211957,
+            "g2_w8_r4_t1_s2": -24.906220950912083,
+            "g2_w16_r3_t1_s4": -28.34807805289846,
+            "g2_w16_r4_t1_s2": -25.846868571192438,
+            "g4_w8_r4_t2_s2": -42.42856160773619,
+            "g4_w16_r4_t2_s2": -42.93553684468742
+          }
+        }
+      }
+    }
+  ],
+  "limits": [
+    "Quality is retained against qualified Gufo AR and existing upstream draft references; this is not independent original-target/checkpoint proof.",
+    "No new full depth matrix, C>1 or capability result. The prior speculative table remains the better-sampled dflash2-width2.json measurement.",
+    "The upstream performance goal remains open. Artifact, power and timing differences are documented in llama-comparison.json."
+  ]
+}

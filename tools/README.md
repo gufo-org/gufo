@@ -153,6 +153,9 @@ BF16 injection rows, for example `q4 17408 5120 24 7`,
 `q8 5120 17408 24 7` or `bf16 5120 25600 24 16`.
 Batch 1 compares scalar Q4/Q5/Q6/IQ4 dispatch; append `swiglu` for fused
 gate/up projections, for example `q5 17408 5120 32 1 swiglu`.
+An optional final up-format compares mixed pairs, for example
+`q4 17408 5120 24 1 swiglu q5`. Supported pairs are Q4/Q5,
+Q4/IQ4, IQ4/Q4 and IQ4/Q5; omitting the format keeps gate/up identical.
 Q4/Q5/IQ4 comparisons include four-row FFN layouts. Q4 uses compact
 two-tile staging at widths 3–8; width 2 retains padding.
 `q4 67 768 4 2` checks partial rows and tiles for the shortest verification.

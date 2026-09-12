@@ -23,9 +23,12 @@ avoid compiling or running unrelated kernels:
   `qwen_attention_long_context_ops_test`, `qwen_attention_fusion_ops_test`,
   `qwen_attention_projection_ops_test`, `qwen_attention_component_ops_test`;
 - quant: `qwen_quant_gemv_ops_test`, `qwen_kquant_gemv_ops_test`,
-  `qwen_dequant_ops_test`;
+  `qwen_q4kxl_quant_ops_test`, `qwen_dequant_ops_test`;
 - recurrent/runtime: `qwen_ssm_ops_test`, `qwen_graph_ops_test`,
   `qwen_module_ops_test`.
+
+`qwen_q4kxl_quant_ops_test` also owns fused gate/up/SwiGLU equivalence with
+batched verification, including mixed formats, distinct inputs and row tails.
 
 Small utilities under `hip/support/` provide move-only device allocation,
 host/device copies, explicit device requirements, BF16 conversion, and

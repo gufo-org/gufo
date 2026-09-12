@@ -17,12 +17,14 @@
 // reliably caught when every field takes many distinct values.
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <span>
+#include <utility>
 #include <vector>
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -31,6 +33,7 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/ops.hpp"
+#include "tests/models/qwen/hip/support/device_buffer.hpp"
 
 namespace {
 
@@ -399,6 +402,64 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
   HIP_CHECK(hipFree(d_single));
 }
 
+// AR fuses gate/up and SwiGLU; verification uses separate batched
+// projections. Check that both produce identical finite output, including
+// mixed quantization formats, two distinct inputs and incomplete row groups.
+void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
+                     gufo::core::GgmlType up_type, std::size_t rows,
+                     std::size_t columns) {
+  using gufo::test::DeviceBuffer;
+  constexpr std::size_t batch = 2;
+  const DeviceBuffer<std::uint8_t> gate(
+      MakeWeights(gate_type, rows, columns, 0x5EED1234U));
+  const DeviceBuffer<std::uint8_t> up(
+      MakeWeights(up_type, rows, columns, 0xA5A5A5A5U));
+  std::vector<float> x(batch * columns);
+  std::uint32_t state = 0x13579BDFU;
+  for (auto& value : x) {
+    value = static_cast<float>(static_cast<int>(NextRandom(state) & 0xFFFFU) -
+                               32768) *
+            0.000001F;
+  }
+  const DeviceBuffer<float> input(x);
+  DeviceBuffer<float> fused(batch * rows), gate_out(batch * rows),
+      up_out(batch * rows), split(batch * rows);
+  HIP_CHECK(hipMemset(fused.data(), 0xFF, batch * rows * sizeof(float)));
+  HIP_CHECK(hipMemset(split.data(), 0xFF, batch * rows * sizeof(float)));
+  for (std::size_t token = 0; token < batch; ++token) {
+    gufo::hip::LaunchFusedSwiGLUGEMV(
+        gate.data(), gate_type, up.data(), up_type,
+        input.data() + token * columns, fused.data() + token * rows, rows,
+        columns, nullptr);
+  }
+  gufo::hip::LaunchBatchedQuantGEMMFp32(
+      gate_type, gate.data(), input.data(), gate_out.data(), batch, rows,
+      columns, nullptr);
+  gufo::hip::LaunchBatchedQuantGEMMFp32(
+      up_type, up.data(), input.data(), up_out.data(), batch, rows, columns,
+      nullptr);
+  gufo::hip::LaunchBatchedSwiGLUActivation(
+      gate_out.data(), up_out.data(), split.data(), nullptr, batch * rows,
+      nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  const auto actual = fused.CopyToHost();
+  const auto expected = split.CopyToHost();
+  std::size_t mismatches = 0;
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    if (!std::isfinite(actual[index]) || !std::isfinite(expected[index]) ||
+        std::bit_cast<std::uint32_t>(actual[index]) !=
+            std::bit_cast<std::uint32_t>(expected[index])) {
+      ++mismatches;
+    }
+  }
+  std::cout << (mismatches == 0 ? "[ OK ] " : "[FAIL] ")
+            << "fused SwiGLU vs verification "
+            << gufo::core::ToString(gate_type) << "/"
+            << gufo::core::ToString(up_type) << " " << rows << "x" << columns
+            << ": " << mismatches << " of " << actual.size() << " differ\n";
+  g_failed |= mismatches != 0;
+}
+
 }  // namespace
 
 int main() {
@@ -424,6 +485,18 @@ int main() {
     }
   }
   TestSmallBatchExactness({gufo::core::GgmlType::kQ4_K, "Q4_K"}, 8, 1280, 5120);
+  using Type = gufo::core::GgmlType;
+  const std::pair<Type, Type> fused_formats[] = {
+      {Type::kQ4_K, Type::kQ4_K},     {Type::kQ5_K, Type::kQ5_K},
+      {Type::kIQ4_XS, Type::kIQ4_XS}, {Type::kQ4_K, Type::kQ5_K},
+      {Type::kIQ4_XS, Type::kQ4_K},   {Type::kIQ4_XS, Type::kQ5_K},
+      {Type::kQ4_K, Type::kIQ4_XS}};
+  for (const auto& [gate, up] : fused_formats) {
+    TestFusedSwiGLU(gate, up, 66, 768);
+  }
+  TestFusedSwiGLU(Type::kQ4_K, Type::kQ5_K, 65, 768);
+  TestFusedSwiGLU(Type::kQ8_0, Type::kQ8_0, 17408, 5120);
+  TestFusedSwiGLU(Type::kQ6_K, Type::kQ6_K, 17408, 5120);
   if (g_failed) {
     std::cerr << "q4kxl quant equivalence FAILED\n";
     return 1;

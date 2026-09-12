@@ -20,7 +20,6 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
-#include "src/models/qwen/hip/ops/swiglu.hpp"
 #include "src/models/qwen/modules/ffn.hpp"
 #include "src/models/qwen/modules/layer_view.hpp"
 #include "src/models/qwen/modules/module_ctx.hpp"
@@ -553,155 +552,6 @@ void TestBatchedFfnDownMatchesGemv(gufo::core::GgmlType type, const char* label,
   HIP_CHECK(hipFree(d_batched_x));
 }
 
-/// Unspeculated decode computes an FFN's gate and up projections inside one
-/// fused SwiGLU GEMV; the speculative verification chunk computes them as two
-/// batched projections followed by a standalone SwiGLU. A drafted token is
-/// only acceptable if the verifier reproduces decode exactly, so those two
-/// spellings have to agree for every weight format a layer can carry -- and
-/// this seam had no test. The Unsloth Q8 shard mixes formats per layer, so one
-/// model reaches both the K-quant and the Q8_0 spelling of the fused kernel.
-void TestFusedSwiGLUMatchesSplitProjections(gufo::core::GgmlType type,
-                                            const char* label,
-                                            std::size_t intermediate,
-                                            std::size_t hidden, auto&& fill) {
-  const std::size_t row_bytes = gufo::quant::QuantizedRowBytes(type, hidden);
-  gufo::test::Expect(row_bytes != 0, "row bytes for the tested format");
-
-  std::uint32_t seed = 20250902U;
-  auto next = [&seed]() -> std::uint32_t {
-    seed = seed * 1664525U + 1013904223U;
-    return seed;
-  };
-
-  std::vector<std::uint8_t> gate(intermediate * row_bytes);
-  std::vector<std::uint8_t> up(intermediate * row_bytes);
-  fill(gate, intermediate, row_bytes, next);
-  fill(up, intermediate, row_bytes, next);
-  std::vector<float> x(hidden);
-  for (auto& value : x) {
-    value = (static_cast<float>(next() & 0xFFFFU) / 65535.0F) - 0.5F;
-  }
-
-  const auto upload = [](const std::vector<std::uint8_t>& host) {
-    void* device = nullptr;
-    HIP_CHECK(hipMalloc(&device, host.size()));
-    HIP_CHECK(
-        hipMemcpy(device, host.data(), host.size(), hipMemcpyHostToDevice));
-    return device;
-  };
-  void* d_gate = upload(gate);
-  void* d_up = upload(up);
-  float* d_x = nullptr;
-  HIP_CHECK(hipMalloc(&d_x, hidden * sizeof(float)));
-  HIP_CHECK(
-      hipMemcpy(d_x, x.data(), hidden * sizeof(float), hipMemcpyHostToDevice));
-
-  float* d_fused = nullptr;
-  float* d_gate_out = nullptr;
-  float* d_up_out = nullptr;
-  float* d_split = nullptr;
-  HIP_CHECK(hipMalloc(&d_fused, intermediate * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_gate_out, intermediate * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_up_out, intermediate * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_split, intermediate * sizeof(float)));
-
-  gufo::hip::LaunchFusedSwiGLUGEMV(d_gate, type, d_up, type, d_x, d_fused,
-                                   intermediate, hidden, nullptr);
-
-  // Batch two, not one: the verification chunk never dispatches a single row
-  // (`ForwardTokenBatch` rejects it) and the Q8_0 exact shared route is gated
-  // on `batch > 1`, so a batch-one comparison would exercise a kernel the
-  // verifier never reaches.
-  float* d_x2 = nullptr;
-  HIP_CHECK(hipMalloc(&d_x2, 2 * hidden * sizeof(float)));
-  HIP_CHECK(
-      hipMemcpy(d_x2, x.data(), hidden * sizeof(float), hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_x2 + hidden, x.data(), hidden * sizeof(float),
-                      hipMemcpyHostToDevice));
-  float* d_gate2 = nullptr;
-  float* d_up2 = nullptr;
-  HIP_CHECK(hipMalloc(&d_gate2, 2 * intermediate * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_up2, 2 * intermediate * sizeof(float)));
-  gufo::hip::LaunchBatchedQuantGEMMFp32(type, d_gate, d_x2, d_gate2, 2,
-                                        intermediate, hidden, nullptr);
-  gufo::hip::LaunchBatchedQuantGEMMFp32(type, d_up, d_x2, d_up2, 2,
-                                        intermediate, hidden, nullptr);
-  HIP_CHECK(hipMemcpyAsync(d_gate_out, d_gate2, intermediate * sizeof(float),
-                           hipMemcpyDeviceToDevice, nullptr));
-  HIP_CHECK(hipMemcpyAsync(d_up_out, d_up2, intermediate * sizeof(float),
-                           hipMemcpyDeviceToDevice, nullptr));
-  gufo::hip::LaunchBatchedSwiGLUActivation(d_gate_out, d_up_out, d_split,
-                                           nullptr, intermediate, nullptr);
-  HIP_CHECK(hipDeviceSynchronize());
-
-  std::vector<float> fused(intermediate);
-  std::vector<float> split(intermediate);
-  HIP_CHECK(hipMemcpy(fused.data(), d_fused, intermediate * sizeof(float),
-                      hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(split.data(), d_split, intermediate * sizeof(float),
-                      hipMemcpyDeviceToHost));
-
-  std::size_t mismatches = 0;
-  float worst = 0.0F;
-  for (std::size_t index = 0; index < intermediate; ++index) {
-    if (fused[index] != split[index]) {
-      ++mismatches;
-      worst = std::max(worst, std::abs(fused[index] - split[index]));
-    }
-  }
-  // When they disagree, a double-precision host oracle decides which spelling
-  // is the accurate one, because the fix direction depends on it.
-  double fused_error = 0.0;
-  double split_error = 0.0;
-  if (mismatches != 0 && type == gufo::core::GgmlType::kQ8_0) {
-    constexpr std::size_t kOracleRows = 64;
-    for (std::size_t row = 0; row < kOracleRows && row < intermediate; ++row) {
-      const auto dot = [&](const std::vector<std::uint8_t>& w) {
-        const auto* blocks = reinterpret_cast<const gufo::quant::block_q8_0*>(
-            w.data() + (row * row_bytes));
-        const std::size_t count = hidden / 32;
-        double total = 0.0;
-        for (std::size_t b = 0; b < count; ++b) {
-          const double d = gufo::quant::Fp16ToFloat(blocks[b].d);
-          for (std::size_t i = 0; i < 32; ++i) {
-            total += d * static_cast<double>(blocks[b].qs[i]) *
-                     static_cast<double>(x[(b * 32) + i]);
-          }
-        }
-        return total;
-      };
-      const double g = dot(gate);
-      const double u = dot(up);
-      const double reference = (g / (1.0 + std::exp(-g))) * u;
-      fused_error = std::max(
-          fused_error, std::abs(static_cast<double>(fused[row]) - reference));
-      split_error = std::max(
-          split_error, std::abs(static_cast<double>(split[row]) - reference));
-    }
-    std::cout << "        oracle max abs error: fused " << fused_error
-              << ", split " << split_error << std::endl;
-  }
-
-  std::cout << "[ " << (mismatches == 0 ? "OK" : "FAIL")
-            << " ] fused SwiGLU vs split projections " << label << " "
-            << intermediate << "x" << hidden << ": " << mismatches << " of "
-            << intermediate << " differ, max abs " << worst << std::endl;
-  gufo::test::Expect(mismatches == 0,
-                     "the fused SwiGLU GEMV and the split projections must "
-                     "agree bit for bit");
-
-  HIP_CHECK(hipFree(d_gate));
-  HIP_CHECK(hipFree(d_up));
-  HIP_CHECK(hipFree(d_x));
-  HIP_CHECK(hipFree(d_fused));
-  HIP_CHECK(hipFree(d_gate_out));
-  HIP_CHECK(hipFree(d_up_out));
-  HIP_CHECK(hipFree(d_split));
-  HIP_CHECK(hipFree(d_x2));
-  HIP_CHECK(hipFree(d_gate2));
-  HIP_CHECK(hipFree(d_up2));
-}
-
 #endif  // defined(ENGINE_ENABLE_HIP)
 
 int main() {
@@ -727,16 +577,6 @@ int main() {
          auto&& next) { FillQ6_K(bytes, rows, row_bytes, next); });
   TestBatchedFfnDownMatchesGemv(
       gufo::core::GgmlType::kQ6_K, "Q6_K ffn_down", 5120, 17408,
-      [](std::vector<std::uint8_t>& bytes, std::size_t rows,
-         std::size_t row_bytes,
-         auto&& next) { FillQ6_K(bytes, rows, row_bytes, next); });
-  TestFusedSwiGLUMatchesSplitProjections(
-      gufo::core::GgmlType::kQ8_0, "Q8_0", 17408, 5120,
-      [](std::vector<std::uint8_t>& bytes, std::size_t rows,
-         std::size_t row_bytes,
-         auto&& next) { FillQ8_0(bytes, rows, row_bytes, next); });
-  TestFusedSwiGLUMatchesSplitProjections(
-      gufo::core::GgmlType::kQ6_K, "Q6_K", 17408, 5120,
       [](std::vector<std::uint8_t>& bytes, std::size_t rows,
          std::size_t row_bytes,
          auto&& next) { FillQ6_K(bytes, rows, row_bytes, next); });

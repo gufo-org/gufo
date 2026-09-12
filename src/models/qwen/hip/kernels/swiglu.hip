@@ -369,7 +369,8 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
 }
 
 template<std::uint32_t WavesPerBlock,
-         core::GgmlType StaticType = core::GgmlType::kF32>
+         core::GgmlType StaticType = core::GgmlType::kF32,
+         core::GgmlType StaticUpType = StaticType>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
     void Wave32FusedQuantSwiGLUGEMVKernel_2Rows(const void* __restrict__ gate_w,
                                                 core::GgmlType gate_type,
@@ -379,7 +380,10 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
                                                 float* __restrict__ out,
                                                 std::size_t M, std::size_t K) {
   if constexpr (StaticType != core::GgmlType::kF32) {
-    gate_type = up_type = StaticType;
+    gate_type = StaticType;
+  }
+  if constexpr (StaticUpType != core::GgmlType::kF32) {
+    up_type = StaticUpType;
   }
   const std::size_t tid = threadIdx.x;
   const std::size_t lane_id = tid & 31u;
@@ -518,8 +522,11 @@ void LaunchFusedSwiGLUGEMV(const void* gate_w, core::GgmlType gate_type,
       const std::size_t num_pairs = intermediate_size / 2;
       const std::size_t grid =
           (num_pairs + kWavesPerBlock - 1) / kWavesPerBlock;
-      const auto launch = [&]<core::GgmlType StaticType>() {
-        Wave32FusedQuantSwiGLUGEMVKernel_2Rows<kWavesPerBlock, StaticType>
+      const auto launch =
+          [&]<core::GgmlType StaticType,
+              core::GgmlType StaticUpType = StaticType>() {
+        Wave32FusedQuantSwiGLUGEMVKernel_2Rows<kWavesPerBlock, StaticType,
+                                               StaticUpType>
             <<<grid, kBlockThreads, 0, stream>>>(
                 gate_w, gate_type, up_w, up_type, x, out, intermediate_size,
                 hidden_size);
@@ -537,6 +544,32 @@ void LaunchFusedSwiGLUGEMV(const void* gate_w, core::GgmlType gate_type,
             return;
           default:
             break;
+        }
+      }
+      // Mixed-format FFNs benefit from specializing each projection while
+      // keeping the same dot products and SwiGLU arithmetic.
+      if (gate_type == core::GgmlType::kQ4_K) {
+        if (up_type == core::GgmlType::kQ5_K) {
+          launch.template operator()<core::GgmlType::kQ4_K,
+                                     core::GgmlType::kQ5_K>();
+          return;
+        }
+        if (up_type == core::GgmlType::kIQ4_XS) {
+          launch.template operator()<core::GgmlType::kQ4_K,
+                                     core::GgmlType::kIQ4_XS>();
+          return;
+        }
+      }
+      if (gate_type == core::GgmlType::kIQ4_XS) {
+        if (up_type == core::GgmlType::kQ4_K) {
+          launch.template operator()<core::GgmlType::kIQ4_XS,
+                                     core::GgmlType::kQ4_K>();
+          return;
+        }
+        if (up_type == core::GgmlType::kQ5_K) {
+          launch.template operator()<core::GgmlType::kIQ4_XS,
+                                     core::GgmlType::kQ5_K>();
+          return;
         }
       }
       launch.template operator()<core::GgmlType::kF32>();
