@@ -125,13 +125,14 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
-- [Latest exact verification](dflash2-middle-projections.json): medium-size
-  Q5 projections at batches four/eight preserve both target replay suites,
-  all 270 draft trace files and every measured AR token ID/acceptance statistic.
-  Three kernel suites and actual-GGUF controls pass with zero scratch.
-  Paired JSON gains 0.95%, repetition 0.99%, and prose is flat. Rounded EMA and
-  a smaller initial prior also match AR IDs, but both regress prose and are
-  rejected. Preceding [batch-eight scheduling](dflash2-row-scheduling.json),
+- [Latest exact verification](dflash2-q4-staging.json): compact Q4 FFN staging
+  at widths 3–8 preserves 49 verifier/scalar full-logit rows, mixed-capacity
+  and logical-context controls, all 90 Q4 draft trace files and every measured
+  AR token ID/acceptance statistic. Three kernel suites and partial-row/tile
+  controls pass. Ten actual-GGUF cases gain 2.7–19.3%; paired model gains are
+  0.4–0.6%, with zero scratch. Q8/BF16 qualification remains in the
+  [preceding Q5 pass](dflash2-middle-projections.json), which also documents
+  the rejected controller trials. Earlier [batch-eight scheduling](dflash2-row-scheduling.json),
   [IQ4/vocabulary work](dflash2-head-iq4.json),
   [widths 4–6](dflash2-midbatch.json) and
   [scalar/row reuse](dflash2-scalar-row-reuse.json) remain documented.

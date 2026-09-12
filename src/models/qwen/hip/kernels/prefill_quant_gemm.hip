@@ -1733,6 +1733,18 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                    WType == core::GgmlType::kQ5_K)) {
       if (FitsSmallBatch32BitIndices(
               Batch, m, k, quant::QuantizedRowBytes(WType, k))) {
+        if constexpr (WType == core::GgmlType::kQ4_K) {
+          const bool up = m == 17408 && k == 5120;
+          const bool down = m == 5120 && k == 17408;
+          // Four rows share compact staging across two tiles. Widths five
+          // and six benefit only for the longer down projection.
+          if (down || (up && Batch != 5 && Batch != 6)) {
+            SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, 2, 4, 1,
+                                               true>
+                <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
+            return;
+          }
+        }
         if constexpr (WType == core::GgmlType::kQ5_K && Batch >= 3 &&
                       Batch <= 6) {
           const auto launch_rows =

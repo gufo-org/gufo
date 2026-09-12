@@ -295,9 +295,11 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
   constexpr Index kSubsPerTile = 32 * TilesPerStage;
   constexpr Index kVectorsPerSub = kSubElems / 4;
   constexpr bool kCompact =
-      Batch == 8 && TilesPerStage == 1 &&
-      (WType == core::GgmlType::kQ5_K ||
-       (WType == core::GgmlType::kIQ4_XS && RowsPerWave == 4 && NarrowIndex));
+      (WType == core::GgmlType::kQ4_K && Batch >= 3 && RowsPerWave == 4 &&
+       TilesPerStage == 2 && NarrowIndex) ||
+      (Batch == 8 && TilesPerStage == 1 &&
+       (WType == core::GgmlType::kQ5_K ||
+        (WType == core::GgmlType::kIQ4_XS && RowsPerWave == 4 && NarrowIndex)));
   constexpr Index kStride = kSubElems + (kCompact ? 0 : 4);
   constexpr Index kTileStride = kSubsPerTile * kStride;
   constexpr bool kHasOffset =
@@ -333,8 +335,8 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
           value = *reinterpret_cast<const float4*>(
               x + (token * k) + (source_sub * kSubElems) + (vector * 4));
         }
-        // Compact staging uses 16 KiB, plus 1 KiB of sums for affine Q5.
-        // Both reads and writes permute float4 groups; arithmetic is unchanged.
+        // Compact staging removes per-sub-block padding. Both reads and
+        // writes permute float4 groups; arithmetic is unchanged.
         const Index group =
             kCompact ? vector ^ ((sub >> 1U) & 3U) : vector;
         *reinterpret_cast<float4*>(dst + (group * 4)) = value;

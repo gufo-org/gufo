@@ -96,22 +96,23 @@ upstream raw prompts; repetition asks for 1,000 space-separated `red` words.
 
 | Workload | Current tok/s | Change in paired probe |
 | --- | ---: | ---: |
-| Repetition, tg128, fixed-7 | **53.84** | +1.0% |
-| JSON, tg300, adaptive | **48.24** | +1.0% |
-| Prose, tg300, adaptive | **21.99** | Flat |
+| Repetition, tg128, fixed-7 | **53.98** | +0.6% |
+| JSON, tg300, adaptive | **48.43** | +0.4% |
+| Prose, tg300, adaptive | **22.11** | +0.4% |
 
 Every token ID and acceptance statistic is unchanged; repetition accepts
-111/111 proposals. Medium-size Q5 projections at batches four/eight gain
-2.1–8.7% on actual GGUF tensors, with bit-identical outputs and no spills.
-The paired model improvement is about 1%; prose is flat.
-[Measurements and quality checks](eval/dflash2-middle-projections.json).
+111/111 proposals. Compact Q4 staging and four-row reuse improve ten FFN
+cases at verification widths 3–8 by 2.7–19.3% on actual GGUF tensors.
+Outputs remain bit-identical, with no spills. These kernel gains translate
+to the smaller paired model gains above.
+[Measurements and quality checks](eval/dflash2-q4-staging.json).
 
-The rounded-EMA controller reaches 49.60 tok/s on JSON in a one-run pilot,
-but slows prose from 22.13 to 21.11 tok/s; it is not retained. Starting the
-current controller less aggressively also trades JSON speed for a prose loss.
-All pilot token IDs match AR. The cost-aware controller remains the default.
+Early Q5 weight loads and vector headers did not improve speed. Rounded EMA
+and a smaller initial controller prior regress prose; the cost-aware
+controller remains the default.
 
-Preceding work covers [batch-eight scheduling](eval/dflash2-row-scheduling.json),
+Preceding work covers [medium Q5 projections and controller trials](eval/dflash2-middle-projections.json),
+[batch-eight scheduling](eval/dflash2-row-scheduling.json),
 [IQ4/vocabulary projections](eval/dflash2-head-iq4.json),
 [widths 4–6](eval/dflash2-midbatch.json),
 [scalar/row reuse](eval/dflash2-scalar-row-reuse.json) and

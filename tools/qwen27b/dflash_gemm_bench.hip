@@ -322,7 +322,8 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
         };
         narrow.template operator()<1>("narrow_tile1");
         narrow.template operator()<2>("narrow_tile2");
-        if constexpr ((Type == core::GgmlType::kQ5_K && Batch >= 3 &&
+        if constexpr ((Type == core::GgmlType::kQ4_K && Batch >= 3) ||
+                      (Type == core::GgmlType::kQ5_K && Batch >= 3 &&
                        Batch <= 6) ||
                       (Type == core::GgmlType::kIQ4_XS &&
                        (Batch == 3 || Batch == 4 || Batch == 5 ||
