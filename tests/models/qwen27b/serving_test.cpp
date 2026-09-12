@@ -21,6 +21,7 @@
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "tests/models/qwen27b/sampling_cases.hpp"
 
 namespace {
 
@@ -45,6 +46,35 @@ void ExpectStableGpuMemory(std::size_t before, std::size_t after) {
   constexpr std::size_t tolerance = 16ULL * 1024ULL * 1024ULL;
   Expect(after + tolerance >= before,
          "request cleanup leaked more than 16 MiB of GPU memory");
+}
+
+void CheckSamplingStrategies(
+    gufo::server::InferenceBackend& backend,
+    gufo::server::InferenceBackend* speculative_backend = nullptr) {
+  for (const auto& test : gufo::test::QwenSamplingCases()) {
+    const auto prompt = "Sampling " + std::string(test.name) +
+                        ": Continue red, blue, blue, red,";
+    const auto ar = backend.complete(prompt, 4, test.config);
+    const auto ar_replay = backend.complete(prompt, 4, test.config);
+    Expect(ar.completion_tokens == 4 && ar.draft_tokens == 0 &&
+               ar_replay.cache_hit && ar.tokens == ar_replay.tokens,
+           "AR strategy must reproduce all cold/cached token IDs");
+    if (speculative_backend != nullptr) {
+      const auto spec = speculative_backend->complete(prompt, 4, test.config);
+      const auto replay = speculative_backend->complete(prompt, 4, test.config);
+      Expect(spec.completion_tokens == 4 && spec.draft_tokens > 0 &&
+                 !spec.cache_hit && replay.cache_hit &&
+                 spec.tokens == replay.tokens,
+             "DFlash2 strategy must draft and reproduce cold/cached token IDs");
+      Expect(ar.tokens.front() == spec.tokens.front(),
+             "AR/DFlash2 first-token sampling differs");
+      if (!test.config.uses_random_sampling())
+        Expect(ar.tokens == spec.tokens,
+               "deterministic DFlash2 strategy differs from AR");
+    }
+    std::cout << "Sampling replay passed: " << test.name
+              << (speculative_backend ? " (AR + DFlash2)" : " (AR)") << '\n';
+  }
 }
 
 class TemporaryDirectory {
@@ -142,10 +172,16 @@ int main(int argc, const char* const* argv) {
 
     const char* draft_model_path = std::getenv("GUFO_QWEN27B_DFLASH_MODEL");
     bool run_full_suite = draft_model_path != nullptr;
+    bool sampling_only = false;
+    auto sampling_policy = gufo::speculative::DFlashDraftPolicy::kAdaptive;
     for (int index = 2; index < argc; ++index) {
       const std::string_view argument = argv[index];
       if (argument == "--full") {
         run_full_suite = true;
+      } else if (argument == "--sampling-only") {
+        run_full_suite = sampling_only = true;
+      } else if (argument == "--fixed") {
+        sampling_policy = gufo::speculative::DFlashDraftPolicy::kFixed;
       } else if (argument.starts_with("--")) {
         throw std::invalid_argument("unknown Qwen GPU test option");
       } else if (draft_model_path == nullptr) {
@@ -178,6 +214,25 @@ int main(int argc, const char* const* argv) {
     Expect(backend.load(model, &error, context, state_count), error);
     Expect(backend.model_id() == model->GetConfig().model_name,
            "HTTP model identifier");
+
+    if (sampling_only) {
+      if (draft_model_path == nullptr) {
+        CheckSamplingStrategies(backend);
+      } else {
+        gufo::server::InferenceBackend speculative_backend;
+        Expect(speculative_backend.load(
+                   model, &error, context, 2, {.decode_active_tokens = 8}, {},
+                   {.backend = gufo::server::TextSpeculativeBackend::kDFlash,
+                    .draft_model_path = draft_model_path,
+                    .max_draft_tokens = 7,
+                    .min_draft_tokens = 1,
+                    .dflash_policy = sampling_policy}),
+               error);
+        CheckSamplingStrategies(backend, &speculative_backend);
+      }
+      std::cout << "All Qwen sampling strategy replays passed.\n";
+      return 0;
+    }
 
     if (!run_full_suite) {
       RunPromptReuseSmoke(model, backend);
@@ -269,44 +324,7 @@ int main(int argc, const char* const* argv) {
                  sampled_replay.tokens == sampled_spec.tokens,
              "seeded DFlash cached replay differs from the cold request");
 
-      const std::array<gufo::sampling::SamplingConfig, 5> sampling_edges{{
-          {.temperature = 0.05F, .seed = 73},
-          {.temperature = 2.0F,
-           .min_p = 0.02F,
-           .seed = 808,
-           .frequency_penalty = -0.2F,
-           .presence_penalty = -0.1F},
-          {.temperature = 0.8F, .top_k = 1, .seed = 73},
-          {.temperature = 0.8F,
-           .top_k = 1,
-           .top_p = 0.1F,
-           .min_p = 1.0F,
-           .min_keep = 3,
-           .seed = 73},
-          {.temperature = 0.8F,
-           .seed = 73,
-           .repeat_penalty = 1.2F,
-           .repeat_last_n = 0,
-           .frequency_penalty = 0.2F,
-           .presence_penalty = 0.1F},
-      }};
-      for (std::size_t index = 0; index < sampling_edges.size(); ++index) {
-        const auto& config = sampling_edges[index];
-        const auto prompt = "Sampling case " + std::to_string(index) +
-                            ": Continue red, blue, blue, red,";
-        const auto cold = speculative_backend.complete(prompt, 8, config);
-        const auto replay = speculative_backend.complete(prompt, 8, config);
-        Expect(cold.completion_tokens == 8 && cold.draft_tokens > 0 &&
-                   !cold.cache_hit && replay.cache_hit &&
-                   cold.tokens == replay.tokens,
-               "sampling edge must draft and reproduce cold/cached token IDs");
-        const auto ar_first = backend.complete(prompt, 1, config);
-        Expect(ar_first.tokens.front() == cold.tokens.front(),
-               "sampling edge AR/speculative frontier differs");
-        if (!config.uses_random_sampling())
-          Expect(backend.complete(prompt, 8, config).tokens == cold.tokens,
-                 "deterministic top-k one must reproduce AR");
-      }
+      CheckSamplingStrategies(backend, &speculative_backend);
 
       // Before any proposal draws, AR and DFlash must use exactly the same
       // sampler, including when a saved host frontier replaces device logits.

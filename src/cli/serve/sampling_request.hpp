@@ -101,7 +101,9 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
     if (draft_control || field == "samplers" || field == "typical_p" ||
         field == "tfs_z" || field == "mirostat" || field == "mirostat_eta" ||
         field == "mirostat_tau" || field == "dynatemp_range" ||
-        field == "dynatemp_exponent") {
+        field == "dynatemp_exponent" || field.starts_with("xtc_") ||
+        field.starts_with("dry_") || field == "top_n_sigma" ||
+        field == "logit_bias") {
       return SamplingRequestError{
           .message =
               "request field '" + field + "' is not supported" +

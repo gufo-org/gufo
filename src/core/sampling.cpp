@@ -263,7 +263,7 @@ TokenId SamplingDistribution::Sample(std::uint64_t* rng_state) const {
   double sample = gufo::sampling::Uniform(rng_state);
   for (const auto& entry : entries_) {
     sample -= entry.value;
-    if (sample <= 0.0) {
+    if (sample < 0.0) {
       return entry.token;
     }
   }
@@ -582,7 +582,8 @@ TokenId SamplerState::SampleLinear(std::span<const float> logits) {
         1.0 / static_cast<double>(config_.temperature);
     double sum = 0.0;
     for (const float logit : logits) {
-      if (static_cast<double>(logit) >= min_p_threshold) {
+      if (std::isfinite(logit) &&
+          static_cast<double>(logit) >= min_p_threshold) {
         sum += std::exp(
             (static_cast<double>(logit) - static_cast<double>(maximum)) *
             inverse_temperature);
@@ -597,14 +598,17 @@ TokenId SamplerState::SampleLinear(std::span<const float> logits) {
     bool has_candidate = false;
     for (std::size_t index = 0; index < logits.size(); ++index) {
       const double logit = static_cast<double>(logits[index]);
-      if (logit < min_p_threshold) {
+      if (!std::isfinite(logit) || logit < min_p_threshold) {
         continue;
       }
+      const double weight = std::exp((logit - static_cast<double>(maximum)) *
+                                     inverse_temperature);
+      if (weight <= 0.0)
+        continue;
       last_token = static_cast<TokenId>(index);
       has_candidate = true;
-      threshold -= std::exp((logit - static_cast<double>(maximum)) *
-                            inverse_temperature);
-      if (threshold <= 0.0) {
+      threshold -= weight;
+      if (threshold < 0.0) {
         return last_token;
       }
     }
@@ -666,10 +670,13 @@ TokenId SamplerState::SampleLinear(std::span<const float> logits) {
     if (adjusted < min_p_threshold) {
       continue;
     }
+    const double weight = std::exp((adjusted - maximum) * inverse_temperature);
+    if (weight <= 0.0)
+      continue;
     last_token = static_cast<TokenId>(index);
     has_candidate = true;
-    threshold -= std::exp((adjusted - maximum) * inverse_temperature);
-    if (threshold <= 0.0) {
+    threshold -= weight;
+    if (threshold < 0.0) {
       return last_token;
     }
   }
@@ -833,7 +840,7 @@ TokenId SamplerState::SampleSelected(std::span<const float> logits) {
   double threshold = Uniform() * sum;
   for (const auto& candidate : candidate_scratch_) {
     threshold -= std::exp((candidate.value - maximum) * inverse_temperature);
-    if (threshold <= 0.0) {
+    if (threshold < 0.0) {
       return candidate.token;
     }
   }

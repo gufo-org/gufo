@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -6,8 +7,10 @@
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 #include "src/core/sampling.hpp"
+#include "tests/models/qwen27b/sampling_cases.hpp"
 
 namespace {
 
@@ -294,6 +297,69 @@ void TestSamplingFailsClosedOnInvalidInputs() {
   Expect(invalid_config_rejected, "invalid sampling controls are rejected");
 }
 
+void TestZeroDrawAndNonFiniteCandidates() {
+  // Inverse xorshift state whose next 24-bit uniform is exactly zero.
+  constexpr std::uint64_t zero_draw_state = UINT64_C(0x98d76a164d99a710);
+  const std::array<float, 3> cold_logits{-1000.0F, 0.0F, -1.0F};
+  gufo::sampling::SamplerState sampler({.temperature = 1.0F, .seed = 0});
+  sampler.SetRngState(zero_draw_state);
+  Expect(sampler.Sample(cold_logits) == 1,
+         "zero draw must not select underflowed zero probability");
+  const std::array<float, 5> masked_logits{
+      std::numeric_limits<float>::quiet_NaN(), 4.0F,
+      std::numeric_limits<float>::infinity(), 0.0F,
+      -std::numeric_limits<float>::infinity()};
+  for (const auto seed : {0, 73, 808}) {
+    gufo::sampling::SamplerState masked({.temperature = 1.0F, .seed = seed});
+    auto rng = masked.rng_state();
+    const auto expected =
+        gufo::sampling::BuildDistribution(masked_logits, masked.config())
+            .Sample(&rng);
+    Expect(masked.Sample(masked_logits) == expected,
+           "linear CPU sampling must ignore nonfinite candidates");
+  }
+}
+
+void TestStrategyReplayAgainstReference() {
+  const std::array<float, 5> logits{0.4F, 2.0F, -1.0F, 1.1F, -0.3F};
+  for (const auto& test : gufo::test::QwenSamplingCases()) {
+    for (const auto seed : {0, 1, 73, 808}) {
+      auto config = test.config;
+      config.seed = seed;
+      std::vector<gufo::sampling::TokenId> history{1, 1, 2, 3};
+      gufo::sampling::SamplerState sampler(config, history);
+      auto replay = sampler;
+      for (int step = 0; step < 16; ++step) {
+        const auto distribution =
+            gufo::sampling::BuildDistribution(logits, config, history);
+        std::vector<gufo::sampling::Probability> ordered(
+            distribution.entries().begin(), distribution.entries().end());
+        if (config.top_k == 0 && config.top_p == 1.0F &&
+            !(config.min_p > 0.0F && config.min_keep > 1)) {
+          std::ranges::sort(ordered, {}, &gufo::sampling::Probability::token);
+        }
+        auto rng = sampler.rng_state();
+        double threshold = gufo::sampling::Uniform(&rng);
+        auto expected = distribution.best_token();
+        if (config.temperature > 0.0F) {
+          for (const auto& entry : ordered) {
+            if (entry.value > 0.0 && threshold < entry.value) {
+              expected = entry.token;
+              break;
+            }
+            threshold -= entry.value;
+          }
+        }
+        const auto token = sampler.Sample(logits);
+        Expect(token == expected && token == replay.Sample(logits), test.name);
+        history.push_back(token);
+        sampler.Accept(token);
+        replay.Accept(token);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -313,6 +379,8 @@ int main() {
   TestSeedAndStateAreRequestLocal();
   TestDistributionIsNormalized();
   TestSamplingFailsClosedOnInvalidInputs();
+  TestZeroDrawAndNonFiniteCandidates();
+  TestStrategyReplayAgainstReference();
   std::cout << "All logit sampler tests passed.\n";
   return 0;
 }

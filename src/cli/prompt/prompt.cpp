@@ -26,7 +26,6 @@
 
 #include "src/core/heterogeneous/npu_drafter.hpp"
 #include "src/core/speculative/draft_heads.hpp"
-#include "src/core/speculative/prompt_lookup_backend.hpp"
 #include "src/core/speculative/self_speculative.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
@@ -94,7 +93,7 @@ static void PrintTextHelp(std::string_view program_name,
                    &opt.preserve_thinking);
   parser.AddOption("", "--speculative", "MODE",
                    "Draft backend: dspark (DeepSeek V4 Flash), dflash2, "
-                   "mtp, mtp-npu, npu, pld, self, or off",
+                   "mtp, mtp-npu, npu, self, or off",
                    "Speculative", &opt.speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to Qwen DFlash2 GGUF file", "Speculative",
@@ -530,9 +529,7 @@ std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
   std::string err;
   const auto& config = executor.GetConfig();
   std::unique_ptr<speculative::IDraftBackend> draft_backend;
-  if (opt.speculative_backend == "dflash" ||
-      opt.speculative_backend == "dflash2" ||
-      opt.speculative_backend == "dflash-2") {
+  if (opt.speculative_backend == "dflash2") {
     std::string dflash_path = opt.dflash_model_path;
     if (dflash_path.empty()) {
       throw std::invalid_argument("DFlash2 requires --dflash-model");
@@ -552,12 +549,6 @@ std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
     cfg.max_draft_tokens = opt.draft_tokens;
     cfg.vocab_size = config.vocab_size;
     draft_backend = std::make_unique<heterogeneous::NpuDraftBackend>(cfg);
-  } else if (opt.speculative_backend == "pld" ||
-             opt.speculative_backend == "lookup") {
-    speculative::PromptLookupConfig cfg;
-    cfg.max_draft_tokens = opt.draft_tokens;
-    draft_backend =
-        std::make_unique<speculative::PromptLookupDraftBackend>(cfg);
   } else if (opt.speculative_backend == "mtp" ||
              opt.speculative_backend == "mtp-npu") {
     std::string mtp_path = opt.mtp_model_path;
@@ -591,18 +582,11 @@ std::unique_ptr<speculative::SpeculativeVerifier> CreateQwenVerifier(
   s_opts.max_draft_tokens = opt.draft_tokens;
   s_opts.min_draft_tokens = opt.min_draft_tokens;
   s_opts.initial_draft_tokens = opt.draft_tokens;
-  const bool block_diffusion_draft = opt.speculative_backend == "dflash" ||
-                                     opt.speculative_backend == "dflash2" ||
-                                     opt.speculative_backend == "dflash-2";
+  const bool block_diffusion_draft = opt.speculative_backend == "dflash2";
   s_opts.enable_adaptive_draft_length = !block_diffusion_draft;
-  if (opt.speculative_backend == "dflash" ||
-      opt.speculative_backend == "dflash2" ||
-      opt.speculative_backend == "dflash-2") {
-    s_opts.use_batched_verification = true;
-  } else if (opt.speculative_backend == "mtp" ||
-             opt.speculative_backend == "mtp-npu") {
-    s_opts.use_batched_verification = true;
-  }
+  s_opts.use_batched_verification = block_diffusion_draft ||
+                                    opt.speculative_backend == "mtp" ||
+                                    opt.speculative_backend == "mtp-npu";
   return std::make_unique<speculative::SpeculativeVerifier>(
       executor, std::move(draft_backend), s_opts);
 }
@@ -706,24 +690,25 @@ std::optional<PromptOptions> ParsePromptOptions(
   bool speculative_explicit = false;
   const auto parse_speculative_backend =
       [&opt, &speculative_explicit](std::string_view, std::string_view value,
-                                    std::string*) -> bool {
+                                    std::string* error) -> bool {
     speculative_explicit = true;
-    if (value == "none" || value == "off" || value == "false" ||
-        value == "disabled") {
+    if (value == "off") {
       opt.speculative_backend.clear();
-    } else {
+    } else if (value == "dspark" || value == "dflash2" || value == "mtp" ||
+               value == "mtp-npu" || value == "npu" || value == "self") {
       opt.speculative_backend = value;
+    } else {
+      if (error != nullptr)
+        *error = "Unknown speculative backend: " + std::string(value);
+      return false;
     }
     return true;
   };
   parser.AddCustomOption(
       "", "--speculative", "MODE",
       "Draft backend: dspark (DeepSeek V4 Flash), dflash2, mtp, "
-      "mtp-npu, npu, pld, self, or off",
+      "mtp-npu, npu, self, or off",
       "Speculative", parse_speculative_backend);
-  parser.AddCustomOption("", "--speculative-decoding", "MODE",
-                         "Alias for --speculative", "Speculative",
-                         parse_speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to Qwen DFlash2 GGUF file", "Speculative",
                    &opt.dflash_model_path);
@@ -817,8 +802,7 @@ std::optional<PromptOptions> ParsePromptOptions(
     return std::nullopt;
   }
   const auto& backend = opt.speculative_backend;
-  if ((backend == "dflash" || backend == "dflash2" || backend == "dflash-2") &&
-      opt.dflash_model_path.empty()) {
+  if (backend == "dflash2" && opt.dflash_model_path.empty()) {
     if (error_msg != nullptr)
       *error_msg = "DFlash2 requires --dflash-model";
     return std::nullopt;
@@ -839,15 +823,12 @@ std::optional<PromptOptions> ParsePromptOptions(
   }
   if (!opt.draft_policy.empty() &&
       ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       (opt.speculative_backend != "dflash" &&
-        opt.speculative_backend != "dflash2" &&
-        opt.speculative_backend != "dflash-2"))) {
+       opt.speculative_backend != "dflash2")) {
     if (error_msg != nullptr)
       *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
     return std::nullopt;
   }
-  if (opt.min_draft_tokens != 1 &&
-      (backend == "dflash" || backend == "dflash2" || backend == "dflash-2")) {
+  if (opt.min_draft_tokens != 1 && backend == "dflash2") {
     if (error_msg != nullptr)
       *error_msg =
           "DFlash2 requires --min-draft-tokens 1; bound blocks with "

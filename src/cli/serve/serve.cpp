@@ -1074,9 +1074,7 @@ int RunServe(std::span<const char* const> args) {
     }
     if (speculative_backend.empty() || speculative_backend == "off") {
       speculative_config.backend = server::TextSpeculativeBackend::kDisabled;
-    } else if (speculative_backend == "dflash" ||
-               speculative_backend == "dflash2" ||
-               speculative_backend == "dflash-2") {
+    } else if (speculative_backend == "dflash2") {
       speculative_config.backend = server::TextSpeculativeBackend::kDFlash;
     } else if (speculative_backend == "dspark") {
       speculative_config.backend = server::TextSpeculativeBackend::kDSpark;

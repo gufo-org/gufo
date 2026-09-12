@@ -393,10 +393,18 @@ void TestAllSamplingControlsReachBackend() {
 
 void TestUnsupportedSamplingControlsAreRejected() {
   FakeBackend backend;
-  for (const auto* field :
-       {"draft_temperature", "temperature_draft", "draft_top_k", "draft_top_p",
-        "draft_min_p", "draft_seed", "draft_policy", "samplers", "typical_p",
-        "mirostat", "dynatemp_range"}) {
+  for (const auto* field : {"draft_temperature",  "temperature_draft",
+                            "draft_top_k",        "draft_top_p",
+                            "draft_min_p",        "draft_seed",
+                            "draft_policy",       "samplers",
+                            "typical_p",          "tfs_z",
+                            "mirostat",           "mirostat_eta",
+                            "mirostat_tau",       "dynatemp_range",
+                            "dynatemp_exponent",  "xtc_probability",
+                            "xtc_threshold",      "dry_multiplier",
+                            "dry_base",           "dry_allowed_length",
+                            "dry_penalty_last_n", "dry_sequence_breakers",
+                            "top_n_sigma",        "logit_bias"}) {
     auto request = Request(
         R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
     auto body = gufo::server::json::parse(request.body);

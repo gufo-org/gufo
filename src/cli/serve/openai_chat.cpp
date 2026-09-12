@@ -603,8 +603,8 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     return Error(400, "Bad Request", "only n=1 is supported", "unsupported_n");
   }
   for (const std::string_view unsupported :
-       {"logprobs", "top_logprobs", "logit_bias", "stop", "response_format",
-        "modalities", "audio"}) {
+       {"logprobs", "top_logprobs", "stop", "response_format", "modalities",
+        "audio"}) {
     if (body.contains(std::string(unsupported))) {
       return Error(
           400, "Bad Request",

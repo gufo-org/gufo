@@ -271,7 +271,6 @@ if (ENGINE_ENABLE_HIP)
     "${GUFO_H3_ATTENTION_GENERATED_HEADER}"
     src/core/speculative/draft_heads.cpp
     src/core/speculative/self_speculative.cpp
-    src/core/speculative/prompt_lookup_backend.cpp
     src/core/speculative/speculative_verifier.cpp
     src/core/heterogeneous/npu_drafter.cpp
   )
@@ -1018,11 +1017,6 @@ if (BUILD_TESTING)
     add_test(NAME npu_draft_fallback_test COMMAND npu_draft_fallback_test)
     set_tests_properties(npu_draft_fallback_test PROPERTIES
       LABELS "host;speculative;lookup;npu-fallback")
-
-    add_executable(prompt_lookup_test tests/core/prompt_lookup_test.cpp)
-    target_link_libraries(prompt_lookup_test PRIVATE gufo_core hip::host roc::hipblas roc::rocblas)
-    add_test(NAME prompt_lookup_test COMMAND prompt_lookup_test)
-    set_tests_properties(prompt_lookup_test PROPERTIES LABELS "speculative;lookup;pld")
 
   endif()
 

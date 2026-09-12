@@ -115,7 +115,7 @@ def build_prompt_command(
             )
         if args.backend == "dspark":
             option = "--dspark-model"
-        elif args.backend.startswith("dflash"):
+        elif args.backend == "dflash2":
             option = "--dflash-model"
         else:
             option = "--mtp-model"
@@ -345,7 +345,7 @@ def main() -> int:
         help="Free-form tag recorded in the JSON report",
     )
     args = parser.parse_args()
-    if args.draft_policy is not None and not args.backend.startswith("dflash"):
+    if args.draft_policy is not None and args.backend != "dflash2":
         parser.error("--draft-policy requires a DFlash2 backend")
 
     if (

@@ -32,7 +32,6 @@
 #include "src/core/heterogeneous/npu_drafter.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/speculative/draft_heads.hpp"
-#include "src/core/speculative/prompt_lookup_backend.hpp"
 #include "src/core/speculative/self_speculative.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
@@ -81,7 +80,7 @@ void PrintBenchHelp(std::string_view program_name) {
                    "Validation", &opt.model_path);
 
   parser.AddOption("", "--speculative", "MODE",
-                   "Draft backend: dflash2, mtp, mtp-npu, dspark, npu, pld, "
+                   "Draft backend: dflash2, mtp, mtp-npu, dspark, npu, "
                    "self, or off",
                    "Speculative", &opt.speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
@@ -1117,23 +1116,24 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   bool speculative_explicit = false;
   const auto parse_speculative_backend =
       [&opt, &speculative_explicit](std::string_view, std::string_view value,
-                                    std::string*) -> bool {
+                                    std::string* error) -> bool {
     speculative_explicit = true;
-    if (value == "none" || value == "off" || value == "false" ||
-        value == "disabled") {
+    if (value == "off") {
       opt.speculative_backend.clear();
-    } else {
+    } else if (value == "dspark" || value == "dflash2" || value == "mtp" ||
+               value == "mtp-npu" || value == "npu" || value == "self") {
       opt.speculative_backend = value;
+    } else {
+      if (error != nullptr)
+        *error = "Unknown speculative backend: " + std::string(value);
+      return false;
     }
     return true;
   };
   parser.AddCustomOption("", "--speculative", "MODE",
                          "Draft backend: dflash2, mtp, mtp-npu, "
-                         "dspark, npu, pld, self, or off",
+                         "dspark, npu, self, or off",
                          "Speculative", parse_speculative_backend);
-  parser.AddCustomOption("", "--speculative-decoding", "MODE",
-                         "Alias for --speculative", "Speculative",
-                         parse_speculative_backend);
   parser.AddOption("", "--dflash-model", "PATH",
                    "Path to Qwen DFlash2 GGUF file", "Speculative",
                    &opt.dflash_model_path);
@@ -1251,16 +1251,12 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   }
   if (!opt.draft_policy.empty() &&
       ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       (opt.speculative_backend != "dflash" &&
-        opt.speculative_backend != "dflash2" &&
-        opt.speculative_backend != "dflash-2"))) {
+       opt.speculative_backend != "dflash2")) {
     if (error_msg != nullptr)
       *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
     return std::nullopt;
   }
-  if (opt.min_draft_tokens != 1 && (opt.speculative_backend == "dflash" ||
-                                    opt.speculative_backend == "dflash2" ||
-                                    opt.speculative_backend == "dflash-2")) {
+  if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
     if (error_msg != nullptr)
       *error_msg =
           "DFlash2 requires --min-draft-tokens 1; bound blocks with "
@@ -1394,9 +1390,7 @@ int RunBench(std::span<const char* const> args) {
   // prompt/serving. Keep one backend alive across warmup, depth restores and
   // TG.
   std::unique_ptr<speculative::SpeculativeVerifier> dflash_verifier;
-  if (opt.speculative_backend == "dflash" ||
-      opt.speculative_backend == "dflash2" ||
-      opt.speculative_backend == "dflash-2") {
+  if (opt.speculative_backend == "dflash2") {
     hip::QwenDFlashGpuDraftConfig draft_config{
         .max_context = static_cast<std::uint32_t>(required_context),
         .max_draft_tokens = opt.draft_tokens,
@@ -1656,12 +1650,6 @@ int RunBench(std::span<const char* const> args) {
           cfg.max_draft_tokens = opt.draft_tokens;
           cfg.vocab_size = config.vocab_size;
           draft_backend = std::make_unique<heterogeneous::NpuDraftBackend>(cfg);
-        } else if (opt.speculative_backend == "pld" ||
-                   opt.speculative_backend == "lookup") {
-          speculative::PromptLookupConfig cfg;
-          cfg.max_draft_tokens = opt.draft_tokens;
-          draft_backend =
-              std::make_unique<speculative::PromptLookupDraftBackend>(cfg);
         }
 
         std::unique_ptr<speculative::SpeculativeVerifier> owned_spec_verifier;

@@ -206,7 +206,7 @@ __global__ void SortedSamplingKernel(
     std::size_t keep = top_p_end;
     for (std::size_t index = top_p_begin; index < top_p_end; ++index) {
       threshold -= expf(sorted_logits[index] - maximum);
-      if (threshold < 0.0F) {
+      if (threshold <= 0.0F) {
         keep = index + 1U;
         break;
       }
@@ -525,7 +525,7 @@ __global__ void SortedSpeculativeSamplingKernel(
     std::size_t keep = top_p_end;
     for (std::size_t index = top_p_begin; index < top_p_end; ++index) {
       threshold -= expf(sorted_logits[index] - maximum);
-      if (threshold < 0.0F) {
+      if (threshold <= 0.0F) {
         keep = index + 1U;
         break;
       }
@@ -682,12 +682,12 @@ __global__ void ArgmaxKernel(const float* __restrict__ logits,
   const std::size_t tid = threadIdx.x;
   const std::size_t block_size = blockDim.x;
 
-  float max_val = -1e30F;
+  float max_val = -INFINITY;
   std::uint32_t max_idx = 0;
 
   for (std::size_t i = tid; i < vocab_size; i += block_size) {
     const float val = logits[i];
-    if (val > max_val) {
+    if (isfinite(val) && val > max_val) {
       max_val = val;
       max_idx = static_cast<std::uint32_t>(i);
     }
@@ -701,7 +701,9 @@ __global__ void ArgmaxKernel(const float* __restrict__ logits,
 
   for (std::size_t stride = block_size / 2; stride > 0; stride /= 2) {
     if (tid < stride) {
-      if (s_max[tid + stride] > s_max[tid]) {
+      if (s_max[tid + stride] > s_max[tid] ||
+          (s_max[tid + stride] == s_max[tid] &&
+           s_idx[tid + stride] < s_idx[tid])) {
         s_max[tid] = s_max[tid + stride];
         s_idx[tid] = s_idx[tid + stride];
       }
@@ -726,11 +728,11 @@ __global__ void BatchedArgmaxKernel(const float* __restrict__ logits,
   const std::size_t tid = threadIdx.x;
   const float* row_logits = logits + (row * vocab_size);
 
-  float max_val = -1e30F;
+  float max_val = -INFINITY;
   std::uint32_t max_idx = 0;
   for (std::size_t index = tid; index < vocab_size; index += blockDim.x) {
     const float value = row_logits[index];
-    if (value > max_val) {
+    if (isfinite(value) && value > max_val) {
       max_val = value;
       max_idx = static_cast<std::uint32_t>(index);
     }
@@ -743,7 +745,9 @@ __global__ void BatchedArgmaxKernel(const float* __restrict__ logits,
   __syncthreads();
 
   for (std::size_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
-    if (tid < stride && shared_max[tid + stride] > shared_max[tid]) {
+    if (tid < stride && (shared_max[tid + stride] > shared_max[tid] ||
+                         (shared_max[tid + stride] == shared_max[tid] &&
+                          shared_index[tid + stride] < shared_index[tid]))) {
       shared_max[tid] = shared_max[tid + stride];
       shared_index[tid] = shared_index[tid + stride];
     }

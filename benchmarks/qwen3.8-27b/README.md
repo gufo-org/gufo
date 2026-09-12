@@ -136,8 +136,8 @@ MTP=/path/to/mtp-Qwen3.8-27B-Q4_0.gguf
   -p 2048 -n 128 -d 0,4096,8192,12288,16384 -c 1 -r 2 -v
 ```
 
-Only DFlash2 is implemented; the legacy `dflash` and `dflash-2` CLI spellings
-select the same backend. The GGUF architecture name remains `dflash`.
+Select DFlash2 with `--speculative dflash2`. The GGUF architecture identifier
+is `dflash`; it is not a CLI backend name.
 
 DFlash2 prefill includes target feature capture and draft context injection.
 The verbose depth traces must match AR token IDs for the same target.
@@ -153,6 +153,11 @@ The [quality report](eval/README.md) records the maintained checks, pinned
 DFlash2 formulas, evidence and remaining gaps. Start with
 `nix develop -c python3 tools/qwen27b/check.py fast`, then run only the affected
 kernel/model suites. Publish speed only after the affected quality checks pass; label short probes explicitly.
+
+All supported sampling controls pass the bounded AR/DFlash2 matrix across
+both targets, three draft quants and both controllers. The
+[sampling record](eval/sampling-strategies.json) includes probability controls,
+seeded replay and all six HTTP adapters; it is not a capability evaluation.
 
 Production execution has one implementation per supported shape/weight type;
 Qwen kernel, precision and verification environment switches are removed,

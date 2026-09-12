@@ -1,0 +1,839 @@
+{
+  "date_utc": "2026-09-12T14:28:04.550850+00:00",
+  "base_commit": "8190a441e2917ba3a03cc99fe7facc29b316a54c",
+  "platform": "Linux x86-64, AMD Strix Halo gfx1151, Nix; sequential hardware jobs",
+  "purpose": "All supported target sampling strategies with AR-only and DFlash2; finite configurations, not exhaustive numeric inputs or capability qualification",
+  "final_source_sha256": {
+    "src/cli/bench/bench.cpp": "f6b8e4886c775f3fcd6c9613bb05c9c75d153cb58794fd9e2da80da4c4e77674",
+    "src/cli/prompt/prompt.cpp": "ade0b107f5848f43ab30ac9a7cc0074615b02d718bf4dafe05af9592aaf85c9d",
+    "src/cli/serve/openai_chat.cpp": "525fcd4ce041fc02eb27ba58bcd0e6d21ea5f159ec803e156925fa75584246b6",
+    "src/cli/serve/sampling_request.hpp": "18758398dbe79610b41640ce25b6b830c878228dcc201185f5cbc5e843259f0b",
+    "src/cli/serve/serve.cpp": "c97ce7941e933fec743fc196fa25e13fe4f146b1193246b1324a1981dff97dd8",
+    "src/core/sampling.cpp": "0d3107d3d62aad117111d1fff3ba346eb50509bf696af3434bb3c2af5e4d29ee",
+    "src/models/qwen/hip/kernels/sample.hip": "c532985357ced749db8694150cd5f64c6a9f0f447ea42ee969218ae0b0039b44",
+    "tests/cli/logit_sampler_test.cpp": "6eb40651016e539c8fb4a86facc49edb6f941042f2e6078ce6ce727f1a9a7ad0",
+    "tests/cli/openai_chat_test.cpp": "c0f1d566031ee16143838e9f58b1782187bdd126a2ceab3e27bde7446e300278",
+    "tests/kernels/qwen_sampling_hip_test.hip": "c032f1a491d0f34261ae0a6487efa6108fc39d1796ce1c415be550dc1413ba38",
+    "tests/models/qwen27b/cli_test.py": "f6b6be089d8a16075f8982000e5f37d4e64b8018539fb75e363bb7f39045536d",
+    "tests/models/qwen27b/sampling_cases.hpp": "d6408ee463596dda73e66e5c14439b793ffdeb04041cd93bea711e92293b92b7",
+    "tests/models/qwen27b/serving_test.cpp": "982e6257e9e8077ee762bd4d82ab1f9c1d23ddd1ce736e256a37e99217f45888",
+    "tools/quant/speculative-corpus.py": "4455c6bb44ad8842cda09fafbcdeeb6f74d806e77979a1ed9181fa26cb803b6d"
+  },
+  "artifacts": {
+    "target_q4": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+      "bytes": 17559178144,
+      "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+    },
+    "target_q8": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+      "bytes": 31457991680,
+      "sha256": "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
+    },
+    "draft_q4": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "bytes": 1143006816,
+      "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+    },
+    "draft_q8": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf",
+      "bytes": 2056414816,
+      "sha256": "c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e"
+    },
+    "draft_bf16": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf",
+      "bytes": 3860293216,
+      "sha256": "26d47ca20ab07688327a63d912acad222d924eaaa92a980cc488de3c67e736bc"
+    },
+    "initial_release_binary": {
+      "path": "/nix/store/a4dm1ijg57s2fq4c74wi1ai9wma8q20v-gufo-8190a44-dirty/bin/gufo",
+      "bytes": 16058648,
+      "sha256": "3936e4c758d8bc78280e5bc0869d91afba7a38caf99729b472b2f57e005254ca"
+    },
+    "canonical_release_binary": {
+      "path": "/nix/store/c8zada3kpdx561lx4xya3vna8k9x1m5r-gufo-8190a44-dirty/bin/gufo",
+      "bytes": 16057784,
+      "sha256": "20b708f851c9767a76f589e34a042c6ffcafb2383c009c635c84ae076964ea5d"
+    },
+    "release_binary": {
+      "path": "/nix/store/x6npva8b6g7r4h2zknkbgjqhaahg4j8a-gufo-8190a44-dirty/bin/gufo",
+      "bytes": 16054872,
+      "sha256": "1702d1ac76318c63ef248048ae64c7f23dca2a7cb91bb731206f2ed9db69c8b5"
+    },
+    "model_test_binary": {
+      "path": "/home/fbozzo/projects/strix-halo.cpp/build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+      "bytes": 45824608,
+      "sha256": "a714f73d241081d49ee5cdf12855ba2a7089c599e2bb09fc9a5aa7b06fb0f1e6"
+    },
+    "sampling_test_binary": {
+      "path": "/home/fbozzo/projects/strix-halo.cpp/build/gpu-test/qwen_sampling_hip_test",
+      "bytes": 2857648,
+      "sha256": "695b0e36af800177570d75eae452dfe3aa63f7d319c26a05d6dfa41eb310491d"
+    }
+  },
+  "artifact_hash_note": "Model SHA256 values reused from dflash2-rollback.json; file lengths checked without rehashing weights.",
+  "release_note": "Initial Q4 AR/adaptive HTTP records use the initial release; subsequent HTTP records use the canonical-CLI release. Final terminal/benchmark/options checks use the cleanup release. The final CLI has one spelling per supported behavior and omits the unused backend implementation. Model sampling code is identical across these releases.",
+  "initial_release_serve_sha256": "da7a5993ca83dd83616039559e0aa91b2da396eee07bc24c92ff1e557deba533",
+  "sampling_contract": {
+    "order": [
+      "penalties",
+      "top_k",
+      "top_p",
+      "min_p",
+      "temperature"
+    ],
+    "greedy": "Temperature zero, or top_k=1 with min_keep<=1: exact AR IDs; lowest-token argmax ties.",
+    "random": "Seeded replay within a backend/controller; compare target and speculative distributions, not identical cross-backend continuations.",
+    "draft": "Shared target temperature, trained top-16 selector, actual sparse q; acceptance min(1,p/q), correction normalized max(p-q,0).",
+    "unsupported": "HTTP rejects independent draft controls, sampler ordering, typical/tail-free/Mirostat/dynamic temperature, XTC, DRY, top-n-sigma and logit bias."
+  },
+  "operator_coverage": {
+    "named_cases": 23,
+    "cartesian_cases": 192,
+    "oversized_floor_cases": 1,
+    "ar_configurations": 216,
+    "ar_quantiles": 864,
+    "random_configurations_with_acceptance_and_residual_cdf_checks": 141,
+    "probability_tolerance": 2e-05,
+    "full_vocabulary": 248320,
+    "full_vocabulary_configurations": 4,
+    "cpu_reference_replay_steps": 1472,
+    "regressions": [
+      "exact top-p prefix inside a GPU segment",
+      "scalar and batched lowest-token greedy ties",
+      "very negative finite greedy logits",
+      "zero uniform skips underflowed mass",
+      "CPU linear sampler ignores nonfinite candidates"
+    ]
+  },
+  "model_coverage": {
+    "named_cases": 23,
+    "tokens_per_request": 4,
+    "target_quants": [
+      "Q4",
+      "Q8"
+    ],
+    "draft_quants": [
+      "Q4_K_M",
+      "Q8_0",
+      "BF16"
+    ],
+    "controllers": [
+      "adaptive",
+      "fixed"
+    ],
+    "assertions": [
+      "AR cold/cached token replay and zero drafts",
+      "DFlash2 cold/cached token replay and positive drafts",
+      "AR/DFlash2 first-token equality",
+      "all-token AR equality for deterministic strategies"
+    ]
+  },
+  "http_coverage": {
+    "sampling_configurations": 15,
+    "adapters": [
+      "/v1/completions",
+      "/completion",
+      "/infill",
+      "/v1/chat/completions",
+      "/v1/messages",
+      "/v1/responses"
+    ],
+    "assertions": [
+      "CLI startup defaults and request overrides",
+      "raw prompt/HTTP parity",
+      "seeded replay",
+      "unseeded execution",
+      "SSE text equality",
+      "C2 request-local sampling",
+      "unsupported controls rejected"
+    ]
+  },
+  "terminal_coverage": {
+    "sampling_configurations": 15,
+    "tokens_per_turn": 4,
+    "pairings": [
+      "Q4 AR",
+      "Q8 target / BF16 draft / adaptive DFlash2"
+    ],
+    "assertions": [
+      "prompt matches first chat turn",
+      "two-turn chat replays exact token hashes"
+    ]
+  },
+  "regressions_before_fix": {
+    "gpu": "Boundary regression: nucleus=257 (expected 256), draft accepted=1 (expected false), greedy tie=256 (expected 1)\nAssertion failed: exact nucleus cutoff and lowest-token greedy ties\n",
+    "cpu": "Assertion failed: zero draw must not select underflowed zero probability\n",
+    "http": "Assertion failed: unsupported sampling must not be silently ignored\n"
+  },
+  "focused_tests": "warning: Git tree '/home/fbozzo/projects/strix-halo.cpp' is dirty\nTest project /home/fbozzo/projects/strix-halo.cpp/build/gpu-test\n    Start  21: openai_chat_test\n1/9 Test  #21: openai_chat_test ...........................   Passed    0.05 sec\n    Start  26: logit_sampler_test\n2/9 Test  #26: logit_sampler_test .........................   Passed    0.04 sec\n    Start  28: prompt_cli_test\n3/9 Test  #28: prompt_cli_test ............................   Passed    0.04 sec\n    Start  29: bench_cli_test\n4/9 Test  #29: bench_cli_test .............................   Passed    0.04 sec\n    Start  86: qwen_sampling_hip_test\n5/9 Test  #86: qwen_sampling_hip_test .....................   Passed    0.58 sec\n    Start  89: speculative_verification_test\n6/9 Test  #89: speculative_verification_test ..............   Passed    0.05 sec\n    Start 126: qwen27b.tools\n7/9 Test #126: qwen27b.tools ..............................   Passed    0.08 sec\n    Start 128: qwen27b.cli-options\n8/9 Test #128: qwen27b.cli-options ........................   Passed   14.13 sec\n    Start 133: qwen_dflash_noncausal_attention_ops_test\n9/9 Test #133: qwen_dflash_noncausal_attention_ops_test ...   Passed    1.12 sec\n\n100% tests passed, 0 tests failed out of 9\n\nLabel Time Summary:\napi            =   0.05 sec*proc (1 test)\ncli            =  14.21 sec*proc (3 tests)\ncorrectness    =   0.58 sec*proc (1 test)\ncpu            =  14.38 sec*proc (6 tests)\ndflash         =   1.12 sec*proc (1 test)\ndflash2        =   1.12 sec*proc (1 test)\ngpu            =   1.75 sec*proc (3 tests)\nhip            =   1.75 sec*proc (3 tests)\nkernels        =   1.12 sec*proc (1 test)\nopenai         =   0.05 sec*proc (1 test)\nqwen           =   0.58 sec*proc (1 test)\nqwen27b        =  15.32 sec*proc (3 tests)\nsampling       =   0.62 sec*proc (2 tests)\nserver         =   0.18 sec*proc (4 tests)\nspeculative    =   0.05 sec*proc (1 test)\nstreaming      =   0.05 sec*proc (1 test)\ntools          =   0.13 sec*proc (2 tests)\n\nTotal Test time (real) =  16.13 sec\n",
+  "runs": [
+    {
+      "label": "target_q4-draft_q4-adaptive-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "--sampling-only"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q4",
+      "returncode": 0,
+      "seconds": 38.72,
+      "log_sha256": "93418c316cf218da0895bdde447cabedef1031bbd0c6cab7fffc8916fc48afd7",
+      "policy": "adaptive",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q4-draft_q4-fixed-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "--sampling-only",
+        "--fixed"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q4",
+      "returncode": 0,
+      "seconds": 38.87,
+      "log_sha256": "93418c316cf218da0895bdde447cabedef1031bbd0c6cab7fffc8916fc48afd7",
+      "policy": "fixed",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q4-draft_q8-adaptive-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "--sampling-only"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q8",
+      "returncode": 0,
+      "seconds": 37.37,
+      "log_sha256": "945ff3f85c38e80acdb9485f6683d9569eca80fff8ac0255d481b4a64f994eb8",
+      "policy": "adaptive",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q4-draft_q8-fixed-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "--sampling-only",
+        "--fixed"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q8",
+      "returncode": 0,
+      "seconds": 37.37,
+      "log_sha256": "945ff3f85c38e80acdb9485f6683d9569eca80fff8ac0255d481b4a64f994eb8",
+      "policy": "fixed",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q4-draft_bf16-adaptive-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "--sampling-only"
+      ],
+      "target": "target_q4",
+      "draft": "draft_bf16",
+      "returncode": 0,
+      "seconds": 38.73,
+      "log_sha256": "fcaea6750e86ef9ca1d6528f452fe56a41784a3a6bd42ffb22be9e9743333c1e",
+      "policy": "adaptive",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q4-draft_bf16-fixed-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "--sampling-only",
+        "--fixed"
+      ],
+      "target": "target_q4",
+      "draft": "draft_bf16",
+      "returncode": 0,
+      "seconds": 38.68,
+      "log_sha256": "fcaea6750e86ef9ca1d6528f452fe56a41784a3a6bd42ffb22be9e9743333c1e",
+      "policy": "fixed",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q8-draft_q4-adaptive-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "--sampling-only"
+      ],
+      "target": "target_q8",
+      "draft": "draft_q4",
+      "returncode": 0,
+      "seconds": 51.79,
+      "log_sha256": "99b654f7f11bdf0a306d59fc8df2eba9955be559a480f0352206d07f7edf246e",
+      "policy": "adaptive",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q8-draft_q4-fixed-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "--sampling-only",
+        "--fixed"
+      ],
+      "target": "target_q8",
+      "draft": "draft_q4",
+      "returncode": 0,
+      "seconds": 51.82,
+      "log_sha256": "99b654f7f11bdf0a306d59fc8df2eba9955be559a480f0352206d07f7edf246e",
+      "policy": "fixed",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q8-draft_q8-adaptive-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "--sampling-only"
+      ],
+      "target": "target_q8",
+      "draft": "draft_q8",
+      "returncode": 0,
+      "seconds": 50.89,
+      "log_sha256": "b13a7c6a80643b3ddbbd910e51c117f058bff65ca31abe3b96087ddc2955da48",
+      "policy": "adaptive",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q8-draft_q8-fixed-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "--sampling-only",
+        "--fixed"
+      ],
+      "target": "target_q8",
+      "draft": "draft_q8",
+      "returncode": 0,
+      "seconds": 50.89,
+      "log_sha256": "b13a7c6a80643b3ddbbd910e51c117f058bff65ca31abe3b96087ddc2955da48",
+      "policy": "fixed",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q8-draft_bf16-adaptive-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "--sampling-only"
+      ],
+      "target": "target_q8",
+      "draft": "draft_bf16",
+      "returncode": 0,
+      "seconds": 51.95,
+      "log_sha256": "7a8b6832433d03076d4362aff2d999f54aa0d565042b0a36d8141879c7a34232",
+      "policy": "adaptive",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q8-draft_bf16-fixed-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+        "--sampling-only",
+        "--fixed"
+      ],
+      "target": "target_q8",
+      "draft": "draft_bf16",
+      "returncode": 0,
+      "seconds": 51.99,
+      "log_sha256": "7a8b6832433d03076d4362aff2d999f54aa0d565042b0a36d8141879c7a34232",
+      "policy": "fixed",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "options",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling/bin/gufo",
+        "--scope",
+        "options"
+      ],
+      "target": null,
+      "draft": null,
+      "returncode": 0,
+      "seconds": 14.39,
+      "log_sha256": "aaf71ad6cf96acd6dec1a0dcdbf490eb2a100ede2509eaade0faef3dcd78ffcc"
+    },
+    {
+      "label": "target_q4-ar-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "ar"
+      ],
+      "target": "target_q4",
+      "draft": null,
+      "returncode": 0,
+      "seconds": 83.84,
+      "log_sha256": "e0c398b33c147c4ea4344143cb3adcf04b86a5cdb885900ec5e88c3ea4b88e9f",
+      "sampling_cases": 15,
+      "backends": [
+        "ar"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "target_q4-draft_q4-adaptive-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "adaptive"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q4",
+      "returncode": 0,
+      "seconds": 52.4,
+      "log_sha256": "3d38074769923f4d0f12bdd9923b9ad01220b0d9e3f931e1d3986e159c4d19be",
+      "policy": "adaptive",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "target_q4-draft_q4-fixed-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-canonical/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "fixed"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q4",
+      "returncode": 0,
+      "seconds": 51.24,
+      "log_sha256": "3ba502472497da1da171b6adc9e700044d9ea31c7726f231ff4f1f092e31990c",
+      "policy": "fixed",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "options-final",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-canonical/bin/gufo",
+        "--scope",
+        "options"
+      ],
+      "target": null,
+      "draft": null,
+      "returncode": 0,
+      "seconds": 17.7,
+      "log_sha256": "aaf71ad6cf96acd6dec1a0dcdbf490eb2a100ede2509eaade0faef3dcd78ffcc"
+    },
+    {
+      "label": "target_q4-draft_q8-adaptive-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-canonical/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "adaptive"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q8",
+      "returncode": 0,
+      "seconds": 50.49,
+      "log_sha256": "3d38074769923f4d0f12bdd9923b9ad01220b0d9e3f931e1d3986e159c4d19be",
+      "policy": "adaptive",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "target_q4-draft_bf16-adaptive-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-canonical/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "adaptive"
+      ],
+      "target": "target_q4",
+      "draft": "draft_bf16",
+      "returncode": 0,
+      "seconds": 51.55,
+      "log_sha256": "3d38074769923f4d0f12bdd9923b9ad01220b0d9e3f931e1d3986e159c4d19be",
+      "policy": "adaptive",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "target_q8-ar-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-canonical/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "ar"
+      ],
+      "target": "target_q8",
+      "draft": null,
+      "returncode": 0,
+      "seconds": 132.68,
+      "log_sha256": "e0c398b33c147c4ea4344143cb3adcf04b86a5cdb885900ec5e88c3ea4b88e9f",
+      "sampling_cases": 15,
+      "backends": [
+        "ar"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "target_q8-draft_q4-adaptive-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-canonical/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "adaptive"
+      ],
+      "target": "target_q8",
+      "draft": "draft_q4",
+      "returncode": 0,
+      "seconds": 62.07,
+      "log_sha256": "3d38074769923f4d0f12bdd9923b9ad01220b0d9e3f931e1d3986e159c4d19be",
+      "policy": "adaptive",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "target_q8-draft_q4-fixed-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-canonical/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "fixed"
+      ],
+      "target": "target_q8",
+      "draft": "draft_q4",
+      "returncode": 0,
+      "seconds": 61.81,
+      "log_sha256": "3ba502472497da1da171b6adc9e700044d9ea31c7726f231ff4f1f092e31990c",
+      "policy": "fixed",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "target_q8-draft_q8-adaptive-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-canonical/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "adaptive"
+      ],
+      "target": "target_q8",
+      "draft": "draft_q8",
+      "returncode": 0,
+      "seconds": 58.42,
+      "log_sha256": "3d38074769923f4d0f12bdd9923b9ad01220b0d9e3f931e1d3986e159c4d19be",
+      "policy": "adaptive",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "target_q8-draft_bf16-adaptive-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-canonical/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "adaptive"
+      ],
+      "target": "target_q8",
+      "draft": "draft_bf16",
+      "returncode": 0,
+      "seconds": 62.31,
+      "log_sha256": "3d38074769923f4d0f12bdd9923b9ad01220b0d9e3f931e1d3986e159c4d19be",
+      "policy": "adaptive",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "adapters": 6
+    },
+    {
+      "label": "options-complete",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-complete/bin/gufo",
+        "--scope",
+        "options"
+      ],
+      "target": null,
+      "draft": null,
+      "returncode": 0,
+      "seconds": 14.61,
+      "log_sha256": "aaf71ad6cf96acd6dec1a0dcdbf490eb2a100ede2509eaade0faef3dcd78ffcc"
+    },
+    {
+      "label": "target_q4-draft_q4-bench",
+      "command": [
+        "python3",
+        "-c",
+        "import os,sys; sys.path.insert(0,\"tests/models/qwen27b\"); import cli_test; cli_test.check_bench(sys.argv[1], os.environ[\"GUFO_QWEN27B_MODEL\"], os.environ[\"GUFO_QWEN27B_DFLASH_MODEL\"])",
+        "result-qwen-sampling-complete/bin/gufo"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q4",
+      "returncode": 0,
+      "seconds": 24.05,
+      "log_sha256": "48c943aebc15d0caae0d5d6d3fba36f082e317b4ada5f272200d5e30240d18c1",
+      "backends": [
+        "ar",
+        "dflash2-fixed",
+        "dflash2-adaptive"
+      ],
+      "prompt_tokens": 16,
+      "generation_tokens": 8,
+      "depths": [
+        0,
+        32
+      ],
+      "repetitions": 2
+    },
+    {
+      "label": "target_q4-ar-terminal",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-complete/bin/gufo",
+        "--scope",
+        "sampling",
+        "--backend",
+        "ar"
+      ],
+      "target": "target_q4",
+      "draft": null,
+      "returncode": 0,
+      "seconds": 87.36,
+      "log_sha256": "7e31d1ad5bdab98675328f5246aaaf536cf1ea40bc3d95b43417167816c4fd8a",
+      "sampling_cases": 15,
+      "backends": [
+        "ar"
+      ],
+      "chat_turns": 2,
+      "tokens_per_turn": 4
+    },
+    {
+      "label": "target_q8-draft_bf16-adaptive-terminal",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling-complete/bin/gufo",
+        "--scope",
+        "sampling",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "adaptive"
+      ],
+      "target": "target_q8",
+      "draft": "draft_bf16",
+      "returncode": 0,
+      "seconds": 151.94,
+      "log_sha256": "f93743a1c36ea0c29764a065b571fe03b60ccc68d1ffa238655b04470fc0b0c5",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "policy": "adaptive",
+      "chat_turns": 2,
+      "tokens_per_turn": 4
+    }
+  ],
+  "initial_failed_attempts": [
+    {
+      "label": "target_q4-draft_q4-adaptive-model",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test",
+        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+        "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+        "--sampling-only"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q4",
+      "returncode": 1,
+      "seconds": 0.06,
+      "log_sha256": "ebbf7a6c12241f1765b9ed0bf4c9d1df27b053b019ab70797a0ca33e5dc768c5",
+      "policy": "adaptive",
+      "sampling_cases": 23,
+      "backends": [
+        "ar",
+        "dflash2"
+      ],
+      "output_tokens_per_request": 4
+    },
+    {
+      "label": "target_q4-draft_q4-fixed-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-sampling/bin/gufo",
+        "--scope",
+        "http",
+        "--backend",
+        "dflash2",
+        "--policy",
+        "fixed"
+      ],
+      "target": "target_q4",
+      "draft": "draft_q4",
+      "returncode": 1,
+      "seconds": 3.52,
+      "log_sha256": "f5b41866847b66212ba01e6bc6bb62bd2843c5cb8ce043aa67a30e54946acfe3",
+      "policy": "fixed",
+      "sampling_cases": 15,
+      "backends": [
+        "dflash2"
+      ],
+      "adapters": 6
+    }
+  ],
+  "initial_failure_notes": [
+    "The first model invocation supplied the draft both positionally and via environment; the harness was corrected.",
+    "The initial fixed HTTP check used a legacy alias not supported by serve. The user requested one spelling: all entrypoints now reject that alias and tests use --speculative dflash2."
+  ],
+  "limits": [
+    "Finite parameter/seed grid; this does not establish every possible numeric configuration.",
+    "Short model continuations; no repeated speed matrix or capability evaluation.",
+    "Independent original-target/checkpoint and MTP qualification remain open."
+  ]
+}

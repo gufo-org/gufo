@@ -37,6 +37,15 @@ SAMPLING_CASES = [
      "repeat_last_n": 8, "frequency_penalty": 0.15, "presence_penalty": 0.1},
     {"temperature": 2, "min_p": 0.02, "seed": 808,
      "frequency_penalty": -0.2, "presence_penalty": -0.1},
+    {"temperature": 1, "seed": 0},
+    {"temperature": 0.8, "top_k": 3, "seed": 73},
+    {"temperature": 0.8, "top_p": 0.7, "seed": 73},
+    {"temperature": 0.8, "min_p": 0.3, "seed": 73},
+    {"temperature": 0.8, "repeat_penalty": 1.5, "seed": 73},
+    {"temperature": 0.8, "repeat_penalty": 0.7, "seed": 73},
+    {"temperature": 0.8, "frequency_penalty": 0.4, "seed": 73},
+    {"temperature": 0.8, "presence_penalty": 0.4, "seed": 73},
+    {"temperature": 0.8, "repeat_penalty": 1.5, "repeat_last_n": 1, "seed": 73},
 ]
 
 
@@ -96,17 +105,23 @@ def check_options(binary):
                                 text=True, capture_output=True, timeout=30)
         if result.returncode != 2:
             raise AssertionError(f"chat silently ignored {flag}")
-    result = subprocess.run([binary, "bench", "--temperature", "0.8"],
-                            text=True, capture_output=True, timeout=30)
-    if result.returncode != 2:
-        raise AssertionError("greedy benchmark silently accepted sampling")
+    for field, value in dict(temperature=0.8, top_k=40, top_p=0.9, min_p=0.05,
+                            min_keep=3, seed=73, repeat_penalty=1.1,
+                            repeat_last_n=8, frequency_penalty=0.2,
+                            presence_penalty=0.1).items():
+        result = subprocess.run(
+            [binary, "bench", *sampling_flags({field: value})],
+            text=True, capture_output=True, timeout=30)
+        if result.returncode != 2:
+            raise AssertionError(f"greedy benchmark silently accepted {field}")
     print("All gufo modules reject unsupported draft sampling; help and errors valid")
 
 
 def run(binary, model, mode, backend, sampling=None):
+    max_tokens = 4
     command = [binary, mode, "--model", model, "--verbose",
                *sampling_flags(sampling or {"temperature": 0}),
-               "--max-tokens", "8", *backend]
+               "--max-tokens", str(max_tokens), *backend]
     if mode == "prompt":
         command += ["--prompt", PROMPTS[0]]
     result = subprocess.run(
@@ -114,7 +129,7 @@ def run(binary, model, mode, backend, sampling=None):
         text=True, capture_output=True, timeout=180, check=True)
     traces = TRACE.findall(result.stderr)
     count = 1 if mode == "prompt" else 2
-    if len(traces) != count or any(int(tokens) != 8 for tokens, _ in traces):
+    if len(traces) != count or any(int(tokens) != max_tokens for tokens, _ in traces):
         raise AssertionError(f"incomplete {mode} {backend}: {result.stderr}")
     if "gfx1151 GPU Executor" not in result.stdout:
         raise AssertionError(f"{mode} ignored GPU execution")
@@ -124,32 +139,39 @@ def run(binary, model, mode, backend, sampling=None):
     return traces
 
 
-def check_sampling(binary, model, draft, policies):
+def sampling_backends(draft, policies, selection):
+    if selection in ("ar", "both"):
+        yield "AR", []
+    if selection == "ar":
+        return
     for policy in policies:
-        backend = (["--speculative-decoding", "dflash"] if policy == "fixed" else
-                   ["--speculative", "dflash2"])
-        backend += ["--dflash-model", draft,
+        backend = ["--speculative", "dflash2", "--dflash-model", draft,
                    "--draft-policy", policy]
+        yield policy, backend
+
+
+def check_sampling(binary, model, draft, policies, selection="both"):
+    for policy, backend in sampling_backends(draft, policies, selection):
         for config in SAMPLING_CASES:
             prompt = run(binary, model, "prompt", backend, config)
             chat = run(binary, model, "chat", backend, config)
             replay = run(binary, model, "chat", backend, config)
             if prompt[0] != chat[0] or chat != replay:
                 raise AssertionError(f"seeded prompt/chat mismatch: {policy} {config}")
-        print(f"{policy}: six sampling configurations, prompt and two chat turns replay")
+        print(f"{policy}: {len(SAMPLING_CASES)} sampling configurations, "
+              "prompt and two chat turns replay")
 
 
-def check_http(binary, model, draft, policies):
+def check_http(binary, model, draft, policies, selection="both"):
     prompt = "Continue the pattern red, blue, blue, red, blue, blue,"
     messages = [{"role": "user", "content": prompt}]
     defaults = SAMPLING_CASES[4]
-    for policy in policies:
+    for policy, backend in sampling_backends(draft, policies, selection):
         # CLI and HTTP raw framing must use identical sampling settings.
         direct = subprocess.run(
             [binary, "prompt", "--model", model, "--raw", "--verbose",
              "--max-tokens", "8", *sampling_flags(defaults),
-             "--speculative", "dflash2", "--dflash-model", draft,
-             "--draft-policy", policy, prompt],
+             *backend, prompt],
             text=True, capture_output=True, timeout=180, check=True)
         completion = direct.stdout.split("--- Generation Output ---\n", 1)[1]
         completion = re.split(r"Generated \d+ tokens on GPU in ", completion)[0]
@@ -167,8 +189,7 @@ def check_http(binary, model, draft, policies):
                  "--model", model, "--context", "512", "--sessions", "2",
                  "--served-model-name", "qwen27b-wiring-test",
                  "--max-tokens", "8", *sampling_flags(defaults),
-                 "--speculative", "dflash2", "--dflash-model", draft,
-                 "--draft-policy", policy], stdout=log, stderr=log)
+                 *backend], stdout=log, stderr=log)
 
             def request(path, body=None, expected=200):
                 if body is not None:
@@ -211,6 +232,13 @@ def check_http(binary, model, draft, policies):
                     raise AssertionError("serve CLI sampling defaults were lost")
                 if completion.removesuffix("\n") != explicit["choices"][0]["text"]:
                     raise AssertionError("prompt and actual HTTP sampling differ")
+                unseeded = request("/v1/completions", {
+                    "prompt": prompt, **defaults, "seed": -1})
+                count = unseeded["usage"]["completion_tokens"]
+                drafts = unseeded["usage"].get("draft_tokens", 0)
+                if (not 0 <= count <= 8 or (not backend and drafts != 0) or
+                        (backend and count > 1 and drafts == 0)):
+                    raise AssertionError("unseeded request ignored its sampling backend")
                 for config in SAMPLING_CASES:
                     # Reset omitted controls rather than inheriting the intentionally
                     # nontrivial serve defaults.
@@ -221,8 +249,10 @@ def check_http(binary, model, draft, policies):
                     raw = request("/v1/completions", {"prompt": prompt, **sampling})
                     replay = request("/v1/completions", {"prompt": prompt, **sampling})
                     text = raw["choices"][0]["text"]
-                    if raw["choices"] != replay["choices"] or raw["usage"]["draft_tokens"] <= 0:
-                        raise AssertionError(f"HTTP sampling bypassed drafts or failed replay: {config}")
+                    drafts = raw["usage"].get("draft_tokens", 0)
+                    if (raw["choices"] != replay["choices"] or
+                            (drafts > 0) != bool(backend)):
+                        raise AssertionError(f"HTTP sampling backend or replay differs: {config}")
                     for path, payload in (("/completion", {"prompt": prompt}),
                                           ("/infill", {"input_prefix": prompt})):
                         if request(path, {**payload, **sampling})["content"] != text:
@@ -261,10 +291,19 @@ def check_http(binary, model, draft, policies):
                     ("/completion", {"prompt": prompt}),
                     ("/infill", {"input_prefix": prompt}),
                 ):
-                    for field, value in (("draft_temperature", 0.8), ("top_p", 0),
-                                         ("temperature", -1), ("seed", 1.5)):
+                    for field, value in (
+                            ("draft_temperature", 0.8), ("top_p", 0),
+                            ("temperature", -1), ("seed", 1.5),
+                            ("samplers", ["top_k", "temperature"]),
+                            ("typical_p", 0.9), ("tfs_z", 0.9),
+                            ("mirostat", 2), ("mirostat_eta", 0.1),
+                            ("mirostat_tau", 5), ("dynatemp_range", 0.5),
+                            ("dynatemp_exponent", 1),
+                            ("xtc_probability", 0.5), ("dry_multiplier", 0.8),
+                            ("top_n_sigma", 2), ("logit_bias", {"42": 1})):
                         request(path, {**payload, field: value}, expected=400)
-                print(f"{policy}: serve defaults, six HTTP adapters, sampling replay, SSE and C2 exact")
+                print(f"{policy}: {len(SAMPLING_CASES)} sampling configurations, "
+                      "serve defaults, six HTTP adapters, replay, SSE and C2 exact")
             finally:
                 process.terminate()
                 try:
@@ -279,7 +318,7 @@ def check_bench(binary, model, draft):
               "-p", "16", "-n", "8", "-d", "0,32", "-r", "2"]
     baseline = None
     backends = [[]] + [
-        ["--speculative", "dflash-2" if policy == "fixed" else "dflash2",
+        ["--speculative", "dflash2",
          "--dflash-model", draft,
          "--draft-policy", policy] for policy in ("fixed", "adaptive")
     ]
@@ -311,6 +350,9 @@ def main():
     parser.add_argument("--scope", choices=("all", "options", "sampling", "http"),
                         default="all")
     parser.add_argument("--policy", choices=("fixed", "adaptive"))
+    parser.add_argument("--backend", choices=("ar", "dflash2", "both"),
+                        default="both",
+                        help="backend coverage for the sampling/http scopes")
     args = parser.parse_args()
     binary = args.binary
     policies = [args.policy] if args.policy else ["fixed", "adaptive"]
@@ -321,14 +363,18 @@ def main():
     artifacts = [os.environ.get("GUFO_QWEN27B_" + name + "_MODEL", "")
                  for name in ("MTP", "DFLASH")]
     model = os.environ.get("GUFO_QWEN27B_MODEL", "")
-    required = [model, artifacts[1]] + ([artifacts[0]] if args.scope == "all" else [])
+    required = [model]
+    if args.backend != "ar" or args.scope == "all":
+        required.append(artifacts[1])
+    if args.scope == "all":
+        required.append(artifacts[0])
     if not all(path and Path(path).is_file() for path in required):
-        print("Qwen27B CLI test needs target, MTP and DFlash model artifacts")
+        print("Qwen27B CLI test is missing a selected model artifact")
         return 77
     if args.scope in ("all", "sampling"):
-        check_sampling(binary, model, artifacts[1], policies)
+        check_sampling(binary, model, artifacts[1], policies, args.backend)
     if args.scope in ("all", "http"):
-        check_http(binary, model, artifacts[1], policies)
+        check_http(binary, model, artifacts[1], policies, args.backend)
     if args.scope != "all":
         return 0
     baseline = None

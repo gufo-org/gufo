@@ -36,34 +36,72 @@ Artifact variables `GUFO_QWEN27B_*_MODEL` are test inputs, not execution switche
 
 The maintained executable test is `tests/models/qwen27b/cli_test.py`.
 Use `--scope options` without models, or `--scope sampling` / `--scope http`
-with target/draft artifact variables to check only the affected surface.
-It covers temperatures 0, 0.05, 0.8 and 2; deterministic top-k; minimum
-candidate floors; combined filters; positive/negative penalties; disabled
-history; seeded replay; both controllers; streaming; and C2 state isolation.
-GPU operator tests separately compare 576 sampling quantiles against the
-independent CPU distribution, including `top-k=1,min-keep>1`. Sampled verifier
-tests check target probabilities, not equality to AR's different RNG sequence.
+with artifact variables. `--backend ar` needs only the target;
+`--backend dflash2` adds the draft; the default checks both. The 15 executable
+cases cover individual controls and combinations across six HTTP adapters,
+seeded replay, unseeded requests, streaming and C2 state isolation.
+Terminal checks use four tokens per turn; HTTP checks use eight.
+
+`sampling_cases.hpp` holds 23 named cases shared by CPU, GPU and model tests:
+greedy; cold/normal/hot temperature; top-k, top-p and min-p independently;
+each minimum-candidate floor; repetition penalty/reward; positive/negative
+frequency and presence penalties; history disabled, one token and longer
+windows; and combined filters. Seeds include 0, 73 and 808.
+
+The GPU test checks 216 configurations (864 AR quantiles). Its 141 random
+configurations also bracket each acceptance probability **p/q** and check the
+normalized positive **p−q** residual CDF against the double-precision CPU
+reference (2e-5 probability tolerance). Four additional controls use the full
+248,320-token vocabulary. Exact nucleus cutoffs, cross-thread argmax ties,
+zero random draws and underflow have regressions. CPU replay checks 1,472
+steps against the reference, with evolving committed history.
+
+For quick model qualification, load a target and optional draft once:
+
+```sh
+nix develop -c build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test \
+  "$MODEL" "$DRAFT" --sampling-only
+# Omit "$DRAFT" for AR only; add --fixed for the fixed DFlash2 controller.
+# Do not also set GUFO_QWEN27B_DFLASH_MODEL when passing a draft positional path.
+```
+
+Each named case checks four generated tokens, cold/cached replay for both
+backends, first-token equality and actual drafting. Deterministic strategies
+must match all AR IDs. Sampled strategies preserve the target distribution;
+AR and DFlash2 consume different RNG sequences, so their full sampled
+continuations need not match. This is a finite, explicit coverage matrix,
+not a claim to test every numeric parameter combination or model capability.
 
 ## Executable and sampling contract
 
 | Entry point | Qwen27B behavior |
 | --- | --- |
-| `prompt`, `chat` | Shared target sampling and GPU DFlash2 implementation; `fixed`/`adaptive`, draft length cap and legacy backend aliases. Chat reads stdin and rejects prompt-only input/display arguments and raw framing. |
+| `prompt`, `chat` | Shared target sampling and GPU DFlash2 implementation; `fixed`/`adaptive` and draft length cap. Chat reads stdin and rejects prompt-only input/display arguments and raw framing. |
 | `bench` | Greedy, C1, with AR/MTP/DFlash2; sampling flags are rejected. Qwen C>1 measurements use the HTTP benchmark. |
 | `serve`, `serve llm`, `gufo-server` | DFlash2 and sampling defaults from startup; request sampling overrides across OpenAI chat/completions/responses, Anthropic messages, and llama completion/infill. `--cpu` is removed. |
 | `eval` | Uses the connected server's draft configuration and sampling defaults; `--greedy` overrides temperature only. |
 | `video`, `transcribe`/`asr`, audio/video serving, `diagnose`/`info`, `probe` | Do not run Qwen27B DFlash2; unsupported draft flags fail explicitly. |
+
+Use `--speculative dflash2` in prompt, chat, bench and serving. `off` disables
+speculation. Each behavior has one spelling.
 
 The target supports temperature, top-k, top-p, min-p, min-keep, seed,
 repeat penalty/window, frequency penalty and presence penalty. Ordering is
 penalties → top-k → top-p → min-p → temperature. `min-keep` is a floor even
 when top-k is 1. At temperature 0 the final choice is greedy.
 
+Qwen AR and DFlash2 apply these operations on the GPU, including acceptance
+and residual sampling. The CPU holds request history and RNG state; cached
+host logits are uploaded before sampling. The shared CPU sampler supplies
+reference/generic paths and is also used by DS4 serving.
+
 DFlash2 shares the target temperature and samples its trained top-16 selector.
 There are no independent draft temperature/filter/seed controls. Target
 filters and penalties apply to **p**; verification uses the actual proposal
 **q**. Unsupported draft sampling fields and unsupported alternative sampler
 fields in HTTP requests return an error instead of being ignored.
+This includes typical/tail-free/Mirostat/dynamic-temperature, XTC, DRY,
+top-n-sigma, custom sampler ordering and logit bias; these are unsupported.
 The block controller is configured when starting the server, not per request.
 OpenAI chat and server defaults bound temperature to [0,2]; the native sampler
 accepts any finite nonnegative temperature.
@@ -87,6 +125,14 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Sampling qualification](sampling-strategies.json): all 12 combinations of
+  Q4/Q8 targets, Q4/Q8/BF16 drafts and fixed/adaptive controllers pass the
+  23-case AR/DFlash2 replay check. HTTP passes AR on both targets, all six
+  adaptive target/draft pairings, and fixed Q4 drafts on both targets, each
+  with 15 configurations across six adapters. Final release checks cover
+  options, a bounded Q4/Q4 benchmark replay, and 15 prompt/chat configurations
+  for Q4 AR and Q8/BF16 adaptive DFlash2. These are correctness probes, not
+  new speed measurements.
 - Q4 and Q8: fixed 24/29/24-token prefixes, eight forced continuation tokens
   each. Repeated prefill and snapshot continuation are byte-identical. All
   24 batched-verifier logit rows per target equal scalar decode byte for
