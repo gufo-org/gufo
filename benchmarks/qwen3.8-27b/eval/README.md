@@ -125,13 +125,14 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
-- [Latest exact verification](dflash2-dot-order.json): Q5 batch-8 dot ordering
-  and compact IQ4 staging preserve both target replay suites, all 270 draft
-  trace files and every measured AR token ID/acceptance count. Three kernel
-  suites pass; all three selected variants have zero private scratch.
-  Paired release probes gain 2.2% on repetition/JSON; prose is essentially
-  unchanged. Depth 0/4096 traces match. The preceding
-  [scalar/row-reuse pass](dflash2-scalar-row-reuse.json) remains documented.
+- [Latest exact verification](dflash2-midbatch.json): four Q5 FFN layouts at
+  widths 4–6 preserve both target replay suites, all 270 draft trace files
+  and every measured AR token ID/acceptance count. Three kernel suites pass;
+  all four selected variants have zero private scratch. Prose gains 0.65%,
+  JSON measures 0.23% lower in the short paired release probe, and depth
+  0/4096 traces match. Packed-bit lane sharing was exact but slower: rejected.
+  Preceding [batch-eight scheduling](dflash2-dot-order.json) and
+  [scalar/row reuse](dflash2-scalar-row-reuse.json) remain documented.
 - [Packed decoding and verification](dflash2-packed-decode.json): 40 retained
   projection cases cover widths 3–8 with finite, bit-exact output comparisons.
   Both target suites and all 270 draft trace files pass the scale/index update;

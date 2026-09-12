@@ -1710,6 +1710,32 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                    WType == core::GgmlType::kQ5_K)) {
       if (FitsSmallBatch32BitIndices(
               Batch, m, k, quant::QuantizedRowBytes(WType, k))) {
+        if constexpr (WType == core::GgmlType::kQ5_K && Batch >= 4 &&
+                      Batch <= 6) {
+          const auto launch_rows =
+              [&]<std::size_t Tiles, std::size_t TokensPerStep = Batch>() {
+            SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, Tiles, 4,
+                                               1, true, TokensPerStep>
+                <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
+          };
+          // Four output rows amortize activation staging at these FFN shapes.
+          if (m == 5120 && k == 17408) {
+            if constexpr (Batch == 4) {
+              launch_rows.template operator()<1, 2>();
+            } else if constexpr (Batch == 5) {
+              launch_rows.template operator()<1>();
+            } else {
+              launch_rows.template operator()<2>();
+            }
+            return;
+          }
+          if constexpr (Batch == 5) {
+            if (m == 17408 && k == 5120) {
+              launch_rows.template operator()<2>();
+              return;
+            }
+          }
+        }
         if constexpr (WType == core::GgmlType::kQ5_K && Batch >= 7) {
           const auto launch_rows =
               [&]<std::uint32_t Waves, std::size_t TokensPerStep = Batch>() {

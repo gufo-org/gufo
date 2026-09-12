@@ -322,6 +322,26 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
         };
         narrow.template operator()<1>("narrow_tile1");
         narrow.template operator()<2>("narrow_tile2");
+        if constexpr (Type == core::GgmlType::kQ5_K && Batch >= 4 &&
+                      Batch <= 6) {
+          const auto rows4 =
+              [&]<std::size_t Tiles, std::size_t TokensPerStep = Batch>(
+                  const char* name) {
+                geometries.push_back({name, [&](const void* w) {
+                  SmallBatchKQuantExactFp32GEMMKernel<
+                      16, Batch, 4, Type, Tiles, 4, 1, true, TokensPerStep>
+                      <<<(rows + 63) / 64, 512>>>(
+                          w, input.Get(), output.Get(), rows, columns);
+                }});
+              };
+          if constexpr (Batch == 4) {
+            rows4.template operator()<1, 2>("rows4_tile1_step2");
+          } else {
+            rows4.template operator()<2>("rows4_tile2");
+            if constexpr (Batch == 5)
+              rows4.template operator()<1>("rows4_tile1");
+          }
+        }
         if constexpr ((Batch >= 7 && Type == core::GgmlType::kQ5_K) ||
                       (Batch == 8 && Type == core::GgmlType::kIQ4_XS)) {
           geometries.push_back(
