@@ -27,7 +27,7 @@ Other rows remain the reference sweep at `023a13a`. Full refresh: TODO.
 
 Recommended **Q4_K_M draft, adaptive controller**, pp2048/tg128, in tok/s.
 One timed repetition after warmup; every measured row matches all 128 AR IDs.
-Latest bounded refresh covers depths 0 and 4096.
+These depth rows precede the latest kernel changes. Refresh: **TODO**.
 
 | Context depth | Q4 pp / tg | Q8 pp / tg |
 | ---: | ---: | ---: |
@@ -37,7 +37,7 @@ Latest bounded refresh covers depths 0 and 4096.
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-[Latest Q4 measurements](eval/dflash2-head-iq4.json);
+[Q4 depth measurements](eval/dflash2-head-iq4.json);
 [preceding Q8 measurements](eval/dflash2-batch-widths.json).
 The [controller comparison](eval/dflash2-controllers.json) remains separate.
 Earlier [fixed-block precision results](eval/dflash2-rollback.json) and the
@@ -91,55 +91,36 @@ prompt; fixed can be faster with Q8/BF16 drafts. Draft files occupy
 advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
-**Q4 target/Q4 draft at `941e4bc`:** greedy C1, including prefill. Two timed
-samples per binary in ABBA order; fixed-seven repetition has four.
-No separate warmup. JSON/prose use upstream raw prompts; repetition asks
-for 1,000 space-separated `red` words.
+**Latest Q4 target/Q4 draft:** greedy C1, including prefill and excluding
+model loading. Two timed samples per binary in ABBA order; JSON has four
+across two comparisons. No separate warmup. Changes compare binaries within
+this probe, not against earlier tables measured at different times.
 
-| Workload | Current tok/s | Change in paired probe |
+| Workload | Current tok/s | Paired change |
 | --- | ---: | ---: |
-| Repetition, tg128, fixed-7 | **53.79** | −0.1%, within noise |
-| JSON, tg300, adaptive | **48.50** | +0.2% |
-| Prose, tg300, adaptive | **22.17** | +0.3% |
-| Repetition, tg128, fixed-1 control | **18.83** | +12.6% |
+| Repetition, tg128, fixed-7 | **54.15** | +0.3% |
+| JSON, tg300, adaptive | **48.50** | +0.4% |
+| Prose, tg300, adaptive | **22.12** | +0.1%, effectively flat |
 
-Every token ID and acceptance statistic is unchanged; repetition accepts
-111/111 proposals at fixed-7 and 63/63 at fixed-1. One proposal requires
-two target rows: anchor plus proposal. Reusing activations across four
-output rows and enabling branchless decoding cuts that verification from
-101.4 to 88.8 ms in the profile, with bit-identical output and no spills.
-Adaptive workloads mostly use larger blocks, so their total gain is smaller.
-[Measurements and quality checks](eval/dflash2-width2.json).
+Every token ID and acceptance statistic is unchanged. Alternating FMA
+multiplication operands in Q5 batch-eight projections reduces their profiled
+GPU time by 0.93%, with no spills or changed accumulation order.
+[Measurements and quality checks](eval/dflash2-fma-order.json).
 
-The latest [mixed-format scalar specialization](eval/dflash2-mixed-formats.json)
-raises depth-zero AR generation from 11.685 to **11.74 tok/s** (+0.5%).
-Two samples per binary retain every token ID. One-pair JSON/prose DFlash2
-controls are unchanged within noise; the speculative table above remains
-the preceding measurement. Prefill is not optimized by this change.
+[Mixed-format scalar specialization](eval/dflash2-mixed-formats.json) raises
+AR generation to **11.74 tok/s** at depth zero. Earlier work covers
+[two-token verification](eval/dflash2-width2.json) and
+[compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json).
+The [quality report](eval/README.md) indexes the remaining evidence.
 
-Partial token groups, transposed staging, repacked Q5 headers and streaming
-loads did not improve speed. Splitting batch-eight verification between
-workgroups was slower. Rounded EMA and a smaller initial controller prior
-regress prose; the cost-aware controller remains the default.
-
-Preceding work covers [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json),
-[medium Q5 projections and controller trials](eval/dflash2-middle-projections.json),
-[batch-eight scheduling](eval/dflash2-row-scheduling.json),
-[IQ4/vocabulary projections](eval/dflash2-head-iq4.json),
-[widths 4–6](eval/dflash2-midbatch.json),
-[scalar/row reuse](eval/dflash2-scalar-row-reuse.json) and
-[packed verification](eval/dflash2-packed-decode.json).
-Alternative Q6 head layouts, weight copies and broader loop reordering were
-not retained. The peak calibrator checks its work before reporting rates.
+Compiler scheduling flags did not change the emitted kernels; scheduling
+boundaries and expanded Q5 codes were slower. Rounded EMA and a smaller
+initial controller prior regressed prose. None is retained.
 
 The upstream headline uses different artifacts/power and excludes prefill;
 it is not a matched engine comparison. [Source audit and comparison limits](eval/llama-comparison.json).
-Earlier records cover [all-precision repetition](eval/dflash2-wiring.json),
-[sampling controls](eval/dflash2-sampling.json),
-[staging layouts](eval/dflash2-batch-widths.json) and
-[BF16/quantized projections](eval/dflash2-exact-gemm.json).
-The earlier [rollback pass](eval/dflash2-rollback.json) saves **50.5 MiB per session**
-and fixes cache addressing across mixed capacities and at logical context 262,144.
+The [rollback pass](eval/dflash2-rollback.json) saves **50.5 MiB per session**
+and qualifies mixed cache capacities and logical context 262,144.
 
 ## Reproduce
 

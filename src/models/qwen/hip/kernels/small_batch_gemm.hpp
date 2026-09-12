@@ -396,10 +396,21 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
                   const float4 xv = *reinterpret_cast<const float4*>(
                       staged_x + token * kTileStride + slot * kStride +
                       input_group * 4);
-                  dots[r][local_token] += q0 * xv.x;
-                  dots[r][local_token] += q1 * xv.y;
-                  dots[r][local_token] += q2 * xv.z;
-                  dots[r][local_token] += q3 * xv.w;
+                  // Alternating operand positions helps paired FMA issue on
+                  // gfx1151 without changing products or accumulation order.
+                  const bool swap = ((r ^ token) & 1U) != 0U;
+                  dots[r][local_token] =
+                      swap ? __builtin_fmaf(xv.x, q0, dots[r][local_token])
+                           : __builtin_fmaf(q0, xv.x, dots[r][local_token]);
+                  dots[r][local_token] =
+                      swap ? __builtin_fmaf(xv.y, q1, dots[r][local_token])
+                           : __builtin_fmaf(q1, xv.y, dots[r][local_token]);
+                  dots[r][local_token] =
+                      swap ? __builtin_fmaf(xv.z, q2, dots[r][local_token])
+                           : __builtin_fmaf(q2, xv.z, dots[r][local_token]);
+                  dots[r][local_token] =
+                      swap ? __builtin_fmaf(xv.w, q3, dots[r][local_token])
+                           : __builtin_fmaf(q3, xv.w, dots[r][local_token]);
                 }
               }
             }

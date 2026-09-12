@@ -131,6 +131,14 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Q5 batch-eight FMA scheduling](dflash2-fma-order.json): alternating
+  multiplication operands retains all 51 Q4 verifier/scalar logit rows,
+  cache/context controls and all 90 draft trace files. Both kernel suites
+  and the maintained Q5 partial-row/tile probe pass. All 16 release
+  continuations and acceptance statistics match their AR references.
+  JSON improves 0.35%, repetition 0.31%, and prose is effectively flat.
+  The affected kernel union takes 0.93% less GPU time with zero scratch.
+  Q8 target and Q8/BF16 draft artifacts contain no Q5 tensors.
 - [Mixed-format scalar projections](dflash2-mixed-formats.json): independently
   specializing gate/up formats retains all 51 Q4 verifier/scalar logit rows,
   the cache/context controls and all 90 Q4 draft trace files. The consolidated
@@ -139,7 +147,7 @@ injection; the complete serialized history must remain byte-identical.
   kernel union takes 3.6% less GPU time; the four new variants have no spills.
   No Q8-target tensor pair selects a new specialization; its preceding
   full-model qualification remains below.
-- [Latest exact verification](dflash2-width2.json): two-token Q4/Q5/IQ4/Q6
+- [Two-token verification](dflash2-width2.json): two-token Q4/Q5/IQ4/Q6
   projections preserve 51 verifier/scalar full-logit rows on each target,
   mixed-capacity and logical-context controls, all 90 Q4 draft trace files,
   and every measured AR ID/acceptance statistic. Three kernel suites and
