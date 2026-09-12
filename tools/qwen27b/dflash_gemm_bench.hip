@@ -338,6 +338,7 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                 }});
               };
           if constexpr (Type == core::GgmlType::kQ5_K && Batch == 4) {
+            rows4.template operator()<1>("rows4_tile1");
             rows4.template operator()<1, 2>("rows4_tile1_step2");
           } else {
             rows4.template operator()<2>("rows4_tile2");

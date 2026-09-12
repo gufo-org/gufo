@@ -96,24 +96,28 @@ upstream raw prompts; repetition asks for 1,000 space-separated `red` words.
 
 | Workload | Current tok/s | Change in paired probe |
 | --- | ---: | ---: |
-| Repetition, tg128, fixed-7 | **53.39** | +0.5% |
-| JSON, tg300, adaptive | **47.83** | +0.3% |
+| Repetition, tg128, fixed-7 | **53.84** | +1.0% |
+| JSON, tg300, adaptive | **48.24** | +1.0% |
 | Prose, tg300, adaptive | **21.99** | Flat |
 
 Every token ID and acceptance statistic is unchanged; repetition accepts
-111/111 proposals. Batch-eight Q5 FFN scheduling gains 1.5–2.3% on real mapped
-GGUF tensors, with bit-identical outputs and no spills. The paired model
-improvement is small; prefill has no established gain.
-[Measurements and quality checks](eval/dflash2-row-scheduling.json).
-The repaired peak calibrator checks its work before reporting rates.
+111/111 proposals. Medium-size Q5 projections at batches four/eight gain
+2.1–8.7% on actual GGUF tensors, with bit-identical outputs and no spills.
+The paired model improvement is about 1%; prose is flat.
+[Measurements and quality checks](eval/dflash2-middle-projections.json).
 
-Preceding work covers [IQ4 and vocabulary projections](eval/dflash2-head-iq4.json),
+The rounded-EMA controller reaches 49.60 tok/s on JSON in a one-run pilot,
+but slows prose from 22.13 to 21.11 tok/s; it is not retained. Starting the
+current controller less aggressively also trades JSON speed for a prose loss.
+All pilot token IDs match AR. The cost-aware controller remains the default.
+
+Preceding work covers [batch-eight scheduling](eval/dflash2-row-scheduling.json),
+[IQ4/vocabulary projections](eval/dflash2-head-iq4.json),
 [widths 4–6](eval/dflash2-midbatch.json),
-[batch-eight token grouping](eval/dflash2-dot-order.json),
 [scalar/row reuse](eval/dflash2-scalar-row-reuse.json) and
 [packed verification](eval/dflash2-packed-decode.json).
-The fixed-length pilot supports the current controller cost estimate;
-copying weights and broader loop reordering were not retained.
+Alternative Q6 head layouts, weight copies and broader loop reordering were
+not retained. The peak calibrator checks its work before reporting rates.
 
 The upstream headline uses different artifacts/power and excludes prefill;
 it is not a matched engine comparison. [Source audit and comparison limits](eval/llama-comparison.json).

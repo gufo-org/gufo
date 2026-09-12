@@ -1741,7 +1741,18 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                                1, true, TokensPerStep>
                 <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
           };
-          // Four output rows amortize activation staging at these FFN shapes.
+          // Four output rows amortize staging for the FFNs and these two
+          // smaller projections. The latter benefit at verification width 4.
+          if constexpr (Batch == 4) {
+            if (m == 5120 && k == 6144) {
+              launch_rows.template operator()<1, 2>();
+              return;
+            }
+            if (m == 6144 && k == 5120) {
+              launch_rows.template operator()<1>();
+              return;
+            }
+          }
           if (m == 5120 && k == 17408) {
             if constexpr (Batch == 4) {
               launch_rows.template operator()<1, 2>();
@@ -1767,14 +1778,16 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                 <<<(m + Waves * 4 - 1) / (Waves * 4), Waves * 32, 0,
                    stream>>>(w, fp32_x, y, m, k);
           };
-          // Large batch-8 FFNs finish one token's dots at a time. The long
-          // down projection also amortizes staging across more waves.
+          // These batch-8 projections finish one token's dots at a time.
+          // The long FFN down projection shares staging across more waves.
           if constexpr (Batch == 8) {
             if (m == 5120 && k == 17408) {
               launch_rows.template operator()<16, 1>();
               return;
             }
-            if (m == 17408 && k == 5120) {
+            if ((m == 5120 && k == 6144) ||
+                (k == 5120 && (m == 1024 || m == 6144 || m == 10240 ||
+                              m == 12288 || m == 17408))) {
               launch_rows.template operator()<8, 1>();
               return;
             }

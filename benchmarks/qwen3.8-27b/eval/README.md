@@ -125,15 +125,15 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
-- [Latest exact verification](dflash2-row-scheduling.json): batch-eight Q5 FFN
-  scheduling preserves both target replay suites, all 270 draft trace files
-  and every measured AR token ID/acceptance statistic. Three kernel suites
-  and real-GGUF projection controls pass; both variants retain zero scratch.
-  Paired JSON gains 0.32%, repetition 0.53%, and prose is flat. The repaired
-  roofline probe passes host checksum and emitted-instruction checks.
-  Preceding [IQ4/vocabulary work](dflash2-head-iq4.json),
-  [widths 4–6](dflash2-midbatch.json),
-  [batch-eight token grouping](dflash2-dot-order.json) and
+- [Latest exact verification](dflash2-middle-projections.json): medium-size
+  Q5 projections at batches four/eight preserve both target replay suites,
+  all 270 draft trace files and every measured AR token ID/acceptance statistic.
+  Three kernel suites and actual-GGUF controls pass with zero scratch.
+  Paired JSON gains 0.95%, repetition 0.99%, and prose is flat. Rounded EMA and
+  a smaller initial prior also match AR IDs, but both regress prose and are
+  rejected. Preceding [batch-eight scheduling](dflash2-row-scheduling.json),
+  [IQ4/vocabulary work](dflash2-head-iq4.json),
+  [widths 4–6](dflash2-midbatch.json) and
   [scalar/row reuse](dflash2-scalar-row-reuse.json) remain documented.
 - [Packed decoding and verification](dflash2-packed-decode.json): 40 retained
   projection cases cover widths 3–8 with finite, bit-exact output comparisons.
