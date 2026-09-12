@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -17,6 +18,8 @@
 
 #include "src/cli/serve/json.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/core/speculative/speculative_verifier.hpp"
+#include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
@@ -130,6 +133,108 @@ void CaptureReferenceTrace(
   std::cout << "DFlash reference trace: " << directory << '\n';
 }
 
+void CaptureAcceptanceTrace(
+    const std::shared_ptr<const gufo::hip::QwenGpuModel>& target_model,
+    const std::shared_ptr<const gufo::hip::QwenDFlashGpuModel>& draft_model,
+    const char* input_path, const char* output_path) {
+  using gufo::server::json::Value;
+  using Token = gufo::tokenization::TokenId;
+  std::ifstream input(input_path);
+  Expect(input.good(), "open acceptance trace request");
+  const auto request = gufo::server::json::parse(
+      std::string(std::istreambuf_iterator<char>(input), {}));
+  const auto text = request.member_str("prompt");
+  const auto limit = request.member_size("max_tokens", 128);
+  Expect(!text.empty() && limit > 0 && limit <= 256,
+         "acceptance trace requires a prompt and 1..256 output tokens");
+  std::string rendered = text;
+  if (const auto* raw = request.find("raw");
+      raw == nullptr || !raw->as_bool()) {
+    const std::vector<gufo::tokenization::ChatMessage> messages{
+        {gufo::tokenization::ChatRole::kSystem,
+         "You are a helpful, respectful, and honest assistant.", "", ""},
+        {gufo::tokenization::ChatRole::kUser, text, "", ""},
+    };
+    const auto chat = gufo::tokenization::QwenChatTemplate::Render(
+        messages, {.add_generation_prompt = true, .enable_thinking = false});
+    Expect(chat.has_value(), "render acceptance trace prompt");
+    rendered = *chat;
+  }
+  const auto& tokenizer = target_model->GetTokenizer();
+  const auto prompt = tokenizer.Encode(rendered);
+  Expect(prompt.size() + limit < 2048, "bounded acceptance trace context");
+  std::string error;
+  auto executor =
+      gufo::hip::QwenGpuExecutor::Create(target_model, &error, 2048);
+  Expect(executor != nullptr, error);
+  gufo::models::GenerationOptions generation;
+  generation.max_new_tokens = limit;
+  const auto reference = executor->Generate(prompt, generation);
+  Expect(!reference.empty(),
+         "acceptance trace needs a nonempty AR continuation");
+  auto backend = gufo::hip::QwenDFlashGpuDraftBackend::Create(
+      draft_model, {.max_context = 2048, .max_draft_tokens = 7}, &error);
+  Expect(backend != nullptr, error);
+  auto* inspect = backend.get();
+  gufo::speculative::SpeculativeVerifier verifier(
+      *executor, std::move(backend),
+      {.max_draft_tokens = 7,
+       .initial_draft_tokens = 7,
+       .enable_adaptive_draft_length = false,
+       .use_batched_verification = true});
+  Token current = verifier.Prime(prompt);
+  auto sequence = prompt;
+  sequence.push_back(current);
+  std::vector<Token> output{current};
+  auto rows = Value::array();
+  while (output.size() < limit) {
+    const auto budget = static_cast<std::uint32_t>(limit - output.size());
+    // Observe the exact next proposal without advancing its logical state.
+    const auto saved = inspect->Snapshot();
+    const auto proposed = inspect->Propose(
+        sequence, static_cast<std::uint32_t>(sequence.size() - 1),
+        std::min(7U, budget - 1));
+    inspect->RestoreSnapshot(*saved);
+    const auto step = verifier.VerifyStep(
+        sequence, static_cast<std::uint32_t>(sequence.size() - 1), current,
+        tokenizer.GetEosTokenId(), budget);
+    Expect(step.draft_count == proposed.tokens.size(), "trace proposal replay");
+    auto row = Value::object();
+    row["offset"] = output.size();
+    row["drafted"] = step.draft_count;
+    row["accepted"] = step.accepted_count;
+    row["proposed"] = tokenizer.Decode(proposed.tokens);
+    row["emitted"] = tokenizer.Decode(step.emitted_tokens);
+    if (step.accepted_count < proposed.tokens.size()) {
+      row["rejected"] = tokenizer.Decode(
+          std::span(proposed.tokens).subspan(step.accepted_count, 1));
+      row["correction"] = tokenizer.Decode(
+          std::span(step.emitted_tokens).subspan(step.accepted_count, 1));
+    }
+    rows.push_back(std::move(row));
+    for (std::size_t index = 0; index < step.emitted_tokens.size(); ++index) {
+      if (step.hit_eos && index + 1 == step.emitted_tokens.size())
+        break;
+      const auto token = step.emitted_tokens[index];
+      output.push_back(token);
+      sequence.push_back(token);
+    }
+    if (step.hit_eos)
+      break;
+    current = step.next_token;
+  }
+  Expect(output == reference, "acceptance trace must reproduce every AR ID");
+  auto document = Value::object();
+  document["request"] = request;
+  document["completion"] = tokenizer.Decode(output);
+  document["tokens"] = output.size();
+  document["exact_ar"] = true;
+  document["steps"] = std::move(rows);
+  std::ofstream file(output_path);
+  file << document.dump() << '\n';
+  Expect(file.good(), "write acceptance trace");
+}
+
 }  // namespace
 
 int main(int argc, const char* const* argv) {
@@ -166,6 +271,10 @@ int main(int argc, const char* const* argv) {
 
     if (argc == 5 && std::string_view(argv[3]) == "--trace") {
       CaptureReferenceTrace(target_model, dflash_model, argv[4]);
+      return 0;
+    }
+    if (argc == 6 && std::string_view(argv[3]) == "--acceptance-trace") {
+      CaptureAcceptanceTrace(target_model, dflash_model, argv[4], argv[5]);
       return 0;
     }
 

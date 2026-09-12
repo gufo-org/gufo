@@ -365,7 +365,6 @@ void PrintServeHelp(std::string_view program_name,
         static_cast<std::size_t>(4) * 1024U * 1024U * 1024U;
     std::size_t cache_disk_staging_bytes =
         static_cast<std::size_t>(512) * 1024U * 1024U;
-    bool force_cpu = false;
 
     gufo::cli::ArgParser parser(
         std::string(program_name) + " serve llm",
@@ -472,9 +471,6 @@ void PrintServeHelp(std::string_view program_name,
         "", "--cache-disk-staging-bytes", "N",
         "Single-operation RAM staging byte limit (default: 536870912)", "Cache",
         &cache_disk_staging_bytes);
-    parser.AddFlag("", "--cpu",
-                   "Force CPU OpenMP execution fallback instead of GPU ROCm",
-                   "Hardware", &force_cpu);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
     parser.PrintHelp();
@@ -927,7 +923,6 @@ int RunServe(std::span<const char* const> args) {
         static_cast<std::size_t>(4) * 1024U * 1024U * 1024U;
     std::size_t cache_disk_staging_bytes =
         static_cast<std::size_t>(512) * 1024U * 1024U;
-    bool force_cpu = false;
 
     gufo::cli::ArgParser llm_parser(
         "gufo serve llm",
@@ -1031,9 +1026,6 @@ int RunServe(std::span<const char* const> args) {
         "", "--cache-disk-staging-bytes", "N",
         "Single-operation RAM staging byte limit (default: 536870912)", "Cache",
         &cache_disk_staging_bytes);
-    llm_parser.AddFlag(
-        "", "--cpu", "Force CPU OpenMP execution fallback instead of GPU ROCm",
-        "Hardware", &force_cpu);
 
     if (!llm_parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << "\n";
@@ -1095,11 +1087,22 @@ int RunServe(std::span<const char* const> args) {
                 << "' is not supported by the HTTP server\n";
       return 2;
     }
-    if (!draft_policy.empty() &&
-        speculative_config.backend != server::TextSpeculativeBackend::kDFlash)
-      throw std::invalid_argument("--draft-policy requires DFlash2");
-    speculative_config.dflash_policy =
-        speculative::ParseDFlashDraftPolicy(draft_policy);
+    try {
+      if (!draft_policy.empty() &&
+          speculative_config.backend != server::TextSpeculativeBackend::kDFlash)
+        throw std::invalid_argument("--draft-policy requires DFlash2");
+      speculative_config.dflash_policy =
+          speculative::ParseDFlashDraftPolicy(draft_policy);
+    } catch (const std::invalid_argument& exception) {
+      std::cerr << "Error: " << exception.what() << '\n';
+      return 2;
+    }
+    if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&
+        (dflash_model_path.empty() || min_draft_tokens != 1)) {
+      std::cerr << "Error: DFlash2 requires --dflash-model and "
+                   "--min-draft-tokens 1; bound blocks with --draft-tokens\n";
+      return 2;
+    }
     speculative_config.draft_model_path =
         speculative_config.backend == server::TextSpeculativeBackend::kDSpark
             ? dspark_model_path

@@ -87,6 +87,22 @@ prompt; fixed can be faster with Q8/BF16 drafts. Draft files occupy
 advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
+**Repetition control:** ask for 1,000 space-separated `red` words, measure
+128 tokens with adaptive DFlash2, C1, including the short chat prefill.
+One release pass at `784fdba`; all six pairings have **100% acceptance**
+and match all AR token IDs. This measures an easy case, not typical chat.
+
+| Target | AR tok/s | Q4_K_M draft | Q8_0 draft | BF16 draft |
+| --- | ---: | ---: | ---: | ---: |
+| Q4 | 11.20 | **46.24** | 45.73 | 44.10 |
+| Q8 | 6.92 | **42.44** | 42.15 | 40.78 |
+
+The mixed `repetition_sequence` case also asks for an explanation. It reaches
+38.14 tok/s / 80.3% acceptance on Q4 and 22.91 / 47.7% on Q8 with Q4 draft,
+but produces different continuations: 128 tokens versus 81. Q8 accepts all
+34 proposals in its stable repeating section; prose, formatting and the
+terminal block lower the aggregate. [Evidence](eval/dflash2-wiring.json).
+
 Greedy requests with repetition/frequency/presence penalties retain DFlash2
 and reproduce AR. A short C1 chat probe with these penalties reaches
 **30.25–31.43 tok/s on Q4** and **25.89–27.03 on Q8** across the three drafts.

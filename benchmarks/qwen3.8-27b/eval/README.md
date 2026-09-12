@@ -12,9 +12,9 @@ Run on gfx1151 inside Nix. Model-specific tests live in
 
 | Suite | Contract |
 | --- | --- |
-| `fast` | NPU packing, GGUF reference decoding and strict result reporting. |
+| `fast` | Sampling/verifier and HTTP parser regressions, executable option validation, NPU packing, GGUF reference decoding and strict result reporting. |
 | `kernels` | Quantized/BF16 GEMM versus independent/decode controls; exact recurrent state and replay; DFlash convolution, windowed attention, full-vocabulary top-k, sampled selector and verifier distributions. |
-| `model` | Target full-logit replay; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt and multi-turn GPU chat token-ID parity across AR/MTP/DFlash. |
+| `model` | Target full-logit replay; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt/chat/bench parity, seeded multi-turn replay and HTTP adapter sampling. |
 | `serving` | Direct versus served tokens, seeded sampled replay, EOS, bounded prefill, cache forks, persistent restore, concurrency, cancellation and reclamation. |
 | `reference` | Teacher-forced target versus optional BF16: KL, total variation, top-1 agreement, RMSE and NLL difference. Informational quantization measurements. |
 
@@ -33,6 +33,50 @@ nix develop -c python3 tools/qwen27b/check.py reference \
 The GPU correctness preset uses optimized code with symbols; test assertions
 remain enabled. Performance measurements always use Nix release binaries.
 Artifact variables `GUFO_QWEN27B_*_MODEL` are test inputs, not execution switches.
+
+The maintained executable test is `tests/models/qwen27b/cli_test.py`.
+Use `--scope options` without models, or `--scope sampling` / `--scope http`
+with target/draft artifact variables to check only the affected surface.
+It covers temperatures 0, 0.05, 0.8 and 2; deterministic top-k; minimum
+candidate floors; combined filters; positive/negative penalties; disabled
+history; seeded replay; both controllers; streaming; and C2 state isolation.
+GPU operator tests separately compare 576 sampling quantiles against the
+independent CPU distribution, including `top-k=1,min-keep>1`. Sampled verifier
+tests check target probabilities, not equality to AR's different RNG sequence.
+
+## Executable and sampling contract
+
+| Entry point | Qwen27B behavior |
+| --- | --- |
+| `prompt`, `chat` | Shared target sampling and GPU DFlash2 implementation; `fixed`/`adaptive`, draft length cap and legacy backend aliases. Chat reads stdin and rejects prompt-only input/display arguments and raw framing. |
+| `bench` | Greedy, C1, with AR/MTP/DFlash2; sampling flags are rejected. Qwen C>1 measurements use the HTTP benchmark. |
+| `serve`, `serve llm`, `gufo-server` | DFlash2 and sampling defaults from startup; request sampling overrides across OpenAI chat/completions/responses, Anthropic messages, and llama completion/infill. `--cpu` is removed. |
+| `eval` | Uses the connected server's draft configuration and sampling defaults; `--greedy` overrides temperature only. |
+| `video`, `transcribe`/`asr`, audio/video serving, `diagnose`/`info`, `probe` | Do not run Qwen27B DFlash2; unsupported draft flags fail explicitly. |
+
+The target supports temperature, top-k, top-p, min-p, min-keep, seed,
+repeat penalty/window, frequency penalty and presence penalty. Ordering is
+penalties → top-k → top-p → min-p → temperature. `min-keep` is a floor even
+when top-k is 1. At temperature 0 the final choice is greedy.
+
+DFlash2 shares the target temperature and samples its trained top-16 selector.
+There are no independent draft temperature/filter/seed controls. Target
+filters and penalties apply to **p**; verification uses the actual proposal
+**q**. Unsupported draft sampling fields and unsupported alternative sampler
+fields in HTTP requests return an error instead of being ignored.
+The block controller is configured when starting the server, not per request.
+OpenAI chat and server defaults bound temperature to [0,2]; the native sampler
+accepts any finite nonnegative temperature.
+
+Use the existing model test's optional
+`--acceptance-trace request.json output.json` mode to inspect block acceptance.
+The request contains `prompt`, optional `raw`, and `max_tokens` (1–256).
+It records proposed/emitted text, accepted counts and first corrections, and
+requires the full continuation to match AR IDs. This diagnostic includes
+extra snapshot/proposal work; never use its runtime as a speed measurement.
+
+## Model/operator checks
+
 The unused in-tree CPU DFlash forward pipeline and its duplicate operator
 tests are removed. The pinned upstream runner owns the full reference.
 All three draft artifacts pass loading and state tests. The optimized
@@ -223,6 +267,7 @@ Gains from different workloads must not be added together.
 | [Exact projections](dflash2-exact-gemm.json) | BF16 streaming with cached K/V injection; symmetric projections omit offset scratch while retaining scalar rounding; dead verification settings removed. |
 | [Greedy sampling controls](dflash2-sampling.json) | Penalty-enabled requests retain DFlash2 and exact AR output; one C1 chat probe reaches 30.25–31.43 tok/s on Q4 and 25.89–27.03 on Q8 across the three drafts. |
 | [Controllers](dflash2-controllers.json) | With Q4 draft, adaptive gains 3.3% on the pilot and 2.0% on three other prompts for the Q4 target; Q8 target is effectively unchanged. Q8/BF16 drafts can favor fixed. Accepted-length-only and positional predictors were slower overall. |
+| [Sampling and executable wiring](dflash2-wiring.json) | Six target/draft HTTP pairings pass; fixed/adaptive terminal, cached benchmark and backend checks cover both targets. The sampling-floor regression fails before the fix; 576 GPU/reference comparisons pass afterward. Pure repetition reaches 100% acceptance across all six pairings. |
 
 Rollback snapshots omit unused attention-layer rows: **202 → 151.5 MiB**
 per speculative session, preserving every live state byte. Existing operator

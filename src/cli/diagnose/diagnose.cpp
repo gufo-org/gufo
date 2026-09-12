@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/cli/arg_parser.hpp"
 #include "src/core/diagnostics/allocation_benchmark.h"
 #include "src/core/diagnostics/artifact_validator.h"
 #include "src/core/diagnostics/bandwidth.h"
@@ -588,7 +589,16 @@ static void CheckNpu() {
 #endif
 
 int RunProbe(std::span<const char* const> args) {
-  (void)args;
+  ArgParser parser("gufo probe", "Probe GPU and NPU availability.");
+  std::string error;
+  if (!parser.Parse(args, &error)) {
+    std::cerr << "Error: " << error << '\n';
+    return 2;
+  }
+  if (parser.IsHelpRequested()) {
+    parser.PrintHelp();
+    return 0;
+  }
   std::printf("Hello, Strix Halo!\n");
 
 #if defined(ENGINE_ENABLE_HIP)

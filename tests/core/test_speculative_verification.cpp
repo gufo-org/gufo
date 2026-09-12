@@ -689,7 +689,8 @@ void TestSampledSpeculationMatchesTargetDistribution() {
          "positive-temperature verification continues to use drafts");
 }
 
-void TestFilteredSampledSpeculationMatchesTargetDistribution() {
+void TestFilteredSampledSpeculationMatchesTargetDistribution(
+    bool top_k_one_with_floor = false) {
   constexpr std::size_t trials = 4096;
   const std::vector<float> target_logits = {-INFINITY, std::log(0.40F),
                                             std::log(0.60F)};
@@ -703,6 +704,11 @@ void TestFilteredSampledSpeculationMatchesTargetDistribution() {
   config.repeat_last_n = 2;
   config.frequency_penalty = 0.1F;
   config.presence_penalty = 0.05F;
+  if (top_k_one_with_floor) {
+    config = {.temperature = 0.8F, .top_k = 1, .min_keep = 2};
+  }
+  Expect(config.uses_random_sampling(),
+         "minimum candidate floor must preserve random sampling");
 
   const std::vector<TokenId> initial_sequence = {1, 0};
   const double expected_second_probability =
@@ -1002,6 +1008,7 @@ int main() {
   TestFirstTokenUsesTargetSampler();
   TestSampledSpeculationMatchesTargetDistribution();
   TestFilteredSampledSpeculationMatchesTargetDistribution();
+  TestFilteredSampledSpeculationMatchesTargetDistribution(true);
   TestGreedyPenaltiesRetainSpeculationAndHistory();
   TestMalformedProposalDoesNotAdvanceTarget();
   TestStopAndBudgetKeepExactFrontier();

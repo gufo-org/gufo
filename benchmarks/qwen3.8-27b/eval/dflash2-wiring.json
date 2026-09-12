@@ -1,0 +1,983 @@
+{
+  "schema": "gufo.qwen27b-wiring.v1",
+  "date": "2026-09-12",
+  "baseline_commit": "784fdba468d708ba59fb6333c93322b63b6ca48c",
+  "artifacts": {
+    "target_q4": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+      "bytes": 17559178144,
+      "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+    },
+    "target_q8": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+      "bytes": 31457991680,
+      "sha256": "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
+    },
+    "draft_q4": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "bytes": 1143006816,
+      "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+    },
+    "draft_q8": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q8/Qwen3.8-27B-DFlash2-Q8_0.gguf",
+      "bytes": 2056414816,
+      "sha256": "c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e"
+    },
+    "draft_bf16": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-gguf/Qwen3.8-27B-DFlash2-BF16.gguf",
+      "bytes": 3860293216,
+      "sha256": "26d47ca20ab07688327a63d912acad222d924eaaa92a980cc488de3c67e736bc"
+    }
+  },
+  "speed": {
+    "mixed_sequence": {
+      "scope": "C1, adaptive, short chat prefill included, max 128 new tokens",
+      "repetitions": 2,
+      "references": {
+        "q4": {
+          "completion": "The pattern repeats every three terms: **red, blue, blue**.\n\nHere are the next twenty terms:\n\n1. blue\n2. red\n3. blue\n4. blue\n5. red\n6. blue\n7. blue\n8. red\n9. blue\n10. blue\n11. red\n12. blue\n13. blue\n14. red\n15. blue\n16. blue\n17. red\n18. blue\n19. blue\n20. red\n\n**Rule:** The sequence follows a repeating cycle of **red, blue",
+          "tokens": 128,
+          "seconds": 11.411,
+          "tps": 11.2173,
+          "token_sha256": "e966850ad0dc1cc5fe1a2db460f19b5d47d3e2f4d27d96601d01144907f4aa24"
+        },
+        "q8": {
+          "completion": "The pattern repeats every three terms: **red, blue, blue**.\n\nThe next twenty terms are:\n**blue, red, blue, blue, red, blue, blue, red, blue, blue, red, blue, blue, red, blue, blue, red, blue, blue, red**\n\n**Rule:** The sequence follows a repeating cycle of \"red, blue, blue.\"",
+          "tokens": 81,
+          "seconds": 11.78,
+          "tps": 6.88,
+          "token_sha256": "c6237436f5e68da56e4536d0a1de998f917ec48a215e7ed5bb381cadf1133f2e"
+        }
+      },
+      "pairings": {
+        "q4/q4": {
+          "exact": true,
+          "spec_tps": 38.14465,
+          "acceptance": 0.80303,
+          "average_draft": 6.285714285714286,
+          "runs": [
+            {
+              "tokens": 128,
+              "seconds": 3.35726,
+              "tps": 38.1263,
+              "token_sha256": "e966850ad0dc1cc5fe1a2db460f19b5d47d3e2f4d27d96601d01144907f4aa24",
+              "acceptance": 0.80303,
+              "drafted": 132,
+              "accepted": 106,
+              "steps": 21
+            },
+            {
+              "tokens": 128,
+              "seconds": 3.35403,
+              "tps": 38.163,
+              "token_sha256": "e966850ad0dc1cc5fe1a2db460f19b5d47d3e2f4d27d96601d01144907f4aa24",
+              "acceptance": 0.80303,
+              "drafted": 132,
+              "accepted": 106,
+              "steps": 21
+            }
+          ]
+        },
+        "q4/q8": {
+          "exact": true,
+          "spec_tps": 37.979749999999996,
+          "acceptance": 0.80303,
+          "average_draft": 6.285714285714286,
+          "runs": [
+            {
+              "tokens": 128,
+              "seconds": 3.37142,
+              "tps": 37.9662,
+              "token_sha256": "e966850ad0dc1cc5fe1a2db460f19b5d47d3e2f4d27d96601d01144907f4aa24",
+              "acceptance": 0.80303,
+              "drafted": 132,
+              "accepted": 106,
+              "steps": 21
+            },
+            {
+              "tokens": 128,
+              "seconds": 3.36901,
+              "tps": 37.9933,
+              "token_sha256": "e966850ad0dc1cc5fe1a2db460f19b5d47d3e2f4d27d96601d01144907f4aa24",
+              "acceptance": 0.80303,
+              "drafted": 132,
+              "accepted": 106,
+              "steps": 21
+            }
+          ]
+        },
+        "q4/bf16": {
+          "exact": true,
+          "spec_tps": 36.372550000000004,
+          "acceptance": 0.80303,
+          "average_draft": 6.285714285714286,
+          "runs": [
+            {
+              "tokens": 128,
+              "seconds": 3.52567,
+              "tps": 36.3052,
+              "token_sha256": "e966850ad0dc1cc5fe1a2db460f19b5d47d3e2f4d27d96601d01144907f4aa24",
+              "acceptance": 0.80303,
+              "drafted": 132,
+              "accepted": 106,
+              "steps": 21
+            },
+            {
+              "tokens": 128,
+              "seconds": 3.51263,
+              "tps": 36.4399,
+              "token_sha256": "e966850ad0dc1cc5fe1a2db460f19b5d47d3e2f4d27d96601d01144907f4aa24",
+              "acceptance": 0.80303,
+              "drafted": 132,
+              "accepted": 106,
+              "steps": 21
+            }
+          ]
+        },
+        "q8/q4": {
+          "exact": true,
+          "spec_tps": 22.905,
+          "acceptance": 0.476923,
+          "average_draft": 6.842105263157895,
+          "runs": [
+            {
+              "tokens": 81,
+              "seconds": 3.54,
+              "tps": 22.9,
+              "token_sha256": "c6237436f5e68da56e4536d0a1de998f917ec48a215e7ed5bb381cadf1133f2e",
+              "acceptance": 0.476923,
+              "drafted": 130,
+              "accepted": 62,
+              "steps": 19
+            },
+            {
+              "tokens": 81,
+              "seconds": 3.54,
+              "tps": 22.91,
+              "token_sha256": "c6237436f5e68da56e4536d0a1de998f917ec48a215e7ed5bb381cadf1133f2e",
+              "acceptance": 0.476923,
+              "drafted": 130,
+              "accepted": 62,
+              "steps": 19
+            }
+          ]
+        },
+        "q8/q8": {
+          "exact": true,
+          "spec_tps": 22.729999999999997,
+          "acceptance": 0.476923,
+          "average_draft": 6.842105263157895,
+          "runs": [
+            {
+              "tokens": 81,
+              "seconds": 3.56,
+              "tps": 22.74,
+              "token_sha256": "c6237436f5e68da56e4536d0a1de998f917ec48a215e7ed5bb381cadf1133f2e",
+              "acceptance": 0.476923,
+              "drafted": 130,
+              "accepted": 62,
+              "steps": 19
+            },
+            {
+              "tokens": 81,
+              "seconds": 3.57,
+              "tps": 22.72,
+              "token_sha256": "c6237436f5e68da56e4536d0a1de998f917ec48a215e7ed5bb381cadf1133f2e",
+              "acceptance": 0.476923,
+              "drafted": 130,
+              "accepted": 62,
+              "steps": 19
+            }
+          ]
+        },
+        "q8/bf16": {
+          "exact": true,
+          "spec_tps": 21.925,
+          "acceptance": 0.476923,
+          "average_draft": 6.842105263157895,
+          "runs": [
+            {
+              "tokens": 81,
+              "seconds": 3.69,
+              "tps": 21.93,
+              "token_sha256": "c6237436f5e68da56e4536d0a1de998f917ec48a215e7ed5bb381cadf1133f2e",
+              "acceptance": 0.476923,
+              "drafted": 130,
+              "accepted": 62,
+              "steps": 19
+            },
+            {
+              "tokens": 81,
+              "seconds": 3.69,
+              "tps": 21.92,
+              "token_sha256": "c6237436f5e68da56e4536d0a1de998f917ec48a215e7ed5bb381cadf1133f2e",
+              "acceptance": 0.476923,
+              "drafted": 130,
+              "accepted": 62,
+              "steps": 19
+            }
+          ]
+        }
+      },
+      "case_id": "repetition_sequence"
+    },
+    "pure_word": {
+      "scope": "C1, adaptive, short chat prefill included, max 128 new tokens",
+      "repetitions": 1,
+      "references": {
+        "q4": {
+          "completion": "red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red",
+          "tokens": 128,
+          "seconds": 11.4244,
+          "tps": 11.2041,
+          "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73"
+        },
+        "q8": {
+          "completion": "red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red red",
+          "tokens": 128,
+          "seconds": 18.49,
+          "tps": 6.92,
+          "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73"
+        }
+      },
+      "pairings": {
+        "q4/q4": {
+          "exact": true,
+          "spec_tps": 46.2404,
+          "acceptance": 1.0,
+          "average_draft": 6.470588235294118,
+          "runs": [
+            {
+              "tokens": 128,
+              "seconds": 2.76814,
+              "tps": 46.2404,
+              "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+              "acceptance": 1.0,
+              "drafted": 110,
+              "accepted": 110,
+              "steps": 17
+            }
+          ]
+        },
+        "q4/q8": {
+          "exact": true,
+          "spec_tps": 45.7338,
+          "acceptance": 1.0,
+          "average_draft": 6.470588235294118,
+          "runs": [
+            {
+              "tokens": 128,
+              "seconds": 2.79881,
+              "tps": 45.7338,
+              "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+              "acceptance": 1.0,
+              "drafted": 110,
+              "accepted": 110,
+              "steps": 17
+            }
+          ]
+        },
+        "q4/bf16": {
+          "exact": true,
+          "spec_tps": 44.1017,
+          "acceptance": 1.0,
+          "average_draft": 6.470588235294118,
+          "runs": [
+            {
+              "tokens": 128,
+              "seconds": 2.90238,
+              "tps": 44.1017,
+              "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+              "acceptance": 1.0,
+              "drafted": 110,
+              "accepted": 110,
+              "steps": 17
+            }
+          ]
+        },
+        "q8/q4": {
+          "exact": true,
+          "spec_tps": 42.44,
+          "acceptance": 1.0,
+          "average_draft": 6.9375,
+          "runs": [
+            {
+              "tokens": 128,
+              "seconds": 3.02,
+              "tps": 42.44,
+              "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+              "acceptance": 1.0,
+              "drafted": 111,
+              "accepted": 111,
+              "steps": 16
+            }
+          ]
+        },
+        "q8/q8": {
+          "exact": true,
+          "spec_tps": 42.15,
+          "acceptance": 1.0,
+          "average_draft": 6.9375,
+          "runs": [
+            {
+              "tokens": 128,
+              "seconds": 3.04,
+              "tps": 42.15,
+              "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+              "acceptance": 1.0,
+              "drafted": 111,
+              "accepted": 111,
+              "steps": 16
+            }
+          ]
+        },
+        "q8/bf16": {
+          "exact": true,
+          "spec_tps": 40.78,
+          "acceptance": 1.0,
+          "average_draft": 6.9375,
+          "runs": [
+            {
+              "tokens": 128,
+              "seconds": 3.14,
+              "tps": 40.78,
+              "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+              "acceptance": 1.0,
+              "drafted": 111,
+              "accepted": 111,
+              "steps": 16
+            }
+          ]
+        }
+      },
+      "case_id": "repetition_word"
+    }
+  },
+  "acceptance_trace": {
+    "q4": {
+      "request": {
+        "prompt": "Continue the pattern for twenty more terms and briefly state the rule: red, blue, blue, red, blue, blue, red,",
+        "max_tokens": 128
+      },
+      "completion": "The pattern repeats every three terms: **red, blue, blue**.\n\nHere are the next twenty terms:\n\n1. blue\n2. red\n3. blue\n4. blue\n5. red\n6. blue\n7. blue\n8. red\n9. blue\n10. blue\n11. red\n12. blue\n13. blue\n14. red\n15. blue\n16. blue\n17. red\n18. blue\n19. blue\n20. red\n\n**Rule:** The sequence follows a repeating cycle of **red, blue",
+      "tokens": 128,
+      "exact_ar": true,
+      "steps": [
+        {
+          "offset": 1,
+          "drafted": 5,
+          "accepted": 1,
+          "proposed": " pattern is repeating the pattern",
+          "emitted": " pattern repeats",
+          "rejected": " is",
+          "correction": " repeats"
+        },
+        {
+          "offset": 3,
+          "drafted": 5,
+          "accepted": 1,
+          "proposed": " every 3 terms:",
+          "emitted": " every three",
+          "rejected": " ",
+          "correction": " three"
+        },
+        {
+          "offset": 5,
+          "drafted": 4,
+          "accepted": 4,
+          "proposed": " terms: **red",
+          "emitted": " terms: **red,"
+        },
+        {
+          "offset": 10,
+          "drafted": 5,
+          "accepted": 5,
+          "proposed": " blue, blue**.\n\n",
+          "emitted": " blue, blue**.\n\nHere"
+        },
+        {
+          "offset": 16,
+          "drafted": 7,
+          "accepted": 3,
+          "proposed": " are the next 20 terms",
+          "emitted": " are the next twenty",
+          "rejected": " ",
+          "correction": " twenty"
+        },
+        {
+          "offset": 20,
+          "drafted": 6,
+          "accepted": 3,
+          "proposed": " terms:\n\nred, blue",
+          "emitted": " terms:\n\n1",
+          "rejected": "red",
+          "correction": "1"
+        },
+        {
+          "offset": 24,
+          "drafted": 6,
+          "accepted": 5,
+          "proposed": ". blue\n2. blue",
+          "emitted": ". blue\n2. red",
+          "rejected": " blue",
+          "correction": " red"
+        },
+        {
+          "offset": 30,
+          "drafted": 6,
+          "accepted": 6,
+          "proposed": "\n3. blue\n4",
+          "emitted": "\n3. blue\n4."
+        },
+        {
+          "offset": 37,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": " blue\n5. red\n6",
+          "emitted": " blue\n5. red\n6."
+        },
+        {
+          "offset": 45,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": " blue\n7. blue\n8",
+          "emitted": " blue\n7. blue\n8."
+        },
+        {
+          "offset": 53,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": " red\n9. blue\n1",
+          "emitted": " red\n9. blue\n10"
+        },
+        {
+          "offset": 61,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": ". blue\n11. red",
+          "emitted": ". blue\n11. red\n"
+        },
+        {
+          "offset": 69,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": "12. blue\n13",
+          "emitted": "12. blue\n13."
+        },
+        {
+          "offset": 77,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": " blue\n14. red\n",
+          "emitted": " blue\n14. red\n1"
+        },
+        {
+          "offset": 85,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": "5. blue\n16.",
+          "emitted": "5. blue\n16. blue"
+        },
+        {
+          "offset": 93,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": "\n17. red\n1",
+          "emitted": "\n17. red\n18"
+        },
+        {
+          "offset": 101,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": ". blue\n19. blue",
+          "emitted": ". blue\n19. blue\n"
+        },
+        {
+          "offset": 109,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": "20. red\n\n**Rule",
+          "emitted": "20. red\n\n**Rule:**"
+        },
+        {
+          "offset": 117,
+          "drafted": 7,
+          "accepted": 2,
+          "proposed": " The sequence repeats every three repeating sequence",
+          "emitted": " The sequence follows",
+          "rejected": " repeats",
+          "correction": " follows"
+        },
+        {
+          "offset": 120,
+          "drafted": 7,
+          "accepted": 2,
+          "proposed": " a repeating pattern of **red,",
+          "emitted": " a repeating cycle",
+          "rejected": " pattern",
+          "correction": " cycle"
+        },
+        {
+          "offset": 123,
+          "drafted": 4,
+          "accepted": 4,
+          "proposed": " of **red,",
+          "emitted": " of **red, blue"
+        }
+      ]
+    },
+    "q8": {
+      "request": {
+        "prompt": "Continue the pattern for twenty more terms and briefly state the rule: red, blue, blue, red, blue, blue, red,",
+        "max_tokens": 128
+      },
+      "completion": "The pattern repeats every three terms: **red, blue, blue**.\n\nThe next twenty terms are:\n**blue, red, blue, blue, red, blue, blue, red, blue, blue, red, blue, blue, red, blue, blue, red, blue, blue, red**\n\n**Rule:** The sequence follows a repeating cycle of \"red, blue, blue.\"",
+      "tokens": 81,
+      "exact_ar": true,
+      "steps": [
+        {
+          "offset": 1,
+          "drafted": 7,
+          "accepted": 1,
+          "proposed": " pattern is repeating the repeating: **",
+          "emitted": " pattern repeats",
+          "rejected": " is",
+          "correction": " repeats"
+        },
+        {
+          "offset": 3,
+          "drafted": 7,
+          "accepted": 1,
+          "proposed": " every 3 terms: **Blue",
+          "emitted": " every three",
+          "rejected": " ",
+          "correction": " three"
+        },
+        {
+          "offset": 5,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": " terms: **red, blue,",
+          "emitted": " terms: **red, blue, blue"
+        },
+        {
+          "offset": 13,
+          "drafted": 7,
+          "accepted": 2,
+          "proposed": "**.\n\n**Rule after the next",
+          "emitted": "**.\n\nThe",
+          "rejected": "**",
+          "correction": "The"
+        },
+        {
+          "offset": 16,
+          "drafted": 7,
+          "accepted": 0,
+          "proposed": " sequence continues with **red, blue",
+          "emitted": " next",
+          "rejected": " sequence",
+          "correction": " next"
+        },
+        {
+          "offset": 17,
+          "drafted": 7,
+          "accepted": 0,
+          "proposed": " 10 terms are:\n\n",
+          "emitted": " twenty",
+          "rejected": " ",
+          "correction": " twenty"
+        },
+        {
+          "offset": 18,
+          "drafted": 6,
+          "accepted": 3,
+          "proposed": " terms are:\n\nred,",
+          "emitted": " terms are:\n",
+          "rejected": "\n\n",
+          "correction": "\n"
+        },
+        {
+          "offset": 22,
+          "drafted": 7,
+          "accepted": 1,
+          "proposed": "**red, blue, blue,",
+          "emitted": "**blue",
+          "rejected": "red",
+          "correction": "blue"
+        },
+        {
+          "offset": 24,
+          "drafted": 6,
+          "accepted": 1,
+          "proposed": ", blue, red, red",
+          "emitted": ", red",
+          "rejected": " blue",
+          "correction": " red"
+        },
+        {
+          "offset": 26,
+          "drafted": 6,
+          "accepted": 6,
+          "proposed": ", blue, blue, red",
+          "emitted": ", blue, blue, red,"
+        },
+        {
+          "offset": 33,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": " blue, blue, red, blue",
+          "emitted": " blue, blue, red, blue,"
+        },
+        {
+          "offset": 41,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": " blue, red, blue, blue",
+          "emitted": " blue, red, blue, blue,"
+        },
+        {
+          "offset": 49,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": " red, blue, blue, red",
+          "emitted": " red, blue, blue, red,"
+        },
+        {
+          "offset": 57,
+          "drafted": 7,
+          "accepted": 7,
+          "proposed": " blue, blue, red**\n\n",
+          "emitted": " blue, blue, red**\n\n**"
+        },
+        {
+          "offset": 65,
+          "drafted": 7,
+          "accepted": 4,
+          "proposed": "Rule:** The sequence is repeating blocks",
+          "emitted": "Rule:** The sequence follows",
+          "rejected": " is",
+          "correction": " follows"
+        },
+        {
+          "offset": 70,
+          "drafted": 7,
+          "accepted": 2,
+          "proposed": " a repeating pattern of three terms,",
+          "emitted": " a repeating cycle",
+          "rejected": " pattern",
+          "correction": " cycle"
+        },
+        {
+          "offset": 73,
+          "drafted": 7,
+          "accepted": 1,
+          "proposed": " of three terms: **red,",
+          "emitted": " of \"",
+          "rejected": " three",
+          "correction": " \""
+        },
+        {
+          "offset": 75,
+          "drafted": 7,
+          "accepted": 5,
+          "proposed": "red, blue, blue\" (",
+          "emitted": "red, blue, blue.\"",
+          "rejected": "\"",
+          "correction": ".\""
+        },
+        {
+          "offset": 81,
+          "drafted": 7,
+          "accepted": 0,
+          "proposed": "<|im_end|>R.<|im_end|><|im_end|><|im_end|><|im_end|>",
+          "emitted": "<|im_end|>",
+          "rejected": "<|im_end|>",
+          "correction": "<|im_end|>",
+          "note": "Matching terminal EOS is not an accepted output token; subsequent proposals are unused."
+        }
+      ]
+    }
+  },
+  "measurement_binary": {
+    "path": "/nix/store/papwghkri5z83bash2dibr0dwls72jpk-gufo-eb86436-dirty/bin/gufo",
+    "sha256": "44694c831eaa6c464f6f768b97607c0e5322e0f0d96a7cf945eccb7f33ed5d57"
+  },
+  "sampling_matrix_binary": {
+    "path": "/nix/store/q1x3bssmvxxk652rawrbpwjxbriiiwsm-gufo-784fdba-dirty/bin/gufo",
+    "sha256": "84300930e0d8317ed1505ca113f21ae2bbc7516158987770b8251deca771cbec"
+  },
+  "qualified_binary": {
+    "path": "/nix/store/mwshr8r26gi1mq1q2wqq7m6fvp6kivhy-gufo-784fdba-dirty/bin/gufo",
+    "sha256": "60eff06e8b4d0432a737bec07593cdc75f5b98be1124c42195328e8e06d169ec"
+  },
+  "qualification": [
+    {
+      "label": "options",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "options"
+      ],
+      "returncode": 0,
+      "seconds": 13.54
+    },
+    {
+      "label": "q4-q4-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "http",
+        "--policy",
+        "adaptive"
+      ],
+      "returncode": 0,
+      "seconds": 26.42
+    },
+    {
+      "label": "q4-q4-fixed-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "http",
+        "--policy",
+        "fixed"
+      ],
+      "returncode": 0,
+      "seconds": 23.57
+    },
+    {
+      "label": "q4-q4-sampling",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "sampling"
+      ],
+      "returncode": 0,
+      "seconds": 121.92
+    },
+    {
+      "label": "q4-q4-backend",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test"
+      ],
+      "returncode": 0,
+      "seconds": 53.81
+    },
+    {
+      "label": "q4-q4-bench",
+      "command": [
+        "python3",
+        "-c",
+        "import importlib.util,os; s=importlib.util.spec_from_file_location('q','tests/models/qwen27b/cli_test.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.check_bench('result-qwen-wiring/bin/gufo',os.environ['GUFO_QWEN27B_MODEL'],os.environ['GUFO_QWEN27B_DFLASH_MODEL'])"
+      ],
+      "returncode": 0,
+      "seconds": 24.18
+    },
+    {
+      "label": "q4-q8-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "http",
+        "--policy",
+        "adaptive"
+      ],
+      "returncode": 0,
+      "seconds": 22.4
+    },
+    {
+      "label": "q4-bf16-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "http",
+        "--policy",
+        "adaptive"
+      ],
+      "returncode": 0,
+      "seconds": 24.93
+    },
+    {
+      "label": "q8-q4-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "http",
+        "--policy",
+        "adaptive"
+      ],
+      "returncode": 0,
+      "seconds": 30.35
+    },
+    {
+      "label": "q8-q8-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "http",
+        "--policy",
+        "adaptive"
+      ],
+      "returncode": 0,
+      "seconds": 27.45
+    },
+    {
+      "label": "q8-bf16-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "http",
+        "--policy",
+        "adaptive"
+      ],
+      "returncode": 0,
+      "seconds": 29.85
+    },
+    {
+      "label": "q8-bf16-fixed-http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "http",
+        "--policy",
+        "fixed"
+      ],
+      "returncode": 0,
+      "seconds": 29.8
+    },
+    {
+      "label": "q8-bf16-sampling",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring/bin/gufo",
+        "--scope",
+        "sampling"
+      ],
+      "returncode": 0,
+      "seconds": 131.34
+    },
+    {
+      "label": "q8-bf16-backend",
+      "command": [
+        "build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test"
+      ],
+      "returncode": 0,
+      "seconds": 61.65
+    },
+    {
+      "label": "q8-bf16-bench",
+      "command": [
+        "python3",
+        "-c",
+        "import importlib.util,os; s=importlib.util.spec_from_file_location('q','tests/models/qwen27b/cli_test.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.check_bench('result-qwen-wiring/bin/gufo',os.environ['GUFO_QWEN27B_MODEL'],os.environ['GUFO_QWEN27B_DFLASH_MODEL'])"
+      ],
+      "returncode": 0,
+      "seconds": 28.65
+    }
+  ],
+  "source_sha256": {
+    "src/cli/diagnose/diagnose.cpp": "d5e9b43c0bbb6f00651d6390f44c5f89bbe83f45f3182d47b6a9cc02e8449d4f",
+    "src/cli/main.cpp": "0b80da4cc131a9abeb32291dabd65c96d98cf2d6fa262da84f6959f0426887fb",
+    "src/cli/prompt/prompt.cpp": "8414f67d650d5b00ef30dd644a5c7ab9edc410aa07a647b7b02cfcf5e92dd269",
+    "src/cli/serve/sampling_request.hpp": "708f51e3a2b7446fe66f2062a199a80fc8781503e90cbb41c9d0f3c12a17f1da",
+    "src/cli/serve/serve.cpp": "da7a5993ca83dd83616039559e0aa91b2da396eee07bc24c92ff1e557deba533",
+    "src/core/sampling.cpp": "e276da446cc2618a0e61bfd883c614664700e31a0d1de91b754093d597adcd12",
+    "src/models/qwen/hip/kernels/sample.hip": "4a4543501d5cbc306ce158f67ca802d4b3e0de5acaf5847d0c471339d0f72fdc"
+  },
+  "matrix_source_sha256": {
+    "src/cli/diagnose/diagnose.cpp": "d5e9b43c0bbb6f00651d6390f44c5f89bbe83f45f3182d47b6a9cc02e8449d4f",
+    "src/cli/main.cpp": "0b80da4cc131a9abeb32291dabd65c96d98cf2d6fa262da84f6959f0426887fb",
+    "src/cli/prompt/prompt.cpp": "03a6569ed5ad8fedb5c4a14485b8798bef523dc7a53fccdc7f51a33253390017",
+    "src/cli/serve/sampling_request.hpp": "708f51e3a2b7446fe66f2062a199a80fc8781503e90cbb41c9d0f3c12a17f1da",
+    "src/cli/serve/serve.cpp": "da7a5993ca83dd83616039559e0aa91b2da396eee07bc24c92ff1e557deba533",
+    "src/core/sampling.cpp": "e276da446cc2618a0e61bfd883c614664700e31a0d1de91b754093d597adcd12",
+    "src/models/qwen/hip/kernels/sample.hip": "4a4543501d5cbc306ce158f67ca802d4b3e0de5acaf5847d0c471339d0f72fdc"
+  },
+  "final_followup": "Only production change after the full sampling matrix: reject the ignored --no-display-prompt option in chat. Final fast/CLI/HTTP alias checks cover this release.",
+  "sampling_regression": {
+    "trigger": "temperature > 0, top_k = 1, min_keep > 1",
+    "old_behavior": "Qwen GPU AR and the verifier treated this as greedy despite the minimum candidate floor.",
+    "new_behavior": "Sample and verify the retained target distribution; advance RNG normally.",
+    "red_tests": [
+      "qwen_sampling_hip_test: min-keep overrides top-k one instead of silently selecting argmax",
+      "speculative_verification_test: minimum candidate floor must preserve random sampling"
+    ],
+    "gpu_quantile_comparisons": 576,
+    "continuous_parameters_exhaustive": false
+  },
+  "known_ar_behavior": "On repetition_sequence, both AR targets begin the continuation blue, red instead of blue, blue, red. Speculative parity is not an independent capability-quality result.",
+  "limits": [
+    "Pure-word speeds are a single easy-case pass, not representative chat throughput.",
+    "Greedy parity verifies no additional DFlash2 loss; original target checkpoint qualification remains separate.",
+    "Independent draft sampling overrides are unsupported; the trained selector shares the target temperature.",
+    "HTTP comparisons use text and token counts; internal serving tests additionally compare exact token IDs."
+  ],
+  "fast_suite": {
+    "passed": 8,
+    "seconds": 13.78,
+    "model_artifacts_required": false
+  },
+  "focused_unit_checks": {
+    "passed": 7,
+    "includes": [
+      "qwen_sampling_hip_test",
+      "speculative_verification_test",
+      "openai_chat_test",
+      "logit_sampler_test",
+      "prompt_cli_test",
+      "bench_cli_test",
+      "speculative_corpus_test"
+    ]
+  },
+  "final_release_checks": [
+    {
+      "scope": "options",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring-final/bin/gufo",
+        "--scope",
+        "options"
+      ],
+      "returncode": 0,
+      "seconds": 13.68,
+      "server_entrypoint": "all gufo modules"
+    },
+    {
+      "scope": "http",
+      "command": [
+        "python3",
+        "tests/models/qwen27b/cli_test.py",
+        "result-qwen-wiring-final/bin/gufo",
+        "--scope",
+        "http",
+        "--policy",
+        "fixed"
+      ],
+      "returncode": 0,
+      "seconds": 23.54,
+      "server_entrypoint": "gufo-server flags directly"
+    }
+  ]
+}

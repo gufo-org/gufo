@@ -53,6 +53,11 @@
       "id": "instruction_debug",
       "category": "instruction",
       "text": "A service becomes slow only after several hours. Give a prioritized debugging checklist that distinguishes memory growth, lock contention, thermal throttling, and external dependency latency."
+    },
+    {
+      "id": "repetition_word",
+      "category": "repetitive",
+      "text": "Write the word red exactly 1000 times, separated by spaces. Output only the words without any introduction or explanation."
     }
   ]
 }

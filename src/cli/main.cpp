@@ -104,7 +104,10 @@ int run(std::span<const char* const> args) {
     if (sub == "chat") {
       return gufo::cli::RunChat(help_flag);
     }
-    if (sub == "diagnose" || sub == "probe" || sub == "info") {
+    if (sub == "probe") {
+      return gufo::cli::RunProbe(help_flag);
+    }
+    if (sub == "diagnose" || sub == "info") {
       return gufo::cli::RunDiagnose(help_flag);
     }
     std::cerr << "Error: unknown help topic '" << sub << "'\n";

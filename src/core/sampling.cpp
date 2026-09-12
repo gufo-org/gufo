@@ -197,7 +197,7 @@ bool SamplingConfig::penalties_enabled() const noexcept {
 }
 
 bool SamplingConfig::uses_random_sampling() const noexcept {
-  return temperature > 0.0F && top_k != 1;
+  return temperature > 0.0F && (top_k != 1 || min_keep > 1);
 }
 
 bool SamplingConfig::can_use_unmodified_argmax() const noexcept {

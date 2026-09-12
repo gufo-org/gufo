@@ -879,7 +879,7 @@ void LaunchGPUSampling(const float* logits, std::uint32_t* out_token,
     LaunchGPUArgmax(sampling_logits, out_token, vocab_size, stream);
     return;
   }
-  if (parameters.top_k == 1) {
+  if (parameters.top_k == 1 && parameters.min_keep <= 1) {
     LaunchGPUArgmax(sampling_logits, out_token, vocab_size, stream);
     return;
   }
@@ -914,15 +914,14 @@ void LaunchGPUSpeculativeSampling(
     GpuSamplingWorkspace* workspace, hipStream_t stream) {
   if (logits == nullptr || out_token == nullptr || out_accepted == nullptr ||
       workspace == nullptr || vocab_size == 0 ||
-      workspace->vocab_size != vocab_size ||
-      draft_candidate_count == 0 ||
+      workspace->vocab_size != vocab_size || draft_candidate_count == 0 ||
       draft_candidate_count > workspace->penalty_capacity ||
       penalty_count > workspace->penalty_capacity ||
       draft_candidate_ids == nullptr ||
       draft_candidate_probabilities == nullptr ||
       !std::isfinite(draft_token_probability) ||
-      draft_token_probability <= 0.0F ||
-      parameters.temperature <= 0.0F || parameters.top_k == 1) {
+      draft_token_probability <= 0.0F || parameters.temperature <= 0.0F ||
+      (parameters.top_k == 1 && parameters.min_keep <= 1)) {
     throw std::invalid_argument("invalid GPU speculative sampling launch");
   }
 

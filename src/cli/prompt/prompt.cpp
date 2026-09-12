@@ -1098,6 +1098,12 @@ int RunChat(std::span<const char* const> args) {
                  "raw text\n";
     return 2;
   }
+  if (!opt.prompt_text.empty() || !opt.prompt_file.empty() ||
+      !opt.display_prompt) {
+    std::cerr << "Interactive chat reads prompts from stdin; use prompt for "
+                 "--prompt, --file, --no-display-prompt, or positional input\n";
+    return 2;
+  }
   if (opt.model_path.empty()) {
     std::cout << "gufo chat: interactive conversation mode\n"
               << "(Specify --model <PATH.gguf> to load model weights)\n";

@@ -168,7 +168,11 @@ with tempfile.TemporaryDirectory() as temporary:
             row["token_sha256"] = "b" * 64
         return row
 
-    for run in (failed_case, different_token_count, different_token_ids):
+    def empty_continuation(args, prompt, speculative, environment):
+        return result(tokens=0)
+
+    for run in (failed_case, different_token_count, different_token_ids,
+                empty_continuation):
         with patch("sys.argv", command), patch.object(
             speculative_corpus, "run_prompt", side_effect=run
         ), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(

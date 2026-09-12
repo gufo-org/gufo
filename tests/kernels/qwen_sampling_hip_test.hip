@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/sampling.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 
 namespace {
@@ -165,6 +166,94 @@ void TestTopKOneIsDeterministic() {
          "top-k one remains deterministic argmax");
 }
 
+void TestTopKOneRespectsMinimumKeep() {
+  const std::vector<float> logits = {std::log(0.20F), std::log(0.80F)};
+  gufo::hip::GpuSamplingParameters parameters;
+  parameters.temperature = 1.0F;
+  parameters.top_k = 1;
+  parameters.min_keep = 2;
+  parameters.uniform = 0.99F;
+  Expect(Sample(logits, parameters) == 0U,
+         "min-keep overrides top-k one instead of silently selecting argmax");
+  const std::vector<std::uint32_t> ids{0, 1};
+  const std::vector<float> probabilities{0.8F, 0.2F};
+  const auto result = SampleSpeculatively(logits, parameters, 0, 0.8F, ids,
+                                          probabilities, 0.9F, 0.5F);
+  Expect(!result.accepted && result.token == 1,
+         "top-k one with min-keep uses lossless sampled verification");
+}
+
+void TestFilterCombinations() {
+  // Compare quantiles against the independent double-precision CPU
+  // distribution. Exercise every filter together, including minimum floors,
+  // disabled history, greedy and cold/hot random sampling.
+  const std::vector<float> logits{0.4F, 2.0F, -1.0F, 1.1F, -0.3F};
+  const std::vector<std::uint32_t> history{1, 1, 3};
+  const std::vector<std::uint32_t> ids{1, 3};
+  const std::vector<std::uint32_t> counts{2, 1};
+  for (const float temperature : {0.0F, 0.05F, 0.8F, 2.0F}) {
+    for (const int top_k : {0, 1, 3}) {
+      for (const float top_p : {1.0F, 0.65F}) {
+        for (const float min_p : {0.0F, 0.4F}) {
+          for (const std::size_t minimum : {0U, 2U}) {
+            for (const bool penalized : {false, true}) {
+              gufo::sampling::SamplingConfig config{
+                  .temperature = temperature,
+                  .top_k = top_k,
+                  .top_p = top_p,
+                  .min_p = min_p,
+                  .min_keep = minimum,
+                  .repeat_penalty = 1.2F,
+                  .repeat_last_n = penalized ? 8U : 0U,
+                  .frequency_penalty = 0.2F,
+                  .presence_penalty = -0.1F,
+              };
+              const auto distribution =
+                  gufo::sampling::BuildDistribution(logits, config, history);
+              std::vector<gufo::sampling::Probability> ordered(
+                  distribution.entries().begin(), distribution.entries().end());
+              const bool linear =
+                  top_k == 0 && top_p == 1.0F && !(min_p > 0.0F && minimum > 1);
+              if (linear)
+                std::ranges::sort(ordered, {},
+                                  &gufo::sampling::Probability::token);
+              for (const float uniform : {0.0F, 0.23F, 0.91F}) {
+                double threshold = uniform;
+                auto expected = ordered.back().token;
+                for (const auto& entry : ordered) {
+                  if (entry.value > 0.0 && threshold < entry.value) {
+                    expected = entry.token;
+                    break;
+                  }
+                  threshold -= entry.value;
+                }
+                gufo::hip::GpuSamplingParameters parameters{
+                    .temperature = temperature,
+                    .top_k = top_k,
+                    .top_p = top_p,
+                    .min_p = min_p,
+                    .min_keep = minimum,
+                    .repeat_penalty = config.repeat_penalty,
+                    .frequency_penalty = config.frequency_penalty,
+                    .presence_penalty = config.presence_penalty,
+                    .uniform = uniform,
+                };
+                Expect(Sample(logits, parameters,
+                              penalized ? std::span(ids)
+                                        : std::span<const std::uint32_t>{},
+                              penalized ? std::span(counts)
+                                        : std::span<const std::uint32_t>{}) ==
+                           expected,
+                       "GPU filter combination differs from CPU distribution");
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 void TestSpeculativeResidualSampling() {
   const std::vector<float> logits = {std::log(0.20F), std::log(0.80F)};
   const std::vector<std::uint32_t> draft_ids = {0U, 1U};
@@ -237,6 +326,8 @@ int main() {
   TestLinearTemperatureAndMinP();
   TestOrderedFilterChain();
   TestTopKOneIsDeterministic();
+  TestTopKOneRespectsMinimumKeep();
+  TestFilterCombinations();
   TestSpeculativeResidualSampling();
   TestFilteredSpeculativeResidualSampling();
   TestSamplingBoundaryValues();

@@ -407,6 +407,9 @@ def main() -> int:
                 run_prompt(args, case["text"], True, environment)
                 for _ in range(args.repetitions)
             ]
+            if any(run["tokens"] == 0 or run["seconds"] <= 0
+                   for run in [autoregressive, *speculative_runs]):
+                raise RuntimeError("speed comparison needs generated tokens and positive time")
         except (subprocess.TimeoutExpired, RuntimeError) as error:
             # One pathological target/companion pairing must not abort the
             # suite: that it did not finish is itself a result, and the

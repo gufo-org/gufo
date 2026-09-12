@@ -269,6 +269,45 @@ int main(int argc, const char* const* argv) {
                  sampled_replay.tokens == sampled_spec.tokens,
              "seeded DFlash cached replay differs from the cold request");
 
+      const std::array<gufo::sampling::SamplingConfig, 5> sampling_edges{{
+          {.temperature = 0.05F, .seed = 73},
+          {.temperature = 2.0F,
+           .min_p = 0.02F,
+           .seed = 808,
+           .frequency_penalty = -0.2F,
+           .presence_penalty = -0.1F},
+          {.temperature = 0.8F, .top_k = 1, .seed = 73},
+          {.temperature = 0.8F,
+           .top_k = 1,
+           .top_p = 0.1F,
+           .min_p = 1.0F,
+           .min_keep = 3,
+           .seed = 73},
+          {.temperature = 0.8F,
+           .seed = 73,
+           .repeat_penalty = 1.2F,
+           .repeat_last_n = 0,
+           .frequency_penalty = 0.2F,
+           .presence_penalty = 0.1F},
+      }};
+      for (std::size_t index = 0; index < sampling_edges.size(); ++index) {
+        const auto& config = sampling_edges[index];
+        const auto prompt = "Sampling case " + std::to_string(index) +
+                            ": Continue red, blue, blue, red,";
+        const auto cold = speculative_backend.complete(prompt, 8, config);
+        const auto replay = speculative_backend.complete(prompt, 8, config);
+        Expect(cold.completion_tokens == 8 && cold.draft_tokens > 0 &&
+                   !cold.cache_hit && replay.cache_hit &&
+                   cold.tokens == replay.tokens,
+               "sampling edge must draft and reproduce cold/cached token IDs");
+        const auto ar_first = backend.complete(prompt, 1, config);
+        Expect(ar_first.tokens.front() == cold.tokens.front(),
+               "sampling edge AR/speculative frontier differs");
+        if (!config.uses_random_sampling())
+          Expect(backend.complete(prompt, 8, config).tokens == cold.tokens,
+                 "deterministic top-k one must reproduce AR");
+      }
+
       // Before any proposal draws, AR and DFlash must use exactly the same
       // sampler, including when a saved host frontier replaces device logits.
       const std::string first_token_prompt =

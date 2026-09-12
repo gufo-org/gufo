@@ -48,6 +48,9 @@ endfunction()
 add_qwen27b_test(qwen_mtp_reference_test mtp_reference_test.cpp
   "cpu;mtp;external-model")
 if (ENGINE_ENABLE_HIP)
+  add_test(NAME qwen27b.cli-options COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cli_test.py $<TARGET_FILE:gufo> --scope options)
+  set_tests_properties(qwen27b.cli-options PROPERTIES LABELS "qwen27b;cpu;cli")
   add_test(NAME qwen27b.cli COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/cli_test.py $<TARGET_FILE:gufo>)
   set_tests_properties(qwen27b.cli PROPERTIES

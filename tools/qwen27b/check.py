@@ -9,7 +9,9 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 SUITES = {
-    "fast": ["qwen_aie2p_w4a8_pack_test"],
+    "fast": ["qwen_aie2p_w4a8_pack_test", "logit_sampler_test",
+             "prompt_cli_test", "bench_cli_test", "openai_chat_test",
+             "speculative_verification_test"],
     "kernels": ["qwen_gpu_ops_test", "qwen_ssm_ops_test",
                 "qwen_attention_kv_storage_ops_test",
                 "qwen_attention_fusion_ops_test",
@@ -52,7 +54,7 @@ def main() -> None:
     commands = [
         ["cmake", "--preset", "gpu-test"],
         ["cmake", "--build", "--preset", "gpu-test", "--target", *targets,
-         *(["gufo"] if args.suite in ("model", "all") else [])],
+         *(["gufo"] if args.suite in ("fast", "model", "all") else [])],
     ]
     if args.suite == "reference":
         commands.append([
@@ -61,6 +63,8 @@ def main() -> None:
         ])
     else:
         names = targets + (["qwen27b.tools"] if args.suite in ("fast", "all") else [])
+        if args.suite in ("fast", "all"):
+            names.append("qwen27b.cli-options")
         if args.suite in ("model", "all"):
             names.append("qwen27b.cli")
         commands.append(["ctest", "--test-dir", "build/gpu-test", "-R",
