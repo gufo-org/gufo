@@ -125,6 +125,10 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
   const std::size_t bytes =
       type == "bf16" ? rows * columns * 2
                      : rows * columns / (type == "q8" ? 32 : 256) * block_bytes;
+  if (type != "bf16" && type != "q8" &&
+      !FitsSmallBatch32BitIndices(batch, rows, columns, bytes / rows)) {
+    throw std::invalid_argument("K-quant ablations require 32-bit offsets");
+  }
   const std::size_t copies =
       Batch == 16 ? 1
                   : std::max<std::size_t>(
@@ -230,10 +234,36 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                    <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(),
                                                rows, columns);
              }}};
+        const auto narrow = [&]<std::size_t Tiles>(const char* name) {
+          geometries.push_back({name, [&](const void* w) {
+            SmallBatchKQuantExactFp32GEMMKernel<
+                16, Batch, 3, Type, Tiles, 12, 1, true>
+                <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(),
+                                            rows, columns);
+          }});
+        };
+        narrow.template operator()<1>("narrow_tile1");
+        narrow.template operator()<2>("narrow_tile2");
+        if constexpr (Batch == 8 && Type == core::GgmlType::kQ5_K) {
+          geometries.push_back(
+              {"narrow_rows4", [&](const void* w) {
+                 SmallBatchKQuantExactFp32GEMMKernel<8, Batch, 4, Type, 1, 4, 1,
+                                                     true>
+                     <<<(rows + 31) / 32, 256>>>(
+                         w, input.Get(), output.Get(), rows, columns);
+               }});
+        }
         if constexpr (Batch == 8 && Type == core::GgmlType::kQ4_K) {
           geometries.push_back(
               {"groups4", [&](const void* w) {
                  SmallBatchKQuantExactFp32GEMMKernel<16, 4, 3, Type, 1, 12, 2>
+                     <<<((rows + 47) / 48) * 2, 512>>>(
+                         w, input.Get(), output.Get(), rows, columns);
+               }});
+          geometries.push_back(
+              {"narrow_groups4", [&](const void* w) {
+                 SmallBatchKQuantExactFp32GEMMKernel<16, 4, 3, Type, 1, 12, 2,
+                                                     true>
                      <<<((rows + 47) / 48) * 2, 512>>>(
                          w, input.Get(), output.Get(), rows, columns);
                }});
@@ -257,6 +287,21 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
           {"rows3_tile2", [&](const void* w) {
              SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
                                                  core::GgmlType::kQ6_K, 2, 1>
+                 <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
+                                             columns);
+           }},
+          {"narrow_rows2_tile1",
+           [&](const void* w) {
+             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 2,
+                                                 core::GgmlType::kQ6_K, 1, 12,
+                                                 1, true>
+                 <<<(rows + 31) / 32, 512>>>(w, input.Get(), output.Get(), rows,
+                                             columns);
+           }},
+          {"narrow_rows3_tile2", [&](const void* w) {
+             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 3,
+                                                 core::GgmlType::kQ6_K, 2, 1,
+                                                 1, true>
                  <<<(rows + 47) / 48, 512>>>(w, input.Get(), output.Get(), rows,
                                              columns);
            }}};

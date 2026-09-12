@@ -1686,12 +1686,49 @@ std::size_t QuantizedActivationBytes(std::size_t batch, std::size_t k) {
 constexpr std::size_t kKQuantSmallBatchWarps = 16;
 constexpr std::size_t kKQuantSmallBatchRowsPerWave = 2;
 
+static_assert(FitsSmallBatch32BitIndices(8, 17408, 5120, 3520));
+static_assert(!FitsSmallBatch32BitIndices(8, 1, 1ULL << 29, 1));
+static_assert(!FitsSmallBatch32BitIndices(8, 1ULL << 29, 1, 1));
+static_assert(!FitsSmallBatch32BitIndices(8, 65536, 131072, 90112));
+static_assert(!FitsSmallBatch32BitIndices(8, 1, 1, 0));
+
 template<std::size_t RowsPerWave, core::GgmlType WType>
 void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                  std::size_t batch, std::size_t m,
                                  std::size_t k, dim3 grid, dim3 block,
                                  hipStream_t stream) {
   const auto launch = [&]<std::size_t Batch>() {
+    if constexpr (Batch >= 3 &&
+                  (WType == core::GgmlType::kQ4_K ||
+                   WType == core::GgmlType::kQ5_K)) {
+      if (FitsSmallBatch32BitIndices(
+              Batch, m, k, quant::QuantizedRowBytes(WType, k))) {
+        if constexpr (WType == core::GgmlType::kQ5_K && Batch == 8) {
+          // Four output rows amortize staging; eight waves leave enough
+          // registers for the packed decoder without spilling.
+          SmallBatchKQuantExactFp32GEMMKernel<8, Batch, 4, WType, 1, 4, 1,
+                                             true>
+              <<<(m + 31) / 32, 256, 0, stream>>>(w, fp32_x, y, m, k);
+          return;
+        } else {
+          constexpr bool kDoubleStage =
+              (WType == core::GgmlType::kQ4_K && Batch >= 5) ||
+              (WType == core::GgmlType::kQ5_K && Batch >= 5 && Batch <= 7);
+          if constexpr (kDoubleStage) {
+            if ((m == 17408 && k == 5120) || (m == 5120 && k == 17408)) {
+              SmallBatchKQuantExactFp32GEMMKernel<
+                  kKQuantSmallBatchWarps, Batch, RowsPerWave, WType, 2, 12, 1,
+                  true><<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
+              return;
+            }
+          }
+          SmallBatchKQuantExactFp32GEMMKernel<
+              kKQuantSmallBatchWarps, Batch, RowsPerWave, WType, 1, 12, 1,
+              true><<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
+          return;
+        }
+      }
+    }
     // At the large FFN shapes, two tiles halve staging barriers. Select only
     // the widths/formats that benefit: notably Q4 batch 7 also avoids spills.
     constexpr bool kDoubleStage =
@@ -1741,7 +1778,7 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
       if (batch == 8 && k == 5120 && m == 1280) {
         SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, 4,
                                             RowsPerWave, core::GgmlType::kQ4_K,
-                                            1, 12, 2>
+                                            1, 12, 2, true>
             <<<((m + 47) / 48) * 2, block, 0, stream>>>(w, fp32_x, y, m, k);
         return;
       }
@@ -1753,6 +1790,32 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
     case core::GgmlType::kQ6_K: {
+      // The large FFN projections reuse activations across three output rows.
+      // Smaller batches keep two rows to avoid paying for unused capacity.
+      if (batch >= 5 &&
+          ((m == 17408 && k == 5120) || (m == 5120 && k == 17408))) {
+        const auto launch_ffn = [&]<std::size_t Batch>() {
+          SmallBatchKQuantExactFp32GEMMKernel<
+              kKQuantSmallBatchWarps, Batch, 3, core::GgmlType::kQ6_K, 2, 1, 1,
+              true><<<(m + 47) / 48, block, 0, stream>>>(w, fp32_x, y, m, k);
+        };
+        switch (batch) {
+          case 5:
+            launch_ffn.template operator()<5>();
+            return;
+          case 6:
+            launch_ffn.template operator()<6>();
+            return;
+          case 7:
+            launch_ffn.template operator()<7>();
+            return;
+          case 8:
+            launch_ffn.template operator()<8>();
+            return;
+          default:
+            break;
+        }
+      }
       // DFlash2's seven proposals and eight target verification rows share
       // a large vocabulary projection.
       // Stage two consecutive tiles and reuse activations across three rows;
@@ -1761,6 +1824,15 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
       if ((batch == 7 || batch == 8) && m >= 65536) {
         constexpr std::size_t kHeadRows = kKQuantSmallBatchWarps * 3;
         const auto launch_head = [&]<std::size_t Batch>() {
+          if (FitsSmallBatch32BitIndices(
+                  Batch, m, k,
+                  quant::QuantizedRowBytes(core::GgmlType::kQ6_K, k))) {
+            SmallBatchKQuantExactFp32GEMMKernel<
+                kKQuantSmallBatchWarps, Batch, 3, core::GgmlType::kQ6_K, 2, 1,
+                1, true><<<(m + kHeadRows - 1) / kHeadRows, block, 0, stream>>>(
+                w, fp32_x, y, m, k);
+            return;
+          }
           SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch, 3,
                                               core::GgmlType::kQ6_K, 2, 1>
               <<<(m + kHeadRows - 1) / kHeadRows, block, 0, stream>>>(w, fp32_x,

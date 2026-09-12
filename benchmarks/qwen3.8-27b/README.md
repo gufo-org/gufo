@@ -29,13 +29,14 @@ Latest bounded refresh covers depths 0 and 4096.
 
 | Context depth | Q4 pp / tg | Q8 pp / tg |
 | ---: | ---: | ---: |
-| 0 | 396.7 / 21.49 | 466.2 / 24.14 |
-| 4,096 | 383.1 / 15.27 | 447.3 / 16.30 |
+| 0 | 403.1 / 23.63 | 466.2 / 24.14 |
+| 4,096 | 384.2 / 16.62 | 447.3 / 16.30 |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-[Current measurements](eval/dflash2-batch-widths.json).
+[Latest Q4 measurements](eval/dflash2-packed-decode.json);
+[preceding Q8 measurements](eval/dflash2-batch-widths.json).
 The [controller comparison](eval/dflash2-controllers.json) remains separate.
 Earlier [fixed-block precision results](eval/dflash2-rollback.json) and the
 [full depth sweep](eval/dflash2-depths.json) remain historical references.
@@ -88,43 +89,29 @@ prompt; fixed can be faster with Q8/BF16 drafts. Draft files occupy
 advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
-**Repetition control:** ask for 1,000 space-separated `red` words, measure
-128 tokens with adaptive DFlash2, C1, including the short chat prefill.
-One release pass at `784fdba`; all six pairings have **100% acceptance**
-and match all AR token IDs. This measures an easy case, not typical chat.
+**Latest Q4 target/Q4 draft:** greedy C1, two timed samples per binary in
+ABBA order, including prefill. Repetition asks for 1,000 space-separated
+`red` words; JSON/prose use the upstream fork's raw prompts.
 
-| Target | AR tok/s | Q4_K_M draft | Q8_0 draft | BF16 draft |
-| --- | ---: | ---: | ---: | ---: |
-| Q4 | 11.20 | **46.24** | 45.73 | 44.10 |
-| Q8 | 6.92 | **42.44** | 42.15 | 40.78 |
+| Workload | Before tok/s | Current tok/s | Gain |
+| --- | ---: | ---: | ---: |
+| Repetition, tg128, fixed-7 | 48.19 | **51.53** | 6.9% |
+| JSON, tg300, adaptive | 42.78 | **46.02** | 7.6% |
+| Prose, tg300, adaptive | 19.51 | **21.49** | 10.1% |
 
-The mixed `repetition_sequence` case also asks for an explanation. It reaches
-38.14 tok/s / 80.3% acceptance on Q4 and 22.91 / 47.7% on Q8 with Q4 draft,
-but produces different continuations: 128 tokens versus 81. Q8 accepts all
-34 proposals in its stable repeating section; prose, formatting and the
-terminal block lower the aggregate. [Evidence](eval/dflash2-wiring.json).
+Every token ID and acceptance statistic is unchanged; repetition accepts
+111/111 proposals. These short paired probes have no separate warmup.
+Packed Q4/Q5 scale decoding, bounded 32-bit indexing and Q5/Q6 row reuse
+accelerate exact verification at widths 3–8. All 24 new kernel variants have
+zero register scratch. The depth check gains 9.7%/8.8% TG at 0/4K, with no
+consistent prefill change. [Measurements, quality checks and experiments](eval/dflash2-packed-decode.json).
 
-Greedy requests with repetition/frequency/presence penalties retain DFlash2
-and reproduce AR. A short C1 chat probe with these penalties reaches
-**30.25–31.43 tok/s on Q4** and **25.89–27.03 on Q8** across the three drafts.
-These include prefill and are separate from the synthetic table above.
-[Sampling measurements](eval/dflash2-sampling.json).
-
-Matched upstream JSON/prose prompts, raw framing, C1/tg300: **42.70 / 19.38
-tok/s** with Q4 target/Q4 draft and adaptive, including prefill. One pass;
-fixed-3, fixed-7 and adaptive all match 300 AR IDs per prompt.
-The Q8 draft reaches **43.06 / 18.74 tok/s**, also matching every AR ID.
-[Fork comparison, timing differences and source audit](eval/llama-comparison.json).
-
-Exact projections now stream large BF16 weights, cache reused injection K/V
-weights, and skip symmetric-quant offset work while preserving decode rounding.
-Verification widths 3–8 are checked against scalar logits. Larger staging tiles
-remove Q4 batch-7 spills; selected Q4/Q5/IQ4 and Q8 kernels are **2.5–15.6% faster**
-in isolated probes. Paired C1 JSON/tg128 gains **0.35–0.63% on Q4** across all three
-drafts; **Q8 is effectively flat**. The bounded depth check gains 0.2–0.7% TG;
-no consistent prefill gain. All 270 draft trace files remain byte-identical.
-[Current evidence and rejected experiments](eval/dflash2-batch-widths.json);
-[earlier projection work](eval/dflash2-exact-gemm.json).
+The upstream headline uses different artifacts/power and excludes prefill;
+it is not a matched engine comparison. [Source audit and comparison limits](eval/llama-comparison.json).
+Earlier records cover [all-precision repetition](eval/dflash2-wiring.json),
+[sampling controls](eval/dflash2-sampling.json),
+[staging layouts](eval/dflash2-batch-widths.json) and
+[BF16/quantized projections](eval/dflash2-exact-gemm.json).
 The earlier [rollback pass](eval/dflash2-rollback.json) saves **50.5 MiB per session**
 and fixes cache addressing across mixed capacities and at logical context 262,144.
 

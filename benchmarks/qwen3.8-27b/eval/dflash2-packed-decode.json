@@ -1,0 +1,1364 @@
+{
+  "schema": "gufo.qwen27b-packed-decode.v1",
+  "date_utc": "2026-09-12T16:03:09.040159+00:00",
+  "baseline_revision": "480a33781fd8b8a2416e63b604370f6def7d06b3",
+  "scope": "Exact verification projections at widths 3–8. C1 Q4 target/Q4 DFlash2 draft is the release performance focus; no weight, sampling or controller changes.",
+  "model_artifacts_reference": "dflash2-rollback.json: artifacts (unchanged paths and hashes)",
+  "source_sha256": {
+    "src/models/qwen/hip/kernels/prefill_quant_gemm.hip": "80c0556d987696db3d537902ed9e58aa62dddfcd5c2d8bd86eacd6876d2b5776",
+    "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "386a1026e3ae48c57c6b393eb3ed598d500d06ce4e0ee341473ab56763cb7ec5",
+    "src/models/qwen/hip/quant_ops.hpp": "d9a3a581c616d1e07d63b52c89dbefe7bc3f30b2b9923ad1e931ee4eba4dccd6",
+    "tools/qwen27b/dflash_gemm_bench.hip": "3b36770807cfcd44131e31b1d4d01965970c2741faaf36d8157fa30c375a1664"
+  },
+  "retained": [
+    "Q4/Q5 batched scale/min extraction uses bit masks instead of divergent lower/upper cases. Scalar decoding retains its existing extraction. Floating-point products, sums and reduction order are unchanged.",
+    "Use uint32 device indices when weight byte offsets and input/output element offsets all fit; retain size_t for larger matrices. The guard uses division, with compile-time overflow-boundary checks.",
+    "Q4 retains two staging tiles at large FFN widths 5–8 and grouped width-4 work for the small width-8 projection. Q5 uses two tiles at FFN widths 5–7; width 8 uses eight waves/four output rows, removing the first prototype’s register spill.",
+    "Q6 FFN widths 5–8 reuse activations across three output rows/two tiles. Q6 vocabulary widths 7/8 use bounded uint32 indices with the existing three-row layout.",
+    "Extend the existing GEMM ablation tool; no new executable, environment switch or CLI control."
+  ],
+  "kernel_probe": {
+    "method": "Production templates, four alternating forward/reverse rounds, 24 launches per geometry per round, at least 128 MiB of rotating matrices. Each geometry must be finite and bit-identical to the wide-index reference before timing. Retained geometries were rerun after final source cleanup. Medians below; throughput percentages are baseline_ms/candidate_ms - 1.",
+    "results": [
+      {
+        "format": "q4",
+        "m": 17408,
+        "k": 5120,
+        "batch": 3,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.296267,
+        "candidate_ms": 0.2383575,
+        "kernel_speedup_percent": 24.29522880547077,
+        "baseline_rounds_ms": [
+          0.289557,
+          0.295854,
+          0.29668,
+          0.298435
+        ],
+        "candidate_rounds_ms": [
+          0.237279,
+          0.240902,
+          0.236418,
+          0.239436
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 17408,
+        "k": 5120,
+        "batch": 4,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.3191745,
+        "candidate_ms": 0.2488625,
+        "kernel_speedup_percent": 28.253352755035422,
+        "baseline_rounds_ms": [
+          0.305921,
+          0.318878,
+          0.319471,
+          0.330465
+        ],
+        "candidate_rounds_ms": [
+          0.247477,
+          0.248675,
+          0.24905,
+          0.250608
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 17408,
+        "k": 5120,
+        "batch": 5,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.335522,
+        "candidate_ms": 0.2621345,
+        "kernel_speedup_percent": 27.996124127117938,
+        "baseline_rounds_ms": [
+          0.333646,
+          0.337924,
+          0.33053,
+          0.337398
+        ],
+        "candidate_rounds_ms": [
+          0.261572,
+          0.262354,
+          0.262303,
+          0.261966
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 17408,
+        "k": 5120,
+        "batch": 6,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.36794000000000004,
+        "candidate_ms": 0.29468649999999996,
+        "kernel_speedup_percent": 24.85811192572449,
+        "baseline_rounds_ms": [
+          0.362853,
+          0.370573,
+          0.366383,
+          0.369497
+        ],
+        "candidate_rounds_ms": [
+          0.294298,
+          0.293326,
+          0.295075,
+          0.298161
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 17408,
+        "k": 5120,
+        "batch": 7,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.376429,
+        "candidate_ms": 0.320126,
+        "kernel_speedup_percent": 17.587762318587053,
+        "baseline_rounds_ms": [
+          0.380818,
+          0.376855,
+          0.370245,
+          0.376003
+        ],
+        "candidate_rounds_ms": [
+          0.325081,
+          0.321073,
+          0.318269,
+          0.319179
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 17408,
+        "k": 5120,
+        "batch": 8,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.3923335,
+        "candidate_ms": 0.3407385,
+        "kernel_speedup_percent": 15.142110445400213,
+        "baseline_rounds_ms": [
+          0.387779,
+          0.39659,
+          0.388077,
+          0.409806
+        ],
+        "candidate_rounds_ms": [
+          0.341859,
+          0.328006,
+          0.351301,
+          0.339618
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 5120,
+        "k": 17408,
+        "batch": 3,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.301007,
+        "candidate_ms": 0.235612,
+        "kernel_speedup_percent": 27.755377485017753,
+        "baseline_rounds_ms": [
+          0.298349,
+          0.300799,
+          0.301215,
+          0.301604
+        ],
+        "candidate_rounds_ms": [
+          0.234352,
+          0.236872,
+          0.234075,
+          0.238409
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 5120,
+        "k": 17408,
+        "batch": 4,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.33200300000000005,
+        "candidate_ms": 0.2494495,
+        "kernel_speedup_percent": 33.094273590446186,
+        "baseline_rounds_ms": [
+          0.320381,
+          0.331589,
+          0.33405,
+          0.332417
+        ],
+        "candidate_rounds_ms": [
+          0.248408,
+          0.248329,
+          0.250491,
+          0.253015
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 5120,
+        "k": 17408,
+        "batch": 5,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.3454575,
+        "candidate_ms": 0.264636,
+        "kernel_speedup_percent": 30.54062939282638,
+        "baseline_rounds_ms": [
+          0.342041,
+          0.347661,
+          0.34383,
+          0.347085
+        ],
+        "candidate_rounds_ms": [
+          0.263642,
+          0.266529,
+          0.260954,
+          0.26563
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 5120,
+        "k": 17408,
+        "batch": 6,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.3773575,
+        "candidate_ms": 0.29262900000000003,
+        "kernel_speedup_percent": 28.954238985199687,
+        "baseline_rounds_ms": [
+          0.372697,
+          0.3809,
+          0.373815,
+          0.382751
+        ],
+        "candidate_rounds_ms": [
+          0.290908,
+          0.292038,
+          0.29322,
+          0.294127
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 5120,
+        "k": 17408,
+        "batch": 7,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.39279600000000003,
+        "candidate_ms": 0.32537000000000005,
+        "kernel_speedup_percent": 20.722869348741433,
+        "baseline_rounds_ms": [
+          0.400395,
+          0.396847,
+          0.388551,
+          0.388745
+        ],
+        "candidate_rounds_ms": [
+          0.326473,
+          0.34012,
+          0.320707,
+          0.324267
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 5120,
+        "k": 17408,
+        "batch": 8,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.4128755,
+        "candidate_ms": 0.3421055,
+        "kernel_speedup_percent": 20.686601063122346,
+        "baseline_rounds_ms": [
+          0.407731,
+          0.410436,
+          0.415315,
+          0.426755
+        ],
+        "candidate_rounds_ms": [
+          0.340235,
+          0.336854,
+          0.343976,
+          0.363391
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 1280,
+        "k": 5120,
+        "batch": 3,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.038688,
+        "candidate_ms": 0.024457,
+        "kernel_speedup_percent": 58.1878398822423,
+        "baseline_rounds_ms": [
+          0.042096,
+          0.038634,
+          0.038683,
+          0.038693
+        ],
+        "candidate_rounds_ms": [
+          0.024321,
+          0.025293,
+          0.024269,
+          0.024593
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 1280,
+        "k": 5120,
+        "batch": 4,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.0402625,
+        "candidate_ms": 0.028719,
+        "kernel_speedup_percent": 40.19464466032938,
+        "baseline_rounds_ms": [
+          0.044462,
+          0.039783,
+          0.039818,
+          0.040707
+        ],
+        "candidate_rounds_ms": [
+          0.028562,
+          0.030673,
+          0.02761,
+          0.028876
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 1280,
+        "k": 5120,
+        "batch": 5,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.0433105,
+        "candidate_ms": 0.034705,
+        "kernel_speedup_percent": 24.796138884886922,
+        "baseline_rounds_ms": [
+          0.046381,
+          0.043131,
+          0.043425,
+          0.043196
+        ],
+        "candidate_rounds_ms": [
+          0.03469,
+          0.0347,
+          0.03471,
+          0.034772
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 1280,
+        "k": 5120,
+        "batch": 6,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.049518,
+        "candidate_ms": 0.0354525,
+        "kernel_speedup_percent": 39.674211973767726,
+        "baseline_rounds_ms": [
+          0.050911,
+          0.048431,
+          0.049027,
+          0.050009
+        ],
+        "candidate_rounds_ms": [
+          0.034443,
+          0.035861,
+          0.035141,
+          0.035764
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 1280,
+        "k": 5120,
+        "batch": 7,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.051244,
+        "candidate_ms": 0.0384665,
+        "kernel_speedup_percent": 33.21721497926766,
+        "baseline_rounds_ms": [
+          0.052928,
+          0.051305,
+          0.050969,
+          0.051183
+        ],
+        "candidate_rounds_ms": [
+          0.037943,
+          0.038816,
+          0.038117,
+          0.039471
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q4",
+        "m": 1280,
+        "k": 5120,
+        "batch": 8,
+        "baseline_geometry": "groups4",
+        "candidate_geometry": "narrow_groups4",
+        "baseline_ms": 0.0485095,
+        "candidate_ms": 0.035749,
+        "kernel_speedup_percent": 35.694704746985906,
+        "baseline_rounds_ms": [
+          0.046681,
+          0.050012,
+          0.047007,
+          0.050218
+        ],
+        "candidate_rounds_ms": [
+          0.035796,
+          0.03298,
+          0.035702,
+          0.03642
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 17408,
+        "k": 5120,
+        "batch": 3,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.3253355,
+        "candidate_ms": 0.2837155,
+        "kernel_speedup_percent": 14.669625029298716,
+        "baseline_rounds_ms": [
+          0.320762,
+          0.325591,
+          0.32508,
+          0.330155
+        ],
+        "candidate_rounds_ms": [
+          0.282286,
+          0.282982,
+          0.284449,
+          0.288439
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 17408,
+        "k": 5120,
+        "batch": 4,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.340159,
+        "candidate_ms": 0.29407150000000004,
+        "kernel_speedup_percent": 15.672208969587299,
+        "baseline_rounds_ms": [
+          0.339902,
+          0.341246,
+          0.340416,
+          0.336979
+        ],
+        "candidate_rounds_ms": [
+          0.29431,
+          0.296919,
+          0.293833,
+          0.291664
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 17408,
+        "k": 5120,
+        "batch": 5,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.3538065,
+        "candidate_ms": 0.29900950000000004,
+        "kernel_speedup_percent": 18.32617358311357,
+        "baseline_rounds_ms": [
+          0.342311,
+          0.353926,
+          0.355661,
+          0.353687
+        ],
+        "candidate_rounds_ms": [
+          0.299113,
+          0.299879,
+          0.298906,
+          0.29862
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 17408,
+        "k": 5120,
+        "batch": 6,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.37781549999999997,
+        "candidate_ms": 0.3199155,
+        "kernel_speedup_percent": 18.09852914285177,
+        "baseline_rounds_ms": [
+          0.370879,
+          0.383161,
+          0.381415,
+          0.374216
+        ],
+        "candidate_rounds_ms": [
+          0.326132,
+          0.32312,
+          0.315748,
+          0.316711
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 17408,
+        "k": 5120,
+        "batch": 7,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.418781,
+        "candidate_ms": 0.40829099999999996,
+        "kernel_speedup_percent": 2.5692459544785606,
+        "baseline_rounds_ms": [
+          0.41758,
+          0.419982,
+          0.422771,
+          0.408938
+        ],
+        "candidate_rounds_ms": [
+          0.410688,
+          0.425795,
+          0.4057,
+          0.405894
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 17408,
+        "k": 5120,
+        "batch": 8,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_rows4",
+        "baseline_ms": 0.4255635,
+        "candidate_ms": 0.3627275,
+        "kernel_speedup_percent": 17.32319716591657,
+        "baseline_rounds_ms": [
+          0.412229,
+          0.425828,
+          0.425299,
+          0.428019
+        ],
+        "candidate_rounds_ms": [
+          0.360443,
+          0.369183,
+          0.360069,
+          0.365012
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 5120,
+        "k": 17408,
+        "batch": 3,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.33223199999999997,
+        "candidate_ms": 0.2843055,
+        "kernel_speedup_percent": 16.857394598416132,
+        "baseline_rounds_ms": [
+          0.33138,
+          0.334962,
+          0.328012,
+          0.333084
+        ],
+        "candidate_rounds_ms": [
+          0.288061,
+          0.286714,
+          0.279788,
+          0.281897
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 5120,
+        "k": 17408,
+        "batch": 4,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile1",
+        "baseline_ms": 0.3420045,
+        "candidate_ms": 0.296142,
+        "kernel_speedup_percent": 15.486658427376042,
+        "baseline_rounds_ms": [
+          0.340578,
+          0.338021,
+          0.343431,
+          0.348346
+        ],
+        "candidate_rounds_ms": [
+          0.297757,
+          0.295761,
+          0.296523,
+          0.294892
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 5120,
+        "k": 17408,
+        "batch": 5,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.366993,
+        "candidate_ms": 0.3118495,
+        "kernel_speedup_percent": 17.682728367369528,
+        "baseline_rounds_ms": [
+          0.366017,
+          0.36918,
+          0.36668,
+          0.367306
+        ],
+        "candidate_rounds_ms": [
+          0.313235,
+          0.317611,
+          0.30926,
+          0.310464
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 5120,
+        "k": 17408,
+        "batch": 6,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.3891715,
+        "candidate_ms": 0.312583,
+        "kernel_speedup_percent": 24.501812318648163,
+        "baseline_rounds_ms": [
+          0.388085,
+          0.390258,
+          0.387736,
+          0.390587
+        ],
+        "candidate_rounds_ms": [
+          0.31185,
+          0.313316,
+          0.309586,
+          0.315111
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 5120,
+        "k": 17408,
+        "batch": 7,
+        "baseline_geometry": "tile2",
+        "candidate_geometry": "narrow_tile2",
+        "baseline_ms": 0.4286335,
+        "candidate_ms": 0.415528,
+        "kernel_speedup_percent": 3.1539390847307613,
+        "baseline_rounds_ms": [
+          0.44513,
+          0.431205,
+          0.424325,
+          0.426062
+        ],
+        "candidate_rounds_ms": [
+          0.417534,
+          0.42673,
+          0.412425,
+          0.413522
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q5",
+        "m": 5120,
+        "k": 17408,
+        "batch": 8,
+        "baseline_geometry": "tile1",
+        "candidate_geometry": "narrow_rows4",
+        "baseline_ms": 0.4413775,
+        "candidate_ms": 0.353097,
+        "kernel_speedup_percent": 25.001770051855445,
+        "baseline_rounds_ms": [
+          0.426362,
+          0.437634,
+          0.445121,
+          0.446941
+        ],
+        "candidate_rounds_ms": [
+          0.35154,
+          0.353796,
+          0.352398,
+          0.358314
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 17408,
+        "k": 5120,
+        "batch": 5,
+        "baseline_geometry": "rows2_tile1",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 0.369683,
+        "candidate_ms": 0.3563455,
+        "kernel_speedup_percent": 3.7428563009775706,
+        "baseline_rounds_ms": [
+          0.366888,
+          0.370093,
+          0.370031,
+          0.369335
+        ],
+        "candidate_rounds_ms": [
+          0.362022,
+          0.355698,
+          0.356993,
+          0.355504
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 17408,
+        "k": 5120,
+        "batch": 6,
+        "baseline_geometry": "rows2_tile1",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 0.387141,
+        "candidate_ms": 0.3641995,
+        "kernel_speedup_percent": 6.299157467267258,
+        "baseline_rounds_ms": [
+          0.377354,
+          0.385714,
+          0.388568,
+          0.389797
+        ],
+        "candidate_rounds_ms": [
+          0.363781,
+          0.365351,
+          0.364618,
+          0.362532
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 17408,
+        "k": 5120,
+        "batch": 7,
+        "baseline_geometry": "rows2_tile1",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 0.40567200000000003,
+        "candidate_ms": 0.3950395,
+        "kernel_speedup_percent": 2.691503001598594,
+        "baseline_rounds_ms": [
+          0.402732,
+          0.405904,
+          0.408688,
+          0.40544
+        ],
+        "candidate_rounds_ms": [
+          0.398713,
+          0.396014,
+          0.394065,
+          0.390554
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 17408,
+        "k": 5120,
+        "batch": 8,
+        "baseline_geometry": "rows2_tile1",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 0.446307,
+        "candidate_ms": 0.4112445,
+        "kernel_speedup_percent": 8.525949891123163,
+        "baseline_rounds_ms": [
+          0.429885,
+          0.44351,
+          0.449104,
+          0.457219
+        ],
+        "candidate_rounds_ms": [
+          0.411844,
+          0.410645,
+          0.410102,
+          0.413453
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 5120,
+        "k": 17408,
+        "batch": 5,
+        "baseline_geometry": "rows2_tile1",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 0.3694355,
+        "candidate_ms": 0.344341,
+        "kernel_speedup_percent": 7.287688657464564,
+        "baseline_rounds_ms": [
+          0.364184,
+          0.370401,
+          0.369621,
+          0.36925
+        ],
+        "candidate_rounds_ms": [
+          0.343915,
+          0.344767,
+          0.343572,
+          0.344929
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 5120,
+        "k": 17408,
+        "batch": 6,
+        "baseline_geometry": "rows2_tile1",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 0.39329400000000003,
+        "candidate_ms": 0.3496515,
+        "kernel_speedup_percent": 12.481713935161153,
+        "baseline_rounds_ms": [
+          0.378483,
+          0.392277,
+          0.394311,
+          0.401532
+        ],
+        "candidate_rounds_ms": [
+          0.349508,
+          0.34954,
+          0.349763,
+          0.352435
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 5120,
+        "k": 17408,
+        "batch": 7,
+        "baseline_geometry": "rows2_tile1",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 0.40767299999999995,
+        "candidate_ms": 0.38448499999999997,
+        "kernel_speedup_percent": 6.03092448339988,
+        "baseline_rounds_ms": [
+          0.398947,
+          0.407869,
+          0.407477,
+          0.40821
+        ],
+        "candidate_rounds_ms": [
+          0.385366,
+          0.384391,
+          0.384579,
+          0.383333
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 5120,
+        "k": 17408,
+        "batch": 8,
+        "baseline_geometry": "rows2_tile1",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 0.4566605,
+        "candidate_ms": 0.41777,
+        "kernel_speedup_percent": 9.309069583742268,
+        "baseline_rounds_ms": [
+          0.425104,
+          0.464775,
+          0.465877,
+          0.448546
+        ],
+        "candidate_rounds_ms": [
+          0.412056,
+          0.407315,
+          0.429593,
+          0.423484
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 248320,
+        "k": 5120,
+        "batch": 7,
+        "baseline_geometry": "rows3_tile2",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 5.1605785,
+        "candidate_ms": 5.023916,
+        "kernel_speedup_percent": 2.720238554943988,
+        "baseline_rounds_ms": [
+          5.301327,
+          5.187551,
+          5.047766,
+          5.133606
+        ],
+        "candidate_rounds_ms": [
+          5.136778,
+          5.064508,
+          4.983324,
+          4.959019
+        ],
+        "bit_mismatches": 0
+      },
+      {
+        "format": "q6",
+        "m": 248320,
+        "k": 5120,
+        "batch": 8,
+        "baseline_geometry": "rows3_tile2",
+        "candidate_geometry": "narrow_rows3_tile2",
+        "baseline_ms": 5.663169,
+        "candidate_ms": 5.3617895,
+        "kernel_speedup_percent": 5.620875269348025,
+        "baseline_rounds_ms": [
+          5.740152,
+          5.580162,
+          5.586186,
+          5.753092
+        ],
+        "candidate_rounds_ms": [
+          5.30368,
+          5.419899,
+          5.442773,
+          5.137242
+        ],
+        "bit_mismatches": 0
+      }
+    ]
+  },
+  "release": {
+    "date_utc": "2026-09-12T16:03:09.040159+00:00",
+    "binary": {
+      "baseline": {
+        "path": "/nix/store/wg7swn0x1qd5wy5hx1mbbrj4d8ifcwsl-gufo-f87fa08-dirty/bin/gufo",
+        "sha256": "622f6bf2b3f1cd6b0b096e84911b5c76fd078f3edaf8b6156ed5137be7f9af1e"
+      },
+      "candidate": {
+        "path": "/nix/store/37p06yqhs1adp2shfgvslp6ph3d02r92-gufo-480a337-dirty/bin/gufo",
+        "sha256": "bda684ee10031e5e9213648fc11fd43542352577d7f384d61adf3b04c42405a3"
+      }
+    },
+    "method": "Q4 target/Q4 draft; C1, greedy, fixed7 repetition chat TG128; adaptive7 raw upstream JSON/prose TG300. ABBA per prompt, no separate warmup. Timings include prefill, exclude model loading. Full IDs compared with previous qualified AR.",
+    "rows": [
+      {
+        "workload": "repetition",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 2.64691,
+        "tps": 48.3583,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 2.49409,
+        "tps": 51.3214,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 2.47436,
+        "tps": 51.7305,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 128,
+        "seconds": 2.66586,
+        "tps": 48.0144,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "json",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 7.01439,
+        "tps": 42.7692,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 6.52041,
+        "tps": 46.0094,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 6.51787,
+        "tps": 46.0273,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 7.00978,
+        "tps": 42.7974,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "prose",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 15.3748,
+        "tps": 19.5124,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 13.9596,
+        "tps": 21.4906,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 13.9669,
+        "tps": 21.4794,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 15.3729,
+        "tps": 19.5149,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      }
+    ],
+    "summary": [
+      {
+        "workload": "repetition",
+        "baseline": 48.186350000000004,
+        "candidate": 51.525949999999995,
+        "percent": 6.930593414940112,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      },
+      {
+        "workload": "json",
+        "baseline": 42.7833,
+        "candidate": 46.01835,
+        "percent": 7.561478427330304,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      },
+      {
+        "workload": "prose",
+        "baseline": 19.51365,
+        "candidate": 21.485,
+        "percent": 10.102415488645144,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      }
+    ]
+  },
+  "depth_probe": {
+    "method": "Q4 target/Q4 draft, adaptive, pp2048/tg128, C1. One timed repetition after warmup. Baseline measured before the final launch adjustment; final candidate checked against the saved baseline token hashes. Bounded control, not an interleaved variance estimate.",
+    "rows": [
+      {
+        "target": "target_q4",
+        "binary": "baseline",
+        "traces": [
+          [
+            "0",
+            "128",
+            "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+          ],
+          [
+            "4096",
+            "128",
+            "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+          ]
+        ],
+        "stdout": "ggml_cuda_init: found 1 ROCm devices (Total VRAM: 126976 MiB):\n  Device 0: AMD Radeon 8060S Graphics, gfx1151, Wave Size: 32, VRAM: 126976 MiB\n[Model Load]: 0.594465 s\n| model                          |       size |     params | backend    | ngl |            test |                   t/s |\n| ------------------------------ | ---------- | ---------- | ---------- | --- | --------------- | --------------------- |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |          pp2048 |        402.11 ± 0.00 |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |   tg128-dflash2 |         21.54 ± 0.00 |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |  pp2048 @ d4096 |        384.89 ± 0.00 |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 | tg128 @ d4096-dflash2 |         15.27 ± 0.00 |\n\n",
+        "command": [
+          "/home/fbozzo/projects/strix-halo.cpp/result-qwen-q4-goal-base/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+          "--draft-policy",
+          "adaptive",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "0,4096",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "-v"
+        ]
+      },
+      {
+        "target": "target_q4",
+        "binary": "candidate",
+        "traces": [
+          [
+            "0",
+            "128",
+            "095434b2791f856458b6e6ed2c53d8fd0ea4722358c5da48dea3971371dd7fab"
+          ],
+          [
+            "4096",
+            "128",
+            "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+          ]
+        ],
+        "stdout": "ggml_cuda_init: found 1 ROCm devices (Total VRAM: 126976 MiB):\n  Device 0: AMD Radeon 8060S Graphics, gfx1151, Wave Size: 32, VRAM: 126976 MiB\n[Model Load]: 0.724949 s\n| model                          |       size |     params | backend    | ngl |            test |                   t/s |\n| ------------------------------ | ---------- | ---------- | ---------- | --- | --------------- | --------------------- |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |          pp2048 |        403.06 ± 0.00 |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |   tg128-dflash2 |         23.63 ± 0.00 |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 |  pp2048 @ d4096 |        384.16 ± 0.00 |\n| Qwen3.8-27B Q5_K mixed         |  16.35 GiB |    27.32 B | ROCm (HIP) |  99 | tg128 @ d4096-dflash2 |         16.62 ± 0.00 |\n\n",
+        "command": [
+          "/home/fbozzo/projects/strix-halo.cpp/result/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+          "--draft-policy",
+          "adaptive",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "0,4096",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "-v"
+        ]
+      }
+    ],
+    "summary": [
+      {
+        "depth": 0,
+        "baseline_pp": 402.11,
+        "candidate_pp": 403.06,
+        "baseline_tg": 21.54,
+        "candidate_tg": 23.63
+      },
+      {
+        "depth": 4096,
+        "baseline_pp": 384.89,
+        "candidate_pp": 384.16,
+        "baseline_tg": 15.27,
+        "candidate_tg": 16.62
+      }
+    ],
+    "all_128_ids_unchanged": true
+  },
+  "quality": {
+    "focused_kernel_suites": [
+      "qwen_quant_gemv_ops_test",
+      "qwen_q4kxl_quant_ops_test"
+    ],
+    "model": "Both Q4/Q8 target suites passed the scale/index/layout update: 49 full-vocabulary verifier rows per target equal scalar decoding, with snapshot/ring replay, mixed-capacity FP16/FP32 caches and short-prefix logical context 262144 controls. The final Q5 batch-8 launch was rechecked with the Q4 target suite.",
+    "draft_traces": "All 270 trace files (267 float arrays and three manifests) match the preceding qualified release byte for byte across Q4/Q8/BF16 drafts. The final Q5 launch was rechecked on all 90 Q4 draft files.",
+    "release": "All 12 final baseline/candidate prompt runs match every qualified AR token ID: TG128 repetition and TG300 JSON/prose. All acceptance/drafted/accepted/step counts are unchanged within each workload. Both depth traces retain all 128 IDs.",
+    "ar_reference": "JSON/prose AR token hashes come from the pinned matched-prompt comparison; repetition AR was refreshed at the start of this optimization. Target and draft artifacts are unchanged."
+  },
+  "profile": {
+    "method": "Separate rocprofv3 pass, same fixed7 chat repetition/TG128 as the timing control. Totals include prefill and graph preparation; do not interpret whole-invocation idle time as decode overhead.",
+    "baseline_kernel_total_ms": 2672.711933,
+    "candidate_kernel_total_ms": 2453.819909,
+    "q5_batch8": {
+      "launches": 2865,
+      "baseline_ms": 894.610341,
+      "candidate_ms": 757.762673,
+      "baseline_vgpr_allocated": 120,
+      "candidate_vgpr_allocated": 152,
+      "lds_bytes": 17408,
+      "scratch_bytes": 0
+    },
+    "q4_batch8_two_tiles": {
+      "launches": 555,
+      "baseline_ms": 219.632555,
+      "candidate_ms": 186.882756,
+      "vgpr_allocated": 104,
+      "lds_bytes": 43008,
+      "scratch_bytes": 0
+    },
+    "iq4_batch8_two_tiles_unchanged": {
+      "launches": 930,
+      "baseline_ms": 352.725627,
+      "candidate_ms": 355.288054
+    },
+    "compiled_metadata": "Extracted AMDGPU metadata from the final Nix release: all 24 new narrow-index variants have zero private scratch. 91 K-quant variants inspected. The pre-existing, unchanged Q3 batch-6 wide-index fallback has 12 scratch bytes; this is not a claim that every existing kernel is spill-free.",
+    "q5_micro_resources": "Final eight-wave/four-row kernel: 146 compiler-reported VGPRs (152 allocated in runtime metadata), nine register-limited waves/SIMD, 17408 LDS bytes, zero spills."
+  },
+  "rejected": [
+    "Serial output-row accumulation caused hundreds of register spills and about 10x slower isolated kernels; removed.",
+    "Compact double-stage/register activation-sum variants were slower than the retained decoder; removed.",
+    "The first narrow-index Q5 width-8 layout improved total speed but spilled one VGPR. Replaced with the faster eight-wave/four-row layout.",
+    "IQ4 narrow-index gains were inconsistent; its production selection is unchanged. Lower-occupancy Q4 layouts did not consistently improve both FFN shapes."
+  ],
+  "follow_up": [
+    "The same-code-body AR GEMV specialization prototype is bit-exact and faster for Q4/Q5/IQ4 in a short down-projection probe, with lower register use. It is not yet a production change or model speed claim.",
+    "IQ4 now accounts for a larger share of verification time; investigate its workgroup layout and decoder.",
+    "The peak calibration tool has hoistable/dead work in its WMMA-epilogue and LDS rows. Those impossible rates were not used to justify this change; repair the calibration before relying on those ceilings."
+  ],
+  "limits": [
+    "Two timed samples per binary per prompt, no separate warmup: an exploratory paired comparison, not a confidence interval.",
+    "No full-depth/C>1/capability sweep or new independent original-target qualification.",
+    "Upstream headline uses different artifacts/power and decode-only timing; this optimization does not establish matching that headline. The pinned comparison and its limits remain in llama-comparison.json."
+  ]
+}

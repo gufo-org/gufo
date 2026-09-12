@@ -200,14 +200,30 @@ __device__ inline std::size_t QuantBlockQK(core::GgmlType t) {
 // opt-r4-q5k-q6k: unpack the (scale, minimum) pair for Q5_K from the packed
 // 12-byte scales array. index 0..7; mirrors CPU GetQ4ScaleMin in
 // ggml_dequant.cpp (Q5_K uses the same scale/min encoding as Q4_K).
+template<bool SharedScales = false>
 __device__ inline void GetQKScaleMin(std::size_t index,
                                      const std::uint8_t* packed,
                                      std::uint8_t& sc,
                                      std::uint8_t& m) noexcept {
-  // Kept branchy on purpose. A branchless form (compute both cases, select with
-  // cndmask) needs a third unconditional byte read, and the decode GEMV that
-  // dominates this call site is DRAM-bound: the extra load measured 2% slower
-  // end to end (tg128 8.25 -> 8.08) even though it removed the divergence.
+  // Batched projections amortize one extra byte load across token rows and
+  // benefit from avoiding divergent execution of the two encodings. Scalar
+  // GEMV keeps the fewer-load spelling.
+  if constexpr (SharedScales) {
+    const std::size_t base = index & 3U;
+    const unsigned low = packed[base];
+    const unsigned middle = packed[base + 4];
+    const unsigned high = packed[base + 8];
+    const unsigned upper_mask = 0U - static_cast<unsigned>(index >> 2U);
+    const unsigned lower_scale = low & 63U;
+    const unsigned upper_scale = (high & 15U) | ((low >> 6U) << 4U);
+    const unsigned lower_minimum = middle & 63U;
+    const unsigned upper_minimum = (high >> 4U) | ((middle >> 6U) << 4U);
+    sc = static_cast<std::uint8_t>(
+        lower_scale ^ ((lower_scale ^ upper_scale) & upper_mask));
+    m = static_cast<std::uint8_t>(
+        lower_minimum ^ ((lower_minimum ^ upper_minimum) & upper_mask));
+    return;
+  }
   if (index < 4) {
     sc = packed[index] & 0x3FU;
     m = packed[index + 4] & 0x3FU;
@@ -477,6 +493,7 @@ __device__ inline void LoadQuantWords16(const std::uint8_t* __restrict__ src,
 
 /// Decodes the `sub16`-th 16-element sub-block of the row starting at `row`.
 /// `row` must point at the first block of the row for `type`.
+template<bool SharedScales = false>
 __device__ inline void DecodeQuantSub16(core::GgmlType type,
                                         const void* __restrict__ row,
                                         std::size_t sub16,
@@ -506,7 +523,7 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       }
       std::uint8_t sc = 0;
       std::uint8_t m = 0;
-      GetQKScaleMin(sb32, blk.scales, sc, m);
+      GetQKScaleMin<SharedScales>(sb32, blk.scales, sc, m);
       out.scale = __half2float(blk.d) * static_cast<float>(sc);
       out.offset = __half2float(blk.dmin) * static_cast<float>(m);
       return;
@@ -530,7 +547,7 @@ __device__ inline void DecodeQuantSub16(core::GgmlType type,
       }
       std::uint8_t sc = 0;
       std::uint8_t m = 0;
-      GetQKScaleMin(sb32, blk.scales, sc, m);
+      GetQKScaleMin<SharedScales>(sb32, blk.scales, sc, m);
       out.scale = __half2float(blk.d) * static_cast<float>(sc);
       out.offset = __half2float(blk.dmin) * static_cast<float>(m);
       return;

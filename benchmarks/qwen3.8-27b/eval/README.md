@@ -125,6 +125,13 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Packed decoding and verification](dflash2-packed-decode.json): 40 retained
+  projection cases cover widths 3–8 with finite, bit-exact output comparisons.
+  Both target suites and all 270 draft trace files pass the scale/index update;
+  the final Q5 batch-8 layout is rechecked on Q4 target logits and draft traces.
+  All 24 new compiled kernel variants have zero private scratch. Paired Q4/Q4
+  release probes retain every AR token ID and acceptance statistic, including
+  TG300 JSON/prose and TG128 repetition; bounded 0/4K depth checks also match.
 - [Sampling qualification](sampling-strategies.json): all 12 combinations of
   Q4/Q8 targets, Q4/Q8/BF16 drafts and fixed/adaptive controllers pass the
   23-case AR/DFlash2 replay check. HTTP passes AR on both targets, all six
