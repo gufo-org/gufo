@@ -150,6 +150,13 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Batch-4 extension](dflash2-wave64.json): Q4 up/packed-up, Q5 down and
+  IQ4 down retain their arithmetic and index widths. Four affected profile
+  unions take 1.90% less GPU time; overall C1 timing is flat
+  (+0.10% prose/JSON, −0.30% repetition). All 12 continuations, both target
+  suites, 270 draft traces and six maintained GEMM cases pass. The 16 prior
+  wave64 kernels retain identical instructions; all 19 have zero private
+  scratch. The explicit batch-3/4 screen leaves slower/marginal cases unchanged.
 - [Selected wave64 projections](dflash2-wave64.json): bounded Q4/Q5/IQ4
   FFNs at widths 5–8 and Q6 vocabulary heads at 7–8 preserve the FP32 sums.
   Native ISA confirms wave64 and zero private scratch. Q4 batch-5 down

@@ -8,15 +8,15 @@ namespace {
 template<core::GgmlType Type, std::size_t Batch>
 void Launch(const void* w, const float* x, float* y, std::size_t m,
             std::size_t k, hipStream_t stream) {
-  const auto launch =
-      [&]<std::uint32_t Waves, std::size_t Rows, std::size_t Tiles,
-          std::uint32_t MinWaves, std::size_t Step = Batch>() {
-        const dim3 grid(
-            static_cast<unsigned>((m + Waves * Rows - 1) / (Waves * Rows)));
-        SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, Rows, Type, Tiles,
-                                            MinWaves, 1, true, Step, 64>
-            <<<grid, Waves * 32, 0, stream>>>(w, x, y, m, k);
-      };
+  const auto launch = [&]<std::uint32_t Waves, std::size_t Rows,
+                          std::size_t Tiles, std::uint32_t MinWaves,
+                          std::size_t Step = Batch, bool Narrow = true>() {
+    const dim3 grid(
+        static_cast<unsigned>((m + Waves * Rows - 1) / (Waves * Rows)));
+    SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, Rows, Type, Tiles,
+                                        MinWaves, 1, Narrow, Step, 64>
+        <<<grid, Waves * 32, 0, stream>>>(w, x, y, m, k);
+  };
   const bool down = m == 5120;
   if constexpr (Type == core::GgmlType::kQ4_K) {
     if constexpr (Batch == 5 || Batch == 6) {
@@ -28,7 +28,9 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
     constexpr std::size_t kTiles = Batch == 5 ? 1 : 2;
     launch.template operator()<16, 4, kTiles, 4>();
   } else if constexpr (Type == core::GgmlType::kQ5_K) {
-    if constexpr (Batch == 5 || Batch == 6) {
+    if constexpr (Batch == 4) {
+      launch.template operator()<16, 4, 1, 4, 2>();
+    } else if constexpr (Batch == 5 || Batch == 6) {
       launch.template operator()<16, 4, 2, 4>();
     } else if constexpr (Batch == 8) {
       if (down) {
@@ -40,7 +42,9 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
       launch.template operator()<8, 4, 1, 4>();
     }
   } else if constexpr (Type == core::GgmlType::kIQ4_XS) {
-    if constexpr (Batch == 6) {
+    if constexpr (Batch == 4) {
+      launch.template operator()<16, 3, 1, 12, Batch, false>();
+    } else if constexpr (Batch == 6) {
       launch.template operator()<16, 3, 2, 12>();
     } else if constexpr (Batch == 7) {
       launch.template operator()<16, 4, 2, 4>();
@@ -57,6 +61,11 @@ template<core::GgmlType Type>
 void LaunchBatch(const void* w, const float* x, float* y, std::size_t batch,
                  std::size_t m, std::size_t k, hipStream_t stream) {
   switch (batch) {
+    case 4:
+      if constexpr (Type != core::GgmlType::kQ6_K) {
+        Launch<Type, 4>(w, x, y, m, k, stream);
+      }
+      return;
     case 5:
       if constexpr (Type == core::GgmlType::kQ4_K ||
                     Type == core::GgmlType::kQ5_K) {
@@ -85,7 +94,7 @@ bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
                                      const float* x, float* y,
                                      std::size_t batch, std::size_t m,
                                      std::size_t k, hipStream_t stream) {
-  if (batch < 5 || batch > 8) {
+  if (batch < 4 || batch > 8) {
     return false;
   }
   // These bounded dimensions also satisfy the kernel's 32-bit index limits.
@@ -94,19 +103,20 @@ bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
   const bool down = m == 5120 && k == 17408;
   switch (type) {
     case core::GgmlType::kQ4_K:
-      if (!(up || down)) {
+      if (!(up || (down && batch >= 5))) {
         return false;
       }
       LaunchBatch<core::GgmlType::kQ4_K>(w, x, y, batch, m, k, stream);
       return true;
     case core::GgmlType::kQ5_K:
-      if (!((up && batch != 6) || (down && batch >= 6))) {
+      if (!((up && batch >= 5 && batch != 6) ||
+            (down && (batch == 4 || batch >= 6)))) {
         return false;
       }
       LaunchBatch<core::GgmlType::kQ5_K>(w, x, y, batch, m, k, stream);
       return true;
     case core::GgmlType::kIQ4_XS:
-      if (batch < 6 || !(up || down)) {
+      if (!((batch == 4 && down) || (batch >= 6 && (up || down)))) {
         return false;
       }
       LaunchBatch<core::GgmlType::kIQ4_XS>(w, x, y, batch, m, k, stream);

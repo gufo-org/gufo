@@ -99,17 +99,20 @@ are short controls, not a depth sweep.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 57.34 | **59.01** | +2.91% |
-| JSON, tg300, adaptive | 54.32 | **55.89** | +2.88% |
-| Prose, tg300, adaptive | 24.13 | **24.32** | +0.77% |
+| Repetition, tg128, fixed-7 | 59.13 | **58.95** | -0.30% |
+| JSON, tg300, adaptive | 55.86 | **55.92** | +0.10% |
+| Prose, tg300, adaptive | 24.32 | **24.35** | +0.10% |
 
 [Selected wave64 projections](eval/dflash2-wave64.json) accelerate verification
-and the shared vocabulary head at widths 5–8. They retain FP32 arithmetic;
+and the shared vocabulary head at selected widths 4–8. They retain FP32 arithmetic;
 Q4 batch-5 staging and bounded IQ4 indexing are tuned separately.
 All 12 continuations retain AR IDs and acceptance. Q4/Q8 preserve 102 logit
 rows, 102 feature rows and 96 C3 replay/cache rows; all 270 traces across
 Q4/Q8/BF16 drafts remain byte-identical. AR pp2048/tg128 is a regression control.
 The existing GEMM benchmark covers the production route and fallback shapes.
+The latest batch-4 extension reduces affected projection time by 1.9%;
+overall C1 timing is flat. The preceding width-5–8 change improved prose
+0.77%, JSON 2.88% and repetition 2.91%. Width 3 retains wave32.
 Earlier [state stores](eval/dflash2-state-stores.json), projection and replay
 improvements remain indexed in the [quality report](eval/README.md).
 
