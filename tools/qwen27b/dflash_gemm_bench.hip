@@ -9,16 +9,18 @@
 // repeats one matrix across chunks, including the production K/V cache hint.
 // Every geometry must be bit-exact with the reference before timing counts.
 #define ENGINE_ENABLE_HIP 1
+#include <sys/mman.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <functional>
 #include <stdexcept>
 #include <string>
-#include <sys/mman.h>
 #include <vector>
 
 #include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
+#include "src/models/qwen/hip/ops/gemm.hpp"
 // Embed the scalar implementation so ablations use its actual templates and
 // arithmetic without linking the complete model runtime.
 #include "src/models/qwen/hip/kernels/gemv_quant.hip"
@@ -481,6 +483,22 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
     }
   }
   MappedWeights mapped_weights(weights.Get(), physical);
+  const auto quant_type = type == "q4"    ? core::GgmlType::kQ4_K
+                          : type == "q5"  ? core::GgmlType::kQ5_K
+                          : type == "iq4" ? core::GgmlType::kIQ4_XS
+                          : type == "q6"  ? core::GgmlType::kQ6_K
+                                          : core::GgmlType::kF32;
+  if (detail::TryLaunchKQuantSmallBatchWave64(quant_type, mapped_weights.Get(),
+                                              input.Get(), output.Get(), batch,
+                                              rows, columns, nullptr)) {
+    geometries.push_back({"production_wave64", [&](const void* w) {
+                            if (!detail::TryLaunchKQuantSmallBatchWave64(
+                                    quant_type, w, input.Get(), output.Get(),
+                                    batch, rows, columns, nullptr))
+                              throw std::runtime_error(
+                                  "wave64 shape changed during benchmark");
+                          }});
+  }
   geometries.front().launch(mapped_weights.Get());
   Check(hipMemcpy(reference.Get(), output.Get(), batch * rows * sizeof(float),
                   hipMemcpyDeviceToDevice));

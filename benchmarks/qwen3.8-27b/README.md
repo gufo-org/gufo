@@ -11,13 +11,13 @@ that number. Draft precision is selected separately from target precision.
 
 ## Single user, autoregressive
 
-Q4 depth 0 has a [fresh paired AR control](eval/dflash2-state-stores.json);
+Q4 depth 0 has a [fresh paired AR control](eval/dflash2-wave64.json);
 depth 4096 has a [fresh AR control](eval/dflash2-controller-cost.json).
 Other rows remain the reference sweep at `023a13a`. Full refresh: TODO.
 
 | Context depth | Q4 pp / tg (tok/s) | Q8 pp / tg (tok/s) |
 | ---: | ---: | ---: |
-| 0 | 421.7 / 11.83 | 491.1 / 7.07 |
+| 0 | 421.7 / 11.84 | 491.1 / 7.07 |
 | 4,096 | 408.5 / 11.64 | 470.9 / 7.01 |
 | 8,192 | 390.8 / 11.15 | 451.2 / 6.95 |
 | 12,288 | 375.1 / 10.96 | 434.2 / 6.88 |
@@ -99,24 +99,19 @@ are short controls, not a depth sweep.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 57.05 | **57.19** | +0.25% |
-| JSON, tg300, adaptive | 54.05 | **54.23** | +0.34% |
-| Prose, tg300, adaptive | 23.93 | **24.09** | +0.67% |
+| Repetition, tg128, fixed-7 | 57.34 | **59.01** | +2.91% |
+| JSON, tg300, adaptive | 54.32 | **55.89** | +2.88% |
+| Prose, tg300, adaptive | 24.13 | **24.32** | +0.77% |
 
-[Four-lane state stores](eval/dflash2-state-stores.json) keep transposes in
-registers and preserve the state layout and arithmetic. Verification recurrence
-takes 23.8% less GPU time; replay recurrence takes 27.0% less. Scalar AR
-generation improves 0.47%; prefill is flat. Total gains remain modest.
-All 12 speculative traces and four AR controls retain their token IDs.
-The Q4/Q8 checks preserve 102 verification logit rows, 102 feature rows
-and 96 C3 replay/cache rows exactly.
-Earlier [recurrence barriers](eval/dflash2-recurrence-launch.json),
-[rollback copies](eval/dflash2-state-copy.json),
-[joined controls](eval/dflash2-ssm-controls.json),
-[Q5 projections](eval/dflash2-prose-projections.json),
-[mixed-format reuse](eval/dflash2-remaining-formats.json),
-[contiguous FFNs](eval/dflash2-contiguous-ffn.json) and
-[feature transfers](eval/dflash2-feature-transfer.json) remain qualified.
+[Selected wave64 projections](eval/dflash2-wave64.json) accelerate verification
+and the shared vocabulary head at widths 5–8. They retain FP32 arithmetic;
+Q4 batch-5 staging and bounded IQ4 indexing are tuned separately.
+All 12 continuations retain AR IDs and acceptance. Q4/Q8 preserve 102 logit
+rows, 102 feature rows and 96 C3 replay/cache rows; all 270 traces across
+Q4/Q8/BF16 drafts remain byte-identical. AR pp2048/tg128 is a regression control.
+The existing GEMM benchmark covers the production route and fallback shapes.
+Earlier [state stores](eval/dflash2-state-stores.json), projection and replay
+improvements remain indexed in the [quality report](eval/README.md).
 
 [Batched rollback/replay](eval/dflash2-replay-handoff.json) now preserves
 Q4/Q8 logits across coordinator changes and the replay-ring boundary.

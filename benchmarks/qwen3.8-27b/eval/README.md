@@ -150,6 +150,18 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Selected wave64 projections](dflash2-wave64.json): bounded Q4/Q5/IQ4
+  FFNs at widths 5–8 and Q6 vocabulary heads at 7–8 preserve the FP32 sums.
+  Native ISA confirms wave64 and zero private scratch. Q4 batch-5 down
+  staging and IQ4 batch-6 indexing have separate exact-output controls.
+  Fresh Q4/Q4 prose/JSON/repetition improve
+  0.77%/2.88%/2.91%.
+  All 12 token/acceptance traces, 102 target logit rows, 102 feature rows,
+  96 C3 replay/cache rows and 270 draft trace files remain exact.
+  Two operator suites and 27 cases in the existing GEMM benchmark pass.
+  Four AR pp2048/tg128 controls retain all IDs. No new execution option,
+  maintained tool or test executable; sampling/controller policy is unchanged.
+  The profile reuses the qualified baseline; release speed controls are fresh.
 - [Four-lane recurrent-state stores](dflash2-state-stores.json): scalar
   transposes keep the value-major layout and eliminate private storage.
   Verification/replay recurrence takes 23.8%/27.0% less GPU time.

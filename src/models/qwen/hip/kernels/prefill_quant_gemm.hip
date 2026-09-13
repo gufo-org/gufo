@@ -1928,6 +1928,10 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
                                   std::size_t batch, std::size_t m,
                                   std::size_t k, dim3 grid, dim3 block,
                                   hipStream_t stream) {
+  if (detail::TryLaunchKQuantSmallBatchWave64(type, w, fp32_x, y, batch, m, k,
+                                              stream)) {
+    return;
+  }
   constexpr std::size_t RowsPerWave = 3;
   switch (type) {
     case core::GgmlType::kQ4_K:

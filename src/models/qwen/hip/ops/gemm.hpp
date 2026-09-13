@@ -123,6 +123,12 @@ void LaunchDequantizeQ8KToBf16(const void* w, hip_bfloat16* out,
 /// blocks. Unsupported types are a no-op.
 namespace detail {
 
+/// Launches the exact wave64 kernel for measured Qwen27B verification shapes.
+/// Returns false without launching for other widths, shapes and formats.
+[[nodiscard]] bool TryLaunchKQuantSmallBatchWave64(
+    core::GgmlType type, const void* w, const float* x, float* y,
+    std::size_t batch, std::size_t m, std::size_t k, hipStream_t stream);
+
 /// opt-q4kxl: true for the formats that run natively through the K-quant GPU
 /// kernels -- the blocked WMMA GEMM at prefill batch, the exact shared-weight
 /// kernel at draft width, and the routing and activation-fusion gates that feed

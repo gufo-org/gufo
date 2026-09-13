@@ -27,6 +27,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_embed.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_gemm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_gemm.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_norm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_residual.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_rope.hip
@@ -72,6 +73,13 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/model.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/executor.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/dflash/backend.cpp)
+
+  # HIP helpers must share the kernel's wave size, so compile this unit
+  # separately while the other Qwen kernels retain wave32.
+  set_source_files_properties(
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
+    TARGET_DIRECTORY gufo_core
+    PROPERTIES COMPILE_OPTIONS -mwavefrontsize64)
 endif()
 
 if (ENGINE_ENABLE_XRT)

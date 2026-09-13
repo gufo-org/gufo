@@ -56,11 +56,29 @@ for t in "${targets[@]}"; do
     extra+=(-laotriton_v2)
   fi
   echo "==> $src -> $out"
-  hipcc -O3 --offload-arch=gfx1151 -std=c++20 \
-    -I. "${inc[@]}" "${lib[@]}" \
-    -Rpass-analysis=kernel-resource-usage \
-    "$src" "${extra[@]}" -o "$out" 2>"/tmp/${t}.build.log" ||
-    { tail -40 "/tmp/${t}.build.log"; exit 1; }
+  compile=(hipcc -O3 --offload-arch=gfx1151 -std=c++20
+    -I. "${inc[@]}" -Rpass-analysis=kernel-resource-usage)
+  if [[ "$src" -ef tools/qwen27b/dflash_gemm_bench.hip ]]; then
+    # HIP helpers and their callers must share the native wave size, so the
+    # production wave64 kernel is compiled in its own translation unit.
+    objects="$(mktemp -d "/tmp/${t}.XXXXXX")"
+    trap 'rm -rf "$objects"' EXIT
+    {
+      "${compile[@]}" -c "$src" -o "$objects/main.o" &&
+      "${compile[@]}" -DENGINE_ENABLE_HIP=1 -mwavefrontsize64 \
+        -c src/models/qwen/hip/kernels/small_batch_wave64.hip \
+        -o "$objects/wave64.o" &&
+      hipcc --offload-arch=gfx1151 "${lib[@]}" \
+        "$objects/main.o" "$objects/wave64.o" "${extra[@]}" -o "$out"
+    } 2>"/tmp/${t}.build.log" ||
+      { tail -40 "/tmp/${t}.build.log"; exit 1; }
+    rm -rf "$objects"
+    trap - EXIT
+  else
+    "${compile[@]}" "${lib[@]}" \
+      "$src" "${extra[@]}" -o "$out" 2>"/tmp/${t}.build.log" ||
+      { tail -40 "/tmp/${t}.build.log"; exit 1; }
+  fi
   grep -E "Function Name|VGPRs:|Occupancy|VGPRs Spill|LDS Size" \
     "/tmp/${t}.build.log" | sed 's/.*remark: //; s/ \[-Rpass.*//' \
     >"/tmp/${t}.res.txt" || true

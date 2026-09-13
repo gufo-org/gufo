@@ -302,14 +302,19 @@ template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, core::GgmlType WType,
          std::size_t TilesPerStage = 1, std::uint32_t MinWaves = 12,
          std::size_t TokenGroups = 1, bool NarrowIndex = false,
-         std::size_t TokensPerStep = Batch>
-__launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
+         std::size_t TokensPerStep = Batch, std::uint32_t HardwareWaveSize = 32>
+__launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
+                                           ? MinWaves * 32 / HardwareWaveSize
+                                           : 1)) __global__
     void SmallBatchKQuantExactFp32GEMMKernel(const void* __restrict__ w,
                                              const float* __restrict__ x,
                                              float* __restrict__ y,
                                              std::size_t wide_m,
                                              std::size_t wide_k) {
   static_assert(TokensPerStep > 0 && Batch % TokensPerStep == 0);
+  static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
+  // Row ownership and reductions use logical 32-lane groups in either mode.
+  // Only the occupancy hint counts hardware waves.
   using Index = std::conditional_t<NarrowIndex, std::uint32_t, std::size_t>;
   const Index m = static_cast<Index>(wide_m);
   const Index k = static_cast<Index>(wide_k);
