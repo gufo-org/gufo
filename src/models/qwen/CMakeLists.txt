@@ -27,6 +27,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_embed.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_gemm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_gemm.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_norm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_residual.hip
@@ -78,6 +79,7 @@ if (ENGINE_ENABLE_HIP)
   # separately while the other Qwen kernels retain wave32.
   set_source_files_properties(
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
     TARGET_DIRECTORY gufo_core
     PROPERTIES COMPILE_OPTIONS -mwavefrontsize64)
 endif()

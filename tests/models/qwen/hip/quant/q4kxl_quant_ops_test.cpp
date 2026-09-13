@@ -241,8 +241,8 @@ void TestDecodeGemv(const FormatCase& format) {
 
 /// The prefill GEMM quantizes the activation to Q8_1 per 32 elements, so the
 /// reference must apply the same activation quantization before comparing.
-void TestPrefillGemm(const FormatCase& format, std::size_t batch) {
-  constexpr std::size_t kM = 128;
+void TestPrefillGemm(const FormatCase& format, std::size_t batch,
+                     std::size_t kM = 128) {
   const auto weights = MakeWeights(format.type, kM, kK, 0x1BADB002U);
 
   std::vector<float> x(batch * kK);
@@ -427,20 +427,20 @@ void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
   HIP_CHECK(hipMemset(fused.data(), 0xFF, batch * rows * sizeof(float)));
   HIP_CHECK(hipMemset(split.data(), 0xFF, batch * rows * sizeof(float)));
   for (std::size_t token = 0; token < batch; ++token) {
-    gufo::hip::LaunchFusedSwiGLUGEMV(
-        gate.data(), gate_type, up.data(), up_type,
-        input.data() + token * columns, fused.data() + token * rows, rows,
-        columns, nullptr);
+    gufo::hip::LaunchFusedSwiGLUGEMV(gate.data(), gate_type, up.data(), up_type,
+                                     input.data() + token * columns,
+                                     fused.data() + token * rows, rows, columns,
+                                     nullptr);
   }
-  gufo::hip::LaunchBatchedQuantGEMMFp32(
-      gate_type, gate.data(), input.data(), gate_out.data(), batch, rows,
-      columns, nullptr);
-  gufo::hip::LaunchBatchedQuantGEMMFp32(
-      up_type, up.data(), input.data(), up_out.data(), batch, rows, columns,
-      nullptr);
-  gufo::hip::LaunchBatchedSwiGLUActivation(
-      gate_out.data(), up_out.data(), split.data(), nullptr, batch * rows,
-      nullptr);
+  gufo::hip::LaunchBatchedQuantGEMMFp32(gate_type, gate.data(), input.data(),
+                                        gate_out.data(), batch, rows, columns,
+                                        nullptr);
+  gufo::hip::LaunchBatchedQuantGEMMFp32(up_type, up.data(), input.data(),
+                                        up_out.data(), batch, rows, columns,
+                                        nullptr);
+  gufo::hip::LaunchBatchedSwiGLUActivation(gate_out.data(), up_out.data(),
+                                           split.data(), nullptr, batch * rows,
+                                           nullptr);
   HIP_CHECK(hipDeviceSynchronize());
   const auto actual = fused.CopyToHost();
   const auto expected = split.CopyToHost();
@@ -455,7 +455,8 @@ void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
   }
   const DeviceBuffer<float> packed_input(packed_values);
   DeviceBuffer<float> packed_output(batch * rows);
-  HIP_CHECK(hipMemset(packed_output.data(), 0xFF, batch * rows * sizeof(float)));
+  HIP_CHECK(
+      hipMemset(packed_output.data(), 0xFF, batch * rows * sizeof(float)));
   gufo::hip::LaunchPackedSwiGLUActivation(
       packed_input.data(), packed_output.data(), batch, rows, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
@@ -492,6 +493,16 @@ int main() {
     // route launches, so between them they cover a partially and a fully
     // populated token block plus a ragged tail.
     TestPrefillGemm(format, 288);
+    if (format.type == gufo::core::GgmlType::kQ4_K ||
+        format.type == gufo::core::GgmlType::kQ5_K ||
+        format.type == gufo::core::GgmlType::kQ6_K ||
+        format.type == gufo::core::GgmlType::kQ8_0) {
+      // Native wave64: partial token tiles and a partial output-row tile.
+      TestPrefillGemm(format, 129, 1057);
+    }
+    if (format.type == gufo::core::GgmlType::kIQ4_XS) {
+      TestPrefillGemm(format, 129, 1024);
+    }
   }
   for (const auto& format : kFormats) {
     if (format.type == gufo::core::GgmlType::kQ8_0) {

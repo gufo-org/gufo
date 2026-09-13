@@ -12,17 +12,21 @@ Standard sweep: **pp2048 / tg128**, C1. Cells are prefill / generation tok/s.
 
 | Context depth | Q4 | Q8 |
 | ---: | ---: | ---: |
-| 0 | TODO | TODO |
+| 0 | **459.34** / TODO | **504.22** / TODO |
 | 4,096 | TODO | TODO |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
+Prefill measured 2026-09-13 with the qualified native wave64 kernels: two
+warmed runs per target. The 600 tok/s prefill target remains open.
+
 ## Single user, DFlash2
 
-Latest short controls, **2026-09-13**, Q4 target / Q4_K_M draft, greedy C1.
+Latest decode controls, **2026-09-13**, Q4 target / Q4_K_M draft, greedy C1.
 Mean of two warmed release runs; rates include prefill and exclude model load.
-All generated token IDs match AR. These are prompt controls, not a depth sweep.
+All generated token IDs match AR. These precede the prefill kernel update;
+the [quality guide](eval/README.md) records its short regression check.
 
 | Workload | Tokens | Controller | tok/s | Acceptance |
 | --- | ---: | --- | ---: | ---: |

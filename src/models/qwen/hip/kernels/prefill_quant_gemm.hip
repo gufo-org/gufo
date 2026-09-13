@@ -1,117 +1,7 @@
 #if defined(ENGINE_ENABLE_HIP)
-#include <hip/hip_bfloat16.h>
-#include <hip/hip_fp16.h>
-#include <hip/hip_runtime.h>
-
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <cstdlib>
-
-#include "src/core/hip/hip_utils.hpp"
-#include "src/core/quant/ggml_dequant.hpp"
-#include "src/models/qwen/hip/detail/attention_policy.hpp"
-#include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 
 namespace gufo::hip {
-
-using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
-using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
-
-// Tiled Q8_1 activation layout (opt-c163-blocked-w8a8).
-//
-// Activations are written straight into WMMA B-fragment order so both the LDS
-// staging copy and the fragment reads are contiguous:
-//
-//   tile(tt, kb) = [b0: 16 tokens x 16 bytes]   offset   0
-//                  [b1: 16 tokens x 16 bytes]   offset 256
-//                  [16 fp32 token scales    ]   offset 512
-//
-// with tt = token / 16 and kb the 32-element K block. The 576-byte stride keeps
-// every fragment and scale vector 16-byte aligned. For a token count that is a
-// multiple of 16 this is exactly the same total size as the previous row-major
-// block_q8_1 payload (36 bytes per 32 elements), followed by the sum sidecar.
-constexpr std::size_t kQ8ActTileTokens = 16;
-constexpr std::size_t kQ8ActTileBytes = 576;
-constexpr std::size_t kQ8ActScaleOffset = 512;
-constexpr std::size_t kQ8ActSumTileBytes = kQ8ActTileTokens * sizeof(float);
-
-/// Byte size of the tiled Q8_1 activation buffer for a [batch, k] tensor.
-__host__ __device__ inline std::size_t Q8ActTiledBytes(std::size_t batch,
-                                                       std::size_t k) {
-  const std::size_t tiles = (batch + kQ8ActTileTokens - 1) / kQ8ActTileTokens;
-  return tiles * (k / 32) * kQ8ActTileBytes;
-}
-
-/// Byte size of the per-token activation-sum sidecar. Keeping it
-/// after the tiled payload leaves the Q8_1 layout and every Q8 kernel
-/// unchanged.
-__host__ __device__ inline std::size_t Q8ActSumBytes(std::size_t batch,
-                                                     std::size_t k) {
-  const std::size_t tiles = (batch + kQ8ActTileTokens - 1) / kQ8ActTileTokens;
-  return tiles * (k / 32) * kQ8ActSumTileBytes;
-}
-
-__device__ __forceinline__ float* Q8ActSumSidecar(void* base, std::size_t batch,
-                                                  std::size_t k) {
-  return reinterpret_cast<float*>(static_cast<std::uint8_t*>(base) +
-                                  Q8ActTiledBytes(batch, k));
-}
-
-__device__ __forceinline__ const float* Q8ActSumSidecar(const void* base,
-                                                        std::size_t batch,
-                                                        std::size_t k) {
-  return reinterpret_cast<const float*>(static_cast<const std::uint8_t*>(base) +
-                                        Q8ActTiledBytes(batch, k));
-}
-
-__device__ __forceinline__ std::int8_t* Q8ActTile(void* base,
-                                                  std::size_t num_blocks,
-                                                  std::size_t tt,
-                                                  std::size_t kb) {
-  return static_cast<std::int8_t*>(base) +
-         (((tt * num_blocks) + kb) * kQ8ActTileBytes);
-}
-
-__device__ __forceinline__ const std::int8_t* Q8ActTile(const void* base,
-                                                        std::size_t num_blocks,
-                                                        std::size_t tt,
-                                                        std::size_t kb) {
-  return static_cast<const std::int8_t*>(base) +
-         (((tt * num_blocks) + kb) * kQ8ActTileBytes);
-}
-
-/// Writes one lane's quantized byte and (lane 0) the block scale into the tiled
-/// layout. `lane_id` is the element index inside the 32-element block.
-template<bool StoreActivationSum>
-__device__ __forceinline__ void StoreQ8ActLane(void* y, std::size_t batch,
-                                               std::size_t num_blocks,
-                                               std::size_t tok, std::size_t blk,
-                                               std::size_t lane_id, float d,
-                                               std::int8_t q) {
-  const std::size_t tt = tok / kQ8ActTileTokens;
-  const std::size_t tl = tok % kQ8ActTileTokens;
-  std::int8_t* tile = Q8ActTile(y, num_blocks, tt, blk);
-  const std::size_t half = lane_id >> 4u;
-  const std::size_t pos = lane_id & 15u;
-  tile[(half * 256) + (tl * 16) + pos] = q;
-  if (lane_id == 0) {
-    *reinterpret_cast<float*>(tile + kQ8ActScaleOffset + (tl * sizeof(float))) =
-        d;
-  }
-  if constexpr (StoreActivationSum) {
-    int qsum = static_cast<int>(q);
-    for (int off = 16; off > 0; off >>= 1) {
-      qsum += __shfl_xor(qsum, off);
-    }
-    if (lane_id == 0) {
-      float* sums = Q8ActSumSidecar(y, batch, num_blocks * 32);
-      sums[(((tt * num_blocks) + blk) * kQ8ActTileTokens) + tl] =
-          d * static_cast<float>(qsum);
-    }
-  }
-}
 
 template<bool StoreActivationSum, typename T>
 __global__ void QuantizeActivationToQ8_1Kernel(const T* __restrict__ x,
@@ -785,483 +675,6 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
   }
 }
 
-// opt-q4kxl: blocked W(K-quant)A8 WMMA GEMM.
-//
-// The Q8_0 kernel above stages 32 int8 weight codes and one fp32 scale per
-// (row, K block) into LDS and feeds them to `wmma_16x16x16_iu8`. Every format
-// in the UD-Q4_K_XL shard reduces to exactly that shape once
-// DecodeQuantSub16 has run:
-//
-//     w[j] = scale * code[j] - offset
-//
-// so this kernel keeps the whole staging/compute/epilogue structure and only
-// replaces the fetch. Two properties of the K-quant families force the two
-// template flags:
-//
-//   PerHalfScale - Q6_K and Q3_K carry one scale per SIXTEEN elements, so the
-//                  two halves of a 32-element K block need separate scales.
-//                  Sixteen is exactly one WMMA fragment's K depth, so the two
-//                  halves simply stop sharing an accumulator: c0 and c1 are
-//                  scaled independently instead of being summed first. Every
-//                  other format leaves both scales equal and takes the cheaper
-//                  single-accumulator path.
-//   HasOffset    - Q4_K and Q5_K encode an explicit minimum, giving
-//                  sum_j w_j x_j = scale * sum_j q_j x_j - offset * sum_j x_j.
-//                  The second term needs the per-token activation sum, which
-//                  is recovered in-register from the staged Q8 codes
-//                  (sum_j x_j = dx * sum_j qx_j) with four v_dot4 per fragment
-//                  rather than by widening the activation layout. Formats
-//                  without a minimum compile the term out entirely.
-//
-// Weight type is a TEMPLATE parameter, not a runtime argument. It is
-// block-uniform either way, so a runtime argument looks free -- but
-// DecodeQuantSub16 is a switch over every supported format, and inlining it
-// twice per fetch put all eight decode bodies in the instruction stream. An
-// ISA dump of the runtime-typed version measured 6711 instructions against the
-// Q8_0 kernel's 3049, with 120 global-load instructions against 14, and the
-// register allocator had to size for the worst branch: 192-208 VGPRs against
-// 184. Only one branch ever executed, but every branch cost occupancy. With
-// the type known at compile time each instantiation carries exactly one decode
-// path.
-//
-// Left at the default occupancy target deliberately. Q5_K, Q4_K and Q6_K settle
-// at 197-206 VGPRs, which is seven wave32s per SIMD rather than the eight the
-// Q8_0 kernel gets at 184. Forcing eight with `__launch_bounds__(256, 8)` does
-// reach 8 waves with no meaningful scratch, and measured WORSE: pp2048 fell
-// from 462.7 to 412.9 t/s. The rematerialization the allocator inserts into the
-// inner loop to hit the register target costs more than the extra wave returns,
-// so this kernel is latency-bound rather than occupancy-bound.
-template<int BM, int BN, int BK, int WM, int WN, core::GgmlType WType,
-         bool UsePrecomputedSums, bool StagePrecomputedSums>
-__launch_bounds__(WM * WN * 32, 1) __global__
-    void WKQuantA8BlockedWmmaGEMMKernel(const void* __restrict__ w,
-                                        const void* __restrict__ x_blocks,
-                                        float* __restrict__ y,
-                                        std::size_t batch, std::size_t m,
-                                        std::size_t k) {
-  // Q6_K and Q3_K carry one scale per sixteen elements; Q4_K and Q5_K carry an
-  // explicit minimum. The two properties never co-occur.
-  constexpr bool PerHalfScale =
-      WType == core::GgmlType::kQ6_K || WType == core::GgmlType::kQ3_K;
-  constexpr bool HasOffset =
-      WType == core::GgmlType::kQ4_K || WType == core::GgmlType::kQ5_K;
-  static_assert(!StagePrecomputedSums || UsePrecomputedSums);
-  // The block is WM*WN waves of 32 lanes. Eight waves (256 threads) is the
-  // production shape; sixteen waves (512 threads) is what makes BN=256
-  // reachable at all, because the accumulator array is BM*BN/threads registers
-  // and BM*BN is otherwise pinned at 128*128.
-  static_assert(WM * WN == 8 || WM * WN == 16, "8 or 16 wave32s per block");
-  static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
-  constexpr int kThreads = WM * WN * 32;
-  constexpr int kWaves = WM * WN;
-  static_assert(BN / 16 <= kWaves || (BN / 16) % kWaves == 0,
-                "token subtiles must divide evenly across the waves");
-  constexpr int kRowTiles = BM / 16;
-  constexpr int kTokTiles = BN / 16;
-  constexpr int kWaveRowTiles = kRowTiles / WM;
-  constexpr int kWaveTokTiles = kTokTiles / WN;
-  constexpr int kScaleHalves = PerHalfScale ? 2 : 1;
-  constexpr int kOffRowTiles = HasOffset ? kRowTiles : 1;
-  // Token subtiles are staged one per wave. A macro tile with more subtiles
-  // than waves gives each wave several, which is what lets BN grow without
-  // growing the block: BM=64/BN=256 keeps the same BM*BN/threads accumulator
-  // and the same eight-wave workgroup as BM=128/BN=128.
-  constexpr int kStageTiles = (kTokTiles + kWaves - 1) / kWaves;
-
-  __shared__ int32x4_t s_a[BK][kRowTiles][32];
-  __shared__ float s_dw[BK][kScaleHalves][kRowTiles][16];
-  __shared__ float s_off[BK][kOffRowTiles][16];
-  __shared__ int32x4_t s_b[BK][kTokTiles][32];
-  __shared__ float s_dx[BK][kTokTiles][16];
-  __shared__ float s_sx[StagePrecomputedSums && HasOffset ? BK : 1][kTokTiles]
-                       [16];
-
-  const std::size_t num_blocks = k / 32;
-  const std::size_t row_bytes = QuantRowBytes(WType, k);
-
-  const int tid = static_cast<int>(threadIdx.x);
-  const int wave_id = tid >> 5;
-  const int lane_id = tid & 31;
-  const int sub_lane = lane_id & 15;
-  const int half_id = lane_id >> 4;
-  const int wave_row = wave_id / WN;
-  const int wave_tok = wave_id % WN;
-
-  const std::size_t r_block = static_cast<std::size_t>(blockIdx.y) * BM;
-  const std::size_t t_block = static_cast<std::size_t>(blockIdx.x) * BN;
-  const std::size_t tt_block = t_block / kQ8ActTileTokens;
-
-  float acc[kWaveRowTiles][kWaveTokTiles][8];
-#pragma unroll
-  for (int i = 0; i < kWaveRowTiles; ++i) {
-#pragma unroll
-    for (int j = 0; j < kWaveTokTiles; ++j) {
-#pragma unroll
-      for (int l = 0; l < 8; ++l) {
-        acc[i][j][l] = 0.0F;
-      }
-    }
-  }
-
-  // One fetch unit is one (row, K-block) pair, decoded as two sub-16 blocks.
-  // At 256 threads every configuration has at least one unit per thread and the
-  // indexing below reduces to what it was. At 512 threads with BK=2 there are
-  // only BM*BK = 256 units, so half the block sits out the weight half of the
-  // stage; keeping BK=2 rather than growing it to 4 is what holds LDS at 30 KB
-  // and therefore two resident workgroups.
-  constexpr int kFetchUnits = BM * BK;
-  constexpr int kPrefetch = (kFetchUnits + kThreads - 1) / kThreads;
-  constexpr bool kPartialFetch = (kPrefetch * kThreads) != kFetchUnits;
-  int32x4_t r_q0[kPrefetch];
-  int32x4_t r_q1[kPrefetch];
-  float r_dw0[kPrefetch];
-  float r_dw1[kPrefetch];
-  float r_off[kPrefetch];
-  int32x4_t r_b[kStageTiles][BK];
-  float r_dx[kStageTiles][BK];
-  float r_sx[kStageTiles][StagePrecomputedSums && HasOffset ? BK : 1];
-
-  // Row bases and liveness are hoisted exactly as in the Q8_0 kernel: an
-  // out-of-range row is clamped to a valid address and its scale (and offset)
-  // zeroed, so it contributes zero without any divergent branch.
-  const int num_kb = static_cast<int>(num_blocks);
-  const int m_i = static_cast<int>(m);
-  const std::uint8_t* w_row[kPrefetch];
-  float row_live[kPrefetch];
-#pragma unroll
-  for (int p = 0; p < kPrefetch; ++p) {
-    const int idx = (p * kThreads) + tid;
-    const bool unit_live = !kPartialFetch || idx < kFetchUnits;
-    const int idx_clamped = unit_live ? idx : 0;
-    const int r = static_cast<int>(r_block) + (idx_clamped / BK);
-    const int r_clamped = (r < m_i) ? r : (m_i - 1);
-    w_row[p] = static_cast<const std::uint8_t*>(w) +
-               (static_cast<std::size_t>(r_clamped) * row_bytes);
-    row_live[p] = (r < m_i && unit_live) ? 1.0F : 0.0F;
-  }
-  // The staged activation buffer holds exactly ceil(batch / 16) token tiles.
-  // A macro tile wider than the tail reaches past it, so an out-of-range tile
-  // is clamped to tile 0 and its scale zeroed -- the same trick the row bases
-  // use, and the reason a 256-token tile can be launched on any batch at all.
-  const std::size_t num_act_tiles =
-      (batch + kQ8ActTileTokens - 1) / kQ8ActTileTokens;
-  int b_tile[kStageTiles];
-  const std::int8_t* b_base[kStageTiles];
-  std::size_t act_tile[kStageTiles];
-  float tile_scale[kStageTiles];
-  bool b_live[kStageTiles];
-#pragma unroll
-  for (int t = 0; t < kStageTiles; ++t) {
-    b_tile[t] = wave_id + (t * kWaves);
-    const std::size_t wanted = tt_block + static_cast<std::size_t>(b_tile[t]);
-    const bool live = (b_tile[t] < kTokTiles) && (wanted < num_act_tiles);
-    act_tile[t] = live ? wanted : 0;
-    tile_scale[t] = live ? 1.0F : 0.0F;
-    b_live[t] = b_tile[t] < kTokTiles;
-    b_base[t] = reinterpret_cast<const std::int8_t*>(x_blocks) +
-                (act_tile[t] * num_blocks * kQ8ActTileBytes);
-  }
-  const float* activation_sums = Q8ActSumSidecar(x_blocks, batch, k);
-
-  const auto fetch_stage = [&](int kb0) {
-#pragma unroll
-    for (int p = 0; p < kPrefetch; ++p) {
-      const int idx = (p * kThreads) + tid;
-      const int idx_clamped = (!kPartialFetch || idx < kFetchUnits) ? idx : 0;
-      const int kb = kb0 + (idx_clamped % BK);
-      const int kb_clamped = (kb < num_kb) ? kb : (num_kb - 1);
-      const float live = (kb < num_kb) ? row_live[p] : 0.0F;
-      QuantSub16 lo;
-      QuantSub16 hi;
-      DecodeQuantSub16(WType, w_row[p],
-                       static_cast<std::size_t>(kb_clamped) * 2, lo);
-      DecodeQuantSub16(WType, w_row[p],
-                       (static_cast<std::size_t>(kb_clamped) * 2) + 1, hi);
-      __builtin_memcpy(&r_q0[p], lo.q, 16);
-      __builtin_memcpy(&r_q1[p], hi.q, 16);
-      r_dw0[p] = lo.scale * live;
-      r_dw1[p] = hi.scale * live;
-      if constexpr (HasOffset) {
-        r_off[p] = lo.offset * live;
-      }
-    }
-#pragma unroll
-    for (int t = 0; t < kStageTiles; ++t) {
-      if (!b_live[t]) {
-        continue;
-      }
-#pragma unroll
-      for (int i = 0; i < BK; ++i) {
-        const int kb = kb0 + i;
-        const int kb_clamped = (kb < num_kb) ? kb : (num_kb - 1);
-        const auto* tile = b_base[t] + (static_cast<std::size_t>(kb_clamped) *
-                                        kQ8ActTileBytes);
-        r_b[t][i] = reinterpret_cast<const int32x4_t*>(tile)[lane_id];
-        r_dx[t][i] = ((kb < num_kb) ? tile_scale[t] : 0.0F) *
-                     reinterpret_cast<const float*>(
-                         tile + kQ8ActScaleOffset)[lane_id & 15];
-        if constexpr (StagePrecomputedSums && HasOffset) {
-          r_sx[t][i] = ((kb < num_kb) ? tile_scale[t] : 0.0F) *
-                       activation_sums[(((act_tile[t] * num_blocks) +
-                                         static_cast<std::size_t>(kb_clamped)) *
-                                        kQ8ActTileTokens) +
-                                       static_cast<std::size_t>(lane_id & 15)];
-        }
-      }
-    }
-  };
-
-  const auto commit_stage = [&]() {
-#pragma unroll
-    for (int p = 0; p < kPrefetch; ++p) {
-      const int idx = (p * kThreads) + tid;
-      if constexpr (kPartialFetch) {
-        if (idx >= kFetchUnits) {
-          continue;
-        }
-      }
-      const int rr = idx / BK;
-      const int kk = idx % BK;
-      const int rs = rr / 16;
-      const int rl = rr % 16;
-      const int slot = (rl % 2 == 0) ? (rl / 2) : (8 + (rl / 2));
-      s_a[kk][rs][rl] = r_q0[p];
-      s_a[kk][rs][16 + rl] = r_q1[p];
-      s_dw[kk][0][rs][slot] = r_dw0[p];
-      if constexpr (PerHalfScale) {
-        s_dw[kk][1][rs][slot] = r_dw1[p];
-      }
-      if constexpr (HasOffset) {
-        s_off[kk][rs][slot] = r_off[p];
-      }
-    }
-#pragma unroll
-    for (int t = 0; t < kStageTiles; ++t) {
-      if (!b_live[t]) {
-        continue;
-      }
-#pragma unroll
-      for (int i = 0; i < BK; ++i) {
-        s_b[i][b_tile[t]][lane_id] = r_b[t][i];
-        if (lane_id < 16) {
-          s_dx[i][b_tile[t]][lane_id] = r_dx[t][i];
-          if constexpr (StagePrecomputedSums && HasOffset) {
-            s_sx[i][b_tile[t]][lane_id] = r_sx[t][i];
-          }
-        }
-      }
-    }
-  };
-
-  fetch_stage(0);
-  for (int kb0 = 0; kb0 < num_kb; kb0 += BK) {
-    commit_stage();
-    __syncthreads();
-    if (kb0 + BK < num_kb) {
-      fetch_stage(kb0 + BK);
-    }
-
-#pragma unroll
-    for (int kb = 0; kb < BK; ++kb) {
-      int32x4_t a0[kWaveRowTiles];
-      int32x4_t a1[kWaveRowTiles];
-      float dw0[kWaveRowTiles][8];
-      // Sized away when the format does not use them: holding dead
-      // per-accumulator arrays live across the whole WMMA block is exactly what
-      // the Q8_0 kernel's addressing rewrite found to push a BK=2 stage into
-      // scratch.
-      float dw1[PerHalfScale ? kWaveRowTiles : 1][8];
-      float off[HasOffset ? kWaveRowTiles : 1][8];
-#pragma unroll
-      for (int i = 0; i < kWaveRowTiles; ++i) {
-        const int rs = (wave_row * kWaveRowTiles) + i;
-        a0[i] = s_a[kb][rs][sub_lane];
-        a1[i] = s_a[kb][rs][16 + sub_lane];
-        const float4 lo =
-            *reinterpret_cast<const float4*>(&s_dw[kb][0][rs][half_id * 8]);
-        const float4 up = *reinterpret_cast<const float4*>(
-            &s_dw[kb][0][rs][(half_id * 8) + 4]);
-        dw0[i][0] = lo.x;
-        dw0[i][1] = lo.y;
-        dw0[i][2] = lo.z;
-        dw0[i][3] = lo.w;
-        dw0[i][4] = up.x;
-        dw0[i][5] = up.y;
-        dw0[i][6] = up.z;
-        dw0[i][7] = up.w;
-        if constexpr (PerHalfScale) {
-          const float4 hlo =
-              *reinterpret_cast<const float4*>(&s_dw[kb][1][rs][half_id * 8]);
-          const float4 hup = *reinterpret_cast<const float4*>(
-              &s_dw[kb][1][rs][(half_id * 8) + 4]);
-          dw1[i][0] = hlo.x;
-          dw1[i][1] = hlo.y;
-          dw1[i][2] = hlo.z;
-          dw1[i][3] = hlo.w;
-          dw1[i][4] = hup.x;
-          dw1[i][5] = hup.y;
-          dw1[i][6] = hup.z;
-          dw1[i][7] = hup.w;
-        }
-        if constexpr (HasOffset) {
-          const float4 olo =
-              *reinterpret_cast<const float4*>(&s_off[kb][rs][half_id * 8]);
-          const float4 oup = *reinterpret_cast<const float4*>(
-              &s_off[kb][rs][(half_id * 8) + 4]);
-          off[i][0] = olo.x;
-          off[i][1] = olo.y;
-          off[i][2] = olo.z;
-          off[i][3] = olo.w;
-          off[i][4] = oup.x;
-          off[i][5] = oup.y;
-          off[i][6] = oup.z;
-          off[i][7] = oup.w;
-        }
-      }
-#pragma unroll
-      for (int j = 0; j < kWaveTokTiles; ++j) {
-        const int ts = (wave_tok * kWaveTokTiles) + j;
-        const int32x4_t b0 = s_b[kb][ts][sub_lane];
-        const int32x4_t b1 = s_b[kb][ts][16 + sub_lane];
-        const float dx = s_dx[kb][ts][sub_lane];
-        // Activation sum for this token over the 32-element K block. b0/b1
-        // hold exactly token `sub_lane`'s codes, which is the same token dx
-        // belongs to, so this needs no cross-lane traffic.
-        float sx = 0.0F;
-        if constexpr (HasOffset) {
-          if constexpr (UsePrecomputedSums) {
-            if constexpr (StagePrecomputedSums) {
-              sx = s_sx[kb][ts][sub_lane];
-            } else {
-              const std::size_t wanted_tile =
-                  tt_block + static_cast<std::size_t>(ts);
-              const bool sum_live = wanted_tile < num_act_tiles;
-              const std::size_t token_tile = sum_live ? wanted_tile : 0;
-              const int global_kb = kb0 + kb;
-              const std::size_t activation_block = static_cast<std::size_t>(
-                  global_kb < num_kb ? global_kb : num_kb - 1);
-              sx = (sum_live ? 1.0F : 0.0F) *
-                   activation_sums[(((token_tile * num_blocks) +
-                                     activation_block) *
-                                    kQ8ActTileTokens) +
-                                   static_cast<std::size_t>(sub_lane)];
-            }
-          } else {
-            // gfx1151 exposes V_DOT4_I32_IU8 (`sudot4`) but not the dot1-insts
-            // `sdot4`; the activation codes are signed and the ones vector is
-            // unsigned, which is exactly the mixed form sudot4 takes.
-            int qsum = 0;
-#pragma unroll
-            for (int v = 0; v < 4; ++v) {
-              qsum = __builtin_amdgcn_sudot4(true, b0[v], false, 0x01010101,
-                                             qsum, false);
-              qsum = __builtin_amdgcn_sudot4(true, b1[v], false, 0x01010101,
-                                             qsum, false);
-            }
-            sx = dx * static_cast<float>(qsum);
-          }
-        }
-#pragma unroll
-        for (int i = 0; i < kWaveRowTiles; ++i) {
-          if constexpr (PerHalfScale) {
-            int32x8_t c0 = {0, 0, 0, 0, 0, 0, 0, 0};
-            int32x8_t c1 = {0, 0, 0, 0, 0, 0, 0, 0};
-            c0 = Wmma_16x16x16_iu8<true>(a0[i], b0, c0);
-            c1 = Wmma_16x16x16_iu8<true>(a1[i], b1, c1);
-#pragma unroll
-            for (int l = 0; l < 8; ++l) {
-              acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c0[l]) +
-                              (dw1[i][l] * dx) * static_cast<float>(c1[l]);
-            }
-          } else {
-            int32x8_t c = {0, 0, 0, 0, 0, 0, 0, 0};
-            c = Wmma_16x16x16_iu8<true>(a0[i], b0, c);
-            c = Wmma_16x16x16_iu8<true>(a1[i], b1, c);
-#pragma unroll
-            for (int l = 0; l < 8; ++l) {
-              acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c[l]);
-            }
-          }
-          if constexpr (HasOffset) {
-#pragma unroll
-            for (int l = 0; l < 8; ++l) {
-              acc[i][j][l] -= off[i][l] * sx;
-            }
-          }
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  __syncthreads();
-  // Each wave stages its 16x16 output tile through 256 floats of LDS. `s_a` is
-  // BK*kRowTiles*512 bytes, which is exactly kWaves*1024 at 256 threads; the
-  // 512-thread shape needs 16 KB, which is what `s_b` is at BK=2 with BN=256.
-  // Pick whichever staging array actually covers the requirement -- both are
-  // dead by this point, and the __syncthreads above orders the reuse.
-  // A stage buffer big enough for every wave at once is not guaranteed: at
-  // BK=1 each of `s_a` and `s_b` is only 4 KB while eight waves want 8 KB. Take
-  // the larger array, work out how many waves it holds, and run the epilogue in
-  // that many passes. The extra barriers are per block, not per K stage.
-  constexpr int kScratchBytes =
-      static_cast<int>(sizeof(s_a) > sizeof(s_b) ? sizeof(s_a) : sizeof(s_b));
-  constexpr int kWavesPerPass = kScratchBytes / (256 * 4);
-  static_assert(kWavesPerPass >= 1,
-                "no staging array holds even one wave's output tile");
-  constexpr int kEpiloguePasses = (kWaves + kWavesPerPass - 1) / kWavesPerPass;
-  float* const scratch_base =
-      (sizeof(s_a) > sizeof(s_b) ? reinterpret_cast<float*>(&s_a[0][0][0])
-                                 : reinterpret_cast<float*>(&s_b[0][0][0]));
-  float* tile_scratch = scratch_base + ((wave_id % kWavesPerPass) * 256);
-#pragma unroll
-  for (int pass = 0; pass < kEpiloguePasses; ++pass) {
-    if constexpr (kEpiloguePasses > 1) {
-      __syncthreads();
-      if ((wave_id / kWavesPerPass) != pass) {
-        continue;
-      }
-    }
-#pragma unroll
-    for (int i = 0; i < kWaveRowTiles; ++i) {
-#pragma unroll
-      for (int j = 0; j < kWaveTokTiles; ++j) {
-#pragma unroll
-        for (int l = 0; l < 8; ++l) {
-          tile_scratch[(sub_lane * 16) + (2 * l) + half_id] = acc[i][j][l];
-        }
-        __builtin_amdgcn_wave_barrier();
-        const std::size_t r0 =
-            r_block +
-            static_cast<std::size_t>((((wave_row * kWaveRowTiles) + i) * 16));
-        const std::size_t t0 =
-            t_block +
-            static_cast<std::size_t>((((wave_tok * kWaveTokTiles) + j) * 16));
-        if (t0 + 16 <= batch && r0 + 16 <= m) {
-          const std::size_t out_base = (t0 * m) + r0;
-#pragma unroll
-          for (int st = 0; st < 8; ++st) {
-            const int flat = (st * 32) + lane_id;
-            y[out_base + (static_cast<std::size_t>(flat >> 4) * m) +
-              static_cast<std::size_t>(flat & 15)] = tile_scratch[flat];
-          }
-        } else {
-#pragma unroll
-          for (int st = 0; st < 8; ++st) {
-            const int flat = (st * 32) + lane_id;
-            const std::size_t tok = t0 + static_cast<std::size_t>(flat >> 4);
-            const std::size_t r = r0 + static_cast<std::size_t>(flat & 15);
-            if (tok < batch && r < m) {
-              y[(tok * m) + r] = tile_scratch[flat];
-            }
-          }
-        }
-        __builtin_amdgcn_wave_barrier();
-      }
-    }
-  }
-}
-
 template<std::uint32_t WavesPerBlock, std::uint32_t TokensPerWave>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
     void TiledBatchedQ8_0GEMMKernel(const void* __restrict__ w,
@@ -1704,21 +1117,19 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                  hipStream_t stream) {
   const auto launch = [&]<std::size_t Batch>() {
     // Adjacent gate/up tensors use the same kernel with twice as many rows.
-    const bool ffn_up =
-        (m == 17408 || (Batch >= 3 && m == 34816)) && k == 5120;
-    if constexpr (Batch >= 3 &&
-                  (WType == core::GgmlType::kIQ4_NL ||
-                   WType == core::GgmlType::kIQ3_S ||
-                   WType == core::GgmlType::kQ6_K ||
-                   WType == core::GgmlType::kIQ4_XS)) {
+    const bool ffn_up = (m == 17408 || (Batch >= 3 && m == 34816)) && k == 5120;
+    if constexpr (Batch >= 3 && (WType == core::GgmlType::kIQ4_NL ||
+                                 WType == core::GgmlType::kIQ3_S ||
+                                 WType == core::GgmlType::kQ6_K ||
+                                 WType == core::GgmlType::kIQ4_XS)) {
       const bool ffn_down = m == 5120 && k == 17408;
       // The remaining mixed formats benefit from four-row activation reuse
       // at these shapes and widths. Keep narrower batches where reuse loses.
       const bool reuse_four_rows =
           (WType == core::GgmlType::kIQ4_NL &&
            ((m == 17408 && k == 5120) || (Batch >= 5 && ffn_down))) ||
-          (WType == core::GgmlType::kIQ3_S &&
-           (Batch == 3 || Batch >= 5) && ffn_down) ||
+          (WType == core::GgmlType::kIQ3_S && (Batch == 3 || Batch >= 5) &&
+           ffn_down) ||
           (WType == core::GgmlType::kQ6_K &&
            ((Batch >= 6 && m == 5120 && k == 6144) ||
             (Batch == 8 && m == 10240 && k == 5120))) ||
@@ -1726,8 +1137,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
            ((m == 5120 && k == 6144) ||
             (Batch == 8 && k == 5120 && (m == 10240 || m == 12288))));
       if (reuse_four_rows) {
-        SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, 1, 4, 1,
-                                           true>
+        SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, 1, 4, 1, true>
             <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
         return;
       }
@@ -1740,7 +1150,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
       if (up || (Batch != 4 && down)) {
         const auto launch_rows = [&]<std::size_t Tiles>() {
           SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, Tiles, 4, 1,
-                                             true>
+                                              true>
               <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
         };
         if constexpr (Batch == 3) {
@@ -1762,11 +1172,10 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
         return;
       }
     }
-    if constexpr (Batch >= 2 &&
-                  (WType == core::GgmlType::kQ4_K ||
-                   WType == core::GgmlType::kQ5_K)) {
-      if (FitsSmallBatch32BitIndices(
-              Batch, m, k, quant::QuantizedRowBytes(WType, k))) {
+    if constexpr (Batch >= 2 && (WType == core::GgmlType::kQ4_K ||
+                                 WType == core::GgmlType::kQ5_K)) {
+      if (FitsSmallBatch32BitIndices(Batch, m, k,
+                                     quant::QuantizedRowBytes(WType, k))) {
         if constexpr (WType == core::GgmlType::kQ4_K) {
           const bool up = ffn_up;
           const bool down = m == 5120 && k == 17408;
@@ -1774,17 +1183,17 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
           // only for the longer down projection.
           if (down || (up && Batch != 5 && Batch != 6)) {
             SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, 2, 4, 1,
-                                               true>
+                                                true>
                 <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
             return;
           }
         }
         if constexpr (WType == core::GgmlType::kQ5_K && Batch <= 6) {
-          const auto launch_rows =
-              [&]<std::size_t Tiles, std::size_t TokensPerStep = Batch,
-                  std::uint32_t Waves = 16>() {
+          const auto launch_rows = [&]<std::size_t Tiles,
+                                       std::size_t TokensPerStep = Batch,
+                                       std::uint32_t Waves = 16>() {
             SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, 4, WType, Tiles,
-                                               4, 1, true, TokensPerStep>
+                                                4, 1, true, TokensPerStep>
                 <<<(m + Waves * 4 - 1) / (Waves * 4), Waves * 32, 0, stream>>>(
                     w, fp32_x, y, m, k);
           };
@@ -1843,12 +1252,12 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
           }
         }
         if constexpr (WType == core::GgmlType::kQ5_K && Batch >= 7) {
-          const auto launch_rows =
-              [&]<std::uint32_t Waves, std::size_t TokensPerStep = Batch>() {
-            SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, 4, WType, 1, 4,
-                                               1, true, TokensPerStep>
-                <<<(m + Waves * 4 - 1) / (Waves * 4), Waves * 32, 0,
-                   stream>>>(w, fp32_x, y, m, k);
+          const auto launch_rows = [&]<std::uint32_t Waves,
+                                       std::size_t TokensPerStep = Batch>() {
+            SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, 4, WType, 1, 4, 1,
+                                                true, TokensPerStep>
+                <<<(m + Waves * 4 - 1) / (Waves * 4), Waves * 32, 0, stream>>>(
+                    w, fp32_x, y, m, k);
           };
           // These batch-8 projections finish one token's dots at a time.
           // The long FFN down projection shares staging across more waves.
@@ -1859,7 +1268,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
             }
             if ((m == 5120 && k == 6144) ||
                 (k == 5120 && (m == 1024 || m == 6144 || m == 10240 ||
-                              m == 12288 || m == 17408 || m == 34816))) {
+                               m == 12288 || m == 17408 || m == 34816))) {
               launch_rows.template operator()<8, 1>();
               return;
             }
@@ -1872,15 +1281,16 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
               (WType == core::GgmlType::kQ5_K && Batch >= 5 && Batch <= 6);
           if constexpr (kDoubleStage) {
             if ((ffn_up) || (m == 5120 && k == 17408)) {
-              SmallBatchKQuantExactFp32GEMMKernel<
-                  kKQuantSmallBatchWarps, Batch, RowsPerWave, WType, 2, 12, 1,
-                  true><<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
+              SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch,
+                                                  RowsPerWave, WType, 2, 12, 1,
+                                                  true>
+                  <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
               return;
             }
           }
           SmallBatchKQuantExactFp32GEMMKernel<
-              kKQuantSmallBatchWarps, Batch, RowsPerWave, WType, 1, 12, 1,
-              true><<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
+              kKQuantSmallBatchWarps, Batch, RowsPerWave, WType, 1, 12, 1, true>
+              <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
           return;
         }
       }
@@ -1895,17 +1305,17 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
     if constexpr (kDoubleStage) {
       if ((ffn_up) || (m == 5120 && k == 17408)) {
         SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch,
-                                           RowsPerWave, WType, 2>
+                                            RowsPerWave, WType, 2>
             <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
         return;
       }
     }
     SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch,
-                                       RowsPerWave, WType>
+                                        RowsPerWave, WType>
         <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
   };
-#define GUFO_KQUANT_SMALL_BATCH(N) \
-  case N:                         \
+#define GUFO_KQUANT_SMALL_BATCH(N)   \
+  case N:                            \
     launch.template operator()<N>(); \
     return;
   switch (batch) {
@@ -1955,9 +1365,10 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
       if (batch >= 5 &&
           ((m == 17408 && k == 5120) || (m == 5120 && k == 17408))) {
         const auto launch_ffn = [&]<std::size_t Batch>() {
-          SmallBatchKQuantExactFp32GEMMKernel<
-              kKQuantSmallBatchWarps, Batch, 3, core::GgmlType::kQ6_K, 2, 1, 1,
-              true><<<(m + 47) / 48, block, 0, stream>>>(w, fp32_x, y, m, k);
+          SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch, 3,
+                                              core::GgmlType::kQ6_K, 2, 1, 1,
+                                              true>
+              <<<(m + 47) / 48, block, 0, stream>>>(w, fp32_x, y, m, k);
         };
         switch (batch) {
           case 5:
@@ -1984,9 +1395,9 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
         constexpr std::size_t kHeadRows = kKQuantSmallBatchWarps * 3;
         const auto launch_head = [&]<std::size_t Batch>() {
           const auto launch_indices = [&]<bool Narrow>() {
-            SmallBatchKQuantExactFp32GEMMKernel<
-                kKQuantSmallBatchWarps, Batch, 3, core::GgmlType::kQ6_K, 2, 1,
-                1, Narrow>
+            SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch,
+                                                3, core::GgmlType::kQ6_K, 2, 1,
+                                                1, Narrow>
                 <<<(m + kHeadRows - 1) / kHeadRows, block, 0, stream>>>(
                     w, fp32_x, y, m, k);
           };
@@ -2062,21 +1473,18 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
 // opt-q4kxl: tile-configuration dispatch for WKQuantA8BlockedWmmaGEMMKernel.
 // The configurations mirror the Q8_0 launcher exactly so the two paths share
 // the same occupancy tuning.
-template<core::GgmlType WType, bool UsePrecomputedSums,
-         bool StagePrecomputedSums>
-void LaunchKQuantWmmaGEMMTypedImpl(const void* w, const void* q8_1_x, float* y,
-                                   std::size_t batch, std::size_t m,
-                                   std::size_t k, hipStream_t stream) {
+template<core::GgmlType WType>
+void LaunchKQuantWmmaGEMMTyped(const void* w, const void* q8_1_x, float* y,
+                               std::size_t batch, std::size_t m, std::size_t k,
+                               hipStream_t stream) {
   if (batch <= 8) {
     constexpr int kBM = 128;
     const dim3 grid(1, static_cast<unsigned int>((m + kBM - 1) / kBM));
     if (m >= (3 * k)) {
-      WKQuantA8BlockedWmmaGEMMKernel<kBM, 32, 4, 4, 2, WType,
-                                     UsePrecomputedSums, StagePrecomputedSums>
+      WKQuantA8BlockedWmmaGEMMKernel<kBM, 32, 4, 4, 2, WType>
           <<<grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
     } else {
-      WKQuantA8BlockedWmmaGEMMKernel<kBM, 16, 4, 8, 1, WType,
-                                     UsePrecomputedSums, StagePrecomputedSums>
+      WKQuantA8BlockedWmmaGEMMKernel<kBM, 16, 4, 8, 1, WType>
           <<<grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
     }
     return;
@@ -2090,8 +1498,7 @@ void LaunchKQuantWmmaGEMMTypedImpl(const void* w, const void* q8_1_x, float* y,
     // shape WM=2/WN=4 halves the per-token activation sums the offset term
     // needs, but measured far worse -- pp2048 464 -> 372 -- because four row
     // subtiles per wave hold twice the A-fragment and scale state.
-    WKQuantA8BlockedWmmaGEMMKernel<kBM, kBN, 2, 4, 2, WType, UsePrecomputedSums,
-                                   StagePrecomputedSums>
+    WKQuantA8BlockedWmmaGEMMKernel<kBM, kBN, 2, 4, 2, WType>
         <<<grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
     return;
   }
@@ -2099,17 +1506,8 @@ void LaunchKQuantWmmaGEMMTypedImpl(const void* w, const void* q8_1_x, float* y,
   constexpr int kBN = 64;
   const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
                   static_cast<unsigned int>((m + kBM - 1) / kBM));
-  WKQuantA8BlockedWmmaGEMMKernel<kBM, kBN, 4, 8, 1, WType, UsePrecomputedSums,
-                                 StagePrecomputedSums>
+  WKQuantA8BlockedWmmaGEMMKernel<kBM, kBN, 4, 8, 1, WType>
       <<<grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
-}
-
-template<core::GgmlType WType>
-void LaunchKQuantWmmaGEMMTyped(const void* w, const void* q8_1_x, float* y,
-                               std::size_t batch, std::size_t m, std::size_t k,
-                               hipStream_t stream) {
-  LaunchKQuantWmmaGEMMTypedImpl<WType, true, true>(w, q8_1_x, y, batch, m, k,
-                                                   stream);
 }
 
 void LaunchKQuantWmmaGEMM(core::GgmlType type, const void* w,
@@ -2154,6 +1552,10 @@ void LaunchBatchedQuantGEMMPreQuantized(core::GgmlType type, const void* w,
                                         std::size_t batch, std::size_t m,
                                         std::size_t k, hipStream_t stream) {
   if (m == 0 || k == 0 || batch == 0) {
+    return;
+  }
+  if (detail::TryLaunchQuantPrefillWave64(type, w, q8_1_x, y, batch, m, k,
+                                          stream)) {
     return;
   }
   // opt-q4kxl: every K-quant/IQ format in the UD-Q4_K_XL shard goes through the

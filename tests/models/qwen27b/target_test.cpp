@@ -8,8 +8,10 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/testing/compare/logit_comparator.hpp"
@@ -60,9 +62,75 @@ bool ByteEqual(std::span<const float> a, std::span<const float> b) {
          std::memcmp(a.data(), b.data(), a.size_bytes()) == 0;
 }
 
-void CheckVerificationFeatures(
-    Executor& executor,
-    std::span<const std::vector<float>> expected) {
+std::string Fingerprint(std::span<const float> values) {
+  Expect(
+      !values.empty() &&
+          std::ranges::all_of(values, [](float v) { return std::isfinite(v); }),
+      "fingerprinted values must be finite and nonempty");
+  return gufo::crypto::Sha256Hex(
+      {reinterpret_cast<const std::uint8_t*>(values.data()),
+       values.size_bytes()});
+}
+
+void CheckPrefillReplay(
+    const std::shared_ptr<const gufo::hip::QwenGpuModel>& model) {
+  std::string error;
+  auto executor = Executor::Create(model, &error, 4096);
+  Expect(executor != nullptr, error);
+  constexpr std::array<std::uint32_t, 5> layers{6, 20, 34, 48, 62};
+  executor->SetPromptHiddenCapture(true, layers);
+  const auto text = executor->GetTokenizer().Encode(
+      std::string(kTexts[0]) + "\n" + kTexts[1] + "\n" + kTexts[2]);
+  Expect(!text.empty(), "prefill fixture must tokenize");
+  for (const std::size_t length : {128U, 257U, 2048U}) {
+    std::vector<Token> tokens(length + 2);
+    for (std::size_t i = 0; i < tokens.size(); ++i)
+      tokens[i] = text[i % text.size()];
+    const auto prompt = std::span(tokens).first(length);
+    executor->Reset();
+    (void)executor->ForwardPromptBatch(prompt);
+    const auto expected = Logits(*executor);
+    const auto features = Fingerprint(executor->GetPromptHiddenStates());
+    Expect(executor->GetPromptHiddenStates().size() ==
+               length * layers.size() * executor->GetConfig().hidden_size,
+           "prefill must capture every requested feature row");
+    executor->Reset();
+    (void)executor->ForwardPromptBatch(prompt);
+    Expect(ByteEqual(Logits(*executor), expected) &&
+               Fingerprint(executor->GetPromptHiddenStates()) == features,
+           "repeated matrix prefill changed logits or features");
+    std::cout << "prefill fingerprint tokens=" << length
+              << " logits=" << Fingerprint(expected) << " features=" << features
+              << '\n';
+
+    const auto snapshot = executor->SaveSnapshot(length);
+    const auto suffix = std::span(tokens).subspan(length);
+    (void)executor->ForwardVerificationChunk(suffix, length, true);
+    std::vector<std::vector<float>> verified;
+    for (std::size_t row = 0; row < suffix.size(); ++row) {
+      const auto logits = executor->CopyVerificationLogits(row);
+      verified.emplace_back(logits.begin(), logits.end());
+    }
+    const auto hidden = executor->GetVerificationHiddenStates();
+    const std::vector<float> verified_features(hidden.begin(), hidden.end());
+    executor->RestoreSnapshot(*snapshot);
+    for (std::size_t row = 0; row < suffix.size(); ++row) {
+      (void)executor->ForwardToken(suffix[row], length + row);
+      const auto last_hidden = executor->CopyLastHidden();
+      Expect(ByteEqual(Logits(*executor), verified[row]) &&
+                 ByteEqual(last_hidden, std::span(verified_features)
+                                            .subspan(row * last_hidden.size(),
+                                                     last_hidden.size())),
+             "verification after matrix prefill changed logits or features");
+      std::cout << "prefill continuation tokens=" << length << " row=" << row
+                << " logits=" << Fingerprint(verified[row])
+                << " features=" << Fingerprint(last_hidden) << '\n';
+    }
+  }
+}
+
+void CheckVerificationFeatures(Executor& executor,
+                               std::span<const std::vector<float>> expected) {
   const auto actual = executor.GetVerificationHiddenStates();
   const std::size_t width = expected.front().size();
   Expect(actual.size() == expected.size() * width,
@@ -83,8 +151,8 @@ void CheckMixedContextBatch(const Executor& owner, bool replay) {
     Executor short_session(owner.GetSharedModel(), 32, policy);
     Executor long_session(owner.GetSharedModel(), 64, policy);
     Executor longest_session(owner.GetSharedModel(), 128, policy);
-    const std::array<Executor*, 3> sessions{
-        &short_session, &long_session, &longest_session};
+    const std::array<Executor*, 3> sessions{&short_session, &long_session,
+                                            &longest_session};
     constexpr std::array<std::uint32_t, 3> prefix_sizes{5, 9, 13};
     constexpr std::uint32_t continuation = 4;
     std::array<std::vector<Token>, 3> tokens;
@@ -184,7 +252,8 @@ void CheckWideCache(Executor& reference) {
       << "context=262144: prefill, scalar and verification logits exact\n";
 }
 
-std::vector<Case> Capture(const char* path, bool check_replay) {
+std::vector<Case> Capture(const char* path, bool check_replay,
+                          bool prefill_only = false) {
   std::string error;
   auto owner = gufo::core::GgufReader::OpenFile(path, &error);
   Expect(owner != nullptr, error);
@@ -195,6 +264,10 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
   Expect(executor->GetConfig().hidden_size == 5120 &&
              executor->GetConfig().vocab_size == 248320,
          "quality fixture requires Qwen3.8 27B");
+  if (prefill_only) {
+    CheckPrefillReplay(executor->GetSharedModel());
+    return {};
+  }
   if (check_replay) {
     constexpr std::array<std::uint32_t, 5> target_layers{6, 20, 34, 48, 62};
     executor->SetPromptHiddenCapture(true, target_layers);
@@ -222,11 +295,11 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
       row.logits.push_back(Logits(*executor));
       if (check_replay) {
         const auto features = executor->CopyLastHidden();
-        Expect(features.size() == 5 * executor->GetConfig().hidden_size &&
-                   std::ranges::all_of(features, [](float value) {
-                     return std::isfinite(value);
-                   }),
-               "scalar target features must be finite and complete");
+        Expect(
+            features.size() == 5 * executor->GetConfig().hidden_size &&
+                std::ranges::all_of(
+                    features, [](float value) { return std::isfinite(value); }),
+            "scalar target features must be finite and complete");
         expected_features.emplace_back(features.begin(), features.end());
       }
     }
@@ -246,8 +319,8 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
                              row.logits[index + 1]),
                    "adaptive-width verification changed target logits");
           }
-          CheckVerificationFeatures(
-              *executor, std::span(expected_features).first(width));
+          CheckVerificationFeatures(*executor,
+                                    std::span(expected_features).first(width));
           std::cout << "verification width=" << width << " exact=1\n";
         }
         executor->RestoreSnapshot(*snapshot);
@@ -309,6 +382,7 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
     CheckMixedContextBatch(*executor, false);
     CheckMixedContextBatch(*executor, true);
     CheckWideCache(*executor);
+    CheckPrefillReplay(executor->GetSharedModel());
   }
   return cases;
 }
@@ -370,6 +444,10 @@ int main(int argc, const char* const* argv) {
     if (model == nullptr) {
       std::cout << "Set GUFO_QWEN27B_MODEL for the Qwen27B target check.\n";
       return 77;
+    }
+    if (argc == 3 && std::string_view(argv[2]) == "--prefill-only") {
+      (void)Capture(model, true, true);
+      return 0;
     }
     const auto candidate = Capture(model, true);
     if (argc > 2) {

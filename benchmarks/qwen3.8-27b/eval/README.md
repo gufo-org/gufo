@@ -14,7 +14,7 @@ Run on gfx1151 through Nix. Model-specific tests and tools live in
 | --- | --- |
 | `fast` | Sampling/verifier, CLI and HTTP parsing, quantization reference decoding and tool reporting. |
 | `kernels` | Independent GEMM/decode controls; recurrence and replay; DFlash2 convolution, attention, top-k, selector and verifier distributions. |
-| `model` | Target logits/features at widths 2–8; MTP committed-feature replay; DFlash2 loading, history and snapshots; executable sampling parity. |
+| `model` | Target logits/features at widths 2–8 and matrix prefill; MTP committed-feature replay; DFlash2 loading, history and snapshots; executable sampling parity. |
 | `serving` | Direct/served tokens, seeded replay, EOS, cache forks, persistent restore, concurrency and cancellation. |
 | `reference` | Optional BF16 target comparison: KL, total variation, top-1, RMSE and NLL. This measures quantization differences, not original-checkpoint correctness. |
 
@@ -48,6 +48,21 @@ draft precision. Compare full logits/features and token IDs, including cached
 replay; retain the established tolerances. Run short warmed release timings
 with matched artifacts and prompts, alternating binaries during experiments.
 Profile separately. Broaden to depth/concurrency sweeps only when needed.
+
+For prefill changes, the existing target check also covers 128/257/2048-token
+prefixes, repeated prefill and two-token scalar/verification replay. It prints
+SHA-256 fingerprints of full logits and all five feature taps at every prompt
+position, so two builds can be compared without storing logit dumps:
+
+```sh
+nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_target_test \
+  "$MODEL" --prefill-only
+```
+
+The native wave64 Q4_K/Q5_K/Q6_K/Q8_0 and IQ4_XS prefill kernels pass the
+independent operator formula, including partial row/token tiles. Q4/Q8 model
+fingerprints match the preceding implementation exactly at all three lengths. This establishes
+preservation, not independent original-checkpoint accuracy.
 
 Current retained-kernel qualification covers 102 target logit rows, 102 tapped
 feature rows, 96 C3 replay/cache rows, and logical context 262,144 with a short
@@ -152,9 +167,15 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 ## Latest measurement provenance
 
-The [benchmark table](../README.md) uses the qualified Qwen implementation from
-`6654d1e`, measured on 2026-09-13. Later documentation and DS4 integration do not
-change its Qwen kernels. Release binary SHA-256:
+AR prefill uses the native wave64 release measured on 2026-09-13, SHA-256
+`b3586d7ee923190c63e05f83a2dc3543e6c2206a764376299ddf663c45c58a6d`.
+Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 1 --verbose`.
+The short Q4/Q4 adaptive regression check at pp2048/tg32 retained every token
+ID and acceptance count, with unchanged generation speed. A matched speed
+refresh across all six target/draft precision pairs remains TODO.
+
+The real-prompt DFlash2 table uses the qualified decode implementation from
+`6654d1e`, measured on 2026-09-13. Release binary SHA-256:
 `1a1793815a8a99acc0b901098dacaa635de167562bf4d2dfd5fa71c4d66cd1e8`.
 
 The raw prose/JSON prompts are `prose_tides` / `json_records` in
@@ -163,9 +184,13 @@ The chat repetition prompt is “Output the word red exactly 1000 times,
 separated by spaces. Do not add any other text.”, with 128 tokens and fixed-7.
 Use `gufo prompt --temperature 0 --verbose --max-tokens N` with the target,
 DFlash2 draft and controller; add `--raw` only for prose/JSON. Warm up first.
-Two current-release samples per prompt were interleaved with the completed
-experiment; every token hash and acceptance count matched. The joined draft
-FFN experiment was rejected because full-model timing was unchanged.
+Two release samples per prompt were interleaved during qualification; every
+token hash and acceptance count matched.
+
+Prefill experiments: native wave64 retained for Q4_K/Q5_K/Q6_K/Q8_0 and
+IQ4_XS down projections, with branch-free affine scale decoding. Row-loop
+reordering, smaller tiles, deeper staging and removal of tile bounds checks
+rejected as flat or slower.
 
 | Artifact | SHA-256 |
 | --- | --- |

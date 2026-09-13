@@ -316,7 +316,8 @@ while the model gets slower.
 
 ```sh
 nix develop -c tools/bench/build.sh tools/qwen27b/prefill_gemm_bench.hip
-/tmp/prefill_gemm_bench 2048 12
+/tmp/prefill_gemm_bench q5 17408 5120 2048 12
+/tmp/prefill_gemm_bench q8-swiglu 2048 12
 
 /tmp/bf16_gemm_bench -b 2048     # hipBLAS / hipBLASLt bar to beat
 /tmp/aotriton_attn_bench -i 5    # AOTriton flash-attention capability probe
