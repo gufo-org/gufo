@@ -99,17 +99,19 @@ after warmup on the quiet host. These are short controls.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 56.75 | **56.76** | +0.02% |
-| JSON, tg300, adaptive | 53.70 | **53.80** | +0.18% |
-| Prose, tg300, adaptive | 23.71 | **23.77** | +0.24% |
+| Repetition, tg128, fixed-7 | 56.85 | **56.98** | +0.24% |
+| JSON, tg300, adaptive | 53.77 | **53.89** | +0.23% |
+| Prose, tg300, adaptive | 23.77 | **23.86** | +0.37% |
 
-The latest [recurrent-control change](eval/dflash2-ssm-controls.json) joins
-adjacent alpha/beta projections using existing scratch. Their launch count
-halves and their GPU time falls 36.7%; whole prose GPU time falls 0.37%.
-End-to-end gains remain small; repetition is flat. All 12 continuations,
+The latest [rollback-copy change](eval/dflash2-state-copy.json) uses
+contiguous vector transfers for large recurrent-state groups. The same 203
+copies take 15.3% less GPU time; whole-profile timing is flat.
+End-to-end gains remain small. All 12 continuations,
 102 verification logit rows, 102 feature rows and 96 C3 replay/cache rows
-remain exact. No arithmetic, weight or allocation change.
-Earlier [Q5 projections](eval/dflash2-prose-projections.json),
+remain exact. The expanded rollback fixture also passes FP32/BF16 states,
+tail groups and repeated saves. No arithmetic, layout or allocation change.
+Earlier [joined recurrent controls](eval/dflash2-ssm-controls.json),
+[Q5 projections](eval/dflash2-prose-projections.json),
 [mixed-format reuse](eval/dflash2-remaining-formats.json),
 [contiguous FFNs](eval/dflash2-contiguous-ffn.json) and
 [feature transfers](eval/dflash2-feature-transfer.json) remain qualified.

@@ -32,7 +32,7 @@
 #include "tests/models/qwen/hip/support/device.hpp"
 #include "tests/models/qwen/support/synthetic_weights.hpp"
 
-void TestRecurrentRollbackRows() {
+void TestRecurrentRollbackRows(bool large_state) {
   using gufo::hip::QwenRecurrentStateStorage;
   for (const auto storage :
        {QwenRecurrentStateStorage::kFp32, QwenRecurrentStateStorage::kBf16}) {
@@ -43,6 +43,11 @@ void TestRecurrentRollbackRows() {
                                           {4U, 1U},
                                           {4U, 0U}}) {
       auto config = gufo::models::qwen::make_small_qwen_config();
+      if (large_state) {
+        config.ssm_time_step_rank = 48;
+        config.ssm_state_size = 128;
+        config.ssm_inner_size = 48 * 128;
+      }
       config.num_layers = layers;
       config.full_attention_interval = interval;
       auto policy = gufo::hip::QwenExecutionPolicy::Production();
@@ -727,7 +732,8 @@ int main() {
   }
 
   TestBatchedSSMConvEquivalence();
-  TestRecurrentRollbackRows();
+  TestRecurrentRollbackRows(false);
+  TestRecurrentRollbackRows(true);
   TestBf16RecurrentMemoryAndSnapshot();
   TestBatchedSSMRowSplitRecurrenceEquivalence(96);
   // Above the launcher's 2048-token crossover, so the two-row prefetching tile

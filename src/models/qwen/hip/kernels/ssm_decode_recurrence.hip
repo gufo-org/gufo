@@ -10,6 +10,34 @@
 
 namespace gufo::hip {
 
+__global__ void CopyRecurrentStateRowsKernel(
+    uint4* __restrict__ destination, const uint4* __restrict__ source,
+    std::uint32_t width, std::uint32_t destination_pitch,
+    std::uint32_t source_pitch) {
+  const std::uint32_t column = blockIdx.x * blockDim.x + threadIdx.x;
+  if (column < width) {
+    destination[blockIdx.y * destination_pitch + column] =
+        source[blockIdx.y * source_pitch + column];
+  }
+}
+
+void LaunchCopyRecurrentStateRows(
+    void* destination, const void* source, std::uint32_t width_bytes,
+    std::uint32_t destination_pitch_bytes, std::uint32_t source_pitch_bytes,
+    std::uint32_t groups, hipStream_t stream) {
+  if (width_bytes == 0 || groups == 0) {
+    return;
+  }
+  constexpr std::uint32_t kVectorBytes = sizeof(uint4);
+  constexpr unsigned kThreads = 256;
+  const std::uint32_t width = width_bytes / kVectorBytes;
+  CopyRecurrentStateRowsKernel<<<
+      dim3((width + kThreads - 1) / kThreads, groups), kThreads, 0, stream>>>(
+      static_cast<uint4*>(destination), static_cast<const uint4*>(source),
+      width, destination_pitch_bytes / kVectorBytes,
+      source_pitch_bytes / kVectorBytes);
+}
+
 __global__ void CaptureBatchedSsmReplayKernel(
     const float* __restrict__ qkv, const float* __restrict__ alpha,
     const float* __restrict__ beta, SsmReplayCapture replay_capture,

@@ -150,6 +150,16 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Vectorized rollback copies](dflash2-state-copy.json): a 256×1 workgroup
+  copies contiguous vectors within each large recurrent-state group.
+  The same 203 copies take 15.3% less GPU time; whole-profile time is flat.
+  Fresh paired release runs improve prose 0.37%, JSON 0.23% and repetition
+  0.24%. All 12 continuations, 102 verification logit rows, 102 feature rows
+  and 96 C3 replay/cache rows remain exact. The existing rollback fixture
+  now covers small and large FP32/BF16 states, tail groups, skipped attention
+  rows and repeated saves. Layout, allocation, synchronization and arithmetic
+  are unchanged. The baseline profile is reused from the preceding qualified
+  build; speed measurements are fresh. Slower copy variants are removed.
 - [Joined recurrent controls](dflash2-ssm-controls.json): adjacent Q8
   alpha/beta weights share one launch; recurrence reads the interleaved rows
   from existing scratch. Their launch count halves and GPU time falls 36.7%.

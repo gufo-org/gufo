@@ -1,0 +1,1806 @@
+{
+  "date_utc": "2026-09-13T07:52:23.910719+00:00",
+  "status": "retained: vectorized pitched copies of large recurrent rollback state",
+  "base_revision": "b4f7f0fd1ca42e7b395a24dae40c04111a40b8a9",
+  "source_sha256": {
+    "src/models/qwen/hip/ssm_replay.cpp": "deebc8f8bbcc0456817b5e66500f1de258dcd8c39ff220ec9cb053c31ce61eca",
+    "src/models/qwen/hip/ops/ssm.hpp": "478072fe56653750def1075a651137b93b7f1e214bc5d450e82a82d3e660fbf0",
+    "src/models/qwen/hip/kernels/ssm_decode_recurrence.hip": "1da926fd82c339d4ca7e44cec8fdd1488e7a72e11dc52a936ae62e102e534f59",
+    "tests/models/qwen/hip/ssm_ops_test.cpp": "dbcf52d673612dc3ddcfdfb73d311585043f437e3b478d4b7c6efeb06a485ff8"
+  },
+  "platform": "Dedicated gfx1151 Strix Halo, Linux x86-64, Nix release. No power or clock changes.",
+  "artifact_reference": "dflash2-rollback.json: artifacts.target_q4, target_q8 and draft_q4; unchanged files.",
+  "change": [
+    "Replace general HIP pitched copies of large recurrent-state groups with an exact uint4 copy, 256x1 threads per workgroup. The prior HIP copy uses 16x16; the new workgroup covers contiguous columns of one row group.",
+    "The arena selects this route for layer rows >= 1 MiB, 16-byte aligned pitches and a complete live group span <=UINT32_MAX bytes. Other layouts retain HIP. Tail groups keep their existing contiguous copy.",
+    "Live/saved layouts, copied bytes, allocations, convolution snapshots, stream synchronization and replay semantics are unchanged. No model arithmetic, draft, sampler, controller or execution option changes.",
+    "The existing rollback fixture checks both small and 48x128x128 recurrent states in FP32/BF16. Six layer/attention-interval combinations, both sizes and both storage types run two saves/restores each: 48 cycles. Every recurrent byte must be restored; skipped attention rows must retain the poison byte."
+  ],
+  "release": {
+    "path": "/nix/store/ikd1x8frc30fhid79p2mfk5rnk1zp3b0-gufo-b4f7f0f-dirty/bin/gufo",
+    "sha256": "5b44b64ff1e554f146db2b04a601ffd8dee20bc9ff4f0afdbaa3d7b8f3e5abd4",
+    "nix_build_pass": true,
+    "build_log": "/tmp/qwen-state-copy-release-build.log"
+  },
+  "speed": {
+    "date_utc": "2026-09-13T07:39:27.538717+00:00",
+    "binary": {
+      "baseline": {
+        "path": "/nix/store/nfs93yqq02a45x8k36zhh3a6xgmkvj59-gufo-f384807-dirty/bin/gufo",
+        "sha256": "fa5832b2761341b284c504bf33f4e93a887d2e603839ab5676e6a514f92a5643"
+      },
+      "candidate": {
+        "path": "/nix/store/ikd1x8frc30fhid79p2mfk5rnk1zp3b0-gufo-b4f7f0f-dirty/bin/gufo",
+        "sha256": "5b44b64ff1e554f146db2b04a601ffd8dee20bc9ff4f0afdbaa3d7b8f3e5abd4"
+      }
+    },
+    "method": "Q4 target/Q4 draft, C1, greedy. Adaptive raw JSON/prose TG300: two timed samples per binary in ABBA order, 128-token raw prose warmup per binary excluded. Fixed-7 repetition chat TG128: two paired samples per binary in ABBA order. Includes prefill, excludes model loading. All IDs and acceptance statistics checked against qualified AR references. Candidate vectorizes large pitched recurrent-state save/restore copies. Buffer layout, bytes, synchronization, arithmetic, draft and controller are unchanged.",
+    "rows": [
+      {
+        "workload": "prose",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 12.605,
+        "tps": 23.8,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.397059,
+          "drafted": 476,
+          "accepted": 189,
+          "steps": 110
+        }
+      },
+      {
+        "workload": "prose",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 12.5669,
+        "tps": 23.8723,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.397059,
+          "drafted": 476,
+          "accepted": 189,
+          "steps": 110
+        }
+      },
+      {
+        "workload": "prose",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 12.5844,
+        "tps": 23.839,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.397059,
+          "drafted": 476,
+          "accepted": 189,
+          "steps": 110
+        }
+      },
+      {
+        "workload": "prose",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 12.6395,
+        "tps": 23.7351,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.397059,
+          "drafted": 476,
+          "accepted": 189,
+          "steps": 110
+        }
+      },
+      {
+        "workload": "json",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 5.58284,
+        "tps": 53.7361,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.898246,
+          "drafted": 285,
+          "accepted": 256,
+          "steps": 43
+        }
+      },
+      {
+        "workload": "json",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 5.56499,
+        "tps": 53.9084,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.898246,
+          "drafted": 285,
+          "accepted": 256,
+          "steps": 43
+        }
+      },
+      {
+        "workload": "json",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 5.5689,
+        "tps": 53.8706,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.898246,
+          "drafted": 285,
+          "accepted": 256,
+          "steps": 43
+        }
+      },
+      {
+        "workload": "json",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 5.57631,
+        "tps": 53.799,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.898246,
+          "drafted": 285,
+          "accepted": 256,
+          "steps": 43
+        }
+      },
+      {
+        "workload": "repetition",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 2.25288,
+        "tps": 56.8161,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 2.24914,
+        "tps": 56.9106,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 2.24358,
+        "tps": 57.0516,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      },
+      {
+        "workload": "repetition",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 128,
+        "seconds": 2.25043,
+        "tps": 56.8781,
+        "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+        "speculative": {
+          "acceptance": 1.0,
+          "drafted": 111,
+          "accepted": 111,
+          "steps": 16
+        }
+      }
+    ],
+    "summary": [
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "baseline": 23.76755,
+        "candidate": 23.855649999999997,
+        "percent": 0.3706734602430428,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      },
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "baseline": 53.76755,
+        "candidate": 53.8895,
+        "percent": 0.2268096649373108,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      },
+      {
+        "workload": "repetition",
+        "mode": "dflash2",
+        "baseline": 56.8471,
+        "candidate": 56.9811,
+        "percent": 0.2357200279345939,
+        "all_ids_exact": true,
+        "acceptance_unchanged": true
+      }
+    ]
+  },
+  "profile": {
+    "baseline": {
+      "groups": [
+        {
+          "name": "__amd_rocclr_copyBufferRectAligned",
+          "grid_x": 589824,
+          "grid_y": 16,
+          "block_x": 16,
+          "count": 203,
+          "ms": 303.387146,
+          "scratch": 0
+        }
+      ],
+      "calls": 203,
+      "gpu_ms": 303.387146,
+      "effective_read_plus_write_gb_per_second": 202.06507781315165
+    },
+    "candidate": {
+      "groups": [
+        {
+          "name": "gufo::hip::CopyRecurrentStateRowsKernel(HIP_vector_type<unsigned int, 4u>*, HIP_vector_type<unsigned int, 4u> const*, unsigned int, unsigned int, unsigned int)",
+          "grid_x": 589824,
+          "grid_y": 16,
+          "block_x": 256,
+          "count": 203,
+          "ms": 256.830453,
+          "scratch": 0
+        }
+      ],
+      "calls": 203,
+      "gpu_ms": 256.830453,
+      "effective_read_plus_write_gb_per_second": 238.69423017370923
+    },
+    "copy_time_reduction_percent": 15.345637946045343,
+    "whole_gpu_time_reduction_percent": 0.02029488127135437,
+    "baseline_profile_reused_from": "Qualified b4f7f0f candidate trace in /tmp/qwen-ssm-pair-release/profile.json; same binary SHA, command, tokens and acceptance. Only candidate reprofiled to limit remote time.",
+    "method": "Compare the 203 pitched DeltaNet state copies of 144 MiB each (110 saves + 93 restores), at grid 589824x16 with the new vectorized copy kernel. Conv-state and unrelated copies excluded. Zero private scratch. Diagnostic timings; unprofiled fresh ABBA comparisons own throughput claims.",
+    "geometry": {
+      "baseline": {
+        "workgroup": [
+          16,
+          16,
+          1
+        ],
+        "grid": [
+          589824,
+          16,
+          1
+        ]
+      },
+      "candidate": {
+        "workgroup": [
+          256,
+          1,
+          1
+        ],
+        "grid": [
+          589824,
+          16,
+          1
+        ]
+      }
+    }
+  },
+  "quality": {
+    "source_sha256": {
+      "src/models/qwen/hip/ssm_replay.cpp": "deebc8f8bbcc0456817b5e66500f1de258dcd8c39ff220ec9cb053c31ce61eca",
+      "src/models/qwen/hip/ops/ssm.hpp": "478072fe56653750def1075a651137b93b7f1e214bc5d450e82a82d3e660fbf0",
+      "tests/models/qwen27b/target_test.cpp": "037ea611c1ccc186d736bae9ba621f5aad4f48953984572c19d7ccf215fa988a",
+      "src/models/qwen/hip/kernels/ssm_decode_recurrence.hip": "1da926fd82c339d4ca7e44cec8fdd1488e7a72e11dc52a936ae62e102e534f59",
+      "tests/models/qwen/hip/ssm_ops_test.cpp": "dbcf52d673612dc3ddcfdfb73d311585043f437e3b478d4b7c6efeb06a485ff8"
+    },
+    "target_suites": [
+      {
+        "target": "q4",
+        "verification_full_vocabulary_rows_exact": 51,
+        "verification_feature_rows_exact": 51,
+        "retained_last_feature_checks": 9,
+        "c3_cache_capacities": [
+          32,
+          64,
+          128
+        ],
+        "c3_prefix_sizes": [
+          5,
+          9,
+          13
+        ],
+        "c3_continuation_steps": 4,
+        "c3_rows_exact_per_cache_precision_per_mode": 12,
+        "c3_cache_precisions": [
+          "fp16",
+          "fp32"
+        ],
+        "c3_modes": [
+          "ordinary",
+          "growing_prefix_rollback_replay"
+        ],
+        "c3_coordinator_session_indices": [
+          0,
+          1,
+          2,
+          0
+        ],
+        "c3_replay_ring_boundary_crossed": true,
+        "wide_context": 262144,
+        "prefill_metrics": [
+          "prefill case=0 top1_match=1 rmse=0.0352181 max_abs=0.143674",
+          "prefill case=1 top1_match=1 rmse=0.0238825 max_abs=0.115072",
+          "prefill case=2 top1_match=1 rmse=0.0248176 max_abs=0.123336"
+        ],
+        "log_sha256": "5c7770bb3feebfb0f16ef4b070800d5a6196ce524c63cb8319d030bc966edd8f"
+      },
+      {
+        "target": "q8",
+        "verification_full_vocabulary_rows_exact": 51,
+        "verification_feature_rows_exact": 51,
+        "retained_last_feature_checks": 9,
+        "c3_cache_capacities": [
+          32,
+          64,
+          128
+        ],
+        "c3_prefix_sizes": [
+          5,
+          9,
+          13
+        ],
+        "c3_continuation_steps": 4,
+        "c3_rows_exact_per_cache_precision_per_mode": 12,
+        "c3_cache_precisions": [
+          "fp16",
+          "fp32"
+        ],
+        "c3_modes": [
+          "ordinary",
+          "growing_prefix_rollback_replay"
+        ],
+        "c3_coordinator_session_indices": [
+          0,
+          1,
+          2,
+          0
+        ],
+        "c3_replay_ring_boundary_crossed": true,
+        "wide_context": 262144,
+        "prefill_metrics": [
+          "prefill case=0 top1_match=1 rmse=0.03 max_abs=0.14",
+          "prefill case=1 top1_match=1 rmse=0.02 max_abs=0.11",
+          "prefill case=2 top1_match=1 rmse=0.03 max_abs=0.18"
+        ],
+        "log_sha256": "482fc43ed8a4f0187f2bcba2779d0c7c28a04dbc9073995da14d99c85c6f1c7c"
+      }
+    ],
+    "ssm_ops_pass": true,
+    "ssm_log_sha256": "4c583dbb4400aaefc36dc3853af0449b6eeec26302a05502674d3c3182745ac3"
+  },
+  "microbenchmark": {
+    "method": "Qwen27B exact FP32 recurrent-state packed copy:64live/48packed layer rows,48heads128x128,144MiB/copied direction. Current hipMemcpy2DAsync vs vectorized uint4 copies, optional nontemporal stores, and bounded-grid strip mining. Same allocations and layout. Every copied byte and untouched attention row equals HIP for save+restore with two full-bit seeds. Nine balanced rounds x8copies, separate directions. Isolated pilot only.",
+    "source_sha256": "9523deab792973d75aad628f916aa19a24463147163bf2988deee38e06fcee9c",
+    "quality_log": "QUALITY every copied byte and untouched attention row matches HIP, save+restore, two full-bit seeds\n",
+    "raw": [
+      {
+        "direction": "save",
+        "variant": "hip_pitched",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.530609",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.301578",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1_nt",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.304854",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "2.967371",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4_nt",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "4.270931",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.393495",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1_nt",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.413803",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "3.150524",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4_nt",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "4.639844",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.296082",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1_nt",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.302795",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "2.949516",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4_nt",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "4.313456",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.393736",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1_nt",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.410763",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "3.156501",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4_nt",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "4.632681",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "hip_pitched",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.531881",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1_nt",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.306918",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "2.863014",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4_nt",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "4.299234",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.395574",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1_nt",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.416223",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "3.152012",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4_nt",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "4.638347",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "hip_pitched",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.529181",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.302705",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "2.821546",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4_nt",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "4.291520",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.396501",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1_nt",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.413162",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "3.149337",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4_nt",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "4.631695",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "hip_pitched",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.532747",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.301828",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1_nt",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.305760",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4_nt",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "4.278295",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.398530",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1_nt",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.411539",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "3.148040",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4_nt",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "4.630798",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "hip_pitched",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.531234",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.306888",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1_nt",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.305630",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "2.937824",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.408028",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1_nt",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.415677",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "3.141748",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4_nt",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "4.640587",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "hip_pitched",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.531019",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.304223",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1_nt",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.305054",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "2.848963",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4_nt",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "4.232184",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1_nt",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.400674",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "3.144764",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4_nt",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "4.635197",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "hip_pitched",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.531194",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.305575",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1_nt",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.305450",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "2.971247",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4_nt",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "4.377532",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.393260",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "3.168198",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4_nt",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "4.637260",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "hip_pitched",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.530849",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.304859",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1_nt",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.301042",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "2.868003",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4_nt",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "4.307020",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.397348",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1_nt",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.413303",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4_nt",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "4.614873",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "hip_pitched",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.529727",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.306637",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec1_nt",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.303020",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "2.901506",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "vec4_nt",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "4.302426",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.394898",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec1_nt",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.411239",
+        "mismatches": "0"
+      },
+      {
+        "direction": "save",
+        "variant": "grid32_vec4",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "3.145375",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "hip_pitched",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.557925",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.300716",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1_nt",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.300055",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "2.885291",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4_nt",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "4.319057",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.395980",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1_nt",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "1.415812",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "3.133062",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4_nt",
+        "round": "0",
+        "bytes": "150994944",
+        "ms": "4.609999",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.292616",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1_nt",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.302339",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "2.884194",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4_nt",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "4.249125",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.396907",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1_nt",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.415557",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "3.139760",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4_nt",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "4.601092",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "hip_pitched",
+        "round": "1",
+        "bytes": "150994944",
+        "ms": "1.541153",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1_nt",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.300881",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "2.806247",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4_nt",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "4.356813",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.398109",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1_nt",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.411980",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "3.134760",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4_nt",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "4.604940",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "hip_pitched",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.543898",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1",
+        "round": "2",
+        "bytes": "150994944",
+        "ms": "1.300155",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "2.884545",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4_nt",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "4.353422",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.393976",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1_nt",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.414530",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "3.139514",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4_nt",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "4.600512",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "hip_pitched",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.543463",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.302800",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1_nt",
+        "round": "3",
+        "bytes": "150994944",
+        "ms": "1.304829",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4_nt",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "4.220066",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.393666",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1_nt",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.412396",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "3.150335",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4_nt",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "4.600006",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "hip_pitched",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.544244",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.303241",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1_nt",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "1.301427",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4",
+        "round": "4",
+        "bytes": "150994944",
+        "ms": "2.903761",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.410322",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1_nt",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.413047",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "3.132792",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4_nt",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "4.597972",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "hip_pitched",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.545597",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.300741",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1_nt",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "1.305836",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "2.948230",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4_nt",
+        "round": "5",
+        "bytes": "150994944",
+        "ms": "4.196988",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1_nt",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.402402",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "3.139313",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4_nt",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "4.609067",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "hip_pitched",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.541805",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.302554",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1_nt",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.304388",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "2.950729",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4_nt",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "4.315530",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1",
+        "round": "6",
+        "bytes": "150994944",
+        "ms": "1.395820",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "3.150189",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4_nt",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "4.596444",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "hip_pitched",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.543092",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.301422",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1_nt",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.305505",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "2.928537",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4_nt",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "4.332502",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.393370",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1_nt",
+        "round": "7",
+        "bytes": "150994944",
+        "ms": "1.413188",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4_nt",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "4.585538",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "hip_pitched",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.544279",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.302965",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec1_nt",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.304498",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "2.919445",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "vec4_nt",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "4.261259",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.394532",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec1_nt",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "1.411720",
+        "mismatches": "0"
+      },
+      {
+        "direction": "restore",
+        "variant": "grid32_vec4",
+        "round": "8",
+        "bytes": "150994944",
+        "ms": "3.147013",
+        "mismatches": "0"
+      }
+    ],
+    "summary": [
+      {
+        "direction": "save",
+        "median_ms": {
+          "hip_pitched": 1.531019,
+          "vec1": 1.304223,
+          "vec1_nt": 1.305054,
+          "vec4": 2.901506,
+          "vec4_nt": 4.299234,
+          "grid32_vec1": 1.395574,
+          "grid32_vec1_nt": 1.413162,
+          "grid32_vec4": 3.149337,
+          "grid32_vec4_nt": 4.635197
+        },
+        "throughput_gain_percent": {
+          "vec1": 17.38935749484558,
+          "vec1_nt": 17.314609203910326,
+          "vec4": -47.233643494102715,
+          "vec4_nt": -64.38856317195109,
+          "grid32_vec1": 9.705325550633637,
+          "grid32_vec1_nt": 8.339949701449644,
+          "grid32_vec4": -51.38599013062115,
+          "grid32_vec4_nt": -66.96971024101026
+        }
+      },
+      {
+        "direction": "restore",
+        "median_ms": {
+          "hip_pitched": 1.543898,
+          "vec1": 1.301422,
+          "vec1_nt": 1.304388,
+          "vec4": 2.903761,
+          "vec4_nt": 4.31553,
+          "grid32_vec1": 1.39582,
+          "grid32_vec1_nt": 1.413047,
+          "grid32_vec4": 3.139514,
+          "grid32_vec4_nt": 4.600512
+        },
+        "throughput_gain_percent": {
+          "vec1": 18.631619874260608,
+          "vec1_nt": 18.361867787805465,
+          "vec4": -46.83109250382521,
+          "vec4_nt": -64.22460277184958,
+          "grid32_vec1": 10.60867447092031,
+          "grid32_vec1_nt": 9.260201536113088,
+          "grid32_vec4": -50.82366251591808,
+          "grid32_vec4_nt": -66.44073529207184
+        }
+      }
+    ]
+  },
+  "limits": [
+    "Fresh ABBA measurements: two timed samples per binary/workload after 128-token prose warmup. Prose +0.37%, JSON +0.23%, repetition +0.24%; short controls, not confidence intervals.",
+    "The profile reuses the immediately preceding qualified b4f7f0f trace as baseline and only profiles the candidate. Same binary SHA, prompt, generated IDs, acceptance, copy count and profiler command. Large-copy GPU time falls 15.35%; whole-profile GPU time is essentially flat (-0.02%). Use the fresh unprofiled comparison for total throughput.",
+    "Q4/Q8 full-logit, feature, cache, replay and logical 262144 short-prefix controls passed. The expanded SSM suite passes before release timing. Unchanged draft operator/sampling/HTTP/depth suites were not repeated.",
+    "No independent original-target/checkpoint/MTP quality claim and no C>1 throughput claim. The 75-question capability comparison has not run.",
+    "The original FP4 headline 65.6 JSON/26.1 prose decode-only remains unmatched. The everyday 55 figure and matched-Kquant comparisons do not replace the goal."
+  ],
+  "rejected_variants": "Four uint4 vectors per thread, nontemporal stores and bounded-grid strip mining were slower than the simple vectorized copy. All matched every tested byte, but no alternate implementation remains in production.",
+  "raw_directories": [
+    "/tmp/qwen-state-copy",
+    "/tmp/qwen-state-copy-release",
+    "/tmp/qwen-state-copy-quality"
+  ],
+  "runner_sha256": {
+    "qwen_state_copy_probe.hip": "9523deab792973d75aad628f916aa19a24463147163bf2988deee38e06fcee9c",
+    "qwen-state-copy-run.py": "71a1fe9b420907b11897ab79d5c083380a827f47ad338a16238aec554d536590",
+    "qwen-state-copy-speed.py": "78850c1ca8445017d9ce13c3d0587a3de3e6d293dafe6442e60275150822b23f",
+    "qwen-state-copy-qualify.py": "6eba6c9f5948738500d38abbe809fcd1457ffae07e1d4fec6b84dac7250bde3a",
+    "qwen-state-copy-profile.py": "bc57fdcf52d179c9c2009e98368aca1e1b8f3fa053592e43f6ca2bb882741f3a",
+    "qwen-state-copy-attribution.py": "9d79e0118c2197538e1b5ab061638250818d6e6f606166cad7ecb4b979972078",
+    "qwen-state-copy-geometry.py": "ea7a8d355f0135facf452232f0121c570a676c556a7cead18c6c10fd7fdda137"
+  }
+}
