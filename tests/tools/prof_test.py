@@ -27,7 +27,18 @@ for quant in (12, 13, 23):
     assert prof.short(f"void gufo::hip::{symbol}(void const*, float*)") == (
         symbol.replace("gufo::", "")
     )
+    anonymous = prof.short(
+        f"void gufo::hip::(anonymous namespace)::{symbol}(void const*, float*)"
+    )
+    assert anonymous == symbol.replace("gufo::", "")
 
+assert prof.stage_of(
+    prof.short(
+        "void gufo::hip::(anonymous namespace)::HalfPrefillGemmKernel"
+        "<256, 256, (gufo::core::GgmlType)13, true>(void const*, float*)"
+    ),
+    prof.STAGE_MAPS["qwen"],
+) == "gemm: quant x fp16 prefill"
 
 with tempfile.TemporaryDirectory() as directory:
     database = Path(directory) / "profile.db"

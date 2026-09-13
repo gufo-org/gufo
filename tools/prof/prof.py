@@ -65,6 +65,9 @@ STAGE_MAPS: dict[str, list[tuple[str, str]]] = {
         ("SmallBatchQ8_0Exact", "gemm: exact q8 verification"),
         ("BatchedExactBf16", "gemm: exact bf16 verification"),
         ("WKQuantA8Blocked", "gemm: k-quant prefill"),
+        ("HalfPrefillGemmKernel", "gemm: quant x fp16 prefill"),
+        ("HalfNorm", "norm+fp16"),
+        ("HalfCast", "convert"),
         ("dflash_selector", "draft: selector"),
         ("dflash_noncausal_attention", "draft: attention"),
         ("dflash_grouped_dynamic_conv", "draft: convolution"),
@@ -110,12 +113,11 @@ def stage_of(name: str, stages: list[tuple[str, str]]) -> str:
 
 
 def short(name: str) -> str:
-    # A __global__ function with internal linkage (anonymous namespace) can reach
-    # the database with an empty display_name, which would otherwise silently
-    # collapse several kernels into one nameless row. Surface that instead of
-    # hiding it -- the fix belongs in the kernel, not here.
+    # Surface missing symbols instead of silently producing a blank row.
     if not name or not name.strip():
         return "<unnamed: internal-linkage kernel>"
+    # This is a namespace component, not the function's argument list.
+    name = name.replace("(anonymous namespace)::", "")
     # Enum template arguments contain casts such as "(GgmlType)12".
     # Cutting at that parenthesis merges different quantizations and widths.
     depth = 0

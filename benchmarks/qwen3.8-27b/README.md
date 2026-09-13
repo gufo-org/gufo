@@ -12,28 +12,29 @@ Standard sweep: **pp2048 / tg128**, C1. Cells are prefill / generation tok/s.
 
 | Context depth | Q4 | Q8 |
 | ---: | ---: | ---: |
-| 0 | **465.70** / TODO | **503.17** / TODO |
+| 0 | **549.36** / TODO | **503.17** / TODO |
 | 4,096 | TODO | TODO |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-Prefill measured 2026-09-13 with the qualified native wave64 kernels: four
-warmed samples for Q4 and two for Q8. Current optimization focuses on
+Prefill measured 2026-09-13: two warmed release samples per target. Q4 uses
+FP16 activations with packed quantized weights; Q8 retains native wave64.
+Current optimization focuses on
 **Q4 AR pp2048**, targeting **600 tok/s without quality loss**.
 
 ## Single user, DFlash2
 
-Latest decode controls, **2026-09-13**, Q4 target / Q4_K_M draft, greedy C1.
-Mean of two warmed release runs; rates include prefill and exclude model load.
-All generated token IDs match AR. These precede the prefill kernel update;
-the [quality guide](eval/README.md) records its short regression check.
+Current short control, **2026-09-13**, Q4 target, adaptive, greedy C1.
+One warmed release sample per draft; all 32 generated IDs match AR and
+acceptance is 22.2%. Prefill includes feature capture and draft injection.
+These **tg32 controls are not the full tg128 sweep**.
 
-| Workload | Tokens | Controller | tok/s | Acceptance |
-| --- | ---: | --- | ---: | ---: |
-| Prose, raw | 300 | adaptive | **24.45** | 39.7% |
-| JSON, raw | 300 | adaptive | **56.41** | 89.8% |
-| Repeated word, chat | 128 | fixed, 7 proposals | **59.35** | 100% |
+| Draft | pp2048 tok/s | tg32 tok/s |
+| --- | ---: | ---: |
+| Q4_K_M | **510.74** | **16.44** |
+| Q8_0 | 507.59 | 16.07 |
+| BF16 | 511.25 | 15.08 |
 
 pp2048/tg128 at depths **0 / 4,096 / 8,192 / 12,288 / 16,384**,
 for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.

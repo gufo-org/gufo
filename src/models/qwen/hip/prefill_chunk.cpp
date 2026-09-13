@@ -9,8 +9,44 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/prefill_fp16.hpp"
 
 namespace gufo::hip {
+namespace {
+bool UseQwen27bFp16Prefill(const models::QwenModelWeights& weights,
+                           std::size_t batch) {
+  const auto& config = weights.config;
+  // Large Qwen27B low-bit prefill is qualified independently from the Q8
+  // target and from the small-batch decode/verification kernels.
+  if (batch < 1024 || config.hidden_size != 5120 ||
+      config.intermediate_size != 17408 || config.num_layers != 64 ||
+      config.AttentionSize() != 6144 || config.ssm_inner_size != 6144)
+    return false;
+  const auto supported = [](const models::QwenTensorRef& tensor) {
+    return tensor.type == core::GgmlType::kQ8_0 ||
+           detail::IsNativeWmmaQuant(tensor.type);
+  };
+  bool low_bit_ffn = false;
+  for (const auto& layer : weights.layers) {
+    if (!supported(layer.ffn_gate) || !supported(layer.ffn_up) ||
+        !supported(layer.ffn_down))
+      return false;
+    low_bit_ffn |= detail::IsNativeWmmaQuant(layer.ffn_gate.type) ||
+                   detail::IsNativeWmmaQuant(layer.ffn_up.type) ||
+                   detail::IsNativeWmmaQuant(layer.ffn_down.type);
+    if (layer.is_full_attention) {
+      if (!supported(layer.attn_q) || !supported(layer.attn_k) ||
+          !supported(layer.attn_v) || !supported(layer.attn_output))
+        return false;
+    } else if (!supported(layer.attn_qkv) || !supported(layer.attn_gate) ||
+               !supported(layer.ssm_alpha) || !supported(layer.ssm_beta) ||
+               !supported(layer.ssm_out))
+      return false;
+  }
+  return low_bit_ffn;
+}
+}  // namespace
+
 tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     std::span<const tokenization::TokenId> prompt_tokens,
     std::uint32_t start_pos, bool compute_logits) {
@@ -56,12 +92,18 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       scratch.decode.prompt_tokens.data(), scratch.decode.hidden.data(),
       batch_size, hidden_size, arena_.stream);
 
+  const bool half_prefill = UseQwen27bFp16Prefill(weights_, batch_size);
   // Execute the pure Qwen route decision while keeping hipBLASLt failure as a
   // runtime fallback to hipBLAS, not as resolver state.
   const auto gemm_weight = [&](const models::QwenTensorRef& w,
                                const void* bf16_input, const float* fp32_input,
                                float* output, std::size_t m, std::size_t k,
                                const void* q8_act = nullptr) {
+    if (half_prefill) {
+      LaunchBatchedQuantGEMMFp16(w.type, w.data, bf16_input, output, batch_size,
+                                 m, k, arena_.stream);
+      return;
+    }
     const auto resolution = models::qwen::ResolveQwenGemmRoute(
         {.type = w.type,
          .batch_size = batch_size,
@@ -147,9 +189,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // pre-quantized WMMA route, so they must drive the same fusion decisions --
     // a gate left at `== kQ8_0` would leave the activation buffer unwritten
     // under a route that reads it.
-    const auto reads_q8_act = [](const models::QwenTensorRef& w) {
-      return w.type == core::GgmlType::kQ8_0 ||
-             detail::IsNativeWmmaQuant(w.type);
+    const auto reads_q8_act = [&](const models::QwenTensorRef& w) {
+      return !half_prefill && (w.type == core::GgmlType::kQ8_0 ||
+                               detail::IsNativeWmmaQuant(w.type));
     };
     const auto is_q8 = reads_q8_act;
     // opt-c173-norm-quant: when every projection reading a norm is Q8_0 the
@@ -171,7 +213,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         is_q8(layer.ffn_gate) && is_q8(layer.ffn_up);
 
     // Pre-layer RMSNorm (generates BF16 into d_scratch_bf16 directly)
-    if (norm_feeds_q8_only) {
+    if (half_prefill) {
+      LaunchBatchedRMSNormFp16(arena_.d_hidden, nullptr,
+                               static_cast<const float*>(layer.attn_norm.data),
+                               nullptr, arena_.d_scratch_bf16, batch_size,
+                               hidden_size, eps, arena_.stream);
+    } else if (norm_feeds_q8_only) {
       LaunchBatchedFusedRMSNormQuantizeQ8_1(
           arena_.d_hidden, /*residual=*/nullptr,
           static_cast<const float*>(layer.attn_norm.data), /*sum_out=*/nullptr,
@@ -366,7 +413,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // from FP32 drops one launch and one round trip (about 75 MB per layer
       // at batch 2048) and keeps the activation's full precision going into the
       // Q8_1 codes instead of rounding to BF16 first.
-      if (reads_q8_act(layer.attn_output)) {
+      if (half_prefill) {
+        LaunchFloatToFp16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                          batch_size * attention_size, arena_.stream);
+      } else if (reads_q8_act(layer.attn_output)) {
         LaunchQuantizeActivationQ8_1FromFp32(
             arena_.d_ssm_out, arena_.d_scratch_q8_act, batch_size,
             attention_size, arena_.stream);
@@ -381,7 +431,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                   arena_.d_attn_out, hidden_size, attention_size,
                   arena_.d_scratch_q8_act);
     } else {
-      if (!norm_feeds_q8_only) {
+      if (!half_prefill && !norm_feeds_q8_only) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
@@ -454,7 +504,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             arena_.GetRecurrentStateStorage());
       }
 
-      if (ssm_row_split && ssm_epilogue_q8) {
+      if (half_prefill) {
+        LaunchFloatToFp16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                          batch_size * ssm_inner_size, arena_.stream);
+      } else if (ssm_row_split && ssm_epilogue_q8) {
         // The recurrence epilogue already wrote the quantized activation.
       } else if (reads_q8_act(layer.ssm_out)) {
         LaunchQuantizeActivationQ8_1FromFp32(
@@ -472,7 +525,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                   arena_.d_scratch_q8_act);
     }
 
-    if (ffn_feeds_q8_only) {
+    if (half_prefill) {
+      LaunchBatchedRMSNormFp16(arena_.d_hidden, arena_.d_attn_out,
+                               static_cast<const float*>(layer.ffn_norm.data),
+                               arena_.d_hidden, arena_.d_scratch_bf16,
+                               batch_size, hidden_size, eps, arena_.stream);
+    } else if (ffn_feeds_q8_only) {
       // The post-attention residual add folds into the norm: one pass reads the
       // hidden state and the attention output, writes the updated hidden state
       // for the next residual link, and emits the Q8_1 activation.
@@ -495,9 +553,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     // Which buffer holds the Q8_1 form of the SwiGLU output ffn_down consumes.
     // The fused epilogue below moves it out of the shared activation scratch.
     const void* ffn_down_q8_act = arena_.d_scratch_q8_act;
+    const void* ffn_down_input = arena_.d_scratch_bf16;
 
     {
-      if (!ffn_feeds_q8_only) {
+      if (!half_prefill && !ffn_feeds_q8_only) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
@@ -517,7 +576,15 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
           IsFusedSwiGluGemmEpilogueSupported(
               layer.ffn_gate.type, batch_size, intermediate_size,
               batch_size * intermediate_size * sizeof(float));
-      if (fused_dual_swiglu) {
+      if (half_prefill) {
+        gemm_weight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_ffn_gate, intermediate_size, hidden_size);
+        LaunchBatchedQuantGEMMSwiGLUFp16(
+            layer.ffn_up.type, layer.ffn_up.data, arena_.d_scratch_bf16,
+            arena_.d_ffn_gate, arena_.d_ffn_up, batch_size, intermediate_size,
+            hidden_size, arena_.stream);
+        ffn_down_input = arena_.d_ffn_up;
+      } else if (fused_dual_swiglu) {
         LaunchBatchedDualQuantGEMMSwiGLUQuantizeQ8_1(
             layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
             arena_.d_scratch_q8_act, arena_.d_ffn_gate, arena_.d_ffn_up,
@@ -545,7 +612,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // (about 500 MB per layer at batch 2048) and one kernel launch. Other
       // ffn_down formats still need the FP32/BF16 forms, so they keep the
       // unfused chain.
-      if (fused_dual_swiglu) {
+      if (half_prefill || fused_dual_swiglu) {
         // The up projection's epilogue already wrote the quantized activation.
       } else if (reads_q8_act(layer.ffn_down)) {
         LaunchBatchedFusedSwiGLUQuantizeQ8_1(
@@ -562,7 +629,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       }
     }
 
-    gemm_weight(layer.ffn_down, arena_.d_scratch_bf16, arena_.d_ffn_act,
+    gemm_weight(layer.ffn_down, ffn_down_input, arena_.d_ffn_act,
                 arena_.d_ffn_out, hidden_size, intermediate_size,
                 ffn_down_q8_act);
 

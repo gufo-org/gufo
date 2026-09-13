@@ -59,19 +59,37 @@ nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_target_test \
   "$MODEL" --prefill-only
 ```
 
-The native wave64 Q4_K/Q5_K/Q6_K/Q8_0 and IQ4_XS prefill kernels pass the
-independent operator formula, including partial row/token tiles. Q4/Q8 model
-fingerprints match the preceding implementation exactly at all three lengths.
-Q4_K/Q5_K also use grouped output tiles and padded weight staging; the other
-31 quantized prefill kernel instruction streams remain identical in the
-release binary. This establishes preservation, not independent
-original-checkpoint accuracy.
+Large Q4 prefill (chunks of at least 1024 tokens) uses fully scaled packed
+weights and FP16 activations with FP32 accumulation. Normalization writes FP16
+directly; the up projection fuses SwiGLU. Both retain the separate FP32
+producer's rounding boundary, including halfway cases, and reuse existing
+scratch allocations. Q8 and short-prefill paths retain native integer WMMA.
 
-Current retained-kernel qualification covers 102 target logit rows, 102 tapped
-feature rows, 96 C3 replay/cache rows, and logical context 262,144 with a short
-prefix. All 270 draft trace files across the three precisions remain byte-exact.
-Trace mode exits before the state suite: loading, history, snapshot and serving
-checks must also run when those paths change.
+The shared quantization test checks all eight Q4 artifact formats against
+independently decoded weights and FP64 dot products, including partial row and
+token tiles. It requires at least a 2× RMSE improvement over A8 and lower maximum
+error. Fused SwiGLU and norm/residual outputs must be byte-identical to separate
+FP32 producers followed by FP16 conversion. The existing test executable takes
+about 1.6 seconds; no additional executable is needed.
+
+Model precision qualification: two real 2048-token prefixes from
+`docs/PERFORMANCE.md` and `src/models/qwen/hip/batched_decode.cpp`, with 32
+full-vocabulary rows per prefix, sampled every 64 positions. The reference
+streams each projection's independently decoded Q4 weights through FP32 GEMM.
+Every row improves RMSE and KL over A8; aggregate RMSE/KL/total variation must
+at least halve, and greedy agreement must not decrease. All 64 greedy choices
+match the reference. Mean logit RMSE is **0.00179 / 0.00358** for the two texts,
+16–31× lower than A8; all five feature taps also improve. This qualifies
+execution of these quantized weights, not conversion or the original checkpoint.
+The integrated fusions preserve all first-prefix logits and complete feature
+taps exactly relative to the qualified unfused FP16 calculation. Repeat-prefill
+and scalar/verification replay pass; Q8 fingerprints remain unchanged.
+
+Existing short-prefix decode/draft qualification covers 102 target logit rows,
+102 tapped feature rows, 96 C3 replay/cache rows, and logical context 262,144
+with a short prefix. All 270 draft trace files across the three precisions
+remain byte-exact. Trace mode exits before the state suite: loading, history,
+snapshot and serving checks must also run when those paths change.
 
 ## Sampling and executable contract
 
@@ -170,52 +188,34 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 ## Latest measurement provenance
 
-AR prefill uses the native wave64 release measured on 2026-09-13, SHA-256
+Q4 release measured on 2026-09-13, SHA-256:
+`f8870a43d66b76cc8163ef830825e970821d31f7c9934076d6c3293792786bf6`.
+The pp2048-only result is the mean of two warmed runs, **549.40 / 549.32 tok/s**.
+Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 1 --verbose`; alternate release
+binaries when comparing implementations. Q8's recorded 503.17 tok/s is from
+the unchanged native wave64 release, SHA-256
 `feec38298e8a84a8b9f5dfcf290b924aed597e9f2bd8643fa40b5bd154aa736f`.
-Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 2 --verbose`.
-Q4 reports two runs of two samples; Q8 reports two single-sample runs.
-Alternating release binaries controls first-run timing variation. Profiling
-still attributes 85% of Q4 GPU time to quantized prefill GEMM.
-The short Q4/Q4 adaptive regression check at pp2048/tg32 retained every token
-ID and acceptance count, with unchanged generation speed. A matched speed
-refresh across all six target/draft precision pairs remains TODO.
 
-The real-prompt DFlash2 table uses the qualified decode implementation from
-`6654d1e`, measured on 2026-09-13. Release binary SHA-256:
-`1a1793815a8a99acc0b901098dacaa635de167562bf4d2dfd5fa71c4d66cd1e8`.
+The Q4 pp2048/tg32 controls cover AR and all three adaptive DFlash2 drafts.
+Generation remains effectively unchanged; all outputs match the same target's
+AR token IDs and retain the same acceptance counts. The benchmark README shows
+only the current samples. These short controls do not replace the depth sweep
+or a broad draft-precision comparison. Real-prompt controls use `prose_tides` /
+`json_records` from [the adaptive corpus](../speculative-adaptive-corpus.json),
+and the chat prompt “Output the word red exactly 1000 times, separated by
+spaces. Do not add any other text.”; their current speed refresh is TODO.
 
-The raw prose/JSON prompts are `prose_tides` / `json_records` in
-[the adaptive corpus](../speculative-adaptive-corpus.json), with 300 tokens.
-The chat repetition prompt is “Output the word red exactly 1000 times,
-separated by spaces. Do not add any other text.”, with 128 tokens and fixed-7.
-Use `gufo prompt --temperature 0 --verbose --max-tokens N` with the target,
-DFlash2 draft and controller; add `--raw` only for prose/JSON. Warm up first.
-Two release samples per prompt were interleaved during qualification; every
-token hash and acceptance count matched.
+The separate profile attributes **84.1%** of GPU time to FP16 quantized GEMM,
+with 1.6% idle time in the dispatch span. All 34 new kernels have zero scratch
+spills. The profiler preserves anonymous-namespace and quantization names,
+so it reports each kernel independently.
 
-Prefill experiments: native wave64 retained for Q4_K/Q5_K/Q6_K/Q8_0 and
-IQ4_XS down projections, with branch-free affine scale decoding. Q4_K/Q5_K
-also retain eight-row tile grouping and 64-byte padding between weight stages.
-Larger/fused tiles, weight expansion and additional metadata caching did not
-justify their complexity. Dedicated loader waves, double buffering, regrouped
-integer dots and offset-sign changes were flat or slower. Compiler scheduling,
-DS/WMMA interleaving and direct activation reads were also slower.
-Larger wave32 workgroups were slower; interleaved activation metadata did not
-improve total time. GPU weight copies gave only 2–3% isolated gains with extra
-storage; production retains mapped weights.
-FP16/FP32 WMMA differed from an independent integer-dot oracle even with
-integer-valued inputs. Nearest-integer rounding restored the tested Q5/Q8
-matrix outputs, but conversion plus GEMM had 34–38% lower throughput. Retain
-integer WMMA.
-
-Global FP16 weight expansion was slower. Fused FP16 FFN execution remains
-**unqualified**: large-operator throughput improved, and sampled relative RMSE
-against FP64 fell by at least 20× across 183 projections using real Q4 activations.
-However, 42 full-vocabulary model rows against a streamed FP32 FFN reference
-show mixed individual errors and one lost greedy agreement. Repeatability and
-scalar/verification replay pass; the numerical gate fails. The reference uses
-the same quantized weights, not the original checkpoint. Production retains
-integer WMMA. Current optimization focuses on Q4 pp2048.
+Experiments retained: native wave64 for Q8/short prefill; fused dequantization,
+FP16 norm and up/SwiGLU for large Q4 prefill, using mapped GGUF weights.
+Streamed dense FP16 BLAS and split-K did not improve the small projections.
+Additional weight copies, metadata caching and integer-kernel scheduling
+experiments did not justify their complexity. The next targets are FFN gate/up
+sharing and the SSM output epilogue; Q4 pp2048 at 600 tok/s remains open.
 
 | Artifact | SHA-256 |
 | --- | --- |

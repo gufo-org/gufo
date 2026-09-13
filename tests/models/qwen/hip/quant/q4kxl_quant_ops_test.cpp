@@ -33,6 +33,7 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/prefill_fp16.hpp"
 #include "tests/models/qwen/hip/support/device_buffer.hpp"
 
 namespace {
@@ -480,9 +481,144 @@ void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
   g_failed |= mismatches != 0;
 }
 
+// Compare against independently decoded weights and FP64 dot products, not
+// against the quantized activation that the implementation itself produces.
+// Every format shares this test; large and ragged tiles exercise both stores.
+void TestFp16Prefill(const FormatCase& format, std::size_t rows,
+                     std::size_t batch) {
+  using gufo::test::DeviceBuffer;
+  const auto weights = MakeWeights(format.type, rows, kK, 0x821314U);
+  std::uint32_t state = 0x726135U;
+  const auto value = [&] {
+    return std::bit_cast<float>((NextRandom(state) & 0x807FFFFFU) |
+                                0x3C000000U);
+  };
+  std::vector<float> x(batch * kK), gate(batch * rows);
+  for (float& item : x)
+    item = value();
+  for (float& item : gate)
+    item = value() * 32.0F;
+  DeviceBuffer<std::uint8_t> d_weights(weights);
+  DeviceBuffer<float> d_x(x), d_gate(gate), d_half_y(batch * rows),
+      d_a8_y(batch * rows);
+  DeviceBuffer<std::uint16_t> d_half_x(batch * kK);
+  DeviceBuffer<std::uint8_t> d_q8(
+      gufo::hip::QuantizedActivationBytes(batch, kK));
+  gufo::hip::LaunchFloatToFp16(d_x.data(), d_half_x.data(), x.size(), nullptr);
+  gufo::hip::LaunchBatchedQuantGEMMFp16(format.type, d_weights.data(),
+                                        d_half_x.data(), d_half_y.data(), batch,
+                                        rows, kK, nullptr);
+  gufo::hip::LaunchQuantizeActivationQ8_1FromFp32(d_x.data(), d_q8.data(),
+                                                  batch, kK, nullptr);
+  gufo::hip::LaunchBatchedQuantGEMMPreQuantized(format.type, d_weights.data(),
+                                                d_q8.data(), d_a8_y.data(),
+                                                batch, rows, kK, nullptr);
+  const auto actual = d_half_y.CopyToHost();
+  const auto a8 = d_a8_y.CopyToHost();
+  bool passed = std::ranges::all_of(
+      actual, [](float item) { return std::isfinite(item); });
+  double half_error = 0.0, a8_error = 0.0, half_max = 0.0, a8_max = 0.0;
+  std::vector<float> decoded(kK);
+  const std::size_t row_bytes = gufo::quant::QuantizedRowBytes(format.type, kK);
+  for (std::size_t sample = 0; sample < 256; ++sample) {
+    const std::size_t row = (sample * 137 + 17) % rows;
+    const std::size_t token = (sample * 61 + 7) % batch;
+    Dequantize(format.type, weights.data() + row * row_bytes, decoded.data(),
+               kK);
+    double expected = 0.0;
+    for (std::size_t j = 0; j < kK; ++j)
+      expected += static_cast<double>(decoded[j]) * x[token * kK + j];
+    const double error_half = actual[token * rows + row] - expected;
+    const double error_a8 = a8[token * rows + row] - expected;
+    half_error += error_half * error_half;
+    a8_error += error_a8 * error_a8;
+    half_max = std::max(half_max, std::abs(error_half));
+    a8_max = std::max(a8_max, std::abs(error_a8));
+  }
+  passed &= half_error < a8_error * 0.25 && half_max < a8_max;
+
+  if (rows >= 4096) {
+    // This is the production alias epoch: the up buffer holds the half
+    // activation after the up projection, while the norm input stays live.
+    DeviceBuffer<float> d_activation(batch * rows), d_up_storage(batch * rows);
+    DeviceBuffer<std::uint16_t> d_expected(batch * rows);
+    gufo::hip::LaunchBatchedSwiGLUActivation(d_gate.data(), d_half_y.data(),
+                                             d_activation.data(), nullptr,
+                                             batch * rows, nullptr);
+    gufo::hip::LaunchFloatToFp16(d_activation.data(), d_expected.data(),
+                                 batch * rows, nullptr);
+    gufo::hip::LaunchBatchedQuantGEMMSwiGLUFp16(
+        format.type, d_weights.data(), d_half_x.data(), d_gate.data(),
+        d_up_storage.data(), batch, rows, kK, nullptr);
+    std::vector<std::uint16_t> fused(batch * rows);
+    HIP_CHECK(hipMemcpy(fused.data(), d_up_storage.data(),
+                        fused.size() * sizeof(std::uint16_t),
+                        hipMemcpyDeviceToHost));
+    passed &= fused == d_expected.CopyToHost();
+  }
+  std::cout << (passed ? "[ OK ] " : "[FAIL] ") << "FP16 prefill "
+            << format.name << " " << rows << "x" << kK << " batch=" << batch
+            << " FP64 RMSE ratio=" << std::sqrt(half_error / a8_error) << '\n';
+  g_failed |= !passed;
+}
+
+void TestFp16Norm() {
+  using gufo::test::DeviceBuffer;
+  constexpr std::size_t dim = 5120, batch = 65, elements = batch * dim;
+  std::uint32_t state = 0x764203U;
+  const auto value = [&] {
+    return std::bit_cast<float>((NextRandom(state) & 0x807FFFFFU) |
+                                0x3F000000U);
+  };
+  std::vector<float> input(elements), residual(elements), weight(dim);
+  for (float& item : input)
+    item = value();
+  for (float& item : residual)
+    item = value();
+  for (float& item : weight)
+    item = value();
+  DeviceBuffer<float> d_input(input), d_residual(residual), d_weight(weight),
+      d_sum(elements), d_norm(elements);
+  DeviceBuffer<std::uint16_t> d_expected(elements), d_actual(elements);
+  for (bool add_residual : {false, true}) {
+    d_input.CopyFrom(input);
+    if (add_residual)
+      gufo::hip::LaunchBatchedResidualAdd(d_input.data(), d_residual.data(),
+                                          d_sum.data(), batch, dim, nullptr);
+    else
+      d_sum.CopyFrom(input);
+    gufo::hip::LaunchBatchedRMSNorm(d_sum.data(), d_weight.data(),
+                                    d_norm.data(), nullptr, batch, dim, 1e-6F,
+                                    nullptr);
+    gufo::hip::LaunchFloatToFp16(d_norm.data(), d_expected.data(), elements,
+                                 nullptr);
+    gufo::hip::LaunchBatchedRMSNormFp16(
+        d_input.data(), add_residual ? d_residual.data() : nullptr,
+        d_weight.data(), add_residual ? d_input.data() : nullptr,
+        d_actual.data(), batch, dim, 1e-6F, nullptr);
+    bool passed = d_actual.CopyToHost() == d_expected.CopyToHost();
+    if (add_residual) {
+      const auto actual_sum = d_input.CopyToHost();
+      const auto expected_sum = d_sum.CopyToHost();
+      passed &= std::memcmp(actual_sum.data(), expected_sum.data(),
+                            elements * sizeof(float)) == 0;
+    }
+    std::cout << (passed ? "[ OK ] " : "[FAIL] ")
+              << "FP16 norm/residual rounding, residual=" << add_residual
+              << '\n';
+    g_failed |= !passed;
+  }
+}
+
 }  // namespace
 
 int main() {
+  TestFp16Norm();
+  for (const auto& format : kFormats) {
+    TestFp16Prefill(format, 4097, 257);
+  }
+  TestFp16Prefill({gufo::core::GgmlType::kQ8_0, "Q8_0"}, 48, 129);
+  TestFp16Prefill({gufo::core::GgmlType::kQ6_K, "Q6_K"}, 1057, 129);
   for (const auto& format : kFormats) {
     TestDecodeGemv(format);
   }
