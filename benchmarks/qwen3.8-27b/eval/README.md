@@ -61,8 +61,11 @@ nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_target_test \
 
 The native wave64 Q4_K/Q5_K/Q6_K/Q8_0 and IQ4_XS prefill kernels pass the
 independent operator formula, including partial row/token tiles. Q4/Q8 model
-fingerprints match the preceding implementation exactly at all three lengths. This establishes
-preservation, not independent original-checkpoint accuracy.
+fingerprints match the preceding implementation exactly at all three lengths.
+Q4_K/Q5_K also use grouped output tiles and padded weight staging; the other
+31 quantized prefill kernel instruction streams remain identical in the
+release binary. This establishes preservation, not independent
+original-checkpoint accuracy.
 
 Current retained-kernel qualification covers 102 target logit rows, 102 tapped
 feature rows, 96 C3 replay/cache rows, and logical context 262,144 with a short
@@ -168,8 +171,11 @@ maintained test inputs. Historical experiment reports remain in Git history.
 ## Latest measurement provenance
 
 AR prefill uses the native wave64 release measured on 2026-09-13, SHA-256
-`b3586d7ee923190c63e05f83a2dc3543e6c2206a764376299ddf663c45c58a6d`.
-Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 1 --verbose`.
+`feec38298e8a84a8b9f5dfcf290b924aed597e9f2bd8643fa40b5bd154aa736f`.
+Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 2 --verbose`.
+Q4 reports two runs of two samples; Q8 reports two single-sample runs.
+Alternating release binaries controls first-run timing variation. Profiling
+still attributes 85% of Q4 GPU time to quantized prefill GEMM.
 The short Q4/Q4 adaptive regression check at pp2048/tg32 retained every token
 ID and acceptance count, with unchanged generation speed. A matched speed
 refresh across all six target/draft precision pairs remains TODO.
@@ -188,13 +194,11 @@ Two release samples per prompt were interleaved during qualification; every
 token hash and acceptance count matched.
 
 Prefill experiments: native wave64 retained for Q4_K/Q5_K/Q6_K/Q8_0 and
-IQ4_XS down projections, with branch-free affine scale decoding. Row-loop
-reordering, smaller tiles, deeper staging and removal of tile bounds checks
-rejected as flat or slower.
-Temporary weight expansion and larger/fused tiles were not retained: gains
-were small or workload-dependent. Independent integer-dot halves and double
-buffering were slower; grouped scheduling and LDS padding gained at most 1.4%
-in the tested matrices.
+IQ4_XS down projections, with branch-free affine scale decoding. Q4_K/Q5_K
+also retain eight-row tile grouping and 64-byte padding between weight stages.
+Larger/fused tiles, weight expansion and additional metadata caching did not
+justify their complexity. Dedicated loader waves, double buffering, regrouped
+integer dots and offset-sign changes were flat or slower.
 FP16/FP32 WMMA differed from an independent integer-dot oracle even with
 integer-valued inputs. Nearest-integer rounding restored the tested Q5/Q8
 matrix outputs, but conversion plus GEMM had 34–38% lower throughput. Retain

@@ -12,14 +12,14 @@ Standard sweep: **pp2048 / tg128**, C1. Cells are prefill / generation tok/s.
 
 | Context depth | Q4 | Q8 |
 | ---: | ---: | ---: |
-| 0 | **459.34** / TODO | **504.22** / TODO |
+| 0 | **465.70** / TODO | **503.17** / TODO |
 | 4,096 | TODO | TODO |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-Prefill measured 2026-09-13 with the qualified native wave64 kernels: two
-warmed runs per target. The 600 tok/s prefill target remains open.
+Prefill measured 2026-09-13 with the qualified native wave64 kernels: four
+warmed samples for Q4 and two for Q8. The 600 tok/s prefill target remains open.
 
 ## Single user, DFlash2
 

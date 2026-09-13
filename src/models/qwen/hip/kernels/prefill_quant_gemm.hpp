@@ -167,7 +167,24 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
 
   constexpr int kStageTiles = (kTokTiles + kStageWaves - 1) / kStageWaves;
 
-  __shared__ int32x4_t s_a[BK][kRowTiles][32];
+  constexpr bool kAffineWave64 = WaveSize == 64 && HasOffset;
+  // Offset paired affine-weight writes in neighboring K stages by 64 bytes.
+  // Keep the original array type for the other kernels: flattening it changes
+  // address generation and register allocation even when its size is equal.
+  struct PaddedWeightStage {
+    int32x4_t values[kRowTiles][32];
+    int32x4_t padding[4];
+  };
+  using WeightStage = std::conditional_t<kAffineWave64, PaddedWeightStage,
+                                         int32x4_t[kRowTiles][32]>;
+  __shared__ WeightStage s_a[BK];
+  const auto weight_stage = [&](int stage) -> auto& {
+    if constexpr (kAffineWave64) {
+      return s_a[stage].values;
+    } else {
+      return s_a[stage];
+    }
+  };
   __shared__ float s_dw[BK][kScaleHalves][kRowTiles][16];
   __shared__ float s_off[BK][kOffRowTiles][16];
   __shared__ int32x4_t s_b[BK][kTokTiles][32];
@@ -187,8 +204,25 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
   const int wave_row = wave_id / WN;
   const int wave_tok = wave_id % WN;
 
-  const std::size_t r_block = static_cast<std::size_t>(blockIdx.y) * BM;
-  const std::size_t t_block = static_cast<std::size_t>(blockIdx.x) * BN;
+  unsigned row_tile = blockIdx.y;
+  unsigned token_tile = blockIdx.x;
+  if constexpr (kAffineWave64) {
+    // Reuse each activation panel across up to eight neighboring row tiles.
+    // The final group may contain fewer rows; every output tile still has
+    // exactly one owner.
+    const unsigned first_row = (blockIdx.y / 8) * 8;
+    const unsigned within = (blockIdx.y % 8) * gridDim.x + blockIdx.x;
+    const unsigned rows = min(8U, gridDim.y - first_row);
+    if (rows == 8) {
+      row_tile = first_row + (within & 7U);
+      token_tile = within >> 3;
+    } else {
+      row_tile = first_row + within % rows;
+      token_tile = within / rows;
+    }
+  }
+  const std::size_t r_block = static_cast<std::size_t>(row_tile) * BM;
+  const std::size_t t_block = static_cast<std::size_t>(token_tile) * BN;
   const std::size_t tt_block = t_block / kQ8ActTileTokens;
 
   float acc[kWaveRowTiles][kWaveTokTiles][kAccumulatorElements];
@@ -315,8 +349,8 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
       const int slot = WaveSize == 32
                            ? ((rl % 2 == 0) ? (rl / 2) : (8 + (rl / 2)))
                            : ((rl % 4) * 4 + rl / 4);
-      s_a[kk][rs][rl] = r_q0[p];
-      s_a[kk][rs][16 + rl] = r_q1[p];
+      weight_stage(kk)[rs][rl] = r_q0[p];
+      weight_stage(kk)[rs][16 + rl] = r_q1[p];
       s_dw[kk][0][rs][slot] = r_dw0[p];
       if constexpr (PerHalfScale) {
         s_dw[kk][1][rs][slot] = r_dw1[p];
@@ -362,8 +396,8 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
 #pragma unroll
       for (int i = 0; i < kWaveRowTiles; ++i) {
         const int rs = (wave_row * kWaveRowTiles) + i;
-        a0[i] = s_a[kb][rs][sub_lane];
-        a1[i] = s_a[kb][rs][16 + sub_lane];
+        a0[i] = weight_stage(kb)[rs][sub_lane];
+        a1[i] = weight_stage(kb)[rs][16 + sub_lane];
         const float4 lo = *reinterpret_cast<const float4*>(
             &s_dw[kb][0][rs][half_id * kAccumulatorElements]);
         dw0[i][0] = lo.x;
@@ -464,8 +498,9 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
                 "no staging array holds even one wave's output tile");
   constexpr int kEpiloguePasses = (kWaves + kWavesPerPass - 1) / kWavesPerPass;
   float* const scratch_base =
-      (sizeof(s_a) > sizeof(s_b) ? reinterpret_cast<float*>(&s_a[0][0][0])
-                                 : reinterpret_cast<float*>(&s_b[0][0][0]));
+      (sizeof(s_a) > sizeof(s_b)
+           ? reinterpret_cast<float*>(&weight_stage(0)[0][0])
+           : reinterpret_cast<float*>(&s_b[0][0][0]));
   float* tile_scratch = scratch_base + ((wave_id % kWavesPerPass) * 256);
 #pragma unroll
   for (int pass = 0; pass < kEpiloguePasses; ++pass) {
