@@ -91,6 +91,44 @@ void LaunchFfnActivation(const models::QwenLayerWeights& layer,
       stream);
 }
 
+struct SsmControls {
+  const float* alpha;
+  const float* beta;
+  std::size_t row_stride;
+};
+
+SsmControls LaunchSsmControls(const models::QwenLayerWeights& layer,
+                             const QwenGpuScratchView& scratch,
+                             std::size_t batch_size, std::size_t time_step_rank,
+                             std::size_t hidden_size, hipStream_t stream) {
+  const auto& alpha = layer.ssm_alpha;
+  const auto& beta = layer.ssm_beta;
+  if (time_step_rank == 48 && hidden_size == 5120 &&
+      alpha.type == core::GgmlType::kQ8_0 && beta.type == alpha.type &&
+      alpha.num_elements == time_step_rank * hidden_size &&
+      beta.num_elements == alpha.num_elements) {
+    const std::size_t matrix_bytes = alpha.EncodedSizeBytes();
+    const std::size_t row_stride = 2 * time_step_rank;
+    if (alpha.available_bytes >= 2 * matrix_bytes &&
+        static_cast<const std::byte*>(alpha.data) + matrix_bytes == beta.data &&
+        scratch.decode.weight_bf16.size_bytes() >=
+            batch_size * row_stride * sizeof(float)) {
+      // Adjacent control matrices share one launch. Recurrence already accepts
+      // a row stride, so it can consume the interleaved output directly.
+      auto* const packed =
+          reinterpret_cast<float*>(scratch.decode.weight_bf16.data());
+      LaunchProjection(alpha, scratch.decode.normed.data(), packed, batch_size,
+                       row_stride, hidden_size, stream);
+      return {packed, packed + time_step_rank, row_stride};
+    }
+  }
+  LaunchProjection(alpha, scratch.decode.normed.data(), scratch.ssm.alpha.data(),
+                   batch_size, time_step_rank, hidden_size, stream);
+  LaunchProjection(beta, scratch.decode.normed.data(), scratch.ssm.beta.data(),
+                   batch_size, time_step_rank, hidden_size, stream);
+  return {scratch.ssm.alpha.data(), scratch.ssm.beta.data(), time_step_rank};
+}
+
 }  // namespace
 
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
@@ -264,12 +302,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
                        scratch.ssm.gate.data(), batch_size, ssm_inner_size,
                        hidden_size, arena.stream);
-      LaunchProjection(layer.ssm_alpha, scratch.decode.normed.data(),
-                       scratch.ssm.alpha.data(), batch_size, time_step_rank,
-                       hidden_size, arena.stream);
-      LaunchProjection(layer.ssm_beta, scratch.decode.normed.data(),
-                       scratch.ssm.beta.data(), batch_size, time_step_rank,
-                       hidden_size, arena.stream);
+      const auto controls = LaunchSsmControls(
+          layer, scratch, batch_size, time_step_rank, hidden_size, arena.stream);
 
       for (std::size_t row = 0; row < batch_size; ++row) {
         auto& state_arena = items[row].executor->arena_;
@@ -281,8 +315,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
             state_arena.d_ssm_conv_state,
             scratch.ssm.conv_out.data() + (row * ssm_qkv_size),
             state_arena.d_ssm_deltanet_state,
-            scratch.ssm.alpha.data() + (row * time_step_rank),
-            scratch.ssm.beta.data() + (row * time_step_rank),
+            controls.alpha + (row * controls.row_stride),
+            controls.beta + (row * controls.row_stride),
             static_cast<const float*>(layer.ssm_a.data),
             static_cast<const float*>(layer.ssm_dt.data),
             static_cast<const float*>(layer.ssm_norm.data),
@@ -560,12 +594,8 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
       LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
                        scratch.ssm.gate.data(), batch_size, ssm_inner_size,
                        hidden_size, arena_.stream);
-      LaunchProjection(layer.ssm_alpha, scratch.decode.normed.data(),
-                       scratch.ssm.alpha.data(), batch_size, time_step_rank,
-                       hidden_size, arena_.stream);
-      LaunchProjection(layer.ssm_beta, scratch.decode.normed.data(),
-                       scratch.ssm.beta.data(), batch_size, time_step_rank,
-                       hidden_size, arena_.stream);
+      const auto controls = LaunchSsmControls(
+          layer, scratch, batch_size, time_step_rank, hidden_size, arena_.stream);
       {
         // One pair of launches walks the whole verification batch. The rows are
         // still applied in order with identical arithmetic, so this is
@@ -577,15 +607,14 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
             scratch.ssm.qkv.data(),
             static_cast<const float*>(layer.ssm_conv1d.data),
             arena_.d_ssm_conv_state, scratch.ssm.conv_out.data(),
-            arena_.d_ssm_deltanet_state, scratch.ssm.alpha.data(),
-            scratch.ssm.beta.data(),
+            arena_.d_ssm_deltanet_state, controls.alpha, controls.beta,
             static_cast<const float*>(layer.ssm_a.data),
             static_cast<const float*>(layer.ssm_dt.data),
             static_cast<const float*>(layer.ssm_norm.data),
             scratch.ssm.gate.data(), scratch.ssm.out.data(), layer_index,
             ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
             config.ssm_state_size, config.SsmValueSize(),
-            static_cast<std::uint32_t>(batch_size), time_step_rank,
+            static_cast<std::uint32_t>(batch_size), controls.row_stride,
             ssm_inner_size, arena_.stream, replay_capture,
             arena_.GetRecurrentStateStorage());
       }

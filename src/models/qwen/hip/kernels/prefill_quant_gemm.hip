@@ -2371,9 +2371,10 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     // Large projections share each weight row across the batch. Narrow SSM
     // projections instead distribute token rows across more workgroups.
     if (type == core::GgmlType::kQ8_0) {
-      // The 48-output SSM controls fit in cache. Independent token rows
-      // expose more workgroups than the large-matrix shared-weight geometry.
-      if (m == 48 && k == 5120) {
+      // The 48-output SSM controls, or their joined 96-output pair, fit in
+      // cache. Independent token rows expose more workgroups than the
+      // large-matrix shared-weight geometry.
+      if ((m == 48 || m == 96) && k == 5120) {
         SmallBatchQ8_0ExactFp32VecGEMMKernel<8, 1, 1>
             <<<dim3((m + 7) / 8, static_cast<unsigned>(batch)), 256, 0,
                stream>>>(w, fp32_x, y, m, k);

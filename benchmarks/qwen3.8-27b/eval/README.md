@@ -137,6 +137,9 @@ rows per cache precision in both ordinary decoding and growing-prefix
 rollback/replay, including the replay-ring boundary. This covers packed FFNs,
 session positions and state handoffs between GPU streams.
 
+The existing Q8 operator test compares both separate 48-row controls and
+their joined 96-row projection against scalar decode at widths 1–8.
+
 The unused in-tree CPU DFlash forward pipeline and its duplicate operator
 tests are removed. The pinned upstream runner owns the full reference.
 All three draft artifacts pass loading and state tests. The optimized
@@ -147,6 +150,16 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Joined recurrent controls](dflash2-ssm-controls.json): adjacent Q8
+  alpha/beta weights share one launch; recurrence reads the interleaved rows
+  from existing scratch. Their launch count halves and GPU time falls 36.7%.
+  Short paired release runs improve prose 0.24% and JSON 0.18%; repetition
+  is flat. All 12 continuations, 102 verification logit rows, 102 feature
+  rows and 96 C3 replay/cache rows remain exact. The Q8 operator suite passes
+  the joined shape at widths 1–8. No draft/sampler arithmetic, allocation,
+  execution switch or maintained executable is added. Wider workgroups,
+  distributed packed loads and greedy-tail recycling fail speed controls
+  and remain removed; the report includes their results.
 - [Batched replay handoff](dflash2-replay-handoff.json): replay records use
   each session's position, and the coordinator waits for queued state work
   on other streams. The same regression fixture fails on the preceding

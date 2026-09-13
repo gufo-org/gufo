@@ -95,28 +95,27 @@ table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
 **Latest Q4 target/Q4 draft:** greedy C1, including prefill and excluding
 model loading. Each workload uses two samples per binary in ABBA order
-after warmup on the quiet host; JSON also has a BAAB confirmation, pooled
-with the initial samples. These are short controls.
+after warmup on the quiet host. These are short controls.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 56.66 | **56.78** | +0.21% |
-| JSON, tg300, adaptive | 53.75 | **53.68** | −0.13% |
-| Prose, tg300, adaptive | 23.58 | **23.64** | +0.24% |
+| Repetition, tg128, fixed-7 | 56.75 | **56.76** | +0.02% |
+| JSON, tg300, adaptive | 53.70 | **53.80** | +0.18% |
+| Prose, tg300, adaptive | 23.71 | **23.77** | +0.24% |
 
-The latest [Q5 projection change](eval/dflash2-prose-projections.json)
-shares activations across four output rows for medium projections at widths
-5–6. The matched projection group takes 2.14% less GPU time; the full prose
-trace falls 0.43%. End-to-end gains remain small. All 16 continuations,
-102 verification logit rows, 102 feature rows, C3 cache controls and 90 Q4
-draft traces remain exact. Arithmetic, weights and allocations are unchanged.
-Earlier [mixed-format reuse](eval/dflash2-remaining-formats.json),
+The latest [recurrent-control change](eval/dflash2-ssm-controls.json) joins
+adjacent alpha/beta projections using existing scratch. Their launch count
+halves and their GPU time falls 36.7%; whole prose GPU time falls 0.37%.
+End-to-end gains remain small; repetition is flat. All 12 continuations,
+102 verification logit rows, 102 feature rows and 96 C3 replay/cache rows
+remain exact. No arithmetic, weight or allocation change.
+Earlier [Q5 projections](eval/dflash2-prose-projections.json),
+[mixed-format reuse](eval/dflash2-remaining-formats.json),
 [contiguous FFNs](eval/dflash2-contiguous-ffn.json) and
 [feature transfers](eval/dflash2-feature-transfer.json) remain qualified.
 
 [Batched rollback/replay](eval/dflash2-replay-handoff.json) now preserves
 Q4/Q8 logits across coordinator changes and the replay-ring boundary.
-This fixes state handling; C1 kernels and the speed table above are unchanged.
 
 The controller uses [measured Q4 verification costs](eval/dflash2-controller-cost.json);
 Q8 keeps its previous formula. Its earlier chat comparison was flat in
@@ -128,9 +127,9 @@ AR generation to **11.74 tok/s** at depth zero. Earlier work covers
 [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json).
 The [quality report](eval/README.md) indexes the remaining evidence.
 
-Wider Q5 tiles/staging, alternative controller startup and position estimates,
-and fewer CPU waits failed speed controls and remain excluded.
-[Latest follow-ups](eval/dflash2-replay-handoff.json) and the
+Wider Q5 layouts, shared packed loads, proposal-tail recycling and alternative
+controller estimates failed speed controls and remain excluded.
+[Latest follow-ups](eval/dflash2-ssm-controls.json) and the
 [quality report](eval/README.md) record the rejected experiments.
 
 **Same host and identical Q4 target/draft files**, at `b55a120`, raw tg300,

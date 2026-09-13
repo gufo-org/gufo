@@ -440,6 +440,7 @@ int main() {
   TestQ8KSmallBatchFp32GEMMEquivalence();
   TestQ8_0SmallBatchFp32GEMMEquivalence(16, 512);
   TestQ8_0SmallBatchFp32GEMMEquivalence(48, 5120);
+  TestQ8_0SmallBatchFp32GEMMEquivalence(96, 5120);
   TestQ8_0SmallBatchFp32GEMMEquivalence(5120, 5120);
   TestQ8_0SmallBatchFp32GEMMEquivalence(17408, 5120);
   TestQ8_0SmallBatchFp32GEMMEquivalence(5120, 17408);
