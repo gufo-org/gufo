@@ -1211,5 +1211,2653 @@
     "Operator accuracy and B1/B8 equality do not qualify changed target distributions or establish original-checkpoint fidelity.",
     "No75-question capability comparison; no new execution switch, maintained tool or test.",
     "The full performance objective remains open."
-  ]
+  ],
+  "staging_followups": {
+    "date_utc": "2026-09-13T09:22:54.503193+00:00",
+    "baseline_commit": "d213ca202f1b8dae1106d7b9981f35e90a3a8cf2",
+    "retained": false,
+    "production_release": {
+      "path": "/nix/store/y33zyblbwlk8yq8blr3icbq3brda1zq8-gufo-889e77d-dirty/bin/gufo",
+      "sha256": "a2e5f2366c7c1cd1ef9810331af405134e5b3c41bf2bc0b05bdc1298c3225c40",
+      "nix_build_pass": true,
+      "build_log": "/tmp/qwen-state-store-integration/release_build.log"
+    },
+    "scope": "Q4 target/Q4 draft performance investigation. Temporary operator probes only; production, maintained tests/tools, weights, sampling and controller are unchanged.",
+    "decisions": [
+      "Reject distributed float4 activation staging: throughput falls 3.88\u201312.15% across the three Q6/IQ4 cases.",
+      "Reject Q5 weight decoding before the staging barrier: throughput falls 11.05\u201321.77%.",
+      "Making the Q5 unsigned coefficient range explicit restores native byte-to-float conversions, but early decoding still loses 9.56\u201320.40%; the unsigned late-decode control is flat.",
+      "All checked outputs remain finite and bit-identical, and every compiled projection variant has zero private scratch. Lower register counts and more paired FMAs do not imply faster execution.",
+      "No full-model or speed-matrix rerun is warranted for rejected temporary kernels. The qualified production release remains unchanged."
+    ],
+    "experiments": {
+      "distributed-staging": {
+        "date_utc": "2026-09-13T09:07:58.191016+00:00",
+        "parent": "d213ca202f1b8dae1106d7b9981f35e90a3a8cf2",
+        "method": "Q4 target GGUF, whole-file read-only host registration. Batch 5: Q6 vocabulary projection W16/R3/T2/min1; IQ4_XS FFNs W16/R4/T2/min4. Distributed float4 activation staging versus production and an unchanged clone. Preserve all dot/reduction arithmetic, LDS layout and weights. Every output finite/bit-exact under full-mantissa seeds 19 and 971 before timing. Six rotated-order rounds, eight rotations through up to eight same-shape tensors.",
+        "source_sha256": {
+          "/tmp/qwen_distributed_staging.hpp": "b2464833251bef9f40ae318275fbabe942d74a590f8aef1f63e6fc4710f62ed5",
+          "/tmp/qwen_distributed_staging_probe.hip": "30661e5fab5c06e50332ea685b7f92f31eabbccf26a1245e6ae4b614ff9b095c",
+          "/home/fbozzo/projects/strix-halo.cpp/src/models/qwen/hip/kernels/small_batch_gemm.hpp": "6375d4d7b93491d85976598829b6325130c7affb5d3ecda04b83914362fc1668"
+        },
+        "cases": [
+          {
+            "name": "q6-b5-248320-5120",
+            "tensors": [
+              {
+                "name": "output.weight",
+                "shape": [
+                  248320,
+                  5120
+                ],
+                "type": 14,
+                "type_name": "Q6_K",
+                "offset": 0
+              }
+            ],
+            "median_ms": {
+              "production": 4.755509,
+              "control_clone": 4.7556015,
+              "distributed": 5.4133475
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": -0.0019450746661653362,
+              "distributed": -12.152157237273242
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.787754",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.796140",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.446399",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.779491",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.426092",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.767178",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.431942",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.754525",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.757615",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.756493",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.753588",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.400603",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.752285",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.382229",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.753613",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "5.377054",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.752120",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.751419",
+                "mismatches": "0"
+              }
+            ]
+          },
+          {
+            "name": "iq4-b5-17408-5120",
+            "tensors": [
+              {
+                "name": "blk.0.ffn_gate.weight",
+                "shape": [
+                  17408,
+                  5120
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 1863168000
+              },
+              {
+                "name": "blk.1.ffn_gate.weight",
+                "shape": [
+                  17408,
+                  5120
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 2080287616
+              },
+              {
+                "name": "blk.1.ffn_up.weight",
+                "shape": [
+                  17408,
+                  5120
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 2127637376
+              },
+              {
+                "name": "blk.2.ffn_gate.weight",
+                "shape": [
+                  17408,
+                  5120
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 2302772992
+              },
+              {
+                "name": "blk.2.ffn_up.weight",
+                "shape": [
+                  17408,
+                  5120
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 2350122752
+              },
+              {
+                "name": "blk.4.ffn_gate.weight",
+                "shape": [
+                  17408,
+                  5120
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 2784742016
+              },
+              {
+                "name": "blk.5.ffn_gate.weight",
+                "shape": [
+                  17408,
+                  5120
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 3023529472
+              },
+              {
+                "name": "blk.5.ffn_up.weight",
+                "shape": [
+                  17408,
+                  5120
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 3070879232
+              }
+            ],
+            "median_ms": {
+              "production": 0.25881699999999996,
+              "control_clone": 0.2587275,
+              "distributed": 0.269256
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": 0.034592380013709345,
+              "distributed": -3.8769795287756037
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.258183",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.259297",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.269023",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.259250",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.269647",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.259557",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.271248",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.259837",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.259424",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.259418",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.258205",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.269163",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.257474",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.269349",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.258216",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.269074",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.257734",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.257850",
+                "mismatches": "0"
+              }
+            ]
+          },
+          {
+            "name": "iq4-b5-5120-17408",
+            "tensors": [
+              {
+                "name": "blk.0.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 1815818240
+              },
+              {
+                "name": "blk.7.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 3453592832
+              },
+              {
+                "name": "blk.9.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 3875102848
+              },
+              {
+                "name": "blk.10.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 4090625024
+              },
+              {
+                "name": "blk.11.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 4332568448
+              },
+              {
+                "name": "blk.12.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 4525776768
+              },
+              {
+                "name": "blk.15.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 5147032064
+              },
+              {
+                "name": "blk.18.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 23,
+                "type_name": "IQ4_XS",
+                "offset": 5773414656
+              }
+            ],
+            "median_ms": {
+              "production": 0.2441575,
+              "control_clone": 0.243911,
+              "distributed": 0.2578975
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": 0.10106145274302314,
+              "distributed": -5.327698019562033
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.243732",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.243148",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.259239",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.244533",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.257623",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.244258",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.259099",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.247218",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.244800",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.244057",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.243599",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.258172",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.243542",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.257508",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.244664",
+                "mismatches": "0"
+              },
+              {
+                "variant": "distributed",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.256321",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.243439",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "378798080",
+                "ms_per_matrix": "0.244223",
+                "mismatches": "0"
+              }
+            ]
+          }
+        ],
+        "binary_sha256": "a89957671cc652d1df316eb529b134495da19553c1510b1fcfb320f7d360c14e"
+      },
+      "predecode-stage": {
+        "date_utc": "2026-09-13T09:10:33.332593+00:00",
+        "parent": "d213ca202f1b8dae1106d7b9981f35e90a3a8cf2",
+        "method": "Q4 target GGUF, read-only mapped weights, Q5 batch 5: FFN-down and 5120x6144 use W16/R4/T1/min4; 6144x5120 uses W8/R4/T1/min4. Production versus unchanged clone versus quantized weight decoding moved before the activation-staging barrier. Same coefficients, dot products, summation order, memory layout and allocations. Finite bit-exact outputs under full-mantissa seeds 19/971, then six balanced rounds with eight rotations over up to eight matrices.",
+        "source_sha256": {
+          "/tmp/qwen_predecode_stage.hpp": "83725aac07677e0869a0e127733ae0244d478d85c0e4a4d2b3212bd7066e57e4",
+          "/tmp/qwen_predecode_stage_probe.hip": "915529fc1a3df9fe85e7c5ad0f9f676e1f7e4e19cd0f0172c924b68f2a4d4e4d",
+          "/home/fbozzo/projects/strix-halo.cpp/src/models/qwen/hip/kernels/small_batch_gemm.hpp": "6375d4d7b93491d85976598829b6325130c7affb5d3ecda04b83914362fc1668"
+        },
+        "cases": [
+          {
+            "name": "q5-b5-5120-17408",
+            "tensors": [
+              {
+                "name": "blk.3.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2499619456
+              },
+              {
+                "name": "blk.4.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2723465856
+              },
+              {
+                "name": "blk.5.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2962253312
+              },
+              {
+                "name": "blk.20.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6196647040
+              },
+              {
+                "name": "blk.21.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6442807296
+              },
+              {
+                "name": "blk.22.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6682004352
+              },
+              {
+                "name": "blk.23.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6948810496
+              },
+              {
+                "name": "blk.24.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 7190351616
+              }
+            ],
+            "median_ms": {
+              "production": 0.27657750000000003,
+              "control_clone": 0.27669849999999996,
+              "early_decode": 0.352901
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": -0.043729908185241584,
+              "early_decode": -21.627453591800528
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277548",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277833",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.353782",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277833",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.354443",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277474",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.352083",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277136",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277582",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.276019",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275815",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.353335",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275450",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.351965",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275789",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.352467",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275368",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275747",
+                "mismatches": "0"
+              }
+            ]
+          },
+          {
+            "name": "q5-b5-5120-6144",
+            "tensors": [
+              {
+                "name": "blk.4.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2882934272
+              },
+              {
+                "name": "blk.5.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3118936448
+              },
+              {
+                "name": "blk.7.attn_output.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3392971008
+              },
+              {
+                "name": "blk.8.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3806269568
+              },
+              {
+                "name": "blk.9.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4017859584
+              },
+              {
+                "name": "blk.10.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4236167040
+              },
+              {
+                "name": "blk.11.attn_output.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4262116224
+              },
+              {
+                "name": "blk.12.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4668533504
+              }
+            ],
+            "median_ms": {
+              "production": 0.107513,
+              "control_clone": 0.10799800000000001,
+              "early_decode": 0.137438
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": -0.4490823904146457,
+              "early_decode": -21.773454212081088
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107699",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108148",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.138100",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107220",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.137587",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107327",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.137395",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108106",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108103",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108486",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108249",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.137358",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107450",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.137266",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107322",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.137481",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107222",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107893",
+                "mismatches": "0"
+              }
+            ]
+          },
+          {
+            "name": "q5-b5-6144-5120",
+            "tensors": [
+              {
+                "name": "blk.0.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 1758126080
+              },
+              {
+                "name": "blk.2.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2201499392
+              },
+              {
+                "name": "blk.4.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2672327296
+              },
+              {
+                "name": "blk.5.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2904561152
+              },
+              {
+                "name": "blk.8.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3609588992
+              },
+              {
+                "name": "blk.10.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4039486464
+              },
+              {
+                "name": "blk.12.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4474638208
+              },
+              {
+                "name": "blk.20.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6145508480
+              }
+            ],
+            "median_ms": {
+              "production": 0.110844,
+              "control_clone": 0.11124200000000001,
+              "early_decode": 0.124611
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": -0.3577785368835573,
+              "early_decode": -11.047981317861188
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110883",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111239",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.124429",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111245",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.125262",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110788",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.124483",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110805",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110866",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111305",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111575",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.124739",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111534",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.124446",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110545",
+                "mismatches": "0"
+              },
+              {
+                "variant": "early_decode",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.124966",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111649",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111073",
+                "mismatches": "0"
+              }
+            ]
+          }
+        ],
+        "binary_sha256": "294b4fb031c6374b3dee234d7820f5e17ea2e467a34813fe00c23dcfb3c087a7"
+      },
+      "unsigned-predecode": {
+        "date_utc": "2026-09-13T09:13:43.205946+00:00",
+        "parent": "d213ca202f1b8dae1106d7b9981f35e90a3a8cf2",
+        "method": "Q4 target GGUF, read-only mapped weights, Q5 batch 5: FFN-down and 5120x6144 use W16/R4/T1/min4; 6144x5120 uses W8/R4/T1/min4. Production versus unsigned late-decode control versus unsigned weight decoding moved before the activation-staging barrier. Same coefficients, dot products, summation order, memory layout and allocations. Q5 unsigned [0,31] coefficients are explicit in the two cloned kernels. Finite bit-exact outputs under full-mantissa seeds 19/971, then six balanced rounds with eight rotations over up to eight matrices.",
+        "source_sha256": {
+          "/tmp/qwen_unsigned_predecode.hpp": "2547489c1fc62c144eaf9937d20ca0b5d3c567e553c2effca126be06e315efaa",
+          "/tmp/qwen_unsigned_predecode_probe.hip": "babdf1c4796c84b8486353892de6dcc3b0058c6e90d4a973a76f1bb451959c0e",
+          "/home/fbozzo/projects/strix-halo.cpp/src/models/qwen/hip/kernels/small_batch_gemm.hpp": "6375d4d7b93491d85976598829b6325130c7affb5d3ecda04b83914362fc1668"
+        },
+        "cases": [
+          {
+            "name": "q5-b5-5120-17408",
+            "tensors": [
+              {
+                "name": "blk.3.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2499619456
+              },
+              {
+                "name": "blk.4.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2723465856
+              },
+              {
+                "name": "blk.5.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2962253312
+              },
+              {
+                "name": "blk.20.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6196647040
+              },
+              {
+                "name": "blk.21.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6442807296
+              },
+              {
+                "name": "blk.22.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6682004352
+              },
+              {
+                "name": "blk.23.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6948810496
+              },
+              {
+                "name": "blk.24.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 7190351616
+              }
+            ],
+            "median_ms": {
+              "production": 0.27565249999999997,
+              "unsigned_late": 0.2756725,
+              "unsigned_early": 0.3433985
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "unsigned_late": -0.0072549855353765125,
+              "unsigned_early": -19.728100151864393
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275810",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275917",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.344000",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275790",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.344321",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275626",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.343839",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275679",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275953",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275729",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275555",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.342628",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275097",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.342958",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275089",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.341902",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275203",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275016",
+                "mismatches": "0"
+              }
+            ]
+          },
+          {
+            "name": "q5-b5-5120-6144",
+            "tensors": [
+              {
+                "name": "blk.4.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2882934272
+              },
+              {
+                "name": "blk.5.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3118936448
+              },
+              {
+                "name": "blk.7.attn_output.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3392971008
+              },
+              {
+                "name": "blk.8.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3806269568
+              },
+              {
+                "name": "blk.9.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4017859584
+              },
+              {
+                "name": "blk.10.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4236167040
+              },
+              {
+                "name": "blk.11.attn_output.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4262116224
+              },
+              {
+                "name": "blk.12.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4668533504
+              }
+            ],
+            "median_ms": {
+              "production": 0.106954,
+              "unsigned_late": 0.107346,
+              "unsigned_early": 0.1343605
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "unsigned_late": -0.3651742962010762,
+              "unsigned_early": -20.397735941738826
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107175",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107372",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.133525",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107225",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.134232",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.106825",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.135311",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.106683",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107405",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107434",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107320",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.133652",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.106898",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.134558",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.106975",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.134489",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.106933",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107980",
+                "mismatches": "0"
+              }
+            ]
+          },
+          {
+            "name": "q5-b5-6144-5120",
+            "tensors": [
+              {
+                "name": "blk.0.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 1758126080
+              },
+              {
+                "name": "blk.2.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2201499392
+              },
+              {
+                "name": "blk.4.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2672327296
+              },
+              {
+                "name": "blk.5.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2904561152
+              },
+              {
+                "name": "blk.8.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3609588992
+              },
+              {
+                "name": "blk.10.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4039486464
+              },
+              {
+                "name": "blk.12.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4474638208
+              },
+              {
+                "name": "blk.20.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6145508480
+              }
+            ],
+            "median_ms": {
+              "production": 0.11112649999999999,
+              "unsigned_late": 0.11149700000000001,
+              "unsigned_early": 0.12286949999999999
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "unsigned_late": -0.3322959362135558,
+              "unsigned_early": -9.557294527934113
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110825",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111545",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.123363",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110374",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.122977",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111186",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.122915",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110823",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111640",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111622",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111449",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.122173",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110778",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.122824",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111067",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_early",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.121097",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111220",
+                "mismatches": "0"
+              },
+              {
+                "variant": "unsigned_late",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.112797",
+                "mismatches": "0"
+              }
+            ]
+          }
+        ],
+        "binary_sha256": "48d406a97e7fbccbbd242ef7ca3fbc48d64040291e4aa117d04065d9998e6747"
+      }
+    },
+    "isa": {
+      "distributed_staging_probe": [
+        {
+          "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 5ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 5ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 107,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 25600
+          },
+          "static_instructions": 928,
+          "instructions_sha256": "8cf8f4a427a6260c58aec612624658dfd56b930b8855c1adedf99fd2b27c528c",
+          "selected_opcodes": {
+            "s_waitcnt": 65,
+            "s_barrier": 2,
+            "v_bfe_u32": 2,
+            "v_cvt_f32_f16_e32": 3,
+            "v_bfe_i32": 36,
+            "v_cvt_f32_i32_e32": 51,
+            "v_fma_f32": 15,
+            "v_fmac_f32_e32": 97,
+            "v_dual_fmac_f32": 128
+          }
+        },
+        {
+          "name": "void gufo::hip::StagingProbeKernel<16u, 5ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 5ul, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 107,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 25600
+          },
+          "static_instructions": 928,
+          "instructions_sha256": "8cf8f4a427a6260c58aec612624658dfd56b930b8855c1adedf99fd2b27c528c",
+          "selected_opcodes": {
+            "s_waitcnt": 65,
+            "s_barrier": 2,
+            "v_bfe_u32": 2,
+            "v_cvt_f32_f16_e32": 3,
+            "v_bfe_i32": 36,
+            "v_cvt_f32_i32_e32": 51,
+            "v_fma_f32": 15,
+            "v_fmac_f32_e32": 97,
+            "v_dual_fmac_f32": 128
+          }
+        },
+        {
+          "name": "void gufo::hip::StagingProbeKernel<16u, 5ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 5ul, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 80,
+            "sgpr_count": 16,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 25600
+          },
+          "static_instructions": 1027,
+          "instructions_sha256": "c745dbfb442172bd0fa83f68bfc53f13517956f537eff688b2f4662632ca0508",
+          "selected_opcodes": {
+            "s_waitcnt": 75,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_f16_e32": 3,
+            "v_cvt_f32_i32_e32": 51,
+            "v_bfe_i32": 36,
+            "v_fma_f32": 15,
+            "v_fmac_f32_e32": 169,
+            "v_dual_fmac_f32": 56
+          }
+        },
+        {
+          "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)23, 2ul, 4u, 1ul, true, 5ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 118,
+            "sgpr_count": 22,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 25600
+          },
+          "static_instructions": 1154,
+          "instructions_sha256": "51e9c77ca228ad9a0877c132069940d61220bfcda7e3733d60f49da171c613bd",
+          "selected_opcodes": {
+            "s_waitcnt": 71,
+            "s_barrier": 2,
+            "v_bfe_u32": 6,
+            "v_bfe_i32": 48,
+            "v_cvt_f32_i32_e32": 68,
+            "v_fma_f32": 20,
+            "v_fmac_f32_e32": 165,
+            "v_dual_fmac_f32": 135,
+            "v_cvt_f32_f16_e32": 4
+          }
+        },
+        {
+          "name": "void gufo::hip::StagingProbeKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)23, 2ul, 4u, 1ul, true, 5ul, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 118,
+            "sgpr_count": 22,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 25600
+          },
+          "static_instructions": 1154,
+          "instructions_sha256": "51e9c77ca228ad9a0877c132069940d61220bfcda7e3733d60f49da171c613bd",
+          "selected_opcodes": {
+            "s_waitcnt": 71,
+            "s_barrier": 2,
+            "v_bfe_u32": 6,
+            "v_bfe_i32": 48,
+            "v_cvt_f32_i32_e32": 68,
+            "v_fma_f32": 20,
+            "v_fmac_f32_e32": 165,
+            "v_dual_fmac_f32": 135,
+            "v_cvt_f32_f16_e32": 4
+          }
+        },
+        {
+          "name": "void gufo::hip::StagingProbeKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)23, 2ul, 4u, 1ul, true, 5ul, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 103,
+            "sgpr_count": 18,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 25600
+          },
+          "static_instructions": 1129,
+          "instructions_sha256": "4f996f07e1d20672f1a3b9319ac3e59fff572712c4667eda7a64a0b95289f091",
+          "selected_opcodes": {
+            "s_waitcnt": 73,
+            "s_barrier": 2,
+            "v_bfe_u32": 7,
+            "v_cvt_f32_i32_e32": 68,
+            "v_bfe_i32": 48,
+            "v_fma_f32": 20,
+            "v_fmac_f32_e32": 193,
+            "v_cvt_f32_f16_e32": 4,
+            "v_dual_fmac_f32": 107
+          }
+        }
+      ],
+      "predecode_stage_probe": [
+        {
+          "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "1db6bdba67705ed3d27be210ff3f05f977253ebcc5f28f35b383e37d2ae9f124",
+          "selected_opcodes": {
+            "s_waitcnt": 84,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_fmac_f32_e32": 250,
+            "v_cvt_f32_f16_e32": 8
+          }
+        },
+        {
+          "name": "void gufo::hip::PredecodeProbeKernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "1db6bdba67705ed3d27be210ff3f05f977253ebcc5f28f35b383e37d2ae9f124",
+          "selected_opcodes": {
+            "s_waitcnt": 84,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_fmac_f32_e32": 250,
+            "v_cvt_f32_f16_e32": 8
+          }
+        },
+        {
+          "name": "void gufo::hip::PredecodeProbeKernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 129,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1193,
+          "instructions_sha256": "24853e89ff76dde370817da3334698182bee8a3ed6a541d0d4a903bf7d7d0c3d",
+          "selected_opcodes": {
+            "s_waitcnt": 82,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_f16_e32": 8,
+            "v_cvt_f32_ubyte0_e32": 8,
+            "v_bfe_i32": 48,
+            "v_cvt_f32_i32_e32": 64,
+            "v_fma_f32": 40,
+            "v_fmac_f32_e32": 125,
+            "v_dual_fmac_f32": 175
+          }
+        },
+        {
+          "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "e8a6c81ae6c70a77ec675d5a6ca24e83e2a638c1f9855889f4e11619434c108c",
+          "selected_opcodes": {
+            "s_waitcnt": 84,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_fmac_f32_e32": 250,
+            "v_cvt_f32_f16_e32": 8
+          }
+        },
+        {
+          "name": "void gufo::hip::PredecodeProbeKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "e8a6c81ae6c70a77ec675d5a6ca24e83e2a638c1f9855889f4e11619434c108c",
+          "selected_opcodes": {
+            "s_waitcnt": 84,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_fmac_f32_e32": 250,
+            "v_cvt_f32_f16_e32": 8
+          }
+        },
+        {
+          "name": "void gufo::hip::PredecodeProbeKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 129,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1193,
+          "instructions_sha256": "ea1a17c6a95935a7b1bfc03a886c21174aba33d1d02b72cc3d9484781328dc41",
+          "selected_opcodes": {
+            "s_waitcnt": 82,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_f16_e32": 8,
+            "v_cvt_f32_ubyte0_e32": 8,
+            "v_bfe_i32": 48,
+            "v_cvt_f32_i32_e32": 64,
+            "v_fma_f32": 40,
+            "v_fmac_f32_e32": 125,
+            "v_dual_fmac_f32": 175
+          }
+        }
+      ],
+      "unsigned_predecode_probe": [
+        {
+          "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "1db6bdba67705ed3d27be210ff3f05f977253ebcc5f28f35b383e37d2ae9f124",
+          "selected_opcodes": {
+            "s_waitcnt": 84,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_fmac_f32_e32": 250,
+            "v_cvt_f32_f16_e32": 8
+          }
+        },
+        {
+          "name": "void gufo::hip::UnsignedPredecodeKernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "1db6bdba67705ed3d27be210ff3f05f977253ebcc5f28f35b383e37d2ae9f124",
+          "selected_opcodes": {
+            "s_waitcnt": 84,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_fmac_f32_e32": 250,
+            "v_cvt_f32_f16_e32": 8
+          }
+        },
+        {
+          "name": "void gufo::hip::UnsignedPredecodeKernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 129,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1125,
+          "instructions_sha256": "a8d2bef4914167cbe1a523e1e1aa1013e6dfcb8088a463d4a947c5dc374d76be",
+          "selected_opcodes": {
+            "s_waitcnt": 79,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_f16_e32": 8,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_fma_f32": 40,
+            "v_fmac_f32_e32": 104,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_dual_fmac_f32": 196
+          }
+        },
+        {
+          "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "e8a6c81ae6c70a77ec675d5a6ca24e83e2a638c1f9855889f4e11619434c108c",
+          "selected_opcodes": {
+            "s_waitcnt": 84,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_fmac_f32_e32": 250,
+            "v_cvt_f32_f16_e32": 8
+          }
+        },
+        {
+          "name": "void gufo::hip::UnsignedPredecodeKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, false>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "e8a6c81ae6c70a77ec675d5a6ca24e83e2a638c1f9855889f4e11619434c108c",
+          "selected_opcodes": {
+            "s_waitcnt": 84,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_fmac_f32_e32": 250,
+            "v_cvt_f32_f16_e32": 8
+          }
+        },
+        {
+          "name": "void gufo::hip::UnsignedPredecodeKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, true>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 129,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1125,
+          "instructions_sha256": "e448b8ec88d9131432303b9db4cc5e72f116af08e6e0392cd980c794f0e2fa42",
+          "selected_opcodes": {
+            "s_waitcnt": 79,
+            "s_barrier": 2,
+            "v_bfe_u32": 3,
+            "v_cvt_f32_f16_e32": 8,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_fma_f32": 40,
+            "v_fmac_f32_e32": 104,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_dual_fmac_f32": 196
+          }
+        }
+      ]
+    },
+    "full_isa_sha256": "ada2f2f225816c3915d98fd809784d39b884e4f288365f7463e968eb4abe87af",
+    "verification_graph_bound": {
+      "database": "/tmp/qwen-state-store-quad-release/candidate-prose-profile/candidate_results.db",
+      "method": "Reuse the qualified Q4/Q4 prose trace. Clip GPU dispatch intervals to the final 75%, 50% and 25% of its first-to-last-kernel span, then merge overlaps. Includes runtime copy kernels. This bounds the benefit from removing idle alone; it is not a measured graph implementation, does not attribute every gap to launches and does not cover other workloads.",
+      "rows": [
+        {
+          "final_fraction_of_kernel_timeline": 0.75,
+          "dispatches": 108884,
+          "span_ms": 10879.25586,
+          "gpu_busy_ms": 10519.252708,
+          "idle_ms": 360.003152,
+          "idle_percent": 3.309078825176192,
+          "ideal_speedup_if_all_idle_removed_percent": 3.422326300101286
+        },
+        {
+          "final_fraction_of_kernel_timeline": 0.5,
+          "dispatches": 72707,
+          "span_ms": 7252.83724,
+          "gpu_busy_ms": 7003.050612,
+          "idle_ms": 249.786628,
+          "idle_percent": 3.4439850190268437,
+          "ideal_speedup_if_all_idle_removed_percent": 3.56682597112723
+        },
+        {
+          "final_fraction_of_kernel_timeline": 0.25,
+          "dispatches": 36279,
+          "span_ms": 3626.41862,
+          "gpu_busy_ms": 3497.623338,
+          "idle_ms": 128.795282,
+          "idle_percent": 3.5515834076541335,
+          "ideal_speedup_if_all_idle_removed_percent": 3.6823656967490237
+        }
+      ],
+      "code_constraints": [
+        "Verification runs direct launches. Scalar decoding already has graph replay.",
+        "Verification attention and fused RoPE/KV-write take host start_pos arguments.",
+        "Tapped features temporarily use a logits allocation that can grow.",
+        "A replay implementation must update positions, preserve capture storage and invalidate graphs when addresses or capture configuration change."
+      ]
+    },
+    "source_sha256": {
+      "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "6375d4d7b93491d85976598829b6325130c7affb5d3ecda04b83914362fc1668",
+      "src/models/qwen/hip/kernels/prefill_quant_gemm.hip": "848dcfa1acf2df1d8c117954336bacd46724b5e7ef6b6fe98d5b77f3a1cd9964",
+      "src/models/qwen/hip/batched_decode.cpp": "2fa8b9249a6f9d70f28aebbb3d5531613e77f2bdfc4549ef6cafec4abac2cf0a",
+      "src/models/qwen/hip/decode.cpp": "16bf10d8f693bc15c329499073ab3a681bc247a36af66e570b475f20b2d79918"
+    },
+    "runner_sha256": {
+      "qwen-distributed-staging.py": "d8a0b7b98fb081639aeb3cb9dcc10a0358c3cf7f6019311be545904eb6767b87",
+      "qwen-predecode-stage.py": "5efe1fb61efa98d7698ac2eb9babbb047a40dafa18e426c620beeccbe02e7fdc",
+      "qwen-unsigned-predecode.py": "2975543d4303be5605b65f61729ab35660d92d8c12c72053487c2b420ae7e2d0",
+      "qwen-staging-isa.py": "33ff2e31fc0e4581acee2e739e6471def27a0990b5fc308045ad97162a1d349c",
+      "qwen-verification-graph-bound.py": "1d17adc18e174243e21382d220ee9637262b4db27ef072b54c4959f4f05b4a03"
+    },
+    "limits": "Batch-five operator controls are not a model capability or independent checkpoint qualification. The graph estimate removes idle only from selected tail windows of the preceding qualified prose trace; no graph implementation or new release speedup is claimed. The original FP4 headline goal remains open."
+  }
 }
