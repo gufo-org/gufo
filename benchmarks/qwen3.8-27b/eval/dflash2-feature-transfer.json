@@ -1496,5 +1496,348 @@
     "qwen-q6-expanded-run.py": "fa9a09fc3b292e612a718a75a5993265278cb6e85e7579e97501b01492555ff5",
     "qwen_q6_expanded_probe.hip": "cfdd0140c8744030beae27c2ca3a3d4c6ad177b608a423717f6528f479751aad",
     "qwen_q6_expanded_probe.hpp": "3cda2d00c5d43c9c18aeb4ec2c0ba7a51eadc0b047fa47b532d537fa386d513e"
+  },
+  "normalization_cost_controls": {
+    "date_utc": "2026-09-13T03:49:27.222454+00:00",
+    "base_commit": "244c8e291292613af99efee1e6892cd4a5d8dd35",
+    "decision": "No production change. The two-barrier reduction is deferred because its isolated benefit projects below 0.1% of total inference time. The single-wave variant is rejected for a large slowdown. No additional full-model build, sweep, maintained test or tool.",
+    "operator_contract": "Keep each original thread subtotal and the 128,64,32,16,8,4,2,1 addition tree. Two-barrier variant reads paired LDS subtotals in the first wave, then uses wave shuffles. Single-wave variant holds the original eight per-lane partial sums in registers and uses the same tree, with no LDS.",
+    "quality": "Each harness checks two full-mantissa seeds, weighted and unweighted normalization, FP32 and BF16 outputs, dimensions 1,31,32,63,127,128,255,256,257,511,512,4096,5120,10240,25600 and batches 1,3,4,7,8,16,128. Every output is finite and bit-identical to production, including clone controls. The combined graph harness checks 94,646,916 output elements per dtype. This is operator parity, not an independent checkpoint qualification.",
+    "method": "Balanced variant ordering; nine rounds for three variants, eight rounds for four variants. Graph replay checks whether CPU launch overhead masks the norm timing. Correctness precedes timing. No power/clock changes.",
+    "finding": "At verification widths 3,4,7,8, the two-barrier variant saves about 0.30us per call, about 4.6% more norm throughput, in direct and graph controls. Norm is about 1.4% of the release profile, so extrapolation would be roughly 0.06% total throughput if the isolated ratio carried over. This is an estimate, not an end-to-end gain. The batch 128 result varies between harnesses. The single-wave variant takes about 5.6 times as long at small widths despite zero spills.",
+    "compiler_resources": {
+      "production": {
+        "vgprs": 11,
+        "vgpr_spills": 0,
+        "lds_bytes": 1024
+      },
+      "source_clone": {
+        "vgprs": 11,
+        "vgpr_spills": 0,
+        "lds_bytes": 1024
+      },
+      "two_barriers": {
+        "vgprs": 11,
+        "vgpr_spills": 0,
+        "lds_bytes": 1024
+      },
+      "single_wave": {
+        "vgprs": 18,
+        "vgpr_spills": 0,
+        "lds_bytes": 0
+      }
+    },
+    "runs": {
+      "tree": {
+        "timing": "256 launches per measurement; direct host submission",
+        "quality_log": "QUALITY finite/bit-exact fp32 and bf16 output_elements=63097944",
+        "samples": [
+          {
+            "batch": 3,
+            "dim": 5120,
+            "ms": {
+              "production": [0.007206363, 0.00725536, 0.007289957, 0.007256453, 0.007178809, 0.007279781, 0.007238293, 0.00729152, 0.00721857],
+              "source_clone": [0.007156895, 0.007217008, 0.007270855, 0.007229059, 0.00724816, 0.00724393, 0.007152199, 0.007242992, 0.007273519],
+              "two_barriers": [0.006993621, 0.006931781, 0.006917223, 0.006912684, 0.006974363, 0.006955418, 0.006958082, 0.006948531, 0.006975145]
+            },
+            "median_ms": {
+              "production": 0.00725536,
+              "source_clone": 0.007242992,
+              "two_barriers": 0.006955418
+            },
+            "throughput_change_percent": {
+              "source_clone": 0.1707581618204168,
+              "two_barriers": 4.312350458304581
+            }
+          },
+          {
+            "batch": 4,
+            "dim": 5120,
+            "ms": {
+              "production": [0.007117441, 0.007242367, 0.007194465, 0.007209176, 0.007136852, 0.006805765, 0.006805293, 0.006808113, 0.006830027],
+              "source_clone": [0.007172234, 0.00714875, 0.007198063, 0.007144992, 0.007242832, 0.00685852, 0.006835504, 0.006852098, 0.006805449],
+              "two_barriers": [0.006907047, 0.006861649, 0.006900156, 0.006864308, 0.006833629, 0.006532438, 0.006537289, 0.006506449, 0.006505981]
+            },
+            "median_ms": {
+              "production": 0.007117441,
+              "source_clone": 0.007144992,
+              "two_barriers": 0.006833629
+            },
+            "throughput_change_percent": {
+              "source_clone": -0.3855987522449311,
+              "two_barriers": 4.153166641033645
+            }
+          },
+          {
+            "batch": 7,
+            "dim": 5120,
+            "ms": {
+              "production": [0.006898281, 0.0069335, 0.006922074, 0.006935067, 0.006923953, 0.006896242, 0.006897809, 0.006890922, 0.006916754],
+              "source_clone": [0.00691957, 0.006892176, 0.006892332, 0.006896246, 0.006893582, 0.006919883, 0.006941957, 0.006921601, 0.006897653],
+              "two_barriers": [0.006601316, 0.006597871, 0.006618692, 0.006614937, 0.006604289, 0.006614309, 0.006593645, 0.006620414, 0.006597398]
+            },
+            "median_ms": {
+              "production": 0.006916754,
+              "source_clone": 0.006897653,
+              "two_barriers": 0.006604289
+            },
+            "throughput_change_percent": {
+              "source_clone": 0.2769202799850934,
+              "two_barriers": 4.73124359033954
+            }
+          },
+          {
+            "batch": 8,
+            "dim": 5120,
+            "ms": {
+              "production": [0.006887008, 0.006910332, 0.006887008, 0.006913305, 0.006864308, 0.00689014, 0.006863059, 0.006884812, 0.006875891],
+              "source_clone": [0.006868379, 0.006879961, 0.006890449, 0.006861805, 0.006864465, 0.006889043, 0.00691143, 0.006892328, 0.006862117],
+              "two_barriers": [0.00656625, 0.006565152, 0.006567656, 0.006568125, 0.006579867, 0.006562805, 0.006562805, 0.006566403, 0.006582683]
+            },
+            "median_ms": {
+              "production": 0.006887008,
+              "source_clone": 0.006879961,
+              "two_barriers": 0.006566403
+            },
+            "throughput_change_percent": {
+              "source_clone": 0.102427906204694,
+              "two_barriers": 4.882505688426364
+            }
+          },
+          {
+            "batch": 128,
+            "dim": 5120,
+            "ms": {
+              "production": [0.012238781, 0.012522125, 0.012574727, 0.012590535, 0.012525571, 0.012596484, 0.012554531, 0.012562672, 0.012538875],
+              "source_clone": [0.0123313, 0.012586934, 0.012605567, 0.012570812, 0.012609476, 0.012547797, 0.012555785, 0.012561105, 0.012566586],
+              "two_barriers": [0.012194793, 0.012297329, 0.0122607, 0.012264145, 0.012255379, 0.01225209, 0.012250992, 0.012252246, 0.012246453]
+            },
+            "median_ms": {
+              "production": 0.012554531,
+              "source_clone": 0.012566586,
+              "two_barriers": 0.012252246
+            },
+            "throughput_change_percent": {
+              "source_clone": -0.09592899774050201,
+              "two_barriers": 2.467180303105243
+            }
+          }
+        ]
+      },
+      "tree-graph": {
+        "timing": "256 launches per measurement; graph replay",
+        "quality_log": "QUALITY finite/bit-exact fp32 and bf16 output_elements=63097944",
+        "samples": [
+          {
+            "batch": 3,
+            "dim": 5120,
+            "ms": {
+              "production": [0.006746746, 0.006761457, 0.006744867, 0.006764277, 0.006748465, 0.006747528, 0.00674659, 0.006748152, 0.006749246],
+              "source_clone": [0.006763648, 0.006742988, 0.006744551, 0.006763336, 0.006763808, 0.00674768, 0.006747055, 0.00674518, 0.006748938],
+              "two_barriers": [0.006445863, 0.006465903, 0.00644743, 0.006470285, 0.006445711, 0.006447902, 0.006448371, 0.006448058, 0.00644884]
+            },
+            "median_ms": {
+              "production": 0.006748152,
+              "source_clone": 0.00674768,
+              "two_barriers": 0.006448058
+            },
+            "throughput_change_percent": {
+              "source_clone": 0.0069949967989035855,
+              "two_barriers": 4.654021412338416
+            }
+          },
+          {
+            "batch": 4,
+            "dim": 5120,
+            "ms": {
+              "production": [0.006699465, 0.006720285, 0.00670134, 0.006720129, 0.006720281, 0.00670009, 0.006700562, 0.006701656, 0.006704945],
+              "source_clone": [0.006721066, 0.006720129, 0.0067015, 0.006699305, 0.006718094, 0.006699152, 0.006703379, 0.006701028, 0.0067015],
+              "two_barriers": [0.006419406, 0.006427391, 0.006400777, 0.006400153, 0.006399996, 0.006398742, 0.006399527, 0.006404535, 0.006399059]
+            },
+            "median_ms": {
+              "production": 0.006701656,
+              "source_clone": 0.0067015,
+              "two_barriers": 0.006400153
+            },
+            "throughput_change_percent": {
+              "source_clone": 0.0023278370514079327,
+              "two_barriers": 4.71087175572209
+            }
+          },
+          {
+            "batch": 7,
+            "dim": 5120,
+            "ms": {
+              "production": [0.006805441, 0.006809203, 0.006794176, 0.006790887, 0.006790891, 0.006789637, 0.006796055, 0.006790105, 0.00678948],
+              "source_clone": [0.006809047, 0.00680357, 0.006788852, 0.006787445, 0.006793547, 0.006788539, 0.006791672, 0.006799965, 0.006790887],
+              "two_barriers": [0.006488133, 0.006505976, 0.006506289, 0.006489227, 0.006490637, 0.006490633, 0.006490164, 0.006504723, 0.006489696]
+            },
+            "median_ms": {
+              "production": 0.006790891,
+              "source_clone": 0.006791672,
+              "two_barriers": 0.006490633
+            },
+            "throughput_change_percent": {
+              "source_clone": -0.01149937747287888,
+              "two_barriers": 4.6260202972499
+            }
+          },
+          {
+            "batch": 8,
+            "dim": 5120,
+            "ms": {
+              "production": [0.006758012, 0.006775859, 0.006759422, 0.006781965, 0.006765059, 0.006761301, 0.006758328, 0.006760519, 0.006759891],
+              "source_clone": [0.006776641, 0.006776797, 0.006781805, 0.006760828, 0.006758949, 0.006761144, 0.006761769, 0.006760359, 0.006759734],
+              "two_barriers": [0.006475609, 0.006458703, 0.006478113, 0.006477328, 0.006459172, 0.006459328, 0.006460266, 0.006464024, 0.006459168]
+            },
+            "median_ms": {
+              "production": 0.006760519,
+              "source_clone": 0.006761144,
+              "two_barriers": 0.006460266
+            },
+            "throughput_change_percent": {
+              "source_clone": -0.009243997761321232,
+              "two_barriers": 4.647687881582585
+            }
+          },
+          {
+            "batch": 128,
+            "dim": 5120,
+            "ms": {
+              "production": [0.012926011, 0.012948086, 0.012982992, 0.012983304, 0.012984711, 0.012974695, 0.012943699, 0.013000367, 0.012951528],
+              "source_clone": [0.012935246, 0.012998489, 0.012994418, 0.012978137, 0.012998332, 0.01300491, 0.012957008, 0.012983144, 0.012986441],
+              "two_barriers": [0.012632175, 0.012640629, 0.01265675, 0.012632172, 0.012667711, 0.012640156, 0.012657222, 0.012635933, 0.012635148]
+            },
+            "median_ms": {
+              "production": 0.012974695,
+              "source_clone": 0.012986441,
+              "two_barriers": 0.012640156
+            },
+            "throughput_change_percent": {
+              "source_clone": -0.09044818360934848,
+              "two_barriers": 2.6466366396110885
+            }
+          }
+        ]
+      },
+      "wave": {
+        "timing": "256 launches per measurement; graph replay",
+        "quality_log": "QUALITY finite/bit-exact fp32 and bf16 output_elements=94646916",
+        "samples": [
+          {
+            "batch": 3,
+            "dim": 5120,
+            "ms": {
+              "production": [0.006745027, 0.00674143, 0.00676225, 0.006743461, 0.006742363, 0.006747059, 0.006745027, 0.006746437],
+              "source_clone": [0.006760996, 0.006766472, 0.006747215, 0.006763652, 0.006748938, 0.006748156, 0.006751598, 0.006746437],
+              "two_barriers": [0.006467629, 0.006447125, 0.006448219, 0.006462617, 0.006450566, 0.006446184, 0.006449937, 0.006449625],
+              "single_wave": [0.03849395, 0.038161922, 0.038027763, 0.038104918, 0.037628084, 0.038102571, 0.03811118, 0.03958068]
+            },
+            "median_ms": {
+              "production": 0.006745027,
+              "source_clone": 0.006750268,
+              "two_barriers": 0.006449781,
+              "single_wave": 0.038108049000000005
+            },
+            "throughput_change_percent": {
+              "source_clone": -0.0776413617948224,
+              "two_barriers": 4.577612790263719,
+              "single_wave": -82.30025630543301
+            }
+          },
+          {
+            "batch": 4,
+            "dim": 5120,
+            "ms": {
+              "production": [0.00701225, 0.006712934, 0.006696648, 0.006696492, 0.006696648, 0.006698211, 0.00670009, 0.006696961],
+              "source_clone": [0.006701821, 0.006700567, 0.006699309, 0.006718094, 0.006701031, 0.006699937, 0.006698371, 0.006701813],
+              "two_barriers": [0.006419883, 0.006401414, 0.006402351, 0.006401406, 0.006398899, 0.006399684, 0.00640125, 0.006404383],
+              "single_wave": [0.036685083, 0.038109008, 0.038114287, 0.036626179, 0.038040087, 0.039070614, 0.037338458, 0.038415484]
+            },
+            "median_ms": {
+              "production": 0.006697586,
+              "source_clone": 0.006700799,
+              "two_barriers": 0.00640141,
+              "single_wave": 0.0380745475
+            },
+            "throughput_change_percent": {
+              "source_clone": -0.04794950572312162,
+              "two_barriers": 4.626730673398516,
+              "single_wave": -82.40928273671538
+            }
+          },
+          {
+            "batch": 7,
+            "dim": 5120,
+            "ms": {
+              "production": [0.006800437, 0.006805918, 0.006784156, 0.006783371, 0.00678259, 0.006789164, 0.006785406, 0.006785722],
+              "source_clone": [0.006804035, 0.006809352, 0.006789164, 0.006789164, 0.006788227, 0.006787445, 0.006794176, 0.006787445],
+              "two_barriers": [0.006506762, 0.006507074, 0.006506133, 0.006486879, 0.006488289, 0.006489383, 0.006486563, 0.006490793],
+              "single_wave": [0.03761163, 0.038837213, 0.037806045, 0.03908376, 0.039363034, 0.037256423, 0.03997685, 0.03819209]
+            },
+            "median_ms": {
+              "production": 0.006785564,
+              "source_clone": 0.006789164,
+              "two_barriers": 0.006490088,
+              "single_wave": 0.0385146515
+            },
+            "throughput_change_percent": {
+              "source_clone": -0.053025674442397364,
+              "two_barriers": 4.552727174115367,
+              "single_wave": -82.38186317225276
+            }
+          },
+          {
+            "batch": 8,
+            "dim": 5120,
+            "ms": {
+              "production": [0.006773512, 0.006772418, 0.006757386, 0.006760047, 0.006755195, 0.006755508, 0.006754098, 0.006760363],
+              "source_clone": [0.006777582, 0.00677993, 0.006761144, 0.006759891, 0.006762863, 0.006757543, 0.006760832, 0.006760363],
+              "two_barriers": [0.006459168, 0.006458387, 0.006462773, 0.006481086, 0.006458543, 0.006599902, 0.006459484, 0.006463555],
+              "single_wave": [0.038296819, 0.037904046, 0.037561845, 0.039319206, 0.037635729, 0.038864132, 0.038037583, 0.0366924]
+            },
+            "median_ms": {
+              "production": 0.006758716499999999,
+              "source_clone": 0.006760988,
+              "two_barriers": 0.0064611285,
+              "single_wave": 0.0379708145
+            },
+            "throughput_change_percent": {
+              "source_clone": -0.03359716065167717,
+              "two_barriers": 4.605820794308602,
+              "single_wave": -82.20023302370825
+            }
+          },
+          {
+            "batch": 128,
+            "dim": 5120,
+            "ms": {
+              "production": [0.012327543, 0.012313453, 0.012268988, 0.012932274, 0.012171152, 0.012318152, 0.012284175, 0.012910668],
+              "source_clone": [0.012769305, 0.012750368, 0.012779801, 0.012905973, 0.012757097, 0.012755379, 0.012743949, 0.012893137],
+              "two_barriers": [0.012537625, 0.01198534, 0.012528234, 0.012523691, 0.012530109, 0.011890785, 0.012512266, 0.012499269],
+              "single_wave": [0.059226148, 0.058899291, 0.059152417, 0.059281722, 0.059189517, 0.058803793, 0.059205797, 0.059246652]
+            },
+            "median_ms": {
+              "production": 0.0123158025,
+              "source_clone": 0.012763201,
+              "two_barriers": 0.012517978499999999,
+              "single_wave": 0.059197657
+            },
+            "throughput_change_percent": {
+              "source_clone": -3.5053784704949797,
+              "two_barriers": -1.6150850554664142,
+              "single_wave": -79.19545616476003
+            }
+          }
+        ]
+      }
+    },
+    "temporary_sources_sha256": {
+      "qwen_norm_tree_probe.hip": "cdad52bfd7a81705ff9781b4a229ae105fd2404aa5f62d5de1e85d99a7f105df",
+      "qwen_norm_tree_probe.hpp": "e89ff9c375dc77b3c5f0b8edffdc045da54533c4a86a8485958592b3ad01ea01",
+      "qwen_norm_tree_graph_probe.hip": "4e8c5a9b67dd70ef02bc63c8bf11b78e76af6f66372ef08fbeafc0df165d1ff8",
+      "qwen_norm_wave_probe.hip": "ae633f3ddaa4e8aee6013314c10718a4f0da2ebec6000d97e57698af21a0323c",
+      "qwen_norm_wave_probe.hpp": "3bf8e27509a0db98be7e2ede34ac49e942a2be2c63c9483ca7487f84ca940374"
+    }
   }
 }

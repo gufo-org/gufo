@@ -150,7 +150,10 @@ injection; the complete serialized history must remain byte-identical.
   129 fewer copy API calls over 43 rounds and identical model-kernel calls.
   API waits include preceding GPU work; they are not pure copy cost.
   Lossless Q6 head expansion preserves outputs but loses 14–26%, so it is
-  rejected. No new maintained test/tool or execution option is added.
+  rejected. A lower-barrier norm saves about 0.30µs per call in isolation;
+  its projected total benefit is below 0.1%, so it remains unshipped. A
+  single-wave norm is about 5.6× slower. Both preserve checked outputs.
+  No new maintained test/tool or execution option is added.
 - [Rejected matrix/loop probes](dflash2-matrix-probes.json): skipping the final
   tile barrier loses up to 2.5% while preserving every checked output. Native
   integer WMMA with four activation components slightly improves sampled FP64
