@@ -142,23 +142,36 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
     }
     __syncthreads();
 
-    if (tid == 0) {
+    float inv_k_norm = 0.0F;
+    float inv_q_norm = 0.0F;
+    // Resident waves repeat the same ordered four-term sum. This removes the
+    // broadcast barrier without changing the normalization arithmetic.
+    if (Resident || tid == 0) {
       float k_sq = 0.0F, q_sq = 0.0F;
-      const std::size_t num_warps = blockDim.x >> 5u;
+      const std::size_t num_warps = Resident ? 4 : blockDim.x >> 5u;
       for (std::size_t w = 0; w < num_warps; ++w) {
         k_sq += s_warp_k[w];
         if constexpr (WriteOutput)
           q_sq += s_warp_q[w];
       }
-      s_norm[0] = 1.0F / sqrtf(k_sq + 1e-6F);
+      inv_k_norm = 1.0F / sqrtf(k_sq + 1e-6F);
       if constexpr (WriteOutput)
-        s_norm[1] = 1.0F / sqrtf(q_sq + 1e-6F);
+        inv_q_norm = 1.0F / sqrtf(q_sq + 1e-6F);
+      if constexpr (!Resident) {
+        s_norm[0] = inv_k_norm;
+        if constexpr (WriteOutput)
+          s_norm[1] = inv_q_norm;
+      }
     }
-    __syncthreads();
+    if constexpr (!Resident) {
+      __syncthreads();
+      inv_k_norm = s_norm[0];
+      if constexpr (WriteOutput)
+        inv_q_norm = s_norm[1];
+    }
 
-    const float inv_k_norm = s_norm[0];
     const float q_scale =
-        WriteOutput ? (1.0F / sqrtf(static_cast<float>(key_dim))) * s_norm[1]
+        WriteOutput ? (1.0F / sqrtf(static_cast<float>(key_dim))) * inv_q_norm
                     : 0.0F;
     if (tid < key_dim) {
       s_k[tid] *= inv_k_norm;
@@ -252,18 +265,23 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
     }
     __syncthreads();
 
-    if (tid == 0) {
+    float rms = 0.0F;
+    if (Resident || tid == 0) {
       float total_sq = 0.0F;
-      const std::size_t num_warps = blockDim.x >> 5u;
+      const std::size_t num_warps = Resident ? 4 : blockDim.x >> 5u;
       for (std::size_t w = 0; w < num_warps; ++w) {
         total_sq += s_val_warp[w];
       }
       const float mean_sq = total_sq / static_cast<float>(val_dim);
-      s_norm[0] = rsqrtf(mean_sq + 1e-6F);
+      rms = rsqrtf(mean_sq + 1e-6F);
+      if constexpr (!Resident)
+        s_norm[0] = rms;
     }
-    __syncthreads();
+    if constexpr (!Resident) {
+      __syncthreads();
+      rms = s_norm[0];
+    }
 
-    const float rms = s_norm[0];
     if (tid < val_dim) {
       const float w = (ssm_norm != nullptr) ? ssm_norm[tid] : 1.0F;
       float val = o_h[tid] * rms * w;

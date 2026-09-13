@@ -192,7 +192,8 @@ void LaunchSSMConvRecurrenceRows(
   };
   if (state_storage == QwenRecurrentStateStorage::kBf16) {
     launch_output.template operator()<hip_bfloat16, false>();
-  } else if (key_dim == 128 && val_dim == 128 && rows > 1) {
+  } else if (key_dim == 128 && val_dim == 128 &&
+             (rows > 1 || out_buf == nullptr)) {
     launch_output.template operator()<float, true>();
   } else {
     launch_output.template operator()<float, false>();

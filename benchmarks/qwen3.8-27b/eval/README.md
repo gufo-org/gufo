@@ -150,6 +150,16 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Recurrence barriers and replay dispatch](dflash2-recurrence-launch.json):
+  resident waves compute the same ordered norm sums locally; one-row FP32
+  replay keeps state in registers. Verification recurrence takes 6.0% less
+  GPU time and combined recurrence 3.0% less; replay time is flat. Fresh
+  release prose/JSON improve 0.25%/0.24%; repetition is flat across all eight
+  samples. All 16 continuations, 102 logit rows, 102 feature rows and 96 C3
+  replay/cache rows remain exact. The SSM suite and maintained recurrence
+  ablation pass. Scalar AR, arithmetic order, storage and controller stay
+  unchanged; there are no new tools or switches. The baseline profile is
+  reused from the preceding qualified build; speed controls are fresh.
 - [Vectorized rollback copies](dflash2-state-copy.json): a 256×1 workgroup
   copies contiguous vectors within each large recurrent-state group.
   The same 203 copies take 15.3% less GPU time; whole-profile time is flat.

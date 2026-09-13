@@ -94,23 +94,24 @@ advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
 **Latest Q4 target/Q4 draft:** greedy C1, including prefill and excluding
-model loading. Each workload uses two samples per binary in ABBA order
-after warmup on the quiet host. These are short controls.
+model loading. Prose/JSON use two samples per binary in ABBA order after
+warmup; repetition uses four. These are short controls.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 56.85 | **56.98** | +0.24% |
-| JSON, tg300, adaptive | 53.77 | **53.89** | +0.23% |
-| Prose, tg300, adaptive | 23.77 | **23.86** | +0.37% |
+| Repetition, tg128, fixed-7 | 57.08 | **57.08** | -0.01% |
+| JSON, tg300, adaptive | 53.92 | **54.05** | +0.24% |
+| Prose, tg300, adaptive | 23.86 | **23.92** | +0.25% |
 
-The latest [rollback-copy change](eval/dflash2-state-copy.json) uses
-contiguous vector transfers for large recurrent-state groups. The same 203
-copies take 15.3% less GPU time; whole-profile timing is flat.
-End-to-end gains remain small. All 12 continuations,
-102 verification logit rows, 102 feature rows and 96 C3 replay/cache rows
-remain exact. The expanded rollback fixture also passes FP32/BF16 states,
-tail groups and repeated saves. No arithmetic, layout or allocation change.
-Earlier [joined recurrent controls](eval/dflash2-ssm-controls.json),
+The latest [recurrence change](eval/dflash2-recurrence-launch.json) removes
+normalization broadcasts during verification and uses resident FP32 state
+for one-row replay. Verification recurrence takes 6.0% less GPU time;
+all recurrence takes 3.0% less, with replay time flat. Total gains remain
+small; repetition is flat across all eight measurements.
+All 16 continuations, 102 verification logit rows, 102 feature rows and
+96 C3 replay/cache rows remain exact. Scalar AR and ordered arithmetic
+are unchanged. Earlier [rollback copies](eval/dflash2-state-copy.json),
+[joined controls](eval/dflash2-ssm-controls.json),
 [Q5 projections](eval/dflash2-prose-projections.json),
 [mixed-format reuse](eval/dflash2-remaining-formats.json),
 [contiguous FFNs](eval/dflash2-contiguous-ffn.json) and

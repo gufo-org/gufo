@@ -140,12 +140,7 @@ void Run(unsigned rows, unsigned iterations, unsigned seed) {
            launch.template operator()<false, true>(state);
        }},
       {"state_only", false,
-       [&](float* state) {
-         if (rows > 1)
-           launch.template operator()<true, false>(state);
-         else
-           launch.template operator()<false, false>(state);
-       }},
+       [&](float* state) { launch.template operator()<true, false>(state); }},
   };
   Events events;
   std::puts("rows,round,variant,ms,state_exact,output_exact");
