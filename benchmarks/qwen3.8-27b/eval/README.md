@@ -323,6 +323,9 @@ injection; the complete serialized history must remain byte-identical.
   prose 2.8%. Three chat prompts are flat in aggregate, with code/reasoning
   losing 1.0–1.6%; the one depth-4096 sample loses 1.0%. Decisions precede
   proposals and never use live timing. Target/draft arithmetic is unchanged.
+  Recalibration after wave64 is rejected: prose −0.74%, JSON −4.46%, with
+  all eight AR continuations exact. JSON needs 45 rounds instead of 43;
+  more drafted tokens offset the cheaper wide kernels. The prior table remains.
 - [Q5 batch-eight FMA scheduling](dflash2-fma-order.json): alternating
   multiplication operands retains all 51 Q4 verifier/scalar logit rows,
   cache/context controls and all 90 draft trace files. Both kernel suites

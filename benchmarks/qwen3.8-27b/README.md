@@ -123,6 +123,7 @@ Q4/Q8 logits across coordinator changes and the replay-ring boundary.
 The controller uses [measured Q4 verification costs](eval/dflash2-controller-cost.json);
 Q8 keeps its previous formula. Its earlier chat comparison was flat in
 aggregate, with code/reasoning losing 1.0–1.6%; the depth-4096 control lost 1.0%.
+Recalibrating after wave64 loses 0.7% prose and 4.5% JSON; the existing table stays.
 
 Earlier work covers [mixed-format scalar projections](eval/dflash2-mixed-formats.json),
 [two-token verification](eval/dflash2-width2.json) and
