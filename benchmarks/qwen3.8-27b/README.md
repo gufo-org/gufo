@@ -121,7 +121,8 @@ The [quality report](eval/README.md) indexes the remaining evidence.
 
 Lossless row packing, residual-precision WMMA/INT8, precomputed activation
 sums and removing full-tile bounds checks were slower. Alignment hints
-changed no instructions; rejected experiments remain excluded.
+changed no instructions. Further [integer-matrix and final-barrier probes](eval/dflash2-matrix-probes.json)
+also lost; rejected experiments remain excluded.
 
 **Same host and identical Q4 target/draft files**, at `b55a120`, raw tg300,
 including prefill:

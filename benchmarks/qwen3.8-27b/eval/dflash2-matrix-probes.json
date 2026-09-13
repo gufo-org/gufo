@@ -1,0 +1,1215 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-09-13T03:15:25.363455+00:00",
+  "baseline_commit": "9a2b261b855146838319b6636331c96c09005561",
+  "retained": false,
+  "scope": "Q4 target/Q4 draft performance research. No production source, numerical policy, model artifact, test executable or tool is changed. All candidates are isolated temporary microbenchmarks; the qualified release remains unchanged.",
+  "source_sha256": {
+    "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "6375d4d7b93491d85976598829b6325130c7affb5d3ecda04b83914362fc1668",
+    "src/models/qwen/hip/quant_ops.hpp": "d9a3a581c616d1e07d63b52c89dbefe7bc3f30b2b9923ad1e931ee4eba4dccd6",
+    "src/models/qwen/dflash_policy.hpp": "44bac3ce82990aeb350d1f81f287f8d8dc9eaf704cd27669a9dddb1b19f3974a"
+  },
+  "production_binary": {
+    "path": "/nix/store/ykbx8g06gw1n2fiisc10nb1cqkyq7jwi-gufo-25fcc26-dirty/bin/gufo",
+    "sha256": "49ad02c713831e561c4b7ea79313a7797fcd3fb69c272a9aa048d4921fa1ff98"
+  },
+  "artifacts": {
+    "target_q4": {
+      "path": "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+      "bytes": 17559178144,
+      "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+    },
+    "draft_q4": {
+      "path": "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "bytes": 1143006816,
+      "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+    }
+  },
+  "last_tile_barrier": {
+    "retained": false,
+    "decision": "Reject both loop forms. Skipping the final reuse barrier preserves outputs but regresses up/down/medium. No register or scratch improvement; the candidate adds a vector-condition branch and four static instructions.",
+    "measurements": {
+      "q5-17408-5120": {
+        "median_ms": {
+          "production": 0.332576,
+          "clone": 0.33306199999999997,
+          "conditional_barrier": 0.333268,
+          "exit_before_barrier": 0.3329845
+        },
+        "gain_percent": {
+          "production": 0.0,
+          "clone": -0.14591877788519003,
+          "conditional_barrier": -0.20764069757672754,
+          "exit_before_barrier": -0.12267838292774336
+        },
+        "timing_ms_per_matrix_by_round": {
+          "production": [
+            0.334867,
+            0.331487,
+            0.33249,
+            0.331239,
+            0.33329,
+            0.331629,
+            0.332624,
+            0.332177,
+            0.332935,
+            0.333258,
+            0.33385,
+            0.332528
+          ],
+          "clone": [
+            0.335636,
+            0.333975,
+            0.330608,
+            0.332808,
+            0.33108,
+            0.333023,
+            0.332832,
+            0.331713,
+            0.334841,
+            0.333101,
+            0.333459,
+            0.333572
+          ],
+          "conditional_barrier": [
+            0.335946,
+            0.334638,
+            0.330935,
+            0.333149,
+            0.332701,
+            0.332651,
+            0.332727,
+            0.333873,
+            0.333387,
+            0.337152,
+            0.332676,
+            0.334757
+          ],
+          "exit_before_barrier": [
+            0.335132,
+            0.334668,
+            0.333577,
+            0.333093,
+            0.332214,
+            0.331676,
+            0.332876,
+            0.333604,
+            0.332747,
+            0.332775,
+            0.332256,
+            0.333715
+          ]
+        },
+        "tensor_names": [
+          "blk.3.ffn_up.weight",
+          "blk.6.ffn_up.weight",
+          "blk.7.ffn_up.weight",
+          "blk.20.ffn_up.weight",
+          "blk.22.ffn_up.weight",
+          "blk.23.ffn_gate.weight",
+          "blk.23.ffn_up.weight",
+          "blk.24.ffn_gate.weight",
+          "blk.24.ffn_up.weight",
+          "blk.25.ffn_gate.weight",
+          "blk.25.ffn_up.weight",
+          "blk.26.ffn_gate.weight",
+          "blk.26.ffn_up.weight",
+          "blk.27.ffn_up.weight",
+          "blk.28.ffn_gate.weight",
+          "blk.36.ffn_up.weight"
+        ]
+      },
+      "q5-5120-17408": {
+        "median_ms": {
+          "production": 0.31616299999999997,
+          "clone": 0.317061,
+          "conditional_barrier": 0.324216,
+          "exit_before_barrier": 0.32234850000000004
+        },
+        "gain_percent": {
+          "production": 0.0,
+          "clone": -0.28322625614629615,
+          "conditional_barrier": -2.483837935203703,
+          "exit_before_barrier": -1.9188859262568525
+        },
+        "timing_ms_per_matrix_by_round": {
+          "production": [
+            0.326804,
+            0.327551,
+            0.325323,
+            0.322697,
+            0.320649,
+            0.31671,
+            0.315616,
+            0.314332,
+            0.314678,
+            0.31558,
+            0.314315,
+            0.313996
+          ],
+          "clone": [
+            0.328902,
+            0.327293,
+            0.325771,
+            0.323686,
+            0.319692,
+            0.317887,
+            0.314522,
+            0.315783,
+            0.316235,
+            0.314705,
+            0.315566,
+            0.315572
+          ],
+          "conditional_barrier": [
+            0.33445,
+            0.333636,
+            0.332696,
+            0.328593,
+            0.325291,
+            0.323191,
+            0.322489,
+            0.318949,
+            0.319975,
+            0.325241,
+            0.320807,
+            0.319992
+          ],
+          "exit_before_barrier": [
+            0.332673,
+            0.334061,
+            0.33094,
+            0.328711,
+            0.325346,
+            0.323268,
+            0.321197,
+            0.319771,
+            0.319343,
+            0.320299,
+            0.320487,
+            0.321429
+          ]
+        },
+        "tensor_names": [
+          "blk.3.ffn_down.weight",
+          "blk.4.ffn_down.weight",
+          "blk.5.ffn_down.weight",
+          "blk.20.ffn_down.weight",
+          "blk.21.ffn_down.weight",
+          "blk.22.ffn_down.weight",
+          "blk.23.ffn_down.weight",
+          "blk.24.ffn_down.weight",
+          "blk.25.ffn_down.weight",
+          "blk.26.ffn_down.weight",
+          "blk.27.ffn_down.weight",
+          "blk.28.ffn_down.weight",
+          "blk.30.ffn_down.weight",
+          "blk.34.ffn_down.weight",
+          "blk.35.ffn_down.weight",
+          "blk.36.ffn_down.weight"
+        ]
+      },
+      "q5-5120-6144": {
+        "median_ms": {
+          "production": 0.1277565,
+          "clone": 0.127994,
+          "conditional_barrier": 0.1289835,
+          "exit_before_barrier": 0.1286275
+        },
+        "gain_percent": {
+          "production": 0.0,
+          "clone": -0.18555557291748404,
+          "conditional_barrier": -0.95128446661783,
+          "exit_before_barrier": -0.6771491321840295
+        },
+        "timing_ms_per_matrix_by_round": {
+          "production": [
+            0.128734,
+            0.128979,
+            0.128027,
+            0.127566,
+            0.128407,
+            0.128309,
+            0.127447,
+            0.127893,
+            0.127345,
+            0.12762,
+            0.127395,
+            0.127026
+          ],
+          "clone": [
+            0.12867,
+            0.12864,
+            0.128361,
+            0.128314,
+            0.129223,
+            0.127445,
+            0.128849,
+            0.127674,
+            0.127198,
+            0.127348,
+            0.126827,
+            0.126804
+          ],
+          "conditional_barrier": [
+            0.129158,
+            0.128992,
+            0.129044,
+            0.129151,
+            0.128975,
+            0.128011,
+            0.129033,
+            0.128834,
+            0.127219,
+            0.130446,
+            0.127861,
+            0.128077
+          ],
+          "exit_before_barrier": [
+            0.129353,
+            0.129547,
+            0.128028,
+            0.129771,
+            0.129471,
+            0.127912,
+            0.128747,
+            0.128728,
+            0.128527,
+            0.12752,
+            0.128063,
+            0.128017
+          ]
+        },
+        "tensor_names": [
+          "blk.4.ssm_out.weight",
+          "blk.5.ssm_out.weight",
+          "blk.7.attn_output.weight",
+          "blk.8.ssm_out.weight",
+          "blk.9.ssm_out.weight",
+          "blk.10.ssm_out.weight",
+          "blk.11.attn_output.weight",
+          "blk.12.ssm_out.weight",
+          "blk.13.ssm_out.weight",
+          "blk.16.ssm_out.weight",
+          "blk.17.ssm_out.weight",
+          "blk.18.ssm_out.weight",
+          "blk.19.attn_output.weight",
+          "blk.20.ssm_out.weight",
+          "blk.26.ssm_out.weight",
+          "blk.28.ssm_out.weight"
+        ]
+      },
+      "method": "Actual Q5 GGUF, batch8, production geometry. Original vs source clone vs conditional final barrier vs loop exit before final barrier. The barrier after computing a tile protects LDS overwrite on the next iteration; the final tile has no overwrite. All workgroup threads take the same loop exit. Two full-mantissa input seeds; every output finite/bit-exact before timing.12balancedroundsx6rotations through16tensors."
+    },
+    "isa": [
+      {
+        "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1600,
+        "instructions_sha256": "b507cca9f04d9d9cf42b49d2542c89ef8877a1e1a6aa9c0a2ccbcd1b58d7d4a9",
+        "selected_opcodes": {
+          "s_delay_alu": 109,
+          "s_waitcnt": 126,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1600,
+        "instructions_sha256": "d068e8d72b52ded753d8f5a6dd082d8f4d297293237d04028b74b13f2740c8c8",
+        "selected_opcodes": {
+          "s_delay_alu": 109,
+          "s_waitcnt": 126,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void gufo::hip::LastBarrierKQuantKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 0u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1600,
+        "instructions_sha256": "b507cca9f04d9d9cf42b49d2542c89ef8877a1e1a6aa9c0a2ccbcd1b58d7d4a9",
+        "selected_opcodes": {
+          "s_delay_alu": 109,
+          "s_waitcnt": 126,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void gufo::hip::LastBarrierKQuantKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 0u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1600,
+        "instructions_sha256": "d068e8d72b52ded753d8f5a6dd082d8f4d297293237d04028b74b13f2740c8c8",
+        "selected_opcodes": {
+          "s_delay_alu": 109,
+          "s_waitcnt": 126,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void gufo::hip::LastBarrierKQuantKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1604,
+        "instructions_sha256": "019002fe7e1bf2cb95a1f63d1ec26060179dfbeb8751bb28dc073c900fa31b92",
+        "selected_opcodes": {
+          "s_delay_alu": 107,
+          "s_waitcnt": 126,
+          "s_cbranch_vccz": 1,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void gufo::hip::LastBarrierKQuantKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1604,
+        "instructions_sha256": "95c2d9b82ac4be56318811a16a38bea5d7acde2a87cc8c472c2d2f7c98205be8",
+        "selected_opcodes": {
+          "s_delay_alu": 107,
+          "s_waitcnt": 126,
+          "s_cbranch_vccz": 1,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void gufo::hip::LastBarrierKQuantKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 2u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1604,
+        "instructions_sha256": "61c597bf11601c1de1ce710cbd334c901c4010ad986155b70c6bbf15b14171d9",
+        "selected_opcodes": {
+          "s_delay_alu": 108,
+          "s_waitcnt": 125,
+          "s_cbranch_vccz": 1,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void gufo::hip::LastBarrierKQuantKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 2u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1604,
+        "instructions_sha256": "72f7de7b55143de249aaf222406ebdc8b448cbce3c3c0de838f60ff44da2a2bd",
+        "selected_opcodes": {
+          "s_delay_alu": 108,
+          "s_waitcnt": 125,
+          "s_cbranch_vccz": 1,
+          "s_barrier": 2
+        }
+      }
+    ],
+    "quality": "Two full-mantissa seeds, all outputs finite and bit-exact across sixteen actual tensors for each of three Q5 shapes. Original and clone have identical instruction hashes."
+  },
+  "integer_matrix_instructions": {
+    "retained": false,
+    "method": "Q5 packed codes remain exact. Encode each32-element activation group into three/four fixed-point bytes using a shared binary exponent. Native integer WMMA consumes unsigned lower bytes and a signed highest byte, then FP32 reconstructs/scales each group. Activation preparation is included once per projection. Integer partials are bounded by32*31*255=252960 and cannot overflow int32.",
+    "quality_limit": "Different arithmetic from production. Four components slightly improve the sampled FP64 operator RMSE; this is not model quality equivalence. Three components are less accurate in this probe. All variants are finite and retain first-token B1/B8 equality.",
+    "initial_probe": {
+      "method": "Actual Q5 up17408x5120,8tensors,2full-mantissa seeds,768independent FP64 samples pervariant. All outputs finite, all first-token B1/B8 bits equal.5balancedroundsx4rotations, preparation included perprojection. Three/four byte fixed-point activation components, unsigned lower bytes and signed highest byte, native integer WMMA. Changes arithmetic, not qualified model behavior.",
+      "quality": [
+        {
+          "variant": "production",
+          "fp64_samples": 768,
+          "max_abs_error": 5.75839022465e-07,
+          "rmse": 1.60238599542e-07,
+          "relative_rmse": 2.51611952263e-07,
+          "b1_b8_mismatches": 0
+        },
+        {
+          "variant": "split4_parts3",
+          "fp64_samples": 768,
+          "max_abs_error": 5.57573965887e-07,
+          "rmse": 2.14924009391e-07,
+          "relative_rmse": 3.37480792677e-07,
+          "b1_b8_mismatches": 0
+        },
+        {
+          "variant": "split8_parts3",
+          "fp64_samples": 768,
+          "max_abs_error": 7.49812091305e-07,
+          "rmse": 2.15870057671e-07,
+          "relative_rmse": 3.38966308996e-07,
+          "b1_b8_mismatches": 0
+        },
+        {
+          "variant": "split4_parts4",
+          "fp64_samples": 768,
+          "max_abs_error": 5.38982197429e-07,
+          "rmse": 1.55283528255e-07,
+          "relative_rmse": 2.43831335334e-07,
+          "b1_b8_mismatches": 0
+        },
+        {
+          "variant": "split8_parts4",
+          "fp64_samples": 768,
+          "max_abs_error": 4.79377552653e-07,
+          "rmse": 1.51889638255e-07,
+          "relative_rmse": 2.38502136932e-07,
+          "b1_b8_mismatches": 0
+        }
+      ],
+      "median_ms": {
+        "1": {
+          "production": 0.281217,
+          "split4_parts3": 0.560343,
+          "split8_parts3": 0.449448,
+          "split4_parts4": 0.612463,
+          "split8_parts4": 0.511609
+        },
+        "8": {
+          "production": 0.332223,
+          "split4_parts3": 0.618262,
+          "split8_parts3": 0.516006,
+          "split4_parts4": 0.66569,
+          "split8_parts4": 0.555781
+        }
+      },
+      "source_sha256": "dbb0e242ef4566c3c0eb2ee16a8751c57f005f6815de6c67d896b85802b6b8ef",
+      "relative_to_production_percent": {
+        "1": {
+          "production": 0.0,
+          "split4_parts3": -49.81341785299362,
+          "split8_parts3": -37.43058151332301,
+          "split4_parts4": -54.08424672184279,
+          "split8_parts4": -45.032827804045674
+        },
+        "8": {
+          "production": 0.0,
+          "split4_parts3": -46.26501386143739,
+          "split8_parts3": -35.616446320391624,
+          "split4_parts4": -50.09343688503658,
+          "split8_parts4": -40.22411705329977
+        }
+      },
+      "timing_ms_per_matrix_by_round": {
+        "1": {
+          "production": [
+            0.281217,
+            0.281851,
+            0.281339,
+            0.281085,
+            0.281121
+          ],
+          "split4_parts3": [
+            0.577568,
+            0.571657,
+            0.560343,
+            0.559578,
+            0.555512
+          ],
+          "split8_parts3": [
+            0.459522,
+            0.461088,
+            0.449448,
+            0.446799,
+            0.444802
+          ],
+          "split4_parts4": [
+            0.622872,
+            0.618582,
+            0.612463,
+            0.593557,
+            0.591377
+          ],
+          "split8_parts4": [
+            0.514673,
+            0.511609,
+            0.511811,
+            0.504035,
+            0.502527
+          ]
+        },
+        "8": {
+          "production": [
+            0.32825,
+            0.331111,
+            0.332685,
+            0.332223,
+            0.3338
+          ],
+          "split4_parts3": [
+            0.628613,
+            0.618262,
+            0.617344,
+            0.618597,
+            0.617774
+          ],
+          "split8_parts3": [
+            0.513497,
+            0.516006,
+            0.523217,
+            0.517037,
+            0.51534
+          ],
+          "split4_parts4": [
+            0.667059,
+            0.662116,
+            0.665628,
+            0.66569,
+            0.666914
+          ],
+          "split8_parts4": [
+            0.554189,
+            0.555781,
+            0.561735,
+            0.562747,
+            0.555156
+          ]
+        }
+      },
+      "tensor_names": [
+        "blk.3.ffn_up.weight",
+        "blk.6.ffn_up.weight",
+        "blk.7.ffn_up.weight",
+        "blk.20.ffn_up.weight",
+        "blk.22.ffn_up.weight",
+        "blk.23.ffn_gate.weight",
+        "blk.23.ffn_up.weight",
+        "blk.24.ffn_gate.weight"
+      ]
+    },
+    "initial_isa": [
+      {
+        "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1600,
+        "instructions_sha256": "b507cca9f04d9d9cf42b49d2542c89ef8877a1e1a6aa9c0a2ccbcd1b58d7d4a9",
+        "selected_opcodes": {
+          "s_delay_alu": 109,
+          "s_waitcnt": 126,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1600,
+        "instructions_sha256": "d068e8d72b52ded753d8f5a6dd082d8f4d297293237d04028b74b13f2740c8c8",
+        "selected_opcodes": {
+          "s_delay_alu": 109,
+          "s_waitcnt": 126,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void EncodeMatrixActivation<3u>(float const*, MatrixActivation<3u>*, unsigned int)",
+        "vgpr_count": 93,
+        "sgpr_count": 7,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 0,
+        "static_instructions": 371,
+        "instructions_sha256": "dcd466026a61019b4566e4b2377185922105bfaa1bfdc76838acfba9c009beff",
+        "selected_opcodes": {
+          "s_waitcnt": 10,
+          "s_delay_alu": 23
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<1u, 4u, 3u>(void const*, MatrixActivation<3u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 103,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 4096,
+        "static_instructions": 511,
+        "instructions_sha256": "0094011b344c889d78cad4bf9c5e2a9bc0b41c34f10b033318bf1974bd4952a0",
+        "selected_opcodes": {
+          "s_waitcnt": 33,
+          "s_delay_alu": 45,
+          "v_wmma_i32_16x16x16_iu8": 6,
+          "s_barrier": 3
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<1u, 8u, 3u>(void const*, MatrixActivation<3u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 102,
+        "sgpr_count": 23,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 8192,
+        "static_instructions": 541,
+        "instructions_sha256": "0b95ae2f8ca1070b40790339050acfdb2b9bf30268d6b070d982cb9569ec68e1",
+        "selected_opcodes": {
+          "s_waitcnt": 42,
+          "s_delay_alu": 42,
+          "v_wmma_i32_16x16x16_iu8": 6,
+          "s_barrier": 4
+        }
+      },
+      {
+        "name": "void EncodeMatrixActivation<4u>(float const*, MatrixActivation<4u>*, unsigned int)",
+        "vgpr_count": 95,
+        "sgpr_count": 7,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 0,
+        "static_instructions": 425,
+        "instructions_sha256": "1452532839bc59b1d5c3a8b5c4c40b406150388d34d33a1fdf37a45ad0fb2365",
+        "selected_opcodes": {
+          "s_waitcnt": 10,
+          "s_delay_alu": 23
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<1u, 4u, 4u>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 115,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 4096,
+        "static_instructions": 539,
+        "instructions_sha256": "a40bc43231bc38d07e023630948094b917248b243da97f0884c1d9628ceff89c",
+        "selected_opcodes": {
+          "s_waitcnt": 39,
+          "s_delay_alu": 43,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 3
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<1u, 8u, 4u>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 119,
+        "sgpr_count": 23,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 8192,
+        "static_instructions": 572,
+        "instructions_sha256": "8e18010d21b223e0c2ba7c84a1142ca9e0cf1d0ad95aa7ab8e6ffcfec668b7d9",
+        "selected_opcodes": {
+          "s_waitcnt": 42,
+          "s_delay_alu": 46,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 4
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<8u, 4u, 3u>(void const*, MatrixActivation<3u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 103,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 4096,
+        "static_instructions": 516,
+        "instructions_sha256": "1cb967030428a093f3384b267f28608baba310b4ad26b0fd5a8dcadeeb0a0c85",
+        "selected_opcodes": {
+          "s_delay_alu": 44,
+          "s_waitcnt": 33,
+          "v_wmma_i32_16x16x16_iu8": 6,
+          "s_barrier": 3
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<8u, 8u, 3u>(void const*, MatrixActivation<3u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 102,
+        "sgpr_count": 23,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 8192,
+        "static_instructions": 544,
+        "instructions_sha256": "d92f8cde8f44364470fa00b0627ba58eef8850e55bbabbd4a59b3faf94f39d36",
+        "selected_opcodes": {
+          "s_waitcnt": 42,
+          "s_delay_alu": 43,
+          "v_wmma_i32_16x16x16_iu8": 6,
+          "s_barrier": 4
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<8u, 4u, 4u>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 115,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 4096,
+        "static_instructions": 542,
+        "instructions_sha256": "a6535f4eb29a88bdad4d0c911d2e5f52053170f0edeba9fa1816a4d424203a31",
+        "selected_opcodes": {
+          "s_delay_alu": 43,
+          "s_waitcnt": 38,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 3
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<8u, 8u, 4u>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 119,
+        "sgpr_count": 23,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 8192,
+        "static_instructions": 575,
+        "instructions_sha256": "4f9f061d37434381fc01e5280eef531319d59a2178490a92120f880d5d0408b0",
+        "selected_opcodes": {
+          "s_waitcnt": 41,
+          "s_delay_alu": 48,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 4
+        }
+      }
+    ],
+    "coalesced_decode_probe": {
+      "method": "Actual Q5 up17408x5120,8tensors,2full-mantissa seeds,768independent FP64 samples pervariant. All outputs finite, all first-token B1/B8 bits equal.6balancedroundsx4rotations, preparation included perprojection. Four byte fixed-point activation components; direct8/16/32 versus coalesced decode and padded LDS staging8/16, all staged/direct outputs bit-exact, unsigned lower bytes and signed highest byte, native integer WMMA. Changes arithmetic, not qualified model behavior.",
+      "quality": [
+        {
+          "variant": "production",
+          "fp64_samples": 768,
+          "max_abs_error": 5.75839022465e-07,
+          "rmse": 1.60238599542e-07,
+          "relative_rmse": 2.51611952263e-07,
+          "b1_b8_mismatches": 0
+        },
+        {
+          "variant": "direct8",
+          "fp64_samples": 768,
+          "max_abs_error": 4.79377552653e-07,
+          "rmse": 1.51889638255e-07,
+          "relative_rmse": 2.38502136932e-07,
+          "b1_b8_mismatches": 0
+        },
+        {
+          "variant": "direct16",
+          "fp64_samples": 768,
+          "max_abs_error": 4.54581321932e-07,
+          "rmse": 1.48375919914e-07,
+          "relative_rmse": 2.32984780103e-07,
+          "b1_b8_mismatches": 0
+        },
+        {
+          "variant": "direct32",
+          "fp64_samples": 768,
+          "max_abs_error": 4.90228944994e-07,
+          "rmse": 1.44606462645e-07,
+          "relative_rmse": 2.27065853545e-07,
+          "b1_b8_mismatches": 0
+        },
+        {
+          "variant": "staged8",
+          "fp64_samples": 768,
+          "max_abs_error": 4.79377552653e-07,
+          "rmse": 1.51889638255e-07,
+          "relative_rmse": 2.38502136932e-07,
+          "b1_b8_mismatches": 0
+        },
+        {
+          "variant": "staged16",
+          "fp64_samples": 768,
+          "max_abs_error": 4.54581321932e-07,
+          "rmse": 1.48375919914e-07,
+          "relative_rmse": 2.32984780103e-07,
+          "b1_b8_mismatches": 0
+        }
+      ],
+      "median_ms": {
+        "1": {
+          "production": 0.279488,
+          "direct8": 0.523372,
+          "direct16": 0.550008,
+          "direct32": 0.6833685,
+          "staged8": 0.564365,
+          "staged16": 0.6497785
+        },
+        "8": {
+          "production": 0.32442499999999996,
+          "direct8": 0.6530009999999999,
+          "direct16": 0.6265125,
+          "direct32": 0.7318575,
+          "staged8": 0.5778485,
+          "staged16": 0.667497
+        }
+      },
+      "source_sha256": "6d1d9727bf61cbd918564c0878f72366a882b51bbdceb0a124921ee6b963ef6b",
+      "relative_to_production_percent": {
+        "1": {
+          "production": 0.0,
+          "direct8": -46.598595263025146,
+          "direct16": -49.18473913106719,
+          "direct32": -59.10142185365582,
+          "staged8": -50.47743924587811,
+          "staged16": -56.987188711230054
+        },
+        "8": {
+          "production": 0.0,
+          "direct8": -50.317840248330405,
+          "direct16": -48.21731409987831,
+          "direct32": -55.671015190798755,
+          "staged8": -43.856391424395845,
+          "staged16": -51.39678530390399
+        }
+      },
+      "timing_ms_per_matrix_by_round": {
+        "1": {
+          "production": [
+            0.280253,
+            0.279658,
+            0.279179,
+            0.278555,
+            0.280163,
+            0.279318
+          ],
+          "direct8": [
+            0.53838,
+            0.530154,
+            0.525234,
+            0.52151,
+            0.521469,
+            0.519469
+          ],
+          "direct16": [
+            0.560965,
+            0.560276,
+            0.551256,
+            0.54876,
+            0.546708,
+            0.54546
+          ],
+          "direct32": [
+            0.690667,
+            0.6882,
+            0.682599,
+            0.684138,
+            0.674221,
+            0.675758
+          ],
+          "staged8": [
+            0.570444,
+            0.570196,
+            0.564132,
+            0.560085,
+            0.564598,
+            0.558933
+          ],
+          "staged16": [
+            0.65451,
+            0.652776,
+            0.651482,
+            0.647421,
+            0.647076,
+            0.648075
+          ]
+        },
+        "8": {
+          "production": [
+            0.324998,
+            0.323844,
+            0.324247,
+            0.323949,
+            0.325404,
+            0.324603
+          ],
+          "direct8": [
+            0.651848,
+            0.641297,
+            0.656221,
+            0.653045,
+            0.652957,
+            0.653284
+          ],
+          "direct16": [
+            0.623061,
+            0.62456,
+            0.629491,
+            0.626484,
+            0.626878,
+            0.626541
+          ],
+          "direct32": [
+            0.730932,
+            0.73174,
+            0.730508,
+            0.737118,
+            0.732194,
+            0.731975
+          ],
+          "staged8": [
+            0.582306,
+            0.576445,
+            0.576894,
+            0.578803,
+            0.580521,
+            0.575468
+          ],
+          "staged16": [
+            0.66393,
+            0.665814,
+            0.665787,
+            0.679848,
+            0.66918,
+            0.67006
+          ]
+        }
+      },
+      "tensor_names": [
+        "blk.3.ffn_up.weight",
+        "blk.6.ffn_up.weight",
+        "blk.7.ffn_up.weight",
+        "blk.20.ffn_up.weight",
+        "blk.22.ffn_up.weight",
+        "blk.23.ffn_gate.weight",
+        "blk.23.ffn_up.weight",
+        "blk.24.ffn_gate.weight"
+      ]
+    },
+    "coalesced_decode_isa": [
+      {
+        "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1600,
+        "instructions_sha256": "b507cca9f04d9d9cf42b49d2542c89ef8877a1e1a6aa9c0a2ccbcd1b58d7d4a9",
+        "selected_opcodes": {
+          "s_delay_alu": 109,
+          "s_waitcnt": 126,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "vgpr_count": 155,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 17408,
+        "static_instructions": 1600,
+        "instructions_sha256": "d068e8d72b52ded753d8f5a6dd082d8f4d297293237d04028b74b13f2740c8c8",
+        "selected_opcodes": {
+          "s_delay_alu": 109,
+          "s_waitcnt": 126,
+          "s_barrier": 2
+        }
+      },
+      {
+        "name": "void EncodeMatrixActivation<4u>(float const*, MatrixActivation<4u>*, unsigned int)",
+        "vgpr_count": 95,
+        "sgpr_count": 7,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 0,
+        "static_instructions": 425,
+        "instructions_sha256": "1452532839bc59b1d5c3a8b5c4c40b406150388d34d33a1fdf37a45ad0fb2365",
+        "selected_opcodes": {
+          "s_waitcnt": 10,
+          "s_delay_alu": 23
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<1u, 8u, 4u, false>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 108,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 8192,
+        "static_instructions": 566,
+        "instructions_sha256": "259781baf0cc4bac572d84536330376cd81c6e63b3264e8c5a1a4c945bf21d53",
+        "selected_opcodes": {
+          "s_delay_alu": 41,
+          "s_waitcnt": 47,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 4
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<1u, 16u, 4u, false>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 108,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 16384,
+        "static_instructions": 602,
+        "instructions_sha256": "62d3779173a2b3066169cdd24a8a55267608016a7b4ab75ba81a36df42502256",
+        "selected_opcodes": {
+          "s_delay_alu": 43,
+          "s_waitcnt": 52,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 5
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<1u, 32u, 4u, false>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 108,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 32768,
+        "static_instructions": 631,
+        "instructions_sha256": "9da49d260217e3ad93240e02ba389f2d85f1e9ffd59ffd6a327af0185b1e73e0",
+        "selected_opcodes": {
+          "s_delay_alu": 44,
+          "s_waitcnt": 57,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 6
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<1u, 8u, 4u, true>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 104,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 15360,
+        "static_instructions": 578,
+        "instructions_sha256": "987edc6ee45f315a6ec0e987ccbd03b93b9a1725c437f238d4d9c7a8827813d5",
+        "selected_opcodes": {
+          "s_delay_alu": 41,
+          "s_waitcnt": 48,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 6
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<1u, 16u, 4u, true>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 106,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 30720,
+        "static_instructions": 615,
+        "instructions_sha256": "7621fc1e4e45f60fa4f24c5b3d44f1281cfe194b28fc24d4afb9c3f5c8704ea6",
+        "selected_opcodes": {
+          "s_delay_alu": 45,
+          "s_waitcnt": 56,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 7
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<8u, 8u, 4u, false>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 107,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 8192,
+        "static_instructions": 571,
+        "instructions_sha256": "e648019083a6f58c757d1b3dc017f2d4295780bbe18faed336ba3f7b38462df2",
+        "selected_opcodes": {
+          "s_delay_alu": 43,
+          "s_waitcnt": 43,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 4
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<8u, 16u, 4u, false>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 107,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 16384,
+        "static_instructions": 605,
+        "instructions_sha256": "5d772cbe7088d108a741d0356cb57b9f67a2420686121dd440fee355d7ecb16c",
+        "selected_opcodes": {
+          "s_delay_alu": 44,
+          "s_waitcnt": 48,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 5
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<8u, 32u, 4u, false>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 107,
+        "sgpr_count": 19,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 32768,
+        "static_instructions": 634,
+        "instructions_sha256": "2d07dbf64b06a7fe4e1562720cc10c86b54d415feabcfe364c0166f11dcb7c66",
+        "selected_opcodes": {
+          "s_delay_alu": 45,
+          "s_waitcnt": 53,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 6
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<8u, 8u, 4u, true>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 104,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 15360,
+        "static_instructions": 580,
+        "instructions_sha256": "4dde9448f319acc13af6a5d07d98c052cff37b56a752518d117f515285e6eb51",
+        "selected_opcodes": {
+          "s_delay_alu": 40,
+          "s_waitcnt": 48,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 6
+        }
+      },
+      {
+        "name": "void IntegerWmmaQ5<8u, 16u, 4u, true>(void const*, MatrixActivation<4u> const*, float*, unsigned int, unsigned int)",
+        "vgpr_count": 106,
+        "sgpr_count": 20,
+        "private_segment_fixed_size": 0,
+        "group_segment_fixed_size": 30720,
+        "static_instructions": 621,
+        "instructions_sha256": "201330e2c0393e1668162783bfc81c10f973a56b806eddb8d616173b1ec482c9",
+        "selected_opcodes": {
+          "s_delay_alu": 46,
+          "s_waitcnt": 56,
+          "v_wmma_i32_16x16x16_iu8": 8,
+          "s_barrier": 7
+        }
+      }
+    ],
+    "coalesced_contract": "Stage consecutive K groups from each output row through adjacent threads, decode once, and use padded LDS for native matrix fragments. Each staged8/staged16 result must equal its respective direct8/direct16 result across every output. That comparison passes. Increase K splits only in this new algorithm, to16/32.",
+    "decision": "Reject. Initial best four-component B8 takes0.555781ms versus0.332223ms production (+67.29% time). Coalescing improves the revised direct8 variant, but staged8 still takes0.5778485ms versus0.324425ms production (+78.11% time). Larger splits do not close the gap. No spilling; lower VGPR counts and fewer static instructions do not imply higher throughput.",
+    "comparison_limit": "Compare each candidate only with its own harness control. Rewriting the loop for shared staging changes direct-path code generation; its absolute rates are not interchangeable with the initial harness."
+  },
+  "block_limit": {
+    "draft_gguf_key": "dflash.block_size",
+    "value": 8,
+    "includes_anchor": true,
+    "controller_max_proposals": 7,
+    "finding": "The current Q4 draft checkpoint supports seven proposals plus its committed anchor. The controller does not truncate a larger trained block in this artifact.",
+    "inspected_sources": [
+      "src/models/qwen/dflash_weights.hpp",
+      "src/models/qwen/dflash_policy.hpp",
+      "src/models/qwen/hip/dflash/backend.cpp"
+    ]
+  },
+  "probe_source_sha256": {
+    "qwen_last_barrier_probe.hip": "a53f1c1e6043c673982016c31a7bb248dc5f9ebefca01e8541c4b3436bec88c7",
+    "qwen_last_barrier_probe.hpp": "86925357ac6e991f1937a3ba8ac05fc82c75f3a58fa7f107203fea172d837e9f",
+    "qwen-last-barrier-run.py": "a69c0777e4cbe581e986ce75b53267b54b82c793de2d287ac4f00fa64ad88e65",
+    "qwen_integer_wmma_probe.hip": "dbb0e242ef4566c3c0eb2ee16a8751c57f005f6815de6c67d896b85802b6b8ef",
+    "qwen-integer-wmma-run.py": "4423ed69091cb27c9f5da38120e92ad584326b5f2310e35f3f82d539a3b9718d",
+    "qwen_integer_wmma_staging_probe.hip": "6d1d9727bf61cbd918564c0878f72366a882b51bbdceb0a124921ee6b963ef6b",
+    "qwen-integer-wmma-staging-run.py": "94b3d8c6f6f52c4b01e8639d11928f93161f96ec57b33bee072179a1f53e103b"
+  },
+  "probe_binary_sha256": {
+    "/tmp/qwen_last_barrier_probe": "198fbea9459ed43762101b81d009677f01e5df2705cfd684fdcf260d11f817ea",
+    "/tmp/qwen_integer_wmma_probe": "de0542ba1ceba7baa1b848285e0a6c678d08a73c09e017047ff8fa300584d22c",
+    "/tmp/qwen_integer_wmma_staging_probe": "16a9403cfa391ec52651c3cff1298337e13a066608a7af058bd52447953ac27b"
+  },
+  "raw_evidence_sha256": {
+    "qwen-last-barrier-results.json": "e63542e9307315b13876f152df10b386fa6f74a27167b177dbea36172d1a61eb",
+    "qwen-last-barrier-isa.json": "63a04f400e5ea35813cdb69961eb2f4756fd5fae4a05cb0bcfb0241f6b93b11d",
+    "qwen-integer-wmma-results.json": "05b502a21c13a4ae77c7fb70e69d298b8e60526d6c07a17b3e63d0a284396b12",
+    "qwen-integer-wmma-isa.json": "45016d09edb5279bd507a1a34940c2af8eae30bc88e1a733bdb03295d0a06395",
+    "qwen-integer-wmma-staging-results.json": "171e2ae254fddfbc5a3562bd232269feb32a8f2a08b7ccb6fe6307c8a3ebcc23",
+    "qwen-integer-wmma-staging-isa.json": "f03b1afe6bf00cbe6b5b85ba2ea778353f2d30be3c80edee5d1af6636338ed8c"
+  },
+  "remote_directories": [
+    "/tmp/qwen-last-barrier",
+    "/tmp/qwen-last-barrier-probe-isa",
+    "/tmp/qwen-integer-wmma",
+    "/tmp/qwen-integer-wmma-probe-isa",
+    "/tmp/qwen-integer-wmma-staging",
+    "/tmp/qwen-integer-wmma-staging-probe-isa"
+  ],
+  "limits": [
+    "No production change or fresh model quality/speed sweep. Current qualified release evidence remains in dflash2-synchronization.json.",
+    "Operator accuracy and B1/B8 equality do not qualify changed target distributions or establish original-checkpoint fidelity.",
+    "No75-question capability comparison; no new execution switch, maintained tool or test.",
+    "The full performance objective remains open."
+  ]
+}

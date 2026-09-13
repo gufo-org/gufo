@@ -139,6 +139,14 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Rejected matrix/loop probes](dflash2-matrix-probes.json): skipping the final
+  tile barrier loses up to 2.5% while preserving every checked output. Native
+  integer WMMA with four activation components slightly improves sampled FP64
+  operator error, but takes 67–78% more time in the relevant paired controls.
+  Coalesced weight staging and larger K splits do not close the gap; staged
+  and direct outputs agree exactly. This does not qualify changed model
+  numerics. The draft GGUF's block size is eight, so seven proposals plus the
+  anchor is the correct cap. Production and maintained checks are unchanged.
 - [Shared-memory synchronization](dflash2-synchronization.json): packed
   projections retain LDS completion, the workgroup barrier and compiler
   ordering while avoiding global cache invalidation. Arithmetic is unchanged.
