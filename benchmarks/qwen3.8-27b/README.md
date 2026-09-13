@@ -115,7 +115,8 @@ The [quality report](eval/README.md) indexes the remaining evidence.
 
 Compiler scheduling flags did not change the emitted kernels; scheduling
 boundaries and expanded Q5 codes were slower. Rounded EMA and a smaller
-initial controller prior regressed prose. None is retained.
+initial controller prior regressed prose. Broader FMA scheduling changes
+showed no meaningful release gain. None is retained.
 
 The upstream headline uses different artifacts/power and excludes prefill;
 it is not a matched engine comparison. [Source audit and comparison limits](eval/llama-comparison.json).

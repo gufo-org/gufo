@@ -139,6 +139,10 @@ injection; the complete serialized history must remain byte-identical.
   JSON improves 0.35%, repetition 0.31%, and prose is effectively flat.
   The affected kernel union takes 0.93% less GPU time with zero scratch.
   Q8 target and Q8/BF16 draft artifacts contain no Q5 tensors.
+  Further Q4 batch-eight/Q5 batch-seven scheduling changes pass the same
+  quality checks but leave release throughput effectively flat, so they
+  are reverted. Six additional Q5 FMA patterns also fail to beat the
+  controls consistently; the same record includes both rejected experiments.
 - [Mixed-format scalar projections](dflash2-mixed-formats.json): independently
   specializing gate/up formats retains all 51 Q4 verifier/scalar logit rows,
   the cache/context controls and all 90 Q4 draft trace files. The consolidated
