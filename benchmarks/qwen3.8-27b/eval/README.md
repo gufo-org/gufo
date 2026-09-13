@@ -191,6 +191,9 @@ Prefill experiments: native wave64 retained for Q4_K/Q5_K/Q6_K/Q8_0 and
 IQ4_XS down projections, with branch-free affine scale decoding. Row-loop
 reordering, smaller tiles, deeper staging and removal of tile bounds checks
 rejected as flat or slower.
+Temporary weight expansion and larger/fused tiles were not retained: gains
+were small or workload-dependent. Floating-point WMMA did not preserve exact
+outputs.
 
 | Artifact | SHA-256 |
 | --- | --- |
