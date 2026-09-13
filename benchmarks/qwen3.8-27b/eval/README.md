@@ -198,11 +198,18 @@ IQ4_XS down projections, with branch-free affine scale decoding. Q4_K/Q5_K
 also retain eight-row tile grouping and 64-byte padding between weight stages.
 Larger/fused tiles, weight expansion and additional metadata caching did not
 justify their complexity. Dedicated loader waves, double buffering, regrouped
-integer dots and offset-sign changes were flat or slower.
+integer dots and offset-sign changes were flat or slower. Compiler scheduling,
+DS/WMMA interleaving and direct activation reads were also slower.
 FP16/FP32 WMMA differed from an independent integer-dot oracle even with
 integer-valued inputs. Nearest-integer rounding restored the tested Q5/Q8
 matrix outputs, but conversion plus GEMM had 34–38% lower throughput. Retain
 integer WMMA.
+
+Dense FP16 inputs with FP32 accumulation reduced error against sampled FP64
+operator references, using CPU-checked weight decoding. Library GEMM and
+direct/prefetched WMMA remained slower after conversion costs; the best
+pipeline lost 9–17% throughput on Q5 and 18–24% on Q8. This alternative was
+not retained or qualified at model level.
 
 | Artifact | SHA-256 |
 | --- | --- |
