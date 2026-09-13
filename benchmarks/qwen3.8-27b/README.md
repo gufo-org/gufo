@@ -19,7 +19,8 @@ Standard sweep: **pp2048 / tg128**, C1. Cells are prefill / generation tok/s.
 | 16,384 | TODO | TODO |
 
 Prefill measured 2026-09-13 with the qualified native wave64 kernels: four
-warmed samples for Q4 and two for Q8. The 600 tok/s prefill target remains open.
+warmed samples for Q4 and two for Q8. Current optimization focuses on
+**Q4 AR pp2048**, targeting **600 tok/s without quality loss**.
 
 ## Single user, DFlash2
 

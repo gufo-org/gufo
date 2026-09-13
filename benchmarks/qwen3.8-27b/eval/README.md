@@ -200,18 +200,22 @@ Larger/fused tiles, weight expansion and additional metadata caching did not
 justify their complexity. Dedicated loader waves, double buffering, regrouped
 integer dots and offset-sign changes were flat or slower. Compiler scheduling,
 DS/WMMA interleaving and direct activation reads were also slower.
+Larger wave32 workgroups were slower; interleaved activation metadata did not
+improve total time. GPU weight copies gave only 2–3% isolated gains with extra
+storage; production retains mapped weights.
 FP16/FP32 WMMA differed from an independent integer-dot oracle even with
 integer-valued inputs. Nearest-integer rounding restored the tested Q5/Q8
 matrix outputs, but conversion plus GEMM had 34–38% lower throughput. Retain
 integer WMMA.
 
-Global FP16 weight expansion was slower. Experimental fused dequantization,
-bank-aware staging and deferred decoding improve large FFN operator throughput
-by 6–37% with the best tested variants across Q4/Q5/Q6/IQ4/Q8. CPU decoder
-checks, sampled FP64 error checks and exact raw-decoder replay pass, including
-partial tiles; the small partial-tile case is slower. This changes arithmetic
-and remains a prototype: model-level quality, selective dispatch and DFlash2
-speed qualification are **TODO**. Production still uses integer WMMA.
+Global FP16 weight expansion was slower. Fused FP16 FFN execution remains
+**unqualified**: large-operator throughput improved, and sampled relative RMSE
+against FP64 fell by at least 20× across 183 projections using real Q4 activations.
+However, 42 full-vocabulary model rows against a streamed FP32 FFN reference
+show mixed individual errors and one lost greedy agreement. Repeatability and
+scalar/verification replay pass; the numerical gate fails. The reference uses
+the same quantized weights, not the original checkpoint. Production retains
+integer WMMA. Current optimization focuses on Q4 pp2048.
 
 | Artifact | SHA-256 |
 | --- | --- |
