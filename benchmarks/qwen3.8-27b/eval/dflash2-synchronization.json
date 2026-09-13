@@ -2180,6 +2180,99 @@
         }
       ],
       "limits": "The unchanged template compiles to145VGPR in this translation unit, versus155 in the integer/barrier harnesses and160 allocated at runtime in the qualified release. Its identical-clone control matches instructions. Do not compare absolute rates across these harnesses; no release bounds-free comparison was run."
+    },
+    "precomputed_activation_sums": {
+      "baseline_commit": "3e18df73cf03983f2cf9b2c7fe50ea30786f9046",
+      "retained": false,
+      "method": "Actual Q5 GGUF, batch8 and production geometry. Original vs identical clone vs precomputed exact per-subgroup activation sums. prepared_with_launch includes one preparation kernel per projection. prepared_reused_ceiling excludes preparation to estimate potential reuse/fusion only; not a production speed claim. Two full-mantissa input seeds, every output finite/bit-exact before timing.12balancedroundsx6rotations through16tensors.",
+      "contract": "One thread sums sixteen FP32 activations in the existing left-to-right order. Each projection tile then loads this exact sum; weights, dot products and final reduction order are unchanged.",
+      "quality": "All outputs finite and bit-identical for two full-mantissa seeds across sixteen actual tensors per shape. No production edit or model qualification for the rejected probe.",
+      "results": [
+        {
+          "shape": "q5-17408-5120",
+          "matrices": 16,
+          "median_ms": {
+            "production": 0.3340925,
+            "clone": 0.3340765,
+            "prepared_with_launch": 0.3365225,
+            "prepared_reused_ceiling": 0.334646
+          },
+          "gain_percent": {
+            "production": 0.0,
+            "clone": 0.004789322206155688,
+            "prepared_with_launch": -0.7220913906202386,
+            "prepared_reused_ceiling": -0.16539866007660997
+          }
+        },
+        {
+          "shape": "q5-5120-17408",
+          "matrices": 16,
+          "median_ms": {
+            "production": 0.32264950000000003,
+            "clone": 0.324218,
+            "prepared_with_launch": 0.348522,
+            "prepared_reused_ceiling": 0.34586399999999995
+          },
+          "gain_percent": {
+            "production": 0.0,
+            "clone": -0.4837794323572342,
+            "prepared_with_launch": -7.423491199981624,
+            "prepared_reused_ceiling": -6.712031318668588
+          }
+        },
+        {
+          "shape": "q5-5120-6144",
+          "matrices": 16,
+          "median_ms": {
+            "production": 0.1258545,
+            "clone": 0.1257105,
+            "prepared_with_launch": 0.1297075,
+            "prepared_reused_ceiling": 0.127352
+          },
+          "gain_percent": {
+            "production": 0.0,
+            "clone": 0.11454890402951001,
+            "prepared_with_launch": -2.9705298459996476,
+            "prepared_reused_ceiling": -1.175874740875671
+          }
+        }
+      ],
+      "isa_summary": {
+        "vgpr_count": {
+          "baseline": 155,
+          "candidate": 155
+        },
+        "sgpr_count": {
+          "baseline": 20,
+          "candidate": 24
+        },
+        "scratch_bytes": {
+          "baseline": 0,
+          "candidate": 0
+        },
+        "lds_bytes": {
+          "baseline": 17408,
+          "candidate": 17408
+        },
+        "static_instructions": {
+          "baseline": 1600,
+          "candidate": 1599
+        },
+        "static_s_waitcnt": {
+          "baseline": 126,
+          "candidate": 131
+        },
+        "clone_control": "The source clone has identical opcodes/resources; one kernel-argument offset changes from40 to48 because the prototype adds an unused pointer argument. Its speed stays within0.49% of production."
+      },
+      "decision": "Reject: including preparation loses 0.72%, 7.42%, 2.97% on up/down/medium. Even the reuse-only ceiling excluding preparation loses 0.17%, 6.71%, 1.18%. No sums workspace or normalization fusion added.",
+      "source_sha256": {
+        "qwen_sums_probe.hip": "e1f68a7e8b3c4006af6463521170c735f0d0591d04e437f0fd74c81b4ee41bff",
+        "qwen_sums_probe.hpp": "2fe86a8c2ee9907a373ae2f6a9cc9b0be7499658ce91cb862778f28a02aaa166",
+        "qwen-sums-run.py": "934044eeef92a1ba7d81784b4f6b736cdb7d4d91cbd2632925ac6ff9133b74d7"
+      },
+      "remote_raw_directory": "/tmp/qwen-sums",
+      "raw_results_sha256": "83adc8cae3bbb31241711ccbcb788143197b75da6690485d1aae3a4f2faae7c0",
+      "isa_sha256": "b3a7b6595b7307c58996e975b30a29dfcccbe3a81b209bea40fcd438a63d2b49"
     }
   },
   "deprioritized_operators": {

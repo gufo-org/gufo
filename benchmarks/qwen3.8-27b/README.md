@@ -119,9 +119,9 @@ AR generation to **11.74 tok/s** at depth zero. Earlier work covers
 [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json).
 The [quality report](eval/README.md) indexes the remaining evidence.
 
-Lossless row packing, residual-precision WMMA/INT8 and removing full-tile
-bounds checks were slower; alignment hints changed no instructions.
-Rejected scheduling, expanded-code and controller experiments remain excluded.
+Lossless row packing, residual-precision WMMA/INT8, precomputed activation
+sums and removing full-tile bounds checks were slower. Alignment hints
+changed no instructions; rejected experiments remain excluded.
 
 **Same host and identical Q4 target/draft files**, at `b55a120`, raw tg300,
 including prefill:
