@@ -145,6 +145,17 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Short-block Q5 projections](dflash2-prose-projections.json): medium
+  projections at widths 5–6 reuse four rows, with unchanged arithmetic.
+  Selected isolated gains are 3–13%; release prose improves 0.24%,
+  repetition 0.21%, and pooled JSON decreases 0.13%. All 16 continuations,
+  102 full-logit rows, 102 feature rows, C3 cache controls and 90 Q4 draft
+  traces remain exact. The matched 9,450-call projection union includes
+  unchanged FFN down projections and takes 2.14% less GPU time; whole prose
+  GPU time falls 0.43%. Wider tiles, compiler barriers, full draft blocks and
+  residual/norm fusion were rejected. A 256-token acceptance diagnostic
+  remains AR-exact; sparse later-position observations do not justify a
+  controller change.
 - [Remaining mixed-format projections](dflash2-remaining-formats.json):
   selected Q6/IQ projections reuse activations across four output rows at
   widths 3–8, preserving the exact kernel arithmetic. Both quantized operator

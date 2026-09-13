@@ -95,24 +95,24 @@ table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
 **Latest Q4 target/Q4 draft:** greedy C1, including prefill and excluding
 model loading. Each workload uses two samples per binary in ABBA order
-after warmup on the quiet host; prose also has a BAAB confirmation, pooled
+after warmup on the quiet host; JSON also has a BAAB confirmation, pooled
 with the initial samples. These are short controls.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 56.49 | **56.61** | +0.21% |
-| JSON, tg300, adaptive | 53.38 | **53.66** | +0.53% |
-| Prose, tg300, adaptive | 23.58 | **23.58** | flat |
+| Repetition, tg128, fixed-7 | 56.66 | **56.78** | +0.21% |
+| JSON, tg300, adaptive | 53.75 | **53.68** | −0.13% |
+| Prose, tg300, adaptive | 23.58 | **23.64** | +0.24% |
 
-The latest [mixed-format projection change](eval/dflash2-remaining-formats.json)
-shares activations across four output rows for selected Q6/IQ projections.
-The affected 1,341 calls take 11.53% less GPU time; overall gains remain small
-because these calls account for only 5% of the profile. All 16 continuations,
+The latest [Q5 projection change](eval/dflash2-prose-projections.json)
+shares activations across four output rows for medium projections at widths
+5–6. The matched projection group takes 2.14% less GPU time; the full prose
+trace falls 0.43%. End-to-end gains remain small. All 16 continuations,
 102 verification logit rows, 102 feature rows, C3 cache controls and 90 Q4
-draft traces remain exact. Arithmetic and allocations are unchanged.
-Earlier [contiguous FFNs](eval/dflash2-contiguous-ffn.json) remove 1,554
-projection launches; [feature transfers](eval/dflash2-feature-transfer.json)
-improved JSON 1.93% and repetition 1.45%.
+draft traces remain exact. Arithmetic, weights and allocations are unchanged.
+Earlier [mixed-format reuse](eval/dflash2-remaining-formats.json),
+[contiguous FFNs](eval/dflash2-contiguous-ffn.json) and
+[feature transfers](eval/dflash2-feature-transfer.json) remain qualified.
 
 The controller uses [measured Q4 verification costs](eval/dflash2-controller-cost.json);
 Q8 keeps its previous formula. Its earlier chat comparison was flat in
@@ -124,11 +124,10 @@ AR generation to **11.74 tok/s** at depth zero. Earlier work covers
 [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json).
 The [quality report](eval/README.md) indexes the remaining evidence.
 
-Lossless row packing, residual-precision WMMA/INT8, precomputed activation
-sums and removing full-tile bounds checks were slower. Alignment hints
-changed no instructions. Further [integer-matrix and final-barrier probes](eval/dflash2-matrix-probes.json)
-also lost. [Lossless Q6 head expansion](eval/dflash2-feature-transfer.json)
-increased bandwidth demand and lost 14–26%; rejected experiments remain excluded.
+Wider Q5 tiles, compiler barriers, full draft blocks with short verification
+and residual/norm fusion failed their speed controls and remain excluded.
+The [latest report](eval/dflash2-prose-projections.json) records these attempts;
+earlier rejected experiments are indexed in the [quality report](eval/README.md).
 
 **Same host and identical Q4 target/draft files**, at `b55a120`, raw tg300,
 including prefill:

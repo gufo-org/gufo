@@ -1781,11 +1781,32 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
         }
         if constexpr (WType == core::GgmlType::kQ5_K && Batch <= 6) {
           const auto launch_rows =
-              [&]<std::size_t Tiles, std::size_t TokensPerStep = Batch>() {
-            SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, Tiles, 4,
-                                               1, true, TokensPerStep>
-                <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
+              [&]<std::size_t Tiles, std::size_t TokensPerStep = Batch,
+                  std::uint32_t Waves = 16>() {
+            SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, 4, WType, Tiles,
+                                               4, 1, true, TokensPerStep>
+                <<<(m + Waves * 4 - 1) / (Waves * 4), Waves * 32, 0, stream>>>(
+                    w, fp32_x, y, m, k);
           };
+          // Short adaptive blocks frequently use these medium projections.
+          // Reuse four rows only at widths/shapes with measured gains.
+          if constexpr (Batch == 5) {
+            if (m == 6144 && k == 5120) {
+              launch_rows.template operator()<1, Batch, 8>();
+              return;
+            }
+            if (m == 5120 && k == 6144) {
+              launch_rows.template operator()<1>();
+              return;
+            }
+          }
+          if constexpr (Batch == 5 || Batch == 6) {
+            if ((m == 5120 && k == 6144) ||
+                (k == 5120 && (m == 6144 || m == 10240 || m == 12288))) {
+              launch_rows.template operator()<2>();
+              return;
+            }
+          }
           // Reuse four output rows for the FFNs and selected smaller
           // projections, including the shortest speculative blocks.
           if constexpr (Batch == 2) {
