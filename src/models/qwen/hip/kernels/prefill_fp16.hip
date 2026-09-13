@@ -124,7 +124,8 @@ __device__ __forceinline__ gufo::hip::QuantSub16 DecodeRaw(
 }
 
 // Fully scaled FP16 weights and activations; FP32 accumulation in K16 order.
-template<int BM, int BN, int WM, int WN, gufo::core::GgmlType Type, bool SwiGLU>
+template<int BM, int BN, int WM, int WN, gufo::core::GgmlType Type, bool SwiGLU,
+         bool Complete = false>
 __launch_bounds__(WM * WN * 32) __global__
     void HalfPrefillGemmKernel(const void* __restrict__ w,
                                const short* __restrict__ x,
@@ -179,14 +180,17 @@ __launch_bounds__(WM * WN * 32) __global__
   for (int p = 0; p < PFA; ++p) {
     const int r = r_block + (((p * kThreads) + tid) / BK);
     w_row[p] = static_cast<const std::uint8_t*>(w) +
-               (static_cast<std::size_t>((r < m) ? r : (m - 1)) * row_bytes);
+               (static_cast<std::size_t>((Complete || r < m) ? r : (m - 1)) *
+                row_bytes);
   }
   const short* x_row[PFB];
 #pragma unroll
   for (int p = 0; p < PFB; ++p) {
     const int t = t_block + (((p * kThreads) + tid) / BK);
     x_row[p] =
-        x + (static_cast<std::size_t>((t < batch) ? t : (batch - 1)) * k);
+        x +
+        (static_cast<std::size_t>((Complete || t < batch) ? t : (batch - 1)) *
+         k);
   }
 
   uint4 ra[PFA][2], rb[PFB][2];
@@ -196,7 +200,7 @@ __launch_bounds__(WM * WN * 32) __global__
 #pragma unroll
     for (int p = 0; p < PFA; ++p) {
       const int idx = p * kThreads + tid, kk = ks0 + idx % BK;
-      if (idx < BM * BK && kk < ksteps) {
+      if (idx < BM * BK && (Complete || kk < ksteps)) {
         if constexpr (DecodeStage == 2)
           raw[p] = LoadRaw<Type>(w_row[p], kk);
         else {
@@ -223,7 +227,7 @@ __launch_bounds__(WM * WN * 32) __global__
 #pragma unroll
     for (int p = 0; p < PFB; ++p) {
       const int idx = p * kThreads + tid, kk = ks0 + idx % BK;
-      if (idx < BN * BK && kk < ksteps) {
+      if (idx < BN * BK && (Complete || kk < ksteps)) {
         const short* src = x_row[p] + static_cast<std::size_t>(kk) * 16;
         rb[p][0] = *reinterpret_cast<const uint4*>(src);
         rb[p][1] = *reinterpret_cast<const uint4*>(src + 8);
@@ -284,15 +288,19 @@ __launch_bounds__(WM * WN * 32) __global__
             LoadSwizzled(&s_b[ks][(wt * WTS) + j][sl ^ (ks & 3)][0]);
 #pragma unroll
         for (int i = 0; i < WRS; ++i) {
-          acc[i][j] = WmmaHalf(a[i], b, acc[i][j]);
+          if constexpr (Type == gufo::core::GgmlType::kIQ3_S)
+            acc[i][j] = WmmaHalf(a[i], b, acc[i][j]);
+          else
+            acc[i][j] = WmmaHalf(b, a[i], acc[i][j]);
         }
       }
     }
     __syncthreads();
   }
 
-  // C element l of a wave32 tile is row 2l + lane/16, column lane%16. The
-  // output is [token][row], so transpose through the (now dead) weight stage.
+  // Orient WMMA output as [token][row] for coalesced direct stores. IQ3_S
+  // keeps the original orientation and LDS transpose, which is faster for
+  // its decoder's register schedule.
   const auto store = [&](std::size_t index, float value) {
     if constexpr (SwiGLU) {
       const float g = gate[index];
@@ -302,48 +310,66 @@ __launch_bounds__(WM * WN * 32) __global__
     } else
       y[index] = value;
   };
-  __syncthreads();
   const int hi = lane / 16;
-  constexpr int Slots =
-      (sizeof(s_a) >= sizeof(s_b) ? sizeof(s_a) : sizeof(s_b)) / (256 * 4);
-  static_assert(Slots >= WM * WN);
-  float* scratch = (sizeof(s_a) >= sizeof(s_b)
-                        ? reinterpret_cast<float*>(&s_a[0][0][0][0])
-                        : reinterpret_cast<float*>(&s_b[0][0][0][0])) +
-                   (wave * 256);
+  if constexpr (Type != gufo::core::GgmlType::kIQ3_S) {
+#pragma unroll
+    for (int i = 0; i < WRS; ++i) {
+#pragma unroll
+      for (int j = 0; j < WTS; ++j) {
+        const int row = r_block + ((wr * WRS + i) * 16) + sl;
+        const int t0 = t_block + ((wt * WTS + j) * 16);
+#pragma unroll
+        for (int l = 0; l < 8; ++l) {
+          const int token = t0 + 2 * l + hi;
+          if (Complete || (row < m && token < batch))
+            store(std::size_t(token) * m + row, acc[i][j][l]);
+        }
+      }
+    }
+  } else {
+    __syncthreads();
+    constexpr int Slots =
+        (sizeof(s_a) >= sizeof(s_b) ? sizeof(s_a) : sizeof(s_b)) / (256 * 4);
+    static_assert(Slots >= WM * WN);
+    float* scratch = (sizeof(s_a) >= sizeof(s_b)
+                          ? reinterpret_cast<float*>(&s_a[0][0][0][0])
+                          : reinterpret_cast<float*>(&s_b[0][0][0][0])) +
+                     (wave * 256);
 
 #pragma unroll
-  for (int i = 0; i < WRS; ++i) {
+    for (int i = 0; i < WRS; ++i) {
 #pragma unroll
-    for (int j = 0; j < WTS; ++j) {
+      for (int j = 0; j < WTS; ++j) {
 #pragma unroll
-      for (int l = 0; l < 256 / WaveSize; ++l) {
-        scratch[(sl * 16) + ((WaveSize / 16) * l) + hi] = acc[i][j][l];
-      }
-      __builtin_amdgcn_wave_barrier();
-      const int r0 = r_block + (((wr * WRS) + i) * 16);
-      const int t0 = t_block + (((wt * WTS) + j) * 16);
-      if (t0 + 16 <= batch && r0 + 16 <= m) {
-        const std::size_t base =
-            (static_cast<std::size_t>(t0) * m) + static_cast<std::size_t>(r0);
-#pragma unroll
-        for (int s = 0; s < 256 / WaveSize; ++s) {
-          const int flat = (s * WaveSize) + lane;
-          store(base + (static_cast<std::size_t>(flat >> 4) * m) + (flat & 15),
-                scratch[flat]);
+        for (int l = 0; l < 256 / WaveSize; ++l) {
+          scratch[(sl * 16) + ((WaveSize / 16) * l) + hi] = acc[i][j][l];
         }
-      } else {
+        __builtin_amdgcn_wave_barrier();
+        const int r0 = r_block + (((wr * WRS) + i) * 16);
+        const int t0 = t_block + (((wt * WTS) + j) * 16);
+        if (t0 + 16 <= batch && r0 + 16 <= m) {
+          const std::size_t base =
+              (static_cast<std::size_t>(t0) * m) + static_cast<std::size_t>(r0);
 #pragma unroll
-        for (int s = 0; s < 256 / WaveSize; ++s) {
-          const int flat = (s * WaveSize) + lane;
-          const int tok = t0 + (flat >> 4);
-          const int r = r0 + (flat & 15);
-          if (tok < batch && r < m) {
-            store((static_cast<std::size_t>(tok) * m) + r, scratch[flat]);
+          for (int s = 0; s < 256 / WaveSize; ++s) {
+            const int flat = (s * WaveSize) + lane;
+            store(
+                base + (static_cast<std::size_t>(flat >> 4) * m) + (flat & 15),
+                scratch[flat]);
+          }
+        } else {
+#pragma unroll
+          for (int s = 0; s < 256 / WaveSize; ++s) {
+            const int flat = (s * WaveSize) + lane;
+            const int tok = t0 + (flat >> 4);
+            const int r = r0 + (flat & 15);
+            if (tok < batch && r < m) {
+              store((static_cast<std::size_t>(tok) * m) + r, scratch[flat]);
+            }
           }
         }
+        __builtin_amdgcn_wave_barrier();
       }
-      __builtin_amdgcn_wave_barrier();
     }
   }
 }
@@ -397,23 +423,30 @@ void DirectGemm(gufo::core::GgmlType type, const void* w, const void* x,
                 float* y, std::size_t batch, std::size_t m, std::size_t k,
                 const float* gate, hipStream_t stream) {
   const auto launch = [&]<gufo::core::GgmlType Type>() {
-    if constexpr (SwiGLU)
-      HalfPrefillGemmKernel<256, 256, 8, 4, Type, true>
+    const auto large = [&]<bool Full>() {
+      HalfPrefillGemmKernel<256, 256, 8, 4, Type, SwiGLU, Full>
           <<<dim3((batch + 255) / 256, (m + 255) / 256), 1024, 0, stream>>>(
               w, static_cast<const short*>(x), y, batch, m, k, gate);
-    else {
-      if (m >= 4096)
-        HalfPrefillGemmKernel<256, 256, 8, 4, Type, false>
-            <<<dim3((batch + 255) / 256, (m + 255) / 256), 1024, 0, stream>>>(
-                w, static_cast<const short*>(x), y, batch, m, k, nullptr);
-      else if (m >= 1024)
-        HalfPrefillGemmKernel<64, 128, 2, 4, Type, false>
-            <<<dim3((batch + 127) / 128, (m + 63) / 64), 256, 0, stream>>>(
-                w, static_cast<const short*>(x), y, batch, m, k, nullptr);
-      else
-        HalfPrefillGemmKernel<32, 64, 2, 2, Type, false>
-            <<<dim3((batch + 63) / 64, (m + 31) / 32), 128, 0, stream>>>(
-                w, static_cast<const short*>(x), y, batch, m, k, nullptr);
+    };
+    if (SwiGLU || m >= 4096) {
+      // Only Q4/Q5 benefit from removing the tail checks on complete tiles.
+      // Other formats retain the general kernel's better register schedule.
+      if constexpr (Type == gufo::core::GgmlType::kQ4_K ||
+                    Type == gufo::core::GgmlType::kQ5_K) {
+        if (m % 256 == 0 && batch % 256 == 0) {
+          large.template operator()<true>();
+          return;
+        }
+      }
+      large.template operator()<false>();
+    } else if (m >= 1024) {
+      HalfPrefillGemmKernel<64, 128, 2, 4, Type, false>
+          <<<dim3((batch + 127) / 128, (m + 63) / 64), 256, 0, stream>>>(
+              w, static_cast<const short*>(x), y, batch, m, k, nullptr);
+    } else {
+      HalfPrefillGemmKernel<32, 64, 2, 2, Type, false>
+          <<<dim3((batch + 63) / 64, (m + 31) / 32), 128, 0, stream>>>(
+              w, static_cast<const short*>(x), y, batch, m, k, nullptr);
     }
   };
   using gufo::core::GgmlType;

@@ -22,6 +22,7 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/ops.hpp"
+#include "src/models/qwen/hip/ops/prefill_fp16.hpp"
 #include "src/models/qwen/modules/ffn.hpp"
 #include "src/models/qwen/modules/layer_view.hpp"
 #include "src/models/qwen/modules/module_ctx.hpp"
@@ -30,6 +31,7 @@
 #include "src/models/qwen/modules/residual.hpp"
 #include "tests/models/qwen/hip/support/bfloat16.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
+#include "tests/models/qwen/hip/support/device_buffer.hpp"
 #include "tests/models/qwen/support/synthetic_weights.hpp"
 
 void TestRecurrentRollbackRows(bool large_state) {
@@ -644,6 +646,52 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
   };
   compare_bf16("gated output", out_ref, out_bf16, 3e-2);
   compare_bf16("carried state", delta_ref, delta_bf16, 3e-2);
+
+  // Direct FP16 output must match the original FP32 epilogue followed by a
+  // cast, for both recurrent-state formats and both register-tile sizes.
+  // Reuse the existing scratch and restart from the same nonzero state.
+  for (const bool bf16_state : {false, true}) {
+    gufo::test::DeviceBuffer<std::uint16_t> expected(batch * inner_size);
+    gufo::test::DeviceBuffer<std::uint16_t> actual(batch * inner_size);
+    float* output = bf16_state ? d_out_bf16 : d_out_new;
+    float* conv_state = bf16_state ? d_state_bf16 : d_state_new;
+    float* conv_output = bf16_state ? d_conv_bf16 : d_conv_new;
+    void* state = bf16_state ? d_delta_bf16 : d_delta_new;
+    const auto storage = bf16_state
+                             ? gufo::hip::QwenRecurrentStateStorage::kBf16
+                             : gufo::hip::QwenRecurrentStateStorage::kFp32;
+    gufo::hip::LaunchFloatToFp16(output, expected.data(), batch * inner_size,
+                                 nullptr);
+    HIP_CHECK(hipMemset(conv_state, 0, qkv_dim * 4 * sizeof(float)));
+    if (bf16_state) {
+      HIP_CHECK(hipMemcpy(state, h_delta0_bf16.data(),
+                          delta_size * sizeof(std::uint16_t),
+                          hipMemcpyHostToDevice));
+    } else {
+      upload(static_cast<float*>(state), h_delta0);
+    }
+    gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
+        d_qkv, d_w, conv_state, conv_output, state, d_alpha, d_beta, d_ssm_a,
+        d_ssm_dt, d_ssm_norm, d_gate, output, nullptr, d_kq, d_ab, 0, batch,
+        qkv_dim, num_key_heads, num_heads, key_dim, val_dim, nullptr, storage,
+        actual.data());
+    if (actual.CopyToHost() != expected.CopyToHost()) {
+      throw std::runtime_error("fused SSM FP16 epilogue changed output bits");
+    }
+    std::vector<std::uint8_t> state_bits(
+        delta_size * gufo::hip::QwenRecurrentStateElementBytes(storage));
+    HIP_CHECK(hipMemcpy(state_bits.data(), state, state_bits.size(),
+                        hipMemcpyDeviceToHost));
+    const void* expected_state =
+        bf16_state ? static_cast<void*>(delta_bf16_bits.data())
+                   : static_cast<void*>(delta_new.data());
+    if (std::memcmp(state_bits.data(), expected_state, state_bits.size()) !=
+        0) {
+      throw std::runtime_error("FP16 epilogue changed recurrent state");
+    }
+  }
+  // Restore the FP32 reference consumed by the Q8_1 epilogue check below.
+  upload(d_out_new, out_new);
 
   // opt-c174-ssm-epilogue-quant: with a Q8_1 destination the epilogue quantizes
   // the gated row in the same pass instead of storing FP32 for the quantizer to

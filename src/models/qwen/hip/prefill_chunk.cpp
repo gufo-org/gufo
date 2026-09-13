@@ -455,19 +455,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             ssm_qkv_size, time_step_rank, arena_.stream);
       }
 
-      // opt-c010-ssm-gate-residual: fuse the per-head post-RMSNorm + SiLU
-      // gate into the DeltaNet recurrence epilogue (one launch, no raw_out
-      // global round trip). The unfused chain (recurrence +
-      // BatchedSSMPostNormGateKernel) stays wired as the reference.
-      // opt-c170-deltanet-rowsplit: the recurrence is serial in the token index
-      // but independent across state rows, so hoisting the row-uniform k/q
-      // norms and gates into two tiny prologue kernels lets the 128 rows of a
-      // head spread over 16 waves instead of being pinned to one block behind
-      // four barriers per token. The previous single-block kernel stays wired
-      // for shapes that cannot use the row-split kernel.
-      // opt-c174-ssm-epilogue-quant: the gated SSM row feeds only the Q8_0
-      // ssm_out projection, so the epilogue can emit the quantized activation
-      // and skip the FP32 round trip.
+      // The row-split recurrence parallelizes independent state rows. Its
+      // epilogue emits the activation consumed by ssm_out directly.
       const bool ssm_epilogue_q8 = reads_q8_act(layer.ssm_out) &&
                                    IsFusedSSMEpilogueQuantizeQ8_1Supported(
                                        config.SsmValueSize(), ssm_inner_size);
@@ -489,7 +478,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             arena_.d_ssm_kq_scales, arena_.d_ssm_alpha_beta, l, batch_size,
             ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
             config.ssm_state_size, config.SsmValueSize(), arena_.stream,
-            arena_.GetRecurrentStateStorage());
+            arena_.GetRecurrentStateStorage(),
+            half_prefill ? arena_.d_scratch_bf16 : nullptr);
       } else {
         LaunchBatchedSSMConvRecurrence(
             arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
@@ -505,8 +495,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       }
 
       if (half_prefill) {
-        LaunchFloatToFp16(arena_.d_ssm_out, arena_.d_scratch_bf16,
-                          batch_size * ssm_inner_size, arena_.stream);
+        if (!ssm_row_split) {
+          LaunchFloatToFp16(arena_.d_ssm_out, arena_.d_scratch_bf16,
+                            batch_size * ssm_inner_size, arena_.stream);
+        }
       } else if (ssm_row_split && ssm_epilogue_q8) {
         // The recurrence epilogue already wrote the quantized activation.
       } else if (reads_q8_act(layer.ssm_out)) {

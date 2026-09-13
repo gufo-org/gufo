@@ -555,6 +555,8 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
                         fused.size() * sizeof(std::uint16_t),
                         hipMemcpyDeviceToHost));
     passed &= fused == d_expected.CopyToHost();
+    passed &= std::ranges::all_of(
+        fused, [](std::uint16_t bits) { return (bits & 0x7C00U) != 0x7C00U; });
   }
   std::cout << (passed ? "[ OK ] " : "[FAIL] ") << "FP16 prefill "
             << format.name << " " << rows << "x" << kK << " batch=" << batch
@@ -616,6 +618,10 @@ int main() {
   TestFp16Norm();
   for (const auto& format : kFormats) {
     TestFp16Prefill(format, 4097, 257);
+    if (format.type == gufo::core::GgmlType::kQ4_K ||
+        format.type == gufo::core::GgmlType::kQ5_K) {
+      TestFp16Prefill(format, 4096, 256);
+    }
   }
   TestFp16Prefill({gufo::core::GgmlType::kQ8_0, "Q8_0"}, 48, 129);
   TestFp16Prefill({gufo::core::GgmlType::kQ6_K, "Q6_K"}, 1057, 129);

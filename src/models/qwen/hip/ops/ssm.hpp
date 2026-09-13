@@ -25,10 +25,11 @@ struct SsmReplayCapture {
 /// Copies aligned recurrent-state row groups without touching attention rows.
 /// Pointers, widths and pitches must be 16-byte aligned; all byte offsets must
 /// fit in uint32_t. The arena retains the general HIP copy for other layouts.
-void LaunchCopyRecurrentStateRows(
-    void* destination, const void* source, std::uint32_t width_bytes,
-    std::uint32_t destination_pitch_bytes, std::uint32_t source_pitch_bytes,
-    std::uint32_t groups, hipStream_t stream);
+void LaunchCopyRecurrentStateRows(void* destination, const void* source,
+                                  std::uint32_t width_bytes,
+                                  std::uint32_t destination_pitch_bytes,
+                                  std::uint32_t source_pitch_bytes,
+                                  std::uint32_t groups, hipStream_t stream);
 
 /// Captures the raw recurrent inputs for every row in a verification batch so
 /// a rejected speculative suffix can restore the checkpoint and replay only
@@ -108,7 +109,8 @@ void LaunchBatchedSSMConvRecurrence(
 /// head); both are pure scratch. `out_buf` carries the recurrence output and is
 /// then normalized and gated in place. When `q8_out` is non-null the epilogue
 /// writes the tiled Q8_1 activation there instead of the FP32 row, which is
-/// valid only when nothing else reads the FP32 form.
+/// valid only when nothing else reads the FP32 form. Alternatively, `fp16_out`
+/// receives the gated row as FP16. Only one activation destination may be set.
 void LaunchBatchedSSMConvRecurrenceRowSplit(
     const float* qkv_in, const float* conv_weights, float* conv_state,
     float* conv_out, void* deltanet_state, const float* alpha_buf,
@@ -118,7 +120,8 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
     std::size_t batch_size, std::size_t qkv_size, std::uint32_t num_key_heads,
     std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim,
     hipStream_t stream = nullptr,
-    QwenRecurrentStateStorage state_storage = QwenRecurrentStateStorage::kFp32);
+    QwenRecurrentStateStorage state_storage = QwenRecurrentStateStorage::kFp32,
+    void* fp16_out = nullptr);
 
 }  // namespace gufo::hip
 

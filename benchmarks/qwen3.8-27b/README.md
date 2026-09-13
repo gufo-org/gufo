@@ -12,14 +12,14 @@ Standard sweep: **pp2048 / tg128**, C1. Cells are prefill / generation tok/s.
 
 | Context depth | Q4 | Q8 |
 | ---: | ---: | ---: |
-| 0 | **549.36** / TODO | **503.17** / TODO |
+| 0 | **573.61** / TODO | **503.17** / TODO |
 | 4,096 | TODO | TODO |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-Prefill measured 2026-09-13: two warmed release samples per target. Q4 uses
-FP16 activations with packed quantized weights; Q8 retains native wave64.
+Prefill measured 2026-09-13: six warmed release samples for Q4, two for Q8.
+Q4 uses FP16 activations with packed quantized weights; Q8 retains native wave64.
 Current optimization focuses on
 **Q4 AR pp2048**, targeting **600 tok/s without quality loss**.
 
@@ -32,9 +32,9 @@ These **tg32 controls are not the full tg128 sweep**.
 
 | Draft | pp2048 tok/s | tg32 tok/s |
 | --- | ---: | ---: |
-| Q4_K_M | **510.74** | **16.44** |
-| Q8_0 | 507.59 | 16.07 |
-| BF16 | 511.25 | 15.08 |
+| Q4_K_M | **537.70** | **16.48** |
+| Q8_0 | 535.44 | 16.07 |
+| BF16 | 538.63 | 15.10 |
 
 pp2048/tg128 at depths **0 / 4,096 / 8,192 / 12,288 / 16,384**,
 for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.

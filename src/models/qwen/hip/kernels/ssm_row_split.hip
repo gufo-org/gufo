@@ -46,6 +46,7 @@
 // matrix cores but needs 1.2x (chunk 16) to 1.9x (chunk 64) more MACs, which
 // cancels the 2x BF16 WMMA rate, so this stays a VALU kernel.
 #if defined(ENGINE_ENABLE_HIP)
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -351,6 +352,54 @@ bool IsDeltaNetRowSplitSupported(std::uint32_t key_dim,
          val_dim == static_cast<std::uint32_t>(kRowSplitDim);
 }
 
+namespace {
+// One wave per head retains the four independent reductions from the FP32
+// epilogue. Writing FP16 directly avoids materializing and rereading its FP32
+// output; the recurrence still computes and stores FP32.
+__global__ void BatchedSSMPostNormGateFp16Kernel(const float* raw,
+                                                 const float* weight,
+                                                 const float* gate, __half* out,
+                                                 std::size_t head_count) {
+  const unsigned lane = threadIdx.x & 31U;
+  const std::size_t head = std::size_t(blockIdx.x) * 8 + threadIdx.x / 32;
+  if (head >= head_count) {
+    return;
+  }
+  const std::size_t base = head * kRowSplitDim;
+  float values[4], squares[4];
+#pragma unroll
+  for (unsigned j = 0; j < 4; ++j) {
+    values[j] = raw[base + lane + j * 32];
+    squares[j] = __fmul_rn(values[j], values[j]);
+  }
+  for (int shift = 16; shift > 0; shift >>= 1) {
+#pragma unroll
+    for (unsigned j = 0; j < 4; ++j) {
+      squares[j] += __shfl_xor(squares[j], shift);
+    }
+  }
+  const float sum =
+      __shfl(__fadd_rn(__fadd_rn(__fadd_rn(squares[0], squares[1]), squares[2]),
+                       squares[3]),
+             0);
+  const float inv =
+      rsqrtf(__fadd_rn(__fmul_rn(sum, 1.0F / kRowSplitDim), 1e-6F));
+#pragma unroll
+  for (unsigned j = 0; j < 4; ++j) {
+    const unsigned column = lane + j * 32;
+    float result = (values[j] * inv) * (weight ? weight[column] : 1.0F);
+    if (gate) {
+      const float g = gate[base + column];
+      const float sig = 1.0F / (1.0F + expf(-g));
+      result *= g * sig;
+    }
+    // Preserve the standalone FP32 producer's rounding before conversion.
+    asm volatile("" : "+v"(result));
+    out[base + column] = __float2half_rn(result);
+  }
+}
+}  // namespace
+
 void LaunchBatchedSSMConvRecurrenceRowSplit(
     const float* qkv_in, const float* conv_weights, float* conv_state,
     float* conv_out, void* deltanet_state, const float* alpha_buf,
@@ -359,7 +408,8 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
     float* kq_scales, float* alpha_beta, std::uint32_t layer_idx,
     std::size_t batch_size, std::size_t qkv_size, std::uint32_t num_key_heads,
     std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim,
-    hipStream_t stream, QwenRecurrentStateStorage state_storage) {
+    hipStream_t stream, QwenRecurrentStateStorage state_storage,
+    void* fp16_out) {
   if (!IsDeltaNetRowSplitSupported(key_dim, val_dim)) {
     throw std::invalid_argument(
         "row-split Qwen recurrent state requires 128x128 matrices");
@@ -428,12 +478,12 @@ void LaunchBatchedSSMConvRecurrenceRowSplit(
     }
   }
 
-  // opt-c174-ssm-epilogue-quant: when the gated row's only consumer is the Q8_0
-  // ssm_out projection, the epilogue writes the quantized activation directly
-  // and the FP32 store plus its read-back disappear. Otherwise the post-norm
-  // gate runs in place, which is safe because it reads its input into registers
-  // before the block reduction.
-  if (q8_out != nullptr) {
+  // Emit the activation consumed by ssm_out directly. Other callers retain the
+  // FP32 in-place epilogue.
+  if (fp16_out != nullptr) {
+    BatchedSSMPostNormGateFp16Kernel<<<(ab_count + 7) / 8, 256, 0, stream>>>(
+        out_buf, ssm_norm, gate, static_cast<__half*>(fp16_out), ab_count);
+  } else if (q8_out != nullptr) {
     LaunchBatchedFusedSSMPostNormGateQuantizeQ8_1(
         out_buf, ssm_norm, gate, q8_out, batch_size, inner_size, num_heads,
         val_dim, stream);
