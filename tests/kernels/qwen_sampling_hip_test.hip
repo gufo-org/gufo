@@ -396,6 +396,26 @@ void TestSamplingBoundaryValues() {
            "cold residual sampling must recover target mass outside draft "
            "support");
   }
+
+  // Inverse xorshift state whose next output is UINT64_MAX. The RNG keeps
+  // 24 bits, so its largest draw must remain below one after the GPU cast.
+  std::uint64_t maximum_draw_state = UINT64_C(0xa8d395be4b19cce8);
+  const double maximum_draw = gufo::sampling::Uniform(&maximum_draw_state);
+  const float gpu_draw = static_cast<float>(maximum_draw);
+  Expect(maximum_draw == gpu_draw && gpu_draw == std::nextafter(1.0F, 0.0F),
+         "the largest RNG draw remains exactly representable below one");
+  const std::vector<float> equal_logits(4, 0.0F);
+  const std::vector<std::uint32_t> ids{0, 1, 2, 3};
+  const std::vector<float> probabilities{0.25F, 0.5F, 0.125F, 0.125F};
+  for (const int top_k : {0, 4}) {
+    gufo::hip::GpuSamplingParameters parameters;
+    parameters.temperature = 1.0F;
+    parameters.top_k = top_k;
+    const auto result = SampleSpeculatively(
+        equal_logits, parameters, 0, 0.25F, ids, probabilities, gpu_draw, 0.5F);
+    Expect(result.accepted && result.token == 0,
+           "p(y) = q(y) accepts even the largest draw on both GPU routes");
+  }
 }
 
 void TestExactNucleusBoundaryAndGreedyTies() {

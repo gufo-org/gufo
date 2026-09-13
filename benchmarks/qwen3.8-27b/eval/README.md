@@ -32,9 +32,15 @@ nix develop -c python3 tools/qwen27b/check.py reference \
 The correctness build retains optimization, symbols and assertions; measure
 speed only with `result/bin/gufo`. Artifact variables `GUFO_QWEN27B_*_MODEL`
 select test inputs. Load target/reference models sequentially.
-For a quick sampling-only model check, run the existing
-`build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test "$MODEL" "$DRAFT"
---sampling-only` inside `nix develop -c`; add `--fixed` for the fixed controller.
+Sampling-only checks load each model once; omit the draft for AR:
+
+```sh
+nix develop -c build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test \
+  "$MODEL" --sampling-only
+nix develop -c build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test \
+  "$MODEL" "$DRAFT" --sampling-only
+# Add --fixed to check the fixed controller.
+```
 
 For an optimization, first check the affected operator against independent
 formulas or scalar decode. Then check model replay on each affected target and
@@ -77,12 +83,24 @@ sample. Controller state persists within a request and resets for a new one.
 | `eval` | Uses server draft configuration and sampling defaults. |
 | Audio/video, diagnostics and probes | Do not run Qwen27B DFlash2; unsupported draft flags are rejected. |
 
-The maintained sampling matrix has 23 named strategies: temperatures, individual
-filters, minimum-candidate floors, penalties/rewards, history windows and combined
-settings. All 12 target/draft/controller combinations pass bounded model replay.
+Sampling refresh: **2026-09-13**, runtime source `ffb1f44`. All
+[23 named strategies](../../../tests/models/qwen27b/sampling_cases.hpp) pass on
+Q4/Q8 AR and all 12 target/draft/controller combinations: Q4/Q8 targets,
+Q4_K_M/Q8_0/BF16 drafts, fixed/adaptive. They cover temperatures, individual
+filters, candidate floors, penalties/rewards, history windows and combinations.
+Each case checks four tokens and cold/cached replay. All six target/draft state
+suites also pass seven-proposal controller, RNG and snapshot/reuse checks.
+
 GPU checks cover 216 configurations / 864 AR quantiles, 141 acceptance/residual
-controls and four full-vocabulary cases. CPU reference replay covers 1,472 steps.
-HTTP checks cover six adapters, streaming, seeded replay and C2 state isolation.
+controls and four full-vocabulary cases. The largest 24-bit RNG draw remains
+exactly representable below one and accepts `p(y) = q(y)` on both GPU routes.
+CPU reference replay covers 1,472 steps. No sampling implementation change was
+needed.
+
+HTTP: 15 configurations across six adapters on both targets, with AR and Q4_K_M
+drafts under fixed/adaptive. Checks include startup defaults, request overrides,
+seeded/unseeded execution, streaming and C2 state isolation. Prompt/two-turn chat
+replay covers the same 15 configurations on Q4 AR and Q8/BF16 adaptive DFlash2.
 This finite matrix does not establish arbitrary-context capability or complete
 C>1 speculative parity.
 
