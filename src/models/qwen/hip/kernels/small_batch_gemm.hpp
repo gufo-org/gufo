@@ -288,6 +288,16 @@ __device__ __forceinline__ float ReduceKQuantWave(float value) {
   }
 }
 
+// These GEMMs exchange data through LDS only. Global inputs are read-only,
+// and output stores follow the final tile. Complete LDS traffic and preserve
+// compiler memory ordering without invalidating the global read cache.
+__device__ __forceinline__ __attribute__((convergent))
+void SyncKQuantTile() {
+  asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+  __builtin_amdgcn_s_barrier();
+  asm volatile("" ::: "memory");
+}
+
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, core::GgmlType WType,
          std::size_t TilesPerStage = 1, std::uint32_t MinWaves = 12,
@@ -366,7 +376,7 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
         staged_sums[(token * kSubsPerTile) + sub] = total;
       }
     }
-    __syncthreads();
+    SyncKQuantTile();
 
     for (Index tile = 0; tile < TilesPerStage; ++tile) {
       const Index slot = tile * 32 + lane;
@@ -476,7 +486,7 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
         }
       }
     }
-    __syncthreads();
+    SyncKQuantTile();
   }
 
 #pragma unroll

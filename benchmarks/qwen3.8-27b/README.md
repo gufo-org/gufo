@@ -99,14 +99,15 @@ after warmup on the quiet host. These are short controls.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 54.87 | **54.96** | Flat |
-| JSON, tg300, adaptive | 51.55 | **51.74** | +0.39% |
-| Prose, tg300, adaptive | 22.97 | **23.20** | +1.01% |
+| Repetition, tg128, fixed-7 | 54.87 | **55.54** | +1.22% |
+| JSON, tg300, adaptive | 51.80 | **52.33** | +1.02% |
+| Prose, tg300, adaptive | 23.21 | **23.38** | +0.71% |
 
-The latest [exact wave reductions](eval/dflash2-reductions.json) save 0.38%
-of the affected projections' profiled GPU time. All 12 continuations match
-AR, all 51 verifier/scalar logit rows are exact, and all 90 Q4 draft trace
-files are unchanged. No new execution option is added.
+The latest [shared-memory synchronization](eval/dflash2-synchronization.json)
+avoids unnecessary global cache invalidation and saves 1.12% of the affected
+projections' profiled GPU time. All 12 continuations match AR, all 51
+verifier/scalar logit rows are exact, and all 90 Q4 draft trace files are
+unchanged. Arithmetic and execution options are unchanged.
 
 The controller uses [measured Q4 verification costs](eval/dflash2-controller-cost.json);
 Q8 keeps its previous formula. Its earlier chat comparison was flat in
@@ -118,9 +119,9 @@ AR generation to **11.74 tok/s** at depth zero. Earlier work covers
 [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json).
 The [quality report](eval/README.md) indexes the remaining evidence.
 
-Lossless row packing and residual-precision WMMA were slower; alignment
-hints changed no instructions. Earlier scheduling, expanded-code and
-controller experiments that failed their controls are also excluded.
+Lossless row packing, residual-precision WMMA/INT8 and removing full-tile
+bounds checks were slower; alignment hints changed no instructions.
+Rejected scheduling, expanded-code and controller experiments remain excluded.
 
 **Same host and identical Q4 target/draft files**, at `b55a120`, raw tg300,
 including prefill:

@@ -139,6 +139,15 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Shared-memory synchronization](dflash2-synchronization.json): packed
+  projections retain LDS completion, the workgroup barrier and compiler
+  ordering while avoiding global cache invalidation. Arithmetic is unchanged.
+  Both kernel suites, partial rows, all 51 Q4 full-logit rows, cache/context
+  controls, 90 draft traces and 12 measured AR continuations pass.
+  Short paired runs improve prose 0.71%, JSON 1.02% and repetition 1.22%.
+  The same 18,318 affected projection calls take 1.12% less GPU time with
+  zero scratch. Slower integer-residual and full-tile probes are rejected;
+  no new maintained test, tool or execution option is added.
 - [Exact wave reductions](dflash2-reductions.json): immediate XOR shuffles
   retain the scalar addition order. All 51 Q4 verifier/scalar full-logit rows,
   mixed-cache/context controls, 90 draft trace files and 12 measured AR token
