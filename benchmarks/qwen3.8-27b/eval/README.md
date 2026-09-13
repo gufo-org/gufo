@@ -205,11 +205,13 @@ integer-valued inputs. Nearest-integer rounding restored the tested Q5/Q8
 matrix outputs, but conversion plus GEMM had 34–38% lower throughput. Retain
 integer WMMA.
 
-Dense FP16 inputs with FP32 accumulation reduced error against sampled FP64
-operator references, using CPU-checked weight decoding. Library GEMM and
-direct/prefetched WMMA remained slower after conversion costs; the best
-pipeline lost 9–17% throughput on Q5 and 18–24% on Q8. This alternative was
-not retained or qualified at model level.
+Global FP16 weight expansion was slower. Experimental fused dequantization,
+bank-aware staging and deferred decoding improve large FFN operator throughput
+by 6–37% with the best tested variants across Q4/Q5/Q6/IQ4/Q8. CPU decoder
+checks, sampled FP64 error checks and exact raw-decoder replay pass, including
+partial tiles; the small partial-tile case is slower. This changes arithmetic
+and remains a prototype: model-level quality, selective dispatch and DFlash2
+speed qualification are **TODO**. Production still uses integer WMMA.
 
 | Artifact | SHA-256 |
 | --- | --- |
