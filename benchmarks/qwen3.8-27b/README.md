@@ -114,6 +114,10 @@ Earlier [mixed-format reuse](eval/dflash2-remaining-formats.json),
 [contiguous FFNs](eval/dflash2-contiguous-ffn.json) and
 [feature transfers](eval/dflash2-feature-transfer.json) remain qualified.
 
+[Batched rollback/replay](eval/dflash2-replay-handoff.json) now preserves
+Q4/Q8 logits across coordinator changes and the replay-ring boundary.
+This fixes state handling; C1 kernels and the speed table above are unchanged.
+
 The controller uses [measured Q4 verification costs](eval/dflash2-controller-cost.json);
 Q8 keeps its previous formula. Its earlier chat comparison was flat in
 aggregate, with code/reasoning losing 1.0–1.6%; the depth-4096 control lost 1.0%.
@@ -124,10 +128,10 @@ AR generation to **11.74 tok/s** at depth zero. Earlier work covers
 [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json).
 The [quality report](eval/README.md) indexes the remaining evidence.
 
-Wider Q5 tiles, compiler barriers, full draft blocks with short verification
-and residual/norm fusion failed their speed controls and remain excluded.
-The [latest report](eval/dflash2-prose-projections.json) records these attempts;
-earlier rejected experiments are indexed in the [quality report](eval/README.md).
+Wider Q5 tiles/staging, alternative controller startup and position estimates,
+and fewer CPU waits failed speed controls and remain excluded.
+[Latest follow-ups](eval/dflash2-replay-handoff.json) and the
+[quality report](eval/README.md) record the rejected experiments.
 
 **Same host and identical Q4 target/draft files**, at `b55a120`, raw tg300,
 including prefill:

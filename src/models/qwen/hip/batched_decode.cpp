@@ -130,12 +130,19 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
         "Qwen GPU decode width exceeds the coordinator arena capacity");
   }
 
+  bool capture_replay = false;
   for (const auto& item : items) {
     auto& executor = *item.executor;
     if (executor.replaying_ssm_state_) {
       executor.replaying_ssm_state_ = false;
       executor.arena_.DisableSsmReplayCapture();
     }
+    // Replay and capture-flag updates may still be queued on a session's
+    // stream. The coordinator takes ownership only after they finish.
+    if (&executor != coordinator) {
+      HIP_CHECK(hipStreamSynchronize(executor.arena_.stream));
+    }
+    capture_replay |= executor.arena_.IsSsmReplayCaptureActive();
     executor.arena_.MarkSsmReplayPosition(item.position);
     executor.last_hidden_offset_ = 0;
   }
@@ -157,8 +164,10 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   const std::size_t time_step_rank = config.ssm_time_step_rank;
 
   std::array<std::uint32_t, kMaxDecodeBatch> host_tokens{};
+  std::array<std::uint32_t, kMaxDecodeBatch> host_positions{};
   for (std::size_t row = 0; row < batch_size; ++row) {
     host_tokens[row] = items[row].token_id;
+    host_positions[row] = items[row].position;
   }
   HIP_CHECK(hipMemcpyAsync(
       scratch.decode.prompt_tokens.data(), host_tokens.data(),
@@ -167,6 +176,13 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                                scratch.decode.prompt_tokens.data(),
                                scratch.decode.hidden.data(), batch_size,
                                hidden_size, arena.stream);
+  if (capture_replay) {
+    // Embedding has consumed the token IDs. Reuse the buffer for the actual
+    // per-session positions until every recurrent layer has captured its row.
+    HIP_CHECK(hipMemcpyAsync(
+        scratch.decode.prompt_tokens.data(), host_positions.data(),
+        batch_size * sizeof(std::uint32_t), hipMemcpyHostToDevice, arena.stream));
+  }
 
   EmitDecodeRouteTelemetry(weights, coordinator->policy_);
   for (std::uint32_t layer_index = 0; layer_index < config.num_layers;
@@ -257,6 +273,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
 
       for (std::size_t row = 0; row < batch_size; ++row) {
         auto& state_arena = items[row].executor->arena_;
+        auto replay_capture = state_arena.GetSsmReplayCapture();
+        replay_capture.position = scratch.decode.prompt_tokens.data() + row;
         LaunchSSMConvRecurrence(
             scratch.ssm.qkv.data() + (row * ssm_qkv_size),
             static_cast<const float*>(layer.ssm_conv1d.data),
@@ -272,7 +290,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
             scratch.ssm.out.data() + (row * ssm_inner_size), layer_index,
             ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
             config.ssm_state_size, config.SsmValueSize(), arena.stream,
-            state_arena.GetSsmReplayCapture(),
+            replay_capture,
             state_arena.GetRecurrentStateStorage());
       }
 

@@ -132,8 +132,10 @@ independent CPU decode/GEMV/GEMM controls remain.
 
 The existing target test checks full logits and all five DFlash2 features
 at verification widths 2–8. Its mixed-cache control uses three sessions with
-32/64/128 capacities, rotates each as coordinator and checks nine full-logit
-rows per cache precision. This exercises packed FFNs in independent requests.
+32/64/128 capacities and rotates each as coordinator. It checks 12 full-logit
+rows per cache precision in both ordinary decoding and growing-prefix
+rollback/replay, including the replay-ring boundary. This covers packed FFNs,
+session positions and state handoffs between GPU streams.
 
 The unused in-tree CPU DFlash forward pipeline and its duplicate operator
 tests are removed. The pinned upstream runner owns the full reference.
@@ -145,6 +147,15 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Batched replay handoff](dflash2-replay-handoff.json): replay records use
+  each session's position, and the coordinator waits for queued state work
+  on other streams. The same regression fixture fails on the preceding
+  implementation and passes on Q4/Q8 after the fix: 96 C3 full-logit rows,
+  102 ordinary verification rows and 102 feature rows remain exact.
+  C1 operators and controllers are unchanged. Wider Q5 rows/staging,
+  positional acceptance estimates, full-block startup and fewer CPU waits
+  fail their speed controls and remain reverted. These short probes do not
+  refresh the depth matrix or qualify full C>1 speculative serving.
 - [Short-block Q5 projections](dflash2-prose-projections.json): medium
   projections at widths 5–6 reuse four rows, with unchanged arithmetic.
   Selected isolated gains are 3–13%; release prose improves 0.24%,

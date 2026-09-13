@@ -75,7 +75,7 @@ void CheckVerificationFeatures(
          "last verification features differ from scalar decoding");
 }
 
-void CheckMixedContextBatch(const Executor& owner) {
+void CheckMixedContextBatch(const Executor& owner, bool replay) {
   for (const auto storage : {gufo::hip::QwenKvCacheStorage::kFp16,
                              gufo::hip::QwenKvCacheStorage::kFp32}) {
     auto policy = gufo::hip::QwenExecutionPolicy::Production();
@@ -86,7 +86,7 @@ void CheckMixedContextBatch(const Executor& owner) {
     const std::array<Executor*, 3> sessions{
         &short_session, &long_session, &longest_session};
     constexpr std::array<std::uint32_t, 3> prefix_sizes{5, 9, 13};
-    constexpr std::uint32_t continuation = 3;
+    constexpr std::uint32_t continuation = 4;
     std::array<std::vector<Token>, 3> tokens;
     std::array<std::vector<std::vector<float>>, 3> expected;
     for (std::size_t row = 0; row < sessions.size(); ++row) {
@@ -104,6 +104,8 @@ void CheckMixedContextBatch(const Executor& owner) {
         expected[row].push_back(Logits(session));
       }
       session.RestoreSnapshot(*snapshot);
+      if (replay)
+        session.SaveState(prefix_sizes[row]);
     }
     for (std::uint32_t step = 0; step < continuation; ++step) {
       std::array<gufo::hip::QwenGpuBatchItem, 3> items;
@@ -111,8 +113,10 @@ void CheckMixedContextBatch(const Executor& owner) {
         const auto position = prefix_sizes[row] + step;
         items[row] = {sessions[row], tokens[row][position], position};
       }
-      // Exercise packed FFNs at width three and each cache as coordinator.
-      std::rotate(items.begin(), items.begin() + step, items.end());
+      // Hand replayed state to each possible coordinator. The longest prefix
+      // crosses the replay ring; all rows still use one scalar oracle.
+      const auto coordinator = step % sessions.size();
+      std::rotate(items.begin(), items.begin() + coordinator, items.end());
       const auto predictions = Executor::ForwardTokenBatch(items);
       Expect(predictions.size() == sessions.size(),
              "mixed-context batch returned the wrong number of rows");
@@ -123,13 +127,21 @@ void CheckMixedContextBatch(const Executor& owner) {
         const auto next = static_cast<Token>(std::ranges::max_element(logits) -
                                              logits.begin());
         const std::size_t batch_row =
-            (row + sessions.size() - step) % sessions.size();
+            (row + sessions.size() - coordinator) % sessions.size();
         Expect(predictions[batch_row] == next,
                "mixed-context batch returned a different token");
       }
+      if (replay) {
+        for (std::size_t row = 0; row < sessions.size(); ++row) {
+          sessions[row]->RestoreState();
+          sessions[row]->CommitVerificationChunk(
+              std::span(tokens[row]).subspan(prefix_sizes[row], step + 1),
+              prefix_sizes[row]);
+        }
+      }
     }
     std::cout << "mixed-context batch: storage=" << static_cast<int>(storage)
-              << " all 9 full-logit rows exact\n";
+              << " replay=" << replay << " all 12 full-logit rows exact\n";
   }
 }
 
@@ -294,7 +306,8 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
     cases.push_back(std::move(row));
   }
   if (check_replay) {
-    CheckMixedContextBatch(*executor);
+    CheckMixedContextBatch(*executor, false);
+    CheckMixedContextBatch(*executor, true);
     CheckWideCache(*executor);
   }
   return cases;
