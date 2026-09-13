@@ -99,16 +99,18 @@ after warmup on the quiet host. These are short controls.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 55.54 | **56.34** | +1.45% |
-| JSON, tg300, adaptive | 52.24 | **53.24** | +1.93% |
-| Prose, tg300, adaptive | 23.36 | **23.42** | +0.27% |
+| Repetition, tg128, fixed-7 | 56.37 | **56.45** | +0.14% |
+| JSON, tg300, adaptive | 53.23 | **53.39** | +0.30% |
+| Prose, tg300, adaptive | 23.48 | **23.55** | +0.28% |
 
-The latest [feature-transfer change](eval/dflash2-feature-transfer.json)
-copies target features to the host once after verification layers, reusing
-the logits workspace without extra allocation. All 12 continuations match
-AR. Across Q4/Q8, all 102 verification logit rows and 102 feature rows are
-bit-exact; all 46 sampling cases pass. Arithmetic and execution options are
-unchanged. Prose is nearly flat in this short comparison.
+The latest [contiguous FFN change](eval/dflash2-contiguous-ffn.json) combines
+adjacent gate/up projections at verification widths 3–8, preserving arithmetic
+and using existing scratch memory. The JSON trace confirms 1,554 fewer
+projection launches. All 12 continuations, 102 verification logit rows,
+102 feature rows, C3 cache controls and 90 Q4 draft traces remain exact;
+a short depth-4096 continuation also matches AR. Overall gains are small in
+these short controls. The preceding [feature-transfer change](eval/dflash2-feature-transfer.json)
+improved JSON 1.93% and repetition 1.45%, with all 46 sampling cases passing.
 
 The controller uses [measured Q4 verification costs](eval/dflash2-controller-cost.json);
 Q8 keeps its previous formula. Its earlier chat comparison was flat in

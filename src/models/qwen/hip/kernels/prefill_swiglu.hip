@@ -19,15 +19,17 @@ __global__ void BatchedSwiGLUActivationKernel(
     std::size_t num_elements) {
   const std::size_t idx = (blockIdx.x * blockDim.x) + threadIdx.x;
   if (idx < num_elements) {
-    const float g = gate[idx];
-    const float u = up[idx];
+    const std::size_t source = idx + blockIdx.y * 2 * num_elements;
+    const std::size_t destination = idx + blockIdx.y * num_elements;
+    const float g = gate[source];
+    const float u = up[source];
     const float sig_g = 1.0F / (1.0F + expf(-g));
     const float val = (g * sig_g) * u;
     if (out != nullptr) {
-      out[idx] = val;
+      out[destination] = val;
     }
     if (out_bf16 != nullptr) {
-      out_bf16[idx] = hip_bfloat16(val);
+      out_bf16[destination] = hip_bfloat16(val);
     }
   }
 }
@@ -44,6 +46,19 @@ void LaunchBatchedSwiGLUActivation(const float* gate, const float* up,
       static_cast<unsigned int>((num_elements + block_size - 1) / block_size);
   BatchedSwiGLUActivationKernel<<<num_blocks, block_size, 0, stream>>>(
       gate, up, out, static_cast<hip_bfloat16*>(out_bf16), num_elements);
+}
+
+void LaunchPackedSwiGLUActivation(const float* gate_up, float* out,
+                                   std::size_t batch_size,
+                                   std::size_t intermediate_size,
+                                   hipStream_t stream) {
+  if (batch_size == 0 || intermediate_size == 0) {
+    return;
+  }
+  const dim3 grid(static_cast<unsigned int>((intermediate_size + 255) / 256),
+                  static_cast<unsigned int>(batch_size));
+  BatchedSwiGLUActivationKernel<<<grid, 256, 0, stream>>>(
+      gate_up, gate_up + intermediate_size, out, nullptr, intermediate_size);
 }
 
 }  // namespace gufo::hip

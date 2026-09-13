@@ -82,11 +82,13 @@ void CheckMixedContextBatch(const Executor& owner) {
     policy.kv_cache_storage = storage;
     Executor short_session(owner.GetSharedModel(), 32, policy);
     Executor long_session(owner.GetSharedModel(), 64, policy);
-    const std::array<Executor*, 2> sessions{&short_session, &long_session};
-    constexpr std::array<std::uint32_t, 2> prefix_sizes{5, 9};
+    Executor longest_session(owner.GetSharedModel(), 128, policy);
+    const std::array<Executor*, 3> sessions{
+        &short_session, &long_session, &longest_session};
+    constexpr std::array<std::uint32_t, 3> prefix_sizes{5, 9, 13};
     constexpr std::uint32_t continuation = 3;
-    std::array<std::vector<Token>, 2> tokens;
-    std::array<std::vector<std::vector<float>>, 2> expected;
+    std::array<std::vector<Token>, 3> tokens;
+    std::array<std::vector<std::vector<float>>, 3> expected;
     for (std::size_t row = 0; row < sessions.size(); ++row) {
       auto& session = *sessions[row];
       tokens[row] = owner.GetTokenizer().Encode(kTexts[row]);
@@ -104,14 +106,13 @@ void CheckMixedContextBatch(const Executor& owner) {
       session.RestoreSnapshot(*snapshot);
     }
     for (std::uint32_t step = 0; step < continuation; ++step) {
-      std::array<gufo::hip::QwenGpuBatchItem, 2> items;
+      std::array<gufo::hip::QwenGpuBatchItem, 3> items;
       for (std::size_t row = 0; row < sessions.size(); ++row) {
         const auto position = prefix_sizes[row] + step;
         items[row] = {sessions[row], tokens[row][position], position};
       }
-      // Both cache capacities must work as the shared-projection coordinator.
-      if (step % 2 != 0)
-        std::swap(items[0], items[1]);
+      // Exercise packed FFNs at width three and each cache as coordinator.
+      std::rotate(items.begin(), items.begin() + step, items.end());
       const auto predictions = Executor::ForwardTokenBatch(items);
       Expect(predictions.size() == sessions.size(),
              "mixed-context batch returned the wrong number of rows");
@@ -121,12 +122,14 @@ void CheckMixedContextBatch(const Executor& owner) {
         const auto& logits = expected[row][step];
         const auto next = static_cast<Token>(std::ranges::max_element(logits) -
                                              logits.begin());
-        Expect(predictions[step % 2 != 0 ? 1 - row : row] == next,
+        const std::size_t batch_row =
+            (row + sessions.size() - step) % sessions.size();
+        Expect(predictions[batch_row] == next,
                "mixed-context batch returned a different token");
       }
     }
     std::cout << "mixed-context batch: storage=" << static_cast<int>(storage)
-              << " all 6 full-logit rows exact\n";
+              << " all 9 full-logit rows exact\n";
   }
 }
 

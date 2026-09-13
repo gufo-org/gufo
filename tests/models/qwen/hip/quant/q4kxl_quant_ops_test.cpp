@@ -402,9 +402,9 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
   HIP_CHECK(hipFree(d_single));
 }
 
-// AR fuses gate/up and SwiGLU; verification uses separate batched
-// projections. Check that both produce identical finite output, including
-// mixed quantization formats, two distinct inputs and incomplete row groups.
+// AR's fused FFN and verification must produce identical finite activations.
+// Check separate and packed gate/up rows, including mixed quantization
+// formats, two distinct inputs and incomplete row groups.
 void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
                      gufo::core::GgmlType up_type, std::size_t rows,
                      std::size_t columns) {
@@ -444,16 +444,35 @@ void TestFusedSwiGLU(gufo::core::GgmlType gate_type,
   HIP_CHECK(hipDeviceSynchronize());
   const auto actual = fused.CopyToHost();
   const auto expected = split.CopyToHost();
+  const auto gate_values = gate_out.CopyToHost();
+  const auto up_values = up_out.CopyToHost();
+  std::vector<float> packed_values(2 * batch * rows);
+  for (std::size_t token = 0; token < batch; ++token) {
+    std::copy_n(gate_values.data() + token * rows, rows,
+                packed_values.data() + 2 * token * rows);
+    std::copy_n(up_values.data() + token * rows, rows,
+                packed_values.data() + (2 * token + 1) * rows);
+  }
+  const DeviceBuffer<float> packed_input(packed_values);
+  DeviceBuffer<float> packed_output(batch * rows);
+  HIP_CHECK(hipMemset(packed_output.data(), 0xFF, batch * rows * sizeof(float)));
+  gufo::hip::LaunchPackedSwiGLUActivation(
+      packed_input.data(), packed_output.data(), batch, rows, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  const auto packed = packed_output.CopyToHost();
   std::size_t mismatches = 0;
   for (std::size_t index = 0; index < actual.size(); ++index) {
     if (!std::isfinite(actual[index]) || !std::isfinite(expected[index]) ||
+        !std::isfinite(packed[index]) ||
         std::bit_cast<std::uint32_t>(actual[index]) !=
+            std::bit_cast<std::uint32_t>(expected[index]) ||
+        std::bit_cast<std::uint32_t>(packed[index]) !=
             std::bit_cast<std::uint32_t>(expected[index])) {
       ++mismatches;
     }
   }
   std::cout << (mismatches == 0 ? "[ OK ] " : "[FAIL] ")
-            << "fused SwiGLU vs verification "
+            << "fused/packed SwiGLU vs verification "
             << gufo::core::ToString(gate_type) << "/"
             << gufo::core::ToString(up_type) << " " << rows << "x" << columns
             << ": " << mismatches << " of " << actual.size() << " differ\n";

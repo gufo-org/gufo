@@ -49,6 +49,48 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
   }
 }
 
+void LaunchFfnActivation(const models::QwenLayerWeights& layer,
+                         const QwenGpuScratchView& scratch,
+                         std::size_t batch_size, std::size_t intermediate_size,
+                         std::size_t hidden_size, hipStream_t stream) {
+  const auto& gate = layer.ffn_gate;
+  const auto& up = layer.ffn_up;
+  const bool packed_format = gate.type == core::GgmlType::kQ4_K ||
+                             gate.type == core::GgmlType::kQ5_K ||
+                             gate.type == core::GgmlType::kIQ4_XS;
+  if (batch_size >= 3 && batch_size <= kMaxDecodeBatch &&
+      intermediate_size == 17408 && hidden_size == 5120 && packed_format &&
+      gate.type == up.type &&
+      gate.num_elements == intermediate_size * hidden_size &&
+      up.num_elements == gate.num_elements) {
+    const std::size_t matrix_bytes = gate.EncodedSizeBytes();
+    const std::size_t packed_elements = 2 * batch_size * intermediate_size;
+    if (gate.available_bytes >= 2 * matrix_bytes &&
+        static_cast<const std::byte*>(gate.data) + matrix_bytes == up.data &&
+        scratch.decode.weight_bf16.size_bytes() >=
+            packed_elements * sizeof(float)) {
+      // Adjacent GGUF tensors form one matrix with twice as many output rows.
+      // Exact projections do not need dequantization scratch; reuse it until
+      // SwiGLU has consumed the packed gate/up rows on this stream.
+      auto* const packed =
+          reinterpret_cast<float*>(scratch.decode.weight_bf16.data());
+      LaunchProjection(gate, scratch.decode.normed.data(), packed, batch_size,
+                       2 * intermediate_size, hidden_size, stream);
+      LaunchPackedSwiGLUActivation(packed, scratch.ffn.activation.data(),
+                                   batch_size, intermediate_size, stream);
+      return;
+    }
+  }
+  LaunchProjection(gate, scratch.decode.normed.data(), scratch.ffn.gate.data(),
+                   batch_size, intermediate_size, hidden_size, stream);
+  LaunchProjection(up, scratch.decode.normed.data(), scratch.ffn.up.data(),
+                   batch_size, intermediate_size, hidden_size, stream);
+  LaunchBatchedSwiGLUActivation(
+      scratch.ffn.gate.data(), scratch.ffn.up.data(),
+      scratch.ffn.activation.data(), nullptr, batch_size * intermediate_size,
+      stream);
+}
+
 }  // namespace
 
 std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
@@ -247,16 +289,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                          scratch.decode.normed.data(), nullptr, batch_size,
                          hidden_size, 1e-6F, arena.stream);
 
-    LaunchProjection(layer.ffn_gate, scratch.decode.normed.data(),
-                     scratch.ffn.gate.data(), batch_size, intermediate_size,
-                     hidden_size, arena.stream);
-    LaunchProjection(layer.ffn_up, scratch.decode.normed.data(),
-                     scratch.ffn.up.data(), batch_size, intermediate_size,
-                     hidden_size, arena.stream);
-    LaunchBatchedSwiGLUActivation(scratch.ffn.gate.data(),
-                                  scratch.ffn.up.data(),
-                                  scratch.ffn.activation.data(), nullptr,
-                                  batch_size * intermediate_size, arena.stream);
+    LaunchFfnActivation(layer, scratch, batch_size, intermediate_size,
+                         hidden_size, arena.stream);
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena.stream);
@@ -551,16 +585,8 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                          scratch.decode.normed.data(), nullptr, batch_size,
                          hidden_size, 1e-6F, arena_.stream);
 
-    LaunchProjection(layer.ffn_gate, scratch.decode.normed.data(),
-                     scratch.ffn.gate.data(), batch_size, intermediate_size,
-                     hidden_size, arena_.stream);
-    LaunchProjection(layer.ffn_up, scratch.decode.normed.data(),
-                     scratch.ffn.up.data(), batch_size, intermediate_size,
-                     hidden_size, arena_.stream);
-    LaunchBatchedSwiGLUActivation(
-        scratch.ffn.gate.data(), scratch.ffn.up.data(),
-        scratch.ffn.activation.data(), nullptr, batch_size * intermediate_size,
-        arena_.stream);
+    LaunchFfnActivation(layer, scratch, batch_size, intermediate_size,
+                         hidden_size, arena_.stream);
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena_.stream);

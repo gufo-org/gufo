@@ -1703,10 +1703,13 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                  std::size_t k, dim3 grid, dim3 block,
                                  hipStream_t stream) {
   const auto launch = [&]<std::size_t Batch>() {
+    // Adjacent gate/up tensors use the same kernel with twice as many rows.
+    const bool ffn_up =
+        (m == 17408 || (Batch >= 3 && m == 34816)) && k == 5120;
     if constexpr (WType == core::GgmlType::kIQ4_XS &&
                   (Batch == 2 || Batch == 3 || Batch == 4 || Batch == 5 ||
                    Batch == 7)) {
-      const bool up = m == 17408 && k == 5120;
+      const bool up = ffn_up;
       const bool down = m == 5120 && k == 17408;
       if (up || (Batch != 4 && down)) {
         const auto launch_rows = [&]<std::size_t Tiles>() {
@@ -1727,7 +1730,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
       }
     }
     if constexpr (WType == core::GgmlType::kIQ4_XS && Batch == 8) {
-      if ((m == 17408 && k == 5120) || (m == 5120 && k == 17408)) {
+      if ((ffn_up) || (m == 5120 && k == 17408)) {
         SmallBatchKQuantExactFp32GEMMKernel<8, Batch, 4, WType, 1, 4, 1, true>
             <<<(m + 31) / 32, 256, 0, stream>>>(w, fp32_x, y, m, k);
         return;
@@ -1739,7 +1742,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
       if (FitsSmallBatch32BitIndices(
               Batch, m, k, quant::QuantizedRowBytes(WType, k))) {
         if constexpr (WType == core::GgmlType::kQ4_K) {
-          const bool up = m == 17408 && k == 5120;
+          const bool up = ffn_up;
           const bool down = m == 5120 && k == 17408;
           // Four rows share two staged tiles. Widths five and six benefit
           // only for the longer down projection.
@@ -1786,7 +1789,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
             return;
           }
           if constexpr (Batch == 2 || Batch == 3 || Batch == 5) {
-            if (m == 17408 && k == 5120) {
+            if (ffn_up) {
               launch_rows.template operator()<2>();
               return;
             }
@@ -1809,7 +1812,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
             }
             if ((m == 5120 && k == 6144) ||
                 (k == 5120 && (m == 1024 || m == 6144 || m == 10240 ||
-                              m == 12288 || m == 17408))) {
+                              m == 12288 || m == 17408 || m == 34816))) {
               launch_rows.template operator()<8, 1>();
               return;
             }
@@ -1821,7 +1824,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
               (WType == core::GgmlType::kQ4_K && Batch >= 5) ||
               (WType == core::GgmlType::kQ5_K && Batch >= 5 && Batch <= 6);
           if constexpr (kDoubleStage) {
-            if ((m == 17408 && k == 5120) || (m == 5120 && k == 17408)) {
+            if ((ffn_up) || (m == 5120 && k == 17408)) {
               SmallBatchKQuantExactFp32GEMMKernel<
                   kKQuantSmallBatchWarps, Batch, RowsPerWave, WType, 2, 12, 1,
                   true><<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);
@@ -1843,7 +1846,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
         (WType == core::GgmlType::kIQ4_XS &&
          (Batch == 5 || Batch == 6 || Batch == 8));
     if constexpr (kDoubleStage) {
-      if ((m == 17408 && k == 5120) || (m == 5120 && k == 17408)) {
+      if ((ffn_up) || (m == 5120 && k == 17408)) {
         SmallBatchKQuantExactFp32GEMMKernel<kKQuantSmallBatchWarps, Batch,
                                            RowsPerWave, WType, 2>
             <<<grid, block, 0, stream>>>(w, fp32_x, y, m, k);

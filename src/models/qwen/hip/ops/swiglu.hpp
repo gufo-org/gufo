@@ -25,6 +25,12 @@ void LaunchBatchedSwiGLUActivation(const float* gate, const float* up,
                                    std::size_t num_elements,
                                    hipStream_t stream = nullptr);
 
+/// SwiGLU for adjacent gate/up rows stored as [batch, 2, intermediate_size].
+void LaunchPackedSwiGLUActivation(const float* gate_up, float* out,
+                                   std::size_t batch_size,
+                                   std::size_t intermediate_size,
+                                   hipStream_t stream = nullptr);
+
 }  // namespace gufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)

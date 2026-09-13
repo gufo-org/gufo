@@ -123,11 +123,17 @@ extra snapshot/proposal work; never use its runtime as a speed measurement.
 
 ## Model/operator checks
 
-`qwen_q4kxl_quant_ops_test` owns the fused-SwiGLU versus batched-verification
-contract: two distinct inputs, same/mixed formats, partial row groups and
-full-size Q8/Q6 controls. All 70,686 outputs must be finite and bit-identical.
+`qwen_q4kxl_quant_ops_test` owns the fused/packed-SwiGLU versus separate
+batched-verification contract: two distinct inputs, same/mixed formats,
+partial row groups and full-size Q8/Q6 controls. All 70,686 outputs per route
+must be finite and bit-identical.
 It replaces the older same-format-only test in `qwen_kquant_gemv_ops_test`;
 independent CPU decode/GEMV/GEMM controls remain.
+
+The existing target test checks full logits and all five DFlash2 features
+at verification widths 2–8. Its mixed-cache control uses three sessions with
+32/64/128 capacities, rotates each as coordinator and checks nine full-logit
+rows per cache precision. This exercises packed FFNs in independent requests.
 
 The unused in-tree CPU DFlash forward pipeline and its duplicate operator
 tests are removed. The pinned upstream runner owns the full reference.
@@ -139,6 +145,18 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Contiguous FFN projections](dflash2-contiguous-ffn.json): already adjacent
+  same-format gate/up tensors share one exact matrix launch at widths 3–8,
+  followed by packed SwiGLU using existing scratch. Projection-plus-activation
+  microbenchmarks improve 1.1–4.4%; short paired end-to-end controls improve
+  JSON 0.30%, prose 0.28% and repetition 0.14%. All 102 verification logit
+  rows, 102 feature rows, 18 final-feature checks, C3 cache controls,
+  90 Q4 draft traces and 12 measured AR continuations remain exact.
+  A pp2048/tg16 depth-4096 control also matches AR across the attention
+  split-K threshold. The JSON trace confirms 1,554 fewer launches without
+  added allocations; total traced GPU time does not improve, so throughput
+  comes from the unprofiled paired runs. No new test executable, tool or
+  execution option is added.
 - [Consolidated feature transfers](dflash2-feature-transfer.json): target
   verification captures taps on the GPU and copies them to the host together,
   reusing the logits workspace without extra allocation or changed arithmetic.
