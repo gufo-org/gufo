@@ -139,6 +139,15 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Exact wave reductions](dflash2-reductions.json): immediate XOR shuffles
+  retain the scalar addition order. All 51 Q4 verifier/scalar full-logit rows,
+  mixed-cache/context controls, 90 draft trace files and 12 measured AR token
+  continuations remain exact. Both kernel suites and the partial-row probe
+  pass. Short paired runs improve prose 1.0% and JSON 0.39%; repetition is
+  flat. All 18,318 affected projection calls take 0.38% less GPU time with
+  zero scratch. Q8 target and Q8/BF16 drafts contain none of the seven
+  affected packed formats. The record also rejects slower lossless row
+  packing and residual-precision WMMA; neither changes production numerics.
 - [Measured controller costs](dflash2-controller-cost.json): Q4 uses an offline
   cost curve for each proposal count; Q8 retains its previous formula.
   All 20 measured greedy continuations and both depth controls match AR;

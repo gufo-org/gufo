@@ -274,6 +274,20 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
   }
 }
 
+// Immediate XOR masks avoid the lane-address calculation of __shfl_xor.
+// Keep the descending butterfly order identical to scalar decoding.
+template<int Offset = 16>
+__device__ __forceinline__ float ReduceKQuantWave(float value) {
+  const int other = __builtin_amdgcn_ds_swizzle(
+      __builtin_bit_cast(int, value), (Offset << 10) | 31);
+  const float sum = value + __builtin_bit_cast(float, other);
+  if constexpr (Offset > 1) {
+    return ReduceKQuantWave<Offset / 2>(sum);
+  } else {
+    return sum;
+  }
+}
+
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, core::GgmlType WType,
          std::size_t TilesPerStage = 1, std::uint32_t MinWaves = 12,
@@ -469,9 +483,7 @@ __launch_bounds__(WavesPerBlock * 32, MinWaves) __global__
   for (Index r = 0; r < RowsPerWave; ++r) {
 #pragma unroll
     for (Index token = 0; token < Batch; ++token) {
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        sums[r][token] += __shfl_xor(sums[r][token], offset);
-      }
+      sums[r][token] = ReduceKQuantWave(sums[r][token]);
     }
   }
   if (lane == 0) {

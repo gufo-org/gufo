@@ -94,24 +94,23 @@ advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
 **Latest Q4 target/Q4 draft:** greedy C1, including prefill and excluding
-model loading. JSON/prose use two timed samples after warming on the quiet
-host. Fixed repetition retains its preceding measurement.
+model loading. Each workload uses two samples per binary in ABBA order
+after warmup on the quiet host. These are short controls.
 
-| Workload | Current tok/s | Measurement |
-| --- | ---: | ---: |
-| Repetition, tg128, fixed-7 | **54.15** | Earlier run |
-| JSON, tg300, adaptive | **51.29** | Two runs |
-| Prose, tg300, adaptive | **22.91** | Two runs |
+| Workload | Before tok/s | Current tok/s | Change |
+| --- | ---: | ---: | ---: |
+| Repetition, tg128, fixed-7 | 54.87 | **54.96** | Flat |
+| JSON, tg300, adaptive | 51.55 | **51.74** | +0.39% |
+| Prose, tg300, adaptive | 22.97 | **23.20** | +1.01% |
 
-The controller uses measured costs for Q4 verification widths. All token IDs
-match AR; verification rounds fall from 45 to 43 for JSON and 115 to 110 for
-prose. Three chat prompts are flat in aggregate: explanation improves 2.2%,
-code loses 1.0%, and reasoning loses 1.6%. The single depth-4096 control loses
-1.0%. Q8 keeps its previous cost formula.
-[Measurements and quality checks](eval/dflash2-controller-cost.json).
+The latest [exact wave reductions](eval/dflash2-reductions.json) save 0.38%
+of the affected projections' profiled GPU time. All 12 continuations match
+AR, all 51 verifier/scalar logit rows are exact, and all 90 Q4 draft trace
+files are unchanged. No new execution option is added.
 
-The preceding [Q5 batch-eight FMA change](eval/dflash2-fma-order.json)
-reduces the affected kernels' profiled GPU time by 0.93%, preserving exact outputs.
+The controller uses [measured Q4 verification costs](eval/dflash2-controller-cost.json);
+Q8 keeps its previous formula. Its earlier chat comparison was flat in
+aggregate, with code/reasoning losing 1.0–1.6%; the depth-4096 control lost 1.0%.
 
 [Mixed-format scalar specialization](eval/dflash2-mixed-formats.json) raises
 AR generation to **11.74 tok/s** at depth zero. Earlier work covers
@@ -119,12 +118,12 @@ AR generation to **11.74 tok/s** at depth zero. Earlier work covers
 [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json).
 The [quality report](eval/README.md) indexes the remaining evidence.
 
-Compiler scheduling flags did not change the emitted kernels; scheduling
-boundaries and expanded Q5 codes were slower. Rounded EMA and a smaller
-initial controller prior regressed prose. Broader FMA scheduling changes
-and explicit vector FMAs showed no useful gain. None is retained.
+Lossless row packing and residual-precision WMMA were slower; alignment
+hints changed no instructions. Earlier scheduling, expanded-code and
+controller experiments that failed their controls are also excluded.
 
-**Same host and identical Q4 target/draft files**, raw tg300, including prefill:
+**Same host and identical Q4 target/draft files**, at `b55a120`, raw tg300,
+including prefill:
 
 | Workload / policy | Gufo tok/s | Laurent Vulkan tok/s |
 | --- | ---: | ---: |
