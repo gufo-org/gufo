@@ -60,6 +60,21 @@ bool ByteEqual(std::span<const float> a, std::span<const float> b) {
          std::memcmp(a.data(), b.data(), a.size_bytes()) == 0;
 }
 
+void CheckVerificationFeatures(
+    Executor& executor,
+    std::span<const std::vector<float>> expected) {
+  const auto actual = executor.GetVerificationHiddenStates();
+  const std::size_t width = expected.front().size();
+  Expect(actual.size() == expected.size() * width,
+         "verification feature dimensions changed");
+  for (std::size_t row = 0; row < expected.size(); ++row) {
+    Expect(ByteEqual(actual.subspan(row * width, width), expected[row]),
+           "verification features differ from scalar decoding");
+  }
+  Expect(ByteEqual(executor.CopyLastHidden(), expected.back()),
+         "last verification features differ from scalar decoding");
+}
+
 void CheckMixedContextBatch(const Executor& owner) {
   for (const auto storage : {gufo::hip::QwenKvCacheStorage::kFp16,
                              gufo::hip::QwenKvCacheStorage::kFp32}) {
@@ -165,6 +180,10 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
   Expect(executor->GetConfig().hidden_size == 5120 &&
              executor->GetConfig().vocab_size == 248320,
          "quality fixture requires Qwen3.8 27B");
+  if (check_replay) {
+    constexpr std::array<std::uint32_t, 5> target_layers{6, 20, 34, 48, 62};
+    executor->SetPromptHiddenCapture(true, target_layers);
+  }
   std::vector<Case> cases;
   for (const auto* text : kTexts) {
     // The middle case crosses the 16-row replay ring after three tokens.
@@ -181,10 +200,20 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
     (void)executor->ForwardPromptBatch(
         std::span(row.tokens).first(prompt_size));
     row.logits.push_back(Logits(*executor));
+    std::vector<std::vector<float>> expected_features;
     auto snapshot = executor->SaveSnapshot(prompt_size);
     for (std::size_t pos = prompt_size; pos < row.tokens.size(); ++pos) {
       (void)executor->ForwardToken(row.tokens[pos], pos);
       row.logits.push_back(Logits(*executor));
+      if (check_replay) {
+        const auto features = executor->CopyLastHidden();
+        Expect(features.size() == 5 * executor->GetConfig().hidden_size &&
+                   std::ranges::all_of(features, [](float value) {
+                     return std::isfinite(value);
+                   }),
+               "scalar target features must be finite and complete");
+        expected_features.emplace_back(features.begin(), features.end());
+      }
     }
     if (check_replay) {
       executor->RestoreSnapshot(*snapshot);
@@ -202,6 +231,8 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
                              row.logits[index + 1]),
                    "adaptive-width verification changed target logits");
           }
+          CheckVerificationFeatures(
+              *executor, std::span(expected_features).first(width));
           std::cout << "verification width=" << width << " exact=1\n";
         }
         executor->RestoreSnapshot(*snapshot);
@@ -221,6 +252,9 @@ std::vector<Case> Capture(const char* path, bool check_replay) {
         Expect(ByteEqual(logits, row.logits[index + 1]),
                "batched verification changed target logits");
       }
+      CheckVerificationFeatures(*executor, expected_features);
+      std::cout << "verification features case=" << cases.size()
+                << " rows=" << suffix.size() << " exact=1\n";
       executor->RestoreState();
       constexpr std::size_t committed = 5;
       executor->CommitVerificationChunk(suffix.first(committed), prompt_size);

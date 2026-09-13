@@ -99,15 +99,16 @@ after warmup on the quiet host. These are short controls.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 54.87 | **55.54** | +1.22% |
-| JSON, tg300, adaptive | 51.80 | **52.33** | +1.02% |
-| Prose, tg300, adaptive | 23.21 | **23.38** | +0.71% |
+| Repetition, tg128, fixed-7 | 55.54 | **56.34** | +1.45% |
+| JSON, tg300, adaptive | 52.24 | **53.24** | +1.93% |
+| Prose, tg300, adaptive | 23.36 | **23.42** | +0.27% |
 
-The latest [shared-memory synchronization](eval/dflash2-synchronization.json)
-avoids unnecessary global cache invalidation and saves 1.12% of the affected
-projections' profiled GPU time. All 12 continuations match AR, all 51
-verifier/scalar logit rows are exact, and all 90 Q4 draft trace files are
-unchanged. Arithmetic and execution options are unchanged.
+The latest [feature-transfer change](eval/dflash2-feature-transfer.json)
+copies target features to the host once after verification layers, reusing
+the logits workspace without extra allocation. All 12 continuations match
+AR. Across Q4/Q8, all 102 verification logit rows and 102 feature rows are
+bit-exact; all 46 sampling cases pass. Arithmetic and execution options are
+unchanged. Prose is nearly flat in this short comparison.
 
 The controller uses [measured Q4 verification costs](eval/dflash2-controller-cost.json);
 Q8 keeps its previous formula. Its earlier chat comparison was flat in
@@ -122,7 +123,8 @@ The [quality report](eval/README.md) indexes the remaining evidence.
 Lossless row packing, residual-precision WMMA/INT8, precomputed activation
 sums and removing full-tile bounds checks were slower. Alignment hints
 changed no instructions. Further [integer-matrix and final-barrier probes](eval/dflash2-matrix-probes.json)
-also lost; rejected experiments remain excluded.
+also lost. [Lossless Q6 head expansion](eval/dflash2-feature-transfer.json)
+increased bandwidth demand and lost 14–26%; rejected experiments remain excluded.
 
 **Same host and identical Q4 target/draft files**, at `b55a120`, raw tg300,
 including prefill:

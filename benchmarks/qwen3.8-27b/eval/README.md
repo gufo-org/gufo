@@ -14,7 +14,7 @@ Run on gfx1151 inside Nix. Model-specific tests live in
 | --- | --- |
 | `fast` | Sampling/verifier and HTTP parser regressions, executable option validation, NPU packing, GGUF reference decoding and strict result reporting. |
 | `kernels` | Quantized/BF16 GEMM versus independent/decode controls; exact recurrent state and replay; DFlash convolution, windowed attention, full-vocabulary top-k, sampled selector and verifier distributions. |
-| `model` | Target full-logit replay at verification widths 2–8; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt/chat/bench parity, seeded multi-turn replay and HTTP adapter sampling. |
+| `model` | Target full-logit and tapped-feature replay at verification widths 2–8; MTP committed-feature alignment; DFlash loading, ring/snapshot/restore; prompt/chat/bench parity, seeded multi-turn replay and HTTP adapter sampling. |
 | `serving` | Direct versus served tokens, seeded sampled replay, EOS, bounded prefill, cache forks, persistent restore, concurrency, cancellation and reclamation. |
 | `reference` | Teacher-forced target versus optional BF16: KL, total variation, top-1 agreement, RMSE and NLL difference. Informational quantization measurements. |
 
@@ -139,6 +139,18 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Consolidated feature transfers](dflash2-feature-transfer.json): target
+  verification captures taps on the GPU and copies them to the host together,
+  reusing the logits workspace without extra allocation or changed arithmetic.
+  The existing target test now checks all five DFlash2 taps and the retained
+  final row: 102 full-vocabulary rows, 102 feature rows and 18 final-row checks
+  are bit-exact across Q4/Q8. Cache/context controls, 46 sampling cases and
+  all 12 measured AR continuations pass. Short paired runs improve JSON 1.93%
+  and repetition 1.45%; prose is nearly flat (+0.27%). The trace confirms
+  129 fewer copy API calls over 43 rounds and identical model-kernel calls.
+  API waits include preceding GPU work; they are not pure copy cost.
+  Lossless Q6 head expansion preserves outputs but loses 14–26%, so it is
+  rejected. No new maintained test/tool or execution option is added.
 - [Rejected matrix/loop probes](dflash2-matrix-probes.json): skipping the final
   tile barrier loses up to 2.5% while preserving every checked output. Native
   integer WMMA with four activation components slightly improves sampled FP64

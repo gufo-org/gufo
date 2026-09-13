@@ -352,6 +352,14 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
   const std::size_t time_step_rank = config.ssm_time_step_rank;
   const std::size_t captured_layer_count =
       arena_.GetTargetLayerCapture().size();
+  const std::size_t feature_width = captured_layer_count * hidden_size;
+  const std::size_t feature_elements =
+      capture_prompt_hidden_ ? batch_size * feature_width : 0;
+  const std::size_t feature_rows =
+      feature_elements / vocab_size + (feature_elements % vocab_size != 0);
+  // Logits are produced after the transformer layers. Reuse their workspace
+  // for tapped features so host transfers do not interrupt the layer loop.
+  EnsureVerificationLogits(std::max(batch_size, feature_rows));
 
   std::array<std::uint32_t, kMaxDecodeBatch> host_tokens{};
   std::array<std::uint32_t, kMaxDecodeBatch> host_positions{};
@@ -374,8 +382,7 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                            hipMemcpyHostToDevice, arena_.stream));
 
   if (capture_prompt_hidden_ && captured_layer_count > 0) {
-    h_verification_hidden_.resize(batch_size * captured_layer_count *
-                                  hidden_size);
+    h_verification_hidden_.resize(feature_elements);
   }
 
   EmitDecodeRouteTelemetry(weights_, policy_);
@@ -564,22 +571,29 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
       if (const auto tap = arena_.GetTargetLayerCaptureIndex(layer_index);
           tap.has_value()) {
         float* const destination =
-            h_verification_hidden_.data() + (*tap * hidden_size);
+            d_verification_logits_ + (*tap * hidden_size);
         HIP_CHECK(hipMemcpy2DAsync(
-            destination, captured_layer_count * hidden_size * sizeof(float),
+            destination, feature_width * sizeof(float),
             scratch.decode.hidden.data(), hidden_size * sizeof(float),
-            hidden_size * sizeof(float), batch_size, hipMemcpyDeviceToHost,
-            arena_.stream));
-        HIP_CHECK(hipMemcpyAsync(
-            arena_.d_target_layer_features + (*tap * hidden_size),
-            scratch.decode.hidden.data() + ((batch_size - 1) * hidden_size),
-            hidden_size * sizeof(float), hipMemcpyDeviceToDevice,
+            hidden_size * sizeof(float), batch_size, hipMemcpyDeviceToDevice,
             arena_.stream));
       }
     }
   }
 
-  if (capture_prompt_hidden_ && captured_layer_count == 0) {
+  if (capture_prompt_hidden_ && captured_layer_count > 0) {
+    // Both copies precede the output projection on the same stream, so the
+    // workspace can be overwritten with logits once the features are copied.
+    HIP_CHECK(hipMemcpyAsync(
+        h_verification_hidden_.data(), d_verification_logits_,
+        feature_elements * sizeof(float), hipMemcpyDeviceToHost,
+        arena_.stream));
+    HIP_CHECK(hipMemcpyAsync(
+        arena_.d_target_layer_features,
+        d_verification_logits_ + (batch_size - 1) * feature_width,
+        feature_width * sizeof(float), hipMemcpyDeviceToDevice,
+        arena_.stream));
+  } else if (capture_prompt_hidden_ && captured_layer_count == 0) {
     h_verification_hidden_.resize(batch_size * hidden_size);
     HIP_CHECK(hipMemcpyAsync(h_verification_hidden_.data(),
                              scratch.decode.hidden.data(),
@@ -592,7 +606,6 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                        static_cast<const float*>(weights_.output_norm.data),
                        scratch.decode.normed.data(), nullptr, batch_size,
                        hidden_size, 1e-6F, arena_.stream);
-  EnsureVerificationLogits(batch_size);
   LaunchProjection(weights_.output, scratch.decode.normed.data(),
                    d_verification_logits_, batch_size, vocab_size, hidden_size,
                    arena_.stream);
