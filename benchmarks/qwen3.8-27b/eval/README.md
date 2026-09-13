@@ -150,6 +150,16 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Medium projections and Q6 FFNs](dflash2-wave64.json): selected widths
+  5–8 retain their geometry, index width and FP32 sums. A lower occupancy
+  hint removes batch-6 Q4 private storage; all 26 native kernels have zero
+  scratch, and the prior 19 retain identical instructions. The affected
+  profile unions take 3.41% less GPU time; fresh C1 Q4/Q4 prose/JSON/repetition
+  improve 0.44%/0.94%/1.02%. All 12 token/acceptance traces and 270 draft files
+  stay exact. Both target suites, two operator suites and 34 maintained GEMM
+  cases pass; the final Q4-only hint repeats its three cases and Q4 suite.
+  Q8 has no matching changed tensors, so its preceding suite is reused.
+  Eight scalar wave64 probes remain excluded; no new scalar or sampling code.
 - [Batch-4 extension](dflash2-wave64.json): Q4 up/packed-up, Q5 down and
   IQ4 down retain their arithmetic and index widths. Four affected profile
   unions take 1.90% less GPU time; overall C1 timing is flat

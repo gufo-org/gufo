@@ -17,8 +17,15 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
                                         MinWaves, 1, Narrow, Step, 64>
         <<<grid, Waves * 32, 0, stream>>>(w, x, y, m, k);
   };
-  const bool down = m == 5120;
+  const bool down = m == 5120 && k == 17408;
   if constexpr (Type == core::GgmlType::kQ4_K) {
+    if constexpr (Batch >= 5) {
+      if (k == 5120 && (m == 6144 || m == 10240 || m == 12288)) {
+        constexpr std::uint32_t kMinWaves = Batch == 6 ? 8 : 12;
+        launch.template operator()<16, 3, 1, kMinWaves>();
+        return;
+      }
+    }
     if constexpr (Batch == 5 || Batch == 6) {
       if (!down) {
         launch.template operator()<16, 3, 2, 12>();
@@ -53,6 +60,12 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
     }
   } else {
     static_assert(Type == core::GgmlType::kQ6_K);
+    if constexpr (Batch >= 7) {
+      if (m == 5120 && k == 6144) {
+        launch.template operator()<16, 4, 1, 4>();
+        return;
+      }
+    }
     launch.template operator()<16, 3, 2, 1>();
   }
 }
@@ -68,7 +81,8 @@ void LaunchBatch(const void* w, const float* x, float* y, std::size_t batch,
       return;
     case 5:
       if constexpr (Type == core::GgmlType::kQ4_K ||
-                    Type == core::GgmlType::kQ5_K) {
+                    Type == core::GgmlType::kQ5_K ||
+                    Type == core::GgmlType::kQ6_K) {
         Launch<Type, 5>(w, x, y, m, k, stream);
       }
       return;
@@ -101,16 +115,20 @@ bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
   // A packed gate/up pair has twice the rows of an individual FFN projection.
   const bool up = k == 5120 && (m == 17408 || m == 34816);
   const bool down = m == 5120 && k == 17408;
+  const bool medium_up = k == 5120 && (m == 6144 || m == 10240 || m == 12288);
+  const bool medium_down = m == 5120 && k == 6144;
   switch (type) {
     case core::GgmlType::kQ4_K:
-      if (!(up || (down && batch >= 5))) {
+      if (!(up || ((down || medium_up) && batch >= 5))) {
         return false;
       }
       LaunchBatch<core::GgmlType::kQ4_K>(w, x, y, batch, m, k, stream);
       return true;
     case core::GgmlType::kQ5_K:
       if (!((up && batch >= 5 && batch != 6) ||
-            (down && (batch == 4 || batch >= 6)))) {
+            (down && (batch == 4 || batch >= 6)) ||
+            (medium_up && batch >= 6 && !(batch == 8 && m == 6144)) ||
+            (medium_down && batch >= 7))) {
         return false;
       }
       LaunchBatch<core::GgmlType::kQ5_K>(w, x, y, batch, m, k, stream);
@@ -122,7 +140,9 @@ bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
       LaunchBatch<core::GgmlType::kIQ4_XS>(w, x, y, batch, m, k, stream);
       return true;
     case core::GgmlType::kQ6_K:
-      if (batch < 7 || m != 248320 || k != 5120) {
+      if (!((batch == 5 && down) ||
+            (batch >= 7 && (down || (up && m == 17408) || medium_down ||
+                            (m == 248320 && k == 5120))))) {
         return false;
       }
       LaunchBatch<core::GgmlType::kQ6_K>(w, x, y, batch, m, k, stream);
