@@ -105,8 +105,10 @@ def check_options(binary):
                                 text=True, capture_output=True, timeout=30)
         if result.returncode != 2:
             raise AssertionError(f"chat silently ignored {flag}")
-    for field, value in dict(temperature=0.8, top_k=40, top_p=0.9, min_p=0.05,
-                            min_keep=3, seed=73, repeat_penalty=1.1,
+    # Temperature/seed are shared parser options for DS4. Qwen's
+    # architecture-specific rejection is checked with its model below.
+    for field, value in dict(top_k=40, top_p=0.9, min_p=0.05,
+                            min_keep=3, repeat_penalty=1.1,
                             repeat_last_n=8, frequency_penalty=0.2,
                             presence_penalty=0.1).items():
         result = subprocess.run(
@@ -323,6 +325,12 @@ def check_bench(binary, model, draft):
          "--draft-policy", policy] for policy in ("fixed", "adaptive")
     ]
     for backend in backends:
+        sampled = subprocess.run(
+            common + backend + ["--temperature", "0.8", "--seed", "73"],
+            text=True, capture_output=True, timeout=30)
+        if (sampled.returncode != 1 or
+                "sampled model benchmarks currently support DS4 only" not in sampled.stderr):
+            raise AssertionError("Qwen benchmark did not reject sampled generation")
         result = subprocess.run(common + backend, text=True, capture_output=True,
                                 timeout=180, check=True)
         traces = BENCH_TRACE.findall(result.stderr)

@@ -26,6 +26,24 @@ void TestDefaultOptions() {
   Expect(options->repetitions == 1, "default is one repetition");
   Expect(options->draft_tokens == 7, "default draft ceiling is seven");
   Expect(options->min_draft_tokens == 1, "default minimum draft is one");
+  Expect(options->temperature == 0.0F && options->seed == 0,
+         "benchmark sampling defaults remain greedy");
+}
+
+void TestDs4SamplingOptions() {
+  const std::array<const char*, 4> args = {
+      "--temperature", "0.6", "--seed", "7"};
+  const auto options = gufo::cli::ParseBenchOptions(args);
+  Expect(options && options->temperature == 0.6F && options->seed == 7,
+         "DS4 benchmark retains temperature and seed");
+  for (const char* value : {"-1", "nan", "inf"}) {
+    const std::array<const char*, 2> invalid = {"--temperature", value};
+    Expect(!gufo::cli::ParseBenchOptions(invalid),
+           "invalid benchmark temperature is rejected");
+  }
+  const std::array<const char*, 2> invalid_seed = {"--seed", "-1"};
+  Expect(!gufo::cli::ParseBenchOptions(invalid_seed),
+         "negative benchmark seed is rejected");
 }
 
 void TestDepthOptions() {
@@ -125,6 +143,7 @@ void TestInvalidWorkload() {
 
 int main() {
   TestDefaultOptions();
+  TestDs4SamplingOptions();
   TestDepthOptions();
   TestHybridMtpOptions();
   TestInvalidDepth();
