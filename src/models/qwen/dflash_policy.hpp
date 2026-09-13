@@ -2,6 +2,7 @@
 #define GUFO_MODELS_QWEN_DFLASH_POLICY_HPP_
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -36,10 +37,10 @@ public:
   static constexpr std::uint32_t kMaxDraftTokens = 7;
 
   DFlashLengthController(DFlashDraftPolicy policy, std::uint32_t limit,
-                         float row_cost = 0.08F)
+                         bool q8_target = false)
       : policy_(policy),
         limit_(std::clamp(limit, 1U, kMaxDraftTokens)),
-        row_cost_(row_cost) {
+        q8_target_(q8_target) {
     Reset();
   }
 
@@ -49,7 +50,7 @@ public:
       return cap;
 
     // Weight reads impose a substantial cost even on a short verification.
-    // Fixed-length gfx1151 pilots estimate incremental cost per verified row.
+    // gfx1151 profiles estimate draft-plus-verification cost at each width.
     // Use that offline estimate, never request timings, and maximize expected
     // emitted tokens (including the target correction) per unit of work.
     const float probability = mean_ / (mean_ + 1.0F);
@@ -60,8 +61,10 @@ public:
     for (std::uint32_t length = 1; length <= cap; ++length) {
       survival *= probability;
       expected_tokens += survival;
-      const float score =
-          expected_tokens / (1.0F + row_cost_ * static_cast<float>(length));
+      const float cost = q8_target_
+                             ? 1.0F + 0.02F * static_cast<float>(length)
+                             : kQ4RelativeCost[length - 1];
+      const float score = expected_tokens / cost;
       if (score > best_score) {
         best_score = score;
         best_length = length;
@@ -90,9 +93,11 @@ public:
   }
 
 private:
+  static constexpr std::array<float, kMaxDraftTokens> kQ4RelativeCost{
+      1.0F, 1.02F, 1.045F, 1.08F, 1.14F, 1.20F, 1.29F};
   DFlashDraftPolicy policy_;
   std::uint32_t limit_;
-  float row_cost_;
+  bool q8_target_;
   float mean_{0.0F};
 };
 

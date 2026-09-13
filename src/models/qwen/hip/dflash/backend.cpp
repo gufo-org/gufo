@@ -186,9 +186,7 @@ QwenDFlashGpuDraftBackend::QwenDFlashGpuDraftBackend(
           // (Q8_0 head) from Q4 (Q6_K head). Q8 verification is more bandwidth
           // bound, so short blocks save less work in the fixed-length pilot.
           executor_->GetModel().GetWeights().output.type ==
-                  core::GgmlType::kQ8_0
-              ? 0.02F
-              : 0.08F) {}
+              core::GgmlType::kQ8_0) {}
 
 std::unique_ptr<QwenDFlashGpuDraftBackend> QwenDFlashGpuDraftBackend::Create(
     std::shared_ptr<const QwenDFlashGpuModel> model,

@@ -12,13 +12,13 @@ that number. Draft precision is selected separately from target precision.
 ## Single user, autoregressive
 
 Q4 depth 0 has a [paired AR refresh](eval/dflash2-mixed-formats.json);
-depth 4096 uses the [preceding refresh](eval/dflash2-scalar-row-reuse.json).
+depth 4096 has a [fresh AR control](eval/dflash2-controller-cost.json).
 Other rows remain the reference sweep at `023a13a`. Full refresh: TODO.
 
 | Context depth | Q4 pp / tg (tok/s) | Q8 pp / tg (tok/s) |
 | ---: | ---: | ---: |
 | 0 | 420.2 / 11.74 | 491.1 / 7.07 |
-| 4,096 | 405.0 / 11.51 | 470.9 / 7.01 |
+| 4,096 | 408.5 / 11.64 | 470.9 / 7.01 |
 | 8,192 | 390.8 / 11.15 | 451.2 / 6.95 |
 | 12,288 | 375.1 / 10.96 | 434.2 / 6.88 |
 | 16,384 | 362.0 / 10.77 | 414.4 / 6.81 |
@@ -27,17 +27,19 @@ Other rows remain the reference sweep at `023a13a`. Full refresh: TODO.
 
 Recommended **Q4_K_M draft, adaptive controller**, pp2048/tg128, in tok/s.
 One timed repetition after warmup; every measured row matches all 128 AR IDs.
-These depth rows precede the latest kernel changes. Refresh: **TODO**.
+Q4 depth 4096 uses the measured-cost controller below; the other entries
+precede the latest changes. Full refresh: **TODO**.
 
 | Context depth | Q4 pp / tg | Q8 pp / tg |
 | ---: | ---: | ---: |
 | 0 | 398.1 / 24.18 | 466.2 / 24.14 |
-| 4,096 | 384.9 / 17.00 | 447.3 / 16.30 |
+| 4,096 | 386.4 / 17.06 | 447.3 / 16.30 |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-[Q4 depth measurements](eval/dflash2-head-iq4.json);
+[Current Q4 depth-4096 control](eval/dflash2-controller-cost.json);
+[earlier Q4 depth measurements](eval/dflash2-head-iq4.json);
 [preceding Q8 measurements](eval/dflash2-batch-widths.json).
 The [controller comparison](eval/dflash2-controllers.json) remains separate.
 Earlier [fixed-block precision results](eval/dflash2-rollback.json) and the
@@ -72,7 +74,7 @@ speculative serving is being qualified before these numbers are published.
 ## Draft choice and latest optimization
 
 **Q4_K_M is the recommended draft; adaptive is the default controller.**
-All three drafts pass the pinned upstream operator comparison. A short C1
+All three drafts pass the pinned upstream operator comparison. An earlier C1
 comparison on three chat prompts (explanation, code, reasoning), tg128,
 one repetition per pairing, includes prefill:
 
@@ -92,20 +94,25 @@ advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
 **Latest Q4 target/Q4 draft:** greedy C1, including prefill and excluding
-model loading. Two timed samples per binary in ABBA order; JSON has four
-across two comparisons. No separate warmup. Changes compare binaries within
-this probe, not against earlier tables measured at different times.
+model loading. JSON/prose use two timed samples per binary in ABBA order.
+Prose uses a confirmation after warming. Fixed repetition retains its
+preceding measurement.
 
 | Workload | Current tok/s | Paired change |
 | --- | ---: | ---: |
-| Repetition, tg128, fixed-7 | **54.15** | +0.3% |
-| JSON, tg300, adaptive | **48.50** | +0.4% |
-| Prose, tg300, adaptive | **22.12** | +0.1%, effectively flat |
+| Repetition, tg128, fixed-7 | **54.15** | Unchanged route |
+| JSON, tg300, adaptive | **51.48** | +4.7% |
+| Prose, tg300, adaptive | **22.91** | +2.8% |
 
-Every token ID and acceptance statistic is unchanged. Alternating FMA
-multiplication operands in Q5 batch-eight projections reduces their profiled
-GPU time by 0.93%, with no spills or changed accumulation order.
-[Measurements and quality checks](eval/dflash2-fma-order.json).
+The controller uses measured costs for Q4 verification widths. All token IDs
+match AR; verification rounds fall from 45 to 43 for JSON and 115 to 110 for
+prose. Three chat prompts are flat in aggregate: explanation improves 2.2%,
+code loses 1.0%, and reasoning loses 1.6%. The single depth-4096 control loses
+1.0%. Q8 keeps its previous cost formula.
+[Measurements and quality checks](eval/dflash2-controller-cost.json).
+
+The preceding [Q5 batch-eight FMA change](eval/dflash2-fma-order.json)
+reduces the affected kernels' profiled GPU time by 0.93%, preserving exact outputs.
 
 [Mixed-format scalar specialization](eval/dflash2-mixed-formats.json) raises
 AR generation to **11.74 tok/s** at depth zero. Earlier work covers
@@ -116,10 +123,10 @@ The [quality report](eval/README.md) indexes the remaining evidence.
 Compiler scheduling flags did not change the emitted kernels; scheduling
 boundaries and expanded Q5 codes were slower. Rounded EMA and a smaller
 initial controller prior regressed prose. Broader FMA scheduling changes
-showed no meaningful release gain. None is retained.
+and explicit vector FMAs showed no useful gain. None is retained.
 
-The upstream headline uses different artifacts/power and excludes prefill;
-it is not a matched engine comparison. [Source audit and comparison limits](eval/llama-comparison.json).
+The upstream headline uses different artifacts and excludes prefill; power
+settings have not been matched. [Source audit and comparison limits](eval/llama-comparison.json).
 The [rollback pass](eval/dflash2-rollback.json) saves **50.5 MiB per session**
 and qualifies mixed cache capacities and logical context 262,144.
 

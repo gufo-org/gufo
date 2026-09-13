@@ -40,31 +40,33 @@ void TestLengthController() {
   fixed.Observe(0, 7);
   Expect(fixed.Choose(100) == 7 && fixed.Choose(3) == 3 && fixed.Choose(0) == 0,
          "fixed blocks obey only the configured and remaining budgets");
-  DFlashLengthController adaptive(DFlashDraftPolicy::kAdaptive, 7);
-  for (int round = 0; round < 32; ++round)
-    adaptive.Observe(0, adaptive.Choose(7));
-  Expect(adaptive.Choose(7) == 1, "rejections reduce wasted verification");
-  for (int round = 0; round < 32; ++round) {
-    const auto drafted = adaptive.Choose(7);
-    adaptive.Observe(drafted, drafted);
-  }
-  Expect(adaptive.Choose(7) == 7,
-         "censored full acceptance probes upward instead of getting stuck");
-  const auto saved = adaptive.State();
-  adaptive.Reset();
-  Expect(adaptive.State() != saved, "new requests reset learned acceptance");
-  adaptive.Restore(saved);
-  Expect(adaptive.Choose(7) == 7 && adaptive.Choose(2) == 2,
-         "restored decisions retain history and obey the output budget");
-  for (const float invalid : {-1.0F, 8.0F, INFINITY, NAN}) {
-    bool rejected = false;
-    try {
-      adaptive.Restore(invalid);
-    } catch (const std::invalid_argument&) {
-      rejected = true;
+  for (const bool q8_target : {false, true}) {
+    DFlashLengthController adaptive(DFlashDraftPolicy::kAdaptive, 7, q8_target);
+    for (int round = 0; round < 32; ++round)
+      adaptive.Observe(0, adaptive.Choose(7));
+    Expect(adaptive.Choose(7) == 1, "rejections reduce wasted verification");
+    for (int round = 0; round < 32; ++round) {
+      const auto drafted = adaptive.Choose(7);
+      adaptive.Observe(drafted, drafted);
     }
-    Expect(rejected && adaptive.State() == saved,
-           "malformed controller state cannot mutate the decision history");
+    Expect(adaptive.Choose(7) == 7,
+           "censored full acceptance probes upward instead of getting stuck");
+    const auto saved = adaptive.State();
+    adaptive.Reset();
+    Expect(adaptive.State() != saved, "new requests reset learned acceptance");
+    adaptive.Restore(saved);
+    Expect(adaptive.Choose(7) == 7 && adaptive.Choose(2) == 2,
+           "restored decisions retain history and obey the output budget");
+    for (const float invalid : {-1.0F, 8.0F, INFINITY, NAN}) {
+      bool rejected = false;
+      try {
+        adaptive.Restore(invalid);
+      } catch (const std::invalid_argument&) {
+        rejected = true;
+      }
+      Expect(rejected && adaptive.State() == saved,
+             "malformed controller state cannot mutate the decision history");
+    }
   }
 }
 

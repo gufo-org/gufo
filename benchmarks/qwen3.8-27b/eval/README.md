@@ -131,6 +131,13 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Measured controller costs](dflash2-controller-cost.json): Q4 uses an offline
+  cost curve for each proposal count; Q8 retains its previous formula.
+  All 20 measured greedy continuations and both depth controls match AR;
+  state/snapshot tests and 23 sampling replays pass. JSON improves 4.7% and
+  prose 2.8%. Three chat prompts are flat in aggregate, with code/reasoning
+  losing 1.0–1.6%; the one depth-4096 sample loses 1.0%. Decisions precede
+  proposals and never use live timing. Target/draft arithmetic is unchanged.
 - [Q5 batch-eight FMA scheduling](dflash2-fma-order.json): alternating
   multiplication operands retains all 51 Q4 verifier/scalar logit rows,
   cache/context controls and all 90 draft trace files. Both kernel suites

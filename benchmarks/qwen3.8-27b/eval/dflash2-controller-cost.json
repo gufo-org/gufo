@@ -1,0 +1,929 @@
+{
+  "schema": "gufo.qwen27b-controller-cost.v1",
+  "date_utc": "2026-09-13T00:22:50.249631+00:00",
+  "base_commit": "0030f168eb687da5001de52a0b53aabda4c64a63",
+  "artifacts_reference": "dflash2-rollback.json",
+  "decision": "Retain the measured Q4 draft-plus-verification cost curve. JSON and prose improve; held-out aggregate is flat, with code/reasoning and the one-depth control slightly slower. This is not a universal per-prompt speedup.",
+  "change": {
+    "Q4_relative_cost_by_proposal_count": [
+      1.0,
+      1.02,
+      1.045,
+      1.08,
+      1.14,
+      1.2,
+      1.29
+    ],
+    "previous_Q4_cost": "1 + 0.08 * proposal_count",
+    "Q8_cost": "1 + 0.02 * proposal_count, unchanged formula",
+    "acceptance_model": "Existing geometric survival, accepted-length EMA and censored full acceptance; initial mean 3, unchanged.",
+    "selection": "Before drawing proposals, from committed history and an offline cost curve. No live timing, sampler/proposal change, runtime switch or new controller mode.",
+    "scope": "Q4 target cost calibration uses Q4 draft; all draft arithmetic and the target verification kernels remain unchanged. Fixed policy ignores the cost curve."
+  },
+  "profile_basis": {
+    "method": "Saved b38e507 release profiles only; no new model execution. Pair each target span with its immediately preceding draft selector and draft embedding. Draft wall-span includes the final selector; target includes embedding through Argmax. Excludes variable preceding rollback/injection. GPU trace times are diagnostic, not unprofiled benchmark times.",
+    "source": "b38e507 qualified baseline profiles retained under /tmp/qwen-fma-general-release/baseline-{json,prose}-profile",
+    "workloads": {
+      "json": {
+        "2": {
+          "samples": 1,
+          "verification_ms": 92.017282,
+          "draft_ms": 11.053419,
+          "draft_plus_verification_ms": 103.070701
+        },
+        "6": {
+          "samples": 2,
+          "verification_ms": 106.1549325,
+          "draft_ms": 12.769366999999999,
+          "draft_plus_verification_ms": 118.9242995
+        },
+        "7": {
+          "samples": 3,
+          "verification_ms": 111.727864,
+          "draft_ms": 12.643835,
+          "draft_plus_verification_ms": 124.516852
+        },
+        "8": {
+          "samples": 39,
+          "verification_ms": 116.254825,
+          "draft_ms": 13.519316,
+          "draft_plus_verification_ms": 129.822816
+        }
+      },
+      "prose": {
+        "2": {
+          "samples": 4,
+          "verification_ms": 89.700079,
+          "draft_ms": 11.068787,
+          "draft_plus_verification_ms": 100.703884
+        },
+        "3": {
+          "samples": 15,
+          "verification_ms": 91.586767,
+          "draft_ms": 11.069653,
+          "draft_plus_verification_ms": 102.65642
+        },
+        "4": {
+          "samples": 34,
+          "verification_ms": 93.928357,
+          "draft_ms": 11.3782705,
+          "draft_plus_verification_ms": 105.33440350000001
+        },
+        "5": {
+          "samples": 27,
+          "verification_ms": 97.339871,
+          "draft_ms": 11.482816,
+          "draft_plus_verification_ms": 108.88124
+        },
+        "6": {
+          "samples": 18,
+          "verification_ms": 102.8929265,
+          "draft_ms": 12.0620405,
+          "draft_plus_verification_ms": 115.0991925
+        },
+        "7": {
+          "samples": 9,
+          "verification_ms": 108.394162,
+          "draft_ms": 12.726716,
+          "draft_plus_verification_ms": 120.996302
+        },
+        "8": {
+          "samples": 8,
+          "verification_ms": 115.26851400000001,
+          "draft_ms": 13.411098,
+          "draft_plus_verification_ms": 128.713651
+        }
+      }
+    },
+    "combined_relative_cost_B2_through_B8": [
+      1,
+      1.017944126979443,
+      1.0444990913545191,
+      1.079669628029491,
+      1.1420659534582016,
+      1.2030593887291152,
+      1.2863821218265183
+    ],
+    "old_B8_over_B2_estimate": 1.4444444444444444
+  },
+  "binaries": {
+    "baseline": {
+      "path": "/nix/store/lzmrawljk6m64ap6zi5ppglcmg8s82b3-gufo-29f0cec-dirty/bin/gufo",
+      "sha256": "33d3cf635172e361490b9b17954e4e1741a5edf151f12153bd252e993fb48688"
+    },
+    "candidate": {
+      "path": "/nix/store/r1m8v5mpghc3afwxx3lrp2x648fd3p3j-gufo-0030f16-dirty/bin/gufo",
+      "sha256": "3f604d5477f3d766a39bd131af095ae9292da29e758651dc4611408456e57db2"
+    }
+  },
+  "raw_prompt_comparison": {
+    "method": "Q4 target/Q4 draft, greedy C1 raw JSON/prose, TG300. ABBA, two timed samples per binary; includes prefill, excludes loading. JSON uses the idle comparison; prose uses the subsequent confirmation. No concurrent build/evaluation activity. Every token equals the qualified AR reference; acceptance reproduces within each binary.",
+    "rows": [
+      {
+        "workload": "json",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 6.11077,
+        "tps": 49.0937,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "json",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 5.82849,
+        "tps": 51.4713,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.898246,
+          "drafted": 285,
+          "accepted": 256,
+          "steps": 43
+        }
+      },
+      {
+        "workload": "json",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 5.82649,
+        "tps": 51.489,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.898246,
+          "drafted": 285,
+          "accepted": 256,
+          "steps": 43
+        }
+      },
+      {
+        "workload": "json",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 6.09283,
+        "tps": 49.2382,
+        "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+        "speculative": {
+          "acceptance": 0.84106,
+          "drafted": 302,
+          "accepted": 254,
+          "steps": 45
+        }
+      },
+      {
+        "workload": "prose",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 0,
+        "tokens": 300,
+        "seconds": 13.4321,
+        "tps": 22.3346,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      },
+      {
+        "workload": "prose",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 1,
+        "tokens": 300,
+        "seconds": 13.0844,
+        "tps": 22.9281,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.397059,
+          "drafted": 476,
+          "accepted": 189,
+          "steps": 110
+        }
+      },
+      {
+        "workload": "prose",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "candidate",
+        "repetition": 2,
+        "tokens": 300,
+        "seconds": 13.1095,
+        "tps": 22.8842,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.397059,
+          "drafted": 476,
+          "accepted": 189,
+          "steps": 110
+        }
+      },
+      {
+        "workload": "prose",
+        "draft_cap": 7,
+        "mode": "dflash2",
+        "binary": "baseline",
+        "repetition": 3,
+        "tokens": 300,
+        "seconds": 13.4883,
+        "tps": 22.2415,
+        "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+        "speculative": {
+          "acceptance": 0.414414,
+          "drafted": 444,
+          "accepted": 184,
+          "steps": 115
+        }
+      }
+    ],
+    "summary": [
+      {
+        "workload": "json",
+        "mode": "dflash2",
+        "baseline": 49.165949999999995,
+        "candidate": 51.480149999999995,
+        "percent": 4.706916066912159,
+        "all_ids_exact": true,
+        "deterministic_within_binary": true,
+        "speculative_by_binary": {
+          "baseline": {
+            "acceptance": 0.84106,
+            "drafted": 302,
+            "accepted": 254,
+            "steps": 45
+          },
+          "candidate": {
+            "acceptance": 0.898246,
+            "drafted": 285,
+            "accepted": 256,
+            "steps": 43
+          }
+        }
+      },
+      {
+        "workload": "prose",
+        "mode": "dflash2",
+        "baseline": 22.28805,
+        "candidate": 22.90615,
+        "percent": 2.7732349846666837,
+        "all_ids_exact": true,
+        "deterministic_within_binary": true,
+        "speculative_by_binary": {
+          "baseline": {
+            "acceptance": 0.414414,
+            "drafted": 444,
+            "accepted": 184,
+            "steps": 115
+          },
+          "candidate": {
+            "acceptance": 0.397059,
+            "drafted": 476,
+            "accepted": 189,
+            "steps": 110
+          }
+        }
+      }
+    ]
+  },
+  "heldout": {
+    "date_utc": "2026-09-13T00:23:54.326873+00:00",
+    "binary": {
+      "baseline": {
+        "path": "/nix/store/lzmrawljk6m64ap6zi5ppglcmg8s82b3-gufo-29f0cec-dirty/bin/gufo",
+        "sha256": "33d3cf635172e361490b9b17954e4e1741a5edf151f12153bd252e993fb48688"
+      },
+      "candidate": {
+        "path": "/nix/store/r1m8v5mpghc3afwxx3lrp2x648fd3p3j-gufo-0030f16-dirty/bin/gufo",
+        "sha256": "3f604d5477f3d766a39bd131af095ae9292da29e758651dc4611408456e57db2"
+      }
+    },
+    "method": "Q4 target/Q4 draft, C1 greedy chat, three maintained quick prompts, TG128. Fresh baseline AR reference once per prompt; speculative ABBA, two timed samples per binary. No separate warmup beyond preceding AR. Includes prefill, excludes loading. Every continuation must match the full AR token trace; acceptance must replay within each binary.",
+    "references": {
+      "expository_pangram": {
+        "case": "expository_pangram",
+        "binary": "baseline",
+        "mode": "ar",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 11.1254,
+        "tps": 11.5052,
+        "token_sha256": "8557cc88d1addd95a4e10b67602d39db6bc2faea15cbeb9f32674331946a3e48"
+      },
+      "cpp_ring_buffer": {
+        "case": "cpp_ring_buffer",
+        "binary": "baseline",
+        "mode": "ar",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 11.1323,
+        "tps": 11.498,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7"
+      },
+      "reasoning_train": {
+        "case": "reasoning_train",
+        "binary": "baseline",
+        "mode": "ar",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 11.2923,
+        "tps": 11.3351,
+        "token_sha256": "5e134e6b1dd488d8e5ce7febb7d6fdb9f58a197f374d1f016ddbe9b2cbc82774"
+      }
+    },
+    "rows": [
+      {
+        "case": "expository_pangram",
+        "binary": "baseline",
+        "mode": "dflash2",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 4.60581,
+        "tps": 27.791,
+        "token_sha256": "8557cc88d1addd95a4e10b67602d39db6bc2faea15cbeb9f32674331946a3e48",
+        "speculative": {
+          "acceptance": 0.494565,
+          "drafted": 184,
+          "accepted": 91,
+          "steps": 36
+        }
+      },
+      {
+        "case": "expository_pangram",
+        "binary": "candidate",
+        "mode": "dflash2",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 4.50679,
+        "tps": 28.4016,
+        "token_sha256": "8557cc88d1addd95a4e10b67602d39db6bc2faea15cbeb9f32674331946a3e48",
+        "speculative": {
+          "acceptance": 0.5,
+          "drafted": 184,
+          "accepted": 92,
+          "steps": 35
+        }
+      },
+      {
+        "case": "expository_pangram",
+        "binary": "candidate",
+        "mode": "dflash2",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 4.50342,
+        "tps": 28.4228,
+        "token_sha256": "8557cc88d1addd95a4e10b67602d39db6bc2faea15cbeb9f32674331946a3e48",
+        "speculative": {
+          "acceptance": 0.5,
+          "drafted": 184,
+          "accepted": 92,
+          "steps": 35
+        }
+      },
+      {
+        "case": "expository_pangram",
+        "binary": "baseline",
+        "mode": "dflash2",
+        "repetition": 3,
+        "tokens": 128,
+        "seconds": 4.59889,
+        "tps": 27.8328,
+        "token_sha256": "8557cc88d1addd95a4e10b67602d39db6bc2faea15cbeb9f32674331946a3e48",
+        "speculative": {
+          "acceptance": 0.494565,
+          "drafted": 184,
+          "accepted": 91,
+          "steps": 36
+        }
+      },
+      {
+        "case": "cpp_ring_buffer",
+        "binary": "baseline",
+        "mode": "dflash2",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 3.23886,
+        "tps": 39.5201,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "speculative": {
+          "acceptance": 0.697987,
+          "drafted": 149,
+          "accepted": 104,
+          "steps": 23
+        }
+      },
+      {
+        "case": "cpp_ring_buffer",
+        "binary": "candidate",
+        "mode": "dflash2",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.26546,
+        "tps": 39.1981,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "speculative": {
+          "acceptance": 0.72028,
+          "drafted": 143,
+          "accepted": 103,
+          "steps": 24
+        }
+      },
+      {
+        "case": "cpp_ring_buffer",
+        "binary": "candidate",
+        "mode": "dflash2",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.27152,
+        "tps": 39.1255,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "speculative": {
+          "acceptance": 0.72028,
+          "drafted": 143,
+          "accepted": 103,
+          "steps": 24
+        }
+      },
+      {
+        "case": "cpp_ring_buffer",
+        "binary": "baseline",
+        "mode": "dflash2",
+        "repetition": 3,
+        "tokens": 128,
+        "seconds": 3.23354,
+        "tps": 39.5851,
+        "token_sha256": "a2a77c1f92ae8bbedb581a5de6fe82d897b93c29116fbb3f823e17bcc61d9af7",
+        "speculative": {
+          "acceptance": 0.697987,
+          "drafted": 149,
+          "accepted": 104,
+          "steps": 23
+        }
+      },
+      {
+        "case": "reasoning_train",
+        "binary": "baseline",
+        "mode": "dflash2",
+        "repetition": 0,
+        "tokens": 128,
+        "seconds": 3.59945,
+        "tps": 35.561,
+        "token_sha256": "5e134e6b1dd488d8e5ce7febb7d6fdb9f58a197f374d1f016ddbe9b2cbc82774",
+        "speculative": {
+          "acceptance": 0.658065,
+          "drafted": 155,
+          "accepted": 102,
+          "steps": 25
+        }
+      },
+      {
+        "case": "reasoning_train",
+        "binary": "candidate",
+        "mode": "dflash2",
+        "repetition": 1,
+        "tokens": 128,
+        "seconds": 3.65787,
+        "tps": 34.9931,
+        "token_sha256": "5e134e6b1dd488d8e5ce7febb7d6fdb9f58a197f374d1f016ddbe9b2cbc82774",
+        "speculative": {
+          "acceptance": 0.660131,
+          "drafted": 153,
+          "accepted": 101,
+          "steps": 26
+        }
+      },
+      {
+        "case": "reasoning_train",
+        "binary": "candidate",
+        "mode": "dflash2",
+        "repetition": 2,
+        "tokens": 128,
+        "seconds": 3.6543,
+        "tps": 35.0272,
+        "token_sha256": "5e134e6b1dd488d8e5ce7febb7d6fdb9f58a197f374d1f016ddbe9b2cbc82774",
+        "speculative": {
+          "acceptance": 0.660131,
+          "drafted": 153,
+          "accepted": 101,
+          "steps": 26
+        }
+      },
+      {
+        "case": "reasoning_train",
+        "binary": "baseline",
+        "mode": "dflash2",
+        "repetition": 3,
+        "tokens": 128,
+        "seconds": 3.5966,
+        "tps": 35.5892,
+        "token_sha256": "5e134e6b1dd488d8e5ce7febb7d6fdb9f58a197f374d1f016ddbe9b2cbc82774",
+        "speculative": {
+          "acceptance": 0.658065,
+          "drafted": 155,
+          "accepted": 102,
+          "steps": 25
+        }
+      }
+    ],
+    "summary": [
+      {
+        "case": "expository_pangram",
+        "baseline": 27.811878714135172,
+        "candidate": 28.412212367969225,
+        "percent": 2.1585512435337018,
+        "all_ids_exact": true,
+        "deterministic_within_binary": true
+      },
+      {
+        "case": "cpp_ring_buffer",
+        "baseline": 39.55256164637537,
+        "candidate": 39.16181478297318,
+        "percent": -0.9879179682360739,
+        "all_ids_exact": true,
+        "deterministic_within_binary": true
+      },
+      {
+        "case": "reasoning_train",
+        "baseline": 35.575072435572295,
+        "candidate": 35.01012695273769,
+        "percent": -1.5880374772468508,
+        "all_ids_exact": true,
+        "deterministic_within_binary": true
+      }
+    ],
+    "aggregate": {
+      "baseline": 33.576485967171116,
+      "candidate": 33.59674111611174,
+      "percent": 0.06032539843634499,
+      "completed": 12,
+      "all_ids_exact": true
+    }
+  },
+  "depth_control": {
+    "method": "Q4 target/Q4 draft C1, pp2048/tg128 at depth4096, one timed repetition after benchmark warmup. Fresh baseline AR reference and one baseline/candidate adaptive pair. No depth sweep or variance estimate.",
+    "rows": [
+      {
+        "binary": "baseline",
+        "mode": "ar",
+        "command": [
+          "/nix/store/lzmrawljk6m64ap6zi5ppglcmg8s82b3-gufo-29f0cec-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "4096",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "-v"
+        ],
+        "traces": [
+          [
+            "4096",
+            "128",
+            "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+          ]
+        ],
+        "results": [
+          {
+            "test": "pp2048 @ d4096",
+            "tps": 408.48
+          },
+          {
+            "test": "tg128 @ d4096",
+            "tps": 11.64
+          }
+        ]
+      },
+      {
+        "binary": "baseline",
+        "mode": "dflash2",
+        "command": [
+          "/nix/store/lzmrawljk6m64ap6zi5ppglcmg8s82b3-gufo-29f0cec-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "4096",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "-v",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+          "--draft-policy",
+          "adaptive"
+        ],
+        "traces": [
+          [
+            "4096",
+            "128",
+            "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+          ]
+        ],
+        "results": [
+          {
+            "test": "pp2048 @ d4096",
+            "tps": 386.92
+          },
+          {
+            "test": "tg128 @ d4096-dflash2",
+            "tps": 17.24
+          }
+        ]
+      },
+      {
+        "binary": "candidate",
+        "mode": "dflash2",
+        "command": [
+          "/nix/store/r1m8v5mpghc3afwxx3lrp2x648fd3p3j-gufo-0030f16-dirty/bin/gufo",
+          "bench",
+          "--model",
+          "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+          "-p",
+          "2048",
+          "-n",
+          "128",
+          "-d",
+          "4096",
+          "-c",
+          "1",
+          "-r",
+          "1",
+          "-v",
+          "--speculative",
+          "dflash2",
+          "--dflash-model",
+          "/home/fbozzo/models/qwen3.8-dflash2-q4/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+          "--draft-policy",
+          "adaptive"
+        ],
+        "traces": [
+          [
+            "4096",
+            "128",
+            "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+          ]
+        ],
+        "results": [
+          {
+            "test": "pp2048 @ d4096",
+            "tps": 386.43
+          },
+          {
+            "test": "tg128 @ d4096-dflash2",
+            "tps": 17.06
+          }
+        ]
+      }
+    ],
+    "reference": [
+      [
+        "4096",
+        "128",
+        "f7377600adedf3a66595f32c0424d794d7c5215a21b339585254228834a14c41"
+      ]
+    ]
+  },
+  "quality": {
+    "nix_release_build_passed": true,
+    "DFlash_state_snapshot_restore_reset_and_context_262144_passed": true,
+    "maintained_controller_contract": "Existing TestLengthController now exercises both Q4 and Q8 cost profiles.",
+    "sampling_replay_cases": [
+      "greedy",
+      "temperature-cold",
+      "temperature",
+      "temperature-hot",
+      "top-k-one",
+      "top-k",
+      "top-p",
+      "min-p",
+      "min-p-one",
+      "top-k-floor",
+      "top-p-floor",
+      "min-p-floor",
+      "repeat-penalty",
+      "repeat-reward",
+      "frequency-penalty",
+      "frequency-reward",
+      "presence-penalty",
+      "presence-reward",
+      "history-one",
+      "history-disabled",
+      "greedy-penalties",
+      "all-filters",
+      "all-floors"
+    ],
+    "valid_greedy_speculative_continuations_equal_AR": 20,
+    "additional_depth_speculative_continuations_equal_fresh_AR": 2,
+    "prior_operator_qualification": "dflash2-fma-order.json; target/draft numerical kernels unchanged. No repeated full-logit or upstream-layer sweep.",
+    "scope": "Preserves target decoding and sampled replay contracts; original-target/checkpoint-conversion qualification remains open."
+  },
+  "excluded_timings": [
+    {
+      "source": "/tmp/qwen-cost-curve-release/speed.json",
+      "reason": "Concurrent Nix source-path lookup copied workspace contents and caused disk activity. Entire initial ABBA excluded; token/replay checks remain valid."
+    },
+    {
+      "source": "/tmp/qwen-cost-curve-quiet/speed.json, prose rows only",
+      "reason": "First baseline was still slow after disk activity (20.2389 versus final 22.2476 tok/s). Entire prose comparison excluded; replaced by the separate warmed confirmation. Stable JSON rows retained."
+    }
+  ],
+  "rejected_vector_fma": {
+    "decision": "Reject without a release build: explicit float2 adjacent/strided row pairs and float4 FMAs do not improve the three actual-weight Q5 batch-eight shapes.",
+    "method": "ActualQ5 GGUF batch8, wholefile read-onlyregistration, productiongeometry. Existing scalar FMAs versus explicit float2/float4 builtin_elementwise_fma acrossindependentoutputrows. Eightbalancedrotatedrounds x6rotations ofupto16tensors. Everyoutputfiniteandbitidentical beforetiming. Products andper-outputaccumulationorderunchanged.",
+    "cases": {
+      "q5-17408-5120": {
+        "median_ms": {
+          "production": 0.3471825,
+          "adjacent_pairs": 0.35166450000000005,
+          "strided_pairs": 0.357561,
+          "quad": 0.3566515
+        },
+        "gain_percent": {
+          "production": 0.0,
+          "adjacent_pairs": -1.2745102221009108,
+          "strided_pairs": -2.90258165739552,
+          "quad": -2.654972711456427
+        },
+        "finite_bit_exact": true
+      },
+      "q5-5120-17408": {
+        "median_ms": {
+          "production": 0.3261195,
+          "adjacent_pairs": 0.333598,
+          "strided_pairs": 0.33740749999999997,
+          "quad": 0.3261495
+        },
+        "gain_percent": {
+          "production": 0.0,
+          "adjacent_pairs": -2.2417700345925384,
+          "strided_pairs": -3.3455095100138443,
+          "quad": -0.009198235778373753
+        },
+        "finite_bit_exact": true
+      },
+      "q5-5120-6144": {
+        "median_ms": {
+          "production": 0.130932,
+          "adjacent_pairs": 0.134245,
+          "strided_pairs": 0.133841,
+          "quad": 0.131275
+        },
+        "gain_percent": {
+          "production": 0.0,
+          "adjacent_pairs": -2.4678758985437144,
+          "strided_pairs": -2.1734744958570196,
+          "quad": -0.26128356503524186
+        },
+        "finite_bit_exact": true
+      }
+    },
+    "isa": [
+      {
+        "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "resources": {
+          "vgpr_count": 155,
+          "sgpr_count": 20,
+          "private_segment_fixed_size": 0,
+          "group_segment_fixed_size": 17408
+        },
+        "static_instructions": 1645,
+        "instruction_sha256": "40ee62d6bfcce44e136b7a8d8ddb09ca7b9bfcea9cb3523cf3089a8ad73856d7",
+        "dual_fma_components": 110
+      },
+      {
+        "kernel": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "resources": {
+          "vgpr_count": 155,
+          "sgpr_count": 20,
+          "private_segment_fixed_size": 0,
+          "group_segment_fixed_size": 17408
+        },
+        "static_instructions": 1645,
+        "instruction_sha256": "b4c7ce5fca6eb2961a8e645dfac70f0e75108cf617e0b6873c58411ed6b48cde",
+        "dual_fma_components": 110
+      },
+      {
+        "kernel": "void gufo::hip::FmaVectorKQuantKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 0u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "resources": {
+          "vgpr_count": 153,
+          "sgpr_count": 20,
+          "private_segment_fixed_size": 0,
+          "group_segment_fixed_size": 17408
+        },
+        "static_instructions": 1638,
+        "instruction_sha256": "b10bbd090b01bd2ff53d3095d5834b439627484b40b8813e3011005bc69848c2",
+        "dual_fma_components": 172
+      },
+      {
+        "kernel": "void gufo::hip::FmaVectorKQuantKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 0u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "resources": {
+          "vgpr_count": 153,
+          "sgpr_count": 20,
+          "private_segment_fixed_size": 0,
+          "group_segment_fixed_size": 17408
+        },
+        "static_instructions": 1638,
+        "instruction_sha256": "35daa7f2aa23027cf1d26113d4fd217ffa8cc4ace1fb5bd09ba8aed13b4e1bb8",
+        "dual_fma_components": 172
+      },
+      {
+        "kernel": "void gufo::hip::FmaVectorKQuantKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "resources": {
+          "vgpr_count": 154,
+          "sgpr_count": 20,
+          "private_segment_fixed_size": 0,
+          "group_segment_fixed_size": 17408
+        },
+        "static_instructions": 1636,
+        "instruction_sha256": "798d1598980ff84948542bd1f31fabf05eb0f88de31c9aec457b35a67ad56ca7",
+        "dual_fma_components": 119
+      },
+      {
+        "kernel": "void gufo::hip::FmaVectorKQuantKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "resources": {
+          "vgpr_count": 154,
+          "sgpr_count": 20,
+          "private_segment_fixed_size": 0,
+          "group_segment_fixed_size": 17408
+        },
+        "static_instructions": 1636,
+        "instruction_sha256": "c35ddbda032ec49a9843e364bd266064f89149b705913c55638b60108503c8d1",
+        "dual_fma_components": 119
+      },
+      {
+        "kernel": "void gufo::hip::FmaVectorKQuantKernel<16u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 2u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "resources": {
+          "vgpr_count": 149,
+          "sgpr_count": 20,
+          "private_segment_fixed_size": 0,
+          "group_segment_fixed_size": 17408
+        },
+        "static_instructions": 1628,
+        "instruction_sha256": "d2c69281d9fd760d7d0ac741ef7923c03afa466fcf5dfc4cadb36fc8a7eec917",
+        "dual_fma_components": 164
+      },
+      {
+        "kernel": "void gufo::hip::FmaVectorKQuantKernel<8u, 8ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 1ul, 2u>(void const*, float const*, float*, unsigned long, unsigned long)",
+        "resources": {
+          "vgpr_count": 149,
+          "sgpr_count": 20,
+          "private_segment_fixed_size": 0,
+          "group_segment_fixed_size": 17408
+        },
+        "static_instructions": 1628,
+        "instruction_sha256": "08f7446e0d47fe8a84ffbdfbd4ff90a649a71fb726f9c089bb966b172790bd6d",
+        "dual_fma_components": 164
+      }
+    ]
+  },
+  "upstream_refresh": {
+    "repository": "LaurentZuijdwijk/llama.cpp",
+    "head": "11bfe8a633fa02bac251db6cf21bd5ddab282a64",
+    "unchanged_since": "llama-comparison.json",
+    "engine_executed": false
+  },
+  "source_sha256": {
+    "src/models/qwen/dflash_policy.hpp": "44bac3ce82990aeb350d1f81f287f8d8dc9eaf704cd27669a9dddb1b19f3974a",
+    "src/models/qwen/hip/dflash/backend.cpp": "2589f739369cfe232f2c2139f290554b859c3eb223e51c4a84db133dba983c34",
+    "tests/models/qwen27b/dflash_test.cpp": "541061254a4ffafa8b2511725a0e8c470baf570717377881750ce6e43e64c4eb"
+  },
+  "limits": [
+    "Short paired probes, not statistical significance or a full depth matrix.",
+    "Q4/Q4 focus. Q8 keeps its previous cost formula; other draft precisions have no fresh performance comparison in this pass.",
+    "Code and reasoning lose about 1.0% and 1.6%; the one 4K-depth sample loses about 1.0%.",
+    "No refreshed fixed/repetition, full depth sweep, C>1 or 75-question capability comparison."
+  ]
+}
