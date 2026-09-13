@@ -72,6 +72,14 @@ AR and DFlash2 consume different RNG sequences, so their full sampled
 continuations need not match. This is a finite, explicit coverage matrix,
 not a claim to test every numeric parameter combination or model capability.
 
+The [same-artifact Vulkan comparison](llama-comparison.json) checks two raw
+tg300 prompts against each engine's own AR. All six Gufo speculative runs
+match every AR token and repeat deterministically. The pinned Laurent fork
+matches JSON, but its two prose runs first diverge from its AR at token
+138 and 121 (zero-based), and differ from each other. This does not identify
+a controller bug or establish semantic quality loss; neither engine is an
+independent original-checkpoint oracle.
+
 ## Executable and sampling contract
 
 | Entry point | Qwen27B behavior |

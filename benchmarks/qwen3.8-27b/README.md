@@ -94,15 +94,14 @@ advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
 **Latest Q4 target/Q4 draft:** greedy C1, including prefill and excluding
-model loading. JSON/prose use two timed samples per binary in ABBA order.
-Prose uses a confirmation after warming. Fixed repetition retains its
-preceding measurement.
+model loading. JSON/prose use two timed samples after warming on the quiet
+host. Fixed repetition retains its preceding measurement.
 
-| Workload | Current tok/s | Paired change |
+| Workload | Current tok/s | Measurement |
 | --- | ---: | ---: |
-| Repetition, tg128, fixed-7 | **54.15** | Unchanged route |
-| JSON, tg300, adaptive | **51.48** | +4.7% |
-| Prose, tg300, adaptive | **22.91** | +2.8% |
+| Repetition, tg128, fixed-7 | **54.15** | Earlier run |
+| JSON, tg300, adaptive | **51.29** | Two runs |
+| Prose, tg300, adaptive | **22.91** | Two runs |
 
 The controller uses measured costs for Q4 verification widths. All token IDs
 match AR; verification rounds fall from 45 to 43 for JSON and 115 to 110 for
@@ -125,8 +124,20 @@ boundaries and expanded Q5 codes were slower. Rounded EMA and a smaller
 initial controller prior regressed prose. Broader FMA scheduling changes
 and explicit vector FMAs showed no useful gain. None is retained.
 
-The upstream headline uses different artifacts and excludes prefill; power
-settings have not been matched. [Source audit and comparison limits](eval/llama-comparison.json).
+**Same host and identical Q4 target/draft files**, raw tg300, including prefill:
+
+| Workload / policy | Gufo tok/s | Laurent Vulkan tok/s |
+| --- | ---: | ---: |
+| JSON / adaptive | **51.29** | 36.49–37.81 |
+| Prose / adaptive | **22.91** | 19.08–19.20 |
+| JSON / fixed-7 | **49.74** | 37.22–38.77 |
+
+Two samples per engine; exploratory sequential controls. Fixed-7 has identical
+tokens, acceptance and round counts. All six Gufo continuations match AR.
+Upstream prose differs from its AR and across repeats; this does not establish
+a semantic quality regression or a controller bug. Its FP4 headline uses
+different artifacts, driver/host settings and decode-only timing, and remains
+unmatched. [Measurements, token checks and width-4/8 profile](eval/llama-comparison.json).
 The [rollback pass](eval/dflash2-rollback.json) saves **50.5 MiB per session**
 and qualifies mixed cache capacities and logical context 262,144.
 
