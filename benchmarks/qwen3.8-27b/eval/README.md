@@ -192,8 +192,13 @@ IQ4_XS down projections, with branch-free affine scale decoding. Row-loop
 reordering, smaller tiles, deeper staging and removal of tile bounds checks
 rejected as flat or slower.
 Temporary weight expansion and larger/fused tiles were not retained: gains
-were small or workload-dependent. Floating-point WMMA did not preserve exact
-outputs.
+were small or workload-dependent. Independent integer-dot halves and double
+buffering were slower; grouped scheduling and LDS padding gained at most 1.4%
+in the tested matrices.
+FP16/FP32 WMMA differed from an independent integer-dot oracle even with
+integer-valued inputs. Nearest-integer rounding restored the tested Q5/Q8
+matrix outputs, but conversion plus GEMM had 34–38% lower throughput. Retain
+integer WMMA.
 
 | Artifact | SHA-256 |
 | --- | --- |
