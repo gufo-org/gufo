@@ -1706,6 +1706,32 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
     // Adjacent gate/up tensors use the same kernel with twice as many rows.
     const bool ffn_up =
         (m == 17408 || (Batch >= 3 && m == 34816)) && k == 5120;
+    if constexpr (Batch >= 3 &&
+                  (WType == core::GgmlType::kIQ4_NL ||
+                   WType == core::GgmlType::kIQ3_S ||
+                   WType == core::GgmlType::kQ6_K ||
+                   WType == core::GgmlType::kIQ4_XS)) {
+      const bool ffn_down = m == 5120 && k == 17408;
+      // The remaining mixed formats benefit from four-row activation reuse
+      // at these shapes and widths. Keep narrower batches where reuse loses.
+      const bool reuse_four_rows =
+          (WType == core::GgmlType::kIQ4_NL &&
+           ((m == 17408 && k == 5120) || (Batch >= 5 && ffn_down))) ||
+          (WType == core::GgmlType::kIQ3_S &&
+           (Batch == 3 || Batch >= 5) && ffn_down) ||
+          (WType == core::GgmlType::kQ6_K &&
+           ((Batch >= 6 && m == 5120 && k == 6144) ||
+            (Batch == 8 && m == 10240 && k == 5120))) ||
+          (WType == core::GgmlType::kIQ4_XS &&
+           ((m == 5120 && k == 6144) ||
+            (Batch == 8 && k == 5120 && (m == 10240 || m == 12288))));
+      if (reuse_four_rows) {
+        SmallBatchKQuantExactFp32GEMMKernel<16, Batch, 4, WType, 1, 4, 1,
+                                           true>
+            <<<(m + 63) / 64, 512, 0, stream>>>(w, fp32_x, y, m, k);
+        return;
+      }
+    }
     if constexpr (WType == core::GgmlType::kIQ4_XS &&
                   (Batch == 2 || Batch == 3 || Batch == 4 || Batch == 5 ||
                    Batch == 7)) {

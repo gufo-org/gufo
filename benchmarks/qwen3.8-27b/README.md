@@ -95,22 +95,24 @@ table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
 **Latest Q4 target/Q4 draft:** greedy C1, including prefill and excluding
 model loading. Each workload uses two samples per binary in ABBA order
-after warmup on the quiet host. These are short controls.
+after warmup on the quiet host; prose also has a BAAB confirmation, pooled
+with the initial samples. These are short controls.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 56.37 | **56.45** | +0.14% |
-| JSON, tg300, adaptive | 53.23 | **53.39** | +0.30% |
-| Prose, tg300, adaptive | 23.48 | **23.55** | +0.28% |
+| Repetition, tg128, fixed-7 | 56.49 | **56.61** | +0.21% |
+| JSON, tg300, adaptive | 53.38 | **53.66** | +0.53% |
+| Prose, tg300, adaptive | 23.58 | **23.58** | flat |
 
-The latest [contiguous FFN change](eval/dflash2-contiguous-ffn.json) combines
-adjacent gate/up projections at verification widths 3–8, preserving arithmetic
-and using existing scratch memory. The JSON trace confirms 1,554 fewer
-projection launches. All 12 continuations, 102 verification logit rows,
-102 feature rows, C3 cache controls and 90 Q4 draft traces remain exact;
-a short depth-4096 continuation also matches AR. Overall gains are small in
-these short controls. The preceding [feature-transfer change](eval/dflash2-feature-transfer.json)
-improved JSON 1.93% and repetition 1.45%, with all 46 sampling cases passing.
+The latest [mixed-format projection change](eval/dflash2-remaining-formats.json)
+shares activations across four output rows for selected Q6/IQ projections.
+The affected 1,341 calls take 11.53% less GPU time; overall gains remain small
+because these calls account for only 5% of the profile. All 16 continuations,
+102 verification logit rows, 102 feature rows, C3 cache controls and 90 Q4
+draft traces remain exact. Arithmetic and allocations are unchanged.
+Earlier [contiguous FFNs](eval/dflash2-contiguous-ffn.json) remove 1,554
+projection launches; [feature transfers](eval/dflash2-feature-transfer.json)
+improved JSON 1.93% and repetition 1.45%.
 
 The controller uses [measured Q4 verification costs](eval/dflash2-controller-cost.json);
 Q8 keeps its previous formula. Its earlier chat comparison was flat in
@@ -141,8 +143,10 @@ Two samples per engine; exploratory sequential controls. Fixed-7 has identical
 tokens, acceptance and round counts. All six Gufo continuations match AR.
 Upstream prose differs from its AR and across repeats; this does not establish
 a semantic quality regression or a controller bug. Its FP4 headline uses
-different artifacts, driver/host settings and decode-only timing, and remains
-unmatched. [Measurements, token checks and width-4/8 profile](eval/llama-comparison.json).
+different artifacts and decode-only timing. The author describes 65.6 tok/s
+as a short 115 W burst and reports 55.0 tok/s on the everyday power profile;
+the headline remains unmatched. [Power caveat provenance](eval/dflash2-remaining-formats.json);
+[matched-artifact measurements and checks](eval/llama-comparison.json).
 The [rollback pass](eval/dflash2-rollback.json) saves **50.5 MiB per session**
 and qualifies mixed cache capacities and logical context 262,144.
 

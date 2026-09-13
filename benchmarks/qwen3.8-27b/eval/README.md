@@ -145,6 +145,17 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Remaining mixed-format projections](dflash2-remaining-formats.json):
+  selected Q6/IQ projections reuse activations across four output rows at
+  widths 3–8, preserving the exact kernel arithmetic. Both quantized operator
+  suites, 102 full-logit rows, 102 feature rows, 18 final-feature checks,
+  C3 cache controls, 90 Q4 draft traces and all 16 measured AR continuations
+  pass. The affected 1,341 JSON projection calls take 11.53% less GPU time,
+  without private scratch or added allocations; total GPU time falls 0.41%.
+  Paired release throughput improves JSON 0.53% and repetition 0.21%;
+  pooled prose is flat (-0.02%). Narrow indexing alone and several shorter
+  batch layouts regress and remain excluded. No maintained test/tool or
+  execution option is added.
 - [Contiguous FFN projections](dflash2-contiguous-ffn.json): already adjacent
   same-format gate/up tensors share one exact matrix launch at widths 3–8,
   followed by packed SwiGLU using existing scratch. Projection-plus-activation
