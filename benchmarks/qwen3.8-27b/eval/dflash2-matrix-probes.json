@@ -3,7 +3,7 @@
   "date_utc": "2026-09-13T03:15:25.363455+00:00",
   "baseline_commit": "9a2b261b855146838319b6636331c96c09005561",
   "retained": false,
-  "scope": "Q4 target/Q4 draft performance research. No production source, numerical policy, model artifact, test executable or tool is changed. All candidates are isolated temporary microbenchmarks; the qualified release remains unchanged.",
+  "scope": "Q4 target/Q4 draft performance research. No rejected prototype is retained in production. Initial matrix and later staging/addressing experiments use isolated microbenchmarks; the graph follow-up uses a temporary Nix release. Each section identifies its baseline, source hashes and checks. No execution option or maintained test/tool is added.",
   "source_sha256": {
     "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "6375d4d7b93491d85976598829b6325130c7affb5d3ecda04b83914362fc1668",
     "src/models/qwen/hip/quant_ops.hpp": "d9a3a581c616d1e07d63b52c89dbefe7bc3f30b2b9923ad1e931ee4eba4dccd6",
@@ -1207,7 +1207,7 @@
     "/tmp/qwen-integer-wmma-staging-probe-isa"
   ],
   "limits": [
-    "No production change or fresh model quality/speed sweep. Current qualified release evidence remains in dflash2-synchronization.json.",
+    "Initial matrix probes did not run model quality/speed sweeps. Later sections identify their own checks and releases; the rejected graph prototype has fresh Q4 controls. Current qualified runtime evidence remains in dflash2-state-stores.json.",
     "Operator accuracy and B1/B8 equality do not qualify changed target distributions or establish original-checkpoint fidelity.",
     "No75-question capability comparison; no new execution switch, maintained tool or test.",
     "The full performance objective remains open."
@@ -3859,5 +3859,2382 @@
       "qwen-verification-graph-bound.py": "1d17adc18e174243e21382d220ee9637262b4db27ef072b54c4959f4f05b4a03"
     },
     "limits": "Batch-five operator controls are not a model capability or independent checkpoint qualification. The graph estimate removes idle only from selected tail windows of the preceding qualified prose trace; no graph implementation or new release speedup is claimed. The original FP4 headline goal remains open."
+  },
+  "verification_graph_followup": {
+    "date_utc": "2026-09-13T09:35:49.252199+00:00",
+    "baseline_commit": "4e2fa0c354e5abc246deaec62910af3ad7afe86f",
+    "retained": false,
+    "decision": "Reject the C1 short-context graph prototype: all three bounded paired controls regress (0.87% prose, 1.98% JSON, 1.05% repetition). Restore all six source files and the qualified release. No claimed speed gain or complete graph-lifecycle qualification.",
+    "implementation": "Capture/replay the transformer layer loop per verification width2\u20138 for Qwen27B short contexts (start+batch<4096). Device positions feed online attention and fused QK-normalization/RoPE/KV kernels. Embedding, uploads, output projection and host downloads remain outside capture. Reset graph instances when tapped-feature/logit storage or captured state addresses change. Weight, dot-product, controller and sampling math are unchanged.",
+    "build_and_checks": {
+      "parent": "4e2fa0c354e5abc246deaec62910af3ad7afe86f",
+      "source_sha256": {
+        "src/models/qwen/hip/ops/attention.hpp": "6ac6a70c45cc33b3d703860a521b812b250683e8a3f23da491106a9ae43ba064",
+        "src/models/qwen/hip/kernels/prefill_rope.hip": "fb8f0a7ac97aa2b46e774018d5846a166d7a3d4d280dff3364cf05a89aabfe23",
+        "src/models/qwen/hip/kernels/attention_decode.hip": "c5e2e54c0773f23149305fc4fbeb8e1a5999aefe1e03b52b80f270f5e951c5b5",
+        "src/models/qwen/hip/executor.hpp": "f70efe3e5ec5183211a10e0d997c8d9c97a366be68f1b96222eb19162d84a9fa",
+        "src/models/qwen/hip/executor.cpp": "b4b84d77b05fb081202f3d950f734df78732416d8eb129baa4b79d18e2b4e5e1",
+        "src/models/qwen/hip/batched_decode.cpp": "bfee3a8f05781097b7017fae068c6352ad1aabf5278ea8da78dac1618065c29d"
+      },
+      "checks": [
+        {
+          "name": "focused_build",
+          "seconds": 22.401794211997185,
+          "passed": true,
+          "log_sha256": "b3133dd3e397295694350d7b73374fb2076ea930eb3b95e66924a13d54fb786c"
+        },
+        {
+          "name": "operators",
+          "seconds": 3.2683834309864324,
+          "passed": true,
+          "log_sha256": "a456d5126496cc07e903bacb2bd4d36bf15ab5a73b289ec055a5dee438e8e2eb"
+        },
+        {
+          "name": "q4_target",
+          "seconds": 24.847971184004564,
+          "passed": true,
+          "log_sha256": "5c7770bb3feebfb0f16ef4b070800d5a6196ce524c63cb8319d030bc966edd8f"
+        },
+        {
+          "name": "release_build",
+          "seconds": 95.51546934098587,
+          "passed": true,
+          "log_sha256": "0edf674d5c70e18a147f9527a0e27813fc1ef39b3b52f83b7b045d56c747bf04"
+        }
+      ],
+      "release": {
+        "path": "/nix/store/j6rvarsqxbd2bqnm8qz9yhrnyggxxhf2-gufo-4e2fa0c-dirty/bin/gufo",
+        "sha256": "325319a6accb858fd7537badc6ed8bb9d8dbcaca2a8409110dc7f3964c7ccee9"
+      }
+    },
+    "paired_release_speed": {
+      "date_utc": "2026-09-13T09:35:49.252199+00:00",
+      "binary": {
+        "baseline": {
+          "path": "/nix/store/y33zyblbwlk8yq8blr3icbq3brda1zq8-gufo-889e77d-dirty/bin/gufo",
+          "sha256": "a2e5f2366c7c1cd1ef9810331af405134e5b3c41bf2bc0b05bdc1298c3225c40"
+        },
+        "candidate": {
+          "path": "/nix/store/j6rvarsqxbd2bqnm8qz9yhrnyggxxhf2-gufo-4e2fa0c-dirty/bin/gufo",
+          "sha256": "325319a6accb858fd7537badc6ed8bb9d8dbcaca2a8409110dc7f3964c7ccee9"
+        }
+      },
+      "method": "Bounded graph pilot: C1 Q4 target/Q4 draft, greedy, same qualified AR hashes. One timed sample/binary/workload (raw prose/JSON TG300 adaptive, chat repetition TG128 fixed7), with orders AB/BA/AB. Excludes model loading, includes prefill. Each binary first gets128 raw prose warmup tokens; candidate warmup logs dispatch telemetry to prove capture/replay and is excluded from timings. Target/draft numerical arithmetic and controller unchanged.",
+      "rows": [
+        {
+          "workload": "prose",
+          "draft_cap": 7,
+          "mode": "dflash2",
+          "binary": "baseline",
+          "repetition": 0,
+          "tokens": 300,
+          "seconds": 12.4445,
+          "tps": 24.107,
+          "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+          "speculative": {
+            "acceptance": 0.397059,
+            "drafted": 476,
+            "accepted": 189,
+            "steps": 110
+          }
+        },
+        {
+          "workload": "prose",
+          "draft_cap": 7,
+          "mode": "dflash2",
+          "binary": "candidate",
+          "repetition": 1,
+          "tokens": 300,
+          "seconds": 12.5533,
+          "tps": 23.8981,
+          "token_sha256": "0674f7e4f21961261621df86da475b0952a37763038bfa6d1875188f41cbf3e8",
+          "speculative": {
+            "acceptance": 0.397059,
+            "drafted": 476,
+            "accepted": 189,
+            "steps": 110
+          }
+        },
+        {
+          "workload": "json",
+          "draft_cap": 7,
+          "mode": "dflash2",
+          "binary": "candidate",
+          "repetition": 0,
+          "tokens": 300,
+          "seconds": 5.64012,
+          "tps": 53.1903,
+          "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+          "speculative": {
+            "acceptance": 0.898246,
+            "drafted": 285,
+            "accepted": 256,
+            "steps": 43
+          }
+        },
+        {
+          "workload": "json",
+          "draft_cap": 7,
+          "mode": "dflash2",
+          "binary": "baseline",
+          "repetition": 1,
+          "tokens": 300,
+          "seconds": 5.52832,
+          "tps": 54.2661,
+          "token_sha256": "8c4dfb442c1605607fa3e238dc0c8a99f104018002e3bd61e7bd8866592e26bb",
+          "speculative": {
+            "acceptance": 0.898246,
+            "drafted": 285,
+            "accepted": 256,
+            "steps": 43
+          }
+        },
+        {
+          "workload": "repetition",
+          "draft_cap": 7,
+          "mode": "dflash2",
+          "binary": "baseline",
+          "repetition": 0,
+          "tokens": 128,
+          "seconds": 2.2401,
+          "tps": 57.1403,
+          "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+          "speculative": {
+            "acceptance": 1.0,
+            "drafted": 111,
+            "accepted": 111,
+            "steps": 16
+          }
+        },
+        {
+          "workload": "repetition",
+          "draft_cap": 7,
+          "mode": "dflash2",
+          "binary": "candidate",
+          "repetition": 1,
+          "tokens": 128,
+          "seconds": 2.26393,
+          "tps": 56.5388,
+          "token_sha256": "04ead47cf1ca17241045c6c87fa1cb9e1383c4c6366670617f3634677d293a73",
+          "speculative": {
+            "acceptance": 1.0,
+            "drafted": 111,
+            "accepted": 111,
+            "steps": 16
+          }
+        }
+      ],
+      "summary": [
+        {
+          "workload": "prose",
+          "baseline": 24.107,
+          "candidate": 23.8981,
+          "percent": -0.8665532832787148,
+          "all_ids_exact": true,
+          "acceptance_unchanged": true
+        },
+        {
+          "workload": "json",
+          "candidate": 53.1903,
+          "baseline": 54.2661,
+          "percent": -1.9824531337243712,
+          "all_ids_exact": true,
+          "acceptance_unchanged": true
+        },
+        {
+          "workload": "repetition",
+          "baseline": 57.1403,
+          "candidate": 56.5388,
+          "percent": -1.0526721070767908,
+          "all_ids_exact": true,
+          "acceptance_unchanged": true
+        }
+      ],
+      "warmup": [
+        {
+          "binary": "baseline",
+          "token_sha256": "457af97af412b934034fe5808f7a80da5d5709160464bd1b8a637d7834ba0c17",
+          "speculative": {
+            "acceptance": 0.473404,
+            "drafted": 188,
+            "accepted": 89,
+            "steps": 38
+          },
+          "graph_statuses": {}
+        },
+        {
+          "binary": "candidate",
+          "token_sha256": "457af97af412b934034fe5808f7a80da5d5709160464bd1b8a637d7834ba0c17",
+          "speculative": {
+            "acceptance": 0.473404,
+            "drafted": 188,
+            "accepted": 89,
+            "steps": 38
+          },
+          "graph_statuses": {
+            "miss_captured": 4,
+            "hit": 38
+          }
+        }
+      ]
+    },
+    "restored_source_sha256": {
+      "src/models/qwen/hip/ops/attention.hpp": "b962a42b15f260844ed480a43dd41516e7148ce7ccb30462a9e87f6cc3dc039a",
+      "src/models/qwen/hip/kernels/prefill_rope.hip": "1db22addf9e8704bce2c44e2996d0e7bb2ca4204998593fdb202af449ac75ff2",
+      "src/models/qwen/hip/kernels/attention_decode.hip": "c49f28009003fcc0469cb62ef648bca8eb93a361864044ccd16ac940de3d782b",
+      "src/models/qwen/hip/executor.hpp": "4d41c3636ff0ac01b6f4e40d3193f3db022549def95ab43c3434915027737323",
+      "src/models/qwen/hip/executor.cpp": "3c85e1b138b1a13695151c69c0cfd84d4ffa3024de4080201b857bd06db5eee6",
+      "src/models/qwen/hip/batched_decode.cpp": "2fa8b9249a6f9d70f28aebbb3d5531613e77f2bdfc4549ef6cafec4abac2cf0a"
+    },
+    "prototype_patch_sha256": "2fcf16aaa619ed5cea5ceb87ee3af5967413e46f14d359d71755049291aab6b6",
+    "limits": [
+      "One timed sample per binary/workload, with warmups; this is a rejection pilot, not a statistically qualified performance estimate.",
+      "Four existing operator suites and the Q4 target suite passed. Warmup telemetry proves4captures/38hits with identical128IDs and acceptance. All six timed traces match qualified AR hashes and pairwise acceptance/round counts.",
+      "The target fixture mainly exercises freshly captured graphs. Repeated cached-graph full-logit/tap regression, callback-exception cleanup, Q8 and broader serving/capture lifecycle checks would still be required before promotion. The slower prototype was removed before expanding these checks.",
+      "The existing trace idle bound describes removing idle alone. Graph replay did not realize that theoretical bound in the measured prototype."
+    ]
+  },
+  "buffer_addressing_followup": {
+    "date_utc": "2026-09-13T09:44:44.971869+00:00",
+    "baseline_commit": "4e2fa0c354e5abc246deaec62910af3ad7afe86f",
+    "retained": false,
+    "decision": "Reject raw-buffer weight addressing. Full vector offsets are flat across the three Q5 batch5 cases (-0.10% to+0.30% throughput); separating the uniform tile offset loses3.43\u20139.77%. Q6 vocabulary throughput loses1.05%. No production code or weight layout is changed.",
+    "experiments": {
+      "q5_addressing": {
+        "date_utc": "2026-09-13T09:41:35.302591+00:00",
+        "parent": "4e2fa0c354e5abc246deaec62910af3ad7afe86f",
+        "method": "Q4 target GGUF read-only host mapping. Q5 batch5 production geometry, unchanged clone, raw buffer loads with full vector offset, and raw buffer loads with the uniform tile offset supplied separately. Byte-identical weight decoding and all original FP32 dot/scale/reduction arithmetic. Two full-mantissa seeds19/971; every output finite/bit-exact before timing. Six rotated-order rounds, eight rotations through up to8 actual tensors. Buffer resource flags0x31004000 follow ROCm composable_kernel gfx11.",
+        "source_sha256": {
+          "/tmp/qwen_buffer_address.hpp": "d55f540e3e93287e655b1ecd0c1213517e5436d92d22dfa02ee1779d6a53b543",
+          "/tmp/qwen_buffer_address_probe.hip": "9b1cf4395989c133bf5eba8822da3f9004f05d11a007a5db5d827d5f29e57f8b",
+          "/home/fbozzo/projects/strix-halo.cpp/src/models/qwen/hip/kernels/small_batch_gemm.hpp": "6375d4d7b93491d85976598829b6325130c7affb5d3ecda04b83914362fc1668"
+        },
+        "cases": [
+          {
+            "name": "q5-b5-5120-17408",
+            "tensors": [
+              {
+                "name": "blk.3.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2499619456
+              },
+              {
+                "name": "blk.4.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2723465856
+              },
+              {
+                "name": "blk.5.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2962253312
+              },
+              {
+                "name": "blk.20.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6196647040
+              },
+              {
+                "name": "blk.21.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6442807296
+              },
+              {
+                "name": "blk.22.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6682004352
+              },
+              {
+                "name": "blk.23.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6948810496
+              },
+              {
+                "name": "blk.24.ffn_down.weight",
+                "shape": [
+                  5120,
+                  17408
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 7190351616
+              }
+            ],
+            "median_ms": {
+              "production": 0.2778795,
+              "control_clone": 0.278233,
+              "buffer_offset": 0.277057,
+              "buffer_scalar_offset": 0.2896765
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": -0.12705178753059654,
+              "buffer_offset": 0.2968703191040145,
+              "buffer_scalar_offset": -4.072473949388367
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.279308",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.278688",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277513",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.289336",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277969",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277496",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.290183",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.278096",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277673",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.289804",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277663",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.278497",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.289578",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.278713",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.278529",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.276618",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277484",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.277395",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.276479",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.289658",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275802",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.276368",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.289695",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "490209280",
+                "ms_per_matrix": "0.275580",
+                "mismatches": "0"
+              }
+            ]
+          },
+          {
+            "name": "q5-b5-5120-6144",
+            "tensors": [
+              {
+                "name": "blk.4.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2882934272
+              },
+              {
+                "name": "blk.5.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3118936448
+              },
+              {
+                "name": "blk.7.attn_output.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3392971008
+              },
+              {
+                "name": "blk.8.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3806269568
+              },
+              {
+                "name": "blk.9.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4017859584
+              },
+              {
+                "name": "blk.10.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4236167040
+              },
+              {
+                "name": "blk.11.attn_output.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4262116224
+              },
+              {
+                "name": "blk.12.ssm_out.weight",
+                "shape": [
+                  5120,
+                  6144
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4668533504
+              }
+            ],
+            "median_ms": {
+              "production": 0.107955,
+              "control_clone": 0.1079865,
+              "buffer_offset": 0.10806099999999999,
+              "buffer_scalar_offset": 0.11178450000000001
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": -0.029170312955784095,
+              "buffer_offset": -0.09809274391315848,
+              "buffer_scalar_offset": -3.425788011754771
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.109059",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107698",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108761",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111108",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107480",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108791",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111982",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107811",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108307",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111803",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107305",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108798",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.112368",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107776",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108356",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107784",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108099",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108275",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107782",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111766",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107480",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.107815",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111384",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.108524",
+                "mismatches": "0"
+              }
+            ]
+          },
+          {
+            "name": "q5-b5-6144-5120",
+            "tensors": [
+              {
+                "name": "blk.0.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 1758126080
+              },
+              {
+                "name": "blk.2.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2201499392
+              },
+              {
+                "name": "blk.4.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2672327296
+              },
+              {
+                "name": "blk.5.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 2904561152
+              },
+              {
+                "name": "blk.8.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 3609588992
+              },
+              {
+                "name": "blk.10.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4039486464
+              },
+              {
+                "name": "blk.12.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 4474638208
+              },
+              {
+                "name": "blk.20.attn_gate.weight",
+                "shape": [
+                  6144,
+                  5120
+                ],
+                "type": 13,
+                "type_name": "Q5_K",
+                "offset": 6145508480
+              }
+            ],
+            "median_ms": {
+              "production": 0.1113055,
+              "control_clone": 0.11182900000000001,
+              "buffer_offset": 0.111266,
+              "buffer_scalar_offset": 0.123352
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": -0.4681254415223379,
+              "buffer_offset": 0.0355005122858687,
+              "buffer_scalar_offset": -9.765954342045525
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.112340",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111629",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111014",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "0",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.122398",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110697",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111160",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.123851",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111244",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111087",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.124201",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110972",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.112029",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.123397",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111716",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.112717",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "3",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111848",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111367",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.112421",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111372",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "4",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.123307",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111371",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.111414",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_scalar_offset",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.123111",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "8",
+                "weight_bytes": "173015040",
+                "ms_per_matrix": "0.110797",
+                "mismatches": "0"
+              }
+            ]
+          }
+        ],
+        "binary_sha256": "2c7acbe42b659a1377523e8a814f7baf3abea5b3cc25e864d3294a3cde80b30e"
+      },
+      "q6_vocabulary": {
+        "date_utc": "2026-09-13T09:43:02.918310+00:00",
+        "parent": "4e2fa0c354e5abc246deaec62910af3ad7afe86f",
+        "method": "Q4 target tied Q6 vocabulary projection, 248320x5120, batch5, production W16/R3/T2/min1 geometry. Whole GGUF read-only host mapping. Original and unchanged clone versus raw-buffer weight loads, unchanged FP32 math and bytes. Two full-mantissa seeds19/971; every output finite/bit-exact before6rotated-order rounds x8launches. Descriptor flags0x31004000.",
+        "source_sha256": {
+          "/tmp/qwen_buffer_q6.hpp": "a91c914bd7b1ccbcbd082238d4f59b9dd853265f2237912586b4583de78aab87",
+          "/tmp/qwen_buffer_q6_probe.hip": "954675dac25fac499285554e766a10202af82665e56d29dd7db32e1a64a91b7c",
+          "/home/fbozzo/projects/strix-halo.cpp/src/models/qwen/hip/kernels/small_batch_gemm.hpp": "6375d4d7b93491d85976598829b6325130c7affb5d3ecda04b83914362fc1668"
+        },
+        "cases": [
+          {
+            "name": "q6-b5-248320-5120",
+            "tensors": [
+              {
+                "name": "output.weight",
+                "shape": [
+                  248320,
+                  5120
+                ],
+                "type": 14,
+                "type_name": "Q6_K",
+                "offset": 0
+              }
+            ],
+            "median_ms": {
+              "production": 4.7528095,
+              "control_clone": 4.751457,
+              "buffer_offset": 4.803257
+            },
+            "gain_percent": {
+              "production": 0.0,
+              "control_clone": 0.028464952960738366,
+              "buffer_offset": -1.0502769266770628
+            },
+            "finite_bit_exact": true,
+            "raw": [
+              {
+                "variant": "production",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.752742",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.751970",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "0",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.804845",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.750944",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.803428",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "1",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.751099",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.803086",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.752877",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "2",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.753408",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.753128",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.750819",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "3",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.802831",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.749286",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.801193",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "4",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.751770",
+                "mismatches": "0"
+              },
+              {
+                "variant": "buffer_offset",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.803943",
+                "mismatches": "0"
+              },
+              {
+                "variant": "production",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.753493",
+                "mismatches": "0"
+              },
+              {
+                "variant": "control_clone",
+                "round": "5",
+                "matrices": "1",
+                "weight_bytes": "1042944000",
+                "ms_per_matrix": "4.753118",
+                "mismatches": "0"
+              }
+            ]
+          }
+        ],
+        "binary_sha256": "5d73e169b2e43e00352af9f51db49ef2a9fd563b793c2b824491ea0ce8f0124a"
+      }
+    },
+    "isa": {
+      "buffer_address_probe": [
+        {
+          "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "1db6bdba67705ed3d27be210ff3f05f977253ebcc5f28f35b383e37d2ae9f124",
+          "opcodes": {
+            "s_clause": 4,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "v_dual_mov_b32": 50,
+            "s_delay_alu": 84,
+            "v_and_or_b32": 25,
+            "v_dual_and_b32": 6,
+            "v_or_b32_e32": 6,
+            "s_waitcnt": 84,
+            "v_cmp_gt_u32_e64": 5,
+            "v_mov_b32_e32": 10,
+            "s_cmp_lt_u32": 1,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 2,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "s_mulk_i32": 1,
+            "v_cndmask_b32_e64": 4,
+            "v_mul_u32_u24_e32": 2,
+            "v_lshl_or_b32": 1,
+            "v_mul_lo_u32": 5,
+            "v_lshl_add_u32": 1,
+            "s_mov_b32": 7,
+            "v_cmp_gt_u32_e32": 2,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "s_and_b32": 2,
+            "v_dual_add_f32": 71,
+            "v_dual_add_nc_u32": 2,
+            "ds_store_b128": 4,
+            "v_add_f32_e32": 50,
+            "v_cmp_lt_u32_e64": 1,
+            "ds_store_b32": 1,
+            "v_add_nc_u32_e32": 5,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 18,
+            "v_add_co_u32": 31,
+            "v_add_co_ci_u32_e64": 31,
+            "global_load_b128": 12,
+            "v_mad_i32_i24": 1,
+            "v_mul_i32_i24_e32": 1,
+            "v_cmpx_gt_u32_e64": 4,
+            "v_bfe_u32": 3,
+            "v_mad_u64_u32": 1,
+            "v_and_b32_e32": 27,
+            "ds_load_b128": 20,
+            "global_load_u8": 12,
+            "global_load_b32": 4,
+            "v_sub_nc_u32_e32": 1,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_dual_lshlrev_b32": 2,
+            "v_fmac_f32_e32": 250,
+            "v_bfi_b32": 8,
+            "v_cvt_f32_f16_e32": 8,
+            "v_mul_f32_e32": 19,
+            "v_dual_mul_f32": 9,
+            "ds_load_b32": 1,
+            "ds_load_2addr_b32": 2,
+            "ds_swizzle_b32": 100,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 3,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        },
+        {
+          "name": "void gufo::hip::BufferAddressQ5Kernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, 0u>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "1db6bdba67705ed3d27be210ff3f05f977253ebcc5f28f35b383e37d2ae9f124",
+          "opcodes": {
+            "s_clause": 4,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "v_dual_mov_b32": 50,
+            "s_delay_alu": 84,
+            "v_and_or_b32": 25,
+            "v_dual_and_b32": 6,
+            "v_or_b32_e32": 6,
+            "s_waitcnt": 84,
+            "v_cmp_gt_u32_e64": 5,
+            "v_mov_b32_e32": 10,
+            "s_cmp_lt_u32": 1,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 2,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "s_mulk_i32": 1,
+            "v_cndmask_b32_e64": 4,
+            "v_mul_u32_u24_e32": 2,
+            "v_lshl_or_b32": 1,
+            "v_mul_lo_u32": 5,
+            "v_lshl_add_u32": 1,
+            "s_mov_b32": 7,
+            "v_cmp_gt_u32_e32": 2,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "s_and_b32": 2,
+            "v_dual_add_f32": 71,
+            "v_dual_add_nc_u32": 2,
+            "ds_store_b128": 4,
+            "v_add_f32_e32": 50,
+            "v_cmp_lt_u32_e64": 1,
+            "ds_store_b32": 1,
+            "v_add_nc_u32_e32": 5,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 18,
+            "v_add_co_u32": 31,
+            "v_add_co_ci_u32_e64": 31,
+            "global_load_b128": 12,
+            "v_mad_i32_i24": 1,
+            "v_mul_i32_i24_e32": 1,
+            "v_cmpx_gt_u32_e64": 4,
+            "v_bfe_u32": 3,
+            "v_mad_u64_u32": 1,
+            "v_and_b32_e32": 27,
+            "ds_load_b128": 20,
+            "global_load_u8": 12,
+            "global_load_b32": 4,
+            "v_sub_nc_u32_e32": 1,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_dual_lshlrev_b32": 2,
+            "v_fmac_f32_e32": 250,
+            "v_bfi_b32": 8,
+            "v_cvt_f32_f16_e32": 8,
+            "v_mul_f32_e32": 19,
+            "v_dual_mul_f32": 9,
+            "ds_load_b32": 1,
+            "ds_load_2addr_b32": 2,
+            "ds_swizzle_b32": 100,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 3,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        },
+        {
+          "name": "void gufo::hip::BufferAddressQ5Kernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 142,
+            "sgpr_count": 22,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1193,
+          "instructions_sha256": "bef52db7374a0ec2c3ea220938fd1e9b5659ee4abed1fd0c7539f7fe629129d8",
+          "opcodes": {
+            "s_clause": 5,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "v_dual_mov_b32": 49,
+            "s_delay_alu": 108,
+            "v_and_or_b32": 26,
+            "v_dual_and_b32": 10,
+            "v_or_b32_e32": 9,
+            "s_waitcnt": 94,
+            "v_cmp_gt_u32_e64": 5,
+            "v_mov_b32_e32": 11,
+            "s_cmp_lt_u32": 1,
+            "s_cbranch_scc1": 2,
+            "v_dual_lshlrev_b32": 6,
+            "s_lshr_b32": 2,
+            "s_mulk_i32": 1,
+            "v_dual_add_nc_u32": 4,
+            "v_bfe_u32": 3,
+            "v_sub_nc_u32_e32": 1,
+            "s_and_b32": 3,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "v_mul_u32_u24_e32": 2,
+            "v_cndmask_b32_e64": 4,
+            "v_lshl_or_b32": 1,
+            "v_mul_lo_u32": 6,
+            "v_lshl_add_u32": 1,
+            "s_mul_i32": 1,
+            "s_mov_b32": 9,
+            "v_cmp_gt_u32_e32": 2,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "v_dual_add_f32": 66,
+            "ds_store_b128": 4,
+            "v_add_f32_e32": 55,
+            "v_cmp_lt_u32_e64": 1,
+            "ds_store_b32": 1,
+            "v_add_nc_u32_e32": 17,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 14,
+            "v_add_co_u32": 7,
+            "v_add_co_ci_u32_e64": 7,
+            "global_load_b128": 4,
+            "v_mad_i32_i24": 1,
+            "v_mul_i32_i24_e32": 1,
+            "v_cmpx_gt_u32_e64": 4,
+            "buffer_load_b128": 8,
+            "ds_load_b128": 20,
+            "v_and_b32_e32": 22,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_fma_f32": 40,
+            "v_fmac_f32_e32": 252,
+            "buffer_load_u8": 12,
+            "buffer_load_u16": 8,
+            "v_dual_fmac_f32": 48,
+            "v_cvt_f32_f16_e32": 8,
+            "v_bfi_b32": 8,
+            "v_mul_f32_e32": 25,
+            "v_dual_mul_f32": 3,
+            "ds_load_2addr_b32": 2,
+            "ds_load_b32": 1,
+            "ds_swizzle_b32": 100,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 3,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        },
+        {
+          "name": "void gufo::hip::BufferAddressQ5Kernel<8u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, 2u>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 162,
+            "sgpr_count": 22,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1193,
+          "instructions_sha256": "34e1e2c793307ea8af0ee4e9cd1d4042ae121293367ff2e19dd57730642da964",
+          "opcodes": {
+            "s_clause": 6,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "v_dual_mov_b32": 47,
+            "s_delay_alu": 103,
+            "v_and_or_b32": 26,
+            "v_dual_and_b32": 11,
+            "v_or_b32_e32": 25,
+            "s_waitcnt": 92,
+            "v_cmp_gt_u32_e64": 5,
+            "v_mov_b32_e32": 13,
+            "s_cmp_lt_u32": 1,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 3,
+            "v_dual_lshlrev_b32": 10,
+            "s_mulk_i32": 2,
+            "v_bfe_u32": 3,
+            "v_sub_nc_u32_e32": 1,
+            "s_and_b32": 3,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "v_cndmask_b32_e64": 4,
+            "v_dual_add_nc_u32": 12,
+            "v_mul_lo_u32": 5,
+            "v_mul_u32_u24_e32": 2,
+            "v_mad_u32_u24": 4,
+            "v_lshl_or_b32": 1,
+            "v_lshl_add_u32": 1,
+            "s_mul_i32": 1,
+            "s_mov_b32": 9,
+            "v_cmp_gt_u32_e32": 2,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "v_dual_add_f32": 68,
+            "ds_store_b128": 4,
+            "v_add_f32_e32": 53,
+            "v_cmp_lt_u32_e64": 1,
+            "ds_store_b32": 1,
+            "v_add_nc_u32_e32": 5,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 10,
+            "v_add_co_u32": 7,
+            "v_add_co_ci_u32_e64": 7,
+            "global_load_b128": 4,
+            "v_mad_i32_i24": 1,
+            "v_mul_i32_i24_e32": 1,
+            "v_cmpx_gt_u32_e64": 4,
+            "buffer_load_b128": 8,
+            "ds_load_b128": 20,
+            "buffer_load_u8": 12,
+            "buffer_load_u16": 8,
+            "v_and_b32_e32": 21,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 57,
+            "v_fmac_f32_e32": 243,
+            "v_cvt_f32_f16_e32": 8,
+            "ds_load_b32": 1,
+            "v_bfi_b32": 8,
+            "v_mul_f32_e32": 25,
+            "ds_load_2addr_b32": 2,
+            "v_dual_mul_f32": 3,
+            "ds_swizzle_b32": 100,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 3,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        },
+        {
+          "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "e8a6c81ae6c70a77ec675d5a6ca24e83e2a638c1f9855889f4e11619434c108c",
+          "opcodes": {
+            "s_clause": 4,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "v_dual_mov_b32": 50,
+            "s_delay_alu": 84,
+            "v_and_or_b32": 25,
+            "v_dual_and_b32": 6,
+            "v_or_b32_e32": 6,
+            "s_waitcnt": 84,
+            "v_cmp_gt_u32_e64": 5,
+            "v_mov_b32_e32": 10,
+            "s_cmp_lt_u32": 1,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 2,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "s_mulk_i32": 1,
+            "v_cndmask_b32_e64": 4,
+            "v_mul_u32_u24_e32": 2,
+            "v_lshl_or_b32": 1,
+            "v_mul_lo_u32": 5,
+            "v_lshl_add_u32": 1,
+            "s_mov_b32": 7,
+            "v_cmp_gt_u32_e32": 2,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "s_and_b32": 2,
+            "v_dual_add_f32": 71,
+            "v_dual_add_nc_u32": 2,
+            "ds_store_b128": 4,
+            "v_add_f32_e32": 50,
+            "v_cmp_lt_u32_e64": 1,
+            "ds_store_b32": 1,
+            "v_add_nc_u32_e32": 5,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 18,
+            "v_add_co_u32": 31,
+            "v_add_co_ci_u32_e64": 31,
+            "global_load_b128": 12,
+            "v_mad_i32_i24": 1,
+            "v_mul_i32_i24_e32": 1,
+            "v_cmpx_gt_u32_e64": 4,
+            "v_bfe_u32": 3,
+            "v_mad_u64_u32": 1,
+            "v_and_b32_e32": 27,
+            "ds_load_b128": 20,
+            "global_load_u8": 12,
+            "global_load_b32": 4,
+            "v_sub_nc_u32_e32": 1,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_dual_lshlrev_b32": 2,
+            "v_fmac_f32_e32": 250,
+            "v_bfi_b32": 8,
+            "v_cvt_f32_f16_e32": 8,
+            "v_mul_f32_e32": 19,
+            "v_dual_mul_f32": 9,
+            "ds_load_b32": 1,
+            "ds_load_2addr_b32": 2,
+            "ds_swizzle_b32": 100,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 3,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        },
+        {
+          "name": "void gufo::hip::BufferAddressQ5Kernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, 0u>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 136,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1179,
+          "instructions_sha256": "e8a6c81ae6c70a77ec675d5a6ca24e83e2a638c1f9855889f4e11619434c108c",
+          "opcodes": {
+            "s_clause": 4,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "v_dual_mov_b32": 50,
+            "s_delay_alu": 84,
+            "v_and_or_b32": 25,
+            "v_dual_and_b32": 6,
+            "v_or_b32_e32": 6,
+            "s_waitcnt": 84,
+            "v_cmp_gt_u32_e64": 5,
+            "v_mov_b32_e32": 10,
+            "s_cmp_lt_u32": 1,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 2,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "s_mulk_i32": 1,
+            "v_cndmask_b32_e64": 4,
+            "v_mul_u32_u24_e32": 2,
+            "v_lshl_or_b32": 1,
+            "v_mul_lo_u32": 5,
+            "v_lshl_add_u32": 1,
+            "s_mov_b32": 7,
+            "v_cmp_gt_u32_e32": 2,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "s_and_b32": 2,
+            "v_dual_add_f32": 71,
+            "v_dual_add_nc_u32": 2,
+            "ds_store_b128": 4,
+            "v_add_f32_e32": 50,
+            "v_cmp_lt_u32_e64": 1,
+            "ds_store_b32": 1,
+            "v_add_nc_u32_e32": 5,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 18,
+            "v_add_co_u32": 31,
+            "v_add_co_ci_u32_e64": 31,
+            "global_load_b128": 12,
+            "v_mad_i32_i24": 1,
+            "v_mul_i32_i24_e32": 1,
+            "v_cmpx_gt_u32_e64": 4,
+            "v_bfe_u32": 3,
+            "v_mad_u64_u32": 1,
+            "v_and_b32_e32": 27,
+            "ds_load_b128": 20,
+            "global_load_u8": 12,
+            "global_load_b32": 4,
+            "v_sub_nc_u32_e32": 1,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 50,
+            "v_dual_lshlrev_b32": 2,
+            "v_fmac_f32_e32": 250,
+            "v_bfi_b32": 8,
+            "v_cvt_f32_f16_e32": 8,
+            "v_mul_f32_e32": 19,
+            "v_dual_mul_f32": 9,
+            "ds_load_b32": 1,
+            "ds_load_2addr_b32": 2,
+            "ds_swizzle_b32": 100,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 3,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        },
+        {
+          "name": "void gufo::hip::BufferAddressQ5Kernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 142,
+            "sgpr_count": 22,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1193,
+          "instructions_sha256": "a9c40e9c49f4c092ed53e88233b0f2eb69b1e38fe5037716e82c87b0f9fde669",
+          "opcodes": {
+            "s_clause": 5,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "v_dual_mov_b32": 49,
+            "s_delay_alu": 108,
+            "v_and_or_b32": 26,
+            "v_dual_and_b32": 10,
+            "v_or_b32_e32": 9,
+            "s_waitcnt": 94,
+            "v_cmp_gt_u32_e64": 5,
+            "v_mov_b32_e32": 11,
+            "s_cmp_lt_u32": 1,
+            "s_cbranch_scc1": 2,
+            "v_dual_lshlrev_b32": 6,
+            "s_lshr_b32": 2,
+            "s_mulk_i32": 1,
+            "v_dual_add_nc_u32": 4,
+            "v_bfe_u32": 3,
+            "v_sub_nc_u32_e32": 1,
+            "s_and_b32": 3,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "v_mul_u32_u24_e32": 2,
+            "v_cndmask_b32_e64": 4,
+            "v_lshl_or_b32": 1,
+            "v_mul_lo_u32": 6,
+            "v_lshl_add_u32": 1,
+            "s_mul_i32": 1,
+            "s_mov_b32": 9,
+            "v_cmp_gt_u32_e32": 2,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "v_dual_add_f32": 66,
+            "ds_store_b128": 4,
+            "v_add_f32_e32": 55,
+            "v_cmp_lt_u32_e64": 1,
+            "ds_store_b32": 1,
+            "v_add_nc_u32_e32": 17,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 14,
+            "v_add_co_u32": 7,
+            "v_add_co_ci_u32_e64": 7,
+            "global_load_b128": 4,
+            "v_mad_i32_i24": 1,
+            "v_mul_i32_i24_e32": 1,
+            "v_cmpx_gt_u32_e64": 4,
+            "buffer_load_b128": 8,
+            "ds_load_b128": 20,
+            "v_and_b32_e32": 22,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_fma_f32": 40,
+            "v_fmac_f32_e32": 252,
+            "buffer_load_u8": 12,
+            "buffer_load_u16": 8,
+            "v_dual_fmac_f32": 48,
+            "v_cvt_f32_f16_e32": 8,
+            "v_bfi_b32": 8,
+            "v_mul_f32_e32": 25,
+            "v_dual_mul_f32": 3,
+            "ds_load_2addr_b32": 2,
+            "ds_load_b32": 1,
+            "ds_swizzle_b32": 100,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 3,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        },
+        {
+          "name": "void gufo::hip::BufferAddressQ5Kernel<16u, 5ul, 4ul, (gufo::core::GgmlType)13, 1ul, 4u, 1ul, true, 5ul, 2u>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 162,
+            "sgpr_count": 22,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 13440
+          },
+          "static_instructions": 1193,
+          "instructions_sha256": "92e566a6b0a42659dfd675ce92a1589fb6fbf1c400f9446cb3027c6fc3894283",
+          "opcodes": {
+            "s_clause": 6,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 48,
+            "s_lshl_b32": 2,
+            "v_dual_mov_b32": 47,
+            "s_delay_alu": 103,
+            "v_and_or_b32": 26,
+            "v_dual_and_b32": 11,
+            "v_or_b32_e32": 25,
+            "s_waitcnt": 92,
+            "v_cmp_gt_u32_e64": 5,
+            "v_mov_b32_e32": 13,
+            "s_cmp_lt_u32": 1,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 3,
+            "v_dual_lshlrev_b32": 10,
+            "s_mulk_i32": 2,
+            "v_bfe_u32": 3,
+            "v_sub_nc_u32_e32": 1,
+            "s_and_b32": 3,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "v_cndmask_b32_e64": 4,
+            "v_dual_add_nc_u32": 12,
+            "v_mul_lo_u32": 5,
+            "v_mul_u32_u24_e32": 2,
+            "v_mad_u32_u24": 4,
+            "v_lshl_or_b32": 1,
+            "v_lshl_add_u32": 1,
+            "s_mul_i32": 1,
+            "s_mov_b32": 9,
+            "v_cmp_gt_u32_e32": 2,
+            "s_branch": 4,
+            "s_or_b32": 10,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 5,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "v_dual_add_f32": 68,
+            "ds_store_b128": 4,
+            "v_add_f32_e32": 53,
+            "v_cmp_lt_u32_e64": 1,
+            "ds_store_b32": 1,
+            "v_add_nc_u32_e32": 5,
+            "s_and_not1_b32": 1,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 10,
+            "v_add_co_u32": 7,
+            "v_add_co_ci_u32_e64": 7,
+            "global_load_b128": 4,
+            "v_mad_i32_i24": 1,
+            "v_mul_i32_i24_e32": 1,
+            "v_cmpx_gt_u32_e64": 4,
+            "buffer_load_b128": 8,
+            "ds_load_b128": 20,
+            "buffer_load_u8": 12,
+            "buffer_load_u16": 8,
+            "v_and_b32_e32": 21,
+            "v_cvt_f32_ubyte0_e32": 24,
+            "v_cvt_f32_ubyte1_e32": 16,
+            "v_cvt_f32_ubyte2_e32": 16,
+            "v_cvt_f32_ubyte3_e32": 16,
+            "v_fma_f32": 40,
+            "v_dual_fmac_f32": 57,
+            "v_fmac_f32_e32": 243,
+            "v_cvt_f32_f16_e32": 8,
+            "ds_load_b32": 1,
+            "v_bfi_b32": 8,
+            "v_mul_f32_e32": 25,
+            "ds_load_2addr_b32": 2,
+            "v_dual_mul_f32": 3,
+            "ds_swizzle_b32": 100,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 3,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        }
+      ],
+      "buffer_q6_probe": [
+        {
+          "name": "void gufo::hip::SmallBatchKQuantExactFp32GEMMKernel<16u, 5ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 5ul>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 107,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 25600
+          },
+          "static_instructions": 928,
+          "instructions_sha256": "8cf8f4a427a6260c58aec612624658dfd56b930b8855c1adedf99fd2b27c528c",
+          "opcodes": {
+            "s_clause": 8,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 27,
+            "v_dual_mov_b32": 32,
+            "s_delay_alu": 77,
+            "v_lshl_or_b32": 1,
+            "v_lshl_add_u32": 1,
+            "v_dual_and_b32": 2,
+            "v_dual_add_nc_u32": 9,
+            "v_mov_b32_e32": 15,
+            "s_waitcnt": 65,
+            "s_cmp_lt_u32": 1,
+            "v_cmp_gt_u32_e32": 4,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 2,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "s_mulk_i32": 1,
+            "v_dual_cndmask_b32": 1,
+            "v_mul_lo_u32": 4,
+            "v_cndmask_b32_e32": 2,
+            "v_cmp_gt_u32_e64": 1,
+            "s_mov_b32": 10,
+            "s_branch": 5,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 3,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "s_and_b32": 3,
+            "s_or_b32": 7,
+            "v_add_nc_u32_e32": 11,
+            "ds_store_b128": 6,
+            "v_cmp_lt_u32_e32": 2,
+            "s_and_not1_b32": 1,
+            "v_and_b32_e32": 14,
+            "v_or_b32_e32": 3,
+            "v_mul_i32_i24_e32": 2,
+            "v_mul_u32_u24_e32": 2,
+            "v_cmp_le_u32_e32": 1,
+            "s_xor_b32": 5,
+            "s_or_saveexec_b32": 2,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 18,
+            "v_add_co_u32": 34,
+            "v_add_co_ci_u32_e64": 34,
+            "global_load_b128": 10,
+            "s_cbranch_vccnz": 1,
+            "v_cmpx_gt_u32_e64": 3,
+            "v_bfe_u32": 2,
+            "v_mad_u64_u32": 1,
+            "v_sub_co_u32": 1,
+            "v_sub_co_ci_u32_e64": 1,
+            "global_load_d16_b16": 2,
+            "v_mul_hi_i32_i24_e32": 1,
+            "global_load_i8": 3,
+            "global_load_d16_hi_b16": 1,
+            "ds_load_b128": 20,
+            "v_cndmask_b32_e64": 1,
+            "v_and_or_b32": 12,
+            "v_xor_b32_e32": 12,
+            "v_cvt_f32_f16_e32": 3,
+            "v_bfe_i32": 36,
+            "v_ashrrev_i32_e32": 12,
+            "v_cvt_f32_i32_e32": 51,
+            "v_fma_f32": 15,
+            "v_fmac_f32_e32": 97,
+            "v_dual_fmac_f32": 128,
+            "v_mul_f32_e32": 8,
+            "v_dual_mul_f32": 10,
+            "v_dual_add_f32": 46,
+            "v_add_f32_e32": 34,
+            "ds_swizzle_b32": 75,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 2,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        },
+        {
+          "name": "void gufo::hip::BufferAddressQ6Kernel<16u, 5ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 5ul, 0u>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 107,
+            "sgpr_count": 20,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 25600
+          },
+          "static_instructions": 928,
+          "instructions_sha256": "8cf8f4a427a6260c58aec612624658dfd56b930b8855c1adedf99fd2b27c528c",
+          "opcodes": {
+            "s_clause": 8,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 27,
+            "v_dual_mov_b32": 32,
+            "s_delay_alu": 77,
+            "v_lshl_or_b32": 1,
+            "v_lshl_add_u32": 1,
+            "v_dual_and_b32": 2,
+            "v_dual_add_nc_u32": 9,
+            "v_mov_b32_e32": 15,
+            "s_waitcnt": 65,
+            "s_cmp_lt_u32": 1,
+            "v_cmp_gt_u32_e32": 4,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 2,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "s_mulk_i32": 1,
+            "v_dual_cndmask_b32": 1,
+            "v_mul_lo_u32": 4,
+            "v_cndmask_b32_e32": 2,
+            "v_cmp_gt_u32_e64": 1,
+            "s_mov_b32": 10,
+            "s_branch": 5,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 3,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "s_and_b32": 3,
+            "s_or_b32": 7,
+            "v_add_nc_u32_e32": 11,
+            "ds_store_b128": 6,
+            "v_cmp_lt_u32_e32": 2,
+            "s_and_not1_b32": 1,
+            "v_and_b32_e32": 14,
+            "v_or_b32_e32": 3,
+            "v_mul_i32_i24_e32": 2,
+            "v_mul_u32_u24_e32": 2,
+            "v_cmp_le_u32_e32": 1,
+            "s_xor_b32": 5,
+            "s_or_saveexec_b32": 2,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 18,
+            "v_add_co_u32": 34,
+            "v_add_co_ci_u32_e64": 34,
+            "global_load_b128": 10,
+            "s_cbranch_vccnz": 1,
+            "v_cmpx_gt_u32_e64": 3,
+            "v_bfe_u32": 2,
+            "v_mad_u64_u32": 1,
+            "v_sub_co_u32": 1,
+            "v_sub_co_ci_u32_e64": 1,
+            "global_load_d16_b16": 2,
+            "v_mul_hi_i32_i24_e32": 1,
+            "global_load_i8": 3,
+            "global_load_d16_hi_b16": 1,
+            "ds_load_b128": 20,
+            "v_cndmask_b32_e64": 1,
+            "v_and_or_b32": 12,
+            "v_xor_b32_e32": 12,
+            "v_cvt_f32_f16_e32": 3,
+            "v_bfe_i32": 36,
+            "v_ashrrev_i32_e32": 12,
+            "v_cvt_f32_i32_e32": 51,
+            "v_fma_f32": 15,
+            "v_fmac_f32_e32": 97,
+            "v_dual_fmac_f32": 128,
+            "v_mul_f32_e32": 8,
+            "v_dual_mul_f32": 10,
+            "v_dual_add_f32": 46,
+            "v_add_f32_e32": 34,
+            "ds_swizzle_b32": 75,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 2,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        },
+        {
+          "name": "void gufo::hip::BufferAddressQ6Kernel<16u, 5ul, 3ul, (gufo::core::GgmlType)14, 2ul, 1u, 1ul, true, 5ul, 1u>(void const*, float const*, float*, unsigned long, unsigned long)",
+          "resources": {
+            "vgpr_count": 103,
+            "sgpr_count": 22,
+            "private_segment_fixed_size": 0,
+            "group_segment_fixed_size": 25600
+          },
+          "static_instructions": 865,
+          "instructions_sha256": "885160dd3cdbe4b8d410ab623ba9ecf94674327468f61fd9925edebc01aeb2bf",
+          "opcodes": {
+            "s_clause": 8,
+            "s_load_b128": 2,
+            "s_load_b64": 1,
+            "v_lshrrev_b32_e32": 27,
+            "v_dual_mov_b32": 31,
+            "s_delay_alu": 52,
+            "v_lshl_or_b32": 2,
+            "v_lshl_add_u32": 1,
+            "v_dual_and_b32": 3,
+            "v_dual_add_nc_u32": 8,
+            "v_mov_b32_e32": 16,
+            "s_waitcnt": 68,
+            "s_cmp_lt_u32": 1,
+            "v_cmp_gt_u32_e32": 4,
+            "s_cbranch_scc1": 2,
+            "s_lshr_b32": 2,
+            "v_bfe_u32": 1,
+            "s_mulk_i32": 1,
+            "v_cmp_gt_u32_e64": 1,
+            "v_and_or_b32": 14,
+            "v_dual_lshlrev_b32": 1,
+            "s_and_b32": 4,
+            "s_add_u32": 1,
+            "s_addc_u32": 1,
+            "s_add_i32": 2,
+            "v_dual_cndmask_b32": 1,
+            "v_mul_lo_u32": 5,
+            "v_cndmask_b32_e32": 2,
+            "s_mul_i32": 1,
+            "s_mov_b32": 12,
+            "s_branch": 5,
+            "s_barrier": 2,
+            "s_cmp_ge_u32": 1,
+            "s_and_saveexec_b32": 3,
+            "s_cbranch_execz": 9,
+            "s_load_b32": 1,
+            "s_or_b32": 7,
+            "v_add_nc_u32_e32": 27,
+            "ds_store_b128": 6,
+            "v_cmp_lt_u32_e32": 1,
+            "s_and_not1_b32": 1,
+            "v_and_b32_e32": 14,
+            "v_or_b32_e32": 3,
+            "v_mul_i32_i24_e32": 1,
+            "v_mul_u32_u24_e32": 2,
+            "v_cmp_le_u32_e32": 1,
+            "s_xor_b32": 5,
+            "s_or_saveexec_b32": 2,
+            "v_lshlrev_b64": 7,
+            "v_lshlrev_b32_e32": 14,
+            "v_add_co_u32": 7,
+            "v_add_co_ci_u32_e64": 7,
+            "global_load_b128": 4,
+            "s_cbranch_vccnz": 1,
+            "v_cmpx_gt_u32_e64": 3,
+            "buffer_load_b128": 6,
+            "ds_load_b128": 20,
+            "buffer_load_u16": 3,
+            "buffer_load_i8": 3,
+            "v_xor_b32_e32": 12,
+            "v_bfe_i32": 36,
+            "v_cvt_f32_i32_e32": 51,
+            "v_fma_f32": 15,
+            "v_fmac_f32_e32": 98,
+            "v_ashrrev_i32_e32": 12,
+            "v_dual_fmac_f32": 127,
+            "v_cvt_f32_f16_e32": 3,
+            "v_mul_f32_e32": 9,
+            "v_dual_mul_f32": 9,
+            "v_add_f32_e32": 32,
+            "v_dual_add_f32": 48,
+            "ds_swizzle_b32": 75,
+            "v_cmpx_eq_u32_e32": 1,
+            "s_cbranch_execnz": 2,
+            "global_store_b32": 5,
+            "s_nop": 1,
+            "s_sendmsg": 1,
+            "s_endpgm": 1
+          }
+        }
+      ]
+    },
+    "interpretation": "Q5 uses136VGPRs in production/clone,142with full buffer offsets and162with separate scalar offsets. Q6 falls from107to103VGPRs but remains slower. All measured templates have zero private scratch; register-count changes alone do not establish speed.",
+    "reference_sources": [
+      {
+        "repository": "llvm/llvm-project",
+        "ref": "release/20.x",
+        "path": "clang/test/CodeGenOpenCL/builtins-amdgcn-make-buffer-rsrc.cl",
+        "retrieved_file_sha256": "3f57adf5b0ba0f501bc5213ab9b3fd9bbbe331ea1859a23c6c891c3129c3cbc2"
+      },
+      {
+        "repository": "llvm/llvm-project",
+        "ref": "release/20.x",
+        "path": "clang/test/CodeGenOpenCL/builtins-amdgcn-raw-buffer-load.cl",
+        "retrieved_file_sha256": "d49dd8a15a6f5128d1597c02f174f8003630125f366dd827ce7d49f6116be80c"
+      },
+      {
+        "repository": "ROCm/composable_kernel",
+        "ref": "default branch retrieved2026-09-13",
+        "path": "include/ck/ck.hpp",
+        "retrieved_file_sha256": "4383d4436afe6271d7a6dfa5c71242f6741e10cbdee718300887d5c35e0bd04d",
+        "usage": "gfx11 resource flags0x31004000"
+      }
+    ],
+    "production_release": {
+      "path": "/nix/store/y33zyblbwlk8yq8blr3icbq3brda1zq8-gufo-889e77d-dirty/bin/gufo",
+      "sha256": "a2e5f2366c7c1cd1ef9810331af405134e5b3c41bf2bc0b05bdc1298c3225c40"
+    },
+    "source_sha256": {
+      "src/models/qwen/hip/kernels/small_batch_gemm.hpp": "6375d4d7b93491d85976598829b6325130c7affb5d3ecda04b83914362fc1668"
+    },
+    "limits": [
+      "Actual mapped target GGUF tensors and two full-mantissa inputs; every output must be finite and bit-identical before timing. These are operator controls, not a new model quality or capability evaluation.",
+      "Six rotated-order rounds of eight rotations, with unchanged clone controls. Only batch5 is screened; losing/flat candidates are not expanded to other widths.",
+      "The Q6 harness also compiles an IQ4 mode that was not run; its ISA is excluded from this section."
+    ]
   }
 }

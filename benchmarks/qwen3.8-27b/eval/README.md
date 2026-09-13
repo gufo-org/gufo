@@ -261,9 +261,14 @@ injection; the complete serialized history must remain byte-identical.
   anchor is the correct cap. Further batch-five staging probes retain exact
   outputs but lose 3.9–21.8% throughput, including explicit unsigned Q5
   decoding. All have zero private scratch. The prose trace's later windows
-  contain 3.3–3.6% idle time; removing idle alone could improve throughput
-  by 3.4–3.7%. Graph replay still needs position and buffer-lifetime work.
-  Production and maintained checks are unchanged.
+  contain 3.3–3.6% idle time. A short-context C1 verification graph prototype
+  passes four operator suites and the Q4 target suite, with replay confirmed
+  by telemetry. All six timed continuations retain AR IDs and acceptance,
+  but prose/JSON/repetition lose 0.9%/2.0%/1.1%; the prototype is removed.
+  Raw-buffer addressing is also excluded: Q5 is flat or slower, and the
+  Q6 vocabulary projection loses 1.1%, despite exact checked outputs.
+  Production and maintained checks are unchanged; these bounded rejection
+  probes do not establish full graph lifecycle or model capability coverage.
 - [Shared-memory synchronization](dflash2-synchronization.json): packed
   projections retain LDS completion, the workgroup barrier and compiler
   ordering while avoiding global cache invalidation. Arithmetic is unchanged.

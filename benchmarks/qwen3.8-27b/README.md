@@ -132,8 +132,8 @@ The [quality report](eval/README.md) indexes the remaining evidence.
 
 Wider Q5 layouts, shared packed loads, proposal-tail recycling and alternative
 controller estimates failed speed controls and remain excluded.
-[Activation staging and early weight decoding](eval/dflash2-matrix-probes.json)
-also lose throughput while preserving checked outputs; neither is retained.
+[Staging, weight addressing and verification graphs](eval/dflash2-matrix-probes.json)
+also fail speed controls while preserving checked outputs; none is retained.
 [Latest follow-ups](eval/dflash2-ssm-controls.json) and the
 [quality report](eval/README.md) record the rejected experiments.
 
