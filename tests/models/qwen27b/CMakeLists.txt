@@ -66,6 +66,7 @@ if (ENGINE_ENABLE_HIP)
   add_executable(inference_backend_gpu_test serving_test.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_cache.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_disk_store.cpp
+    ${PROJECT_SOURCE_DIR}/src/cli/serve/logging.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp

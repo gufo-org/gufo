@@ -150,6 +150,19 @@ injection; the complete serialized history must remain byte-identical.
 
 ## Current evidence
 
+- [Four-lane recurrent-state stores](dflash2-state-stores.json): scalar
+  transposes keep the value-major layout and eliminate private storage.
+  Verification/replay recurrence takes 23.8%/27.0% less GPU time.
+  Fresh C1 Q4/Q4 prose/JSON/repetition improve 0.67%/0.34%/0.25%.
+  Q4 AR pp2048 is flat; tg128 improves 0.47%. All 12 speculative
+  continuations, four AR controls, 102 logit rows, 102 feature rows and 96 C3
+  replay/cache rows remain exact. SSM FP32/BF16 and the maintained recurrence
+  ablation pass. No new tools, tests, switches or arithmetic changes.
+  The baseline profile is reused; paired speed controls precede the rebase.
+  The integrated release passes affected core/serving tests, both target
+  suites and three bounded token/acceptance controls; its fingerprint is
+  recorded separately. The report includes the paired precursor and slower
+  load/aggregate-store variants.
 - [Recurrence barriers and replay dispatch](dflash2-recurrence-launch.json):
   resident waves compute the same ordered norm sums locally; one-row FP32
   replay keeps state in registers. Verification recurrence takes 6.0% less

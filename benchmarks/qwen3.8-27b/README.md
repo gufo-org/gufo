@@ -11,13 +11,13 @@ that number. Draft precision is selected separately from target precision.
 
 ## Single user, autoregressive
 
-Q4 depth 0 has a [paired AR refresh](eval/dflash2-mixed-formats.json);
+Q4 depth 0 has a [fresh paired AR control](eval/dflash2-state-stores.json);
 depth 4096 has a [fresh AR control](eval/dflash2-controller-cost.json).
 Other rows remain the reference sweep at `023a13a`. Full refresh: TODO.
 
 | Context depth | Q4 pp / tg (tok/s) | Q8 pp / tg (tok/s) |
 | ---: | ---: | ---: |
-| 0 | 420.2 / 11.74 | 491.1 / 7.07 |
+| 0 | 421.7 / 11.83 | 491.1 / 7.07 |
 | 4,096 | 408.5 / 11.64 | 470.9 / 7.01 |
 | 8,192 | 390.8 / 11.15 | 451.2 / 6.95 |
 | 12,288 | 375.1 / 10.96 | 434.2 / 6.88 |
@@ -94,23 +94,24 @@ advantage here. These short chat results do not replace the synthetic depth
 table. [Controller and precision comparison](eval/dflash2-controllers.json).
 
 **Latest Q4 target/Q4 draft:** greedy C1, including prefill and excluding
-model loading. Prose/JSON use two samples per binary in ABBA order after
-warmup; repetition uses four. These are short controls.
+model loading. Two samples per binary use ABBA order after warmup. These
+are short controls, not a depth sweep.
 
 | Workload | Before tok/s | Current tok/s | Change |
 | --- | ---: | ---: | ---: |
-| Repetition, tg128, fixed-7 | 57.08 | **57.08** | -0.01% |
-| JSON, tg300, adaptive | 53.92 | **54.05** | +0.24% |
-| Prose, tg300, adaptive | 23.86 | **23.92** | +0.25% |
+| Repetition, tg128, fixed-7 | 57.05 | **57.19** | +0.25% |
+| JSON, tg300, adaptive | 54.05 | **54.23** | +0.34% |
+| Prose, tg300, adaptive | 23.93 | **24.09** | +0.67% |
 
-The latest [recurrence change](eval/dflash2-recurrence-launch.json) removes
-normalization broadcasts during verification and uses resident FP32 state
-for one-row replay. Verification recurrence takes 6.0% less GPU time;
-all recurrence takes 3.0% less, with replay time flat. Total gains remain
-small; repetition is flat across all eight measurements.
-All 16 continuations, 102 verification logit rows, 102 feature rows and
-96 C3 replay/cache rows remain exact. Scalar AR and ordered arithmetic
-are unchanged. Earlier [rollback copies](eval/dflash2-state-copy.json),
+[Four-lane state stores](eval/dflash2-state-stores.json) keep transposes in
+registers and preserve the state layout and arithmetic. Verification recurrence
+takes 23.8% less GPU time; replay recurrence takes 27.0% less. Scalar AR
+generation improves 0.47%; prefill is flat. Total gains remain modest.
+All 12 speculative traces and four AR controls retain their token IDs.
+The Q4/Q8 checks preserve 102 verification logit rows, 102 feature rows
+and 96 C3 replay/cache rows exactly.
+Earlier [recurrence barriers](eval/dflash2-recurrence-launch.json),
+[rollback copies](eval/dflash2-state-copy.json),
 [joined controls](eval/dflash2-ssm-controls.json),
 [Q5 projections](eval/dflash2-prose-projections.json),
 [mixed-format reuse](eval/dflash2-remaining-formats.json),
@@ -124,8 +125,7 @@ The controller uses [measured Q4 verification costs](eval/dflash2-controller-cos
 Q8 keeps its previous formula. Its earlier chat comparison was flat in
 aggregate, with code/reasoning losing 1.0–1.6%; the depth-4096 control lost 1.0%.
 
-[Mixed-format scalar specialization](eval/dflash2-mixed-formats.json) raises
-AR generation to **11.74 tok/s** at depth zero. Earlier work covers
+Earlier work covers [mixed-format scalar projections](eval/dflash2-mixed-formats.json),
 [two-token verification](eval/dflash2-width2.json) and
 [compact Q4 staging at widths 3–8](eval/dflash2-q4-staging.json).
 The [quality report](eval/README.md) indexes the remaining evidence.

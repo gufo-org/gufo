@@ -295,9 +295,61 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
     __syncthreads();
   }
   if constexpr (Resident) {
+    // Transpose four float4 columns within each four-lane group. Each store
+    // then writes 64 contiguous bytes per value row, without changing layout.
+    const unsigned peer = tid & 3U;
+    const std::size_t group_row = (tid & ~std::size_t{3}) * 128;
 #pragma unroll
-    for (std::size_t vi = 0; vi < 32; ++vi)
-      detail::StoreRecurrentState4(s_matrix + tid * 128, vi, resident[vi]);
+    for (std::size_t vi = 0; vi < 32; vi += 4) {
+      // Scalar selections keep the exchanges in registers. Selecting float4
+      // aggregates here materializes private storage in the generated code.
+      float ax = resident[vi].x, ay = resident[vi].y, az = resident[vi].z,
+            aw = resident[vi].w;
+      float bx = resident[vi + 1].x, by = resident[vi + 1].y,
+            bz = resident[vi + 1].z, bw = resident[vi + 1].w;
+      float cx = resident[vi + 2].x, cy = resident[vi + 2].y,
+            cz = resident[vi + 2].z, cw = resident[vi + 2].w;
+      float dx = resident[vi + 3].x, dy = resident[vi + 3].y,
+            dz = resident[vi + 3].z, dw = resident[vi + 3].w;
+      // Bound exchange temporaries to this group to prevent hoisting/spills.
+      asm volatile(""
+                   : "+v"(ax), "+v"(ay), "+v"(az), "+v"(aw), "+v"(bx), "+v"(by),
+                     "+v"(bz), "+v"(bw), "+v"(cx), "+v"(cy), "+v"(cz), "+v"(cw),
+                     "+v"(dx), "+v"(dy), "+v"(dz), "+v"(dw)
+                   :
+                   : "memory");
+      const auto transpose = [&](float& left, float& right, unsigned bit) {
+        const bool other = (tid & bit) != 0;
+        const float received = __shfl_xor(other ? left : right, bit);
+        left = other ? received : left;
+        right = other ? right : received;
+      };
+      transpose(ax, bx, 1);
+      transpose(ay, by, 1);
+      transpose(az, bz, 1);
+      transpose(aw, bw, 1);
+      transpose(cx, dx, 1);
+      transpose(cy, dy, 1);
+      transpose(cz, dz, 1);
+      transpose(cw, dw, 1);
+      transpose(ax, cx, 2);
+      transpose(ay, cy, 2);
+      transpose(az, cz, 2);
+      transpose(aw, cw, 2);
+      transpose(bx, dx, 2);
+      transpose(by, dy, 2);
+      transpose(bz, dz, 2);
+      transpose(bw, dw, 2);
+      detail::StoreRecurrentState4(s_matrix + group_row, vi + peer,
+                                   float4{ax, ay, az, aw});
+      detail::StoreRecurrentState4(s_matrix + group_row + 128, vi + peer,
+                                   float4{bx, by, bz, bw});
+      detail::StoreRecurrentState4(s_matrix + group_row + 256, vi + peer,
+                                   float4{cx, cy, cz, cw});
+      detail::StoreRecurrentState4(s_matrix + group_row + 384, vi + peer,
+                                   float4{dx, dy, dz, dw});
+      asm volatile("" ::: "memory");
+    }
   }
 }
 

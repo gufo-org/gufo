@@ -133,12 +133,7 @@ void Run(unsigned rows, unsigned iterations, unsigned seed) {
       {"original", true,
        [&](float* state) { launch.template operator()<false, true>(state); }},
       {"verification", true,
-       [&](float* state) {
-         if (rows > 1)
-           launch.template operator()<true, true>(state);
-         else
-           launch.template operator()<false, true>(state);
-       }},
+       [&](float* state) { launch.template operator()<true, true>(state); }},
       {"state_only", false,
        [&](float* state) { launch.template operator()<true, false>(state); }},
   };
