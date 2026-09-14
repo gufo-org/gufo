@@ -3,7 +3,7 @@
 Linux x86-64, gfx1151, 128 GB unified memory; Nix release binaries.
 Production targets: **UD-Q4_K_XL / UD-Q8_K_XL**. Recommended DFlash2 draft:
 **Q4_K_M**, with **adaptive** as the default controller. Q8_0 and BF16 drafts
-remain supported; their current matched speed comparison is **TODO**.
+remain supported; a full comparison across context depths is **TODO**.
 
 ## Single user, autoregressive
 
@@ -12,29 +12,30 @@ Standard sweep: **pp2048 / tg128**, C1. Cells are prefill / generation tok/s.
 
 | Context depth | Q4 | Q8 |
 | ---: | ---: | ---: |
-| 0 | **573.61** / TODO | **503.17** / TODO |
+| 0 | **592.25** / TODO | **503.17** / TODO |
 | 4,096 | TODO | TODO |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-Prefill measured 2026-09-13: six warmed release samples for Q4, two for Q8.
+Prefill measured with six warmed release samples for Q4 (2026-09-14) and
+two for Q8 (2026-09-13).
 Q4 uses FP16 activations with packed quantized weights; Q8 retains native wave64.
 Current optimization focuses on
 **Q4 AR pp2048**, targeting **600 tok/s without quality loss**.
 
 ## Single user, DFlash2
 
-Current short control, **2026-09-13**, Q4 target, adaptive, greedy C1.
+Current short control, **2026-09-14**, Q4 target, adaptive, greedy C1.
 One warmed release sample per draft; all 32 generated IDs match AR and
 acceptance is 22.2%. Prefill includes feature capture and draft injection.
 These **tg32 controls are not the full tg128 sweep**.
 
 | Draft | pp2048 tok/s | tg32 tok/s |
 | --- | ---: | ---: |
-| Q4_K_M | **537.70** | **16.48** |
-| Q8_0 | 535.44 | 16.07 |
-| BF16 | 538.63 | 15.10 |
+| Q4_K_M | **549.83** | **16.43** |
+| Q8_0 | 551.77 | 16.06 |
+| BF16 | 554.95 | 15.12 |
 
 pp2048/tg128 at depths **0 / 4,096 / 8,192 / 12,288 / 16,384**,
 for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.

@@ -537,6 +537,20 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
   }
   passed &= half_error < a8_error * 0.25 && half_max < a8_max;
 
+  // The residual must be added after the complete dot product, including
+  // when the output reuses the live residual buffer.
+  DeviceBuffer<float> d_residual(gate), d_residual_expected(batch * rows);
+  gufo::hip::LaunchBatchedResidualAdd(d_gate.data(), d_half_y.data(),
+                                      d_residual_expected.data(), batch, rows,
+                                      nullptr);
+  gufo::hip::LaunchBatchedQuantGEMMResidualFp16(
+      format.type, d_weights.data(), d_half_x.data(), d_residual.data(), batch,
+      rows, kK, nullptr);
+  const auto residual = d_residual.CopyToHost();
+  const auto residual_expected = d_residual_expected.CopyToHost();
+  passed &= std::memcmp(residual.data(), residual_expected.data(),
+                        residual.size() * sizeof(float)) == 0;
+
   if (rows >= 4096) {
     // This is the production alias epoch: the up buffer holds the half
     // activation after the up projection, while the norm input stays live.
@@ -557,6 +571,46 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
     passed &= fused == d_expected.CopyToHost();
     passed &= std::ranges::all_of(
         fused, [](std::uint16_t bits) { return (bits & 0x7C00U) != 0x7C00U; });
+
+    // Independent gate and up matrices catch swapped fragments. Compare the
+    // paired kernel with two standalone projections and the activation.
+    // Synthetic block scales are much larger than model weights; bound both
+    // projections so their product remains representable in FP16.
+    auto paired_input = x;
+    for (float& item : paired_input)
+      item *= 0.03125F;
+    d_x.CopyFrom(paired_input);
+    gufo::hip::LaunchFloatToFp16(d_x.data(), d_half_x.data(), x.size(),
+                                 nullptr);
+    gufo::hip::LaunchBatchedQuantGEMMFp16(format.type, d_weights.data(),
+                                          d_half_x.data(), d_half_y.data(),
+                                          batch, rows, kK, nullptr);
+    DeviceBuffer<std::uint8_t> d_gate_weights(
+        MakeWeights(format.type, rows, kK, 0x173841U));
+    gufo::hip::LaunchBatchedQuantGEMMFp16(format.type, d_gate_weights.data(),
+                                          d_half_x.data(), d_gate.data(), batch,
+                                          rows, kK, nullptr);
+    gufo::hip::LaunchBatchedSwiGLUActivation(d_gate.data(), d_half_y.data(),
+                                             d_activation.data(), nullptr,
+                                             batch * rows, nullptr);
+    gufo::hip::LaunchFloatToFp16(d_activation.data(), d_expected.data(),
+                                 batch * rows, nullptr);
+    const bool paired = gufo::hip::TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
+        format.type, d_gate_weights.data(), d_weights.data(), d_half_x.data(),
+        d_up_storage.data(), batch, rows, kK, nullptr);
+    const bool supported = format.type == gufo::core::GgmlType::kQ4_K ||
+                           format.type == gufo::core::GgmlType::kQ5_K ||
+                           format.type == gufo::core::GgmlType::kIQ4_XS;
+    passed &= paired == supported;
+    if (paired) {
+      HIP_CHECK(hipMemcpy(fused.data(), d_up_storage.data(),
+                          fused.size() * sizeof(std::uint16_t),
+                          hipMemcpyDeviceToHost));
+      passed &= fused == d_expected.CopyToHost();
+      passed &= std::ranges::all_of(fused, [](std::uint16_t bits) {
+        return (bits & 0x7C00U) != 0x7C00U;
+      });
+    }
   }
   std::cout << (passed ? "[ OK ] " : "[FAIL] ") << "FP16 prefill "
             << format.name << " " << rows << "x" << kK << " batch=" << batch
@@ -625,6 +679,14 @@ int main() {
   }
   TestFp16Prefill({gufo::core::GgmlType::kQ8_0, "Q8_0"}, 48, 129);
   TestFp16Prefill({gufo::core::GgmlType::kQ6_K, "Q6_K"}, 1057, 129);
+  // Attention K/V projections use the larger tile at long prefill widths.
+  // An incomplete final token tile must preserve the same FP32 dot order.
+  for (const auto& format : {FormatCase{gufo::core::GgmlType::kQ4_K, "Q4_K"},
+                             FormatCase{gufo::core::GgmlType::kQ5_K, "Q5_K"},
+                             FormatCase{gufo::core::GgmlType::kQ6_K, "Q6_K"},
+                             FormatCase{gufo::core::GgmlType::kQ8_0, "Q8_0"}}) {
+    TestFp16Prefill(format, 1024, 1025);
+  }
   for (const auto& format : kFormats) {
     TestDecodeGemv(format);
   }

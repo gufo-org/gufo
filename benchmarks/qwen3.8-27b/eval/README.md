@@ -2,7 +2,7 @@
 
 Targets: UD-Q4_K_XL and UD-Q8_K_XL. DFlash2 drafts: Q4_K_M, Q8_0 and BF16.
 **Adaptive is the default** in prompt, chat, bench and serving. Q4_K_M is the
-recommended draft; a current comparison of all draft precisions remains TODO.
+recommended draft; a full comparison across context depths remains TODO.
 
 ## Maintained checks
 
@@ -61,18 +61,24 @@ nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_target_test \
 
 Large Q4 prefill (chunks of at least 1024 tokens) uses fully scaled packed
 weights and FP16 activations with FP32 accumulation. Normalization writes FP16
-directly; the up projection fuses SwiGLU and the SSM epilogue writes FP16.
-They retain the separate FP32 producers' rounding boundaries, including halfway
-cases, and reuse existing scratch allocations. Complete Q4/Q5 matrix tiles skip
+directly; matching Q4_K/Q5_K/IQ4_XS gate/up projections share a kernel
+that emits SwiGLU without an intermediate gate buffer. Other pairs fuse the
+up projection with SwiGLU. Output projections add residuals directly in FP32
+after completing the dot product; the SSM epilogue writes FP16. They retain the
+separate FP32 producers' rounding boundaries, including halfway cases, and reuse
+existing scratch allocations. Complete Q4/Q5 matrix tiles skip
 tail checks; most formats write matrix results directly in the output layout.
-IQ3_S retains its faster LDS transpose. Q8 and short-prefill paths retain native integer WMMA.
+Large attention K/V projections use the same 256×256 tile for Q4/Q5/Q6/Q8
+weights. IQ3_S retains its faster LDS transpose. Q8 targets and short prefill
+retain native integer WMMA.
 
 The shared quantization test checks all eight Q4 artifact formats against
-independently decoded weights and FP64 dot products, including complete Q4/Q5 tiles and
-partial row/token tiles. It requires at least a 2× RMSE improvement over A8 and lower maximum
-error. Fused SwiGLU and norm/residual outputs must be byte-identical to separate
-FP32 producers followed by FP16 conversion. The existing test executable takes
-about 1.4 seconds. The existing SSM test also checks exact FP16 output and
+independently decoded weights and FP64 dot products, including complete Q4/Q5
+tiles, partial row/token tiles and 1024-row K/V projections at width 1025.
+It requires at least a 2× RMSE improvement over A8 and lower maximum error.
+Paired gate/up, SwiGLU, normalization and in-place residual outputs must be
+byte-identical to the separate FP32 producers and FP16 conversions. The existing
+test executable takes about 1.7 seconds. The SSM test checks exact FP16 output and
 unchanged recurrent state with FP32/BF16 storage; no extra executable is needed.
 
 Model precision qualification: two real 2048-token prefixes from
@@ -192,10 +198,10 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 ## Latest measurement provenance
 
-Q4 release measured on 2026-09-13, SHA-256:
-`686dba04afd56df01f8d2b757faa9545583138da2dd2757bd43c8fd87b074356`.
-The pp2048-only result, **573.61 tok/s**, averages six warmed samples in two
-processes: **572.64 ± 0.36 / 574.58 ± 0.39 tok/s**, three repetitions each.
+Q4 release measured on 2026-09-14, SHA-256:
+`c59adaeb6bc9b4212f8cb340efcb022cb5bac84e1f16f21177c72628ec952f52`.
+The pp2048-only result, **592.25 tok/s**, averages six warmed samples in two
+processes: **593.52 ± 0.22 / 590.97 ± 0.40 tok/s**, three repetitions each.
 Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 3 --verbose`; alternate release
 binaries when comparing implementations. Q8's recorded 503.17 tok/s is from
 the unchanged native wave64 release, SHA-256
@@ -210,15 +216,18 @@ or a broad draft-precision comparison. Real-prompt controls use `prose_tides` /
 and the chat prompt “Output the word red exactly 1000 times, separated by
 spaces. Do not add any other text.”; their current speed refresh is TODO.
 
-The separate profile attributes **85.6%** of GPU time to FP16 quantized GEMM,
-with 1.7% idle time in the dispatch span. All 38 FP16 prefill kernels and the
-SSM output kernel have zero scratch spills. The profiler preserves anonymous-namespace and quantization names,
-so it reports each kernel independently.
+The separate profile attributes **87.0%** of GPU time to FP16 quantized GEMM,
+with 1.7% idle time in the dispatch span. All 69 FP16 prefill kernels have zero
+scratch spills; unused small SwiGLU instantiations are excluded from the build.
+The profiler preserves anonymous-namespace and quantization names, so it reports
+each kernel independently.
 
 Retained: native wave64 for Q8/short prefill; packed-weight FP16 prefill with
-fused norm, up/SwiGLU and SSM output; direct matrix stores and complete Q4/Q5
-tiles. Separate weight expansion, wider token tiles and warp-based RMSNorm
-were slower. Dense BLAS and split-K did not improve small projections.
+fused norm, paired gate/up, in-place residuals and SSM output; direct matrix
+stores, complete Q4/Q5 tiles and larger K/V tiles. Separate weight expansion,
+wider token panels, cached packed bitplanes and warp-based RMSNorm were slower.
+Dense BLAS and split-K did not improve small projections. Mixed-format gate/up
+fusion showed small component gains and remains unshipped.
 Quantized GEMM remains the next target; **Q4 pp2048 at 600 tok/s is still open**.
 
 | Artifact | SHA-256 |

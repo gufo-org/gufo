@@ -427,9 +427,16 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                      arena_.d_scratch_q8_act, batch_size,
                                      attention_size, arena_.stream);
       }
-      gemm_weight(layer.attn_output, arena_.d_scratch_bf16, arena_.d_ssm_out,
-                  arena_.d_attn_out, hidden_size, attention_size,
-                  arena_.d_scratch_q8_act);
+      if (half_prefill) {
+        LaunchBatchedQuantGEMMResidualFp16(
+            layer.attn_output.type, layer.attn_output.data,
+            arena_.d_scratch_bf16, arena_.d_hidden, batch_size, hidden_size,
+            attention_size, arena_.stream);
+      } else {
+        gemm_weight(layer.attn_output, arena_.d_scratch_bf16, arena_.d_ssm_out,
+                    arena_.d_attn_out, hidden_size, attention_size,
+                    arena_.d_scratch_q8_act);
+      }
     } else {
       if (!half_prefill && !norm_feeds_q8_only) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
@@ -512,16 +519,23 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                      arena_.d_scratch_q8_act, batch_size,
                                      ssm_inner_size, arena_.stream);
       }
-      gemm_weight(layer.ssm_out, arena_.d_scratch_bf16, arena_.d_ssm_out,
-                  arena_.d_attn_out, hidden_size, ssm_inner_size,
-                  arena_.d_scratch_q8_act);
+      if (half_prefill) {
+        LaunchBatchedQuantGEMMResidualFp16(
+            layer.ssm_out.type, layer.ssm_out.data, arena_.d_scratch_bf16,
+            arena_.d_hidden, batch_size, hidden_size, ssm_inner_size,
+            arena_.stream);
+      } else {
+        gemm_weight(layer.ssm_out, arena_.d_scratch_bf16, arena_.d_ssm_out,
+                    arena_.d_attn_out, hidden_size, ssm_inner_size,
+                    arena_.d_scratch_q8_act);
+      }
     }
 
     if (half_prefill) {
-      LaunchBatchedRMSNormFp16(arena_.d_hidden, arena_.d_attn_out,
+      LaunchBatchedRMSNormFp16(arena_.d_hidden, nullptr,
                                static_cast<const float*>(layer.ffn_norm.data),
-                               arena_.d_hidden, arena_.d_scratch_bf16,
-                               batch_size, hidden_size, eps, arena_.stream);
+                               nullptr, arena_.d_scratch_bf16, batch_size,
+                               hidden_size, eps, arena_.stream);
     } else if (ffn_feeds_q8_only) {
       // The post-attention residual add folds into the norm: one pass reads the
       // hidden state and the attention output, writes the updated hidden state
@@ -569,12 +583,20 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
               layer.ffn_gate.type, batch_size, intermediate_size,
               batch_size * intermediate_size * sizeof(float));
       if (half_prefill) {
-        gemm_weight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
-                    arena_.d_ffn_gate, intermediate_size, hidden_size);
-        LaunchBatchedQuantGEMMSwiGLUFp16(
-            layer.ffn_up.type, layer.ffn_up.data, arena_.d_scratch_bf16,
-            arena_.d_ffn_gate, arena_.d_ffn_up, batch_size, intermediate_size,
-            hidden_size, arena_.stream);
+        const bool paired =
+            layer.ffn_gate.type == layer.ffn_up.type &&
+            TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
+                layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
+                arena_.d_scratch_bf16, arena_.d_ffn_up, batch_size,
+                intermediate_size, hidden_size, arena_.stream);
+        if (!paired) {
+          gemm_weight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
+                      arena_.d_ffn_gate, intermediate_size, hidden_size);
+          LaunchBatchedQuantGEMMSwiGLUFp16(
+              layer.ffn_up.type, layer.ffn_up.data, arena_.d_scratch_bf16,
+              arena_.d_ffn_gate, arena_.d_ffn_up, batch_size, intermediate_size,
+              hidden_size, arena_.stream);
+        }
         ffn_down_input = arena_.d_ffn_up;
       } else if (fused_dual_swiglu) {
         LaunchBatchedDualQuantGEMMSwiGLUQuantizeQ8_1(
@@ -621,12 +643,19 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       }
     }
 
-    gemm_weight(layer.ffn_down, ffn_down_input, arena_.d_ffn_act,
-                arena_.d_ffn_out, hidden_size, intermediate_size,
-                ffn_down_q8_act);
-
-    LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out, arena_.d_hidden,
-                             batch_size, hidden_size, arena_.stream);
+    if (half_prefill) {
+      LaunchBatchedQuantGEMMResidualFp16(
+          layer.ffn_down.type, layer.ffn_down.data, ffn_down_input,
+          arena_.d_hidden, batch_size, hidden_size, intermediate_size,
+          arena_.stream);
+    } else {
+      gemm_weight(layer.ffn_down, ffn_down_input, arena_.d_ffn_act,
+                  arena_.d_ffn_out, hidden_size, intermediate_size,
+                  ffn_down_q8_act);
+      LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out,
+                               arena_.d_hidden, batch_size, hidden_size,
+                               arena_.stream);
+    }
 
     if (capture_prompt_hidden_) {
       if (const auto tap_index = arena_.GetTargetLayerCaptureIndex(l);

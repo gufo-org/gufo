@@ -30,6 +30,22 @@ void LaunchBatchedQuantGEMMSwiGLUFp16(core::GgmlType type, const void* weights,
                                       void* output, std::size_t batch,
                                       std::size_t m, std::size_t k,
                                       hipStream_t stream);
+// Adds the completed FP32 dot product to residual in place. Input and residual
+// must not alias; accumulation starts at zero, as in the standalone GEMM.
+void LaunchBatchedQuantGEMMResidualFp16(core::GgmlType type,
+                                        const void* weights, const void* input,
+                                        float* residual, std::size_t batch,
+                                        std::size_t m, std::size_t k,
+                                        hipStream_t stream);
+// Matching Q4_K, Q5_K and IQ4_XS gate/up weights share a kernel that emits FP16
+// SwiGLU directly. Returns false without launching for other formats.
+// All buffers are disjoint; the output may reuse the dead FP32 up allocation.
+bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(core::GgmlType type,
+                                             const void* gate_weights,
+                                             const void* up_weights,
+                                             const void* input, void* output,
+                                             std::size_t batch, std::size_t m,
+                                             std::size_t k, hipStream_t stream);
 }  // namespace gufo::hip
 #endif
 #endif

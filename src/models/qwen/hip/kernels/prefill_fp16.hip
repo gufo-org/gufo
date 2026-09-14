@@ -123,14 +123,18 @@ __device__ __forceinline__ gufo::hip::QuantSub16 DecodeRaw(
   return q;
 }
 
+enum class HalfEpilogue { kStore, kSwiGLU, kGateUp, kResidual };
+
 // Fully scaled FP16 weights and activations; FP32 accumulation in K16 order.
-template<int BM, int BN, int WM, int WN, gufo::core::GgmlType Type, bool SwiGLU,
-         bool Complete = false>
+template<int BM, int BN, int WM, int WN, gufo::core::GgmlType Type,
+         HalfEpilogue Epilogue, bool Complete = false>
 __launch_bounds__(WM * WN * 32) __global__
     void HalfPrefillGemmKernel(const void* __restrict__ w,
                                const short* __restrict__ x,
                                float* __restrict__ y, int batch, int m, int k,
-                               const float* __restrict__ gate) {
+                               const float* __restrict__ gate,
+                               const void* __restrict__ up = nullptr) {
+  constexpr bool Paired = Epilogue == HalfEpilogue::kGateUp;
   constexpr int BK = 4, WaveSize = 32, Group = 8;
   constexpr int DecodeStage = (Type == gufo::core::GgmlType::kQ4_K ||
                                Type == gufo::core::GgmlType::kQ5_K ||
@@ -167,7 +171,8 @@ __launch_bounds__(WM * WN * 32) __global__
     row_tile = first + within % rows;
     token_tile = within / rows;
   }
-  const int r_block = row_tile * BM, t_block = token_tile * BN;
+  const int r_block = row_tile * (Paired ? BM / 2 : BM),
+            t_block = token_tile * BN;
   const int ksteps = k / 16;
 
   v8f acc[WRS][WTS] = {};
@@ -178,8 +183,12 @@ __launch_bounds__(WM * WN * 32) __global__
   const std::size_t row_bytes = gufo::hip::QuantRowBytes(Type, k);
 #pragma unroll
   for (int p = 0; p < PFA; ++p) {
-    const int r = r_block + (((p * kThreads) + tid) / BK);
-    w_row[p] = static_cast<const std::uint8_t*>(w) +
+    const int physical_row = ((p * kThreads) + tid) / BK;
+    const int r =
+        r_block +
+        (Paired ? (physical_row / 32) * 16 + physical_row % 16 : physical_row);
+    const void* source = Paired && physical_row % 32 >= 16 ? up : w;
+    w_row[p] = static_cast<const std::uint8_t*>(source) +
                (static_cast<std::size_t>((Complete || r < m) ? r : (m - 1)) *
                 row_bytes);
   }
@@ -302,16 +311,42 @@ __launch_bounds__(WM * WN * 32) __global__
   // keeps the original orientation and LDS transpose, which is faster for
   // its decoder's register schedule.
   const auto store = [&](std::size_t index, float value) {
-    if constexpr (SwiGLU) {
+    if constexpr (Epilogue == HalfEpilogue::kSwiGLU) {
       const float g = gate[index];
       const float sig = 1.0F / (1.0F + expf(-g));
       reinterpret_cast<__half*>(y)[index] =
           RoundActivation(__fmul_rn(g * sig, value));
+    } else if constexpr (Epilogue == HalfEpilogue::kResidual) {
+      // Add only after the dot product, preserving the FP32 residual link.
+      y[index] = __fadd_rn(y[index], value);
     } else
       y[index] = value;
   };
   const int hi = lane / 16;
-  if constexpr (Type != gufo::core::GgmlType::kIQ3_S) {
+  if constexpr (Paired) {
+    static_assert(WRS % 2 == 0 && Type != gufo::core::GgmlType::kIQ3_S);
+    // Adjacent 16-row fragments hold gate and up for the same logical rows.
+    // One wave owns both accumulators, so no intermediate store or exchange
+    // between waves is needed.
+#pragma unroll
+    for (int i = 0; i < WRS; i += 2) {
+#pragma unroll
+      for (int j = 0; j < WTS; ++j) {
+        const int row = r_block + (wr * (WRS / 2) + i / 2) * 16 + sl;
+        const int t0 = t_block + (wt * WTS + j) * 16;
+#pragma unroll
+        for (int l = 0; l < 8; ++l) {
+          const int token = t0 + 2 * l + hi;
+          if (Complete || (row < m && token < batch)) {
+            const float g = acc[i][j][l], u = acc[i + 1][j][l];
+            const float sig = 1.0F / (1.0F + expf(-g));
+            reinterpret_cast<__half*>(y)[std::size_t(token) * m + row] =
+                RoundActivation(__fmul_rn(g * sig, u));
+          }
+        }
+      }
+    }
+  } else if constexpr (Type != gufo::core::GgmlType::kIQ3_S) {
 #pragma unroll
     for (int i = 0; i < WRS; ++i) {
 #pragma unroll
@@ -418,17 +453,22 @@ void LaunchFloatToFp16(const float* x, void* y, std::size_t n,
                        hipStream_t stream) {
   HalfCast<<<(n + 255) / 256, 256, 0, stream>>>(x, static_cast<__half*>(y), n);
 }
-template<bool SwiGLU>
+template<HalfEpilogue Epilogue>
 void DirectGemm(gufo::core::GgmlType type, const void* w, const void* x,
                 float* y, std::size_t batch, std::size_t m, std::size_t k,
                 const float* gate, hipStream_t stream) {
   const auto launch = [&]<gufo::core::GgmlType Type>() {
+    constexpr bool LargeKvTile = Type == gufo::core::GgmlType::kQ4_K ||
+                                 Type == gufo::core::GgmlType::kQ5_K ||
+                                 Type == gufo::core::GgmlType::kQ6_K ||
+                                 Type == gufo::core::GgmlType::kQ8_0;
     const auto large = [&]<bool Full>() {
-      HalfPrefillGemmKernel<256, 256, 8, 4, Type, SwiGLU, Full>
+      HalfPrefillGemmKernel<256, 256, 8, 4, Type, Epilogue, Full>
           <<<dim3((batch + 255) / 256, (m + 255) / 256), 1024, 0, stream>>>(
               w, static_cast<const short*>(x), y, batch, m, k, gate);
     };
-    if (SwiGLU || m >= 4096) {
+    if (Epilogue == HalfEpilogue::kSwiGLU || m >= 4096 ||
+        (LargeKvTile && m >= 1024 && batch >= 1024)) {
       // Only Q4/Q5 benefit from removing the tail checks on complete tiles.
       // Other formats retain the general kernel's better register schedule.
       if constexpr (Type == gufo::core::GgmlType::kQ4_K ||
@@ -439,14 +479,16 @@ void DirectGemm(gufo::core::GgmlType type, const void* w, const void* x,
         }
       }
       large.template operator()<false>();
-    } else if (m >= 1024) {
-      HalfPrefillGemmKernel<64, 128, 2, 4, Type, false>
-          <<<dim3((batch + 127) / 128, (m + 63) / 64), 256, 0, stream>>>(
-              w, static_cast<const short*>(x), y, batch, m, k, nullptr);
-    } else {
-      HalfPrefillGemmKernel<32, 64, 2, 2, Type, false>
-          <<<dim3((batch + 63) / 64, (m + 31) / 32), 128, 0, stream>>>(
-              w, static_cast<const short*>(x), y, batch, m, k, nullptr);
+    } else if constexpr (Epilogue != HalfEpilogue::kSwiGLU) {
+      if (m >= 1024) {
+        HalfPrefillGemmKernel<64, 128, 2, 4, Type, Epilogue>
+            <<<dim3((batch + 127) / 128, (m + 63) / 64), 256, 0, stream>>>(
+                w, static_cast<const short*>(x), y, batch, m, k, nullptr);
+      } else {
+        HalfPrefillGemmKernel<32, 64, 2, 2, Type, Epilogue>
+            <<<dim3((batch + 63) / 64, (m + 31) / 32), 128, 0, stream>>>(
+                w, static_cast<const short*>(x), y, batch, m, k, nullptr);
+      }
     }
   };
   using gufo::core::GgmlType;
@@ -483,14 +525,59 @@ void LaunchBatchedQuantGEMMFp16(gufo::core::GgmlType type, const void* w,
                                 const void* x, float* y, std::size_t batch,
                                 std::size_t m, std::size_t k,
                                 hipStream_t stream) {
-  DirectGemm<false>(type, w, x, y, batch, m, k, nullptr, stream);
+  DirectGemm<HalfEpilogue::kStore>(type, w, x, y, batch, m, k, nullptr, stream);
 }
 void LaunchBatchedQuantGEMMSwiGLUFp16(gufo::core::GgmlType type, const void* w,
                                       const void* x, const float* gate, void* y,
                                       std::size_t batch, std::size_t m,
                                       std::size_t k, hipStream_t stream) {
-  DirectGemm<true>(type, w, x, static_cast<float*>(y), batch, m, k, gate,
-                   stream);
+  DirectGemm<HalfEpilogue::kSwiGLU>(type, w, x, static_cast<float*>(y), batch,
+                                    m, k, gate, stream);
+}
+
+void LaunchBatchedQuantGEMMResidualFp16(gufo::core::GgmlType type,
+                                        const void* w, const void* x,
+                                        float* residual, std::size_t batch,
+                                        std::size_t m, std::size_t k,
+                                        hipStream_t stream) {
+  DirectGemm<HalfEpilogue::kResidual>(type, w, x, residual, batch, m, k,
+                                      nullptr, stream);
+}
+
+bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
+    gufo::core::GgmlType type, const void* gate_weights, const void* up_weights,
+    const void* x, void* y, std::size_t batch, std::size_t m, std::size_t k,
+    hipStream_t stream) {
+  const auto launch = [&]<gufo::core::GgmlType Type>() {
+    const auto tile = [&]<bool Full>() {
+      HalfPrefillGemmKernel<256, 256, 8, 4, Type, HalfEpilogue::kGateUp, Full>
+          <<<dim3((batch + 255) / 256, (m + 127) / 128), 1024, 0, stream>>>(
+              gate_weights, static_cast<const short*>(x),
+              static_cast<float*>(y), batch, m, k, nullptr, up_weights);
+    };
+    if constexpr (Type == gufo::core::GgmlType::kQ4_K ||
+                  Type == gufo::core::GgmlType::kQ5_K) {
+      if (m % 128 == 0 && batch % 256 == 0) {
+        tile.template operator()<true>();
+        return;
+      }
+    }
+    tile.template operator()<false>();
+  };
+  using gufo::core::GgmlType;
+  switch (type) {
+    case GgmlType::kQ4_K:
+      launch.template operator()<GgmlType::kQ4_K>();
+      return true;
+    case GgmlType::kQ5_K:
+      launch.template operator()<GgmlType::kQ5_K>();
+      return true;
+    case GgmlType::kIQ4_XS:
+      launch.template operator()<GgmlType::kIQ4_XS>();
+      return true;
+    default:
+      return false;
+  }
 }
 
 }  // namespace gufo::hip
