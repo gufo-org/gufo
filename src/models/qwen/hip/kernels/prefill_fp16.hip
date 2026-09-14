@@ -43,40 +43,50 @@ struct HalfWeights {
   uint4 low, high;
 };
 
-// All 16 IQ4 codebook entries are integers represented exactly in FP16.
-// Look up their half bits directly, avoiding signed-byte extraction and
-// conversion for each weight. Scaling still uses the original FP32 product.
+struct RawIqWeights {
+  unsigned data[4], shift;
+  float scale;
+};
+
 template<gufo::core::GgmlType Type>
-__device__ __forceinline__ HalfWeights LoadIqHalf(const void* row,
-                                                  unsigned sub) {
+__device__ __forceinline__ RawIqWeights LoadIqRaw(
+    const void* row, unsigned sub, const uint2* header = nullptr) {
   static_assert(Type == gufo::core::GgmlType::kIQ4_XS ||
                 Type == gufo::core::GgmlType::kIQ4_NL);
-  unsigned data[4];
-  const unsigned shift = (sub & 1) * 4;
-  float scale;
+  RawIqWeights weights;
+  weights.shift = (sub & 1) * 4;
   if constexpr (Type == gufo::core::GgmlType::kIQ4_XS) {
     const auto& block = static_cast<const IQ4XSBlock*>(row)[sub / 16];
     const unsigned sb = (sub / 2) & 7;
-    LoadQuantWords16(block.qs + sb * 16, data);
+    LoadQuantWords16(block.qs + sb * 16, weights.data);
+    const unsigned low =
+        header ? header->y >> (8 * (sb / 2)) : block.scales_l[sb / 2];
+    const unsigned high = header ? header->x >> 16 : block.scales_h;
+    const __half d = header ? __ushort_as_half(header->x & 65535) : block.d;
     const int code = static_cast<int>(
-                         ((unsigned(block.scales_l[sb / 2]) >>
-                           (4 * (sb & 1))) &
-                          15) |
-                         (((unsigned(block.scales_h) >> (2 * sb)) & 3) << 4)) -
+                         ((low >> (4 * (sb & 1))) & 15) |
+                         (((high >> (2 * sb)) & 3) << 4)) -
                      32;
-    scale = __half2float(block.d) * static_cast<float>(code);
+    weights.scale = __half2float(d) * static_cast<float>(code);
   } else {
     const auto& block = static_cast<const IQ4NLBlock*>(row)[sub / 2];
-    LoadQuantWords16(block.qs, data);
-    scale = __half2float(block.d);
+    LoadQuantWords16(block.qs, weights.data);
+    weights.scale = __half2float(block.d);
   }
+  return weights;
+}
+
+// All 16 IQ4 codebook entries are integers represented exactly in FP16.
+// Look up their half bits directly, avoiding signed-byte extraction and
+// conversion for each weight. Scaling still uses the original FP32 product.
+__device__ __forceinline__ HalfWeights DecodeIqRaw(const RawIqWeights& weights) {
   union {
     v16bf f;
     uint4 u[2];
   } result;
 #pragma unroll
   for (unsigned i = 0; i < 4; ++i) {
-    const unsigned n = (data[i] >> shift) & 0x0f0f0f0fU;
+    const unsigned n = (weights.data[i] >> weights.shift) & 0x0f0f0f0fU;
     const unsigned index = n & 0x07070707U;
     const unsigned select = ((n & 0x08080808U) >> 3) * 255;
     // Low and high bytes of FP16 {-127, -104, -83, -65, -49, -35,
@@ -94,15 +104,21 @@ __device__ __forceinline__ HalfWeights LoadIqHalf(const void* row,
     const unsigned c0 = __builtin_amdgcn_perm(hi, lo, 0x05010400U);
     const unsigned c1 = __builtin_amdgcn_perm(hi, lo, 0x07030602U);
     result.f[4 * i] = static_cast<_Float16>(__fmul_rn(
-        scale, __half2float(__ushort_as_half(c0 & 65535))));
+        weights.scale, __half2float(__ushort_as_half(c0 & 65535))));
     result.f[4 * i + 1] = static_cast<_Float16>(
-        __fmul_rn(scale, __half2float(__ushort_as_half(c0 >> 16))));
+        __fmul_rn(weights.scale, __half2float(__ushort_as_half(c0 >> 16))));
     result.f[4 * i + 2] = static_cast<_Float16>(__fmul_rn(
-        scale, __half2float(__ushort_as_half(c1 & 65535))));
+        weights.scale, __half2float(__ushort_as_half(c1 & 65535))));
     result.f[4 * i + 3] = static_cast<_Float16>(
-        __fmul_rn(scale, __half2float(__ushort_as_half(c1 >> 16))));
+        __fmul_rn(weights.scale, __half2float(__ushort_as_half(c1 >> 16))));
   }
   return {result.u[0], result.u[1]};
+}
+
+template<gufo::core::GgmlType Type>
+__device__ __forceinline__ HalfWeights LoadIqHalf(const void* row,
+                                                  unsigned sub) {
+  return DecodeIqRaw(LoadIqRaw<Type>(row, sub));
 }
 
 template<gufo::core::GgmlType Type>
@@ -223,6 +239,16 @@ __launch_bounds__(WM * WN * 32) __global__
       (Type == gufo::core::GgmlType::kQ5_K ||
        (Type == gufo::core::GgmlType::kQ4_K &&
         UpType == gufo::core::GgmlType::kQ5_K));
+  // These IQ4_XS projections benefit from keeping packed weights until
+  // LDS commit and reusing the block header. Q3/IQ4_NL mixed pairs retain
+  // immediate decoding.
+  constexpr bool CacheIqHeader =
+      BM == 256 && BN == 256 &&
+      ((Type == gufo::core::GgmlType::kIQ4_XS &&
+        (!Mixed || UpType == gufo::core::GgmlType::kQ4_K ||
+         UpType == gufo::core::GgmlType::kQ5_K)) ||
+       (Type == gufo::core::GgmlType::kQ4_K &&
+        UpType == gufo::core::GgmlType::kIQ4_XS));
   // The mixed Q6 gate is qualified with the fetch-stage decoder; deferring
   // its decode changes dot-product rounding in this kernel specialization.
   constexpr int DecodeStage = (Type == gufo::core::GgmlType::kQ4_K ||
@@ -303,9 +329,20 @@ __launch_bounds__(WM * WN * 32) __global__
   }
 
   uint4 ra[PFA][2], rb[PFB][2], headers[PFA];
+  uint2 iq_headers[PFA];
+  RawIqWeights raw_iq[PFA];
   struct NoRaw {};
   std::conditional_t<DecodeStage == 2, RawWeights<Type>, NoRaw> raw[PFA];
   std::conditional_t<Mixed && UpRaw, RawWeights<UpType>, NoRaw> raw_up[PFA];
+  const auto fetch_iq = [&](int p, int kk) {
+    if ((kk & 12) == 0)
+      __builtin_memcpy(
+          &iq_headers[p],
+          reinterpret_cast<const IQ4XSBlock*>(w_row[p]) + unsigned(kk) / 16,
+          8);
+    raw_iq[p] = LoadIqRaw<gufo::core::GgmlType::kIQ4_XS>(
+        w_row[p], unsigned(kk), &iq_headers[p]);
+  };
   const auto fetch_up = [&](int p, int kk) {
     if constexpr (Mixed) {
       if constexpr (UpRaw) {
@@ -320,6 +357,9 @@ __launch_bounds__(WM * WN * 32) __global__
         } else {
           raw_up[p] = LoadRaw<UpType>(w_row[p], kk);
         }
+      } else if constexpr (CacheIqHeader &&
+                           UpType == gufo::core::GgmlType::kIQ4_XS) {
+        fetch_iq(p, kk);
       } else if constexpr (UpType == gufo::core::GgmlType::kIQ4_XS ||
                            UpType == gufo::core::GgmlType::kIQ4_NL) {
         const auto packed = LoadIqHalf<UpType>(w_row[p], unsigned(kk));
@@ -355,7 +395,10 @@ __launch_bounds__(WM * WN * 32) __global__
           raw[p] = LoadRaw<Type>(w_row[p], kk, &headers[p]);
         } else if constexpr (DecodeStage == 2)
           raw[p] = LoadRaw<Type>(w_row[p], kk);
-        else if constexpr (Type == gufo::core::GgmlType::kIQ4_XS ||
+        else if constexpr (CacheIqHeader &&
+                           Type == gufo::core::GgmlType::kIQ4_XS) {
+          fetch_iq(p, kk);
+        } else if constexpr (Type == gufo::core::GgmlType::kIQ4_XS ||
                            Type == gufo::core::GgmlType::kIQ4_NL) {
           const auto packed = LoadIqHalf<Type>(w_row[p], unsigned(kk));
           ra[p][0] = packed.low;
@@ -376,6 +419,8 @@ __launch_bounds__(WM * WN * 32) __global__
           ra[p][1] = packed.u[1];
         }
       } else {
+        if constexpr (CacheIqHeader)
+          raw_iq[p] = {};
         ra[p][0] = make_uint4(0, 0, 0, 0);
         ra[p][1] = make_uint4(0, 0, 0, 0);
         if (Mixed && (idx / BK) % 32 >= 16)
@@ -409,6 +454,10 @@ __launch_bounds__(WM * WN * 32) __global__
           packed.f[j] = static_cast<_Float16>(__fsub_rn(
               __fmul_rn(q.scale, static_cast<float>(q.q[j])), q.offset));
         StoreSwizzled(dst, packed.u[0], packed.u[1], row);
+      } else if constexpr (CacheIqHeader &&
+                           UpType == gufo::core::GgmlType::kIQ4_XS) {
+        const auto packed = DecodeIqRaw(raw_iq[p]);
+        StoreSwizzled(dst, packed.low, packed.high, row);
       } else {
         StoreSwizzled(dst, ra[p][0], ra[p][1], row);
       }
@@ -434,6 +483,10 @@ __launch_bounds__(WM * WN * 32) __global__
             packed.f[j] = static_cast<_Float16>(__fsub_rn(
                 __fmul_rn(q.scale, static_cast<float>(q.q[j])), q.offset));
           StoreSwizzled(dst, packed.u[0], packed.u[1], row);
+        } else if constexpr (CacheIqHeader &&
+                             Type == gufo::core::GgmlType::kIQ4_XS) {
+          const auto packed = DecodeIqRaw(raw_iq[p]);
+          StoreSwizzled(dst, packed.low, packed.high, row);
         } else
           StoreSwizzled(dst, ra[p][0], ra[p][1], row);
       }

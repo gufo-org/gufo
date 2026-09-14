@@ -12,13 +12,13 @@ Standard sweep: **pp2048 / tg128**, C1. Cells are prefill / generation tok/s.
 
 | Context depth | Q4 | Q8 |
 | ---: | ---: | ---: |
-| 0 | **613.65** / TODO | **503.17** / TODO |
+| 0 | **610.56** / TODO | **503.17** / TODO |
 | 4,096 | TODO | TODO |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
 | 16,384 | TODO | TODO |
 
-Prefill measured with six warmed release samples for Q4 (2026-09-14) and
+Prefill measured with 12 warmed release samples for Q4 (2026-09-14) and
 two for Q8 (2026-09-13).
 Q4 uses FP16 activations with packed quantized weights; Q8 retains native wave64.
 
@@ -31,9 +31,9 @@ These **tg32 controls are not the full tg128 sweep**.
 
 | Draft | pp2048 tok/s | tg32 tok/s |
 | --- | ---: | ---: |
-| Q4_K_M | **572.84** | **16.48** |
-| Q8_0 | 569.07 | 16.09 |
-| BF16 | 571.57 | 15.09 |
+| Q4_K_M | **573.56** | **16.42** |
+| Q8_0 | 569.45 | 16.05 |
+| BF16 | 574.41 | 15.10 |
 
 pp2048/tg128 at depths **0 / 4,096 / 8,192 / 12,288 / 16,384**,
 for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.
@@ -79,3 +79,6 @@ Start with `nix develop -c python3 tools/qwen27b/check.py fast`, then run the
 speculation must match AR IDs; sampled verification must preserve the target
 distribution and reproduce seeded runs within the same configuration.
 Independent original-target/MTP qualification and complete C>1 parity: **TODO**.
+
+Current optimization target: **800 tok/s Q4 C1 AR pp2048**, retaining quality
+and DFlash2 performance.
