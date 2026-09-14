@@ -737,6 +737,8 @@ int main() {
   }
   TestFp16Prefill({gufo::core::GgmlType::kQ8_0, "Q8_0"}, 48, 129);
   TestFp16Prefill({gufo::core::GgmlType::kQ6_K, "Q6_K"}, 1057, 129);
+  TestFp16Prefill({gufo::core::GgmlType::kIQ4_NL, "IQ4_NL"}, 48, 129);
+  TestFp16Prefill({gufo::core::GgmlType::kIQ4_XS, "IQ4_XS"}, 1057, 129);
   // Attention K/V projections use the larger tile at long prefill widths.
   // An incomplete final token tile must preserve the same FP32 dot order.
   for (const auto& format : {FormatCase{gufo::core::GgmlType::kQ4_K, "Q4_K"},

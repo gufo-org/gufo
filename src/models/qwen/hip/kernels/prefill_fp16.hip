@@ -39,6 +39,72 @@ __device__ __forceinline__ void StoreSwizzled(short* p, uint4 lo, uint4 hi,
   reinterpret_cast<uint4*>(p)[shift ^ 1] = hi;
 }
 
+struct HalfWeights {
+  uint4 low, high;
+};
+
+// All 16 IQ4 codebook entries are integers represented exactly in FP16.
+// Look up their half bits directly, avoiding signed-byte extraction and
+// conversion for each weight. Scaling still uses the original FP32 product.
+template<gufo::core::GgmlType Type>
+__device__ __forceinline__ HalfWeights LoadIqHalf(const void* row,
+                                                  unsigned sub) {
+  static_assert(Type == gufo::core::GgmlType::kIQ4_XS ||
+                Type == gufo::core::GgmlType::kIQ4_NL);
+  unsigned data[4];
+  const unsigned shift = (sub & 1) * 4;
+  float scale;
+  if constexpr (Type == gufo::core::GgmlType::kIQ4_XS) {
+    const auto& block = static_cast<const IQ4XSBlock*>(row)[sub / 16];
+    const unsigned sb = (sub / 2) & 7;
+    LoadQuantWords16(block.qs + sb * 16, data);
+    const int code = static_cast<int>(
+                         ((unsigned(block.scales_l[sb / 2]) >>
+                           (4 * (sb & 1))) &
+                          15) |
+                         (((unsigned(block.scales_h) >> (2 * sb)) & 3) << 4)) -
+                     32;
+    scale = __half2float(block.d) * static_cast<float>(code);
+  } else {
+    const auto& block = static_cast<const IQ4NLBlock*>(row)[sub / 2];
+    LoadQuantWords16(block.qs, data);
+    scale = __half2float(block.d);
+  }
+  union {
+    v16bf f;
+    uint4 u[2];
+  } result;
+#pragma unroll
+  for (unsigned i = 0; i < 4; ++i) {
+    const unsigned n = (data[i] >> shift) & 0x0f0f0f0fU;
+    const unsigned index = n & 0x07070707U;
+    const unsigned select = ((n & 0x08080808U) >> 3) * 255;
+    // Low and high bytes of FP16 {-127, -104, -83, -65, -49, -35,
+    // -22, -10, 1, 13, 25, 38, 53, 69, 89, 113}, four entries per word.
+    const unsigned lo0 =
+        __builtin_amdgcn_perm(0x00806020U, 0x103080f0U, index);
+    const unsigned lo1 =
+        __builtin_amdgcn_perm(0x109050a0U, 0xc0408000U, index);
+    const unsigned hi0 =
+        __builtin_amdgcn_perm(0xc9cdd0d2U, 0xd4d5d6d7U, index);
+    const unsigned hi1 =
+        __builtin_amdgcn_perm(0x57555452U, 0x504e4a3cU, index);
+    const unsigned lo = (lo0 & ~select) | (lo1 & select);
+    const unsigned hi = (hi0 & ~select) | (hi1 & select);
+    const unsigned c0 = __builtin_amdgcn_perm(hi, lo, 0x05010400U);
+    const unsigned c1 = __builtin_amdgcn_perm(hi, lo, 0x07030602U);
+    result.f[4 * i] = static_cast<_Float16>(__fmul_rn(
+        scale, __half2float(__ushort_as_half(c0 & 65535))));
+    result.f[4 * i + 1] = static_cast<_Float16>(
+        __fmul_rn(scale, __half2float(__ushort_as_half(c0 >> 16))));
+    result.f[4 * i + 2] = static_cast<_Float16>(__fmul_rn(
+        scale, __half2float(__ushort_as_half(c1 & 65535))));
+    result.f[4 * i + 3] = static_cast<_Float16>(
+        __fmul_rn(scale, __half2float(__ushort_as_half(c1 >> 16))));
+  }
+  return {result.u[0], result.u[1]};
+}
+
 template<gufo::core::GgmlType Type>
 struct RawWeights {
   static_assert(Type == gufo::core::GgmlType::kQ4_K ||
@@ -227,6 +293,11 @@ __launch_bounds__(WM * WN * 32) __global__
     if constexpr (Mixed) {
       if constexpr (UpRaw) {
         raw_up[p] = LoadRaw<UpType>(w_row[p], kk);
+      } else if constexpr (UpType == gufo::core::GgmlType::kIQ4_XS ||
+                           UpType == gufo::core::GgmlType::kIQ4_NL) {
+        const auto packed = LoadIqHalf<UpType>(w_row[p], unsigned(kk));
+        ra[p][0] = packed.low;
+        ra[p][1] = packed.high;
       } else {
         gufo::hip::QuantSub16 q;
         gufo::hip::DecodeQuantSub16<true>(UpType, w_row[p], kk, q);
@@ -249,6 +320,12 @@ __launch_bounds__(WM * WN * 32) __global__
           fetch_up(p, kk);
         else if constexpr (DecodeStage == 2)
           raw[p] = LoadRaw<Type>(w_row[p], kk);
+        else if constexpr (Type == gufo::core::GgmlType::kIQ4_XS ||
+                           Type == gufo::core::GgmlType::kIQ4_NL) {
+          const auto packed = LoadIqHalf<Type>(w_row[p], unsigned(kk));
+          ra[p][0] = packed.low;
+          ra[p][1] = packed.high;
+        }
         else {
           gufo::hip::QuantSub16 q;
           gufo::hip::DecodeQuantSub16<true>(Type, w_row[p], kk, q);

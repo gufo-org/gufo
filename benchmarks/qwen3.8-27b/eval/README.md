@@ -76,10 +76,13 @@ retain native integer WMMA.
 Large IQ4_XS projections and Q5 projections with short reduction dimensions use
 wider row groups to improve input reuse. Long Q5 reductions and mixed gate/up
 pairs retain the smaller groups. The dot-product and epilogue order is unchanged.
+IQ4_XS/IQ4_NL prefill looks up the integer codebook entries directly as exact
+FP16 values, preserving FP32 scaling and eliminating signed-byte conversions.
 
 The shared quantization test checks all eight Q4 artifact formats against
 independently decoded weights and FP64 dot products, including complete Q4/Q5
-tiles, partial row/token tiles and 1024-row K/V projections at width 1025.
+tiles, partial row/token tiles, small/medium IQ4 projections and 1024-row K/V
+projections at width 1025.
 It requires at least a 2× RMSE improvement over A8 and lower maximum error.
 Paired gate/up, SwiGLU, normalization and in-place residual outputs must be
 byte-identical to the separate FP32 producers and FP16 conversions. Mixed pairs
@@ -211,9 +214,9 @@ maintained test inputs. Historical experiment reports remain in Git history.
 ## Latest measurement provenance
 
 Q4 release measured on 2026-09-14, SHA-256:
-`b2a731824c2cbbdc3e31b802ab0b4d074fbaa5cc743888081cb1140b72415530`.
-The pp2048-only result, **602.50 tok/s**, averages six warmed samples in two
-processes: **603.06 ± 0.46 / 601.93 ± 0.22 tok/s**, three repetitions each.
+`8a23c84f38da48141d0cadbb3e89253368580158f485957d8c45967375936664`.
+The pp2048-only result, **603.43 tok/s**, averages six warmed samples in two
+processes: **603.99 ± 0.27 / 602.87 ± 0.49 tok/s**, three repetitions each.
 Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 3 --verbose`; alternate release
 binaries after sustained warmup when comparing implementations. Early transient
 boosts are excluded from the headline. Q8's recorded 503.17 tok/s is from
@@ -239,14 +242,11 @@ each kernel independently.
 Retained: native wave64 for Q8/short prefill; packed-weight FP16 prefill with
 fixed-width norm, matching/mixed gate/up fusion, in-place residuals and SSM output;
 direct matrix stores, complete Q4/Q5 tiles, larger K/V tiles and wider row groups
-for qualified projections. Separate weight expansion,
-wider token panels, cached packed bitplanes and warp-based RMSNorm were slower.
-Dense BLAS and split-K did not improve small projections. Aligned weight loads
-did not improve the main GEMMs. Convolution/KQ fusion
-was rejected because component gains did not improve full-model prefill.
-Smaller tiles with two resident blocks and alternative normalization reductions
-did not improve the retained implementation. **Q4 C1 pp2048 exceeds 600 tok/s**
-in the settled six-sample release measurement above.
+for qualified projections; exact IQ4 half lookup.
+Rejected: weight/activation repacking, alternative tile sizes, FP16 wave64,
+two-stage LDS buffering and alternative normalization reductions. Dense BLAS,
+split-K for small projections, and convolution/KQ fusion did not improve
+model prefill. Rejected experiments add no production paths.
 
 | Artifact | SHA-256 |
 | --- | --- |
@@ -255,6 +255,9 @@ in the settled six-sample release measurement above.
 | Draft Q4_K_M | `1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd` |
 | Draft Q8_0 | `c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e` |
 | Draft BF16 | `26d47ca20ab07688327a63d912acad222d924eaaa92a980cc488de3c67e736bc` |
+
+Current optimization focus: **Q4 C1 AR pp2048 toward 700 tok/s**, preserving
+quality and DFlash2 performance. Q8 optimization is deferred.
 
 TODO: independent original-target/conversion and MTP qualification; optional
 BF16 target comparison; refreshed pp2048/tg128 depths and all draft precisions;

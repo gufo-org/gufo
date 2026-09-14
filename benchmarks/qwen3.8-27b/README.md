@@ -12,7 +12,7 @@ Standard sweep: **pp2048 / tg128**, C1. Cells are prefill / generation tok/s.
 
 | Context depth | Q4 | Q8 |
 | ---: | ---: | ---: |
-| 0 | **602.50** / TODO | **503.17** / TODO |
+| 0 | **603.43** / TODO | **503.17** / TODO |
 | 4,096 | TODO | TODO |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |
@@ -31,9 +31,9 @@ These **tg32 controls are not the full tg128 sweep**.
 
 | Draft | pp2048 tok/s | tg32 tok/s |
 | --- | ---: | ---: |
-| Q4_K_M | **565.19** | **16.46** |
-| Q8_0 | 561.59 | 16.07 |
-| BF16 | 565.20 | 15.08 |
+| Q4_K_M | **564.30** | **16.41** |
+| Q8_0 | 562.40 | 16.03 |
+| BF16 | 566.41 | 15.08 |
 
 pp2048/tg128 at depths **0 / 4,096 / 8,192 / 12,288 / 16,384**,
 for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.
