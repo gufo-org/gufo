@@ -191,6 +191,51 @@ void TestBf16RecurrentMemoryAndSnapshot() {
   }
 }
 
+// Independent causal-convolution oracle, including nonzero carried history.
+// Only short batches need scalar output checks; all batches check the exact tail.
+void CheckSSMConvolution(const std::vector<float>& input,
+                         const std::vector<float>& weights,
+                         const std::vector<float>& history,
+                         const float* device_output, const float* device_state,
+                         std::size_t batch, std::size_t channels) {
+  std::vector<float> state(channels * 4);
+  HIP_CHECK(hipMemcpy(state.data(), device_state, state.size() * sizeof(float),
+                      hipMemcpyDeviceToHost));
+  for (std::size_t c = 0; c < channels; ++c) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      const float expected = batch + j < 4
+                                 ? history[(c * 4) + batch + j]
+                                 : input[((batch + j - 4) * channels) + c];
+      if (std::memcmp(&expected, &state[(c * 4) + j], sizeof(float)) != 0) {
+        throw std::runtime_error("convolution history differs from causal tail");
+      }
+    }
+  }
+  if (batch > 8) {
+    return;
+  }
+  std::vector<float> output(batch * channels);
+  HIP_CHECK(hipMemcpy(output.data(), device_output,
+                      output.size() * sizeof(float), hipMemcpyDeviceToHost));
+  for (std::size_t t = 0; t < batch; ++t) {
+    for (std::size_t c = 0; c < channels; ++c) {
+      double dot = 0.0;
+      for (std::size_t j = 0; j < 4; ++j) {
+        const float value = t + j < 3
+                                ? history[(c * 4) + t + j + 1]
+                                : input[((t + j - 3) * channels) + c];
+        dot += static_cast<double>(value) * weights[(c * 4) + j];
+      }
+      const double expected = dot / (1.0 + std::exp(-dot));
+      const float actual = output[(t * channels) + c];
+      if (!std::isfinite(actual) ||
+          std::abs(actual - expected) > 2e-6 * (1.0 + std::abs(expected))) {
+        throw std::runtime_error("convolution differs from causal formula");
+      }
+    }
+  }
+}
+
 void TestBatchedSSMConvEquivalence() {
   constexpr std::size_t batch = 8;
   constexpr std::uint32_t num_key_heads = 16;
@@ -478,6 +523,10 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
   for (std::size_t i = 0; i < h_gate.size(); ++i) {
     h_gate[i] = 0.5F * std::sin(0.013F * static_cast<float>(i + 1));
   }
+  std::vector<float> h_history(qkv_dim * 4);
+  for (std::size_t i = 0; i < h_history.size(); ++i) {
+    h_history[i] = 0.4F * std::sin(0.031F * static_cast<float>(i % 211));
+  }
   // A non-zero starting state so the decay path is live from the first token.
   std::vector<float> h_delta0(delta_size);
   std::vector<std::uint16_t> h_delta0_bf16(delta_size);
@@ -540,9 +589,9 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
   HIP_CHECK(hipMemcpy(d_delta_bf16, h_delta0_bf16.data(),
                       h_delta0_bf16.size() * sizeof(std::uint16_t),
                       hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemset(d_state_ref, 0, qkv_dim * 4 * sizeof(float)));
-  HIP_CHECK(hipMemset(d_state_new, 0, qkv_dim * 4 * sizeof(float)));
-  HIP_CHECK(hipMemset(d_state_bf16, 0, qkv_dim * 4 * sizeof(float)));
+  upload(d_state_ref, h_history);
+  upload(d_state_new, h_history);
+  upload(d_state_bf16, h_history);
 
   gufo::hip::LaunchBatchedSSMConvRecurrence(
       d_qkv, d_w, d_state_ref, d_conv_ref, d_delta_ref, d_alpha, d_beta,
@@ -566,6 +615,12 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
       gufo::hip::QwenRecurrentStateStorage::kBf16);
 
   HIP_CHECK(hipDeviceSynchronize());
+  CheckSSMConvolution(h_qkv, h_weights, h_history, d_conv_ref, d_state_ref,
+                       batch, qkv_dim);
+  CheckSSMConvolution(h_qkv, h_weights, h_history, d_conv_new, d_state_new,
+                       batch, qkv_dim);
+  CheckSSMConvolution(h_qkv, h_weights, h_history, d_conv_bf16, d_state_bf16,
+                       batch, qkv_dim);
 
   const auto download = [](std::vector<float>& dst, const float* src) {
     HIP_CHECK(hipMemcpy(dst.data(), src, dst.size() * sizeof(float),
@@ -662,7 +717,7 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
                              : gufo::hip::QwenRecurrentStateStorage::kFp32;
     gufo::hip::LaunchFloatToFp16(output, expected.data(), batch * inner_size,
                                  nullptr);
-    HIP_CHECK(hipMemset(conv_state, 0, qkv_dim * 4 * sizeof(float)));
+    upload(conv_state, h_history);
     if (bf16_state) {
       HIP_CHECK(hipMemcpy(state, h_delta0_bf16.data(),
                           delta_size * sizeof(std::uint16_t),
@@ -722,7 +777,7 @@ void TestBatchedSSMRowSplitRecurrenceEquivalence(std::size_t batch) {
 
     // Candidate: the same recurrence from the same starting state, but with the
     // epilogue writing Q8_1.
-    HIP_CHECK(hipMemset(d_state_q8, 0, qkv_dim * 4 * sizeof(float)));
+    upload(d_state_q8, h_history);
     upload(d_delta_q8, h_delta0);
     gufo::hip::LaunchBatchedSSMConvRecurrenceRowSplit(
         d_qkv, d_w, d_state_q8, d_conv_q8, d_delta_q8, d_alpha, d_beta, d_ssm_a,
@@ -783,7 +838,9 @@ int main() {
   TestRecurrentRollbackRows(false);
   TestRecurrentRollbackRows(true);
   TestBf16RecurrentMemoryAndSnapshot();
-  TestBatchedSSMRowSplitRecurrenceEquivalence(96);
+  for (const std::size_t batch : {1U, 2U, 3U, 7U, 96U}) {
+    TestBatchedSSMRowSplitRecurrenceEquivalence(batch);
+  }
   // Above the launcher's 2048-token crossover, so the two-row prefetching tile
   // runs too.
   TestBatchedSSMRowSplitRecurrenceEquivalence(2080);

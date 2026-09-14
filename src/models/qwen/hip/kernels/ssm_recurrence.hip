@@ -21,7 +21,7 @@ __global__ void BatchedSSMPostNormGateKernel(
 
 __global__ void BatchedSSMConvKernel(const float* __restrict__ qkv_in,
                                      const float* __restrict__ conv_weights,
-                                     float* __restrict__ conv_state,
+                                     const float* __restrict__ conv_state,
                                      float* __restrict__ conv_out,
                                      std::size_t batch_size,
                                      std::size_t qkv_dim) {
@@ -57,18 +57,11 @@ __global__ void BatchedSSMConvKernel(const float* __restrict__ qkv_in,
 
   const float sig = 1.0F / (1.0F + expf(-dot));
   conv_out[(t * qkv_dim) + c] = dot * sig;
-
-  // Final token updates state for future decode steps
-  if (t == batch_size - 1) {
-    conv_state[c_off + 0] = s0;
-    conv_state[c_off + 1] = s1;
-    conv_state[c_off + 2] = s2;
-    conv_state[c_off + 3] = s3;
-  }
 }
 
 template<detail::QwenRecurrentStateElement StateT>
 __global__ void BatchedDeltaNetRecurrenceKernel(
+    const float* __restrict__ qkv_in, float* __restrict__ conv_state,
     const float* __restrict__ conv_out, StateT* __restrict__ deltanet_state,
     const float* __restrict__ alpha_buf, const float* __restrict__ beta_buf,
     const float* __restrict__ ssm_a, const float* __restrict__ ssm_dt,
@@ -81,6 +74,10 @@ __global__ void BatchedDeltaNetRecurrenceKernel(
   }
 
   const std::size_t tid = threadIdx.x;
+  for (std::size_t c = (static_cast<std::size_t>(h) * blockDim.x) + tid;
+       c < qkv_size; c += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+    detail::StoreSSMConvHistory(qkv_in, conv_state, c, batch_size, qkv_size);
+  }
   const std::size_t lane_id = tid & 31u;
   const std::size_t warp_id = tid >> 5u;
   const std::uint32_t kh_idx = h % num_key_heads;
@@ -277,12 +274,14 @@ void LaunchBatchedSSMConvRecurrence(
 
   if (state_storage == QwenRecurrentStateStorage::kBf16) {
     BatchedDeltaNetRecurrenceKernel<<<num_heads, 256, 0, stream>>>(
-        conv_out, static_cast<hip_bfloat16*>(deltanet_state), alpha_buf,
+        qkv_in, conv_layer_state, conv_out,
+        static_cast<hip_bfloat16*>(deltanet_state), alpha_buf,
         beta_buf, ssm_a, ssm_dt, out_buf, layer_idx, batch_size, qkv_size,
         num_key_heads, num_heads, key_dim, val_dim);
   } else {
     BatchedDeltaNetRecurrenceKernel<<<num_heads, 256, 0, stream>>>(
-        conv_out, static_cast<float*>(deltanet_state), alpha_buf, beta_buf,
+        qkv_in, conv_layer_state, conv_out,
+        static_cast<float*>(deltanet_state), alpha_buf, beta_buf,
         ssm_a, ssm_dt, out_buf, layer_idx, batch_size, qkv_size, num_key_heads,
         num_heads, key_dim, val_dim);
   }

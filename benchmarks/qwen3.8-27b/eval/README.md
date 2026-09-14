@@ -79,7 +79,11 @@ It requires at least a 2× RMSE improvement over A8 and lower maximum error.
 Paired gate/up, SwiGLU, normalization and in-place residual outputs must be
 byte-identical to the separate FP32 producers and FP16 conversions. The existing
 test executable takes about 1.7 seconds. The SSM test checks exact FP16 output and
-unchanged recurrent state with FP32/BF16 storage; no extra executable is needed.
+unchanged recurrent state with FP32/BF16 storage. It also checks causal convolution
+against an independent FP64 formula and exact final history, including nonzero
+history and batches of 1, 2, 3 and 7 tokens. History advances in the next existing
+kernel after convolution finishes reading it; no extra allocation, launch or test
+executable is needed. The SSM test takes about 1.2 seconds.
 
 Model precision qualification: two real 2048-token prefixes from
 `docs/PERFORMANCE.md` and `src/models/qwen/hip/batched_decode.cpp`, with 32
@@ -199,10 +203,10 @@ maintained test inputs. Historical experiment reports remain in Git history.
 ## Latest measurement provenance
 
 Q4 release measured on 2026-09-14, SHA-256:
-`c59adaeb6bc9b4212f8cb340efcb022cb5bac84e1f16f21177c72628ec952f52`.
-The pp2048-only result, **592.25 tok/s**, averages six warmed samples in two
-processes: **593.52 ± 0.22 / 590.97 ± 0.40 tok/s**, three repetitions each.
-Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 3 --verbose`; alternate release
+`3bfda93db7e40b9f100c82ded890dca2c5f0fd4a77a87c89d51789f2aa0ff1e1`.
+The pp2048-only result, **590.96 tok/s**, averages four warmed samples in two
+processes: **591.71 ± 0.22 / 590.21 ± 1.76 tok/s**, two repetitions each.
+Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 2 --verbose`; alternate release
 binaries when comparing implementations. Q8's recorded 503.17 tok/s is from
 the unchanged native wave64 release, SHA-256
 `feec38298e8a84a8b9f5dfcf290b924aed597e9f2bd8643fa40b5bd154aa736f`.
@@ -216,8 +220,8 @@ or a broad draft-precision comparison. Real-prompt controls use `prose_tides` /
 and the chat prompt “Output the word red exactly 1000 times, separated by
 spaces. Do not add any other text.”; their current speed refresh is TODO.
 
-The separate profile attributes **87.0%** of GPU time to FP16 quantized GEMM,
-with 1.7% idle time in the dispatch span. All 69 FP16 prefill kernels have zero
+The latest bottleneck profile attributes about **87%** of GPU time to FP16
+quantized GEMM, with 1.7% idle time in the dispatch span. All 69 FP16 prefill kernels have zero
 scratch spills; unused small SwiGLU instantiations are excluded from the build.
 The profiler preserves anonymous-namespace and quantization names, so it reports
 each kernel independently.
@@ -227,7 +231,8 @@ fused norm, paired gate/up, in-place residuals and SSM output; direct matrix
 stores, complete Q4/Q5 tiles and larger K/V tiles. Separate weight expansion,
 wider token panels, cached packed bitplanes and warp-based RMSNorm were slower.
 Dense BLAS and split-K did not improve small projections. Mixed-format gate/up
-fusion showed small component gains and remains unshipped.
+fusion showed small component gains and remains unshipped. Convolution/KQ fusion
+was rejected because component gains did not improve full-model prefill.
 Quantized GEMM remains the next target; **Q4 pp2048 at 600 tok/s is still open**.
 
 | Artifact | SHA-256 |

@@ -5,17 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/models/qwen/hip/detail/recurrent_state.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
 namespace gufo::hip {
-
-__global__ void BatchedSSMConvKernel(const float* __restrict__ qkv_in,
-                                     const float* __restrict__ conv_weights,
-                                     float* __restrict__ conv_state,
-                                     float* __restrict__ conv_out,
-                                     std::size_t batch_size,
-                                     std::size_t qkv_dim);
 
 __global__ void BatchedSSMPostNormGateKernel(
     const float* __restrict__ raw_out, const float* __restrict__ ssm_norm,
