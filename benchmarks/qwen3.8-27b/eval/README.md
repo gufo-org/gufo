@@ -78,6 +78,10 @@ wider row groups to improve input reuse. Long Q5 reductions and mixed gate/up
 pairs retain the smaller groups. The dot-product and epilogue order is unchanged.
 IQ4_XS/IQ4_NL prefill looks up the integer codebook entries directly as exact
 FP16 values, preserving FP32 scaling and eliminating signed-byte conversions.
+Qualified IQ4 kernels interleave LDS reads with WMMA. Large Q5 projections and
+Q4/Q5 gate/up pairs reuse Q5 block headers across four K64 iterations, avoiding
+repeated metadata loads. Both changes preserve arithmetic and use existing
+buffer allocations.
 
 The shared quantization test checks all eight Q4 artifact formats against
 independently decoded weights and FP64 dot products, including complete Q4/Q5
@@ -214,9 +218,9 @@ maintained test inputs. Historical experiment reports remain in Git history.
 ## Latest measurement provenance
 
 Q4 release measured on 2026-09-14, SHA-256:
-`8a23c84f38da48141d0cadbb3e89253368580158f485957d8c45967375936664`.
-The pp2048-only result, **603.43 tok/s**, averages six warmed samples in two
-processes: **603.99 ± 0.27 / 602.87 ± 0.49 tok/s**, three repetitions each.
+`a63999696efad66bd8ff8e6b0aad25098ab4fc0f05d32c3098b7f01715ca1ac4`.
+The pp2048-only result, **613.65 tok/s**, averages six warmed samples in two
+processes: **615.36 ± 0.19 / 611.93 ± 0.24 tok/s**, three repetitions each.
 Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 3 --verbose`; alternate release
 binaries after sustained warmup when comparing implementations. Early transient
 boosts are excluded from the headline. Q8's recorded 503.17 tok/s is from
@@ -242,11 +246,12 @@ each kernel independently.
 Retained: native wave64 for Q8/short prefill; packed-weight FP16 prefill with
 fixed-width norm, matching/mixed gate/up fusion, in-place residuals and SSM output;
 direct matrix stores, complete Q4/Q5 tiles, larger K/V tiles and wider row groups
-for qualified projections; exact IQ4 half lookup.
+for qualified projections; exact IQ4 half lookup, IQ4 instruction scheduling
+and Q5 header reuse.
 Rejected: weight/activation repacking, alternative tile sizes, FP16 wave64,
-two-stage LDS buffering and alternative normalization reductions. Dense BLAS,
-split-K for small projections, and convolution/KQ fusion did not improve
-model prefill. Rejected experiments add no production paths.
+two-stage LDS buffering, weight copies and alternative normalization reductions.
+Dense BLAS, split-K for small projections, and convolution/KQ fusion did not
+improve model prefill. Rejected experiments add no production paths.
 
 | Artifact | SHA-256 |
 | --- | --- |

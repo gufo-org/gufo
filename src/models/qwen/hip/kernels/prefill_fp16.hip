@@ -121,7 +121,8 @@ struct RawWeights {
 };
 template<gufo::core::GgmlType Type>
 __device__ __forceinline__ RawWeights<Type> LoadRaw(const void* row,
-                                                    unsigned sub) {
+                                                    unsigned sub,
+                                                    const uint4* header = nullptr) {
   using namespace gufo::hip;
   using gufo::core::GgmlType;
   RawWeights<Type> r{};
@@ -135,11 +136,20 @@ __device__ __forceinline__ RawWeights<Type> LoadRaw(const void* row,
     using Block =
         std::conditional_t<Type == GgmlType::kQ5_K, Q5KBlock, Q4KBlock>;
     const auto& b = static_cast<const Block*>(row)[sub / 16];
-    r.d = b.d;
-    r.dmin = b.dmin;
-    r.sc0 = b.scales[sb & 3];
-    r.sc1 = b.scales[(sb & 3) + 4];
-    r.sc2 = b.scales[(sb & 3) + 8];
+    if (header) {
+      r.d = __ushort_as_half(header->x & 65535);
+      r.dmin = __ushort_as_half(header->x >> 16);
+      const unsigned shift = (sb & 3) * 8;
+      r.sc0 = (header->y >> shift) & 255;
+      r.sc1 = (header->z >> shift) & 255;
+      r.sc2 = (header->w >> shift) & 255;
+    } else {
+      r.d = b.d;
+      r.dmin = b.dmin;
+      r.sc0 = b.scales[sb & 3];
+      r.sc1 = b.scales[(sb & 3) + 4];
+      r.sc2 = b.scales[(sb & 3) + 8];
+    }
     LoadQuantWords16(b.qs + (sb / 2) * 32 + lane, r.low);
     if constexpr (Type == GgmlType::kQ5_K)
       LoadQuantWords16(b.qh + lane, r.high);
@@ -206,6 +216,13 @@ __launch_bounds__(WM * WN * 32) __global__
   constexpr bool UpRaw = UpType == gufo::core::GgmlType::kQ4_K ||
                          UpType == gufo::core::GgmlType::kQ5_K;
   constexpr int BK = 4, WaveSize = 32;
+  // A 256-weight Q5 block spans four K64 iterations. Keep its header in
+  // registers for the Q5 and Q4/Q5 kernels that benefit from this reuse.
+  constexpr bool CacheQ5Header =
+      BM == 256 && BN == 256 &&
+      (Type == gufo::core::GgmlType::kQ5_K ||
+       (Type == gufo::core::GgmlType::kQ4_K &&
+        UpType == gufo::core::GgmlType::kQ5_K));
   // The mixed Q6 gate is qualified with the fetch-stage decoder; deferring
   // its decode changes dot-product rounding in this kernel specialization.
   constexpr int DecodeStage = (Type == gufo::core::GgmlType::kQ4_K ||
@@ -285,14 +302,24 @@ __launch_bounds__(WM * WN * 32) __global__
          k);
   }
 
-  uint4 ra[PFA][2], rb[PFB][2];
+  uint4 ra[PFA][2], rb[PFB][2], headers[PFA];
   struct NoRaw {};
   std::conditional_t<DecodeStage == 2, RawWeights<Type>, NoRaw> raw[PFA];
   std::conditional_t<Mixed && UpRaw, RawWeights<UpType>, NoRaw> raw_up[PFA];
   const auto fetch_up = [&](int p, int kk) {
     if constexpr (Mixed) {
       if constexpr (UpRaw) {
-        raw_up[p] = LoadRaw<UpType>(w_row[p], kk);
+        if constexpr (CacheQ5Header &&
+                      UpType == gufo::core::GgmlType::kQ5_K) {
+          if ((kk & 12) == 0)
+            __builtin_memcpy(
+                &headers[p],
+                reinterpret_cast<const Q5KBlock*>(w_row[p]) + unsigned(kk) / 16,
+                16);
+          raw_up[p] = LoadRaw<UpType>(w_row[p], kk, &headers[p]);
+        } else {
+          raw_up[p] = LoadRaw<UpType>(w_row[p], kk);
+        }
       } else if constexpr (UpType == gufo::core::GgmlType::kIQ4_XS ||
                            UpType == gufo::core::GgmlType::kIQ4_NL) {
         const auto packed = LoadIqHalf<UpType>(w_row[p], unsigned(kk));
@@ -318,7 +345,15 @@ __launch_bounds__(WM * WN * 32) __global__
       if (idx < BM * BK && (Complete || kk < ksteps)) {
         if (Mixed && (idx / BK) % 32 >= 16)
           fetch_up(p, kk);
-        else if constexpr (DecodeStage == 2)
+        else if constexpr (CacheQ5Header &&
+                           Type == gufo::core::GgmlType::kQ5_K) {
+          if ((ks0 & 15) == 0)
+            __builtin_memcpy(
+                &headers[p],
+                reinterpret_cast<const Q5KBlock*>(w_row[p]) + unsigned(kk) / 16,
+                16);
+          raw[p] = LoadRaw<Type>(w_row[p], kk, &headers[p]);
+        } else if constexpr (DecodeStage == 2)
           raw[p] = LoadRaw<Type>(w_row[p], kk);
         else if constexpr (Type == gufo::core::GgmlType::kIQ4_XS ||
                            Type == gufo::core::GgmlType::kIQ4_NL) {
@@ -438,6 +473,15 @@ __launch_bounds__(WM * WN * 32) __global__
             acc[i][j] = WmmaHalf(b, a[i], acc[i][j]);
         }
       }
+    }
+    if constexpr (BM == 256 && BN == 256 &&
+                  ((Type == gufo::core::GgmlType::kIQ4_XS &&
+                    (!Mixed || UpType != gufo::core::GgmlType::kQ5_K)) ||
+                   (Type == gufo::core::GgmlType::kIQ4_NL &&
+                    UpType == gufo::core::GgmlType::kIQ4_XS))) {
+      // Interleave LDS reads with WMMA after IQ4 decoding. Mixed Q5
+      // decoders retain the compiler's default instruction schedule.
+      __builtin_amdgcn_iglp_opt(0);
     }
     __syncthreads();
   }
