@@ -127,7 +127,8 @@ enum class HalfEpilogue { kStore, kSwiGLU, kGateUp, kResidual };
 
 // Fully scaled FP16 weights and activations; FP32 accumulation in K16 order.
 template<int BM, int BN, int WM, int WN, gufo::core::GgmlType Type,
-         HalfEpilogue Epilogue, bool Complete = false>
+         HalfEpilogue Epilogue, bool Complete = false,
+         gufo::core::GgmlType UpType = Type>
 __launch_bounds__(WM * WN * 32) __global__
     void HalfPrefillGemmKernel(const void* __restrict__ w,
                                const short* __restrict__ x,
@@ -135,6 +136,9 @@ __launch_bounds__(WM * WN * 32) __global__
                                const float* __restrict__ gate,
                                const void* __restrict__ up = nullptr) {
   constexpr bool Paired = Epilogue == HalfEpilogue::kGateUp;
+  constexpr bool Mixed = Paired && Type != UpType;
+  constexpr bool UpRaw = UpType == gufo::core::GgmlType::kQ4_K ||
+                         UpType == gufo::core::GgmlType::kQ5_K;
   constexpr int BK = 4, WaveSize = 32, Group = 8;
   constexpr int DecodeStage = (Type == gufo::core::GgmlType::kQ4_K ||
                                Type == gufo::core::GgmlType::kQ5_K ||
@@ -181,6 +185,7 @@ __launch_bounds__(WM * WN * 32) __global__
   // is masked out at the store instead of branching in the K loop.
   const std::uint8_t* w_row[PFA];
   const std::size_t row_bytes = gufo::hip::QuantRowBytes(Type, k);
+  const std::size_t up_row_bytes = gufo::hip::QuantRowBytes(UpType, k);
 #pragma unroll
   for (int p = 0; p < PFA; ++p) {
     const int physical_row = ((p * kThreads) + tid) / BK;
@@ -190,7 +195,7 @@ __launch_bounds__(WM * WN * 32) __global__
     const void* source = Paired && physical_row % 32 >= 16 ? up : w;
     w_row[p] = static_cast<const std::uint8_t*>(source) +
                (static_cast<std::size_t>((Complete || r < m) ? r : (m - 1)) *
-                row_bytes);
+                (Mixed && physical_row % 32 >= 16 ? up_row_bytes : row_bytes));
   }
   const short* x_row[PFB];
 #pragma unroll
@@ -205,12 +210,32 @@ __launch_bounds__(WM * WN * 32) __global__
   uint4 ra[PFA][2], rb[PFB][2];
   struct NoRaw {};
   std::conditional_t<DecodeStage == 2, RawWeights<Type>, NoRaw> raw[PFA];
+  std::conditional_t<Mixed && UpRaw, RawWeights<UpType>, NoRaw> raw_up[PFA];
+  const auto fetch_up = [&](int p, int kk) {
+    if constexpr (Mixed) {
+      if constexpr (UpRaw) {
+        raw_up[p] = LoadRaw<UpType>(w_row[p], kk);
+      } else {
+        gufo::hip::QuantSub16 q;
+        gufo::hip::DecodeQuantSub16<true>(UpType, w_row[p], kk, q);
+        union { v16bf f; uint4 u[2]; } packed;
+#pragma unroll
+        for (int j = 0; j < 16; ++j)
+          packed.f[j] = static_cast<_Float16>(__fsub_rn(
+              __fmul_rn(q.scale, static_cast<float>(q.q[j])), q.offset));
+        ra[p][0] = packed.u[0];
+        ra[p][1] = packed.u[1];
+      }
+    }
+  };
   const auto fetch = [&](int ks0) {
 #pragma unroll
     for (int p = 0; p < PFA; ++p) {
       const int idx = p * kThreads + tid, kk = ks0 + idx % BK;
       if (idx < BM * BK && (Complete || kk < ksteps)) {
-        if constexpr (DecodeStage == 2)
+        if (Mixed && (idx / BK) % 32 >= 16)
+          fetch_up(p, kk);
+        else if constexpr (DecodeStage == 2)
           raw[p] = LoadRaw<Type>(w_row[p], kk);
         else {
           gufo::hip::QuantSub16 q;
@@ -229,8 +254,12 @@ __launch_bounds__(WM * WN * 32) __global__
       } else {
         ra[p][0] = make_uint4(0, 0, 0, 0);
         ra[p][1] = make_uint4(0, 0, 0, 0);
-        if constexpr (DecodeStage == 2)
+        if (Mixed && (idx / BK) % 32 >= 16)
+          fetch_up(p, kk);
+        else if constexpr (DecodeStage == 2)
           raw[p] = {};
+        if constexpr (Mixed && UpRaw)
+          raw_up[p] = {};
       }
     }
 #pragma unroll
@@ -246,6 +275,21 @@ __launch_bounds__(WM * WN * 32) __global__
       }
     }
   };
+  const auto commit_up = [&](int p, short* dst, int row) {
+    if constexpr (Mixed) {
+      if constexpr (UpRaw) {
+        gufo::hip::QuantSub16 q = DecodeRaw<UpType>(raw_up[p]);
+        union { v16bf f; uint4 u[2]; } packed;
+#pragma unroll
+        for (int j = 0; j < 16; ++j)
+          packed.f[j] = static_cast<_Float16>(__fsub_rn(
+              __fmul_rn(q.scale, static_cast<float>(q.q[j])), q.offset));
+        StoreSwizzled(dst, packed.u[0], packed.u[1], row);
+      } else {
+        StoreSwizzled(dst, ra[p][0], ra[p][1], row);
+      }
+    }
+  };
   const auto commit = [&]() {
 #pragma unroll
     for (int p = 0; p < PFA; ++p) {
@@ -253,7 +297,9 @@ __launch_bounds__(WM * WN * 32) __global__
       if (idx < BM * BK) {
         const int placed = (row ^ (ks & 3));
         short* dst = &s_a[ks][placed / 16][placed % 16][0];
-        if constexpr (DecodeStage != 0) {
+        if (Mixed && row % 32 >= 16) {
+          commit_up(p, dst, row);
+        } else if constexpr (DecodeStage != 0) {
           gufo::hip::QuantSub16 q = DecodeRaw<Type>(raw[p]);
           union {
             v16bf f;
@@ -436,6 +482,36 @@ __global__ void HalfNorm(const float* x, const float* residual,
     out[base + i] = RoundActivation(__fmul_rn(v * inv, weight[i]));
   }
 }
+__global__ void HalfNorm5120(const float* __restrict__ x,
+                              const float* __restrict__ weight,
+                              __half* __restrict__ out, float eps) {
+  constexpr unsigned Dim = 5120, Elements = Dim / 256;
+  const unsigned row = blockIdx.x, tid = threadIdx.x;
+  const std::size_t base = std::size_t(row) * Dim;
+  float sum_sq = 0;
+#pragma unroll
+  for (unsigned j = 0; j < Elements; ++j) {
+    const float v = x[base + j * 256 + tid];
+    // Explicit FMAs preserve which square rounds first when LLVM unrolls
+    // the loop; contracting two ordinary products can swap that boundary.
+    sum_sq = __fmaf_rn(v, v, sum_sq);
+  }
+  __shared__ float sums[256];
+  sums[tid] = sum_sq;
+  __syncthreads();
+  for (unsigned stride = 128; stride; stride /= 2) {
+    if (tid < stride)
+      sums[tid] += sums[tid + stride];
+    __syncthreads();
+  }
+  const float inv = rsqrtf(sums[0] / static_cast<float>(Dim) + eps);
+#pragma unroll
+  for (unsigned j = 0; j < Elements; ++j) {
+    const unsigned i = j * 256 + tid;
+    out[base + i] = RoundActivation(__fmul_rn(x[base + i] * inv, weight[i]));
+  }
+}
+
 __global__ void HalfCast(const float* x, __half* y, std::size_t n) {
   auto i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < n)
@@ -446,6 +522,11 @@ void LaunchBatchedRMSNormFp16(const float* x, const float* residual,
                               const float* weight, float* sum_out, void* out,
                               std::size_t batch, std::size_t dim, float eps,
                               hipStream_t stream) {
+  if (dim == 5120 && residual == nullptr && sum_out == nullptr) {
+    HalfNorm5120<<<batch, 256, 0, stream>>>(
+        x, weight, static_cast<__half*>(out), eps);
+    return;
+  }
   HalfNorm<<<batch, 256, 0, stream>>>(x, residual, weight, sum_out,
                                       static_cast<__half*>(out), dim, eps);
 }
@@ -545,18 +626,22 @@ void LaunchBatchedQuantGEMMResidualFp16(gufo::core::GgmlType type,
 }
 
 bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
-    gufo::core::GgmlType type, const void* gate_weights, const void* up_weights,
-    const void* x, void* y, std::size_t batch, std::size_t m, std::size_t k,
-    hipStream_t stream) {
-  const auto launch = [&]<gufo::core::GgmlType Type>() {
+    gufo::core::GgmlType gate_type, gufo::core::GgmlType up_type,
+    const void* gate_weights, const void* up_weights, const void* x, void* y,
+    std::size_t batch, std::size_t m, std::size_t k, hipStream_t stream) {
+  const auto launch = [&]<gufo::core::GgmlType Type,
+                          gufo::core::GgmlType UpType = Type>() {
     const auto tile = [&]<bool Full>() {
-      HalfPrefillGemmKernel<256, 256, 8, 4, Type, HalfEpilogue::kGateUp, Full>
+      HalfPrefillGemmKernel<256, 256, 8, 4, Type, HalfEpilogue::kGateUp, Full,
+                            UpType>
           <<<dim3((batch + 255) / 256, (m + 127) / 128), 1024, 0, stream>>>(
               gate_weights, static_cast<const short*>(x),
               static_cast<float*>(y), batch, m, k, nullptr, up_weights);
     };
-    if constexpr (Type == gufo::core::GgmlType::kQ4_K ||
-                  Type == gufo::core::GgmlType::kQ5_K) {
+    if constexpr ((Type == gufo::core::GgmlType::kQ4_K ||
+                   Type == gufo::core::GgmlType::kQ5_K) &&
+                  (UpType == gufo::core::GgmlType::kQ4_K ||
+                   UpType == gufo::core::GgmlType::kQ5_K)) {
       if (m % 128 == 0 && batch % 256 == 0) {
         tile.template operator()<true>();
         return;
@@ -565,7 +650,26 @@ bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
     tile.template operator()<false>();
   };
   using gufo::core::GgmlType;
-  switch (type) {
+  // Mixed pairs keep independent row strides and decoders. Qualify each
+  // pairing: a shared input alone does not guarantee a faster kernel.
+  if (gate_type != up_type) {
+    if (gate_type == GgmlType::kQ4_K && up_type == GgmlType::kQ5_K) {
+      launch.template operator()<GgmlType::kQ4_K, GgmlType::kQ5_K>();
+    } else if (gate_type == GgmlType::kIQ4_XS &&
+               up_type == GgmlType::kQ5_K) {
+      launch.template operator()<GgmlType::kIQ4_XS, GgmlType::kQ5_K>();
+    } else if (gate_type == GgmlType::kQ4_K &&
+               up_type == GgmlType::kIQ4_XS) {
+      launch.template operator()<GgmlType::kQ4_K, GgmlType::kIQ4_XS>();
+    } else if (gate_type == GgmlType::kIQ4_XS &&
+               up_type == GgmlType::kQ4_K) {
+      launch.template operator()<GgmlType::kIQ4_XS, GgmlType::kQ4_K>();
+    } else {
+      return false;
+    }
+    return true;
+  }
+  switch (gate_type) {
     case GgmlType::kQ4_K:
       launch.template operator()<GgmlType::kQ4_K>();
       return true;

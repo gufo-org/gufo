@@ -596,8 +596,8 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
     gufo::hip::LaunchFloatToFp16(d_activation.data(), d_expected.data(),
                                  batch * rows, nullptr);
     const bool paired = gufo::hip::TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
-        format.type, d_gate_weights.data(), d_weights.data(), d_half_x.data(),
-        d_up_storage.data(), batch, rows, kK, nullptr);
+        format.type, format.type, d_gate_weights.data(), d_weights.data(),
+        d_half_x.data(), d_up_storage.data(), batch, rows, kK, nullptr);
     const bool supported = format.type == gufo::core::GgmlType::kQ4_K ||
                            format.type == gufo::core::GgmlType::kQ5_K ||
                            format.type == gufo::core::GgmlType::kIQ4_XS;
@@ -618,9 +618,66 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
   g_failed |= !passed;
 }
 
+void TestFp16MixedPair(gufo::core::GgmlType gate_type,
+                        gufo::core::GgmlType up_type, std::size_t rows,
+                        std::size_t batch) {
+  using gufo::test::DeviceBuffer;
+  constexpr std::size_t kK = 768;
+  std::uint32_t state = 0x493578U;
+  std::vector<float> input(batch * kK);
+  // Match the bounded inputs used by the same-format fusion test: synthetic
+  // quantization scales are much larger than the checkpoint's scales.
+  for (float& item : input)
+    item = std::bit_cast<float>((NextRandom(state) & 0x807FFFFFU) |
+                                0x3C000000U) *
+           0.03125F;
+  DeviceBuffer<std::uint8_t> gate_weights(
+      MakeWeights(gate_type, rows, kK, 0x173841U));
+  DeviceBuffer<std::uint8_t> up_weights(
+      MakeWeights(up_type, rows, kK, 0x639482U));
+  DeviceBuffer<float> x(input), gate(batch * rows), up(batch * rows),
+      activation(batch * rows), output(batch * rows);
+  DeviceBuffer<std::uint16_t> half_x(input.size()), expected(batch * rows);
+  gufo::hip::LaunchFloatToFp16(x.data(), half_x.data(), input.size(), nullptr);
+  gufo::hip::LaunchBatchedQuantGEMMFp16(
+      gate_type, gate_weights.data(), half_x.data(), gate.data(), batch, rows,
+      kK, nullptr);
+  gufo::hip::LaunchBatchedQuantGEMMFp16(
+      up_type, up_weights.data(), half_x.data(), up.data(), batch, rows, kK,
+      nullptr);
+  gufo::hip::LaunchBatchedSwiGLUActivation(
+      gate.data(), up.data(), activation.data(), nullptr, batch * rows,
+      nullptr);
+  gufo::hip::LaunchFloatToFp16(activation.data(), expected.data(), batch * rows,
+                               nullptr);
+  bool passed = gufo::hip::TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
+      gate_type, up_type, gate_weights.data(), up_weights.data(), half_x.data(),
+      output.data(), batch, rows, kK, nullptr);
+  std::vector<std::uint16_t> actual(batch * rows);
+  HIP_CHECK(hipMemcpy(actual.data(), output.data(),
+                      actual.size() * sizeof(std::uint16_t),
+                      hipMemcpyDeviceToHost));
+  const auto reference = expected.CopyToHost();
+  std::size_t mismatches = 0, nonfinite = 0;
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    mismatches += actual[i] != reference[i];
+    nonfinite += (actual[i] & 0x7C00U) == 0x7C00U ||
+                 (reference[i] & 0x7C00U) == 0x7C00U;
+  }
+  passed &= mismatches == 0 && nonfinite == 0;
+  std::cout << (passed ? "[ OK ] " : "[FAIL] ") << "FP16 mixed gate/up "
+            << static_cast<int>(gate_type) << "/" << static_cast<int>(up_type)
+            << " rows=" << rows << " batch=" << batch
+            << " mismatches=" << mismatches << " nonfinite=" << nonfinite
+            << '\n';
+  g_failed |= !passed;
+}
+
 void TestFp16Norm() {
   using gufo::test::DeviceBuffer;
-  constexpr std::size_t dim = 5120, batch = 65, elements = batch * dim;
+  // A full chunk exposes rare FP16 ties affected by contracting the first
+  // two squared values in a different order.
+  constexpr std::size_t dim = 5120, batch = 2048, elements = batch * dim;
   std::uint32_t state = 0x764203U;
   const auto value = [&] {
     return std::bit_cast<float>((NextRandom(state) & 0x807FFFFFU) |
@@ -727,6 +784,11 @@ int main() {
       {Type::kQ4_K, Type::kIQ4_XS}};
   for (const auto& [gate, up] : fused_formats) {
     TestFusedSwiGLU(gate, up, 66, 768);
+    if (gate != up) {
+      // Different byte strides, full tiles, and both row and token tails.
+      TestFp16MixedPair(gate, up, 256, 256);
+      TestFp16MixedPair(gate, up, 263, 259);
+    }
   }
   TestFusedSwiGLU(Type::kQ4_K, Type::kQ5_K, 65, 768);
   TestFusedSwiGLU(Type::kQ8_0, Type::kQ8_0, 17408, 5120);

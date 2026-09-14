@@ -61,7 +61,7 @@ nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_target_test \
 
 Large Q4 prefill (chunks of at least 1024 tokens) uses fully scaled packed
 weights and FP16 activations with FP32 accumulation. Normalization writes FP16
-directly; matching Q4_K/Q5_K/IQ4_XS gate/up projections share a kernel
+directly; matching and qualified mixed Q4_K/Q5_K/IQ4_XS gate/up pairs share a kernel
 that emits SwiGLU without an intermediate gate buffer. Other pairs fuse the
 up projection with SwiGLU. Output projections add residuals directly in FP32
 after completing the dot product; the SSM epilogue writes FP16. They retain the
@@ -77,8 +77,11 @@ independently decoded weights and FP64 dot products, including complete Q4/Q5
 tiles, partial row/token tiles and 1024-row K/V projections at width 1025.
 It requires at least a 2× RMSE improvement over A8 and lower maximum error.
 Paired gate/up, SwiGLU, normalization and in-place residual outputs must be
-byte-identical to the separate FP32 producers and FP16 conversions. The existing
-test executable takes about 1.7 seconds. The SSM test checks exact FP16 output and
+byte-identical to the separate FP32 producers and FP16 conversions. Mixed pairs
+cover independent weight strides and row/token tails. A full normalization chunk
+checks rare rounding ties; explicit FMAs preserve the first square's rounding
+when the fixed-width loop unrolls. The existing test executable takes about
+1.8 seconds. The SSM test checks exact FP16 output and
 unchanged recurrent state with FP32/BF16 storage. It also checks causal convolution
 against an independent FP64 formula and exact final history, including nonzero
 history and batches of 1, 2, 3 and 7 tokens. History advances in the next existing
@@ -203,9 +206,9 @@ maintained test inputs. Historical experiment reports remain in Git history.
 ## Latest measurement provenance
 
 Q4 release measured on 2026-09-14, SHA-256:
-`3bfda93db7e40b9f100c82ded890dca2c5f0fd4a77a87c89d51789f2aa0ff1e1`.
-The pp2048-only result, **590.96 tok/s**, averages four warmed samples in two
-processes: **591.71 ± 0.22 / 590.21 ± 1.76 tok/s**, two repetitions each.
+`afdfc6805f1ad90d5419ffc26d5531209fbe6a6bf52f694ba880439309d06dd0`.
+The pp2048-only result, **593.61 tok/s**, averages four warmed samples in two
+processes: **594.58 ± 0.26 / 592.63 ± 2.06 tok/s**, two repetitions each.
 Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 2 --verbose`; alternate release
 binaries when comparing implementations. Q8's recorded 503.17 tok/s is from
 the unchanged native wave64 release, SHA-256
@@ -220,18 +223,19 @@ or a broad draft-precision comparison. Real-prompt controls use `prose_tides` /
 and the chat prompt “Output the word red exactly 1000 times, separated by
 spaces. Do not add any other text.”; their current speed refresh is TODO.
 
-The latest bottleneck profile attributes about **87%** of GPU time to FP16
-quantized GEMM, with 1.7% idle time in the dispatch span. All 69 FP16 prefill kernels have zero
+The measured pp2048 chunk spends about **90%** of GPU time in FP16 quantized
+GEMM, with **0.07%** dispatch idle time, excluding warmups and resets.
+All 75 FP16 prefill kernels have zero
 scratch spills; unused small SwiGLU instantiations are excluded from the build.
 The profiler preserves anonymous-namespace and quantization names, so it reports
 each kernel independently.
 
 Retained: native wave64 for Q8/short prefill; packed-weight FP16 prefill with
-fused norm, paired gate/up, in-place residuals and SSM output; direct matrix
-stores, complete Q4/Q5 tiles and larger K/V tiles. Separate weight expansion,
+fixed-width norm, matching/mixed gate/up fusion, in-place residuals and SSM output;
+direct matrix stores, complete Q4/Q5 tiles and larger K/V tiles. Separate weight expansion,
 wider token panels, cached packed bitplanes and warp-based RMSNorm were slower.
-Dense BLAS and split-K did not improve small projections. Mixed-format gate/up
-fusion showed small component gains and remains unshipped. Convolution/KQ fusion
+Dense BLAS and split-K did not improve small projections. Aligned weight loads
+did not improve the main GEMMs. Convolution/KQ fusion
 was rejected because component gains did not improve full-model prefill.
 Quantized GEMM remains the next target; **Q4 pp2048 at 600 tok/s is still open**.
 

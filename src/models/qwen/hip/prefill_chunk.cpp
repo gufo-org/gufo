@@ -584,11 +584,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
               batch_size * intermediate_size * sizeof(float));
       if (half_prefill) {
         const bool paired =
-            layer.ffn_gate.type == layer.ffn_up.type &&
             TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
-                layer.ffn_gate.type, layer.ffn_gate.data, layer.ffn_up.data,
-                arena_.d_scratch_bf16, arena_.d_ffn_up, batch_size,
-                intermediate_size, hidden_size, arena_.stream);
+                layer.ffn_gate.type, layer.ffn_up.type, layer.ffn_gate.data,
+                layer.ffn_up.data, arena_.d_scratch_bf16, arena_.d_ffn_up,
+                batch_size, intermediate_size, hidden_size, arena_.stream);
         if (!paired) {
           gemm_weight(layer.ffn_gate, arena_.d_scratch_bf16, arena_.d_normed,
                       arena_.d_ffn_gate, intermediate_size, hidden_size);

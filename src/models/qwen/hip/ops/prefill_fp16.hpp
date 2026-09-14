@@ -12,6 +12,7 @@ void LaunchFloatToFp16(const float* input, void* output, std::size_t elements,
                        hipStream_t stream);
 // Optional residual and sum_out preserve the FP32 residual link; sum_out may
 // alias input. The normalization reduction matches LaunchBatchedRMSNorm.
+// The FP16 output must be disjoint from the FP32 inputs and weights.
 void LaunchBatchedRMSNormFp16(const float* input, const float* residual,
                               const float* weight, float* sum_out, void* output,
                               std::size_t batch, std::size_t dim, float eps,
@@ -37,10 +38,11 @@ void LaunchBatchedQuantGEMMResidualFp16(core::GgmlType type,
                                         float* residual, std::size_t batch,
                                         std::size_t m, std::size_t k,
                                         hipStream_t stream);
-// Matching Q4_K, Q5_K and IQ4_XS gate/up weights share a kernel that emits FP16
-// SwiGLU directly. Returns false without launching for other formats.
+// Qualified gate/up weight pairs share a kernel that emits FP16 SwiGLU
+// directly. Returns false without launching for other pairs.
 // All buffers are disjoint; the output may reuse the dead FP32 up allocation.
-bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(core::GgmlType type,
+bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(core::GgmlType gate_type,
+                                             core::GgmlType up_type,
                                              const void* gate_weights,
                                              const void* up_weights,
                                              const void* input, void* output,
