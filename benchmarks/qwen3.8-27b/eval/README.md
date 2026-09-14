@@ -61,9 +61,10 @@ nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_target_test \
 
 Large Q4 prefill (chunks of at least 1024 tokens) uses fully scaled packed
 weights and FP16 activations with FP32 accumulation. Normalization writes FP16
-directly; matching and qualified mixed Q4_K/Q5_K/IQ4_XS gate/up pairs share a kernel
-that emits SwiGLU without an intermediate gate buffer. Other pairs fuse the
-up projection with SwiGLU. Output projections add residuals directly in FP32
+directly; all 64 FFN gate/up pairs in the Q4 artifact share a kernel
+that emits SwiGLU without an intermediate gate buffer. The mixed Q6/Q5 pair
+uses the canonical fetch-stage decoder to preserve the established dot-product
+rounding. Output projections add residuals directly in FP32
 after completing the dot product; the SSM epilogue writes FP16. They retain the
 separate FP32 producers' rounding boundaries, including halfway cases, and reuse
 existing scratch allocations. Complete Q4/Q5 matrix tiles skip
@@ -71,6 +72,10 @@ tail checks; most formats write matrix results directly in the output layout.
 Large attention K/V projections use the same 256×256 tile for Q4/Q5/Q6/Q8
 weights. IQ3_S retains its faster LDS transpose. Q8 targets and short prefill
 retain native integer WMMA.
+
+Large IQ4_XS projections and Q5 projections with short reduction dimensions use
+wider row groups to improve input reuse. Long Q5 reductions and mixed gate/up
+pairs retain the smaller groups. The dot-product and epilogue order is unchanged.
 
 The shared quantization test checks all eight Q4 artifact formats against
 independently decoded weights and FP64 dot products, including complete Q4/Q5
@@ -206,11 +211,12 @@ maintained test inputs. Historical experiment reports remain in Git history.
 ## Latest measurement provenance
 
 Q4 release measured on 2026-09-14, SHA-256:
-`afdfc6805f1ad90d5419ffc26d5531209fbe6a6bf52f694ba880439309d06dd0`.
-The pp2048-only result, **593.61 tok/s**, averages four warmed samples in two
-processes: **594.58 ± 0.26 / 592.63 ± 2.06 tok/s**, two repetitions each.
-Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 2 --verbose`; alternate release
-binaries when comparing implementations. Q8's recorded 503.17 tok/s is from
+`b2a731824c2cbbdc3e31b802ab0b4d074fbaa5cc743888081cb1140b72415530`.
+The pp2048-only result, **602.50 tok/s**, averages six warmed samples in two
+processes: **603.06 ± 0.46 / 601.93 ± 0.22 tok/s**, three repetitions each.
+Use `gufo bench -p 2048 -n 0 -d 0 -c 1 -r 3 --verbose`; alternate release
+binaries after sustained warmup when comparing implementations. Early transient
+boosts are excluded from the headline. Q8's recorded 503.17 tok/s is from
 the unchanged native wave64 release, SHA-256
 `feec38298e8a84a8b9f5dfcf290b924aed597e9f2bd8643fa40b5bd154aa736f`.
 
@@ -225,19 +231,22 @@ spaces. Do not add any other text.”; their current speed refresh is TODO.
 
 The measured pp2048 chunk spends about **90%** of GPU time in FP16 quantized
 GEMM, with **0.07%** dispatch idle time, excluding warmups and resets.
-All 75 FP16 prefill kernels have zero
+All 82 FP16 prefill kernels have zero
 scratch spills; unused small SwiGLU instantiations are excluded from the build.
 The profiler preserves anonymous-namespace and quantization names, so it reports
 each kernel independently.
 
 Retained: native wave64 for Q8/short prefill; packed-weight FP16 prefill with
 fixed-width norm, matching/mixed gate/up fusion, in-place residuals and SSM output;
-direct matrix stores, complete Q4/Q5 tiles and larger K/V tiles. Separate weight expansion,
+direct matrix stores, complete Q4/Q5 tiles, larger K/V tiles and wider row groups
+for qualified projections. Separate weight expansion,
 wider token panels, cached packed bitplanes and warp-based RMSNorm were slower.
 Dense BLAS and split-K did not improve small projections. Aligned weight loads
 did not improve the main GEMMs. Convolution/KQ fusion
 was rejected because component gains did not improve full-model prefill.
-Quantized GEMM remains the next target; **Q4 pp2048 at 600 tok/s is still open**.
+Smaller tiles with two resident blocks and alternative normalization reductions
+did not improve the retained implementation. **Q4 C1 pp2048 exceeds 600 tok/s**
+in the settled six-sample release measurement above.
 
 | Artifact | SHA-256 |
 | --- | --- |

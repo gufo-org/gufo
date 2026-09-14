@@ -600,6 +600,7 @@ void TestFp16Prefill(const FormatCase& format, std::size_t rows,
         d_half_x.data(), d_up_storage.data(), batch, rows, kK, nullptr);
     const bool supported = format.type == gufo::core::GgmlType::kQ4_K ||
                            format.type == gufo::core::GgmlType::kQ5_K ||
+                           format.type == gufo::core::GgmlType::kQ6_K ||
                            format.type == gufo::core::GgmlType::kIQ4_XS;
     passed &= paired == supported;
     if (paired) {
@@ -789,6 +790,18 @@ int main() {
       TestFp16MixedPair(gate, up, 256, 256);
       TestFp16MixedPair(gate, up, 263, 259);
     }
+  }
+  // Additional FP16 pairs cover the remaining FFN layers in this checkpoint.
+  // Keep complete tiles and independently ragged row/token tails.
+  for (const auto& [gate, up] :
+       {std::pair{Type::kQ6_K, Type::kQ5_K},
+        std::pair{Type::kIQ4_XS, Type::kQ3_K},
+        std::pair{Type::kQ3_K, Type::kIQ4_XS},
+        std::pair{Type::kIQ4_NL, Type::kIQ4_XS},
+        std::pair{Type::kIQ4_NL, Type::kQ5_K},
+        std::pair{Type::kQ5_K, Type::kIQ4_NL}}) {
+    TestFp16MixedPair(gate, up, 256, 256);
+    TestFp16MixedPair(gate, up, 263, 259);
   }
   TestFusedSwiGLU(Type::kQ4_K, Type::kQ5_K, 65, 768);
   TestFusedSwiGLU(Type::kQ8_0, Type::kQ8_0, 17408, 5120);

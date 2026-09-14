@@ -139,10 +139,12 @@ __launch_bounds__(WM * WN * 32) __global__
   constexpr bool Mixed = Paired && Type != UpType;
   constexpr bool UpRaw = UpType == gufo::core::GgmlType::kQ4_K ||
                          UpType == gufo::core::GgmlType::kQ5_K;
-  constexpr int BK = 4, WaveSize = 32, Group = 8;
+  constexpr int BK = 4, WaveSize = 32;
+  // The mixed Q6 gate is qualified with the fetch-stage decoder; deferring
+  // its decode changes dot-product rounding in this kernel specialization.
   constexpr int DecodeStage = (Type == gufo::core::GgmlType::kQ4_K ||
                                Type == gufo::core::GgmlType::kQ5_K ||
-                               Type == gufo::core::GgmlType::kQ6_K ||
+                               (Type == gufo::core::GgmlType::kQ6_K && !Mixed) ||
                                Type == gufo::core::GgmlType::kQ8_0)
                                   ? 2
                                   : 0;
@@ -169,9 +171,19 @@ __launch_bounds__(WM * WN * 32) __global__
 
   unsigned row_tile = blockIdx.y, token_tile = blockIdx.x;
   {
-    unsigned first = (blockIdx.y / Group) * Group,
-             within = (blockIdx.y % Group) * gridDim.x + blockIdx.x,
-             rows = min(unsigned(Group), gridDim.y - first);
+    // Wider row groups improve input reuse for these large projections.
+    // Long Q5 reductions and mixed gate/up decoders retain smaller groups.
+    unsigned group_shift = 3;
+    if constexpr (BM == 256 && BN == 256 && !Mixed) {
+      if constexpr (Type == gufo::core::GgmlType::kIQ4_XS)
+        group_shift = 5;
+      else if constexpr (Type == gufo::core::GgmlType::kQ5_K)
+        group_shift = k <= 8192 ? 5 : 3;
+    }
+    const unsigned group = 1U << group_shift;
+    unsigned first = (blockIdx.y >> group_shift) << group_shift,
+             within = (blockIdx.y & (group - 1)) * gridDim.x + blockIdx.x,
+             rows = min(group, gridDim.y - first);
     row_tile = first + within % rows;
     token_tile = within / rows;
   }
@@ -664,6 +676,24 @@ bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
     } else if (gate_type == GgmlType::kIQ4_XS &&
                up_type == GgmlType::kQ4_K) {
       launch.template operator()<GgmlType::kIQ4_XS, GgmlType::kQ4_K>();
+    } else if (gate_type == GgmlType::kQ6_K &&
+               up_type == GgmlType::kQ5_K) {
+      launch.template operator()<GgmlType::kQ6_K, GgmlType::kQ5_K>();
+    } else if (gate_type == GgmlType::kIQ4_XS &&
+               up_type == GgmlType::kQ3_K) {
+      launch.template operator()<GgmlType::kIQ4_XS, GgmlType::kQ3_K>();
+    } else if (gate_type == GgmlType::kQ3_K &&
+               up_type == GgmlType::kIQ4_XS) {
+      launch.template operator()<GgmlType::kQ3_K, GgmlType::kIQ4_XS>();
+    } else if (gate_type == GgmlType::kIQ4_NL &&
+               up_type == GgmlType::kIQ4_XS) {
+      launch.template operator()<GgmlType::kIQ4_NL, GgmlType::kIQ4_XS>();
+    } else if (gate_type == GgmlType::kIQ4_NL &&
+               up_type == GgmlType::kQ5_K) {
+      launch.template operator()<GgmlType::kIQ4_NL, GgmlType::kQ5_K>();
+    } else if (gate_type == GgmlType::kQ5_K &&
+               up_type == GgmlType::kIQ4_NL) {
+      launch.template operator()<GgmlType::kQ5_K, GgmlType::kIQ4_NL>();
     } else {
       return false;
     }
@@ -675,6 +705,9 @@ bool TryLaunchBatchedDualQuantGEMMSwiGLUFp16(
       return true;
     case GgmlType::kQ5_K:
       launch.template operator()<GgmlType::kQ5_K>();
+      return true;
+    case GgmlType::kQ6_K:
+      launch.template operator()<GgmlType::kQ6_K>();
       return true;
     case GgmlType::kIQ4_XS:
       launch.template operator()<GgmlType::kIQ4_XS>();
