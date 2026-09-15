@@ -5,6 +5,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -96,6 +97,8 @@ public:
       bool compute_logits = true) = 0;
   virtual void SaveState(std::uint32_t valid_context) = 0;
   virtual void RestoreState() = 0;
+  /// Closes the replay log once all chunks of a proposal have been processed.
+  virtual void FinishVerification() {}
   virtual void SetPromptHiddenCapture(
       bool enabled, std::span<const std::uint32_t> target_layer_ids = {}) {
     (void)enabled;
@@ -330,7 +333,7 @@ public:
                         tokenization::TokenId eos_id,
                         std::uint32_t max_emitted_tokens, float temperature,
                         std::uint64_t* rng_state);
-  StepResult VerifyStep(std::vector<tokenization::TokenId>& current_sequence,
+  StepResult VerifyStep(std::span<const tokenization::TokenId> current_sequence,
                         std::uint32_t cur_pos,
                         tokenization::TokenId current_token,
                         tokenization::TokenId eos_id,
@@ -358,10 +361,16 @@ private:
   void UpdateAdaptiveDraftLength(std::size_t accepted, std::size_t drafted);
   struct PreparedStep;
   [[nodiscard]] PreparedStep PrepareStep(const StepRequest& request,
-                                        bool defer_target_only = false);
-  [[nodiscard]] StepResult FinishStep(PreparedStep& prepared,
-                                      VerificationChunkResult verification,
-                                      sampling::SamplerState& sampler);
+                                         bool defer_target_only = false,
+                                         bool defer_proposal = false);
+  void PrepareTargetOnlyStep(PreparedStep& prepared, const StepRequest& request,
+                             bool defer_target_only);
+  void PrepareProposalVerification(PreparedStep& prepared,
+                                   const StepRequest& request,
+                                   bool defer_target_only);
+  [[nodiscard]] std::optional<StepResult> ProcessVerificationChunk(
+      PreparedStep& prepared, VerificationChunkResult verification,
+      sampling::SamplerState& sampler);
   [[nodiscard]] StepResult VerifySequentialStep(
       std::span<const tokenization::TokenId> current_sequence,
       std::uint32_t cur_pos, tokenization::TokenId current_token,

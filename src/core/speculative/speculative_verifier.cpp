@@ -189,6 +189,8 @@ public:
     executor_.CommitVerificationChunk(committed_tokens, start_pos);
   }
 
+  void FinishVerification() override { executor_.FinishVerification(); }
+
   tokenization::TokenId GetEosTokenId() const noexcept override {
     return executor_.GetTokenizer().GetEosTokenId();
   }
@@ -391,12 +393,18 @@ struct SpeculativeVerifier::PreparedStep {
   bool capture_hidden{false};
   bool capture_logits{false};
   bool target_only{false};
+  std::uint32_t max_draft_tokens{0};
+  std::size_t chunk_limit{std::numeric_limits<std::size_t>::max()};
+  std::size_t verified_rows{0};
+  std::size_t accepted_count{0};
+  std::size_t physical_width{1};
 };
 
 SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
-    std::vector<tokenization::TokenId>& current_sequence, std::uint32_t cur_pos,
-    tokenization::TokenId current_token, tokenization::TokenId eos_id,
-    std::uint32_t max_emitted_tokens, sampling::SamplerState& sampler) {
+    std::span<const tokenization::TokenId> current_sequence,
+    std::uint32_t cur_pos, tokenization::TokenId current_token,
+    tokenization::TokenId eos_id, std::uint32_t max_emitted_tokens,
+    sampling::SamplerState& sampler) {
   sampler.config().Validate();
   if (!use_batched_verification_ &&
       sampler.config().can_use_unmodified_argmax()) {
@@ -410,11 +418,15 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
   auto verification = target_executor_->ForwardVerificationChunk(
       prepared.inputs, prepared.position, prepared.capture_hidden,
       prepared.capture_logits);
-  return FinishStep(prepared, std::move(verification), sampler);
+  auto result =
+      ProcessVerificationChunk(prepared, std::move(verification), sampler);
+  if (!result.has_value())
+    throw std::logic_error("complete verification still requires target rows");
+  return std::move(*result);
 }
 
 SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
-    const StepRequest& request, bool defer_target_only) {
+    const StepRequest& request, bool defer_target_only, bool defer_proposal) {
   request.sampler.config().Validate();
   if (request.max_emitted_tokens == 0) {
     throw std::invalid_argument(
@@ -428,61 +440,76 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
       prepared.random_sampling || request.sampler.config().penalties_enabled();
   if (prepared.sampled)
     prepared.working_sampler.emplace(request.sampler);
-  auto& working_sampler =
-      prepared.sampled ? *prepared.working_sampler : request.sampler;
-  const auto target_only_step = [&]() {
-    if (defer_target_only) {
-      prepared.target_only = true;
-      prepared.inputs = {request.current_token};
-      prepared.capture_hidden =
-          draft_backend_ != nullptr && draft_backend_->RequiresTargetHiddenStates();
-      prepared.capture_logits =
-          (prepared.sampled || options_.retain_frontier_logits) &&
-          !target_executor_->SupportsDeviceResidentSampling();
-      return;
-    }
-    auto next = AdvanceCommittedToken(request.current_token, request.position);
-    if (prepared.sampled)
-      next = target_executor_->SampleLastLogits(working_sampler);
-    std::vector<float> logits;
-    if (options_.retain_frontier_logits) {
-      const auto row = target_executor_->CopyLastLogits();
-      logits.assign(row.begin(), row.end());
-    }
-    request.sampler.SetRngState(working_sampler.rng_state());
-    ++stats_.total_verification_steps;
-    ++stats_.total_emitted_tokens;
-    prepared.immediate = StepResult{
-        .emitted_tokens = {next},
-        .next_token = next,
-        .next_token_logits = std::move(logits),
-        .hit_eos = IsStopToken(next, request.eos_id),
-    };
-  };
-  const std::uint32_t max_draft_tokens =
+  prepared.max_draft_tokens =
       request.max_emitted_tokens > 1 && draft_backend_ != nullptr &&
               (!prepared.sampled || draft_backend_->SupportsSampledProposals())
           ? std::min(current_draft_length_, request.max_emitted_tokens - 1)
           : 0;
-  if (max_draft_tokens == 0) {
-    target_only_step();
+  if (prepared.max_draft_tokens == 0) {
+    PrepareTargetOnlyStep(prepared, request, defer_target_only);
     return prepared;
   }
+  if (defer_proposal)
+    return prepared;
+  auto& working_sampler =
+      prepared.sampled ? *prepared.working_sampler : request.sampler;
   prepared.proposal =
       prepared.random_sampling
           ? draft_backend_->ProposeSampled(request.sequence, request.position,
-                                           max_draft_tokens,
+                                           prepared.max_draft_tokens,
                                            request.sampler.config().temperature,
                                            working_sampler.mutable_rng_state())
           : draft_backend_->Propose(request.sequence, request.position,
-                                    max_draft_tokens);
+                                    prepared.max_draft_tokens);
+  PrepareProposalVerification(prepared, request, defer_target_only);
+  return prepared;
+}
+
+void SpeculativeVerifier::PrepareTargetOnlyStep(PreparedStep& prepared,
+                                                const StepRequest& request,
+                                                bool defer_target_only) {
+  auto& working_sampler =
+      prepared.sampled ? *prepared.working_sampler : request.sampler;
+  if (defer_target_only) {
+    prepared.target_only = true;
+    prepared.inputs = {request.current_token};
+    prepared.capture_hidden = draft_backend_ != nullptr &&
+                              draft_backend_->RequiresTargetHiddenStates();
+    prepared.capture_logits =
+        (prepared.sampled || options_.retain_frontier_logits) &&
+        !target_executor_->SupportsDeviceResidentSampling();
+    return;
+  }
+  auto next = AdvanceCommittedToken(request.current_token, request.position);
+  if (prepared.sampled)
+    next = target_executor_->SampleLastLogits(working_sampler);
+  std::vector<float> logits;
+  if (options_.retain_frontier_logits) {
+    const auto row = target_executor_->CopyLastLogits();
+    logits.assign(row.begin(), row.end());
+  }
+  request.sampler.SetRngState(working_sampler.rng_state());
+  ++stats_.total_verification_steps;
+  ++stats_.total_emitted_tokens;
+  prepared.immediate = StepResult{
+      .emitted_tokens = {next},
+      .next_token = next,
+      .next_token_logits = std::move(logits),
+      .hit_eos = IsStopToken(next, request.eos_id),
+  };
+}
+
+void SpeculativeVerifier::PrepareProposalVerification(
+    PreparedStep& prepared, const StepRequest& request,
+    bool defer_target_only) {
   const auto& proposal = prepared.proposal;
   if (proposal.tokens.empty()) {
-    target_only_step();
-    return prepared;
+    PrepareTargetOnlyStep(prepared, request, defer_target_only);
+    return;
   }
   const std::size_t num_draft = proposal.tokens.size();
-  if (num_draft > max_draft_tokens || proposal.start_pos != request.position) {
+  if (num_draft > prepared.max_draft_tokens ||
+      proposal.start_pos != request.position) {
     throw std::runtime_error("draft backend returned a malformed proposal");
   }
   const bool random_sampling = prepared.random_sampling;
@@ -551,10 +578,10 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
   prepared.capture_logits =
       prepared.sampled && !target_executor_->SupportsDeviceResidentSampling();
   target_executor_->SaveState(request.position);
-  return prepared;
 }
 
-SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
+std::optional<SpeculativeVerifier::StepResult>
+SpeculativeVerifier::ProcessVerificationChunk(
     PreparedStep& prepared, VerificationChunkResult verification,
     sampling::SamplerState& sampler) {
   const auto& proposal = prepared.proposal;
@@ -566,6 +593,10 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
   const bool random_sampling = prepared.random_sampling;
   const bool device_resident_sampling =
       target_executor_->SupportsDeviceResidentSampling();
+  const std::size_t chunk_begin = prepared.verified_rows;
+  const std::size_t chunk_rows =
+      std::min(prepared.chunk_limit, verification_inputs.size() - chunk_begin);
+  const std::size_t chunk_end = chunk_begin + chunk_rows;
   auto& working_sampler =
       prepared.sampled ? *prepared.working_sampler : sampler;
   const auto& token_probabilities = prepared.token_probabilities;
@@ -577,25 +608,24 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
                          .subspan(offset, proposal.candidates_per_token)};
   };
   if ((!prepared.sampled || prepared.target_only) &&
-      verification.predictions.size() != verification_inputs.size()) {
+      verification.predictions.size() != chunk_rows) {
     throw std::runtime_error(
         "target executor returned an incomplete verification chunk");
   }
   if (prepared.capture_logits &&
       (verification.vocab_size == 0 ||
-       verification.logits.size() !=
-           verification_inputs.size() * verification.vocab_size)) {
+       verification.logits.size() != chunk_rows * verification.vocab_size)) {
     throw std::runtime_error(
         "target executor returned incomplete verification logits");
   }
-  if (capture_target_hidden &&
-      (verification.hidden_width == 0 ||
-       verification.hidden_states.size() !=
-           verification_inputs.size() * verification.hidden_width)) {
+  if (capture_target_hidden && (verification.hidden_width == 0 ||
+                                verification.hidden_states.size() !=
+                                    chunk_rows * verification.hidden_width)) {
     throw std::runtime_error(
         "target executor returned incomplete verification hidden states");
   }
   if (prepared.target_only) {
+    target_executor_->FinishVerification();
     const auto prediction = verification.predictions.front();
     if (capture_target_hidden &&
         !draft_backend_->AppendTargetContext(
@@ -608,33 +638,34 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
     }
     auto next = prediction;
     if (prepared.sampled) {
-      next = device_resident_sampling
-                 ? target_executor_->SampleVerificationLogits(0, working_sampler)
-                 : working_sampler.Sample(std::span(verification.logits)
-                                              .first(verification.vocab_size));
+      next =
+          device_resident_sampling
+              ? target_executor_->SampleVerificationLogits(0, working_sampler)
+              : working_sampler.Sample(std::span(verification.logits)
+                                           .first(verification.vocab_size));
     }
     std::vector<float> logits;
     if (options_.retain_frontier_logits) {
-      const auto row =
-          prepared.capture_logits
-              ? std::span<const float>(verification.logits)
-                    .first(verification.vocab_size)
-              : target_executor_->CopyVerificationLogits(0);
+      const auto row = prepared.capture_logits
+                           ? std::span<const float>(verification.logits)
+                                 .first(verification.vocab_size)
+                           : target_executor_->CopyVerificationLogits(0);
       logits.assign(row.begin(), row.end());
     }
     sampler.SetRngState(working_sampler.rng_state());
     ++stats_.total_verification_steps;
     ++stats_.total_emitted_tokens;
-    return {.emitted_tokens = {next},
-            .next_token = next,
-            .next_token_logits = std::move(logits),
-            .hit_eos = IsStopToken(next, eos_id)};
+    return StepResult{.emitted_tokens = {next},
+                      .next_token = next,
+                      .next_token_logits = std::move(logits),
+                      .hit_eos = IsStopToken(next, eos_id)};
   }
-  std::size_t accepted_count = 0;
+  auto& accepted_count = prepared.accepted_count;
   tokenization::TokenId correction_token = 0;
-  for (; accepted_count < num_draft; ++accepted_count) {
+  for (; accepted_count < std::min(num_draft, chunk_end); ++accepted_count) {
+    const auto local_row = accepted_count - chunk_begin;
     if (!prepared.sampled) {
-      correction_token = verification.predictions[accepted_count];
+      correction_token = verification.predictions[local_row];
       if (correction_token != proposal.tokens[accepted_count] ||
           IsStopToken(correction_token, eos_id)) {
         break;
@@ -647,11 +678,11 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
       // without drawing random numbers or constructing a proposal distribution.
       const auto target_token =
           device_resident_sampling
-              ? target_executor_->SampleVerificationLogits(accepted_count,
+              ? target_executor_->SampleVerificationLogits(local_row,
                                                            working_sampler)
               : working_sampler.Sample(std::span<const float>(
                     verification.logits.data() +
-                        accepted_count * verification.vocab_size,
+                        local_row * verification.vocab_size,
                     verification.vocab_size));
       if (target_token != proposal.tokens[accepted_count] ||
           IsStopToken(target_token, eos_id)) {
@@ -666,7 +697,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
         proposal_row(accepted_count);
     if (device_resident_sampling) {
       const auto decision = target_executor_->VerifySampledToken(
-          accepted_count, proposal.tokens[accepted_count], candidate_ids,
+          local_row, proposal.tokens[accepted_count], candidate_ids,
           candidate_probabilities, draft_probability, working_sampler);
       if (decision.accepted) {
         if (IsStopToken(proposal.tokens[accepted_count], eos_id)) {
@@ -680,7 +711,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
     }
 
     const auto target_row = std::span<const float>(
-        verification.logits.data() + (accepted_count * verification.vocab_size),
+        verification.logits.data() + (local_row * verification.vocab_size),
         verification.vocab_size);
     const auto target_distribution = working_sampler.Distribution(target_row);
     const double target_probability =
@@ -698,39 +729,55 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
         working_sampler.mutable_rng_state());
     break;
   }
+  const bool complete = accepted_count < chunk_end;
+  const std::size_t committed_input_count =
+      complete ? accepted_count + 1 : chunk_end;
+  if (capture_target_hidden) {
+    // Only committed input rows reach the draft, in their original order.
+    // Pending features remain private until this proposal receives feedback.
+    for (std::size_t row = chunk_begin; row < committed_input_count; ++row) {
+      draft_backend_->UpdateTargetHidden(std::span<const float>(
+          verification.hidden_states.data() +
+              ((row - chunk_begin) * verification.hidden_width),
+          verification.hidden_width));
+    }
+  }
+  prepared.verified_rows = chunk_end;
+  if (!complete)
+    return std::nullopt;
+  target_executor_->FinishVerification();
+  const auto correction_row_index = accepted_count - chunk_begin;
   if (accepted_count == num_draft) {
     if (!prepared.sampled) {
-      correction_token = verification.predictions[num_draft];
+      correction_token = verification.predictions[correction_row_index];
     } else if (device_resident_sampling) {
       correction_token = target_executor_->SampleVerificationLogits(
-          num_draft, working_sampler);
+          correction_row_index, working_sampler);
     } else {
       const auto bonus_row = std::span<const float>(
-          verification.logits.data() + (num_draft * verification.vocab_size),
+          verification.logits.data() +
+              (correction_row_index * verification.vocab_size),
           verification.vocab_size);
       correction_token = working_sampler.Sample(bonus_row);
     }
   }
 
-  std::vector<float> greedy_frontier;
-  if (!prepared.sampled && options_.retain_frontier_logits) {
-    const auto row = target_executor_->CopyVerificationLogits(accepted_count);
-    greedy_frontier.assign(row.begin(), row.end());
+  std::vector<float> frontier;
+  if (options_.retain_frontier_logits) {
+    const auto row =
+        prepared.capture_logits
+            ? std::span<const float>(verification.logits)
+                  .subspan(correction_row_index * verification.vocab_size,
+                           verification.vocab_size)
+            : target_executor_->CopyVerificationLogits(correction_row_index);
+    frontier.assign(row.begin(), row.end());
   }
-  const std::size_t committed_input_count = accepted_count + 1;
-  if (accepted_count != num_draft) {
+  if (chunk_end > committed_input_count) {
     target_executor_->RestoreState();
     target_executor_->CommitVerificationChunk(
         std::span<const tokenization::TokenId>(verification_inputs.data(),
                                                committed_input_count),
         cur_pos);
-  }
-  if (capture_target_hidden) {
-    for (std::size_t row = 0; row < committed_input_count; ++row) {
-      draft_backend_->UpdateTargetHidden(std::span<const float>(
-          verification.hidden_states.data() + (row * verification.hidden_width),
-          verification.hidden_width));
-    }
   }
 
   StepResult result;
@@ -741,23 +788,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
       proposal.tokens.begin() + static_cast<std::ptrdiff_t>(accepted_count));
   result.emitted_tokens.push_back(correction_token);
   result.next_token = correction_token;
-  if (options_.retain_frontier_logits) {
-    if (!prepared.sampled) {
-      result.next_token_logits = std::move(greedy_frontier);
-    } else if (device_resident_sampling) {
-      const auto correction_row =
-          target_executor_->CopyVerificationLogits(accepted_count);
-      result.next_token_logits.assign(correction_row.begin(),
-                                      correction_row.end());
-    } else {
-      const auto correction_row =
-          std::span<const float>(verification.logits.data() +
-                                     (accepted_count * verification.vocab_size),
-                                 verification.vocab_size);
-      result.next_token_logits.assign(correction_row.begin(),
-                                      correction_row.end());
-    }
-  }
+  result.next_token_logits = std::move(frontier);
   result.hit_eos = std::any_of(
       result.emitted_tokens.begin(), result.emitted_tokens.end(),
       [&](tokenization::TokenId token) { return IsStopToken(token, eos_id); });
@@ -777,6 +808,12 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
 
 std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
     std::span<const StepRequest> requests) {
+  if (requests.size() == 1) {
+    const auto& request = requests.front();
+    return {request.verifier.VerifyStep(
+        request.sequence, request.position, request.current_token,
+        request.eos_id, request.max_emitted_tokens, request.sampler)};
+  }
   std::vector<StepResult> result(requests.size());
   for (std::size_t index = 0; index < requests.size(); ++index) {
     requests[index].sampler.config().Validate();
@@ -787,6 +824,12 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
   }
   std::vector<PreparedStep> prepared;
   prepared.reserve(requests.size());
+  std::vector<std::size_t> prepared_indices;
+  prepared_indices.reserve(requests.size());
+  std::vector<speculative::DraftProposalRequest> draft_requests;
+  draft_requests.reserve(requests.size());
+  std::vector<std::size_t> draft_indices;
+  draft_indices.reserve(requests.size());
   std::vector<TargetVerificationItem> items;
   items.reserve(requests.size());
   std::vector<std::size_t> indices;
@@ -802,31 +845,86 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
           request.eos_id, request.max_emitted_tokens);
       continue;
     }
-    auto& step = prepared.emplace_back(
-        verifier.PrepareStep(request, requests.size() > 1));
+    auto& step =
+        prepared.emplace_back(verifier.PrepareStep(request, true, true));
+    prepared_indices.push_back(index);
+    if (step.max_draft_tokens > 0) {
+      auto& sampler = step.sampled ? *step.working_sampler : request.sampler;
+      draft_indices.push_back(prepared.size() - 1);
+      draft_requests.push_back(
+          {verifier.draft_backend_.get(), request.sequence, request.position,
+           step.max_draft_tokens,
+           step.random_sampling ? request.sampler.config().temperature : 0.0F,
+           step.random_sampling ? sampler.mutable_rng_state() : nullptr});
+    }
+  }
+  if (!draft_requests.empty()) {
+    auto proposals =
+        draft_requests.front().backend->ProposeBatch(draft_requests);
+    if (proposals.size() != draft_requests.size())
+      throw std::runtime_error("draft returned an incomplete proposal batch");
+    for (std::size_t index = 0; index < proposals.size(); ++index) {
+      const auto prepared_index = draft_indices[index];
+      auto& step = prepared[prepared_index];
+      const auto& request = requests[prepared_indices[prepared_index]];
+      step.proposal = std::move(proposals[index]);
+      request.verifier.PrepareProposalVerification(step, request, true);
+    }
+  }
+  for (std::size_t prepared_index = 0; prepared_index < prepared.size();
+       ++prepared_index) {
+    auto& step = prepared[prepared_index];
+    const auto index = prepared_indices[prepared_index];
     if (step.immediate.has_value()) {
       result[index] = std::move(*step.immediate);
       continue;
     }
-    indices.push_back(index);
-    items.push_back({verifier.target_executor_, step.inputs, step.position,
-                     step.capture_hidden, step.capture_logits});
+    indices.push_back(prepared_index);
+    const auto& stats = requests[index].verifier.stats_;
+    if (stats.total_draft_tokens > 0 && stats.AcceptanceRate() < 0.5F)
+      step.chunk_limit = 2;
   }
-  if (items.empty())
-    return result;
-  auto verification = items.front().executor->ForwardVerificationBatch(items);
-  if (verification.chunks.size() != items.size())
-    throw std::runtime_error(
-        "target returned an incomplete verification batch");
-  std::size_t chunk = 0;
-  for (auto& step : prepared) {
-    if (step.immediate.has_value())
-      continue;
-    const std::size_t index = indices[chunk];
-    result[index] = requests[index].verifier.FinishStep(
-        step, std::move(verification.chunks[chunk]), requests[index].sampler);
-    result[index].physical_width = verification.physical_width;
-    ++chunk;
+  // Proposals and all their RNG draws are already fixed. Verification can stop
+  // after a private rejection without changing the draft policy or sampling.
+  // High-acceptance requests keep full blocks; shorter chunks avoid discarded
+  // suffix work for requests whose own observed acceptance is lower.
+  while (!indices.empty()) {
+    items.clear();
+    for (const auto prepared_index : indices) {
+      auto& step = prepared[prepared_index];
+      // Small surviving groups cannot amortize another target pass.
+      if (indices.size() < 4)
+        step.chunk_limit = std::numeric_limits<std::size_t>::max();
+      const auto index = prepared_indices[prepared_index];
+      const auto tokens = std::span<const tokenization::TokenId>(step.inputs)
+                              .subspan(step.verified_rows);
+      items.push_back(
+          {requests[index].verifier.target_executor_,
+           tokens.first(std::min(tokens.size(), step.chunk_limit)),
+           step.position + static_cast<std::uint32_t>(step.verified_rows),
+           step.capture_hidden, step.capture_logits});
+    }
+    auto verification = items.front().executor->ForwardVerificationBatch(items);
+    if (verification.chunks.size() != items.size())
+      throw std::runtime_error(
+          "target returned an incomplete verification batch");
+    std::size_t remaining = 0;
+    for (std::size_t chunk = 0; chunk < indices.size(); ++chunk) {
+      const auto prepared_index = indices[chunk];
+      auto& step = prepared[prepared_index];
+      const auto index = prepared_indices[prepared_index];
+      step.physical_width =
+          std::max(step.physical_width, verification.physical_width);
+      auto finished = requests[index].verifier.ProcessVerificationChunk(
+          step, std::move(verification.chunks[chunk]), requests[index].sampler);
+      if (finished.has_value()) {
+        result[index] = std::move(*finished);
+        result[index].physical_width = step.physical_width;
+      } else {
+        indices[remaining++] = prepared_index;
+      }
+    }
+    indices.resize(remaining);
   }
   return result;
 }

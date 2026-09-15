@@ -225,8 +225,10 @@ void CheckConcurrencyWidths(const Executor& owner) {
   for (std::size_t row = 0; row < count; ++row) {
     // The C8 coordinator has enough FFN scratch for all verification logits;
     // smaller coordinators exercise the bounded-allocation fallback.
-    sessions[row] = std::make_unique<Executor>(
-        owner.GetSharedModel(), row == count / 2 ? 1024 : row % 2 == 0 ? 64 : 128);
+    sessions[row] = std::make_unique<Executor>(owner.GetSharedModel(),
+                                               row == count / 2 ? 1024
+                                               : row % 2 == 0   ? 64
+                                                                : 128);
     auto& session = *sessions[row];
     session.SetPromptHiddenCapture(true, taps);
     const std::string text = kTexts[row % kTexts.size()];
@@ -266,17 +268,16 @@ void CheckConcurrencyWidths(const Executor& owner) {
     std::cout << "concurrency width=" << width << " logits/features exact=1\n";
 
     for (const std::size_t cohort_rows :
-         {0U, 9U, 10U, 11U, 12U, 13U, 14U, 15U, 16U, 64U}) {
-      if ((cohort_rows == 64 && width != count) ||
-          (cohort_rows > 0 && cohort_rows < 64 && width != 2))
+         {0U, 9U, 10U, 11U, 12U, 13U, 14U, 15U, 16U, 32U, 48U, 64U}) {
+      if ((cohort_rows >= 32 && width != count) ||
+          (cohort_rows > 0 && cohort_rows < 32 && width != 2))
         continue;
       std::array<gufo::hip::QwenGpuVerificationItem, count> verification_items;
       for (std::size_t row = 0; row < width; ++row) {
         const auto position = items[row].position;
         const std::size_t length =
-            cohort_rows != 0
-                ? cohort_rows / width + (row < cohort_rows % width)
-                : (3 * row + width - 2) % 8 + 1;
+            cohort_rows != 0 ? cohort_rows / width + (row < cohort_rows % width)
+                             : (3 * row + width - 2) % 8 + 1;
         sessions[row]->RestoreSnapshot(*snapshots[row]);
         sessions[row]->SaveState(position);
         verification_items[row] = {
@@ -332,6 +333,64 @@ void CheckConcurrencyWidths(const Executor& owner) {
                 << " logits/features/replay exact=1\n";
     }
   }
+  for (std::size_t row = 0; row < count; ++row) {
+    sessions[row]->RestoreSnapshot(*snapshots[row]);
+    sessions[row]->SaveState(items[row].position);
+  }
+  // Append chunks without resetting the rollback snapshot. Requests leave
+  // independently, including a final single-session continuation.
+  for (std::size_t stage = 0; stage < 4; ++stage) {
+    const auto active = count >> stage;
+    const auto offset = stage * 2;
+    std::vector<gufo::hip::QwenGpuVerificationItem> chunks;
+    for (std::size_t row = 0; row < active; ++row) {
+      const auto position =
+          items[row].position + static_cast<std::uint32_t>(offset);
+      chunks.push_back({sessions[row].get(),
+                        std::span(tokens[row]).subspan(position, 2), position,
+                        true});
+    }
+    const auto rotation = stage % active;
+    std::rotate(chunks.begin(), chunks.begin() + rotation, chunks.end());
+    const auto predictions = Executor::ForwardVerificationBatch(chunks);
+    for (std::size_t index = 0; index < active; ++index) {
+      const auto row = (index + rotation) % active;
+      CheckVerificationFeatures(
+          *sessions[row], std::span(expected_features[row]).subspan(offset, 2));
+      for (std::size_t local = 0; local < 2; ++local) {
+        const auto& expected = expected_logits[row][offset + local];
+        Expect(
+            ByteEqual(sessions[row]->CopyVerificationLogits(local), expected) &&
+                predictions[index][local] ==
+                    static_cast<Token>(std::ranges::max_element(expected) -
+                                       expected.begin()),
+            "appended verification chunk changed logits or features");
+      }
+    }
+    for (std::size_t row = active / 2; row < active; ++row) {
+      const auto position = items[row].position;
+      const auto committed = offset + 1;
+      auto& session = *sessions[row];
+      session.RestoreState();
+      session.CommitVerificationChunk(
+          std::span(tokens[row]).subspan(position, committed), position);
+      (void)session.ForwardToken(tokens[row][position + committed],
+                                 position + committed);
+      const auto actual = Logits(session);
+      if (!ByteEqual(actual, expected_logits[row][committed])) {
+        const auto difference = gufo::testing::CompareLogits(
+            actual, expected_logits[row][committed]);
+        std::cerr << "chunk replay stage=" << stage << " row=" << row
+                  << " committed=" << committed
+                  << " max_abs=" << difference.max_abs_diff << '\n';
+      }
+      Expect(ByteEqual(actual, expected_logits[row][committed]) &&
+                 ByteEqual(session.CopyLastHidden(),
+                           expected_features[row][committed]),
+             "rollback across verification chunks changed continuation state");
+    }
+  }
+  std::cout << "appended verification: C8/4/2/1 logits/features/replay exact\n";
 }
 
 void CheckWideCache(Executor& reference) {

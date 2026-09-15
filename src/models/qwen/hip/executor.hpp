@@ -506,6 +506,8 @@ public:
   void Reset() noexcept;
   void SaveState(std::uint32_t valid_context);
   void RestoreState();
+  /// Ends replay capture after the last verification chunk.
+  void FinishVerification();
 
 private:
   void ReplaySsmState(std::uint32_t position, std::uint32_t count = 1);

@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -253,8 +254,20 @@ public:
   }
   std::size_t StateSize() const noexcept { return state_.size(); }
 
+  gufo::speculative::VerificationChunkResult ForwardVerificationChunk(
+      std::span<const TokenId> tokens, std::uint32_t position,
+      bool capture_hidden, bool capture_logits) override {
+    verification_rows_ += tokens.size();
+    ++verification_calls_;
+    return ISpeculativeTargetExecutor::ForwardVerificationChunk(
+        tokens, position, capture_hidden, capture_logits);
+  }
+  std::size_t VerificationRows() const noexcept { return verification_rows_; }
+  std::size_t VerificationCalls() const noexcept { return verification_calls_; }
+
   gufo::speculative::TargetVerificationBatch ForwardVerificationBatch(
-      std::span<const gufo::speculative::TargetVerificationItem> items) override {
+      std::span<const gufo::speculative::TargetVerificationItem> items)
+      override {
     last_batch_size_ = items.size();
     return ISpeculativeTargetExecutor::ForwardVerificationBatch(items);
   }
@@ -271,6 +284,8 @@ private:
   bool repeat_logits_{false};
   std::size_t sample_calls_{0};
   std::size_t last_batch_size_{0};
+  std::size_t verification_rows_{0};
+  std::size_t verification_calls_{0};
   std::vector<float> last_logits_;
   std::vector<TokenId> state_;
   std::vector<TokenId> saved_state_;
@@ -340,8 +355,17 @@ public:
   }
   bool SupportsSampledProposals() const noexcept override { return true; }
 
+  std::vector<gufo::speculative::DraftProposal> ProposeBatch(
+      std::span<const gufo::speculative::DraftProposalRequest> requests)
+      override {
+    last_batch_size_ = requests.size();
+    return IDraftBackend::ProposeBatch(requests);
+  }
+  std::size_t LastBatchSize() const noexcept { return last_batch_size_; }
+
 private:
   gufo::speculative::DraftProposal proposal_;
+  std::size_t last_batch_size_{0};
 };
 
 class PersistentDraftSnapshot final
@@ -946,6 +970,7 @@ void TestConcurrentTargetOnlySteps() {
       samplers.reserve(3);
       std::vector<TokenId> sequence{0, 0};
       std::vector<SpeculativeVerifier::StepRequest> requests;
+      const FixedSampledDraftBackend* proposal_coordinator = nullptr;
       SpeculativeOptions options;
       options.max_draft_tokens = 2;
       options.initial_draft_tokens = 2;
@@ -957,8 +982,12 @@ void TestConcurrentTargetOnlySteps() {
             std::vector<float>{-INFINITY, 0.4F, 0.2F}, true));
         std::unique_ptr<IDraftBackend> draft;
         if (index == 1) {
-          draft = std::make_unique<FixedSampledDraftBackend>(
-              DraftProposal{.start_pos = 1});
+          DraftProposal empty;
+          empty.start_pos = 1;
+          auto fixed =
+              std::make_unique<FixedSampledDraftBackend>(std::move(empty));
+          proposal_coordinator = fixed.get();
+          draft = std::move(fixed);
         } else {
           draft = std::make_unique<BinarySampledDraftBackend>(0.8F, 0.2F);
         }
@@ -981,14 +1010,16 @@ void TestConcurrentTargetOnlySteps() {
         }
         samplers.emplace_back(config, sequence);
         requests.push_back({*verifiers.back(), sequence, 1, 0,
-                            scenario == 3 ? 1U : 99U,
-                            index == 0 ? 1U : 3U, samplers.back()});
+                            scenario == 3 ? 1U : 99U, index == 0 ? 1U : 3U,
+                            samplers.back()});
       }
       std::vector<SpeculativeVerifier::StepResult> results;
       if (batched) {
         results = SpeculativeVerifier::VerifyBatch(requests);
         Expect(targets.front()->LastBatchSize() == 3,
                "budget tails and empty proposals join normal verification");
+        Expect(proposal_coordinator->LastBatchSize() == 2,
+               "empty and sampled proposals share one independent draft batch");
       } else {
         for (const auto& request : requests) {
           results.push_back(request.verifier.VerifyStep(
@@ -1006,8 +1037,11 @@ void TestConcurrentTargetOnlySteps() {
                    result.draft_count == stats.total_draft_tokens,
                "batched target-only result counters");
         observations.push_back(
-            {result.emitted_tokens, result.next_token, result.next_token_logits,
-             result.hit_eos, samplers[index].rng_state(),
+            {result.emitted_tokens,
+             result.next_token,
+             result.next_token_logits,
+             result.hit_eos,
+             samplers[index].rng_state(),
              targets[index]->StateSize(),
              {stats.total_draft_tokens, stats.total_accepted_tokens,
               stats.total_verification_steps, stats.total_emitted_tokens}});
@@ -1038,18 +1072,171 @@ void TestConcurrentTargetOnlySteps() {
       {draft, sequence, 3, 10, 900, 3, draft_sampler},
   }};
   const auto results = SpeculativeVerifier::VerifyBatch(requests);
-  Expect(results[0].emitted_tokens == std::vector<TokenId>{11} &&
-             tail_target.State() == sequence &&
-             tail_view->UpdatedHidden() == std::vector<float>({10, 3}) &&
-             tail_view->Accepted().empty() &&
-             tail_view->CorrectionToken() == 0,
-         "a target-only tail appends its committed hidden state without feedback");
-  Expect(results[1].emitted_tokens == std::vector<TokenId>({11, 12}) &&
-             draft_target.State() == std::vector<TokenId>({1, 2, 3, 10, 11}) &&
-             draft_view->UpdatedHidden() == std::vector<float>({11, 4}) &&
-             draft_view->Accepted() == std::vector<TokenId>{11} &&
-             draft_view->CorrectionToken() == 12,
-         "a mixed cohort retains the normal proposal's hidden state and feedback");
+  Expect(
+      results[0].emitted_tokens == std::vector<TokenId>{11} &&
+          tail_target.State() == sequence &&
+          tail_view->UpdatedHidden() == std::vector<float>({10, 3}) &&
+          tail_view->Accepted().empty() && tail_view->CorrectionToken() == 0,
+      "a target-only tail appends its committed hidden state without feedback");
+  Expect(
+      results[1].emitted_tokens == std::vector<TokenId>({11, 12}) &&
+          draft_target.State() == std::vector<TokenId>({1, 2, 3, 10, 11}) &&
+          draft_view->UpdatedHidden() == std::vector<float>({11, 4}) &&
+          draft_view->Accepted() == std::vector<TokenId>{11} &&
+          draft_view->CorrectionToken() == 12,
+      "a mixed cohort retains the normal proposal's hidden state and feedback");
+}
+
+void TestConcurrentVerificationChunks() {
+  using namespace gufo::speculative;
+  class Draft final : public IDraftBackend {
+  public:
+    explicit Draft(std::size_t accepted) : accepted_(accepted) {}
+    std::string_view Name() const noexcept override { return "chunk fixture"; }
+    DraftProposal Propose(std::span<const TokenId>, std::uint32_t position,
+                          std::uint32_t count) override {
+      const auto accepted = step_ == 0 ? 0 : step_ % 3 == 1 ? accepted_ : count;
+      ++step_;
+      DraftProposal result;
+      result.start_pos = position;
+      for (std::size_t row = 0; row < count; ++row)
+        result.tokens.push_back(row < accepted ? 1U : 2U);
+      return result;
+    }
+    DraftProposal ProposeSampled(std::span<const TokenId> sequence,
+                                 std::uint32_t position, std::uint32_t count,
+                                 float, std::uint64_t* rng) override {
+      auto result = Propose(sequence, position, count);
+      result.candidates_per_token = 1;
+      result.candidate_ids = result.tokens;
+      result.candidate_probabilities.assign(result.tokens.size(), 1.0F);
+      // Even discarded suffix proposals consume their original private draws.
+      for (std::size_t row = 0; row < result.tokens.size(); ++row)
+        (void)gufo::sampling::Uniform(rng);
+      return result;
+    }
+    bool SupportsSampledProposals() const noexcept override { return true; }
+    void AcceptFeedback(std::span<const TokenId> accepted,
+                        TokenId correction) override {
+      feedback.emplace_back(accepted.begin(), accepted.end());
+      feedback.back().push_back(correction);
+    }
+    std::vector<std::vector<TokenId>> feedback;
+
+  private:
+    std::size_t accepted_;
+    std::size_t step_{0};
+  };
+  struct Observation {
+    std::vector<TokenId> tokens;
+    TokenId frontier;
+    std::vector<float> logits;
+    bool eos;
+    std::uint64_t rng;
+    std::size_t state_size;
+    std::array<std::size_t, 4> stats;
+    std::vector<std::vector<TokenId>> feedback;
+    bool operator==(const Observation&) const = default;
+  };
+  for (int scenario = 0; scenario < 3; ++scenario) {
+    const auto run = [&](bool batched) {
+      constexpr std::size_t count = 4;
+      std::array<std::unique_ptr<SampledTargetExecutor>, count> targets;
+      std::array<std::unique_ptr<SpeculativeVerifier>, count> verifiers;
+      std::array<const Draft*, count> drafts{};
+      std::array<std::vector<TokenId>, count> sequences;
+      std::vector<gufo::sampling::SamplerState> samplers;
+      samplers.reserve(count);
+      SpeculativeOptions options;
+      options.max_draft_tokens = options.initial_draft_tokens = 7;
+      options.enable_adaptive_draft_length = false;
+      options.use_batched_verification = true;
+      options.retain_frontier_logits = true;
+      for (std::size_t index = 0; index < count; ++index) {
+        targets[index] = std::make_unique<SampledTargetExecutor>(
+            std::vector<float>{-INFINITY, 0.0F, -INFINITY}, true);
+        auto draft = std::make_unique<Draft>(index + 1);
+        drafts[index] = draft.get();
+        verifiers[index] = std::make_unique<SpeculativeVerifier>(
+            *targets[index], std::move(draft), options);
+        sequences[index] = {0};
+        sequences[index].push_back(verifiers[index]->Prime(sequences[index]));
+        gufo::sampling::SamplingConfig config;
+        config.seed = static_cast<std::int64_t>(83 + index);
+        if (scenario != 0) {
+          config.repeat_penalty = 1.1F;
+          config.frequency_penalty = 0.6F;
+          config.repeat_last_n = 3;
+        }
+        if (scenario == 2) {
+          config.temperature = 0.8F;
+          config.top_k = 2;
+          config.top_p = 0.9F;
+          config.min_p = 0.1F;
+        }
+        samplers.emplace_back(config, sequences[index]);
+      }
+      std::vector<Observation> observations;
+      for (std::size_t round = 0; round < 4; ++round) {
+        std::vector<SpeculativeVerifier::StepRequest> requests;
+        std::array<std::vector<TokenId>, count> history;
+        for (std::size_t index = 0; index < count; ++index) {
+          const auto& sequence = sequences[index];
+          history[index].assign(samplers[index].history().begin(),
+                                samplers[index].history().end());
+          requests.push_back(
+              {*verifiers[index], sequence,
+               static_cast<std::uint32_t>(sequence.size() - 1), sequence.back(),
+               round == 3 && index == 1 ? 1U : 99U,
+               round == 3 && index == 0 ? 1U : 8U, samplers[index]});
+        }
+        std::vector<SpeculativeVerifier::StepResult> results;
+        if (batched) {
+          results = SpeculativeVerifier::VerifyBatch(requests);
+        } else {
+          for (const auto& request : requests)
+            results.push_back(request.verifier.VerifyStep(
+                request.sequence, request.position, request.current_token,
+                request.eos_id, request.max_emitted_tokens, request.sampler));
+        }
+        for (std::size_t index = 0; index < count; ++index) {
+          const auto& result = results[index];
+          const auto& stats = verifiers[index]->GetStats();
+          Expect(std::ranges::equal(samplers[index].history(), history[index]),
+                 "chunked verification must keep caller-owned history");
+          observations.push_back(
+              {result.emitted_tokens,
+               result.next_token,
+               result.next_token_logits,
+               result.hit_eos,
+               samplers[index].rng_state(),
+               targets[index]->StateSize(),
+               {stats.total_draft_tokens, stats.total_accepted_tokens,
+                stats.total_verification_steps, stats.total_emitted_tokens},
+               drafts[index]->feedback});
+          for (const auto token : result.emitted_tokens) {
+            sequences[index].push_back(token);
+            samplers[index].Accept(token);
+          }
+        }
+      }
+      std::size_t rows = 0;
+      std::size_t calls = 0;
+      for (const auto& target : targets) {
+        rows += target->VerificationRows();
+        calls += target->VerificationCalls();
+      }
+      return std::tuple{observations, rows, calls};
+    };
+    const auto [isolated, full_rows, full_calls] = run(false);
+    const auto [batched, chunk_rows, chunk_calls] = run(true);
+    Expect(
+        batched == isolated,
+        "verification chunks changed tokens, frontier, RNG, state or feedback");
+    Expect(chunk_rows < full_rows && chunk_calls > full_calls,
+           "fixture must both stop rejected suffixes and continue accepted "
+           "chunks");
+  }
 }
 
 void TestPersistentVerifierSnapshotRoundTrip() {
@@ -1147,6 +1334,7 @@ int main() {
   TestMalformedProposalDoesNotAdvanceTarget();
   TestStopAndBudgetKeepExactFrontier();
   TestConcurrentTargetOnlySteps();
+  TestConcurrentVerificationChunks();
   TestPersistentVerifierSnapshotRoundTrip();
   std::cout << "All speculative verification tests passed.\n";
   return 0;

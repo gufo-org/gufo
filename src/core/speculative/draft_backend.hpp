@@ -31,6 +31,19 @@ struct DraftTargetContext {
   tokenization::TokenId first_token{0};
 };
 
+class IDraftBackend;
+
+/// Independent requests that may share a draft-model forward pass. Each RNG
+/// belongs to its request; batching must preserve its proposal distribution.
+struct DraftProposalRequest {
+  IDraftBackend* backend{nullptr};
+  std::span<const tokenization::TokenId> tokens;
+  std::uint32_t position{0};
+  std::uint32_t max_tokens{0};
+  float temperature{0.0F};
+  std::uint64_t* rng_state{nullptr};
+};
+
 class IDraftBackendSnapshot {
 public:
   IDraftBackendSnapshot() = default;
@@ -94,6 +107,32 @@ public:
   /// probabilities required by lossless speculative rejection sampling.
   [[nodiscard]] virtual bool SupportsSampledProposals() const noexcept {
     return false;
+  }
+
+  /// Providers can share projections while retaining separate request state.
+  /// The default preserves the ordinary per-request proposal operations.
+  [[nodiscard]] virtual std::vector<DraftProposal> ProposeBatch(
+      std::span<const DraftProposalRequest> requests) {
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+      if (requests[index].backend == nullptr)
+        throw std::invalid_argument("draft batch contains a null backend");
+      for (std::size_t previous = 0; previous < index; ++previous) {
+        if (requests[index].backend == requests[previous].backend)
+          throw std::invalid_argument("draft batch repeats a session");
+      }
+    }
+    std::vector<DraftProposal> proposals;
+    proposals.reserve(requests.size());
+    for (const auto& request : requests) {
+      proposals.push_back(
+          request.temperature > 0.0F
+              ? request.backend->ProposeSampled(
+                    request.tokens, request.position, request.max_tokens,
+                    request.temperature, request.rng_state)
+              : request.backend->Propose(request.tokens, request.position,
+                                         request.max_tokens));
+    }
+    return proposals;
   }
 
   /// Returns true when the backend consumes target-model hidden states.

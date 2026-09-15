@@ -127,16 +127,19 @@ namespace detail {
 /// Returns false without launching for other widths, shapes and formats.
 [[nodiscard]] bool TryLaunchKQuantSmallBatchWave64(
     core::GgmlType type, const void* w, const float* x, float* y,
-    std::size_t batch, std::size_t m, std::size_t k, hipStream_t stream);
+    std::size_t batch, std::size_t m, std::size_t k, hipStream_t stream,
+    std::size_t groups = 1);
 
-[[nodiscard]] bool TryLaunchQ8SmallBatchWave64(
-    const void* w, const float* x, float* y, std::size_t batch,
-    std::size_t m, std::size_t k, hipStream_t stream);
+[[nodiscard]] bool TryLaunchQ8SmallBatchWave64(const void* w, const float* x,
+                                               float* y, std::size_t batch,
+                                               std::size_t m, std::size_t k,
+                                               hipStream_t stream);
 
 /// Exact BF16 projection for selected shared widths; the caller selects shapes.
-[[nodiscard]] bool TryLaunchBf16SmallBatchWave64(
-    const void* w, const float* x, float* y, std::size_t batch,
-    std::size_t m, std::size_t k, hipStream_t stream);
+[[nodiscard]] bool TryLaunchBf16SmallBatchWave64(const void* w, const float* x,
+                                                 float* y, std::size_t batch,
+                                                 std::size_t m, std::size_t k,
+                                                 hipStream_t stream);
 
 /// opt-q4kxl: true for the formats that run natively through the K-quant GPU
 /// kernels -- the blocked WMMA GEMM at prefill batch, the exact shared-weight

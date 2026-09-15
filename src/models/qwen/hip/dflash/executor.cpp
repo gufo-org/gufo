@@ -270,44 +270,49 @@ void QwenDFlashGpuExecutor::Allocate() {
     AllocateBuffer(d_injected_v_[i], history_capacity_ * kv_dim);
   }
 
+  const auto allocate_scratch = [this](auto*& pointer, std::size_t elements) {
+    AllocateBuffer(pointer, elements);
+    scratch_bytes_ += elements * sizeof(*pointer);
+  };
   // Scratch buffers for prompt injection & block drafting
-  AllocateBuffer(d_target_features_, injection_capacity_ * enc_in_dim);
-  AllocateBuffer(
+  allocate_scratch(d_target_features_, injection_capacity_ * enc_in_dim);
+  allocate_scratch(
       d_fused_features_,
       std::max<std::size_t>(injection_capacity_, block_size) * hidden_size);
-  AllocateBuffer(
+  allocate_scratch(
       d_block_normed_,
       std::max<std::size_t>(injection_capacity_, block_size) * hidden_size);
-  AllocateBuffer(
+  allocate_scratch(
       d_k_block_,
       std::max<std::size_t>(injection_capacity_, block_size) * kv_dim);
-  AllocateBuffer(
+  allocate_scratch(
       d_v_block_,
       std::max<std::size_t>(injection_capacity_, block_size) * kv_dim);
 
   // Scratch buffers for block drafting (size = block_size)
-  AllocateBuffer(d_block_hidden_, block_size * hidden_size);
-  AllocateBuffer(d_conv_hidden_, block_size * hidden_size);
-  AllocateBuffer(d_dynamic_coefficients_, block_size * dynamic_size);
-  AllocateBuffer(d_q_, block_size * q_dim);
-  AllocateBuffer(d_attn_out_, block_size * q_dim);
-  AllocateBuffer(d_ffn_gate_, block_size * intermediate_size);
-  AllocateBuffer(d_ffn_up_, block_size * intermediate_size);
-  AllocateBuffer(d_ffn_down_, block_size * hidden_size);
-  AllocateBuffer(d_logits_, block_size * cfg.vocab_size);
-  AllocateBuffer(d_selector_hidden_, block_size * df_cfg.selector_rank);
+  allocate_scratch(d_block_hidden_, block_size * hidden_size);
+  allocate_scratch(d_conv_hidden_, block_size * hidden_size);
+  allocate_scratch(d_dynamic_coefficients_, block_size * dynamic_size);
+  allocate_scratch(d_q_, block_size * q_dim);
+  allocate_scratch(d_attn_out_, block_size * q_dim);
+  allocate_scratch(d_ffn_gate_, block_size * intermediate_size);
+  allocate_scratch(d_ffn_up_, block_size * intermediate_size);
+  allocate_scratch(d_ffn_down_, block_size * hidden_size);
+  allocate_scratch(d_logits_, block_size * cfg.vocab_size);
+  allocate_scratch(d_selector_hidden_, block_size * df_cfg.selector_rank);
   const std::size_t selector_scratch_elements =
       kernels::DFlashSelectorScratchElements(cfg.vocab_size);
-  AllocateBuffer(d_selector_partial_scores_, selector_scratch_elements);
-  AllocateBuffer(d_selector_partial_ids_, selector_scratch_elements);
-  AllocateBuffer(d_selector_candidate_ids_, block_size * df_cfg.selector_top_k);
-  AllocateBuffer(d_selector_candidate_probabilities_,
-                 block_size * df_cfg.selector_top_k);
-  AllocateBuffer(d_selector_uniforms_, block_size);
-  AllocateBuffer(d_confidences_, block_size);
-  AllocateBuffer(d_out_token_, block_size);
+  allocate_scratch(d_selector_partial_scores_, selector_scratch_elements);
+  allocate_scratch(d_selector_partial_ids_, selector_scratch_elements);
+  allocate_scratch(d_selector_candidate_ids_,
+                   block_size * df_cfg.selector_top_k);
+  allocate_scratch(d_selector_candidate_probabilities_,
+                   block_size * df_cfg.selector_top_k);
+  allocate_scratch(d_selector_uniforms_, block_size);
+  allocate_scratch(d_confidences_, block_size);
+  allocate_scratch(d_out_token_, block_size);
   if (block_size > kDFlashMaxSharedBatch)
-    AllocateBuffer(d_bf16_input_, block_size * intermediate_size);
+    allocate_scratch(d_bf16_input_, block_size * intermediate_size);
 
   PrewarmBlockGemms();
 }
@@ -536,6 +541,8 @@ void QwenDFlashGpuExecutor::Free() noexcept {
     (void)hipFree(d_out_token_);
   if (d_bf16_input_ != nullptr)
     (void)hipFree(d_bf16_input_);
+  if (d_batch_scratch_ != nullptr)
+    (void)hipFree(d_batch_scratch_);
   hipblaslt_gemm_.reset();
   if (hipblas_handle_ != nullptr) {
     (void)hipblasDestroy(hipblas_handle_);
@@ -553,6 +560,49 @@ std::size_t QwenDFlashGpuExecutor::StateBytes() const noexcept {
       model_->GetConfig().head_dim;
   return 2U * model_->GetDFlashConfig().num_layers * history_capacity_ *
          kv_width * sizeof(float);
+}
+
+QwenGpuMemoryUsage QwenDFlashGpuExecutor::GetMemoryUsage() const noexcept {
+  return {StateBytes(), scratch_bytes_ + batch_scratch_bytes_};
+}
+
+QwenGpuMemoryUsage QwenDFlashGpuExecutor::EstimateMemoryUsage(
+    const QwenDFlashGpuModel& model, std::uint32_t max_context,
+    std::size_t max_batch_width) {
+  if (max_context == 0 || max_context > model.GetConfig().context_length ||
+      max_batch_width == 0 || max_batch_width > 8)
+    throw std::invalid_argument("DFlash memory estimate has invalid limits");
+  const auto& config = model.GetConfig();
+  const auto& draft = model.GetDFlashConfig();
+  const std::size_t hidden = config.hidden_size;
+  const std::size_t kv =
+      static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+  const std::size_t block = draft.block_size;
+  const std::size_t injection = std::min(max_context, std::uint32_t{256});
+  const std::size_t shared = std::max(injection, block);
+  const std::size_t dynamic =
+      2U * draft.conv_kernel_size * (hidden / draft.conv_group_size);
+  const std::size_t scratch_elements =
+      injection * draft.target_layer_ids.size() * hidden +
+      shared * (2U * hidden + 2U * kv) +
+      block * (3U * hidden + dynamic + 2U * config.AttentionSize() +
+               2U * config.intermediate_size + config.vocab_size +
+               draft.selector_rank + 2U * draft.selector_top_k + 3U) +
+      2U * kernels::DFlashSelectorScratchElements(config.vocab_size);
+  QwenGpuMemoryUsage usage{
+      .request_state_bytes = 2U * draft.num_layers *
+                             static_cast<std::size_t>(
+                                 std::min(max_context, draft.sliding_window)) *
+                             kv * sizeof(float),
+      .temporary_scratch_bytes = scratch_elements * sizeof(float),
+  };
+  if (block > kDFlashMaxSharedBatch)
+    usage.temporary_scratch_bytes +=
+        block * config.intermediate_size * sizeof(hip_bfloat16);
+  if (max_batch_width > 1 && config.head_dim <= 256)
+    usage.temporary_scratch_bytes += BatchScratchBytes(
+        model, max_batch_width * std::min<std::size_t>(block, max_context));
+  return usage;
 }
 
 std::size_t QwenDFlashGpuExecutor::SnapshotPayloadBytes() const noexcept {

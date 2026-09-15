@@ -85,10 +85,9 @@ void LaunchFfnActivation(const models::QwenLayerWeights& layer,
                    batch_size, intermediate_size, hidden_size, stream);
   LaunchProjection(up, scratch.decode.normed.data(), scratch.ffn.up.data(),
                    batch_size, intermediate_size, hidden_size, stream);
-  LaunchBatchedSwiGLUActivation(
-      scratch.ffn.gate.data(), scratch.ffn.up.data(),
-      scratch.ffn.activation.data(), nullptr, batch_size * intermediate_size,
-      stream);
+  LaunchBatchedSwiGLUActivation(scratch.ffn.gate.data(), scratch.ffn.up.data(),
+                                scratch.ffn.activation.data(), nullptr,
+                                batch_size * intermediate_size, stream);
 }
 
 struct SsmControls {
@@ -98,9 +97,10 @@ struct SsmControls {
 };
 
 SsmControls LaunchSsmControls(const models::QwenLayerWeights& layer,
-                             const QwenGpuScratchView& scratch,
-                             std::size_t batch_size, std::size_t time_step_rank,
-                             std::size_t hidden_size, hipStream_t stream) {
+                              const QwenGpuScratchView& scratch,
+                              std::size_t batch_size,
+                              std::size_t time_step_rank,
+                              std::size_t hidden_size, hipStream_t stream) {
   const auto& alpha = layer.ssm_alpha;
   const auto& beta = layer.ssm_beta;
   if (time_step_rank == 48 && hidden_size == 5120 &&
@@ -122,8 +122,9 @@ SsmControls LaunchSsmControls(const models::QwenLayerWeights& layer,
       return {packed, packed + time_step_rank, row_stride};
     }
   }
-  LaunchProjection(alpha, scratch.decode.normed.data(), scratch.ssm.alpha.data(),
-                   batch_size, time_step_rank, hidden_size, stream);
+  LaunchProjection(alpha, scratch.decode.normed.data(),
+                   scratch.ssm.alpha.data(), batch_size, time_step_rank,
+                   hidden_size, stream);
   LaunchProjection(beta, scratch.decode.normed.data(), scratch.ssm.beta.data(),
                    batch_size, time_step_rank, hidden_size, stream);
   return {scratch.ssm.alpha.data(), scratch.ssm.beta.data(), time_step_rank};
@@ -211,8 +212,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
     auto replay = state_arena.GetSsmReplayCapture();
     replay.position = scratch.decode.prompt_tokens.data() + row;
     ssm_sequences[row] = {state_arena.d_ssm_conv_state,
-                           state_arena.d_ssm_deltanet_state, replay,
-                           static_cast<std::uint32_t>(row), 1};
+                          state_arena.d_ssm_deltanet_state, replay,
+                          static_cast<std::uint32_t>(row), 1};
   }
   HIP_CHECK(hipMemcpyAsync(
       scratch.decode.prompt_tokens.data(), host_tokens.data(),
@@ -224,9 +225,10 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   if (capture_replay) {
     // Embedding has consumed the token IDs. Reuse the buffer for the actual
     // per-session positions until every recurrent layer has captured its row.
-    HIP_CHECK(hipMemcpyAsync(
-        scratch.decode.prompt_tokens.data(), host_positions.data(),
-        batch_size * sizeof(std::uint32_t), hipMemcpyHostToDevice, arena.stream));
+    HIP_CHECK(hipMemcpyAsync(scratch.decode.prompt_tokens.data(),
+                             host_positions.data(),
+                             batch_size * sizeof(std::uint32_t),
+                             hipMemcpyHostToDevice, arena.stream));
   }
 
   EmitDecodeRouteTelemetry(weights, coordinator->policy_);
@@ -309,8 +311,9 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
                        scratch.ssm.gate.data(), batch_size, ssm_inner_size,
                        hidden_size, arena.stream);
-      const auto controls = LaunchSsmControls(
-          layer, scratch, batch_size, time_step_rank, hidden_size, arena.stream);
+      const auto controls =
+          LaunchSsmControls(layer, scratch, batch_size, time_step_rank,
+                            hidden_size, arena.stream);
 
       LaunchSSMConvRecurrenceBatch(
           scratch.ssm.qkv.data(),
@@ -339,7 +342,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                          hidden_size, 1e-6F, arena.stream);
 
     LaunchFfnActivation(layer, scratch, batch_size, intermediate_size,
-                         hidden_size, arena.stream);
+                        hidden_size, arena.stream);
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena.stream);
@@ -507,10 +510,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
     auto& state_arena = item.executor->arena_;
     auto replay = state_arena.GetSsmReplayCapture();
     replay.position = scratch.decode.prompt_tokens.data() + offsets[index];
-    ssm_sequences[index] = {
-        state_arena.d_ssm_conv_state, state_arena.d_ssm_deltanet_state, replay,
-        static_cast<std::uint32_t>(offsets[index]),
-        static_cast<std::uint32_t>(item.tokens.size())};
+    ssm_sequences[index] = {state_arena.d_ssm_conv_state,
+                            state_arena.d_ssm_deltanet_state, replay,
+                            static_cast<std::uint32_t>(offsets[index]),
+                            static_cast<std::uint32_t>(item.tokens.size())};
     for (std::size_t row = 0; row < item.tokens.size(); ++row) {
       const auto position = item.position + static_cast<std::uint32_t>(row);
       host_tokens[offsets[index] + row] = item.tokens[row];
@@ -674,8 +677,9 @@ QwenGpuExecutor::ForwardVerificationBatch(
       LaunchProjection(layer.attn_gate, scratch.decode.normed.data(),
                        scratch.ssm.gate.data(), batch_size, ssm_inner_size,
                        hidden_size, arena_.stream);
-      const auto controls = LaunchSsmControls(
-          layer, scratch, batch_size, time_step_rank, hidden_size, arena_.stream);
+      const auto controls =
+          LaunchSsmControls(layer, scratch, batch_size, time_step_rank,
+                            hidden_size, arena_.stream);
       LaunchSSMConvRecurrenceBatch(
           scratch.ssm.qkv.data(),
           static_cast<const float*>(layer.ssm_conv1d.data),
@@ -703,7 +707,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
                          hidden_size, 1e-6F, arena_.stream);
 
     LaunchFfnActivation(layer, scratch, batch_size, intermediate_size,
-                         hidden_size, arena_.stream);
+                        hidden_size, arena_.stream);
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena_.stream);
@@ -713,13 +717,12 @@ QwenGpuExecutor::ForwardVerificationBatch(
     if (capture_prompt_hidden_) {
       if (const auto tap = arena_.GetTargetLayerCaptureIndex(layer_index);
           tap.has_value()) {
-        float* const destination =
-            feature_buffer + (*tap * hidden_size);
-        HIP_CHECK(hipMemcpy2DAsync(
-            destination, feature_width * sizeof(float),
-            scratch.decode.hidden.data(), hidden_size * sizeof(float),
-            hidden_size * sizeof(float), batch_size, hipMemcpyDeviceToDevice,
-            arena_.stream));
+        float* const destination = feature_buffer + (*tap * hidden_size);
+        HIP_CHECK(hipMemcpy2DAsync(destination, feature_width * sizeof(float),
+                                   scratch.decode.hidden.data(),
+                                   hidden_size * sizeof(float),
+                                   hidden_size * sizeof(float), batch_size,
+                                   hipMemcpyDeviceToDevice, arena_.stream));
       }
     }
   }
@@ -734,12 +737,11 @@ QwenGpuExecutor::ForwardVerificationBatch(
                          feature_buffer + offset * feature_width,
                          item.tokens.size() * feature_width * sizeof(float),
                          hipMemcpyDeviceToHost, arena_.stream));
-      HIP_CHECK(
-          hipMemcpyAsync(executor.arena_.d_target_layer_features,
-                         feature_buffer +
-                             (offset + item.tokens.size() - 1) * feature_width,
-                         feature_width * sizeof(float), hipMemcpyDeviceToDevice,
-                         arena_.stream));
+      HIP_CHECK(hipMemcpyAsync(
+          executor.arena_.d_target_layer_features,
+          feature_buffer + (offset + item.tokens.size() - 1) * feature_width,
+          feature_width * sizeof(float), hipMemcpyDeviceToDevice,
+          arena_.stream));
     } else if (capture_prompt_hidden_) {
       HIP_CHECK(
           hipMemcpyAsync(executor.h_verification_hidden_.data(),
@@ -762,12 +764,11 @@ QwenGpuExecutor::ForwardVerificationBatch(
                        static_cast<const float*>(weights_.output_norm.data),
                        scratch.decode.normed.data(), nullptr, batch_size,
                        hidden_size, 1e-6F, arena_.stream);
-  LaunchProjection(weights_.output, scratch.decode.normed.data(),
-                   logits_buffer, batch_size, vocab_size, hidden_size,
-                   arena_.stream);
+  LaunchProjection(weights_.output, scratch.decode.normed.data(), logits_buffer,
+                   batch_size, vocab_size, hidden_size, arena_.stream);
   auto* const d_out_tokens = scratch.decode.prompt_tokens.data();
-  LaunchBatchedGPUArgmax(logits_buffer, d_out_tokens, batch_size,
-                         vocab_size, arena_.stream);
+  LaunchBatchedGPUArgmax(logits_buffer, d_out_tokens, batch_size, vocab_size,
+                         arena_.stream);
   std::array<tokenization::TokenId, kMaxRows> host_predictions{};
   HIP_CHECK(hipMemcpyAsync(host_predictions.data(), d_out_tokens,
                            batch_size * sizeof(tokenization::TokenId),
@@ -794,7 +795,6 @@ QwenGpuExecutor::ForwardVerificationBatch(
   predictions.reserve(items.size());
   for (std::size_t index = 0; index < items.size(); ++index) {
     const auto& item = items[index];
-    item.executor->arena_.DisableSsmReplayCapture();
     predictions.emplace_back(
         host_predictions.begin() + offsets[index],
         host_predictions.begin() + offsets[index] + item.tokens.size());

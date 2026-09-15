@@ -286,6 +286,84 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeSampled(
                      rng_state);
 }
 
+std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
+    std::span<const speculative::DraftProposalRequest> requests) {
+  if (requests.size() < 2 || requests.size() > 8)
+    return IDraftBackend::ProposeBatch(requests);
+  std::array<QwenDFlashGpuDraftBackend*, 8> backends{};
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    auto* backend =
+        dynamic_cast<QwenDFlashGpuDraftBackend*>(requests[index].backend);
+    if (backend == nullptr ||
+        &backend->executor_->GetModel() != &executor_->GetModel())
+      return IDraftBackend::ProposeBatch(requests);
+    backends[index] = backend;
+  }
+  // Validate every request before changing caches or drawing random values.
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    const auto& backend = *backends[index];
+    if (!backend.primed_ || request.tokens.empty() || request.position == 0 ||
+        backend.proposal_active_ || !std::isfinite(request.temperature) ||
+        request.temperature < 0.0F ||
+        (request.temperature > 0.0F && request.rng_state == nullptr))
+      throw std::invalid_argument(
+          "DFlash2 proposal batch has an invalid request");
+    for (std::size_t previous = 0; previous < index; ++previous) {
+      if (backends[previous] == backends[index])
+        throw std::invalid_argument("DFlash2 proposal batch repeats a session");
+    }
+  }
+  std::vector<speculative::DraftProposal> proposals(requests.size());
+  std::array<
+      std::array<float, speculative::DFlashLengthController::kMaxDraftTokens>,
+      8>
+      uniforms{};
+  std::vector<QwenDFlashBlockRequest> blocks;
+  std::vector<std::size_t> indices;
+  blocks.reserve(requests.size());
+  indices.reserve(requests.size());
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    auto& backend = *backends[index];
+    backend.InjectPendingFeatures(request.position);
+    proposals[index].start_pos = request.position;
+    const auto budget =
+        request.position < backend.config_.max_context
+            ? backend.config_.max_context - request.position - 1U
+            : 0U;
+    const auto count =
+        backend.controller_.Choose(std::min(request.max_tokens, budget));
+    if (count == 0)
+      continue;
+    backend.proposed_tokens_.clear();
+    if (request.temperature > 0.0F) {
+      for (std::uint32_t row = 0; row < count; ++row)
+        uniforms[index][row] =
+            static_cast<float>(sampling::Uniform(request.rng_state));
+    }
+    indices.push_back(index);
+    blocks.push_back({backend.executor_.get(),
+                      request.tokens.back(),
+                      request.position,
+                      count,
+                      request.temperature,
+                      std::span(uniforms[index]).first(count),
+                      {}});
+  }
+  if (blocks.empty())
+    return proposals;
+  auto generated = QwenDFlashGpuExecutor::ForwardBlockBatch(blocks);
+  for (std::size_t block = 0; block < generated.size(); ++block) {
+    const auto index = indices[block];
+    auto& backend = *backends[index];
+    backend.proposed_tokens_ = generated[block].tokens;
+    backend.proposal_active_ = !backend.proposed_tokens_.empty();
+    proposals[index] = std::move(generated[block]);
+  }
+  return proposals;
+}
+
 void QwenDFlashGpuDraftBackend::InjectPendingFeatures(
     std::uint32_t current_pos) {
   if (current_pos < executor_->GetInjectedContextLength()) {

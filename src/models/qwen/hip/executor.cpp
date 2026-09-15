@@ -113,8 +113,8 @@ QwenGpuMemoryUsage QwenGpuExecutor::EstimateMemoryUsage(
 
 QwenGpuMemoryUsage QwenGpuExecutor::GetMemoryUsage() const {
   auto usage = arena_.GetMemoryUsage();
-  usage.temporary_scratch_bytes +=
-      verification_logits_capacity_ * weights_.config.vocab_size * sizeof(float);
+  usage.temporary_scratch_bytes += verification_logits_capacity_ *
+                                   weights_.config.vocab_size * sizeof(float);
   usage.temporary_scratch_bytes += sampling_workspace_.SizeBytes();
   return usage;
 }
@@ -174,8 +174,14 @@ void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
 }
 
 void QwenGpuExecutor::RestoreState() {
+  if (arena_.IsSsmReplayCaptureActive())
+    arena_.DisableSsmReplayCapture();
   arena_.RestoreState();
   replaying_ssm_state_ = true;
+}
+
+void QwenGpuExecutor::FinishVerification() {
+  arena_.DisableSsmReplayCapture();
 }
 
 void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,

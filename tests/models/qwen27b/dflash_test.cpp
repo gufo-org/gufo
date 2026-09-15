@@ -5,11 +5,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -68,6 +71,234 @@ void TestLengthController() {
              "malformed controller state cannot mutate the decision history");
     }
   }
+}
+
+void TestConcurrentBlocks(
+    const std::shared_ptr<const gufo::hip::QwenGpuModel>& target_model,
+    const std::shared_ptr<const gufo::hip::QwenDFlashGpuModel>& draft_model) {
+  using namespace gufo::hip;
+  using gufo::speculative::DraftProposal;
+  using Token = gufo::tokenization::TokenId;
+  std::string error;
+  auto target = QwenGpuExecutor::Create(target_model, &error, 128);
+  Expect(target != nullptr, error);
+  const auto& config = draft_model->GetDFlashConfig();
+  target->SetPromptHiddenCapture(true, config.target_layer_ids);
+  auto prompt = target->GetTokenizer().Encode(
+      "Virtual memory gives every process a separate address space. The "
+      "operating system maps virtual pages to physical memory, handles page "
+      "faults, and keeps unrelated processes from changing each other's data.");
+  Expect(prompt.size() >= 25, "concurrent draft reference prompt");
+  prompt.resize(25);
+  (void)target->ForwardPromptBatch(prompt);
+  const auto captured = target->GetPromptHiddenStates();
+  const std::vector<float> features(captured.begin(), captured.end());
+  const auto feature_width =
+      config.target_layer_ids.size() * target_model->GetConfig().hidden_size;
+  target.reset();
+  std::array<std::unique_ptr<QwenDFlashGpuExecutor>, 8> executors;
+  std::array<std::uint32_t, 8> positions{};
+  std::array<std::array<float, 7>, 8> uniforms{};
+  const std::array<float, 8> temperatures{0.0F, 0.2F, 0.8F, 1.3F,
+                                          2.0F, 0.0F, 0.7F, 1.0F};
+  const auto serial_memory =
+      QwenDFlashGpuExecutor::EstimateMemoryUsage(*draft_model, 128);
+  const auto batch_memory =
+      QwenDFlashGpuExecutor::EstimateMemoryUsage(*draft_model, 128, 8);
+  for (std::size_t index = 0; index < executors.size(); ++index) {
+    executors[index] = QwenDFlashGpuExecutor::Create(draft_model, 128, &error);
+    Expect(executors[index] != nullptr, error);
+    const auto memory = executors[index]->GetMemoryUsage();
+    Expect(memory.request_state_bytes == serial_memory.request_state_bytes &&
+               memory.temporary_scratch_bytes ==
+                   serial_memory.temporary_scratch_bytes,
+           "draft memory estimate matches allocated state and scalar scratch");
+    positions[index] = 3U * static_cast<std::uint32_t>(index + 1U);
+    Expect(executors[index]->InjectTargetContext(
+               std::span(features).first(positions[index] * feature_width), 0,
+               positions[index]),
+           "independent concurrent draft context");
+    for (std::size_t row = 0; row < uniforms[index].size(); ++row)
+      uniforms[index][row] =
+          (static_cast<float>((index * 13U + row * 7U) % 101U) + 0.5F) / 101.0F;
+  }
+  const auto exact = [](std::span<const float> actual,
+                        std::span<const float> expected) {
+    return actual.size() == expected.size() &&
+           (actual.empty() || std::memcmp(actual.data(), expected.data(),
+                                          actual.size_bytes()) == 0);
+  };
+  for (const bool full_block : {false, true}) {
+    std::array<DraftProposal, 8> expected;
+    std::array<std::map<std::string, std::vector<float>>, 8> traces;
+    std::array<std::uint32_t, 8> counts{};
+    for (std::size_t index = 0; index < executors.size(); ++index) {
+      counts[index] =
+          full_block ? 7U : 1U + static_cast<std::uint32_t>(index % 7U);
+      auto& proposal = expected[index];
+      proposal.start_pos = positions[index];
+      proposal.candidates_per_token =
+          temperatures[index] > 0.0F ? config.selector_top_k : 0;
+      const DFlashTrace trace = [&](std::string_view name,
+                                    std::span<const float> values) {
+        traces[index].emplace(std::string(name),
+                              std::vector<float>(values.begin(), values.end()));
+      };
+      proposal.tokens = executors[index]->ForwardBlock(
+          prompt[positions[index]], positions[index], counts[index],
+          temperatures[index], uniforms[index], nullptr,
+          temperatures[index] > 0.0F ? &proposal.candidate_ids : nullptr,
+          temperatures[index] > 0.0F ? &proposal.candidate_probabilities
+                                     : nullptr,
+          trace);
+    }
+    for (const std::size_t width : {2U, 4U, 6U, 8U}) {
+      std::vector<QwenDFlashBlockRequest> requests;
+      std::vector<std::size_t> order;
+      std::array<std::set<std::string>, 8> visited;
+      for (std::size_t row = 0; row < width; ++row) {
+        const auto index = (row + width / 2U) % executors.size();
+        order.push_back(index);
+        requests.push_back(
+            {executors[index].get(), prompt[positions[index]], positions[index],
+             counts[index], temperatures[index], uniforms[index],
+             [&, index](std::string_view name, std::span<const float> values) {
+               const auto found = traces[index].find(std::string(name));
+               Expect(
+                   found != traces[index].end(),
+                   "concurrent draft trace stage exists in scalar reference");
+               Expect(exact(values, found->second),
+                      "concurrent draft differs at " + std::string(name) +
+                          " request " + std::to_string(index) + " width " +
+                          std::to_string(width));
+               visited[index].insert(std::string(name));
+             }});
+      }
+      const auto actual = QwenDFlashGpuExecutor::ForwardBlockBatch(requests);
+      Expect(actual.size() == width, "concurrent draft result count");
+      const auto memory = requests.front().executor->GetMemoryUsage();
+      Expect(
+          memory.request_state_bytes == serial_memory.request_state_bytes &&
+              memory.temporary_scratch_bytes >
+                  serial_memory.temporary_scratch_bytes &&
+              memory.temporary_scratch_bytes <=
+                  batch_memory.temporary_scratch_bytes,
+          "concurrent draft workspace is counted within its admission bound");
+      if (full_block && width == 8)
+        Expect(memory.TotalBytes() == batch_memory.TotalBytes(),
+               "full concurrent draft memory matches its admission estimate");
+      for (std::size_t row = 0; row < width; ++row) {
+        const auto index = order[row];
+        Expect(visited[index].size() == traces[index].size(),
+               "every scalar draft stage was checked in the batch");
+        const auto& reference = expected[index];
+        Expect(actual[row].start_pos == reference.start_pos &&
+                   actual[row].tokens == reference.tokens &&
+                   actual[row].candidate_ids == reference.candidate_ids &&
+                   actual[row].candidates_per_token ==
+                       reference.candidates_per_token &&
+                   exact(actual[row].candidate_probabilities,
+                         reference.candidate_probabilities),
+               "concurrent draft tokens and actual selector distributions");
+        Expect(executors[index]->GetInjectedContextLength() == positions[index],
+               "drafting cannot commit another request's context");
+      }
+    }
+  }
+  std::cout
+      << "DFlash2 C2/C4/C6/C8: exact layers, logits, selector probabilities; "
+         "ragged/full blocks, distinct positions/temperatures/draws\n";
+  for (auto& executor : executors)
+    executor.reset();
+  std::array<std::unique_ptr<QwenDFlashGpuDraftBackend>, 8> backends;
+  std::array<std::vector<Token>, 8> sequences;
+  std::array<std::uint64_t, 8> rng{};
+  for (std::size_t index = 0; index < backends.size(); ++index) {
+    const QwenDFlashGpuDraftConfig policy{
+        .max_context = 128,
+        .max_draft_tokens = 7,
+        .policy = index % 2 == 0
+                      ? gufo::speculative::DFlashDraftPolicy::kAdaptive
+                      : gufo::speculative::DFlashDraftPolicy::kFixed};
+    backends[index] =
+        QwenDFlashGpuDraftBackend::Create(draft_model, policy, &error);
+    Expect(backends[index] != nullptr, error);
+    Expect(backends[index]->PrimeTargetContext(
+               {std::span(prompt).first(positions[index]),
+                std::span(features).first(positions[index] * feature_width),
+                feature_width, prompt[positions[index]]}),
+           "concurrent backend prime");
+    sequences[index].assign(prompt.begin(),
+                            prompt.begin() + positions[index] + 1U);
+    rng[index] = 191U + 31U * index;
+  }
+  const auto payload = [](const QwenDFlashGpuDraftBackend& backend) {
+    auto snapshot = backend.Snapshot();
+    std::vector<std::uint8_t> bytes(snapshot->PersistentPayloadBytes());
+    Expect(snapshot->SerializePersistent(bytes) == bytes.size(),
+           "concurrent backend snapshot size");
+    return bytes;
+  };
+  for (std::size_t round = 0; round < 2; ++round) {
+    std::array<DraftProposal, 8> expected;
+    std::array<std::vector<std::uint8_t>, 8> expected_state;
+    auto expected_rng = rng;
+    std::vector<gufo::speculative::DraftProposalRequest> requests;
+    std::array<std::size_t, 8> accepted{};
+    for (std::size_t index = 0; index < backends.size(); ++index) {
+      auto& backend = *backends[index];
+      const auto saved = backend.Snapshot();
+      const auto limit = 1U + static_cast<std::uint32_t>(index % 7U);
+      expected[index] =
+          temperatures[index] > 0.0F
+              ? backend.ProposeSampled(sequences[index], positions[index],
+                                       limit, temperatures[index],
+                                       &expected_rng[index])
+              : backend.Propose(sequences[index], positions[index], limit);
+      accepted[index] = std::min(index % 4U, expected[index].tokens.size());
+      backend.AcceptFeedback(
+          std::span(expected[index].tokens).first(accepted[index]), 4);
+      expected_state[index] = payload(backend);
+      backend.RestoreSnapshot(*saved);
+      requests.push_back({&backend, sequences[index], positions[index], limit,
+                          temperatures[index],
+                          temperatures[index] > 0.0F ? &rng[index] : nullptr});
+    }
+    const auto actual = backends.front()->ProposeBatch(requests);
+    Expect(rng == expected_rng,
+           "batched proposals preserve every request's RNG");
+    Expect(actual.size() == backends.size(), "batched backend result count");
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+      Expect(
+          actual[index].start_pos == expected[index].start_pos &&
+              actual[index].tokens == expected[index].tokens &&
+              actual[index].candidate_ids == expected[index].candidate_ids &&
+              actual[index].candidates_per_token ==
+                  expected[index].candidates_per_token &&
+              exact(actual[index].candidate_probabilities,
+                    expected[index].candidate_probabilities),
+          "batched backend preserves independent proposals and probabilities");
+      auto& backend = *backends[index];
+      backend.AcceptFeedback(
+          std::span(actual[index].tokens).first(accepted[index]), 4);
+      Expect(payload(backend) == expected_state[index],
+             "batched feedback preserves each controller, cache and pending "
+             "history");
+      for (std::size_t row = 0; row <= accepted[index]; ++row) {
+        const auto feature_row = (positions[index] + row) % prompt.size();
+        backend.UpdateTargetHidden(std::span(features).subspan(
+            feature_row * feature_width, feature_width));
+      }
+      sequences[index].insert(sequences[index].end(),
+                              actual[index].tokens.begin(),
+                              actual[index].tokens.begin() + accepted[index]);
+      sequences[index].push_back(4);
+      positions[index] += static_cast<std::uint32_t>(accepted[index] + 1U);
+    }
+  }
+  std::cout
+      << "DFlash2 batched backends: exact RNG, private fixed/adaptive policy, "
+         "pending feature injection and persistent state\n";
 }
 
 void CaptureReferenceTrace(
@@ -279,6 +510,9 @@ int main(int argc, const char* const* argv) {
       CaptureAcceptanceTrace(target_model, dflash_model, argv[4], argv[5]);
       return 0;
     }
+    TestConcurrentBlocks(target_model, dflash_model);
+    if (argc == 4 && std::string_view(argv[3]) == "--concurrency-only")
+      return 0;
 
     gufo::hip::QwenDFlashGpuDraftConfig config{
         .max_context = 512,

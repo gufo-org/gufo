@@ -52,6 +52,7 @@ void ExpectStableGpuMemory(std::size_t before, std::size_t after) {
 void CheckSamplingStrategies(
     gufo::server::InferenceBackend& backend,
     gufo::server::InferenceBackend* speculative_backend = nullptr) {
+  constexpr std::uint32_t token_count = 8;
   struct Reference {
     std::string prompt;
     gufo::sampling::SamplingConfig config;
@@ -62,17 +63,19 @@ void CheckSamplingStrategies(
   for (const auto& test : gufo::test::QwenSamplingCases()) {
     const auto prompt = "Sampling " + std::string(test.name) +
                         ": Continue red, blue, blue, red,";
-    const auto ar = backend.complete(prompt, 4, test.config);
-    const auto ar_replay = backend.complete(prompt, 4, test.config);
-    Expect(ar.completion_tokens == 4 && ar.draft_tokens == 0 &&
+    const auto ar = backend.complete(prompt, token_count, test.config);
+    const auto ar_replay = backend.complete(prompt, token_count, test.config);
+    Expect(ar.completion_tokens == token_count && ar.draft_tokens == 0 &&
                ar_replay.cache_hit && ar.tokens == ar_replay.tokens,
            "AR strategy must reproduce all cold/cached token IDs");
     Reference reference{
         .prompt = prompt, .config = test.config, .ar = ar, .speculative = {}};
     if (speculative_backend != nullptr) {
-      const auto spec = speculative_backend->complete(prompt, 4, test.config);
-      const auto replay = speculative_backend->complete(prompt, 4, test.config);
-      Expect(spec.completion_tokens == 4 && spec.draft_tokens > 0 &&
+      const auto spec =
+          speculative_backend->complete(prompt, token_count, test.config);
+      const auto replay =
+          speculative_backend->complete(prompt, token_count, test.config);
+      Expect(spec.completion_tokens == token_count && spec.draft_tokens > 0 &&
                  !spec.cache_hit && replay.cache_hit &&
                  spec.tokens == replay.tokens,
              "DFlash2 strategy must draft and reproduce cold/cached token IDs");
@@ -95,7 +98,8 @@ void CheckSamplingStrategies(
     for (std::size_t row = 0; row < width; ++row) {
       const auto* reference = &references[(offset + row) % references.size()];
       pending.push_back(std::async(std::launch::async, [&current, reference] {
-        return current.complete(reference->prompt, 4, reference->config);
+        return current.complete(reference->prompt, token_count,
+                                reference->config);
       }));
     }
     std::size_t physical_width = 1;

@@ -336,6 +336,7 @@ public:
       if (draft_backend == nullptr) {
         throw std::runtime_error("Failed to create DFlash session: " + error);
       }
+      draft_backend_ = draft_backend.get();
       verifier_ = std::make_unique<speculative::SpeculativeVerifier>(
           *executor_, std::move(draft_backend), speculative_options);
     }
@@ -356,7 +357,12 @@ public:
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
     try {
-      const auto usage = executor_->GetMemoryUsage();
+      auto usage = executor_->GetMemoryUsage();
+      if (draft_backend_ != nullptr) {
+        const auto draft = draft_backend_->GetMemoryUsage();
+        usage.request_state_bytes += draft.request_state_bytes;
+        usage.temporary_scratch_bytes += draft.temporary_scratch_bytes;
+      }
       return {
           .per_request_state_bytes = usage.request_state_bytes,
           .temporary_scratch_bytes = usage.temporary_scratch_bytes,
@@ -590,6 +596,8 @@ private:
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::unique_ptr<hip::QwenGpuExecutor> executor_;
   std::unique_ptr<speculative::SpeculativeVerifier> verifier_;
+  // Owned by verifier_; used only to account the session's draft allocations.
+  hip::QwenDFlashGpuDraftBackend* draft_backend_{nullptr};
   std::vector<TextRunnerToken> sequence_;
   std::size_t position_{0};
   std::optional<TextRunnerToken> frontier_;
@@ -694,8 +702,16 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    const auto usage = hip::QwenGpuExecutor::EstimateMemoryUsage(
+    auto usage = hip::QwenGpuExecutor::EstimateMemoryUsage(
         model_->GetConfig(), max_context_, execution_policy_);
+    std::size_t resident_weights = model_->GetResidentBytes();
+    if (dflash_model_ != nullptr) {
+      const auto draft = hip::QwenDFlashGpuExecutor::EstimateMemoryUsage(
+          *dflash_model_, max_context_, MaximumDecodeBatchWidth());
+      usage.request_state_bytes += draft.request_state_bytes;
+      usage.temporary_scratch_bytes += draft.temporary_scratch_bytes;
+      resident_weights += dflash_model_->GetPackedWeightBytes();
+    }
     std::size_t free_bytes = 0;
     std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
@@ -703,7 +719,7 @@ public:
       capacity = free_bytes;
     }
     return {
-        .resident_weights_bytes = model_->GetResidentBytes(),
+        .resident_weights_bytes = resident_weights,
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = usage.request_state_bytes,
         .temporary_scratch_bytes = usage.temporary_scratch_bytes,
