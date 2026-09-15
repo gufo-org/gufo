@@ -1743,11 +1743,18 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     for (std::size_t offset = 0; offset < batch;) {
       const std::size_t remaining = batch - offset;
       const auto groups = std::min<std::size_t>(4, remaining / 16);
-      if (groups > 1 && detail::TryLaunchKQuantSmallBatchWave64(
-                            type, w, fp32_x + offset * k, y + offset * m, 16, m,
-                            k, stream, groups)) {
-        offset += groups * 16;
-        continue;
+      if (groups > 1) {
+        const bool launched =
+            q8_projection ? detail::TryLaunchQ8SmallBatchWave64(
+                                w, fp32_x + offset * k, y + offset * m, 16, m,
+                                k, stream, groups)
+                          : detail::TryLaunchKQuantSmallBatchWave64(
+                                type, w, fp32_x + offset * k, y + offset * m,
+                                16, m, k, stream, groups);
+        if (launched) {
+          offset += groups * 16;
+          continue;
+        }
       }
       std::size_t width = exact_width && remaining > 8
                               ? std::min<std::size_t>(16, remaining)

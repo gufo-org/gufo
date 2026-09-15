@@ -133,7 +133,8 @@ namespace detail {
 [[nodiscard]] bool TryLaunchQ8SmallBatchWave64(const void* w, const float* x,
                                                float* y, std::size_t batch,
                                                std::size_t m, std::size_t k,
-                                               hipStream_t stream);
+                                               hipStream_t stream,
+                                               std::size_t groups = 1);
 
 /// Exact BF16 projection for selected shared widths; the caller selects shapes.
 [[nodiscard]] bool TryLaunchBf16SmallBatchWave64(const void* w, const float* x,

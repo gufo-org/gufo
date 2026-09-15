@@ -24,7 +24,7 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
   const bool down = m == 5120 && k == 17408;
   if constexpr (Batch > 8) {
     if constexpr (Type == core::GgmlType::kIQ4_XS && Batch == 16) {
-      if (down || (m == 34816 && k == 5120)) {
+      if (down || (k == 5120 && (m == 17408 || m == 34816))) {
         launch.template operator()<8, 4, 1, 4, 1, true, 16>();
         return;
       }
@@ -206,7 +206,39 @@ void LaunchBatch(const void* w, const float* x, float* y, std::size_t batch,
 
 bool TryLaunchQ8SmallBatchWave64(const void* w, const float* x, float* y,
                                  std::size_t batch, std::size_t m,
-                                 std::size_t k, hipStream_t stream) {
+                                 std::size_t k, hipStream_t stream,
+                                 std::size_t groups) {
+  if (groups != 1) {
+    const bool ffn =
+        ((m == 17408 || m == 34816) && k == 5120) || (m == 5120 && k == 17408);
+    if (batch != 16 || groups < 2 || groups > 4 ||
+        !(ffn || (k == 5120 && (m == 6144 || m == 10240)) ||
+          (m == 5120 && k == 6144)))
+      return false;
+    const auto launch = [&]<std::size_t Groups>() {
+      const auto launch_step = [&]<std::size_t Step>() {
+        SmallBatchQ8_0ExactFp32VecGEMMKernel<16, 16, 3, true, true, 64, Groups,
+                                             Step>
+            <<<((m + 47) / 48) * Groups, 512, 0, stream>>>(w, x, y, m, k);
+      };
+      if (ffn)
+        launch_step.template operator()<1>();
+      else
+        launch_step.template operator()<16>();
+    };
+    switch (groups) {
+      case 2:
+        launch.template operator()<2>();
+        break;
+      case 3:
+        launch.template operator()<3>();
+        break;
+      case 4:
+        launch.template operator()<4>();
+        break;
+    }
+    return true;
+  }
   if (batch == 6 && m == 5120 && k == 17408) {
     SmallBatchQ8_0ExactFp32VecGEMMKernel<8, 6, 4, true, false, 64>
         <<<(m + 31) / 32, 256, 0, stream>>>(w, x, y, m, k);

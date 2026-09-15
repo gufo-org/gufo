@@ -179,7 +179,8 @@ __device__ __forceinline__ __attribute__((convergent)) void SyncKQuantTile() {
 
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, bool NarrowIndex = false,
-         bool XorStage = false, std::uint32_t HardwareWaveSize = 32>
+         bool XorStage = false, std::uint32_t HardwareWaveSize = 32,
+         std::size_t TokenGroups = 1, std::size_t TokensPerStep = Batch>
 __launch_bounds__(WavesPerBlock * 32, 1) __global__
     void SmallBatchQ8_0ExactFp32VecGEMMKernel(const void* __restrict__ w,
                                               const float* __restrict__ x,
@@ -187,12 +188,17 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
                                               std::size_t wide_m,
                                               std::size_t wide_k) {
   static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
+  static_assert(TokenGroups > 0 && TokensPerStep > 0 &&
+                Batch % TokensPerStep == 0);
   using Index = std::conditional_t<NarrowIndex, std::uint32_t, std::size_t>;
   const Index m = static_cast<Index>(wide_m);
   const Index k = static_cast<Index>(wide_k);
-  // A second grid dimension distributes narrow projections across tokens.
-  x += static_cast<Index>(blockIdx.y) * Batch * k;
-  y += static_cast<Index>(blockIdx.y) * Batch * m;
+  // Adjacent workgroups reuse a weight row across independent token groups.
+  // The second grid dimension still distributes narrow projections by token.
+  const Index token_group =
+      static_cast<Index>(blockIdx.y) * TokenGroups + blockIdx.x % TokenGroups;
+  x += token_group * Batch * k;
+  y += token_group * Batch * m;
   constexpr Index kBlocksPerTile = 32;
   constexpr Index kVectorsPerBlock = kQ8_0BlockSize / 4;
   // Transpose the vector groups and XOR their block indices to fit sixteen
@@ -203,7 +209,8 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
 
   const Index lane = threadIdx.x & 31u;
   const Index warp_id = threadIdx.x >> 5u;
-  const Index row_base = ((blockIdx.x * WavesPerBlock) + warp_id) * RowsPerWave;
+  const Index row_base =
+      (((blockIdx.x / TokenGroups) * WavesPerBlock) + warp_id) * RowsPerWave;
   const Index num_blocks = k / kQ8_0BlockSize;
   const auto* base = static_cast<const Q8_0Block*>(w);
   float sums[RowsPerWave][Batch] = {};
@@ -244,43 +251,73 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
         rows[r] = &base[(safe_row * num_blocks) + block];
         scale[r] = __half2float(rows[r]->d);
       }
-      float block_dots[RowsPerWave][Batch] = {};
-#pragma unroll
-      for (Index group = 0; group < kVectorsPerBlock; ++group) {
-        std::uint32_t packed[RowsPerWave];
+      constexpr bool kPreloadWeights = TokensPerStep < Batch;
+      constexpr Index kPackedGroups = kPreloadWeights ? kVectorsPerBlock : 1;
+      std::uint32_t packed[RowsPerWave][kPackedGroups];
+      if constexpr (kPreloadWeights) {
 #pragma unroll
         for (Index r = 0; r < RowsPerWave; ++r) {
-          __builtin_memcpy(&packed[r], rows[r]->qs + (group * 4),
-                           sizeof(std::uint32_t));
-        }
 #pragma unroll
-        for (Index token = 0; token < Batch; ++token) {
-          const float4 xv = *reinterpret_cast<const float4*>(
-              staged_x + (token * kTileStride) +
-              (XorStage ? group * 128 + (lane ^ group) * 4
-                        : lane * kStride + group * 4));
-#pragma unroll
-          for (Index r = 0; r < RowsPerWave; ++r) {
-            const std::uint32_t p = packed[r];
-            block_dots[r][token] +=
-                static_cast<float>(static_cast<std::int8_t>(p & 0xFFU)) * xv.x;
-            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
-                                        (p >> 8U) & 0xFFU)) *
-                                    xv.y;
-            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
-                                        (p >> 16U) & 0xFFU)) *
-                                    xv.z;
-            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
-                                        (p >> 24U) & 0xFFU)) *
-                                    xv.w;
+          for (Index group = 0; group < kVectorsPerBlock; ++group) {
+            __builtin_memcpy(&packed[r][group], rows[r]->qs + group * 4,
+                             sizeof(std::uint32_t));
           }
         }
       }
 #pragma unroll
-      for (Index r = 0; r < RowsPerWave; ++r) {
+      for (Index token_base = 0; token_base < Batch;
+           token_base += TokensPerStep) {
+        if constexpr (kPreloadWeights) {
+          // Finish a few independent dots at a time to bound register use.
+          __builtin_amdgcn_sched_barrier(0);
+        }
+        float block_dots[RowsPerWave][TokensPerStep] = {};
 #pragma unroll
-        for (Index token = 0; token < Batch; ++token) {
-          sums[r][token] += scale[r] * block_dots[r][token];
+        for (Index group = 0; group < kVectorsPerBlock; ++group) {
+          if constexpr (!kPreloadWeights) {
+#pragma unroll
+            for (Index r = 0; r < RowsPerWave; ++r) {
+              __builtin_memcpy(&packed[r][0], rows[r]->qs + group * 4,
+                               sizeof(std::uint32_t));
+            }
+          }
+#pragma unroll
+          for (Index local_token = 0; local_token < TokensPerStep;
+               ++local_token) {
+            const Index token = token_base + local_token;
+            const float4 xv = *reinterpret_cast<const float4*>(
+                staged_x + token * kTileStride +
+                (XorStage ? group * 128 + (lane ^ group) * 4
+                          : lane * kStride + group * 4));
+#pragma unroll
+            for (Index r = 0; r < RowsPerWave; ++r) {
+              const std::uint32_t p = packed[r][kPreloadWeights ? group : 0];
+              block_dots[r][local_token] +=
+                  static_cast<float>(static_cast<std::int8_t>(p & 0xFFU)) *
+                  xv.x;
+              block_dots[r][local_token] +=
+                  static_cast<float>(
+                      static_cast<std::int8_t>((p >> 8U) & 0xFFU)) *
+                  xv.y;
+              block_dots[r][local_token] +=
+                  static_cast<float>(
+                      static_cast<std::int8_t>((p >> 16U) & 0xFFU)) *
+                  xv.z;
+              block_dots[r][local_token] +=
+                  static_cast<float>(
+                      static_cast<std::int8_t>((p >> 24U) & 0xFFU)) *
+                  xv.w;
+            }
+          }
+        }
+#pragma unroll
+        for (Index r = 0; r < RowsPerWave; ++r) {
+#pragma unroll
+          for (Index local_token = 0; local_token < TokensPerStep;
+               ++local_token) {
+            sums[r][token_base + local_token] +=
+                scale[r] * block_dots[r][local_token];
+          }
         }
       }
     }
