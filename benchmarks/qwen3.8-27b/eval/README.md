@@ -52,22 +52,27 @@ Profile separately. Broaden to depth/concurrency sweeps only when needed.
 Generation changes must cover **C2/4/6/8 on Q4 and Q8, with and without
 DFlash2**, and retain C1 performance. The target test reuses eight scalar
 oracles with different prompts and prefix lengths to check complete logits and
-all five draft-feature taps at those widths. HTTP controls check physical
+all five draft-feature taps at those widths. Verification covers unequal chunks,
+all 64 rows at C8, rotated coordinators and replay after partial acceptance.
+HTTP controls check physical
 execution width, greedy output/counts and seeded sampling against C1.
 Report aggregate throughput and whole-request latency; speculative stage
 throughput excludes scheduler waiting and is not per-user delivered throughput.
 
-Current packed gate/up projections cover C2 and Q8_0 weights. Selected Q8
-widths reuse three output rows with bounded 32-bit indexing and LDS-only
-synchronization, retaining FP32 arithmetic and reduction order. Full target
-logits/features, replay and quantization checks pass on both targets. Short
-C1/2/4/6/8 controls preserve greedy text/counts and draft acceptance; temperature
-0.8 with seed 42 reproduces C1 within each target/mode configuration. Matched
-C1 controls cover all three draft precisions on both targets, preserving output
-and acceptance without regression beyond timing noise. The Q4 target/Q8 draft
-control uses balanced binary order at both tg64 and tg128. Three new Q8 kernels
-have no scratch spills. Broader sampling qualification below remains
-applicable; the sampler and draft policy are unchanged.
+Concurrent DFlash2 verification shares exact projections across up to eight
+requests. Each request retains its own attention cache, recurrent state, feature
+taps, sampler, controller and accepted-prefix replay. Projection groups remain
+at most eight rows; adjacent compatible FFN gate/up matrices share a launch.
+Selected Q8 widths use three output rows and bounded indexing with unchanged
+FP32 arithmetic and reduction order.
+
+Qualification on **2026-09-15** covers both full target suites, serving state
+and cleanup, and all 23 sampling strategies for both targets, all three drafts
+and both controllers. Concurrent sampled tokens and acceptance counts match
+isolated execution. Short release controls cover physical C1/2/4/6/8,
+greedy output/counts and temperature 0.8 / seed 42. Matched C1 controls cover
+all draft precisions; Q4 AR also uses balanced binary order at tg128.
+The context-depth sweep remains TODO.
 
 For prefill changes, the existing target check also covers 128/257/2048-token
 prefixes, repeated prefill and two-token scalar/verification replay. It prints

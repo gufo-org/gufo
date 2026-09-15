@@ -434,8 +434,9 @@ public:
     return executor_->SampleCachedLogits(frontier_logits_, sampler);
   }
 
-  [[nodiscard]] TextDecodeStep DecodeSpeculative(
-      std::size_t max_tokens, sampling::SamplerState& sampler) {
+  [[nodiscard]] bool PrepareSpeculativeDecode(std::size_t max_tokens,
+                                              sampling::SamplerState& sampler,
+                                              TextDecodeStep& result) {
     if (verifier_ == nullptr || !frontier_.has_value()) {
       throw std::logic_error("Qwen speculative state has no frontier");
     }
@@ -443,64 +444,63 @@ public:
       throw std::invalid_argument(
           "Qwen speculative decode budget must be at least one token");
     }
-
-    TextDecodeStep result;
-    sampling::SamplerState working_sampler = sampler;
-    const auto append_selection = [&](TextRunnerToken token) {
-      if (IsQwenStopToken(model_->GetTokenizer(), token)) {
-        result.stop = true;
-        return false;
-      }
-      result.selections.push_back({
-          .stop = false,
-          .token = token,
-          .piece = std::string(model_->GetTokenizer().DecodeToken(token)),
-      });
-      sequence_.push_back(token);
-      working_sampler.Accept(token);
-      return true;
-    };
-
     if (!frontier_published_) {
-      if (!working_sampler.config().can_use_unmodified_argmax()) {
-        frontier_ = SelectFrontier(working_sampler);
-      }
-      if (!append_selection(*frontier_)) {
-        sampler.SetRngState(working_sampler.rng_state());
-        return result;
-      }
+      if (!sampler.config().can_use_unmodified_argmax())
+        frontier_ = SelectFrontier(sampler);
+      if (!AppendSpeculativeSelection(*frontier_, sampler, result))
+        return false;
       frontier_published_ = true;
-      if (result.selections.size() == max_tokens) {
-        sampler.SetRngState(working_sampler.rng_state());
-        return result;
-      }
     }
+    return result.selections.size() < max_tokens;
+  }
 
-    const auto stats_before = verifier_->GetStats();
-    const std::size_t remaining = max_tokens - result.selections.size();
-    const auto verification = verifier_->VerifyStep(
-        sequence_, static_cast<std::uint32_t>(position_), *frontier_,
-        model_->GetTokenizer().GetEosTokenId(),
-        static_cast<std::uint32_t>(std::min<std::size_t>(
-            remaining, std::numeric_limits<std::uint32_t>::max())),
-        working_sampler);
-    const auto stats_after = verifier_->GetStats();
-    result.draft_tokens =
-        stats_after.total_draft_tokens - stats_before.total_draft_tokens;
-    result.draft_accepted_tokens =
-        stats_after.total_accepted_tokens - stats_before.total_accepted_tokens;
+  [[nodiscard]] speculative::SpeculativeVerifier::StepRequest
+  VerificationRequest(std::size_t remaining, sampling::SamplerState& sampler) {
+    return {*verifier_,
+            sequence_,
+            static_cast<std::uint32_t>(position_),
+            *frontier_,
+            model_->GetTokenizer().GetEosTokenId(),
+            static_cast<std::uint32_t>(std::min<std::size_t>(
+                remaining, std::numeric_limits<std::uint32_t>::max())),
+            sampler};
+  }
 
+  void FinishSpeculativeDecode(
+      speculative::SpeculativeVerifier::StepResult verification,
+      sampling::SamplerState& sampler, TextDecodeStep& result) {
+    result.draft_tokens = verification.draft_count;
+    result.draft_accepted_tokens = verification.accepted_count;
+    result.execution_plan = {
+        .kind = verification.physical_width > 1
+                    ? TextExecutionPlanKind::kBatched
+                    : TextExecutionPlanKind::kSerial,
+        .physical_width = verification.physical_width,
+    };
     for (const TextRunnerToken token : verification.emitted_tokens) {
       // Each prediction consumes one input, including a terminal prediction.
       // EOS itself remains the unconsumed frontier and is not published.
       ++position_;
-      if (!append_selection(token)) {
+      if (!AppendSpeculativeSelection(token, sampler, result))
         break;
-      }
     }
     frontier_ = verification.next_token;
-    frontier_logits_ = verification.next_token_logits;
+    frontier_logits_ = std::move(verification.next_token_logits);
     frontier_published_ = !result.stop;
+  }
+
+  [[nodiscard]] TextDecodeStep DecodeSpeculative(
+      std::size_t max_tokens, sampling::SamplerState& sampler) {
+    TextDecodeStep result;
+    sampling::SamplerState working_sampler = sampler;
+    if (PrepareSpeculativeDecode(max_tokens, working_sampler, result)) {
+      const auto request = VerificationRequest(
+          max_tokens - result.selections.size(), working_sampler);
+      auto verification = verifier_->VerifyStep(
+          sequence_, request.position, request.current_token, request.eos_id,
+          request.max_emitted_tokens, working_sampler);
+      FinishSpeculativeDecode(std::move(verification), working_sampler, result);
+    }
     sampler.SetRngState(working_sampler.rng_state());
     return result;
   }
@@ -570,6 +570,23 @@ public:
   }
 
 private:
+  bool AppendSpeculativeSelection(TextRunnerToken token,
+                                  sampling::SamplerState& sampler,
+                                  TextDecodeStep& result) {
+    if (IsQwenStopToken(model_->GetTokenizer(), token)) {
+      result.stop = true;
+      return false;
+    }
+    result.selections.push_back({
+        .stop = false,
+        .token = token,
+        .piece = std::string(model_->GetTokenizer().DecodeToken(token)),
+    });
+    sequence_.push_back(token);
+    sampler.Accept(token);
+    return true;
+  }
+
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::unique_ptr<hip::QwenGpuExecutor> executor_;
   std::unique_ptr<speculative::SpeculativeVerifier> verifier_;
@@ -666,6 +683,10 @@ public:
                 .fork = true,
                 .final_token_advance_required = !speculative_enabled,
                 .multi_token_decode = speculative_enabled,
+                .batched_multi_token_decode =
+                    speculative_enabled && MaximumDecodeBatchWidth() > 1,
+                .batched_multi_token_decode_max_width =
+                    speculative_enabled ? MaximumDecodeBatchWidth() : 0,
                 .prefix_reuse = true,
             },
         .persistence = persistence_,
@@ -698,15 +719,13 @@ public:
             .physical_width = 1,
         },
     };
-    if (dflash_model_ == nullptr) {
-      // ForwardTokenBatch executes the exact number of ready rows. Advertise
-      // every supported width so six users are reported as a six-row batch.
-      for (std::size_t width = 2; width <= 8; ++width) {
-        plans.push_back({
-            .kind = TextExecutionPlanKind::kBatched,
-            .physical_width = width,
-        });
-      }
+    // Report actual session widths, including C6. Speculation reserves up to
+    // eight token rows per session in the coordinator's existing scratch.
+    for (std::size_t width = 2; width <= MaximumDecodeBatchWidth(); ++width) {
+      plans.push_back({
+          .kind = TextExecutionPlanKind::kBatched,
+          .physical_width = width,
+      });
     }
     return plans;
   }
@@ -871,6 +890,44 @@ public:
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
     return qwen.DecodeSpeculative(max_tokens, sampler);
+  }
+
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+      std::span<const TextRunnerDecode> decodes) const override {
+    if (dflash_model_ == nullptr || decodes.size() < 2 ||
+        decodes.size() > MaximumDecodeBatchWidth()) {
+      return TextModelRunner::DecodeBatch(decodes);
+    }
+    std::vector<TextDecodeStep> steps(decodes.size());
+    std::vector<QwenTextRunnerState*> states;
+    std::vector<sampling::SamplerState> samplers;
+    std::vector<speculative::SpeculativeVerifier::StepRequest> requests;
+    std::vector<std::size_t> indices;
+    states.reserve(decodes.size());
+    samplers.reserve(decodes.size());
+    requests.reserve(decodes.size());
+    indices.reserve(decodes.size());
+    for (std::size_t index = 0; index < decodes.size(); ++index) {
+      const auto& decode = decodes[index];
+      auto& state = RequireQwenState(decode.state.get());
+      states.push_back(&state);
+      auto& sampler = samplers.emplace_back(decode.sampler.get());
+      if (state.PrepareSpeculativeDecode(decode.max_tokens, sampler,
+                                         steps[index])) {
+        requests.push_back(state.VerificationRequest(
+            decode.max_tokens - steps[index].selections.size(), sampler));
+        indices.push_back(index);
+      }
+    }
+    auto verified = speculative::SpeculativeVerifier::VerifyBatch(requests);
+    for (std::size_t item = 0; item < indices.size(); ++item) {
+      const std::size_t index = indices[item];
+      states[index]->FinishSpeculativeDecode(std::move(verified[item]),
+                                             samplers[index], steps[index]);
+    }
+    for (std::size_t index = 0; index < decodes.size(); ++index)
+      decodes[index].sampler.get().SetRngState(samplers[index].rng_state());
+    return steps;
   }
 
   void AdvanceBatch(
@@ -1129,6 +1186,11 @@ public:
   }
 
 private:
+  [[nodiscard]] std::size_t MaximumDecodeBatchWidth() const noexcept {
+    const std::size_t rows_per_session = dflash_model_ != nullptr ? 8 : 1;
+    return std::clamp<std::size_t>(max_context_ / rows_per_session, 1, 8);
+  }
+
   std::shared_ptr<const hip::QwenGpuModel> model_;
   std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model_;
   std::uint32_t max_context_;

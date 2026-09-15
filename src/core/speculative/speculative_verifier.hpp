@@ -61,6 +61,21 @@ struct SampledVerificationResult {
   bool accepted{false};
 };
 
+class ISpeculativeTargetExecutor;
+
+struct TargetVerificationItem {
+  ISpeculativeTargetExecutor* executor;
+  std::span<const tokenization::TokenId> tokens;
+  std::uint32_t position;
+  bool capture_hidden;
+  bool capture_logits;
+};
+
+struct TargetVerificationBatch {
+  std::vector<VerificationChunkResult> chunks;
+  std::size_t physical_width{1};
+};
+
 class ISpeculativeTargetExecutor {
 public:
   virtual ~ISpeculativeTargetExecutor() = default;
@@ -187,6 +202,18 @@ public:
     }
     return result;
   }
+  /// Groups independent sequences while preserving each executor's state.
+  [[nodiscard]] virtual TargetVerificationBatch ForwardVerificationBatch(
+      std::span<const TargetVerificationItem> items) {
+    TargetVerificationBatch result;
+    result.chunks.reserve(items.size());
+    for (const auto& item : items) {
+      result.chunks.push_back(item.executor->ForwardVerificationChunk(
+          item.tokens, item.position, item.capture_hidden,
+          item.capture_logits));
+    }
+    return result;
+  }
   virtual void CommitVerificationChunk(
       std::span<const tokenization::TokenId> committed_tokens,
       std::uint32_t start_pos) {
@@ -268,7 +295,21 @@ public:
     tokenization::TokenId next_token{0};
     std::vector<float> next_token_logits;
     bool hit_eos{false};
+    std::size_t physical_width{1};
   };
+
+  struct StepRequest {
+    SpeculativeVerifier& verifier;
+    std::span<const tokenization::TokenId> sequence;
+    std::uint32_t position;
+    tokenization::TokenId current_token;
+    tokenization::TokenId eos_id;
+    std::uint32_t max_emitted_tokens;
+    sampling::SamplerState& sampler;
+  };
+
+  [[nodiscard]] static std::vector<StepResult> VerifyBatch(
+      std::span<const StepRequest> requests);
 
   [[nodiscard]] std::span<const float> CopyLastTargetLogits() {
     return target_executor_->CopyLastLogits();
@@ -315,11 +356,15 @@ private:
   void ConfigureAdaptiveDraftPolicy();
   void ResetAdaptiveDraftLength() noexcept;
   void UpdateAdaptiveDraftLength(std::size_t accepted, std::size_t drafted);
-  [[nodiscard]] StepResult VerifySampledStep(
-      std::vector<tokenization::TokenId>& current_sequence,
+  struct PreparedStep;
+  [[nodiscard]] PreparedStep PrepareStep(const StepRequest& request);
+  [[nodiscard]] StepResult FinishStep(PreparedStep& prepared,
+                                      VerificationChunkResult verification,
+                                      sampling::SamplerState& sampler);
+  [[nodiscard]] StepResult VerifySequentialStep(
+      std::span<const tokenization::TokenId> current_sequence,
       std::uint32_t cur_pos, tokenization::TokenId current_token,
-      tokenization::TokenId eos_id, std::uint32_t max_emitted_tokens,
-      sampling::SamplerState& sampler);
+      tokenization::TokenId eos_id, std::uint32_t max_emitted_tokens);
 
   std::unique_ptr<ISpeculativeTargetExecutor> owned_target_executor_;
   ISpeculativeTargetExecutor* target_executor_;

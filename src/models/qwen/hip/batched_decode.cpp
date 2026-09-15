@@ -32,6 +32,15 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
                       float* output, std::size_t batch_size,
                       std::size_t output_size, std::size_t input_size,
                       hipStream_t stream) {
+  if (batch_size > kMaxDecodeBatch) {
+    for (std::size_t row = 0; row < batch_size; row += kMaxDecodeBatch) {
+      const std::size_t width = std::min(kMaxDecodeBatch, batch_size - row);
+      LaunchProjection(weight, input + row * input_size,
+                       output + row * output_size, width, output_size,
+                       input_size, stream);
+    }
+    return;
+  }
   if (SupportsExactSharedProjection(weight.type)) {
     LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
                                batch_size, output_size, input_size, stream);
@@ -59,9 +68,8 @@ void LaunchFfnActivation(const models::QwenLayerWeights& layer,
                              gate.type == core::GgmlType::kQ5_K ||
                              gate.type == core::GgmlType::kIQ4_XS ||
                              gate.type == core::GgmlType::kQ8_0;
-  if (batch_size >= 2 && batch_size <= kMaxDecodeBatch &&
-      intermediate_size == 17408 && hidden_size == 5120 && packed_format &&
-      gate.type == up.type &&
+  if (batch_size >= 2 && intermediate_size == 17408 && hidden_size == 5120 &&
+      packed_format && gate.type == up.type &&
       gate.num_elements == intermediate_size * hidden_size &&
       up.num_elements == gate.num_elements) {
     const std::size_t matrix_bytes = gate.EncodedSizeBytes();
@@ -403,29 +411,71 @@ std::vector<tokenization::TokenId>
 QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
     std::span<const tokenization::TokenId> candidate_tokens,
     std::uint32_t start_pos, bool capture_logits) {
-  const std::size_t batch_size = candidate_tokens.size();
-  if (batch_size == 0) {
+  if (candidate_tokens.empty()) {
     h_verification_hidden_.clear();
     h_verification_logits_.clear();
     last_verification_rows_ = 0;
     return {};
   }
-  if (batch_size > kMaxDecodeBatch) {
+  const QwenGpuVerificationItem item{this, candidate_tokens, start_pos,
+                                     capture_logits};
+  auto predictions = ForwardVerificationBatch(std::span(&item, 1));
+  return std::move(predictions.front());
+}
+
+std::vector<std::vector<tokenization::TokenId>>
+QwenGpuExecutor::ForwardVerificationBatch(
+    std::span<const QwenGpuVerificationItem> items) {
+  if (items.empty() || items.size() > kMaxDecodeBatch ||
+      items.front().executor == nullptr) {
     throw std::invalid_argument(
-        "Qwen exact verification supports at most eight tokens");
+        "Qwen verification requires one to eight sessions");
   }
-  if (static_cast<std::size_t>(start_pos) + batch_size >
-      arena_.GetMaxContext()) {
-    throw std::length_error(
-        "Qwen verification chunk exceeds the GPU context length");
-  }
-
-  replaying_ssm_state_ = false;
-  last_verification_rows_ = batch_size;
-  h_verification_hidden_.clear();
-  h_verification_logits_.clear();
-
+  auto& coordinator = *items.front().executor;
+  auto& arena_ = coordinator.arena_;
+  const auto& weights_ = coordinator.weights_;
   const auto& config = weights_.config;
+  const bool capture_prompt_hidden_ = coordinator.capture_prompt_hidden_;
+  const auto policy = coordinator.policy_.Fingerprint();
+  constexpr std::size_t kMaxRows = kMaxDecodeBatch * kMaxDecodeBatch;
+  std::array<std::size_t, kMaxDecodeBatch> offsets{};
+  std::size_t batch_size = 0;
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    const auto& item = items[index];
+    const auto* executor = item.executor;
+    if (executor == nullptr || executor->model_ != coordinator.model_ ||
+        executor->policy_.Fingerprint() != policy ||
+        executor->capture_prompt_hidden_ != capture_prompt_hidden_ ||
+        !std::ranges::equal(executor->arena_.GetTargetLayerCapture(),
+                            arena_.GetTargetLayerCapture()) ||
+        item.tokens.empty() || item.tokens.size() > kMaxDecodeBatch) {
+      throw std::invalid_argument(
+          "Qwen verification has incompatible sessions or token counts");
+    }
+    for (std::size_t previous = 0; previous < index; ++previous) {
+      if (items[previous].executor == executor)
+        throw std::invalid_argument("Qwen verification repeats a session");
+    }
+    if (item.position > executor->arena_.GetMaxContext() ||
+        item.tokens.size() > executor->arena_.GetMaxContext() - item.position) {
+      throw std::length_error("Qwen verification exceeds a session context");
+    }
+    offsets[index] = batch_size;
+    batch_size += item.tokens.size();
+  }
+  if (batch_size > arena_.GetMaxBatch()) {
+    throw std::length_error(
+        "Qwen verification exceeds coordinator scratch capacity");
+  }
+  for (const auto& item : items) {
+    auto& executor = *item.executor;
+    if (&executor != &coordinator)
+      HIP_CHECK(hipStreamSynchronize(executor.arena_.stream));
+    executor.replaying_ssm_state_ = false;
+    executor.last_verification_rows_ = item.tokens.size();
+    executor.h_verification_hidden_.clear();
+    executor.h_verification_logits_.clear();
+  }
   const auto scratch = arena_.GetScratchView(batch_size);
   const std::size_t hidden_size = config.hidden_size;
   const std::size_t intermediate_size = config.intermediate_size;
@@ -444,16 +494,25 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
       capture_prompt_hidden_ ? batch_size * feature_width : 0;
   const std::size_t feature_rows =
       feature_elements / vocab_size + (feature_elements % vocab_size != 0);
-  // Logits are produced after the transformer layers. Reuse their workspace
-  // for tapped features so host transfers do not interrupt the layer loop.
-  EnsureVerificationLogits(std::max(batch_size, feature_rows));
-
-  std::array<std::uint32_t, kMaxDecodeBatch> host_tokens{};
-  std::array<std::uint32_t, kMaxDecodeBatch> host_positions{};
-  for (std::size_t row = 0; row < batch_size; ++row) {
-    host_tokens[row] = candidate_tokens[row];
-    host_positions[row] = start_pos + static_cast<std::uint32_t>(row);
-    arena_.MarkSsmReplayPosition(host_positions[row]);
+  coordinator.EnsureVerificationLogits(std::max(batch_size, feature_rows));
+  auto* const d_verification_logits_ = coordinator.d_verification_logits_;
+  for (const auto& item : items) {
+    if (item.executor != &coordinator)
+      item.executor->EnsureVerificationLogits(item.tokens.size());
+    if (capture_prompt_hidden_)
+      item.executor->h_verification_hidden_.resize(
+          item.tokens.size() * (feature_width ? feature_width : hidden_size));
+  }
+  std::array<std::uint32_t, kMaxRows> host_tokens{};
+  std::array<std::uint32_t, kMaxRows> host_positions{};
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    const auto& item = items[index];
+    for (std::size_t row = 0; row < item.tokens.size(); ++row) {
+      const auto position = item.position + static_cast<std::uint32_t>(row);
+      host_tokens[offsets[index] + row] = item.tokens[row];
+      host_positions[offsets[index] + row] = position;
+      item.executor->arena_.MarkSsmReplayPosition(position);
+    }
   }
   HIP_CHECK(hipMemcpyAsync(scratch.decode.prompt_tokens.data(),
                            host_tokens.data(),
@@ -467,17 +526,13 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                            host_positions.data(),
                            batch_size * sizeof(std::uint32_t),
                            hipMemcpyHostToDevice, arena_.stream));
-
-  if (capture_prompt_hidden_ && captured_layer_count > 0) {
-    h_verification_hidden_.resize(feature_elements);
-  }
-
-  EmitDecodeRouteTelemetry(weights_, policy_);
+  EmitDecodeRouteTelemetry(weights_, coordinator.policy_);
   for (std::uint32_t layer_index = 0; layer_index < config.num_layers;
        ++layer_index) {
     const auto& layer = weights_.layers[layer_index];
-    const auto route_plan = ResolveQwenLayerRoute(
-        policy_, QwenExecutionMode::kDecode, layer.is_full_attention);
+    const auto route_plan =
+        ResolveQwenLayerRoute(coordinator.policy_, QwenExecutionMode::kDecode,
+                              layer.is_full_attention);
 
     LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
                          static_cast<const float*>(layer.attn_norm.data),
@@ -499,7 +554,6 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                             config.num_attention_heads, config.head_dim,
                             arena_.stream);
 
-      const std::size_t total_k = arena_.GetAttentionKvPlaneElements();
       const std::uint32_t attention_layer =
           layer_index / config.full_attention_interval;
       const bool fused_qknorm_rope_kv =
@@ -524,65 +578,86 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
         }
       }
 
-      if (fused_qknorm_rope_kv) {
-        LaunchBatchedFusedQKNormRoPEKvWrite(
-            scratch.attention.q.data(), scratch.attention.k.data(),
-            scratch.attention.v.data(),
-            static_cast<const float*>(layer.attn_q_norm.data),
-            static_cast<const float*>(layer.attn_k_norm.data),
-            scratch.attention.q.data(), scratch.attention.k.data(),
-            arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
-            arena_.d_attention_kv_f16,
-            OffsetIfPresent(
-                static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
-                total_k),
-            attention_layer, start_pos, batch_size, arena_.GetMaxContext(),
-            config.num_attention_heads, config.num_key_value_heads,
-            config.head_dim, config.rotary_dim, config.rope_theta, 1e-6F,
-            arena_.stream);
-        // Exact verification projections do not use weight dequantization
-        // scratch. Reuse it for independent split-K rows without allocating
-        // another buffer or changing the scalar decode workspace.
-        auto attention_scratch = scratch.attention.split_k;
-        if (scratch.decode.weight_bf16.size_bytes() >=
-            batch_size * attention_scratch.size_bytes()) {
-          attention_scratch = {
-              reinterpret_cast<float*>(scratch.decode.weight_bf16.data()),
-              batch_size * attention_scratch.size()};
-        }
-        LaunchCausalDecodeAttention(
-            scratch.attention.q.data(), scratch.ssm.gate.data(),
-            arena_.d_kv_cache, OffsetIfPresent(arena_.d_kv_cache, total_k),
-            arena_.d_attention_kv_f16,
-            OffsetIfPresent(
-                static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
-                total_k),
-            scratch.ssm.out.data(), attention_layer, start_pos, batch_size,
-            arena_.GetMaxContext(), config.num_attention_heads,
-            config.num_key_value_heads, config.head_dim, arena_.stream,
-            attention_scratch);
-      } else {
-        for (std::size_t row = 0; row < batch_size; ++row) {
-          float* const query =
-              scratch.attention.q.data() + (row * attention_size);
-          float* const key = scratch.attention.k.data() + (row * kv_size);
-          const std::uint32_t position = host_positions[row];
-          LaunchRoPE(query, key, config.num_attention_heads,
-                     config.num_key_value_heads, config.head_dim,
-                     config.rotary_dim, position, config.rope_theta,
-                     arena_.stream);
-          LaunchAttention(
-              query, key, scratch.attention.v.data() + row * kv_size,
-              scratch.ssm.gate.data() + row * attention_size, arena_.d_kv_cache,
-              OffsetIfPresent(arena_.d_kv_cache, total_k),
-              arena_.d_attention_kv_f16,
+      for (std::size_t index = 0; index < items.size(); ++index) {
+        const auto& item = items[index];
+        auto& state_arena = item.executor->arena_;
+        const std::size_t offset = offsets[index];
+        const std::size_t sequence_size = item.tokens.size();
+        const std::uint32_t start_pos = item.position;
+        const std::size_t total_k = state_arena.GetAttentionKvPlaneElements();
+        if (fused_qknorm_rope_kv) {
+          LaunchBatchedFusedQKNormRoPEKvWrite(
+              (scratch.attention.q.data() + offset * attention_size),
+              (scratch.attention.k.data() + offset * kv_size),
+              (scratch.attention.v.data() + offset * kv_size),
+              static_cast<const float*>(layer.attn_q_norm.data),
+              static_cast<const float*>(layer.attn_k_norm.data),
+              (scratch.attention.q.data() + offset * attention_size),
+              (scratch.attention.k.data() + offset * kv_size),
+              state_arena.d_kv_cache,
+              OffsetIfPresent(state_arena.d_kv_cache, total_k),
+              state_arena.d_attention_kv_f16,
               OffsetIfPresent(
-                  static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
+                  static_cast<std::uint16_t*>(state_arena.d_attention_kv_f16),
                   total_k),
-              scratch.ssm.out.data() + row * attention_size, attention_layer,
-              position, arena_.GetMaxContext(), config.num_attention_heads,
+              attention_layer, start_pos, sequence_size,
+              state_arena.GetMaxContext(), config.num_attention_heads,
+              config.num_key_value_heads, config.head_dim, config.rotary_dim,
+              config.rope_theta, 1e-6F, arena_.stream);
+          // Exact verification projections do not use weight dequantization
+          // scratch. Reuse it for independent split-K rows without allocating
+          // another buffer or changing the scalar decode workspace.
+          auto attention_scratch = scratch.attention.split_k;
+          if (scratch.decode.weight_bf16.size_bytes() >=
+              sequence_size * attention_scratch.size_bytes()) {
+            attention_scratch = {
+                reinterpret_cast<float*>(scratch.decode.weight_bf16.data()),
+                sequence_size * attention_scratch.size()};
+          }
+          LaunchCausalDecodeAttention(
+              (scratch.attention.q.data() + offset * attention_size),
+              (scratch.ssm.gate.data() + offset * attention_size),
+              state_arena.d_kv_cache,
+              OffsetIfPresent(state_arena.d_kv_cache, total_k),
+              state_arena.d_attention_kv_f16,
+              OffsetIfPresent(
+                  static_cast<std::uint16_t*>(state_arena.d_attention_kv_f16),
+                  total_k),
+              (scratch.ssm.out.data() + offset * attention_size),
+              attention_layer, start_pos, sequence_size,
+              state_arena.GetMaxContext(), config.num_attention_heads,
               config.num_key_value_heads, config.head_dim, arena_.stream,
-              arena_.d_split_k_attention);
+              attention_scratch);
+        } else {
+          for (std::size_t row = 0; row < sequence_size; ++row) {
+            float* const query =
+                (scratch.attention.q.data() + offset * attention_size) +
+                (row * attention_size);
+            float* const key = (scratch.attention.k.data() + offset * kv_size) +
+                               (row * kv_size);
+            const std::uint32_t position = host_positions[offset + row];
+            LaunchRoPE(query, key, config.num_attention_heads,
+                       config.num_key_value_heads, config.head_dim,
+                       config.rotary_dim, position, config.rope_theta,
+                       arena_.stream);
+            LaunchAttention(
+                query, key,
+                (scratch.attention.v.data() + offset * kv_size) + row * kv_size,
+                (scratch.ssm.gate.data() + offset * attention_size) +
+                    row * attention_size,
+                state_arena.d_kv_cache,
+                OffsetIfPresent(state_arena.d_kv_cache, total_k),
+                state_arena.d_attention_kv_f16,
+                OffsetIfPresent(
+                    static_cast<std::uint16_t*>(state_arena.d_attention_kv_f16),
+                    total_k),
+                (scratch.ssm.out.data() + offset * attention_size) +
+                    row * attention_size,
+                attention_layer, position, state_arena.GetMaxContext(),
+                config.num_attention_heads, config.num_key_value_heads,
+                config.head_dim, arena_.stream,
+                state_arena.d_split_k_attention);
+          }
         }
       }
       LaunchProjection(layer.attn_output, scratch.ssm.out.data(),
@@ -597,27 +672,30 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
                        hidden_size, arena_.stream);
       const auto controls = LaunchSsmControls(
           layer, scratch, batch_size, time_step_rank, hidden_size, arena_.stream);
-      {
-        // One pair of launches walks the whole verification batch. The rows are
-        // still applied in order with identical arithmetic, so this is
-        // bit-exact; it removes 2 x batch_size dispatches per SSM layer, which
-        // dominated the stage at width 8.
-        auto replay_capture = arena_.GetSsmReplayCapture();
-        replay_capture.position = scratch.decode.prompt_tokens.data();
+      for (std::size_t index = 0; index < items.size(); ++index) {
+        const auto& item = items[index];
+        auto& state_arena = item.executor->arena_;
+        const std::size_t offset = offsets[index];
+        auto replay_capture = state_arena.GetSsmReplayCapture();
+        replay_capture.position = scratch.decode.prompt_tokens.data() + offset;
         LaunchSSMConvRecurrenceRows(
-            scratch.ssm.qkv.data(),
+            scratch.ssm.qkv.data() + offset * ssm_qkv_size,
             static_cast<const float*>(layer.ssm_conv1d.data),
-            arena_.d_ssm_conv_state, scratch.ssm.conv_out.data(),
-            arena_.d_ssm_deltanet_state, controls.alpha, controls.beta,
+            state_arena.d_ssm_conv_state,
+            scratch.ssm.conv_out.data() + offset * ssm_qkv_size,
+            state_arena.d_ssm_deltanet_state,
+            controls.alpha + offset * controls.row_stride,
+            controls.beta + offset * controls.row_stride,
             static_cast<const float*>(layer.ssm_a.data),
             static_cast<const float*>(layer.ssm_dt.data),
             static_cast<const float*>(layer.ssm_norm.data),
-            scratch.ssm.gate.data(), scratch.ssm.out.data(), layer_index,
+            scratch.ssm.gate.data() + offset * ssm_inner_size,
+            scratch.ssm.out.data() + offset * ssm_inner_size, layer_index,
             ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
             config.ssm_state_size, config.SsmValueSize(),
-            static_cast<std::uint32_t>(batch_size), controls.row_stride,
+            static_cast<std::uint32_t>(item.tokens.size()), controls.row_stride,
             ssm_inner_size, arena_.stream, replay_capture,
-            arena_.GetRecurrentStateStorage());
+            state_arena.GetRecurrentStateStorage());
       }
 
       LaunchProjection(layer.ssm_out, scratch.ssm.out.data(),
@@ -655,27 +733,40 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
     }
   }
 
-  if (capture_prompt_hidden_ && captured_layer_count > 0) {
-    // Both copies precede the output projection on the same stream, so the
-    // workspace can be overwritten with logits once the features are copied.
-    HIP_CHECK(hipMemcpyAsync(
-        h_verification_hidden_.data(), d_verification_logits_,
-        feature_elements * sizeof(float), hipMemcpyDeviceToHost,
-        arena_.stream));
-    HIP_CHECK(hipMemcpyAsync(
-        arena_.d_target_layer_features,
-        d_verification_logits_ + (batch_size - 1) * feature_width,
-        feature_width * sizeof(float), hipMemcpyDeviceToDevice,
-        arena_.stream));
-  } else if (capture_prompt_hidden_ && captured_layer_count == 0) {
-    h_verification_hidden_.resize(batch_size * hidden_size);
-    HIP_CHECK(hipMemcpyAsync(h_verification_hidden_.data(),
-                             scratch.decode.hidden.data(),
-                             h_verification_hidden_.size() * sizeof(float),
-                             hipMemcpyDeviceToHost, arena_.stream));
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    const auto& item = items[index];
+    auto& executor = *item.executor;
+    const std::size_t offset = offsets[index];
+    if (capture_prompt_hidden_ && captured_layer_count > 0) {
+      HIP_CHECK(
+          hipMemcpyAsync(executor.h_verification_hidden_.data(),
+                         d_verification_logits_ + offset * feature_width,
+                         item.tokens.size() * feature_width * sizeof(float),
+                         hipMemcpyDeviceToHost, arena_.stream));
+      HIP_CHECK(
+          hipMemcpyAsync(executor.arena_.d_target_layer_features,
+                         d_verification_logits_ +
+                             (offset + item.tokens.size() - 1) * feature_width,
+                         feature_width * sizeof(float), hipMemcpyDeviceToDevice,
+                         arena_.stream));
+    } else if (capture_prompt_hidden_) {
+      HIP_CHECK(
+          hipMemcpyAsync(executor.h_verification_hidden_.data(),
+                         scratch.decode.hidden.data() + offset * hidden_size,
+                         item.tokens.size() * hidden_size * sizeof(float),
+                         hipMemcpyDeviceToHost, arena_.stream));
+    }
+    if (&executor == &coordinator) {
+      executor.last_hidden_offset_ = (item.tokens.size() - 1) * hidden_size;
+    } else {
+      HIP_CHECK(hipMemcpyAsync(
+          executor.arena_.d_hidden,
+          scratch.decode.hidden.data() +
+              (offset + item.tokens.size() - 1) * hidden_size,
+          hidden_size * sizeof(float), hipMemcpyDeviceToDevice, arena_.stream));
+      executor.last_hidden_offset_ = 0;
+    }
   }
-  last_hidden_offset_ = (batch_size - 1) * hidden_size;
-
   LaunchBatchedRMSNorm(scratch.decode.hidden.data(),
                        static_cast<const float*>(weights_.output_norm.data),
                        scratch.decode.normed.data(), nullptr, batch_size,
@@ -683,23 +774,40 @@ QwenGpuExecutor::ForwardDecodeEquivalentVerificationChunk(
   LaunchProjection(weights_.output, scratch.decode.normed.data(),
                    d_verification_logits_, batch_size, vocab_size, hidden_size,
                    arena_.stream);
-  auto* const d_out_tokens = scratch.decode.sampled_token.data();
+  auto* const d_out_tokens = scratch.decode.prompt_tokens.data();
   LaunchBatchedGPUArgmax(d_verification_logits_, d_out_tokens, batch_size,
                          vocab_size, arena_.stream);
-
-  std::vector<tokenization::TokenId> predictions(batch_size, 0);
-  HIP_CHECK(hipMemcpyAsync(predictions.data(), d_out_tokens,
+  std::array<tokenization::TokenId, kMaxRows> host_predictions{};
+  HIP_CHECK(hipMemcpyAsync(host_predictions.data(), d_out_tokens,
                            batch_size * sizeof(tokenization::TokenId),
                            hipMemcpyDeviceToHost, arena_.stream));
-  if (capture_logits) {
-    h_verification_logits_.resize(batch_size * vocab_size);
-    HIP_CHECK(hipMemcpyAsync(h_verification_logits_.data(),
-                             d_verification_logits_,
-                             h_verification_logits_.size() * sizeof(float),
-                             hipMemcpyDeviceToHost, arena_.stream));
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    const auto& item = items[index];
+    auto& executor = *item.executor;
+    const std::size_t count = item.tokens.size() * vocab_size;
+    const auto* logits = d_verification_logits_ + offsets[index] * vocab_size;
+    if (&executor != &coordinator) {
+      HIP_CHECK(hipMemcpyAsync(executor.d_verification_logits_, logits,
+                               count * sizeof(float), hipMemcpyDeviceToDevice,
+                               arena_.stream));
+    }
+    if (item.capture_logits) {
+      executor.h_verification_logits_.resize(count);
+      HIP_CHECK(hipMemcpyAsync(executor.h_verification_logits_.data(), logits,
+                               count * sizeof(float), hipMemcpyDeviceToHost,
+                               arena_.stream));
+    }
   }
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
-  arena_.DisableSsmReplayCapture();
+  std::vector<std::vector<tokenization::TokenId>> predictions;
+  predictions.reserve(items.size());
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    const auto& item = items[index];
+    item.executor->arena_.DisableSsmReplayCapture();
+    predictions.emplace_back(
+        host_predictions.begin() + offsets[index],
+        host_predictions.begin() + offsets[index] + item.tokens.size());
+  }
   return predictions;
 }
 

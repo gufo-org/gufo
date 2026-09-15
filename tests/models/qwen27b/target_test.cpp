@@ -219,22 +219,28 @@ void CheckConcurrencyWidths(const Executor& owner) {
   std::array<std::unique_ptr<Executor>, count> sessions;
   std::array<std::unique_ptr<gufo::hip::QwenGpuSnapshot>, count> snapshots;
   std::array<gufo::hip::QwenGpuBatchItem, count> items;
-  std::array<std::vector<float>, count> expected_logits;
-  std::array<std::vector<float>, count> expected_features;
+  std::array<std::vector<Token>, count> tokens;
+  std::array<std::array<std::vector<float>, 9>, count> expected_logits;
+  std::array<std::array<std::vector<float>, 9>, count> expected_features;
   for (std::size_t row = 0; row < count; ++row) {
-    sessions[row] = std::make_unique<Executor>(owner.GetSharedModel(), 64);
+    sessions[row] = std::make_unique<Executor>(owner.GetSharedModel(),
+                                               row % 2 == 0 ? 64 : 128);
     auto& session = *sessions[row];
     session.SetPromptHiddenCapture(true, taps);
-    const auto tokens = owner.GetTokenizer().Encode(kTexts[row % kTexts.size()]);
+    const std::string text = kTexts[row % kTexts.size()];
+    tokens[row] = owner.GetTokenizer().Encode(text + "\n" + text);
     const auto position = static_cast<std::uint32_t>(5 + 4 * row);
-    Expect(tokens.size() > position, "concurrency fixture has too few tokens");
-    (void)session.ForwardPromptBatch(std::span(tokens).first(position));
+    Expect(tokens[row].size() >= position + expected_logits[row].size(),
+           "concurrency fixture has too few tokens");
+    (void)session.ForwardPromptBatch(std::span(tokens[row]).first(position));
     snapshots[row] = session.SaveSnapshot(position);
-    items[row] = {&session, tokens[position], position};
-    (void)session.ForwardToken(tokens[position], position);
-    expected_logits[row] = Logits(session);
-    const auto features = session.CopyLastHidden();
-    expected_features[row].assign(features.begin(), features.end());
+    items[row] = {&session, tokens[row][position], position};
+    for (std::size_t step = 0; step < expected_logits[row].size(); ++step) {
+      (void)session.ForwardToken(tokens[row][position + step], position + step);
+      expected_logits[row][step] = Logits(session);
+      const auto features = session.CopyLastHidden();
+      expected_features[row][step].assign(features.begin(), features.end());
+    }
   }
   // Reuse eight scalar oracles across the required serving widths. Unequal
   // prefixes and different prompts expose accidental sharing of request state.
@@ -245,17 +251,71 @@ void CheckConcurrencyWidths(const Executor& owner) {
         Executor::ForwardTokenBatch(std::span(items).first(width));
     Expect(predictions.size() == width, "concurrency width changed");
     for (std::size_t row = 0; row < width; ++row) {
-      Expect(ByteEqual(Logits(*sessions[row]), expected_logits[row]) &&
+      Expect(ByteEqual(Logits(*sessions[row]), expected_logits[row][0]) &&
                  ByteEqual(sessions[row]->CopyLastHidden(),
-                           expected_features[row]),
+                           expected_features[row][0]),
              "concurrent decoding changed target logits or draft features");
-      const auto& logits = expected_logits[row];
+      const auto& logits = expected_logits[row][0];
       Expect(predictions[row] ==
                  static_cast<Token>(std::ranges::max_element(logits) -
                                     logits.begin()),
              "concurrent decoding changed the target prediction");
     }
     std::cout << "concurrency width=" << width << " logits/features exact=1\n";
+
+    for (const bool full_block : {false, true}) {
+      if (full_block && width != count)
+        continue;
+      std::array<gufo::hip::QwenGpuVerificationItem, count> verification_items;
+      for (std::size_t row = 0; row < width; ++row) {
+        const auto position = items[row].position;
+        const std::size_t length =
+            full_block ? 8 : (3 * row + width - 2) % 8 + 1;
+        sessions[row]->RestoreSnapshot(*snapshots[row]);
+        sessions[row]->SaveState(position);
+        verification_items[row] = {
+            sessions[row].get(),
+            std::span(tokens[row]).subspan(position, length), position, true};
+      }
+      // Rotate the coordinator, vary chunk lengths and cross eight total rows.
+      // Attention capacity and recurrent replay still belong to each sequence.
+      const std::size_t rotation = width / 2;
+      auto batch = std::span(verification_items).first(width);
+      std::rotate(batch.begin(), batch.begin() + rotation, batch.end());
+      const auto verified = Executor::ForwardVerificationBatch(batch);
+      Expect(verified.size() == width, "verification cohort width changed");
+      for (std::size_t index = 0; index < width; ++index) {
+        const std::size_t row = (index + rotation) % width;
+        auto& session = *sessions[row];
+        const auto& item = batch[index];
+        Expect(verified[index].size() == item.tokens.size(),
+               "verification changed a sequence length");
+        CheckVerificationFeatures(
+            session,
+            std::span(expected_features[row]).first(item.tokens.size()));
+        for (std::size_t step = 0; step < item.tokens.size(); ++step) {
+          const auto& logits = expected_logits[row][step];
+          Expect(ByteEqual(session.CopyVerificationLogits(step), logits) &&
+                     verified[index][step] ==
+                         static_cast<Token>(std::ranges::max_element(logits) -
+                                            logits.begin()),
+                 "concurrent verification changed logits or predictions");
+        }
+        const std::size_t committed = item.tokens.size() / 2 + 1;
+        session.RestoreState();
+        session.CommitVerificationChunk(item.tokens.first(committed),
+                                        item.position);
+        (void)session.ForwardToken(tokens[row][item.position + committed],
+                                   item.position + committed);
+        Expect(ByteEqual(Logits(session), expected_logits[row][committed]) &&
+                   ByteEqual(session.CopyLastHidden(),
+                             expected_features[row][committed]),
+               "concurrent verification replay changed continuation state");
+      }
+      std::cout << "verification concurrency=" << width
+                << (full_block ? " full" : " ragged")
+                << " logits/features/replay exact=1\n";
+    }
   }
 }
 
@@ -298,8 +358,10 @@ void CheckWideCache(Executor& reference) {
       << "context=262144: prefill, scalar and verification logits exact\n";
 }
 
+enum class CheckMode { kAll, kPrefill, kConcurrency };
+
 std::vector<Case> Capture(const char* path, bool check_replay,
-                          bool prefill_only = false) {
+                          CheckMode mode = CheckMode::kAll) {
   std::string error;
   auto owner = gufo::core::GgufReader::OpenFile(path, &error);
   Expect(owner != nullptr, error);
@@ -310,8 +372,12 @@ std::vector<Case> Capture(const char* path, bool check_replay,
   Expect(executor->GetConfig().hidden_size == 5120 &&
              executor->GetConfig().vocab_size == 248320,
          "quality fixture requires Qwen3.8 27B");
-  if (prefill_only) {
+  if (mode == CheckMode::kPrefill) {
     CheckPrefillReplay(executor->GetSharedModel());
+    return {};
+  }
+  if (mode == CheckMode::kConcurrency) {
+    CheckConcurrencyWidths(*executor);
     return {};
   }
   if (check_replay) {
@@ -493,7 +559,11 @@ int main(int argc, const char* const* argv) {
       return 77;
     }
     if (argc == 3 && std::string_view(argv[2]) == "--prefill-only") {
-      (void)Capture(model, true, true);
+      (void)Capture(model, true, CheckMode::kPrefill);
+      return 0;
+    }
+    if (argc == 3 && std::string_view(argv[2]) == "--concurrency-only") {
+      (void)Capture(model, true, CheckMode::kConcurrency);
       return 0;
     }
     const auto candidate = Capture(model, true);

@@ -39,6 +39,13 @@ struct QwenGpuBatchItem {
   std::uint32_t position{0};
 };
 
+struct QwenGpuVerificationItem {
+  QwenGpuExecutor* executor{nullptr};
+  std::span<const tokenization::TokenId> tokens;
+  std::uint32_t position{0};
+  bool capture_logits{false};
+};
+
 struct QwenSampledVerificationResult {
   tokenization::TokenId token{0};
   bool accepted{false};
@@ -424,6 +431,10 @@ public:
   [[nodiscard]] std::vector<tokenization::TokenId> ForwardVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,
       std::uint32_t start_pos, bool capture_logits = false);
+  /// Shares exact projections across independent speculative chunks. Each
+  /// sequence retains its own causal attention, recurrence and replay state.
+  [[nodiscard]] static std::vector<std::vector<tokenization::TokenId>>
+  ForwardVerificationBatch(std::span<const QwenGpuVerificationItem> items);
   void CommitVerificationChunk(
       std::span<const tokenization::TokenId> committed_tokens,
       std::uint32_t start_pos);

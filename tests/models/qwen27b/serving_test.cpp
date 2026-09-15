@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -51,6 +52,13 @@ void ExpectStableGpuMemory(std::size_t before, std::size_t after) {
 void CheckSamplingStrategies(
     gufo::server::InferenceBackend& backend,
     gufo::server::InferenceBackend* speculative_backend = nullptr) {
+  struct Reference {
+    std::string prompt;
+    gufo::sampling::SamplingConfig config;
+    gufo::server::InferenceBackend::Result ar;
+    gufo::server::InferenceBackend::Result speculative;
+  };
+  std::vector<Reference> references;
   for (const auto& test : gufo::test::QwenSamplingCases()) {
     const auto prompt = "Sampling " + std::string(test.name) +
                         ": Continue red, blue, blue, red,";
@@ -59,6 +67,8 @@ void CheckSamplingStrategies(
     Expect(ar.completion_tokens == 4 && ar.draft_tokens == 0 &&
                ar_replay.cache_hit && ar.tokens == ar_replay.tokens,
            "AR strategy must reproduce all cold/cached token IDs");
+    Reference reference{
+        .prompt = prompt, .config = test.config, .ar = ar, .speculative = {}};
     if (speculative_backend != nullptr) {
       const auto spec = speculative_backend->complete(prompt, 4, test.config);
       const auto replay = speculative_backend->complete(prompt, 4, test.config);
@@ -71,10 +81,56 @@ void CheckSamplingStrategies(
       if (!test.config.uses_random_sampling())
         Expect(ar.tokens == spec.tokens,
                "deterministic DFlash2 strategy differs from AR");
+      reference.speculative = spec;
     }
+    references.push_back(std::move(reference));
     std::cout << "Sampling replay passed: " << test.name
               << (speculative_backend ? " (AR + DFlash2)" : " (AR)") << '\n';
   }
+  const auto check_concurrent = [&](gufo::server::InferenceBackend& current,
+                                    bool speculative, std::size_t width,
+                                    std::size_t offset) {
+    std::vector<std::future<gufo::server::InferenceBackend::Result>> pending;
+    pending.reserve(width);
+    for (std::size_t row = 0; row < width; ++row) {
+      const auto* reference = &references[(offset + row) % references.size()];
+      pending.push_back(std::async(std::launch::async, [&current, reference] {
+        return current.complete(reference->prompt, 4, reference->config);
+      }));
+    }
+    std::size_t physical_width = 1;
+    for (std::size_t row = 0; row < width; ++row) {
+      const auto result = pending[row].get();
+      const auto& reference = references[(offset + row) % references.size()];
+      const auto& expected = speculative ? reference.speculative : reference.ar;
+      Expect(result.tokens == expected.tokens &&
+                 result.draft_tokens == expected.draft_tokens &&
+                 result.draft_accepted_tokens == expected.draft_accepted_tokens,
+             "concurrent sampling changed isolated tokens or draft acceptance");
+      physical_width =
+          std::max(physical_width, result.physical_execution_width);
+    }
+    Expect(physical_width <= width,
+           "concurrent sampling reported an invalid physical width");
+    std::cout << "Sampling concurrency=" << width
+              << " physical_width=" << physical_width
+              << (speculative ? " DFlash2" : " AR") << " exact=1\n";
+    return physical_width;
+  };
+  // Reuse the isolated oracles above. The final C8 group wraps around so all
+  // 23 strategies participate, including greedy penalties and combined floors.
+  std::size_t offset = 0;
+  bool shared_ar = false;
+  bool shared_speculative = false;
+  for (const std::size_t width : {2U, 4U, 6U, 8U, 8U}) {
+    shared_ar |= check_concurrent(backend, false, width, offset) > 1;
+    if (speculative_backend != nullptr)
+      shared_speculative |=
+          check_concurrent(*speculative_backend, true, width, offset) > 1;
+    offset += width;
+  }
+  Expect(shared_ar && (speculative_backend == nullptr || shared_speculative),
+         "concurrent sampling did not exercise shared target execution");
 }
 
 class TemporaryDirectory {
@@ -203,7 +259,7 @@ int main(int argc, const char* const* argv) {
            "every mapped GGUF shard must have one shared GPU region");
 
     const std::uint32_t context = run_full_suite ? 256U : 64U;
-    const std::size_t state_count = run_full_suite ? 2U : 1U;
+    const std::size_t state_count = run_full_suite ? 8U : 1U;
     gufo::server::InferenceBackend backend;
     Expect(
         !backend.load(model, &error, context, state_count, {}, {},
@@ -211,7 +267,9 @@ int main(int argc, const char* const* argv) {
                        .min_draft_tokens = 2}) &&
             error.find("min-draft-tokens") != std::string::npos,
         "DFlash must reject an unused adaptive draft floor");
-    Expect(backend.load(model, &error, context, state_count), error);
+    Expect(backend.load(model, &error, context, state_count, {},
+                        {.max_pending_requests_per_client = 8}),
+           error);
     Expect(backend.model_id() == model->GetConfig().model_name,
            "HTTP model identifier");
 
@@ -221,7 +279,9 @@ int main(int argc, const char* const* argv) {
       } else {
         gufo::server::InferenceBackend speculative_backend;
         Expect(speculative_backend.load(
-                   model, &error, context, 2, {.decode_active_tokens = 8}, {},
+                   model, &error, context, state_count,
+                   {.decode_active_tokens = 8},
+                   {.max_pending_requests_per_client = 8},
                    {.backend = gufo::server::TextSpeculativeBackend::kDFlash,
                     .draft_model_path = draft_model_path,
                     .max_draft_tokens = 7,
@@ -280,17 +340,19 @@ int main(int argc, const char* const* argv) {
 
     if (draft_model_path != nullptr) {
       gufo::server::InferenceBackend speculative_backend;
-      Expect(speculative_backend.load(
-                 model, &error, context, 2, {.decode_active_tokens = 8}, {},
-                 gufo::server::TextSpeculativeConfig{
-                     .backend = gufo::server::TextSpeculativeBackend::kDFlash,
-                     .draft_model_path = draft_model_path,
-                     .max_draft_tokens = 7,
-                     .min_draft_tokens = 1,
-                     .dflash_policy =
-                         gufo::speculative::DFlashDraftPolicy::kAdaptive,
-                 }),
-             error);
+      Expect(
+          speculative_backend.load(
+              model, &error, context, state_count, {.decode_active_tokens = 8},
+              {.max_pending_requests_per_client = 8},
+              gufo::server::TextSpeculativeConfig{
+                  .backend = gufo::server::TextSpeculativeBackend::kDFlash,
+                  .draft_model_path = draft_model_path,
+                  .max_draft_tokens = 7,
+                  .min_draft_tokens = 1,
+                  .dflash_policy =
+                      gufo::speculative::DFlashDraftPolicy::kAdaptive,
+              }),
+          error);
       const auto direct_spec = GenerateDirect(*direct, raw_prompt_tokens, 8);
       const auto http_spec = speculative_backend.complete(raw_prompt, 8, 0.0F);
       Expect(http_spec.tokens == direct_spec,
