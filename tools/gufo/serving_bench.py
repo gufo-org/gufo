@@ -685,9 +685,27 @@ def _summarize_rounds(
     rounds: list[RoundObservation],
 ) -> dict[str, Any]:
     samples = [sample for round_ in rounds for sample in round_.samples]
+    span_ms = sum(round_.span_ms for round_ in rounds)
+    prefill_tokens = sum(sample.prefill_tokens for sample in samples)
+    output_tokens = sum(sample.completion_tokens for sample in samples)
+    aggregate = {}
+    for metric, tokens in (
+        ("prefill_tokens_per_second", prefill_tokens),
+        ("output_tokens_per_second", output_tokens),
+        ("total_tokens_per_second", prefill_tokens + output_tokens),
+    ):
+        aggregate[metric] = distribution(
+            getattr(round_, metric) for round_ in rounds
+        )
+        # A median of per-group rates gives fast and slow prompt groups equal
+        # weight. Overall throughput accounts for all delivered tokens and time.
+        aggregate[metric]["overall"] = (
+            tokens * 1000.0 / span_ms if span_ms > 0.0 else None
+        )
     result = {
         "requestCount": len(samples),
         "roundCount": len(rounds),
+        "measuredSpanMs": span_ms,
         "stage": {
             "prefill_tokens_per_second": distribution(
                 sample.prefill_tokens_per_second for sample in samples
@@ -718,17 +736,7 @@ def _summarize_rounds(
             ),
             "queue_ms": distribution(sample.queue_ms for sample in samples),
         },
-        "aggregate": {
-            "prefill_tokens_per_second": distribution(
-                round_.prefill_tokens_per_second for round_ in rounds
-            ),
-            "output_tokens_per_second": distribution(
-                round_.output_tokens_per_second for round_ in rounds
-            ),
-            "total_tokens_per_second": distribution(
-                round_.total_tokens_per_second for round_ in rounds
-            ),
-        },
+        "aggregate": aggregate,
         "executionPlans": sorted(
             {sample.execution_plan for sample in samples}
         ),
@@ -861,8 +869,9 @@ def run_benchmark(
                 "client-observed request wall time"
             ),
             "aggregate_total_tokens_per_second": (
-                "sum of actual prefill plus completion tokens divided by "
-                "the synchronized concurrency-round span"
+                "overall: actual prefill plus completion tokens divided by "
+                "the sum of measured round spans; other statistics describe "
+                "individual rounds"
             ),
             "draft_acceptance": (
                 "accepted support-model tokens divided by drafted "
@@ -1021,8 +1030,9 @@ def run_corpus_benchmark(
                 "support-model tokens"
             ),
             "aggregate_total_tokens_per_second": (
-                "sum of actual prefill plus completion tokens divided by "
-                "the synchronized concurrency-round span"
+                "overall: actual prefill plus completion tokens divided by "
+                "the sum of measured round spans; other statistics describe "
+                "individual rounds"
             ),
             "completion_sha256": (
                 "SHA-256 of generated text for cross-concurrency exactness "
@@ -1130,6 +1140,7 @@ def print_human(report: dict[str, Any]) -> None:
         latency = result["latency"]
         stage = result["stage"]
         aggregate = result["aggregate"]
+        aggregate_rate = aggregate["total_tokens_per_second"]["overall"]
         speculative = result["speculative"]
         request_p95 = latency["request_ms"]["p95"]
         ttft_p95 = latency["client_ttft_ms"]["p95"]
@@ -1145,7 +1156,7 @@ def print_human(report: dict[str, Any]) -> None:
             f"{_median(stage['prefill_tokens_per_second']):>13}  "
             f"{_median(stage['decode_tokens_per_second']):>9}  "
             f"{_median(stage['whole_request_tokens_per_second']):>11}  "
-            f"{_median(aggregate['total_tokens_per_second']):>15}  "
+            f"{'-' if aggregate_rate is None else f'{aggregate_rate:.2f}':>15}  "
             f"{speculative['acceptedTokens']:>5}/"
             f"{speculative['draftedTokens']:<5}"
         )

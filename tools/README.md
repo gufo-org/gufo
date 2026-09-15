@@ -91,7 +91,7 @@ tools/quant/gufo-gguf.py --gguf artifacts/gguf/Qwen3.5-0.8B-Q4_K_M.gguf --recon 
 - `tools/quant/gufo-quantize.py` — deterministic conversion (recipe + range/imatrix search)
 - `tools/quant/gufo-mp-experiment.py` — quantize+bench sweep across presets (comparison table)
 - `tools/quant/gufo-bench.py` — correctness-linked benchmark
-- `tools/serving/gufo-serving-bench.py` — canonical C=1/C=2/C=4 HTTP serving benchmark
+- `tools/serving/gufo-serving-bench.py` — canonical concurrent HTTP serving benchmark
 - `tools/quant/gufo-gguf.py` — GGUF header/tensor-info inspection + Q4-family dequant
   (`--card` model card, `--recon` per-tensor retention vs bf16 with our SHQ4
   stats merged from the quantization plan; see `benchmarks/qwen3.5-0.8b/`)

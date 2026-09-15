@@ -55,23 +55,29 @@ pp2048/tg128 across all five context depths at C2/4/6/8: **TODO**.
 
 ## Multiple users, DFlash2
 
-Q4_K_M draft, same workload and units. **Adaptive remains the default.**
-Fixed 1 uses `--draft-policy fixed --draft-tokens 1`. Each request keeps its
-own sampling, caches and recurrent state.
+Q4_K_M draft, adaptive controller, greedy **tg64**, cached prompts, context
+capacity 4096. **2026-09-15**, one warmup and one measured pass; C1 warms all
+three mixed-corpus prompts. Aggregate delivered tok/s:
 
-| Concurrency | Q4 adaptive | Q4 fixed 1 | Q8 adaptive | Q8 fixed 1 |
+| Concurrency | Q4 repetition | Q4 mixed corpus | Q8 repetition | Q8 mixed corpus |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | **23.66** | 18.55 | **15.79** | 12.03 |
-| 2 | 29.17 | **30.72** | **24.73** | 21.09 |
-| 4 | 31.63 | **44.60** | 25.45 | **34.43** |
-| 6 | 32.79 | **46.77** | 25.61 | **43.14** |
-| 8 | 34.20 | **49.18** | 26.79 | **46.38** |
+| 1 | 62.26 | 36.63 | TODO | TODO |
+| 2 | 74.55 | 40.85 | TODO | TODO |
+| 4 | 81.16 | 43.81 | TODO | TODO |
+| 6 | 80.24 | 49.84 | TODO | TODO |
+| 8 | 84.00 | 51.79 | TODO | TODO |
 
-Greedy output matches AR throughout. Temperature 0.8 / seed 42 reproduces C1
-output within each target/controller configuration at C2/4/6/8. Higher
-concurrency favors shorter blocks on this prompt. Separate JSON and repetition
-controls favor adaptive at C8 on both targets; see the [quality guide](eval/README.md).
-Controller tuning across workloads and the pp2048/tg128 depth sweep remain **TODO**.
+Repetition accepts **100%** of proposals. The mixed corpus contains 24 requests:
+eight each of code, JSON and prose; acceptance is **61.21%**. Throughput is total
+output tokens divided by the sum of measured request-group spans. C8 mixed
+request latency is **7.58 s median / 10.14 s p95**. Physical batch widths and
+per-request output hashes are checked at every concurrency.
+
+Draft projections share up to 64 rows. Verification skips rejected suffixes
+while retaining every request's original proposals, sampling draws and controller
+feedback. **Adaptive remains the default**; controller changes, Q8 measurements
+and pp2048/tg128 across the five context depths remain **TODO**.
+[Prompts, methodology and quality checks](eval/README.md).
 
 ## Reproduce and maintain quality
 

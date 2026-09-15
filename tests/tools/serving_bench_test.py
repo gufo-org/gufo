@@ -152,6 +152,34 @@ check(
     "aggregate whole-request throughput is reported",
 )
 check(len(c4["samples"]) == 4, "raw per-request samples are retained")
+sample = serving_bench.RequestObservation(
+    **c4["samples"][0], started_at=0.0, finished_at=1.0
+)
+mixed_rounds = [
+    serving_bench.RoundObservation(
+        concurrency=1,
+        repetition=0,
+        span_ms=span_ms,
+        prefill_tokens_per_second=sample.prefill_tokens * 1000.0 / span_ms,
+        output_tokens_per_second=sample.completion_tokens * 1000.0 / span_ms,
+        total_tokens_per_second=(
+            sample.prefill_tokens + sample.completion_tokens
+        ) * 1000.0 / span_ms,
+        samples=(sample,),
+    )
+    for span_ms in (1000.0, 1000.0, 10000.0)
+]
+mixed = serving_bench._summarize_rounds(mixed_rounds)
+check(mixed["measuredSpanMs"] == 12000.0, "all measured group spans count")
+check(
+    mixed["aggregate"]["output_tokens_per_second"]["overall"] == 0.5
+    and mixed["aggregate"]["output_tokens_per_second"]["median"] == 2.0,
+    "mixed-corpus throughput must account for slow groups",
+)
+check(
+    mixed["aggregate"]["total_tokens_per_second"]["overall"] == 3.0,
+    "overall throughput counts uncached prefill plus generated tokens",
+)
 check(c4["speculative"]["draftedTokens"] == 32, "draft tokens aggregate")
 check(c4["speculative"]["acceptedTokens"] == 16, "accepted tokens aggregate")
 check(c4["speculative"]["acceptance"] == 0.5, "aggregate acceptance")

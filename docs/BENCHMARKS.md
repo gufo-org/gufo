@@ -164,6 +164,12 @@ median, p95, and p99 behavior. It embeds the canonical machine fingerprint and
 source revision while excluding endpoint hosts, prompts, generated text, local
 paths, raw token IDs, and timestamps.
 
+Use `aggregate.output_tokens_per_second.overall` for corpus throughput: total
+delivered tokens divided by the sum of measured round spans. The human table
+uses the corresponding total-token rate. Per-round medians remain available
+for timing variation, but do not describe throughput over a mixed corpus.
+`measuredSpanMs` excludes warmups and time between rounds.
+
 ## Machine Fingerprint & Artifact Binding
 
 All diagnostic and benchmark artifacts must embed a canonical machine fingerprint

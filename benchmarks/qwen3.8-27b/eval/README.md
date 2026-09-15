@@ -49,48 +49,46 @@ replay; retain the established tolerances. Run short warmed release timings
 with matched artifacts and prompts, alternating binaries during experiments.
 Profile separately. Broaden to depth/concurrency sweeps only when needed.
 
-Generation changes must cover **C2/4/6/8 on Q4 and Q8, with and without
-DFlash2**, and retain C1 performance. The target test reuses eight scalar
-oracles with different prompts and prefix lengths to check complete logits and
-all five draft-feature taps at those widths. Verification covers unequal chunks,
-every combined width from 9 through 16, all 64 rows at C8, rotated coordinators
-and replay after partial acceptance.
-HTTP controls check physical
-execution width, greedy output/counts and seeded sampling against C1.
-Report aggregate throughput and whole-request latency; speculative stage
-throughput excludes scheduler waiting and is not per-user delivered throughput.
+Generation changes must cover **C2/4/6/8 on Q4 and Q8**, preserving C1
+performance. The target check reuses eight scalar oracles with different prompts
+and prefix lengths. It compares complete logits and all five feature taps,
+unequal chunks, combined widths 9–16/32/48/64, rotated coordinators and
+accepted-prefix replay. It also appends chunks while the cohort shrinks through
+C8/C4/C2/C1; recurrent replay must retain every committed chunk exactly.
 
-Concurrent DFlash2 verification shares exact projections across up to eight
-requests. Each request retains its own attention cache, recurrent state, feature
-taps, sampler, controller and accepted-prefix replay. Selected FFN and vocabulary
-projections reuse weights across 9–16 rows; BF16 projections also support 24/32.
-Q8 uses native wave64 for measured six- and twelve-row projections, with a
-transposed activation layout fitting sixteen rows in 64 KiB of LDS. Other shapes
-retain their established groups. FP32 arithmetic and reduction order are unchanged.
+Concurrent DFlash2 drafting shares projections across up to 64 rows. Attention,
+convolution, selector predecessors, positions, RNG and controller state remain
+private. The draft check requires byte-identical layer traces, complete logits,
+selector candidates/probabilities and persistent payloads against isolated
+execution, including ragged blocks and two rounds of feedback/context injection.
+Both target and draft executables accept `--concurrency-only` for these checks.
 
-Convolution and recurrence share launches across requests while preserving each
-sequence's computation order. Target-only tail rows join the verification batch.
-The final FFN scratch holds combined logits when it has room; sessions retain
-their own rows. Tests exercise both this reuse and the allocation fallback.
-Memory reporting includes retained verification logits and GPU sampling workspace.
+Verification generates the original complete proposal before dividing target
+work into chunks. Low-acceptance requests use two-row chunks when at least four
+requests remain. Smaller groups keep full blocks. Rejected suffixes stop early;
+proposal draws, target sampling, emitted tokens, counts and controller feedback
+must match full verification. The generic verifier test checks these invariants,
+including penalties, random sampling, EOS, budget tails and continuation.
 
-Qualification on **2026-09-15** covers shared-verification state handling with
-both full target suites, serving cleanup, and all 23 sampling strategies for
-both targets, all three drafts and both controllers. Concurrent sampled tokens
-and acceptance counts match isolated execution. Wider kernels additionally
-pass complete logit/feature and partial-acceptance replay checks at C2/4/6/8,
-including all 64 rows. The existing target executable's `--concurrency-only`
-option runs this focused check.
+Q4 exact projections group adjacent sets of sixteen rows in one launch. Shared
+recurrence preserves each sequence's computation order. Target-only tail rows
+join verification, and existing FFN scratch holds combined logits when it fits.
+Memory accounting includes target verification/sampling allocations, draft-owned
+weights, draft KV state, scalar scratch and the lazy batch workspace. The draft
+test compares allocated bytes with admission estimates before and after batching.
 
-Short release controls cover physical C1/2/4/6/8, greedy output/counts and
-temperature 0.8 / seed 42. They cover adaptive and fixed one-proposal blocks;
-sampling reproduces C1 within each configuration. Matched C1 controls cover all
-draft precisions. The maintained GEMM benchmark checks shared kernels against
-smaller groups, including BF16 partial rows/input tiles. The context-depth sweep
-remains TODO.
-The `kernels` suite also uses the existing recurrence microbenchmark to compare
-one-row and eight-row resident execution with the per-token storage reference,
-requiring exact output and state bits.
+The **2026-09-15** concurrency refresh covers both targets, all three drafts,
+all 23 sampling strategies under fixed/adaptive controllers, and serving
+cache/fork/persistence/cancellation checks. Eight-token cold/cached and concurrent
+runs must reproduce isolated IDs and acceptance counts. Deterministic speculation
+must match AR; sampled runs reproduce within each configuration.
+
+Release controls use the repetition prompt and a balanced code/JSON/prose corpus.
+Track aggregate delivered throughput, whole-request latency, physical width,
+output hashes and acceptance. Corpus throughput uses
+`aggregate.output_tokens_per_second.overall`: total delivered tokens divided by
+the sum of measured group spans. Per-group medians can misrepresent a mixed
+workload. The depth sweep and Q8 performance refresh remain TODO.
 
 For prefill changes, the existing target check also covers 128/257/2048-token
 prefixes, repeated prefill and two-token scalar/verification replay. It prints
@@ -198,7 +196,7 @@ Sampling/state refresh: **2026-09-15**. All
 Q4/Q8 AR and all 12 target/draft/controller combinations: Q4/Q8 targets,
 Q4_K_M/Q8_0/BF16 drafts, fixed/adaptive. They cover temperatures, individual
 filters, candidate floors, penalties/rewards, history windows and combinations.
-Each case checks four tokens and cold/cached replay. All six target/draft state
+Each case checks eight tokens and cold/cached replay. All six target/draft state
 suites also pass seven-proposal controller, RNG and snapshot/reuse checks.
 
 GPU checks cover 216 configurations / 864 AR quantiles, 141 acceptance/residual
@@ -262,16 +260,19 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 ## Latest measurement provenance
 
-Generation release measured on **2026-09-15**, SHA-256:
-`e8744c835a0407f9b060117d543fa9921027686efb5efa2c3b4f9c575c44d515`.
-The current tables use cached `prose_tides`, context capacity 4096, greedy tg64,
-one warmup and one measured round at C1/2/4/6/8. Both targets cover AR and
-Q4_K_M DFlash2 with adaptive and fixed one-proposal blocks. Sampled controls use
-temperature 0.8 / seed 42 and tg16. Reports retain request latency, aggregate
-throughput, physical width, output fingerprints and acceptance counts.
-All three draft precisions have matched C1 controls. Fixed one-proposal blocks
-help higher concurrency on this prompt but reduce C1 speed; adaptive remains
-the default. A controller comparison across workloads is TODO.
+Q4 concurrent DFlash2 release measured on **2026-09-15**, SHA-256:
+`c3e98c4b27d3005f97184fc373caa6dd19b51b5ef080c5c26e93f1e2f86e1d52`.
+Q4_K_M draft, adaptive, greedy tg64, context capacity 4096, cached prompts.
+The mixed workload repeats each of the three maintained corpus prompts eight
+times, giving 24 requests divisible by C1/2/4/6/8. Warm every unique prompt before
+measurement. Repetition accepts every proposal; mixed acceptance is 61.21%.
+Reports retain individual latency, physical width, output hashes and draft counts.
+
+Unchanged AR and single-user draft controls use release SHA-256
+`e8744c835a0407f9b060117d543fa9921027686efb5efa2c3b4f9c575c44d515`,
+measured on 2026-09-15. They use cached `prose_tides`, tg64 and context capacity
+4096. Fixed one-proposal blocks remain a comparison policy; adaptive is the
+default. Q8 concurrency, controller comparisons and context-depth sweeps are TODO.
 
 Q4 release measured on 2026-09-14, SHA-256:
 `0f6804912d5f9e97df7ffc1e5c49f5898b7444481006725d4c4b274fa2b0307a`.
@@ -284,24 +285,9 @@ the unchanged native wave64 release, SHA-256
 `feec38298e8a84a8b9f5dfcf290b924aed597e9f2bd8643fa40b5bd154aa736f`.
 
 Prompts live in [the adaptive corpus](../speculative-adaptive-corpus.json).
-Additional C8 controls use its `json_records` prompt and: "Output the word red
-exactly 1000 times, separated by spaces. Do not add any other text."
-Same release, Q4_K_M draft, cached greedy tg64, one warmup and one measured
-round. Aggregate delivered tok/s:
-
-| Target / prompt | AR | Adaptive | Fixed 1 |
-| --- | ---: | ---: | ---: |
-| Q4 / JSON | 66.21 | **74.68** | 53.28 |
-| Q4 / repetition | 67.59 | **77.39** | 54.79 |
-| Q8 / JSON | 48.88 | **67.57** | 50.31 |
-| Q8 / repetition | 49.73 | **74.81** | 51.42 |
-
-All three modes produce identical greedy output within each target/prompt;
-physical execution width is eight. Repetition accepts 100% of proposals on
-both targets and both controllers. Adaptive JSON acceptance is 96.43% on Q4
-and 90% on Q8. Controller performance depends on the workload: these controls
-favor adaptive, while `prose_tides` favors shorter blocks at higher concurrency.
-They do not replace the depth sweep or a broad draft-precision comparison.
+The repetition prompt is: "Output the word red exactly 1000 times, separated by
+spaces. Do not add any other text." Keep its 100% acceptance control separate
+from the balanced mixed workload.
 
 The measured pp2048 chunk spends about **90%** of GPU time in FP16 quantized
 GEMM, with **0.07%** dispatch idle time, excluding warmups and resets.
@@ -322,8 +308,10 @@ improve model prefill. Rejected experiments add no production paths.
 
 Generation profiles place most GPU time in exact quantized projections.
 Retained: wider exact projection groups, native wave64 for measured shapes,
-shared recurrence launches, batched target-only tails and logit scratch reuse.
-Rejected: extra Q8 staging, coefficient preconversion and paired-lane Q8 dots.
+shared recurrence launches, batched drafting and target-only tails, logit scratch
+reuse, sixteen-row grouping and early termination of rejected suffixes.
+Rejected: extra Q8 staging, coefficient preconversion, paired-lane Q8 dots, wider
+scalar tiles, direct global activation loads and alternate FMA schedules.
 No runtime switches select these experiments.
 
 | Artifact | SHA-256 |
