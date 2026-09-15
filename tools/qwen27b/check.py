@@ -70,6 +70,13 @@ def main() -> None:
         commands.append(["ctest", "--test-dir", "build/gpu-test", "-R",
                          "^(" + "|".join(names) + ")$",
                          "--output-on-failure", "--stop-on-failure", "--no-tests=error"])
+        if args.suite in ("kernels", "all"):
+            # This existing tool compares the optimized resident recurrence
+            # with the independent per-token storage geometry, bit for bit.
+            commands.append(["tools/bench/build.sh",
+                             "tools/qwen27b/deltanet_bench.hip"])
+            commands.extend([["/tmp/deltanet_bench", str(rows), "1"]
+                             for rows in (1, 8)])
     for command in commands:
         subprocess.run(command, cwd=ROOT, env=environment, check=True)
 

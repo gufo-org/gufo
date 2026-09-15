@@ -25,6 +25,14 @@ struct GpuSamplingWorkspace {
   std::size_t sort_temp_storage_bytes{0};
   std::size_t vocab_size{0};
   std::size_t penalty_capacity{0};
+
+  [[nodiscard]] std::size_t SizeBytes() const noexcept {
+    if (vocab_size == 0)
+      return 0;
+    return 2 * vocab_size * (sizeof(float) + sizeof(std::uint32_t)) +
+           penalty_capacity * (3 * sizeof(std::uint32_t) + sizeof(float)) +
+           sizeof(std::uint32_t) + sort_temp_storage_bytes;
+  }
 };
 
 struct GpuSamplingParameters {
@@ -42,6 +50,8 @@ struct GpuSamplingParameters {
 void AllocateGpuSamplingWorkspace(GpuSamplingWorkspace* workspace,
                                   std::size_t vocab_size,
                                   std::size_t penalty_capacity);
+[[nodiscard]] std::size_t EstimateGpuSamplingWorkspaceBytes(
+    std::size_t vocab_size, std::size_t penalty_capacity);
 void FreeGpuSamplingWorkspace(GpuSamplingWorkspace* workspace) noexcept;
 
 /// Samples one device-resident logit row and writes a single device token.

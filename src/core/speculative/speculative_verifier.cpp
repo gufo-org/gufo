@@ -390,6 +390,7 @@ struct SpeculativeVerifier::PreparedStep {
   bool random_sampling{false};
   bool capture_hidden{false};
   bool capture_logits{false};
+  bool target_only{false};
 };
 
 SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
@@ -413,7 +414,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
 }
 
 SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
-    const StepRequest& request) {
+    const StepRequest& request, bool defer_target_only) {
   request.sampler.config().Validate();
   if (request.max_emitted_tokens == 0) {
     throw std::invalid_argument(
@@ -430,6 +431,16 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
   auto& working_sampler =
       prepared.sampled ? *prepared.working_sampler : request.sampler;
   const auto target_only_step = [&]() {
+    if (defer_target_only) {
+      prepared.target_only = true;
+      prepared.inputs = {request.current_token};
+      prepared.capture_hidden =
+          draft_backend_ != nullptr && draft_backend_->RequiresTargetHiddenStates();
+      prepared.capture_logits =
+          (prepared.sampled || options_.retain_frontier_logits) &&
+          !target_executor_->SupportsDeviceResidentSampling();
+      return;
+    }
     auto next = AdvanceCommittedToken(request.current_token, request.position);
     if (prepared.sampled)
       next = target_executor_->SampleLastLogits(working_sampler);
@@ -565,7 +576,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
                      std::span(proposal.candidate_probabilities)
                          .subspan(offset, proposal.candidates_per_token)};
   };
-  if (!prepared.sampled &&
+  if ((!prepared.sampled || prepared.target_only) &&
       verification.predictions.size() != verification_inputs.size()) {
     throw std::runtime_error(
         "target executor returned an incomplete verification chunk");
@@ -583,6 +594,41 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::FinishStep(
            verification_inputs.size() * verification.hidden_width)) {
     throw std::runtime_error(
         "target executor returned incomplete verification hidden states");
+  }
+  if (prepared.target_only) {
+    const auto prediction = verification.predictions.front();
+    if (capture_target_hidden &&
+        !draft_backend_->AppendTargetContext(
+            {.prompt_tokens = verification_inputs,
+             .prompt_hidden_states = verification.hidden_states,
+             .hidden_size = verification.hidden_width,
+             .first_token = prediction},
+            cur_pos)) {
+      throw std::runtime_error("draft failed to append committed target token");
+    }
+    auto next = prediction;
+    if (prepared.sampled) {
+      next = device_resident_sampling
+                 ? target_executor_->SampleVerificationLogits(0, working_sampler)
+                 : working_sampler.Sample(std::span(verification.logits)
+                                              .first(verification.vocab_size));
+    }
+    std::vector<float> logits;
+    if (options_.retain_frontier_logits) {
+      const auto row =
+          prepared.capture_logits
+              ? std::span<const float>(verification.logits)
+                    .first(verification.vocab_size)
+              : target_executor_->CopyVerificationLogits(0);
+      logits.assign(row.begin(), row.end());
+    }
+    sampler.SetRngState(working_sampler.rng_state());
+    ++stats_.total_verification_steps;
+    ++stats_.total_emitted_tokens;
+    return {.emitted_tokens = {next},
+            .next_token = next,
+            .next_token_logits = std::move(logits),
+            .hit_eos = IsStopToken(next, eos_id)};
   }
   std::size_t accepted_count = 0;
   tokenization::TokenId correction_token = 0;
@@ -756,7 +802,8 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
           request.eos_id, request.max_emitted_tokens);
       continue;
     }
-    auto& step = prepared.emplace_back(verifier.PrepareStep(request));
+    auto& step = prepared.emplace_back(
+        verifier.PrepareStep(request, requests.size() > 1));
     if (step.immediate.has_value()) {
       result[index] = std::move(*step.immediate);
       continue;

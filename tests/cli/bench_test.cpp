@@ -68,9 +68,9 @@ void TestHybridMtpOptions() {
                                             "mtp-npu",
                                             "--mtp-model",
                                             "mtp.gguf",
-                                            "--spec-draft-n-max",
+                                            "--draft-tokens",
                                             "2",
-                                            "--spec-draft-n-min",
+                                            "--min-draft-tokens",
                                             "2",
                                             "--n-gen",
                                             "128"};
@@ -94,16 +94,11 @@ void TestInvalidDepth() {
   Expect(!gufo::cli::ParseBenchOptions(range_args, &error).has_value(),
          "invalid draft range rejected");
 
-  for (const char* flag : {"--spec-draft-p-min", "--draft-p-min"}) {
-    const std::array<const char*, 2> removed = {flag, "0.75"};
-    Expect(!gufo::cli::ParseBenchOptions(removed, &error).has_value(),
-           "removed confidence policy is rejected");
-  }
-  const std::array<const char*, 4> fixed_block = {"--speculative", "dflash2",
-                                                  "--spec-draft-n-min", "2"};
-  Expect(!gufo::cli::ParseBenchOptions(fixed_block, &error).has_value() &&
+  const std::array<const char*, 4> unsupported_floor = {"--speculative", "dflash2",
+                                                  "--min-draft-tokens", "2"};
+  Expect(!gufo::cli::ParseBenchOptions(unsupported_floor, &error).has_value() &&
              error.find("min-draft-tokens") != std::string::npos,
-         "DFlash rejects an unused adaptive draft floor");
+         "DFlash2 rejects an unsupported minimum draft length");
   for (const char* policy : {"fixed", "adaptive", "unknown"}) {
     const std::array<const char*, 4> args = {"--speculative", "dflash2",
                                              "--draft-policy", policy};

@@ -100,9 +100,6 @@ void PrintBenchHelp(std::string_view program_name) {
       "", "--draft-tokens", "N",
       "Maximum speculative draft tokens per verification step (default: 7)",
       "Speculative", &opt.draft_tokens);
-  parser.AddOption("", "--spec-draft-n-max", "N",
-                   "llama.cpp-compatible alias for --draft-tokens",
-                   "Speculative", &opt.draft_tokens);
   parser.AddOption("", "--draft-vocab", "N",
                    "Qwen3.8-Flash-Next: score MTP drafts over the first N "
                    "token ids only (default: 0 = full vocabulary)",
@@ -111,9 +108,7 @@ void PrintBenchHelp(std::string_view program_name) {
   parser.AddOption("", "--min-draft-tokens", "N",
                    "Adaptive draft floor (default: 1)", "Speculative",
                    &opt.min_draft_tokens);
-  parser.AddOption("", "--spec-draft-n-min", "N",
-                   "llama.cpp-compatible alias for --min-draft-tokens",
-                   "Speculative", &opt.min_draft_tokens);
+
   parser.AddOption("", "--temperature", "T",
                    "DeepSeek generation temperature; 0 is greedy (default: 0)",
                    "Workload", &opt.temperature);
@@ -1185,12 +1180,6 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
         opt.min_draft_tokens = count;
         return true;
       });
-  parser.AddOption("", "--spec-draft-n-max", "N",
-                   "llama.cpp-compatible alias for --draft-tokens",
-                   "Speculative", &opt.draft_tokens);
-  parser.AddOption("", "--spec-draft-n-min", "N",
-                   "llama.cpp-compatible alias for --min-draft-tokens",
-                   "Speculative", &opt.min_draft_tokens);
   parser.AddOption("", "--draft-vocab", "N",
                    "Qwen3.8-Flash-Next: score MTP drafts over the first N "
                    "token ids only (default: 0 = full vocabulary)",

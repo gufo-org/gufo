@@ -88,9 +88,35 @@ void QwenGpuExecutor::EnsureVerificationLogits(std::size_t batch_size) {
     HIP_CHECK(hipFree(d_verification_logits_));
     d_verification_logits_ = nullptr;
   }
+  verification_logits_capacity_ = 0;
   HIP_CHECK(hipMalloc(&d_verification_logits_,
                       batch_size * weights_.config.vocab_size * sizeof(float)));
   verification_logits_capacity_ = batch_size;
+}
+
+QwenGpuMemoryUsage QwenGpuExecutor::EstimateMemoryUsage(
+    const core::ModelConfig& config, std::uint32_t max_context,
+    QwenExecutionPolicy policy) {
+  auto usage = QwenGpuArena::EstimateMemoryUsage(config, max_context, policy);
+  usage.temporary_scratch_bytes +=
+      EstimateGpuSamplingWorkspaceBytes(config.vocab_size, max_context);
+  // Reserve the bounded fallback for eight requests with eight rows each.
+  // Large arenas reuse FFN scratch and normally retain fewer rows.
+  const std::size_t rows = std::min<std::size_t>(max_context, 64);
+  const std::size_t features = rows * 5 * config.hidden_size;
+  const std::size_t feature_rows =
+      (features + config.vocab_size - 1) / config.vocab_size;
+  usage.temporary_scratch_bytes +=
+      std::max(rows, feature_rows) * config.vocab_size * sizeof(float);
+  return usage;
+}
+
+QwenGpuMemoryUsage QwenGpuExecutor::GetMemoryUsage() const {
+  auto usage = arena_.GetMemoryUsage();
+  usage.temporary_scratch_bytes +=
+      verification_logits_capacity_ * weights_.config.vocab_size * sizeof(float);
+  usage.temporary_scratch_bytes += sampling_workspace_.SizeBytes();
+  return usage;
 }
 
 void QwenGpuExecutor::Reset() noexcept {

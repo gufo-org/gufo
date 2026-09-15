@@ -24,16 +24,14 @@ Q4 uses FP16 activations with packed quantized weights; Q8 retains native wave64
 
 ## Single user, DFlash2
 
-Current short control, **2026-09-14**, Q4 target, adaptive, greedy C1.
-One warmed release sample per draft; all 32 generated IDs match AR and
-acceptance is 22.2%. Prefill includes feature capture and draft injection.
-These **tg32 controls are not the full tg128 sweep**.
+Short control, **2026-09-15**: cached `prose_tides`, **tg64**, adaptive,
+greedy C1, one warmed release sample per draft. Generation tok/s:
 
-| Draft | pp2048 tok/s | tg32 tok/s |
+| Draft | Q4 target | Q8 target |
 | --- | ---: | ---: |
-| Q4_K_M | **573.56** | **16.42** |
-| Q8_0 | 569.45 | 16.05 |
-| BF16 | 574.41 | 15.10 |
+| Q4_K_M | **23.66** | **15.79** |
+| Q8_0 | 22.90 | 15.49 |
+| BF16 | 22.13 | 14.26 |
 
 pp2048/tg128 at depths **0 / 4,096 / 8,192 / 12,288 / 16,384**,
 for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.
@@ -42,36 +40,38 @@ for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.
 ## Multiple users, autoregressive
 
 Short generation control, **2026-09-15**: `prose_tides`, context capacity 4096,
-cached prompt, **tg64**, one warmup and one measured round. Cells are
-**aggregate / per-user whole-request tok/s**. C1 is the regression control.
+cached prompt, **tg64**, one warmup and one measured round. All concurrency
+tables report **aggregate delivered tok/s**. C1 is the regression control.
 
 | Concurrency | Q4 | Q8 |
 | ---: | ---: | ---: |
-| 1 | 11.79 / 11.79 | 7.10 / 7.10 |
-| 2 | 22.89 / 11.45 | 14.36 / 7.18 |
-| 4 | 41.38 / 10.35 | 27.00 / 6.75 |
-| 6 | 55.99 / 9.33 | 38.02 / 6.34 |
-| 8 | 65.77 / 8.22 | 48.70 / 6.09 |
+| 1 | 11.79 | 7.10 |
+| 2 | 22.98 | 14.38 |
+| 4 | 41.84 | 27.17 |
+| 6 | 57.08 | 38.74 |
+| 8 | 67.74 | 49.66 |
 
 pp2048/tg128 across all five context depths at C2/4/6/8: **TODO**.
 
 ## Multiple users, DFlash2
 
-Q4_K_M/adaptive, same short workload and units. Target verification shares
-projections across requests; draft generation and recurrent state remain
-independent for each user.
+Q4_K_M draft, same workload and units. **Adaptive remains the default.**
+Fixed 1 uses `--draft-policy fixed --draft-tokens 1`. Each request keeps its
+own sampling, caches and recurrent state.
 
-| Concurrency | Q4 target | Q8 target |
-| ---: | ---: | ---: |
-| 1 | 23.66 / 23.66 | 15.68 / 15.68 |
-| 2 | 24.81 / 12.40 | 16.18 / 8.09 |
-| 4 | 28.92 / 7.23 | 17.70 / 4.42 |
-| 6 | 29.71 / 4.95 | 17.46 / 2.91 |
-| 8 | 30.94 / 3.87 | 18.14 / 2.27 |
+| Concurrency | Q4 adaptive | Q4 fixed 1 | Q8 adaptive | Q8 fixed 1 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | **23.66** | 18.55 | **15.79** | 12.03 |
+| 2 | 29.17 | **30.72** | **24.73** | 21.09 |
+| 4 | 31.63 | **44.60** | 25.45 | **34.43** |
+| 6 | 32.79 | **46.77** | 25.61 | **43.14** |
+| 8 | 34.20 | **49.18** | 26.79 | **46.38** |
 
-Greedy output matches AR at every width. Temperature 0.8 / seed 42 reproduces
-C1 output within each target/mode configuration at C2/4/6/8. These controls
-do not replace the pp2048/tg128 depth sweep, which remains **TODO**.
+Greedy output matches AR throughout. Temperature 0.8 / seed 42 reproduces C1
+output within each target/controller configuration at C2/4/6/8. Higher
+concurrency favors shorter blocks on this prompt. Separate JSON and repetition
+controls favor adaptive at C8 on both targets; see the [quality guide](eval/README.md).
+Controller tuning across workloads and the pp2048/tg128 depth sweep remain **TODO**.
 
 ## Reproduce and maintain quality
 

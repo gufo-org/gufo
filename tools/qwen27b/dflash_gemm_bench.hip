@@ -2,12 +2,13 @@
 // Build inside Nix with tools/bench/build.sh and this source path.
 // Run: /tmp/dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] [batch]
 // Scalar Q4/Q5/IQ4/Q6 use batch=1; append swiglu [up-quant] for gate/up.
-// Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise; widths 2–8 supported.
-// BF16 also accepts batch=16 to compare injection with two batch-8 launches.
-// Weights use read-only host registration, matching production GGUF mapping.
-// Decode rotates matrices to exceed cache capacity. Batch-16 context injection
-// repeats one matrix across chunks, including the production K/V cache hint.
-// Every geometry must be bit-exact with the reference before timing counts.
+// Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise; widths 2–8
+// supported. BF16/Q8/Q4/Q5/IQ4 also accept widths 12/16 for shared
+// verification. Weights use read-only host registration, matching production
+// GGUF mapping. Quantized projections rotate matrices beyond cache capacity.
+// Wide BF16 repeats one matrix across chunks, including the production K/V
+// cache hint. Every geometry must be bit-exact with the reference before timing
+// counts.
 #define ENGINE_ENABLE_HIP 1
 #include <sys/mman.h>
 
@@ -155,17 +156,18 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
          const std::string& up_type = "") {
   using namespace gufo;
   using namespace gufo::hip;
-  if (rows == 0 || columns == 0 || columns % 256 != 0 || iterations < 1 ||
+  const std::size_t column_block = type == "bf16" ? 8 : type == "q8" ? 32 : 256;
+  if (rows == 0 || columns == 0 || columns % column_block != 0 || iterations < 1 ||
       (type != "bf16" && type != "q8" && type != "q4" && type != "q5" &&
        type != "iq4" && type != "q6")) {
     throw std::invalid_argument(
-        "require bf16|q8|q4|q5|iq4|q6, positive M, K divisible by 256, "
+        "require bf16|q8|q4|q5|iq4|q6, positive M, complete weight blocks, "
         "positive "
         "iterations");
   }
-  if constexpr (Batch > 8) {
+  if constexpr (Batch > 16) {
     if (type != "bf16")
-      throw std::invalid_argument("wide injection is BF16 only");
+      throw std::invalid_argument("24/32-row ablations require bf16");
   }
   if constexpr (Batch == 1) {
     if (type == "bf16" || type == "q8")
@@ -195,14 +197,18 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
   const std::size_t up_matrix_bytes =
       mixed ? rows * columns / 256 * up_block_bytes : matrix_bytes;
   const std::size_t bytes = matrix_bytes + (fused ? up_matrix_bytes : 0);
-  if (Batch != 1 && type != "bf16" && type != "q8" &&
-      !FitsSmallBatch32BitIndices(batch, rows, columns, matrix_bytes / rows)) {
+  if (Batch != 1 && type != "bf16" && (type != "q8" || Batch > 8) &&
+      (!FitsSmallBatch32BitIndices(std::min<std::size_t>(batch, 8), rows,
+                                   columns, matrix_bytes / rows) ||
+       rows > std::numeric_limits<std::uint32_t>::max() / batch ||
+       columns > std::numeric_limits<std::uint32_t>::max() / batch)) {
     throw std::invalid_argument("K-quant ablations require 32-bit offsets");
   }
   const std::size_t copies =
-      Batch == 16 ? 1
-                  : std::max<std::size_t>(
-                        1, (128ULL * 1024 * 1024 + bytes - 1) / bytes);
+      Batch > 8 && type == "bf16"
+          ? 1
+          : std::max<std::size_t>(1,
+                                  (128ULL * 1024 * 1024 + bytes - 1) / bytes);
   const std::size_t physical = bytes * copies;
   Buffer<unsigned char> weights(physical);
   Buffer<float> input(batch * columns), output(batch * rows),
@@ -279,28 +285,73 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
       scalar.template operator()<core::GgmlType::kQ6_K>();
     }
   } else if (type == "bf16") {
-    if constexpr (Batch == 16) {
+    if constexpr (Batch > 8) {
       geometries = {
-          {"batch8_chunks",
+          {"split8",
            [&](const void* w) {
-             for (std::size_t offset = 0; offset < Batch; offset += 8)
-               BatchedExactBf16GEMMFp32VecKernel<16, 8, 2>
-                   <<<(rows + 31) / 32, 512>>>(
-                       static_cast<const hip_bfloat16*>(w),
-                       input.Get() + offset * columns,
-                       output.Get() + offset * rows, rows, columns);
-           }},
-          {"batch16", [&](const void* w) {
-             const auto launch = [&]<bool StreamWeights>() {
-               BatchedExactBf16GEMMFp32VecKernel<16, 16, 2, StreamWeights>
-                   <<<(rows + 31) / 32, 512>>>(
-                       static_cast<const hip_bfloat16*>(w), input.Get(),
-                       output.Get(), rows, columns);
+             const auto launch = [&]<std::size_t Width>(std::size_t offset) {
+               const auto* weights = static_cast<const hip_bfloat16*>(w);
+               const float* x = input.Get() + offset * columns;
+               float* y = output.Get() + offset * rows;
+               if constexpr (Width == 8) {
+                 if ((rows == 5120 && columns == 4096) ||
+                     (columns == 5120 && (rows == 12288 || rows == 17408))) {
+                   BatchedExactBf16GEMMFp32VecKernel<16, Width, 1>
+                       <<<(rows + 15) / 16, 512>>>(weights, x, y, rows,
+                                                   columns);
+                   return;
+                 }
+               }
+               BatchedExactBf16GEMMFp32VecKernel<16, Width, 2>
+                   <<<(rows + 31) / 32, 512>>>(weights, x, y, rows, columns);
              };
-             if (rows == 1024 && columns == 5120)
-               launch.template operator()<false>();
-             else
-               launch.template operator()<true>();
+             for (std::size_t offset = 0; offset + 8 <= Batch; offset += 8)
+               launch.template operator()<8>(offset);
+             if constexpr (Batch % 8 != 0)
+               launch.template operator()<Batch % 8>((Batch / 8) * 8);
+           }},
+          {"wide", [&](const void* w) {
+             if constexpr (Batch >= 9 && Batch <= 15 && Batch != 12) {
+               if (rows == 5120 && columns == 6144) {
+                 BatchedExactBf16GEMMFp32VecKernel<16, Batch, 1>
+                     <<<(rows + 15) / 16, 512>>>(
+                         static_cast<const hip_bfloat16*>(w), input.Get(),
+                         output.Get(), rows, columns);
+                 return;
+               }
+             }
+             if constexpr ((Batch >= 9 && Batch <= 15 && Batch != 12) ||
+                           Batch > 16) {
+               if (!detail::TryLaunchBf16SmallBatchWave64(
+                       w, input.Get(), output.Get(), Batch, rows, columns,
+                       nullptr))
+                 throw std::runtime_error("unsupported wide BF16 batch");
+             } else {
+               const auto launch = [&]<unsigned Waves, std::size_t Rows,
+                                       bool Stream = true>() {
+                 BatchedExactBf16GEMMFp32VecKernel<Waves, Batch, Rows, Stream>
+                     <<<(rows + Waves * Rows - 1) / (Waves * Rows), Waves * 32>>>(
+                         static_cast<const hip_bfloat16*>(w), input.Get(),
+                         output.Get(), rows, columns);
+               };
+               if (rows == 5120 && columns == 6144) {
+                 launch.template operator()<16, 1>();
+                 return;
+               }
+               if constexpr (Batch == 12) {
+                 if (columns == 5120 &&
+                     (rows == 12288 || rows == 17408 || rows == 248320)) {
+                   launch.template operator()<8, 2>();
+                   return;
+                 }
+               } else {
+                 if (rows == 1024 && columns == 5120) {
+                   launch.template operator()<16, 2, false>();
+                   return;
+                 }
+               }
+               launch.template operator()<16, 2>();
+             }
            }}};
     } else {
       geometries = {{"rows2",
@@ -481,6 +532,78 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                                              columns);
            }}};
     }
+  } else if constexpr (Batch <= 16) {
+    if (type == "q8") {
+      geometries = {
+          {"split8",
+           [&](const void* w) {
+             const auto launch = [&]<std::size_t Width>(std::size_t offset) {
+               const float* x = input.Get() + offset * columns;
+               float* y = output.Get() + offset * rows;
+               if ((Width == 2 || Width == 4 || Width == 8) &&
+                   rows == 34816 && columns == 5120) {
+                 SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Width, 3, true>
+                     <<<(rows + 47) / 48, 512>>>(w, x, y, rows, columns);
+                 return;
+               }
+               if constexpr (Width == 8) {
+                 if (rows == 5120 && columns == 17408) {
+                   SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Width, 3>
+                       <<<(rows + 47) / 48, 512>>>(w, x, y, rows, columns);
+                   return;
+                 }
+               }
+               SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Width, 2>
+                   <<<(rows + 31) / 32, 512>>>(w, x, y, rows, columns);
+             };
+             launch.template operator()<8>(0);
+             launch.template operator()<Batch - 8>(8);
+           }},
+          {"wide_xor", [&](const void* w) {
+             constexpr std::size_t Rows =
+                 Batch == 11 || Batch == 13 || Batch == 14
+                     ? 4 : Batch == 12 ? 2 : 3;
+             SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, Rows, true, true>
+                 <<<(rows + 16 * Rows - 1) / (16 * Rows), 512>>>(
+                     w, input.Get(), output.Get(), rows, columns);
+           }}};
+    } else {
+      const auto quant = [&]<core::GgmlType Type>() {
+        geometries = {
+            // This generic split is an arithmetic oracle. Its geometry does
+            // not represent every shape-specific production dispatch.
+            {"generic_split8",
+             [&](const void* w) {
+               const auto launch = [&]<std::size_t Width>(std::size_t offset) {
+                 SmallBatchKQuantExactFp32GEMMKernel<16, Width, 3, Type>
+                     <<<(rows + 47) / 48, 512>>>(
+                         w, input.Get() + offset * columns,
+                         output.Get() + offset * rows, rows, columns);
+               };
+               launch.template operator()<8>(0);
+               launch.template operator()<Batch - 8>(8);
+             }},
+            {"wide_wave32", [&](const void* w) {
+               constexpr std::size_t Step =
+                   (Type == core::GgmlType::kIQ4_XS && Batch % 2 == 0) ||
+                           (Type == core::GgmlType::kQ4_K && Batch == 12)
+                       ? 2
+                       : 1;
+               SmallBatchKQuantExactFp32GEMMKernel<8, Batch, 4, Type, 1, 4, 1,
+                                                   true, Step>
+                   <<<(rows + 31) / 32, 256>>>(w, input.Get(), output.Get(),
+                                               rows, columns);
+             }}};
+      };
+      if (type == "q4")
+        quant.template operator()<core::GgmlType::kQ4_K>();
+      else if (type == "q5")
+        quant.template operator()<core::GgmlType::kQ5_K>();
+      else if (type == "q6")
+        quant.template operator()<core::GgmlType::kQ6_K>();
+      else
+        quant.template operator()<core::GgmlType::kIQ4_XS>();
+    }
   }
   MappedWeights mapped_weights(weights.Get(), physical);
   const auto quant_type = type == "q4"    ? core::GgmlType::kQ4_K
@@ -488,13 +611,17 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                           : type == "iq4" ? core::GgmlType::kIQ4_XS
                           : type == "q6"  ? core::GgmlType::kQ6_K
                                           : core::GgmlType::kF32;
-  if (detail::TryLaunchKQuantSmallBatchWave64(quant_type, mapped_weights.Get(),
-                                              input.Get(), output.Get(), batch,
-                                              rows, columns, nullptr)) {
+  const auto launch_native = [&](const void* w) {
+    return type == "q8"
+               ? detail::TryLaunchQ8SmallBatchWave64(
+                     w, input.Get(), output.Get(), batch, rows, columns, nullptr)
+               : detail::TryLaunchKQuantSmallBatchWave64(
+                     quant_type, w, input.Get(), output.Get(), batch, rows,
+                     columns, nullptr);
+  };
+  if (launch_native(mapped_weights.Get())) {
     geometries.push_back({"production_wave64", [&](const void* w) {
-                            if (!detail::TryLaunchKQuantSmallBatchWave64(
-                                    quant_type, w, input.Get(), output.Get(),
-                                    batch, rows, columns, nullptr))
+                            if (!launch_native(w))
                               throw std::runtime_error(
                                   "wave64 shape changed during benchmark");
                           }});
@@ -543,7 +670,7 @@ int main(int argc, char** argv) {
     if (argc < 4 || argc > 8)
       throw std::invalid_argument(
           "usage: dflash_gemm_bench bf16|q8|q4|q5|iq4|q6 M K [iterations] "
-          "[batch=1..8|16 (16 is BF16 injection only)] [swiglu [up-quant]]");
+          "[batch=1..16|24|32] [swiglu [up-quant]]");
     const bool fused = argc >= 7;
     const int batch = argc >= 6                      ? std::stoi(argv[5])
                       : std::string(argv[1]) == "q6" ? 7
@@ -568,12 +695,30 @@ int main(int argc, char** argv) {
       Run<7>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else if (batch == 8) {
       Run<8>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 9) {
+      Run<9>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 10) {
+      Run<10>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 11) {
+      Run<11>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 12) {
+      Run<12>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 13) {
+      Run<13>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 14) {
+      Run<14>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 15) {
+      Run<15>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else if (batch == 16) {
       Run<16>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 24) {
+      Run<24>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
+    } else if (batch == 32) {
+      Run<32>(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), iterations);
     } else {
       throw std::invalid_argument(
-          "batch must be one scalar row, 2–8 verification rows or sixteen "
-          "injection rows");
+          "batch must be one scalar row, 2–8 verification rows, or 9–16 "
+          "shared projection rows; bf16 also supports 24/32 rows");
     }
     return 0;
   } catch (const std::exception& error) {

@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen/hip/execution_policy.hpp"
@@ -20,6 +21,14 @@ struct SsmReplayCapture {
   float* beta{nullptr};
   const std::uint32_t* position{nullptr};
   const std::uint32_t* enabled{nullptr};
+};
+
+struct SsmSequenceState {
+  float* conv{nullptr};
+  void* recurrent{nullptr};
+  SsmReplayCapture replay;
+  std::uint32_t row_offset{0};
+  std::uint32_t rows{0};
 };
 
 /// Copies aligned recurrent-state row groups without touching attention rows.
@@ -66,6 +75,20 @@ void LaunchSSMConvRecurrenceRows(
     std::uint32_t rows, std::size_t projection_row_stride,
     std::size_t inner_row_stride, hipStream_t stream = nullptr,
     SsmReplayCapture replay_capture = {},
+    QwenRecurrentStateStorage state_storage = QwenRecurrentStateStorage::kFp32);
+
+/// Runs independent request states in one pair of launches. Row offsets index
+/// the shared projection buffers; each sequence retains its own causal order
+/// and replay positions. A single sequence uses the direct rows launcher.
+void LaunchSSMConvRecurrenceBatch(
+    const float* qkv_in, const float* conv_weights, float* conv_out,
+    const float* alpha_buf, const float* beta_buf, const float* ssm_a,
+    const float* ssm_dt, const float* ssm_norm, const float* gate, float* out_buf,
+    std::span<const SsmSequenceState> sequences, std::uint32_t layer_idx,
+    std::size_t qkv_size, std::uint32_t num_key_heads, std::uint32_t num_heads,
+    std::uint32_t key_dim, std::uint32_t val_dim,
+    std::size_t projection_row_stride, std::size_t inner_row_stride,
+    hipStream_t stream = nullptr,
     QwenRecurrentStateStorage state_storage = QwenRecurrentStateStorage::kFp32);
 
 void LaunchSSMConvRecurrence(

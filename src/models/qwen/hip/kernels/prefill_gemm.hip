@@ -95,8 +95,56 @@ void LaunchBatchedGEMM(const void* A, bool is_bf16, const float* X, float* Y,
 void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
                                        std::size_t batch_size, std::size_t M,
                                        std::size_t K, hipStream_t stream) {
-  if (M == 0 || K == 0 || batch_size == 0 ||
-      (batch_size > 8 && batch_size != 16)) {
+  if (M == 0 || K == 0 || batch_size == 0) {
+    return;
+  }
+  const bool exact_width =
+      ((K == 5120 && (M == 12288 || M == 248320)) ||
+       (M == 5120 && K == 6144));
+  const bool wide = batch_size > 16 && exact_width;
+  if (exact_width && batch_size >= 9 && batch_size <= 15 && batch_size != 12) {
+    if (M == 5120 && K == 6144) {
+      const auto launch = [&]<std::size_t Batch>() {
+        BatchedExactBf16GEMMFp32VecKernel<16, Batch, 1>
+            <<<(M + 15) / 16, 512, 0, stream>>>(
+                static_cast<const hip_bfloat16*>(A), X, Y, M, K);
+      };
+      switch (batch_size) {
+        case 9: launch.template operator()<9>(); break;
+        case 10: launch.template operator()<10>(); break;
+        case 11: launch.template operator()<11>(); break;
+        case 13: launch.template operator()<13>(); break;
+        case 14: launch.template operator()<14>(); break;
+        case 15: launch.template operator()<15>(); break;
+      }
+      return;
+    }
+    if (detail::TryLaunchBf16SmallBatchWave64(
+            A, X, Y, batch_size, M, K, stream))
+      return;
+  }
+  if (wide &&
+      detail::TryLaunchBf16SmallBatchWave64(A, X, Y, batch_size, M, K, stream))
+    return;
+  if (batch_size > 8 && batch_size != 12 && batch_size != 16) {
+    for (std::size_t offset = 0; offset < batch_size;) {
+      const std::size_t remaining = batch_size - offset;
+      // Balanced groups avoid an expensive short remainder at common cohort
+      // sizes: 36=24+12, 40=24+16, 48=24+24 and 60=24+24+12.
+      const bool prefer24 =
+          remaining == 36 || remaining == 40 || remaining == 48 || remaining == 60;
+      const std::size_t width = wide && remaining >= 32 && !prefer24 ? 32
+                                : wide && remaining >= 24 && remaining != 28
+                                    ? 24
+                                : remaining >= 16 ? 16
+                                : exact_width && remaining > 8 ? remaining
+                                : remaining >= 12
+                                    ? 12
+                                    : std::min<std::size_t>(8, remaining);
+      LaunchExactBf16GEMMFp32SmallBatch(A, X + offset * K, Y + offset * M,
+                                        width, M, K, stream);
+      offset += width;
+    }
     return;
   }
   constexpr std::uint32_t kVecWaves = 16;
@@ -113,6 +161,23 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
         <<<vec_blocks, kVecWaves * 32, 0, stream>>>(a_vec, X, Y, M, K);
     return;
   }
+  if ((batch_size == 12 || batch_size == 16) && M == 5120 && K == 6144) {
+    const auto launch = [&]<std::size_t Batch>() {
+      BatchedExactBf16GEMMFp32VecKernel<16, Batch, 1>
+          <<<(M + 15) / 16, 512, 0, stream>>>(a_vec, X, Y, M, K);
+    };
+    if (batch_size == 12)
+      launch.template operator()<12>();
+    else
+      launch.template operator()<16>();
+    return;
+  }
+  if (batch_size == 12 && K == 5120 &&
+      (M == 12288 || M == 17408 || M == 248320)) {
+    BatchedExactBf16GEMMFp32VecKernel<8, 12, 2>
+        <<<(M + 15) / 16, 256, 0, stream>>>(a_vec, X, Y, M, K);
+    return;
+  }
   // One row per wave wins on DFlash2's attention output/FFN and the target's
   // large BF16 query projection; each preserves the same accumulation order.
   if (batch_size == 8 &&
@@ -123,6 +188,10 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
     return;
   }
   switch (batch_size) {
+    case 12:
+      BatchedExactBf16GEMMFp32VecKernel<kVecWaves, 12, kVecRowsPerWave>
+          <<<vec_blocks, kVecWaves * 32, 0, stream>>>(a_vec, X, Y, M, K);
+      return;
     case 16:
       BatchedExactBf16GEMMFp32VecKernel<kVecWaves, 16, kVecRowsPerWave>
           <<<vec_blocks, kVecWaves * 32, 0, stream>>>(a_vec, X, Y, M, K);
@@ -160,12 +229,6 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
           <<<vec_blocks, kVecWaves * 32, 0, stream>>>(a_vec, X, Y, M, K);
       return;
   }
-}
-
-void LaunchExactBf16GEMMFp32Batch8(const void* A, const float* X, float* Y,
-                                   std::size_t M, std::size_t K,
-                                   hipStream_t stream) {
-  LaunchExactBf16GEMMFp32SmallBatch(A, X, Y, 8, M, K, stream);
 }
 
 __global__ void FloatToBfloat16Kernel(const float* __restrict__ in,

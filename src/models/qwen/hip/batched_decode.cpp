@@ -32,21 +32,12 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
                       float* output, std::size_t batch_size,
                       std::size_t output_size, std::size_t input_size,
                       hipStream_t stream) {
-  if (batch_size > kMaxDecodeBatch) {
-    for (std::size_t row = 0; row < batch_size; row += kMaxDecodeBatch) {
-      const std::size_t width = std::min(kMaxDecodeBatch, batch_size - row);
-      LaunchProjection(weight, input + row * input_size,
-                       output + row * output_size, width, output_size,
-                       input_size, stream);
-    }
-    return;
-  }
   if (SupportsExactSharedProjection(weight.type)) {
     LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
                                batch_size, output_size, input_size, stream);
     return;
   }
-  if (weight.type == core::GgmlType::kBF16 && batch_size <= kMaxDecodeBatch) {
+  if (weight.type == core::GgmlType::kBF16) {
     LaunchExactBf16GEMMFp32SmallBatch(weight.data, input, output, batch_size,
                                       output_size, input_size, stream);
     return;
@@ -212,9 +203,16 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
 
   std::array<std::uint32_t, kMaxDecodeBatch> host_tokens{};
   std::array<std::uint32_t, kMaxDecodeBatch> host_positions{};
+  std::array<SsmSequenceState, kMaxDecodeBatch> ssm_sequences{};
   for (std::size_t row = 0; row < batch_size; ++row) {
     host_tokens[row] = items[row].token_id;
     host_positions[row] = items[row].position;
+    auto& state_arena = items[row].executor->arena_;
+    auto replay = state_arena.GetSsmReplayCapture();
+    replay.position = scratch.decode.prompt_tokens.data() + row;
+    ssm_sequences[row] = {state_arena.d_ssm_conv_state,
+                           state_arena.d_ssm_deltanet_state, replay,
+                           static_cast<std::uint32_t>(row), 1};
   }
   HIP_CHECK(hipMemcpyAsync(
       scratch.decode.prompt_tokens.data(), host_tokens.data(),
@@ -314,28 +312,18 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       const auto controls = LaunchSsmControls(
           layer, scratch, batch_size, time_step_rank, hidden_size, arena.stream);
 
-      for (std::size_t row = 0; row < batch_size; ++row) {
-        auto& state_arena = items[row].executor->arena_;
-        auto replay_capture = state_arena.GetSsmReplayCapture();
-        replay_capture.position = scratch.decode.prompt_tokens.data() + row;
-        LaunchSSMConvRecurrence(
-            scratch.ssm.qkv.data() + (row * ssm_qkv_size),
-            static_cast<const float*>(layer.ssm_conv1d.data),
-            state_arena.d_ssm_conv_state,
-            scratch.ssm.conv_out.data() + (row * ssm_qkv_size),
-            state_arena.d_ssm_deltanet_state,
-            controls.alpha + (row * controls.row_stride),
-            controls.beta + (row * controls.row_stride),
-            static_cast<const float*>(layer.ssm_a.data),
-            static_cast<const float*>(layer.ssm_dt.data),
-            static_cast<const float*>(layer.ssm_norm.data),
-            scratch.ssm.gate.data() + (row * ssm_inner_size),
-            scratch.ssm.out.data() + (row * ssm_inner_size), layer_index,
-            ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
-            config.ssm_state_size, config.SsmValueSize(), arena.stream,
-            replay_capture,
-            state_arena.GetRecurrentStateStorage());
-      }
+      LaunchSSMConvRecurrenceBatch(
+          scratch.ssm.qkv.data(),
+          static_cast<const float*>(layer.ssm_conv1d.data),
+          scratch.ssm.conv_out.data(), controls.alpha, controls.beta,
+          static_cast<const float*>(layer.ssm_a.data),
+          static_cast<const float*>(layer.ssm_dt.data),
+          static_cast<const float*>(layer.ssm_norm.data),
+          scratch.ssm.gate.data(), scratch.ssm.out.data(),
+          std::span(ssm_sequences).first(batch_size), layer_index, ssm_qkv_size,
+          config.ssm_group_count, config.ssm_time_step_rank,
+          config.ssm_state_size, config.SsmValueSize(), controls.row_stride,
+          ssm_inner_size, arena.stream, arena.GetRecurrentStateStorage());
 
       LaunchProjection(layer.ssm_out, scratch.ssm.out.data(),
                        scratch.attention.output.data(), batch_size, hidden_size,
@@ -494,8 +482,16 @@ QwenGpuExecutor::ForwardVerificationBatch(
       capture_prompt_hidden_ ? batch_size * feature_width : 0;
   const std::size_t feature_rows =
       feature_elements / vocab_size + (feature_elements % vocab_size != 0);
-  coordinator.EnsureVerificationLogits(std::max(batch_size, feature_rows));
-  auto* const d_verification_logits_ = coordinator.d_verification_logits_;
+  // The last FFN releases this scratch before the vocabulary projection.
+  // Reuse it for the combined rows; each session retains only its own logits.
+  const auto full_gate = arena_.GetScratchView(arena_.GetMaxBatch()).ffn.gate;
+  const bool reuse_gate =
+      items.size() > 1 && full_gate.size() >= batch_size * vocab_size;
+  coordinator.EnsureVerificationLogits(std::max(
+      reuse_gate ? items.front().tokens.size() : batch_size, feature_rows));
+  auto* const feature_buffer = coordinator.d_verification_logits_;
+  auto* const logits_buffer =
+      reuse_gate ? full_gate.data() : coordinator.d_verification_logits_;
   for (const auto& item : items) {
     if (item.executor != &coordinator)
       item.executor->EnsureVerificationLogits(item.tokens.size());
@@ -505,8 +501,16 @@ QwenGpuExecutor::ForwardVerificationBatch(
   }
   std::array<std::uint32_t, kMaxRows> host_tokens{};
   std::array<std::uint32_t, kMaxRows> host_positions{};
+  std::array<SsmSequenceState, kMaxDecodeBatch> ssm_sequences{};
   for (std::size_t index = 0; index < items.size(); ++index) {
     const auto& item = items[index];
+    auto& state_arena = item.executor->arena_;
+    auto replay = state_arena.GetSsmReplayCapture();
+    replay.position = scratch.decode.prompt_tokens.data() + offsets[index];
+    ssm_sequences[index] = {
+        state_arena.d_ssm_conv_state, state_arena.d_ssm_deltanet_state, replay,
+        static_cast<std::uint32_t>(offsets[index]),
+        static_cast<std::uint32_t>(item.tokens.size())};
     for (std::size_t row = 0; row < item.tokens.size(); ++row) {
       const auto position = item.position + static_cast<std::uint32_t>(row);
       host_tokens[offsets[index] + row] = item.tokens[row];
@@ -672,31 +676,18 @@ QwenGpuExecutor::ForwardVerificationBatch(
                        hidden_size, arena_.stream);
       const auto controls = LaunchSsmControls(
           layer, scratch, batch_size, time_step_rank, hidden_size, arena_.stream);
-      for (std::size_t index = 0; index < items.size(); ++index) {
-        const auto& item = items[index];
-        auto& state_arena = item.executor->arena_;
-        const std::size_t offset = offsets[index];
-        auto replay_capture = state_arena.GetSsmReplayCapture();
-        replay_capture.position = scratch.decode.prompt_tokens.data() + offset;
-        LaunchSSMConvRecurrenceRows(
-            scratch.ssm.qkv.data() + offset * ssm_qkv_size,
-            static_cast<const float*>(layer.ssm_conv1d.data),
-            state_arena.d_ssm_conv_state,
-            scratch.ssm.conv_out.data() + offset * ssm_qkv_size,
-            state_arena.d_ssm_deltanet_state,
-            controls.alpha + offset * controls.row_stride,
-            controls.beta + offset * controls.row_stride,
-            static_cast<const float*>(layer.ssm_a.data),
-            static_cast<const float*>(layer.ssm_dt.data),
-            static_cast<const float*>(layer.ssm_norm.data),
-            scratch.ssm.gate.data() + offset * ssm_inner_size,
-            scratch.ssm.out.data() + offset * ssm_inner_size, layer_index,
-            ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
-            config.ssm_state_size, config.SsmValueSize(),
-            static_cast<std::uint32_t>(item.tokens.size()), controls.row_stride,
-            ssm_inner_size, arena_.stream, replay_capture,
-            state_arena.GetRecurrentStateStorage());
-      }
+      LaunchSSMConvRecurrenceBatch(
+          scratch.ssm.qkv.data(),
+          static_cast<const float*>(layer.ssm_conv1d.data),
+          scratch.ssm.conv_out.data(), controls.alpha, controls.beta,
+          static_cast<const float*>(layer.ssm_a.data),
+          static_cast<const float*>(layer.ssm_dt.data),
+          static_cast<const float*>(layer.ssm_norm.data),
+          scratch.ssm.gate.data(), scratch.ssm.out.data(),
+          std::span(ssm_sequences).first(items.size()), layer_index,
+          ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
+          config.ssm_state_size, config.SsmValueSize(), controls.row_stride,
+          ssm_inner_size, arena_.stream, arena_.GetRecurrentStateStorage());
 
       LaunchProjection(layer.ssm_out, scratch.ssm.out.data(),
                        scratch.attention.output.data(), batch_size, hidden_size,
@@ -723,7 +714,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
       if (const auto tap = arena_.GetTargetLayerCaptureIndex(layer_index);
           tap.has_value()) {
         float* const destination =
-            d_verification_logits_ + (*tap * hidden_size);
+            feature_buffer + (*tap * hidden_size);
         HIP_CHECK(hipMemcpy2DAsync(
             destination, feature_width * sizeof(float),
             scratch.decode.hidden.data(), hidden_size * sizeof(float),
@@ -740,12 +731,12 @@ QwenGpuExecutor::ForwardVerificationBatch(
     if (capture_prompt_hidden_ && captured_layer_count > 0) {
       HIP_CHECK(
           hipMemcpyAsync(executor.h_verification_hidden_.data(),
-                         d_verification_logits_ + offset * feature_width,
+                         feature_buffer + offset * feature_width,
                          item.tokens.size() * feature_width * sizeof(float),
                          hipMemcpyDeviceToHost, arena_.stream));
       HIP_CHECK(
           hipMemcpyAsync(executor.arena_.d_target_layer_features,
-                         d_verification_logits_ +
+                         feature_buffer +
                              (offset + item.tokens.size() - 1) * feature_width,
                          feature_width * sizeof(float), hipMemcpyDeviceToDevice,
                          arena_.stream));
@@ -772,10 +763,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
                        scratch.decode.normed.data(), nullptr, batch_size,
                        hidden_size, 1e-6F, arena_.stream);
   LaunchProjection(weights_.output, scratch.decode.normed.data(),
-                   d_verification_logits_, batch_size, vocab_size, hidden_size,
+                   logits_buffer, batch_size, vocab_size, hidden_size,
                    arena_.stream);
   auto* const d_out_tokens = scratch.decode.prompt_tokens.data();
-  LaunchBatchedGPUArgmax(d_verification_logits_, d_out_tokens, batch_size,
+  LaunchBatchedGPUArgmax(logits_buffer, d_out_tokens, batch_size,
                          vocab_size, arena_.stream);
   std::array<tokenization::TokenId, kMaxRows> host_predictions{};
   HIP_CHECK(hipMemcpyAsync(host_predictions.data(), d_out_tokens,
@@ -785,8 +776,8 @@ QwenGpuExecutor::ForwardVerificationBatch(
     const auto& item = items[index];
     auto& executor = *item.executor;
     const std::size_t count = item.tokens.size() * vocab_size;
-    const auto* logits = d_verification_logits_ + offsets[index] * vocab_size;
-    if (&executor != &coordinator) {
+    const auto* logits = logits_buffer + offsets[index] * vocab_size;
+    if (logits != executor.d_verification_logits_) {
       HIP_CHECK(hipMemcpyAsync(executor.d_verification_logits_, logits,
                                count * sizeof(float), hipMemcpyDeviceToDevice,
                                arena_.stream));

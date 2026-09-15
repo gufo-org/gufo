@@ -28,9 +28,9 @@ namespace {
 
 using TokenId = gufo::tokenization::TokenId;
 
-void Expect(bool condition, std::string_view message) {
+void Expect(bool condition, const std::string& message) {
   if (!condition) {
-    throw std::runtime_error(std::string(message));
+    throw std::runtime_error(message);
   }
 }
 

@@ -223,8 +223,10 @@ void CheckConcurrencyWidths(const Executor& owner) {
   std::array<std::array<std::vector<float>, 9>, count> expected_logits;
   std::array<std::array<std::vector<float>, 9>, count> expected_features;
   for (std::size_t row = 0; row < count; ++row) {
-    sessions[row] = std::make_unique<Executor>(owner.GetSharedModel(),
-                                               row % 2 == 0 ? 64 : 128);
+    // The C8 coordinator has enough FFN scratch for all verification logits;
+    // smaller coordinators exercise the bounded-allocation fallback.
+    sessions[row] = std::make_unique<Executor>(
+        owner.GetSharedModel(), row == count / 2 ? 1024 : row % 2 == 0 ? 64 : 128);
     auto& session = *sessions[row];
     session.SetPromptHiddenCapture(true, taps);
     const std::string text = kTexts[row % kTexts.size()];
@@ -263,14 +265,18 @@ void CheckConcurrencyWidths(const Executor& owner) {
     }
     std::cout << "concurrency width=" << width << " logits/features exact=1\n";
 
-    for (const bool full_block : {false, true}) {
-      if (full_block && width != count)
+    for (const std::size_t cohort_rows :
+         {0U, 9U, 10U, 11U, 12U, 13U, 14U, 15U, 16U, 64U}) {
+      if ((cohort_rows == 64 && width != count) ||
+          (cohort_rows > 0 && cohort_rows < 64 && width != 2))
         continue;
       std::array<gufo::hip::QwenGpuVerificationItem, count> verification_items;
       for (std::size_t row = 0; row < width; ++row) {
         const auto position = items[row].position;
         const std::size_t length =
-            full_block ? 8 : (3 * row + width - 2) % 8 + 1;
+            cohort_rows != 0
+                ? cohort_rows / width + (row < cohort_rows % width)
+                : (3 * row + width - 2) % 8 + 1;
         sessions[row]->RestoreSnapshot(*snapshots[row]);
         sessions[row]->SaveState(position);
         verification_items[row] = {
@@ -282,7 +288,16 @@ void CheckConcurrencyWidths(const Executor& owner) {
       const std::size_t rotation = width / 2;
       auto batch = std::span(verification_items).first(width);
       std::rotate(batch.begin(), batch.begin() + rotation, batch.end());
+      const auto memory_before = batch.front().executor->GetMemoryUsage();
       const auto verified = Executor::ForwardVerificationBatch(batch);
+      const auto memory_after = batch.front().executor->GetMemoryUsage();
+      if (width == count && cohort_rows == 64) {
+        const auto retained_limit =
+            8 * owner.GetConfig().vocab_size * sizeof(float);
+        Expect(memory_after.TotalBytes() - memory_before.TotalBytes() <=
+                   retained_limit,
+               "a coordinator must not retain the whole cohort's logits");
+      }
       Expect(verified.size() == width, "verification cohort width changed");
       for (std::size_t index = 0; index < width; ++index) {
         const std::size_t row = (index + rotation) % width;
@@ -313,7 +328,7 @@ void CheckConcurrencyWidths(const Executor& owner) {
                "concurrent verification replay changed continuation state");
       }
       std::cout << "verification concurrency=" << width
-                << (full_block ? " full" : " ragged")
+                << " cohort_rows=" << cohort_rows
                 << " logits/features/replay exact=1\n";
     }
   }

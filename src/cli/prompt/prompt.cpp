@@ -112,16 +112,12 @@ static void PrintTextHelp(std::string_view program_name,
                    "Maximum speculative draft tokens evaluated per step "
                    "(default: 7)",
                    "Speculative", &opt.draft_tokens);
-  parser.AddOption("", "--spec-draft-n-max", "N",
-                   "llama.cpp-compatible alias for --draft-tokens",
-                   "Speculative", &opt.draft_tokens);
+
 
   parser.AddOption("", "--min-draft-tokens", "N",
                    "Adaptive draft floor (default: 1)", "Speculative",
                    &opt.min_draft_tokens);
-  parser.AddOption("", "--spec-draft-n-min", "N",
-                   "llama.cpp-compatible alias for --min-draft-tokens",
-                   "Speculative", &opt.min_draft_tokens);
+
 
   parser.AddFlag("", "--cpu",
                  "Force CPU OpenMP execution fallback instead of GPU ROCm",
@@ -761,12 +757,8 @@ std::optional<PromptOptions> ParsePromptOptions(
         opt.min_draft_tokens = count;
         return true;
       });
-  parser.AddOption("", "--spec-draft-n-max", "N",
-                   "llama.cpp-compatible alias for --draft-tokens",
-                   "Speculative", &opt.draft_tokens);
-  parser.AddOption("", "--spec-draft-n-min", "N",
-                   "llama.cpp-compatible alias for --min-draft-tokens",
-                   "Speculative", &opt.min_draft_tokens);
+
+
 
   parser.AddFlag("", "--cpu",
                  "Force CPU OpenMP execution fallback instead of GPU ROCm",

@@ -1703,6 +1703,65 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     return;
   }
 
+  if (batch > 8) {
+    const bool ffn =
+        ((m == 17408 || m == 34816) && k == 5120) || (m == 5120 && k == 17408);
+    const bool q8_projection =
+        type == core::GgmlType::kQ8_0 &&
+        (ffn || (k == 5120 && (m == 6144 || m == 10240)) ||
+         (m == 5120 && k == 6144));
+    const auto launch_q8 = [&]<std::size_t Batch>(const float* input,
+                                                  float* output) {
+      if constexpr (Batch == 12) {
+        if (detail::TryLaunchQ8SmallBatchWave64(
+                w, input, output, Batch, m, k, stream))
+          return;
+      }
+      constexpr std::size_t rows =
+          Batch == 11 || Batch == 13 || Batch == 14 ? 4 : Batch == 12 ? 2 : 3;
+      SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, rows, true, true>
+          <<<(m + 16 * rows - 1) / (16 * rows), 512, 0, stream>>>(
+              w, input, output, m, k);
+    };
+    // Cross-request verification can contain up to 64 rows. Reuse weights in
+    // wider exact groups where measured, and keep the established small-batch
+    // arithmetic for other projections and the final unpadded group.
+    const bool exact_width =
+        q8_projection || (m == 34816 && k == 5120) ||
+        (m == 5120 && k == 17408) ||
+        (type == core::GgmlType::kQ6_K && m == 248320 && k == 5120);
+    for (std::size_t offset = 0; offset < batch;) {
+      const std::size_t remaining = batch - offset;
+      std::size_t width = exact_width && remaining > 8
+                              ? std::min<std::size_t>(16, remaining)
+                              : remaining >= 16 ? 16
+                              : remaining >= 12 ? 12 : 0;
+      const float* input = fp32_x + offset * k;
+      float* output = y + offset * m;
+      if (width != 0 && q8_projection) {
+        switch (width) {
+          case 9: launch_q8.template operator()<9>(input, output); break;
+          case 10: launch_q8.template operator()<10>(input, output); break;
+          case 11: launch_q8.template operator()<11>(input, output); break;
+          case 12: launch_q8.template operator()<12>(input, output); break;
+          case 13: launch_q8.template operator()<13>(input, output); break;
+          case 14: launch_q8.template operator()<14>(input, output); break;
+          case 15: launch_q8.template operator()<15>(input, output); break;
+          case 16: launch_q8.template operator()<16>(input, output); break;
+        }
+      } else if (width != 0 && detail::TryLaunchKQuantSmallBatchWave64(
+                                      type, w, input, output, width, m, k,
+                                      stream)) {
+        // The native dispatcher owns the qualified K-quant shapes.
+      } else {
+        width = std::min<std::size_t>(8, remaining);
+        LaunchBatchedQuantGEMMFp32(type, w, input, output, width, m, k, stream);
+      }
+      offset += width;
+    }
+    return;
+  }
+
   constexpr std::size_t kWarp = 32;
   constexpr std::size_t kWarpsPerBlock = 8;
   const std::size_t num_blocks_x = (m + kWarpsPerBlock - 1) / kWarpsPerBlock;
@@ -1728,6 +1787,9 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     // Large projections share each weight row across the batch. Narrow SSM
     // projections instead distribute token rows across more workgroups.
     if (type == core::GgmlType::kQ8_0) {
+      if (batch == 6 && detail::TryLaunchQ8SmallBatchWave64(
+                            w, fp32_x, y, batch, m, k, stream))
+        return;
       // The 48-output SSM controls, or their joined 96-output pair, fit in
       // cache. Independent token rows expose more workgroups than the
       // large-matrix shared-weight geometry.

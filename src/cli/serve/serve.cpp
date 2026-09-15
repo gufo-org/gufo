@@ -422,16 +422,11 @@ void PrintServeHelp(std::string_view program_name,
         "-d", "--draft-tokens", "N",
         "Maximum speculative draft tokens evaluated per step (default: 7)",
         "Speculative", &draft_tokens);
-    parser.AddOption("", "--spec-draft-n-max", "N",
-                     "llama.cpp-compatible alias for --draft-tokens",
-                     "Speculative", &draft_tokens);
+
 
     parser.AddOption("", "--min-draft-tokens", "N",
                      "Adaptive draft floor (default: 1)", "Speculative",
                      &min_draft_tokens);
-    parser.AddOption("", "--spec-draft-n-min", "N",
-                     "llama.cpp-compatible alias for --min-draft-tokens",
-                     "Speculative", &min_draft_tokens);
     parser.AddOption("", "--draft-vocab", "N",
                      "Qwen3.8-Flash-Next MTP: score drafts over the first N "
                      "token ids only (default: 0 = full vocabulary)",
@@ -976,15 +971,10 @@ int RunServe(std::span<const char* const> args) {
         "-d", "--draft-tokens", "N",
         "Maximum speculative draft tokens evaluated per step (default: 7)",
         "Speculative", &draft_tokens);
-    llm_parser.AddOption("", "--spec-draft-n-max", "N",
-                         "llama.cpp-compatible alias for --draft-tokens",
-                         "Speculative", &draft_tokens);
+
     llm_parser.AddOption("", "--min-draft-tokens", "N",
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
-    llm_parser.AddOption("", "--spec-draft-n-min", "N",
-                         "llama.cpp-compatible alias for --min-draft-tokens",
-                         "Speculative", &min_draft_tokens);
     llm_parser.AddOption("", "--draft-vocab", "N",
                          "Qwen3.8-Flash-Next MTP: score drafts over the first "
                          "N token ids only (default: 0 = full vocabulary)",

@@ -53,7 +53,8 @@ Generation changes must cover **C2/4/6/8 on Q4 and Q8, with and without
 DFlash2**, and retain C1 performance. The target test reuses eight scalar
 oracles with different prompts and prefix lengths to check complete logits and
 all five draft-feature taps at those widths. Verification covers unequal chunks,
-all 64 rows at C8, rotated coordinators and replay after partial acceptance.
+every combined width from 9 through 16, all 64 rows at C8, rotated coordinators
+and replay after partial acceptance.
 HTTP controls check physical
 execution width, greedy output/counts and seeded sampling against C1.
 Report aggregate throughput and whole-request latency; speculative stage
@@ -61,18 +62,35 @@ throughput excludes scheduler waiting and is not per-user delivered throughput.
 
 Concurrent DFlash2 verification shares exact projections across up to eight
 requests. Each request retains its own attention cache, recurrent state, feature
-taps, sampler, controller and accepted-prefix replay. Projection groups remain
-at most eight rows; adjacent compatible FFN gate/up matrices share a launch.
-Selected Q8 widths use three output rows and bounded indexing with unchanged
-FP32 arithmetic and reduction order.
+taps, sampler, controller and accepted-prefix replay. Selected FFN and vocabulary
+projections reuse weights across 9–16 rows; BF16 projections also support 24/32.
+Q8 uses native wave64 for measured six- and twelve-row projections, with a
+transposed activation layout fitting sixteen rows in 64 KiB of LDS. Other shapes
+retain their established groups. FP32 arithmetic and reduction order are unchanged.
 
-Qualification on **2026-09-15** covers both full target suites, serving state
-and cleanup, and all 23 sampling strategies for both targets, all three drafts
-and both controllers. Concurrent sampled tokens and acceptance counts match
-isolated execution. Short release controls cover physical C1/2/4/6/8,
-greedy output/counts and temperature 0.8 / seed 42. Matched C1 controls cover
-all draft precisions; Q4 AR also uses balanced binary order at tg128.
-The context-depth sweep remains TODO.
+Convolution and recurrence share launches across requests while preserving each
+sequence's computation order. Target-only tail rows join the verification batch.
+The final FFN scratch holds combined logits when it has room; sessions retain
+their own rows. Tests exercise both this reuse and the allocation fallback.
+Memory reporting includes retained verification logits and GPU sampling workspace.
+
+Qualification on **2026-09-15** covers shared-verification state handling with
+both full target suites, serving cleanup, and all 23 sampling strategies for
+both targets, all three drafts and both controllers. Concurrent sampled tokens
+and acceptance counts match isolated execution. Wider kernels additionally
+pass complete logit/feature and partial-acceptance replay checks at C2/4/6/8,
+including all 64 rows. The existing target executable's `--concurrency-only`
+option runs this focused check.
+
+Short release controls cover physical C1/2/4/6/8, greedy output/counts and
+temperature 0.8 / seed 42. They cover adaptive and fixed one-proposal blocks;
+sampling reproduces C1 within each configuration. Matched C1 controls cover all
+draft precisions. The maintained GEMM benchmark checks shared kernels against
+smaller groups, including BF16 partial rows/input tiles. The context-depth sweep
+remains TODO.
+The `kernels` suite also uses the existing recurrence microbenchmark to compare
+one-row and eight-row resident execution with the per-token storage reference,
+requiring exact output and state bits.
 
 For prefill changes, the existing target check also covers 128/257/2048-token
 prefixes, repeated prefill and two-token scalar/verification replay. It prints
@@ -175,7 +193,7 @@ sample. Controller state persists within a request and resets for a new one.
 | `eval` | Uses server draft configuration and sampling defaults. |
 | Audio/video, diagnostics and probes | Do not run Qwen27B DFlash2; unsupported draft flags are rejected. |
 
-Sampling refresh: **2026-09-13**, runtime source `ffb1f44`. All
+Sampling/state refresh: **2026-09-15**. All
 [23 named strategies](../../../tests/models/qwen27b/sampling_cases.hpp) pass on
 Q4/Q8 AR and all 12 target/draft/controller combinations: Q4/Q8 targets,
 Q4_K_M/Q8_0/BF16 drafts, fixed/adaptive. They cover temperatures, individual
@@ -193,8 +211,8 @@ HTTP: 15 configurations across six adapters on both targets, with AR and Q4_K_M
 drafts under fixed/adaptive. Checks include startup defaults, request overrides,
 seeded/unseeded execution, streaming and C2 state isolation. Prompt/two-turn chat
 replay covers the same 15 configurations on Q4 AR and Q8/BF16 adaptive DFlash2.
-This finite matrix does not establish arbitrary-context capability or complete
-C>1 speculative parity.
+This finite matrix does not establish arbitrary-context capability. Full
+context/concurrency sweeps across all draft precisions remain TODO.
 
 ## Pinned original DFlash2 operators
 
@@ -244,6 +262,17 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 ## Latest measurement provenance
 
+Generation release measured on **2026-09-15**, SHA-256:
+`e8744c835a0407f9b060117d543fa9921027686efb5efa2c3b4f9c575c44d515`.
+The current tables use cached `prose_tides`, context capacity 4096, greedy tg64,
+one warmup and one measured round at C1/2/4/6/8. Both targets cover AR and
+Q4_K_M DFlash2 with adaptive and fixed one-proposal blocks. Sampled controls use
+temperature 0.8 / seed 42 and tg16. Reports retain request latency, aggregate
+throughput, physical width, output fingerprints and acceptance counts.
+All three draft precisions have matched C1 controls. Fixed one-proposal blocks
+help higher concurrency on this prompt but reduce C1 speed; adaptive remains
+the default. A controller comparison across workloads is TODO.
+
 Q4 release measured on 2026-09-14, SHA-256:
 `0f6804912d5f9e97df7ffc1e5c49f5898b7444481006725d4c4b274fa2b0307a`.
 The pp2048-only result, **610.56 tok/s**, averages 12 warmed samples in four
@@ -254,14 +283,25 @@ boosts are excluded from the headline. Q8's recorded 503.17 tok/s is from
 the unchanged native wave64 release, SHA-256
 `feec38298e8a84a8b9f5dfcf290b924aed597e9f2bd8643fa40b5bd154aa736f`.
 
-The Q4 pp2048/tg32 controls cover AR and all three adaptive DFlash2 drafts.
-Generation remains effectively unchanged; all outputs match the same target's
-AR token IDs and retain the same acceptance counts. The benchmark README shows
-only the current samples. These short controls do not replace the depth sweep
-or a broad draft-precision comparison. Real-prompt controls use `prose_tides` /
-`json_records` from [the adaptive corpus](../speculative-adaptive-corpus.json),
-and the chat prompt “Output the word red exactly 1000 times, separated by
-spaces. Do not add any other text.”; their current speed refresh is TODO.
+Prompts live in [the adaptive corpus](../speculative-adaptive-corpus.json).
+Additional C8 controls use its `json_records` prompt and: "Output the word red
+exactly 1000 times, separated by spaces. Do not add any other text."
+Same release, Q4_K_M draft, cached greedy tg64, one warmup and one measured
+round. Aggregate delivered tok/s:
+
+| Target / prompt | AR | Adaptive | Fixed 1 |
+| --- | ---: | ---: | ---: |
+| Q4 / JSON | 66.21 | **74.68** | 53.28 |
+| Q4 / repetition | 67.59 | **77.39** | 54.79 |
+| Q8 / JSON | 48.88 | **67.57** | 50.31 |
+| Q8 / repetition | 49.73 | **74.81** | 51.42 |
+
+All three modes produce identical greedy output within each target/prompt;
+physical execution width is eight. Repetition accepts 100% of proposals on
+both targets and both controllers. Adaptive JSON acceptance is 96.43% on Q4
+and 90% on Q8. Controller performance depends on the workload: these controls
+favor adaptive, while `prose_tides` favors shorter blocks at higher concurrency.
+They do not replace the depth sweep or a broad draft-precision comparison.
 
 The measured pp2048 chunk spends about **90%** of GPU time in FP16 quantized
 GEMM, with **0.07%** dispatch idle time, excluding warmups and resets.
@@ -280,6 +320,12 @@ two-stage LDS buffering, weight copies and alternative normalization reductions.
 Dense BLAS, split-K for small projections, and convolution/KQ fusion did not
 improve model prefill. Rejected experiments add no production paths.
 
+Generation profiles place most GPU time in exact quantized projections.
+Retained: wider exact projection groups, native wave64 for measured shapes,
+shared recurrence launches, batched target-only tails and logit scratch reuse.
+Rejected: extra Q8 staging, coefficient preconversion and paired-lane Q8 dots.
+No runtime switches select these experiments.
+
 | Artifact | SHA-256 |
 | --- | --- |
 | Target UD-Q4_K_XL | `3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e` |
@@ -288,10 +334,10 @@ improve model prefill. Rejected experiments add no production paths.
 | Draft Q8_0 | `c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e` |
 | Draft BF16 | `26d47ca20ab07688327a63d912acad222d924eaaa92a980cc488de3c67e736bc` |
 
-Current optimization focus: **Q4 C1 AR pp2048 toward 800 tok/s**, preserving
-quality and DFlash2 performance. Q8 optimization is deferred.
+Current optimization focus: **Q4 and Q8 generation at C2, C4, C6 and C8,
+with and without DFlash2**, preserving sampling correctness and **C1 performance**.
 
 TODO: independent original-target/conversion and MTP qualification; optional
-BF16 target comparison; refreshed pp2048/tg128 depths and all draft precisions;
-C>1 speed and complete speculative parity. The 75-question capability comparison
+BF16 target comparison; refreshed pp2048/tg128 depths at all tracked widths
+and all draft precisions. The 75-question capability comparison
 requires confirmation before running.

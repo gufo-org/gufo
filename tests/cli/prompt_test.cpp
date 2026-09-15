@@ -42,9 +42,9 @@ void TestHybridMtpFlags() {
                                            "mtp-npu",
                                            "--mtp-model",
                                            "mtp.gguf",
-                                           "--spec-draft-n-max",
+                                           "--draft-tokens",
                                            "2",
-                                           "--spec-draft-n-min",
+                                           "--min-draft-tokens",
                                            "2",
                                            "Prompt"};
   const auto opt = gufo::cli::ParsePromptOptions(args);
@@ -74,14 +74,10 @@ void TestInvalidFlags() {
   const std::array<const char*, 2> args6 = {"--top-p", "0"};
   assert(!gufo::cli::ParsePromptOptions(args6, &err).has_value());
 
-  for (const char* flag : {"--spec-draft-p-min", "--draft-p-min"}) {
-    const std::array<const char*, 2> removed = {flag, "0.75"};
-    assert(!gufo::cli::ParsePromptOptions(removed, &err).has_value());
-  }
-  const std::array<const char*, 6> fixed_block = {
+  const std::array<const char*, 6> unsupported_floor = {
       "--speculative",      "dflash2", "--dflash-model", "draft.gguf",
       "--min-draft-tokens", "2"};
-  assert(!gufo::cli::ParsePromptOptions(fixed_block, &err).has_value());
+  assert(!gufo::cli::ParsePromptOptions(unsupported_floor, &err).has_value());
   assert(err.find("min-draft-tokens") != std::string::npos);
   for (const char* policy : {"fixed", "adaptive", "unknown"}) {
     const std::array<const char*, 6> args = {"--speculative",  "dflash2",

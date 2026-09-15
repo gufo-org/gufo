@@ -494,12 +494,8 @@ public:
   }
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
       const core::ModelConfig& config, std::uint32_t max_context,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production()) {
-    return QwenGpuArena::EstimateMemoryUsage(config, max_context, policy);
-  }
-  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const {
-    return arena_.GetMemoryUsage();
-  }
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   [[nodiscard]] std::unique_ptr<QwenGpuSnapshot> SaveSnapshot(
       std::uint32_t valid_context);
   void RestoreSnapshot(const QwenGpuSnapshot& snapshot);

@@ -14,7 +14,7 @@
 namespace gufo::hip {
 
 template<detail::QwenRecurrentStateElement StateT, bool Resident = false,
-         bool WriteOutput = true>
+         bool WriteOutput = true, typename Sequences = std::nullptr_t>
 __launch_bounds__(Resident ? 128 : 1024, 1) __global__
     void DeltaNetRecurrenceKernel(
         const float* __restrict__ conv_out, StateT* __restrict__ deltanet_state,
@@ -26,7 +26,19 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
         std::uint32_t key_dimension, std::uint32_t value_dimension,
         SsmReplayCapture replay_capture, std::uint32_t rows,
         std::size_t conv_row_stride, std::size_t projection_row_stride,
-        std::size_t inner_row_stride) {
+        std::size_t inner_row_stride, Sequences sequences = {}) {
+  if constexpr (!std::is_same_v<Sequences, std::nullptr_t>) {
+    const auto& sequence = sequences.sequences[blockIdx.y];
+    deltanet_state = static_cast<StateT*>(sequence.recurrent);
+    replay_capture = sequence.replay;
+    rows = sequence.rows;
+    const std::size_t offset = sequence.row_offset;
+    conv_out += offset * conv_row_stride;
+    if (alpha_buf) alpha_buf += offset * projection_row_stride;
+    if (beta_buf) beta_buf += offset * projection_row_stride;
+    if (gate) gate += offset * inner_row_stride;
+    if (out_buf) out_buf += offset * inner_row_stride;
+  }
   static_assert(!Resident || std::is_same_v<StateT, float>);
   const std::uint32_t key_dim = Resident ? 128 : key_dimension;
   const std::uint32_t val_dim = Resident ? 128 : value_dimension;

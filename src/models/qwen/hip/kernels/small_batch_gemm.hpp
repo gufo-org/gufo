@@ -29,12 +29,14 @@ constexpr bool FitsSmallBatch32BitIndices(std::size_t batch, std::size_t m,
 // the same order at every batch width; tile geometry never changes arithmetic.
 // Float4-aligned LDS rows amortize activation loads across output rows.
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
-         std::size_t RowsPerWave, bool StreamWeights = true>
+         std::size_t RowsPerWave, bool StreamWeights = true,
+         std::uint32_t HardwareWaveSize = 32>
 __launch_bounds__(WavesPerBlock * 32, 1) __global__
     void BatchedExactBf16GEMMFp32VecKernel(const hip_bfloat16* __restrict__ A,
                                            const float* __restrict__ X,
                                            float* __restrict__ Y, std::size_t M,
                                            std::size_t K) {
+  static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
   constexpr std::size_t kValuesPerVector = 8;
   constexpr std::size_t kVectorsPerTile = 32;
   constexpr std::size_t kStride = kValuesPerVector + 4;
@@ -177,13 +179,15 @@ void SyncKQuantTile() {
 }
 
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
-         std::size_t RowsPerWave, bool NarrowIndex = false>
+         std::size_t RowsPerWave, bool NarrowIndex = false,
+         bool XorStage = false, std::uint32_t HardwareWaveSize = 32>
 __launch_bounds__(WavesPerBlock * 32, 1) __global__
     void SmallBatchQ8_0ExactFp32VecGEMMKernel(const void* __restrict__ w,
                                               const float* __restrict__ x,
                                               float* __restrict__ y,
                                               std::size_t wide_m,
                                               std::size_t wide_k) {
+  static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
   using Index = std::conditional_t<NarrowIndex, std::uint32_t, std::size_t>;
   const Index m = static_cast<Index>(wide_m);
   const Index k = static_cast<Index>(wide_k);
@@ -192,7 +196,9 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
   y += static_cast<Index>(blockIdx.y) * Batch * m;
   constexpr Index kBlocksPerTile = 32;
   constexpr Index kVectorsPerBlock = kQ8_0BlockSize / 4;
-  constexpr Index kStride = kQ8_0BlockSize + 4;
+  // Transpose the vector groups and XOR their block indices to fit sixteen
+  // activation rows in 64 KiB of LDS without changing the dot-product order.
+  constexpr Index kStride = kQ8_0BlockSize + (XorStage ? 0 : 4);
   constexpr Index kTileStride = kBlocksPerTile * kStride;
   __shared__ float staged_x[Batch * kTileStride];
 
@@ -221,7 +227,9 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
             x + (token * k) + (source_block * kQ8_0BlockSize) + (vector * 4));
       }
       *reinterpret_cast<float4*>(staged_x + (token * kTileStride) +
-                                 (block * kStride) + (vector * 4)) = value;
+                                 (XorStage ? vector * 128 + (block ^ vector) * 4
+                                           : block * kStride + vector * 4)) =
+          value;
     }
     if constexpr (NarrowIndex) {
       SyncKQuantTile();
@@ -252,8 +260,9 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
 #pragma unroll
         for (Index token = 0; token < Batch; ++token) {
           const float4 xv = *reinterpret_cast<const float4*>(
-              staged_x + (token * kTileStride) + (lane * kStride) +
-              (group * 4));
+              staged_x + (token * kTileStride) +
+              (XorStage ? group * 128 + (lane ^ group) * 4
+                        : lane * kStride + group * 4));
 #pragma unroll
           for (Index r = 0; r < RowsPerWave; ++r) {
             const std::uint32_t p = packed[r];

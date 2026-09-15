@@ -357,7 +357,8 @@ private:
   void ResetAdaptiveDraftLength() noexcept;
   void UpdateAdaptiveDraftLength(std::size_t accepted, std::size_t drafted);
   struct PreparedStep;
-  [[nodiscard]] PreparedStep PrepareStep(const StepRequest& request);
+  [[nodiscard]] PreparedStep PrepareStep(const StepRequest& request,
+                                        bool defer_target_only = false);
   [[nodiscard]] StepResult FinishStep(PreparedStep& prepared,
                                       VerificationChunkResult verification,
                                       sampling::SamplerState& sampler);

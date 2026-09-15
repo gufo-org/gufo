@@ -769,6 +769,18 @@ void LaunchBatchedGPUArgmax(const float* logits, std::uint32_t* out_tokens,
                         stream>>>(logits, out_tokens, vocab_size);
 }
 
+std::size_t EstimateGpuSamplingWorkspaceBytes(std::size_t vocab_size,
+                                              std::size_t penalty_capacity) {
+  GpuSamplingWorkspace workspace;
+  workspace.vocab_size = vocab_size;
+  workspace.penalty_capacity = penalty_capacity;
+  HIP_CHECK(hipcub::DeviceRadixSort::SortPairsDescending(
+      nullptr, workspace.sort_temp_storage_bytes,
+      workspace.adjusted_logits, workspace.sorted_logits,
+      workspace.token_ids, workspace.sorted_token_ids, vocab_size));
+  return workspace.SizeBytes();
+}
+
 void AllocateGpuSamplingWorkspace(GpuSamplingWorkspace* workspace,
                                   std::size_t vocab_size,
                                   std::size_t penalty_capacity) {

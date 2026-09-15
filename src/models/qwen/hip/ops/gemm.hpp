@@ -129,6 +129,15 @@ namespace detail {
     core::GgmlType type, const void* w, const float* x, float* y,
     std::size_t batch, std::size_t m, std::size_t k, hipStream_t stream);
 
+[[nodiscard]] bool TryLaunchQ8SmallBatchWave64(
+    const void* w, const float* x, float* y, std::size_t batch,
+    std::size_t m, std::size_t k, hipStream_t stream);
+
+/// Exact BF16 projection for selected shared widths; the caller selects shapes.
+[[nodiscard]] bool TryLaunchBf16SmallBatchWave64(
+    const void* w, const float* x, float* y, std::size_t batch,
+    std::size_t m, std::size_t k, hipStream_t stream);
+
 /// opt-q4kxl: true for the formats that run natively through the K-quant GPU
 /// kernels -- the blocked WMMA GEMM at prefill batch, the exact shared-weight
 /// kernel at draft width, and the routing and activation-fusion gates that feed
@@ -179,8 +188,8 @@ void LaunchBatchedQuantGEMMBf16(core::GgmlType type, const void* w,
 /// Directly computes Y[B, M] = X_fp32[B, K] * W_quant[M, K]^T using the same
 /// quant-block dot product and FP32 activation precision as decode. Intended
 /// for short verification batches where exact target-path numerics matter.
-/// Q8_0 and Q8_K batches of two through eight rows share weight loads while
-/// preserving the isolated production GEMV arithmetic order.
+/// Groups of up to sixteen rows share weight loads while preserving the
+/// isolated production GEMV arithmetic order.
 void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
                                 const float* fp32_x, float* y,
                                 std::size_t batch, std::size_t m, std::size_t k,
@@ -280,19 +289,13 @@ void LaunchBatchedGEMM(const void* A, bool is_bf16, const float* X, float* Y,
                        std::size_t batch_size, std::size_t M, std::size_t K,
                        hipStream_t stream = nullptr);
 
-/// Exact small-batch BF16-weight GEMM with FP32 activations for any width in
-/// 1..8 or 16. The per-output accumulation order matches the decode GEMV and
-/// does not depend on the batch width, so narrow batches stay bit-identical to
-/// wide ones while the weight stream is still read exactly once.
+/// Exact BF16-weight GEMM with FP32 activations, grouped into at most sixteen
+/// rows. The per-output accumulation order matches the decode GEMV and does
+/// not depend on the batch width.
 void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
                                        std::size_t batch_size, std::size_t M,
                                        std::size_t K,
                                        hipStream_t stream = nullptr);
-
-/// Fixed width-8 alias of LaunchExactBf16GEMMFp32SmallBatch.
-void LaunchExactBf16GEMMFp32Batch8(const void* A, const float* X, float* Y,
-                                   std::size_t M, std::size_t K,
-                                   hipStream_t stream = nullptr);
 
 /// Converts float buffer to bfloat16 buffer on GPU
 void LaunchFloatToBfloat16(const float* in, void* out, std::size_t num_elements,

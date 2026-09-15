@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -33,6 +34,125 @@
 #include "tests/models/qwen/hip/support/device.hpp"
 #include "tests/models/qwen/hip/support/device_buffer.hpp"
 #include "tests/models/qwen/support/synthetic_weights.hpp"
+
+void TestConcurrentSsmRecurrence() {
+  using gufo::test::DeviceBuffer;
+  using Storage = gufo::hip::QwenRecurrentStateStorage;
+  constexpr std::size_t count = 8, total_rows = 36, layers = 2;
+  constexpr unsigned heads = 4, key_heads = 2, dim = 128, layer = 1;
+  constexpr std::size_t inner = heads * dim;
+  constexpr std::size_t qkv = 2 * key_heads * dim + inner;
+  constexpr std::size_t conv_per_sequence = layers * qkv * 4;
+  constexpr std::size_t state_per_sequence = layers * heads * dim * dim;
+  constexpr std::size_t replay_qkv = layers * gufo::hip::kSsmReplayCapacity * qkv;
+  constexpr std::size_t replay_control =
+      layers * gufo::hip::kSsmReplayCapacity * heads;
+  const auto values = [](std::size_t size, float phase) {
+    std::vector<float> result(size);
+    for (std::size_t i = 0; i < size; ++i)
+      result[i] = 0.1F * std::sin(phase + static_cast<float>(i) * 0.013F);
+    return result;
+  };
+  DeviceBuffer<float> input(values(total_rows * qkv, 1)),
+      weights(values(qkv * 4, 2)), controls(values(total_rows * heads * 2, 3)),
+      decay(std::vector<float>(heads, -0.15F)), dt(values(heads, 4)),
+      norm(std::vector<float>(dim, 1)), gate(values(total_rows * inner, 5)),
+      conv_state(count * conv_per_sequence), conv_output(total_rows * qkv),
+      output(total_rows * inner), captured_qkv(count * replay_qkv),
+      captured_alpha(count * replay_control),
+      captured_beta(count * replay_control);
+  const auto initial_conv = values(count * conv_per_sequence, 6);
+  const auto initial_state = values(count * state_per_sequence, 7);
+  std::vector<std::uint32_t> positions(total_rows), enabled(count);
+  std::array<gufo::hip::SsmSequenceState, count> sequences{};
+  std::size_t offset = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    sequences[i].row_offset = static_cast<std::uint32_t>(offset);
+    sequences[i].rows = static_cast<std::uint32_t>(i + 1);
+    for (std::size_t row = 0; row <= i; ++row)
+      positions[offset + row] = static_cast<std::uint32_t>(14 + i + row);
+    enabled[i] = i % 2;
+    offset += i + 1;
+  }
+  DeviceBuffer<std::uint32_t> device_positions(positions), device_enabled(enabled);
+  const auto clear = [](auto& buffer) {
+    HIP_CHECK(hipMemset(buffer.data(), 0,
+                        buffer.size() * sizeof(*buffer.data())));
+  };
+  const auto expect_equal = [](const auto& expected, const auto& actual) {
+    if (expected.size() != actual.size() ||
+        std::memcmp(expected.data(), actual.data(),
+                    expected.size() * sizeof(expected[0])) != 0)
+      throw std::runtime_error("concurrent SSM changed output, state or replay");
+  };
+  for (const auto storage : {Storage::kFp32, Storage::kBf16}) {
+    const std::size_t element_bytes =
+        gufo::hip::QwenRecurrentStateElementBytes(storage);
+    std::vector<std::uint8_t> state_bytes(initial_state.size() * element_bytes);
+    for (std::size_t i = 0; i < initial_state.size(); ++i) {
+      if (storage == Storage::kFp32) {
+        std::memcpy(state_bytes.data() + i * element_bytes, &initial_state[i],
+                    element_bytes);
+      } else {
+        const auto bits = gufo::test::FloatToBf16Bits(initial_state[i]);
+        std::memcpy(state_bytes.data() + i * element_bytes, &bits, element_bytes);
+      }
+    }
+    DeviceBuffer<std::uint8_t> recurrent(state_bytes);
+    for (std::size_t i = 0; i < count; ++i) {
+      auto& sequence = sequences[i];
+      sequence.conv = conv_state.data() + i * conv_per_sequence;
+      sequence.recurrent = recurrent.data() + i * state_per_sequence * element_bytes;
+      sequence.replay = {
+          captured_qkv.data() + i * replay_qkv,
+          captured_alpha.data() + i * replay_control,
+          captured_beta.data() + i * replay_control,
+          device_positions.data() + sequence.row_offset, device_enabled.data() + i};
+    }
+    const auto reset = [&] {
+      conv_state.CopyFrom(initial_conv);
+      recurrent.CopyFrom(state_bytes);
+      for (auto* buffer : {&conv_output, &output, &captured_qkv,
+                            &captured_alpha, &captured_beta})
+        clear(*buffer);
+    };
+    for (const std::size_t width : {1U, 2U, 4U, 6U, 8U}) {
+      for (const bool write_output : {false, true}) {
+        reset();
+        for (const auto& sequence : std::span(sequences).first(width)) {
+          const std::size_t row = sequence.row_offset;
+          gufo::hip::LaunchSSMConvRecurrenceRows(
+              input.data() + row * qkv, weights.data(), sequence.conv,
+              conv_output.data() + row * qkv, sequence.recurrent,
+              controls.data() + row * heads * 2,
+              controls.data() + row * heads * 2 + heads, decay.data(), dt.data(),
+              norm.data(), gate.data() + row * inner,
+              write_output ? output.data() + row * inner : nullptr, layer, qkv,
+              key_heads, heads, dim, dim, sequence.rows, heads * 2, inner,
+              nullptr, sequence.replay, storage);
+        }
+        const auto expected_state = recurrent.CopyToHost();
+        std::vector<std::vector<float>> expected;
+        for (auto* buffer : {&conv_state, &conv_output, &output, &captured_qkv,
+                              &captured_alpha, &captured_beta})
+          expected.push_back(buffer->CopyToHost());
+        reset();
+        gufo::hip::LaunchSSMConvRecurrenceBatch(
+            input.data(), weights.data(), conv_output.data(), controls.data(),
+            controls.data() + heads, decay.data(), dt.data(), norm.data(),
+            gate.data(), write_output ? output.data() : nullptr,
+            std::span(sequences).first(width), layer, qkv, key_heads, heads,
+            dim, dim, heads * 2, inner, nullptr, storage);
+        expect_equal(expected_state, recurrent.CopyToHost());
+        std::size_t index = 0;
+        for (auto* buffer : {&conv_state, &conv_output, &output, &captured_qkv,
+                              &captured_alpha, &captured_beta})
+          expect_equal(expected[index++], buffer->CopyToHost());
+      }
+    }
+  }
+  std::cout << "Concurrent SSM: FP32/BF16 state, ragged rows and replay exact\n";
+}
 
 void TestRecurrentRollbackRows(bool large_state) {
   using gufo::hip::QwenRecurrentStateStorage;
@@ -835,6 +955,7 @@ int main() {
   }
 
   TestBatchedSSMConvEquivalence();
+  TestConcurrentSsmRecurrence();
   TestRecurrentRollbackRows(false);
   TestRecurrentRollbackRows(true);
   TestBf16RecurrentMemoryAndSnapshot();
