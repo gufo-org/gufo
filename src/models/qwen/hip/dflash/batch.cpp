@@ -119,6 +119,137 @@ std::size_t QwenDFlashGpuExecutor::BatchScratchBytes(
       .Bytes();
 }
 
+void QwenDFlashGpuExecutor::InjectTargetContextBatch(
+    std::span<const QwenDFlashContextRequest> requests) {
+  if (requests.empty() || requests.size() > 8 ||
+      requests.front().executor == nullptr)
+    throw std::invalid_argument(
+        "DFlash2 context batch requires one to eight sessions");
+  auto& coordinator = *requests.front().executor;
+  const auto& config = coordinator.model_->GetConfig();
+  const auto& weights = coordinator.model_->GetWeights();
+  const auto feature_width = coordinator.GetTargetFeaturesSize();
+  std::array<std::size_t, 9> offsets{};
+  std::array<std::uint32_t, 8> counts{};
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    const auto* executor = request.executor;
+    if (executor == nullptr || executor->model_ != coordinator.model_ ||
+        request.position != executor->injected_context_len_ ||
+        request.position > executor->max_context_ ||
+        request.features.size() % feature_width != 0 ||
+        request.features.size() / feature_width >
+            executor->max_context_ - request.position)
+      throw std::invalid_argument(
+          "DFlash2 context batch has an invalid request");
+    for (std::size_t previous = 0; previous < index; ++previous) {
+      if (requests[previous].executor == executor)
+        throw std::invalid_argument("DFlash2 context batch repeats a session");
+    }
+    counts[index] =
+        static_cast<std::uint32_t>(request.features.size() / feature_width);
+    offsets[index + 1] = offsets[index] + counts[index];
+  }
+  const auto rows = offsets[requests.size()];
+  if (rows == 0)
+    return;
+  if (requests.size() == 1 || rows > coordinator.injection_capacity_ ||
+      config.head_dim > 256) {
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+      const auto& request = requests[index];
+      if (!request.executor->InjectTargetContext(
+              request.features, request.position, counts[index], request.trace))
+        throw std::runtime_error("DFlash2 context injection failed");
+    }
+    return;
+  }
+  const auto stream = coordinator.stream_;
+  const auto hidden_size = config.hidden_size;
+  const auto kv_size =
+      static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+  for (const auto& request : requests)
+    HIP_CHECK(hipStreamSynchronize(request.executor->stream_));
+  BatchCompletion completion{stream};
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    if (counts[index] == 0)
+      continue;
+    HIP_CHECK(hipMemcpyAsync(
+        coordinator.d_target_features_ + offsets[index] * feature_width,
+        requests[index].features.data(), requests[index].features.size_bytes(),
+        hipMemcpyHostToDevice, stream));
+  }
+  coordinator.RunInjectGemm(
+      weights.fc_projection, coordinator.d_target_features_,
+      coordinator.d_fused_features_, rows, hidden_size, feature_width);
+  LaunchBatchedRMSNorm(coordinator.d_fused_features_,
+                       static_cast<const float*>(weights.fc_norm.data),
+                       coordinator.d_block_normed_, nullptr, rows, hidden_size,
+                       1e-6F, stream);
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    if (counts[index] != 0 && request.trace)
+      TraceBlock(request.trace,
+                 "context." + std::to_string(request.position) + ".normalized",
+                 coordinator.d_block_normed_ + offsets[index] * hidden_size,
+                 counts[index] * hidden_size, stream);
+  }
+  for (std::size_t layer_index = 0; layer_index < weights.layers.size();
+       ++layer_index) {
+    const auto& layer = weights.layers[layer_index].transformer;
+    coordinator.RunInjectGemm(layer.attn_k, coordinator.d_block_normed_,
+                              coordinator.d_k_block_, rows, kv_size,
+                              hidden_size);
+    coordinator.RunInjectGemm(layer.attn_v, coordinator.d_block_normed_,
+                              coordinator.d_v_block_, rows, kv_size,
+                              hidden_size);
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+      const auto& request = requests[index];
+      auto& executor = *request.executor;
+      const auto count = counts[index];
+      if (count == 0)
+        continue;
+      auto* key = coordinator.d_k_block_ + offsets[index] * kv_size;
+      auto* value = coordinator.d_v_block_ + offsets[index] * kv_size;
+      if (layer.attn_k_norm.data != nullptr) {
+        LaunchBatchedFusedQKNormRoPEKvWrite(
+            nullptr, key, key, nullptr,
+            static_cast<const float*>(layer.attn_k_norm.data), nullptr, key,
+            nullptr, nullptr, nullptr, nullptr, 0, request.position, count, 0,
+            0, config.num_key_value_heads, config.head_dim, config.rotary_dim,
+            config.rope_theta, 1e-6F, stream);
+      } else {
+        LaunchBatchedRoPE(nullptr, key, count, 0, config.num_key_value_heads,
+                          config.head_dim, config.rotary_dim, request.position,
+                          config.rope_theta, stream);
+      }
+      if (request.trace) {
+        const auto prefix = "context." + std::to_string(request.position) +
+                            "." + std::to_string(layer_index) + ".";
+        TraceBlock(request.trace, prefix + "k", key, count * kv_size, stream);
+        TraceBlock(request.trace, prefix + "v", value, count * kv_size, stream);
+      }
+      for (std::uint32_t offset = 0; offset < count;) {
+        const auto slot =
+            (request.position + offset) % executor.history_capacity_;
+        const auto chunk =
+            std::min(count - offset, executor.history_capacity_ - slot);
+        const auto bytes = chunk * kv_size * sizeof(float);
+        HIP_CHECK(hipMemcpyAsync(
+            executor.d_injected_k_[layer_index] + slot * kv_size,
+            key + offset * kv_size, bytes, hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpyAsync(
+            executor.d_injected_v_[layer_index] + slot * kv_size,
+            value + offset * kv_size, bytes, hipMemcpyDeviceToDevice, stream));
+        offset += chunk;
+      }
+    }
+  }
+  HIP_CHECK(hipStreamSynchronize(stream));
+  completion.completed = true;
+  for (std::size_t index = 0; index < requests.size(); ++index)
+    requests[index].executor->injected_context_len_ += counts[index];
+}
+
 std::vector<speculative::DraftProposal>
 QwenDFlashGpuExecutor::ForwardBlockBatch(
     std::span<const QwenDFlashBlockRequest> requests) {

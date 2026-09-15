@@ -29,9 +29,9 @@ greedy C1, one warmed release sample per draft. Generation tok/s:
 
 | Draft | Q4 target | Q8 target |
 | --- | ---: | ---: |
-| Q4_K_M | **23.66** | **15.79** |
-| Q8_0 | 22.90 | 15.49 |
-| BF16 | 22.13 | 14.26 |
+| Q4_K_M | **23.63** | **15.72** |
+| Q8_0 | 22.79 | 15.49 |
+| BF16 | 22.15 | 14.26 |
 
 pp2048/tg128 at depths **0 / 4,096 / 8,192 / 12,288 / 16,384**,
 for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.
@@ -45,11 +45,11 @@ tables report **aggregate delivered tok/s**. C1 is the regression control.
 
 | Concurrency | Q4 | Q8 |
 | ---: | ---: | ---: |
-| 1 | 11.79 | 7.10 |
+| 1 | 11.82 | 7.10 |
 | 2 | 22.98 | 14.38 |
-| 4 | 41.84 | 27.17 |
-| 6 | 57.08 | 38.74 |
-| 8 | 67.74 | 49.66 |
+| 4 | 41.87 | 27.13 |
+| 6 | 57.01 | 38.72 |
+| 8 | 67.77 | 49.65 |
 
 pp2048/tg128 across all five context depths at C2/4/6/8: **TODO**.
 
@@ -61,22 +61,24 @@ three mixed-corpus prompts. Aggregate delivered tok/s:
 
 | Concurrency | Q4 repetition | Q4 mixed corpus | Q8 repetition | Q8 mixed corpus |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 62.26 | 36.63 | TODO | TODO |
-| 2 | 74.55 | 40.85 | TODO | TODO |
-| 4 | 81.16 | 43.81 | TODO | TODO |
-| 6 | 80.24 | 49.84 | TODO | TODO |
-| 8 | 84.00 | 51.79 | TODO | TODO |
+| 1 | 61.87 | 36.70 | 49.20 | 25.10 |
+| 2 | 79.51 | 41.27 | 74.34 | 32.38 |
+| 4 | 90.36 | 45.70 | 76.69 | 35.01 |
+| 6 | 90.87 | 53.50 | 76.95 | 40.15 |
+| 8 | 96.12 | 55.58 | 77.37 | 40.83 |
 
 Repetition accepts **100%** of proposals. The mixed corpus contains 24 requests:
-eight each of code, JSON and prose; acceptance is **61.21%**. Throughput is total
-output tokens divided by the sum of measured request-group spans. C8 mixed
-request latency is **7.58 s median / 10.14 s p95**. Physical batch widths and
-per-request output hashes are checked at every concurrency.
+eight each of code, JSON and prose; acceptance is **61.21% for Q4 / 49.13% for
+Q8**. Throughput is total output tokens divided by the sum of measured
+request-group spans. C8 mixed latency (median / p95): **Q4 6.95 / 9.48 s;
+Q8 9.37 / 13.12 s**. Physical widths, output hashes and acceptance counts are
+checked at every concurrency; both C1 controls retain their performance.
 
-Draft projections share up to 64 rows. Verification skips rejected suffixes
-while retaining every request's original proposals, sampling draws and controller
-feedback. **Adaptive remains the default**; controller changes, Q8 measurements
-and pp2048/tg128 across the five context depths remain **TODO**.
+Drafting and context injection share projections across requests. Exact
+verification uses wider row groups and skips rejected suffixes while retaining
+private proposals, sampling draws and controller feedback. **Adaptive remains
+the default**; controller comparisons and pp2048/tg128 across the five context
+depths remain **TODO**.
 [Prompts, methodology and quality checks](eval/README.md).
 
 ## Reproduce and maintain quality

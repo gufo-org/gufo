@@ -314,6 +314,22 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
         throw std::invalid_argument("DFlash2 proposal batch repeats a session");
     }
   }
+  std::vector<QwenDFlashContextRequest> contexts;
+  contexts.reserve(requests.size());
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    auto& backend = *backends[index];
+    if (backend.PendingFeatureCount(requests[index].position) > 0) {
+      contexts.push_back({backend.executor_.get(),
+                          backend.pending_target_features_,
+                          backend.executor_->GetInjectedContextLength(),
+                          {}});
+    }
+  }
+  if (!contexts.empty()) {
+    QwenDFlashGpuExecutor::InjectTargetContextBatch(contexts);
+    for (auto* backend : std::span(backends).first(requests.size()))
+      backend->pending_target_features_.clear();
+  }
   std::vector<speculative::DraftProposal> proposals(requests.size());
   std::array<
       std::array<float, speculative::DFlashLengthController::kMaxDraftTokens>,
@@ -326,7 +342,6 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
   for (std::size_t index = 0; index < requests.size(); ++index) {
     const auto& request = requests[index];
     auto& backend = *backends[index];
-    backend.InjectPendingFeatures(request.position);
     proposals[index].start_pos = request.position;
     const auto budget =
         request.position < backend.config_.max_context
@@ -364,8 +379,8 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
   return proposals;
 }
 
-void QwenDFlashGpuDraftBackend::InjectPendingFeatures(
-    std::uint32_t current_pos) {
+std::uint32_t QwenDFlashGpuDraftBackend::PendingFeatureCount(
+    std::uint32_t current_pos) const {
   if (current_pos < executor_->GetInjectedContextLength()) {
     throw std::logic_error(
         "DFlash committed position precedes injected history");
@@ -380,16 +395,26 @@ void QwenDFlashGpuDraftBackend::InjectPendingFeatures(
       throw std::logic_error(
           "DFlash committed target feature history is incomplete");
     }
-    if (!executor_->InjectTargetContext(pending_target_features_, start_p,
-                                        count)) {
-      throw std::runtime_error(
-          "DFlash committed target feature injection failed");
-    }
-    pending_target_features_.clear();
+    return count;
   } else if (!pending_target_features_.empty()) {
     throw std::logic_error(
         "DFlash has target features without a matching committed position");
   }
+  return 0;
+}
+
+void QwenDFlashGpuDraftBackend::InjectPendingFeatures(
+    std::uint32_t current_pos) {
+  const auto count = PendingFeatureCount(current_pos);
+  if (count == 0)
+    return;
+  if (!executor_->InjectTargetContext(pending_target_features_,
+                                      executor_->GetInjectedContextLength(),
+                                      count)) {
+    throw std::runtime_error(
+        "DFlash committed target feature injection failed");
+  }
+  pending_target_features_.clear();
 }
 
 bool QwenDFlashGpuDraftBackend::AppendTargetContext(

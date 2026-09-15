@@ -20,10 +20,7 @@ constexpr std::size_t kMaxDecodeBatch = 8;
 
 [[nodiscard]] constexpr bool SupportsExactSharedProjection(
     core::GgmlType type) noexcept {
-  // opt-q4kxl: the K-quant/IQ formats have an exact shared-weight small-batch
-  // kernel too (SmallBatchKQuantExactFp32GEMMKernel). Without them here, every
-  // projection in the UD-Q4_K_XL shard fell to the per-row loop below, which
-  // re-reads the weight matrix once per token in the draft block.
+  // These formats preserve scalar FP32 arithmetic while sharing weight loads.
   return type == core::GgmlType::kQ8_0 || type == core::GgmlType::kQ8_K ||
          detail::IsNativeWmmaQuant(type);
 }
@@ -57,6 +54,7 @@ void LaunchFfnActivation(const models::QwenLayerWeights& layer,
   const auto& up = layer.ffn_up;
   const bool packed_format = gate.type == core::GgmlType::kQ4_K ||
                              gate.type == core::GgmlType::kQ5_K ||
+                             gate.type == core::GgmlType::kQ6_K ||
                              gate.type == core::GgmlType::kIQ4_XS ||
                              gate.type == core::GgmlType::kQ8_0;
   if (batch_size >= 2 && intermediate_size == 17408 && hidden_size == 5120 &&

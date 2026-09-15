@@ -29,6 +29,13 @@ using DFlashTrace =
 
 class QwenDFlashGpuExecutor;
 
+struct QwenDFlashContextRequest {
+  QwenDFlashGpuExecutor* executor{nullptr};
+  std::span<const float> features;
+  std::uint32_t position{0};
+  DFlashTrace trace;
+};
+
 struct QwenDFlashBlockRequest {
   QwenDFlashGpuExecutor* executor{nullptr};
   tokenization::TokenId anchor{0};
@@ -139,6 +146,11 @@ public:
   bool InjectTargetContext(std::span<const float> target_features,
                            std::uint32_t position, std::uint32_t num_tokens,
                            const DFlashTrace& trace = {});
+
+  /// Projects committed features together and writes each private cache at
+  /// its original absolute positions. Reuses the coordinator's scalar scratch.
+  static void InjectTargetContextBatch(
+      std::span<const QwenDFlashContextRequest> requests);
 
   /// Executes non-causal parallel block diffusion drafting.
   [[nodiscard]] std::vector<tokenization::TokenId> ForwardBlock(
@@ -317,6 +329,7 @@ public:
 
 private:
   void InjectPendingFeatures(std::uint32_t position);
+  [[nodiscard]] std::uint32_t PendingFeatureCount(std::uint32_t position) const;
   QwenDFlashGpuDraftBackend(std::unique_ptr<QwenDFlashGpuExecutor> executor,
                             QwenDFlashGpuDraftConfig config);
   [[nodiscard]] speculative::DraftProposal ProposeImpl(

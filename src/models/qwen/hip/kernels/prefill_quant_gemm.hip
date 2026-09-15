@@ -1704,6 +1704,14 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
   }
 
   if (batch > 8) {
+    // Paired seven-row blocks avoid a separate tail on these projections.
+    if ((type == core::GgmlType::kQ6_K ||
+         (type == core::GgmlType::kQ5_K && m == 5120 && k == 6144)) &&
+        batch <= 56 && batch % 14 == 0 &&
+        detail::TryLaunchKQuantSmallBatchWave64(type, w, fp32_x, y, 14, m, k,
+                                                stream, batch / 14)) {
+      return;
+    }
     const bool ffn =
         ((m == 17408 || m == 34816) && k == 5120) || (m == 5120 && k == 17408);
     const bool q8_projection =
@@ -1727,10 +1735,11 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     // Cross-request verification can contain up to 64 rows. Reuse weights in
     // wider exact groups where measured, and keep the established small-batch
     // arithmetic for other projections and the final unpadded group.
-    const bool exact_width =
-        q8_projection || (m == 34816 && k == 5120) ||
-        (m == 5120 && k == 17408) ||
-        (type == core::GgmlType::kQ6_K && m == 248320 && k == 5120);
+    const bool exact_width = q8_projection || (m == 34816 && k == 5120) ||
+                             (m == 5120 && k == 17408) ||
+                             (type == core::GgmlType::kQ6_K &&
+                              ((k == 5120 && (m == 248320 || m == 17408)) ||
+                               (m == 5120 && k == 6144)));
     for (std::size_t offset = 0; offset < batch;) {
       const std::size_t remaining = batch - offset;
       const auto groups = std::min<std::size_t>(4, remaining / 16);

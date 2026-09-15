@@ -158,8 +158,8 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
 // Keep the descending butterfly order identical to scalar decoding.
 template<int Offset = 16>
 __device__ __forceinline__ float ReduceKQuantWave(float value) {
-  const int other = __builtin_amdgcn_ds_swizzle(
-      __builtin_bit_cast(int, value), (Offset << 10) | 31);
+  const int other = __builtin_amdgcn_ds_swizzle(__builtin_bit_cast(int, value),
+                                                (Offset << 10) | 31);
   const float sum = value + __builtin_bit_cast(float, other);
   if constexpr (Offset > 1) {
     return ReduceKQuantWave<Offset / 2>(sum);
@@ -171,8 +171,7 @@ __device__ __forceinline__ float ReduceKQuantWave(float value) {
 // These GEMMs exchange data through LDS only. Global inputs are read-only,
 // and output stores follow the final tile. Complete LDS traffic and preserve
 // compiler memory ordering without invalidating the global read cache.
-__device__ __forceinline__ __attribute__((convergent))
-void SyncKQuantTile() {
+__device__ __forceinline__ __attribute__((convergent)) void SyncKQuantTile() {
   asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
   __builtin_amdgcn_s_barrier();
   asm volatile("" ::: "memory");
@@ -204,18 +203,15 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
 
   const Index lane = threadIdx.x & 31u;
   const Index warp_id = threadIdx.x >> 5u;
-  const Index row_base =
-      ((blockIdx.x * WavesPerBlock) + warp_id) * RowsPerWave;
+  const Index row_base = ((blockIdx.x * WavesPerBlock) + warp_id) * RowsPerWave;
   const Index num_blocks = k / kQ8_0BlockSize;
   const auto* base = static_cast<const Q8_0Block*>(w);
   float sums[RowsPerWave][Batch] = {};
 
   for (Index tile_base = 0; tile_base < num_blocks;
        tile_base += kBlocksPerTile) {
-    constexpr Index kTileVectors =
-        Batch * kBlocksPerTile * kVectorsPerBlock;
-    for (Index flat = threadIdx.x; flat < kTileVectors;
-         flat += blockDim.x) {
+    constexpr Index kTileVectors = Batch * kBlocksPerTile * kVectorsPerBlock;
+    for (Index flat = threadIdx.x; flat < kTileVectors; flat += blockDim.x) {
       const Index token = flat / (kBlocksPerTile * kVectorsPerBlock);
       const Index within = flat % (kBlocksPerTile * kVectorsPerBlock);
       const Index block = within / kVectorsPerBlock;
@@ -327,7 +323,8 @@ template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, core::GgmlType WType,
          std::size_t TilesPerStage = 1, std::uint32_t MinWaves = 12,
          std::size_t TokenGroups = 1, bool NarrowIndex = false,
-         std::size_t TokensPerStep = Batch, std::uint32_t HardwareWaveSize = 32>
+         std::size_t TokensPerStep = Batch, std::uint32_t HardwareWaveSize = 32,
+         std::uint32_t LogicalLanes = 32>
 __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
                                            ? MinWaves * 32 / HardwareWaveSize
                                            : 1)) __global__
@@ -338,7 +335,10 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
                                              std::size_t wide_k) {
   static_assert(TokensPerStep > 0 && Batch % TokensPerStep == 0);
   static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
-  // Row ownership and reductions use logical 32-lane groups in either mode.
+  static_assert(LogicalLanes == 16 || LogicalLanes == 32);
+  static_assert(LogicalLanes == 32 || TilesPerStage == 1);
+  // Sixteen-lane groups keep both original lane partials independently, then
+  // combine them in the same descending butterfly order as scalar decoding.
   // Only the occupancy hint counts hardware waves.
   using Index = std::conditional_t<NarrowIndex, std::uint32_t, std::size_t>;
   const Index m = static_cast<Index>(wide_m);
@@ -346,7 +346,8 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
   x += (blockIdx.x % TokenGroups) * Batch * k;
   y += (blockIdx.x % TokenGroups) * Batch * m;
   constexpr Index kSubElems = 16;
-  constexpr Index kSubsPerTile = 32 * TilesPerStage;
+  constexpr Index kPhases = 32 / LogicalLanes;
+  constexpr Index kSubsPerTile = LogicalLanes * TilesPerStage;
   constexpr Index kVectorsPerSub = kSubElems / 4;
   constexpr bool kCompact =
       (WType == core::GgmlType::kQ4_K && Batch >= 3 && RowsPerWave == 4 &&
@@ -363,84 +364,128 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
   // Compute it once during staging, in the decode GEMV's left-to-right order.
   __shared__ float staged_sums[kHasOffset ? Batch * kSubsPerTile : 1];
 
-  const Index lane = threadIdx.x & 31u;
-  const Index warp_id = threadIdx.x >> 5u;
+  const Index lane = threadIdx.x % LogicalLanes;
+  const Index warp_id = threadIdx.x / LogicalLanes;
   const Index row_base =
-      (((blockIdx.x / TokenGroups) * WavesPerBlock) + warp_id) * RowsPerWave;
+      (((blockIdx.x / TokenGroups) * WavesPerBlock * kPhases) + warp_id) *
+      RowsPerWave;
   const Index num_sub = k / kSubElems;
   const Index row_bytes = QuantRowBytes(WType, k);
-  float sums[RowsPerWave][Batch] = {};
+  float sums[kPhases][RowsPerWave][Batch] = {};
 
   for (Index tile_base = 0; tile_base < num_sub;
-       tile_base += kSubsPerTile) {
-    // One thread stages a whole (token, sub-block) so it can accumulate that
-    // sub-block's activation sum sequentially while it has the values.
-    for (Index flat = threadIdx.x; flat < Batch * kSubsPerTile;
-         flat += blockDim.x) {
-      const Index token = flat / kSubsPerTile;
-      const Index sub = flat % kSubsPerTile;
-      const Index source_sub = tile_base + sub;
-      float* dst = staged_x + (token * kTileStride) + (sub * kStride);
-      float total = 0.0F;
+       tile_base += 32 * TilesPerStage) {
 #pragma unroll
-      for (Index vector = 0; vector < kVectorsPerSub; ++vector) {
-        float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
-        if (source_sub < num_sub) {
-          value = *reinterpret_cast<const float4*>(
-              x + (token * k) + (source_sub * kSubElems) + (vector * 4));
+    for (Index phase = 0; phase < kPhases; ++phase) {
+      // One thread stages a whole (token, sub-block) so it can accumulate that
+      // sub-block's activation sum sequentially while it has the values.
+      for (Index flat = threadIdx.x; flat < Batch * kSubsPerTile;
+           flat += blockDim.x) {
+        const Index token = flat / kSubsPerTile;
+        const Index sub = flat % kSubsPerTile;
+        const Index source_sub = tile_base + phase * LogicalLanes + sub;
+        float* dst = staged_x + (token * kTileStride) + (sub * kStride);
+        float total = 0.0F;
+#pragma unroll
+        for (Index vector = 0; vector < kVectorsPerSub; ++vector) {
+          float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
+          if (source_sub < num_sub) {
+            value = *reinterpret_cast<const float4*>(
+                x + (token * k) + (source_sub * kSubElems) + (vector * 4));
+          }
+          // Compact staging removes per-sub-block padding. Both reads and
+          // writes permute float4 groups; arithmetic is unchanged.
+          const Index group = kCompact ? vector ^ ((sub >> 1U) & 3U) : vector;
+          *reinterpret_cast<float4*>(dst + (group * 4)) = value;
+          if constexpr (kHasOffset) {
+            // Left to right, term by term, matching the GEMV's scalar loop.
+            total += value.x;
+            total += value.y;
+            total += value.z;
+            total += value.w;
+          }
         }
-        // Compact staging removes per-sub-block padding. Both reads and
-        // writes permute float4 groups; arithmetic is unchanged.
-        const Index group =
-            kCompact ? vector ^ ((sub >> 1U) & 3U) : vector;
-        *reinterpret_cast<float4*>(dst + (group * 4)) = value;
         if constexpr (kHasOffset) {
-          // Left to right, term by term, matching the GEMV's scalar loop.
-          total += value.x;
-          total += value.y;
-          total += value.z;
-          total += value.w;
+          staged_sums[(token * kSubsPerTile) + sub] = total;
         }
       }
-      if constexpr (kHasOffset) {
-        staged_sums[(token * kSubsPerTile) + sub] = total;
-      }
-    }
-    SyncKQuantTile();
+      SyncKQuantTile();
 
-    for (Index tile = 0; tile < TilesPerStage; ++tile) {
-      const Index slot = tile * 32 + lane;
-      const Index sub = tile_base + slot;
-      if (sub < num_sub) {
-        QuantSub16 decoded[RowsPerWave];
+      for (Index tile = 0; tile < TilesPerStage; ++tile) {
+        const Index slot = tile * 32 + lane;
+        const Index sub = tile_base + phase * LogicalLanes + slot;
+        if (sub < num_sub) {
+          QuantSub16 decoded[RowsPerWave];
 #pragma unroll
-        for (Index r = 0; r < RowsPerWave; ++r) {
-          const Index row = row_base + r;
-          const Index safe_row = row < m ? row : m - 1;
-          DecodeQuantSub16<NarrowIndex>(
-              WType,
-              static_cast<const std::uint8_t*>(w) + (safe_row * row_bytes), sub,
-              decoded[r]);
-        }
-        // Group independent token dots without reordering an output's sums.
+          for (Index r = 0; r < RowsPerWave; ++r) {
+            const Index row = row_base + r;
+            const Index safe_row = row < m ? row : m - 1;
+            DecodeQuantSub16<NarrowIndex>(
+                WType,
+                static_cast<const std::uint8_t*>(w) + (safe_row * row_bytes),
+                sub, decoded[r]);
+          }
+          // Group independent token dots without reordering an output's sums.
 #pragma unroll
-        for (Index token_base = 0; token_base < Batch;
-             token_base += TokensPerStep) {
-          float dots[RowsPerWave][TokensPerStep] = {};
-          if constexpr (WType == core::GgmlType::kQ5_K && Batch == 8 &&
-                        RowsPerWave == 4 && NarrowIndex && TokensPerStep == 1) {
-            // Convert each row's four coefficients before its dependent FMAs.
-            // This schedule is faster for the batch-eight Q5 FFN geometries;
-            // each output retains the scalar dot product's accumulation order.
+          for (Index token_base = 0; token_base < Batch;
+               token_base += TokensPerStep) {
+            if constexpr (LogicalLanes == 16 ||
+                          (RowsPerWave == 6 && HardwareWaveSize == 64 &&
+                           ((Batch == 16 && (WType == core::GgmlType::kQ4_K ||
+                                             WType == core::GgmlType::kQ5_K)) ||
+                            (WType == core::GgmlType::kQ6_K &&
+                             (Batch == 14 || Batch == 16))))) {
+              // Bound live token loads to avoid spilling the output partials.
+              // This fence preserves every dot and reduction order.
+              __builtin_amdgcn_sched_barrier(0);
+            }
+            float dots[RowsPerWave][TokensPerStep] = {};
+            if constexpr (WType == core::GgmlType::kQ5_K && Batch == 8 &&
+                          RowsPerWave == 4 && NarrowIndex &&
+                          TokensPerStep == 1) {
+              // Convert each row's four coefficients before its dependent FMAs.
+              // This schedule is faster for the batch-eight Q5 FFN geometries;
+              // each output retains the scalar dot product's accumulation
+              // order.
 #pragma unroll
-            for (Index group = 0; group < kVectorsPerSub; ++group) {
+              for (Index group = 0; group < kVectorsPerSub; ++group) {
 #pragma unroll
-              for (Index r = 0; r < RowsPerWave; ++r) {
-                const std::int8_t* q = decoded[r].q + group * 4;
-                const float q0 = static_cast<float>(q[0]);
-                const float q1 = static_cast<float>(q[1]);
-                const float q2 = static_cast<float>(q[2]);
-                const float q3 = static_cast<float>(q[3]);
+                for (Index r = 0; r < RowsPerWave; ++r) {
+                  const std::int8_t* q = decoded[r].q + group * 4;
+                  const float q0 = static_cast<float>(q[0]);
+                  const float q1 = static_cast<float>(q[1]);
+                  const float q2 = static_cast<float>(q[2]);
+                  const float q3 = static_cast<float>(q[3]);
+#pragma unroll
+                  for (Index local_token = 0; local_token < TokensPerStep;
+                       ++local_token) {
+                    const Index token = token_base + local_token;
+                    const Index input_group =
+                        kCompact ? group ^ ((slot >> 1U) & 3U) : group;
+                    const float4 xv = *reinterpret_cast<const float4*>(
+                        staged_x + token * kTileStride + slot * kStride +
+                        input_group * 4);
+                    // Alternating operand positions helps paired FMA issue on
+                    // gfx1151 without changing products or accumulation order.
+                    const bool swap = ((r ^ token) & 1U) != 0U;
+                    dots[r][local_token] =
+                        swap ? __builtin_fmaf(xv.x, q0, dots[r][local_token])
+                             : __builtin_fmaf(q0, xv.x, dots[r][local_token]);
+                    dots[r][local_token] =
+                        swap ? __builtin_fmaf(xv.y, q1, dots[r][local_token])
+                             : __builtin_fmaf(q1, xv.y, dots[r][local_token]);
+                    dots[r][local_token] =
+                        swap ? __builtin_fmaf(xv.z, q2, dots[r][local_token])
+                             : __builtin_fmaf(q2, xv.z, dots[r][local_token]);
+                    dots[r][local_token] =
+                        swap ? __builtin_fmaf(xv.w, q3, dots[r][local_token])
+                             : __builtin_fmaf(q3, xv.w, dots[r][local_token]);
+                  }
+                }
+              }
+            } else {
+#pragma unroll
+              for (Index group = 0; group < kVectorsPerSub; ++group) {
 #pragma unroll
                 for (Index local_token = 0; local_token < TokensPerStep;
                      ++local_token) {
@@ -448,82 +493,57 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
                   const Index input_group =
                       kCompact ? group ^ ((slot >> 1U) & 3U) : group;
                   const float4 xv = *reinterpret_cast<const float4*>(
-                      staged_x + token * kTileStride + slot * kStride +
-                      input_group * 4);
-                  // Alternating operand positions helps paired FMA issue on
-                  // gfx1151 without changing products or accumulation order.
-                  const bool swap = ((r ^ token) & 1U) != 0U;
-                  dots[r][local_token] =
-                      swap ? __builtin_fmaf(xv.x, q0, dots[r][local_token])
-                           : __builtin_fmaf(q0, xv.x, dots[r][local_token]);
-                  dots[r][local_token] =
-                      swap ? __builtin_fmaf(xv.y, q1, dots[r][local_token])
-                           : __builtin_fmaf(q1, xv.y, dots[r][local_token]);
-                  dots[r][local_token] =
-                      swap ? __builtin_fmaf(xv.z, q2, dots[r][local_token])
-                           : __builtin_fmaf(q2, xv.z, dots[r][local_token]);
-                  dots[r][local_token] =
-                      swap ? __builtin_fmaf(xv.w, q3, dots[r][local_token])
-                           : __builtin_fmaf(q3, xv.w, dots[r][local_token]);
+                      staged_x + (token * kTileStride) + (slot * kStride) +
+                      (input_group * 4));
+#pragma unroll
+                  for (Index r = 0; r < RowsPerWave; ++r) {
+                    const std::int8_t* q = decoded[r].q + (group * 4);
+                    dots[r][local_token] += static_cast<float>(q[0]) * xv.x;
+                    dots[r][local_token] += static_cast<float>(q[1]) * xv.y;
+                    dots[r][local_token] += static_cast<float>(q[2]) * xv.z;
+                    dots[r][local_token] += static_cast<float>(q[3]) * xv.w;
+                  }
                 }
               }
             }
-          } else {
 #pragma unroll
-            for (Index group = 0; group < kVectorsPerSub; ++group) {
+            for (Index r = 0; r < RowsPerWave; ++r) {
 #pragma unroll
               for (Index local_token = 0; local_token < TokensPerStep;
                    ++local_token) {
                 const Index token = token_base + local_token;
-                const Index input_group =
-                    kCompact ? group ^ ((slot >> 1U) & 3U) : group;
-                const float4 xv = *reinterpret_cast<const float4*>(
-                    staged_x + (token * kTileStride) + (slot * kStride) +
-                    (input_group * 4));
-#pragma unroll
-                for (Index r = 0; r < RowsPerWave; ++r) {
-                  const std::int8_t* q = decoded[r].q + (group * 4);
-                  dots[r][local_token] += static_cast<float>(q[0]) * xv.x;
-                  dots[r][local_token] += static_cast<float>(q[1]) * xv.y;
-                  dots[r][local_token] += static_cast<float>(q[2]) * xv.z;
-                  dots[r][local_token] += static_cast<float>(q[3]) * xv.w;
-                }
-              }
-            }
-          }
-#pragma unroll
-          for (Index r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-            for (Index local_token = 0; local_token < TokensPerStep;
-                 ++local_token) {
-              const Index token = token_base + local_token;
-              if constexpr (kHasOffset) {
-                sums[r][token] +=
-                    (decoded[r].scale * dots[r][local_token]) -
-                    (decoded[r].offset *
-                     staged_sums[(token * kSubsPerTile) + slot]);
-              } else {
-                // Decode rounds the scaled dot before accumulating it. Keep
-                // contraction disabled only here; the dot above still uses its
-                // original FMAs. Symmetric formats need no activation sums.
+                if constexpr (kHasOffset) {
+                  sums[phase][r][token] +=
+                      (decoded[r].scale * dots[r][local_token]) -
+                      (decoded[r].offset *
+                       staged_sums[(token * kSubsPerTile) + slot]);
+                } else {
+                  // Decode rounds the scaled dot before accumulating it. Keep
+                  // contraction disabled only here; the dot above still uses
+                  // its original FMAs. Symmetric formats need no activation
+                  // sums.
 #pragma clang fp contract(off)
-                const float contribution =
-                    decoded[r].scale * dots[r][local_token];
-                sums[r][token] += contribution;
+                  const float contribution =
+                      decoded[r].scale * dots[r][local_token];
+                  sums[phase][r][token] += contribution;
+                }
               }
             }
           }
         }
       }
+      SyncKQuantTile();
     }
-    SyncKQuantTile();
   }
 
 #pragma unroll
   for (Index r = 0; r < RowsPerWave; ++r) {
 #pragma unroll
     for (Index token = 0; token < Batch; ++token) {
-      sums[r][token] = ReduceKQuantWave(sums[r][token]);
+      if constexpr (kPhases == 2) {
+        sums[0][r][token] += sums[1][r][token];
+      }
+      sums[0][r][token] = ReduceKQuantWave<LogicalLanes / 2>(sums[0][r][token]);
     }
   }
   if (lane == 0) {
@@ -535,7 +555,7 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
       }
 #pragma unroll
       for (Index token = 0; token < Batch; ++token) {
-        y[(token * m) + row] = sums[r][token];
+        y[(token * m) + row] = sums[0][r][token];
       }
     }
   }

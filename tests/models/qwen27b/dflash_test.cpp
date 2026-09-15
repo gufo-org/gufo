@@ -97,6 +97,15 @@ void TestConcurrentBlocks(
       config.target_layer_ids.size() * target_model->GetConfig().hidden_size;
   target.reset();
   std::array<std::unique_ptr<QwenDFlashGpuExecutor>, 8> executors;
+  std::array<std::map<std::string, std::vector<float>>, 8> context_traces;
+  std::array<std::vector<std::uint8_t>, 8> context_payloads;
+  const auto context_payload = [](const QwenDFlashGpuExecutor& executor) {
+    const auto snapshot = executor.SaveSnapshot();
+    std::vector<std::uint8_t> bytes(snapshot->PersistentPayloadBytes());
+    Expect(snapshot->SerializePersistent(bytes) == bytes.size(),
+           "concurrent context snapshot size");
+    return bytes;
+  };
   std::array<std::uint32_t, 8> positions{};
   std::array<std::array<float, 7>, 8> uniforms{};
   const std::array<float, 8> temperatures{0.0F, 0.2F, 0.8F, 1.3F,
@@ -114,10 +123,17 @@ void TestConcurrentBlocks(
                    serial_memory.temporary_scratch_bytes,
            "draft memory estimate matches allocated state and scalar scratch");
     positions[index] = 3U * static_cast<std::uint32_t>(index + 1U);
-    Expect(executors[index]->InjectTargetContext(
-               std::span(features).first(positions[index] * feature_width), 0,
-               positions[index]),
-           "independent concurrent draft context");
+    Expect(
+        executors[index]->InjectTargetContext(
+            std::span(features).first(positions[index] * feature_width), 0,
+            positions[index],
+            [&, index](std::string_view name, std::span<const float> values) {
+              context_traces[index].emplace(
+                  std::string(name),
+                  std::vector<float>(values.begin(), values.end()));
+            }),
+        "independent concurrent draft context");
+    context_payloads[index] = context_payload(*executors[index]);
     for (std::size_t row = 0; row < uniforms[index].size(); ++row)
       uniforms[index][row] =
           (static_cast<float>((index * 13U + row * 7U) % 101U) + 0.5F) / 101.0F;
@@ -128,6 +144,37 @@ void TestConcurrentBlocks(
            (actual.empty() || std::memcmp(actual.data(), expected.data(),
                                           actual.size_bytes()) == 0);
   };
+  for (const std::size_t width : {2U, 4U, 6U, 8U}) {
+    std::vector<QwenDFlashContextRequest> contexts;
+    std::array<std::set<std::string>, 8> visited;
+    std::vector<std::size_t> order;
+    for (std::size_t row = 0; row < width; ++row) {
+      const auto index = (row + width / 2U) % executors.size();
+      order.push_back(index);
+      executors[index]->Reset();
+      contexts.push_back(
+          {executors[index].get(),
+           std::span(features).first(positions[index] * feature_width), 0,
+           [&, index](std::string_view name, std::span<const float> values) {
+             const auto found = context_traces[index].find(std::string(name));
+             Expect(found != context_traces[index].end() &&
+                        exact(values, found->second),
+                    "shared context differs at " + std::string(name) +
+                        " request " + std::to_string(index));
+             visited[index].insert(std::string(name));
+           }});
+    }
+    QwenDFlashGpuExecutor::InjectTargetContextBatch(contexts);
+    for (const auto index : order) {
+      Expect(visited[index].size() == context_traces[index].size(),
+             "every context normalization and K/V projection was checked");
+      Expect(context_payload(*executors[index]) == context_payloads[index],
+             "shared context preserves each complete private KV cache");
+      Expect(executors[index]->GetMemoryUsage().TotalBytes() ==
+                 serial_memory.TotalBytes(),
+             "shared context reuses existing scalar scratch");
+    }
+  }
   for (const bool full_block : {false, true}) {
     std::array<DraftProposal, 8> expected;
     std::array<std::map<std::string, std::vector<float>>, 8> traces;
@@ -734,6 +781,51 @@ int main(int argc, const char* const* argv) {
                 complete_payload.size() &&
             complete_payload == wrapped_payload,
         "skipping expired chunks preserves the complete history byte for byte");
+    // Shared projection must preserve each ring when a chunk crosses its end.
+    auto peer = gufo::hip::QwenDFlashGpuExecutor::Create(dflash_model, capacity,
+                                                         &error);
+    Expect(peer != nullptr, error);
+    const auto crossing_position = window - 3U;
+    executor->Reset();
+    Expect(executor->InjectTargetContext(
+               rows.first(crossing_position * feature_width), 0,
+               crossing_position),
+           "prime a context immediately before ring wrap");
+    const auto crossing = executor->SaveSnapshot();
+    peer->RestoreSnapshot(*crossing);
+    const std::array<gufo::hip::QwenDFlashContextRequest, 2> crossing_requests{
+        {{executor.get(),
+          rows.subspan(crossing_position * feature_width, 10U * feature_width),
+          crossing_position,
+          {}},
+         {peer.get(),
+          rows.subspan(crossing_position * feature_width, 13U * feature_width),
+          crossing_position,
+          {}}}};
+    const auto serialize = [](const gufo::hip::QwenDFlashGpuExecutor& value) {
+      const auto snapshot = value.SaveSnapshot();
+      std::vector<std::uint8_t> bytes(snapshot->PersistentPayloadBytes());
+      Expect(snapshot->SerializePersistent(bytes) == bytes.size(),
+             "serialize shared ring history");
+      return bytes;
+    };
+    std::array<std::vector<std::uint8_t>, 2> crossing_payloads;
+    for (std::size_t index = 0; index < crossing_requests.size(); ++index) {
+      const auto& request = crossing_requests[index];
+      Expect(request.executor->InjectTargetContext(
+                 request.features, request.position,
+                 request.features.size() / feature_width),
+             "scalar reference across ring wrap");
+      crossing_payloads[index] = serialize(*request.executor);
+      request.executor->RestoreSnapshot(*crossing);
+    }
+    gufo::hip::QwenDFlashGpuExecutor::InjectTargetContextBatch(
+        crossing_requests);
+    for (std::size_t index = 0; index < crossing_requests.size(); ++index) {
+      Expect(serialize(*crossing_requests[index].executor) ==
+                 crossing_payloads[index],
+             "shared context is byte exact across private ring boundaries");
+    }
     executor->Reset();
     executor->RestorePersistentSnapshot(wrapped_payload);
     std::vector<float> replay_confidences;

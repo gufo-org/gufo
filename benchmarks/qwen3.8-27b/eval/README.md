@@ -52,7 +52,7 @@ Profile separately. Broaden to depth/concurrency sweeps only when needed.
 Generation changes must cover **C2/4/6/8 on Q4 and Q8**, preserving C1
 performance. The target check reuses eight scalar oracles with different prompts
 and prefix lengths. It compares complete logits and all five feature taps,
-unequal chunks, combined widths 9–16/32/48/64, rotated coordinators and
+unequal chunks, combined widths 9–16/28/32/42/48/56/64, rotated coordinators and
 accepted-prefix replay. It also appends chunks while the cohort shrinks through
 C8/C4/C2/C1; recurrent replay must retain every committed chunk exactly.
 
@@ -61,6 +61,9 @@ convolution, selector predecessors, positions, RNG and controller state remain
 private. The draft check requires byte-identical layer traces, complete logits,
 selector candidates/probabilities and persistent payloads against isolated
 execution, including ragged blocks and two rounds of feedback/context injection.
+Shared context injection must also match scalar normalization, every K/V
+projection and complete private KV snapshots. It reuses scalar scratch; unequal
+chunks crossing ring boundaries must remain byte exact.
 Both target and draft executables accept `--concurrency-only` for these checks.
 
 Verification generates the original complete proposal before dividing target
@@ -70,9 +73,12 @@ proposal draws, target sampling, emitted tokens, counts and controller feedback
 must match full verification. The generic verifier test checks these invariants,
 including penalties, random sampling, EOS, budget tails and continuation.
 
-Q4 exact projections group adjacent sets of sixteen rows in one launch. Shared
-recurrence preserves each sequence's computation order. Target-only tail rows
-join verification, and existing FFN scratch holds combined logits when it fits.
+Exact projections group adjacent sets of fourteen or sixteen rows in one launch.
+Q4/Q5 use six output rows where measured; Q6 has wider FFN/SSM routes and adjacent
+gate/up fusion. IQ4 FFN groups use sixteen lanes, keeping both original partial
+sums independently before the unchanged reduction. Shared recurrence preserves
+each sequence's computation order. Target-only tail rows join verification, and
+existing FFN scratch holds combined logits when it fits.
 Memory accounting includes target verification/sampling allocations, draft-owned
 weights, draft KV state, scalar scratch and the lazy batch workspace. The draft
 test compares allocated bytes with admission estimates before and after batching.
@@ -88,7 +94,7 @@ Track aggregate delivered throughput, whole-request latency, physical width,
 output hashes and acceptance. Corpus throughput uses
 `aggregate.output_tokens_per_second.overall`: total delivered tokens divided by
 the sum of measured group spans. Per-group medians can misrepresent a mixed
-workload. The depth sweep and Q8 performance refresh remain TODO.
+workload. The depth sweep remains TODO.
 
 For prefill changes, the existing target check also covers 128/257/2048-token
 prefixes, repeated prefill and two-token scalar/verification replay. It prints
@@ -260,19 +266,21 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 ## Latest measurement provenance
 
-Q4 concurrent DFlash2 release measured on **2026-09-15**, SHA-256:
-`c3e98c4b27d3005f97184fc373caa6dd19b51b5ef080c5c26e93f1e2f86e1d52`.
+Q4/Q8 concurrent DFlash2 release measured on **2026-09-15**, SHA-256:
+`26fd73c8389e7b371baf1bc6347ab9d18e78500c6a25f2dbf61f6be952a04e14`.
 Q4_K_M draft, adaptive, greedy tg64, context capacity 4096, cached prompts.
 The mixed workload repeats each of the three maintained corpus prompts eight
 times, giving 24 requests divisible by C1/2/4/6/8. Warm every unique prompt before
-measurement. Repetition accepts every proposal; mixed acceptance is 61.21%.
-Reports retain individual latency, physical width, output hashes and draft counts.
+measurement. Repetition accepts every proposal; mixed acceptance is 61.21% for
+Q4 and 49.13% for Q8. Reports retain individual latency, physical width, output
+hashes and draft counts. Every C2/4/6/8 request reproduces its isolated target's
+output and acceptance counts. Contemporaneous C1 controls show no regression.
 
-Unchanged AR and single-user draft controls use release SHA-256
-`e8744c835a0407f9b060117d543fa9921027686efb5efa2c3b4f9c575c44d515`,
-measured on 2026-09-15. They use cached `prose_tides`, tg64 and context capacity
-4096. Fixed one-proposal blocks remain a comparison policy; adaptive is the
-default. Q8 concurrency, controller comparisons and context-depth sweeps are TODO.
+AR and single-user draft controls use the same release, cached `prose_tides`,
+tg64 and context capacity 4096. AR covers C1/2/4/6/8 on both targets; all six
+target/draft combinations cover C1 and reproduce their target's AR output.
+Fixed one-proposal blocks remain a comparison policy; adaptive is the default.
+Controller comparisons and context-depth sweeps are TODO.
 
 Q4 release measured on 2026-09-14, SHA-256:
 `0f6804912d5f9e97df7ffc1e5c49f5898b7444481006725d4c4b274fa2b0307a`.
@@ -308,10 +316,12 @@ improve model prefill. Rejected experiments add no production paths.
 
 Generation profiles place most GPU time in exact quantized projections.
 Retained: wider exact projection groups, native wave64 for measured shapes,
-shared recurrence launches, batched drafting and target-only tails, logit scratch
-reuse, sixteen-row grouping and early termination of rejected suffixes.
+shared recurrence launches, batched drafting/context injection and target-only
+tails, logit scratch reuse, fourteen/sixteen-row grouping, narrower IQ4 lane
+groups, Q6 gate/up fusion and early termination of rejected suffixes.
 Rejected: extra Q8 staging, coefficient preconversion, paired-lane Q8 dots, wider
-scalar tiles, direct global activation loads and alternate FMA schedules.
+scalar tiles, direct global activation loads, compact fourteen-row staging,
+predecoded weight caches and explicit paired-FP32 schedules.
 No runtime switches select these experiments.
 
 | Artifact | SHA-256 |

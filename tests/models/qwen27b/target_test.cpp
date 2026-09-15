@@ -267,10 +267,10 @@ void CheckConcurrencyWidths(const Executor& owner) {
     }
     std::cout << "concurrency width=" << width << " logits/features exact=1\n";
 
-    for (const std::size_t cohort_rows :
-         {0U, 9U, 10U, 11U, 12U, 13U, 14U, 15U, 16U, 32U, 48U, 64U}) {
-      if ((cohort_rows >= 32 && width != count) ||
-          (cohort_rows > 0 && cohort_rows < 32 && width != 2))
+    for (const std::size_t cohort_rows : {0U, 9U, 10U, 11U, 12U, 13U, 14U, 15U,
+                                          16U, 28U, 32U, 42U, 48U, 56U, 64U}) {
+      if ((cohort_rows > 16 && width != count) ||
+          (cohort_rows > 0 && cohort_rows <= 16 && width != 2))
         continue;
       std::array<gufo::hip::QwenGpuVerificationItem, count> verification_items;
       for (std::size_t row = 0; row < width; ++row) {
