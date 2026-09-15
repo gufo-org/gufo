@@ -76,7 +76,9 @@ including penalties, random sampling, EOS, budget tails and continuation.
 Exact projections group adjacent sets of fourteen or sixteen rows in one launch.
 Q4/Q5 use six output rows where measured; Q6 has wider FFN/SSM routes and adjacent
 gate/up fusion. IQ4 FFN groups use sixteen lanes, keeping both original partial
-sums independently before the unchanged reduction. Shared recurrence preserves
+sums independently before the unchanged reduction. Q8 and BF16 projections reuse
+cached weight rows across adjacent sixteen-token groups; every dot product
+retains its scalar accumulation order. Shared recurrence preserves
 each sequence's computation order. Target-only tail rows join verification, and
 existing FFN scratch holds combined logits when it fits.
 Memory accounting includes target verification/sampling allocations, draft-owned
@@ -267,7 +269,7 @@ maintained test inputs. Historical experiment reports remain in Git history.
 ## Latest measurement provenance
 
 Q4/Q8 concurrent DFlash2 release measured on **2026-09-15**, SHA-256:
-`26fd73c8389e7b371baf1bc6347ab9d18e78500c6a25f2dbf61f6be952a04e14`.
+`50a49ca8db0baba5c18292b563c5316517eb17a295a608785f2ca2fcfd3951ad`.
 Q4_K_M draft, adaptive, greedy tg64, context capacity 4096, cached prompts.
 The mixed workload repeats each of the three maintained corpus prompts eight
 times, giving 24 requests divisible by C1/2/4/6/8. Warm every unique prompt before
@@ -276,9 +278,13 @@ Q4 and 49.13% for Q8. Reports retain individual latency, physical width, output
 hashes and draft counts. Every C2/4/6/8 request reproduces its isolated target's
 output and acceptance counts. Contemporaneous C1 controls show no regression.
 
-AR and single-user draft controls use the same release, cached `prose_tides`,
-tg64 and context capacity 4096. AR covers C1/2/4/6/8 on both targets; all six
-target/draft combinations cover C1 and reproduce their target's AR output.
+The C1 mixed-corpus, AR and three-precision single-user draft controls use
+release SHA-256
+`26fd73c8389e7b371baf1bc6347ab9d18e78500c6a25f2dbf61f6be952a04e14`;
+their generation routes are unchanged. AR/draft controls use cached
+`prose_tides`, tg64 and context capacity 4096. AR covers C1/2/4/6/8 on both
+targets; all six target/draft combinations cover C1 and reproduce their
+target's AR output.
 Fixed one-proposal blocks remain a comparison policy; adaptive is the default.
 Controller comparisons and context-depth sweeps are TODO.
 
@@ -314,14 +320,19 @@ two-stage LDS buffering, weight copies and alternative normalization reductions.
 Dense BLAS, split-K for small projections, and convolution/KQ fusion did not
 improve model prefill. Rejected experiments add no production paths.
 
-Generation profiles place most GPU time in exact quantized projections.
+Cached Q4 repetition/tg128 profiles are about 96%/97% GPU-busy at C2/C4; exact
+quantized projections account for about 88% of GPU time. A dominant paired Q5 FFN projection
+takes 0.89/1.69 ms at those widths. C1 already verifies seven or eight positions
+per block, so additional requests increase the arithmetic work substantially.
 Retained: wider exact projection groups, native wave64 for measured shapes,
 shared recurrence launches, batched drafting/context injection and target-only
 tails, logit scratch reuse, fourteen/sixteen-row grouping, narrower IQ4 lane
-groups, Q6 gate/up fusion and early termination of rejected suffixes.
+groups, Q6 gate/up fusion, cached Q8/BF16 weight reuse and early termination of
+rejected suffixes.
 Rejected: extra Q8 staging, coefficient preconversion, paired-lane Q8 dots, wider
 scalar tiles, direct global activation loads, compact fourteen-row staging,
-predecoded weight caches and explicit paired-FP32 schedules.
+predecoded weight caches, lossless half-coefficient FMAs and explicit paired-FP32
+schedules.
 No runtime switches select these experiments.
 
 | Artifact | SHA-256 |

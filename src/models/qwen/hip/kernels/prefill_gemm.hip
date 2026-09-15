@@ -98,9 +98,18 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
   if (M == 0 || K == 0 || batch_size == 0) {
     return;
   }
+  if (batch_size >= 32) {
+    const auto groups = std::min<std::size_t>(4, batch_size / 16);
+    if (detail::TryLaunchBf16SmallBatchWave64(A, X, Y, 16, M, K, stream,
+                                              groups)) {
+      const auto consumed = groups * 16;
+      LaunchExactBf16GEMMFp32SmallBatch(A, X + consumed * K, Y + consumed * M,
+                                        batch_size - consumed, M, K, stream);
+      return;
+    }
+  }
   const bool exact_width =
-      ((K == 5120 && (M == 12288 || M == 248320)) ||
-       (M == 5120 && K == 6144));
+      ((K == 5120 && (M == 12288 || M == 248320)) || (M == 5120 && K == 6144));
   const bool wide = batch_size > 16 && exact_width;
   if (exact_width && batch_size >= 9 && batch_size <= 15 && batch_size != 12) {
     if (M == 5120 && K == 6144) {
@@ -110,17 +119,29 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
                 static_cast<const hip_bfloat16*>(A), X, Y, M, K);
       };
       switch (batch_size) {
-        case 9: launch.template operator()<9>(); break;
-        case 10: launch.template operator()<10>(); break;
-        case 11: launch.template operator()<11>(); break;
-        case 13: launch.template operator()<13>(); break;
-        case 14: launch.template operator()<14>(); break;
-        case 15: launch.template operator()<15>(); break;
+        case 9:
+          launch.template operator()<9>();
+          break;
+        case 10:
+          launch.template operator()<10>();
+          break;
+        case 11:
+          launch.template operator()<11>();
+          break;
+        case 13:
+          launch.template operator()<13>();
+          break;
+        case 14:
+          launch.template operator()<14>();
+          break;
+        case 15:
+          launch.template operator()<15>();
+          break;
       }
       return;
     }
-    if (detail::TryLaunchBf16SmallBatchWave64(
-            A, X, Y, batch_size, M, K, stream))
+    if (detail::TryLaunchBf16SmallBatchWave64(A, X, Y, batch_size, M, K,
+                                              stream))
       return;
   }
   if (wide &&
@@ -131,16 +152,15 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
       const std::size_t remaining = batch_size - offset;
       // Balanced groups avoid an expensive short remainder at common cohort
       // sizes: 36=24+12, 40=24+16, 48=24+24 and 60=24+24+12.
-      const bool prefer24 =
-          remaining == 36 || remaining == 40 || remaining == 48 || remaining == 60;
-      const std::size_t width = wide && remaining >= 32 && !prefer24 ? 32
-                                : wide && remaining >= 24 && remaining != 28
-                                    ? 24
-                                : remaining >= 16 ? 16
-                                : exact_width && remaining > 8 ? remaining
-                                : remaining >= 12
-                                    ? 12
-                                    : std::min<std::size_t>(8, remaining);
+      const bool prefer24 = remaining == 36 || remaining == 40 ||
+                            remaining == 48 || remaining == 60;
+      const std::size_t width =
+          wide && remaining >= 32 && !prefer24         ? 32
+          : wide && remaining >= 24 && remaining != 28 ? 24
+          : remaining >= 16                            ? 16
+          : exact_width && remaining > 8               ? remaining
+          : remaining >= 12                            ? 12
+                            : std::min<std::size_t>(8, remaining);
       LaunchExactBf16GEMMFp32SmallBatch(A, X + offset * K, Y + offset * M,
                                         width, M, K, stream);
       offset += width;

@@ -140,7 +140,8 @@ namespace detail {
 [[nodiscard]] bool TryLaunchBf16SmallBatchWave64(const void* w, const float* x,
                                                  float* y, std::size_t batch,
                                                  std::size_t m, std::size_t k,
-                                                 hipStream_t stream);
+                                                 hipStream_t stream,
+                                                 std::size_t groups = 1);
 
 /// opt-q4kxl: true for the formats that run natively through the K-quant GPU
 /// kernels -- the blocked WMMA GEMM at prefill batch, the exact shared-weight

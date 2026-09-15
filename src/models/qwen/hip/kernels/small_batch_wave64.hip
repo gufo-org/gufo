@@ -255,8 +255,39 @@ bool TryLaunchQ8SmallBatchWave64(const void* w, const float* x, float* y,
 
 bool TryLaunchBf16SmallBatchWave64(const void* w, const float* x, float* y,
                                    std::size_t batch, std::size_t m,
-                                   std::size_t k, hipStream_t stream) {
-  if (m == 0 || k == 0 ||
+                                   std::size_t k, hipStream_t stream,
+                                   std::size_t groups) {
+  if (groups > 1) {
+    const bool up = k == 5120 && (m == 1024 || m == 12288 || m == 248320);
+    const bool down = m == 5120 && k == 6144;
+    if (batch != 16 || groups > 4 || !(up || down))
+      return false;
+    const auto launch = [&]<std::size_t Groups, std::size_t Rows>() {
+      // Neighboring token groups reuse the same weight rows through cache.
+      BatchedExactBf16GEMMFp32VecKernel<16, 16, Rows, false, 64, Groups>
+          <<<((m + 16 * Rows - 1) / (16 * Rows)) * Groups, 512, 0, stream>>>(
+              static_cast<const hip_bfloat16*>(w), x, y, m, k);
+    };
+    const auto launch_shape = [&]<std::size_t Groups>() {
+      if (down)
+        launch.template operator()<Groups, 2>();
+      else
+        launch.template operator()<Groups, 3>();
+    };
+    switch (groups) {
+      case 2:
+        launch_shape.template operator()<2>();
+        break;
+      case 3:
+        launch_shape.template operator()<3>();
+        break;
+      case 4:
+        launch_shape.template operator()<4>();
+        break;
+    }
+    return true;
+  }
+  if (m == 0 || k == 0 || groups == 0 ||
       !((batch >= 9 && batch <= 15 && batch != 12) || batch == 24 ||
         batch == 32))
     return false;
