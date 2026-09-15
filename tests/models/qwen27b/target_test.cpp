@@ -213,6 +213,52 @@ void CheckMixedContextBatch(const Executor& owner, bool replay) {
   }
 }
 
+void CheckConcurrencyWidths(const Executor& owner) {
+  constexpr std::size_t count = 8;
+  constexpr std::array<std::uint32_t, 5> taps{6, 20, 34, 48, 62};
+  std::array<std::unique_ptr<Executor>, count> sessions;
+  std::array<std::unique_ptr<gufo::hip::QwenGpuSnapshot>, count> snapshots;
+  std::array<gufo::hip::QwenGpuBatchItem, count> items;
+  std::array<std::vector<float>, count> expected_logits;
+  std::array<std::vector<float>, count> expected_features;
+  for (std::size_t row = 0; row < count; ++row) {
+    sessions[row] = std::make_unique<Executor>(owner.GetSharedModel(), 64);
+    auto& session = *sessions[row];
+    session.SetPromptHiddenCapture(true, taps);
+    const auto tokens = owner.GetTokenizer().Encode(kTexts[row % kTexts.size()]);
+    const auto position = static_cast<std::uint32_t>(5 + 4 * row);
+    Expect(tokens.size() > position, "concurrency fixture has too few tokens");
+    (void)session.ForwardPromptBatch(std::span(tokens).first(position));
+    snapshots[row] = session.SaveSnapshot(position);
+    items[row] = {&session, tokens[position], position};
+    (void)session.ForwardToken(tokens[position], position);
+    expected_logits[row] = Logits(session);
+    const auto features = session.CopyLastHidden();
+    expected_features[row].assign(features.begin(), features.end());
+  }
+  // Reuse eight scalar oracles across the required serving widths. Unequal
+  // prefixes and different prompts expose accidental sharing of request state.
+  for (const std::size_t width : {2U, 4U, 6U, 8U}) {
+    for (std::size_t row = 0; row < width; ++row)
+      sessions[row]->RestoreSnapshot(*snapshots[row]);
+    const auto predictions =
+        Executor::ForwardTokenBatch(std::span(items).first(width));
+    Expect(predictions.size() == width, "concurrency width changed");
+    for (std::size_t row = 0; row < width; ++row) {
+      Expect(ByteEqual(Logits(*sessions[row]), expected_logits[row]) &&
+                 ByteEqual(sessions[row]->CopyLastHidden(),
+                           expected_features[row]),
+             "concurrent decoding changed target logits or draft features");
+      const auto& logits = expected_logits[row];
+      Expect(predictions[row] ==
+                 static_cast<Token>(std::ranges::max_element(logits) -
+                                    logits.begin()),
+             "concurrent decoding changed the target prediction");
+    }
+    std::cout << "concurrency width=" << width << " logits/features exact=1\n";
+  }
+}
+
 void CheckWideCache(Executor& reference) {
   // Exercise the 2^32-element K/V boundary without filling the context.
   Executor wide(reference.GetSharedModel(), 262144);
@@ -381,6 +427,7 @@ std::vector<Case> Capture(const char* path, bool check_replay,
   if (check_replay) {
     CheckMixedContextBatch(*executor, false);
     CheckMixedContextBatch(*executor, true);
+    CheckConcurrencyWidths(*executor);
     CheckWideCache(*executor);
     CheckPrefillReplay(executor->GetSharedModel());
   }

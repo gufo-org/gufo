@@ -49,6 +49,26 @@ replay; retain the established tolerances. Run short warmed release timings
 with matched artifacts and prompts, alternating binaries during experiments.
 Profile separately. Broaden to depth/concurrency sweeps only when needed.
 
+Generation changes must cover **C2/4/6/8 on Q4 and Q8, with and without
+DFlash2**, and retain C1 performance. The target test reuses eight scalar
+oracles with different prompts and prefix lengths to check complete logits and
+all five draft-feature taps at those widths. HTTP controls check physical
+execution width, greedy output/counts and seeded sampling against C1.
+Report aggregate throughput and whole-request latency; speculative stage
+throughput excludes scheduler waiting and is not per-user delivered throughput.
+
+Current packed gate/up projections cover C2 and Q8_0 weights. Selected Q8
+widths reuse three output rows with bounded 32-bit indexing and LDS-only
+synchronization, retaining FP32 arithmetic and reduction order. Full target
+logits/features, replay and quantization checks pass on both targets. Short
+C1/2/4/6/8 controls preserve greedy text/counts and draft acceptance; temperature
+0.8 with seed 42 reproduces C1 within each target/mode configuration. Matched
+C1 controls cover all three draft precisions on both targets, preserving output
+and acceptance without regression beyond timing noise. The Q4 target/Q8 draft
+control uses balanced binary order at both tg64 and tg128. Three new Q8 kernels
+have no scratch spills. Broader sampling qualification below remains
+applicable; the sampler and draft policy are unchanged.
+
 For prefill changes, the existing target check also covers 128/257/2048-token
 prefixes, repeated prefill and two-token scalar/verification replay. It prints
 SHA-256 fingerprints of full logits and all five feature taps at every prompt

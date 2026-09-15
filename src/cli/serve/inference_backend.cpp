@@ -692,30 +692,23 @@ public:
   }
 
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
-    if (dflash_model_ != nullptr) {
-      return {{
-          .kind = TextExecutionPlanKind::kSerial,
-          .physical_width = 1,
-      }};
-    }
-    return {
+    std::vector<TextExecutionPlan> plans{
         {
             .kind = TextExecutionPlanKind::kSerial,
             .physical_width = 1,
         },
-        {
-            .kind = TextExecutionPlanKind::kBatched,
-            .physical_width = 2,
-        },
-        {
-            .kind = TextExecutionPlanKind::kBatched,
-            .physical_width = 4,
-        },
-        {
-            .kind = TextExecutionPlanKind::kBatched,
-            .physical_width = 8,
-        },
     };
+    if (dflash_model_ == nullptr) {
+      // ForwardTokenBatch executes the exact number of ready rows. Advertise
+      // every supported width so six users are reported as a six-row batch.
+      for (std::size_t width = 2; width <= 8; ++width) {
+        plans.push_back({
+            .kind = TextExecutionPlanKind::kBatched,
+            .physical_width = width,
+        });
+      }
+    }
+    return plans;
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(

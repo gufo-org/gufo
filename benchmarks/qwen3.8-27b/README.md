@@ -41,21 +41,36 @@ for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.
 
 ## Multiple users, autoregressive
 
-Q4 and Q8, pp2048/tg128 at the same five depths:
+Short generation control, **2026-09-15**: `prose_tides`, context capacity 4096,
+cached prompt, **tg64**, one warmup and one measured round. Cells are
+**aggregate / per-user whole-request tok/s**. C1 is the regression control.
 
-| Concurrency | Aggregate prefill / per-user generation |
-| ---: | --- |
-| 2 | TODO |
-| 4 | TODO |
+| Concurrency | Q4 | Q8 |
+| ---: | ---: | ---: |
+| 1 | 11.85 / 11.85 | 7.10 / 7.10 |
+| 2 | 22.92 / 11.46 | 14.36 / 7.18 |
+| 4 | 41.36 / 10.34 | 27.00 / 6.75 |
+| 6 | 56.08 / 9.35 | 38.05 / 6.34 |
+| 8 | 65.94 / 8.24 | 48.67 / 6.08 |
+
+pp2048/tg128 across all five context depths at C2/4/6/8: **TODO**.
 
 ## Multiple users, DFlash2
 
-Q4 and Q8 targets with Q4_K_M/adaptive, same workload and reporting units:
+Q4_K_M/adaptive, same short workload and units. DFlash2 currently executes
+requests serially; batching verification across users is in progress.
 
-| Concurrency | Aggregate prefill / per-user generation |
-| ---: | --- |
-| 2 | TODO |
-| 4 | TODO |
+| Concurrency | Q4 target | Q8 target |
+| ---: | ---: | ---: |
+| 1 | 23.61 / 23.61 | 15.68 / 15.68 |
+| 2 | 23.47 / 11.84 | 15.59 / 7.87 |
+| 4 | 23.65 / 6.00 | 15.73 / 3.99 |
+| 6 | 23.65 / 4.00 | 15.73 / 2.66 |
+| 8 | 23.65 / 3.00 | 15.73 / 2.00 |
+
+Greedy output matches AR at every width. Temperature 0.8 / seed 42 reproduces
+C1 output within each target/mode configuration at C2/4/6/8. These controls
+do not replace the pp2048/tg128 depth sweep, which remains **TODO**.
 
 ## Reproduce and maintain quality
 
@@ -80,5 +95,8 @@ speculation must match AR IDs; sampled verification must preserve the target
 distribution and reproduce seeded runs within the same configuration.
 Independent original-target/MTP qualification and complete C>1 parity: **TODO**.
 
-Current optimization target: **800 tok/s Q4 C1 AR pp2048**, retaining quality
-and DFlash2 performance.
+Current optimization target: **Q4 and Q8 generation at C2, C4, C6 and C8,
+with and without DFlash2**. C1 must retain its performance. Track aggregate
+throughput, per-user latency, physical batch width, output correctness and
+seeded sampling at every concurrency level. Screen changes with short runs;
+check retained changes across C1/2/4/6/8 before publishing speed.

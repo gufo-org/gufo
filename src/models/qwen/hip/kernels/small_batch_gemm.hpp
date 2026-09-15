@@ -152,128 +152,6 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
   }
 }
 
-template<std::uint32_t WavesPerBlock, std::size_t Batch,
-         std::size_t RowsPerWave>
-__launch_bounds__(WavesPerBlock * 32, 1) __global__
-    void SmallBatchQ8_0ExactFp32VecGEMMKernel(const void* __restrict__ w,
-                                              const float* __restrict__ x,
-                                              float* __restrict__ y,
-                                              std::size_t m, std::size_t k) {
-  // A second grid dimension distributes narrow projections across tokens.
-  x += static_cast<std::size_t>(blockIdx.y) * Batch * k;
-  y += static_cast<std::size_t>(blockIdx.y) * Batch * m;
-  constexpr std::size_t kBlocksPerTile = 32;
-  constexpr std::size_t kVectorsPerBlock = kQ8_0BlockSize / 4;
-  constexpr std::size_t kStride = kQ8_0BlockSize + 4;
-  constexpr std::size_t kTileStride = kBlocksPerTile * kStride;
-  __shared__ float staged_x[Batch * kTileStride];
-
-  const std::size_t lane = threadIdx.x & 31u;
-  const std::size_t warp_id = threadIdx.x >> 5u;
-  const std::size_t row_base =
-      ((blockIdx.x * WavesPerBlock) + warp_id) * RowsPerWave;
-  const std::size_t num_blocks = k / kQ8_0BlockSize;
-  const auto* base = static_cast<const Q8_0Block*>(w);
-  float sums[RowsPerWave][Batch] = {};
-
-  for (std::size_t tile_base = 0; tile_base < num_blocks;
-       tile_base += kBlocksPerTile) {
-    constexpr std::size_t kTileVectors =
-        Batch * kBlocksPerTile * kVectorsPerBlock;
-    for (std::size_t flat = threadIdx.x; flat < kTileVectors;
-         flat += blockDim.x) {
-      const std::size_t token = flat / (kBlocksPerTile * kVectorsPerBlock);
-      const std::size_t within = flat % (kBlocksPerTile * kVectorsPerBlock);
-      const std::size_t block = within / kVectorsPerBlock;
-      const std::size_t vector = within % kVectorsPerBlock;
-      const std::size_t source_block = tile_base + block;
-      float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
-      if (source_block < num_blocks) {
-        value = *reinterpret_cast<const float4*>(
-            x + (token * k) + (source_block * kQ8_0BlockSize) + (vector * 4));
-      }
-      *reinterpret_cast<float4*>(staged_x + (token * kTileStride) +
-                                 (block * kStride) + (vector * 4)) = value;
-    }
-    __syncthreads();
-
-    const std::size_t block = tile_base + lane;
-    if (block < num_blocks) {
-      const Q8_0Block* rows[RowsPerWave];
-      float scale[RowsPerWave];
-#pragma unroll
-      for (std::size_t r = 0; r < RowsPerWave; ++r) {
-        const std::size_t row = row_base + r;
-        const std::size_t safe_row = row < m ? row : m - 1;
-        rows[r] = &base[(safe_row * num_blocks) + block];
-        scale[r] = __half2float(rows[r]->d);
-      }
-      float block_dots[RowsPerWave][Batch] = {};
-#pragma unroll
-      for (std::size_t group = 0; group < kVectorsPerBlock; ++group) {
-        std::uint32_t packed[RowsPerWave];
-#pragma unroll
-        for (std::size_t r = 0; r < RowsPerWave; ++r) {
-          __builtin_memcpy(&packed[r], rows[r]->qs + (group * 4),
-                           sizeof(std::uint32_t));
-        }
-#pragma unroll
-        for (std::size_t token = 0; token < Batch; ++token) {
-          const float4 xv = *reinterpret_cast<const float4*>(
-              staged_x + (token * kTileStride) + (lane * kStride) +
-              (group * 4));
-#pragma unroll
-          for (std::size_t r = 0; r < RowsPerWave; ++r) {
-            const std::uint32_t p = packed[r];
-            block_dots[r][token] +=
-                static_cast<float>(static_cast<std::int8_t>(p & 0xFFU)) * xv.x;
-            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
-                                        (p >> 8U) & 0xFFU)) *
-                                    xv.y;
-            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
-                                        (p >> 16U) & 0xFFU)) *
-                                    xv.z;
-            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
-                                        (p >> 24U) & 0xFFU)) *
-                                    xv.w;
-          }
-        }
-      }
-#pragma unroll
-      for (std::size_t r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-        for (std::size_t token = 0; token < Batch; ++token) {
-          sums[r][token] += scale[r] * block_dots[r][token];
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-#pragma unroll
-  for (std::size_t r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-    for (std::size_t token = 0; token < Batch; ++token) {
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        sums[r][token] += __shfl_xor(sums[r][token], offset);
-      }
-    }
-  }
-  if (lane == 0) {
-#pragma unroll
-    for (std::size_t r = 0; r < RowsPerWave; ++r) {
-      const std::size_t row = row_base + r;
-      if (row >= m) {
-        continue;
-      }
-#pragma unroll
-      for (std::size_t token = 0; token < Batch; ++token) {
-        y[(token * m) + row] = sums[r][token];
-      }
-    }
-  }
-}
-
 // Immediate XOR masks avoid the lane-address calculation of __shfl_xor.
 // Keep the descending butterfly order identical to scalar decoding.
 template<int Offset = 16>
@@ -296,6 +174,144 @@ void SyncKQuantTile() {
   asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
   __builtin_amdgcn_s_barrier();
   asm volatile("" ::: "memory");
+}
+
+template<std::uint32_t WavesPerBlock, std::size_t Batch,
+         std::size_t RowsPerWave, bool NarrowIndex = false>
+__launch_bounds__(WavesPerBlock * 32, 1) __global__
+    void SmallBatchQ8_0ExactFp32VecGEMMKernel(const void* __restrict__ w,
+                                              const float* __restrict__ x,
+                                              float* __restrict__ y,
+                                              std::size_t wide_m,
+                                              std::size_t wide_k) {
+  using Index = std::conditional_t<NarrowIndex, std::uint32_t, std::size_t>;
+  const Index m = static_cast<Index>(wide_m);
+  const Index k = static_cast<Index>(wide_k);
+  // A second grid dimension distributes narrow projections across tokens.
+  x += static_cast<Index>(blockIdx.y) * Batch * k;
+  y += static_cast<Index>(blockIdx.y) * Batch * m;
+  constexpr Index kBlocksPerTile = 32;
+  constexpr Index kVectorsPerBlock = kQ8_0BlockSize / 4;
+  constexpr Index kStride = kQ8_0BlockSize + 4;
+  constexpr Index kTileStride = kBlocksPerTile * kStride;
+  __shared__ float staged_x[Batch * kTileStride];
+
+  const Index lane = threadIdx.x & 31u;
+  const Index warp_id = threadIdx.x >> 5u;
+  const Index row_base =
+      ((blockIdx.x * WavesPerBlock) + warp_id) * RowsPerWave;
+  const Index num_blocks = k / kQ8_0BlockSize;
+  const auto* base = static_cast<const Q8_0Block*>(w);
+  float sums[RowsPerWave][Batch] = {};
+
+  for (Index tile_base = 0; tile_base < num_blocks;
+       tile_base += kBlocksPerTile) {
+    constexpr Index kTileVectors =
+        Batch * kBlocksPerTile * kVectorsPerBlock;
+    for (Index flat = threadIdx.x; flat < kTileVectors;
+         flat += blockDim.x) {
+      const Index token = flat / (kBlocksPerTile * kVectorsPerBlock);
+      const Index within = flat % (kBlocksPerTile * kVectorsPerBlock);
+      const Index block = within / kVectorsPerBlock;
+      const Index vector = within % kVectorsPerBlock;
+      const Index source_block = tile_base + block;
+      float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
+      if (source_block < num_blocks) {
+        value = *reinterpret_cast<const float4*>(
+            x + (token * k) + (source_block * kQ8_0BlockSize) + (vector * 4));
+      }
+      *reinterpret_cast<float4*>(staged_x + (token * kTileStride) +
+                                 (block * kStride) + (vector * 4)) = value;
+    }
+    if constexpr (NarrowIndex) {
+      SyncKQuantTile();
+    } else {
+      __syncthreads();
+    }
+
+    const Index block = tile_base + lane;
+    if (block < num_blocks) {
+      const Q8_0Block* rows[RowsPerWave];
+      float scale[RowsPerWave];
+#pragma unroll
+      for (Index r = 0; r < RowsPerWave; ++r) {
+        const Index row = row_base + r;
+        const Index safe_row = row < m ? row : m - 1;
+        rows[r] = &base[(safe_row * num_blocks) + block];
+        scale[r] = __half2float(rows[r]->d);
+      }
+      float block_dots[RowsPerWave][Batch] = {};
+#pragma unroll
+      for (Index group = 0; group < kVectorsPerBlock; ++group) {
+        std::uint32_t packed[RowsPerWave];
+#pragma unroll
+        for (Index r = 0; r < RowsPerWave; ++r) {
+          __builtin_memcpy(&packed[r], rows[r]->qs + (group * 4),
+                           sizeof(std::uint32_t));
+        }
+#pragma unroll
+        for (Index token = 0; token < Batch; ++token) {
+          const float4 xv = *reinterpret_cast<const float4*>(
+              staged_x + (token * kTileStride) + (lane * kStride) +
+              (group * 4));
+#pragma unroll
+          for (Index r = 0; r < RowsPerWave; ++r) {
+            const std::uint32_t p = packed[r];
+            block_dots[r][token] +=
+                static_cast<float>(static_cast<std::int8_t>(p & 0xFFU)) * xv.x;
+            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
+                                        (p >> 8U) & 0xFFU)) *
+                                    xv.y;
+            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
+                                        (p >> 16U) & 0xFFU)) *
+                                    xv.z;
+            block_dots[r][token] += static_cast<float>(static_cast<std::int8_t>(
+                                        (p >> 24U) & 0xFFU)) *
+                                    xv.w;
+          }
+        }
+      }
+#pragma unroll
+      for (Index r = 0; r < RowsPerWave; ++r) {
+#pragma unroll
+        for (Index token = 0; token < Batch; ++token) {
+          sums[r][token] += scale[r] * block_dots[r][token];
+        }
+      }
+    }
+    if constexpr (NarrowIndex) {
+      SyncKQuantTile();
+    } else {
+      __syncthreads();
+    }
+  }
+
+#pragma unroll
+  for (Index r = 0; r < RowsPerWave; ++r) {
+#pragma unroll
+    for (Index token = 0; token < Batch; ++token) {
+      if constexpr (NarrowIndex) {
+        sums[r][token] = ReduceKQuantWave(sums[r][token]);
+      } else {
+        for (int offset = 16; offset > 0; offset >>= 1) {
+          sums[r][token] += __shfl_xor(sums[r][token], offset);
+        }
+      }
+    }
+  }
+  if (lane == 0) {
+#pragma unroll
+    for (Index r = 0; r < RowsPerWave; ++r) {
+      const Index row = row_base + r;
+      if (row >= m) {
+        continue;
+      }
+#pragma unroll
+      for (Index token = 0; token < Batch; ++token) {
+        y[(token * m) + row] = sums[r][token];
+      }
+    }
+  }
 }
 
 template<std::uint32_t WavesPerBlock, std::size_t Batch,

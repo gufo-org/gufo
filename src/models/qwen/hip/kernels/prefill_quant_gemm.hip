@@ -862,55 +862,6 @@ __global__ void BatchedQuantGEMVKernel(core::GgmlType type,
   }
 }
 
-template<std::uint32_t WavesPerBlock>
-__launch_bounds__(WavesPerBlock * 32, 4) __global__
-    void SmallBatchQ8_0Fp32GEMMKernel(const void* __restrict__ w,
-                                      const float* __restrict__ x,
-                                      float* __restrict__ y, std::size_t batch,
-                                      std::size_t m, std::size_t k) {
-  constexpr std::size_t kMaxBatch = 8;
-  const std::size_t lane = threadIdx.x & 31u;
-  const std::size_t warp_id = threadIdx.x >> 5u;
-  const std::size_t row = (blockIdx.x * WavesPerBlock) + warp_id;
-  if (row >= m) {
-    return;
-  }
-
-  const std::size_t num_blocks = k / kQ8_0BlockSize;
-  const auto* row_blocks =
-      static_cast<const Q8_0Block*>(w) + (row * num_blocks);
-  float sums[kMaxBatch] = {0.0F};
-
-  // This is the Q8_0 branch of QuantWarpBlockDot<float>, with its exact
-  // per-block reduction and accumulation order retained for every token.
-  // Keeping the candidate loop inside one warp lets all candidates share the
-  // same weight load, which is the dominant traffic at these small batches.
-  for (std::size_t b = 0; b < num_blocks; ++b) {
-    const Q8_0Block& wblk = row_blocks[b];
-    const float d_w = __half2float(wblk.d);
-    const float q = static_cast<float>(wblk.qs[lane]);
-#pragma unroll
-    for (std::size_t tok = 0; tok < kMaxBatch; ++tok) {
-      if (tok < batch) {
-        float dot = q * x[(tok * k) + (b * kQ8_0BlockSize) + lane];
-        for (int off = 16; off > 0; off >>= 1) {
-          dot += __shfl_xor(dot, off);
-        }
-        sums[tok] += d_w * dot;
-      }
-    }
-  }
-
-  if (lane == 0) {
-#pragma unroll
-    for (std::size_t tok = 0; tok < kMaxBatch; ++tok) {
-      if (tok < batch) {
-        y[(tok * m) + row] = sums[tok];
-      }
-    }
-  }
-}
-
 template<std::uint32_t WavesPerBlock, std::size_t TokensPerWave>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
     void SmallBatchQ8KFp32GEMMKernel(const void* __restrict__ w,
@@ -1117,7 +1068,7 @@ void LaunchKQuantSmallBatchTyped(const void* w, const float* fp32_x, float* y,
                                  hipStream_t stream) {
   const auto launch = [&]<std::size_t Batch>() {
     // Adjacent gate/up tensors use the same kernel with twice as many rows.
-    const bool ffn_up = (m == 17408 || (Batch >= 3 && m == 34816)) && k == 5120;
+    const bool ffn_up = (m == 17408 || (Batch >= 2 && m == 34816)) && k == 5120;
     if constexpr (Batch >= 3 && (WType == core::GgmlType::kIQ4_NL ||
                                  WType == core::GgmlType::kIQ3_S ||
                                  WType == core::GgmlType::kQ6_K ||
@@ -1787,6 +1738,28 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
         return;
       }
       constexpr std::size_t kVecWarpsPerBlock = 16;
+      // Joined Qwen27B gate/up matrices benefit from three-row reuse at
+      // these widths. Their bounded dimensions allow 32-bit device indexing;
+      // each output keeps the scalar block-dot and reduction order.
+      if (m == 34816 && k == 5120) {
+        const auto launch_packed = [&]<std::size_t Batch>() {
+          SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, 3, true>
+              <<<(m + 47) / 48, 512, 0, stream>>>(w, fp32_x, y, m, k);
+        };
+        switch (batch) {
+          case 2:
+            launch_packed.template operator()<2>();
+            return;
+          case 4:
+            launch_packed.template operator()<4>();
+            return;
+          case 8:
+            launch_packed.template operator()<8>();
+            return;
+          default:
+            break;
+        }
+      }
       // Batch 7 shares its 31.5 KiB activation stage across twice as many
       // waves. Batch 8 instead benefits from three rows per wave below.
       if (batch == 7 && m == 5120 && k == 17408) {
@@ -1871,13 +1844,6 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
           <<<static_cast<unsigned int>(num_blocks_x), block, 0, stream>>>(
               w, fp32_x, y, batch, m, k);
     }
-    return;
-  }
-  if (type == core::GgmlType::kQ8_0 && batch <= 8) {
-    const dim3 block(static_cast<unsigned int>(kWarp * kWarpsPerBlock));
-    SmallBatchQ8_0Fp32GEMMKernel<kWarpsPerBlock>
-        <<<static_cast<unsigned int>(num_blocks_x), block, 0, stream>>>(
-            w, fp32_x, y, batch, m, k);
     return;
   }
 

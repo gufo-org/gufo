@@ -57,8 +57,9 @@ void LaunchFfnActivation(const models::QwenLayerWeights& layer,
   const auto& up = layer.ffn_up;
   const bool packed_format = gate.type == core::GgmlType::kQ4_K ||
                              gate.type == core::GgmlType::kQ5_K ||
-                             gate.type == core::GgmlType::kIQ4_XS;
-  if (batch_size >= 3 && batch_size <= kMaxDecodeBatch &&
+                             gate.type == core::GgmlType::kIQ4_XS ||
+                             gate.type == core::GgmlType::kQ8_0;
+  if (batch_size >= 2 && batch_size <= kMaxDecodeBatch &&
       intermediate_size == 17408 && hidden_size == 5120 && packed_format &&
       gate.type == up.type &&
       gate.num_elements == intermediate_size * hidden_size &&
