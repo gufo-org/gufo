@@ -5,6 +5,9 @@ Production targets: **UD-Q4_K_XL / UD-Q8_K_XL**. Recommended DFlash2 draft:
 **Q4_K_M**, with **adaptive** as the default controller. Q8_0 and BF16 drafts
 remain supported; a full comparison across context depths is **TODO**.
 
+Tables show the latest qualified release measurements. C1/C4 repetition was
+rechecked on the current release; the remaining performance refresh is **TODO**.
+
 ## Single user, autoregressive
 
 Standard sweep: **pp2048 / tg128**, C1. Cells are prefill / generation tok/s.
@@ -56,15 +59,16 @@ pp2048/tg128 across all five context depths at C2/4/6/8: **TODO**.
 ## Multiple users, DFlash2
 
 Q4_K_M draft, adaptive controller, greedy **tg64**, cached prompts, context
-capacity 4096. **2026-09-16**, one warmed pass (Q8 C6 repetition: three).
+capacity 4096. **2026-09-16**, three warmed rounds for C1/C4 repetition and Q8
+C6 repetition; one warmed pass for the remaining cells.
 All three mixed-corpus prompts are warmed before measurement.
 Aggregate delivered tok/s:
 
 | Concurrency | Q4 repetition | Q4 mixed corpus | Q8 repetition | Q8 mixed corpus |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 62.06 | 36.46 | 48.80 | 24.77 |
+| 1 | 62.08 | 36.46 | 48.85 | 24.77 |
 | 2 | 84.07 | 41.85 | 78.64 | 33.00 |
-| 4 | 94.43 | 46.48 | 89.98 | 35.66 |
+| 4 | 93.62 | 46.48 | 89.60 | 35.66 |
 | 6 | 96.06 | 55.02 | 93.48 | 42.34 |
 | 8 | 100.37 | 56.73 | 96.81 | 43.92 |
 

@@ -70,8 +70,9 @@ Verification generates the original complete proposal before dividing target
 work into chunks. Low-acceptance requests use two-row chunks when at least four
 requests remain. Smaller groups keep full blocks. Rejected suffixes stop early;
 proposal draws, target sampling, emitted tokens, counts and controller feedback
-must match full verification. The generic verifier test checks these invariants,
-including penalties, random sampling, EOS, budget tails and continuation.
+must match full verification. The generic verifier test checks C2/4/6/8,
+including a fully accepting peer, penalties, random sampling, EOS, budget tails
+and continuation.
 
 Exact projections group adjacent sets of fourteen or sixteen rows in one launch.
 Q4/Q5 use six output rows where measured; Q6 has wider FFN/SSM routes and adjacent
@@ -84,7 +85,9 @@ Q3_K and IQ4_NL FFNs use wider native groups at fourteen/sixteen positions;
 the same test checks complete scalar outputs and independent grouped inputs.
 Q8 and BF16 projections reuse
 cached weight rows across adjacent sixteen-token groups; every dot product
-retains its scalar accumulation order. Shared recurrence preserves
+retains its scalar accumulation order. BF16 draft gate/up projections also use
+this route at combined widths 32/48/64; SiLU arithmetic is unchanged.
+Shared recurrence preserves
 each sequence's computation order. Target-only tail rows join verification, and
 existing FFN scratch holds combined logits when it fits.
 Memory accounting includes target verification/sampling allocations, draft-owned
@@ -183,6 +186,11 @@ Qwen AR and DFlash2 sample on the GPU. The CPU owns request history and RNG
 state. Target processing is penalties → top-k → top-p → min-p → temperature;
 `min-keep` is a candidate floor. Temperature zero uses the adjusted argmax.
 
+Batched unadjusted argmax reduces vocabulary tiles in parallel, then selects the
+winning token. It retains complete logits and reuses idle FFN scratch. The
+maintained GPU sampling test covers tile boundaries, realistic vocabulary sizes,
+C1/2/4/6/8, lowest-ID ties, nonfinite filtering and scratch bounds.
+
 DFlash2 uses an anchor plus up to seven proposals. The trained top-16 selector
 shares target temperature and reports its actual proposal distribution `q`.
 There are no independent draft sampling controls. The verifier accepts token
@@ -274,46 +282,52 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 ## Latest measurement provenance
 
-Both targets' concurrent DFlash2, Q4_K_M draft C1 and C8 AR controls
-refreshed on **2026-09-16**, release SHA-256:
+The headline tables retain the latest qualified full matrix, with C1/C4
+repetition refreshed below. The full matrix was measured on
+**2026-09-16**, release SHA-256:
 `5d809239f49e815bbc1111b7c2055f9a3d55da0b5a69b0beb23b1676e6b4ba30`.
-The refreshed cells use one warmed pass; Q8 C6 repetition uses three after
-a variable first measurement. Contemporaneous release controls accompany
-the retained kernel changes.
-Q4_K_M draft, adaptive, greedy tg64, context capacity 4096, cached prompts.
-The mixed workload repeats each of the three maintained corpus prompts eight
-times, giving 24 requests divisible by C1/2/4/6/8. Warm every unique prompt before
-measurement: three groups at C1, two at C2, one at C4/6/8. Every measured
-request must report a cache hit and zero prefill tokens.
-Repetition accepts every proposal; mixed acceptance is 61.21% for
-Q4 and 49.13% for Q8. Reports retain individual latency, physical width, output
-hashes and draft counts. Every C2/4/6/8 request reproduces its isolated target's
-output and acceptance counts. Contemporaneous C1 controls show no regression.
-The projection refresh passed operator checks, complete target concurrency
-checks on Q4/Q8, all six target/draft-precision concurrency combinations, and
-bitwise projection microbenchmarks, including Q3_K and IQ4_NL native groups.
-Every C1/2/4/6/8 output hash, token count and draft acceptance count matches the
-prior release. Individual Q4/Q5/IQ4 gate/up projections retain fourteen-row
-groups at combined widths 14/28/42. Qualified eight/fourteen/sixteen-position
-projections distribute their final reductions and stores across lanes,
-preserving the scalar butterfly tree. Matching Q4/Q5/IQ4 gate/up projections
-fuse SwiGLU into their stores. Q8 sixteen-position kernels share decoded weights;
-BF16 reductions retain the original arithmetic and need only an LDS barrier.
-Qualified Q4/Q5 shapes use a separately compiled instruction schedule without
-scratch spills. Source-line debug information preserves profiling while avoiding
-an LLVM scheduler crash with full debug information.
-
-The C1 mixed corpus uses the same refreshed release. Single-user Q8_0/BF16
-draft controls use release SHA-256
+It supplies concurrent Q4_K_M DFlash2, Q4_K_M C1 and C8 AR controls for both
+targets. Q8_0/BF16 C1 draft controls use
 `e1a1e5161fc07c1cb9c49cb1de9d56f2c94adb757017f3d0f033293ca159131c`;
-those C1 routes are unchanged. AR C1/2/4/6 retains measurements from release SHA-256
-`26fd73c8389e7b371baf1bc6347ab9d18e78500c6a25f2dbf61f6be952a04e14`;
-those generation routes are unchanged. AR/draft controls use cached
-`prose_tides`, tg64 and context capacity 4096. AR covers C1/2/4/6/8 on both
-targets; all six target/draft combinations cover C1 and reproduce their
-target's AR output.
-Fixed one-proposal blocks remain a comparison policy; adaptive is the default.
-Controller comparisons and context-depth sweeps are TODO.
+AR C1/2/4/6 controls use
+`26fd73c8389e7b371baf1bc6347ab9d18e78500c6a25f2dbf61f6be952a04e14`.
+The full matrix uses one warmed pass, except Q8 C6 repetition (three).
+
+The latest retained kernel release is
+`570180f3ca44aa17ff1d5b6014d69e90ee9e04c9df4d797f7d6f61367df9f31d`.
+It keeps the established verification chunk policy. Tiled argmax retains all
+logits, finite filtering and lowest-ID ties without allocating another buffer.
+BF16 draft gate/up reuses weights across sixteen-token groups without changing
+SiLU arithmetic. Isolated actual-weight controls measured about 3.3% lower
+head-plus-argmax latency at sixteen rows and 23% lower BF16 gate/up latency at
+32 rows. These are operator results, not whole-model speedups.
+
+On this release, Q4_K_M draft repetition measures **Q4 C1 62.08 / C4 93.62**
+and **Q8 C1 48.85 / C4 89.60 aggregate tok/s**. Each cell uses three warmups
+and three measured rounds, greedy tg64, adaptive, context capacity 4096.
+Servers run sequentially. Completion hashes, output token counts, proposal
+counts and acceptance counts match the control release for every request.
+These measurements replace the corresponding headline cells. The remaining
+performance refresh is **TODO**; runs affected by host activity are excluded.
+
+The kernel refresh passes complete Q4/Q8 target concurrency checks, all six
+target/draft concurrency checks, and the 23-strategy Q4/Q8 AR and Q4_K_M DFlash2
+sampling checks under fixed/adaptive. Cold/cached and concurrent sampling retain
+isolated IDs and acceptance counts. The restored chunk policy passes the
+expanded C2/4/6/8 verifier fixture, including RNG, frontier logits, feedback,
+continuation and fully accepting peers. No tolerance was relaxed.
+
+DFlash2 measurements use adaptive, greedy tg64, context capacity 4096 and cached
+prompts. The mixed workload repeats each maintained corpus prompt eight times,
+giving 24 requests divisible by C1/2/4/6/8. Warm every unique prompt before
+measurement: three groups at C1, two at C2, one at C4/6/8. Every measured request
+must report a cache hit and zero prefill tokens. Repetition accepts every
+proposal; mixed acceptance is 61.21% for Q4 and 49.13% for Q8. Keep individual
+latency, physical width, output hashes and draft counts. Concurrent requests
+must reproduce isolated output and acceptance counts. AR and the C1 draft
+comparison use cached `prose_tides`, tg64 and context capacity 4096.
+Fixed remains a comparison policy; adaptive is the default. Controller
+comparisons and context-depth sweeps remain TODO.
 
 Q4 release measured on 2026-09-14, SHA-256:
 `0f6804912d5f9e97df7ffc1e5c49f5898b7444481006725d4c4b274fa2b0307a`.
@@ -347,9 +361,10 @@ two-stage LDS buffering, weight copies and alternative normalization reductions.
 Dense BLAS, split-K for small projections, and convolution/KQ fusion did not
 improve model prefill. Rejected experiments add no production paths.
 
-Cached Q4 repetition/tg128 profiles are about 96%/97% GPU-busy at C2/C4.
-The target model consumes roughly 88% of GPU time; quantized projections
-dominate. A common Q5 projection takes about 0.30/0.58 ms at those widths,
+Cached Q4 repetition/tg64 profiles are about 97% GPU-busy at C2/C4.
+Quantized projection kernels occupy about 88% of measured GPU time,
+excluding the warmup cohort.
+A common Q5 projection takes about 0.30/0.58 ms at those widths,
 and a paired projection with SwiGLU takes about 0.84/1.59 ms.
 C1 already verifies seven or eight positions per block. C4 generally uses two
 sixteen-position groups, repeating the dot products and weight decoding.
@@ -360,14 +375,19 @@ tails, logit scratch reuse, fourteen/sixteen-row grouping, narrower IQ4 lane
 groups, Q6 gate/up fusion, cached Q8/BF16 weight reuse and early termination of
 rejected suffixes; qualified instruction scheduling for Q4/Q5 groups of sixteen
 and distributed exact output reductions, fused matching gate/up activations and
-qualified Q8 sixteen-position scheduling and native Q3_K/IQ4_NL FFN groups.
+qualified Q8 sixteen-position scheduling and native Q3_K/IQ4_NL FFN groups;
+BF16 draft gate/up weight reuse and tiled argmax.
 Rejected: extra Q8 staging, coefficient preconversion, paired-lane Q8 dots, wider
 scalar tiles, direct global activation loads, compact fourteen-row staging,
 predecoded weight caches, lossless half-coefficient FMAs and explicit paired-FP32
 schedules. Mixed-format exact gate/up fusion improved its microbenchmark but
 not serving throughput; alternative BF16 sixteen-position tiles did not help.
 Lossless coefficient packing slowed the main microbenchmarks; DPP output
-reductions did not improve serving.
+reductions did not improve serving. GPU target-feature handoff and combined
+draft gate/up projections did not improve serving. Fused top-16 projection
+selection was slower; fused argmax lost to the simpler tiled reduction.
+A cost-based chunk planner did not qualify consistently across targets and was
+removed; the established private-acceptance chunk policy remains.
 No runtime switches select these experiments.
 
 | Artifact | SHA-256 |
