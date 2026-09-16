@@ -1705,8 +1705,13 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
 
   if (batch > 8) {
     // Paired seven-row blocks avoid a separate tail on these projections.
+    const bool iq4_groups = type == core::GgmlType::kIQ4_XS &&
+                            ((batch == 28 && ((m == 34816 && k == 5120) ||
+                                              (m == 5120 && k == 17408))) ||
+                             (batch == 42 && m == 5120 && k == 17408));
     if ((type == core::GgmlType::kQ6_K ||
-         (type == core::GgmlType::kQ5_K && m == 5120 && k == 6144)) &&
+         (type == core::GgmlType::kQ5_K && m == 5120 && k == 6144) ||
+         iq4_groups) &&
         batch <= 56 && batch % 14 == 0 &&
         detail::TryLaunchKQuantSmallBatchWave64(type, w, fp32_x, y, 14, m, k,
                                                 stream, batch / 14)) {

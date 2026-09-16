@@ -76,7 +76,11 @@ including penalties, random sampling, EOS, budget tails and continuation.
 Exact projections group adjacent sets of fourteen or sixteen rows in one launch.
 Q4/Q5 use six output rows where measured; Q6 has wider FFN/SSM routes and adjacent
 gate/up fusion. IQ4 FFN groups use sixteen lanes, keeping both original partial
-sums independently before the unchanged reduction. Q8 and BF16 projections reuse
+sums independently before the unchanged reduction. Qualified IQ4 shapes also
+use twelve/fourteen-row groups and paired token dots. The quantization test
+compares their FP32 bits with scalar decode at widths 12/16/28/42, using
+independent token inputs across twelve exponent levels.
+Q8 and BF16 projections reuse
 cached weight rows across adjacent sixteen-token groups; every dot product
 retains its scalar accumulation order. Shared recurrence preserves
 each sequence's computation order. Target-only tail rows join verification, and
@@ -144,7 +148,7 @@ byte-identical to the separate FP32 producers and FP16 conversions. Mixed pairs
 cover independent weight strides and row/token tails. A full normalization chunk
 checks rare rounding ties; explicit FMAs preserve the first square's rounding
 when the fixed-width loop unrolls. The existing test executable takes about
-1.8 seconds. The SSM test checks exact FP16 output and
+four seconds. The SSM test checks exact FP16 output and
 unchanged recurrent state with FP32/BF16 storage. It also checks causal convolution
 against an independent FP64 formula and exact final history, including nonzero
 history and batches of 1, 2, 3 and 7 tokens. History advances in the next existing
@@ -268,8 +272,13 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 ## Latest measurement provenance
 
-Q4/Q8 concurrent DFlash2 release measured on **2026-09-15**, SHA-256:
-`50a49ca8db0baba5c18292b563c5316517eb17a295a608785f2ca2fcfd3951ad`.
+Q4 concurrent DFlash2 and both targets' C1 controls refreshed on
+**2026-09-16**, release SHA-256:
+`401a2dcc016e065b14b5c7391cd841329190e6a7fc4d183bfb5b83d792aef689`.
+Q4 C1/2/4 repetition and Q8 C1 use the latest paired release controls.
+Q8 C2/4/6/8 retain the **2026-09-15** measurements, release SHA-256:
+`50a49ca8db0baba5c18292b563c5316517eb17a295a608785f2ca2fcfd3951ad`;
+the IQ4 changes do not affect those Q8 projection routes.
 Q4_K_M draft, adaptive, greedy tg64, context capacity 4096, cached prompts.
 The mixed workload repeats each of the three maintained corpus prompts eight
 times, giving 24 requests divisible by C1/2/4/6/8. Warm every unique prompt before
@@ -277,6 +286,9 @@ measurement. Repetition accepts every proposal; mixed acceptance is 61.21% for
 Q4 and 49.13% for Q8. Reports retain individual latency, physical width, output
 hashes and draft counts. Every C2/4/6/8 request reproduces its isolated target's
 output and acceptance counts. Contemporaneous C1 controls show no regression.
+The IQ4 refresh passed operator checks, complete target concurrency checks on
+Q4/Q8, and all three Q4 draft-precision concurrency checks. Every Q4 C2/4/6/8
+output hash, token count and draft acceptance count matches the prior release.
 
 The C1 mixed-corpus, AR and three-precision single-user draft controls use
 release SHA-256

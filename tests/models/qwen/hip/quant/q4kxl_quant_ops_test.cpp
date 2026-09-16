@@ -348,9 +348,11 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
   std::vector<float> x(batch * columns);
   std::uint32_t state = 0x13579BDFU;
   for (auto& value : x) {
-    value = static_cast<float>(static_cast<int>(NextRandom(state) & 0xFFFFU) -
-                               32768) /
-            32768.0F;
+    const float unit =
+        static_cast<float>(static_cast<int>(NextRandom(state) & 0xFFFFU) -
+                           32768) /
+        32768.0F;
+    value = std::ldexp(unit, static_cast<int>(NextRandom(state) % 12U) - 6);
   }
 
   void* d_w = nullptr;
@@ -384,7 +386,10 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
     HIP_CHECK(hipMemcpy(single.data(), d_single, rows * sizeof(float),
                         hipMemcpyDeviceToHost));
     for (std::size_t row = 0; row < rows; ++row) {
-      if (batched[(token * rows) + row] != single[row]) {
+      const float actual = batched[(token * rows) + row];
+      if (!std::isfinite(actual) || !std::isfinite(single[row]) ||
+          std::bit_cast<std::uint32_t>(actual) !=
+              std::bit_cast<std::uint32_t>(single[row])) {
         ++mismatches;
       }
     }
@@ -779,6 +784,13 @@ int main() {
     }
   }
   TestSmallBatchExactness({gufo::core::GgmlType::kQ4_K, "Q4_K"}, 8, 1280, 5120);
+  // Production IQ4 verification shapes cover the two lane partials, grouped
+  // requests and the longer down projection with independent token inputs.
+  const FormatCase iq4{gufo::core::GgmlType::kIQ4_XS, "IQ4_XS"};
+  TestSmallBatchExactness(iq4, 12, 34816, 5120);
+  TestSmallBatchExactness(iq4, 28, 34816, 5120);
+  TestSmallBatchExactness(iq4, 16, 5120, 17408);
+  TestSmallBatchExactness(iq4, 42, 5120, 17408);
   using Type = gufo::core::GgmlType;
   const std::pair<Type, Type> fused_formats[] = {
       {Type::kQ4_K, Type::kQ4_K},     {Type::kQ5_K, Type::kQ5_K},

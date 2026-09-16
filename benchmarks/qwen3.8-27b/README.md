@@ -56,24 +56,29 @@ pp2048/tg128 across all five context depths at C2/4/6/8: **TODO**.
 ## Multiple users, DFlash2
 
 Q4_K_M draft, adaptive controller, greedy **tg64**, cached prompts, context
-capacity 4096. **2026-09-15**, one warmup and one measured pass; C1 warms all
+capacity 4096. **2026-09-15–16**, one warmup and one measured pass; C1 warms all
 three mixed-corpus prompts. Aggregate delivered tok/s:
 
 | Concurrency | Q4 repetition | Q4 mixed corpus | Q8 repetition | Q8 mixed corpus |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 61.49 | 36.70 | 49.30 | 25.10 |
-| 2 | 78.40 | 40.93 | 74.14 | 32.18 |
-| 4 | 89.40 | 45.81 | 86.95 | 35.27 |
-| 6 | 90.08 | 53.58 | 90.39 | 42.01 |
-| 8 | 97.32 | 56.03 | 93.59 | 43.37 |
+| 1 | 61.41 | 36.70 | 48.03 | 25.10 |
+| 2 | 78.48 | 40.92 | 74.14 | 32.18 |
+| 4 | 88.88 | 45.49 | 86.95 | 35.27 |
+| 6 | 91.14 | 53.46 | 90.39 | 42.01 |
+| 8 | 96.24 | 55.53 | 93.59 | 43.37 |
 
 Repetition accepts **100%** of proposals. The mixed corpus contains 24 requests:
 eight each of code, JSON and prose; acceptance is **61.21% for Q4 / 49.13% for
 Q8**. Throughput is total output tokens divided by the sum of measured
-request-group spans. C8 mixed latency (median / p95): **Q4 6.89 / 9.41 s;
+request-group spans. C8 mixed latency (median / p95): **Q4 6.97 / 9.50 s;
 Q8 8.46 / 12.52 s**. Physical widths, output hashes and acceptance counts are
 checked at every concurrency; both C1 controls retain their performance.
 The quality guide identifies the separate C1 mixed-corpus control.
+
+Target quantized projections are the main scaling limit. C1 DFlash2 already
+verifies seven or eight positions together; C2/C4 increase that work to
+14–16/28–32 positions. Larger batches currently bring limited additional
+throughput. The **100 tok/s at C2 / 150 tok/s at C4** targets remain unmet.
 
 Drafting and context injection share projections across requests. Exact
 verification uses wider row groups and skips rejected suffixes while retaining

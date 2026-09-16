@@ -24,8 +24,20 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
   const bool down = m == 5120 && k == 17408;
   if constexpr (Batch > 8) {
     if constexpr (Type == core::GgmlType::kIQ4_XS && Batch == 16) {
-      if (down || (k == 5120 && (m == 17408 || m == 34816))) {
+      if (down) {
+        launch.template operator()<8, 4, 1, 4, Groups == 1 ? 2 : 1, true, 16>();
+        return;
+      }
+      if (k == 5120 && (m == 17408 || m == 34816)) {
         launch.template operator()<8, 4, 1, 4, 1, true, 16>();
+        return;
+      }
+    }
+    if constexpr (Type == core::GgmlType::kIQ4_XS &&
+                  (Batch == 12 || Batch == 14)) {
+      if ((m == 34816 && k == 5120) || (Batch == 14 && Groups > 1 && down)) {
+        constexpr std::size_t kRows = Batch == 12 ? 3 : 4;
+        launch.template operator()<8, kRows, 1, 4, 1, true, 16>();
         return;
       }
     }
@@ -126,6 +138,15 @@ void LaunchBatch(const void* w, const float* x, float* y, std::size_t batch,
   // Adjacent workgroups reuse the same weight rows. Fourteen-row groups cover
   // paired seven-row verification blocks without a separate tail.
   if (groups > 1) {
+    if constexpr (Type == core::GgmlType::kIQ4_XS) {
+      if (batch == 14) {
+        if (groups == 2)
+          Launch<Type, 14, 2>(w, x, y, m, k, stream);
+        else
+          Launch<Type, 14, 3>(w, x, y, m, k, stream);
+        return;
+      }
+    }
     const auto launch_groups = [&]<std::size_t Batch>() {
       switch (groups) {
         case 2:
@@ -344,7 +365,9 @@ bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
   if (batch < 4 || batch > 16 || groups == 0 || groups > 4 ||
       (groups > 1 && batch != 16 &&
        !((type == core::GgmlType::kQ6_K || type == core::GgmlType::kQ5_K) &&
-         batch == 14))) {
+         batch == 14) &&
+       !(type == core::GgmlType::kIQ4_XS && batch == 14 &&
+         (groups == 2 || groups == 3)))) {
     return false;
   }
   // These bounded dimensions also satisfy the kernel's 32-bit index limits.
