@@ -62,6 +62,7 @@ for t in "${targets[@]}"; do
   if [[ "$src" -ef tools/qwen27b/dflash_gemm_bench.hip ||
         "$src" -ef tools/qwen27b/prefill_gemm_bench.hip ]]; then
     native_sources+=(src/models/qwen/hip/kernels/small_batch_wave64.hip)
+    native_sources+=(src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip)
   fi
   if [[ "$src" -ef tools/qwen27b/prefill_gemm_bench.hip ]]; then
     native_sources+=(src/models/qwen/hip/kernels/prefill_quant_wave64.hip)
@@ -75,7 +76,12 @@ for t in "${targets[@]}"; do
       native_objects=()
       for unit in "${native_sources[@]}"; do
         object="$objects/$(basename "$unit").o"
+        native_extra=()
+        if [[ "$unit" == src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip ]]; then
+          native_extra+=(-Xarch_device -mllvm=-amdgpu-sched-strategy=iterative-ilp)
+        fi
         "${compile[@]}" -DENGINE_ENABLE_HIP=1 -mwavefrontsize64 \
+          "${native_extra[@]}" \
           -c "$unit" -o "$object" || exit 1
         native_objects+=("$object")
       done

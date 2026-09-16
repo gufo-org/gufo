@@ -274,9 +274,10 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 Both targets' concurrent DFlash2 and C1 controls refreshed on
 **2026-09-16**, release SHA-256:
-`b95ae1d5af53dd773d678b1dddbd469a9c041d5bb0934e3f4bbf2c4468b9a7c4`.
-Q4 C1/2 repetition and Q8 C4 use the latest paired release controls;
-the other refreshed cells use one warmed pass.
+`26b8a9a6570fa269bae09f16b71b516a3a8e1d75dd557f30f23a0befc171b132`.
+Q4 C1/C4 repetition uses three warmups and three measured rounds per binary.
+Q4 C2 repetition and Q8 C4 use paired release controls; the other refreshed
+cells use one warmed pass.
 Q4_K_M draft, adaptive, greedy tg64, context capacity 4096, cached prompts.
 The mixed workload repeats each of the three maintained corpus prompts eight
 times, giving 24 requests divisible by C1/2/4/6/8. Warm every unique prompt before
@@ -284,11 +285,15 @@ measurement. Repetition accepts every proposal; mixed acceptance is 61.21% for
 Q4 and 49.13% for Q8. Reports retain individual latency, physical width, output
 hashes and draft counts. Every C2/4/6/8 request reproduces its isolated target's
 output and acceptance counts. Contemporaneous C1 controls show no regression.
-The FFN dispatch refresh passed operator checks, complete target concurrency
-checks on Q4/Q8, and all six target/draft-precision concurrency combinations.
+The scheduling refresh passed operator checks, complete target concurrency
+checks on Q4/Q8, all six target/draft-precision concurrency combinations, and
+the standalone benchmark build and smoke check.
 Every C1/2/4/6/8 output hash, token count and draft acceptance count matches the
 prior release. Individual Q4/Q5/IQ4 gate/up projections retain fourteen-row
 groups at combined widths 14/28/42; generation widths up to eight are unchanged.
+Q4/Q5 groups of sixteen use a separately compiled instruction schedule with
+237 VGPRs and no scratch spills. Source-line debug information preserves
+profiling while avoiding an LLVM scheduler crash with full debug information.
 
 The C1 mixed-corpus, AR and three-precision single-user draft controls use
 release SHA-256
@@ -341,7 +346,7 @@ Retained: wider exact projection groups, native wave64 for measured shapes,
 shared recurrence launches, batched drafting/context injection and target-only
 tails, logit scratch reuse, fourteen/sixteen-row grouping, narrower IQ4 lane
 groups, Q6 gate/up fusion, cached Q8/BF16 weight reuse and early termination of
-rejected suffixes.
+rejected suffixes; qualified instruction scheduling for Q4/Q5 groups of sixteen.
 Rejected: extra Q8 staging, coefficient preconversion, paired-lane Q8 dots, wider
 scalar tiles, direct global activation loads, compact fourteen-row staging,
 predecoded weight caches, lossless half-coefficient FMAs and explicit paired-FP32

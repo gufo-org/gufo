@@ -1,5 +1,6 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/qwen/hip/kernels/small_batch_gemm.hpp"
+#include "src/models/qwen/hip/kernels/small_batch_quant16_wave64.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 
 namespace gufo::hip::detail {
@@ -12,14 +13,22 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
       [&]<std::uint32_t Waves, std::size_t Rows, std::size_t Tiles,
           std::uint32_t MinWaves, std::size_t Step = Batch, bool Narrow = true,
           std::uint32_t LogicalLanes = 32>() {
-        constexpr std::size_t kRowsPerBlock =
-            Waves * Rows * (32 / LogicalLanes);
-        const dim3 grid(static_cast<unsigned>(
-            ((m + kRowsPerBlock - 1) / kRowsPerBlock) * Groups));
-        SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, Rows, Type, Tiles,
-                                            MinWaves, Groups, Narrow, Step, 64,
-                                            LogicalLanes>
-            <<<grid, Waves * 32, 0, stream>>>(w, x, y, m, k);
+        if constexpr (Batch == 16 && (Type == core::GgmlType::kQ4_K ||
+                                      Type == core::GgmlType::kQ5_K)) {
+          static_assert(Waves == 8 && Rows == 6 && Tiles == 1 &&
+                        MinWaves == 4 && Step == 1 && Narrow &&
+                        LogicalLanes == 32);
+          LaunchKQuantSixteenWave64(Type, w, x, y, m, k, stream, Groups);
+        } else {
+          constexpr std::size_t kRowsPerBlock =
+              Waves * Rows * (32 / LogicalLanes);
+          const dim3 grid(static_cast<unsigned>(
+              ((m + kRowsPerBlock - 1) / kRowsPerBlock) * Groups));
+          SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, Rows, Type, Tiles,
+                                              MinWaves, Groups, Narrow, Step,
+                                              64, LogicalLanes>
+              <<<grid, Waves * 32, 0, stream>>>(w, x, y, m, k);
+        }
       };
   const bool down = m == 5120 && k == 17408;
   if constexpr (Batch > 8) {

@@ -30,6 +30,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_fp16.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_norm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_residual.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_rope.hip
@@ -84,6 +85,14 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
     TARGET_DIRECTORY gufo_core
     PROPERTIES COMPILE_OPTIONS -mwavefrontsize64)
+  # Iterative ILP improves Q4/Q5 groups of sixteen without changing arithmetic.
+  # Keep it isolated: other widths regress. Line tables retain source profiling
+  # while avoiding an LLVM register-pressure crash with full debug information.
+  set_source_files_properties(
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip
+    TARGET_DIRECTORY gufo_core
+    PROPERTIES COMPILE_OPTIONS
+    "-mwavefrontsize64;-gline-tables-only;-Xarch_device;-mllvm=-amdgpu-sched-strategy=iterative-ilp")
 endif()
 
 if (ENGINE_ENABLE_XRT)
