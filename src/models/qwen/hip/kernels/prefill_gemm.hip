@@ -150,17 +150,14 @@ void LaunchExactBf16GEMMFp32SmallBatch(const void* A, const float* X, float* Y,
   if (batch_size > 8 && batch_size != 12 && batch_size != 16) {
     for (std::size_t offset = 0; offset < batch_size;) {
       const std::size_t remaining = batch_size - offset;
-      // Balanced groups avoid an expensive short remainder at common cohort
-      // sizes: 36=24+12, 40=24+16, 48=24+24 and 60=24+24+12.
-      const bool prefer24 = remaining == 36 || remaining == 40 ||
-                            remaining == 48 || remaining == 60;
-      const std::size_t width =
-          wide && remaining >= 32 && !prefer24         ? 32
-          : wide && remaining >= 24 && remaining != 28 ? 24
-          : remaining >= 16                            ? 16
-          : exact_width && remaining > 8               ? remaining
-          : remaining >= 12                            ? 12
-                            : std::min<std::size_t>(8, remaining);
+      // Wider supported projections already took the grouped sixteen-row
+      // launch. Here, 28 rows split evenly into sixteen and twelve.
+      const std::size_t width = wide && remaining >= 24 && remaining != 28 ? 24
+                                : remaining >= 16                          ? 16
+                                : exact_width && remaining > 8 ? remaining
+                                : remaining >= 12
+                                    ? 12
+                                    : std::min<std::size_t>(8, remaining);
       LaunchExactBf16GEMMFp32SmallBatch(A, X + offset * K, Y + offset * M,
                                         width, M, K, stream);
       offset += width;

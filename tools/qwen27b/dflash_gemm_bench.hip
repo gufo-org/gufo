@@ -311,46 +311,61 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                launch.template operator()<Batch % 8>((Batch / 8) * 8);
            }},
           {"wide", [&](const void* w) {
-             if constexpr (Batch >= 9 && Batch <= 15 && Batch != 12) {
-               if (rows == 5120 && columns == 6144) {
-                 BatchedExactBf16GEMMFp32VecKernel<16, Batch, 1>
-                     <<<(rows + 15) / 16, 512>>>(
-                         static_cast<const hip_bfloat16*>(w), input.Get(),
-                         output.Get(), rows, columns);
+             if constexpr (Batch == 32) {
+               if (detail::TryLaunchBf16SmallBatchWave64(w, input.Get(),
+                                                         output.Get(), 16, rows,
+                                                         columns, nullptr, 2))
                  return;
-               }
-             }
-             if constexpr ((Batch >= 9 && Batch <= 15 && Batch != 12) ||
-                           Batch > 16) {
-               if (!detail::TryLaunchBf16SmallBatchWave64(
-                       w, input.Get(), output.Get(), Batch, rows, columns,
-                       nullptr))
-                 throw std::runtime_error("unsupported wide BF16 batch");
+               for (std::size_t offset = 0; offset < Batch; offset += 16)
+                 BatchedExactBf16GEMMFp32VecKernel<16, 16, 2>
+                     <<<(rows + 31) / 32, 512>>>(
+                         static_cast<const hip_bfloat16*>(w),
+                         input.Get() + offset * columns,
+                         output.Get() + offset * rows, rows, columns);
+               return;
              } else {
-               const auto launch = [&]<unsigned Waves, std::size_t Rows,
-                                       bool Stream = true>() {
-                 BatchedExactBf16GEMMFp32VecKernel<Waves, Batch, Rows, Stream>
-                     <<<(rows + Waves * Rows - 1) / (Waves * Rows), Waves * 32>>>(
-                         static_cast<const hip_bfloat16*>(w), input.Get(),
-                         output.Get(), rows, columns);
-               };
-               if (rows == 5120 && columns == 6144) {
-                 launch.template operator()<16, 1>();
-                 return;
-               }
-               if constexpr (Batch == 12) {
-                 if (columns == 5120 &&
-                     (rows == 12288 || rows == 17408 || rows == 248320)) {
-                   launch.template operator()<8, 2>();
+               if constexpr (Batch >= 9 && Batch <= 15 && Batch != 12) {
+                 if (rows == 5120 && columns == 6144) {
+                   BatchedExactBf16GEMMFp32VecKernel<16, Batch, 1>
+                       <<<(rows + 15) / 16, 512>>>(
+                           static_cast<const hip_bfloat16*>(w), input.Get(),
+                           output.Get(), rows, columns);
                    return;
                  }
+               }
+               if constexpr ((Batch >= 9 && Batch <= 15 && Batch != 12) ||
+                             Batch > 16) {
+                 if (!detail::TryLaunchBf16SmallBatchWave64(
+                         w, input.Get(), output.Get(), Batch, rows, columns,
+                         nullptr))
+                   throw std::runtime_error("unsupported wide BF16 batch");
                } else {
-                 if (rows == 1024 && columns == 5120) {
-                   launch.template operator()<16, 2, false>();
+                 const auto launch = [&]<unsigned Waves, std::size_t Rows,
+                                         bool Stream = true>() {
+                   BatchedExactBf16GEMMFp32VecKernel<Waves, Batch, Rows, Stream>
+                       <<<(rows + Waves * Rows - 1) / (Waves * Rows),
+                          Waves * 32>>>(static_cast<const hip_bfloat16*>(w),
+                                        input.Get(), output.Get(), rows,
+                                        columns);
+                 };
+                 if (rows == 5120 && columns == 6144) {
+                   launch.template operator()<16, 1>();
                    return;
                  }
+                 if constexpr (Batch == 12) {
+                   if (columns == 5120 &&
+                       (rows == 12288 || rows == 17408 || rows == 248320)) {
+                     launch.template operator()<8, 2>();
+                     return;
+                   }
+                 } else {
+                   if (rows == 1024 && columns == 5120) {
+                     launch.template operator()<16, 2, false>();
+                     return;
+                   }
+                 }
+                 launch.template operator()<16, 2>();
                }
-               launch.template operator()<16, 2>();
              }
            }}};
     } else {

@@ -288,8 +288,7 @@ bool TryLaunchBf16SmallBatchWave64(const void* w, const float* x, float* y,
     return true;
   }
   if (m == 0 || k == 0 || groups == 0 ||
-      !((batch >= 9 && batch <= 15 && batch != 12) || batch == 24 ||
-        batch == 32))
+      !((batch >= 9 && batch <= 15 && batch != 12) || batch == 24))
     return false;
   const auto launch = [&]<std::size_t Batch, unsigned Waves = 16,
                           std::size_t Rows = 2>() {
@@ -330,9 +329,6 @@ bool TryLaunchBf16SmallBatchWave64(const void* w, const float* x, float* y,
       break;
     case 24:
       launch_shape.template operator()<24>();
-      break;
-    case 32:
-      launch_shape.template operator()<32>();
       break;
     default:
       return false;
