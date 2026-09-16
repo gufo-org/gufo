@@ -16,6 +16,7 @@ namespace gufo::hip {
 namespace {
 
 constexpr std::size_t kSamplingThreads = 256;
+constexpr std::size_t kArgmaxTile = 4096;
 
 __device__ float SparseDraftProbability(
     std::uint32_t token,
@@ -721,20 +722,36 @@ void LaunchGPUArgmax(const float* logits, std::uint32_t* out_token,
   ArgmaxKernel<<<1, 256, 0, stream>>>(logits, out_token, vocab_size);
 }
 
+template<bool Partial = false, bool MapIndices = false>
 __global__ void BatchedArgmaxKernel(const float* __restrict__ logits,
                                     std::uint32_t* __restrict__ out_tokens,
-                                    std::size_t vocab_size) {
-  const std::size_t row = blockIdx.x;
+                                    std::size_t vocab_size,
+                                    float* partial_values = nullptr,
+                                    std::uint32_t* partial_tokens = nullptr) {
+  const std::size_t row = Partial ? blockIdx.y : blockIdx.x;
   const std::size_t tid = threadIdx.x;
   const float* row_logits = logits + (row * vocab_size);
+  const std::size_t begin = Partial ? blockIdx.x * kArgmaxTile : 0;
+  const std::size_t end = Partial && begin + kArgmaxTile < vocab_size
+                              ? begin + kArgmaxTile
+                              : vocab_size;
 
   float max_val = -INFINITY;
   std::uint32_t max_idx = 0;
-  for (std::size_t index = tid; index < vocab_size; index += blockDim.x) {
+  for (std::size_t index = begin + tid; index < end; index += blockDim.x) {
     const float value = row_logits[index];
-    if (isfinite(value) && value > max_val) {
-      max_val = value;
-      max_idx = static_cast<std::uint32_t>(index);
+    if constexpr (MapIndices) {
+      const auto candidate = partial_tokens[row * vocab_size + index];
+      if (isfinite(value) &&
+          (value > max_val || (value == max_val && candidate < max_idx))) {
+        max_val = value;
+        max_idx = candidate;
+      }
+    } else {
+      if (isfinite(value) && value > max_val) {
+        max_val = value;
+        max_idx = static_cast<std::uint32_t>(index);
+      }
     }
   }
 
@@ -755,18 +772,40 @@ __global__ void BatchedArgmaxKernel(const float* __restrict__ logits,
   }
 
   if (tid == 0) {
-    out_tokens[row] = shared_index[0];
+    if constexpr (Partial) {
+      const auto offset = row * gridDim.x + blockIdx.x;
+      partial_values[offset] = shared_max[0];
+      partial_tokens[offset] = shared_index[0];
+    } else {
+      out_tokens[row] = shared_index[0];
+    }
   }
 }
 
 void LaunchBatchedGPUArgmax(const float* logits, std::uint32_t* out_tokens,
                             std::size_t batch_size, std::size_t vocab_size,
-                            hipStream_t stream) {
+                            std::span<float> scratch, hipStream_t stream) {
   if (batch_size == 0 || vocab_size == 0) {
     return;
   }
-  BatchedArgmaxKernel<<<static_cast<unsigned int>(batch_size), 256, 0,
-                        stream>>>(logits, out_tokens, vocab_size);
+  const auto partials = (vocab_size - 1) / kArgmaxTile + 1;
+  if (partials > 1 && batch_size <= scratch.size() / (2 * partials)) {
+    // FFN output scratch is free after the head projection. Parallel vocabulary
+    // tiles keep large rows from serializing their reads in one workgroup.
+    auto* const indices = reinterpret_cast<std::uint32_t*>(
+        scratch.data() + batch_size * partials);
+    BatchedArgmaxKernel<true><<<dim3(static_cast<unsigned>(partials),
+                                     static_cast<unsigned>(batch_size)),
+                                256, 0, stream>>>(
+        logits, out_tokens, vocab_size, scratch.data(), indices);
+    BatchedArgmaxKernel<false, true>
+        <<<static_cast<unsigned>(batch_size), 256, 0, stream>>>(
+            scratch.data(), out_tokens, partials, nullptr, indices);
+  } else {
+    BatchedArgmaxKernel<>
+        <<<static_cast<unsigned int>(batch_size), 256, 0, stream>>>(
+            logits, out_tokens, vocab_size);
+  }
 }
 
 std::size_t EstimateGpuSamplingWorkspaceBytes(std::size_t vocab_size,

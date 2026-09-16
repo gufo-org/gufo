@@ -880,21 +880,73 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
       continue;
     }
     indices.push_back(prepared_index);
-    const auto& stats = requests[index].verifier.stats_;
-    if (stats.total_draft_tokens > 0 && stats.AcceptanceRate() < 0.5F)
-      step.chunk_limit = 2;
   }
-  // Proposals and all their RNG draws are already fixed. Verification can stop
-  // after a private rejection without changing the draft policy or sampling.
-  // High-acceptance requests keep full blocks; shorter chunks avoid discarded
-  // suffix work for requests whose own observed acceptance is lower.
+  // The proposals, controller decisions and RNG draws are fixed already.
+  // Estimate a first chunk plus one surviving suffix pass. gfx1151 target
+  // profiles have a substantial fixed weight-read cost as well as row cost;
+  // the coarse 10 + rows proxy matches the C2/C4 cost ratio. Require a 5%
+  // predicted saving, and keep single requests and accepted suffixes whole.
   while (!indices.empty()) {
+    std::size_t full_rows = 0;
+    std::size_t max_rows = 0;
+    bool continuing = false;
+    for (const auto prepared_index : indices) {
+      const auto& step = prepared[prepared_index];
+      const auto rows = step.inputs.size() - step.verified_rows;
+      full_rows += rows;
+      max_rows = std::max(max_rows, rows);
+      continuing = continuing || step.verified_rows != 0;
+    }
+    std::size_t chunk_limit = max_rows;
+    double acceptance_limit = 1.0;
+    double best_cost = 0.95 * (10.0 + static_cast<double>(full_rows));
+    const auto acceptance = [&](std::size_t prepared_index) {
+      const auto& stats =
+          requests[prepared_indices[prepared_index]].verifier.stats_;
+      return stats.total_draft_tokens == 0
+                 ? 1.0
+                 : static_cast<double>(stats.AcceptanceRate());
+    };
+    if (indices.size() > 1 && !continuing) {
+      // Keep high-acceptance requests whole while testing shorter prefixes for
+      // progressively larger low-acceptance groups.
+      for (const auto threshold_index : indices) {
+        const auto threshold = acceptance(threshold_index);
+        if (threshold == 1.0)
+          continue;
+        for (std::size_t candidate = 2; candidate < max_rows; ++candidate) {
+          std::size_t first_rows = 0;
+          double remaining_rows = 0.0;
+          double all_finished = 1.0;
+          for (const auto prepared_index : indices) {
+            const auto& step = prepared[prepared_index];
+            const auto rows = step.inputs.size() - step.verified_rows;
+            const auto probability = acceptance(prepared_index);
+            const auto taken =
+                probability <= threshold ? std::min(rows, candidate) : rows;
+            first_rows += taken;
+            if (taken == rows)
+              continue;
+            const double survival = std::pow(probability, taken);
+            all_finished *= 1.0 - survival;
+            remaining_rows += survival * static_cast<double>(rows - taken);
+          }
+          const double cost = 10.0 + static_cast<double>(first_rows) +
+                              10.0 * (1.0 - all_finished) + remaining_rows;
+          if (cost < best_cost) {
+            best_cost = cost;
+            chunk_limit = candidate;
+            acceptance_limit = threshold;
+          }
+        }
+      }
+    }
     items.clear();
     for (const auto prepared_index : indices) {
       auto& step = prepared[prepared_index];
-      // Small surviving groups cannot amortize another target pass.
-      if (indices.size() < 4)
-        step.chunk_limit = std::numeric_limits<std::size_t>::max();
+      step.chunk_limit = acceptance(prepared_index) <= acceptance_limit
+                             ? chunk_limit
+                             : step.inputs.size() - step.verified_rows;
       const auto index = prepared_indices[prepared_index];
       const auto tokens = std::span<const tokenization::TokenId>(step.inputs)
                               .subspan(step.verified_rows);

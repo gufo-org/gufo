@@ -377,7 +377,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                    hidden_size, arena.stream);
   LaunchBatchedGPUArgmax(coordinator->d_verification_logits_,
                          scratch.decode.prompt_tokens.data(), batch_size,
-                         vocab_size, arena.stream);
+                         vocab_size, scratch.ffn.out, arena.stream);
 
   std::array<std::uint32_t, kMaxDecodeBatch> host_frontiers{};
   HIP_CHECK(hipMemcpyAsync(
@@ -772,7 +772,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
                    batch_size, vocab_size, hidden_size, arena_.stream);
   auto* const d_out_tokens = scratch.decode.prompt_tokens.data();
   LaunchBatchedGPUArgmax(logits_buffer, d_out_tokens, batch_size, vocab_size,
-                         arena_.stream);
+                         scratch.ffn.out, arena_.stream);
   std::array<tokenization::TokenId, kMaxRows> host_predictions{};
   HIP_CHECK(hipMemcpyAsync(host_predictions.data(), d_out_tokens,
                            batch_size * sizeof(tokenization::TokenId),

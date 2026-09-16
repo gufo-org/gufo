@@ -1095,7 +1095,10 @@ void TestConcurrentVerificationChunks() {
     std::string_view Name() const noexcept override { return "chunk fixture"; }
     DraftProposal Propose(std::span<const TokenId>, std::uint32_t position,
                           std::uint32_t count) override {
-      const auto accepted = step_ == 0 ? 0 : step_ % 3 == 1 ? accepted_ : count;
+      const auto accepted = accepted_ == 7   ? count
+                            : step_ == 0     ? 0
+                            : step_ % 3 == 1 ? accepted_
+                                             : count;
       ++step_;
       DraftProposal result;
       result.start_pos = position;
@@ -1138,105 +1141,118 @@ void TestConcurrentVerificationChunks() {
     std::vector<std::vector<TokenId>> feedback;
     bool operator==(const Observation&) const = default;
   };
-  for (int scenario = 0; scenario < 3; ++scenario) {
-    const auto run = [&](bool batched) {
-      constexpr std::size_t count = 4;
-      std::array<std::unique_ptr<SampledTargetExecutor>, count> targets;
-      std::array<std::unique_ptr<SpeculativeVerifier>, count> verifiers;
-      std::array<const Draft*, count> drafts{};
-      std::array<std::vector<TokenId>, count> sequences;
-      std::vector<gufo::sampling::SamplerState> samplers;
-      samplers.reserve(count);
-      SpeculativeOptions options;
-      options.max_draft_tokens = options.initial_draft_tokens = 7;
-      options.enable_adaptive_draft_length = false;
-      options.use_batched_verification = true;
-      options.retain_frontier_logits = true;
-      for (std::size_t index = 0; index < count; ++index) {
-        targets[index] = std::make_unique<SampledTargetExecutor>(
-            std::vector<float>{-INFINITY, 0.0F, -INFINITY}, true);
-        auto draft = std::make_unique<Draft>(index + 1);
-        drafts[index] = draft.get();
-        verifiers[index] = std::make_unique<SpeculativeVerifier>(
-            *targets[index], std::move(draft), options);
-        sequences[index] = {0};
-        sequences[index].push_back(verifiers[index]->Prime(sequences[index]));
-        gufo::sampling::SamplingConfig config;
-        config.seed = static_cast<std::int64_t>(83 + index);
-        if (scenario != 0) {
-          config.repeat_penalty = 1.1F;
-          config.frequency_penalty = 0.6F;
-          config.repeat_last_n = 3;
-        }
-        if (scenario == 2) {
-          config.temperature = 0.8F;
-          config.top_k = 2;
-          config.top_p = 0.9F;
-          config.min_p = 0.1F;
-        }
-        samplers.emplace_back(config, sequences[index]);
-      }
-      std::vector<Observation> observations;
-      for (std::size_t round = 0; round < 4; ++round) {
-        std::vector<SpeculativeVerifier::StepRequest> requests;
-        std::array<std::vector<TokenId>, count> history;
+  const auto check_width = []<std::size_t count>() {
+    for (int scenario = 0; scenario < 3; ++scenario) {
+      const auto run = [&](bool batched) {
+        std::array<std::unique_ptr<SampledTargetExecutor>, count> targets;
+        std::array<std::unique_ptr<SpeculativeVerifier>, count> verifiers;
+        std::array<const Draft*, count> drafts{};
+        std::array<std::vector<TokenId>, count> sequences;
+        std::vector<gufo::sampling::SamplerState> samplers;
+        samplers.reserve(count);
+        SpeculativeOptions options;
+        options.max_draft_tokens = options.initial_draft_tokens = 7;
+        options.enable_adaptive_draft_length = false;
+        options.use_batched_verification = true;
+        options.retain_frontier_logits = true;
         for (std::size_t index = 0; index < count; ++index) {
-          const auto& sequence = sequences[index];
-          history[index].assign(samplers[index].history().begin(),
-                                samplers[index].history().end());
-          requests.push_back(
-              {*verifiers[index], sequence,
-               static_cast<std::uint32_t>(sequence.size() - 1), sequence.back(),
-               round == 3 && index == 1 ? 1U : 99U,
-               round == 3 && index == 0 ? 1U : 8U, samplers[index]});
+          targets[index] = std::make_unique<SampledTargetExecutor>(
+              std::vector<float>{-INFINITY, 0.0F, -INFINITY}, true);
+          auto draft =
+              std::make_unique<Draft>(index + 1 == count ? 7 : index + 1);
+          drafts[index] = draft.get();
+          verifiers[index] = std::make_unique<SpeculativeVerifier>(
+              *targets[index], std::move(draft), options);
+          sequences[index] = {0};
+          sequences[index].push_back(verifiers[index]->Prime(sequences[index]));
+          gufo::sampling::SamplingConfig config;
+          config.seed = static_cast<std::int64_t>(83 + index);
+          if (scenario != 0) {
+            config.repeat_penalty = 1.1F;
+            config.frequency_penalty = 0.6F;
+            config.repeat_last_n = 3;
+          }
+          if (scenario == 2) {
+            config.temperature = 0.8F;
+            config.top_k = 2;
+            config.top_p = 0.9F;
+            config.min_p = 0.1F;
+          }
+          samplers.emplace_back(config, sequences[index]);
         }
-        std::vector<SpeculativeVerifier::StepResult> results;
-        if (batched) {
-          results = SpeculativeVerifier::VerifyBatch(requests);
-        } else {
-          for (const auto& request : requests)
-            results.push_back(request.verifier.VerifyStep(
-                request.sequence, request.position, request.current_token,
-                request.eos_id, request.max_emitted_tokens, request.sampler));
-        }
-        for (std::size_t index = 0; index < count; ++index) {
-          const auto& result = results[index];
-          const auto& stats = verifiers[index]->GetStats();
-          Expect(std::ranges::equal(samplers[index].history(), history[index]),
-                 "chunked verification must keep caller-owned history");
-          observations.push_back(
-              {result.emitted_tokens,
-               result.next_token,
-               result.next_token_logits,
-               result.hit_eos,
-               samplers[index].rng_state(),
-               targets[index]->StateSize(),
-               {stats.total_draft_tokens, stats.total_accepted_tokens,
-                stats.total_verification_steps, stats.total_emitted_tokens},
-               drafts[index]->feedback});
-          for (const auto token : result.emitted_tokens) {
-            sequences[index].push_back(token);
-            samplers[index].Accept(token);
+        std::vector<Observation> observations;
+        for (std::size_t round = 0; round < 4; ++round) {
+          std::vector<SpeculativeVerifier::StepRequest> requests;
+          std::array<std::vector<TokenId>, count> history;
+          for (std::size_t index = 0; index < count; ++index) {
+            const auto& sequence = sequences[index];
+            history[index].assign(samplers[index].history().begin(),
+                                  samplers[index].history().end());
+            requests.push_back(
+                {*verifiers[index], sequence,
+                 static_cast<std::uint32_t>(sequence.size() - 1),
+                 sequence.back(), round == 3 && index == 1 ? 1U : 99U,
+                 round == 3 && index == 0 ? 1U : 8U, samplers[index]});
+          }
+          std::vector<SpeculativeVerifier::StepResult> results;
+          if (batched) {
+            results = SpeculativeVerifier::VerifyBatch(requests);
+          } else {
+            for (const auto& request : requests)
+              results.push_back(request.verifier.VerifyStep(
+                  request.sequence, request.position, request.current_token,
+                  request.eos_id, request.max_emitted_tokens, request.sampler));
+          }
+          for (std::size_t index = 0; index < count; ++index) {
+            const auto& result = results[index];
+            const auto& stats = verifiers[index]->GetStats();
+            Expect(
+                std::ranges::equal(samplers[index].history(), history[index]),
+                "chunked verification must keep caller-owned history");
+            observations.push_back(
+                {result.emitted_tokens,
+                 result.next_token,
+                 result.next_token_logits,
+                 result.hit_eos,
+                 samplers[index].rng_state(),
+                 targets[index]->StateSize(),
+                 {stats.total_draft_tokens, stats.total_accepted_tokens,
+                  stats.total_verification_steps, stats.total_emitted_tokens},
+                 drafts[index]->feedback});
+            for (const auto token : result.emitted_tokens) {
+              sequences[index].push_back(token);
+              samplers[index].Accept(token);
+            }
           }
         }
-      }
-      std::size_t rows = 0;
-      std::size_t calls = 0;
-      for (const auto& target : targets) {
-        rows += target->VerificationRows();
-        calls += target->VerificationCalls();
-      }
-      return std::tuple{observations, rows, calls};
-    };
-    const auto [isolated, full_rows, full_calls] = run(false);
-    const auto [batched, chunk_rows, chunk_calls] = run(true);
-    Expect(
-        batched == isolated,
-        "verification chunks changed tokens, frontier, RNG, state or feedback");
-    Expect(chunk_rows < full_rows && chunk_calls > full_calls,
-           "fixture must both stop rejected suffixes and continue accepted "
-           "chunks");
-  }
+        std::size_t rows = 0;
+        std::size_t calls = 0;
+        for (const auto& target : targets) {
+          rows += target->VerificationRows();
+          calls += target->VerificationCalls();
+        }
+        return std::tuple{observations, rows, calls,
+                          targets.back()->VerificationRows(),
+                          targets.back()->VerificationCalls()};
+      };
+      const auto [isolated, full_rows, full_calls, high_rows, high_calls] =
+          run(false);
+      const auto [batched, chunk_rows, chunk_calls, high_chunk_rows,
+                  high_chunk_calls] = run(true);
+      Expect(batched == isolated,
+             "verification chunks changed tokens, frontier, RNG, state or "
+             "feedback");
+      Expect(chunk_rows < full_rows && chunk_calls > full_calls,
+             "fixture must both stop rejected suffixes and continue accepted "
+             "chunks");
+      Expect(high_chunk_rows == high_rows && high_chunk_calls == high_calls,
+             "a rejecting peer must not split a fully accepted request");
+    }
+  };
+  check_width.template operator()<2>();
+  check_width.template operator()<4>();
+  check_width.template operator()<6>();
+  check_width.template operator()<8>();
 }
 
 void TestPersistentVerifierSnapshotRoundTrip() {

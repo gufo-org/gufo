@@ -344,7 +344,8 @@ bool TryLaunchBf16SmallBatchWave64(const void* w, const float* x, float* y,
                                    std::size_t k, hipStream_t stream,
                                    std::size_t groups) {
   if (groups > 1) {
-    const bool up = k == 5120 && (m == 1024 || m == 12288 || m == 248320);
+    const bool up =
+        k == 5120 && (m == 1024 || m == 12288 || m == 17408 || m == 248320);
     const bool down = m == 5120 && k == 6144;
     if (batch != 16 || groups > 4 || !(up || down))
       return false;

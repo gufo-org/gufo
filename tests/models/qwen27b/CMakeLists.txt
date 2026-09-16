@@ -48,6 +48,9 @@ endfunction()
 add_qwen27b_test(qwen_mtp_reference_test mtp_reference_test.cpp
   "cpu;mtp;external-model")
 if (ENGINE_ENABLE_HIP)
+  add_qwen27b_test(qwen_sampling_hip_test sampling_test.hip
+    "hip;gpu;sampling;correctness")
+  target_link_libraries(qwen_sampling_hip_test PRIVATE hip::host)
   add_test(NAME qwen27b.cli-options COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/cli_test.py $<TARGET_FILE:gufo> --scope options)
   set_tests_properties(qwen27b.cli-options PROPERTIES LABELS "qwen27b;cpu;cli")
@@ -69,8 +72,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/cli/serve/logging.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp
-    ${PROJECT_SOURCE_DIR}/src/cli/serve/logging.cpp)
+    ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
   target_link_libraries(inference_backend_gpu_test PRIVATE
     gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next hip::host)
   add_test(NAME inference_backend_gpu_test COMMAND inference_backend_gpu_test)

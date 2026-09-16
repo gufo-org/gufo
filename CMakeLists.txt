@@ -978,14 +978,6 @@ if (BUILD_TESTING)
     set_tests_properties(hipblaslt_runtime_cache_test PROPERTIES
       LABELS "hip;gpu;hipblaslt;cache")
 
-    add_executable(qwen_sampling_hip_test
-      tests/kernels/qwen_sampling_hip_test.hip)
-    target_link_libraries(qwen_sampling_hip_test PRIVATE gufo_core hip::host)
-    add_test(NAME qwen_sampling_hip_test COMMAND qwen_sampling_hip_test)
-    set_tests_properties(qwen_sampling_hip_test PROPERTIES
-      LABELS "hip;gpu;qwen;sampling;correctness"
-      SKIP_RETURN_CODE 77)
-
     add_executable(persistent_deltanet_test
       tests/kernels/persistent_deltanet_test.cpp)
     target_link_libraries(persistent_deltanet_test PRIVATE gufo_core hip::host)

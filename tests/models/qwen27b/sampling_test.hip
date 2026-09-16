@@ -458,7 +458,7 @@ void TestExactNucleusBoundaryAndGreedyTies() {
                      tied_logits.size() * sizeof(float), hipMemcpyHostToDevice),
            "upload batched tie");
   gufo::hip::LaunchBatchedGPUArgmax(device_logits, device_token, 1,
-                                    tied_logits.size());
+                                    tied_logits.size(), {});
   std::uint32_t batched_token = 0;
   CheckHip(hipMemcpy(&batched_token, device_token, sizeof(batched_token),
                      hipMemcpyDeviceToHost),
@@ -537,6 +537,84 @@ void TestFullVocabularyQuantiles() {
   }
 }
 
+void TestBatchedArgmaxTiles() {
+  for (const std::size_t vocab : {4095U, 4096U, 4097U, 248323U}) {
+    constexpr std::size_t rows = 8;
+    std::vector<float> logits(rows * vocab, -3e35F);
+    for (std::size_t row = 0; row < rows; ++row) {
+      auto values = std::span(logits).subspan(row * vocab, vocab);
+      if (row == 0) {
+        std::fill(values.begin(), values.end(), NAN);
+        values[17] = INFINITY;
+        values[19] = -INFINITY;
+      } else if (row == 1) {
+        values.back() = -1e35F;
+      } else if (row == 2) {
+        values[4094] = values.back() = 37.0F;
+      } else if (row == 3) {
+        values[1] = values[256] = 44.0F;
+      } else if (row == 4) {
+        std::fill(values.begin(), values.end(), 0.0F);
+      } else if (row == 5) {
+        values[0] = NAN;
+        values[vocab / 2] = INFINITY;
+        values.back() = 3.0F;
+      } else if (row == 6) {
+        values[vocab > 4096 ? 4096 : 1024] = values.back() = 9.0F;
+      } else {
+        values[17] = -2e35F;
+      }
+    }
+    std::vector<std::uint32_t> expected(rows, 0);
+    for (std::size_t row = 0; row < rows; ++row) {
+      float maximum = -INFINITY;
+      for (std::size_t id = 0; id < vocab; ++id) {
+        const auto value = logits[row * vocab + id];
+        if (std::isfinite(value) && value > maximum) {
+          maximum = value;
+          expected[row] = static_cast<std::uint32_t>(id);
+        }
+      }
+    }
+    const auto scratch_count = 2 * rows * ((vocab + 4095) / 4096);
+    float* device_logits = nullptr;
+    float* scratch = nullptr;
+    std::uint32_t* tokens = nullptr;
+    CheckHip(hipMalloc(&device_logits, logits.size() * sizeof(float)),
+             "allocate tiled argmax logits");
+    CheckHip(hipMalloc(&scratch, (scratch_count + 2) * sizeof(float)),
+             "allocate guarded argmax scratch");
+    CheckHip(hipMalloc(&tokens, rows * sizeof(std::uint32_t)),
+             "allocate batched argmax tokens");
+    CheckHip(hipMemcpy(device_logits, logits.data(),
+                       logits.size() * sizeof(float), hipMemcpyHostToDevice),
+             "upload tiled argmax fixtures");
+    CheckHip(hipMemset(scratch, 0xA5, (scratch_count + 2) * sizeof(float)),
+             "poison argmax scratch");
+    for (const std::size_t width : {1U, 2U, 4U, 6U, 8U}) {
+      gufo::hip::LaunchBatchedGPUArgmax(device_logits, tokens, width, vocab,
+                                        {scratch + 1, scratch_count});
+      std::vector<std::uint32_t> actual(width);
+      CheckHip(hipMemcpy(actual.data(), tokens, width * sizeof(std::uint32_t),
+                         hipMemcpyDeviceToHost),
+               "read tiled argmax");
+      Expect(std::equal(actual.begin(), actual.end(), expected.begin()),
+             "argmax tiles must preserve finite extrema and lowest-ID ties");
+    }
+    std::uint32_t first = 0, last = 0;
+    CheckHip(hipMemcpy(&first, scratch, sizeof(first), hipMemcpyDeviceToHost),
+             "read leading argmax guard");
+    CheckHip(hipMemcpy(&last, scratch + scratch_count + 1, sizeof(last),
+                       hipMemcpyDeviceToHost),
+             "read trailing argmax guard");
+    Expect(first == 0xA5A5A5A5U && last == first,
+           "argmax scratch must remain within the supplied span");
+    CheckHip(hipFree(tokens), "free argmax tokens");
+    CheckHip(hipFree(scratch), "free argmax scratch");
+    CheckHip(hipFree(device_logits), "free argmax logits");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -555,6 +633,7 @@ int main() {
   TestSamplingBoundaryValues();
   TestExactNucleusBoundaryAndGreedyTies();
   TestFullVocabularyQuantiles();
+  TestBatchedArgmaxTiles();
   std::cout << "All Qwen GPU sampling tests passed.\n";
   return 0;
 }

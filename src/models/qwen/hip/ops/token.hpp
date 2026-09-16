@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include "src/core/gguf_reader.hpp"
 
@@ -120,6 +121,7 @@ void LaunchGPUArgmax(const float* logits, std::uint32_t* out_token,
 /// Computes one argmax per row of a [batch_size, vocab_size] logits matrix.
 void LaunchBatchedGPUArgmax(const float* logits, std::uint32_t* out_tokens,
                             std::size_t batch_size, std::size_t vocab_size,
+                            std::span<float> scratch,
                             hipStream_t stream = nullptr);
 
 /// Batched Embedding lookup for B tokens
