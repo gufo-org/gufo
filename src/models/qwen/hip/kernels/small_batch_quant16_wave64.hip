@@ -10,8 +10,20 @@ namespace {
 template<core::GgmlType Type, std::size_t Groups>
 void Launch(const void* w, const float* x, float* y, std::size_t m,
             std::size_t k, hipStream_t stream) {
-  SmallBatchKQuantExactFp32GEMMKernel<8, 16, 6, Type, 1, 4, Groups, true, 1, 64>
-      <<<((m + 47) / 48) * Groups, 256, 0, stream>>>(w, x, y, m, k);
+  const auto launch = [&]<bool DistributedOutput>() {
+    SmallBatchKQuantExactFp32GEMMKernel<8, 16, 6, Type, 1, 4, Groups, true, 1,
+                                        64, 32, DistributedOutput>
+        <<<((m + 47) / 48) * Groups, 256, 0, stream>>>(w, x, y, m, k);
+  };
+  const bool ffn =
+      (k == 5120 && (m == 17408 || m == 34816)) || (m == 5120 && k == 17408);
+  const bool q5_ssm_out =
+      Type == core::GgmlType::kQ5_K && m == 5120 && k == 6144;
+  // Other projection shapes retain their qualified compiler schedule.
+  if (ffn || q5_ssm_out)
+    launch.template operator()<true>();
+  else
+    launch.template operator()<false>();
 }
 
 template<core::GgmlType Type>

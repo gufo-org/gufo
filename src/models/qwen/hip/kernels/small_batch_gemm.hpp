@@ -171,6 +171,36 @@ __device__ __forceinline__ float ReduceKQuantWave(float value) {
   }
 }
 
+// Assign different token columns to the lanes as their K partials merge.
+// Each output keeps the descending butterfly tree of scalar decoding, while
+// successive stages need half as many shuffles and additions per lane.
+template<std::size_t Columns, int Offset>
+__device__ __forceinline__ float ReduceKQuantColumns(
+    const float (&values)[Columns]) {
+  static_assert(Columns > 0 && (Columns & (Columns - 1)) == 0);
+  static_assert(Offset >= 0);
+  static_assert(Columns == 1 ||
+                Columns <= 2 * static_cast<std::size_t>(Offset));
+  if constexpr (Columns > 1) {
+    constexpr std::size_t kHalf = Columns / 2;
+    const bool high = (threadIdx.x & static_cast<unsigned>(Offset)) != 0;
+    float next[kHalf];
+#pragma unroll
+    for (std::size_t j = 0; j < kHalf; ++j) {
+      const float own = high ? values[j + kHalf] : values[j];
+      const float other = high ? values[j] : values[j + kHalf];
+      const int partner = __builtin_amdgcn_ds_swizzle(
+          __builtin_bit_cast(int, other), (Offset << 10) | 31);
+      next[j] = own + __builtin_bit_cast(float, partner);
+    }
+    return ReduceKQuantColumns<kHalf, Offset / 2>(next);
+  } else if constexpr (Offset > 0) {
+    return ReduceKQuantWave<Offset>(values[0]);
+  } else {
+    return values[0];
+  }
+}
+
 // These GEMMs exchange data through LDS only. Global inputs are read-only,
 // and output stores follow the final tile. Complete LDS traffic and preserve
 // compiler memory ordering without invalidating the global read cache.
@@ -364,7 +394,9 @@ template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t TilesPerStage = 1, std::uint32_t MinWaves = 12,
          std::size_t TokenGroups = 1, bool NarrowIndex = false,
          std::size_t TokensPerStep = Batch, std::uint32_t HardwareWaveSize = 32,
-         std::uint32_t LogicalLanes = 32>
+         std::uint32_t LogicalLanes = 32,
+         bool DistributedOutput = HardwareWaveSize == 64 &&
+                                  (Batch == 14 || Batch == 16)>
 __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
                                            ? MinWaves * 32 / HardwareWaveSize
                                            : 1)) __global__
@@ -576,26 +608,56 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
     }
   }
 
-#pragma unroll
-  for (Index r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-    for (Index token = 0; token < Batch; ++token) {
-      if constexpr (kPhases == 2) {
-        sums[0][r][token] += sums[1][r][token];
-      }
-      sums[0][r][token] = ReduceKQuantWave<LogicalLanes / 2>(sums[0][r][token]);
-    }
-  }
-  if (lane == 0) {
+  if constexpr (DistributedOutput) {
+    static_assert(Batch == 14 || Batch == 16);
+    constexpr Index kColumns = 16;
+    constexpr Index kLanesPerToken = LogicalLanes / kColumns;
+    float final[RowsPerWave];
 #pragma unroll
     for (Index r = 0; r < RowsPerWave; ++r) {
-      const Index row = row_base + r;
-      if (row >= m) {
-        continue;
-      }
+      float values[kColumns] = {};
 #pragma unroll
       for (Index token = 0; token < Batch; ++token) {
-        y[(token * m) + row] = sums[0][r][token];
+        values[token] = sums[0][r][token];
+        if constexpr (kPhases == 2) {
+          values[token] += sums[1][r][token];
+        }
+      }
+      final[r] = ReduceKQuantColumns<kColumns, LogicalLanes / 2>(values);
+    }
+    const Index token = lane / kLanesPerToken;
+    if (lane % kLanesPerToken == 0 && token < Batch) {
+#pragma unroll
+      for (Index r = 0; r < RowsPerWave; ++r) {
+        const Index row = row_base + r;
+        if (row < m) {
+          y[token * m + row] = final[r];
+        }
+      }
+    }
+  } else {
+#pragma unroll
+    for (Index r = 0; r < RowsPerWave; ++r) {
+#pragma unroll
+      for (Index token = 0; token < Batch; ++token) {
+        if constexpr (kPhases == 2) {
+          sums[0][r][token] += sums[1][r][token];
+        }
+        sums[0][r][token] =
+            ReduceKQuantWave<LogicalLanes / 2>(sums[0][r][token]);
+      }
+    }
+    if (lane == 0) {
+#pragma unroll
+      for (Index r = 0; r < RowsPerWave; ++r) {
+        const Index row = row_base + r;
+        if (row >= m) {
+          continue;
+        }
+#pragma unroll
+        for (Index token = 0; token < Batch; ++token) {
+          y[(token * m) + row] = sums[0][r][token];
+        }
       }
     }
   }
