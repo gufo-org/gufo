@@ -64,19 +64,25 @@ void LaunchFfnActivation(const models::QwenLayerWeights& layer,
     const std::size_t matrix_bytes = gate.EncodedSizeBytes();
     const std::size_t packed_elements = 2 * batch_size * intermediate_size;
     if (gate.available_bytes >= 2 * matrix_bytes &&
-        static_cast<const std::byte*>(gate.data) + matrix_bytes == up.data &&
-        scratch.decode.weight_bf16.size_bytes() >=
-            packed_elements * sizeof(float)) {
-      // Adjacent GGUF tensors form one matrix with twice as many output rows.
-      // Exact projections do not need dequantization scratch; reuse it until
-      // SwiGLU has consumed the packed gate/up rows on this stream.
-      auto* const packed =
-          reinterpret_cast<float*>(scratch.decode.weight_bf16.data());
-      LaunchProjection(gate, scratch.decode.normed.data(), packed, batch_size,
-                       2 * intermediate_size, hidden_size, stream);
-      LaunchPackedSwiGLUActivation(packed, scratch.ffn.activation.data(),
-                                   batch_size, intermediate_size, stream);
-      return;
+        static_cast<const std::byte*>(gate.data) + matrix_bytes == up.data) {
+      if (TryLaunchPackedQuantSwiGLUFp32(
+              gate.type, gate.data, scratch.decode.normed.data(),
+              scratch.ffn.activation.data(), batch_size, intermediate_size,
+              hidden_size, stream))
+        return;
+      if (scratch.decode.weight_bf16.size_bytes() >=
+          packed_elements * sizeof(float)) {
+        // Adjacent GGUF tensors form one matrix with twice as many output rows.
+        // Exact projections do not need dequantization scratch; reuse it until
+        // SwiGLU has consumed the packed gate/up rows on this stream.
+        auto* const packed =
+            reinterpret_cast<float*>(scratch.decode.weight_bf16.data());
+        LaunchProjection(gate, scratch.decode.normed.data(), packed, batch_size,
+                         2 * intermediate_size, hidden_size, stream);
+        LaunchPackedSwiGLUActivation(packed, scratch.ffn.activation.data(),
+                                     batch_size, intermediate_size, stream);
+        return;
+      }
     }
   }
   LaunchProjection(gate, scratch.decode.normed.data(), scratch.ffn.gate.data(),

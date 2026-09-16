@@ -24,139 +24,6 @@ constexpr bool FitsSmallBatch32BitIndices(std::size_t batch, std::size_t m,
          m <= limit / batch && k <= limit / batch && m <= limit / row_bytes;
 }
 
-// Exact FP32-activation kernels shared by decoding, speculative verification,
-// DFlash2 and the focused microbenchmark. Each lane visits its input groups in
-// the same order at every batch width; tile geometry never changes arithmetic.
-// Float4-aligned LDS rows amortize activation loads across output rows.
-template<std::uint32_t WavesPerBlock, std::size_t Batch,
-         std::size_t RowsPerWave, bool StreamWeights = true,
-         std::uint32_t HardwareWaveSize = 32, std::size_t TokenGroups = 1>
-__launch_bounds__(WavesPerBlock * 32, 1) __global__
-    void BatchedExactBf16GEMMFp32VecKernel(const hip_bfloat16* __restrict__ A,
-                                           const float* __restrict__ X,
-                                           float* __restrict__ Y, std::size_t M,
-                                           std::size_t K) {
-  static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
-  static_assert(TokenGroups > 0);
-  X += (blockIdx.x % TokenGroups) * Batch * K;
-  Y += (blockIdx.x % TokenGroups) * Batch * M;
-  constexpr std::size_t kValuesPerVector = 8;
-  constexpr std::size_t kVectorsPerTile = 32;
-  constexpr std::size_t kStride = kValuesPerVector + 4;
-  constexpr std::size_t kTileStride = kVectorsPerTile * kStride;
-  __shared__ float staged_x[Batch * kTileStride];
-
-  const std::size_t lane = threadIdx.x & 31u;
-  const std::size_t warp_id = threadIdx.x >> 5u;
-  const std::size_t row_base =
-      (((blockIdx.x / TokenGroups) * WavesPerBlock) + warp_id) * RowsPerWave;
-  const std::size_t vector_count = K / kValuesPerVector;
-  float sums[RowsPerWave][Batch] = {};
-
-  for (std::size_t tile_base = 0; tile_base < vector_count;
-       tile_base += kVectorsPerTile) {
-    constexpr std::size_t kTileHalves = Batch * kVectorsPerTile * 2;
-    for (std::size_t flat = threadIdx.x; flat < kTileHalves;
-         flat += blockDim.x) {
-      const std::size_t token = flat / (kVectorsPerTile * 2);
-      const std::size_t within = flat % (kVectorsPerTile * 2);
-      const std::size_t vector = within >> 1U;
-      const std::size_t half = within & 1U;
-      const std::size_t source_vector = tile_base + vector;
-      float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
-      if (source_vector < vector_count) {
-        value = *reinterpret_cast<const float4*>(
-            X + (token * K) + (source_vector * kValuesPerVector) + (half * 4));
-      }
-      *reinterpret_cast<float4*>(staged_x + (token * kTileStride) +
-                                 (vector * kStride) + (half * 4)) = value;
-    }
-    __syncthreads();
-
-    const std::size_t vector = tile_base + lane;
-    if (vector < vector_count) {
-      uint4 packed[RowsPerWave];
-#pragma unroll
-      for (std::size_t r = 0; r < RowsPerWave; ++r) {
-        const std::size_t row = row_base + r;
-        const std::size_t safe_row = row < M ? row : M - 1;
-        // Select the cache hint at dispatch: a runtime branch here makes
-        // the large feature projection slower, even when it is uniform.
-        if constexpr (!StreamWeights) {
-          packed[r] =
-              reinterpret_cast<const uint4*>(A + (safe_row * K))[vector];
-        } else {
-          typedef std::uint32_t PackedWeights
-              __attribute__((ext_vector_type(4), may_alias));
-          const auto words = __builtin_nontemporal_load(
-              reinterpret_cast<const PackedWeights*>(A + (safe_row * K)) +
-              vector);
-          packed[r] = {words[0], words[1], words[2], words[3]};
-        }
-      }
-#pragma unroll
-      for (std::size_t token = 0; token < Batch; ++token) {
-        const float* input =
-            staged_x + (token * kTileStride) + (lane * kStride);
-        const float4 x0 = *reinterpret_cast<const float4*>(input);
-        const float4 x1 = *reinterpret_cast<const float4*>(input + 4);
-#pragma unroll
-        for (std::size_t r = 0; r < RowsPerWave; ++r) {
-          const auto* weights =
-              reinterpret_cast<const hip_bfloat16*>(&packed[r]);
-          sums[r][token] += (static_cast<float>(weights[0]) * x0.x) +
-                            (static_cast<float>(weights[1]) * x0.y) +
-                            (static_cast<float>(weights[2]) * x0.z) +
-                            (static_cast<float>(weights[3]) * x0.w) +
-                            (static_cast<float>(weights[4]) * x1.x) +
-                            (static_cast<float>(weights[5]) * x1.y) +
-                            (static_cast<float>(weights[6]) * x1.z) +
-                            (static_cast<float>(weights[7]) * x1.w);
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  // Tail elements outside the vectorized span, matching the GEMV epilogue.
-  for (std::size_t k = (vector_count * kValuesPerVector) + lane; k < K;
-       k += 32) {
-#pragma unroll
-    for (std::size_t r = 0; r < RowsPerWave; ++r) {
-      const std::size_t row = row_base + r;
-      const std::size_t safe_row = row < M ? row : M - 1;
-      const float weight = static_cast<float>(A[(safe_row * K) + k]);
-#pragma unroll
-      for (std::size_t token = 0; token < Batch; ++token) {
-        sums[r][token] += weight * X[(token * K) + k];
-      }
-    }
-  }
-
-#pragma unroll
-  for (std::size_t r = 0; r < RowsPerWave; ++r) {
-#pragma unroll
-    for (std::size_t token = 0; token < Batch; ++token) {
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        sums[r][token] += __shfl_xor(sums[r][token], offset);
-      }
-    }
-  }
-  if (lane == 0) {
-#pragma unroll
-    for (std::size_t r = 0; r < RowsPerWave; ++r) {
-      const std::size_t row = row_base + r;
-      if (row >= M) {
-        continue;
-      }
-#pragma unroll
-      for (std::size_t token = 0; token < Batch; ++token) {
-        Y[(token * M) + row] = sums[r][token];
-      }
-    }
-  }
-}
-
 // Immediate XOR masks avoid the lane-address calculation of __shfl_xor.
 // Keep the descending butterfly order identical to scalar decoding.
 template<int Offset = 16>
@@ -210,10 +77,160 @@ __device__ __forceinline__ __attribute__((convergent)) void SyncKQuantTile() {
   asm volatile("" ::: "memory");
 }
 
+// Exact FP32-activation kernels shared by decoding, speculative verification,
+// DFlash2 and the focused microbenchmark. Each lane visits its input groups in
+// the same order at every batch width; tile geometry never changes arithmetic.
+// Float4-aligned LDS rows amortize activation loads across output rows.
+template<std::uint32_t WavesPerBlock, std::size_t Batch,
+         std::size_t RowsPerWave, bool StreamWeights = true,
+         std::uint32_t HardwareWaveSize = 32, std::size_t TokenGroups = 1>
+__launch_bounds__(WavesPerBlock * 32, 1) __global__
+    void BatchedExactBf16GEMMFp32VecKernel(const hip_bfloat16* __restrict__ A,
+                                           const float* __restrict__ X,
+                                           float* __restrict__ Y, std::size_t M,
+                                           std::size_t K) {
+  static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
+  static_assert(TokenGroups > 0);
+  X += (blockIdx.x % TokenGroups) * Batch * K;
+  Y += (blockIdx.x % TokenGroups) * Batch * M;
+  constexpr std::size_t kValuesPerVector = 8;
+  constexpr std::size_t kVectorsPerTile = 32;
+  constexpr std::size_t kStride = kValuesPerVector + 4;
+  constexpr std::size_t kTileStride = kVectorsPerTile * kStride;
+  __shared__ float staged_x[Batch * kTileStride];
+
+  const std::size_t lane = threadIdx.x & 31u;
+  const std::size_t warp_id = threadIdx.x >> 5u;
+  const std::size_t row_base =
+      (((blockIdx.x / TokenGroups) * WavesPerBlock) + warp_id) * RowsPerWave;
+  const std::size_t vector_count = K / kValuesPerVector;
+  float sums[RowsPerWave][Batch] = {};
+
+  for (std::size_t tile_base = 0; tile_base < vector_count;
+       tile_base += kVectorsPerTile) {
+    constexpr std::size_t kTileHalves = Batch * kVectorsPerTile * 2;
+    for (std::size_t flat = threadIdx.x; flat < kTileHalves;
+         flat += blockDim.x) {
+      const std::size_t token = flat / (kVectorsPerTile * 2);
+      const std::size_t within = flat % (kVectorsPerTile * 2);
+      const std::size_t vector = within >> 1U;
+      const std::size_t half = within & 1U;
+      const std::size_t source_vector = tile_base + vector;
+      float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
+      if (source_vector < vector_count) {
+        value = *reinterpret_cast<const float4*>(
+            X + (token * K) + (source_vector * kValuesPerVector) + (half * 4));
+      }
+      *reinterpret_cast<float4*>(staged_x + (token * kTileStride) +
+                                 (vector * kStride) + (half * 4)) = value;
+    }
+    if constexpr (Batch == 16)
+      SyncKQuantTile();
+    else
+      __syncthreads();
+
+    const std::size_t vector = tile_base + lane;
+    if (vector < vector_count) {
+      uint4 packed[RowsPerWave];
+#pragma unroll
+      for (std::size_t r = 0; r < RowsPerWave; ++r) {
+        const std::size_t row = row_base + r;
+        const std::size_t safe_row = row < M ? row : M - 1;
+        // Select the cache hint at dispatch: a runtime branch here makes
+        // the large feature projection slower, even when it is uniform.
+        if constexpr (!StreamWeights) {
+          packed[r] =
+              reinterpret_cast<const uint4*>(A + (safe_row * K))[vector];
+        } else {
+          typedef std::uint32_t PackedWeights
+              __attribute__((ext_vector_type(4), may_alias));
+          const auto words = __builtin_nontemporal_load(
+              reinterpret_cast<const PackedWeights*>(A + (safe_row * K)) +
+              vector);
+          packed[r] = {words[0], words[1], words[2], words[3]};
+        }
+      }
+#pragma unroll
+      for (std::size_t token = 0; token < Batch; ++token) {
+        const float* input =
+            staged_x + (token * kTileStride) + (lane * kStride);
+        const float4 x0 = *reinterpret_cast<const float4*>(input);
+        const float4 x1 = *reinterpret_cast<const float4*>(input + 4);
+#pragma unroll
+        for (std::size_t r = 0; r < RowsPerWave; ++r) {
+          const auto* weights =
+              reinterpret_cast<const hip_bfloat16*>(&packed[r]);
+          sums[r][token] += (static_cast<float>(weights[0]) * x0.x) +
+                            (static_cast<float>(weights[1]) * x0.y) +
+                            (static_cast<float>(weights[2]) * x0.z) +
+                            (static_cast<float>(weights[3]) * x0.w) +
+                            (static_cast<float>(weights[4]) * x1.x) +
+                            (static_cast<float>(weights[5]) * x1.y) +
+                            (static_cast<float>(weights[6]) * x1.z) +
+                            (static_cast<float>(weights[7]) * x1.w);
+        }
+      }
+    }
+    if constexpr (Batch == 16)
+      SyncKQuantTile();
+    else
+      __syncthreads();
+  }
+
+  // Tail elements outside the vectorized span, matching the GEMV epilogue.
+  for (std::size_t k = (vector_count * kValuesPerVector) + lane; k < K;
+       k += 32) {
+#pragma unroll
+    for (std::size_t r = 0; r < RowsPerWave; ++r) {
+      const std::size_t row = row_base + r;
+      const std::size_t safe_row = row < M ? row : M - 1;
+      const float weight = static_cast<float>(A[(safe_row * K) + k]);
+#pragma unroll
+      for (std::size_t token = 0; token < Batch; ++token) {
+        sums[r][token] += weight * X[(token * K) + k];
+      }
+    }
+  }
+
+  if constexpr (Batch == 16) {
+#pragma unroll
+    for (std::size_t r = 0; r < RowsPerWave; ++r) {
+      const float value = ReduceKQuantColumns<Batch, 16>(sums[r]);
+      const std::size_t row = row_base + r;
+      if ((lane & 1U) == 0 && row < M)
+        Y[(lane / 2) * M + row] = value;
+    }
+  } else {
+#pragma unroll
+    for (std::size_t r = 0; r < RowsPerWave; ++r) {
+#pragma unroll
+      for (std::size_t token = 0; token < Batch; ++token) {
+        for (int offset = 16; offset > 0; offset >>= 1) {
+          sums[r][token] += __shfl_xor(sums[r][token], offset);
+        }
+      }
+    }
+    if (lane == 0) {
+#pragma unroll
+      for (std::size_t r = 0; r < RowsPerWave; ++r) {
+        const std::size_t row = row_base + r;
+        if (row >= M) {
+          continue;
+        }
+#pragma unroll
+        for (std::size_t token = 0; token < Batch; ++token) {
+          Y[(token * M) + row] = sums[r][token];
+        }
+      }
+    }
+  }
+}
+
 template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, bool NarrowIndex = false,
          bool XorStage = false, std::uint32_t HardwareWaveSize = 32,
-         std::size_t TokenGroups = 1, std::size_t TokensPerStep = Batch>
+         std::size_t TokenGroups = 1, std::size_t TokensPerStep = Batch,
+         bool DistributedOutput = false>
 __launch_bounds__(WavesPerBlock * 32, 1) __global__
     void SmallBatchQ8_0ExactFp32VecGEMMKernel(const void* __restrict__ w,
                                               const float* __restrict__ x,
@@ -307,6 +324,10 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
         float block_dots[RowsPerWave][TokensPerStep] = {};
 #pragma unroll
         for (Index group = 0; group < kVectorsPerBlock; ++group) {
+          if constexpr (DistributedOutput && TokensPerStep == Batch) {
+            // Keep one coefficient group live through its token dots.
+            __builtin_amdgcn_sched_barrier(0);
+          }
           if constexpr (!kPreloadWeights) {
 #pragma unroll
             for (Index r = 0; r < RowsPerWave; ++r) {
@@ -361,29 +382,40 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
     }
   }
 
+  if constexpr (DistributedOutput) {
+    static_assert(Batch == 16);
 #pragma unroll
-  for (Index r = 0; r < RowsPerWave; ++r) {
+    for (Index r = 0; r < RowsPerWave; ++r) {
+      const float value = ReduceKQuantColumns<Batch, 16>(sums[r]);
+      const Index row = row_base + r;
+      if ((lane & 1U) == 0 && row < m)
+        y[(lane / 2) * m + row] = value;
+    }
+  } else {
 #pragma unroll
-    for (Index token = 0; token < Batch; ++token) {
-      if constexpr (NarrowIndex) {
-        sums[r][token] = ReduceKQuantWave(sums[r][token]);
-      } else {
-        for (int offset = 16; offset > 0; offset >>= 1) {
-          sums[r][token] += __shfl_xor(sums[r][token], offset);
+    for (Index r = 0; r < RowsPerWave; ++r) {
+#pragma unroll
+      for (Index token = 0; token < Batch; ++token) {
+        if constexpr (NarrowIndex) {
+          sums[r][token] = ReduceKQuantWave(sums[r][token]);
+        } else {
+          for (int offset = 16; offset > 0; offset >>= 1) {
+            sums[r][token] += __shfl_xor(sums[r][token], offset);
+          }
         }
       }
     }
-  }
-  if (lane == 0) {
+    if (lane == 0) {
 #pragma unroll
-    for (Index r = 0; r < RowsPerWave; ++r) {
-      const Index row = row_base + r;
-      if (row >= m) {
-        continue;
-      }
+      for (Index r = 0; r < RowsPerWave; ++r) {
+        const Index row = row_base + r;
+        if (row >= m) {
+          continue;
+        }
 #pragma unroll
-      for (Index token = 0; token < Batch; ++token) {
-        y[(token * m) + row] = sums[r][token];
+        for (Index token = 0; token < Batch; ++token) {
+          y[(token * m) + row] = sums[r][token];
+        }
       }
     }
   }
@@ -396,7 +428,12 @@ template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t TokensPerStep = Batch, std::uint32_t HardwareWaveSize = 32,
          std::uint32_t LogicalLanes = 32,
          bool DistributedOutput = HardwareWaveSize == 64 &&
-                                  (Batch == 14 || Batch == 16)>
+                                  (Batch == 14 || Batch == 16 ||
+                                   (Batch == 8 &&
+                                    (WType == core::GgmlType::kQ4_K ||
+                                     WType == core::GgmlType::kQ5_K ||
+                                     WType == core::GgmlType::kIQ4_XS))),
+         bool FusedSwiGLU = false>
 __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
                                            ? MinWaves * 32 / HardwareWaveSize
                                            : 1)) __global__
@@ -409,6 +446,7 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
   static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
   static_assert(LogicalLanes == 16 || LogicalLanes == 32);
   static_assert(LogicalLanes == 32 || TilesPerStage == 1);
+  static_assert(!FusedSwiGLU || (DistributedOutput && RowsPerWave % 2 == 0));
   // Sixteen-lane groups keep both original lane partials independently, then
   // combine them in the same descending butterfly order as scalar decoding.
   // Only the occupancy hint counts hardware waves.
@@ -416,7 +454,8 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
   const Index m = static_cast<Index>(wide_m);
   const Index k = static_cast<Index>(wide_k);
   x += (blockIdx.x % TokenGroups) * Batch * k;
-  y += (blockIdx.x % TokenGroups) * Batch * m;
+  const Index output_rows = FusedSwiGLU ? m / 2 : m;
+  y += (blockIdx.x % TokenGroups) * Batch * output_rows;
   constexpr Index kSubElems = 16;
   constexpr Index kPhases = 32 / LogicalLanes;
   constexpr Index kSubsPerTile = LogicalLanes * TilesPerStage;
@@ -490,7 +529,10 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
           QuantSub16 decoded[RowsPerWave];
 #pragma unroll
           for (Index r = 0; r < RowsPerWave; ++r) {
-            const Index row = row_base + r;
+            const Index row =
+                FusedSwiGLU
+                    ? (row_base + r) / 2 + ((row_base + r) % 2) * output_rows
+                    : row_base + r;
             const Index safe_row = row < m ? row : m - 1;
             DecodeQuantSub16<NarrowIndex>(
                 WType,
@@ -609,8 +651,8 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
   }
 
   if constexpr (DistributedOutput) {
-    static_assert(Batch == 14 || Batch == 16);
-    constexpr Index kColumns = 16;
+    static_assert(Batch == 8 || Batch == 14 || Batch == 16);
+    constexpr Index kColumns = Batch == 8 ? 8 : 16;
     constexpr Index kLanesPerToken = LogicalLanes / kColumns;
     float final[RowsPerWave];
 #pragma unroll
@@ -627,11 +669,24 @@ __launch_bounds__(WavesPerBlock * 32, (MinWaves * 32 / HardwareWaveSize > 0
     }
     const Index token = lane / kLanesPerToken;
     if (lane % kLanesPerToken == 0 && token < Batch) {
+      if constexpr (FusedSwiGLU) {
 #pragma unroll
-      for (Index r = 0; r < RowsPerWave; ++r) {
-        const Index row = row_base + r;
-        if (row < m) {
-          y[token * m + row] = final[r];
+        for (Index r = 0; r < RowsPerWave / 2; ++r) {
+          const Index row = row_base / 2 + r;
+          if (row < output_rows) {
+            const float gate = final[2 * r];
+            const float up = final[2 * r + 1];
+            const float sigmoid = 1.0F / (1.0F + expf(-gate));
+            y[token * output_rows + row] = (gate * sigmoid) * up;
+          }
+        }
+      } else {
+#pragma unroll
+        for (Index r = 0; r < RowsPerWave; ++r) {
+          const Index row = row_base + r;
+          if (row < m) {
+            y[token * m + row] = final[r];
+          }
         }
       }
     }

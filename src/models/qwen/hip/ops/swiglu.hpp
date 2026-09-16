@@ -31,6 +31,15 @@ void LaunchPackedSwiGLUActivation(const float* gate_up, float* out,
                                    std::size_t intermediate_size,
                                    hipStream_t stream = nullptr);
 
+/// Exact projection and SwiGLU for adjacent packed gate/up weights.
+/// Returns false without launching when the shape has no qualified fused route.
+bool TryLaunchPackedQuantSwiGLUFp32(core::GgmlType type, const void* gate_up,
+                                    const float* input, float* output,
+                                    std::size_t batch_size,
+                                    std::size_t intermediate_size,
+                                    std::size_t hidden_size,
+                                    hipStream_t stream = nullptr);
+
 }  // namespace gufo::hip
 
 #endif  // defined(ENGINE_ENABLE_HIP)

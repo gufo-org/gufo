@@ -1708,12 +1708,14 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
     const bool individual_up =
         m == 17408 && k == 5120 &&
         (type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ5_K ||
-         type == core::GgmlType::kIQ4_XS);
+         type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kQ3_K ||
+         type == core::GgmlType::kIQ4_NL);
     const bool iq4_groups = type == core::GgmlType::kIQ4_XS &&
                             ((batch == 28 && ((m == 34816 && k == 5120) ||
                                               (m == 5120 && k == 17408))) ||
                              (batch == 42 && m == 5120 && k == 17408));
-    if ((type == core::GgmlType::kQ6_K ||
+    if ((type == core::GgmlType::kQ6_K || type == core::GgmlType::kQ3_K ||
+         type == core::GgmlType::kIQ4_NL ||
          (type == core::GgmlType::kQ5_K && m == 5120 && k == 6144) ||
          iq4_groups || (individual_up && batch <= 42)) &&
         batch <= 56 && batch % 14 == 0 &&
@@ -1729,7 +1731,7 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
          (m == 5120 && k == 6144));
     const auto launch_q8 = [&]<std::size_t Batch>(const float* input,
                                                   float* output) {
-      if constexpr (Batch == 12) {
+      if constexpr (Batch == 12 || Batch == 16) {
         if (detail::TryLaunchQ8SmallBatchWave64(w, input, output, Batch, m, k,
                                                 stream))
           return;

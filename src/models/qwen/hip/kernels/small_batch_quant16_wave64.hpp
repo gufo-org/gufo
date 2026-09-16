@@ -17,6 +17,12 @@ void LaunchKQuantSixteenWave64(core::GgmlType type, const void* w,
                                std::size_t k, hipStream_t stream,
                                std::size_t groups);
 
+// Adjacent Qwen27B gate/up matrices with the activation fused into their
+// stores.
+void LaunchPackedSwiGLUSixteenWave64(core::GgmlType type, const void* w,
+                                     const float* x, float* y,
+                                     std::size_t groups, hipStream_t stream);
+
 }  // namespace gufo::hip::detail
 #endif
 

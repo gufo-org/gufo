@@ -58,6 +58,10 @@ for t in "${targets[@]}"; do
   echo "==> $src -> $out"
   compile=(hipcc -O3 --offload-arch=gfx1151 -std=c++20
     -I. "${inc[@]}" -Rpass-analysis=kernel-resource-usage)
+  if [[ "$src" -ef tools/qwen27b/dflash_gemm_bench.hip ]]; then
+    # Exact projection comparisons use the production compiler optimization level.
+    compile[1]=-O2
+  fi
   native_sources=()
   if [[ "$src" -ef tools/qwen27b/dflash_gemm_bench.hip ||
         "$src" -ef tools/qwen27b/prefill_gemm_bench.hip ]]; then

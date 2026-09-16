@@ -24,14 +24,14 @@ Q4 uses FP16 activations with packed quantized weights; Q8 retains native wave64
 
 ## Single user, DFlash2
 
-Short control, **2026-09-15**: cached `prose_tides`, **tg64**, adaptive,
+Short control, **2026-09-16**: cached `prose_tides`, **tg64**, adaptive,
 greedy C1, one warmed release sample per draft. Generation tok/s:
 
 | Draft | Q4 target | Q8 target |
 | --- | ---: | ---: |
-| Q4_K_M | **23.63** | **15.72** |
-| Q8_0 | 22.79 | 15.49 |
-| BF16 | 22.15 | 14.26 |
+| Q4_K_M | **23.51** | **15.61** |
+| Q8_0 | 22.66 | 15.33 |
+| BF16 | 21.96 | 14.11 |
 
 pp2048/tg128 at depths **0 / 4,096 / 8,192 / 12,288 / 16,384**,
 for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.
@@ -39,7 +39,7 @@ for Q4 and Q8 targets: **TODO**. MTP performance: **TODO**.
 
 ## Multiple users, autoregressive
 
-Short generation control, **2026-09-15**: `prose_tides`, context capacity 4096,
+Short generation controls, **2026-09-15/16**: `prose_tides`, context capacity 4096,
 cached prompt, **tg64**, one warmup and one measured round. All concurrency
 tables report **aggregate delivered tok/s**. C1 is the regression control.
 
@@ -49,32 +49,32 @@ tables report **aggregate delivered tok/s**. C1 is the regression control.
 | 2 | 22.98 | 14.38 |
 | 4 | 41.87 | 27.13 |
 | 6 | 57.01 | 38.72 |
-| 8 | 67.77 | 49.65 |
+| 8 | 68.08 | 49.03 |
 
 pp2048/tg128 across all five context depths at C2/4/6/8: **TODO**.
 
 ## Multiple users, DFlash2
 
 Q4_K_M draft, adaptive controller, greedy **tg64**, cached prompts, context
-capacity 4096. **2026-09-16**, one warmed pass.
-C1 warms all three mixed-corpus prompts.
+capacity 4096. **2026-09-16**, one warmed pass (Q8 C6 repetition: three).
+All three mixed-corpus prompts are warmed before measurement.
 Aggregate delivered tok/s:
 
 | Concurrency | Q4 repetition | Q4 mixed corpus | Q8 repetition | Q8 mixed corpus |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 61.15 | 36.70 | 48.84 | 25.10 |
-| 2 | 82.41 | 41.56 | 73.96 | 31.58 |
-| 4 | 92.84 | 46.32 | 86.57 | 35.04 |
-| 6 | 93.76 | 54.55 | 90.21 | 41.75 |
-| 8 | 98.09 | 56.38 | 93.19 | 43.06 |
+| 1 | 62.06 | 36.46 | 48.80 | 24.77 |
+| 2 | 84.07 | 41.85 | 78.64 | 33.00 |
+| 4 | 94.43 | 46.48 | 89.98 | 35.66 |
+| 6 | 96.06 | 55.02 | 93.48 | 42.34 |
+| 8 | 100.37 | 56.73 | 96.81 | 43.92 |
 
 Repetition accepts **100%** of proposals. The mixed corpus contains 24 requests:
 eight each of code, JSON and prose; acceptance is **61.21% for Q4 / 49.13% for
 Q8**. Throughput is total output tokens divided by the sum of measured
-request-group spans. C8 mixed latency (median / p95): **Q4 6.82 / 9.38 s;
-Q8 8.54 / 12.60 s**. Physical widths, output hashes and acceptance counts are
+request-group spans. C8 mixed latency (median / p95): **Q4 6.75 / 9.33 s;
+Q8 8.36 / 12.37 s**. Physical widths, output hashes and acceptance counts are
 checked at every concurrency; both C1 controls retain their performance.
-The quality guide identifies the separate C1 mixed-corpus control.
+The quality guide records each control's release.
 
 Target quantized projections are the main scaling limit. C1 DFlash2 already
 verifies seven or eight positions together; C2/C4 increase that work to
