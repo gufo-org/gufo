@@ -2715,11 +2715,10 @@ bool InferenceBackend::load(
     return false;
   }
   if (model->HasMtp() && (speculative_config.max_draft_tokens == 0 ||
-                          speculative_config.min_draft_tokens != 1 ||
-                          speculative_config.draft_p_min != 0.0F)) {
+                          speculative_config.min_draft_tokens != 1)) {
     SetError(error,
              "Qwen3.8-Flash-Next MTP drafts a fixed chain; custom draft "
-             "floors and confidence thresholds are unsupported");
+             "floors are unsupported");
     return false;
   }
   try {
