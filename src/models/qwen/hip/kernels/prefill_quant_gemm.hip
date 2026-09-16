@@ -1705,13 +1705,17 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
 
   if (batch > 8) {
     // Paired seven-row blocks avoid a separate tail on these projections.
+    const bool individual_up =
+        m == 17408 && k == 5120 &&
+        (type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ5_K ||
+         type == core::GgmlType::kIQ4_XS);
     const bool iq4_groups = type == core::GgmlType::kIQ4_XS &&
                             ((batch == 28 && ((m == 34816 && k == 5120) ||
                                               (m == 5120 && k == 17408))) ||
                              (batch == 42 && m == 5120 && k == 17408));
     if ((type == core::GgmlType::kQ6_K ||
          (type == core::GgmlType::kQ5_K && m == 5120 && k == 6144) ||
-         iq4_groups) &&
+         iq4_groups || (individual_up && batch <= 42)) &&
         batch <= 56 && batch % 14 == 0 &&
         detail::TryLaunchKQuantSmallBatchWave64(type, w, fp32_x, y, 14, m, k,
                                                 stream, batch / 14)) {
@@ -1761,11 +1765,12 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
           continue;
         }
       }
-      std::size_t width = exact_width && remaining > 8
-                              ? std::min<std::size_t>(16, remaining)
-                          : remaining >= 16 ? 16
-                          : remaining >= 12 ? 12
-                                            : 0;
+      std::size_t width =
+          (exact_width || (individual_up && remaining == 14)) && remaining > 8
+              ? std::min<std::size_t>(16, remaining)
+          : remaining >= 16 ? 16
+          : remaining >= 12 ? 12
+                            : 0;
       const float* input = fp32_x + offset * k;
       float* output = y + offset * m;
       if (width != 0 && q8_projection) {

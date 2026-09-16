@@ -272,13 +272,11 @@ maintained test inputs. Historical experiment reports remain in Git history.
 
 ## Latest measurement provenance
 
-Q4 concurrent DFlash2 and both targets' C1 controls refreshed on
+Both targets' concurrent DFlash2 and C1 controls refreshed on
 **2026-09-16**, release SHA-256:
-`401a2dcc016e065b14b5c7391cd841329190e6a7fc4d183bfb5b83d792aef689`.
-Q4 C1/2/4 repetition and Q8 C1 use the latest paired release controls.
-Q8 C2/4/6/8 retain the **2026-09-15** measurements, release SHA-256:
-`50a49ca8db0baba5c18292b563c5316517eb17a295a608785f2ca2fcfd3951ad`;
-the IQ4 changes do not affect those Q8 projection routes.
+`b95ae1d5af53dd773d678b1dddbd469a9c041d5bb0934e3f4bbf2c4468b9a7c4`.
+Q4 C1/2 repetition and Q8 C4 use the latest paired release controls;
+the other refreshed cells use one warmed pass.
 Q4_K_M draft, adaptive, greedy tg64, context capacity 4096, cached prompts.
 The mixed workload repeats each of the three maintained corpus prompts eight
 times, giving 24 requests divisible by C1/2/4/6/8. Warm every unique prompt before
@@ -286,9 +284,11 @@ measurement. Repetition accepts every proposal; mixed acceptance is 61.21% for
 Q4 and 49.13% for Q8. Reports retain individual latency, physical width, output
 hashes and draft counts. Every C2/4/6/8 request reproduces its isolated target's
 output and acceptance counts. Contemporaneous C1 controls show no regression.
-The IQ4 refresh passed operator checks, complete target concurrency checks on
-Q4/Q8, and all three Q4 draft-precision concurrency checks. Every Q4 C2/4/6/8
-output hash, token count and draft acceptance count matches the prior release.
+The FFN dispatch refresh passed operator checks, complete target concurrency
+checks on Q4/Q8, and all six target/draft-precision concurrency combinations.
+Every C1/2/4/6/8 output hash, token count and draft acceptance count matches the
+prior release. Individual Q4/Q5/IQ4 gate/up projections retain fourteen-row
+groups at combined widths 14/28/42; generation widths up to eight are unchanged.
 
 The C1 mixed-corpus, AR and three-precision single-user draft controls use
 release SHA-256
@@ -332,10 +332,11 @@ two-stage LDS buffering, weight copies and alternative normalization reductions.
 Dense BLAS, split-K for small projections, and convolution/KQ fusion did not
 improve model prefill. Rejected experiments add no production paths.
 
-Cached Q4 repetition/tg128 profiles are about 96%/97% GPU-busy at C2/C4; exact
-quantized projections account for about 88% of GPU time. A dominant paired Q5 FFN projection
-takes 0.89/1.69 ms at those widths. C1 already verifies seven or eight positions
-per block, so additional requests increase the arithmetic work substantially.
+Cached Q4 repetition/tg128 profiles are about 96%/97% GPU-busy at C2/C4.
+Target quantized projections account for about 79% of GPU time, draft
+projections another 9%. A dominant paired Q5 FFN projection takes about
+0.90/1.71 ms at those widths. C1 already verifies seven or eight positions per
+block, so additional requests increase the arithmetic work substantially.
 Retained: wider exact projection groups, native wave64 for measured shapes,
 shared recurrence launches, batched drafting/context injection and target-only
 tails, logit scratch reuse, fourteen/sixteen-row grouping, narrower IQ4 lane

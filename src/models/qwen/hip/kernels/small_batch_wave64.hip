@@ -23,6 +23,12 @@ void Launch(const void* w, const float* x, float* y, std::size_t m,
       };
   const bool down = m == 5120 && k == 17408;
   if constexpr (Batch > 8) {
+    if constexpr (Batch == 14 && Type != core::GgmlType::kQ6_K) {
+      if (m == 17408 && k == 5120) {
+        launch.template operator()<8, 6, 1, 4, 2>();
+        return;
+      }
+    }
     if constexpr (Type == core::GgmlType::kIQ4_XS && Batch == 16) {
       if (down) {
         launch.template operator()<8, 4, 1, 4, Groups == 1 ? 2 : 1, true, 16>();
@@ -138,7 +144,8 @@ void LaunchBatch(const void* w, const float* x, float* y, std::size_t batch,
   // Adjacent workgroups reuse the same weight rows. Fourteen-row groups cover
   // paired seven-row verification blocks without a separate tail.
   if (groups > 1) {
-    if constexpr (Type == core::GgmlType::kIQ4_XS) {
+    if constexpr (Type == core::GgmlType::kIQ4_XS ||
+                  Type == core::GgmlType::kQ4_K) {
       if (batch == 14) {
         if (groups == 2)
           Launch<Type, 14, 2>(w, x, y, m, k, stream);
@@ -362,12 +369,17 @@ bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
                                      std::size_t batch, std::size_t m,
                                      std::size_t k, hipStream_t stream,
                                      std::size_t groups) {
+  const bool individual_up14 =
+      batch == 14 && groups <= 3 && m == 17408 && k == 5120 &&
+      (type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ5_K ||
+       type == core::GgmlType::kIQ4_XS);
   if (batch < 4 || batch > 16 || groups == 0 || groups > 4 ||
       (groups > 1 && batch != 16 &&
        !((type == core::GgmlType::kQ6_K || type == core::GgmlType::kQ5_K) &&
          batch == 14) &&
        !(type == core::GgmlType::kIQ4_XS && batch == 14 &&
-         (groups == 2 || groups == 3)))) {
+         (groups == 2 || groups == 3)) &&
+       !individual_up14)) {
     return false;
   }
   // These bounded dimensions also satisfy the kernel's 32-bit index limits.
@@ -385,7 +397,7 @@ bool TryLaunchKQuantSmallBatchWave64(core::GgmlType type, const void* w,
       if (!head && !((batch == 14 || batch == 16) && projection))
         return false;
     } else if (batch != 12 && batch != 16) {
-      if (!((m == 34816 && k == 5120) || down ||
+      if (!((m == 34816 && k == 5120) || down || individual_up14 ||
             (type == core::GgmlType::kQ5_K && batch == 14 && medium_down)))
         return false;
     } else if (!(up || down || medium_up ||

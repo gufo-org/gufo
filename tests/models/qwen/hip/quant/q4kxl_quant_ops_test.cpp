@@ -792,6 +792,13 @@ int main() {
   TestSmallBatchExactness(iq4, 16, 5120, 17408);
   TestSmallBatchExactness(iq4, 42, 5120, 17408);
   using Type = gufo::core::GgmlType;
+  // Individual gate/up matrices keep fourteen-row blocks intact, including
+  // three concurrent groups that previously needed a separate short tail.
+  for (const auto& format : {FormatCase{Type::kQ4_K, "Q4_K"},
+                             FormatCase{Type::kQ5_K, "Q5_K"}, iq4}) {
+    TestSmallBatchExactness(format, 14, 17408, 5120);
+    TestSmallBatchExactness(format, 42, 17408, 5120);
+  }
   const std::pair<Type, Type> fused_formats[] = {
       {Type::kQ4_K, Type::kQ4_K},     {Type::kQ5_K, Type::kQ5_K},
       {Type::kIQ4_XS, Type::kIQ4_XS}, {Type::kQ4_K, Type::kQ5_K},

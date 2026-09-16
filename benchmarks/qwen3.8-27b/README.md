@@ -61,17 +61,17 @@ three mixed-corpus prompts. Aggregate delivered tok/s:
 
 | Concurrency | Q4 repetition | Q4 mixed corpus | Q8 repetition | Q8 mixed corpus |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 61.41 | 36.70 | 48.03 | 25.10 |
-| 2 | 78.48 | 40.92 | 74.14 | 32.18 |
-| 4 | 88.88 | 45.49 | 86.95 | 35.27 |
-| 6 | 91.14 | 53.46 | 90.39 | 42.01 |
-| 8 | 96.24 | 55.53 | 93.59 | 43.37 |
+| 1 | 61.76 | 36.70 | 49.01 | 25.10 |
+| 2 | 80.71 | 41.48 | 74.12 | 32.07 |
+| 4 | 88.84 | 45.72 | 85.82 | 35.12 |
+| 6 | 92.30 | 53.80 | 90.01 | 41.79 |
+| 8 | 96.31 | 55.61 | 93.07 | 43.14 |
 
 Repetition accepts **100%** of proposals. The mixed corpus contains 24 requests:
 eight each of code, JSON and prose; acceptance is **61.21% for Q4 / 49.13% for
 Q8**. Throughput is total output tokens divided by the sum of measured
-request-group spans. C8 mixed latency (median / p95): **Q4 6.97 / 9.50 s;
-Q8 8.46 / 12.52 s**. Physical widths, output hashes and acceptance counts are
+request-group spans. C8 mixed latency (median / p95): **Q4 6.95 / 9.50 s;
+Q8 8.52 / 12.58 s**. Physical widths, output hashes and acceptance counts are
 checked at every concurrency; both C1 controls retain their performance.
 The quality guide identifies the separate C1 mixed-corpus control.
 
