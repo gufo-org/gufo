@@ -307,7 +307,7 @@ int main() {
   if (!gufo::quant::IsSupported(gufo::core::GgmlType::kF32) ||
       !gufo::quant::IsSupported(gufo::core::GgmlType::kQ8_K) ||
       gufo::quant::IsSupported(gufo::core::GgmlType::kQ4_0) ||
-      gufo::quant::IsSupported(static_cast<gufo::core::GgmlType>(65535))) {
+      gufo::quant::IsSupported(gufo::core::GgmlType::kStrixSHQ4_T16)) {
     std::printf("IsSupported: FAIL\n");
     return 1;
   }

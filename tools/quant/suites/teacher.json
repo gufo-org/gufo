@@ -1,0 +1,10 @@
+{
+  "schema": "gufo.suite.v1",
+  "model": "Qwen/Qwen3.5-0.8B",
+  "prompts": [
+    "The quick brown fox jumps over the lazy dog.",
+    "Quantum computing exploits superposition and entanglement to solve certain problems faster.",
+    "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a",
+    "The capital of France is Paris. The capital of Japan is Tokyo."
+  ]
+}

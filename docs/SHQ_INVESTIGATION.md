@@ -911,7 +911,7 @@ after scoring; the shipped artifacts are untouched.
 - OCP Microscaling formats (MXFP4): <https://arxiv.org/abs/2310.10537>.
 - Strix Halo llama.cpp measurements: <https://github.com/visorcraft/strix-halo-llm-perf>,
   <https://kyuz0.github.io/amd-strix-halo-toolboxes/>.
-- In-repo: [QUANTIZATION.md](QUANTIZATION.md), [GPU_BACKEND.md](GPU_BACKEND.md),
-  [NPU_BACKEND.md](NPU_BACKEND.md), [benchmarks/qwen3.8-27b/README.md](../benchmarks/qwen3.8-27b/README.md),
+- In-repo: [QUANTIZATION.md](QUANTIZATION.md), [GPU_BACKEND.md](https://github.com/gufo-org/gufo/blob/b129eda8aad0e577814fa92bb4c6ca28bd5996c0/docs/GPU_BACKEND.md),
+  [NPU_BACKEND.md](https://github.com/gufo-org/gufo/blob/b129eda8aad0e577814fa92bb4c6ca28bd5996c0/docs/NPU_BACKEND.md), [benchmarks/qwen3.8-27b/README.md](../benchmarks/qwen3.8-27b/README.md),
   [benchmarks/qwen3.5-0.8b/MIXED_PRECISION.md](../benchmarks/qwen3.5-0.8b/MIXED_PRECISION.md),
   [benchmarks/deepseek-v4-flash/README.md](../benchmarks/deepseek-v4-flash/README.md).

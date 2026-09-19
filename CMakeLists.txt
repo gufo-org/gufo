@@ -338,6 +338,9 @@ if (ENGINE_ENABLE_HIP)
 
   option(GUFO_BUILD_DIAG_TOOLS "Build standalone diagnostic tools" OFF)
   if(GUFO_BUILD_DIAG_TOOLS)
+    add_executable(gguf_dump_types tools/quant/gguf_dump_types.cpp)
+    target_link_libraries(gguf_dump_types PRIVATE gufo_core)
+
     add_executable(wmma_layout_test tools/bench/wmma_layout_test.hip)
     target_link_libraries(wmma_layout_test PRIVATE gufo_core hip::device)
   endif()

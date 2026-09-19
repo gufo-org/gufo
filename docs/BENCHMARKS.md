@@ -1,106 +1,223 @@
-# Benchmark methodology
+# Benchmark Methodology
 
-Build with `nix build` and measure binaries under `result/bin`. Per-model
-results and qualification gaps live in:
+How Gufo benchmarks are computed, and which utilities produce them. This
+file documents the method; per-model results live in `benchmarks/<model>/`
+(readmes), never as raw committed artifacts (`artifacts/` is gitignored).
+This method is teacher-forced and matched-token; it is not free-running
+evaluation. Capability evaluation (free-running, answer-graded) is defined
+in [EVAL.md](EVAL.md) and runs through the OpenAI-compatible serving route.
 
-- [DeepSeek V4 Flash](../benchmarks/deepseek-v4-flash/README.md)
-- [Qwen3.8 27B](../benchmarks/qwen3.8-27b/README.md)
-- [Qwen3.8 Flash-Next](../benchmarks/qwen3.8-flash-next/README.md)
-- [Audio](benchmarks/TTS_ASR.md)
-- [MiniMax H3](models/MINIMAX_H3.md#profiling)
+Checked-in JSON retains fixtures, model provenance, calibration inputs and
+bounded result summaries. Serving summaries preserve aggregate metrics and
+per-case completion hashes and the original report digest. Raw samples stay
+in ignored `artifacts/`. Full-logit captures also stay there, except for independent
+reference data required by a maintained correctness test. Downloaded tokenizer
+files and `.direnv` shell state are local files, not repository source; use
+`nix run nixpkgs#cloc -- --vcs=git --force-lang=C++,hip` to count the tracked tree.
 
-## Direct and serving measurements
+## Pipeline (tools/)
 
-`gufo bench` measures the model path. Keep model artifact, prompt length,
-generation length, context depth, speculative mode, and sampling controls
-fixed when comparing runs. `pp2048` means 2,048 new prompt tokens; context
-depth is separate from the amount of new prefill work.
+Benchmarks are the last step of the offline conversion toolchain. Each step
+has one utility; a benchmark consumes the artifacts the earlier steps produce:
 
-`tools/serving/gufo-serving-bench.py` measures HTTP serving with synchronized
-requests. It distinguishes server-stage prefill/decode throughput, scheduler
-and client TTFT, token ITL, whole-request throughput, and aggregate concurrency
-throughput. C1 serving and a direct single-user benchmark are comparable only
-when prompt, cache state, sampling, speculation, and timed scope match.
+```bash
+# 1. download safetensors + tokenizer -> artifacts/source
+# 2. validate safetensors, write source manifest
+tools/quant/gufo-inspect.py --source artifacts/source --revision <sha> \
+  --out artifacts/work/source-manifest.json
 
-Use `aggregate.output_tokens_per_second.overall` for corpus throughput:
-delivered output tokens divided by the sum of measured round spans.
-Per-round medians describe variation; they are not the corpus throughput.
-`measuredSpanMs` excludes warmups and time between rounds.
+# 3. capture full-precision teacher logits + perplexity (matched-token)
+tools/quant/gufo-capture.py --source artifacts/source \
+  --suite tools/quant/suites/teacher.json --out artifacts/teacher
 
-`--endpoint-profile openai` supports other OpenAI-compatible servers. Missing
-server-stage metrics remain null. `--reference-report` compares completion
-hashes against an existing C1 reference; category filters select a focused
-subset. Qualify acceptance with a fresh server so prompt-cache hits do not
-hide work. See [serving benchmark commands](PERFORMANCE.md) for invocation.
+# 4. quantize LM linear projections to SHQ4-T16 U4Z G64
+tools/quant/gufo-quantize.py --source artifacts/source \
+  --out artifacts/quant --plan artifacts/work/quantization-plan.json
 
-`tools/bench/speculative-corpus.py` compares direct autoregressive and
-speculative token traces. Request correctness, acceptance, and end-to-end
-speed are separate requirements.
+# 5. benchmark: candidate-vs-teacher quality + prefill/decode speed
+tools/quant/gufo-bench.py --source artifacts/source --quant artifacts/quant \
+  --suite tools/quant/suites/teacher.json --teacher-artifact artifacts/teacher
+```
+
+Key utilities and their roles:
+
+- `tools/quant/gufo-capture.py` — teacher-forced full-precision logit dump. Logits are
+  chunked by position, zstd-compressed, checksummed into an artifact dir
+  (`manifest.json`, `tokens.u32`, `logits-*.f32.zst`, `metrics.json`).
+  This is the teacher oracle; it is captured once and reused.
+- `tools/quant/gufo-quantize.py` — deterministic SHQ4 conversion. Records per-tensor
+  reconstruction stats (max abs err, rmse, mean abs err) in the plan.
+- `tools/quant/gufo-bench.py` — the benchmark itself. Runs the candidate forward pass,
+  compares candidate logits against the captured teacher artifact, and times
+  prefill/decode on both.
+- `tools/quant/suites/<model>.json` — prompt suite (schema `gufo.suite.v1`):
+  a small fixed set of prompts, tokenized once with the pinned tokenizer.
 
 ## Quality method (matched-token, per position)
 
-Use the independent references and model-owned limits described in
-[testing](TESTING.md). Tokenize once and feed teacher and candidate the same
-predetermined history. Compare full next-token distributions before appending
-the next evaluation token. Free-running text cannot isolate numerical error
-after the first differing choice.
+Per `docs/TESTING.md`: quantization comparisons are teacher forced, not
+free-running. One tokenization; the same input prefix drives both teacher and
+candidate; compare their full next-token distributions; append the
+predetermined evaluation token, never each model's sampled token. This
+isolates intrinsic quantization error from trajectory divergence.
+
+For each prompt, at every position:
 
 ```text
-p_t = softmax(teacher_logits)
-p_c = softmax(candidate_logits)
+p_t = softmax(z_t)   # teacher logits (captured artifact, f32)
+p_c = softmax(z_c)   # candidate logits (forward run)
 KL  = sum_v p_t[v] * (log p_t[v] - log p_c[v])
 NLL = -log(p_c[target_token])
 ```
 
-Record non-finite counts, normalized-logit error, KL, teacher-token
-NLL/perplexity, top-1 agreement, and top-k overlap as applicable. Aggregates
-are over scored positions. A changed tokenizer, template, suite, or history
-changes the comparison identity.
+Aggregates over all scored positions (`quality.py`):
 
-Capability evaluation is separate: [gufo eval](EVAL.md) grades free-running
-answers through the OpenAI-compatible server.
+- KL: mean, median, p95, p99, p99.9, max
+- teacher-token NLL and corpus perplexity
+- top-1 agreement; top-5 / top-k set overlap
+- candidate probability on the teacher top-1 token
+- rank displacement of the teacher top-1 token
+- max and RMS diff of normalized log probabilities
+- count of non-finite values
 
-## Focused kernel measurements
+Current slice reports mean/median/p95/p99/max KL, top-1 agreement, and
+teacher + candidate perplexity.
 
-`gufo-kernel-bench` exercises production HIP entry points without loading a
-model. Correctness sentinels run outside the timed interval:
+### Position count and Artifact Schema
+
+`positions` in a report equals the total number of scored next-token positions
+across all suite prompts. The captured teacher logit artifact follows the
+`gufo.logit-artifact.v1` schema with chunked zstd compression, dynamic
+vocabulary extraction for Qwen3.5-4B and Qwen3.8-27B, and SHA-256 chunk
+manifest validation.
+
+The committed suite identity is:
+
+```text
+tools/suites/teacher.json
+sha256: b33862883e78e7500cc8553cffe68ec8c44ca5ac1ceca8cbccb3070f6d42b131
+```
+
+KL aggregates are computed over positions, not prompts. A changed suite hash or
+position count creates a new benchmark identity and must not be compared as the
+same run.
+
+### Per-layer breakdown (planned)
+
+The first slice measures whole-model, whole-prompt quality: one KL per scored
+position, aggregated model-wide. It does not isolate which layer or tensor
+contributes the KL tail. Per-layer and per-tensor attribution (layer-output
+error, per-layer KL, first-divergent-layer search) is a planned refinement;
+`gufo-quantize.py` already records per-tensor reconstruction stats, and
+[the testing guide](TESTING.md#matched-token-and-layer-comparisons) documents
+layer-boundary comparisons. Imatrix search was
+implemented before this planned prerequisite; per-layer attribution is now a
+required catch-up gate before selecting the Qwen3.8-27B production recipe or
+promoting native quantized kernels.
+
+## Speed method (CPU reference runtime)
+
+Speed is measured only after logits are comparable
+(`docs/TESTING.md`: correctness before performance counts).
+
+- Prefill: full-prompt forward (all suite prompts), summed tokens.
+- Decode: single-token forward, repeated.
+- Both teacher and candidate run through the same pinned torch reference path,
+  timed with `time.perf_counter`, median of `--repeats` runs (default 2).
+
+Important: candidate speed here is the reference runtime after
+dequant-reload-to-bf16 — it measures SHQ4 dequant cost, not Gufo kernels.
+Real kernel speed (HIP gfx1151 / XDNA2 AIE2P consuming packed planes
+directly) is a separate, later milestone. Kernel benchmarks will record the
+backend and kernel name per timing row.
+
+## Focused GPU kernel benchmarks
+
+`gufo-kernel-bench` measures production HIP entry points without loading a
+model. It covers matrix operations, attention, DeltaNet, normalization, and
+elementwise kernels. Correctness sentinels run outside the timed interval.
 
 ```sh
 ./result/bin/gufo-kernel-bench --list
 ./result/bin/gufo-kernel-bench \
-  --case decode-attention --context 4096,8192,12288,16384 \
-  --warmup 5 --repetitions 30 --json
+  --case decode-attention \
+  --context 4096,8192,12288,16384 \
+  --warmup 5 \
+  --repetitions 30 \
+  --json
 ```
 
-Standalone microbenchmarks under `tools/bench` and model-specific tool folders
-report component correctness alongside timing. Their numbers do not replace
-end-to-end model measurements. Collect profiler traces separately and use
-[the performance guide](PERFORMANCE.md) to identify the limiting operation.
+The JSON report records shapes, raw HIP-event samples, summary latency,
+dispatch choices, and a privacy-safe machine fingerprint. Collect profiler
+resource data in a separate `rocprofv3` pass.
 
-## Reporting and artifact retention
+`tune_hipblaslt` creates an optional hardware/ROCm-bound plan database.
+`tools/qwen27b/deltanet_bench.hip` compares exact recurrence and state-only
+replay kernels at block lengths 1-16. Full-logit rollback checks live in the
+Qwen27B model suite.
+Generated databases, traces, and replay reports are local artifacts and are
+not committed. See [Performance Engineering](PERFORMANCE.md) for commands and
+promotion rules.
 
-Record model/engine revisions, artifact hashes, hardware/software fingerprint,
-input identity, context, output count, sampling, concurrency, cache state,
-oracle identity, and the exact timed scope. A numerical mismatch or device
-failure is not a passing result. Add repetitions when timing noise or a
-suspected regression requires them.
+## Serving benchmark
 
-Checked-in JSON retains fixtures, model provenance, controller calibration,
-and bounded result summaries. Serving summaries preserve aggregate metrics,
-per-case completion hashes, and the original report digest. Raw samples,
-profiler traces, generated tuning databases, and full-logit captures stay in
-ignored `artifacts/`, except for independent reference data needed by a
-maintained correctness test.
+`tools/serving/gufo-serving-bench.py` is the canonical HTTP serving harness. It sends
+synchronized streamed Chat Completions requests at C=1, C=2, and C=4 by
+default. Its `gufo.serving-benchmark.v1` artifact reports direct server-stage
+prefill/decode throughput, scheduler and client TTFT, token ITL, whole-request
+throughput, and aggregate concurrency throughput as distinct metrics.
 
-Serving reports exclude endpoint hosts, prompts, generated text, model paths,
-raw token IDs, and timestamps. The canonical machine fingerprint excludes
-hostnames, usernames, secrets, timestamps, and private paths.
-`gufo diagnose --validate-artifact` validates its supported diagnostic schema;
-each model/tool owns the validation of its own result schema.
+The harness consumes the terminal `usage.gufo` metrics emitted by
+`gufo serve llm`, retains every request and round sample, and summarizes
+median, p95, and p99 behavior. It embeds the canonical machine fingerprint and
+source revision while excluding endpoint hosts, prompts, generated text, local
+paths, raw token IDs, and timestamps.
 
-Downloaded tokenizer files and `.direnv` shell state are local artifacts.
-Count tracked source, including HIP translation units, with:
+Use `aggregate.output_tokens_per_second.overall` for corpus throughput: total
+delivered tokens divided by the sum of measured round spans. The human table
+prints it as `output tok/s` next to the total-token rate. Per-round medians
+remain available for timing variation, but do not describe throughput over a
+mixed corpus. `measuredSpanMs` excludes warmups and time between rounds.
 
-```sh
-nix run nixpkgs#cloc -- --vcs=git --force-lang=C++,hip
-```
+`--endpoint-profile openai` runs the same request schedule against any
+OpenAI-compatible server (for example `llama-server`). Plain `usage` is
+enough; server-stage fields become `null`, and llama-server `timings`
+(`prompt_n`, `predicted_ms`, `draft_n_accepted`, `cache_n`, ...) are parsed
+when present (`metricsSources` records which). `--no-cache-prompt` sends
+`cache_prompt=false` so llama-server does not reuse prompts across rounds.
+`--category`/`--exclude-category` split a suite into groups, and
+`--reference-report` compares every completion hash against another
+artifact's C=1 completions instead of this run's own; `completionExactness`
+then reports matched requests, matched cases, and
+`matchedRoundOutputTokensPerSecond` over rounds whose outputs all matched.
+`--note` stores server flags and versions in the artifact.
+
+## Machine Fingerprint & Artifact Binding
+
+All diagnostic and benchmark artifacts must embed a canonical machine fingerprint
+and its SHA-256 identifier (`fingerprintId`):
+
+- **Canonical Identity**: Records pinned CPU topology, gfx1151 GPU identity/CUs,
+  XDNA2 NPU identity, kernel drivers (`amdgpu`, `amdxdna`), ROCm/HIP, and XRT toolchain pins.
+- **Privacy Redaction**: Hostnames, usernames, process secrets, timestamps, and local
+  user paths are strictly excluded from the canonical identity and forbidden in benchmark artifacts.
+- **Validation**: Artifacts can be validated with `gufo diagnose --validate-artifact <path>`,
+  which checks schema compliance (`schemaVersion: 1.0.0`), re-hashes canonical fields,
+  and rejects mismatched fingerprints or incompatible architectures.
+
+## Reporting rules
+
+Every report records, at minimum:
+
+- Machine `fingerprintId` referencing the canonical machine fingerprint.
+- Source repo + immutable revision, source storage dtype (bf16), accumulation
+  contract.
+- Candidate: which tensors quantized, the SHQ4 scheme (T16, U4Z, group size),
+  tensor count, artifact size.
+- Suite hash and scored position count.
+- Oracle runtime and version.
+- `--json` output is machine-readable; human form prints speed then quality.
+
+A benchmark result is only comparable against another result with the same
+machine fingerprint, source revision, suite, tokenizer, and reference runtime. Do not average
+numbers across revisions or suites.

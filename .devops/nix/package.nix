@@ -54,6 +54,8 @@ let
       || relativePath == "tools/bench/tune_hipblaslt.cpp"
       || relativePath == "tools/bench/benchmark_ssm_replay.cpp"
       || relativePath == "tools/bench/wmma_layout_test.hip"
+      || relativePath == "tools/quant"
+      || relativePath == "tools/quant/gguf_dump_types.cpp"
       || relativePath == "tools/gufo"
       || relativePath == "tools/gufo/compile_h3_attention.py"
       || relativePath == "tools/gufo/h3_attention_kernel.py";

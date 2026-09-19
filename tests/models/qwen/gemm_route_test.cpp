@@ -45,7 +45,8 @@ void TestFormatCapabilities() {
       GgmlType::kQ6_K,          GgmlType::kQ8_K,
       GgmlType::kIQ2_XXS,       GgmlType::kIQ4_NL,
       GgmlType::kIQ3_S,         GgmlType::kIQ4_XS,
-      GgmlType::kBF16,
+      GgmlType::kBF16,          GgmlType::kStrixSHQ4_T16,
+      GgmlType::kStrixSHQ6_T16, GgmlType::kStrixSHQ8_T16,
   };
   for (const auto type : all_types) {
     const auto descriptor = DescribeQwenGemmFormat(type);

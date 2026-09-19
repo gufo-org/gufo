@@ -1,0 +1,31 @@
+{
+  "schema": "gufo.suite.v1",
+  "model": "Qwen/Qwen3.5-0.8B",
+  "prompts": [
+    "Write a haiku about autumn leaves falling in a city park.",
+    "Explain the water cycle in three sentences suitable for a child.",
+    "def quicksort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[len(arr) // 2]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    return quicksort(left) + middle + quicksort(right)",
+    "List the first ten prime numbers and explain why 2 is the only even prime.",
+    "Translate 'Good morning, how are you today?' into French, Spanish, and Japanese.",
+    "The mitochondria is known as the powerhouse of the cell because it produces ATP through cellular respiration.",
+    "Write a short story in exactly fifty words about a robot learning to paint.",
+    "What is the difference between TCP and UDP? Give one practical use case for each.",
+    "Summarize the plot of Hamlet in two paragraphs without spoiling the ending.",
+    "Calculate the area of a circle with radius 7 cm. Show your working.",
+    "def bubble_sort(arr):\n    n = len(arr)\n    for i in range(n):\n        for j in range(0, n - i - 1):\n            if arr[j] > arr[j + 1]:\n                arr[j], arr[j + 1] = arr[j + 1], arr[j]\n    return arr",
+    "A train leaves station A at 9:00 AM traveling 60 km/h. Another train leaves station B at 10:00 AM traveling 80 km/h. If the stations are 300 km apart, when do they meet?",
+    "Explain how neural networks learn from data, mentioning gradients and backpropagation.",
+    "Write a JSON object describing a user profile with name, age, email, and a list of hobbies.",
+    "The recipe for a classic margherita pizza requires pizza dough, tomato sauce, fresh mozzarella, and basil.",
+    "Describe the process of photosynthesis including the role of chlorophyll and sunlight.",
+    "What are three practical tips for improving code performance in Python?",
+    "Give me a haiku, a limerick, and a sonnet about the ocean.",
+    "How does a hash table achieve O(1) average lookup time? Discuss collisions.",
+    "The Great Barrier Reef is the world's largest coral reef system, composed of over 2,900 individual reefs.",
+    "Write a Python function that checks whether a string is a valid palindrome ignoring spaces and case.",
+    "Explain the difference between supervised and unsupervised learning with examples.",
+    "Why is the sky blue? Explain Rayleigh scattering in simple terms.",
+    "def binary_search(arr, target):\n    lo, hi = 0, len(arr) - 1\n    while lo <= hi:\n        mid = (lo + hi) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            lo = mid + 1\n        else:\n            hi = mid - 1\n    return -1",
+    "Compare the Roman Empire and the Han Dynasty in terms of trade, engineering, and collapse."
+  ]
+}
