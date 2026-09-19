@@ -1,0 +1,14 @@
+00394605708dd377f3e50fa942f1b7ea1c377a3d96b1b40ffaaefa62702cdb10  benchmarks/shq-review-2026-09-13/source/fp4_study_0731.json
+9b861fef880aa8f333fc2942d084aa4ea7e8e4c38e4f675c8a573cfce0c2adf0  benchmarks/shq-review-2026-09-13/source/fp4_study_0731.py
+c3c8d47214a3bf62439feefae64d06399e29caef257bc88d263bc2d5982d4539  benchmarks/shq-review-2026-09-13/source/gguf_scan.json
+1309de14a2688ff8e228aa6d526ad904a09cb8336c64a57f470017ee50439276  benchmarks/shq-review-2026-09-13/source/kl-attnQ4K-shexpQ8.log
+b7c05be46651933d8b7c491490e2ea7dc8bfe5565c7993b9013cc5a70652f3f3  benchmarks/shq-review-2026-09-13/source/kl-attnQ5K.log
+382d475461caee362174daa7e27dc480cef5b34c0ac8d20efcfcbc7154a6848a  benchmarks/shq-review-2026-09-13/source/kl-attnq4k.log
+d9908606f2aee6636c354889567c3809f0894a021328e1fe1538e8af1ca195ce  benchmarks/shq-review-2026-09-13/source/kl-denseQ6K.log
+4131c206b0fdf475f85e05894e793a6177d0ddb09346f476303104754ce5d45c  benchmarks/shq-review-2026-09-13/source/qwen-kl-q4.log
+a778857de4c8e7f47fabd0daf78abf105ca174e263f83069aaf6cd96f7565f62  benchmarks/shq-review-2026-09-13/source/qwen-kl-q4_0-pure.log
+68edb06ca487921d2e7a16fdc79a458689e82af4e66906b74b5eec33b9457152  benchmarks/shq-review-2026-09-13/source/qwen-kl-q4_1-pure.log
+f72ae5d5e2b635c1d9a018a57654a5e021b6cc21528bdb4a4d2ee5c8ac2a892a  benchmarks/shq-review-2026-09-13/source/qwen-kl-q4_k-pure.log
+e99f2fac4a98e12d421ffb9b6c5016d831107a5f5c2251e6bbe82c147f68a2a7  benchmarks/shq-review-2026-09-13/source/shq_gemv_bench.hip
+502f2a3321dcddf621cb12ece541f41f7fce02c22006edc2ef77afdfb61d473d  benchmarks/shq-review-2026-09-13/source/variants.sh
+821e85507e72607c5f213de6860e551da5ffe01c6d38ae8e24baa420f4d2960d  benchmarks/shq-review-2026-09-13/source/w4_unpack_wmma.hip

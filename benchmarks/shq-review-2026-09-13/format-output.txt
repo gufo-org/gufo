@@ -1,0 +1,6 @@
+SHQ6 G32: 832 bytes/1024 weights = 6.5 bpw
+SHQ6 G64: 800 bytes/1024 weights = 6.25 bpw
+Proposed SHQ5: all 32 signed codes round-trip; S5=5.25, U5Z=5.328125 bpw
+Allowed floating-search scale example: 0.00351562514, frexp=(0.9000000357627869, -8); not an E8M0 power of two
+Constructed legal MXFP4 block: best grid scale=0.0052734375, squared error=0.0004895019229; selected scale is not a power of two
+PASS (representation checks only)

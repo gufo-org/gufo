@@ -1,0 +1,18 @@
+metadata {'total_size': 166878536440}
+shards 48
+layers.4.attn.indexer.wq_b.weight model-00006-of-00048.safetensors {'dtype': 'F8_E4M3', 'shape': [8192, 1024], 'data_offsets': [228116568, 236505176]}
+layers.4.attn.indexer.wq_b.scale model-00006-of-00048.safetensors {'dtype': 'F8_E8M0', 'shape': [64, 8], 'data_offsets': [26781400, 26781912]}
+layers.5.ffn.shared_experts.w1.weight model-00007-of-00048.safetensors {'dtype': 'F8_E4M3', 'shape': [2048, 4096], 'data_offsets': [322205016, 330593624]}
+layers.5.ffn.shared_experts.w1.scale model-00007-of-00048.safetensors {'dtype': 'F8_E8M0', 'shape': [16, 32], 'data_offsets': [215248728, 215249240]}
+layers.5.attn.wq_a.weight model-00007-of-00048.safetensors {'dtype': 'F8_E4M3', 'shape': [1024, 4096], 'data_offsets': [284456280, 288650584]}
+layers.5.attn.wkv.weight model-00007-of-00048.safetensors {'dtype': 'F8_E4M3', 'shape': [512, 4096], 'data_offsets': [215250264, 217347416]}
+layers.5.attn.wo_a.weight model-00007-of-00048.safetensors {'dtype': 'F8_E4M3', 'shape': [8192, 4096], 'data_offsets': [217347416, 250901848]}
+layers.5.attn.wo_b.weight model-00007-of-00048.safetensors {'dtype': 'F8_E4M3', 'shape': [4096, 8192], 'data_offsets': [250901848, 284456280]}
+layers.5.ffn.gate.weight model-00007-of-00048.safetensors {'dtype': 'BF16', 'shape': [256, 4096], 'data_offsets': [11810264, 13907416]}
+embed.weight model-00001-of-00048.safetensors {'dtype': 'BF16', 'shape': [129280, 4096], 'data_offsets': [0, 1059061760]}
+head.weight model-00045-of-00048.safetensors {'dtype': 'BF16', 'shape': [129280, 4096], 'data_offsets': [262164, 1059323924]}
+layers.5.ffn.experts.0.w1.weight model-00007-of-00048.safetensors {'dtype': 'I8', 'shape': [2048, 2048], 'data_offsets': [347370840, 351565144]}
+layers.5.ffn.experts.0.w1.scale model-00007-of-00048.safetensors {'dtype': 'F8_E8M0', 'shape': [2048, 128], 'data_offsets': [13922136, 14184280]}
+layers.5.attn.wq_b.weight model-00007-of-00048.safetensors {'dtype': 'F8_E4M3', 'shape': [32768, 1024], 'data_offsets': [288650584, 322205016]}
+layers.5.attn.wq_b.scale model-00007-of-00048.safetensors {'dtype': 'F8_E8M0', 'shape': [256, 8], 'data_offsets': [13920088, 13922136]}
+head.scale not present

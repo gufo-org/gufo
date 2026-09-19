@@ -1,0 +1,4 @@
+KL Q5 minus Q6 mean 0.01409 positive chunks 24 paired chunk bootstrap 95% [0.01166708 0.01666834]
+NLL Q5 minus Q6 mean -0.012580000000000001 positive chunks 5 paired chunk bootstrap 95% [-0.01994376 -0.00557916]
+kl-attnQ5K.log NLL vs base mean -0.0025300000000000006 paired chunk bootstrap95 [-0.00885044  0.00374044]
+kl-denseQ6K.log NLL vs base mean 0.01005 paired chunk bootstrap95 [0.00445832 0.01560918]

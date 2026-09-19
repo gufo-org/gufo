@@ -18,7 +18,7 @@
 
 namespace gufo::core {
 
-/// GGML tensor types used by supported model artifacts.
+/// GGML tensor types including standard GGML and custom Strix Halo layouts.
 enum class GgmlType : std::uint16_t {
   kF32 = 0,
   kF16 = 1,
@@ -39,6 +39,12 @@ enum class GgmlType : std::uint16_t {
   kIQ3_S = 21,
   kIQ4_XS = 23,
   kBF16 = 30,
+
+  // Strix Halo specialized hardware quantization types (Wave32 & XDNA2 NPU
+  // aligned)
+  kStrixSHQ4_T16 = 1000,
+  kStrixSHQ6_T16 = 1001,
+  kStrixSHQ8_T16 = 1002,
 };
 
 [[nodiscard]] constexpr std::string_view ToString(GgmlType type) noexcept {
@@ -81,6 +87,12 @@ enum class GgmlType : std::uint16_t {
       return "IQ4_XS";
     case GgmlType::kBF16:
       return "BF16";
+    case GgmlType::kStrixSHQ4_T16:
+      return "GUFO_SHQ4_T16";
+    case GgmlType::kStrixSHQ6_T16:
+      return "GUFO_SHQ6_T16";
+    case GgmlType::kStrixSHQ8_T16:
+      return "GUFO_SHQ8_T16";
   }
   return "UNKNOWN";
 }
