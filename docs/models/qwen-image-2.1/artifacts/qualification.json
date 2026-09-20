@@ -109,7 +109,7 @@
     "seeded_png_replay": true,
     "n2_independent_seeds": true,
     "concurrent_independent_seeds": true,
-    "disconnect_recovery_seconds": 0.4278549760347232,
+    "disconnect_recovery_seconds": 0.3483211320126429,
     "openai_sdk_llama_swap": {
       "openai_sdk": "2.41.1",
       "llama_swap_model_alias": "qwen-image-test",
@@ -119,7 +119,9 @@
       "non_square": "64x96",
       "opaque_alpha": true,
       "llama_swap_revision": "96e6f94c018b51ae9cfc420b3166cfcace5bf97a"
-    }
+    },
+    "resized_request_replay": true,
+    "edit_seeded_png_replay": true
   },
   "attention_optimization": {
     "fp64_operator_oracle": true,
@@ -146,5 +148,21 @@
     "exact_model_boundaries_and_png": 156,
     "normalization_fp64_operator_oracle": true,
     "packing_is_byte_permutation": true
+  },
+  "development_control": {
+    "date": "2026-09-20",
+    "output": "1024x1024",
+    "steps": 2,
+    "seed": 42,
+    "warm": true,
+    "http_seconds": 8.310854669078253,
+    "prompt_seconds": 0.0914529,
+    "denoise_seconds": 6.40743,
+    "vae_seconds": 1.51849,
+    "separate_gpu_profile_seconds": 7.8997,
+    "gpu_idle_percent": 1.4,
+    "native_projection_seconds": 3.8916,
+    "fused_attention_seconds": 1.85318,
+    "full_40_step_performance": "TODO"
   }
 }

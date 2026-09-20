@@ -60,11 +60,12 @@ def main():
             result = json.load(response)
         elapsed = time.perf_counter() - start
         images = []
+        expected_size = tuple(map(int, fields["size"].split("x")))
         for item in result["data"]:
             raw = base64.b64decode(item["b64_json"], validate=True)
             with Image.open(io.BytesIO(raw)) as image:
                 image.load()
-                assert image.format == "PNG" and image.size == (args.size, args.size)
+                assert image.format == "PNG" and image.size == expected_size
             images.append(raw)
         assert len(images) == fields.get("n", 1)
         return images, elapsed
@@ -95,6 +96,9 @@ def main():
         with ThreadPoolExecutor(max_workers=2) as pool:
             actual = list(pool.map(send, [fields, peer]))
         assert [value[0][0] for value in actual] == expected, "concurrency changed images"
+        side = args.size + 32
+        send(dict(fields, size=f"{side}x{side}"))
+        assert send(fields)[0][0] == previous, "changing image size contaminated replay"
         # Send an expensive request, disconnect, then reuse the same process.
         url = urllib.parse.urlsplit(args.url)
         connection_class = (http.client.HTTPSConnection if url.scheme == "https"
@@ -108,7 +112,7 @@ def main():
         recovery, elapsed = send(fields)
         assert recovery[0] == previous, "disconnect contaminated subsequent generation"
         assert elapsed < 30, "disconnected request kept the model busy"
-        report["isolation"] = {"n2": True, "concurrency": True,
+        report["isolation"] = {"n2": True, "concurrency": True, "resized_request": True,
                                "disconnect_recovery_seconds": elapsed}
         print(json.dumps(report["isolation"]), flush=True)
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")

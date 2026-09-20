@@ -20,6 +20,7 @@
 | Larger VAE convolution chunks | Rejected; mixed gains and changed rounding. |
 | Larger hipBLASLt workspace | Rejected; no useful gain in the measured projection shapes. |
 | Coalesced convolution input reads with LDS transpose | Retained; exact layout, including padding, down/upscaling and partial tiles. |
+| Bound unused GPU scratch to 8 GiB and reclaim it on allocation failure | Retained; avoids accumulating stale sizes across requests without changing live model state. |
 | Encode PNG once using libpng’s bounded output size | Retained; avoids a redundant compression pass without changing pixels or encoding. |
 | Fuse only softmax normalization and the value product | Superseded by complete attention fusion. |
 | Vectorized tiled head-layout conversion | Retained; exact for aligned, ragged and grouped-query inputs. |

@@ -61,8 +61,8 @@ and wave-normalization optimizations, plus two-way QK-loop unrolling, preserve
 all 156 saved model boundaries and the PNG exactly; normalization keeps the
 original reduction order.
 
-Serving checks cover seeded PNG replay, independent `n=2`/concurrent seeds and
-disconnect recovery. OpenAI Python SDK 2.41.1 also passed JSON generation and
+Serving checks cover generation/edit PNG replay, independent `n=2`/concurrent
+seeds, replay after changing image size, and disconnect recovery (0.35 s). OpenAI Python SDK 2.41.1 also passed JSON generation and
 two-reference multipart editing through the pinned llama-swap, including model
 aliases, non-square output and opaque alpha. All requests used localhost.
 

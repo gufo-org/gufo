@@ -562,12 +562,29 @@ Matrix Matrix::Reshape(int r, int c) const {
 }
 
 struct Runtime::Pool {
+  static constexpr std::size_t kMaxCachedBytes = 8ULL << 30;
   std::multimap<std::size_t, void*> free;
-  ~Pool() {
+  std::size_t cached_bytes{0};
+  ~Pool() { Clear(); }
+  void Clear() noexcept {
     for (auto [size, p] : free) {
       (void)size;
       (void)hipFree(p);
     }
+    free.clear();
+    cached_bytes = 0;
+  }
+  void Release(void* p, std::size_t bytes) noexcept {
+    if (bytes <= kMaxCachedBytes - cached_bytes) {
+      try {
+        free.emplace(bytes, p);
+        cached_bytes += bytes;
+        return;
+      } catch (...) {
+        // Returning a tensor during exception unwinding must not throw.
+      }
+    }
+    (void)hipFree(p);
   }
   std::shared_ptr<void> Allocate(std::size_t bytes,
                                  const std::shared_ptr<Pool>& self) {
@@ -576,12 +593,20 @@ struct Runtime::Pool {
     if (it != free.end() && it->first <= bytes * 2) {
       bytes = it->first;
       p = it->second;
+      cached_bytes -= bytes;
       free.erase(it);
     } else {
-      Check(hipMalloc(&p, bytes));
+      auto status = hipMalloc(&p, bytes);
+      if (status == hipErrorOutOfMemory && !free.empty()) {
+        Clear();
+        (void)hipGetLastError();
+        status = hipMalloc(&p, bytes);
+      }
+      Check(status);
     }
-    return std::shared_ptr<void>(
-        p, [self, bytes](void* value) { self->free.emplace(bytes, value); });
+    return std::shared_ptr<void>(p, [self, bytes](void* value) noexcept {
+      self->Release(value, bytes);
+    });
   }
 };
 
