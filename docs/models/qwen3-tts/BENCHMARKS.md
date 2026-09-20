@@ -19,19 +19,20 @@ Per-variant endpoint latency:
 
 ## Streaming
 
-2026-09-20, Nix production binary, CustomVoice, resident model, 64 codec frames
+2026-09-20, Nix production `0715cf0`, CustomVoice, resident model, 64 codec frames
 (5.12 seconds of audio), seed 42; talker top-k 20 / top-p 0.85 / T 0.7,
-predictor top-k 30 / top-p 0.9 / T 0.8. One warmup, one check per transport:
+predictor top-k 30 / top-p 0.9 / T 0.8. One warmup, one check per transport;
+loopback clients, WebSocket TCP_NODELAY enabled:
 
 | Transport | First audio | Complete request |
 | --- | ---: | ---: |
-| Buffered WAV | 2.036 s | 2.036 s |
-| PCM HTTP | 0.324 s | 2.068 s |
-| SSE | 0.322 s | 2.059 s |
-| WebSocket | 0.361 s | 2.099 s |
+| Buffered WAV | 2.034 s | 2.034 s |
+| PCM HTTP | 0.324 s | 2.072 s |
+| SSE | 0.323 s | 2.064 s |
+| WebSocket | 0.321 s | 2.061 s |
 
 All four return identical PCM bytes. Two simultaneous requests also reproduce
-those bytes, finishing in 2.037 / 4.073 s. These bounded controls measure early
+those bytes, finishing in 2.037 / 4.070 s. These bounded controls measure early
 delivery; they do not claim increased TTS model throughput or natural EOS.
 
 A default-sampling CustomVoice paragraph reaches EOS at 208 frames / 16.64 s
@@ -44,8 +45,8 @@ Current sampled 64-frame CustomVoice control (same input as above):
 
 | C | Request completion times |
 | ---: | --- |
-| 1 | 2.036 s |
-| 2 | 2.037 / 4.073 s |
+| 1 | 2.034 s |
+| 2 | 2.037 / 4.070 s |
 | 4 | TODO |
 | 6 | TODO |
 | 8 | TODO |

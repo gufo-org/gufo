@@ -85,7 +85,8 @@ prompt and speaker/speech-encoder boundaries. Keep pinned contract hashes,
 shapes, dtype and upstream provenance with each generated reference.
 
 CPU request checks cover independent talker/predictor controls, nucleus
-semantics, top-k ties and stream cancellation. `audio_websocket_test` covers
+semantics, top-k ties, stream cancellation and rejection of nonfinite waveform
+samples before WAV/PCM conversion. `audio_websocket_test` covers
 the actual socket protocol, authentication, fragmented Unicode, ping/close and
 multiple utterances without loading models. The retained waveform tolerances
 remain MAE `<1e-5`, maximum error `<1e-4`; do not relax them for streaming.

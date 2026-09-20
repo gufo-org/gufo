@@ -53,7 +53,7 @@ nix develop -c python3 src/models/qwen3_asr/tools/benchmark.py \
 
 Use one resident runtime and one warmup; repeat only when timing variance needs
 investigation. Report the exact fixture/engine/model identities. A 2026-09-20
-production file-SSE control completes the retained 15.05-second fixture in
-991 ms with identical transcript text. A two-utterance Realtime check matches
+production `0715cf0` file-SSE control completes the retained 15.05-second fixture
+in 994 ms with identical transcript text. A two-utterance Realtime check matches
 uploads of identical 24-kHz PCM. Current long-form corpus and C6 throughput:
 **TODO**. Raw output stays outside Git.
