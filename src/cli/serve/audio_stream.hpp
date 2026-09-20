@@ -2,6 +2,7 @@
 #define GUFO_SERVER_AUDIO_STREAM_HPP_
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -9,10 +10,13 @@
 
 namespace gufo::server {
 
+// An empty result for nonempty input reports an invalid waveform.
 inline std::string EncodePcm16(std::span<const float> samples) {
   std::string bytes;
   bytes.reserve(samples.size() * 2);
   for (const float sample : samples) {
+    if (!std::isfinite(sample))
+      return {};
     const auto value = static_cast<std::uint16_t>(
         static_cast<std::int16_t>(std::clamp(sample, -1.0F, 1.0F) * 32767.0F));
     bytes.push_back(static_cast<char>(value & 255));

@@ -429,6 +429,49 @@ void TestBaseContract() {
         "Base speaker-embedding-only mode does not require reference text");
 }
 
+void TestInvalidWaveform() {
+  for (const float sample : {std::numeric_limits<float>::quiet_NaN(),
+                             std::numeric_limits<float>::infinity(),
+                             -std::numeric_limits<float>::infinity()}) {
+    TtsService service(TtsServiceOptions{
+        .validate_model = false,
+        .voices = {"vivian"},
+        .runner =
+            [sample](const auto& request, const auto&, auto* result, auto*) {
+              result->sample_rate = 24000;
+              result->samples = {0, sample};
+              return !request.on_audio || request.on_audio(result->samples);
+            },
+    });
+    const auto wav =
+        Send(service, "POST", "/v1/audio/speech",
+             R"({"model":"qwen3-tts","input":"x","voice":"vivian"})");
+    Check(wav.status == 500 &&
+              wav.body.find("invalid_audio") != std::string::npos,
+          "nonfinite WAV samples fail before conversion");
+    for (const auto format : {"audio", "sse"}) {
+      auto response = Send(
+          service, "POST", "/v1/audio/speech",
+          std::string(
+              R"({"model":"qwen3-tts","input":"x","voice":"vivian","response_format":"pcm","stream_format":")") +
+              format + "\"}");
+      std::string body;
+      response.streaming_body([&](std::string_view bytes) {
+        body.append(bytes);
+        return true;
+      });
+      Check(response.stream_log->error_code == "invalid_audio",
+            "nonfinite streaming samples report invalid audio");
+      Check(body.find("speech.audio.delta") == std::string::npos &&
+                body.find("speech.audio.done") == std::string::npos &&
+                (format == std::string_view("sse")
+                     ? body.find("event: error") != std::string::npos
+                     : body.empty()),
+            "invalid audio never becomes PCM or a successful terminal event");
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -439,6 +482,7 @@ int main() {
   TestValidationAndVoices();
   TestVoiceDesignContract();
   TestBaseContract();
+  TestInvalidWaveform();
   std::cout << "PASS qwen3_tts_audio_api_test\n";
   return 0;
 }

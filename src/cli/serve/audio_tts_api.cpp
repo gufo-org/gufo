@@ -119,6 +119,8 @@ std::string EncodeWav(std::span<const float> samples,
   output.append("data", 4);
   AppendU32(&output, data_bytes);
   for (const float sample : samples) {
+    if (!std::isfinite(sample))
+      return {};
     const float bounded = std::clamp(sample, -1.0F, 1.0F);
     const auto pcm =
         static_cast<std::int16_t>(bounded * static_cast<float>(32767));
@@ -421,10 +423,15 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
       const auto started = std::chrono::steady_clock::now();
       std::size_t samples = 0;
       bool disconnected = false;
+      bool invalid_audio = false;
       synthesis.on_audio = [&](std::span<const float> chunk) {
         if (cancelled && cancelled())
           return false;
         std::string bytes = EncodePcm16(chunk);
+        if (!chunk.empty() && bytes.empty()) {
+          invalid_audio = true;
+          return false;
+        }
         if (sse) {
           auto event = json::Value::object();
           event["type"] = "speech.audio.delta";
@@ -442,7 +449,11 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
         return disconnected || (cancelled && cancelled());
       };
       if (!service.Synthesize(synthesis, check, &result, &error)) {
-        log->error_code = check() ? "cancelled" : "generation_failed";
+        log->error_code = invalid_audio ? "invalid_audio"
+                          : check()     ? "cancelled"
+                                        : "generation_failed";
+        if (invalid_audio)
+          error = "Qwen3-TTS produced invalid audio";
         if (sse && !check()) {
           auto event = json::Value::object();
           event["type"] = "error";
