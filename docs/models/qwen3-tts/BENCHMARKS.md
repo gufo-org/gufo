@@ -1,68 +1,65 @@
 # Qwen3-TTS benchmarks
 
-Measured on gfx1151 with the release build, warm, for the canonical sentence at
-seed 42.
+2026-09-20, Linux gfx1151, BF16, Nix production build
+`11d1ec94a862` (binary SHA-256 prefix). Resident models; ASR 1.7B loaded but idle.
+The same [37-word paragraph](EVALUATION.md) is used for all three variants:
+seed 42, automatic language, talker T 0.7 / top-k 20 / top-p 0.85,
+predictor T 0.8 / top-k 30 / top-p 0.9.
 
-| | Native | Official ROCm | Ratio |
-|---|---|---|---|
-| Canonical request | `9.05`–`9.16` s for 23.12 s of audio | `98.00` s for 21.84 s | `10.9x` throughput |
-| Real-time factor | `2.55x` | `0.22x` | — |
-| Per codec frame | `31.0` ms | — | — |
+## Single request
 
-Per-variant endpoint latency:
+64 codec frames = 5.12 seconds of audio. Buffered latency is the median of three
+requests after one warmup; PCM streaming is one separate check.
+RTF = request time / generated audio duration, lower is better.
 
-| Variant | Audio | Request |
-|---|---|---|
-| CustomVoice | 23.12 s | `9.09` s |
-| VoiceDesign | 6.96 s | `2.90` s |
-| Base ICL | 5.20 s | `2.69` s, or `2.45` s reusing the reference clip |
+| Variant | Buffered WAV | RTF | First PCM audio | Complete PCM |
+| --- | ---: | ---: | ---: | ---: |
+| CustomVoice | 2.024 s | 0.395 | 0.201 s | 2.062 s |
+| VoiceDesign | 2.027 s | 0.396 | 0.202 s | 2.070 s |
+| Base ICL | 2.694 s | 0.526 | 0.878 s | 2.785 s |
 
-## Streaming
+All three variants return identical buffered/streamed PCM and repeat their
+seeded waveforms exactly. Base uses a cached 15.05-second reference clip with
+its complete transcript; reference-code prefill remains part of each request.
+Its latency is not directly comparable to text-only CustomVoice/VoiceDesign.
 
-2026-09-20, Nix production `0715cf0`, CustomVoice, resident model, 64 codec frames
-(5.12 seconds of audio), seed 42; talker top-k 20 / top-p 0.85 / T 0.7,
-predictor top-k 30 / top-p 0.9 / T 0.8. One warmup, one check per transport;
-loopback clients, WebSocket TCP_NODELAY enabled:
+The first streamed chunk contains four codec frames (320 ms of audio);
+subsequent chunks contain 16. This changes delivery latency, not generated audio.
+Natural-EOS duration and intelligibility are reported in
+[evaluation](EVALUATION.md), separately from fixed-work speed checks.
+
+## Transports and concurrency
+
+One warmed loopback check per transport; WebSocket uses TCP_NODELAY:
 
 | Transport | First audio | Complete request |
 | --- | ---: | ---: |
-| Buffered WAV | 2.034 s | 2.034 s |
-| PCM HTTP | 0.324 s | 2.072 s |
-| SSE | 0.323 s | 2.064 s |
-| WebSocket | 0.321 s | 2.061 s |
+| PCM HTTP | 0.199 s | 2.056 s |
+| SSE | 0.200 s | 2.054 s |
+| WebSocket | 0.198 s | 2.051 s |
 
-All four return identical PCM bytes. Two simultaneous requests also reproduce
-those bytes, finishing in 2.037 / 4.070 s. These bounded controls measure early
-delivery; they do not claim increased TTS model throughput or natural EOS.
-
-A default-sampling CustomVoice paragraph reaches EOS at 208 frames / 16.64 s
-of audio in 6.71 / 6.59 s on two requests, with exact full-WAV replay and 0%
-word error in the native ASR check.
-
-## Concurrent HTTP
-
-Current sampled 64-frame CustomVoice control (same input as above):
+WAV, PCM, SSE and WebSocket return identical PCM bytes.
 
 | C | Request completion times |
 | ---: | --- |
-| 1 | 2.034 s |
-| 2 | 2.037 / 4.070 s |
-| 4 | TODO |
-| 6 | TODO |
-| 8 | TODO |
+| 1 | 2.024 s |
+| 2 | 2.029 / 4.056 s |
+| 4 / 6 / 8 | TODO |
 
-TTS model execution is serialized; output streaming improves first-audio latency.
-Queued requests are cancellable. Single-request variant numbers above use
-separate texts and cannot be compared as equivalent workloads.
+TTS execution remains serialized; streaming delivers audio earlier.
+Queued requests are cancellable. Concurrency does not imply batched model work.
 
-## Reproduce
+## Profile and reproduction
 
-Use the [model server examples](README.md), a fixed text/reference voice,
-checkpoint identity and seed. Measure resident requests after warmup; report
-output audio duration, wall time and RTF. Use sampled requests for natural EOS;
-limit codec frames for greedy operator controls. Profiler runs are separate.
+The final 64-frame request profile has 68,241 dispatches and 1.906 s of GPU
+work: 76.4% in talker/predictor projections and 3.5% in attention. GPU busy
+time is 90.5% of the request's 2.105-second kernel span, excluding loading,
+warmup and idle server time. Projection traffic remains the main throughput
+bottleneck; profile overhead is excluded from the timing tables.
 
-Retained profile: talker/predictor GEMV 22.7 ms per frame, waveform decode
-2.2 ms, other kernels 3.1 ms, dispatch gaps 3.8 ms. Projection traffic is near
-the measured DRAM ceiling; these bounded-profile components are not a new
-end-to-end latency measurement.
+Use the [server examples](README.md) with the settings above. Record model and
+binary identities, exact text/reference, output duration, wall time and RTF.
+Warm the resident model once; run the profiler separately with
+`tools/prof/prof.py` and `--stages qwen-tts`. Raw profiles and audio stay outside
+Git. Retained and rejected optimizations are listed in
+[experiments](EXPERIMENTS.md).

@@ -9,6 +9,17 @@
 
 namespace gufo::models::qwen3_tts::hip {
 
+/// Causal attention with the eager checkpoint's BF16 QK, scaling, probability,
+/// and output boundaries; the softmax reduction itself remains FP32.
+void LaunchBfloat16Attention(const float* query, const float* key,
+                             const float* value, float* key_cache,
+                             float* value_cache, void* output_bfloat16,
+                             std::size_t layer, std::size_t position,
+                             std::size_t tokens, std::size_t capacity,
+                             std::size_t heads, std::size_t kv_heads,
+                             std::size_t head_dim, hipStream_t stream,
+                             bool cache_written);
+
 void LaunchBfloat16PerHeadRMSNorm(float* values, const float* weight,
                                   std::size_t batch_size,
                                   std::uint32_t num_heads,
@@ -42,9 +53,9 @@ void LaunchBfloat16RoPEAndRoundV(float* query, float* key, float* value,
     float* key_cache, float* value_cache, std::uint32_t layer_index,
     std::uint32_t max_context, hipStream_t stream);
 
-/// Adds `update` into `hidden` and writes the RMS-normalized BF16 result, in
-/// one launch. Matches the standalone residual-add and RMSNorm kernels bit for
-/// bit.
+/// Optionally adds `update` into `hidden`, then applies the checkpoint RMSNorm:
+/// round normalization to BF16 before multiplying its weight. A null update
+/// performs normalization alone, using the same reduction and rounding.
 void LaunchBfloat16ResidualAddRMSNorm(float* hidden, const float* update,
                                       const float* weight,
                                       void* output_bfloat16,
@@ -80,8 +91,8 @@ void LaunchBfloat16Bias(const float* input, const void* bias_bfloat16,
 /// frame-major `[frames, hidden_size]`.
 ///
 /// `text_embedding` is optional. When present it holds one `hidden_size` row
-/// that is added to every frame before the BF16 rounding, which reproduces the
-/// per-group lookup followed by the summing pass in one dispatch.
+/// that is added after rounding the codec sum to BF16. The final add rounds
+/// again, matching the two upstream BF16 operations in one dispatch.
 void LaunchBatchedCodecEmbeddingSum(
     const void* const* embedding_tables_bfloat16, const std::uint32_t* codes,
     const float* text_embedding, float* output, std::size_t frames,

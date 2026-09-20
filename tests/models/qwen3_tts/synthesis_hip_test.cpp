@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
       .instruct = "A warm adult voice with clear diction and calm confidence.",
       .max_new_tokens = 64};
   if (config->variant == tts::ModelVariant::kBase) {
-    if (argc < 3)
+    if (argc < 4)
       return 77;
     std::ifstream input(argv[2], std::ios::binary);
     std::vector<char> bytes((std::istreambuf_iterator<char>(input)), {});
@@ -45,9 +45,10 @@ int main(int argc, char** argv) {
     assert(tts::DecodeWav(std::as_bytes(std::span(bytes)),
                           &request.reference_audio, &error));
     // Exercise full ICL: reference codec frames must be consumed, not emitted.
-    request.reference_text =
-        "Uh huh. Oh yeah, yeah. He wasn't even that big when I started "
-        "listening to him.";
+    std::ifstream transcript(argv[3]);
+    request.reference_text.assign(std::istreambuf_iterator<char>(transcript),
+                                  {});
+    assert(!request.reference_text.empty());
   }
   request.sampling.top_k = 20;
   request.sampling.top_p = .85F;
@@ -91,6 +92,14 @@ int main(int argc, char** argv) {
   assert(!runtime->Generate(request, {}, &streamed, &error));
   assert(streamed.codes.empty() && streamed.samples.empty());
   request.on_audio = {};
+  // Reuse shorter prefixes before replaying the original request. Unused K/V
+  // rows may contain another request's data, but causal attention must not read
+  // them; this also exercises reuse after cancellation without cache clearing.
+  auto shorter = request;
+  shorter.text = "A different, shorter sentence.";
+  shorter.max_new_tokens = 8;
+  assert(runtime->Generate(shorter, {}, &streamed, &error));
+  assert(!streamed.codes.empty());
   assert(runtime->Generate(request, {}, &replay, &error));
   assert(replay.codes == buffered.codes && replay.samples == buffered.samples);
   std::cout

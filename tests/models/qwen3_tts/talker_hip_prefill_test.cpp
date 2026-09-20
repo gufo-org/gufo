@@ -1,4 +1,8 @@
+#include <hip/hip_runtime.h>
+
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -13,6 +17,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/models/qwen3_tts/hip/talker_ops.hpp"
 #include "src/models/qwen3_tts/hip/talker_runtime.hpp"
 #include "src/models/qwen3_tts/tokenizer.hpp"
 
@@ -41,6 +46,186 @@ void Check(bool condition, const std::string& message) {
   if (!condition) {
     Fail(message);
   }
+}
+
+template<typename T>
+class DeviceArray {
+public:
+  explicit DeviceArray(std::span<const T> values) : size_(values.size()) {
+    Check(hipMalloc(reinterpret_cast<void**>(&data), values.size_bytes()) ==
+                  hipSuccess &&
+              hipMemcpy(data, values.data(), values.size_bytes(),
+                        hipMemcpyHostToDevice) == hipSuccess,
+          "allocate operator input");
+  }
+  ~DeviceArray() { (void)hipFree(data); }
+  DeviceArray(const DeviceArray&) = delete;
+  DeviceArray& operator=(const DeviceArray&) = delete;
+  std::vector<T> Read() const {
+    std::vector<T> result(size_);
+    Check(hipMemcpy(result.data(), data, size_ * sizeof(T),
+                    hipMemcpyDeviceToHost) == hipSuccess,
+          "read operator result");
+    return result;
+  }
+  T* data{};
+
+private:
+  std::size_t size_;
+};
+
+float Bf16(float value) {
+  auto bits = std::bit_cast<std::uint32_t>(value);
+  bits += 0x7fffU + ((bits >> 16U) & 1U);
+  return std::bit_cast<float>(bits & 0xffff0000U);
+}
+
+std::uint16_t Bf16Bits(float value) {
+  return std::bit_cast<std::uint32_t>(Bf16(value)) >> 16U;
+}
+
+// Independent formulas from Qwen3-TTS 022e286b's BF16 RMSNorm, RoPE and eager
+// attention. Binary-exact inputs avoid testing a particular GPU reduction tree.
+void CheckBfloat16Operators() {
+  constexpr std::size_t width = 128;
+  std::vector<float> input(width), weight(width), update(width);
+  for (std::size_t d = 0; d < width; ++d) {
+    input[d] = static_cast<float>(static_cast<int>(d % 13) - 6) / 8.0F;
+    weight[d] = 0.5F + static_cast<float>(d % 7) / 8.0F;
+    update[d] = static_cast<float>(d % 3) / 16.0F;
+  }
+  DeviceArray<float> device_weight(weight), device_update(update);
+  for (const bool residual : {false, true}) {
+    DeviceArray<float> values(input);
+    DeviceArray<std::uint16_t> output{std::vector<std::uint16_t>(width)};
+    qwen3_tts_hip::LaunchBfloat16ResidualAddRMSNorm(
+        values.data, residual ? device_update.data : nullptr,
+        device_weight.data, output.data, 1, width, 1e-6F, nullptr);
+    auto expected = input;
+    double squared = 0;
+    for (std::size_t d = 0; d < width; ++d) {
+      expected[d] = Bf16(input[d] + (residual ? update[d] : 0));
+      squared += static_cast<double>(expected[d]) * expected[d];
+    }
+    const float inverse =
+        1.0F / std::sqrt(static_cast<float>(squared / width) + 1e-6F);
+    const auto actual = output.Read();
+    for (std::size_t d = 0; d < width; ++d) {
+      Check(actual[d] == Bf16Bits(Bf16(expected[d] * inverse) * weight[d]),
+            "BF16 normalized value must round before gamma multiplication");
+      expected[d] = Bf16(Bf16(expected[d] * inverse) * weight[d]);
+    }
+    if (residual) {
+      continue;
+    }
+    DeviceArray<float> query(input), key(input), value(input);
+    Check(qwen3_tts_hip::LaunchBfloat16QkNormRoPE(
+              query.data, key.data, value.data, device_weight.data,
+              device_weight.data, 1, 1, 1, width, 7, 10000, 1e-6F, nullptr,
+              nullptr, 0, 0, nullptr),
+          "fused norm/RoPE shape");
+    const auto rotated = query.Read();
+    for (std::size_t d = 0; d < width / 2; ++d) {
+      const float angle =
+          7.0F / std::pow(10000.0F, static_cast<float>(2 * d) / width);
+      const float cosine = Bf16(std::cos(angle)), sine = Bf16(std::sin(angle));
+      Check(rotated[d] == Bf16(Bf16(expected[d] * cosine) -
+                               Bf16(expected[d + width / 2] * sine)) &&
+                rotated[d + width / 2] ==
+                    Bf16(Bf16(expected[d + width / 2] * cosine) +
+                         Bf16(expected[d] * sine)),
+            "BF16 RoPE cosine, products and addition");
+    }
+  }
+
+  // An exact halfway sum distinguishes codec-sum rounding from rounding only
+  // after text addition: BF16(1 + 1/256) + 1/256 must remain 1, not 1+1/128.
+  const std::array<std::uint16_t, 2> table{Bf16Bits(1), Bf16Bits(1.0F / 256)};
+  DeviceArray<std::uint16_t> embeddings(table);
+  const std::array<const void*, 2> pointers{embeddings.data,
+                                            embeddings.data + 1};
+  DeviceArray<const void*> tables(pointers);
+  const std::array<std::uint32_t, 2> codes{};
+  DeviceArray<std::uint32_t> device_codes(codes);
+  const std::array<float, 1> text{1.0F / 256};
+  DeviceArray<float> device_text(text), result(text);
+  qwen3_tts_hip::LaunchBatchedCodecEmbeddingSum(tables.data, device_codes.data,
+                                                device_text.data, result.data,
+                                                1, 2, 1, nullptr);
+  Check(result.Read().front() == 1, "BF16 codec sum before text addition");
+
+  // Cover both dot-product dispatches and causal/cache offsets. Future rows
+  // are present but must never contribute to a query.
+  constexpr std::size_t tokens = 65, heads = 2;
+  std::vector<float> queries(tokens * heads * width);
+  std::vector<float> keys(tokens * width), values(tokens * width);
+  for (std::size_t p = 0; p < tokens; ++p) {
+    for (std::size_t d = 0; d < width; ++d) {
+      keys[p * width + d] =
+          static_cast<float>(static_cast<int>((p + d) % 17) - 8) / 16;
+      values[p * width + d] =
+          static_cast<float>(static_cast<int>((p * 3 + d) % 23) - 11) / 16;
+      for (std::size_t h = 0; h < heads; ++h)
+        queries[(p * heads + h) * width + d] =
+            static_cast<float>(static_cast<int>((d + h) % 11) - 5) / 8;
+    }
+  }
+  DeviceArray<float> q(queries), k(keys), v(values);
+  DeviceArray<float> kc{std::vector<float>(keys.size())};
+  DeviceArray<float> vc{std::vector<float>(values.size())};
+  DeviceArray<std::uint16_t> output{std::vector<std::uint16_t>(queries.size())};
+  qwen3_tts_hip::LaunchBfloat16Attention(
+      q.data, k.data, v.data, kc.data, vc.data, output.data, 0, 0, tokens,
+      tokens, heads, 1, width, nullptr, false);
+  const auto actual = output.Read();
+  for (std::size_t p = 0; p < tokens; ++p) {
+    for (std::size_t h = 0; h < heads; ++h) {
+      std::vector<float> probabilities(p + 1);
+      for (std::size_t j = 0; j <= p; ++j) {
+        double dot = 0;
+        for (std::size_t d = 0; d < width; ++d)
+          dot += queries[(p * heads + h) * width + d] * keys[j * width + d];
+        probabilities[j] =
+            Bf16(Bf16(static_cast<float>(dot)) / std::sqrt(128.0F));
+      }
+      const float maximum =
+          *std::max_element(probabilities.begin(), probabilities.end());
+      double total = 0;
+      for (float& probability : probabilities) {
+        probability = std::exp(probability - maximum);
+        total += probability;
+      }
+      for (float& probability : probabilities)
+        probability = Bf16(probability / static_cast<float>(total));
+      for (std::size_t d = 0; d < width; ++d) {
+        double dot = 0;
+        for (std::size_t j = 0; j <= p; ++j)
+          dot += probabilities[j] * values[j * width + d];
+        Check(actual[(p * heads + h) * width + d] ==
+                  Bf16Bits(static_cast<float>(dot)),
+              "BF16 eager causal attention");
+      }
+    }
+  }
+  DeviceArray<std::uint16_t> last{std::vector<std::uint16_t>(heads * width)};
+  qwen3_tts_hip::LaunchBfloat16Attention(
+      q.data + (tokens - 1) * heads * width, k.data + (tokens - 1) * width,
+      v.data + (tokens - 1) * width, kc.data, vc.data, last.data, 0, tokens - 1,
+      1, tokens, heads, 1, width, nullptr, true);
+  const auto cached = last.Read();
+  Check(std::equal(cached.begin(), cached.end(), actual.end() - cached.size()),
+        "BF16 cached attention agrees with causal prefill");
+  for (const std::size_t position : {0, 1, 15, 31}) {
+    qwen3_tts_hip::LaunchBfloat16Attention(
+        q.data + position * heads * width, k.data + position * width,
+        v.data + position * width, kc.data, vc.data, last.data, 0, position, 1,
+        tokens, heads, 1, width, nullptr, true);
+    const auto short_context = last.Read();
+    Check(std::equal(short_context.begin(), short_context.end(),
+                     actual.begin() + position * heads * width),
+          "short predictor attention preserves the full reduction");
+  }
+  std::cout << "PASS independent BF16 operator boundaries\n";
 }
 
 std::uint16_t ReadU16(std::istream& input) {
@@ -193,9 +378,83 @@ Comparison Compare(std::span<const float> actual,
   };
 }
 
+void CheckPredictorHistory(qwen3_tts_hip::TalkerHipRuntime& runtime,
+                           const std::filesystem::path& reference) {
+  const auto hidden = ReadNpyFloat(reference / "predictor_history_hidden.npy");
+  const auto codes = ReadNpyFloat(reference / "predictor_history_codes.npy");
+  const auto logits = ReadNpyFloat(reference / "predictor_history_logits.npy");
+  const auto projection =
+      ReadNpyFloat(reference / "predictor_history_projection.npy");
+  const auto precise =
+      ReadNpyFloat(reference / "predictor_history_projection_fp64.npy");
+  Check(hidden.shape.size() == 2 && hidden.shape[1] == 2048 &&
+            codes.shape == std::vector<std::size_t>({hidden.shape[0], 16}) &&
+            logits.shape ==
+                std::vector<std::size_t>({hidden.shape[0], 15, 2048}) &&
+            projection.shape ==
+                std::vector<std::size_t>({hidden.shape[0], 2, 1024}) &&
+            precise.shape == projection.shape,
+        "official predictor history shapes");
+  std::size_t matching = 0;
+  for (std::size_t frame = 0; frame < hidden.shape[0]; ++frame) {
+    std::vector<std::uint32_t> history;
+    for (std::size_t group = 0; group < 16; ++group) {
+      const float code = codes.values[frame * 16 + group];
+      Check(std::isfinite(code) && code >= 0 && code < 3072 &&
+                std::floor(code) == code,
+            "official predictor code");
+      history.push_back(static_cast<std::uint32_t>(code));
+    }
+    qwen3_tts_hip::CodePredictorOutput output;
+    std::string error;
+    Check(runtime.PredictCodeFrameTrace(
+              std::span(hidden.values).subspan(frame * 2048, 2048),
+              history.front(), &output, &error, history),
+          "fixed-history predictor: " + error);
+    const auto projected =
+        std::span(projection.values).subspan(frame * 2048, 2048);
+    const auto exact = std::span(precise.values).subspan(frame * 2048, 2048);
+    const auto projection_comparison =
+        Compare(output.projected_input, projected);
+    Check(projection_comparison.cosine > 0.999999,
+          "fixed-input predictor projection parity");
+    std::cout << "teacher_projection_frame=" << frame
+              << " mae=" << projection_comparison.mean_absolute_error
+              << " max_abs=" << projection_comparison.maximum_absolute_error
+              << " native_fp64_mae="
+              << Compare(output.projected_input, exact).mean_absolute_error
+              << " upstream_fp64_mae="
+              << Compare(projected, exact).mean_absolute_error << '\n';
+    const auto expected =
+        std::span(logits.values).subspan(frame * 15 * 2048, 15 * 2048);
+    const auto comparison = Compare(output.logits, expected);
+    std::cout << "teacher_frame=" << frame << " cosine=" << comparison.cosine
+              << " mae=" << comparison.mean_absolute_error
+              << " max_abs=" << comparison.maximum_absolute_error << '\n';
+    Check(comparison.cosine > 0.999,
+          "fixed-history predictor logit cosine parity");
+    for (std::size_t head = 0; head < 15; ++head) {
+      const auto row = expected.subspan(head * 2048, 2048);
+      const auto actual = std::span(output.logits).subspan(head * 2048, 2048);
+      const auto wanted = Argmax(row), chosen = Argmax(actual);
+      matching += wanted == chosen;
+      if (wanted != chosen) {
+        std::cout << "teacher_mismatch frame=" << frame << " head=" << head
+                  << " expected=" << wanted << " actual=" << chosen
+                  << " reference_margin=" << row[wanted] - row[chosen]
+                  << " native_margin=" << actual[chosen] - actual[wanted]
+                  << '\n';
+      }
+    }
+  }
+  std::cout << "teacher_argmax_matches=" << matching << '/'
+            << hidden.shape[0] * 15 << '\n';
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  CheckBfloat16Operators();
   const std::filesystem::path model_root =
       argc > 1 ? argv[1]
                : "/home/fbozzo/projects/Qwen3-TTS-12Hz-1.7B-CustomVoice";
@@ -231,6 +490,13 @@ int main(int argc, char** argv) {
   auto runtime =
       qwen3_tts_hip::TalkerHipRuntime::Create(model_root.string(), 512, &error);
   Check(runtime != nullptr, "create HIP runtime: " + error);
+  // Optional independently generated fixed-history trace. It avoids confusing
+  // accumulated autoregressive differences with a predictor implementation bug.
+  if (argc > 3) {
+    CheckPredictorHistory(*runtime, argv[3]);
+    std::cout << "PASS qwen3_tts_talker_hip_prefill_test fixed history\n";
+    return 0;
+  }
 
   qwen3_tts::Tokenizer tokenizer;
   Check(qwen3_tts::Tokenizer::Load(model_root, &tokenizer, &error),
@@ -391,6 +657,8 @@ int main(int argc, char** argv) {
             << expected_frames.size() * expected_frames.front().size()
             << " matching_first_codes=" << matching_first_codes << '/'
             << expected_frames.size() << '\n';
+  Check(matching_first_codes == expected_frames.size(),
+        "five-frame main-code parity");
 
   // Cross the historical frame-38 divergence and attention's 64/128-token
   // boundaries. Short eight-frame controls did not exercise this failure.

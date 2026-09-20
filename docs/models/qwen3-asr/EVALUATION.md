@@ -43,6 +43,12 @@ low-energy chunks. File-streaming text equals buffered output; concurrent
 requests and cancellation/reuse retain the exact 49-token reference. This
 validates splitting and state isolation, not long-form recognition accuracy.
 
+The final 2026-09-20 production transport check preserves the uploaded-file
+transcript through SSE and two consecutive Realtime utterances. Warm file SSE
+completes the 15.05-second recording in 994 ms (RTF 0.066), consistent with the
+previous 992 ms resident control. Loading/first-request initialization is
+excluded from this speed comparison.
+
 Transport checks use OpenAI file-transcription SSE and GA Realtime manual
 commits (24-kHz PCM16). No timestamp/aligner model is involved. The native model
 gets a complete committed utterance; it does not use the upstream wrapper's

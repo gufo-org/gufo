@@ -43,6 +43,8 @@ struct TalkerGenerationOutput {
 struct CodePredictorOutput {
   std::vector<std::uint32_t> codes;
   std::vector<float> logits;
+  // Trace only: projected [talker hidden, first-code embedding] rows.
+  std::vector<float> projected_input;
 };
 
 /// Native gfx1151 talker prefill used as the first exact HIP parity boundary.
@@ -92,10 +94,13 @@ public:
                                       std::string* error = nullptr);
 
   /// Expands a frame and retains one [vocab] logit row for each sub-codebook.
-  [[nodiscard]] bool PredictCodeFrameTrace(std::span<const float> talker_hidden,
-                                           std::uint32_t first_code,
-                                           CodePredictorOutput* output,
-                                           std::string* error = nullptr);
+  /// Optional reference codes feed the predictor a fixed history for
+  /// independent parity checks; returned codes are still the predictor's own
+  /// choices.
+  [[nodiscard]] bool PredictCodeFrameTrace(
+      std::span<const float> talker_hidden, std::uint32_t first_code,
+      CodePredictorOutput* output, std::string* error = nullptr,
+      std::span<const std::uint32_t> reference_codes = {});
 
   /// Feeds one complete codec frame back into the cached talker.
   [[nodiscard]] bool DecodeCodeFrame(std::span<const std::uint32_t> codes,
@@ -134,10 +139,10 @@ private:
 
   /// Shared body of the two frame predictors. `collect_logits` retains the
   /// per-sub-codebook logit rows, which only the trace entry point needs.
-  [[nodiscard]] bool PredictFrame(std::span<const float> talker_hidden,
-                                  std::uint32_t first_code,
-                                  CodePredictorOutput* output,
-                                  bool collect_logits, std::string* error);
+  [[nodiscard]] bool PredictFrame(
+      std::span<const float> talker_hidden, std::uint32_t first_code,
+      CodePredictorOutput* output, bool collect_logits, std::string* error,
+      std::span<const std::uint32_t> reference_codes = {});
 
   [[nodiscard]] bool BuildConditionedPrompt(
       std::span<const std::uint32_t> input_ids,

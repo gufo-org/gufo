@@ -82,6 +82,11 @@ def main():
     orig_layer_forward = Qwen3TTSTalkerDecoderLayer.forward
     orig_talker_forward = Qwen3TTSTalkerForConditionalGeneration.forward
     layer_index = {"value": 0}
+    predictor_first_code = {"value": None}
+    predictor_history = {
+        "hidden": [], "codes": [], "logits": [], "projection": [],
+        "projection_fp64": [],
+    }
 
     @functools.wraps(orig_model_forward)
     def patched_model_forward(self, *positional, **keyword):
@@ -151,6 +156,7 @@ def main():
 
     @functools.wraps(orig_talker_forward)
     def patched_talker_forward(self, *positional, **keyword):
+        predictor_first_code["value"] = keyword.get("input_ids")
         inputs_embeds = keyword.get("inputs_embeds")
         position_ids = keyword.get("position_ids")
         attention_mask = keyword.get("attention_mask")
@@ -189,11 +195,46 @@ def main():
         attn_implementation="eager",
     )
     model.model.eval()
+    predictor = model.model.talker.code_predictor
+    orig_predictor_generate = predictor.generate
+
+    def traced_predictor_generate(*positional, **keyword):
+        # Freeze the official input and history, so native checks can distinguish
+        # predictor arithmetic from errors propagated by earlier token choices.
+        keyword["output_scores"] = True
+        result = orig_predictor_generate(*positional, **keyword)
+        predictor_history["hidden"].append(
+            keyword["inputs_embeds"][0, 0].detach().cpu().float().numpy()
+        )
+        predictor_history["codes"].append(
+            torch.cat((predictor_first_code["value"], result.sequences), dim=-1)
+            [0].detach().cpu().float().numpy()
+        )
+        predictor_history["logits"].append(
+            torch.stack(result.scores, dim=1)[0].detach().cpu().float().numpy()
+        )
+        projection = predictor.small_to_mtp_projection
+        inputs = keyword["inputs_embeds"]
+        with torch.inference_mode():
+            predictor_history["projection"].append(
+                projection(inputs)[0].cpu().float().numpy()
+            )
+            # Distinguish a backend's BF16 rounding boundary from an incorrect
+            # implementation. An upstream matmul is not exact arithmetic.
+            precise = (
+                inputs.cpu().double() @ projection.weight.cpu().double().T
+                + projection.bias.cpu().double()
+            )
+            predictor_history["projection_fp64"].append(
+                precise[0].bfloat16().float().numpy()
+            )
+        return result
 
     Qwen3TTSTalkerModel.forward = patched_model_forward
     Qwen3TTSTalkerAttention.forward = patched_attn_forward
     Qwen3TTSTalkerDecoderLayer.forward = patched_layer_forward
     Qwen3TTSTalkerForConditionalGeneration.forward = patched_talker_forward
+    predictor.generate = traced_predictor_generate
     try:
         model.generate_custom_voice(
             text=TEXT, speaker=args.speaker, language=args.language,
@@ -205,6 +246,10 @@ def main():
         Qwen3TTSTalkerAttention.forward = orig_attn_forward
         Qwen3TTSTalkerDecoderLayer.forward = orig_layer_forward
         Qwen3TTSTalkerForConditionalGeneration.forward = orig_talker_forward
+        predictor.generate = orig_predictor_generate
+    for name, rows in predictor_history.items():
+        if rows:
+            CAPTURE["predictor_history_" + name] = np.stack(rows)
 
     talker = model.model.talker
     talker_device = next(talker.parameters()).device
@@ -253,6 +298,11 @@ def main():
         json.dump({
             "schema": "gufo.qwen3-tts-probe.v1",
             "reference_commit": reference_commit,
+            "torch_version": torch.__version__,
+            "hip_version": torch.version.hip,
+            "device": args.device,
+            "dtype": "bfloat16",
+            "attention_implementation": "eager",
             "text": TEXT,
             "speaker": args.speaker,
             "language": args.language,

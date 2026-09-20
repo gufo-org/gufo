@@ -112,7 +112,7 @@ private:
     std::string stream_error;
     const auto emit = [&](const TalkerGenerationOutput& generated, bool flush) {
       const std::size_t pending = generated.frames - emitted_frames;
-      if (pending == 0 || (!flush && pending < (emitted_frames == 0 ? 8 : 16)))
+      if (pending == 0 || (!flush && pending < (emitted_frames == 0 ? 4 : 16)))
         return true;
       if (IsCancelled(is_cancelled, &stream_error))
         return false;
