@@ -130,6 +130,20 @@ public:
             throw std::runtime_error("injected stream failure");
           }};
     });
+    server.add("POST", "/stream", [](const auto& request, auto&) {
+      auto log = std::make_shared<gufo::server::HttpResponse::StreamLog>();
+      return gufo::server::HttpResponse{
+          .streaming_body =
+              [log, fail = request.body == "fail"](const auto& write) {
+                (void)write(std::string_view("a\0b", 3));
+                (void)write("");
+                (void)write("end");
+                if (fail)
+                  log->error_code = "injected";
+              },
+          .stream_log = log,
+      };
+    });
     std::string error;
     assert(server.start(&error));
     worker = std::jthread([this] { server.run(); });
@@ -499,6 +513,26 @@ void TestPeerDisconnect() {
   assert(server.backend->disconnected);
 }
 
+void TestStreamingFraming() {
+  RunningServer server;
+  const std::string chunks = std::string("3\r\na\0b\r\n", 8) + "3\r\nend\r\n";
+  for (const bool fail : {false, true}) {
+    const auto response = server.Post("/stream", fail ? "fail" : "");
+    ExpectStatus(response, 200);
+    assert(response.find("Transfer-Encoding: chunked\r\n") !=
+           std::string::npos);
+    assert(response.substr(response.find("\r\n\r\n") + 4) ==
+           chunks + (fail ? "" : "0\r\n\r\n"));
+  }
+  const auto thrown = server.Post("/stream-error", "");
+  assert(thrown.substr(thrown.find("\r\n\r\n") + 4) == "b\r\nfirst chunk\r\n");
+  // Existing HTTP/1.0 clients retain close-delimited framing.
+  const auto legacy = server.Send("POST /stream HTTP/1.0\r\n\r\n");
+  assert(legacy.find("Transfer-Encoding:") == std::string::npos);
+  assert(legacy.substr(legacy.find("\r\n\r\n") + 4) ==
+         std::string("a\0bend", 6));
+}
+
 }  // namespace
 
 int main() {
@@ -510,5 +544,6 @@ int main() {
   TestCompatibilityRequests();
   TestCompatibilityUtf8();
   TestPeerDisconnect();
+  TestStreamingFraming();
   std::cout << "HTTP transport checks passed.\n";
 }

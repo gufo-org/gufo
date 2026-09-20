@@ -94,6 +94,18 @@ bool SendAll(int fd, std::string_view data) {
   return true;
 }
 
+bool SendChunk(int fd, std::string_view data) {
+  if (data.empty())
+    return true;
+  char header[2 * sizeof(std::size_t) + 2];
+  const auto length =
+      std::to_chars(header, header + sizeof(header) - 2, data.size(), 16);
+  *length.ptr = '\r';
+  *(length.ptr + 1) = '\n';
+  return SendAll(fd, std::string_view(header, length.ptr + 2 - header)) &&
+         SendAll(fd, data) && SendAll(fd, "\r\n");
+}
+
 bool IsPeerDisconnected(int fd) noexcept {
   pollfd descriptor{
       .fd = fd,
@@ -1214,6 +1226,7 @@ void HttpServer::handle_connection(int client_fd) {
     req.client_id = peer_address;
   req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
   bool response_started = false;
+  bool http11 = false;
   int response_status = 0;
   const auto elapsed_ms = [&] {
     return std::chrono::duration<double, std::milli>(
@@ -1242,6 +1255,7 @@ void HttpServer::handle_connection(int client_fd) {
         std::string version;
         std::string extra;
         ls >> req.method >> target >> version;
+        http11 = version == "HTTP/1.1";
         bool valid_headers = !req.method.empty() && target.starts_with('/') &&
                              (version == "HTTP/1.0" || version == "HTTP/1.1") &&
                              !(ls >> extra);
@@ -1304,7 +1318,7 @@ void HttpServer::handle_connection(int client_fd) {
           }
         } else {
           ok = true;
-          if (ToLower(req.header("Upgrade")) != "websocket")
+          if (!IsWebSocketUpgrade(req))
             body.clear();
         }
         if (ok) {
@@ -1352,14 +1366,24 @@ void HttpServer::handle_connection(int client_fd) {
         resp.websocket(socket);
       }
     } else if (resp.streaming_body) {
+      const bool chunked = http11 && !HasHeader(resp, "content-length");
+      if (chunked)
+        resp.headers.emplace_back("Transfer-Encoding", "chunked");
       const auto head = BuildResponseHead(resp, std::nullopt);
       response_started = true;
       connected = SendAll(client_fd, head);
       if (connected) {
         resp.streaming_body([&](std::string_view chunk) {
-          connected = connected && SendAll(client_fd, chunk);
+          connected = connected && (chunked ? SendChunk(client_fd, chunk)
+                                            : SendAll(client_fd, chunk));
           return connected;
         });
+        // Without the final chunk, HTTP clients report an incomplete body.
+        // Closing an unframed PCM stream would silently look like shorter
+        // audio.
+        if (connected && chunked &&
+            (!resp.stream_log || resp.stream_log->error_code.empty()))
+          connected = SendAll(client_fd, "0\r\n\r\n");
       }
     } else {
       const auto payload = BuildResponse(resp);

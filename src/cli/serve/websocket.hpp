@@ -29,6 +29,7 @@ public:
   bool cancelled() const { return closed_.load(); }
 
 private:
+  bool MarkClosed();
   void ReadLoop();
   bool Read(char* data, std::size_t size);
   bool Send(std::uint8_t opcode, std::string_view bytes);
@@ -44,6 +45,7 @@ private:
   std::jthread reader_;
 };
 
+bool IsWebSocketUpgrade(const HttpRequest& request);
 HttpResponse UpgradeWebSocket(const HttpRequest& request,
                               std::function<void(WebSocket&)> handler);
 

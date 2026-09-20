@@ -31,9 +31,9 @@ bool HasToken(std::string value, std::string_view token) {
     if (end == std::string::npos)
       end = value.size();
     auto item = std::string_view(value).substr(begin, end - begin);
-    while (!item.empty() && item.front() == ' ')
+    while (!item.empty() && (item.front() == ' ' || item.front() == '\t'))
       item.remove_prefix(1);
-    while (!item.empty() && item.back() == ' ')
+    while (!item.empty() && (item.back() == ' ' || item.back() == '\t'))
       item.remove_suffix(1);
     if (item == token)
       return true;
@@ -43,12 +43,15 @@ bool HasToken(std::string value, std::string_view token) {
 }
 }  // namespace
 
+bool IsWebSocketUpgrade(const HttpRequest& request) {
+  return HasToken(request.header("Upgrade"), "websocket");
+}
+
 HttpResponse UpgradeWebSocket(const HttpRequest& request,
                               std::function<void(WebSocket&)> handler) {
   std::string decoded;
   const auto key = request.header("Sec-WebSocket-Key");
-  if (request.method != "GET" ||
-      !HasToken(request.header("Upgrade"), "websocket") ||
+  if (request.method != "GET" || !IsWebSocketUpgrade(request) ||
       !HasToken(request.header("Connection"), "upgrade") ||
       request.header("Sec-WebSocket-Version") != "13" ||
       (!request.header("Content-Length").empty() &&
@@ -143,8 +146,7 @@ bool WebSocket::Send(std::uint8_t opcode, std::string_view bytes) {
       if (count < 0 && errno == EINTR)
         continue;
       if (count <= 0) {
-        closed_ = true;
-        ready_.notify_all();
+        MarkClosed();
         (void)::shutdown(fd_, SHUT_RDWR);
         return false;
       }
@@ -162,13 +164,25 @@ bool WebSocket::SendBinary(std::string_view bytes) {
 }
 
 void WebSocket::Close(std::uint16_t code) {
-  if (closed_.exchange(true))
+  if (!MarkClosed())
     return;
-  ready_.notify_all();
   const std::array<char, 2> payload{static_cast<char>(code >> 8),
                                     static_cast<char>(code & 255)};
   (void)Send(8, std::string_view(payload.data(), payload.size()));
   (void)::shutdown(fd_, SHUT_RD);
+}
+
+bool WebSocket::MarkClosed() {
+  bool changed;
+  {
+    // Receive checks this predicate under queue_mutex_. Changing it under the
+    // same lock prevents a close notification racing between its check and
+    // wait.
+    const std::lock_guard lock(queue_mutex_);
+    changed = !closed_.exchange(true);
+  }
+  ready_.notify_all();
+  return changed;
 }
 
 bool WebSocket::Receive(std::string* text) {
@@ -251,9 +265,8 @@ void WebSocket::ReadLoop() {
             return;
           }
         }
-        closed_ = true;
-        ready_.notify_all();
-        (void)Send(8, payload);
+        if (MarkClosed())
+          (void)Send(8, payload);
         break;
       }
       if (opcode == 9) {
@@ -292,8 +305,7 @@ void WebSocket::ReadLoop() {
   } catch (const std::exception&) {
     Close(1011);
   }
-  closed_ = true;
-  ready_.notify_all();
+  MarkClosed();
 }
 
 }  // namespace gufo::server

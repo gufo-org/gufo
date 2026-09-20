@@ -35,8 +35,8 @@ public:
     assert(::connect(fd, reinterpret_cast<sockaddr*>(&address),
                      sizeof(address)) == 0);
     Send("GET " + std::string(path) +
-         " HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
-         "Connection: keep-alive, Upgrade\r\nSec-WebSocket-Version: "
+         " HTTP/1.1\r\nHost: localhost\r\nUpgrade: other,\twebsocket\r\n"
+         "Connection: keep-alive,\tUpgrade\r\nSec-WebSocket-Version: "
          "13\r\nSec-WebSocket-Key: " +
          std::string(key) + "\r\nAuthorization: " + std::string(authorization) +
          "\r\n\r\n" + first);
@@ -252,6 +252,14 @@ int main() {
     while (!cancelled && std::chrono::steady_clock::now() < deadline)
       std::this_thread::yield();
     assert(cancelled);
+  }
+  // Exercise closure before/while the consumer waits for its first message.
+  // Every connection must release its worker and admission slot.
+  for (int i = 0; i < 32; ++i) {
+    Client client(server.port(), "/v1/audio/speech/stream");
+    client.Send(Client::Frame(std::string("\x03\xE8", 2), 8));
+    const auto reply = client.Receive();
+    assert(reply.first == 8 && reply.second == std::string("\x03\xE8", 2));
   }
   server.stop();
   worker.join();

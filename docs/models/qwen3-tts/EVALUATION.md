@@ -29,10 +29,11 @@ ASR backend.
 | All | Talker prompt cosine | `1.0` | `> 0.99` |
 | All | Prefill-logit cosine | `0.999938` | `> 0.95` |
 | All | Cached-logit cosine | `0.99997` | `> 0.95` |
-| All | Greedy argmax boundaries | match | exact |
+| All | Isolated prefill/predictor argmax boundaries | match | exact |
 | All | Predictor-logit cosine | `0.999539` | `> 0.95` |
 | All | Decoder waveform MAE / max | `1.33e-7` / `1.28e-6` | `< 1e-5` / `< 1e-4` |
 | CustomVoice | Qwen3-ASR WER / transcript LCS | `0%` / `97.29%` | `< 30%` / `> 75%` |
+| CustomVoice | Five-frame greedy codec / main-code agreement | `36/80` / `4/5` | Tracked mismatch |
 | VoiceDesign | Prompt cosine, semantic greedy tokens | `1.0`, 5/5 | `> 0.9999`, exact |
 | Base | Prompt cosine, bounded greedy codes | `1.0`, 80/80 | `> 0.999`, exact |
 | Base | Speaker-embedding cosine | `0.999997` | `> 0.9999` |
@@ -51,6 +52,10 @@ ASR backend.
   A production CustomVoice request also reaches natural EOS at 208 frames
   (16.64 seconds), repeats its entire WAV exactly, and has 0% word error against
   its requested text under native Qwen3-ASR.
+- **Upstream generation:** replay within Gufo does not establish identical
+  full greedy codec trajectories to upstream. The table's argmax checks cover
+  isolated boundaries; later autoregressive codec choices can differ. Even the
+  pinned upstream CPU and ROCm greedy fixtures differ from the third frame.
 - **Greedy EOS:** a diagnostic reached 3000 frames without EOS. Bound greedy
   checks; use sampled output for complete-sentence quality.
 - **Base speech codes:** aggregate agreement 0.577351 is close to the official

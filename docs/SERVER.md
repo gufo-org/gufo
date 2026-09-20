@@ -338,6 +338,9 @@ PCM. `speed` supports `1.0` only; input is capped at 16384 UTF-8 bytes and
 WebSocket protocol. [TTS streaming examples](models/qwen3-tts/README.md#sampling-and-streaming)
 cover per-session configuration, audio events and optional sentence/clause
 segmentation. Output streaming does not change model prompt construction.
+HTTP/1.1 streams use chunked transfer encoding; failed generation omits the
+terminal chunk so clients can detect truncated audio. SSE also reports an error
+event, while WebSocket speech reports an error without `audio.done`.
 
 Qwen3-ASR serving uses the same audio server, naming only the ASR checkpoint:
 

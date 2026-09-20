@@ -51,8 +51,9 @@ revisable rolling-prefix mode.
 ## Limits
 
 The retained 15-second fixture is not a multilingual/long-form qualification.
-The official 104-token audio-window prototype reduced encoder cosine to
-0.964719 (gate 0.995) and became nonfinite on a 60.2-second control. It was
-removed; production uses full attention. This upstream-window parity gap is
-unresolved and must not be hidden by exact short-transcript agreement.
-Long-form and broader independent capability evaluation remain **TODO**.
+Full audio attention matches the pinned upstream eager/SDPA path: the encoder
+calls its layers without an attention mask. Its cumulative sequence lengths
+are consumed by FlashAttention instead; parity with that windowed path is
+unqualified. Do not replace full attention with the rejected 104-token window
+on the strength of a speed measurement. Long-form and broader independent
+capability evaluation remain **TODO**.
