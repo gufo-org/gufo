@@ -469,6 +469,9 @@ private:
     float* shexp_gate;
     float* shexp_up;
     float* shexp_out;
+    /// Shared-expert SwiGLU rows narrowed for the F16 down projection, so
+    /// s_.x_half keeps the routed experts' token rows.
+    __half* shexp_half;
     // head and hidden rows kept for the draft block
     float* logits;
     // mtp
@@ -537,6 +540,9 @@ private:
   bool wide_mixer_{false};
   /// Set by Moe when its epilogue is left for the combine that follows.
   mutable bool moe_pending_{false};
+  /// Set by GatedDense when s_.shexp_half holds the SwiGLU rows its F16
+  /// down projection reads.
+  mutable bool shexp_half_ready_{false};
   // What s_.x_q8t / s_.x_half currently hold (input pointer, rows, cols,
   // and the half type), so a projection over the same rows skips its
   // activation pass. Cleared whenever the source buffer is rewritten.

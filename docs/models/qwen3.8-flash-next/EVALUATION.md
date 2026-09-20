@@ -74,8 +74,14 @@ relative RMS below 0.0008. Full-model session tests additionally cover
 C2/C4/C6/C8, ragged budgets, sampled acceptance/rejection and cache restoration;
 selector/attention operator tests cover sparse deep contexts.
 
-Current optimization qualification (2026-09-20):
+Current optimization qualification (2026-09-20, shared-expert rows 2026-09-21):
 
+- The shared expert's SwiGLU rows for its F16 down projection live in a
+  private buffer, so the routed experts read the token rows the router
+  narrowed instead of a second narrowing pass. Every GEMM input is byte for
+  byte the same: greedy pp2048 output, the 4096-token chunk-boundary logits
+  (`--prefill-only`) and the C2/C4/C6/C8 batch checks (`--batch-only`) are
+  unchanged.
 - Projection checks retain exact scalar/batch FP32 output through 64 input and
   640 expert-down rows, including mixed activation scales, duplicate/inactive
   experts, nonfinite scales and output guards. Ragged Q8 inputs end at the

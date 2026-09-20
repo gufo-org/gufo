@@ -344,10 +344,17 @@ nix develop -c python3 tools/prof/prof.py run --stages qwen -- \
 # re-analyze an existing database
 nix develop -c python3 tools/prof/prof.py show /tmp/prof/prof_results.db --top 20
 
+# list the passes separated by idle gaps over 5 ms, then analyze only pass 3
+nix develop -c python3 tools/prof/prof.py show /tmp/prof/prof_results.db --passes 5
+nix develop -c python3 tools/prof/prof.py show /tmp/prof/prof_results.db --passes 5 --pass 3
+
 # A/B two runs, per stage and per kernel
 nix develop -c python3 tools/prof/prof.py diff before_results.db after_results.db
 ```
 
+A benchmark trace holds several passes (model upload, a warm-up prefill, the
+timed prefill, decoding); the first pass over freshly uploaded weights ran up to
+ten times slower than the timed one, so attribute kernels within the timed pass.
 `run` and `show` print a pipeline-stage rollup (kernel names grouped by model
 stage), a per-kernel table with launch geometry, GPU-busy-versus-wall-span with
 the idle percentage, and the largest idle gaps attributed to the dispatch on

@@ -416,6 +416,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.shexp_gate = f32(T * c.shared_expert_ff);
   s.shexp_up = f32(T * c.shared_expert_ff);
   s.shexp_out = f32(T * hidden);
+  s.shexp_half = Alloc<__half>(a, T * c.shared_expert_ff, error_msg);
   s.logits =
       f32(static_cast<std::size_t>(e->options_.max_logit_rows) * c.vocab_size);
   {
@@ -757,12 +758,11 @@ bool Executor::GatedDense(const DeviceTensor& up, const DeviceTensor& gate,
   if (down != nullptr && down->cols == up.rows && MatrixRows(n_tokens) &&
       n_tokens <= options_.max_batch) {
     if (DenseF16Route(*down, n_tokens)) {
-      SwigluHalf(out, s_.shexp_gate, static_cast<__half*>(s_.x_half),
+      // A private F16 buffer: s_.x_half keeps the narrowed token rows the
+      // router left there, which the routed experts read next.
+      SwigluHalf(out, s_.shexp_gate, s_.shexp_half,
                  static_cast<std::size_t>(n_tokens) * up.rows, stream_);
-      half_src_ = out;
-      half_rows_ = n_tokens;
-      half_cols_ = up.rows;
-      half_bf16_ = false;
+      shexp_half_ready_ = true;
       return true;
     }
     if (down->type == GgmlType::kQ8_0 &&
@@ -1533,9 +1533,20 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // The shared expert (gated by the last router row) does not depend on
   // routing. Queue its GEMMs after the count download, then prepare the
   // routed dispatch on the CPU without waiting for these GEMMs to finish.
+  shexp_half_ready_ = false;
   if (!GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, n_tokens,
-                  &l.shexp_down, error_msg) ||
-      !Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens, error_msg)) {
+                  &l.shexp_down, error_msg)) {
+    return false;
+  }
+  if (shexp_half_ready_) {
+    shexp_half_ready_ = false;
+    if (!DenseF16Gemm(l.shexp_down.data, s_.shexp_half, s_.shexp_out, n_tokens,
+                      l.shexp_down.rows, l.shexp_down.cols, stream_)) {
+      AssignError(error_msg, "shared expert F16 GEMM failed");
+      return false;
+    }
+  } else if (!Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens,
+                    error_msg)) {
     return false;
   }
   if (last_only && l.ffn_gate_exps.type == GgmlType::kQ8_0 &&

@@ -16,7 +16,14 @@ Usage
 -----
   tools/prof/prof.py run  [-o DIR] [--stages qwen] -- <command> [args...]
   tools/prof/prof.py show DB [--stages qwen] [--top N] [--gaps N] [--json]
+                              [--passes GAP_MS] [--pass N]
   tools/prof/prof.py diff BEFORE_DB AFTER_DB [--stages qwen] [--top N]
+
+`--passes GAP_MS` splits the timeline wherever the GPU idles longer than
+GAP_MS and lists every pass (a warm-up prefill, the timed prefill, decoding);
+`--pass N` restricts the tables to one of them. A first pass over freshly
+uploaded weights ran up to ten times slower than the timed one here, so
+per-kernel numbers must come from the pass that was actually timed.
 
 `run` needs rocprofv3 on PATH, so invoke it inside `nix develop`.
 """
@@ -243,12 +250,21 @@ class KernelStat:
 
 
 @dataclass
+class Pass:
+    start_ns: float
+    dispatches: int
+    kernel_ns: float
+    span_ns: float
+
+
+@dataclass
 class Profile:
     kernels: dict[str, KernelStat]
     busy_ns: float
     wall_ns: float
     gaps: list[tuple[float, str, str]]  # (ns, before, after)
     invalid_dispatches: int = 0
+    passes: list[Pass] = field(default_factory=list)
 
     @property
     def total_ns(self) -> float:
@@ -259,7 +275,26 @@ class Profile:
         return sum(k.calls for k in self.kernels.values())
 
 
-def load(db_path: str) -> Profile:
+def split_passes(rows: list[tuple], gap_ns: float) -> list[list[tuple]]:
+    """Groups dispatches (sorted by start) wherever the GPU idles > gap_ns."""
+    passes: list[list[tuple]] = []
+    current: list[tuple] = []
+    last_end = None
+    for row in rows:
+        start, end = row[1], row[2]
+        if end <= start:
+            continue
+        if last_end is not None and start - last_end > gap_ns:
+            passes.append(current)
+            current = []
+        current.append(row)
+        last_end = end if last_end is None else max(last_end, end)
+    if current:
+        passes.append(current)
+    return passes
+
+
+def load(db_path: str, pass_gap_ms: float | None = None, pass_index: int | None = None) -> Profile:
     conn = sqlite3.connect(db_path)
     rows = conn.execute(
         """
@@ -274,6 +309,18 @@ def load(db_path: str) -> Profile:
     conn.close()
     if not rows:
         raise SystemExit(f"{db_path}: no kernel dispatches recorded")
+
+    passes: list[Pass] = []
+    if pass_gap_ms is not None:
+        groups = split_passes(rows, pass_gap_ms * 1e6)
+        for group in groups:
+            kernel_ns = sum(float(r[2] - r[1]) for r in group)
+            span_ns = float(max(r[2] for r in group) - group[0][1])
+            passes.append(Pass(float(group[0][1] - rows[0][1]), len(group), kernel_ns, span_ns))
+        if pass_index is not None:
+            if not 0 <= pass_index < len(groups):
+                raise SystemExit(f"{db_path}: pass {pass_index} out of range (0..{len(groups) - 1})")
+            rows = groups[pass_index]
 
     kernels: dict[str, KernelStat] = defaultdict(KernelStat)
     intervals: list[tuple[float, float, str]] = []
@@ -316,7 +363,7 @@ def load(db_path: str) -> Profile:
     busy += cur_end - cur_start
     wall = cur_end - intervals[0][0]
     gaps.sort(reverse=True)
-    return Profile(dict(kernels), busy, wall, gaps, invalid_dispatches)
+    return Profile(dict(kernels), busy, wall, gaps, invalid_dispatches, passes)
 
 
 def rollup(prof: Profile, stages: list[tuple[str, str]]) -> dict[str, tuple[int, float]]:
@@ -329,9 +376,22 @@ def rollup(prof: Profile, stages: list[tuple[str, str]]) -> dict[str, tuple[int,
 
 
 def cmd_show(args: argparse.Namespace) -> int:
-    prof = load(args.db)
+    prof = load(args.db, args.passes, getattr(args, "pass_index", None))
     stages = STAGE_MAPS.get(args.stages, [])
     total = prof.total_ns
+
+    if prof.passes and not args.json:
+        print(f"-- passes (idle gaps > {args.passes:g} ms; passes under 5 ms of kernel time omitted) --")
+        print(f"{'pass':>5} {'start ms':>10} {'dispatches':>10} {'kernel ms':>10} {'span ms':>9} {'idle ms':>8}")
+        for index, p in enumerate(prof.passes):
+            if p.kernel_ns < 5e6:
+                continue
+            print(
+                f"{index:>5} {p.start_ns / 1e6:>10.1f} {p.dispatches:>10} {p.kernel_ns / 1e6:>10.1f} "
+                f"{p.span_ns / 1e6:>9.1f} {(p.span_ns - p.kernel_ns) / 1e6:>8.1f}"
+            )
+        selected = getattr(args, "pass_index", None)
+        print(f"\ntables below cover {'pass ' + str(selected) if selected is not None else 'the whole trace'}")
 
     if args.json:
         print(
@@ -474,18 +534,35 @@ def main() -> int:
         p.add_argument("--stages", default="qwen", help="stage map name, or '' to disable")
         p.add_argument("--top", type=int, default=25)
 
+    def show_options(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--gaps", type=int, default=8)
+        p.add_argument("--json", action="store_true")
+        p.add_argument(
+            "--passes",
+            type=float,
+            default=None,
+            metavar="GAP_MS",
+            help="split the timeline at idle gaps longer than GAP_MS and list the passes",
+        )
+        p.add_argument(
+            "--pass",
+            dest="pass_index",
+            type=int,
+            default=None,
+            metavar="N",
+            help="restrict the tables to pass N of the --passes split",
+        )
+
     p_show = sub.add_parser("show", help="analyze an existing rocprofv3 database")
     p_show.add_argument("db")
-    p_show.add_argument("--gaps", type=int, default=8)
-    p_show.add_argument("--json", action="store_true")
+    show_options(p_show)
     common(p_show)
     p_show.set_defaults(func=cmd_show)
 
     p_run = sub.add_parser("run", help="profile a command and analyze the result")
     p_run.add_argument("-o", "--out", default=None, help="output directory")
     p_run.add_argument("--tag", default="prof")
-    p_run.add_argument("--gaps", type=int, default=8)
-    p_run.add_argument("--json", action="store_true")
+    show_options(p_run)
     p_run.add_argument("--show-output", action="store_true")
     common(p_run)
     p_run.add_argument("command", nargs=argparse.REMAINDER)
