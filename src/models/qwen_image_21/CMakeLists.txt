@@ -10,6 +10,11 @@ if(ENGINE_ENABLE_HIP)
   # Preserve BF16 operation boundaries and explicit FP32 arithmetic.
   target_compile_options(gufo_qwen_image_21 PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffp-contract=off>)
+  # Schedule independent FP32 value-product chains without changing arithmetic.
+  # Line tables avoid LLVM's full-debug register-pressure crash.
+  set_source_files_properties(hip/attention.hip PROPERTIES
+    COMPILE_OPTIONS
+    "-gline-tables-only;-Xarch_device;-mllvm=-amdgpu-sched-strategy=iterative-ilp")
 else()
   target_sources(gufo_qwen_image_21 PRIVATE model_stub.cpp)
 endif()

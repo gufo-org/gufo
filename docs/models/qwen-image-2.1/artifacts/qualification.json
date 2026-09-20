@@ -22,23 +22,23 @@
     },
     "dit.0.block.": {
       "count": 32,
-      "minimum_cosine": 0.9999997621787732,
-      "maximum_relative_l2": 0.0006896683448568048
+      "minimum_cosine": 0.9999997714941068,
+      "maximum_relative_l2": 0.000676026548807257
     },
     "dit.1.block.": {
       "count": 32,
-      "minimum_cosine": 0.9999988301791507,
-      "maximum_relative_l2": 0.001529672678779087
+      "minimum_cosine": 0.9999984051672633,
+      "maximum_relative_l2": 0.0017859882209636383
     },
     "vae.encoder.block.": {
       "count": 5,
-      "minimum_cosine": 0.9999983046906601,
-      "maximum_relative_l2": 0.0018413625637516767
+      "minimum_cosine": 0.9999983102784489,
+      "maximum_relative_l2": 0.0018383296275812859
     },
     "vae.decoder.block.": {
       "count": 5,
-      "minimum_cosine": 0.9999971065843272,
-      "maximum_relative_l2": 0.0024055848379522793
+      "minimum_cosine": 0.9999970291688656,
+      "maximum_relative_l2": 0.002437552713878623
     }
   },
   "exact_tokenizer": true,
@@ -53,13 +53,13 @@
           "cosine": 0.9999121579126123
         },
         "vae.decoded": {
-          "relative_l2": 0.008969960906154258,
-          "cosine": 0.9999613748621651
+          "relative_l2": 0.008964739389815372,
+          "cosine": 0.9999613920925287
         }
       },
       "png": {
-        "psnr_db": 48.32836825241684,
-        "mae_255": 0.38006591796875
+        "psnr_db": 48.329235242653525,
+        "mae_255": 0.3793487548828125
       }
     },
     "edit": {
@@ -67,17 +67,17 @@
       "steps": 40,
       "boundaries": {
         "latent.39": {
-          "relative_l2": 0.011746548456188607,
-          "cosine": 0.9999310759407437
+          "relative_l2": 0.01154307209275915,
+          "cosine": 0.9999334385754054
         },
         "vae.decoded": {
-          "relative_l2": 0.0033067483303312077,
-          "cosine": 0.9999945428842633
+          "relative_l2": 0.0029786386315674,
+          "cosine": 0.9999955794129012
         }
       },
       "png": {
-        "psnr_db": 55.951424164776824,
-        "mae_255": 0.13309097290039062
+        "psnr_db": 56.577859398966446,
+        "mae_255": 0.12286758422851562
       }
     }
   },
@@ -109,7 +109,7 @@
     "seeded_png_replay": true,
     "n2_independent_seeds": true,
     "concurrent_independent_seeds": true,
-    "disconnect_recovery_seconds": 0.3483211320126429,
+    "disconnect_recovery_seconds": 0.31795014708768576,
     "openai_sdk_llama_swap": {
       "openai_sdk": "2.41.1",
       "llama_swap_model_alias": "qwen-image-test",
@@ -139,15 +139,23 @@
     "exact_bf16_weight_and_activation_packing": true,
     "minimum_rows": 1,
     "fp64_operator_oracle": true,
-    "duplicate_persistent_weights": false
+    "duplicate_persistent_weights": false,
+    "fused_gate_up_silu_and_output_packing": true
   },
   "convolution_layout": {
-    "tiled_copy_exact": true
+    "tiled_copy_exact": true,
+    "native_packed_weights": true,
+    "channel_tap_order_preserved": true,
+    "halo_reuse_exact": true
   },
   "packing_and_normalization": {
-    "exact_model_boundaries_and_png": 156,
     "normalization_fp64_operator_oracle": true,
-    "packing_is_byte_permutation": true
+    "packing_is_byte_permutation": true,
+    "exact_edit_replay_tensors": 155,
+    "exact_edit_replay_rgba": true,
+    "rms_rope_fusion_exact": true,
+    "bf16_silu_bit_patterns_checked": 65536,
+    "bf16_conversion_values_checked": 1393216
   },
   "development_control": {
     "date": "2026-09-20",
@@ -155,14 +163,21 @@
     "steps": 2,
     "seed": 42,
     "warm": true,
-    "http_seconds": 8.310854669078253,
-    "prompt_seconds": 0.0914529,
-    "denoise_seconds": 6.40743,
-    "vae_seconds": 1.51849,
-    "separate_gpu_profile_seconds": 7.8997,
-    "gpu_idle_percent": 1.4,
-    "native_projection_seconds": 3.8916,
-    "fused_attention_seconds": 1.85318,
-    "full_40_step_performance": "TODO"
+    "http_seconds": 5.838276095921174,
+    "prompt_seconds": 0.088923,
+    "denoise_seconds": 4.86534,
+    "vae_seconds": 0.826177,
+    "separate_gpu_profile_seconds": 5.76288,
+    "gpu_idle_percent": 0.5,
+    "native_projection_seconds": 1.71565,
+    "fused_attention_seconds": 1.48746,
+    "full_40_step_performance": "TODO",
+    "fused_feed_forward_seconds": 1.40922,
+    "native_convolution_seconds": 0.55072
+  },
+  "png_encoding": {
+    "compression_level": 1,
+    "adaptive_filters": true,
+    "exact_rgba_roundtrip": true
   }
 }

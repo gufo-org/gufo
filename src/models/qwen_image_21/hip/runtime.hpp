@@ -20,12 +20,22 @@ void Check(hipError_t status);
 
 // Model-private operators; callers supply validated dimensions and buffers.
 bool DenseShape(int channels, int inner);
-// DenseBf16 consumes PackDense16 operands; columns must be a multiple of 64.
+// Columns must be a multiple of 16.
 void PackDense16(const std::uint16_t* input, std::uint16_t* output, int rows,
                  int cols, hipStream_t stream);
 bool DenseBf16(const std::uint16_t* weights, const std::uint16_t* input,
                std::uint16_t* output, int rows, int channels, int inner,
                hipStream_t stream);
+// All inputs and the output use PackDense16 layout.
+bool DenseSwiGlu(const std::uint16_t* gate, const std::uint16_t* up,
+                 const std::uint16_t* input, std::uint16_t* output, int rows,
+                 int channels, int inner, hipStream_t stream);
+bool Convolve3Shape(int channels, int output_channels);
+// Weights use PackDense16 layout.
+bool Convolve3(const std::uint16_t* input, const std::uint16_t* weights,
+               const std::uint16_t* bias, std::uint16_t* output, int height,
+               int width, int channels, int output_channels, hipStream_t stream,
+               int stride = 1, int padding = 1, int upscale = 1);
 bool ExpandConvolution3(const std::uint16_t* input, std::uint16_t* output,
                         int height, int width, int channels, int stride,
                         int padding, int upscale, int output_width, int start,
@@ -55,7 +65,10 @@ enum class Activation { kSilu, kGeluTanh, kGelu, kIdentity };
 void NormalizeRows(const std::uint16_t* input, std::uint16_t* output,
                    const std::uint16_t* weight, const std::uint16_t* bias,
                    int rows, int cols, Norm kind, float epsilon,
-                   hipStream_t stream);
+                   hipStream_t stream, bool silu = false);
+void NormalizeRotary128(const std::uint16_t* input, std::uint16_t* output,
+                        const std::uint16_t* weight, const float* frequencies,
+                        int rows, int heads, float epsilon, hipStream_t stream);
 
 class Runtime {
 public:
@@ -70,14 +83,21 @@ public:
   Matrix Weight(std::string_view name);
   Matrix Linear(const Matrix& x, const std::string& name);
   Matrix Normalize(const Matrix& x, Norm kind, const std::string& weight = {},
-                   float epsilon = 1e-6F);
+                   float epsilon = 1e-6F, bool silu = false);
   Matrix Activate(const Matrix& x, Activation activation);
   Matrix SwiGlu(const Matrix& gate, const Matrix& up);
+  Matrix GatedLinear(const Matrix& x, const std::string& gate,
+                     const std::string& up);
   Matrix Add(const Matrix& a, const Matrix& b);
+  Matrix ModulationFactors(const Matrix& mod, bool gates);
   Matrix Modulate(const Matrix& x, const Matrix& mod, int part, int prefix,
-                  bool gate, const Matrix* residual = nullptr);
+                  const Matrix* residual = nullptr);
+  Matrix NormalizeModulate(const Matrix& x, const Matrix& mod, int part,
+                           int prefix);
   Matrix Rope(const Matrix& x, int heads, int dim, const Matrix& frequencies,
               int mode);
+  Matrix NormalizeRope(const Matrix& x, const std::string& weight, int heads,
+                       const Matrix& frequencies);
   Matrix Attention(const Matrix& q, const Matrix& k, const Matrix& v, int heads,
                    int kv_heads, int dim,
                    const std::vector<int>& key_limits = {});
@@ -114,6 +134,7 @@ private:
   Matrix packed_source_, packed_input_;
   std::size_t weight_bytes_{0};
   Matrix Raw(std::size_t bytes);
+  Matrix PackedInput(const Matrix& x);
   void Matmul(const Matrix& x, const Matrix& w, Matrix& output,
               const Matrix* bias = nullptr, bool convolution = false);
 };

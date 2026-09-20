@@ -113,6 +113,13 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   This saved more complete-request time than faster individual TTS GEMVs.
   Finish a norm's existing descending sum tree within one wave to remove
   barriers without reordering additions. Check the BF16 output boundaries.
+  For BF16 image kernels, branchless round-to-nearest-even conversion and
+  fused gate/up, SiLU and output packing helped; retain NaN payload handling.
+  A BF16 activation has only 65,536 inputs: exhaust that domain before
+  substituting an intrinsic, including signed zero and subnormals.
+  Reuse overlapping convolution windows in LDS while keeping the original
+  channel/tap accumulation order. Fuse normalization/RoPE or activation only
+  after preserving every intermediate BF16 rounding boundary.
   Lossless weight packing can still be a poor trade: 2% TTS speed for over
   2 GiB extra copies was rejected. Non-temporal loads won cold microbenchmarks
   but lost complete TTS requests; always reproduce model cache traffic.

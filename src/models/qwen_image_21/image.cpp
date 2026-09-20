@@ -28,6 +28,19 @@ struct Filter {
   std::vector<std::int32_t> weights;
 };
 
+struct PngOutput {
+  std::vector<std::uint8_t> bytes;
+  std::size_t used{0};
+};
+
+void WritePng(png_structp png, png_bytep data, png_size_t size) {
+  auto& output = *static_cast<PngOutput*>(png_get_io_ptr(png));
+  if (size > output.bytes.size() - output.used)
+    png_error(png, "output PNG exceeds its allocation");
+  std::memcpy(output.bytes.data() + output.used, data, size);
+  output.used += size;
+}
+
 std::vector<Filter> LanczosFilters(int input, int output) {
   std::vector<Filter> result(output);
   const double scale = static_cast<double>(input) / output;
@@ -93,20 +106,45 @@ Image DecodeImage(std::span<const std::uint8_t> bytes) {
 
 std::vector<std::uint8_t> EncodePng(const Image& image) {
   CheckImage(image);
-  png_image png{};
-  png.version = PNG_IMAGE_VERSION;
-  png.width = image.width;
-  png.height = image.height;
-  png.format = PNG_FORMAT_RGBA;
-  // The simplified API's size-only call compresses the complete image too.
-  // Its documented upper bound lets us encode once with identical PNG bytes.
-  png_alloc_size_t size = PNG_IMAGE_PNG_SIZE_MAX(png);
-  std::vector<std::uint8_t> bytes(size);
-  if (!png_image_write_to_memory(&png, bytes.data(), &size, 0,
-                                 image.rgba.data(), 0, nullptr))
+  png_image geometry{};
+  geometry.width = image.width;
+  geometry.height = image.height;
+  geometry.format = PNG_FORMAT_RGBA;
+  // Allocate before setjmp; callbacks only mutate heap state and cannot throw.
+  const auto output = std::make_unique<PngOutput>();
+  output->bytes.resize(PNG_IMAGE_PNG_SIZE_MAX(geometry));
+  auto png = png_create_write_struct(
+      PNG_LIBPNG_VER_STRING, nullptr,
+      [](png_structp p, png_const_charp) { png_longjmp(p, 1); }, nullptr);
+  if (!png)
+    throw std::runtime_error("cannot allocate PNG encoder");
+  auto info = png_create_info_struct(png);
+  if (!info) {
+    png_destroy_write_struct(&png, nullptr);
+    throw std::runtime_error("cannot allocate PNG metadata");
+  }
+  if (setjmp(png_jmpbuf(png))) {
+    png_destroy_write_struct(&png, &info);
     throw std::runtime_error("cannot encode output PNG");
-  bytes.resize(size);
-  return bytes;
+  }
+  png_set_write_fn(png, output.get(), WritePng, nullptr);
+  png_set_IHDR(png, info, image.width, image.height, 8, PNG_COLOR_TYPE_RGBA,
+               PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
+               PNG_FILTER_TYPE_DEFAULT);
+  png_set_sRGB(png, info, PNG_sRGB_INTENT_PERCEPTUAL);
+  // Low compression avoids blocking the response on an expensive zlib search.
+  // Adaptive filtering and every RGBA byte are preserved.
+  png_set_compression_level(png, 1);
+  png_set_filter(png, PNG_FILTER_TYPE_BASE, PNG_ALL_FILTERS);
+  png_write_info(png, info);
+  for (int row = 0; row < image.height; ++row)
+    png_write_row(png, const_cast<png_bytep>(image.rgba.data() +
+                                             static_cast<std::size_t>(row) *
+                                                 image.width * 4));
+  png_write_end(png, info);
+  png_destroy_write_struct(&png, &info);
+  output->bytes.resize(output->used);
+  return std::move(output->bytes);
 }
 
 Image ResizeImage(const Image& image, int width, int height) {

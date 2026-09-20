@@ -40,6 +40,13 @@ int main(int argc, char** argv) {
   const auto roundtrip = DecodeImage(EncodePng(image));
   assert(roundtrip.width == image.width && roundtrip.height == image.height);
   assert(roundtrip.rgba == image.rgba);
+  Image textured{65, 17, std::vector<std::uint8_t>(65 * 17 * 4)};
+  for (std::size_t i = 0; i < textured.rgba.size(); ++i)
+    textured.rgba[i] = static_cast<std::uint8_t>((i * 73) ^ (i >> 3));
+  const auto textured_roundtrip = DecodeImage(EncodePng(textured));
+  assert(textured_roundtrip.width == textured.width &&
+         textured_roundtrip.height == textured.height);
+  assert(textured_roundtrip.rgba == textured.rgba);
   assert(ResizeImage(image, 2, 2).rgba == image.rgba);
   assert(ResizeImage(image, 4, 4).rgba.size() == 64);
   // Pillow RGBA Lanczos: premultiplication, two uint8 passes, unpremultiply.

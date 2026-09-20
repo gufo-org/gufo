@@ -1,93 +1,75 @@
 # Qwen-Image-2.1
 
-Native HIP text-to-image generation and reference-image editing on gfx1151.
-The checkpoint contains a 7B diffusion transformer, Qwen3-VL prompt encoder and
-RGBA VAE. Inference uses BF16 weights with FP32 accumulation. Python is an
-offline reference only.
+Native HIP image generation and editing on AMD Strix Halo (`gfx1151`). Loads
+BF16 safetensors directly; Python is not needed for inference. The checkpoint
+contains a diffusion transformer, Qwen3-VL prompt encoder and RGBA VAE.
 
-The model weights have a **non-commercial Qwen Research License**, separate from
-Gufo's MIT license. See the [pinned sources and contract](../../../src/models/qwen_image_21/UPSTREAM.md).
+Weights use the **non-commercial Qwen Research License**, separate from Gufo's
+MIT license. See the [pinned sources and model contract](../../../src/models/qwen_image_21/UPSTREAM.md).
 
-Download and serve:
+Download about 33.1 GB and start the server:
 
 ```sh
-hf download Qwen/Qwen-Image-2.1 \
-  --revision b3179ad355be050328e483a9dfdd9e60cd62adfa
+MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1 \
+  --revision b3179ad355be050328e483a9dfdd9e60cd62adfa)
 nix build
-./result/bin/gufo serve image --model /path/to/downloaded/snapshot \
+./result/bin/gufo serve image --model "$MODEL_DIR" \
   --served-model-name Qwen-Image-2.1 --port 8080
 ```
 
-The complete download is about 33.1 GB. Point `--model` at the directory
-containing `model_index.json`; no conversion is needed.
-Gufo follows the pinned Diffusers pipeline's 1024² default. The official
-repository recommends 2048²; request that explicitly with `size`.
-
-Generate:
+Generate an image:
 
 ```sh
-curl http://127.0.0.1:8080/v1/images/generations \
+curl --fail-with-body http://127.0.0.1:8080/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen-Image-2.1","prompt":"A red ceramic teapot on a wooden table",
-       "size":"1024x1024","n":1,"response_format":"b64_json","seed":42}'
+       "size":"1024x1024","seed":42}' > response.json
 ```
 
-Edit:
+Edit with multiple references, in the order they are uploaded. For a single
+reference, keep just one `image[]` field:
 
 ```sh
-curl http://127.0.0.1:8080/v1/images/edits \
-  -F model=Qwen-Image-2.1 -F 'image[]=@photo.png' \
-  -F 'prompt=Change the background to a sunset beach' \
-  -F size=1024x1024 -F seed=42
+curl --fail-with-body http://127.0.0.1:8080/v1/images/edits \
+  -F model=Qwen-Image-2.1 \
+  -F 'image[]=@object.png' -F 'image[]=@room.png' \
+  -F 'prompt=Place the object from the first image in the room from the second image' \
+  -F size=1024x1024 -F seed=42 > response.json
 ```
 
-Both return the OpenAI Images shape:
-`{"created":...,"data":[{"b64_json":"..."}]}`. Decode `b64_json` into PNG bytes.
-The OpenAI SDK's `images.generate` and `images.edit` work with the local
-`base_url`; `seed` and `steps` are optional Gufo extensions in `extra_body`.
+Both use the OpenAI Images response format. Save the first PNG:
 
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local")
-image = client.images.generate(
-    model="Qwen-Image-2.1", prompt="A red ceramic teapot on a wooden table",
-    extra_body={"seed": 42},
-)
+```sh
+jq -r '.data[0].b64_json' response.json | base64 --decode > output.png
 ```
 
-| Option | Behavior |
+| Setting | Behavior |
 | --- | --- |
-| `size` | Default `auto`: 1024 square for generation, reference aspect ratio for editing. Explicit dimensions must be multiples of 32, at most 4096 per side and 4 megapixels. |
-| `n` | 1–10 images, independent seeds. GPU execution is serialized. |
-| `image` / `image[]` | PNG/JPEG multipart uploads; up to 10 references, 20 MiB encoded data and 32 megapixels combined. The server body limit also applies. |
-| `background` | `auto`, `transparent` (official transparency prompt), or `opaque` (composite output over white). |
-| `quality` | `auto`, `standard`, `high`: all retain the official 40-step default. |
-| `seed`, `steps` | Reproducible seed; 2–100 steps, default 40. Lower steps change quality. |
+| `size` | Default `auto`: 1024² generation; reference aspect ratio for edits. Explicit sides must be multiples of 32, at most 4096 per side and 4 megapixels total. |
+| `seed`, `steps` | Seeded replay within the same build and request configuration. Default 40 steps; range 2–100. Fewer steps change quality. |
+| `n` | 1–10 outputs with independent seeds; requests execute serially on the GPU. |
+| References | Up to 10 PNG/JPEG uploads, 20 MiB encoded and 32 megapixels combined; the HTTP body limit also applies. |
+| `background` | `auto`, `transparent`, or `opaque` (composite over white). |
 
-Only PNG/base64 output is implemented. URL responses, WebP, streaming,
-`input_fidelity` and separate `mask` uploads return an explicit error.
-Editing accepts annotated reference images. Prompt rewriting is not automatic.
-This model generates images; existing vision chat models handle image-to-text.
-Fixed seeds replay within the same Gufo build and request configuration;
-PyTorch uses a different noise generator. Independent comparisons therefore
-share initial noise rather than assuming equal integer seeds imply equal noise.
+The official repository recommends 2048²; Gufo follows the pinned Diffusers
+1024² default. Set `size` explicitly for larger output. Output is PNG/base64;
+URL output, separate masks, streaming and `input_fidelity` are unsupported.
+OpenAI SDK clients use the local `/v1` base URL; `seed` and `steps` are Gufo
+extensions supplied through `extra_body`.
 
-llama-swap configuration:
+For llama-swap, add this model and send the same requests to the proxy:
 
 ```yaml
 models:
   Qwen-Image-2.1:
     cmd: >
-      /path/to/gufo serve image --model /path/to/downloaded/snapshot
+      /path/to/gufo serve image --model /path/to/snapshot
       --served-model-name Qwen-Image-2.1 --port ${PORT}
 ```
 
-Send the same JSON generation or multipart edit request to llama-swap's port.
-`/health`, `/ready` and `/v1/models` are available. For larger uploads, configure
-Gufo's existing `--max-request-bytes` and the proxy's corresponding limit.
-The Nix `mkGufoServe` helper also accepts `modality = "image"` with `model`
-and `servedModelName`.
+For larger uploads, raise `--max-request-bytes` and the proxy's body limit.
+`/health`, `/ready` and `/v1/models` are available. Nix `mkGufoServe` supports
+`modality = "image"` with `model` and `servedModelName`.
 
 [Benchmarks](BENCHMARKS.md) · [Evaluation](EVALUATION.md) ·
 [Experiments](EXPERIMENTS.md)

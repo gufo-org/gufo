@@ -263,12 +263,10 @@ Matrix VaeResidual(Runtime& rt, const Matrix& x, int height, int width,
   Matrix shortcut = x;
   if (weights.Contains(name + ".conv_shortcut.weight"))
     shortcut = rt.Conv(x, height, width, name + ".conv_shortcut", 1, 0);
-  auto h = rt.Conv(rt.Activate(rt.Normalize(x, Norm::kVae, name + ".norm1"),
-                               Activation::kSilu),
+  auto h = rt.Conv(rt.Normalize(x, Norm::kVae, name + ".norm1", 1e-6F, true),
                    height, width, name + ".conv1");
-  h = rt.Conv(rt.Activate(rt.Normalize(h, Norm::kVae, name + ".norm2"),
-                          Activation::kSilu),
-              height, width, name + ".conv2");
+  h = rt.Conv(rt.Normalize(h, Norm::kVae, name + ".norm2", 1e-6F, true), height,
+              width, name + ".conv2");
   return rt.Add(h, shortcut);
 }
 
@@ -324,8 +322,7 @@ Matrix EncodeVae(Runtime& rt, const Weights& weights, const Image& image,
     rt.Observe(observer, "vae.encoder.block." + std::to_string(block), x);
   }
   x = VaeMid(rt, x, height, width, "vae.encoder.mid_block", weights);
-  x = rt.Conv(rt.Activate(rt.Normalize(x, Norm::kVae, "vae.encoder.norm_out"),
-                          Activation::kSilu),
+  x = rt.Conv(rt.Normalize(x, Norm::kVae, "vae.encoder.norm_out", 1e-6F, true),
               height, width, "vae.encoder.conv_out");
   x = rt.Conv(x, height, width, "vae.quant_conv", 1, 0);
   x = rt.Columns(x, 0, 64);
@@ -364,8 +361,7 @@ Image DecodeVae(Runtime& rt, const Weights& weights, const Matrix& latent,
     }
     rt.Observe(observer, "vae.decoder.block." + std::to_string(block), x);
   }
-  x = rt.Conv(rt.Activate(rt.Normalize(x, Norm::kVae, "vae.decoder.norm_out"),
-                          Activation::kSilu),
+  x = rt.Conv(rt.Normalize(x, Norm::kVae, "vae.decoder.norm_out", 1e-6F, true),
               height, width, "vae.decoder.conv_out");
   rt.Observe(observer, "vae.decoded", x);
   if (x.cols != 4)
@@ -487,23 +483,15 @@ Matrix Denoise(Runtime& rt, DiffusionContext& context, const Matrix& latent,
   rt.Observe(observer, "dit." + std::to_string(step) + ".input", x);
   rt.Observe(observer, "dit." + std::to_string(step) + ".modulation",
              modulation);
+  const auto factors = rt.ModulationFactors(modulation, true);
   for (int layer = 0; layer < 32; ++layer) {
     Cancel(cancelled);
     const auto p = "transformer.transformer_blocks." + std::to_string(layer);
-    const auto norm = rt.Modulate(rt.Normalize(x, Norm::kLayer), modulation, 0,
-                                  prefix, false);
-    const auto q = rt.Rope(
-        rt.Normalize(
-              rt.Linear(norm, p + ".attn.to_q").Reshape(x.rows * 32, 128),
-              Norm::kRms, p + ".attn.norm_q")
-            .Reshape(x.rows, 4096),
-        32, 128, rope, 0);
-    auto k = rt.Rope(
-        rt.Normalize(
-              rt.Linear(norm, p + ".attn.to_k").Reshape(x.rows * 32, 128),
-              Norm::kRms, p + ".attn.norm_k")
-            .Reshape(x.rows, 4096),
-        32, 128, rope, 0);
+    const auto norm = rt.NormalizeModulate(x, factors, 0, prefix);
+    const auto q = rt.NormalizeRope(rt.Linear(norm, p + ".attn.to_q"),
+                                    p + ".attn.norm_q", 32, rope);
+    auto k = rt.NormalizeRope(rt.Linear(norm, p + ".attn.to_k"),
+                              p + ".attn.norm_k", 32, rope);
     auto v = rt.Linear(norm, p + ".attn.to_v");
     if (prefix) {
       // Copy only prefix rows: a view would pin full target K/V for all layers.
@@ -517,21 +505,19 @@ Matrix Denoise(Runtime& rt, DiffusionContext& context, const Matrix& latent,
         rt.Linear(rt.Attention(q, k, v, 32, 32, 128,
                                prefix ? context.limits : std::vector<int>{}),
                   p + ".attn.to_out.0");
-    x = rt.Modulate(attention, modulation, 1, prefix, true, &x);
-    const auto norm2 = rt.Modulate(rt.Normalize(x, Norm::kLayer), modulation, 2,
-                                   prefix, false);
-    const auto mlp =
-        rt.Linear(rt.SwiGlu(rt.Linear(norm2, p + ".img_mlp.gate_layer"),
-                            rt.Linear(norm2, p + ".img_mlp.proj")),
-                  p + ".img_mlp.out");
-    x = rt.Modulate(mlp, modulation, 3, prefix, true, &x);
+    x = rt.Modulate(attention, factors, 1, prefix, &x);
+    const auto norm2 = rt.NormalizeModulate(x, factors, 2, prefix);
+    const auto mlp = rt.Linear(
+        rt.GatedLinear(norm2, p + ".img_mlp.gate_layer", p + ".img_mlp.proj"),
+        p + ".img_mlp.out");
+    x = rt.Modulate(mlp, factors, 3, prefix, &x);
     rt.Observe(
         observer,
         "dit." + std::to_string(step) + ".block." + std::to_string(layer), x);
   }
   const auto scale = rt.Linear(activated, "transformer.norm_out.linear");
-  x = rt.Modulate(rt.Normalize(x.Slice(prefix, latent.rows), Norm::kLayer),
-                  scale, 0, 0, false);
+  x = rt.NormalizeModulate(x.Slice(prefix, latent.rows),
+                           rt.ModulationFactors(scale, false), 0, 0);
   x = rt.Linear(x, "transformer.proj_out");
   rt.Observe(observer, "dit." + std::to_string(step) + ".output", x);
   return x;

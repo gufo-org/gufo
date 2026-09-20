@@ -10,6 +10,7 @@
 #include <tuple>
 #include <vector>
 
+#include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 
 namespace {
@@ -33,6 +34,60 @@ std::uint16_t Bf16(float value) {
 
 float Float(std::uint16_t value) {
   return std::bit_cast<float>(std::uint32_t(value) << 16);
+}
+
+__global__ void Convert(const std::uint32_t* input, std::uint16_t* actual,
+                        std::uint16_t* expected, std::size_t count) {
+  const auto i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < count) {
+    const float value = __uint_as_float(input[i]);
+    actual[i] = image::Bf16(value).data;
+    expected[i] = hip_bfloat16(value).data;
+  }
+}
+
+__global__ void Activation(std::uint16_t* actual, std::uint16_t* expected) {
+  const unsigned bits = blockIdx.x * 256 + threadIdx.x;
+  hip_bfloat16 input;
+  input.data = bits;
+  const float value = float(input);
+  actual[bits] = image::SiluBf16(input).data;
+  expected[bits] = hip_bfloat16(value / (1.0F + expf(-value))).data;
+}
+
+void Conversion() {
+  // Every BF16 exponent/sign/mantissa, at either side of ties and across
+  // underflow/overflow. Include NaNs whose payload lies below the retained
+  // bits.
+  std::vector<std::uint32_t> input;
+  for (unsigned upper = 0; upper < 65536; ++upper)
+    for (unsigned lower : {0U, 1U, 0x7fffU, 0x8000U, 0x8001U, 0xffffU})
+      input.push_back((upper << 16) | lower);
+  std::mt19937 rng(79);
+  for (int i = 0; i < 1000000; ++i)
+    input.push_back(rng());
+  Device<std::uint32_t> x(input.size());
+  Device<std::uint16_t> y(input.size()), reference(input.size());
+  image::Check(hipMemcpy(x.data, input.data(), input.size() * sizeof(input[0]),
+                         hipMemcpyHostToDevice));
+  Convert<<<(input.size() + 255) / 256, 256>>>(x.data, y.data, reference.data,
+                                               input.size());
+  std::vector<std::uint16_t> actual(input.size()), expected(input.size());
+  image::Check(hipMemcpy(actual.data(), y.data, actual.size() * 2,
+                         hipMemcpyDeviceToHost));
+  image::Check(hipMemcpy(expected.data(), reference.data, expected.size() * 2,
+                         hipMemcpyDeviceToHost));
+  assert(actual == expected);
+  // Exhaust the activation's complete input domain, including subnormals,
+  // infinities, signed zero and every NaN payload.
+  Activation<<<256, 256>>>(y.data, reference.data);
+  actual.resize(65536);
+  expected.resize(65536);
+  image::Check(hipMemcpy(actual.data(), y.data, actual.size() * 2,
+                         hipMemcpyDeviceToHost));
+  image::Check(hipMemcpy(expected.data(), reference.data, expected.size() * 2,
+                         hipMemcpyDeviceToHost));
+  assert(actual == expected);
 }
 
 void Normalization() {
@@ -96,6 +151,47 @@ void Normalization() {
         }
       }
       assert(std::sqrt(error / magnitude) < 0.005);
+      if (cols == 128 && kind == image::Norm::kRms) {
+        const auto normalized = actual;
+        for (int heads : {1, 3}) {
+          std::vector<float> frequencies(rows / heads * 128);
+          for (std::size_t i = 0; i < frequencies.size(); i += 2) {
+            frequencies[i] = std::cos(float(i) / 73);
+            frequencies[i + 1] = std::sin(float(i) / 73);
+          }
+          Device<float> rotary(frequencies.size());
+          image::Check(hipMemcpy(rotary.data, frequencies.data(),
+                                 frequencies.size() * sizeof(float),
+                                 hipMemcpyHostToDevice));
+          image::NormalizeRotary128(x.data, y.data, w.data, rotary.data,
+                                    rows / heads, heads, 1e-6F, nullptr);
+          image::Check(hipMemcpy(actual.data(), y.data, actual.size() * 2,
+                                 hipMemcpyDeviceToHost));
+          for (int r = 0; r < rows; ++r)
+            for (int c = 0; c < cols; ++c) {
+              const int pair = (r / heads) * cols + (c & ~1);
+              // Keep the production operator's separate FP32 products.
+              volatile float a =
+                  Float(normalized[r * cols + c]) * frequencies[pair];
+              volatile float b =
+                  Float(normalized[r * cols + (c ^ 1)]) * frequencies[pair + 1];
+              assert(actual[r * cols + c] == Bf16(c % 2 ? a + b : a - b));
+            }
+        }
+      }
+      if (kind == image::Norm::kVae) {
+        const auto normalized = actual;
+        image::NormalizeRows(x.data, y.data, w.data, b.data, rows, cols, kind,
+                             1e-6F, nullptr, true);
+        image::Check(hipMemcpy(actual.data(), y.data, actual.size() * 2,
+                               hipMemcpyDeviceToHost));
+        for (std::size_t i = 0; i < actual.size(); ++i) {
+          const double v = Float(normalized[i]);
+          const double expected = v / (1 + std::exp(-v));
+          assert(std::abs(Float(actual[i]) - expected) <=
+                 0.00391 * std::abs(expected) + 1e-7);
+        }
+      }
     }
   }
 }
@@ -259,7 +355,7 @@ void Fused(bool masked) {
 
 void PackedLayout() {
   for (int rows : {1, 15, 16, 17, 129})
-    for (int cols : {64, 128, 4096}) {
+    for (int cols : {16, 48, 64, 128, 1296, 4096}) {
       std::vector<std::uint16_t> input(std::size_t(rows) * cols),
           output(input.size());
       for (std::size_t i = 0; i < input.size(); ++i)
@@ -284,6 +380,8 @@ void Dense() {
       !image::DenseBf16(nullptr, nullptr, nullptr, 4096, 1152, 4096, nullptr));
   assert(
       !image::DenseBf16(nullptr, nullptr, nullptr, 4096, 4096, 4095, nullptr));
+  assert(!image::DenseSwiGlu(nullptr, nullptr, nullptr, nullptr, 1, 4096, 4096,
+                             nullptr));
   std::mt19937 rng(47);
   for (auto [rows, channels, inner] : {std::tuple{1, 4096, 4096},
                                        {36, 12288, 4096},
@@ -296,7 +394,8 @@ void Dense() {
         replay(output.size());
     for (auto* values : {&weights, &input})
       for (auto& x : *values)
-        x = Bf16(float(int(rng() % 20001) - 10000) / 10000);
+        x = Bf16(float(int(rng() % 20001) - 10000) /
+                 (channels == 12288 ? 40000 : 10000));
     Device<std::uint16_t> w(weights.size()), x(input.size()),
         packed_w(weights.size()), packed_x(input.size()), y(output.size());
     image::Check(hipMemcpy(w.data, weights.data(), weights.size() * 2,
@@ -339,8 +438,122 @@ void Dense() {
       magnitude += expected * expected;
     }
     assert(std::sqrt(error / magnitude) < 0.004);
+    if (channels == 12288) {
+      // Independent gate/up weights, including unsaturated SiLU values. Check
+      // fusion and packed output against separately qualified projections.
+      for (auto& value : weights)
+        value = Bf16(float(int(rng() % 20001) - 10000) / 40000);
+      image::Check(hipMemcpy(w.data, weights.data(), weights.size() * 2,
+                             hipMemcpyHostToDevice));
+      Device<std::uint16_t> packed_up(weights.size());
+      image::PackDense16(w.data, packed_up.data, channels, inner, nullptr);
+      assert(image::DenseBf16(packed_up.data, packed_x.data, y.data, rows,
+                              channels, inner, nullptr));
+      image::Check(hipMemcpy(replay.data(), y.data, replay.size() * 2,
+                             hipMemcpyDeviceToHost));
+      assert(image::DenseSwiGlu(packed_w.data, packed_up.data, packed_x.data,
+                                y.data, rows, channels, inner, nullptr));
+      std::vector<std::uint16_t> fused(output.size());
+      image::Check(hipMemcpy(fused.data(), y.data, fused.size() * 2,
+                             hipMemcpyDeviceToHost));
+      for (int row = 0; row < rows; ++row)
+        for (int channel = 0; channel < channels; ++channel) {
+          const auto index = std::size_t(row) * channels + channel;
+          const double gate = Float(output[index]);
+          const float silu = Float(Bf16(gate / (1 + std::exp(-gate))));
+          const float expected = Float(Bf16(silu * Float(replay[index])));
+          const float actual =
+              Float(fused[std::size_t(channel / 16) * rows * 16 + row * 16 +
+                          channel % 16]);
+          assert(std::isfinite(actual));
+          assert(std::abs(actual - expected) <=
+                 0.00782 * std::abs(expected) + 1e-7);
+        }
+    }
   }
 }
+void Convolution() {
+  assert(!image::Convolve3(nullptr, nullptr, nullptr, nullptr, 5, 7, 4, 96,
+                           nullptr));
+  std::mt19937 rng(71);
+  for (auto [channels, output_channels] : {std::pair{96, 96},
+                                           {144, 144},
+                                           {192, 96},
+                                           {288, 288},
+                                           {384, 192},
+                                           {576, 576},
+                                           {1152, 1152}}) {
+    for (auto [stride, upscale, width] :
+         {std::tuple{1, 1, 7}, {1, 2, 7}, {2, 1, 7}, {1, 1, 64}, {1, 2, 32}}) {
+      constexpr int height = 5;
+      const int padding = stride == 2 ? -1 : 1;
+      const int out_height = height * upscale / stride;
+      const int out_width = width * upscale / stride;
+      const int rows = out_height * out_width;
+      const int inner = channels * 9;
+      std::vector<std::uint16_t> input(height * width * channels),
+          weights(output_channels * inner), bias(output_channels),
+          output(rows * output_channels), replay(output.size());
+      for (auto* values : {&input, &weights, &bias})
+        for (auto& value : *values)
+          value = Bf16(float(int(rng() % 2001) - 1000) / 1000);
+      Device<std::uint16_t> x(input.size()), w(weights.size()),
+          packed_w(weights.size()), b(bias.size()), y(output.size());
+      image::Check(hipMemcpy(x.data, input.data(), input.size() * 2,
+                             hipMemcpyHostToDevice));
+      image::Check(hipMemcpy(w.data, weights.data(), weights.size() * 2,
+                             hipMemcpyHostToDevice));
+      image::Check(hipMemcpy(b.data, bias.data(), bias.size() * 2,
+                             hipMemcpyHostToDevice));
+      image::PackDense16(w.data, packed_w.data, output_channels, inner,
+                         nullptr);
+      for (bool with_bias : {false, true}) {
+        for (auto* result : {&output, &replay}) {
+          assert(image::Convolve3(x.data, packed_w.data,
+                                  with_bias ? b.data : nullptr, y.data, height,
+                                  width, channels, output_channels, nullptr,
+                                  stride, padding, upscale));
+          image::Check(hipMemcpy(result->data(), y.data, result->size() * 2,
+                                 hipMemcpyDeviceToHost));
+        }
+        assert(output == replay);
+        double error = 0, magnitude = 0;
+        for (int sample = 0; sample < 64; ++sample) {
+          const int pixel = sample * 13 % rows;
+          const int channel = sample * 23 % output_channels;
+          double sum = 0, absolute_sum = 0;
+          for (int c = 0; c < channels; ++c)
+            for (int tap = 0; tap < 9; ++tap) {
+              const int iy =
+                  pixel / out_width * stride - std::max(0, padding) + tap / 3;
+              const int ix =
+                  pixel % out_width * stride - std::max(0, padding) + tap % 3;
+              if (iy >= 0 && iy < height * upscale && ix >= 0 &&
+                  ix < width * upscale) {
+                const double product =
+                    double(Float(input[((iy / upscale) * width + ix / upscale) *
+                                           channels +
+                                       c])) *
+                    Float(weights[channel * inner + c * 9 + tap]);
+                sum += product;
+                absolute_sum += std::abs(product);
+              }
+            }
+          const double expected =
+              Float(Bf16(float(sum))) + (with_bias ? Float(bias[channel]) : 0);
+          const double delta =
+              Float(output[pixel * output_channels + channel]) - expected;
+          assert(std::abs(delta) <=
+                 0.00782 * std::abs(expected) + 1e-5 * absolute_sum);
+          error += delta * delta;
+          magnitude += expected * expected;
+        }
+        assert(std::sqrt(error / magnitude) < 0.004);
+      }
+    }
+  }
+}
+
 void ConvolutionLayout() {
   assert(!image::ExpandConvolution3(nullptr, nullptr, 5, 7, 4, 1, 1, 1, 7, 0,
                                     35, nullptr));
@@ -397,12 +610,14 @@ int main() {
   image::Check(hipGetDeviceCount(&devices));
   if (!devices)
     return 77;
+  Conversion();
   Normalization();
   Layout();
   Fused(false);
   Fused(true);
   PackedLayout();
   Dense();
+  Convolution();
   ConvolutionLayout();
   std::cout << "Qwen-Image exact layouts and attention/projection FP64 oracles "
                "passed\n";

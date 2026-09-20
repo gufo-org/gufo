@@ -13,10 +13,10 @@ Maintained checks:
   covering Unicode, whitespace, code and special tokens.
 - `qwen_image_21_probe`: native model boundaries and generated PNG, using the
   actual safetensors. Keep dumps outside Git.
-- `qwen_image_21_kernel_test`: exact head-layout checks with ragged inputs,
-  exact convolution/packed layouts (padding, down/upscaling and tails), and independent
-  FP64 oracles for normalization, dense projections and masked/unmasked fused attention.
-  Checks allocation boundaries and seeded replay without loading weights.
+- `qwen_image_21_kernel_test`: independent FP64 checks for normalization,
+  projections, convolution and masked/unmasked attention; exact packed layouts,
+  padding, down/upscaling and allocation tails. Exhaustively checks BF16 SiLU
+  and checks conversion boundaries, including nonfinite values.
 - `tools/models/qwen_image_21/reference.py`: independent official Diffusers
   comparison using identical initial noise; `--teacher-force` supplies saved
   native inputs to each reference block to separate local errors from drift
@@ -30,10 +30,10 @@ exercises 4K-token image projections and condition caching.
 | --- | ---: | ---: |
 | Qwen3-VL vision blocks | 0.99999903 | 0.001393 |
 | Qwen3-VL text blocks | 0.99999534 | 0.003054 |
-| First-step DiT blocks | 0.99999976 | 0.000690 |
-| Cached-step DiT blocks | 0.99999883 | 0.001530 |
-| VAE encoder blocks | 0.99999830 | 0.001841 |
-| VAE decoder blocks | 0.99999711 | 0.002406 |
+| First-step DiT blocks | 0.99999977 | 0.000676 |
+| Cached-step DiT blocks | 0.99999841 | 0.001786 |
+| VAE encoder blocks | 0.99999831 | 0.001838 |
+| VAE decoder blocks | 0.99999703 | 0.002438 |
 | Flow sigmas | Exact | 0 |
 
 All 137 matched blocks pass the 1% relative-L2 gate. Prompt token IDs and the
@@ -44,25 +44,24 @@ Complete 256×256, 40-step trajectories, without teacher forcing:
 
 | Task | Final latent cosine | Decoded RGBA relative L2 | PNG PSNR | PNG MAE (0–255) |
 | --- | ---: | ---: | ---: | ---: |
-| “A red cube on a white table.” | 0.99991216 | 0.008970 | 48.33 dB | 0.380 |
-| “Change the cube to blue.” | 0.99993108 | 0.003307 | 55.95 dB | 0.133 |
+| “A red cube on a white table.” | 0.99991216 | 0.008965 | 48.33 dB | 0.379 |
+| “Change the cube to blue.” | 0.99993344 | 0.002979 | 56.58 dB | 0.123 |
 
 Both images were visually checked for the requested object/color and preserved
 scene. Different BF16 reductions prevent bit-identical images across runtimes.
-See the [visual comparison](artifacts/comparison.png).
 Metrics are retained in [artifacts/qualification.json](artifacts/qualification.json);
 large tensor dumps remain outside Git.
 The native fused attention keeps probabilities and value accumulation in FP32.
 Its standalone FP32 output differs from an FP64 oracle by at most 0.00000164
 relative L2 across the measured 512–8230-key shapes. Online softmax changes
 rounding; the independent block and trajectory checks above include masked
-attention and the native BF16 projection kernel. The subsequent packing-layout
-and wave-normalization optimizations, plus two-way QK-loop unrolling, preserve
-all 156 saved model boundaries and the PNG exactly; normalization keeps the
-original reduction order.
+attention, fused feed-forward projections and native convolution. Subsequent
+normalization/RoPE fusion, exhaustive BF16 SiLU substitution and convolution
+input reuse preserve all 155 saved tensors and RGBA pixels in the edit replay.
+PNG compression changes encoded bytes, with exact decoded-pixel round trips.
 
 Serving checks cover generation/edit PNG replay, independent `n=2`/concurrent
-seeds, replay after changing image size, and disconnect recovery (0.35 s). OpenAI Python SDK 2.41.1 also passed JSON generation and
+seeds, replay after changing image size, and disconnect recovery (0.32 s). OpenAI Python SDK 2.41.1 also passed JSON generation and
 two-reference multipart editing through the pinned llama-swap, including model
 aliases, non-square output and opaque alpha. All requests used localhost.
 

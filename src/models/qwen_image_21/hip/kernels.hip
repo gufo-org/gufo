@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "src/models/qwen_image_21/hip/bf16.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 
 namespace gufo::models::qwen_image_21::hip {
@@ -17,7 +18,7 @@ namespace {
 using B = hip_bfloat16;
 
 __device__ float Round(float x) {
-  return static_cast<float>(B(x));
+  return static_cast<float>(Bf16(x));
 }
 
 template<bool Maximum>
@@ -57,7 +58,7 @@ __global__ void FloatToBf16(const float* x, B* y, std::size_t n) {
   const auto i =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < n)
-    y[i] = B(x[i]);
+    y[i] = Bf16(x[i]);
 }
 
 __global__ void Bf16ToFloat(const B* x, float* y, std::size_t n) {
@@ -76,10 +77,11 @@ __global__ void Bias(const float* x, const B* bias, B* y, int cols,
     // PyTorch/MIOpen adds convolution bias after rounding the BF16 product.
     // Linear/addmm instead includes bias before the output conversion.
     const float product = Convolution ? Round(x[i]) : x[i];
-    y[i] = B(product + float(bias[i % cols]));
+    y[i] = Bf16(product + float(bias[i % cols]));
   }
 }
 
+template<bool Silu>
 __global__ void NormKernel(const B* x, B* y, const B* w, const B* bias,
                            int cols, int kind, float eps) {
   __shared__ float scratch[256];
@@ -119,7 +121,10 @@ __global__ void NormKernel(const B* x, B* y, const B* w, const B* bias,
       if (bias)
         v += float(bias[c]);
     }
-    y[offset + c] = B(v);
+    if constexpr (Silu) {
+      v = float(SiluBf16(Bf16(v)));
+    }
+    y[offset + c] = Bf16(v);
   }
 }
 
@@ -136,11 +141,12 @@ __device__ float WaveTree(float* p) {
 #pragma unroll
   for (int d = 16; d; d /= 2) {
     float v = __shfl_down(sum, d, 32);
-    if ((threadIdx.x % 32) < d)
+    if (int(threadIdx.x % 32) < d)
       sum += v;
   }
   return __shfl(sum, 0, 32);
 }
+template<bool Silu>
 __global__ void WaveNorm(const B* x, B* y, const B* w, const B* bias, int rows,
                          int cols, int kind, float eps) {
   int lane = threadIdx.x % 32, row = blockIdx.x * 8 + threadIdx.x / 32;
@@ -185,7 +191,40 @@ __global__ void WaveNorm(const B* x, B* y, const B* w, const B* bias, int rows,
       if (bias)
         v += float(bias[c]);
     }
-    y[offset + c] = B(v);
+    if constexpr (Silu) {
+      v = float(SiluBf16(Bf16(v)));
+    }
+    y[offset + c] = Bf16(v);
+  }
+}
+
+// Preserve the RMS reduction and both BF16 normalization boundaries, then
+// rotate adjacent channels while the normalized values remain in registers.
+__global__ void RmsRotary128(const B* x, B* y, const B* weight,
+                             const float* frequencies, int rows, int heads,
+                             float epsilon) {
+  const int lane = threadIdx.x % 32;
+  const int row = blockIdx.x * 8 + threadIdx.x / 32;
+  if (row >= rows * heads)
+    return;
+  const auto offset = std::size_t(row) * 128;
+  float values[4], partial[8]{};
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    values[j] = float(x[offset + lane + j * 32]);
+    partial[j] = values[j] * values[j];
+  }
+  const float inverse = rsqrtf(WaveTree(partial) / 128 + epsilon);
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const int channel = lane + j * 32;
+    const float value =
+        Round(Round(values[j] * inverse) * float(weight[channel]));
+    const float other = __shfl_xor(value, 1, 32);
+    const int pair = (row / heads) * 128 + (channel & ~1);
+    const float cosine = frequencies[pair], sine = frequencies[pair + 1];
+    y[offset + channel] = Bf16(lane % 2 ? value * cosine + other * sine
+                                        : value * cosine - other * sine);
   }
 }
 
@@ -198,36 +237,77 @@ __global__ void Elementwise(const B* x, const B* other, B* y, std::size_t n,
   const float a = float(x[i]);
   float value = a;
   if (op == 0)
-    value = a / (1.0F + expf(-a));
+    value = float(SiluBf16(x[i]));
   if (op == 1)
     value = 0.5F * a *
             (1.0F + tanhf(0.7978845608028654F * (a + 0.044715F * a * a * a)));
   if (op == 2)
     value = 0.5F * a * (1.0F + erff(a * 0.7071067811865475F));
   if (op == 4)
-    value = Round(a / (1.0F + expf(-a))) * float(other[i]);
+    value = float(SiluBf16(x[i])) * float(other[i]);
   if (op == 5)
     value = a + float(other[i]);
   // FlowMatchEuler keeps dt * model_output in BF16 (a zero-dimensional
   // FP32 dt does not promote the BF16 tensor), then adds to the FP32 sample.
   if (op == 6)
     value = a + Round(scalar * float(other[i]));
-  y[i] = B(value);
+  y[i] = Bf16(value);
+}
+
+__global__ void PrepareModulation(const B* x, B* y, int count, bool gates) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < count) {
+    const float value = float(x[i]);
+    y[i] = Bf16(gates && ((i / 4096) % 2) ? tanhf(value) : 1.0F + value);
+  }
+}
+
+// LayerNorm's original sum tree and BF16 boundary, followed by modulation.
+// Cache each lane's input so neither normalization nor the fused scale needs
+// another full activation read.
+__global__ void NormModulation(const B* x, const B* mod, B* y, int mod_cols,
+                               int part, int prefix) {
+  constexpr int cols = 4096;
+  const int lane = threadIdx.x;
+  const int row = blockIdx.x;
+  const auto offset = std::size_t(row) * cols;
+  __shared__ float scratch[256];
+  float values[16], sum = 0;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    values[i] = float(x[offset + lane + i * 256]);
+    sum += values[i];
+  }
+  const float mean = Sum(sum, scratch) / cols;
+  __syncthreads();
+  float square = 0;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    values[i] -= mean;
+    square += values[i] * values[i];
+  }
+  const float inv = rsqrtf(Sum(square, scratch) / cols + 1e-6F);
+  const int mod_offset = (row < prefix ? mod_cols : 0) + part * cols;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    const int c = lane + i * 256;
+    y[offset + c] = Bf16(Round(values[i] * inv) * float(mod[mod_offset + c]));
+  }
 }
 
 __global__ void Modulation(const B* x, const B* mod, const B* residual, B* y,
                            int rows, int cols, int mod_cols, int part,
-                           int prefix, bool gate) {
+                           int prefix) {
   const auto i =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i >= static_cast<std::size_t>(rows) * cols)
     return;
   const int row = i / cols, c = i % cols;
   const float m = float(mod[(row < prefix ? mod_cols : 0) + part * cols + c]);
-  float value = float(x[i]) * (gate ? Round(tanhf(m)) : Round(1.0F + m));
+  float value = float(x[i]) * m;
   if (residual)
     value = float(residual[i]) + Round(value);
-  y[i] = B(value);
+  y[i] = Bf16(value);
 }
 
 __global__ void Rotary(const B* x, B* y, const float* frequencies, int rows,
@@ -248,11 +328,11 @@ __global__ void Rotary(const B* x, B* y, const float* frequencies, int rows,
   if (mode == 2) {
     c = Round(c);
     s = Round(s);
-    y[left] = B(Round(a * c) - Round(b * s));
-    y[right] = B(Round(b * c) + Round(a * s));
+    y[left] = Bf16(Round(a * c) - Round(b * s));
+    y[right] = Bf16(Round(b * c) + Round(a * s));
   } else {
-    y[left] = B(a * c - b * s);
-    y[right] = B(b * c + a * s);
+    y[left] = Bf16(a * c - b * s);
+    y[right] = Bf16(b * c + a * s);
   }
 }
 
@@ -393,7 +473,7 @@ __global__ void Scatter(const B* values, B* y, const int* positions, int count,
     return;
   const auto dst =
       static_cast<std::size_t>(positions[i / cols]) * cols + i % cols;
-  y[dst] = add ? B(float(y[dst]) + float(values[i])) : values[i];
+  y[dst] = add ? Bf16(float(y[dst]) + float(values[i])) : values[i];
 }
 
 __global__ void Im2col(const B* x, B* y, int height, int width, int channels,
@@ -415,7 +495,7 @@ __global__ void Im2col(const B* x, B* y, int height, int width, int channels,
           ? x[(static_cast<std::size_t>(sy / upscale) * width + sx / upscale) *
                   channels +
               c]
-          : B(0.0F);
+          : Bf16(0.0F);
 }
 
 __global__ void Shortcut(const B* x, B* y, int height, int width,
@@ -454,7 +534,7 @@ __global__ void Shortcut(const B* x, B* y, int height, int width,
             x[(static_cast<std::size_t>(iy) * width + ix) * in_channels + ic]);
       }
     }
-    y[i] = B(sum / group);
+    y[i] = Bf16(sum / group);
   }
 }
 
@@ -466,7 +546,7 @@ __global__ void ScaleLatents(const B* x, B* y, const B* mean, const B* stddev,
     return;
   const int c = i % 64;
   const float v = float(x[i]), m = float(mean[c]), s = float(stddev[c]);
-  y[i] = B(encode ? Round(v - m) / s : Round(v * s) + m);
+  y[i] = Bf16(encode ? Round(v - m) / s : Round(v * s) + m);
 }
 
 __global__ void Position(const B* x, const B* table, B* y, int height,
@@ -490,7 +570,7 @@ __global__ void Position(const B* x, const B* table, B* y, int height,
   const float p1 = float(table[(y0 * 48 + x1) * 1152 + c]) * ((1 - dy) * dx);
   const float p2 = float(table[(y1 * 48 + x0) * 1152 + c]) * (dy * (1 - dx));
   const float p3 = float(table[(y1 * 48 + x1) * 1152 + c]) * (dy * dx);
-  y[i] = B(float(x[i]) + Round(p0 + p1 + p2 + p3));
+  y[i] = Bf16(float(x[i]) + Round(p0 + p1 + p2 + p3));
 }
 
 void BlasCheck(hipblasStatus_t status) {
@@ -511,17 +591,35 @@ B* Ptr(const Matrix& m) {
 void NormalizeRows(const std::uint16_t* input, std::uint16_t* output,
                    const std::uint16_t* weight, const std::uint16_t* bias,
                    int rows, int cols, Norm kind, float epsilon,
-                   hipStream_t stream) {
+                   hipStream_t stream, bool silu) {
   const auto* x = reinterpret_cast<const B*>(input);
   auto* y = reinterpret_cast<B*>(output);
   const auto* w = reinterpret_cast<const B*>(weight);
   const auto* b = reinterpret_cast<const B*>(bias);
-  if (cols <= 1152)
-    WaveNorm<<<(rows + 7) / 8, 256, 0, stream>>>(
-        x, y, w, b, rows, cols, static_cast<int>(kind), epsilon);
-  else
-    NormKernel<<<rows, 256, 0, stream>>>(x, y, w, b, cols,
-                                         static_cast<int>(kind), epsilon);
+  if (cols <= 1152) {
+    if (silu)
+      WaveNorm<true><<<(rows + 7) / 8, 256, 0, stream>>>(
+          x, y, w, b, rows, cols, static_cast<int>(kind), epsilon);
+    else
+      WaveNorm<false><<<(rows + 7) / 8, 256, 0, stream>>>(
+          x, y, w, b, rows, cols, static_cast<int>(kind), epsilon);
+  } else {
+    if (silu)
+      NormKernel<true><<<rows, 256, 0, stream>>>(
+          x, y, w, b, cols, static_cast<int>(kind), epsilon);
+    else
+      NormKernel<false><<<rows, 256, 0, stream>>>(
+          x, y, w, b, cols, static_cast<int>(kind), epsilon);
+  }
+}
+
+void NormalizeRotary128(const std::uint16_t* input, std::uint16_t* output,
+                        const std::uint16_t* weight, const float* frequencies,
+                        int rows, int heads, float epsilon,
+                        hipStream_t stream) {
+  RmsRotary128<<<(rows * heads + 7) / 8, 256, 0, stream>>>(
+      reinterpret_cast<const B*>(input), reinterpret_cast<B*>(output),
+      reinterpret_cast<const B*>(weight), frequencies, rows, heads, epsilon);
 }
 
 void ReorderHeads(const std::uint16_t* input, std::uint16_t* output, int rows,
@@ -698,10 +796,14 @@ Matrix Runtime::Weight(std::string_view name) {
     FloatToBf16<<<Blocks(count), 256, 0, stream_>>>(
         reinterpret_cast<const float*>(raw.data), Ptr(m), count);
   }
-  if (w.shape.size() == 2 && DenseShape(rows, cols) &&
-      name.ends_with(".weight") &&
-      !weights_.Contains(std::string(name.substr(0, name.size() - 7)) +
-                         ".bias")) {
+  const bool packed_convolution = w.shape.size() == 4 && w.shape[2] == 3 &&
+                                  w.shape[3] == 3 &&
+                                  Convolve3Shape(w.shape[1], rows);
+  if (packed_convolution ||
+      (w.shape.size() == 2 && DenseShape(rows, cols) &&
+       name.ends_with(".weight") &&
+       !weights_.Contains(std::string(name.substr(0, name.size() - 7)) +
+                          ".bias"))) {
     auto packed = New(rows, cols);
     PackDense16(m.data, packed.data, rows, cols, stream_);
     packed.packed = true;
@@ -713,6 +815,22 @@ Matrix Runtime::Weight(std::string_view name) {
   return m;
 }
 
+Matrix Runtime::PackedInput(const Matrix& x) {
+  if (x.packed)
+    return x;
+  // Inputs are immutable. Retaining the source owner prevents pool reuse
+  // from mistaking a new tensor for a cached QKV/gate-up input.
+  if (packed_source_.data != x.data || packed_source_.rows != x.rows ||
+      packed_source_.cols != x.cols) {
+    auto packed = New(x.rows, x.cols);
+    PackDense16(x.data, packed.data, x.rows, x.cols, stream_);
+    packed.packed = true;
+    packed_source_ = x;
+    packed_input_ = std::move(packed);
+  }
+  return packed_input_;
+}
+
 void Runtime::Matmul(const Matrix& x, const Matrix& w, Matrix& output,
                      const Matrix* bias, bool convolution) {
   if (x.cols != w.cols || output.cols != w.rows || output.rows != x.rows)
@@ -720,23 +838,18 @@ void Runtime::Matmul(const Matrix& x, const Matrix& w, Matrix& output,
   if (bias && bias->size() != static_cast<std::size_t>(output.cols))
     throw std::logic_error("Qwen-Image bias shape mismatch");
   if (w.packed) {
-    if (bias || x.packed)
+    if (bias)
       throw std::logic_error("Qwen-Image packed projection contract mismatch");
-    // Inputs are immutable. Retaining the source owner prevents pool reuse
-    // from mistaking a new tensor for a cached QKV/gate-up input.
-    if (packed_source_.data != x.data || packed_source_.rows != x.rows ||
-        packed_source_.cols != x.cols) {
-      auto packed = New(x.rows, x.cols);
-      PackDense16(x.data, packed.data, x.rows, x.cols, stream_);
-      packed_source_ = x;
-      packed_input_ = std::move(packed);
-    }
-    if (!DenseBf16(w.data, packed_input_.data, output.data, x.rows, w.rows,
-                   x.cols, stream_))
+    const auto packed = PackedInput(x);
+    if (!DenseBf16(w.data, packed.data, output.data, x.rows, w.rows, x.cols,
+                   stream_))
       throw std::logic_error("unsupported Qwen-Image packed projection");
     Check(hipGetLastError());
     return;
   }
+  if (x.packed)
+    throw std::logic_error(
+        "Qwen-Image packed input requires a packed projection");
   const float alpha = 1, beta = 0;
   Matrix accumulation;
   void* dst = output.data;
@@ -776,7 +889,7 @@ Matrix Runtime::Linear(const Matrix& x, const std::string& name) {
 }
 
 Matrix Runtime::Normalize(const Matrix& x, Norm kind, const std::string& weight,
-                          float epsilon) {
+                          float epsilon, bool silu) {
   Matrix w, bias;
   if (!weight.empty()) {
     w = Weight(weight + (kind == Norm::kVae ? ".gamma" : ".weight"));
@@ -789,7 +902,7 @@ Matrix Runtime::Normalize(const Matrix& x, Norm kind, const std::string& weight,
   }
   auto out = New(x.rows, x.cols);
   NormalizeRows(x.data, out.data, w.data, bias.data, x.rows, x.cols, kind,
-                epsilon, stream_);
+                epsilon, stream_, silu);
   Check(hipGetLastError());
   return out;
 }
@@ -812,6 +925,22 @@ Matrix Runtime::SwiGlu(const Matrix& gate, const Matrix& up) {
   return out;
 }
 
+Matrix Runtime::GatedLinear(const Matrix& x, const std::string& gate,
+                            const std::string& up) {
+  const auto g = Weight(gate + ".weight"), u = Weight(up + ".weight");
+  if (!g.packed || !u.packed || g.rows != u.rows || g.cols != u.cols ||
+      x.cols != g.cols)
+    throw std::logic_error("Qwen-Image gated projection contract mismatch");
+  auto out = New(x.rows, g.rows);
+  const auto packed = PackedInput(x);
+  if (!DenseSwiGlu(g.data, u.data, packed.data, out.data, x.rows, g.rows,
+                   x.cols, stream_))
+    throw std::logic_error("unsupported Qwen-Image gated projection");
+  Check(hipGetLastError());
+  out.packed = true;
+  return out;
+}
+
 Matrix Runtime::Add(const Matrix& a, const Matrix& b) {
   if (a.rows != b.rows || a.cols != b.cols)
     throw std::logic_error("residual shape");
@@ -822,8 +951,31 @@ Matrix Runtime::Add(const Matrix& a, const Matrix& b) {
   return out;
 }
 
+Matrix Runtime::ModulationFactors(const Matrix& mod, bool gates) {
+  if (mod.rows != 2 || mod.cols != (gates ? 16384 : 4096))
+    throw std::logic_error("Qwen-Image modulation factors shape mismatch");
+  auto out = New(mod.rows, mod.cols);
+  PrepareModulation<<<Blocks(mod.size()), 256, 0, stream_>>>(Ptr(mod), Ptr(out),
+                                                             mod.size(), gates);
+  Check(hipGetLastError());
+  return out;
+}
+
+Matrix Runtime::NormalizeModulate(const Matrix& x, const Matrix& mod, int part,
+                                  int prefix) {
+  if (x.cols != 4096 || mod.rows != 2 ||
+      (mod.cols != 4096 && mod.cols != 16384) || part < 0 ||
+      part >= mod.cols / x.cols || prefix < 0 || prefix > x.rows)
+    throw std::logic_error("Qwen-Image normalized modulation shape mismatch");
+  auto out = New(x.rows, x.cols);
+  NormModulation<<<x.rows, 256, 0, stream_>>>(Ptr(x), Ptr(mod), Ptr(out),
+                                              mod.cols, part, prefix);
+  Check(hipGetLastError());
+  return out;
+}
+
 Matrix Runtime::Modulate(const Matrix& x, const Matrix& mod, int part,
-                         int prefix, bool gate, const Matrix* residual) {
+                         int prefix, const Matrix* residual) {
   if (mod.rows != 2 || (mod.cols != x.cols && mod.cols != x.cols * 4) ||
       part < 0 || part >= mod.cols / x.cols || prefix < 0 || prefix > x.rows ||
       (residual && (residual->rows != x.rows || residual->cols != x.cols)))
@@ -831,7 +983,7 @@ Matrix Runtime::Modulate(const Matrix& x, const Matrix& mod, int part,
   auto out = New(x.rows, x.cols);
   Modulation<<<Blocks(x.size()), 256, 0, stream_>>>(
       Ptr(x), Ptr(mod), residual ? Ptr(*residual) : nullptr, Ptr(out), x.rows,
-      x.cols, mod.cols, part, prefix, gate);
+      x.cols, mod.cols, part, prefix);
   Check(hipGetLastError());
   return out;
 }
@@ -845,6 +997,20 @@ Matrix Runtime::Rope(const Matrix& x, int heads, int dim,
   Rotary<<<Blocks(x.size() / 2), 256, 0, stream_>>>(
       Ptr(x), Ptr(out), reinterpret_cast<const float*>(frequencies.data),
       x.rows, heads, dim, mode);
+  Check(hipGetLastError());
+  return out;
+}
+
+Matrix Runtime::NormalizeRope(const Matrix& x, const std::string& weight,
+                              int heads, const Matrix& frequencies) {
+  const auto w = Weight(weight + ".weight");
+  if (x.packed || x.cols != heads * 128 || w.size() != 128 ||
+      frequencies.rows != x.rows || frequencies.cols != 256)
+    throw std::logic_error("Qwen-Image normalized rotary shape mismatch");
+  auto out = New(x.rows, x.cols);
+  NormalizeRotary128(x.data, out.data, w.data,
+                     reinterpret_cast<const float*>(frequencies.data), x.rows,
+                     heads, 1e-6F, stream_);
   Check(hipGetLastError());
   return out;
 }
@@ -1035,6 +1201,14 @@ Matrix Runtime::Conv(const Matrix& x, int height, int width,
   Matrix bias;
   if (weights_.Contains(name + ".bias"))
     bias = Weight(name + ".bias");
+  if (w.packed) {
+    if (kernel != 3 ||
+        !Convolve3(x.data, w.data, bias.data, out.data, height, width, x.cols,
+                   out.cols, stream_, stride, padding, upscale))
+      throw std::logic_error("unsupported Qwen-Image packed convolution");
+    Check(hipGetLastError());
+    return out;
+  }
   constexpr int tile = 1024;
   auto col = New(std::min(tile, out.rows), w.cols);
   for (int start = 0; start < out.rows; start += tile) {

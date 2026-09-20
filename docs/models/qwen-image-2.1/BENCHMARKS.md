@@ -2,7 +2,8 @@
 
 AMD Strix Halo gfx1151, BF16 checkpoint, production `nix build` binary.
 Report wall time per complete image plus prompt, denoising and VAE time.
-Warm runs exclude model loading. Profiles and correctness observers are untimed.
+Warm runs exclude model loading. HTTP timings use no profiler or correctness
+observer; GPU times come from a separate request-only profile.
 
 | Mode | Output | Steps | Prompt (s) | Denoising (s) | VAE (s) | Total (s) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -17,9 +18,14 @@ Short development control, warm C1, 1024×1024, two steps, seed 42:
 
 | Prompt (s) | Denoising (s) | VAE (s) | HTTP total (s) |
 | ---: | ---: | ---: | ---: |
-| 0.091 | 6.407 | 1.518 | 8.311 |
+| 0.089 | 4.865 | 0.826 | 5.838 |
 
-A separate request-only profile records 7.90 s of GPU work: native projections
-3.89 s, fused attention 1.85 s, other BLAS 0.98 s. GPU idle time is 1.4% of the
-request span. This control is for kernel iteration, not the default 40-step
-performance or image-quality measurement.
+A separate profile records **5.76 s of GPU work**: native projections 1.72 s,
+fused feed-forward 1.41 s, fused attention 1.49 s and native convolution 0.55 s.
+GPU idle time is 0.5% of the request span. The 5 s target has not been reached.
+This control is for kernel iteration; the default 40-step performance remains
+TODO and quality is measured separately in [EVALUATION.md](EVALUATION.md).
+
+PNG uses low compression with adaptive filters and preserves every RGBA pixel.
+The control's response PNG is approximately 1.00 MB; compression trades response
+size for lower CPU latency.
