@@ -18,6 +18,7 @@ All model documentation lives under [docs/models](docs/models/README.md):
 | [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) · [Evaluation](docs/models/deepseek-v4-flash/EVALUATION.md) |
 | [Qwen3-ASR](docs/models/qwen3-asr/README.md) | Speech recognition | [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) · [Evaluation](docs/models/qwen3-asr/EVALUATION.md) |
 | [Qwen3-TTS](docs/models/qwen3-tts/README.md) | CustomVoice, VoiceDesign, Base cloning | [Benchmarks](docs/models/qwen3-tts/BENCHMARKS.md) · [Evaluation](docs/models/qwen3-tts/EVALUATION.md) |
+| [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation and editing | [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md) · [Evaluation](docs/models/qwen-image-2.1/EVALUATION.md) |
 | [MiniMax H3](docs/models/minimax-h3/README.md) | Text to video/audio, exact and approximate presets | [Benchmarks](docs/models/minimax-h3/BENCHMARKS.md) · [Evaluation](docs/models/minimax-h3/EVALUATION.md) |
 
 ## Manifest/Philosophy

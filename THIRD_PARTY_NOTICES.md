@@ -92,6 +92,21 @@ Model checkpoints are not part of the gufo source or binary
 distribution. Operators obtain them directly from their publisher and remain
 responsible for the terms governing their location and use.
 
+### Qwen-Image-2.1
+
+- **Artifact**: [Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1),
+  revision `b3179ad355be050328e483a9dfdd9e60cd62adfa`; separate BF16
+  safetensors, tokenizer and model configuration.
+- **License**: [Qwen Research License Agreement, September 20, 2026](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/b3179ad355be050328e483a9dfdd9e60cd62adfa/LICENSE).
+  The granted use is non-commercial; commercial use requires a separate license.
+  Gufo neither ships nor automatically downloads these weights.
+- **Reference implementation**: Diffusers and Transformers, Apache-2.0.
+  Native inference follows the [pinned operator contract](src/models/qwen_image_21/UPSTREAM.md);
+  Python reference dependencies are development-only.
+- **Publisher notice**: “Qwen is licensed under the Qwen RESEARCH LICENSE
+  AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd.
+  All Rights Reserved.”
+
 ### MiniMax H3 FL2VA
 
 - **Component Name**: MiniMax H3 Base FL2VA checkpoint

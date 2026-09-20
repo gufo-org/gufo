@@ -18,11 +18,12 @@ def main():
             args, result.returncode, output)
         return output
 
-    for modality in ("llm", "audio", "video"):
+    for modality in ("llm", "audio", "video", "image"):
         check(["serve", "--port", "0", modality, "--help"], 0, "--api-key")
         check(["serve", modality, "--port=0", "--help"], 0, "--api-key")
-        if modality == "audio":
-            help_text = check(["serve", modality, "--help"], 0, "--tts-context")
+        if modality in ("audio", "image"):
+            help_text = check(["serve", modality, "--help"], 0,
+                              "--tts-context" if modality == "audio" else "--model")
             assert "--sessions" not in help_text
             check(["serve", modality, "--sessions", "2"], 2, "Unknown option")
             check(["serve", "--sessions", "2", modality], 2, "Unknown option")
@@ -32,6 +33,7 @@ def main():
         check(["serve", modality, "unexpected"], 2, "Unexpected argument")
         check(["serve", modality, "--port", "65536"], 2, "--port must")
         check(["serve", modality, "--host", "bad.address"], 2, "--host must")
+    check(["serve", "image"], 2, "--model <DIR> is required")
 
     # Values must stay attached to their options, including before a modality
     # was selected. All these deliberately fail at the named file lookup.

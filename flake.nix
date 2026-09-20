@@ -499,6 +499,13 @@
                 mtpModel = "/var/models/mtp.gguf";
                 draftTokens = 3;
               };
+              imageCmd = mkServe {
+                modality = "image";
+                model = "/var/models/qwen-image";
+                servedModelName = "qwen-image-test";
+                port = 9200;
+                maxRequestBytes = 33554432;
+              };
             in
             pkgsSys.runCommand "check-mk-serve" { } ''
               # Verify the synthesized CLI string contains expected flags and binary path
@@ -564,6 +571,10 @@
               echo "$mtp_cmd" | grep -F -- "--speculative mtp"
               echo "$mtp_cmd" | grep -F -- "--mtp-model /var/models/mtp.gguf"
               echo "$mtp_cmd" | grep -F -- "--draft-tokens 3"
+              image_str="${imageCmd}"
+              echo "$image_str" | grep -F -- "--port 9200"
+              echo "$image_str" | grep -F -- "--max-request-bytes 33554432"
+              echo "$image_str" | grep -F -- "image --model /var/models/qwen-image --served-model-name qwen-image-test"
               mkdir -p $out
               echo "PASS: mkGufoServe CLI string check passed" > $out/result.txt
             '';

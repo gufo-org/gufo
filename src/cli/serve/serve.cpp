@@ -26,6 +26,7 @@
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/http_server.hpp"
+#include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
 
@@ -306,6 +307,20 @@ std::optional<ReasoningOptions> ResolveReasoningDefaults(
 
 void PrintServeHelp(std::string_view program_name,
                     std::string_view subcommand) {
+  if (subcommand == "image") {
+    std::filesystem::path model;
+    std::string name = "Qwen-Image-2.1";
+    ArgParser parser(std::string(program_name) + " serve image",
+                     "Serve Qwen-Image-2.1 generation and editing.");
+    parser.AddOption("-m", "--model", "DIR",
+                     "Qwen-Image-2.1 safetensors directory", "Model", &model);
+    parser.AddOption("", "--served-model-name", "NAME", "Public API model ID",
+                     "Model", &name);
+    ServerOptionHelpTargets server_help;
+    AddServerOptionsForHelp(parser, &server_help, false);
+    parser.PrintHelp();
+    return;
+  }
   if (subcommand == "video") {
     std::filesystem::path video_model;
     std::filesystem::path video_root = "video-jobs";
@@ -526,6 +541,8 @@ void PrintServeHelp(std::string_view program_name,
          "/v1/completions) [default]\n"
       << "  video     Serve MiniMax H3 video generation endpoint "
          "(/v1/video/generations)\n"
+      << "  image     Serve Qwen-Image-2.1 (/v1/images/generations, "
+         "/v1/images/edits)\n"
       << "  audio     Serve Qwen3-TTS and/or Qwen3-ASR endpoints "
          "(/v1/audio/speech,\n"
       << "            /v1/audio/transcriptions) via --tts-model and "
@@ -613,14 +630,14 @@ int RunServe(std::span<const char* const> args) {
       }
       continue;
     }
-    if (arg == "llm" || arg == "video" || arg == "audio") {
+    if (arg == "llm" || arg == "video" || arg == "audio" || arg == "image") {
       subcommand = arg;
       sub_args.erase(sub_args.begin() + static_cast<std::ptrdiff_t>(i));
     } else if (arg == "--help" || arg == "-h" || arg == "help") {
       const std::string_view topic =
           arg == "help" && i + 1 < args.size() ? args[i + 1] : "";
       if (!topic.empty() && topic != "llm" && topic != "video" &&
-          topic != "audio") {
+          topic != "audio" && topic != "image") {
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
@@ -652,8 +669,41 @@ int RunServe(std::span<const char* const> args) {
   std::shared_ptr<server::VideoJobService> video_jobs;
   std::shared_ptr<server::TtsService> tts;
   std::shared_ptr<server::AsrService> asr;
+  std::shared_ptr<server::ImageService> images;
 
-  if (subcommand == "video") {
+  if (subcommand == "image") {
+    std::filesystem::path model;
+    std::string name = "Qwen-Image-2.1";
+    ArgParser parser("gufo serve image",
+                     "Serve Qwen-Image-2.1 generation and editing.");
+    parser.AddOption("-m", "--model", "DIR",
+                     "Qwen-Image-2.1 safetensors directory", "Model", &model);
+    parser.AddOption("", "--served-model-name", "NAME", "Public API model ID",
+                     "Model", &name);
+    add_server_options(parser, false);
+    if (!parser.Parse(sub_args, &parse_err)) {
+      std::cerr << "Error: " << parse_err << '\n';
+      return 2;
+    }
+    if (parser.IsHelpRequested()) {
+      PrintServeHelp("gufo", "image");
+      return 0;
+    }
+    if (!valid_server_options())
+      return 2;
+    if (model.empty()) {
+      std::cerr << "Error: --model <DIR> is required for image server\n";
+      return 2;
+    }
+    ModelLoadLog load_log("qwen_image_21", model);
+    try {
+      images = std::make_shared<server::ImageService>(model, name);
+    } catch (const std::exception& error) {
+      std::cerr << "Error loading Qwen-Image-2.1: " << error.what() << '\n';
+      return 1;
+    }
+    load_log.Complete("model=" + name + " weights=mapped upload=on_demand");
+  } else if (subcommand == "video") {
     std::filesystem::path video_model;
     std::filesystem::path video_root = "video-jobs";
     std::filesystem::path video_manifest = DefaultH3SourceManifest();
@@ -1162,7 +1212,8 @@ int RunServe(std::span<const char* const> args) {
           .max_request_body_bytes = max_request_body_bytes,
           .max_connections = max_connections,
           .api_key = std::move(api_key),
-      });
+      },
+      images);
   std::string err;
   if (!server.start(&err)) {
     std::cerr << "Error starting HTTP server: " << err << "\n";

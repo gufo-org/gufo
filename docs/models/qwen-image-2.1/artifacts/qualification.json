@@ -1,0 +1,150 @@
+{
+  "reference": {
+    "torch": "2.12.0",
+    "transformers": "5.17.0",
+    "diffusers": "0.41.0.dev0",
+    "model_revision": "b3179ad355be050328e483a9dfdd9e60cd62adfa",
+    "teacher_forced": true,
+    "diffusers_revision": "80c7ed262aeffbeb43ef13ae04baeb9b84515a69",
+    "official_repository_revision": "fb7ae1d1f9611cd91524d03c53c5246b36ac8577",
+    "shared_initial_noise": true
+  },
+  "matched_blocks": {
+    "vision.block.": {
+      "count": 27,
+      "minimum_cosine": 0.9999990297973057,
+      "maximum_relative_l2": 0.0013929843969178398
+    },
+    "text.block.": {
+      "count": 36,
+      "minimum_cosine": 0.9999953366701526,
+      "maximum_relative_l2": 0.003053954541564774
+    },
+    "dit.0.block.": {
+      "count": 32,
+      "minimum_cosine": 0.9999997621787732,
+      "maximum_relative_l2": 0.0006896683448568048
+    },
+    "dit.1.block.": {
+      "count": 32,
+      "minimum_cosine": 0.9999988301791507,
+      "maximum_relative_l2": 0.001529672678779087
+    },
+    "vae.encoder.block.": {
+      "count": 5,
+      "minimum_cosine": 0.9999983046906601,
+      "maximum_relative_l2": 0.0018413625637516767
+    },
+    "vae.decoder.block.": {
+      "count": 5,
+      "minimum_cosine": 0.9999971065843272,
+      "maximum_relative_l2": 0.0024055848379522793
+    }
+  },
+  "exact_tokenizer": true,
+  "exact_schedule": true,
+  "trajectories": {
+    "generation": {
+      "size": 256,
+      "steps": 40,
+      "boundaries": {
+        "latent.39": {
+          "relative_l2": 0.013320639160798215,
+          "cosine": 0.9999121579126123
+        },
+        "vae.decoded": {
+          "relative_l2": 0.008969960906154258,
+          "cosine": 0.9999613748621651
+        }
+      },
+      "png": {
+        "psnr_db": 48.32836825241684,
+        "mae_255": 0.38006591796875
+      }
+    },
+    "edit": {
+      "size": 256,
+      "steps": 40,
+      "boundaries": {
+        "latent.39": {
+          "relative_l2": 0.011746548456188607,
+          "cosine": 0.9999310759407437
+        },
+        "vae.decoded": {
+          "relative_l2": 0.0033067483303312077,
+          "cosine": 0.9999945428842633
+        }
+      },
+      "png": {
+        "psnr_db": 55.951424164776824,
+        "mae_255": 0.13309097290039062
+      }
+    }
+  },
+  "vae_first_convolution": {
+    "elements": 100663296,
+    "max_abs": 0.0,
+    "relative_l2": 0.0,
+    "cosine": 1.0,
+    "exact_fraction": 1.0
+  },
+  "vision_embedding": {
+    "elements": 4718592,
+    "max_abs": 0.015625,
+    "relative_l2": 4.1984073541038795e-05,
+    "cosine": 0.9999999991186805,
+    "exact_fraction": 0.9999336666531033
+  },
+  "prompts": {
+    "generation": "A red cube on a white table.",
+    "edit": "Change the cube to blue."
+  },
+  "matched_input_case": {
+    "output": "256x256",
+    "steps": 2,
+    "reference_images": 1,
+    "conditioning_resize_area": 1048576
+  },
+  "serving": {
+    "seeded_png_replay": true,
+    "n2_independent_seeds": true,
+    "concurrent_independent_seeds": true,
+    "disconnect_recovery_seconds": 0.4278549760347232,
+    "openai_sdk_llama_swap": {
+      "openai_sdk": "2.41.1",
+      "llama_swap_model_alias": "qwen-image-test",
+      "json_generation": true,
+      "multipart_edit": true,
+      "references": 2,
+      "non_square": "64x96",
+      "opaque_alpha": true,
+      "llama_swap_revision": "96e6f94c018b51ae9cfc420b3166cfcace5bf97a"
+    }
+  },
+  "attention_optimization": {
+    "fp64_operator_oracle": true,
+    "ragged_layout_exact": true,
+    "fused_qk_softmax_pv": true,
+    "fp64_float_output_relative_l2_max": 1.633e-06,
+    "tile_widening_exact_fp32": true,
+    "probabilities": "FP32",
+    "accumulation": "FP32",
+    "masked_and_ragged": true,
+    "all_query_launch_exact": true,
+    "two_way_qk_unroll_exact": true
+  },
+  "projection_optimization": {
+    "exact_bf16_weight_and_activation_packing": true,
+    "minimum_rows": 1,
+    "fp64_operator_oracle": true,
+    "duplicate_persistent_weights": false
+  },
+  "convolution_layout": {
+    "tiled_copy_exact": true
+  },
+  "packing_and_normalization": {
+    "exact_model_boundaries_and_png": 156,
+    "normalization_fp64_operator_oracle": true,
+    "packing_is_byte_permutation": true
+  }
+}

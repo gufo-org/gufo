@@ -4,7 +4,7 @@
 }:
 
 {
-  modality ? "llm", # "llm", "video", "audio" (alias "tts"), or "asr" (alias "stt")
+  modality ? "llm", # "llm", "image", "video", "audio" (alias "tts"), or "asr" (alias "stt")
   model ? null, # path, derivation, or string to GGUF model or weights directory
 
   # Audio Options (modality "audio"/"asr"): one audio server can host
@@ -102,6 +102,7 @@ let
   validModalities = [
     "llm"
     "video"
+    "image"
     "audio"
     "tts"
     "asr"
@@ -182,12 +183,12 @@ let
       "--model"
       (toString model)
     ]
+    ++ lib.optionals (servedModelName != null && lib.elem finalModality [ "llm" "image" ]) [
+      "--served-model-name"
+      servedModelName
+    ]
     ++ lib.optionals (finalModality == "llm") (
-      lib.optionals (servedModelName != null) [
-        "--served-model-name"
-        servedModelName
-      ]
-      ++ lib.optionals (finalContext != null) [
+      lib.optionals (finalContext != null) [
         "--context"
         (toString finalContext)
       ]
@@ -385,6 +386,8 @@ let
 in
 assert lib.assertMsg (lib.elem modality validModalities)
   "gufo.mkServe: 'modality' must be one of ${lib.generators.toJSON { } validModalities}, got '${modality}'";
+assert lib.assertMsg (finalModality != "image" || sessions == null)
+  "gufo.mkServe: image requests are queued; 'sessions' is not an image option";
 assert lib.assertMsg (
   (model != null && model != "") || (isAudio && (finalTtsModel != null || finalAsrModel != null))
 ) "gufo.mkServe: 'model' must be specified (cannot be empty)";

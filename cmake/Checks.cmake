@@ -11,6 +11,7 @@ set(gufo_pr_targets
   ds4_sampling_test ds4_chat_template_test ds4_cli_test
   qwen3_asr_config_test qwen3_asr_audio_api_test
   qwen3_tts_config_test qwen3_tts_audio_api_test
+  qwen_image_21_test
   video_api_test minimax_h3_sampling_test minimax_h3_runtime_test)
 set(gufo_pr_tests ${gufo_pr_targets})
 list(REMOVE_ITEM gufo_pr_tests

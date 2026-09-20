@@ -31,6 +31,7 @@
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
+#include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/sampling_request.hpp"
@@ -499,7 +500,8 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
 
 HttpResponse ListModels(TextGenerationBackend* backend,
                         const VideoJobService* video_jobs,
-                        const TtsService* tts, const AsrService* asr) {
+                        const TtsService* tts, const AsrService* asr,
+                        const ImageService* images) {
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   json::Value data = json::Value::array();
@@ -548,6 +550,15 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     model["created"] = Now();
     model["owned_by"] = "operator-supplied-qwen";
     model["capability"] = "audio_asr";
+    data.push_back(std::move(model));
+  }
+  if (images != nullptr) {
+    auto model = json::Value::object();
+    model["id"] = images->model_id();
+    model["object"] = "model";
+    model["created"] = Now();
+    model["owned_by"] = "operator-supplied-qwen";
+    model["capability"] = "image";
     data.push_back(std::move(model));
   }
   resp["data"] = std::move(data);
@@ -905,13 +916,15 @@ HttpServer::HttpServer(std::string host, int port,
                        std::shared_ptr<VideoJobService> video_jobs,
                        std::shared_ptr<TtsService> tts,
                        std::shared_ptr<AsrService> asr,
-                       HttpServerOptions options)
+                       HttpServerOptions options,
+                       std::shared_ptr<ImageService> images)
     : host_(std::move(host)),
       port_(port),
       backend_(std::move(backend)),
       video_jobs_(std::move(video_jobs)),
       tts_(std::move(tts)),
       asr_(std::move(asr)),
+      images_(std::move(images)),
       options_(std::move(options)) {
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
@@ -943,8 +956,6 @@ void HttpServer::register_routes() {
   add("POST", "/v1/chat/completions", HandleOpenAiChat);
   add("POST", "/v1/responses", OpenAiResponses);
   add("POST", "/v1/embeddings", NotImplemented);
-  add("POST", "/v1/images/generations", NotImplemented);
-  add("POST", "/v1/images/edits", NotImplemented);
 
   // ---- Anthropic ----
   add("POST", "/v1/messages", AnthropicMessages);
@@ -1141,7 +1152,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     const bool ready = (backend_ != nullptr && backend_->ready()) ||
                        (video_jobs_ != nullptr && video_jobs_->ready()) ||
                        (tts_ != nullptr && tts_->ready()) ||
-                       (asr_ != nullptr && asr_->ready());
+                       (asr_ != nullptr && asr_->ready()) || images_ != nullptr;
     if (!ready) {
       return Err(503, "Service Unavailable", "model service is not ready",
                  "server_error", "not_ready");
@@ -1154,6 +1165,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
       body["model"] = asr_->model_id();
     } else if (tts_ != nullptr && tts_->ready()) {
       body["model"] = tts_->model_id();
+    } else if (images_ != nullptr) {
+      body["model"] = images_->model_id();
     } else {
       body["model"] = "minimax-h3";
     }
@@ -1161,8 +1174,14 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   }
   if (req.method == "GET" &&
       (req.path == "/v1/models" || req.path == "/models")) {
-    return ListModels(backend_.get(), video_jobs_.get(), tts_.get(),
-                      asr_.get());
+    return ListModels(backend_.get(), video_jobs_.get(), tts_.get(), asr_.get(),
+                      images_.get());
+  }
+  if (req.path == "/v1/images/generations" || req.path == "/v1/images/edits") {
+    if (!images_)
+      return Err(503, "Service Unavailable", "image service is not configured",
+                 "server_error", "image_service_unavailable");
+    return HandleImageApiRequest(req, *images_);
   }
   if (req.path == "/v1/audio/speech/stream") {
     if (!tts_ || !tts_->ready())

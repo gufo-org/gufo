@@ -16,7 +16,8 @@ prompt caching.
 
 This is an exhaustive list of functionalities and features offered by the gufo cli, the mapping between features and flags is not documented here and should be discovered using the `--help` command to avoid divergences between the implementation and the documentation.
 
-The current supported modality are: llm, video, audio (tts, asr).
+The supported modalities are LLM, image, video, and audio (TTS, ASR).
+`gufo serve image` provides [Qwen-Image-2.1 generation and editing](models/qwen-image-2.1/README.md).
 
 ### LLM or text
 

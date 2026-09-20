@@ -19,6 +19,7 @@ namespace gufo::server {
 class VideoJobService;
 class TtsService;
 class AsrService;
+class ImageService;
 class WebSocket;
 
 struct HttpRequest {
@@ -93,7 +94,8 @@ public:
              std::shared_ptr<VideoJobService> video_jobs = nullptr,
              std::shared_ptr<TtsService> tts = nullptr,
              std::shared_ptr<AsrService> asr = nullptr,
-             HttpServerOptions options = {});
+             HttpServerOptions options = {},
+             std::shared_ptr<ImageService> images = nullptr);
   ~HttpServer();
 
   HttpServer(const HttpServer&) = delete;
@@ -127,6 +129,7 @@ private:
   std::shared_ptr<VideoJobService> video_jobs_;
   std::shared_ptr<TtsService> tts_;
   std::shared_ptr<AsrService> asr_;
+  std::shared_ptr<ImageService> images_;
   HttpServerOptions options_;
   std::string api_key_hash_;
   int listen_fd_ = -1;
