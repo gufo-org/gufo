@@ -84,6 +84,9 @@ struct SynthesisHipRuntime::Impl {
       return false;
     }
 
+    if (request.on_audio) {
+      return GenerateStreaming(request, prompt, is_cancelled, result, error);
+    }
     TalkerGenerationOutput generated;
     if (!GenerateCodecFrames(request, prompt.talker, is_cancelled, &generated,
                              error) ||
@@ -94,6 +97,62 @@ struct SynthesisHipRuntime::Impl {
   }
 
 private:
+  [[nodiscard]] bool GenerateStreaming(const SynthesisRequest& request,
+                                       const NativePrompt& prompt,
+                                       const CancellationCheck& is_cancelled,
+                                       SynthesisResult* result,
+                                       std::string* error) {
+    std::vector<std::uint32_t> codes;
+    const std::size_t reference_frames =
+        prompt.prepend_reference_audio ? prompt.reference_codes.frames : 0;
+    if (reference_frames != 0)
+      codes = prompt.reference_codes.codes;
+    std::size_t decoded_frames = 0;
+    std::size_t emitted_frames = 0;
+    std::string stream_error;
+    const auto emit = [&](const TalkerGenerationOutput& generated, bool flush) {
+      const std::size_t pending = generated.frames - emitted_frames;
+      if (pending == 0 || (!flush && pending < (emitted_frames == 0 ? 8 : 16)))
+        return true;
+      if (IsCancelled(is_cancelled, &stream_error))
+        return false;
+      codes.resize(reference_frames * 16);
+      codes.insert(codes.end(), generated.codes.begin(), generated.codes.end());
+      SpeechDecoderOutput audio;
+      if (!decoder_->DecodeIncremental(codes,
+                                       reference_frames + generated.frames,
+                                       decoded_frames, &audio, &stream_error))
+        return false;
+      const std::size_t drop = decoded_frames < reference_frames
+                                   ? (reference_frames - decoded_frames) * 1920
+                                   : 0;
+      decoded_frames = reference_frames + generated.frames;
+      emitted_frames = generated.frames;
+      const auto samples = std::span<const float>(audio.samples).subspan(drop);
+      if (!request.on_audio(samples)) {
+        stream_error = "Qwen3-TTS audio stream cancelled";
+        return false;
+      }
+      result->sample_count += samples.size();
+      return true;
+    };
+    TalkerGenerationOutput generated;
+    if (!talker_->Generate(
+            prompt.talker, request.max_new_tokens, request.sampling,
+            is_cancelled, &generated, error,
+            [&](const auto& progress) { return emit(progress, false); }) ||
+        !emit(generated, true) || generated.frames == 0) {
+      if (!stream_error.empty())
+        SetError(error, stream_error);
+      *result = {};
+      return false;
+    }
+    result->sample_rate = 24000;
+    result->code_groups = static_cast<std::uint32_t>(generated.code_groups);
+    result->codes.assign(generated.codes.begin(), generated.codes.end());
+    return true;
+  }
+
   Impl(std::size_t maximum_context_tokens, ModelVariant variant)
       : maximum_context_tokens_(maximum_context_tokens), variant_(variant) {}
 
@@ -300,10 +359,7 @@ private:
                                          const CancellationCheck& is_cancelled,
                                          TalkerGenerationOutput* generated,
                                          std::string* error) {
-    const TalkerSamplingOptions sampling{
-        .sample = !request.greedy,
-        .seed = request.seed,
-    };
+    const SamplingOptions& sampling = request.sampling;
     if (!talker_->Generate(prompt, request.max_new_tokens, sampling,
                            is_cancelled, generated, error)) {
       return false;
@@ -359,6 +415,7 @@ private:
     } else {
       result->samples = std::move(audio.samples);
     }
+    result->sample_count = result->samples.size();
     result->codes.reserve(generated.codes.size());
     for (const std::uint32_t code : generated.codes) {
       result->codes.push_back(static_cast<std::int32_t>(code));

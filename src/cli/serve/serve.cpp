@@ -117,8 +117,10 @@ void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                       bool* verbose) {
   parser.AddOption("-i", "--host", "IP", "Bind address", "Server", host);
   parser.AddOption("-p", "--port", "N", "Port to listen on", "Server", port);
-  parser.AddOption("-j", "--sessions", "N", "Preallocated GPU request sessions",
-                   "Server", session_count);
+  if (session_count != nullptr)
+    parser.AddOption("-j", "--sessions", "N",
+                     "Preallocated GPU request sessions", "Server",
+                     session_count);
   parser.AddOption("", "--max-connections", "N",
                    "Maximum simultaneous HTTP connections", "Server",
                    max_connections);
@@ -143,11 +145,12 @@ struct ServerOptionHelpTargets {
 };
 
 void AddServerOptionsForHelp(gufo::cli::ArgParser& parser,
-                             ServerOptionHelpTargets* targets) {
+                             ServerOptionHelpTargets* targets,
+                             bool include_sessions = true) {
   AddServerOptions(parser, &targets->host, &targets->port,
-                   &targets->session_count, &targets->max_connections,
-                   &targets->max_request_body_bytes, &targets->api_key,
-                   &targets->verbose);
+                   include_sessions ? &targets->session_count : nullptr,
+                   &targets->max_connections, &targets->max_request_body_bytes,
+                   &targets->api_key, &targets->verbose);
 }
 
 // Split a `NAME=VALUE` CLI spec. Returns false when either side is empty.
@@ -370,7 +373,7 @@ void PrintServeHelp(std::string_view program_name,
         "Model",
         [](std::string_view, std::string_view, std::string*) { return true; });
     ServerOptionHelpTargets server_help;
-    AddServerOptionsForHelp(parser, &server_help);
+    AddServerOptionsForHelp(parser, &server_help, false);
     parser.PrintHelp();
     return;
   }
@@ -591,9 +594,11 @@ int RunServe(std::span<const char* const> args) {
   // parser consumes every option together, so --served-model-name -v and
   // --model audio cannot be mistaken for server flags or subcommands.
   ArgParser server_parser("gufo serve");
-  const auto add_server_options = [&](ArgParser& parser) {
-    AddServerOptions(parser, &host, &port, &session_count, &max_connections,
-                     &max_request_body_bytes, &api_key, &verbose);
+  const auto add_server_options = [&](ArgParser& parser,
+                                      bool include_sessions = true) {
+    AddServerOptions(
+        parser, &host, &port, include_sessions ? &session_count : nullptr,
+        &max_connections, &max_request_body_bytes, &api_key, &verbose);
   };
   add_server_options(server_parser);
   std::string subcommand = "llm";
@@ -804,7 +809,7 @@ int RunServe(std::span<const char* const> args) {
           return true;
         });
 
-    add_server_options(audio_parser);
+    add_server_options(audio_parser, false);
     if (!audio_parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << "\n";
       PrintServeHelp("gufo", help_topic);

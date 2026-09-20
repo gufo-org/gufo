@@ -1,3 +1,6 @@
+#include <hip/hip_runtime.h>
+
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +16,7 @@
 #include <vector>
 
 #include "src/models/qwen3_asr/hip/audio_encoder_runtime.hpp"
+#include "src/models/qwen3_asr/hip/audio_ops.hpp"
 
 namespace qwen3_asr_hip = gufo::models::qwen3_asr::hip;
 
@@ -27,6 +31,63 @@ void Check(bool condition, std::string_view message) {
   if (!condition) {
     Fail(message);
   }
+}
+
+float Bfloat16(float value) {
+  std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+  bits += 0x7FFFU + ((bits >> 16U) & 1U);
+  return std::bit_cast<float>(bits & 0xFFFF0000U);
+}
+
+void CheckAttentionTails() {
+  constexpr std::size_t tokens = 209;
+  constexpr std::size_t dim = 64;
+  constexpr std::size_t elements = tokens * dim;
+  float* device = nullptr;
+  Check(hipMalloc(&device, elements * 5 * sizeof(float)) == hipSuccess,
+        "allocate attention check");
+  std::vector<float> input(elements * 3);
+  std::vector<float> output(elements);
+  for (const float scale : {0.125F, 8.0F}) {
+    for (std::size_t i = 0; i < elements; ++i) {
+      input[i] = 1.0F;
+      input[elements + i] = scale;
+      input[2 * elements + i] = static_cast<float>((i / dim) % 13) / 16.0F;
+    }
+    Check(hipMemcpy(device, input.data(), input.size() * sizeof(float),
+                    hipMemcpyHostToDevice) == hipSuccess,
+          "copy attention check");
+    for (const std::size_t window : {std::size_t{104}, std::size_t{209}}) {
+      for (int replay = 0; replay < 4; ++replay) {
+        qwen3_asr_hip::LaunchSegmentedSelfAttention(
+            device, device + elements, device + 2 * elements,
+            device + 3 * elements, device + 4 * elements, tokens, window, 1,
+            dim, nullptr);
+        Check(hipMemcpy(output.data(), device + 3 * elements,
+                        elements * sizeof(float),
+                        hipMemcpyDeviceToHost) == hipSuccess,
+              "copy attention result");
+        for (std::size_t token = 0; token < tokens; ++token) {
+          const std::size_t begin = (token / window) * window;
+          const std::size_t end = std::min(begin + window, tokens);
+          const float probability =
+              Bfloat16(1.0F / static_cast<float>(end - begin));
+          float expected = 0;
+          for (std::size_t p = begin; p < end; ++p) {
+            expected =
+                std::fma(probability, input[2 * elements + p * dim], expected);
+          }
+          expected = Bfloat16(expected);
+          for (std::size_t d = 0; d < dim; ++d) {
+            Check(output[token * dim + d] == expected,
+                  "uniform attention matches independent BF16 formula at "
+                  "ragged tails");
+          }
+        }
+      }
+    }
+  }
+  Check(hipFree(device) == hipSuccess, "free attention check");
 }
 
 std::uint16_t ReadU16(std::istream& input) {
@@ -119,6 +180,7 @@ double Cosine(std::span<const float> left, std::span<const float> right) {
 }  // namespace
 
 int main() {
+  CheckAttentionTails();
   const char* configured_model = std::getenv("QWEN3_ASR_MODEL_ROOT");
   const std::filesystem::path model_root =
       configured_model != nullptr ? configured_model

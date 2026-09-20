@@ -13,7 +13,9 @@
 | GPU masked top-k | Screened: only 0.7% gain in bounded greedy request; no production replacement. |
 | Precomputed SnakeBeta exponents | Rejected: about 1% slower. |
 | Decoder GEMM layouts / hipBLASLt | Rejected: neutral/slower or failed exactness; F32 library ceiling remains. |
+| Stateful waveform streaming | Retained: causal convolution histories and attention KV; exact buffered waveform through the 300-frame boundary, without re-decoding growing prefixes. |
+| Sampling controls | Retained: temperature before nucleus filtering and all boundary ties for top-k; independent predictor controls. |
 
-Next: investigate long-request nondeterminism and qualify long reference clips
+Next: broaden long-request replay coverage and qualify long reference clips
 before wider optimization. See [evaluation](EVALUATION.md); no lower-precision
 production change is justified by these measurements.

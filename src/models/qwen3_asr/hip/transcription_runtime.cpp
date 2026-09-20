@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <future>
 #include <memory>
@@ -15,6 +16,8 @@
 #include <string>
 #include <string_view>
 
+#include "src/core/cancellable_gate.hpp"
+#include "src/core/utf8.hpp"
 #include "src/models/qwen3_asr/audio.hpp"
 #include "src/models/qwen3_asr/config.hpp"
 #include "src/models/qwen3_asr/hip/audio_encoder_runtime.hpp"
@@ -142,8 +145,12 @@ struct TranscriptionHipRuntime::Impl {
     *result = {};
     const Clock::time_point total_begin = Clock::now();
     try {
-      if (request.wav.empty()) {
-        throw std::invalid_argument("Qwen3-ASR WAV input must not be empty");
+      auto admission = frontend_gate.Acquire(is_cancelled, error);
+      if (!admission)
+        return false;
+      if (request.wav.empty() == request.pcm16k.empty()) {
+        throw std::invalid_argument(
+            "Qwen3-ASR requires exactly one audio source");
       }
       if (request.max_new_tokens == 0U) {
         throw std::invalid_argument(
@@ -153,72 +160,141 @@ struct TranscriptionHipRuntime::Impl {
           NormalizeLanguage(request.language, config.supported_languages);
       CheckCancellation(is_cancelled);
 
-      AudioBuffer decoded_audio;
       const Clock::time_point decode_begin = Clock::now();
       std::string phase_error;
-      if (!DecodeWav(request.wav, &decoded_audio, &phase_error)) {
-        throw std::invalid_argument(phase_error);
+      std::vector<float> decoded_waveform;
+      std::span<const float> waveform = request.pcm16k;
+      if (!request.wav.empty()) {
+        AudioBuffer decoded_audio;
+        if (!DecodeWav(request.wav, &decoded_audio, &phase_error)) {
+          throw std::invalid_argument(phase_error);
+        }
+        decoded_waveform = ResampleMono16k(decoded_audio);
+        waveform = decoded_waveform;
       }
-      std::vector<float> waveform = ResampleMono16k(decoded_audio);
-      const Clock::time_point decode_end = Clock::now();
-      result->timings.decode_audio_ms = Milliseconds(decode_begin, decode_end);
+      for (const float sample : waveform) {
+        if (!std::isfinite(sample)) {
+          throw std::invalid_argument("Qwen3-ASR PCM must be finite");
+        }
+      }
+      result->timings.decode_audio_ms =
+          Milliseconds(decode_begin, Clock::now());
       result->audio_samples = waveform.size();
       CheckCancellation(is_cancelled);
 
-      const Clock::time_point features_begin = Clock::now();
-      LogMelFeatures features = ComputeLogMelFeatures(waveform);
-      const Clock::time_point features_end = Clock::now();
-      result->timings.feature_extraction_ms =
-          Milliseconds(features_begin, features_end);
-      result->mel_frames = features.frames;
-      CheckCancellation(is_cancelled);
-
-      const std::size_t expected_audio_tokens =
-          AudioEmbeddingTokenCount(features.frames);
-      std::vector<std::uint32_t> prompt = BuildPrompt(
-          tokenizer, PromptOptions{
-                         .context = request.context,
-                         .language = language,
-                         .audio_embedding_tokens = expected_audio_tokens,
-                     });
-      result->prompt_tokens = prompt.size();
-      if (prompt.size() + request.max_new_tokens > maximum_context_tokens) {
-        throw std::length_error(
-            "Qwen3-ASR audio, context, and requested output exceed the "
-            "configured context capacity");
+      const auto make_prompt = [&](std::size_t audio_tokens) {
+        const std::lock_guard lock(tokenizer_mutex);
+        return BuildPrompt(
+            tokenizer, PromptOptions{.context = request.context,
+                                     .language = language,
+                                     .audio_embedding_tokens = audio_tokens});
+      };
+      const auto decode_text = [&](std::span<const std::uint32_t> ids) {
+        // Context/language encoding can lazily replace the tokenizer while
+        // another request is generating its transcript.
+        const std::lock_guard lock(tokenizer_mutex);
+        return tokenizer.Decode(ids, true);
+      };
+      const auto base = make_prompt(1);
+      const std::size_t overhead = base.size() - 1;
+      if (overhead >= maximum_context_tokens ||
+          request.max_new_tokens >= maximum_context_tokens - overhead) {
+        throw std::length_error("Qwen3-ASR context and output exceed capacity");
       }
-
-      const Clock::time_point encoder_begin = Clock::now();
-      AudioEncoderDeviceOutput encoded;
-      if (!audio_encoder->EncodeDevice(features.values, features.frames,
-                                       &encoded, &phase_error)) {
-        throw std::runtime_error(phase_error);
+      const std::size_t budget =
+          maximum_context_tokens - overhead - request.max_new_tokens;
+      const auto chunks =
+          SplitAudio(waveform, AudioSamplesForTokenBudget(budget));
+      result->chunks = chunks.size();
+      std::string previous_language;
+      std::string published;
+      for (const auto& chunk : chunks) {
+        CheckCancellation(is_cancelled);
+        std::span<const float> chunk_waveform =
+            waveform.subspan(chunk.offset, chunk.samples);
+        std::vector<float> padded;
+        // Match upstream's padding of short tails after splitting. Preserve
+        // the existing frontend exactly for an unsplit recording.
+        if (chunks.size() > 1 && chunk.samples < kAudioSampleRate / 2) {
+          padded.assign(chunk_waveform.begin(), chunk_waveform.end());
+          padded.resize(kAudioSampleRate / 2, 0.0F);
+          chunk_waveform = padded;
+        }
+        const auto features_begin = Clock::now();
+        LogMelFeatures features = ComputeLogMelFeatures(chunk_waveform);
+        result->timings.feature_extraction_ms +=
+            Milliseconds(features_begin, Clock::now());
+        result->mel_frames += features.frames;
+        const auto expected = AudioEmbeddingTokenCount(features.frames);
+        auto prompt = make_prompt(expected);
+        if (prompt.size() > maximum_context_tokens ||
+            request.max_new_tokens > maximum_context_tokens - prompt.size()) {
+          throw std::length_error(
+              "Qwen3-ASR audio chunk exceeds context capacity");
+        }
+        result->prompt_tokens += prompt.size();
+        CheckCancellation(is_cancelled);
+        auto gpu_lease = gpu_gate.Acquire(is_cancelled, &phase_error);
+        if (!gpu_lease)
+          throw std::runtime_error(phase_error);
+        const auto encoder_begin = Clock::now();
+        AudioEncoderDeviceOutput encoded;
+        if (!audio_encoder->EncodeDevice(features.values, features.frames,
+                                         &encoded, &phase_error,
+                                         is_cancelled)) {
+          throw std::runtime_error(phase_error);
+        }
+        result->timings.audio_encoder_ms +=
+            Milliseconds(encoder_begin, Clock::now());
+        result->audio_tokens += encoded.tokens;
+        if (encoded.tokens != expected) {
+          throw std::runtime_error(
+              "Qwen3-ASR audio frontend token count is inconsistent");
+        }
+        CheckCancellation(is_cancelled);
+        std::vector<std::uint32_t> generated;
+        const auto progress = [&](std::span<const std::uint32_t> ids) {
+          CheckCancellation(is_cancelled);
+          if (!request.on_text)
+            return true;
+          const std::string raw = decode_text(ids);
+          // Automatic language metadata is not user-visible transcript text.
+          if (!language && raw.find("<asr_text>") == std::string::npos)
+            return true;
+          auto partial = ParseTranscription(raw, language);
+          const std::string current =
+              core::Utf8Decoder{}.Push(result->text + partial.text);
+          if (current == published)
+            return true;
+          published = current;
+          return request.on_text(published);
+        };
+        const auto decoder_begin = Clock::now();
+        if (!text_decoder->GenerateDevice(
+                prompt, encoded.values, encoded.tokens, request.max_new_tokens,
+                &generated, &phase_error, progress, is_cancelled)) {
+          throw std::runtime_error(phase_error);
+        }
+        result->timings.text_decoder_ms +=
+            Milliseconds(decoder_begin, Clock::now());
+        const std::string raw = decode_text(generated);
+        const auto parsed = ParseTranscription(raw, language);
+        result->text += parsed.text;
+        result->decoded += raw;
+        result->generated_ids.insert(result->generated_ids.end(),
+                                     generated.begin(), generated.end());
+        if (!parsed.language.empty() && parsed.language != previous_language) {
+          if (!result->language.empty())
+            result->language += ",";
+          result->language += parsed.language;
+          previous_language = parsed.language;
+        }
       }
-      const Clock::time_point encoder_end = Clock::now();
-      result->timings.audio_encoder_ms =
-          Milliseconds(encoder_begin, encoder_end);
-      result->audio_tokens = encoded.tokens;
-      if (encoded.tokens != expected_audio_tokens) {
-        throw std::runtime_error(
-            "Qwen3-ASR audio frontend token count is inconsistent");
+      result->text = core::Utf8Decoder{}.Push(result->text, true);
+      if (request.on_text && result->text != published &&
+          !request.on_text(result->text)) {
+        throw std::runtime_error("Qwen3-ASR transcription cancelled");
       }
-      CheckCancellation(is_cancelled);
-
-      const Clock::time_point decoder_begin = Clock::now();
-      if (!text_decoder->GenerateDevice(prompt, encoded.values, encoded.tokens,
-                                        request.max_new_tokens,
-                                        &result->generated_ids, &phase_error)) {
-        throw std::runtime_error(phase_error);
-      }
-      const Clock::time_point decoder_end = Clock::now();
-      result->timings.text_decoder_ms =
-          Milliseconds(decoder_begin, decoder_end);
-      CheckCancellation(is_cancelled);
-
-      result->decoded = tokenizer.Decode(result->generated_ids, true);
-      Transcription parsed = ParseTranscription(result->decoded, language);
-      result->language = std::move(parsed.language);
-      result->text = std::move(parsed.text);
       result->sample_rate = kAudioSampleRate;
       result->timings.total_ms = Milliseconds(total_begin, Clock::now());
       return true;
@@ -233,6 +309,11 @@ struct TranscriptionHipRuntime::Impl {
   std::string root;
   std::size_t maximum_context_tokens{0};
   Tokenizer tokenizer;
+  std::mutex tokenizer_mutex;
+  // Bound CPU frontend memory, and yield the shared device state between
+  // chunks so a long upload cannot monopolize every shorter request.
+  core::CancellableGate frontend_gate{2};
+  core::CancellableGate gpu_gate;
   std::unique_ptr<AudioEncoderHipRuntime> audio_encoder;
   std::unique_ptr<TextDecoderHipRuntime> text_decoder;
 };

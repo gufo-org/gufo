@@ -487,9 +487,15 @@ struct AudioEncoderHipRuntime::Impl {
     return result;
   }
 
-  AudioEncoderDeviceOutput Encode(std::span<const float> log_mel,
-                                  std::size_t frames,
-                                  AudioEncoderTrace* trace) {
+  AudioEncoderDeviceOutput Encode(
+      std::span<const float> log_mel, std::size_t frames,
+      AudioEncoderTrace* trace,
+      const std::function<bool()>& is_cancelled = {}) {
+    const auto checkpoint = [&] {
+      if (is_cancelled && is_cancelled())
+        throw std::runtime_error("Qwen3-ASR audio encoder cancelled");
+    };
+    checkpoint();
     const std::size_t tokens = RunFrontend(log_mel, frames);
     if (trace != nullptr) {
       trace->frontend.tokens = tokens;
@@ -508,6 +514,7 @@ struct AudioEncoderHipRuntime::Impl {
                "hipMemcpyAsync Qwen3-ASR frontend activations");
 
     for (std::size_t layer = 0; layer < layers.size(); ++layer) {
+      checkpoint();
       const EncoderLayerWeights& weights = layers[layer];
       LaunchLayerNormToBfloat16(
           hidden.get(), weights.attention_norm_weight.get(),
@@ -703,19 +710,20 @@ bool AudioEncoderHipRuntime::Encode(std::span<const float> log_mel,
   }
 }
 
-bool AudioEncoderHipRuntime::EncodeDevice(std::span<const float> log_mel,
-                                          std::size_t frames,
-                                          AudioEncoderDeviceOutput* output,
-                                          std::string* error) {
+bool AudioEncoderHipRuntime::EncodeDevice(
+    std::span<const float> log_mel, std::size_t frames,
+    AudioEncoderDeviceOutput* output, std::string* error,
+    const std::function<bool()>& is_cancelled) {
   if (output == nullptr) {
     SetError(error, "Qwen3-ASR device encoder output must not be null");
     return false;
   }
   *output = {};
   try {
-    *output = impl_->Encode(log_mel, frames, nullptr);
+    *output = impl_->Encode(log_mel, frames, nullptr, is_cancelled);
     return true;
   } catch (const std::exception& exception) {
+    (void)hipStreamSynchronize(impl_->stream);
     SetError(error, exception.what());
     return false;
   }
@@ -756,7 +764,8 @@ bool AudioEncoderHipRuntime::Encode(std::span<const float>, std::size_t,
 
 bool AudioEncoderHipRuntime::EncodeDevice(std::span<const float>, std::size_t,
                                           AudioEncoderDeviceOutput*,
-                                          std::string* error) {
+                                          std::string* error,
+                                          const std::function<bool()>&) {
   if (error != nullptr) {
     *error = "Qwen3-ASR audio encoder requires ENGINE_ENABLE_HIP";
   }

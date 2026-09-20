@@ -1,9 +1,9 @@
 #include "src/cli/serve/asr_service.hpp"
 
-#include <mutex>
 #include <optional>
 #include <utility>
 
+#include "src/core/cancellable_gate.hpp"
 #include "src/models/qwen3_asr/config.hpp"
 #include "src/models/qwen3_asr/hip/transcription_runtime.hpp"
 
@@ -48,7 +48,7 @@ struct AsrService::Impl {
   std::unique_ptr<models::qwen3_asr::hip::TranscriptionHipRuntime>
       native_runtime;
   std::string initialization_error;
-  std::mutex transcription_mutex;
+  core::CancellableGate transcription_gate;
   bool ready{false};
 };
 
@@ -83,7 +83,16 @@ bool AsrService::Transcribe(
     }
     return false;
   }
-  const std::lock_guard<std::mutex> lock(impl_->transcription_mutex);
+  // Native inference manages admission per chunk, allowing other requests'
+  // frontend work to proceed while the GPU is occupied.
+  if (impl_->native_runtime)
+    return impl_->options.runner(request, is_cancelled, result, error);
+  auto lease = impl_->transcription_gate.Acquire(is_cancelled, error);
+  if (!lease) {
+    if (result)
+      *result = {};
+    return false;
+  }
   return impl_->options.runner(request, is_cancelled, result, error);
 }
 

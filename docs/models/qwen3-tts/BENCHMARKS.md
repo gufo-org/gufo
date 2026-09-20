@@ -17,24 +17,42 @@ Per-variant endpoint latency:
 | VoiceDesign | 6.96 s | `2.90` s |
 | Base ICL | 5.20 s | `2.69` s, or `2.45` s reusing the reference clip |
 
+## Streaming
+
+2026-09-20, Nix production binary, CustomVoice, resident model, 64 codec frames
+(5.12 seconds of audio), seed 42; talker top-k 20 / top-p 0.85 / T 0.7,
+predictor top-k 30 / top-p 0.9 / T 0.8. One warmup, one check per transport:
+
+| Transport | First audio | Complete request |
+| --- | ---: | ---: |
+| Buffered WAV | 2.036 s | 2.036 s |
+| PCM HTTP | 0.324 s | 2.068 s |
+| SSE | 0.322 s | 2.059 s |
+| WebSocket | 0.361 s | 2.099 s |
+
+All four return identical PCM bytes. Two simultaneous requests also reproduce
+those bytes, finishing in 2.037 / 4.073 s. These bounded controls measure early
+delivery; they do not claim increased TTS model throughput or natural EOS.
+
+A default-sampling CustomVoice paragraph reaches EOS at 208 frames / 16.64 s
+of audio in 6.71 / 6.59 s on two requests, with exact full-WAV replay and 0%
+word error in the native ASR check.
+
 ## Concurrent HTTP
 
-| C | engine | wall | throughput | latency p50 | latency max |
-| --- | --- | --- | --- | --- | --- |
-| 1 | gufo | 4.48 s | 2.29 audio-s/s | 4.48 s | 4.48 s |
-| 2 | gufo | 8.95 s | 2.29 | 6.72 s | 8.95 s |
-| 4 | gufo | 17.90 s | 2.29 | 11.19 s | 17.90 s |
-| 8 | gufo | 35.84 s | 2.29 | 20.17 s | 35.84 s |
+Current sampled 64-frame CustomVoice control (same input as above):
 
-Concurrent data: 2026-09-10, Base, greedy, warmed HTTP, synchronized bursts.
-The server serializes requests. C6 and a current sampled concurrency refresh:
-**TODO**. Single-request variant numbers use different texts and cannot be
-compared as equivalent workloads.
+| C | Request completion times |
+| ---: | --- |
+| 1 | 2.036 s |
+| 2 | 2.037 / 4.073 s |
+| 4 | TODO |
+| 6 | TODO |
+| 8 | TODO |
 
-A separate 2026-09-10 BF16 Base comparison (two warmups, median of three,
-English/Italian short/medium texts) averaged RTF **0.472** for Gufo and **0.663**
-for audio.cpp `3174e6b`. RTF is wall/audio (lower is better); it is distinct
-from audio/wall real-time multiples above. No MOS study was performed.
+TTS model execution is serialized; output streaming improves first-audio latency.
+Queued requests are cancellable. Single-request variant numbers above use
+separate texts and cannot be compared as equivalent workloads.
 
 ## Reproduce
 

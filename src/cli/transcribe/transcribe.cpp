@@ -99,8 +99,8 @@ void PrintTranscribeHelp(std::string_view program_name) {
   parser.AddOption("", "--context", "TEXT", "Optional transcription context",
                    "Input", &context);
   parser.AddOption("-n", "--max-tokens", "N",
-                   "Maximum generated tokens (default: 256)", "Generation",
-                   &maximum_tokens);
+                   "Maximum generated tokens per audio chunk (default: 256)",
+                   "Generation", &maximum_tokens);
   parser.AddOption("-c", "--capacity", "N",
                    "Prompt plus generation capacity (default: 1024)",
                    "Generation", &capacity);
@@ -142,8 +142,8 @@ int RunTranscribe(std::span<const char* const> args) {
   parser.AddOption("", "--context", "TEXT", "Optional transcription context",
                    "Input", &context);
   parser.AddOption("-n", "--max-tokens", "N",
-                   "Maximum generated tokens (default: 256)", "Generation",
-                   &maximum_tokens);
+                   "Maximum generated tokens per audio chunk (default: 256)",
+                   "Generation", &maximum_tokens);
   parser.AddOption("-c", "--capacity", "N",
                    "Prompt plus generation capacity (default: 1024)",
                    "Generation", &capacity);
@@ -257,6 +257,7 @@ int RunTranscribe(std::span<const char* const> args) {
   report["audio_tokens"] = result.audio_tokens;
   report["prompt_tokens"] = result.prompt_tokens;
   report["generated_tokens"] = result.generated_ids.size();
+  report["chunks"] = result.chunks;
   report["timings"] = TimingsJson(result.timings, load_ms);
   json::Value runs = json::Value::array();
   double total_ms = 0.0;

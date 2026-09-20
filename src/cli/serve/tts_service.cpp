@@ -1,11 +1,11 @@
 #include "src/cli/serve/tts_service.hpp"
 
 #include <algorithm>
-#include <mutex>
 #include <optional>
 #include <utility>
 #include <vector>
 
+#include "src/core/cancellable_gate.hpp"
 #include "src/models/qwen3_tts/config.hpp"
 #include "src/models/qwen3_tts/hip/synthesis_runtime.hpp"
 
@@ -97,7 +97,7 @@ struct TtsService::Impl {
   TtsServiceOptions options;
   std::unique_ptr<models::qwen3_tts::hip::SynthesisHipRuntime> native_runtime;
   std::string initialization_error;
-  std::mutex generation_mutex;
+  core::CancellableGate generation_gate;
   bool ready{false};
 };
 
@@ -145,7 +145,12 @@ bool TtsService::Synthesize(
     }
     return false;
   }
-  const std::lock_guard<std::mutex> lock(impl_->generation_mutex);
+  auto lease = impl_->generation_gate.Acquire(is_cancelled, error);
+  if (!lease) {
+    if (result)
+      *result = {};
+    return false;
+  }
   return impl_->options.runner(request, is_cancelled, result, error);
 }
 

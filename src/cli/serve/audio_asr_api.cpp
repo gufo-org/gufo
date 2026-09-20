@@ -5,10 +5,12 @@
 #include <charconv>
 #include <cmath>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <ranges>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -287,11 +289,22 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
                    "invalid_temperature");
     }
   }
-  if (Find(parts, "stream") != nullptr ||
-      Find(parts, "timestamp_granularities[]") != nullptr) {
+  if (Find(parts, "timestamp_granularities[]") != nullptr) {
     return Error(400, "Bad Request",
-                 "streaming and timestamp granularities are not supported",
+                 "timestamp granularities are not supported",
                  "unsupported_option");
+  }
+  bool stream = false;
+  if (const auto* value = Find(parts, "stream")) {
+    if (value->body != "true" && value->body != "false") {
+      return Error(400, "Bad Request", "'stream' must be true or false",
+                   "invalid_parameter_type");
+    }
+    stream = value->body == "true";
+  }
+  if (stream && format != "json") {
+    return Error(400, "Bad Request", "streaming transcription requires json",
+                 "invalid_response_format");
   }
   std::size_t maximum_tokens = 256;
   if (const MultipartPart* value = Find(parts, "max_tokens");
@@ -302,6 +315,81 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
   }
 
   const auto* wav_data = reinterpret_cast<const std::byte*>(file->body.data());
+  if (stream) {
+    HttpResponse response;
+    response.headers = {{"Content-Type", "text/event-stream"},
+                        {"Cache-Control", "no-cache"},
+                        {"X-Accel-Buffering", "no"},
+                        {"X-Gufo-Schema", std::string(kAudioAsrApiSchema)}};
+    response.stream_log = std::make_shared<HttpResponse::StreamLog>();
+    response.streaming_body =
+        [&service, wav = file->body,
+         context = prompt == nullptr ? std::string{} : prompt->body,
+         language = language == nullptr || language->body.empty()
+                        ? std::optional<std::string>{}
+                        : std::optional<std::string>{language->body},
+         maximum_tokens, cancelled = request.is_cancelled,
+         log = response.stream_log](const HttpResponse::BodyWriter& write) {
+          bool connected = true;
+          auto send = [&](json::Value event) {
+            if (!connected)
+              return false;
+            connected = write("event: " + event.member_str("type") +
+                              "\ndata: " + event.dump() + "\n\n");
+            return connected;
+          };
+          std::string published;
+          const auto progress = [&](std::string_view text) {
+            if (!text.starts_with(published)) {
+              // Committed SSE deltas cannot be retracted.
+              throw std::runtime_error(
+                  "ASR transcript changed its committed prefix");
+            }
+            if (text.size() == published.size())
+              return connected;
+            auto event = json::Value::object();
+            event["type"] = "transcript.text.delta";
+            event["delta"] = std::string(text.substr(published.size()));
+            published = text;
+            return send(std::move(event));
+          };
+          models::qwen3_asr::TranscriptionRequest input{
+              .wav = {reinterpret_cast<const std::byte*>(wav.data()),
+                      wav.size()},
+              .context = context,
+              .language = language,
+              .max_new_tokens = maximum_tokens,
+              .on_text = progress,
+          };
+          models::qwen3_asr::TranscriptionResult result;
+          std::string error;
+          const auto stop = [&] {
+            return !connected || (cancelled && cancelled());
+          };
+          if (!service.Transcribe(input, stop, &result, &error)) {
+            log->error_code = stop() ? "cancelled" : "transcription_failed";
+            if (!stop()) {
+              auto event = json::Value::object();
+              event["type"] = "error";
+              event["code"] = log->error_code;
+              event["message"] = error;
+              send(std::move(event));
+            }
+            return;
+          }
+          if (!progress(result.text))
+            return;
+          auto done = json::Value::object();
+          done["type"] = "transcript.text.done";
+          done["text"] = result.text;
+          send(std::move(done));
+          log->details = "model=" + service.model_id() +
+                         " chunks=" + std::to_string(result.chunks) +
+                         " generated_tokens=" +
+                         std::to_string(result.generated_ids.size());
+        };
+    return response;
+  }
   models::qwen3_asr::TranscriptionResult result;
   std::string error;
   if (!service.Transcribe(
@@ -346,6 +434,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
   response.headers.emplace_back("Server-Timing", ServerTiming(result.timings));
   response.log_details =
       "model=" + service.model_id() +
+      " chunks=" + std::to_string(result.chunks) +
       " audio_tokens=" + std::to_string(result.audio_tokens) +
       " generated_tokens=" + std::to_string(result.generated_ids.size()) +
       " audio_ms=" +

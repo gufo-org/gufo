@@ -2,6 +2,7 @@
 #define GUFO_MODELS_QWEN3_ASR_HIP_AUDIO_ENCODER_RUNTIME_HPP_
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -56,10 +57,10 @@ public:
 
   /// Production path. Runs the same encoder without intermediate host captures
   /// and retains the final embeddings on the GPU.
-  [[nodiscard]] bool EncodeDevice(std::span<const float> log_mel,
-                                  std::size_t frames,
-                                  AudioEncoderDeviceOutput* output,
-                                  std::string* error = nullptr);
+  [[nodiscard]] bool EncodeDevice(
+      std::span<const float> log_mel, std::size_t frames,
+      AudioEncoderDeviceOutput* output, std::string* error = nullptr,
+      const std::function<bool()>& is_cancelled = {});
 
 private:
   struct Impl;

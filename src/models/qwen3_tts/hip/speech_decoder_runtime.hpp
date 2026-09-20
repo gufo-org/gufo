@@ -49,6 +49,16 @@ public:
                             SpeechDecoderTrace* trace = nullptr,
                             std::string* error = nullptr);
 
+  /// Decode only the new suffix of a growing codec sequence, retaining causal
+  /// convolution histories and attention KV. begin_frame=0 starts a request;
+  /// later calls must extend the identical prefix. Returns suffix audio only.
+  /// Preserves the offline decoder's 300-frame/25-frame context boundaries.
+  [[nodiscard]] bool DecodeIncremental(std::span<const std::uint32_t> codes,
+                                       std::size_t frames,
+                                       std::size_t begin_frame,
+                                       SpeechDecoderOutput* output,
+                                       std::string* error = nullptr);
+
 private:
   struct Impl;
   explicit SpeechDecoderHipRuntime(std::unique_ptr<Impl> impl);

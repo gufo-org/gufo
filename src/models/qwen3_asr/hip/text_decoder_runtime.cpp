@@ -675,6 +675,9 @@ struct TextDecoderHipRuntime::Impl {
                       config.rms_norm_eps, stream);
 
     for (std::size_t layer = 0; layer < layers.size(); ++layer) {
+      if (cancellation && cancellation()) {
+        throw std::runtime_error("Qwen3-ASR generation cancelled");
+      }
       const LayerWeights& weights = layers[layer];
       // q/k/v read the same normalized activations, so decode issues them as
       // one dispatch over 4096 concatenated rows instead of three grids of
@@ -820,6 +823,7 @@ struct TextDecoderHipRuntime::Impl {
 
   LoadResult model;
   std::size_t maximum_tokens;
+  CancellationCheck cancellation;
   std::size_t cache_tokens{0U};
   bool hipblas_attention{false};
   bool batched_attention{false};
@@ -938,6 +942,7 @@ bool TextDecoderHipRuntime::Generate(std::span<const std::uint32_t> prompt_ids,
     }
     return true;
   } catch (const std::exception& exception) {
+    (void)hipStreamSynchronize(impl_->stream);
     generated_ids->clear();
     SetError(error, exception.what());
     return false;
@@ -948,7 +953,9 @@ bool TextDecoderHipRuntime::GenerateDevice(
     std::span<const std::uint32_t> prompt_ids,
     const float* audio_embeddings_device, std::size_t audio_tokens,
     std::size_t maximum_new_tokens, std::vector<std::uint32_t>* generated_ids,
-    std::string* error) {
+    std::string* error,
+    const std::function<bool(std::span<const std::uint32_t>)>& on_tokens,
+    const CancellationCheck& is_cancelled) {
   if (generated_ids == nullptr) {
     SetError(error, "Qwen3-ASR generated-token output must not be null");
     return false;
@@ -957,8 +964,14 @@ bool TextDecoderHipRuntime::GenerateDevice(
   if (maximum_new_tokens == 0U) {
     return true;
   }
+  impl_->cancellation = is_cancelled;
+  struct ClearCancellation {
+    Impl* impl;
+    ~ClearCancellation() { impl->cancellation = {}; }
+  } clear{impl_.get()};
   try {
-    if (prompt_ids.size() + maximum_new_tokens > impl_->maximum_tokens) {
+    if (prompt_ids.size() > impl_->maximum_tokens ||
+        maximum_new_tokens > impl_->maximum_tokens - prompt_ids.size()) {
       throw std::length_error(
           "Qwen3-ASR requested generation exceeds KV capacity");
     }
@@ -969,6 +982,9 @@ bool TextDecoderHipRuntime::GenerateDevice(
           "Qwen3-ASR decoder produced non-finite prefill logits");
     }
     generated_ids->push_back(token);
+    if (on_tokens && !on_tokens(*generated_ids)) {
+      throw std::runtime_error("Qwen3-ASR generation cancelled");
+    }
     while (!IsStopToken(token) && generated_ids->size() < maximum_new_tokens) {
       impl_->Decode(token);
       token = impl_->SelectToken();
@@ -979,9 +995,13 @@ bool TextDecoderHipRuntime::GenerateDevice(
             std::to_string(generated_ids->size()));
       }
       generated_ids->push_back(token);
+      if (on_tokens && !on_tokens(*generated_ids)) {
+        throw std::runtime_error("Qwen3-ASR generation cancelled");
+      }
     }
     return true;
   } catch (const std::exception& exception) {
+    (void)hipStreamSynchronize(impl_->stream);
     generated_ids->clear();
     SetError(error, exception.what());
     return false;
@@ -1023,11 +1043,11 @@ bool TextDecoderHipRuntime::Generate(std::span<const std::uint32_t>,
   return false;
 }
 
-bool TextDecoderHipRuntime::GenerateDevice(std::span<const std::uint32_t>,
-                                           const float*, std::size_t,
-                                           std::size_t,
-                                           std::vector<std::uint32_t>*,
-                                           std::string* error) {
+bool TextDecoderHipRuntime::GenerateDevice(
+    std::span<const std::uint32_t>, const float*, std::size_t, std::size_t,
+    std::vector<std::uint32_t>*, std::string* error,
+    const std::function<bool(std::span<const std::uint32_t>)>&,
+    const CancellationCheck&) {
   if (error != nullptr) {
     *error = "Qwen3-ASR text decoder requires ENGINE_ENABLE_HIP";
   }

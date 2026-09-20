@@ -223,6 +223,9 @@ add_library(gufo_http STATIC
   src/cli/serve/video_api.cpp
   src/cli/serve/video_jobs.cpp
   src/cli/serve/http_server.cpp
+  src/cli/serve/websocket.cpp
+  src/cli/serve/asr_websocket.cpp
+  src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
 )
 target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr)
@@ -375,6 +378,10 @@ if (BUILD_TESTING)
   target_link_libraries(http_server_test PRIVATE gufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
+  add_executable(audio_websocket_test tests/cli/audio_websocket_test.cpp)
+  target_link_libraries(audio_websocket_test PRIVATE gufo_http)
+  add_test(NAME audio_websocket_test COMMAND audio_websocket_test)
+  set_tests_properties(audio_websocket_test PROPERTIES LABELS "cpu;server;audio" TIMEOUT 30)
 
   add_test(NAME serve_cli_test
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli/serve_test.py
@@ -722,6 +729,12 @@ if (BUILD_TESTING)
     LABELS "cpu;hipblaslt;cache")
 
   if (ENGINE_ENABLE_HIP)
+    add_executable(qwen3_tts_synthesis_hip_test
+      tests/models/qwen3_tts/synthesis_hip_test.cpp)
+    target_link_libraries(qwen3_tts_synthesis_hip_test PRIVATE gufo_qwen3_tts)
+    add_test(NAME qwen3_tts_synthesis_hip_test COMMAND qwen3_tts_synthesis_hip_test)
+    set_tests_properties(qwen3_tts_synthesis_hip_test PROPERTIES
+      LABELS "hip;gpu;models;qwen3-tts;quality;external-model;slow" SKIP_RETURN_CODE 77)
     add_executable(qwen3_tts_speech_decoder_hip_test
       tests/models/qwen3_tts/speech_decoder_hip_test.cpp)
     target_link_libraries(qwen3_tts_speech_decoder_hip_test PRIVATE
@@ -731,20 +744,6 @@ if (BUILD_TESTING)
     set_tests_properties(qwen3_tts_speech_decoder_hip_test PROPERTIES
       LABELS "hip;gpu;gfx1151;models;qwen3-tts;speech-decoder;audio;quality;external-model;slow;opt-qwen3-tts-device-copy"
       SKIP_RETURN_CODE 77)
-    add_test(NAME qwen3_tts_speech_decoder_mapped_hip_test
-      COMMAND qwen3_tts_speech_decoder_hip_test)
-    set_tests_properties(qwen3_tts_speech_decoder_mapped_hip_test PROPERTIES
-      ENVIRONMENT "GUFO_QWEN3_TTS_WEIGHT_MODE=mapped"
-      LABELS "hip;gpu;gfx1151;models;qwen3-tts;speech-decoder;audio;quality;external-model;slow;opt-qwen3-tts-device-copy;reference"
-      SKIP_RETURN_CODE 77)
-    add_test(NAME qwen3_tts_speech_decoder_precomputed_snake_hip_test
-      COMMAND qwen3_tts_speech_decoder_hip_test)
-    set_tests_properties(
-      qwen3_tts_speech_decoder_precomputed_snake_hip_test PROPERTIES
-      ENVIRONMENT "GUFO_QWEN3_TTS_PRECOMPUTE_SNAKE=1"
-      LABELS "hip;gpu;gfx1151;models;qwen3-tts;speech-decoder;audio;quality;external-model;slow;opt-qwen3-tts-snake;rejected"
-      SKIP_RETURN_CODE 77)
-
     add_executable(qwen3_tts_talker_hip_prefill_test
       tests/models/qwen3_tts/talker_hip_prefill_test.cpp)
     target_link_libraries(qwen3_tts_talker_hip_prefill_test PRIVATE

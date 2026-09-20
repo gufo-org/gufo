@@ -21,8 +21,14 @@ def main():
     for modality in ("llm", "audio", "video"):
         check(["serve", "--port", "0", modality, "--help"], 0, "--api-key")
         check(["serve", modality, "--port=0", "--help"], 0, "--api-key")
-        check(["serve", modality, "--sessions", "0"], 2,
-              "server limits must be positive")
+        if modality == "audio":
+            help_text = check(["serve", modality, "--help"], 0, "--tts-context")
+            assert "--sessions" not in help_text
+            check(["serve", modality, "--sessions", "2"], 2, "Unknown option")
+            check(["serve", "--sessions", "2", modality], 2, "Unknown option")
+        else:
+            check(["serve", modality, "--sessions", "0"], 2,
+                  "server limits must be positive")
         check(["serve", modality, "unexpected"], 2, "Unexpected argument")
         check(["serve", modality, "--port", "65536"], 2, "--port must")
         check(["serve", modality, "--host", "bad.address"], 2, "--host must")

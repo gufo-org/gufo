@@ -3,12 +3,14 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "src/models/qwen3_asr/audio.hpp"
 #include "src/models/qwen3_asr/hip/transcription_runtime.hpp"
 
 namespace {
@@ -86,6 +88,79 @@ int main() {
         "generated token count must match official output");
   Check(result.audio_tokens == 196U && result.prompt_tokens == 211U,
         "audio and prompt shape must match official output");
+  qwen3_asr::AudioBuffer audio;
+  Check(qwen3_asr::DecodeWav(wav, &audio, &error), error);
+  const auto mono = qwen3_asr::ResampleMono16k(audio);
+  std::vector<float> long_audio;
+  for (int i = 0; i < 4; ++i) {
+    long_audio.insert(long_audio.end(), mono.begin(), mono.end());
+  }
+  qwen3_asr::TranscriptionResult longer;
+  std::string streamed;
+  Check(runtime->Transcribe({.max_new_tokens = 128,
+                             .pcm16k = long_audio,
+                             .on_text =
+                                 [&](std::string_view text) {
+                                   Check(text.starts_with(streamed),
+                                         "streamed transcript only appends");
+                                   streamed = text;
+                                   return true;
+                                 }},
+                            {}, &longer, &error),
+        "long recording: " + error);
+  Check(longer.chunks > 1 && streamed == longer.text &&
+            longer.audio_samples == long_audio.size(),
+        "long recording streams without exceeding the context");
+  const auto chunks = qwen3_asr::SplitAudio(
+      long_audio, qwen3_asr::AudioSamplesForTokenBudget(512 - 15 - 128));
+  std::string expected_long;
+  std::vector<std::uint32_t> expected_ids;
+  for (const auto& chunk : chunks) {
+    qwen3_asr::TranscriptionResult part;
+    Check(runtime->Transcribe(
+              {.max_new_tokens = 128,
+               .pcm16k = std::span<const float>(long_audio)
+                             .subspan(chunk.offset, chunk.samples)},
+              {}, &part, &error),
+          "independent chunk: " + error);
+    expected_long += part.text;
+    expected_ids.insert(expected_ids.end(), part.generated_ids.begin(),
+                        part.generated_ids.end());
+  }
+  Check(longer.text == expected_long && longer.generated_ids == expected_ids,
+        "long recording equals isolated chunk inference and merge");
+  qwen3_asr::TranscriptionResult cancelled;
+  int updates = 0;
+  Check(!runtime->Transcribe(
+            {.wav = wav,
+             .max_new_tokens = 128,
+             .on_text = [&](std::string_view) { return ++updates < 3; }},
+            {}, &cancelled, &error) &&
+            cancelled.generated_ids.empty() && updates == 3,
+        "cancellation interrupts decode and returns no successful partial "
+        "result");
+  qwen3_asr::TranscriptionResult recovered;
+  Check(runtime->Transcribe({.wav = wav, .max_new_tokens = 128}, {}, &recovered,
+                            &error) &&
+            recovered.generated_ids == result.generated_ids,
+        "runtime remains reproducible after cancellation");
+  const auto concurrent = [&](std::string context) {
+    qwen3_asr::TranscriptionResult output;
+    std::string failure;
+    Check(runtime->Transcribe(
+              {.wav = wav, .context = context, .max_new_tokens = 128}, {},
+              &output, &failure),
+          "concurrent transcription: " + failure);
+    return output.generated_ids;
+  };
+  auto first = std::async(std::launch::async, concurrent, "");
+  auto second = std::async(std::launch::async, concurrent, "Names: Gufo.");
+  const auto first_ids = first.get();
+  const auto second_ids = second.get();
+  Check(
+      first_ids == result.generated_ids &&
+          second_ids == concurrent("Names: Gufo."),
+      "concurrent frontend/chunk scheduling preserves independent transcripts");
   std::cout << "PASS qwen3_asr_transcription_hip_test"
             << " total_ms=" << result.timings.total_ms
             << " features_ms=" << result.timings.feature_extraction_ms

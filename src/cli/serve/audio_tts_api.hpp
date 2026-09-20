@@ -13,6 +13,8 @@ inline constexpr std::string_view kAudioTtsApiSchema = "gufo.audio-tts-api.v1";
 [[nodiscard]] bool IsAudioTtsApiPath(std::string_view path) noexcept;
 [[nodiscard]] HttpResponse HandleAudioTtsApiRequest(const HttpRequest& request,
                                                     TtsService& service);
+[[nodiscard]] HttpResponse ValidateAudioTtsRequest(const HttpRequest& request,
+                                                   TtsService& service);
 
 }  // namespace gufo::server
 

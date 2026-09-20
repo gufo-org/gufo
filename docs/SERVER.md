@@ -270,12 +270,12 @@ them co-resident costs the sum of their weights.
 | Variant | Model id | Voices | Additional required fields |
 | --- | --- | --- | --- |
 | CustomVoice | `qwen3-tts-12hz-1.7b-customvoice` | `talker_config.spk_id` names | `voice` |
-| VoiceDesign | `qwen3-tts-12hz-1.7b-voice-design` | `voice-design` | `instruct` |
+| VoiceDesign | `qwen3-tts-12hz-1.7b-voice-design` | `voice-design` | `instructions` |
 | Base | `qwen3-tts-12hz-1.7b-base` | `voice-clone` | `reference_audio`, plus `reference_text` unless `voice_clone_mode` is `speaker_embedding_only` |
 
 `GET /v1/audio/voices` lists the advertised voices. CustomVoice exposes the
 speaker names in `talker_config.spk_id`, while VoiceDesign and Base expose a
-single placeholder name because their timbre comes from `instruct` or
+single placeholder name because their timbre comes from `instructions` or
 `reference_audio` per request.
 
 A Base checkpoint can additionally advertise operator-registered named voices,
@@ -321,15 +321,23 @@ return several minutes of unusable audio. Preset names join
 `voice-clone` in `/v1/audio/voices`, and a request naming a preset must not
 also send `reference_audio`, `reference_text`, or `voice_clone_mode` --- the
 preset already supplies them. Presets require a Base checkpoint; CustomVoice
-selects a trained embedding and VoiceDesign is driven by `instruct`, so
+selects a trained embedding and VoiceDesign is driven by `instructions`, so
 neither has anything to apply them to.
 
 `POST /v1/audio/speech` accepts `model`, `input`, `voice`, `response_format`,
-`speed`, `language`, `instruct`, `seed`, `max_new_tokens`, `greedy`, and the
-Base-only `reference_audio`, `reference_text`, and `voice_clone_mode`. Any
-other field is rejected. `response_format` supports `wav` only and `speed`
-supports `1.0` only; `input` is capped at 16384 UTF-8 bytes and
+`speed`, `language`, `instructions`, `seed`, `max_new_tokens`, `greedy`,
+`stream_format`, talker `temperature`/`top_k`/`top_p`/`repetition_penalty`, and
+predictor `subtalker_dosample`/`subtalker_temperature`/`subtalker_top_k`/`subtalker_top_p`.
+Base additionally accepts `reference_audio`, `reference_text`, `voice_clone_mode`.
+Unknown fields are rejected. `response_format` supports buffered `wav` and
+streaming `pcm`; `stream_format: "sse"` emits OpenAI audio events with base64
+PCM. `speed` supports `1.0` only; input is capped at 16384 UTF-8 bytes and
 `max_new_tokens` at 8192 (default 3000). Output is 24 kHz mono 16-bit PCM.
+
+`GET /v1/audio/speech/stream` upgrades to the vLLM-Omni incremental-text
+WebSocket protocol. [TTS streaming examples](models/qwen3-tts/README.md#sampling-and-streaming)
+cover per-session configuration, audio events and optional sentence/clause
+segmentation. Output streaming does not change model prompt construction.
 
 Qwen3-ASR serving uses the same audio server, naming only the ASR checkpoint:
 
@@ -340,9 +348,18 @@ Qwen3-ASR serving uses the same audio server, naming only the ASR checkpoint:
 
 `POST /v1/audio/transcriptions` accepts OpenAI-compatible multipart fields
 `file`, `model`, `language`, `prompt`, `response_format`, `temperature`, and
-`max_tokens`. The native route is deterministic (`temperature=0`) and supports
-`json`, `text`, and `verbose_json`; streaming and timestamp granularities are
-rejected explicitly.
+`max_tokens`, and `stream`. The native route is deterministic (`temperature=0`)
+and supports `json`, `text`, and `verbose_json`. `stream=true` with JSON emits
+OpenAI transcript delta/done events. Long uploads are split within model
+capacity; `max_tokens` applies per chunk. Timestamp requests are rejected.
+
+`GET /v1/realtime?intent=transcription` upgrades to OpenAI's manual-commit
+transcription WebSocket interface. [ASR streaming examples](models/qwen3-asr/README.md#streaming)
+describe PCM format, append/commit/clear, event IDs and limits. WebSockets use
+the same bearer authentication and connection limits as HTTP. Messages are
+bounded to 4 MiB, queued input to 8 MiB/128 messages, and unconsumed output to
+a five-second socket timeout. Native generation observes close/disconnect;
+no per-server streaming flag or extra model is required.
 
 The MiniMax H3 subset follows the asynchronous OpenAI-style video resource
 shape and is versioned independently as `gufo.video-api.v1`. Its supported

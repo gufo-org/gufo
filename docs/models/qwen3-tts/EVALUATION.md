@@ -42,9 +42,15 @@ ASR backend.
 
 ### Known limitations
 
-- **Full-length replay:** identical fixed-seed requests can diverge after a long
-  prefix (observed at frame 38 of a 60-frame control), including greedy runs.
-  Eight-frame tests and isolated decoder controls repeat; root cause is unknown.
+- **Replay coverage:** current 64-frame sampled checks pass exact codec and
+  waveform replay for CustomVoice, VoiceDesign and Base ICL, including
+  cancellation followed by reuse. Streaming is exact against buffered synthesis
+  in these checks; the isolated decoder also matches through its 300-frame
+  context boundary. The historical frame-38 divergence did not reproduce here;
+  this is bounded coverage, not an arbitrary-length replay guarantee.
+  A production CustomVoice request also reaches natural EOS at 208 frames
+  (16.64 seconds), repeats its entire WAV exactly, and has 0% word error against
+  its requested text under native Qwen3-ASR.
 - **Greedy EOS:** a diagnostic reached 3000 frames without EOS. Bound greedy
   checks; use sampled output for complete-sentence quality.
 - **Base speech codes:** aggregate agreement 0.577351 is close to the official
@@ -62,7 +68,9 @@ scripts live in `tests/models/qwen3_tts`; tensor payloads stay in ignored
 `artifacts/qwen3_tts`. Full logits are regenerated, not stored as experiment dumps.
 
 ```sh
-nix develop -c ctest --preset gpu-full -R qwen3_tts --output-on-failure
+nix develop -c cmake --build --preset gpu-test --target qwen3_tts_synthesis_hip_test
+build/gpu-test/qwen3_tts_synthesis_hip_test "$TTS_MODEL"
+# For Base, also pass a reference WAV after the model directory.
 nix develop -c tools/audio/run_ref_tts.sh greedy
 nix develop -c tools/audio/run_ref_tts.sh
 nix develop -c python3 tests/models/qwen3_tts/quality/compare_intelligibility.py \
@@ -75,3 +83,14 @@ complete speech, and the same ASR runtime to transcribe both waveforms.
 `--contract` supplies variant-specific text. VoiceDesign/Base captures include
 prompt and speaker/speech-encoder boundaries. Keep pinned contract hashes,
 shapes, dtype and upstream provenance with each generated reference.
+
+CPU request checks cover independent talker/predictor controls, nucleus
+semantics, top-k ties and stream cancellation. `audio_websocket_test` covers
+the actual socket protocol, authentication, fragmented Unicode, ping/close and
+multiple utterances without loading models. The retained waveform tolerances
+remain MAE `<1e-5`, maximum error `<1e-4`; do not relax them for streaming.
+
+Interfaces were checked against OpenAI's audio streaming / GA Realtime schemas
+and vLLM-Omni `serving_speech_stream.py` at
+`23f41264456684c793283502f811aab7dcda2c88`. Sentence/clause input segmentation
+is a separate latency/quality tradeoff, never a lossless waveform assertion.

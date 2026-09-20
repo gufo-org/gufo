@@ -392,25 +392,32 @@ int main(int argc, char** argv) {
             << " matching_first_codes=" << matching_first_codes << '/'
             << expected_frames.size() << '\n';
 
-  const qwen3_tts_hip::TalkerSamplingOptions sampling{
-      .sample = true,
-      .seed = 42,
-  };
-  qwen3_tts_hip::TalkerGenerationOutput sampled;
-  Check(runtime->Generate(prompt, 8, sampling, &sampled, &error),
-        "sampled HIP generation: " + error);
-  qwen3_tts_hip::TalkerGenerationOutput repeated;
-  Check(runtime->Generate(prompt, 8, sampling, &repeated, &error),
-        "repeated sampled HIP generation: " + error);
-  Check(sampled.frames > 0 && sampled.code_groups == 16,
-        "sampled HIP generation shape");
-  Check(sampled.codes == repeated.codes && sampled.frames == repeated.frames,
-        "sampled HIP generation is reproducible for a fixed seed");
-  std::cout << "sampled_frames=" << sampled.frames << " sampled_first_codes=";
-  for (std::size_t frame = 0; frame < sampled.frames; ++frame) {
-    std::cout << sampled.codes[frame * sampled.code_groups] << ',';
+  // Cross the historical frame-38 divergence and attention's 64/128-token
+  // boundaries. Short eight-frame controls did not exercise this failure.
+  for (const bool sample : {false, true}) {
+    const qwen3_tts::SamplingOptions sampling{
+        .sample = sample,
+        .seed = 42,
+        .predictor_sample = sample,
+    };
+    qwen3_tts_hip::TalkerGenerationOutput first;
+    Check(runtime->Generate(prompt, 64, sampling, &first, &error),
+          "HIP generation: " + error);
+    qwen3_tts_hip::TalkerGenerationOutput repeated;
+    Check(runtime->Generate(prompt, 64, sampling, &repeated, &error),
+          "repeated HIP generation: " + error);
+    Check(first.frames > 0 && first.code_groups == 16, "HIP generation shape");
+    const auto mismatch =
+        std::mismatch(first.codes.begin(), first.codes.end(),
+                      repeated.codes.begin(), repeated.codes.end());
+    Check(first.codes == repeated.codes && first.frames == repeated.frames,
+          "HIP generation replay differs at frame " +
+              std::to_string(
+                  std::distance(first.codes.begin(), mismatch.first) / 16) +
+              (sample ? " (sampled)" : " (greedy)"));
+    std::cout << "replay_sampled=" << sample << " frames=" << first.frames
+              << '\n';
   }
-  std::cout << '\n';
   std::cout << "PASS qwen3_tts_talker_hip_prefill_test\n";
   return 0;
 }

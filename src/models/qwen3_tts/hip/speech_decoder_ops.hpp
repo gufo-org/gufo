@@ -35,32 +35,22 @@ void LaunchLayerNorm(const float* input, const float* weight, const float* bias,
 
 void LaunchRope(float* query, float* key, std::size_t frames, std::size_t heads,
                 std::size_t head_dimension, float rope_theta,
-                hipStream_t stream);
+                hipStream_t stream, std::size_t start_position = 0);
 
-void LaunchSlidingCausalAttention(const float* query, const float* key,
-                                  const float* value, float* output,
-                                  std::size_t frames, std::size_t heads,
-                                  std::size_t head_dimension,
-                                  std::size_t sliding_window,
-                                  hipStream_t stream);
+void LaunchSlidingCausalAttention(
+    const float* query, const float* key, const float* value, float* output,
+    std::size_t frames, std::size_t heads, std::size_t head_dimension,
+    std::size_t sliding_window, hipStream_t stream,
+    std::size_t query_offset = 0, std::size_t key_frames = 0);
 
 void LaunchSwiGlu(const float* gate, const float* up, float* output,
                   std::size_t elements, hipStream_t stream);
 
 void LaunchGelu(float* values, std::size_t elements, hipStream_t stream);
 
-void LaunchPrepareSnakeBeta(const float* alpha, const float* beta,
-                            float* alpha_exp, float* beta_exp,
-                            std::size_t columns, hipStream_t stream);
-
 void LaunchSnakeBeta(const float* input, const float* alpha, const float* beta,
                      float* output, std::size_t rows, std::size_t columns,
                      hipStream_t stream);
-
-void LaunchPreparedSnakeBeta(const float* input, const float* alpha_exp,
-                             const float* beta_exp, float* output,
-                             std::size_t rows, std::size_t columns,
-                             hipStream_t stream);
 
 void LaunchCausalConv1dIm2Col(const float* input, float* columns,
                               std::size_t input_length,

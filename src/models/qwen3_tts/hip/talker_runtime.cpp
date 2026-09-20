@@ -115,27 +115,6 @@ private:
   std::size_t count_{0};
 };
 
-enum class WeightMode {
-  kAuto,
-  kMapped,
-  kCopy,
-};
-
-WeightMode GetWeightMode() {
-  const char* value = std::getenv("GUFO_QWEN3_TTS_WEIGHT_MODE");
-  if (value == nullptr) {
-    return WeightMode::kAuto;
-  }
-  const std::string_view mode(value);
-  if (mode == "mapped") {
-    return WeightMode::kMapped;
-  }
-  if (mode == "copy") {
-    return WeightMode::kCopy;
-  }
-  return WeightMode::kAuto;
-}
-
 class DeviceRegion {
 public:
   DeviceRegion() = default;
@@ -155,23 +134,12 @@ public:
     host_ = region.data;
     size_ = region.size;
     payload_offset_ = region.payload_offset;
-    const WeightMode mode = GetWeightMode();
     // gfx1151 shares one physical memory pool with the host, but
     // device-resident weights still use coarse-grained pages the GPU caches and
     // streams far faster than host-registered pages, so decode prefers the
     // copy.
-    if (mode == WeightMode::kMapped) {
-      if (TryMap()) {
-        return true;
-      }
-    } else {
-      if (TryCopy()) {
-        return true;
-      }
-      if (mode == WeightMode::kAuto && TryMap()) {
-        return true;
-      }
-    }
+    if (TryCopy() || TryMap())
+      return true;
     SetError(error, "cannot make Qwen3-TTS safetensors GPU-visible");
     return false;
   }
@@ -349,52 +317,11 @@ std::string AsciiLower(std::string_view value) {
   return result;
 }
 
-struct TokenScore {
-  std::uint32_t token;
-  float score;
-};
-
-/// Reduces `candidates` in place so the caller keeps its capacity between
-/// steps.
-std::uint32_t SelectTopKCode(std::vector<TokenScore>& candidates,
-                             std::size_t top_k, float temperature,
-                             std::mt19937* random) {
-  if (candidates.empty()) {
-    throw std::runtime_error("Qwen3-TTS sampler has no eligible tokens");
-  }
-  const auto higher_score = [](const TokenScore& left,
-                               const TokenScore& right) {
-    if (left.score == right.score) {
-      return left.token < right.token;
-    }
-    return left.score > right.score;
-  };
-  const std::size_t selected_count =
-      random == nullptr ? 1 : std::min(top_k, candidates.size());
-  std::partial_sort(candidates.begin(), candidates.begin() + selected_count,
-                    candidates.end(), higher_score);
-  candidates.resize(selected_count);
-  if (random == nullptr) {
-    return candidates.front().token;
-  }
-  const double maximum = static_cast<double>(candidates.front().score);
-  std::vector<double> weights;
-  weights.reserve(candidates.size());
-  for (const TokenScore& candidate : candidates) {
-    weights.push_back(
-        std::exp((static_cast<double>(candidate.score) - maximum) /
-                 static_cast<double>(temperature)));
-  }
-  std::discrete_distribution<std::size_t> distribution(weights.begin(),
-                                                       weights.end());
-  return candidates[distribution(*random)].token;
-}
-
 std::uint32_t SelectMainCode(
     std::span<const float> logits,
     std::span<const std::uint8_t> generated_first_codes,
     std::size_t generation_step, std::uint32_t eos_token,
-    const TalkerSamplingOptions& sampling, std::mt19937* random,
+    const SamplingOptions& sampling, std::mt19937* random,
     std::vector<TokenScore>* scratch) {
   std::vector<TokenScore>& candidates = *scratch;
   candidates.clear();
@@ -415,8 +342,8 @@ std::uint32_t SelectMainCode(
     }
     candidates.push_back({token, score});
   }
-  return SelectTopKCode(candidates, sampling.top_k, sampling.temperature,
-                        random);
+  return SampleCodec(candidates, sampling.top_k, sampling.top_p,
+                     sampling.temperature, random);
 }
 
 }  // namespace
@@ -899,8 +826,8 @@ struct TalkerHipRuntime::Impl {
       for (std::uint32_t token = 0; token < host_logits->size(); ++token) {
         candidate_scratch.push_back({token, (*host_logits)[token]});
       }
-      return SelectTopKCode(candidate_scratch, predictor_top_k,
-                            predictor_temperature, sampling_rng);
+      return SampleCodec(candidate_scratch, predictor_top_k, predictor_top_p,
+                         predictor_temperature, sampling_rng);
     }
     gufo::hip::LaunchGPUArgmax(logits.get(), predictor_token.get(),
                                config.vocab_size, stream);
@@ -1087,6 +1014,7 @@ struct TalkerHipRuntime::Impl {
   std::mt19937* sampling_rng{nullptr};
   std::size_t predictor_top_k{50};
   float predictor_temperature{0.9F};
+  float predictor_top_p{1.0F};
   // Reused across the sixteen sampling steps of every frame so that decode does
   // not allocate per step.
   std::vector<float> predictor_logit_scratch;
@@ -1706,25 +1634,25 @@ bool TalkerHipRuntime::GenerateGreedy(const CustomVoicePromptOutput& prompt,
                                       std::size_t maximum_new_tokens,
                                       TalkerGenerationOutput* output,
                                       std::string* error) {
-  TalkerSamplingOptions sampling;
+  SamplingOptions sampling;
   sampling.sample = false;
+  sampling.predictor_sample = false;
   return Generate(prompt, maximum_new_tokens, sampling, output, error);
 }
 
 bool TalkerHipRuntime::Generate(const CustomVoicePromptOutput& prompt,
                                 std::size_t maximum_new_tokens,
-                                const TalkerSamplingOptions& sampling,
+                                const SamplingOptions& sampling,
                                 TalkerGenerationOutput* output,
                                 std::string* error) {
   return Generate(prompt, maximum_new_tokens, sampling, {}, output, error);
 }
 
-bool TalkerHipRuntime::Generate(const CustomVoicePromptOutput& prompt,
-                                std::size_t maximum_new_tokens,
-                                const TalkerSamplingOptions& sampling,
-                                const CancellationCheck& is_cancelled,
-                                TalkerGenerationOutput* output,
-                                std::string* error) {
+bool TalkerHipRuntime::Generate(
+    const CustomVoicePromptOutput& prompt, std::size_t maximum_new_tokens,
+    const SamplingOptions& sampling, const CancellationCheck& is_cancelled,
+    TalkerGenerationOutput* output, std::string* error,
+    const std::function<bool(const TalkerGenerationOutput&)>& on_codes) {
   if (output == nullptr) {
     SetError(error, "Qwen3-TTS generation output must not be null");
     return false;
@@ -1740,19 +1668,15 @@ bool TalkerHipRuntime::Generate(const CustomVoicePromptOutput& prompt,
     SetError(error, "Qwen3-TTS generation prompt is invalid");
     return false;
   }
-  if (sampling.top_k == 0 || sampling.predictor_top_k == 0 ||
-      !std::isfinite(sampling.temperature) || sampling.temperature <= 0.0F ||
-      !std::isfinite(sampling.predictor_temperature) ||
-      sampling.predictor_temperature <= 0.0F ||
-      !std::isfinite(sampling.repetition_penalty) ||
-      sampling.repetition_penalty <= 0.0F) {
+  if (!ValidSamplingOptions(sampling)) {
     SetError(error, "Qwen3-TTS sampling options are invalid");
     return false;
   }
   std::mt19937 random(sampling.seed);
-  impl_->sampling_rng = sampling.sample ? &random : nullptr;
+  impl_->sampling_rng = sampling.predictor_sample ? &random : nullptr;
   impl_->predictor_top_k = sampling.predictor_top_k;
   impl_->predictor_temperature = sampling.predictor_temperature;
+  impl_->predictor_top_p = sampling.predictor_top_p;
   struct PredictorSamplingReset {
     Impl* impl;
     ~PredictorSamplingReset() { impl->sampling_rng = nullptr; }
@@ -1799,6 +1723,11 @@ bool TalkerHipRuntime::Generate(const CustomVoicePromptOutput& prompt,
       }
       output->codes.insert(output->codes.end(), frame.begin(), frame.end());
       ++output->frames;
+      if (on_codes && !on_codes(*output)) {
+        SetError(error, "Qwen3-TTS audio stream cancelled or failed");
+        *output = {};
+        return false;
+      }
       if (step + 1 == maximum_new_tokens) {
         break;
       }
@@ -1933,18 +1862,18 @@ bool TalkerHipRuntime::GenerateGreedy(const CustomVoicePromptOutput&,
 }
 
 bool TalkerHipRuntime::Generate(const CustomVoicePromptOutput&, std::size_t,
-                                const TalkerSamplingOptions&,
-                                TalkerGenerationOutput*, std::string* error) {
+                                const SamplingOptions&, TalkerGenerationOutput*,
+                                std::string* error) {
   if (error != nullptr) {
     *error = "Qwen3-TTS HIP support is not enabled";
   }
   return false;
 }
 
-bool TalkerHipRuntime::Generate(const CustomVoicePromptOutput&, std::size_t,
-                                const TalkerSamplingOptions&,
-                                const CancellationCheck&,
-                                TalkerGenerationOutput*, std::string* error) {
+bool TalkerHipRuntime::Generate(
+    const CustomVoicePromptOutput&, std::size_t, const SamplingOptions&,
+    const CancellationCheck&, TalkerGenerationOutput*, std::string* error,
+    const std::function<bool(const TalkerGenerationOutput&)>&) {
   if (error != nullptr) {
     *error = "Qwen3-TTS HIP support is not enabled";
   }

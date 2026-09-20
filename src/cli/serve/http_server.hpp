@@ -19,6 +19,7 @@ namespace gufo::server {
 class VideoJobService;
 class TtsService;
 class AsrService;
+class WebSocket;
 
 struct HttpRequest {
   std::string method;  // "GET" / "POST" / ...
@@ -72,6 +73,7 @@ struct HttpResponse {
     std::string error_code;
   };
   std::shared_ptr<StreamLog> stream_log{};
+  std::function<void(WebSocket&)> websocket{};
 };
 
 using Handler =

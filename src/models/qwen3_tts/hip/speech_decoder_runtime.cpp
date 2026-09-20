@@ -1,5 +1,6 @@
 #include "src/models/qwen3_tts/hip/speech_decoder_runtime.hpp"
 
+#include <unordered_map>
 #include <utility>
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -107,32 +108,6 @@ private:
   std::size_t count_{0};
 };
 
-enum class WeightMode {
-  kAuto,
-  kMapped,
-  kCopy,
-};
-
-WeightMode GetWeightMode() {
-  const char* value = std::getenv("GUFO_QWEN3_TTS_WEIGHT_MODE");
-  if (value == nullptr) {
-    return WeightMode::kAuto;
-  }
-  const std::string_view mode(value);
-  if (mode == "mapped") {
-    return WeightMode::kMapped;
-  }
-  if (mode == "copy") {
-    return WeightMode::kCopy;
-  }
-  return WeightMode::kAuto;
-}
-
-bool ShouldPrecomputeSnakeBeta() {
-  const char* value = std::getenv("GUFO_QWEN3_TTS_PRECOMPUTE_SNAKE");
-  return value != nullptr && std::string_view(value) == "1";
-}
-
 class DeviceRegion {
 public:
   DeviceRegion() = default;
@@ -152,22 +127,11 @@ public:
     host_ = region.data;
     size_ = region.size;
     payload_offset_ = region.payload_offset;
-    const WeightMode mode = GetWeightMode();
     // The supported gfx1151 APU shares physical memory with the CPU, but
     // hipMalloc uses coarse-grained pages that the GPU caches and streams
     // faster than host-registered safetensors pages.
-    if (mode == WeightMode::kMapped) {
-      if (TryMap()) {
-        return true;
-      }
-    } else {
-      if (TryCopy()) {
-        return true;
-      }
-      if (mode == WeightMode::kAuto && TryMap()) {
-        return true;
-      }
-    }
+    if (TryCopy() || TryMap())
+      return true;
     SetError(error,
              "cannot make Qwen3-TTS speech-tokenizer weights GPU-visible");
     return false;
@@ -329,8 +293,6 @@ struct ConvWeights {
 struct SnakeBetaWeights {
   const float* alpha{nullptr};
   const float* beta{nullptr};
-  DeviceBuffer<float> alpha_exp;
-  DeviceBuffer<float> beta_exp;
 };
 
 struct CodebookWeights {
@@ -384,6 +346,8 @@ struct Workspace {
   DeviceBuffer<std::uint32_t> codes;
   std::array<DeviceBuffer<float>, 6> scratch;
   DeviceBuffer<float> columns;
+  DeviceBuffer<float> history_input;
+  DeviceBuffer<float> history_output;
 
   void Ensure(std::size_t frames) {
     if (frames <= capacity_frames) {
@@ -401,6 +365,29 @@ struct Workspace {
     }
     columns.Reset(column_elements);
     capacity_frames = frames;
+  }
+};
+
+struct ConvHistory {
+  DeviceBuffer<float> input;
+  std::size_t rows{0};
+};
+
+struct AttentionHistory {
+  DeviceBuffer<float> key;
+  DeviceBuffer<float> value;
+};
+
+struct DecoderHistory {
+  std::unordered_map<const ConvWeights*, ConvHistory> convolutions;
+  std::vector<AttentionHistory> attention;
+  std::vector<std::uint32_t> codes;
+  std::size_t position{0};
+
+  void ResetBlock() {
+    position = 0;
+    for (auto& [weight, history] : convolutions)
+      history.rows = 0;
   }
 };
 
@@ -545,12 +532,6 @@ struct SpeechDecoderHipRuntime::Impl {
         .alpha = LoadVector(alpha_name, channels),
         .beta = LoadVector(beta_name, channels),
     };
-    if (precompute_snake_beta) {
-      result.alpha_exp.Reset(channels);
-      result.beta_exp.Reset(channels);
-      LaunchPrepareSnakeBeta(result.alpha, result.beta, result.alpha_exp.get(),
-                             result.beta_exp.get(), channels, stream);
-    }
     return result;
   }
 
@@ -694,18 +675,65 @@ struct SpeechDecoderHipRuntime::Impl {
   void RunSnakeBeta(const SnakeBetaWeights& weights, const float* input,
                     float* output, std::size_t rows,
                     std::size_t columns) const {
-    if (precompute_snake_beta) {
-      LaunchPreparedSnakeBeta(input, weights.alpha_exp.get(),
-                              weights.beta_exp.get(), output, rows, columns,
-                              stream);
-      return;
-    }
     LaunchSnakeBeta(input, weights.alpha, weights.beta, output, rows, columns,
                     stream);
   }
 
   void RunConv(const ConvWeights& weights, const float* input, float* output,
                std::size_t input_length, std::size_t output_length) {
+    const std::size_t keep = weights.transpose
+                                 ? (weights.kernel - 1) / weights.stride
+                                 : (weights.kernel - 1) * weights.dilation;
+    if (active_history == nullptr || keep == 0) {
+      RunConvRaw(weights, input, output, input_length, output_length);
+      return;
+    }
+    auto& history = active_history->convolutions[&weights];
+    if (history.input.size() < keep * weights.input_channels) {
+      history.input.Reset(keep * weights.input_channels);
+    }
+    const std::size_t previous = history.rows;
+    const std::size_t rows = previous + input_length;
+    const std::size_t stride = weights.transpose ? weights.stride : 1;
+    const std::size_t input_elements = rows * weights.input_channels;
+    const std::size_t output_elements = rows * stride * weights.output_channels;
+    if (workspace.history_input.size() < input_elements)
+      workspace.history_input.Reset(input_elements);
+    if (workspace.history_output.size() < output_elements)
+      workspace.history_output.Reset(output_elements);
+    float* joined = workspace.history_input.get();
+    if (previous != 0) {
+      RequireHip(
+          hipMemcpyAsync(joined, history.input.get(),
+                         previous * weights.input_channels * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream),
+          "copy convolution history");
+    }
+    RequireHip(
+        hipMemcpyAsync(joined + previous * weights.input_channels, input,
+                       input_length * weights.input_channels * sizeof(float),
+                       hipMemcpyDeviceToDevice, stream),
+        "append convolution input");
+    history.rows = std::min(keep, rows);
+    RequireHip(
+        hipMemcpyAsync(history.input.get(),
+                       joined + (rows - history.rows) * weights.input_channels,
+                       history.rows * weights.input_channels * sizeof(float),
+                       hipMemcpyDeviceToDevice, stream),
+        "retain convolution history");
+    RunConvRaw(weights, joined, workspace.history_output.get(), rows,
+               rows * stride);
+    RequireHip(
+        hipMemcpyAsync(output,
+                       workspace.history_output.get() +
+                           previous * stride * weights.output_channels,
+                       output_length * weights.output_channels * sizeof(float),
+                       hipMemcpyDeviceToDevice, stream),
+        "copy incremental convolution output");
+  }
+
+  void RunConvRaw(const ConvWeights& weights, const float* input, float* output,
+                  std::size_t input_length, std::size_t output_length) {
     if (weights.depthwise) {
       if (input_length != output_length ||
           weights.input_channels != weights.output_channels) {
@@ -758,7 +786,8 @@ struct SpeechDecoderHipRuntime::Impl {
   std::vector<float> DecodeChunk(std::span<const std::uint32_t> codes,
                                  std::size_t frames,
                                  SpeechDecoderTrace* trace) {
-    workspace.Ensure(frames);
+    workspace.Ensure(frames +
+                     (active_history == nullptr ? 0 : kLeftContextFrames));
     RequireHip(
         hipMemcpyAsync(workspace.codes.get(), codes.data(), codes.size_bytes(),
                        hipMemcpyHostToDevice, stream),
@@ -796,6 +825,7 @@ struct SpeechDecoderHipRuntime::Impl {
 
     hidden = workspace.scratch[0].get();
     RunLinear(transformer_input, pre_conv_output, hidden, frames);
+    std::size_t layer_index = 0;
     for (const TransformerLayerWeights& layer : transformer_layers) {
       float* normalized = FindScratch(workspace, {hidden});
       LaunchRmsNorm(hidden, layer.input_norm, normalized, frames, 512,
@@ -809,14 +839,47 @@ struct SpeechDecoderHipRuntime::Impl {
       LaunchRope(query, key, frames,
                  model.config.speech_tokenizer.num_attention_heads,
                  model.config.speech_tokenizer.head_dim,
-                 model.config.speech_tokenizer.rope_theta, stream);
+                 model.config.speech_tokenizer.rope_theta, stream,
+                 active_history == nullptr ? 0 : active_history->position);
       float* attention =
           FindScratch(workspace, {hidden, normalized, query, key, value});
+      const float* keys = key;
+      const float* values = value;
+      const std::size_t position =
+          active_history == nullptr ? 0 : active_history->position;
+      if (active_history != nullptr) {
+        active_history->attention.resize(transformer_layers.size());
+        auto& cache = active_history->attention[layer_index];
+        const std::size_t attention_width =
+            model.config.speech_tokenizer.num_attention_heads *
+            model.config.speech_tokenizer.head_dim;
+        const std::size_t cache_elements =
+            (kChunkFrames + kLeftContextFrames) * attention_width;
+        if (cache.key.size() == 0) {
+          cache.key.Reset(cache_elements);
+          cache.value.Reset(cache_elements);
+        }
+        if (position + frames > kChunkFrames + kLeftContextFrames)
+          throw std::length_error(
+              "incremental decoder attention exceeds its window");
+        RequireHip(hipMemcpyAsync(cache.key.get() + position * attention_width,
+                                  key, frames * attention_width * sizeof(float),
+                                  hipMemcpyDeviceToDevice, stream),
+                   "append decoder attention keys");
+        RequireHip(
+            hipMemcpyAsync(cache.value.get() + position * attention_width,
+                           value, frames * attention_width * sizeof(float),
+                           hipMemcpyDeviceToDevice, stream),
+            "append decoder attention values");
+        keys = cache.key.get();
+        values = cache.value.get();
+      }
       LaunchSlidingCausalAttention(
-          query, key, value, attention, frames,
+          query, keys, values, attention, frames,
           model.config.speech_tokenizer.num_attention_heads,
           model.config.speech_tokenizer.head_dim,
-          model.config.speech_tokenizer.sliding_window, stream);
+          model.config.speech_tokenizer.sliding_window, stream, position,
+          position + frames);
       RunLinear(layer.attention_output, attention, normalized, frames);
       LaunchAddScaledChannels(hidden, normalized, layer.attention_scale, frames,
                               512, stream);
@@ -832,6 +895,7 @@ struct SpeechDecoderHipRuntime::Impl {
       RunLinear(layer.down, activation, normalized, frames);
       LaunchAddScaledChannels(hidden, normalized, layer.mlp_scale, frames, 512,
                               stream);
+      ++layer_index;
     }
     float* normalized = FindScratch(workspace, {hidden});
     LaunchRmsNorm(hidden, transformer_norm, normalized, frames, 512,
@@ -934,15 +998,18 @@ struct SpeechDecoderHipRuntime::Impl {
     RequireHip(hipStreamSynchronize(stream),
                "synchronize Qwen3-TTS speech decoder");
     RequireHip(hipGetLastError(), "Qwen3-TTS speech decoder");
+    if (active_history != nullptr)
+      active_history->position += frames;
     return samples;
   }
 
   LoadResult model;
-  bool precompute_snake_beta{ShouldPrecomputeSnakeBeta()};
   DeviceRegion speech_weights;
   hipStream_t stream{nullptr};
   F32Gemm gemm;
   Workspace workspace;
+  DecoderHistory history;
+  DecoderHistory* active_history{nullptr};
 
   CodebookWeights semantic_codebook;
   std::vector<CodebookWeights> acoustic_codebooks;
@@ -978,6 +1045,80 @@ std::unique_ptr<SpeechDecoderHipRuntime> SpeechDecoderHipRuntime::Create(
   } catch (const std::exception& exception) {
     SetError(error, exception.what());
     return nullptr;
+  }
+}
+
+bool SpeechDecoderHipRuntime::DecodeIncremental(
+    std::span<const std::uint32_t> codes, std::size_t frames,
+    std::size_t begin_frame, SpeechDecoderOutput* output, std::string* error) {
+  if (output == nullptr || frames == 0 || begin_frame > frames ||
+      frames > std::numeric_limits<std::size_t>::max() / kSamplesPerCode ||
+      codes.size() != frames * kCodeGroups) {
+    SetError(error, "invalid incremental speech decoder shape");
+    return false;
+  }
+  *output = {};
+  auto& history = impl_->history;
+  if (begin_frame == 0) {
+    history.codes.clear();
+    history.ResetBlock();
+  } else if (history.codes.size() != begin_frame * kCodeGroups ||
+             !std::equal(history.codes.begin(), history.codes.end(),
+                         codes.begin())) {
+    SetError(error, "incremental speech decoder prefix does not match");
+    return false;
+  }
+  for (const auto code : codes) {
+    if (code >= impl_->model.config.speech_tokenizer.codebook_size) {
+      SetError(error, "incremental speech decoder code is out of range");
+      return false;
+    }
+  }
+  const auto started = Clock::now();
+  impl_->active_history = &history;
+  struct ResetActive {
+    Impl* impl;
+    ~ResetActive() { impl->active_history = nullptr; }
+  } reset{impl_.get()};
+  try {
+    for (std::size_t cursor = begin_frame; cursor < frames;) {
+      if (cursor % kChunkFrames == 0) {
+        history.ResetBlock();
+        // The offline decoder restarts every 300 frames with 25 prior frames.
+        // Reconstruct exactly that context, without emitting its audio twice.
+        for (std::size_t warm = cursor - std::min(cursor, kLeftContextFrames);
+             warm < cursor;) {
+          const auto count = std::min<std::size_t>(16, cursor - warm);
+          (void)impl_->DecodeChunk(
+              codes.subspan(warm * kCodeGroups, count * kCodeGroups), count,
+              nullptr);
+          warm += count;
+        }
+      }
+      const auto count = std::min({std::size_t{16}, frames - cursor,
+                                   kChunkFrames - cursor % kChunkFrames});
+      const auto chunk =
+          codes.subspan(cursor * kCodeGroups, count * kCodeGroups);
+      auto samples = impl_->DecodeChunk(chunk, count, nullptr);
+      output->samples.insert(output->samples.end(), samples.begin(),
+                             samples.end());
+      history.codes.insert(history.codes.end(), chunk.begin(), chunk.end());
+      cursor += count;
+    }
+    output->sample_rate =
+        impl_->model.config.speech_tokenizer.output_sample_rate;
+    output->code_frames = frames - begin_frame;
+    output->decode_milliseconds =
+        std::chrono::duration<double, std::milli>(Clock::now() - started)
+            .count();
+    return true;
+  } catch (const std::exception& exception) {
+    (void)hipStreamSynchronize(impl_->stream);
+    history.codes.clear();
+    history.ResetBlock();
+    *output = {};
+    SetError(error, exception.what());
+    return false;
   }
 }
 
@@ -1070,6 +1211,15 @@ bool SpeechDecoderHipRuntime::Decode(std::span<const std::uint32_t>,
   if (error != nullptr) {
     *error = "Qwen3-TTS speech decoder requires a HIP-enabled build";
   }
+  return false;
+}
+
+bool SpeechDecoderHipRuntime::DecodeIncremental(std::span<const std::uint32_t>,
+                                                std::size_t, std::size_t,
+                                                SpeechDecoderOutput*,
+                                                std::string* error) {
+  if (error != nullptr)
+    *error = "Qwen3-TTS speech decoder requires a HIP-enabled build";
   return false;
 }
 

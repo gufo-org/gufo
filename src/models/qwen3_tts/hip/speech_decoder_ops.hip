@@ -149,7 +149,7 @@ __global__ void LayerNormKernel(const float* input, const float* weight,
 
 __global__ void RopeKernel(float* query, float* key, std::size_t frames,
                            std::size_t heads, std::size_t head_dimension,
-                           float rope_theta) {
+                           float rope_theta, std::size_t start_position) {
   const std::size_t half = head_dimension / 2;
   const std::size_t pairs = frames * heads * half;
   const std::size_t index =
@@ -163,7 +163,8 @@ __global__ void RopeKernel(float* query, float* key, std::size_t frames,
   const std::size_t frame = head_and_frame / heads;
   const float exponent =
       -2.0F * static_cast<float>(pair) / static_cast<float>(head_dimension);
-  const float angle = static_cast<float>(frame) * powf(rope_theta, exponent);
+  const float angle =
+      static_cast<float>(frame + start_position) * powf(rope_theta, exponent);
   float sine = 0.0F;
   float cosine = 0.0F;
   sincosf(angle, &sine, &cosine);
@@ -181,8 +182,9 @@ __global__ void RopeKernel(float* query, float* key, std::size_t frames,
 __global__ void SlidingCausalAttentionKernel(
     const float* query, const float* key, const float* value, float* output,
     std::size_t frames, std::size_t heads, std::size_t head_dimension,
-    std::size_t sliding_window) {
-  const std::size_t query_frame = blockIdx.x / heads;
+    std::size_t sliding_window, std::size_t query_offset) {
+  const std::size_t local_query = blockIdx.x / heads;
+  const std::size_t query_frame = local_query + query_offset;
   const std::size_t head = blockIdx.x % heads;
   if (query_frame >= frames) {
     return;
@@ -193,7 +195,7 @@ __global__ void SlidingCausalAttentionKernel(
   const std::size_t first_key =
       query_frame + 1 > sliding_window ? query_frame + 1 - sliding_window : 0;
   const float scale = rsqrtf(static_cast<float>(head_dimension));
-  const std::size_t query_base = (query_frame * heads + head) * head_dimension;
+  const std::size_t query_base = (local_query * heads + head) * head_dimension;
 
   float local_max = -std::numeric_limits<float>::infinity();
   for (std::size_t key_frame = threadIdx.x; key_frame < frames;
@@ -220,6 +222,7 @@ __global__ void SlidingCausalAttentionKernel(
     __syncthreads();
   }
   const float maximum = reduction[0];
+  __syncthreads();
   float local_sum = 0.0F;
   for (std::size_t key_frame = threadIdx.x; key_frame < frames;
        key_frame += blockDim.x) {
@@ -271,17 +274,6 @@ __global__ void GeluKernel(float* values, std::size_t elements) {
   }
 }
 
-__global__ void PrepareSnakeBetaKernel(const float* alpha, const float* beta,
-                                       float* alpha_exp, float* beta_exp,
-                                       std::size_t columns) {
-  const std::size_t channel =
-      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (channel < columns) {
-    alpha_exp[channel] = expf(alpha[channel]);
-    beta_exp[channel] = expf(beta[channel]);
-  }
-}
-
 __global__ void SnakeBetaKernel(const float* input, const float* alpha,
                                 const float* beta, float* output,
                                 std::size_t elements, std::size_t columns) {
@@ -293,20 +285,6 @@ __global__ void SnakeBetaKernel(const float* input, const float* alpha,
     const float beta_exp = expf(beta[channel]);
     const float sine = sinf(input[index] * alpha_exp);
     output[index] = input[index] + sine * sine / (beta_exp + 1.0e-9F);
-  }
-}
-
-__global__ void PreparedSnakeBetaKernel(const float* input,
-                                        const float* alpha_exp,
-                                        const float* beta_exp, float* output,
-                                        std::size_t elements,
-                                        std::size_t columns) {
-  const std::size_t index =
-      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index < elements) {
-    const std::size_t channel = index % columns;
-    const float sine = sinf(input[index] * alpha_exp[channel]);
-    output[index] = input[index] + sine * sine / (beta_exp[channel] + 1.0e-9F);
   }
 }
 
@@ -479,10 +457,11 @@ void LaunchLayerNorm(const float* input, const float* weight, const float* bias,
 
 void LaunchRope(float* query, float* key, std::size_t frames, std::size_t heads,
                 std::size_t head_dimension, float rope_theta,
-                hipStream_t stream) {
+                hipStream_t stream, std::size_t start_position) {
   const std::size_t pairs = frames * heads * (head_dimension / 2);
   hipLaunchKernelGGL(RopeKernel, dim3(Blocks(pairs)), dim3(kThreads), 0, stream,
-                     query, key, frames, heads, head_dimension, rope_theta);
+                     query, key, frames, heads, head_dimension, rope_theta,
+                     start_position);
 }
 
 void LaunchSlidingCausalAttention(const float* query, const float* key,
@@ -490,12 +469,15 @@ void LaunchSlidingCausalAttention(const float* query, const float* key,
                                   std::size_t frames, std::size_t heads,
                                   std::size_t head_dimension,
                                   std::size_t sliding_window,
-                                  hipStream_t stream) {
+                                  hipStream_t stream, std::size_t query_offset,
+                                  std::size_t key_frames) {
+  if (key_frames == 0) key_frames = frames;
   constexpr std::size_t threads = 128;
-  const std::size_t shared_bytes = (frames + threads) * sizeof(float);
+  const std::size_t shared_bytes = (key_frames + threads) * sizeof(float);
   hipLaunchKernelGGL(SlidingCausalAttentionKernel, dim3(frames * heads),
                      dim3(threads), shared_bytes, stream, query, key, value,
-                     output, frames, heads, head_dimension, sliding_window);
+                     output, key_frames, heads, head_dimension, sliding_window,
+                     query_offset);
 }
 
 void LaunchSwiGlu(const float* gate, const float* up, float* output,
@@ -509,30 +491,12 @@ void LaunchGelu(float* values, std::size_t elements, hipStream_t stream) {
                      stream, values, elements);
 }
 
-void LaunchPrepareSnakeBeta(const float* alpha, const float* beta,
-                            float* alpha_exp, float* beta_exp,
-                            std::size_t columns, hipStream_t stream) {
-  hipLaunchKernelGGL(PrepareSnakeBetaKernel, dim3(Blocks(columns)),
-                     dim3(kThreads), 0, stream, alpha, beta, alpha_exp,
-                     beta_exp, columns);
-}
-
 void LaunchSnakeBeta(const float* input, const float* alpha, const float* beta,
                      float* output, std::size_t rows, std::size_t columns,
                      hipStream_t stream) {
   const std::size_t elements = rows * columns;
   hipLaunchKernelGGL(SnakeBetaKernel, dim3(Blocks(elements)), dim3(kThreads), 0,
                      stream, input, alpha, beta, output, elements, columns);
-}
-
-void LaunchPreparedSnakeBeta(const float* input, const float* alpha_exp,
-                             const float* beta_exp, float* output,
-                             std::size_t rows, std::size_t columns,
-                             hipStream_t stream) {
-  const std::size_t elements = rows * columns;
-  hipLaunchKernelGGL(PreparedSnakeBetaKernel, dim3(Blocks(elements)),
-                     dim3(kThreads), 0, stream, input, alpha_exp, beta_exp,
-                     output, elements, columns);
 }
 
 void LaunchCausalConv1dIm2Col(const float* input, float* columns,

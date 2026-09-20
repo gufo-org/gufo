@@ -40,16 +40,6 @@ struct TalkerGenerationOutput {
   std::size_t code_groups{0};
 };
 
-struct TalkerSamplingOptions {
-  bool sample{true};
-  std::uint32_t seed{42};
-  std::size_t top_k{50};
-  float temperature{0.9F};
-  std::size_t predictor_top_k{50};
-  float predictor_temperature{0.9F};
-  float repetition_penalty{1.05F};
-};
-
 struct CodePredictorOutput {
   std::vector<std::uint32_t> codes;
   std::vector<float> logits;
@@ -126,18 +116,17 @@ public:
   /// Generates with the checkpoint's native top-k sampling policy by default.
   [[nodiscard]] bool Generate(const TalkerPromptOutput& prompt,
                               std::size_t maximum_new_tokens,
-                              const TalkerSamplingOptions& sampling,
+                              const SamplingOptions& sampling,
                               TalkerGenerationOutput* output,
                               std::string* error = nullptr);
 
   /// Generates while checking for cancellation before prefill and every codec
   /// frame. A cancelled generation fails without returning partial codes.
-  [[nodiscard]] bool Generate(const TalkerPromptOutput& prompt,
-                              std::size_t maximum_new_tokens,
-                              const TalkerSamplingOptions& sampling,
-                              const CancellationCheck& is_cancelled,
-                              TalkerGenerationOutput* output,
-                              std::string* error = nullptr);
+  [[nodiscard]] bool Generate(
+      const TalkerPromptOutput& prompt, std::size_t maximum_new_tokens,
+      const SamplingOptions& sampling, const CancellationCheck& is_cancelled,
+      TalkerGenerationOutput* output, std::string* error = nullptr,
+      const std::function<bool(const TalkerGenerationOutput&)>& on_codes = {});
 
 private:
   struct Impl;

@@ -3,10 +3,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
 #include <vector>
+
+#include "src/models/qwen3_asr/transcription.hpp"
 
 namespace gufo::models::qwen3_asr::hip {
 
@@ -47,12 +50,13 @@ public:
                               std::string* error = nullptr);
 
   /// Greedy generation from device-resident float32 audio embeddings.
-  [[nodiscard]] bool GenerateDevice(std::span<const std::uint32_t> prompt_ids,
-                                    const float* audio_embeddings_device,
-                                    std::size_t audio_tokens,
-                                    std::size_t maximum_new_tokens,
-                                    std::vector<std::uint32_t>* generated_ids,
-                                    std::string* error = nullptr);
+  [[nodiscard]] bool GenerateDevice(
+      std::span<const std::uint32_t> prompt_ids,
+      const float* audio_embeddings_device, std::size_t audio_tokens,
+      std::size_t maximum_new_tokens, std::vector<std::uint32_t>* generated_ids,
+      std::string* error = nullptr,
+      const std::function<bool(std::span<const std::uint32_t>)>& on_tokens = {},
+      const CancellationCheck& is_cancelled = {});
 
 private:
   struct Impl;

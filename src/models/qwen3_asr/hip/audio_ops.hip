@@ -278,6 +278,9 @@ __global__ void SegmentedSelfAttentionKernel(
     __syncthreads();
   }
   const float maximum = reduction[0];
+  // Every wave must read the maximum before wave zero can overwrite its
+  // shared slot with the exponential sum (especially for short tail windows).
+  __syncthreads();
   float local_sum = 0.0F;
   for (std::size_t offset = threadIdx.x; offset < segment_length;
        offset += blockDim.x) {

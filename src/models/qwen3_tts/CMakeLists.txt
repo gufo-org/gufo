@@ -9,6 +9,7 @@ add_library(gufo_qwen3_tts STATIC
   config.cpp
   loader.cpp
   prompt.cpp
+  sampling.cpp
   tensor.cpp
   tokenizer.cpp
   hip/encoder_support.cpp

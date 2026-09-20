@@ -492,4 +492,64 @@ std::size_t AudioEmbeddingTokenCount(std::size_t feature_frames) {
   return (chunks - 1U) * kAudioChunkTokens + tail_tokens;
 }
 
+std::size_t AudioSamplesForTokenBudget(std::size_t tokens) {
+  if (tokens == 0) {
+    return 0;
+  }
+  std::size_t low = 0;
+  std::size_t high = 1200 * kAudioSampleRate / kAudioHopLength;
+  while (low < high) {
+    const std::size_t middle = low + (high - low + 1) / 2;
+    if (AudioEmbeddingTokenCount(middle) <= tokens) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return std::min<std::size_t>((low + 1) * kAudioHopLength - 1,
+                               1200 * kAudioSampleRate);
+}
+
+std::vector<AudioChunk> SplitAudio(std::span<const float> waveform,
+                                   std::size_t maximum_samples) {
+  if (!waveform.empty() && waveform.size() <= maximum_samples)
+    return {{0, waveform.size()}};
+  if (waveform.empty() || maximum_samples < kAudioSampleRate / 2) {
+    throw std::invalid_argument("Qwen3-ASR audio chunk capacity is too small");
+  }
+  std::vector<AudioChunk> chunks;
+  std::size_t offset = 0;
+  const std::size_t search =
+      std::min<std::size_t>(5 * kAudioSampleRate, maximum_samples / 4);
+  constexpr std::size_t window = kAudioSampleRate / 10;
+  while (waveform.size() - offset > maximum_samples) {
+    const std::size_t right = offset + maximum_samples;
+    const std::size_t left = right - 2 * search;
+    double sum = 0;
+    for (std::size_t i = left; i < left + window; ++i) {
+      sum += std::abs(waveform[i]);
+    }
+    double minimum = sum;
+    std::size_t best = left;
+    for (std::size_t i = left + window; i < right; ++i) {
+      sum += static_cast<double>(std::abs(waveform[i])) -
+             std::abs(waveform[i - window]);
+      if (sum < minimum) {
+        minimum = sum;
+        best = i - window + 1;
+      }
+    }
+    std::size_t boundary = best;
+    for (std::size_t i = best + 1; i < best + window; ++i) {
+      if (std::abs(waveform[i]) < std::abs(waveform[boundary])) {
+        boundary = i;
+      }
+    }
+    chunks.push_back({offset, boundary - offset});
+    offset = boundary;
+  }
+  chunks.push_back({offset, waveform.size() - offset});
+  return chunks;
+}
+
 }  // namespace gufo::models::qwen3_asr

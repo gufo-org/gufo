@@ -37,6 +37,17 @@ Finite tensors, established boundary tolerances, all generated IDs and final
 transcript must pass. Test request cancellation and byte/layout limits when
 changing HTTP or audio handling.
 
+The focused runtime check also runs a 60.2-second recording through a 512-token
+context. The merged token IDs and text equal independent inference of the same
+low-energy chunks. File-streaming text equals buffered output; concurrent
+requests and cancellation/reuse retain the exact 49-token reference. This
+validates splitting and state isolation, not long-form recognition accuracy.
+
+Transport checks use OpenAI file-transcription SSE and GA Realtime manual
+commits (24-kHz PCM16). No timestamp/aligner model is involved. The native model
+gets a complete committed utterance; it does not use the upstream wrapper's
+revisable rolling-prefix mode.
+
 ## Limits
 
 The retained 15-second fixture is not a multilingual/long-form qualification.

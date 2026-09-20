@@ -693,6 +693,7 @@ __launch_bounds__(256) __global__
     __syncthreads();
   }
   const float maximum = reduction[0];
+  __syncthreads();
   float local_sum = 0.0F;
   for (std::size_t key = threadIdx.x; key < visible; key += blockDim.x) {
     const float probability =

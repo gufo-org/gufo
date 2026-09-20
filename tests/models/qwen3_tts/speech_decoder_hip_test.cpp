@@ -277,6 +277,61 @@ int main(int argc, char** argv) {
         "waveform mean absolute error against official ROCm");
   Check(waveform_comparison.maximum_absolute_error < 1.0e-4,
         "waveform maximum absolute error against official ROCm");
+  std::vector<std::uint32_t> long_codes(320 * 16);
+  for (std::size_t i = 0; i < long_codes.size(); ++i) {
+    long_codes[i] = codes[i % codes.size()];
+  }
+  qwen3_tts_hip::SpeechDecoderOutput full;
+  qwen3_tts_hip::SpeechDecoderOutput repeated;
+  Check(runtime->Decode(long_codes, 320, &full, nullptr, &error) &&
+            runtime->Decode(long_codes, 320, &repeated, nullptr, &error),
+        "decode long replay: " + error);
+  Check(full.samples == repeated.samples,
+        "waveform decoder repeats exactly beyond the historical frame-38 gap");
+  for (const std::size_t prefix : {8U, 32U}) {
+    qwen3_tts_hip::SpeechDecoderOutput early;
+    Check(runtime->Decode(std::span(long_codes).first(prefix * 16), prefix,
+                          &early, nullptr, &error),
+          "decode causal prefix: " + error);
+    const auto comparison = Report(
+        "causal_prefix_" + std::to_string(prefix), early.samples,
+        std::span<const float>(full.samples).first(early.samples.size()));
+    Check(comparison.mean_absolute_error < 1.0e-5 &&
+              comparison.maximum_absolute_error < 1.0e-4,
+          "early audio preserves the established waveform quality gate");
+  }
+  std::vector<float> incremental;
+  std::size_t begin = 0;
+  for (const std::size_t end : {8U, 24U, 64U, 299U, 301U, 320U}) {
+    qwen3_tts_hip::SpeechDecoderOutput part;
+    Check(runtime->DecodeIncremental(std::span(long_codes).first(end * 16), end,
+                                     begin, &part, &error),
+          "incremental decoder: " + error);
+    Check(part.samples.size() == (end - begin) * 1920,
+          "incremental decoder emits only new samples");
+    (void)Report("chunk_" + std::to_string(end), part.samples,
+                 std::span<const float>(full.samples)
+                     .subspan(begin * 1920, part.samples.size()));
+    incremental.insert(incremental.end(), part.samples.begin(),
+                       part.samples.end());
+    begin = end;
+  }
+  const auto incremental_comparison =
+      Report("incremental", incremental, full.samples);
+  Check(incremental_comparison.mean_absolute_error < 1.0e-5 &&
+            incremental_comparison.maximum_absolute_error < 1.0e-4,
+        "incremental state retains offline waveform quality");
+  qwen3_tts_hip::SpeechDecoderOutput reset_output;
+  Check(runtime->DecodeIncremental(std::span(long_codes).first(8 * 16), 8, 0,
+                                   &reset_output, &error),
+        error);
+  Check(std::equal(reset_output.samples.begin(), reset_output.samples.end(),
+                   full.samples.begin()),
+        "a new request clears decoder history");
+  long_codes[0] = (long_codes[0] + 1) % 2048;
+  Check(!runtime->DecodeIncremental(std::span(long_codes).first(9 * 16), 9, 8,
+                                    &reset_output, &error),
+        "changed codec prefixes cannot reuse decoder state");
   std::cout << "PASS qwen3_tts_speech_decoder_hip_test\n";
   return 0;
 }

@@ -9,6 +9,7 @@
 
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/audio_asr_api.hpp"
+#include "src/models/qwen3_asr/audio.hpp"
 
 namespace {
 
@@ -34,7 +35,7 @@ class FakeRunner {
 public:
   bool Run(const qwen3_asr::TranscriptionRequest& request,
            const qwen3_asr::CancellationCheck&,
-           qwen3_asr::TranscriptionResult* result, std::string*) {
+           qwen3_asr::TranscriptionResult* result, std::string* error) {
     ++calls;
     wav_bytes = request.wav.size();
     context = request.context;
@@ -47,6 +48,11 @@ public:
     result->generated_ids = {1, 2, 3};
     result->timings.audio_encoder_ms = 10.0;
     result->timings.text_decoder_ms = 20.0;
+    if (request.on_text && !request.on_text("A native")) {
+      if (error != nullptr)
+        *error = "cancelled";
+      return false;
+    }
     return true;
   }
 
@@ -72,7 +78,8 @@ AsrService MakeService(FakeRunner* runner) {
 }
 
 std::string Multipart(std::string response_format = "json",
-                      bool include_unknown = false) {
+                      bool include_unknown = false,
+                      std::string_view stream = {}) {
   constexpr std::string_view boundary = "gufo-test-boundary";
   std::string body;
   const auto append = [&](std::string_view name, std::string_view value,
@@ -98,6 +105,8 @@ std::string Multipart(std::string response_format = "json",
   append("response_format", response_format);
   append("max_tokens", "42");
   append("temperature", "0");
+  if (!stream.empty())
+    append("stream", stream);
   if (include_unknown) {
     append("typo", "true");
   }
@@ -173,11 +182,70 @@ void TestFormatsAndValidation() {
   Check(runner.calls == 2, "invalid requests never invoke inference");
 }
 
+void TestStreamingAndChunks() {
+  FakeRunner runner;
+  AsrService service = MakeService(&runner);
+  const auto response = Send(service, Multipart("json", false, "true"));
+  Check(response.status == 200 && response.streaming_body && runner.calls == 0,
+        "streaming defers inference until the response is consumed");
+  std::string events;
+  response.streaming_body([&](std::string_view part) {
+    events += part;
+    return true;
+  });
+  Check(
+      runner.calls == 1 &&
+          events.find("\"delta\":\"A native\"") != std::string::npos &&
+          events.find("\"delta\":\" transcript.\"") != std::string::npos &&
+          events.find("\"type\":\"transcript.text.done\"") != std::string::npos,
+      "OpenAI SSE emits incremental deltas and a complete transcript");
+  const auto disconnected = Send(service, Multipart("json", false, "true"));
+  int writes = 0;
+  disconnected.streaming_body([&](std::string_view) {
+    ++writes;
+    return false;
+  });
+  Check(writes == 1 && disconnected.stream_log->error_code == "cancelled",
+        "disconnected stream cancels inference without a done event");
+  Check(!Send(service, Multipart("json", false, "false")).streaming_body,
+        "stream=false retains the ordinary JSON contract");
+  Check(Send(service, Multipart("json", false, "yes")).status == 400 &&
+            Send(service, Multipart("text", false, "true")).status == 400,
+        "invalid streaming configurations fail closed");
+
+  constexpr std::size_t limit = 4 * qwen3_asr::kAudioSampleRate;
+  const auto short_chunk =
+      qwen3_asr::SplitAudio(std::vector<float>(1600), 1600);
+  Check(short_chunk.size() == 1 && short_chunk.front().samples == 1600,
+        "a short unsplit input does not require a half-second chunk budget");
+  std::vector<float> waveform(limit * 2 + 137, 0.25F);
+  std::fill(waveform.begin() + 3 * qwen3_asr::kAudioSampleRate,
+            waveform.begin() + 3 * qwen3_asr::kAudioSampleRate + 1600, 0.0F);
+  const auto chunks = qwen3_asr::SplitAudio(waveform, limit);
+  std::size_t consumed = 0;
+  for (const auto& chunk : chunks) {
+    Check(
+        chunk.offset == consumed && chunk.samples > 0 && chunk.samples <= limit,
+        "long audio partitions exactly within the hard capacity");
+    consumed += chunk.samples;
+  }
+  Check(consumed == waveform.size() &&
+            chunks.front().samples == 3 * qwen3_asr::kAudioSampleRate,
+        "chunking prefers a quiet boundary without dropping samples");
+  for (const std::size_t budget : {13U, 104U, 725U}) {
+    const auto samples = qwen3_asr::AudioSamplesForTokenBudget(budget);
+    Check(qwen3_asr::AudioEmbeddingTokenCount(samples / 160) <= budget &&
+              qwen3_asr::AudioEmbeddingTokenCount((samples + 1) / 160) > budget,
+          "audio capacity includes convolutional tails");
+  }
+}
+
 }  // namespace
 
 int main() {
   TestJsonRequest();
   TestFormatsAndValidation();
+  TestStreamingAndChunks();
   std::cout << "PASS qwen3_asr_audio_api_test\n";
   return 0;
 }

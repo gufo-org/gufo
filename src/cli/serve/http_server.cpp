@@ -30,12 +30,14 @@
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
+#include "src/cli/serve/audio_websocket.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_api.hpp"
 #include "src/cli/serve/video_jobs.hpp"
+#include "src/cli/serve/websocket.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
 #include "src/core/utf8.hpp"
@@ -235,7 +237,7 @@ std::string BuildResponseHead(const HttpResponse& resp,
   out += ' ';
   out += resp.reason;
   out += "\r\n";
-  if (!HasHeader(resp, "content-type")) {
+  if (resp.status != 101 && !HasHeader(resp, "content-type")) {
     out += "Content-Type: application/json\r\n";
   }
   if (content_length.has_value()) {
@@ -250,7 +252,9 @@ std::string BuildResponseHead(const HttpResponse& resp,
     out += value;
     out += "\r\n";
   }
-  out += "Connection: close\r\n\r\n";
+  if (!HasHeader(resp, "connection"))
+    out += "Connection: close\r\n";
+  out += "\r\n";
   return out;
 }
 
@@ -1148,6 +1152,18 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     return ListModels(backend_.get(), video_jobs_.get(), tts_.get(),
                       asr_.get());
   }
+  if (req.path == "/v1/audio/speech/stream") {
+    if (!tts_ || !tts_->ready())
+      return Err(503, "Service Unavailable", "TTS is not configured",
+                 "server_error", "tts_service_unavailable");
+    return HandleTtsWebSocket(req, *tts_);
+  }
+  if (req.path == "/v1/realtime") {
+    if (!asr_ || !asr_->ready())
+      return Err(503, "Service Unavailable", "ASR is not configured",
+                 "server_error", "asr_service_unavailable");
+    return HandleAsrWebSocket(req, *asr_);
+  }
   if (IsVideoApiPath(req.path)) {
     if (video_jobs_ == nullptr || !video_jobs_->ready()) {
       return Err(503, "Service Unavailable",
@@ -1288,7 +1304,8 @@ void HttpServer::handle_connection(int client_fd) {
           }
         } else {
           ok = true;
-          body.clear();
+          if (ToLower(req.header("Upgrade")) != "websocket")
+            body.clear();
         }
         if (ok) {
           req.body = std::move(body);
@@ -1300,9 +1317,10 @@ void HttpServer::handle_connection(int client_fd) {
     }
 
     // Successful health/metrics polling and video status polling stay quiet.
-    const bool log_request = req.method == "POST" || req.method == "DELETE" ||
-                             req.path == "/v1/models" ||
-                             req.path.ends_with("/content");
+    const bool log_request =
+        req.method == "POST" || req.method == "DELETE" ||
+        req.path == "/v1/models" || req.path.ends_with("/content") ||
+        req.path == "/v1/realtime" || req.path == "/v1/audio/speech/stream";
     if (ok && log_request) {
       Logger::Info("http", "request=" + req.request_id +
                                " event=received method=" + req.method +
@@ -1326,7 +1344,14 @@ void HttpServer::handle_connection(int client_fd) {
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     response_status = resp.status;
     bool connected = true;
-    if (resp.streaming_body) {
+    if (resp.websocket) {
+      response_started = true;
+      connected = SendAll(client_fd, BuildResponseHead(resp, std::nullopt));
+      if (connected) {
+        WebSocket socket(client_fd, std::move(req.body));
+        resp.websocket(socket);
+      }
+    } else if (resp.streaming_body) {
       const auto head = BuildResponseHead(resp, std::nullopt);
       response_started = true;
       connected = SendAll(client_fd, head);

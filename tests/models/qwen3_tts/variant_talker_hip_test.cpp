@@ -188,8 +188,9 @@ void CheckGreedyCodes(qwen3_tts_hip::TalkerHipRuntime* runtime,
                       const qwen3_tts_hip::TalkerPromptOutput& prompt,
                       std::span<const std::int32_t> expected) {
   std::string error;
-  qwen3_tts_hip::TalkerSamplingOptions greedy;
+  qwen3_tts::SamplingOptions greedy;
   greedy.sample = false;
+  greedy.predictor_sample = false;
   qwen3_tts_hip::TalkerGenerationOutput cancelled;
   std::size_t cancellation_checks = 0;
   Check(!runtime->Generate(

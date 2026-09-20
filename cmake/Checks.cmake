@@ -3,7 +3,7 @@
 set(gufo_pr_targets
   arg_parser_test json_test gguf_reader_test gguf_identity_test
   logit_sampler_test ggml_dequant_test
-  openai_chat_test http_server_test text_generation_scheduler_test
+  openai_chat_test http_server_test audio_websocket_test text_generation_scheduler_test
   text_model_runner_test continuation_disk_store_test
   bench_cli_test prompt_cli_test eval_http_client_test
   qwen_tokenizer_test qwen_chat_template_test

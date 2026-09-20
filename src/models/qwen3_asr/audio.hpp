@@ -43,6 +43,21 @@ struct LogMelFeatures {
 /// convolutional frontend for a log-mel frame count.
 [[nodiscard]] std::size_t AudioEmbeddingTokenCount(std::size_t feature_frames);
 
+struct AudioChunk {
+  std::size_t offset;
+  std::size_t samples;
+};
+
+/// Maximum 16-kHz samples fitting the audio-token budget, capped at the
+/// upstream 20-minute inference window.
+[[nodiscard]] std::size_t AudioSamplesForTokenBudget(std::size_t tokens);
+
+/// Low-energy cuts following the upstream 100-ms absolute-amplitude window,
+/// with the boundary search constrained by the runtime's hard capacity.
+/// Chunks partition the original samples exactly, without gaps or overlap.
+[[nodiscard]] std::vector<AudioChunk> SplitAudio(
+    std::span<const float> waveform, std::size_t maximum_samples);
+
 }  // namespace gufo::models::qwen3_asr
 
 #endif  // GUFO_MODELS_QWEN3_ASR_AUDIO_HPP_

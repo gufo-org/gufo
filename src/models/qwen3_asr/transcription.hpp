@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace gufo::models::qwen3_asr {
@@ -16,6 +17,12 @@ struct TranscriptionRequest {
   std::string context;
   std::optional<std::string> language;
   std::size_t max_new_tokens{256};
+  /// Alternative to WAV for live sessions: normalized mono audio at 16 kHz.
+  /// Exactly one audio source must be supplied.
+  std::span<const float> pcm16k;
+  /// Cumulative UTF-8 transcript, called during generation. Returning false
+  /// cancels the operation; the view is valid only during the callback.
+  std::function<bool(std::string_view)> on_text;
 };
 
 struct TranscriptionTimings {
@@ -36,6 +43,7 @@ struct TranscriptionResult {
   std::size_t mel_frames{0};
   std::size_t audio_tokens{0};
   std::size_t prompt_tokens{0};
+  std::size_t chunks{0};
   TranscriptionTimings timings;
 };
 
