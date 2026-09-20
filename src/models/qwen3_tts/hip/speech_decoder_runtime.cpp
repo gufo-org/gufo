@@ -389,6 +389,36 @@ struct DecoderHistory {
     for (auto& [weight, history] : convolutions)
       history.rows = 0;
   }
+
+  void CopyFrom(const DecoderHistory& source, std::size_t attention_width,
+                hipStream_t stream) {
+    const auto copy = [stream](DeviceBuffer<float>& destination,
+                               const DeviceBuffer<float>& input,
+                               std::size_t count) {
+      if (destination.size() < input.size())
+        destination.Reset(input.size());
+      if (count != 0)
+        RequireHip(hipMemcpyAsync(destination.get(), input.get(),
+                                  count * sizeof(float),
+                                  hipMemcpyDeviceToDevice, stream),
+                   "copy decoder reference state");
+    };
+    ResetBlock();
+    for (const auto& [weights, previous] : source.convolutions) {
+      auto& next = convolutions[weights];
+      copy(next.input, previous.input, previous.rows * weights->input_channels);
+      next.rows = previous.rows;
+    }
+    attention.resize(source.attention.size());
+    for (std::size_t layer = 0; layer < attention.size(); ++layer) {
+      copy(attention[layer].key, source.attention[layer].key,
+           source.position * attention_width);
+      copy(attention[layer].value, source.attention[layer].value,
+           source.position * attention_width);
+    }
+    codes = source.codes;
+    position = source.position;
+  }
 };
 
 std::string TransformerName(std::size_t layer, std::string_view suffix) {
@@ -1009,6 +1039,7 @@ struct SpeechDecoderHipRuntime::Impl {
   F32Gemm gemm;
   Workspace workspace;
   DecoderHistory history;
+  std::unique_ptr<DecoderHistory> reference_history;
   DecoderHistory* active_history{nullptr};
 
   CodebookWeights semantic_codebook;
@@ -1184,6 +1215,65 @@ bool SpeechDecoderHipRuntime::Decode(std::span<const std::uint32_t> codes,
   }
 }
 
+bool SpeechDecoderHipRuntime::DecodeAfterReference(
+    std::span<const std::uint32_t> codes, std::size_t frames,
+    std::size_t reference_frames, SpeechDecoderOutput* output,
+    std::string* error) {
+  if (output == nullptr || reference_frames >= frames ||
+      frames > std::numeric_limits<std::size_t>::max() / kSamplesPerCode ||
+      codes.size() != frames * kCodeGroups) {
+    SetError(error, "invalid speech decoder reference shape");
+    return false;
+  }
+  *output = {};
+  const auto started = Clock::now();
+  // End at an existing incremental work boundary. A partial reference tail
+  // continues with generated codes in the same chunks as a cold request.
+  const std::size_t prefix_frames =
+      reference_frames - (reference_frames % kChunkFrames) % 16;
+  try {
+    if (prefix_frames != 0) {
+      const auto prefix = codes.first(prefix_frames * kCodeGroups);
+      auto& saved = impl_->reference_history;
+      const std::size_t width =
+          impl_->model.config.speech_tokenizer.num_attention_heads *
+          impl_->model.config.speech_tokenizer.head_dim;
+      if (saved == nullptr || saved->codes.size() != prefix.size() ||
+          !std::equal(prefix.begin(), prefix.end(), saved->codes.begin())) {
+        SpeechDecoderOutput discarded;
+        if (!DecodeIncremental(prefix, prefix_frames, 0, &discarded, error))
+          return false;
+        auto replacement = std::make_unique<DecoderHistory>();
+        replacement->CopyFrom(impl_->history, width, impl_->stream);
+        RequireHip(hipStreamSynchronize(impl_->stream),
+                   "capture decoder reference state");
+        saved = std::move(replacement);
+      } else {
+        impl_->history.CopyFrom(*saved, width, impl_->stream);
+      }
+    }
+    if (!DecodeIncremental(codes, frames, prefix_frames, output, error))
+      return false;
+    const std::size_t drop =
+        (reference_frames - prefix_frames) * kSamplesPerCode;
+    output->samples.erase(
+        output->samples.begin(),
+        output->samples.begin() + static_cast<std::ptrdiff_t>(drop));
+    output->code_frames = frames - reference_frames;
+    output->decode_milliseconds =
+        std::chrono::duration<double, std::milli>(Clock::now() - started)
+            .count();
+    return true;
+  } catch (const std::exception& exception) {
+    (void)hipStreamSynchronize(impl_->stream);
+    impl_->history.codes.clear();
+    impl_->history.ResetBlock();
+    *output = {};
+    SetError(error, exception.what());
+    return false;
+  }
+}
+
 }  // namespace gufo::models::qwen3_tts::hip
 
 #else
@@ -1218,6 +1308,14 @@ bool SpeechDecoderHipRuntime::DecodeIncremental(std::span<const std::uint32_t>,
                                                 std::size_t, std::size_t,
                                                 SpeechDecoderOutput*,
                                                 std::string* error) {
+  if (error != nullptr)
+    *error = "Qwen3-TTS speech decoder requires a HIP-enabled build";
+  return false;
+}
+
+bool SpeechDecoderHipRuntime::DecodeAfterReference(
+    std::span<const std::uint32_t>, std::size_t, std::size_t,
+    SpeechDecoderOutput*, std::string* error) {
   if (error != nullptr)
     *error = "Qwen3-TTS speech decoder requires a HIP-enabled build";
   return false;

@@ -88,6 +88,8 @@ function(gufo_qwen3_asr_register_tests)
       ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/text_decoder_hip_test.cpp)
     target_link_libraries(qwen3_asr_text_decoder_hip_test PRIVATE
       gufo_qwen3_asr hip::host)
+    target_compile_definitions(qwen3_asr_text_decoder_hip_test PRIVATE
+      ENGINE_ENABLE_HIP=1)
     add_test(NAME qwen3_asr_text_decoder_hip_test
       COMMAND qwen3_asr_text_decoder_hip_test)
     set_tests_properties(qwen3_asr_text_decoder_hip_test PROPERTIES

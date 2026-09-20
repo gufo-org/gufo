@@ -21,6 +21,12 @@
 | 128-thread short attention | Retained: about 3% faster kernel at 2–32 keys, with exact output; 64 threads were slower. |
 | Remove redundant KV clearing and FP32 attention scratch | Retained: visible rows are overwritten before use; exact cancellation/shorter-prompt replay, 32 MiB less scratch at context 4096. |
 | First streamed audio at four codec frames | Retained: exact buffered/streamed waveforms for all three variants; subsequent chunks remain 16 frames. |
+| Reusable Base waveform-reference state | Retained: exact convolution/KV snapshot, one bounded prefix per runtime; skips reference decoding on repeated voice-clone requests. |
+| Lossless BF16 exponent packing | Rejected: exact audio, but only about 2% faster CustomVoice requests for 2.15 GiB additional device memory. |
+| Row regrouping / LDS activation staging | Rejected: exact output but slower projection controls. |
+| Non-temporal weight loads | Rejected: microbenchmark gains became about a 2% complete-request regression. |
+| Generic talker hipBLASLt prefill | Rejected: failed the five-main-code oracle gate. |
+| Finish normalization within one wave | Retained: fewer barriers with the same sum tree; independent operator and exact waveform replay checks. |
 
 Next: broaden long-request replay coverage and qualify long reference clips
 before wider optimization. See [evaluation](EVALUATION.md); no lower-precision

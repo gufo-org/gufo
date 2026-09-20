@@ -1,59 +1,54 @@
 # Qwen3-ASR benchmarks
 
-Linux gfx1151, BF16, Nix release. RTF = request wall time / input audio duration
-(lower is better). Model loading is excluded from resident request timings.
+2026-09-20, Linux gfx1151, BF16, Nix production binary `8e4ba46f9dd0`
+(SHA-256 prefix). Resident model; one warmup and three timed requests.
+RTF = request time / input duration, lower is better.
 
 ## Single request
 
-Latest retained route audit (September 2026): 15.051229-second English fixture,
-49 greedy output tokens matching the official reference.
+15.05125-second English recording, 49 greedy output tokens matching the official
+reference. Timings include audio decoding, features, encoder and text generation;
+model loading is excluded.
 
 | Metric | Result |
 | --- | ---: |
-| Resident request mean | 992.14 ms |
-| RTF | 0.0659 |
-| Audio per wall second | 15.17 |
-| Load, warm filesystem | 389.198 ms |
+| Median request | 988.80 ms |
+| RTF | 0.0657 |
+| Audio seconds per wall second | 15.22 |
+| Audio encoder | 35.28 ms |
+| Text prefill and generation | 943.98 ms |
 
-Earlier separate stage/profile control: resample 6.27 ms, log-mel 7.18 ms,
-audio encoder 36.02 ms, text prefill/decode 942.44 ms. Decode projections account
-for 77.8% of GPU time, sustaining 91–99% of the measured 240.24 GB/s read ceiling.
-Do not sum stages from different runs into a new headline. A 2026-09-20
-rocprof control (startup, warmup and one request) still places 77.9% of kernel
-time in text-decode GEMV; audio sparse/window changes are not justified as the
-next throughput optimization by this profile.
+Stage medians are measured separately; do not sum them into another headline.
+The matched unchanged control is 986.68 ms: this pass preserves speed, without
+an established ASR throughput gain. Four complete-recording transcripts remain
+unchanged. See [evaluation](EVALUATION.md) for exactness and reference scope.
 
 ## Concurrent HTTP
 
-2026-09-10, Base audio fixture 10.24 s, greedy; synchronized requests. These
-numbers predate the latest loading cleanup and require a current refresh.
+| C | Current latency / throughput |
+| ---: | --- |
+| 1 | See the resident control above; HTTP adds transport overhead. |
+| 2 / 4 / 6 / 8 | TODO: refresh after chunk-level admission changes. |
 
-| C | Audio-s / wall-s | Latency p50 | Latency max |
-| ---: | ---: | ---: | ---: |
-| 1 | 15.71 | 0.65 s | 0.65 s |
-| 2 | 15.73 | 0.98 s | 1.30 s |
-| 4 | 15.73 | 1.63 s | 2.60 s |
-| 6 | TODO | TODO | TODO |
-| 8 | 15.74 | 2.93 s | 5.20 s |
+GPU work remains serialized between chunks. CPU frontend preparation can overlap
+for two requests, and long recordings yield device admission between chunks.
+File SSE and committed Realtime utterances preserve buffered transcript output.
 
-GPU work is serialized between chunks. The current route overlaps CPU frontend
-work for two requests and yields device admission between long-audio chunks;
-the table above predates that scheduling change.
-The matching audio.cpp `3174e6b` BF16 comparison averaged RTF 0.121 versus Gufo
-0.075 on six clips; all six transcripts matched. This is a historical comparison,
-not a general ASR accuracy score.
+## Profile and reproduction
 
-## Reproduce
+The isolated warm request has 13,346 dispatches, 963.05 ms of GPU work and a
+996.35 ms kernel span: **96.7% GPU-busy**. Text projections account for **77.6%**
+of GPU time, library audio/prefill projections 10.8%, text attention 6.1% and
+text normalization 2.8%. Projection bandwidth remains the main bottleneck.
+Profiling overhead is excluded from the timing table.
 
 ```sh
 nix build
 nix develop -c python3 src/models/qwen3_asr/tools/benchmark.py \
-  --model "$MODEL" --audio speech.wav
+  --model "$MODEL" --audio speech.wav --warmup 1 --repeat 3
 ```
 
-Use one resident runtime and one warmup; repeat only when timing variance needs
-investigation. Report the exact fixture/engine/model identities. A 2026-09-20
-production `0715cf0` file-SSE control completes the retained 15.05-second fixture
-in 994 ms with identical transcript text. A two-utterance Realtime check matches
-uploads of identical 24-kHz PCM. Current long-form corpus and C6 throughput:
-**TODO**. Raw output stays outside Git.
+The benchmark uses the CLI's decoded sample count and supports float WAV.
+Record fixture/model/binary identities. Profile separately with
+`tools/prof/prof.py --stages qwen-asr`; raw traces stay outside Git.
+Long-form corpus accuracy and current concurrent throughput remain **TODO**.

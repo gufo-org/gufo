@@ -7,7 +7,6 @@ import argparse
 import json
 import statistics
 import subprocess
-import wave
 from pathlib import Path
 
 
@@ -21,11 +20,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
-
-
-def audio_duration(path: Path) -> float:
-    with wave.open(str(path), "rb") as handle:
-        return handle.getnframes() / handle.getframerate()
 
 
 def median(runs: list[dict[str, float]], field: str) -> float:
@@ -63,7 +57,11 @@ def main() -> int:
     runs = native["runs"]
     if not runs:
         raise ValueError("native Qwen3-ASR benchmark returned no measured runs")
-    duration = audio_duration(args.audio)
+    # Use the actual decoded/resampled input. Python's wave reader rejects
+    # float WAV, which the native CLI supports.
+    duration = native["audio_samples"] / native["sample_rate"]
+    if duration <= 0:
+        raise ValueError("native Qwen3-ASR benchmark returned empty audio")
     total_ms = median(runs, "total_ms")
     report = {
         "schema": "gufo.qwen3-asr.benchmark.v1",

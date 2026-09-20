@@ -40,6 +40,9 @@ curl -sS http://127.0.0.1:8080/v1/audio/speech \
 `reference_audio` and `reference_text`; see [the audio API](../../SERVER.md#other-model-services)
 for formats, limits and language/sampling controls. Both audio services can
 share a process by adding `--asr-model`.
+Repeated Base requests reuse the same reference's encoder features and exact
+waveform-decoder state. One reference prefix is retained per runtime; changing
+voices replaces it. This preserves generated audio and reduces warm latency.
 
 ## Sampling and streaming
 

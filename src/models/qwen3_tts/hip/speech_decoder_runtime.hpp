@@ -59,6 +59,16 @@ public:
                                        SpeechDecoderOutput* output,
                                        std::string* error = nullptr);
 
+  /// Start a voice-clone request and emit only audio after reference_frames.
+  /// Retains one exact, model-owned reference-prefix state for subsequent
+  /// requests. Later streaming calls use DecodeIncremental with the full
+  /// reference-plus-generated frame count.
+  [[nodiscard]] bool DecodeAfterReference(std::span<const std::uint32_t> codes,
+                                          std::size_t frames,
+                                          std::size_t reference_frames,
+                                          SpeechDecoderOutput* output,
+                                          std::string* error = nullptr);
+
 private:
   struct Impl;
   explicit SpeechDecoderHipRuntime(std::unique_ptr<Impl> impl);

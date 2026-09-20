@@ -36,6 +36,25 @@ from dataclasses import dataclass, field
 
 # Kernel-name substring -> pipeline stage. First match wins, so order matters.
 STAGE_MAPS: dict[str, list[tuple[str, str]]] = {
+    "qwen-asr": [
+        ("TextDecodeGemv", "text: projections"),
+        ("TextRowGemv", "text: projections"),
+        ("TextDecodeAttention", "text: attention"),
+        ("TextBatchedAttention", "text: attention"),
+        ("TextArgmax", "text: greedy selection"),
+        ("TextQkNorm", "text: norm/rope"),
+        ("ResidualAddRMSNorm", "text: norm"),
+        ("TextRMSNorm", "text: norm"),
+        ("Cijk", "blas: audio/prefill"),
+        ("Attention", "audio: attention"),
+        ("Conv", "audio: convolution"),
+        ("LayerNorm", "audio: norm"),
+        ("SwiGLU", "text: swiglu"),
+        ("Embedding", "text: embed"),
+        ("Bfloat16", "convert/support"),
+        ("fillBuffer", "runtime: fill"),
+        ("copyBuffer", "runtime: copy"),
+    ],
     "qwen-tts": [
         ("Bfloat16Gemv", "talker/predictor: projections"),
         ("Bfloat16Attention", "talker/predictor: attention"),

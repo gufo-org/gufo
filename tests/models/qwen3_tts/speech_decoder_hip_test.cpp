@@ -181,8 +181,12 @@ int main(int argc, char** argv) {
                : "/home/fbozzo/projects/Qwen3-TTS-12Hz-1.7B-CustomVoice";
   const std::filesystem::path artifacts =
       argc > 2 ? argv[2]
-               : "/home/fbozzo/projects/gufo/artifacts/qwen3_tts/"
-                 "speech_decoder_f32_rocm";
+               : std::filesystem::path(__FILE__)
+                         .parent_path()
+                         .parent_path()
+                         .parent_path()
+                         .parent_path() /
+                     "artifacts/qwen3_tts/speech_decoder_f32_rocm";
   if (!std::filesystem::is_regular_file(model_root / "model.safetensors") ||
       !std::filesystem::is_regular_file(artifacts / "waveform.npy")) {
     std::cerr << "SKIP qwen3_tts_speech_decoder_hip_test: external model or "
@@ -321,6 +325,37 @@ int main(int argc, char** argv) {
   Check(incremental_comparison.mean_absolute_error < 1.0e-5 &&
             incremental_comparison.maximum_absolute_error < 1.0e-4,
         "incremental state retains offline waveform quality");
+  for (const std::size_t reference : {31U, 300U, 303U}) {
+    qwen3_tts_hip::SpeechDecoderOutput cold, cached;
+    Check(runtime->DecodeAfterReference(long_codes, 320, reference, &cold,
+                                        &error),
+          "capture reference state: " + error);
+    Check(runtime->DecodeAfterReference(long_codes, 320, reference, &cached,
+                                        &error),
+          "restore reference state: " + error);
+    Check(cold.samples == cached.samples && cold.code_frames == 320 - reference,
+          "cached reference emits exact suffix audio");
+    Check(std::equal(cold.samples.begin(), cold.samples.end(),
+                     incremental.begin() + reference * 1920),
+          "reference reuse matches independently decoded full history");
+  }
+  // A new voice must replace the saved state, and an intervening unrelated
+  // request must not modify its immutable reference frontier.
+  auto other_codes = long_codes;
+  other_codes[0] = (other_codes[0] + 1) % 2048;
+  qwen3_tts_hip::SpeechDecoderOutput other_full, other_suffix, restored;
+  Check(runtime->DecodeIncremental(other_codes, 320, 0, &other_full, &error) &&
+            runtime->DecodeAfterReference(other_codes, 320, 31, &other_suffix,
+                                          &error) &&
+            runtime->DecodeIncremental(std::span(long_codes).first(8 * 16), 8,
+                                       0, &restored, &error) &&
+            runtime->DecodeAfterReference(other_codes, 320, 31, &restored,
+                                          &error),
+        "replace and independently reuse reference state: " + error);
+  Check(other_suffix.samples == restored.samples &&
+            std::equal(restored.samples.begin(), restored.samples.end(),
+                       other_full.samples.begin() + 31 * 1920),
+        "reference identity and unrelated request isolation");
   qwen3_tts_hip::SpeechDecoderOutput reset_output;
   Check(runtime->DecodeIncremental(std::span(long_codes).first(8 * 16), 8, 0,
                                    &reset_output, &error),

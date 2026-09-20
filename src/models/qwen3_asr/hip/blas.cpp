@@ -7,10 +7,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <hipblaslt/hipblaslt-ext.hpp>
+#include <limits>
 #include <map>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -50,9 +51,8 @@ constexpr std::size_t kWorkspaceBytes = 0;
 ///
 /// This is an index into a library-generated list, so it is only valid for the
 /// ROCm and hipBLASLt versions it was measured against. Re-sweep it after a
-/// toolchain bump with tools/bench/asr_prefill_gemm_bench.hip and the
-/// GUFO_QWEN3_ASR_GEMM_RANK override below; the guard falls back to the last
-/// usable entry if the list is shorter than expected.
+/// toolchain bump with tools/bench/asr_prefill_gemm_bench.hip. The guard falls
+/// back to the last usable entry if the list is shorter than expected.
 constexpr std::size_t kMeasuredHeuristicRank = 6;
 
 [[nodiscard]] bool IsUsable(const hipblasLtMatmulHeuristicResult_t& result,
@@ -97,17 +97,24 @@ void LaunchGemmBf16(hipblasHandle_t handle, const void* a_bf16,
                     std::size_t m, std::size_t k, hipStream_t stream) {
   if (handle == nullptr || a_bf16 == nullptr || x_bf16 == nullptr ||
       y == nullptr || batch_size == 0U || m == 0U || k == 0U) {
-    return;
+    throw std::invalid_argument("invalid Qwen3-ASR GEMM inputs");
   }
-  if (stream != nullptr) {
-    (void)hipblasSetStream(handle, stream);
-  }
-  (void)hipblasGemmEx(handle, HIPBLAS_OP_T, HIPBLAS_OP_N, static_cast<int>(m),
-                      static_cast<int>(batch_size), static_cast<int>(k),
-                      &kAlpha, a_bf16, HIP_R_16BF, static_cast<int>(k), x_bf16,
-                      HIP_R_16BF, static_cast<int>(k), &kBeta, y, HIP_R_32F,
-                      static_cast<int>(m), HIPBLAS_COMPUTE_32F,
-                      HIPBLAS_GEMM_DEFAULT);
+  if (batch_size > std::numeric_limits<int>::max() ||
+      m > std::numeric_limits<int>::max() ||
+      k > std::numeric_limits<int>::max())
+    throw std::length_error("Qwen3-ASR GEMM dimensions exceed library limits");
+  if (stream != nullptr &&
+      hipblasSetStream(handle, stream) != HIPBLAS_STATUS_SUCCESS)
+    throw std::runtime_error("Qwen3-ASR hipBLAS stream setup failed");
+  const auto status = hipblasGemmEx(
+      handle, HIPBLAS_OP_T, HIPBLAS_OP_N, static_cast<int>(m),
+      static_cast<int>(batch_size), static_cast<int>(k), &kAlpha, a_bf16,
+      HIP_R_16BF, static_cast<int>(k), x_bf16, HIP_R_16BF, static_cast<int>(k),
+      &kBeta, y, HIP_R_32F, static_cast<int>(m), HIPBLAS_COMPUTE_32F,
+      HIPBLAS_GEMM_DEFAULT);
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    throw std::runtime_error("Qwen3-ASR hipBLAS GEMM failed: " +
+                             std::to_string(status));
 }
 
 struct GemmLt::Impl {
@@ -196,21 +203,6 @@ struct GemmLt::Impl {
 
     const auto count = static_cast<std::size_t>(found);
     std::size_t rank = std::min(kMeasuredHeuristicRank, count - 1U);
-    if (const char* override_rank = std::getenv("GUFO_QWEN3_ASR_GEMM_RANK");
-        override_rank != nullptr) {
-      rank = static_cast<std::size_t>(std::atoi(override_rank));
-    }
-    if (std::getenv("GUFO_QWEN3_ASR_GEMM_TRACE") != nullptr) {
-      std::fprintf(stderr, "asr-gemm batch=%zu m=%zu k=%zu found=%zu rank=%zu",
-                   batch_size, m, k, count, rank);
-      for (std::size_t index = 0; index < count; ++index) {
-        std::fprintf(stderr, " [%zu]=%d/ws%zu%s", index,
-                     hipblaslt_ext::getIndexFromAlgo(results[index].algo),
-                     results[index].workspaceSize,
-                     IsUsable(results[index], capacity) ? "" : "(x)");
-      }
-      std::fprintf(stderr, "\n");
-    }
     if (rank < count && IsUsable(results[rank], capacity)) {
       Install(raw, results[rank]);
       return raw;
@@ -252,11 +244,14 @@ bool GemmLt::Run(const void* a_bf16, const void* x_bf16, float* y,
   if (plan == nullptr || !plan->usable) {
     return false;
   }
-  return hipblasLtMatmul(impl_->handle, plan->operation, &kAlpha, a_bf16,
-                         plan->a_layout, x_bf16, plan->x_layout, &kBeta, y,
-                         plan->y_layout, y, plan->y_layout, &plan->algorithm,
-                         impl_->workspace, plan->workspace_bytes,
-                         stream) == HIPBLAS_STATUS_SUCCESS;
+  const auto status = hipblasLtMatmul(
+      impl_->handle, plan->operation, &kAlpha, a_bf16, plan->a_layout, x_bf16,
+      plan->x_layout, &kBeta, y, plan->y_layout, y, plan->y_layout,
+      &plan->algorithm, impl_->workspace, plan->workspace_bytes, stream);
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    throw std::runtime_error("Qwen3-ASR hipBLASLt GEMM failed: " +
+                             std::to_string(status));
+  return true;
 }
 
 }  // namespace gufo::models::qwen3_asr::hip

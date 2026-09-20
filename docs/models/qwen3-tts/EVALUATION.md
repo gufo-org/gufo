@@ -41,16 +41,25 @@ warmup and three timed buffered requests:
 
 | Variant | Median buffered request | First streamed PCM | Buffered/streamed PCM |
 | --- | ---: | ---: | --- |
-| CustomVoice | 2.024 s | 0.201 s | byte-identical |
-| VoiceDesign | 2.027 s | 0.202 s | byte-identical |
-| Base ICL | 2.694 s | 0.878 s | byte-identical |
+| CustomVoice | 2.018 s | 0.201 s | byte-identical |
+| VoiceDesign | 2.024 s | 0.201 s | byte-identical |
+| Base ICL | 2.234 s | 0.345 s | byte-identical |
 
-The matched CustomVoice pre-correction control measured 2.037 s buffered and
-0.328 s to first PCM. Complete generation shows no observed speed regression;
-the approximately 0.7% difference is small. First audio arrives about 39%
-earlier. All three optimized waveforms also match the corrected, pre-optimization
-build exactly. Base includes reference-code prefill. See
+The latest matched Base control is 2.693 s buffered and 0.882 s to first PCM:
+the retained reference-state cache reduces warm request time by **17.0%** and
+first-audio latency by **60.9%**. All three optimized waveforms match the previous
+corrected build exactly. CustomVoice and VoiceDesign remain at approximately
+their previous speeds; small differences do not establish a throughput gain.
+Base includes reference-code talker prefill. See
 [benchmark settings](BENCHMARKS.md) for scope and identities.
+
+The Base decoder cache retains one immutable reference frontier, with exact
+convolution history and attention KV. Checks cover replacement by another voice,
+unrelated intervening requests, and reference endpoints before/at/after the
+300-frame reset. Cached and cold suffix waveforms are byte-identical. Existing
+seeded synthesis, stream cancellation and shorter-request replay checks remain
+in the same model test targets. The complete 166-frame Base natural-EOS waveform
+also matches the pre-cache production build exactly, buffered and streamed.
 
 ### Gate metrics
 

@@ -28,7 +28,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
-        "--attention", default="eager", choices=("eager", "sdpa")
+        "--text-attention", default="eager", choices=("eager", "sdpa")
+    )
+    parser.add_argument(
+        "--audio-attention", default="sdpa", choices=("eager", "sdpa")
     )
     return parser.parse_args()
 
@@ -66,6 +69,7 @@ def source_revision(root: Path) -> str:
 
 def main() -> int:
     args = parse_args()
+    device = torch.device(args.device)
     if args.max_new_tokens <= 0:
         raise ValueError("--max-new-tokens must be positive")
 
@@ -84,18 +88,36 @@ def main() -> int:
     np.save(args.out / "waveform.npy", waveform.astype("<f4", copy=False))
 
     torch.manual_seed(0)
-    torch.cuda.reset_peak_memory_stats()
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+        torch.cuda.reset_peak_memory_stats(device)
     load_start = time.perf_counter()
     wrapper = Qwen3ASRModel.from_pretrained(
         str(args.model),
         dtype=torch.bfloat16,
         device_map=args.device,
-        attn_implementation=args.attention,
+        attn_implementation="sdpa",
         max_inference_batch_size=1,
         max_new_tokens=args.max_new_tokens,
     )
     wrapper.model.eval()
-    torch.cuda.synchronize()
+    attention_backends = {}
+    found_audio = found_text = False
+    for module in wrapper.model.modules():
+        kind = type(module).__name__
+        if kind == "Qwen3ASRAudioAttention":
+            found_audio = True
+            module.config._attn_implementation = args.audio_attention
+        elif kind in ("Qwen3ASRTextAttention", "Qwen3ASRThinkerTextAttention"):
+            found_text = True
+            module.config._attn_implementation = args.text_attention
+        else:
+            continue
+        attention_backends[kind] = module.config._attn_implementation
+    if not found_audio or not found_text:
+        raise RuntimeError("official ASR audio/text attention modules are missing")
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
     load_seconds = time.perf_counter() - load_start
 
     prompt = wrapper._build_text_prompt(
@@ -174,7 +196,8 @@ def main() -> int:
         generated = wrapper.model.generate(
             **inputs, max_new_tokens=args.max_new_tokens
         )
-        torch.cuda.synchronize()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
     finally:
         for hook in hooks:
             hook.remove()
@@ -238,9 +261,11 @@ def main() -> int:
         "torch": torch.__version__,
         "hip": torch.version.hip,
         "transformers": __import__("transformers").__version__,
-        "device": torch.cuda.get_device_name(0),
+        "device": (
+            torch.cuda.get_device_name(device) if device.type == "cuda" else str(device)
+        ),
         "dtype": "bfloat16",
-        "attention": args.attention,
+        "attention_backends": attention_backends,
         "audio_file": args.audio.name,
         "audio_sample_rate": 16000,
         "audio_samples": int(waveform.size),
@@ -249,7 +274,9 @@ def main() -> int:
         "prompt": prompt,
         "load_seconds": load_seconds,
         "generate_seconds": generate_seconds,
-        "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+        "peak_allocated_bytes": (
+            torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
+        ),
         "language": language,
         "raw_text": raw_text,
         "text": text,

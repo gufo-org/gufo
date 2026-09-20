@@ -195,6 +195,13 @@ def main():
         attn_implementation="eager",
     )
     model.model.eval()
+    attention_backends = {
+        type(module).__name__: module.config._attn_implementation
+        for module in model.model.modules()
+        if "Attention" in type(module).__name__ and hasattr(module, "config")
+    }
+    if not attention_backends or set(attention_backends.values()) != {"eager"}:
+        raise RuntimeError(f"unexpected TTS attention backends: {attention_backends}")
     predictor = model.model.talker.code_predictor
     orig_predictor_generate = predictor.generate
 
@@ -303,6 +310,7 @@ def main():
             "device": args.device,
             "dtype": "bfloat16",
             "attention_implementation": "eager",
+            "attention_backends": attention_backends,
             "text": TEXT,
             "speaker": args.speaker,
             "language": args.language,

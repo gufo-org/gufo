@@ -119,16 +119,17 @@ private:
       codes.resize(reference_frames * 16);
       codes.insert(codes.end(), generated.codes.begin(), generated.codes.end());
       SpeechDecoderOutput audio;
-      if (!decoder_->DecodeIncremental(codes,
-                                       reference_frames + generated.frames,
-                                       decoded_frames, &audio, &stream_error))
+      const bool first_reference = decoded_frames == 0 && reference_frames != 0;
+      if (!(first_reference ? decoder_->DecodeAfterReference(
+                                  codes, reference_frames + generated.frames,
+                                  reference_frames, &audio, &stream_error)
+                            : decoder_->DecodeIncremental(
+                                  codes, reference_frames + generated.frames,
+                                  decoded_frames, &audio, &stream_error)))
         return false;
-      const std::size_t drop = decoded_frames < reference_frames
-                                   ? (reference_frames - decoded_frames) * 1920
-                                   : 0;
       decoded_frames = reference_frames + generated.frames;
       emitted_frames = generated.frames;
-      const auto samples = std::span<const float>(audio.samples).subspan(drop);
+      const auto samples = std::span<const float>(audio.samples);
       if (!request.on_audio(samples)) {
         stream_error = "Qwen3-TTS audio stream cancelled";
         return false;
@@ -391,30 +392,24 @@ private:
     }
 
     SpeechDecoderOutput audio;
-    if (!decoder_->Decode(codes_to_decode, decoder_frames, &audio, nullptr,
-                          error)) {
+    if (!(prompt.prepend_reference_audio
+              ? decoder_->DecodeAfterReference(codes_to_decode, decoder_frames,
+                                               prompt.reference_codes.frames,
+                                               &audio, error)
+              : decoder_->Decode(codes_to_decode, decoder_frames, &audio,
+                                 nullptr, error))) {
       return false;
     }
-    PopulateResult(prompt, generated, decoder_frames, std::move(audio), result);
+    PopulateResult(generated, std::move(audio), result);
     return true;
   }
 
-  static void PopulateResult(const NativePrompt& prompt,
-                             const TalkerGenerationOutput& generated,
-                             std::size_t decoder_frames,
+  static void PopulateResult(const TalkerGenerationOutput& generated,
                              SpeechDecoderOutput audio,
                              SynthesisResult* result) {
     result->sample_rate = audio.sample_rate;
     result->code_groups = static_cast<std::uint32_t>(generated.code_groups);
-    if (prompt.prepend_reference_audio) {
-      const std::size_t reference_samples =
-          prompt.reference_codes.frames * audio.samples.size() / decoder_frames;
-      result->samples.assign(audio.samples.begin() +
-                                 static_cast<std::ptrdiff_t>(reference_samples),
-                             audio.samples.end());
-    } else {
-      result->samples = std::move(audio.samples);
-    }
+    result->samples = std::move(audio.samples);
     result->sample_count = result->samples.size();
     result->codes.reserve(generated.codes.size());
     for (const std::uint32_t code : generated.codes) {

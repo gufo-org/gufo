@@ -1,4 +1,7 @@
+#include <hip/hip_runtime.h>
+
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -15,6 +18,7 @@
 #include <vector>
 
 #include "src/models/qwen3_asr/hip/text_decoder_runtime.hpp"
+#include "src/models/qwen3_asr/hip/text_ops.hpp"
 #include "src/models/qwen3_asr/prompt.hpp"
 #include "src/models/qwen3_asr/tokenizer.hpp"
 
@@ -32,6 +36,145 @@ void Check(bool condition, std::string_view message) {
   if (!condition) {
     Fail(message);
   }
+}
+
+template<typename T>
+class DeviceArray {
+public:
+  explicit DeviceArray(std::span<const T> values) : size_(values.size()) {
+    Check(hipMalloc(reinterpret_cast<void**>(&data),
+                    std::max(values.size_bytes(), sizeof(T))) == hipSuccess,
+          "allocate operator input");
+    if (!values.empty())
+      Check(hipMemcpy(data, values.data(), values.size_bytes(),
+                      hipMemcpyHostToDevice) == hipSuccess,
+            "upload operator input");
+  }
+  ~DeviceArray() { (void)hipFree(data); }
+  DeviceArray(const DeviceArray&) = delete;
+  DeviceArray& operator=(const DeviceArray&) = delete;
+  std::vector<T> Read() const {
+    std::vector<T> result(size_);
+    Check(hipMemcpy(result.data(), data, size_ * sizeof(T),
+                    hipMemcpyDeviceToHost) == hipSuccess,
+          "read operator result");
+    return result;
+  }
+  T* data{};
+
+private:
+  std::size_t size_;
+};
+
+float Bf16(float value) {
+  auto bits = std::bit_cast<std::uint32_t>(value);
+  bits += 0x7fffU + ((bits >> 16U) & 1U);
+  return std::bit_cast<float>(bits & 0xffff0000U);
+}
+
+void CheckArgmax() {
+  DeviceArray<float> scratch{
+      std::vector<float>(qwen3_asr_hip::TextArgmaxScratchElements())};
+  DeviceArray<std::uint32_t> output{std::vector<std::uint32_t>(1)};
+  const auto check = [&](const std::vector<float>& logits,
+                         std::uint32_t expected) {
+    DeviceArray<float> input(logits);
+    for (float* temporary : {static_cast<float*>(nullptr), scratch.data}) {
+      qwen3_asr_hip::LaunchTextArgmax(input.data, output.data, logits.size(),
+                                      temporary, nullptr);
+      Check(output.Read().front() == expected, "strict finite greedy argmax");
+    }
+  };
+  check({}, UINT32_MAX);
+  check({1.0F, 1.125F, 1.0625F}, 1);
+  check({-3e35F, -2e35F, -1e35F}, 2);
+  check({2, 2, 1}, 0);
+  std::vector<float> large(151936, -2);
+  large[4095] = large[65536] = 1;
+  check(large, 4095);
+  large.back() = 1.125F;
+  check(large, 151935);
+  for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                              std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity()}) {
+    check({invalid}, UINT32_MAX);
+    large[12000] = invalid;
+    check(large, UINT32_MAX);
+  }
+  std::cout << "PASS strict argmax, ties and nonfinite rejection\n";
+}
+
+// Independent eager-attention formula from the pinned official implementation:
+// BF16 QK, BF16 scaling, FP32 softmax, BF16 probabilities and BF16 output.
+void CheckAttention() {
+  constexpr std::size_t tokens = 65, heads = 2, width = 128;
+  std::vector<float> queries(tokens * heads * width);
+  std::vector<float> keys(tokens * width), values(tokens * width);
+  for (std::size_t p = 0; p < tokens; ++p) {
+    for (std::size_t d = 0; d < width; ++d) {
+      keys[p * width + d] =
+          static_cast<float>(static_cast<int>((p + d) % 17) - 8) / 16;
+      values[p * width + d] =
+          static_cast<float>(static_cast<int>((p * 3 + d) % 23) - 11) / 16;
+      for (std::size_t h = 0; h < heads; ++h)
+        queries[(p * heads + h) * width + d] =
+            static_cast<float>(static_cast<int>((d + h) % 11) - 5) / 8;
+    }
+  }
+  DeviceArray<float> q(queries), k(keys), v(values);
+  DeviceArray<float> result{std::vector<float>(queries.size())};
+  DeviceArray<std::uint16_t> result_bf16{
+      std::vector<std::uint16_t>(queries.size())};
+  qwen3_asr_hip::LaunchTextBatchedAttention(q.data, k.data, v.data, result.data,
+                                            result_bf16.data, 0, 0, tokens,
+                                            tokens, heads, 1, width, nullptr);
+  const auto actual = result_bf16.Read();
+  for (std::size_t p = 0; p < tokens; ++p) {
+    for (std::size_t h = 0; h < heads; ++h) {
+      std::vector<float> probabilities(p + 1);
+      for (std::size_t j = 0; j <= p; ++j) {
+        double dot = 0;
+        for (std::size_t d = 0; d < width; ++d)
+          dot += queries[(p * heads + h) * width + d] * keys[j * width + d];
+        probabilities[j] =
+            Bf16(Bf16(static_cast<float>(dot)) / std::sqrt(128.0F));
+      }
+      const float maximum =
+          *std::max_element(probabilities.begin(), probabilities.end());
+      double total = 0;
+      for (float& probability : probabilities) {
+        probability = std::exp(probability - maximum);
+        total += probability;
+      }
+      for (float& probability : probabilities)
+        probability = Bf16(probability / static_cast<float>(total));
+      for (std::size_t d = 0; d < width; ++d) {
+        double dot = 0;
+        for (std::size_t j = 0; j <= p; ++j)
+          dot += probabilities[j] * values[j * width + d];
+        Check(
+            actual[(p * heads + h) * width + d] ==
+                (std::bit_cast<std::uint32_t>(Bf16(static_cast<float>(dot))) >>
+                 16U),
+            "official eager BF16 attention boundaries");
+      }
+    }
+  }
+  DeviceArray<std::uint16_t> last{std::vector<std::uint16_t>(heads * width)};
+  for (const std::size_t position : {0, 1, 31, 63, 64}) {
+    const auto* query = q.data + position * heads * width;
+    if (!qwen3_asr_hip::LaunchTextDecodeAttention(
+            query, k.data, v.data, result.data, last.data, 0, position, tokens,
+            heads, 1, width, nullptr))
+      qwen3_asr_hip::LaunchTextBatchedAttention(
+          query, k.data, v.data, result.data, last.data, 0, position, 1, tokens,
+          heads, 1, width, nullptr);
+    const auto cached = last.Read();
+    Check(std::equal(cached.begin(), cached.end(),
+                     actual.begin() + position * heads * width),
+          "cached attention matches causal prefill");
+  }
+  std::cout << "PASS independent eager attention and cached boundaries\n";
 }
 
 std::uint16_t ReadU16(std::istream& input) {
@@ -157,6 +300,8 @@ double Seconds(std::chrono::steady_clock::time_point start,
 }  // namespace
 
 int main() {
+  CheckArgmax();
+  CheckAttention();
   const char* configured_model = std::getenv("QWEN3_ASR_MODEL_ROOT");
   const std::filesystem::path model_root =
       configured_model != nullptr ? configured_model

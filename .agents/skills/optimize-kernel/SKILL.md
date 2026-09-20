@@ -107,6 +107,15 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   After catch-up writes all attention KV rows, only final request rows need
   the remaining predictor projections/FFN; reuse idle scratch and retain
   scalar-tail arithmetic.
+  Repeated voice cloning can reuse an exact waveform-reference frontier:
+  preserve convolution history and attention KV, key it by actual codec IDs,
+  and qualify replacement/cancellation plus the decoder's context reset.
+  This saved more complete-request time than faster individual TTS GEMVs.
+  Finish a norm's existing descending sum tree within one wave to remove
+  barriers without reordering additions. Check the BF16 output boundaries.
+  Lossless weight packing can still be a poor trade: 2% TTS speed for over
+  2 GiB extra copies was rejected. Non-temporal loads won cold microbenchmarks
+  but lost complete TTS requests; always reproduce model cache traffic.
 - **Graphs:** verify replay actually launches every new operation. Side-stream
   work during capture is not automatically included in the graph. Check the
   relevant shallow/deep dispatch boundaries and unprofiled wall time.

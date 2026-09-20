@@ -25,7 +25,6 @@
 #include <vector>
 
 #include "src/models/qwen3_asr/hip/blas.hpp"
-#include "src/models/qwen3_asr/hip/gemm_route.hpp"
 #include "src/models/qwen3_asr/hip/text_ops.hpp"
 #include "src/models/qwen3_asr/loader.hpp"
 
@@ -108,54 +107,6 @@ private:
   std::size_t count_{0U};
 };
 
-enum class WeightMode : std::uint8_t {
-  kAuto,
-  kMapped,
-  kCopy,
-};
-
-/// Batch-one decode projection route. `GUFO_QWEN3_ASR_TEXT_GEMV` selects it:
-/// `hipblas` (or `0`) for the library GEMM, `unfused` for one shared-kernel
-/// GEMV dispatch per tensor, otherwise the fused model-private dispatch. All
-/// three produce the same tokens; the knob exists so the routes can be
-/// alternated in one process, which is the only way to compare them without the
-/// APU's thermal drift between runs.
-enum class DecodeGemmRoute : std::uint8_t {
-  kHipblas,
-  kUnfusedGemv,
-  kFusedGemv,
-};
-
-DecodeGemmRoute GetDecodeGemmRoute() {
-  const char* value = std::getenv("GUFO_QWEN3_ASR_TEXT_GEMV");
-  if (value == nullptr) {
-    return DecodeGemmRoute::kFusedGemv;
-  }
-  const std::string_view mode(value);
-  if (mode == "0" || mode == "hipblas") {
-    return DecodeGemmRoute::kHipblas;
-  }
-  if (mode == "unfused") {
-    return DecodeGemmRoute::kUnfusedGemv;
-  }
-  return DecodeGemmRoute::kFusedGemv;
-}
-
-WeightMode GetWeightMode() {
-  const char* value = std::getenv("GUFO_QWEN3_ASR_WEIGHT_MODE");
-  if (value == nullptr) {
-    return WeightMode::kAuto;
-  }
-  const std::string_view mode(value);
-  if (mode == "mapped") {
-    return WeightMode::kMapped;
-  }
-  if (mode == "copy") {
-    return WeightMode::kCopy;
-  }
-  return WeightMode::kAuto;
-}
-
 class DeviceRegion {
 public:
   DeviceRegion() = default;
@@ -175,14 +126,7 @@ public:
     host_ = region.data;
     size_ = region.size;
     payload_offset_ = region.payload_offset;
-    const WeightMode mode = GetWeightMode();
-    if (mode == WeightMode::kMapped) {
-      return TryMap();
-    }
-    if (TryCopy(stream)) {
-      return true;
-    }
-    return mode == WeightMode::kAuto && TryMap();
+    return TryCopy(stream) || TryMap();
   }
 
   [[nodiscard]] const void* Resolve(const std::byte* pointer) const noexcept {
@@ -351,36 +295,7 @@ struct TextDecoderHipRuntime::Impl {
                    "hipblasSetStream Qwen3-ASR text");
     RequireHipblas(hipblasSetAtomicsMode(blas, HIPBLAS_ATOMICS_NOT_ALLOWED),
                    "hipblasSetAtomicsMode Qwen3-ASR text");
-    const char* attention_mode = std::getenv("GUFO_QWEN3_ASR_TEXT_ATTENTION");
-    hipblas_attention = attention_mode != nullptr &&
-                        std::string_view(attention_mode) == "hipblas";
-    // `batched` keeps the shared batched kernel for decode so it can be
-    // alternated against the model-private one in a single process.
-    batched_attention = attention_mode != nullptr &&
-                        std::string_view(attention_mode) == "batched";
-    decode_route = GetDecodeGemmRoute();
-    gemv_decode = decode_route != DecodeGemmRoute::kHipblas;
-    if (UsePrefillHipblasLt()) {
-      prefill_lt = std::make_unique<GemmLt>();
-    }
-    if (hipblas_attention) {
-      const TextConfig& config = model.config.text;
-      q_bfloat16.Reset(token_capacity * config.num_attention_heads *
-                       config.head_dim);
-      key_cache_bfloat16.Reset(
-          static_cast<std::size_t>(config.num_hidden_layers) *
-          config.num_key_value_heads * token_capacity * config.head_dim);
-      value_cache_bfloat16.Reset(
-          static_cast<std::size_t>(config.num_hidden_layers) *
-          config.num_key_value_heads * token_capacity * config.head_dim);
-      attention_scores.Reset(
-          static_cast<std::size_t>(config.num_attention_heads) *
-          token_capacity * token_capacity);
-      attention_probabilities.Reset(
-          static_cast<std::size_t>(config.num_attention_heads) *
-          token_capacity * token_capacity);
-      attention_packed.Reset(token_capacity * config.hidden_size);
-    }
+    prefill_lt = std::make_unique<GemmLt>();
     weight_regions.reserve(model.mapped_regions.size());
     for (const MappedRegion region : model.mapped_regions) {
       auto device_region = std::make_unique<DeviceRegion>();
@@ -489,8 +404,7 @@ struct TextDecoderHipRuntime::Impl {
   void GemmFused(const GemmProjection* projections, std::uint32_t count,
                  const void* inputs_bfloat16, std::size_t batch,
                  std::size_t columns) {
-    if (batch == 1U && decode_route == DecodeGemmRoute::kFusedGemv &&
-        count <= kTextDecodeGemvMaxTensors) {
+    if (batch == 1U && count <= kTextDecodeGemvMaxTensors) {
       std::array<TextDecodeGemvTensor, kTextDecodeGemvMaxTensors> tensors{};
       bool representable = true;
       for (std::uint32_t index = 0U; index < count; ++index) {
@@ -511,7 +425,7 @@ struct TextDecoderHipRuntime::Impl {
       }
     }
     for (std::uint32_t index = 0U; index < count; ++index) {
-      if (batch == 1U && gemv_decode) {
+      if (batch == 1U) {
         // Retained fallback for a geometry the fused kernel rejects.
         LaunchTextBfloat16ToFloat(inputs_bfloat16, gemv_input.get(), columns,
                                   stream);
@@ -530,76 +444,6 @@ struct TextDecoderHipRuntime::Impl {
                      projections[index].output, batch, projections[index].rows,
                      columns, stream);
     }
-  }
-
-  void HipblasAttention(std::size_t layer, std::size_t tokens,
-                        std::uint32_t start_position) {
-    const TextConfig& config = model.config.text;
-    const std::uint32_t context_length =
-        start_position + static_cast<std::uint32_t>(tokens);
-    LaunchTextPackQkv(q.get(), k.get(), v.get(), q_bfloat16.get(),
-                      key_cache_bfloat16.get(), value_cache_bfloat16.get(),
-                      static_cast<std::uint32_t>(layer), start_position, tokens,
-                      static_cast<std::uint32_t>(maximum_tokens),
-                      config.num_attention_heads, config.num_key_value_heads,
-                      config.head_dim, stream);
-
-    const float alpha = 1.0F;
-    const float beta = 0.0F;
-    const std::size_t query_head_stride = tokens * config.head_dim;
-    const std::size_t score_head_stride =
-        tokens * static_cast<std::size_t>(context_length);
-    const std::size_t cache_head_stride = maximum_tokens * config.head_dim;
-    for (std::uint32_t head = 0U; head < config.num_attention_heads; ++head) {
-      const std::uint32_t key_value_head =
-          head / (config.num_attention_heads / config.num_key_value_heads);
-      const auto* key_head =
-          key_cache_bfloat16.get() +
-          ((layer * config.num_key_value_heads + key_value_head) *
-           cache_head_stride);
-      const auto* query_head = q_bfloat16.get() + (head * query_head_stride);
-      auto* score_head = attention_scores.get() + (head * score_head_stride);
-      RequireHipblas(
-          hipblasGemmEx(
-              blas, HIPBLAS_OP_T, HIPBLAS_OP_N,
-              static_cast<int>(context_length), static_cast<int>(tokens),
-              static_cast<int>(config.head_dim), &alpha, key_head, HIP_R_16BF,
-              static_cast<int>(config.head_dim), query_head, HIP_R_16BF,
-              static_cast<int>(config.head_dim), &beta, score_head, HIP_R_16BF,
-              static_cast<int>(context_length), HIPBLAS_COMPUTE_32F,
-              HIPBLAS_GEMM_DEFAULT),
-          "hipblasGemmEx Qwen3-ASR text QK");
-    }
-    LaunchTextCausalSoftmax(
-        attention_scores.get(), attention_probabilities.get(), start_position,
-        tokens, context_length, config.num_attention_heads,
-        1.0F / std::sqrt(static_cast<float>(config.head_dim)), stream);
-
-    const std::size_t output_head_stride = tokens * config.head_dim;
-    for (std::uint32_t head = 0U; head < config.num_attention_heads; ++head) {
-      const std::uint32_t key_value_head =
-          head / (config.num_attention_heads / config.num_key_value_heads);
-      const auto* value_head =
-          value_cache_bfloat16.get() +
-          ((layer * config.num_key_value_heads + key_value_head) *
-           cache_head_stride);
-      const auto* probability_head =
-          attention_scores.get() + (head * score_head_stride);
-      auto* output_head = attention_packed.get() + (head * output_head_stride);
-      RequireHipblas(
-          hipblasGemmEx(
-              blas, HIPBLAS_OP_N, HIPBLAS_OP_N,
-              static_cast<int>(config.head_dim), static_cast<int>(tokens),
-              static_cast<int>(context_length), &alpha, value_head, HIP_R_16BF,
-              static_cast<int>(config.head_dim), probability_head, HIP_R_16BF,
-              static_cast<int>(context_length), &beta, output_head, HIP_R_16BF,
-              static_cast<int>(config.head_dim), HIPBLAS_COMPUTE_32F,
-              HIPBLAS_GEMM_DEFAULT),
-          "hipblasGemmEx Qwen3-ASR text PV");
-    }
-    LaunchTextUnpackAttention(attention_packed.get(), bfloat16_scratch.get(),
-                              tokens, config.num_attention_heads,
-                              config.head_dim, stream);
   }
 
   void PreparePrompt(std::span<const std::uint32_t> prompt_ids,
@@ -704,16 +548,13 @@ struct TextDecoderHipRuntime::Impl {
         throw std::runtime_error(
             "Qwen3-ASR text q/k normalization shape is unsupported");
       }
-      if (hipblas_attention) {
-        HipblasAttention(layer, tokens, start_position);
-      } else if (tokens != 1U || batched_attention ||
-                 !LaunchTextDecodeAttention(
-                     q.get(), key_cache.get(), value_cache.get(),
-                     attention.get(), bfloat16_scratch.get(),
-                     static_cast<std::uint32_t>(layer), start_position,
-                     static_cast<std::uint32_t>(maximum_tokens),
-                     config.num_attention_heads, config.num_key_value_heads,
-                     config.head_dim, stream)) {
+      if (tokens != 1U ||
+          !LaunchTextDecodeAttention(
+              q.get(), key_cache.get(), value_cache.get(), attention.get(),
+              bfloat16_scratch.get(), static_cast<std::uint32_t>(layer),
+              start_position, static_cast<std::uint32_t>(maximum_tokens),
+              config.num_attention_heads, config.num_key_value_heads,
+              config.head_dim, stream)) {
         LaunchTextBatchedAttention(
             q.get(), key_cache.get(), value_cache.get(), attention.get(),
             bfloat16_scratch.get(), static_cast<std::uint32_t>(layer),
@@ -795,13 +636,9 @@ struct TextDecoderHipRuntime::Impl {
   }
 
   std::uint32_t SelectToken() {
-    // The model's BF16 reference has a 35.5/35.5 tie at generation step 3.
-    // The decode GEMV accumulation orders that pair as 35.25/35.5. Official
-    // non-tied greedy margins in the captured sequence are at least 1.0.
-    constexpr float kGemvTieTolerance = 0.25F;
-    LaunchTextArgmax(
-        logits.get(), selected_token.get(), model.config.text.vocab_size,
-        gemv_decode ? kGemvTieTolerance : 0.0F, argmax_scratch.get(), stream);
+    LaunchTextArgmax(logits.get(), selected_token.get(),
+                     model.config.text.vocab_size, argmax_scratch.get(),
+                     stream);
     std::uint32_t result = 0U;
     RequireHip(hipMemcpyAsync(&result, selected_token.get(), sizeof(result),
                               hipMemcpyDeviceToHost, stream),
@@ -825,10 +662,6 @@ struct TextDecoderHipRuntime::Impl {
   std::size_t maximum_tokens;
   CancellationCheck cancellation;
   std::size_t cache_tokens{0U};
-  bool hipblas_attention{false};
-  bool batched_attention{false};
-  DecodeGemmRoute decode_route{DecodeGemmRoute::kFusedGemv};
-  bool gemv_decode{false};
   std::vector<std::unique_ptr<DeviceRegion>> weight_regions;
   std::vector<LayerWeights> layers;
   DeviceNorm final_norm;
@@ -850,12 +683,6 @@ struct TextDecoderHipRuntime::Impl {
   DeviceBuffer<float> gemv_input;
   DeviceBuffer<float> key_cache;
   DeviceBuffer<float> value_cache;
-  DeviceBuffer<hip_bfloat16> q_bfloat16;
-  DeviceBuffer<hip_bfloat16> key_cache_bfloat16;
-  DeviceBuffer<hip_bfloat16> value_cache_bfloat16;
-  DeviceBuffer<hip_bfloat16> attention_scores;
-  DeviceBuffer<float> attention_probabilities;
-  DeviceBuffer<hip_bfloat16> attention_packed;
   DeviceBuffer<float> logits;
   DeviceBuffer<float> argmax_scratch;
   DeviceBuffer<std::uint32_t> token_ids;

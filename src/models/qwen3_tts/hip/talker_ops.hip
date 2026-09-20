@@ -15,6 +15,25 @@
 namespace gufo::models::qwen3_tts::hip {
 namespace {
 
+// Preserve the descending shared-memory sum tree. Once only the first wave
+// remains, register shuffles replace five workgroup barriers and LDS rounds.
+__device__ __forceinline__ void FinishNormSum(float* sums) {
+  const auto thread = threadIdx.x;
+  for (unsigned int stride = blockDim.x / 2; stride >= 32; stride /= 2) {
+    if (thread < stride)
+      sums[thread] += sums[thread + stride];
+    __syncthreads();
+  }
+  if (thread < 32) {
+    float sum = sums[thread];
+    for (int offset = 16; offset != 0; offset /= 2)
+      sum += __shfl_down(sum, offset, 32);
+    if (thread == 0)
+      sums[0] = sum;
+  }
+  __syncthreads();
+}
+
 __device__ __forceinline__ float2 RotateBfloat16(float first, float second,
                                                  float angle) {
   const float cosine = static_cast<float>(hip_bfloat16(cosf(angle)));
@@ -154,12 +173,7 @@ __launch_bounds__(ThreadsPerBlock, 4) __global__
   shared_sum[thread] = sum_squared;
   __syncthreads();
 
-  for (std::size_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
-    if (thread < stride) {
-      shared_sum[thread] += shared_sum[thread + stride];
-    }
-    __syncthreads();
-  }
+  FinishNormSum(shared_sum);
 
   const float mean_squared = shared_sum[0] / static_cast<float>(head_dim);
   const float inverse_rms = rsqrtf(mean_squared + epsilon);
@@ -241,12 +255,7 @@ __device__ void NormalizeAndRotateHead(float* head_values, const float* weight,
   }
   shared_sum[thread] = sum_squared;
   __syncthreads();
-  for (std::uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
-    if (thread < stride) {
-      shared_sum[thread] += shared_sum[thread + stride];
-    }
-    __syncthreads();
-  }
+  FinishNormSum(shared_sum);
   const float mean_squared = shared_sum[0] / static_cast<float>(head_dim);
   const float inverse_rms = rsqrtf(mean_squared + epsilon);
   for (std::uint32_t index = thread; index < head_dim; index += blockDim.x) {
@@ -357,12 +366,7 @@ __launch_bounds__(256) __global__ void Bfloat16ResidualAddRMSNormKernel(
   __shared__ float shared_sum[256];
   shared_sum[thread] = sum_squared;
   __syncthreads();
-  for (std::size_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
-    if (thread < stride) {
-      shared_sum[thread] += shared_sum[thread + stride];
-    }
-    __syncthreads();
-  }
+  FinishNormSum(shared_sum);
   const float mean_squared = shared_sum[0] / static_cast<float>(dimension);
   const float inverse_rms = rsqrtf(mean_squared + epsilon);
   for (std::size_t index = thread; index < dimension; index += blockDim.x) {

@@ -12,6 +12,10 @@
 | Fused SwiGLU / non-temporal weight loads | Rejected: slower complete request. |
 | Handwritten BF16 prefill WMMA | Rejected: slower than hipBLASLt on these shapes. |
 | Matrix-core attention port | Not implemented: small fraction of measured request; quantify benefit first. |
+| Strict two-pass argmax | Retained; exact ties only, nonfinite rows fail, 49/49 official IDs. Removes the biased 0.25-logit window and a reduction pass. |
+| Explicit eager text-attention boundaries | Retained; independent BF16 formulas and matched upstream backend checks. Oracle metadata now records the actual nested implementations. |
+| Production route cleanup | Retained; removes six environment switches, unused library attention and scratch; BLAS execution errors now fail the request. |
+| Finish normalization within one wave | Retained; fewer barriers with the same sum tree and unchanged logits/tokens. No separate request-throughput gain claimed. |
 
 Next: cold-weight GEMM plan selection, launch overhead and long-form quality.
 No precision reduction is qualified by these experiments.

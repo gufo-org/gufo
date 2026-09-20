@@ -25,7 +25,6 @@
 
 #include "src/models/qwen3_asr/hip/audio_ops.hpp"
 #include "src/models/qwen3_asr/hip/blas.hpp"
-#include "src/models/qwen3_asr/hip/gemm_route.hpp"
 #include "src/models/qwen3_asr/loader.hpp"
 
 namespace gufo::models::qwen3_asr::hip {
@@ -266,9 +265,7 @@ struct AudioEncoderHipRuntime::Impl {
     RequireHip(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking),
                "hipStreamCreate Qwen3-ASR audio encoder");
     RequireHipblas(hipblasCreate(&blas), "hipblasCreate Qwen3-ASR");
-    if (UsePrefillHipblasLt()) {
-      lt = std::make_unique<GemmLt>();
-    }
+    lt = std::make_unique<GemmLt>();
     RequireHipblas(hipblasSetStream(blas, stream),
                    "hipblasSetStream Qwen3-ASR");
     RequireHipblas(hipblasSetAtomicsMode(blas, HIPBLAS_ATOMICS_NOT_ALLOWED),
