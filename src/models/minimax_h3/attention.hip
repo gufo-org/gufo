@@ -1,3 +1,6 @@
+// Short-path softmax ordering adapted from Composable Kernel, ROCm 7.2.3.
+// Copyright (c) 2018-2023 Advanced Micro Devices, Inc. All rights reserved.
+// MIT; see licenses/composable_kernel.txt. No CK headers/runtime are required.
 #include <cstddef>
 
 #include "src/models/minimax_h3/attention.hip.hpp"
@@ -174,12 +177,133 @@ __global__ __launch_bounds__(128, 1) void WmmaAttention(
   }
 }
 
+// Short sequences retain 128-key local softmax tiles and normalize after each
+// tile. In particular, round local (not running-max-scaled) probabilities to
+// BF16 before PV. Contiguous eight-key lane groups preserve the sum tree.
+// Explicit FMAs below preserve the rounded recurrence across all 50 blocks.
+__global__ __launch_bounds__(128) void ShortAttention(
+    const std::uint16_t* query, const std::uint16_t* key,
+    const std::uint16_t* value, std::uint16_t* output, std::uint32_t rows,
+    std::uint32_t heads) {
+#pragma clang fp contract(off)
+  union Staging {
+    std::uint16_t key[128][136];
+    struct {
+      std::uint16_t probability[64][136];
+      std::uint16_t value[128][136];
+    } pv;
+  };
+  __shared__ __align__(16) Staging staging;
+  const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32;
+  const int swizzled_lane = ((lane & 1) << 3) | ((lane % 16) >> 1);
+  const int first_query = blockIdx.x * 64 + wave * 16;
+  const std::size_t head_base = std::size_t(blockIdx.y) * rows * 128;
+  query += head_base;
+  const auto key_buffer = MakeBuffer(key + head_base, rows * 256);
+  const auto value_buffer = MakeBuffer(value + head_base, rows * 256);
+  Accumulator result[8]{};
+  float running_sum = 0, running_max = -INFINITY;
+  for (std::uint32_t base = 0; base < rows; base += 128) {
+#pragma unroll
+    for (int z = 0; z < 16; ++z) {
+      const int r = tid / 16 + z * 8, d = (tid % 16) * 8;
+      *reinterpret_cast<uint4*>(staging.key[r] + d) =
+          LoadBufferVector(key_buffer, ((base + r) * 128 + d) * 2);
+    }
+    __syncthreads();
+    Accumulator scores[8]{};
+#pragma unroll 1
+    for (int d = 0; d < 8; ++d) {
+      Fragment q{};
+      if (static_cast<std::uint32_t>(first_query + lane % 16) < rows)
+        q = LoadFragment(query + std::size_t(first_query + lane % 16) * 128 +
+                         d * 16);
+#pragma unroll
+      for (int half = 0; half < 8; ++half) {
+        const auto k =
+            LoadFragment(staging.key[half * 16 + swizzled_lane] + d * 16);
+        scores[half] =
+            __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(k, q, scores[half]);
+      }
+      __builtin_amdgcn_sched_barrier(0);
+    }
+    float local_max = -INFINITY, local_sum = 0;
+#pragma unroll
+    for (int half = 0; half < 8; ++half)
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        scores[half][i] = base + half * 16 + i + (lane / 16) * 8 < rows
+                              ? scores[half][i] * 0.08838834764831845F
+                              : -INFINITY;
+        local_max = fmaxf(local_max, scores[half][i]);
+      }
+    local_max = fmaxf(local_max, __shfl_xor(local_max, 16));
+    __syncthreads();
+#pragma unroll
+    for (int half = 0; half < 8; ++half)
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const float p = expf(scores[half][i] - local_max);
+        local_sum += p;
+        staging.pv.probability[wave * 16 + lane % 16]
+                              [half * 16 + i + (lane / 16) * 8] = Bf16(p);
+      }
+    local_sum += __shfl_xor(local_sum, 16);
+#pragma unroll
+    for (int z = 0; z < 16; ++z) {
+      const int r = tid / 16 + z * 8, d = (tid % 16) * 8;
+      *reinterpret_cast<uint4*>(staging.pv.value[r] + d) =
+          LoadBufferVector(value_buffer, ((base + r) * 128 + d) * 2);
+    }
+    __syncthreads();
+    const float next_max = fmaxf(running_max, local_max);
+    const float previous_scale = running_sum * expf(running_max - next_max);
+    const float local_scale = expf(local_max - next_max);
+    const float next_sum = fmaf(local_scale, local_sum, previous_scale);
+#pragma unroll
+    for (int d = 0; d < 8; ++d) {
+      Accumulator partial{};
+#pragma unroll 1
+      for (int half = 0; half < 8; ++half) {
+        const auto p = LoadFragment(
+            staging.pv.probability[wave * 16 + lane % 16] + half * 16);
+        Fragment v;
+#pragma unroll
+        for (int i = 0; i < 16; ++i)
+          v[i] = staging.pv.value[half * 16 + i][d * 16 + swizzled_lane];
+        partial = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(v, p, partial);
+        __builtin_amdgcn_sched_barrier(0);
+      }
+      for (int i = 0; i < 8; ++i)
+        result[d][i] =
+            fmaf(previous_scale, result[d][i], local_scale * partial[i]) /
+            next_sum;
+    }
+    running_sum = next_sum;
+    running_max = next_max;
+    __syncthreads();
+  }
+  const std::uint32_t row = first_query + lane % 16;
+  if (row < rows)
+#pragma unroll
+    for (int d = 0; d < 8; ++d)
+#pragma unroll
+      for (int i = 0; i < 8; ++i)
+        output[(std::size_t(row) * heads + blockIdx.y) * 128 + d * 16 + i +
+               (lane / 16) * 8] = Bf16(result[d][i]);
+}
+
 }  // namespace
 
 void LaunchWmmaAttention(const std::uint16_t* query, const std::uint16_t* key,
                          const std::uint16_t* value, std::uint16_t* output,
                          std::uint32_t rows, std::uint32_t heads,
                          hipStream_t stream) {
+  if (rows <= 4096) {
+    ShortAttention<<<dim3((rows + 63) / 64, heads), 128, 0, stream>>>(
+        query, key, value, output, rows, heads);
+    return;
+  }
   WmmaAttention<<<dim3((rows + 63) / 64, heads), 128, 0, stream>>>(
       query, key, value, output, rows, heads);
 }

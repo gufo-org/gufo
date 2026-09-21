@@ -696,7 +696,6 @@ gufo::bench::KernelBenchResult BenchmarkBatchedAttention(
   HipBuffer<float> value_cache(cache_elements);
   HipBuffer<std::uint16_t> key_cache_f16(cache_elements);
   HipBuffer<std::uint16_t> value_cache_f16(cache_elements);
-  HipBuffer<std::uint16_t> scratch_f16(query_elements);
   HipBuffer<float> output(query_elements);
   FillBytes(query, 0x3c, stream);
   FillBytes(key, 0x3c, stream);
@@ -713,6 +712,14 @@ gufo::bench::KernelBenchResult BenchmarkBatchedAttention(
       "batched_attention/context=" + std::to_string(context) +
       "/heads=24/kv_heads=4/head_dim=256/backend=auto";
   const auto launch = [&] {
+    if (gufo::hip::LaunchQwenWmmaAttention(
+            query.Get(), key.Get(), value.Get(), gate.Get(), key_cache.Get(),
+            value_cache.Get(), key_cache_f16.Get(), value_cache_f16.Get(),
+            output.Get(), 0, 0, context, static_cast<std::uint32_t>(context),
+            kAttentionHeads, kAttentionKvHeads, kAttentionHeadDim, stream)) {
+      selected_backend = "wmma";
+      return;
+    }
     if (!gufo::hip::detail::ShouldAttemptOptimizedAttention(context)) {
       selected_backend = "baseline";
       gufo::hip::LaunchBatchedAttention(
@@ -734,19 +741,6 @@ gufo::bench::KernelBenchResult BenchmarkBatchedAttention(
         rejected_fast_paths.end()) {
       rejected_fast_paths.emplace_back("tiled: rejected");
     }
-    if (gufo::hip::LaunchBatchedAttentionCk(
-            query.Get(), key.Get(), value.Get(), gate.Get(), key_cache.Get(),
-            value_cache.Get(), key_cache_f16.Get(), value_cache_f16.Get(),
-            scratch_f16.Get(), output.Get(), 0, 0, context,
-            static_cast<std::uint32_t>(context), kAttentionHeads,
-            kAttentionKvHeads, kAttentionHeadDim, stream)) {
-      selected_backend = "composable_kernel";
-      return;
-    }
-    if (std::ranges::find(rejected_fast_paths, "composable_kernel: rejected") ==
-        rejected_fast_paths.end()) {
-      rejected_fast_paths.emplace_back("composable_kernel: rejected");
-    }
     selected_backend = "baseline";
     gufo::hip::LaunchBatchedAttention(
         query.Get(), key.Get(), value.Get(), gate.Get(), key_cache.Get(),
@@ -757,14 +751,14 @@ gufo::bench::KernelBenchResult BenchmarkBatchedAttention(
   auto samples_us = MeasureKernel(options, marker, stream, launch);
   VerifyFiniteNonzero(output);
 
-  if (!gufo::hip::detail::ShouldAttemptOptimizedAttention(context)) {
+  if (selected_backend == "baseline" &&
+      !gufo::hip::detail::ShouldAttemptOptimizedAttention(context)) {
     rejected_fast_paths = {
         "tiled: below optimized-attention threshold",
-        "composable_kernel: below optimized-attention threshold",
     };
   }
   const bool uses_f16_cache =
-      selected_backend == "tiled" || selected_backend == "composable_kernel";
+      selected_backend == "tiled" || selected_backend == "wmma";
   gufo::bench::KernelBenchResult result;
   result.kernel = "batched_attention";
   result.backend = selected_backend;

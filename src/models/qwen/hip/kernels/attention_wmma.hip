@@ -1,24 +1,6 @@
-// Masked prefill attention on the WMMA matrix cores (opt-c177-attn-wmma).
-//
-// Replaces both halves of the previous prefill attention: the tiled
-// `v_dot2_f32_f16` kernel, which reached 4.58 TFLOPS -- 15% of its own
-// instruction ceiling and 8% of the 55.05 TFLOPS WMMA ceiling -- and the
-// AOTriton non-causal prefix plus log-sum-exp merge that `opt-c165-attn-split`
-// bolted on to work around AOTriton's missing causal support on gfx11xx. One
-// masked kernel over the whole visible range is faster than that pair at every
-// depth, so the FP16 query conversion, the AOTriton call and the merge pass all
-// go away.
-//
-// Measured against the tiled kernel plus AOTriton at batch 2048
-// (tools/bench/attn_causal_bench.hip), one layer call:
-//
-//   depth      before    after   speedup
-//       0      11.40     3.24     3.52x     (tiled only)
-//    8192      37.6     27.26     1.38x     (tiled diagonal + AOTriton prefix)
-//   16384      64.1     50.48     1.27x
-//
-// 15.9 to 17.4 TFLOPS, or 29-32% of the WMMA ceiling, against AOTriton's 15.6
-// on the easier unmasked shapes.
+// Masked prefill attention on the WMMA matrix cores. One pass covers the
+// visible prefix and causal diagonal, using the canonical FP16 KV cache.
+// Validated against the CPU double-precision reference below.
 //
 // Design. Wave32 fragment layout, verified against a CPU double-precision
 // reference: A holds row L%16 and 16 contiguous k, B holds column L%16 and 16
@@ -601,7 +583,6 @@ bool LaunchQwenWmmaAttention(
       .head_dim = head_dim,
       .has_k_cache_f16 = k_cache_f16 != nullptr,
       .has_v_cache_f16 = v_cache_f16 != nullptr,
-      .has_scratch_f16 = false,
   };
   if (!detail::IsTiledAttentionSupported(support_params)) {
     return false;

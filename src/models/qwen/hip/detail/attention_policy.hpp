@@ -13,8 +13,6 @@ inline constexpr std::size_t kOptimizedAttentionMinBatch{1024};
 inline constexpr std::uint32_t kTiledAttentionQueryHeads{24};
 inline constexpr std::uint32_t kTiledAttentionKvHeads{4};
 inline constexpr std::uint32_t kTiledAttentionHeadDim{256};
-inline constexpr std::uint32_t kCkAttentionKvHeads{4};
-inline constexpr std::uint32_t kCkAttentionHeadDim{256};
 inline constexpr std::size_t kSplitKDecodeAttentionMinContext{4096};
 inline constexpr std::uint32_t kSplitKDecodeAttentionMaxSplits{32};
 inline constexpr std::uint32_t kFusedQkNormMaxHeadDim{256};
@@ -28,7 +26,6 @@ struct AttentionSupportParams {
   std::uint32_t head_dim{0};
   bool has_k_cache_f16{false};
   bool has_v_cache_f16{false};
-  bool has_scratch_f16{false};
 };
 
 [[nodiscard]] constexpr bool ShouldAttemptOptimizedAttention(
@@ -87,16 +84,6 @@ struct AttentionSupportParams {
          params.has_k_cache_f16 && params.has_v_cache_f16;
 }
 
-[[nodiscard]] constexpr bool IsCkAttentionSupported(
-    const AttentionSupportParams& params) noexcept {
-  return params.batch_size != 0 && params.start_pos == 0 &&
-         params.num_kv_heads == kCkAttentionKvHeads &&
-         params.num_heads % kCkAttentionKvHeads == 0 &&
-         params.head_dim == kCkAttentionHeadDim &&
-         params.batch_size <= params.max_context && params.has_k_cache_f16 &&
-         params.has_v_cache_f16 && params.has_scratch_f16;
-}
-
 /// The row-split recurrence needs two scratch planes and a 128 x 128 state
 /// tile.
 [[nodiscard]] constexpr bool ShouldUseSsmRowSplitRecurrence(
@@ -105,17 +92,13 @@ struct AttentionSupportParams {
 }
 
 /// Executes the existing prefill attention fallback chain without virtual
-/// dispatch: tiled, then Composable Kernel, then the baseline implementation.
-template<typename TiledLauncher, typename CkLauncher, typename BaselineLauncher>
+/// dispatch: tiled, then the baseline implementation.
+template<typename TiledLauncher, typename BaselineLauncher>
 inline void DispatchPrefillAttention(std::size_t visible_context,
                                      TiledLauncher&& launch_tiled,
-                                     CkLauncher&& launch_ck,
                                      BaselineLauncher&& launch_baseline) {
   if (ShouldAttemptOptimizedAttention(visible_context)) {
     if (std::forward<TiledLauncher>(launch_tiled)()) {
-      return;
-    }
-    if (std::forward<CkLauncher>(launch_ck)()) {
       return;
     }
   }

@@ -177,10 +177,10 @@ void TestAttentionBackendEquivalence() {
         0.25F * std::sin(static_cast<float>((index % 239) + 1) * 0.023F);
   }
   float *d_q = nullptr, *d_k = nullptr, *d_v = nullptr, *d_gate = nullptr;
-  float *d_cache_seq = nullptr, *d_cache_tile = nullptr, *d_cache_ck = nullptr;
-  float *d_out_seq = nullptr, *d_out_tile = nullptr, *d_out_ck = nullptr;
-  void *d_cache_tile_f16 = nullptr, *d_cache_ck_f16 = nullptr,
-       *d_scratch_ck_f16 = nullptr;
+  float *d_cache_seq = nullptr, *d_cache_tile = nullptr,
+        *d_cache_wmma = nullptr;
+  float *d_out_seq = nullptr, *d_out_tile = nullptr, *d_out_wmma = nullptr;
+  void *d_cache_tile_f16 = nullptr, *d_cache_wmma_f16 = nullptr;
 
   HIP_CHECK(hipMalloc(&d_q, q_size * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_k, kv_size * sizeof(float)));
@@ -188,15 +188,14 @@ void TestAttentionBackendEquivalence() {
   HIP_CHECK(hipMalloc(&d_gate, q_size * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_cache_seq, 2 * cache_elements * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_cache_tile, 2 * cache_elements * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_cache_ck, 2 * cache_elements * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_cache_wmma, 2 * cache_elements * sizeof(float)));
   HIP_CHECK(
       hipMalloc(&d_cache_tile_f16, 2 * cache_elements * sizeof(hip_bfloat16)));
   HIP_CHECK(
-      hipMalloc(&d_cache_ck_f16, 2 * cache_elements * sizeof(hip_bfloat16)));
-  HIP_CHECK(hipMalloc(&d_scratch_ck_f16, 2 * q_size * sizeof(hip_bfloat16)));
+      hipMalloc(&d_cache_wmma_f16, 2 * cache_elements * sizeof(hip_bfloat16)));
   HIP_CHECK(hipMalloc(&d_out_seq, q_size * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_out_tile, q_size * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_out_ck, q_size * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_out_wmma, q_size * sizeof(float)));
 
   HIP_CHECK(hipMemcpy(d_q, h_q.data(), q_size * sizeof(float),
                       hipMemcpyHostToDevice));
@@ -208,11 +207,11 @@ void TestAttentionBackendEquivalence() {
                       hipMemcpyHostToDevice));
   HIP_CHECK(hipMemset(d_cache_seq, 0, 2 * cache_elements * sizeof(float)));
   HIP_CHECK(hipMemset(d_cache_tile, 0, 2 * cache_elements * sizeof(float)));
-  HIP_CHECK(hipMemset(d_cache_ck, 0, 2 * cache_elements * sizeof(float)));
+  HIP_CHECK(hipMemset(d_cache_wmma, 0, 2 * cache_elements * sizeof(float)));
   HIP_CHECK(hipMemset(d_cache_tile_f16, 0,
                       2 * cache_elements * sizeof(hip_bfloat16)));
-  HIP_CHECK(
-      hipMemset(d_cache_ck_f16, 0, 2 * cache_elements * sizeof(hip_bfloat16)));
+  HIP_CHECK(hipMemset(d_cache_wmma_f16, 0,
+                      2 * cache_elements * sizeof(hip_bfloat16)));
 
   for (std::size_t token = 0; token < batch; ++token) {
     gufo::hip::LaunchAttention(d_q + token * attention_width,
@@ -232,19 +231,18 @@ void TestAttentionBackendEquivalence() {
     std::cerr << "Tiled attention rejected the Qwen shape\n";
     std::abort();
   }
-  const bool launched = gufo::hip::LaunchBatchedAttentionCk(
-      d_q, d_k, d_v, d_gate, d_cache_ck, d_cache_ck + cache_elements,
-      d_cache_ck_f16,
-      static_cast<std::uint16_t*>(d_cache_ck_f16) + cache_elements,
-      d_scratch_ck_f16, d_out_ck, 0, 0, batch, max_context, num_heads,
-      num_kv_heads, head_dim);
+  const bool launched = gufo::hip::LaunchQwenWmmaAttention(
+      d_q, d_k, d_v, d_gate, d_cache_wmma, d_cache_wmma + cache_elements,
+      d_cache_wmma_f16,
+      static_cast<std::uint16_t*>(d_cache_wmma_f16) + cache_elements,
+      d_out_wmma, 0, 0, batch, max_context, num_heads, num_kv_heads, head_dim);
   if (!launched) {
-    std::cerr << "Composable Kernel attention rejected the Qwen shape\n";
+    std::cerr << "Native WMMA attention rejected the Qwen shape\n";
     std::abort();
   }
   HIP_CHECK(hipDeviceSynchronize());
 
-  std::vector<float> sequential(q_size), tiled(q_size), ck(q_size);
+  std::vector<float> sequential(q_size), tiled(q_size), wmma(q_size);
   std::vector<float> sequential_cache(2 * cache_elements);
   std::vector<float> tile_cache(2 * cache_elements);
   std::vector<float> ck_cache(2 * cache_elements);
@@ -252,7 +250,7 @@ void TestAttentionBackendEquivalence() {
                       hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(tiled.data(), d_out_tile, q_size * sizeof(float),
                       hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(ck.data(), d_out_ck, q_size * sizeof(float),
+  HIP_CHECK(hipMemcpy(wmma.data(), d_out_wmma, q_size * sizeof(float),
                       hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(sequential_cache.data(), d_cache_seq,
                       sequential_cache.size() * sizeof(float),
@@ -260,15 +258,15 @@ void TestAttentionBackendEquivalence() {
   HIP_CHECK(hipMemcpy(tile_cache.data(), d_cache_tile,
                       tile_cache.size() * sizeof(float),
                       hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(ck_cache.data(), d_cache_ck,
+  HIP_CHECK(hipMemcpy(ck_cache.data(), d_cache_wmma,
                       ck_cache.size() * sizeof(float), hipMemcpyDeviceToHost));
   float max_tile_diff = 0.0F;
-  float max_ck_diff = 0.0F;
+  float max_wmma_diff = 0.0F;
   for (std::size_t index = 0; index < q_size; ++index) {
     max_tile_diff =
         std::max(max_tile_diff, std::abs(sequential[index] - tiled[index]));
-    max_ck_diff =
-        std::max(max_ck_diff, std::abs(sequential[index] - ck[index]));
+    max_wmma_diff =
+        std::max(max_wmma_diff, std::abs(sequential[index] - wmma[index]));
   }
   float max_tile_cache_diff = 0.0F;
   float max_cache_diff = 0.0F;
@@ -282,14 +280,15 @@ void TestAttentionBackendEquivalence() {
   std::cout << "Attention Seq vs tile max diff: " << max_tile_diff << "\n";
   std::cout << "Attention Seq vs tile cache max diff: " << max_tile_cache_diff
             << "\n";
-  std::cout << "Attention Seq vs CK max diff: " << max_ck_diff << "\n";
-  std::cout << "Attention Seq vs CK cache max diff: " << max_cache_diff << "\n";
+  std::cout << "Attention Seq vs WMMA max diff: " << max_wmma_diff << "\n";
+  std::cout << "Attention Seq vs WMMA cache max diff: " << max_cache_diff
+            << "\n";
   if (max_tile_diff >= 5e-3F || max_tile_cache_diff != 0.0F) {
     std::cerr << "Tiled attention mismatch\n";
     std::abort();
   }
-  if (max_ck_diff >= 2e-3F || max_cache_diff != 0.0F) {
-    std::cerr << "Composable Kernel attention mismatch\n";
+  if (max_wmma_diff >= 2e-3F || max_cache_diff != 0.0F) {
+    std::cerr << "Native WMMA attention mismatch\n";
     std::abort();
   }
 
@@ -348,13 +347,12 @@ void TestAttentionBackendEquivalence() {
   HIP_CHECK(hipFree(d_gate));
   HIP_CHECK(hipFree(d_cache_seq));
   HIP_CHECK(hipFree(d_cache_tile));
-  HIP_CHECK(hipFree(d_cache_ck));
+  HIP_CHECK(hipFree(d_cache_wmma));
   HIP_CHECK(hipFree(d_cache_tile_f16));
-  HIP_CHECK(hipFree(d_cache_ck_f16));
-  HIP_CHECK(hipFree(d_scratch_ck_f16));
+  HIP_CHECK(hipFree(d_cache_wmma_f16));
   HIP_CHECK(hipFree(d_out_seq));
   HIP_CHECK(hipFree(d_out_tile));
-  HIP_CHECK(hipFree(d_out_ck));
+  HIP_CHECK(hipFree(d_out_wmma));
 }
 
 #endif  // defined(ENGINE_ENABLE_HIP)

@@ -127,6 +127,10 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   Reuse overlapping convolution windows in LDS while keeping the original
   channel/tap accumulation order. Fuse normalization/RoPE or activation only
   after preserving every intermediate BF16 rounding boundary.
+  rocBLAS can rotate the K reduction per output tile: matching that rotation
+  made native ASR convolutions byte-exact to PyTorch. For attention, lane
+  swizzles change softmax sum groups; preserve those groups and explicit FMA
+  operands. A near-identical single block can still drift over 50 blocks.
   Lossless weight packing can still be a poor trade: 2% TTS speed for over
   2 GiB extra copies was rejected. Non-temporal loads won cold microbenchmarks
   but lost complete TTS requests; always reproduce model cache traffic.

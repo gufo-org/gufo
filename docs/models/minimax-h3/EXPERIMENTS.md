@@ -8,8 +8,9 @@
 | F32 convolution GEMMs | Retained; VisualVAE/AudioVAE teacher metrics. |
 | Fixed-shape row-parallel attention | Retained; independent block/forward gates. Full-resolution speed remains unmeasured. |
 | Native long BF16 attention | Retained; 64-query/32-key WMMA tiles, register-held probabilities, bounded vector loads and branchless BF16 rounding. Independent FP64 and real-weight teacher checks; removes Triton/AOTriton production dependencies. |
+| Native short BF16 attention | Retained; preserves CK's 128-key softmax arithmetic and explicit FMA order with no CK dependency. Byte-exact component controls and unchanged complete-forward teacher errors; 1.6–5.1× faster short-attention controls. |
 | Wider attention tiles / more waves | Rejected; slower at the affected long shapes. |
-| Extra BF16 probability refinement on short attention | Rejected; improved one-block teacher error but worsened complete-forward video-velocity relative L2 from `0.01936` to `0.03418`. Short CK arithmetic stays unchanged. |
+| Extra BF16 probability refinement on short attention | Rejected; improved one-block teacher error but worsened complete-forward error. The retained native path preserves the qualified short-attention arithmetic. |
 | VisualVAE wave-local LayerNorm / selected-frame pruning | Retained; same decoder context and selected-frame teacher. |
 | Direct mapped reused DiT weights | Rejected: slower resident execution. |
 | Alternate softmax reductions | Rejected: quality failures. |

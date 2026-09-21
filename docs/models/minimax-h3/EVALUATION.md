@@ -85,6 +85,8 @@ The following retained measurements document component evidence:
 | --- | ---: | ---: |
 | prompt layers 1 and 50, six-token fox prompt | `0` | `0` |
 | 528-row block output, rechecked 2026-09-21 | `0.00461035` | `0.00483092` |
+| 256x256x22 video velocity, native short attention | `0.0193639` | `0.0458577` |
+| 256x256x22 audio velocity, native short attention | `0.0112591` | `0.0216204` |
 | 512x512x22 refined text | `0.00469088` | `0.00167411` |
 | 512x512x22 block-0 modulation | `0.0022895` | `0.00478469` |
 | 512x512x22 video velocity | `0.0132707` | `0.0154553` |
@@ -96,8 +98,14 @@ The following retained measurements document component evidence:
 ### Native attention qualification
 
 On 2026-09-21, the native HIP replacement was evaluated against independent formulas and
-checkpoint teachers. Agreement with the removed Triton kernel is not the
-quality oracle. The short CK route and frozen ceilings above are unchanged.
+checkpoint teachers. The frozen ceilings above are unchanged.
+
+- Short sequences now use native 128-key softmax tiles. They retain contiguous
+  eight-key lane reductions, BF16 local probabilities and explicit FP32 FMAs.
+  At 528/1872/4096 rows with all 56 heads, outputs are byte-identical to the
+  removed CK implementation. The frozen block and complete-forward teacher
+  errors above are unchanged; this preserves accuracy without claiming an
+  improvement. CK's MIT attribution remains; its headers are no longer needed.
 
 - The maintained analytic test compares dense attention with FP64 softmax/PV
   at 1/8/9, 31/32/33, 63/64/65, 127/128/129, 528 and 4096/4097 rows,

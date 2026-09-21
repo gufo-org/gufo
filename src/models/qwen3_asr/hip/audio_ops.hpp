@@ -16,6 +16,14 @@ void LaunchBiasGelu(void* values_bfloat16, const void* bias_bfloat16,
                     std::size_t elements, std::size_t channels,
                     std::size_t spatial_size, hipStream_t stream);
 
+void LaunchPackConvolutionWeights(const void* input, void* output,
+                                  hipStream_t stream);
+
+void LaunchConvolution3x3(const void* input, const void* weight, void* output,
+                          std::size_t chunks, std::size_t input_channels,
+                          std::size_t height, std::size_t width,
+                          hipStream_t stream);
+
 void LaunchConvOutputLayout(const void* input_bfloat16, void* output_bfloat16,
                             std::size_t chunks, hipStream_t stream);
 

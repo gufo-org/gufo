@@ -18,6 +18,7 @@ if (ENGINE_ENABLE_HIP)
   target_sources(gufo_qwen3_asr PRIVATE
     hip/audio_encoder_runtime.cpp
     hip/audio_ops.hip
+    hip/convolution.hip
     hip/blas.cpp
     hip/text_decoder_runtime.cpp
     hip/text_ops.hip)
@@ -25,8 +26,7 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_qwen3_asr PUBLIC
     hip::host
     roc::hipblas
-    roc::hipblaslt
-    MIOpen)
+    roc::hipblaslt)
 endif()
 
 function(gufo_qwen3_asr_register_tests)

@@ -20,11 +20,6 @@
 #include <utility>
 #include <vector>
 
-#include "ck/ck.hpp"
-#include "ck/tensor_operation/gpu/device/gemm_specialization.hpp"
-#include "ck/tensor_operation/gpu/device/impl/device_batched_gemm_softmax_gemm_permute_wmma_cshuffle.hpp"
-#include "ck/tensor_operation/gpu/device/tensor_specialization.hpp"
-#include "ck/tensor_operation/gpu/element/element_wise_operation.hpp"
 #include "src/models/minimax_h3/attention.hip.hpp"
 #include "src/models/minimax_h3/dit.hpp"
 #include "src/models/minimax_h3/dit_ops.hip.hpp"
@@ -79,76 +74,8 @@ rocblas_int PinnedBf16Solution(std::size_t batch, std::size_t rows,
   return kGfx1151RocblasBf16Solution;
 }
 
-template<ck::index_t... Values>
-using CkSequence = ck::Sequence<Values...>;
-
-using CkPassThrough = ck::tensor_operation::element_wise::PassThrough;
-using CkScale = ck::tensor_operation::element_wise::Scale;
-
-using H3FusedAttentionShort = ck::tensor_operation::device::
-    DeviceBatchedGemmSoftmaxGemmPermute_Wmma_CShuffle<
-        2, 1, 1, 1, 1, ck::bhalf_t, ck::bhalf_t, ck::bhalf_t, ck::bhalf_t,
-        ck::Tuple<>, float, ck::Tuple<>, float, float, CkPassThrough,
-        CkPassThrough, CkScale, CkPassThrough, CkPassThrough,
-        ck::tensor_operation::device::GemmSpecialization::MNKOPadding,
-        ck::tensor_operation::device::TensorSpecialization::Default,
-        ck::tensor_operation::device::TensorSpecialization::Default,
-        ck::tensor_operation::device::TensorSpecialization::Default,
-        ck::tensor_operation::device::TensorSpecialization::Default, 1, 128, 64,
-        128, 80, 8, 8, 80, 64, 8, 16, 16, 16, 1, 8, 5, CkSequence<2, 64, 1>,
-        CkSequence<1, 0, 2>, CkSequence<1, 0, 2>, 2, 8, 8, true,
-        CkSequence<2, 64, 1>, CkSequence<1, 0, 2>, CkSequence<1, 0, 2>, 2, 8, 8,
-        true, CkSequence<2, 8, 8>, CkSequence<0, 2, 1>, CkSequence<0, 2, 1>, 1,
-        2, 1, false, 1, 1, CkSequence<1, 64, 1, 2>, 8,
-        ck::tensor_operation::device::MaskingSpecialization::MaskDisabled>;
-
-template<typename Operation>
-auto MakeH3FusedAttentionArgument(const std::uint16_t* query,
-                                  const std::uint16_t* key,
-                                  const std::uint16_t* value,
-                                  std::uint16_t* output, std::size_t sequence) {
-  Operation operation;
-  return operation.MakeArgument(
-      reinterpret_cast<const ck::bhalf_t*>(query),
-      reinterpret_cast<const ck::bhalf_t*>(key),
-      reinterpret_cast<const ck::bhalf_t*>(value),
-      reinterpret_cast<ck::bhalf_t*>(output),
-      static_cast<ck::index_t>(sequence), static_cast<ck::index_t>(sequence),
-      static_cast<ck::index_t>(kDitHeadDimension),
-      static_cast<ck::index_t>(kDitHeadDimension), 1,
-      static_cast<ck::index_t>(kDitAttentionHeads),
-      1.0F / std::sqrt(static_cast<float>(kDitHeadDimension)), true, true);
-}
-
 bool SupportsH3FusedAttention(std::size_t sequence) {
-  if (sequence == 0 || sequence > kMaximumAttentionRows) {
-    return false;
-  }
-  if (sequence <= kMaximumMaterializedAttentionRows) {
-    H3FusedAttentionShort operation;
-    const auto argument = MakeH3FusedAttentionArgument<H3FusedAttentionShort>(
-        nullptr, nullptr, nullptr, nullptr, sequence);
-    return operation.IsSupportedArgument(argument);
-  }
-  return true;
-}
-
-template<typename Operation>
-bool LaunchH3FusedAttention(const std::uint16_t* query,
-                            const std::uint16_t* key,
-                            const std::uint16_t* value, std::uint16_t* output,
-                            std::size_t sequence, hipStream_t stream) {
-  Operation operation;
-  const auto argument = MakeH3FusedAttentionArgument<Operation>(
-      query, key, value, output, sequence);
-  if (!operation.IsSupportedArgument(argument)) {
-    return false;
-  }
-  StreamConfig config;
-  config.stream_id_ = stream;
-  config.time_kernel_ = false;
-  operation.MakeInvoker().Run(argument, config);
-  return true;
+  return sequence != 0 && sequence <= kMaximumAttentionRows;
 }
 
 void SetError(std::string* error, std::string message) {
@@ -1468,30 +1395,18 @@ bool DitBlockSession::RunInternal(
       impl_->normalization_factors.As<float>(),
       impl_->query.As<std::uint16_t>(), impl_->key.As<std::uint16_t>(),
       impl_->value.As<std::uint16_t>(), rows, kDitAttentionHeads,
-      kDitNormEpsilon, impl_->rows > kMaximumMaterializedAttentionRows,
+      kDitNormEpsilon,
+      impl_->fused_attention || impl_->rows > kMaximumMaterializedAttentionRows,
       run_stream);
   if (!CheckLaunch("H3 DiT grouped QKV norm/RoPE", error)) {
     return false;
   }
   if (impl_->fused_attention) {
-    bool launched = false;
-    if (impl_->rows <= kMaximumMaterializedAttentionRows) {
-      launched = LaunchH3FusedAttention<H3FusedAttentionShort>(
-          impl_->query.As<std::uint16_t>(), impl_->key.As<std::uint16_t>(),
-          impl_->value.As<std::uint16_t>(),
-          impl_->attention_heads.As<std::uint16_t>(), impl_->rows, run_stream);
-    } else {
-      dit_ops::LaunchWmmaAttention(impl_->query.As<std::uint16_t>(),
-                                   impl_->key.As<std::uint16_t>(),
-                                   impl_->value.As<std::uint16_t>(),
-                                   impl_->attention_heads.As<std::uint16_t>(),
-                                   rows, kDitAttentionHeads, run_stream);
-      launched = true;
-    }
-    if (!launched) {
-      SetError(error, "MiniMax H3 fused attention rejected the prepared shape");
-      return false;
-    }
+    dit_ops::LaunchWmmaAttention(impl_->query.As<std::uint16_t>(),
+                                 impl_->key.As<std::uint16_t>(),
+                                 impl_->value.As<std::uint16_t>(),
+                                 impl_->attention_heads.As<std::uint16_t>(),
+                                 rows, kDitAttentionHeads, run_stream);
   } else if (impl_->row_parallel_attention) {
     if (!impl_->attention_gemm.Scores(
             impl_->query.As<std::uint16_t>(), impl_->key.As<std::uint16_t>(),
@@ -1593,9 +1508,7 @@ bool DitBlockSession::RunInternal(
                               : (input_rms_prepared ? 12 : 13);
   telemetry->attention_backend =
       impl_->fused_attention
-          ? (impl_->rows > kMaximumMaterializedAttentionRows
-                 ? "hip_bf16_wmma_flash"
-                 : "ck_bf16_wmma_fused")
+          ? "hip_bf16_wmma_flash"
           : (impl_->row_parallel_attention ? "rocblas_materialized" : "scalar");
   if (device_run) {
     return true;

@@ -29,18 +29,23 @@ not complete-generation latency.
 
 | Sequence rows | Native attention, GPU ms | Real-weight block, GPU ms | Block wall ms |
 | --- | ---: | ---: | ---: |
+| 528 | 0.63 | TODO | TODO |
+| 1,872 | 6.02 | 59.24 | 63.68 |
+| 4,096 | 27.33 | TODO | TODO |
 | 4,097 | 14.20 | TODO | TODO |
 | 7,136 | 42.88 | 320.23 | 332.55 |
 | 37,716 | 1,215.70 | 2,219.87 | 2,284.40 |
 
-Attention averages two timed launches after warm-up; block values are medians
-of three process runs, excluding model loading. The 7,136-row inference trace
+Short attention averages ten timed launches after warm-up; long attention
+averages two. The 1,872-row block is one paired process control; long-block
+values are medians of three process runs. Model loading is excluded. The 7,136-row inference trace
 attributes 81.6% of GPU time to projections and 13.6% to attention, with 0.04 ms
 between kernels. No complete-video speedup is established.
 See [quality evidence](EVALUATION.md#native-attention-qualification)
 and the [measurement record](artifacts/native-attention.json).
 
-The production Nix runtime closure is **7.91 GiB** with no Triton/AOTriton.
+The production Nix runtime closure is **3.82 GiB** with no Triton/AOTriton,
+Composable Kernel or MIOpen dependencies.
 This is package storage, not model RAM or GPU memory.
 
 ## Memory and phase ownership

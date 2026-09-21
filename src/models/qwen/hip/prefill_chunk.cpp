@@ -296,16 +296,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 
       const std::size_t visible_context =
           static_cast<std::size_t>(start_pos) + batch_size;
-      enum class SelectedAttention {
-        kBaseline,
-        kTiled,
-        kComposableKernel,
-      };
-      SelectedAttention selected_attention = SelectedAttention::kBaseline;
-      bool tiled_rejected = false;
-      bool ck_rejected = false;
       // One masked WMMA pass covers the visible prefix and causal diagonal.
-      // Unsupported shapes use the tiled, CK, or scalar fallback below.
+      // Unsupported shapes use the tiled or scalar fallback below.
       // opt-c180-kv-resync: the fused QK-norm/RoPE kernel above already wrote
       // this chunk's K and V into the selected canonical cache plane. Earlier
       // chunks and all three decode paths maintain that same plane. The
@@ -332,10 +324,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       }
 
       if (!wmma_attention) {
+        bool tiled_attention = false;
         detail::DispatchPrefillAttention(
             visible_context,
             [&] {
-              const bool launched = LaunchBatchedAttentionTile(
+              tiled_attention = LaunchBatchedAttentionTile(
                   arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
                   arena_.d_kv_cache,
                   OffsetIfPresent(arena_.d_kv_cache, total_k),
@@ -346,32 +339,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                   arena_.d_ssm_out, attn_layer_idx, start_pos, batch_size,
                   arena_.GetMaxContext(), config.num_attention_heads,
                   config.num_key_value_heads, config.head_dim, arena_.stream);
-              selected_attention = launched ? SelectedAttention::kTiled
-                                            : SelectedAttention::kBaseline;
-              tiled_rejected = !launched;
-              return launched;
+              return tiled_attention;
             },
             [&] {
-              const bool launched = LaunchBatchedAttentionCk(
-                  arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
-                  arena_.d_kv_cache,
-                  OffsetIfPresent(arena_.d_kv_cache, total_k),
-                  arena_.d_attention_kv_f16,
-                  OffsetIfPresent(
-                      static_cast<std::uint16_t*>(arena_.d_attention_kv_f16),
-                      total_k),
-                  arena_.d_scratch_bf16, arena_.d_ssm_out, attn_layer_idx,
-                  start_pos, batch_size, arena_.GetMaxContext(),
-                  config.num_attention_heads, config.num_key_value_heads,
-                  config.head_dim, arena_.stream);
-              selected_attention = launched
-                                       ? SelectedAttention::kComposableKernel
-                                       : SelectedAttention::kBaseline;
-              ck_rejected = !launched;
-              return launched;
-            },
-            [&] {
-              selected_attention = SelectedAttention::kBaseline;
               LaunchBatchedAttention(
                   arena_.d_q, arena_.d_k, arena_.d_v, arena_.d_ssm_gate,
                   arena_.d_kv_cache,
@@ -385,24 +355,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                   config.num_key_value_heads, config.head_dim, arena_.stream,
                   fused_qknorm_rope_kv);
             });
-        if (selected_attention == SelectedAttention::kTiled) {
+        if (tiled_attention) {
           detail::EmitAttentionDispatch("prefill_tiled", "");
-        } else if (selected_attention == SelectedAttention::kComposableKernel) {
-          detail::EmitAttentionDispatch(
-              "prefill_composable_kernel",
-              tiled_rejected ? "prefill_tiled: rejected" : "");
-        } else if (!detail::ShouldAttemptOptimizedAttention(visible_context)) {
-          detail::EmitAttentionDispatch(
-              "prefill_baseline",
-              "prefill_tiled: below_threshold; prefill_composable_kernel: "
-              "below_threshold");
         } else {
           detail::EmitAttentionDispatch(
               "prefill_baseline",
-              tiled_rejected && ck_rejected
-                  ? "prefill_tiled: rejected; prefill_composable_kernel: "
-                    "rejected"
-                  : "optimized_attention: rejected");
+              detail::ShouldAttemptOptimizedAttention(visible_context)
+                  ? "prefill_tiled: rejected"
+                  : "prefill_tiled: below_threshold");
         }
       }
 

@@ -95,14 +95,14 @@ explicit local quality checks.
 
 Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config and the
 following development libraries. The currently qualified toolchain is GCC
-15.3 and ROCm 7.2.3. Attention kernels are compiled directly from HIP;
-Python, Triton and AOTriton are not production build or runtime requirements.
+15.3 and ROCm 7.2.3. Attention and audio convolution kernels are compiled
+directly from HIP. Python, Triton/AOTriton, Composable Kernel and MIOpen are
+not production build or runtime requirements.
 
 | Dependency | Used for |
 | --- | --- |
 | ROCm HIP compiler/runtime, hipBLAS, hipBLASLt, rocBLAS | GPU execution and matrix multiplication |
-| hipCUB, rocPRIM, rocWMMA, Composable Kernel headers | Compiled GPU kernels |
-| MIOpen | ASR audio encoder convolutions |
+| hipCUB, rocPRIM, rocWMMA headers | Compiled GPU kernels |
 | ICU, libcurl, OpenSSL, libpng, libjpeg | Tokenization, HTTPS, hashing and images |
 | FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
 

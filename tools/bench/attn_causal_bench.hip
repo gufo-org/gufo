@@ -12,16 +12,8 @@
 // [position][kv_head][dim], FP32 queries and output laid out
 // [token][head][dim].
 //
-// Why this exists: the production tiled kernel builds both QK^T and PV out of
-// `v_dot2_f32_f16`, which peaks at 29.7 TFLOPS on this part, and reaches only
-// 4.58 TFLOPS -- 15% of its own instruction ceiling and 8% of the 55.05 TFLOPS
-// WMMA ceiling. It is not traffic bound either: it re-reads K and V per query
-// block, 1.62 GiB per layer call at batch 2048, which against its measured
-// 11.6 ms is only 140 GB/s, well under the 241 GB/s DRAM ceiling and far under
-// the 32 MiB MALL its 8 MiB working set fits in. AOTriton's pretuned kernel
-// reaches 15.6 TFLOPS but cannot be masked on gfx11xx. So the masked half has
-// to be written by hand on the matrix cores, and this harness is where that
-// happens.
+// Compare native WMMA tiling against the scalar tiled control. This harness
+// measures matrix throughput, memory traffic and independent FP64 error.
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 

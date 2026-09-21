@@ -16,6 +16,7 @@
 | Explicit eager text-attention boundaries | Retained; independent BF16 formulas and matched upstream backend checks. Oracle metadata now records the actual nested implementations. |
 | Production route cleanup | Retained; removes six environment switches, unused library attention and scratch; BLAS execution errors now fail the request. |
 | Finish normalization within one wave | Retained; fewer barriers with the same sum tree and unchanged logits/tokens. No separate request-throughput gain claimed. |
+| Native BF16 convolutions | Retained; LDS im2col and lossless weight packing replace MIOpen. Preserve the teacher's rotated K accumulation and BF16 rounding; exact raw outputs, unchanged encoder errors, 8.2% faster encoder. |
 
 Next: cold-weight GEMM plan selection, launch overhead and long-form quality.
 No precision reduction is qualified by these experiments.

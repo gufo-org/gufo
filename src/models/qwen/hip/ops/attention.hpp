@@ -142,17 +142,6 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
     std::span<float> packed_k_workspace = {},
     std::span<float> packed_v_workspace = {});
 
-/// Causal GQA through ROCm Composable Kernel. Inputs and outputs remain FP32
-/// at the executor boundary; the fused attention operator uses FP16 tiles with
-/// FP32 accumulation and online softmax. Returns false for unsupported shapes.
-[[nodiscard]] bool LaunchBatchedAttentionCk(
-    const float* q, const float* k, const float* v, const float* gate,
-    float* k_cache, float* v_cache, void* k_cache_f16, void* v_cache_f16,
-    void* scratch_f16, float* out_context, std::uint32_t layer_idx,
-    std::uint32_t start_pos, std::size_t batch_size, std::uint32_t max_context,
-    std::uint32_t num_heads, std::uint32_t num_kv_heads, std::uint32_t head_dim,
-    hipStream_t stream = nullptr);
-
 /// Large-batch causal attention using float32 QK/PV GEMMs and one reusable
 /// [batch, context] score buffer.
 void LaunchBatchedAttentionGemm(

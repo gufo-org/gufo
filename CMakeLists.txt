@@ -45,11 +45,9 @@ if (ENGINE_ENABLE_HIP)
   find_package(hipblas REQUIRED)
   find_package(hipblaslt REQUIRED)
   find_package(rocblas REQUIRED)
-  find_package(miopen REQUIRED)
   find_path(HIPCUB_INCLUDE_DIR hipcub/hipcub.hpp REQUIRED)
   find_path(ROCPRIM_INCLUDE_DIR rocprim/rocprim.hpp REQUIRED)
   find_path(ROCWMMA_INCLUDE_DIR rocwmma/rocwmma.hpp REQUIRED)
-  find_path(COMPOSABLE_KERNEL_INCLUDE_DIR ck/ck.hpp REQUIRED)
   message(STATUS "gufo: HIP target ${CMAKE_HIP_ARCHITECTURES}")
 endif()
 
@@ -165,9 +163,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/speculative/speculative_verifier.cpp
   )
   target_compile_definitions(gufo_core PUBLIC ENGINE_ENABLE_HIP=1)
-  target_compile_definitions(gufo_core PRIVATE CK_ENABLE_BF16=1)
   target_include_directories(gufo_core SYSTEM PRIVATE
-    ${COMPOSABLE_KERNEL_INCLUDE_DIR}
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR})
   target_link_libraries(gufo_core PUBLIC hip::host roc::hipblas

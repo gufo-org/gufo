@@ -22,7 +22,6 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "hipBLASLt",
     "rocBLAS",
     "Composable Kernel",
-    "MIOpen",
     "hipCUB",
     "rocPRIM",
     "rocWMMA",

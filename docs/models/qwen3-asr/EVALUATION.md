@@ -7,9 +7,9 @@ transcript.
 | Boundary | Cosine | Relative L2 | Maximum absolute error |
 |---|---:|---:|---:|
 | CPU log-mel frontend | `1.0` | `9.43e-7` | `7.21e-5` |
-| HIP convolutional frontend | `1.0` | `1.11e-4` | `0.015625` |
+| HIP convolutional frontend | `1.0` | `1.12331e-4` | `0.015625` |
 | Audio encoder layer 0 | `0.999998` | `0.00199` | `0.0625` |
-| Complete audio encoder | `0.999855` | `0.01705` | `0.00830` |
+| Complete audio encoder | `0.999852` | `0.0172329` | `0.00720215` |
 | Text decoder layer 0 | `0.999998` | `0.00195` | `0.0625` |
 | Prefill logits | `0.999211` | `0.04138` | `0.9375` |
 
@@ -23,6 +23,15 @@ The 2026-09-21 component-only weight upload retains all 49 tokens and the
 long-audio, streaming, cancellation and concurrent-request checks. The loader
 test verifies that each selected tensor remains in range and aligned while
 audio-encoder weights are excluded from the text decoder's device copy.
+
+The native convolution replacement on the same date matches **32,317,440/32,317,440**
+BF16 outputs from independent PyTorch `conv2d` calls over the real checkpoint
+and 16 audio chunks. Encoder-boundary errors above are unchanged from the
+MIOpen baseline, and the 49-token transcript, long-audio replay and
+cancellation/concurrency checks pass. The maintained encoder test also compares
+all three convolution shapes against an independent FP64 formula, covering
+padding, spatial tails, weight packing and separate chunks.
+See the [qualification record](artifacts/native-convolution.json).
 
 The current matched oracle explicitly uses **text eager / audio SDPA**.
 The old runner requested eager at the outer wrapper, but both nested attention

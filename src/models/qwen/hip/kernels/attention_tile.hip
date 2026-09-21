@@ -7,11 +7,6 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "ck/ck.hpp"
-#include "ck/tensor_operation/gpu/device/gemm_specialization.hpp"
-#include "ck/tensor_operation/gpu/device/impl/device_grouped_query_attention_forward_wmma.hpp"
-#include "ck/tensor_operation/gpu/device/tensor_specialization.hpp"
-#include "ck/tensor_operation/gpu/element/element_wise_operation.hpp"
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
@@ -364,7 +359,7 @@ __launch_bounds__(256, 3) __global__ void QwenTiledAttentionKernel(
       continue;
     }
     if (lse_out != nullptr && lane == 0) {
-      // log-sum-exp of this partial, in the [head, token] layout AOTriton uses.
+      // log-sum-exp of this partial, in [head, token] layout.
       lse_out[(static_cast<std::size_t>(query_head) * batch_size) +
               local_query_position] =
           (denominator > 0.0F) ? (running_max[column] + logf(denominator))
@@ -426,7 +421,6 @@ bool LaunchBatchedAttentionTile(
       .head_dim = head_dim,
       .has_k_cache_f16 = k_cache_f16 != nullptr,
       .has_v_cache_f16 = v_cache_f16 != nullptr,
-      .has_scratch_f16 = false,
   };
   if (!detail::IsTiledAttentionSupported(support_params)) {
     return false;

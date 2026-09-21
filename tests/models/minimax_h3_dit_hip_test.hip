@@ -769,7 +769,7 @@ int CheckReal() {
     return 1;
   }
   CHECK(telemetry.dispatches > 0);
-  CHECK(telemetry.attention_backend == "ck_bf16_wmma_fused");
+  CHECK(telemetry.attention_backend == "hip_bf16_wmma_flash");
   CHECK(telemetry.weight_bytes > 700ULL * 1024ULL * 1024ULL);
   CHECK(telemetry.activation_bytes > 0);
   CHECK(telemetry.scratch_address == scratch);

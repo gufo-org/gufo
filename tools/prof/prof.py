@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 STAGE_MAPS: dict[str, list[tuple[str, str]]] = {
     "h3": [
         ("WmmaAttention", "attention"),
+        ("ShortAttention", "attention"),
         ("h3_attention_forward", "attention"),
         ("gemm_softmax_gemm", "attention"),
         ("Cijk", "projections"),
@@ -204,7 +205,6 @@ STAGE_MAPS: dict[str, list[tuple[str, str]]] = {
         ("SSMPostNormGate", "ssm: post-norm gate"),
         ("SSM", "ssm: other"),
         ("Attention", "attention"),
-        ("attn_fwd", "attention: aotriton prefix"),
         ("QKNormRoPE", "attention: qk-norm+rope+kv"),
         ("RoPE", "attention: rope"),
         ("PackTiledAttentionKv", "attention: kv pack"),

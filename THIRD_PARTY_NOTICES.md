@@ -15,11 +15,10 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | hipBLAS | Linked | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/hipBLAS](https://github.com/ROCm/hipBLAS) |
 | hipBLASLt | Linked | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/hipBLASLt](https://github.com/ROCm/hipBLASLt) |
 | rocBLAS | Linked | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocBLAS](https://github.com/ROCm/rocBLAS) |
-| MIOpen | Linked; ASR convolutions | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocm-libraries](https://github.com/ROCm/rocm-libraries) |
 | hipCUB | Headers compiled into kernels | `BSD-3-Clause` | ROCm 7.2.3; flake.lock | [ROCm/hipCUB](https://github.com/ROCm/hipCUB) |
 | rocPRIM | Headers compiled into kernels | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocm-libraries](https://github.com/ROCm/rocm-libraries) |
 | rocWMMA | Headers compiled into kernels | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocWMMA](https://github.com/ROCm/rocWMMA) |
-| Composable Kernel | Headers compiled into attention kernels | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/composable_kernel](https://github.com/ROCm/composable_kernel) |
+| Composable Kernel | Adapted short-attention arithmetic; no library/header dependency | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/composable_kernel](https://github.com/ROCm/composable_kernel) |
 | ICU | Linked; Unicode normalization/tokenization | `Unicode-3.0` | 78.3; flake.lock | [unicode-org/icu](https://github.com/unicode-org/icu) |
 | curl / libcurl | Linked; image HTTPS and evaluation client | `curl` | 8.21.0; flake.lock | [curl/curl](https://github.com/curl/curl) |
 | OpenSSL | Linked; cryptographic hashes and HTTPS dependency | `Apache-2.0` | 3.6.3; flake.lock | [openssl/openssl](https://github.com/openssl/openssl) |
@@ -75,7 +74,7 @@ its upstream MIT notice. External model files are never part of the binary packa
 | Torchvision AlexNet weights | Evaluation data only; not shipped | `NOASSERTION` | SHA-256 `7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02` | [PyTorch model distribution](https://download.pytorch.org/models/alexnet-owt-7be5be79.pth) |
 
 Python/PyTorch and reference scripts are not installed with Gufo. Their own
-transitive dependencies, including Triton, remain development-only. Kernel/tuning
+transitive dependencies, including Triton and MIOpen, remain development-only. Kernel/tuning
 executables are built only with `GUFO_BUILD_TOOLS=ON`; ROCprofiler is supplied
 by the development shell. Ordinary build tools (CMake, Ninja, pkg-config,
 and the host compiler) retain their own licenses and are not Gufo code.

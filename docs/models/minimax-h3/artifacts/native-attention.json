@@ -1,62 +1,155 @@
 {
   "date": "2026-09-21",
   "baseline_revision": "1589ed791a843ff05685c74a37b3c2bdb4cf5c1b",
-  "candidate": "native M64/N32 HIP WMMA; CK unchanged for sequences <=4096",
+  "candidate": "native HIP WMMA; 128-key local softmax for <=4096 rows, 32-key online softmax for longer sequences",
   "hardware": "AMD Strix Halo gfx1151",
-  "toolchain": {"rocm": "7.2.3", "gcc": "15.3", "hip_optimization": "-O2"},
+  "toolchain": {
+    "rocm": "7.2.3",
+    "gcc": "15.3",
+    "hip_optimization": "-O2"
+  },
   "scope": {
-    "kernel": "BF16 Q/K/V and output, 56 heads x 128; one warm-up then two timed launches; production compiler flags",
-    "block": "real checkpoint block 0; ProfileBlock deterministic input; optimized diagnostic binary; model loading excluded; three paired process runs",
-    "full_generation": "not run"
+    "long_kernel": "BF16 Q/K/V and output, 56 heads x 128; one warm-up then two timed launches; production compiler flags",
+    "long_block": "real checkpoint block 0; ProfileBlock deterministic input; optimized diagnostic binary; model loading excluded; three paired process runs",
+    "full_generation": "not run",
+    "short_kernel": "BF16 Q/K/V and output, 56 heads x 128; one warm-up and ten timed launches; -O2/gfx1151; comparison with CK uses identical input bytes"
   },
   "kernel_ms": [
-    {"rows": 4097, "triton": 14.8266, "native": 14.2014},
-    {"rows": 7136, "triton": 43.8240, "native": 42.8840},
-    {"rows": 37716, "triton": 1229.3945, "native": 1215.7029}
+    {
+      "rows": 4097,
+      "triton": 14.8266,
+      "native": 14.2014
+    },
+    {
+      "rows": 7136,
+      "triton": 43.824,
+      "native": 42.884
+    },
+    {
+      "rows": 37716,
+      "triton": 1229.3945,
+      "native": 1215.7029
+    }
   ],
   "block_runs": [
     {
       "rows": 7136,
-      "triton_gpu_ms": [325.381, 322.012, 319.411],
-      "native_gpu_ms": [319.642, 320.228, 322.386],
-      "triton_wall_ms": [337.439, 334.409, 332.327],
-      "native_wall_ms": [332.238, 332.553, 336.266]
+      "triton_gpu_ms": [
+        325.381,
+        322.012,
+        319.411
+      ],
+      "native_gpu_ms": [
+        319.642,
+        320.228,
+        322.386
+      ],
+      "triton_wall_ms": [
+        337.439,
+        334.409,
+        332.327
+      ],
+      "native_wall_ms": [
+        332.238,
+        332.553,
+        336.266
+      ]
     },
     {
       "rows": 37716,
-      "triton_gpu_ms": [2192.36, 2239.54, 2262.35],
-      "native_gpu_ms": [2177.75, 2259.68, 2219.87],
-      "triton_wall_ms": [2253.76, 2307.29, 2325.27],
-      "native_wall_ms": [2242.85, 2325.97, 2284.40]
+      "triton_gpu_ms": [
+        2192.36,
+        2239.54,
+        2262.35
+      ],
+      "native_gpu_ms": [
+        2177.75,
+        2259.68,
+        2219.87
+      ],
+      "triton_wall_ms": [
+        2253.76,
+        2307.29,
+        2325.27
+      ],
+      "native_wall_ms": [
+        2242.85,
+        2325.97,
+        2284.4
+      ]
     }
   ],
   "profile_7136_inference": {
     "dispatches": 13,
     "gpu_ms": 319.28,
     "span_ms": 319.32,
-    "projection_ms": 260.50,
+    "projection_ms": 260.5,
     "attention_ms": 43.48,
     "excludes": "weight upload and GEMM plan validation"
   },
-  "native_resources": {"lds_bytes": 17408, "vgpr": 190, "scratch_bytes": 0},
-  "nix_closure_bytes": {"baseline": 9677588096, "native": 8492487048},
+  "native_long_resources": {
+    "lds_bytes": 17408,
+    "vgpr": 190,
+    "scratch_bytes": 0
+  },
+  "nix_closure_bytes": {
+    "baseline": 9677588096,
+    "native": 4106412288,
+    "after_native_long": 8492487048
+  },
   "quality": {
     "authority": "independent FP64 dense attention and maintained FP32 PyTorch checkpoint teacher; Triton is a speed baseline only",
     "analytic": {
-      "rows": [1, 8, 9, 31, 32, 33, 63, 64, 65, 127, 128, 129, 528, 4096, 4097],
+      "rows": [
+        1,
+        8,
+        9,
+        31,
+        32,
+        33,
+        63,
+        64,
+        65,
+        127,
+        128,
+        129,
+        528,
+        4096,
+        4097
+      ],
       "heads": 3,
-      "checks": ["relative L2 <0.004", "relative max <0.01", "all outputs finite", "exact replay", "output guard", "final input head ends at allocation boundary", "uniform and peaked scores"]
+      "checks": [
+        "relative L2 <0.004",
+        "relative max <0.01",
+        "all outputs finite",
+        "exact replay",
+        "output guard",
+        "final input head ends at allocation boundary",
+        "uniform and peaked scores"
+      ]
     },
     "fp64_56_head_control": {
       "sample": "first/middle/last query in first and last heads",
-      "rows": [4097, 7136, 37716],
-      "native_relative_l2": [0.0021470592, 0.0023338936, 0.0023794295],
-      "native_max_abs": [0.00010965912, 0.0001379454, 0.000048937161]
+      "rows": [
+        4097,
+        7136,
+        37716
+      ],
+      "native_relative_l2": [
+        0.0021470592,
+        0.0023338936,
+        0.0023794295
+      ],
+      "native_max_abs": [
+        0.00010965912,
+        0.0001379454,
+        4.8937161e-05
+      ]
     },
     "frozen_528_block": {
       "relative_l2": 0.00461035,
       "relative_max": 0.00483092,
-      "strict_gate": "passed; short CK route unchanged"
+      "strict_gate": "passed; native short arithmetic retains the baseline teacher errors"
     },
     "pytorch_7136_block": {
       "teacher_source": "tools/gufo/h3_dit_golden.py at baseline_revision, with ProfileBlock input and block 0 checkpoint weights",
@@ -80,6 +173,49 @@
       "frozen_forward_video_relative_l2_baseline": 0.0193639,
       "frozen_forward_video_relative_l2_experiment": 0.0341796,
       "decision": "rejected despite isolated block improvement; absent from retained implementation"
+    },
+    "frozen_complete_forward": {
+      "shape": "256x256x22",
+      "source": "tools/gufo/h3_denoiser_golden.py; denoiser-256x256x22-forward-v2",
+      "video_relative_l2": 0.0193639,
+      "video_relative_max": 0.0458577,
+      "audio_relative_l2": 0.0112591,
+      "audio_relative_max": 0.0216204,
+      "comparison": "all four metrics unchanged from CK baseline"
     }
+  },
+  "short_baseline_revision": "247a0836128401c16acee8889d9f5415c48322d0",
+  "production_binary_sha256": "ce73ab914d06e7d493467dbed1d31ef9d52037159eda32fbd8d43c80220a4c6b",
+  "short_kernel_ms": [
+    {
+      "rows": 528,
+      "ck": 0.99788,
+      "native": 0.627543,
+      "mismatched_bf16_outputs": 0,
+      "elements": 3784704
+    },
+    {
+      "rows": 1872,
+      "ck": 17.143454,
+      "native": 6.01862,
+      "mismatched_bf16_outputs": 0,
+      "elements": 13418496
+    },
+    {
+      "rows": 4096,
+      "ck": 139.097504,
+      "native": 27.331402,
+      "mismatched_bf16_outputs": 0,
+      "elements": 29360128
+    }
+  ],
+  "short_real_weight_block": {
+    "rows": 1872,
+    "scope": "one paired optimized diagnostic process control; model loading excluded",
+    "ck_gpu_ms": 70.7942,
+    "native_gpu_ms": 59.2433,
+    "ck_wall_ms": 75.0888,
+    "native_wall_ms": 63.6763,
+    "output_sha256_both": "edadfd6d89efee40dd2b9250786f29e45d55b54671a69939fed7cf333cca177b"
   }
 }

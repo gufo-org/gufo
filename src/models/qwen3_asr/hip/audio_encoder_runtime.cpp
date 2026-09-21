@@ -7,7 +7,6 @@
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
-#include <miopen/miopen.h>
 
 #include <algorithm>
 #include <array>
@@ -60,13 +59,6 @@ void RequireHipblas(hipblasStatus_t status, std::string_view operation) {
   if (status != HIPBLAS_STATUS_SUCCESS) {
     throw std::runtime_error(std::string(operation) + ": status " +
                              std::to_string(status));
-  }
-}
-
-void RequireMiopen(miopenStatus_t status, std::string_view operation) {
-  if (status != miopenStatusSuccess) {
-    throw std::runtime_error(std::string(operation) + ": " +
-                             miopenGetErrorString(status));
   }
 }
 
@@ -147,94 +139,6 @@ DeviceBuffer<hip_bfloat16> UploadBfloat16Async(
   return result;
 }
 
-class TensorDescriptor {
-public:
-  TensorDescriptor() {
-    RequireMiopen(miopenCreateTensorDescriptor(&value_),
-                  "miopenCreateTensorDescriptor");
-  }
-  ~TensorDescriptor() {
-    if (value_ != nullptr) {
-      (void)miopenDestroyTensorDescriptor(value_);
-    }
-  }
-  TensorDescriptor(const TensorDescriptor&) = delete;
-  TensorDescriptor& operator=(const TensorDescriptor&) = delete;
-  void Set(int n, int c, int h, int w) {
-    RequireMiopen(
-        miopenSet4dTensorDescriptor(value_, miopenBFloat16, n, c, h, w),
-        "miopenSet4dTensorDescriptor");
-  }
-  [[nodiscard]] miopenTensorDescriptor_t get() const noexcept { return value_; }
-
-private:
-  miopenTensorDescriptor_t value_{nullptr};
-};
-
-class Convolution {
-public:
-  Convolution(miopenHandle_t handle, int batch, int input_channels,
-              int input_height, int input_width, int output_channels)
-      : handle_(handle) {
-    input_.Set(batch, input_channels, input_height, input_width);
-    weights_.Set(output_channels, input_channels, 3, 3);
-    output_.Set(batch, output_channels, (input_height + 1) / 2,
-                (input_width + 1) / 2);
-    RequireMiopen(miopenCreateConvolutionDescriptor(&convolution_),
-                  "miopenCreateConvolutionDescriptor");
-    RequireMiopen(miopenInitConvolutionDescriptor(
-                      convolution_, miopenConvolution, 1, 1, 2, 2, 1, 1),
-                  "miopenInitConvolutionDescriptor");
-    std::size_t solution_count = 0;
-    RequireMiopen(miopenConvolutionForwardGetSolutionCount(
-                      handle_, weights_.get(), input_.get(), convolution_,
-                      output_.get(), &solution_count),
-                  "miopenConvolutionForwardGetSolutionCount");
-    if (solution_count == 0U) {
-      throw std::runtime_error("MIOpen found no Qwen3-ASR convolution");
-    }
-    std::vector<miopenConvSolution_t> solutions(solution_count);
-    std::size_t returned = 0;
-    RequireMiopen(
-        miopenConvolutionForwardGetSolution(
-            handle_, weights_.get(), input_.get(), convolution_, output_.get(),
-            solutions.size(), &returned, solutions.data()),
-        "miopenConvolutionForwardGetSolution");
-    if (returned == 0U) {
-      throw std::runtime_error("MIOpen returned no Qwen3-ASR convolution");
-    }
-    solution_ = solutions.front().solution_id;
-    workspace_.Reset(
-        (solutions.front().workspace_size + sizeof(std::byte) - 1U) /
-        sizeof(std::byte));
-  }
-
-  ~Convolution() {
-    if (convolution_ != nullptr) {
-      (void)miopenDestroyConvolutionDescriptor(convolution_);
-    }
-  }
-  Convolution(const Convolution&) = delete;
-  Convolution& operator=(const Convolution&) = delete;
-
-  void Run(const void* input, const void* weights, void* output) {
-    RequireMiopen(miopenConvolutionForwardImmediate(
-                      handle_, weights_.get(), weights, input_.get(), input,
-                      convolution_, output_.get(), output, workspace_.get(),
-                      workspace_.size(), solution_),
-                  "miopenConvolutionForwardImmediate");
-  }
-
-private:
-  miopenHandle_t handle_{nullptr};
-  TensorDescriptor input_;
-  TensorDescriptor weights_;
-  TensorDescriptor output_;
-  miopenConvolutionDescriptor_t convolution_{nullptr};
-  std::uint64_t solution_{0};
-  DeviceBuffer<std::byte> workspace_;
-};
-
 std::string LayerName(std::size_t layer, std::string_view suffix) {
   return "thinker.audio_tower.layers." + std::to_string(layer) + "." +
          std::string(suffix);
@@ -271,17 +175,12 @@ struct AudioEncoderHipRuntime::Impl {
                    "hipblasSetStream Qwen3-ASR");
     RequireHipblas(hipblasSetAtomicsMode(blas, HIPBLAS_ATOMICS_NOT_ALLOWED),
                    "hipblasSetAtomicsMode Qwen3-ASR");
-    RequireMiopen(miopenCreate(&miopen), "miopenCreate Qwen3-ASR");
-    RequireMiopen(miopenSetStream(miopen, stream), "miopenSetStream Qwen3-ASR");
     for (const auto& region : model.RegionsFor({"thinker.audio_tower."}))
       core::PrefaultMappedRange(region.data, region.size);
     LoadWeights();
   }
 
   ~Impl() {
-    if (miopen != nullptr) {
-      (void)miopenDestroy(miopen);
-    }
     if (blas != nullptr) {
       (void)hipblasDestroy(blas);
     }
@@ -296,18 +195,28 @@ struct AudioEncoderHipRuntime::Impl {
     return UploadBfloat16Async(store, name, shape, stream);
   }
 
+  DeviceBuffer<hip_bfloat16> UploadConvolution(const TensorStore& store,
+                                               std::string_view name) {
+    auto original = UploadBfloat16(
+        store, name, std::array<std::uint64_t, 4>{480, 480, 3, 3});
+    DeviceBuffer<hip_bfloat16> packed(original.size());
+    LaunchPackConvolutionWeights(original.get(), packed.get(), stream);
+    RequireHip(hipGetLastError(), "pack Qwen3-ASR convolution weights");
+    return packed;
+  }
+
   void LoadWeights() {
     const TensorStore& store = *model.store;
     conv1_weight = UploadBfloat16(store, "thinker.audio_tower.conv2d1.weight",
                                   std::array<std::uint64_t, 4>{480, 1, 3, 3});
     conv1_bias = UploadBfloat16(store, "thinker.audio_tower.conv2d1.bias",
                                 std::array<std::uint64_t, 1>{480});
-    conv2_weight = UploadBfloat16(store, "thinker.audio_tower.conv2d2.weight",
-                                  std::array<std::uint64_t, 4>{480, 480, 3, 3});
+    conv2_weight =
+        UploadConvolution(store, "thinker.audio_tower.conv2d2.weight");
     conv2_bias = UploadBfloat16(store, "thinker.audio_tower.conv2d2.bias",
                                 std::array<std::uint64_t, 1>{480});
-    conv3_weight = UploadBfloat16(store, "thinker.audio_tower.conv2d3.weight",
-                                  std::array<std::uint64_t, 4>{480, 480, 3, 3});
+    conv3_weight =
+        UploadConvolution(store, "thinker.audio_tower.conv2d3.weight");
     conv3_bias = UploadBfloat16(store, "thinker.audio_tower.conv2d3.bias",
                                 std::array<std::uint64_t, 1>{480});
     conv_out = UploadBfloat16(store, "thinker.audio_tower.conv_out.weight",
@@ -327,12 +236,6 @@ struct AudioEncoderHipRuntime::Impl {
     layout.Reset(chunks * kConvTime * kFlattened);
     projected.Reset(chunks * kConvTime * kHidden);
     compact.Reset(chunks * kConvTime * kHidden);
-    first = std::make_unique<Convolution>(miopen, static_cast<int>(chunks), 1,
-                                          128, 100, 480);
-    second = std::make_unique<Convolution>(miopen, static_cast<int>(chunks),
-                                           480, 64, 50, 480);
-    third = std::make_unique<Convolution>(miopen, static_cast<int>(chunks), 480,
-                                          32, 25, 480);
   }
 
   void EnsureEncoderWeights() {
@@ -452,15 +355,21 @@ struct AudioEncoderHipRuntime::Impl {
                "hipMemcpyAsync Qwen3-ASR log-mel");
     LaunchChunkLogMel(feature_input.get(), input.get(), frames,
                       requested_chunks, stream);
-    first->Run(input.get(), conv1_weight.get(), conv1.get());
-    LaunchBiasGelu(conv1.get(), conv1_bias.get(), conv1.size(), kConvChannels,
+    LaunchConvolution3x3(input.get(), conv1_weight.get(), conv1.get(),
+                         requested_chunks, 1, 128, 100, stream);
+    LaunchBiasGelu(conv1.get(), conv1_bias.get(),
+                   requested_chunks * kConvChannels * 64U * 50U, kConvChannels,
                    64U * 50U, stream);
-    second->Run(conv1.get(), conv2_weight.get(), conv2.get());
-    LaunchBiasGelu(conv2.get(), conv2_bias.get(), conv2.size(), kConvChannels,
+    LaunchConvolution3x3(conv1.get(), conv2_weight.get(), conv2.get(),
+                         requested_chunks, 480, 64, 50, stream);
+    LaunchBiasGelu(conv2.get(), conv2_bias.get(),
+                   requested_chunks * kConvChannels * 32U * 25U, kConvChannels,
                    32U * 25U, stream);
-    third->Run(conv2.get(), conv3_weight.get(), conv3.get());
-    LaunchBiasGelu(conv3.get(), conv3_bias.get(), conv3.size(), kConvChannels,
-                   16U * kConvTime, stream);
+    LaunchConvolution3x3(conv2.get(), conv3_weight.get(), conv3.get(),
+                         requested_chunks, 480, 32, 25, stream);
+    LaunchBiasGelu(conv3.get(), conv3_bias.get(),
+                   requested_chunks * kConvChannels * 16U * kConvTime,
+                   kConvChannels, 16U * kConvTime, stream);
     LaunchConvOutputLayout(conv3.get(), layout.get(), requested_chunks, stream);
     Gemm(conv_out.get(), layout.get(), projected.get(),
          requested_chunks * kConvTime, kHidden, kFlattened);
@@ -612,12 +521,8 @@ struct AudioEncoderHipRuntime::Impl {
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
   std::unique_ptr<GemmLt> lt;
-  miopenHandle_t miopen{nullptr};
   std::size_t chunks{0};
   std::size_t token_capacity{0};
-  std::unique_ptr<Convolution> first;
-  std::unique_ptr<Convolution> second;
-  std::unique_ptr<Convolution> third;
   DeviceBuffer<hip_bfloat16> conv1_weight;
   DeviceBuffer<hip_bfloat16> conv1_bias;
   DeviceBuffer<hip_bfloat16> conv2_weight;

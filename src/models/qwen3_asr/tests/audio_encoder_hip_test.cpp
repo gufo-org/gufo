@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -37,6 +38,81 @@ float Bfloat16(float value) {
   std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
   bits += 0x7FFFU + ((bits >> 16U) & 1U);
   return std::bit_cast<float>(bits & 0xFFFF0000U);
+}
+
+void CheckConvolutions() {
+  // Exactly representable products let an independent FP64 convolution test
+  // indexing, packing, padding, spatial tails and batch isolation without a
+  // tolerance that could conceal a wrong channel or tap.
+  const auto encode = [](float value) {
+    return static_cast<std::uint16_t>(
+        std::bit_cast<std::uint32_t>(Bfloat16(value)) >> 16U);
+  };
+  const auto decode = [](std::uint16_t value) {
+    return std::bit_cast<float>(std::uint32_t(value) << 16U);
+  };
+  for (int stage = 0; stage < 3; ++stage) {
+    const int channels = stage == 0 ? 1 : 480;
+    const int height = 128 >> stage;
+    const int width = stage == 0 ? 100 : stage == 1 ? 50 : 25;
+    const int oh = (height + 1) / 2, ow = (width + 1) / 2;
+    const int pixels = oh * ow;
+    std::vector<std::uint16_t> input(2 * channels * height * width);
+    std::vector<std::uint16_t> weight(480 * channels * 9);
+    std::vector<std::uint16_t> output(2 * 480 * pixels + 16);
+    for (std::size_t i = 0; i < input.size(); ++i)
+      input[i] =
+          encode(static_cast<float>(int((i * 17 + i / 31) % 9) - 4) / 16.0F);
+    for (std::size_t i = 0; i < weight.size(); ++i)
+      weight[i] =
+          encode(static_cast<float>(int((i * 13 + i / 7) % 9) - 4) / 16.0F);
+    std::uint16_t *x = nullptr, *w = nullptr, *packed = nullptr, *y = nullptr;
+    Check(hipMalloc(&x, input.size() * 2) == hipSuccess &&
+              hipMalloc(&w, weight.size() * 2) == hipSuccess &&
+              hipMalloc(&packed, weight.size() * 2) == hipSuccess &&
+              hipMalloc(&y, output.size() * 2) == hipSuccess,
+          "allocate convolution check");
+    Check(hipMemcpy(x, input.data(), input.size() * 2, hipMemcpyHostToDevice) ==
+                  hipSuccess &&
+              hipMemcpy(w, weight.data(), weight.size() * 2,
+                        hipMemcpyHostToDevice) == hipSuccess &&
+              hipMemset(y, 0x5a, output.size() * 2) == hipSuccess,
+          "initialize convolution check");
+    if (channels == 480)
+      qwen3_asr_hip::LaunchPackConvolutionWeights(w, packed, nullptr);
+    qwen3_asr_hip::LaunchConvolution3x3(x, channels == 480 ? packed : w, y, 2,
+                                        channels, height, width, nullptr);
+    Check(hipMemcpy(output.data(), y, output.size() * 2,
+                    hipMemcpyDeviceToHost) == hipSuccess,
+          "copy convolution check");
+    for (int batch = 0; batch < 2; ++batch)
+      for (int channel = 0; channel < 480; channel += 7)
+        for (int pixel : {0, 1, ow - 1, ow, 127, 128, pixels - 2, pixels - 1}) {
+          double expected = 0;
+          for (int c = 0; c < channels; ++c)
+            for (int dy = 0; dy < 3; ++dy)
+              for (int dx = 0; dx < 3; ++dx) {
+                const int row = pixel / ow * 2 - 1 + dy;
+                const int col = pixel % ow * 2 - 1 + dx;
+                if (row >= 0 && row < height && col >= 0 && col < width)
+                  expected +=
+                      double(
+                          decode(input[((batch * channels + c) * height + row) *
+                                           width +
+                                       col])) *
+                      decode(
+                          weight[(channel * channels + c) * 9 + dy * 3 + dx]);
+              }
+          Check(output[(batch * 480 + channel) * pixels + pixel] ==
+                    encode(static_cast<float>(expected)),
+                "native convolution differs from independent formula");
+        }
+    for (std::size_t i = output.size() - 16; i < output.size(); ++i)
+      Check(output[i] == 0x5a5a, "convolution overwrote output guard");
+    Check(hipFree(x) == hipSuccess && hipFree(w) == hipSuccess &&
+              hipFree(packed) == hipSuccess && hipFree(y) == hipSuccess,
+          "free convolution check");
+  }
 }
 
 void CheckAttentionTails() {
@@ -180,6 +256,7 @@ double Cosine(std::span<const float> left, std::span<const float> right) {
 }  // namespace
 
 int main() {
+  CheckConvolutions();
   CheckAttentionTails();
   const char* configured_model = std::getenv("QWEN3_ASR_MODEL_ROOT");
   const std::filesystem::path model_root =

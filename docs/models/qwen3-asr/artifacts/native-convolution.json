@@ -1,0 +1,107 @@
+{
+  "date": "2026-09-21",
+  "baseline_revision": "247a0836128401c16acee8889d9f5415c48322d0",
+  "hardware": "AMD Strix Halo gfx1151",
+  "rocm": "7.2.3",
+  "production_binary_sha256": "ce73ab914d06e7d493467dbed1d31ef9d52037159eda32fbd8d43c80220a4c6b",
+  "model_revision": "7278e1e70fe206f11671096ffdd38061171dd6e5",
+  "audio_sha256": "794f24f6f32427d960c1922fec323412f6e953272f380a45d6d7da25cfc94fdc",
+  "oracle": {
+    "source": "independent torch.nn.functional.conv2d with pinned checkpoint BF16 weights and input_features.npy; bias and GELU remain separate BF16 boundaries",
+    "capture_script_sha256": "709d9eaebe346460a006e74f667f9fc6797d325aaaf4337fe2fb303bd013f431",
+    "chunks": 16,
+    "raw_output_elements": [
+      24576000,
+      6144000,
+      1597440
+    ],
+    "mismatched_elements": [
+      0,
+      0,
+      0
+    ],
+    "frontend_relative_l2": 0.000112331,
+    "layer0_relative_l2": 0.00199362,
+    "encoder_relative_l2": 0.0172329,
+    "encoder_max_absolute": 0.00720215,
+    "encoder_vs_baseline": "all measured boundary errors unchanged",
+    "transcript_matches_official": true,
+    "generated_tokens": 49,
+    "maintained_checks": [
+      "independent FP64 convolution samples for all shapes, padding, tails and separate chunks",
+      "frozen encoder tensor comparisons",
+      "full transcript, long audio, cancellation/reuse and concurrent requests"
+    ]
+  },
+  "timing_scope": "Nix production CLI; resident model; one warm-up plus three measured complete requests; 15.05125-second WAV; loading excluded",
+  "baseline": {
+    "audio": "/tmp/qwen3-asr-en.wav",
+    "audio_seconds": 15.05125,
+    "load_ms": 929.264298,
+    "median_audio_encoder_ms": 36.232324,
+    "median_audio_seconds_per_wall_second": 15.215418692339167,
+    "median_decode_audio_ms": 0.555461,
+    "median_feature_extraction_ms": 7.103666,
+    "median_realtime_factor": 0.06572280528195333,
+    "median_text_decoder_ms": 944.784921,
+    "median_total_ms": 989.210373,
+    "model": "/var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5",
+    "repeat": 3,
+    "schema": "gufo.qwen3-asr.benchmark.v1",
+    "transcript": "Uh huh. Oh yeah, yeah. He wasn't even that big when I started listening to him, but and his solo music didn't do overly well, but he did very well when he started writing for other people.",
+    "warmup": 1
+  },
+  "native": {
+    "audio": "/tmp/qwen3-asr-en.wav",
+    "audio_seconds": 15.05125,
+    "load_ms": 371.954847,
+    "median_audio_encoder_ms": 33.2493,
+    "median_audio_seconds_per_wall_second": 15.270015960001034,
+    "median_decode_audio_ms": 0.556022,
+    "median_feature_extraction_ms": 7.294557,
+    "median_realtime_factor": 0.06548781629432772,
+    "median_text_decoder_ms": 944.254154,
+    "median_total_ms": 985.673495,
+    "model": "/var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5",
+    "repeat": 3,
+    "schema": "gufo.qwen3-asr.benchmark.v1",
+    "transcript": "Uh huh. Oh yeah, yeah. He wasn't even that big when I started listening to him, but and his solo music didn't do overly well, but he did very well when he started writing for other people.",
+    "warmup": 1
+  },
+  "interpretation": "8.2% lower encoder latency; whole request remains about 0.99 s, dominated by text decoding; no substantial whole-model gain claimed",
+  "convolution_micro_ms": {
+    "scope": "BF16 checkpoint inputs, 16 chunks, one warm-up plus five timed launches per stage; production compiler flags",
+    "miopen": [
+      0.368971,
+      2.982702,
+      1.822666
+    ],
+    "native": [
+      0.326543,
+      2.16531,
+      0.60837
+    ]
+  },
+  "profile": {
+    "scope": "final warm request, from ChunkLogMel to final kernel; loading and warm-up excluded",
+    "dispatches": 13253,
+    "gpu_ms": 1275.189,
+    "span_ms": 1308.665597,
+    "gpu_busy_percent": 97.44192885663517,
+    "text_projection_ms": 749.633184,
+    "convolution": [
+      {
+        "kernel": "gufo::models::qwen3_asr::hip::(anonymous namespace)::FirstConvolution(unsigned short const*, unsigned short const*, hip_bfloat16*)",
+        "gpu_ms": 0.805556
+      },
+      {
+        "kernel": "void gufo::models::qwen3_asr::hip::(anonymous namespace)::Convolution<64, 50, 480, 32, 6, 2>(unsigned short const*, unsigned short const*, hip_bfloat16*)",
+        "gpu_ms": 2.249834
+      },
+      {
+        "kernel": "void gufo::models::qwen3_asr::hip::(anonymous namespace)::Convolution<32, 25, 480, 32, 6, 2>(unsigned short const*, unsigned short const*, hip_bfloat16*)",
+        "gpu_ms": 0.660003
+      }
+    ]
+  }
+}
