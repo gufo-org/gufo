@@ -44,9 +44,13 @@ fused SwiGLU/activation packing takes **19.06 ms**. Weights are packed once
 during loading; activations are written directly in the native projection's
 layout.
 
-One complete 50-block denoiser forward at **1344×768×124**, with six text rows,
-takes **95.67 s**, excluding setup/loading. This is one diagnostic forward,
-with zero initial latents; it does not run the denoising schedule or VAE.
+**95.67 s is the time for one denoiser evaluation, not a complete video.**
+The exact preset needs **49 evaluations**, followed by video/audio decoding.
+Complete-generation latency remains **TODO**.
+
+This single evaluation runs all 50 transformer blocks at **1344×768×124**,
+with six text rows and zero initial latents. Setup/loading is excluded.
+It does not run the denoising schedule or VAE.
 Peak retained memory is **43.50 GiB**, including **4.94 GiB** scratch.
 
 The full-resolution block trace attributes 58.7% of GPU time to attention
