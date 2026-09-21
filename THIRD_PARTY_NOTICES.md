@@ -16,7 +16,6 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | hipBLASLt | Linked | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/hipBLASLt](https://github.com/ROCm/hipBLASLt) |
 | rocBLAS | Linked | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocBLAS](https://github.com/ROCm/rocBLAS) |
 | MIOpen | Linked; ASR convolutions | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocm-libraries](https://github.com/ROCm/rocm-libraries) |
-| AOTriton | Linked; H3 attention images | `MIT` | 0.11.1b; flake.lock | [ROCm/aotriton](https://github.com/ROCm/aotriton) |
 | hipCUB | Headers compiled into kernels | `BSD-3-Clause` | ROCm 7.2.3; flake.lock | [ROCm/hipCUB](https://github.com/ROCm/hipCUB) |
 | rocPRIM | Headers compiled into kernels | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocm-libraries](https://github.com/ROCm/rocm-libraries) |
 | rocWMMA | Headers compiled into kernels | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocWMMA](https://github.com/ROCm/rocWMMA) |
@@ -65,7 +64,6 @@ its upstream MIT notice. External model files are never part of the binary packa
 | Component Name | Relationship | License (SPDX) | Pinned Revision / Version | Upstream Source / Location |
 | --- | --- | --- | --- | --- |
 | LLVM/Clang | HIP build toolchain | `Apache-2.0 WITH LLVM-exception` | ROCm LLVM from flake.lock | [ROCm/llvm-project](https://github.com/ROCm/llvm-project) |
-| Triton | Build-time compilation of retained H3 kernels | `MIT` | 3.7.0; flake.lock | [triton-lang/triton](https://github.com/triton-lang/triton) |
 | ROCprofiler SDK / ROCTx | Development profiling and benchmark markers only | `MIT` | ROCm 7.2.3; flake.lock | [ROCm/rocprofiler-sdk](https://github.com/ROCm/rocprofiler-sdk) |
 | PyTorch ROCm | Independent evaluation; not shipped | `BSD-3-Clause` | 2.12.0; flake.lock | [pytorch/pytorch](https://github.com/pytorch/pytorch) |
 | Torchvision | Evaluation; not shipped | `BSD-3-Clause` | 0.27.0; flake.lock | [pytorch/vision](https://github.com/pytorch/vision) |
@@ -76,11 +74,11 @@ its upstream MIT notice. External model files are never part of the binary packa
 | SoX | Development audio utility | `GPL-2.0-or-later` | flake.lock | [SoX](https://sourceforge.net/projects/sox/) |
 | Torchvision AlexNet weights | Evaluation data only; not shipped | `NOASSERTION` | SHA-256 `7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02` | [PyTorch model distribution](https://download.pytorch.org/models/alexnet-owt-7be5be79.pth) |
 
-Python/PyTorch and reference scripts are not installed with Gufo. Triton is
-needed while building H3's native code, not during inference. Kernel/tuning
+Python/PyTorch and reference scripts are not installed with Gufo. Their own
+transitive dependencies, including Triton, remain development-only. Kernel/tuning
 executables are built only with `GUFO_BUILD_TOOLS=ON`; ROCprofiler is supplied
 by the development shell. Ordinary build tools (CMake, Ninja, pkg-config,
-Python and the host compiler) retain their own licenses and are not Gufo code.
+and the host compiler) retain their own licenses and are not Gufo code.
 
 The LPIPS evaluator checks the AlexNet digest above and calibration digest
 `df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0`, records the

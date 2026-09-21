@@ -93,36 +93,28 @@ explicit local quality checks.
 
 ### Without Nix
 
-Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config, Python 3.10+ and the
+Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config and the
 following development libraries. The currently qualified toolchain is GCC
-15.3, ROCm 7.2.3, AOTriton 0.11.1b and Triton 3.7.0.
+15.3 and ROCm 7.2.3. Attention kernels are compiled directly from HIP;
+Python, Triton and AOTriton are not production build or runtime requirements.
 
 | Dependency | Used for |
 | --- | --- |
 | ROCm HIP compiler/runtime, hipBLAS, hipBLASLt, rocBLAS | GPU execution and matrix multiplication |
 | hipCUB, rocPRIM, rocWMMA, Composable Kernel headers | Compiled GPU kernels |
 | MIOpen | ASR audio encoder convolutions |
-| AOTriton, including **gfx1151 kernel images** | H3 attention |
 | ICU, libcurl, OpenSSL, libpng, libjpeg | Tokenization, HTTPS, hashing and images |
 | FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
-| Python Triton 3.7.0 | Build-time H3 kernel compilation; not needed to run Gufo |
 
 Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
-Use the development packages for the libraries above. AOTriton's Python package
-alone is insufficient: CMake needs its headers, `aotriton-config.cmake`, shared
-library and gfx1151 images. If building it from
-[the upstream source](https://github.com/ROCm/aotriton/tree/0.11.1b), select
-`-DAOTRITON_TARGET_ARCH=gfx1151 -DAOTRITON_USE_TORCH=OFF` and follow its install
-instructions. ROCm normally installs under `/opt/rocm`.
+Use the development packages for the libraries above. ROCm normally installs
+under `/opt/rocm`.
 
 For example, on Debian/Ubuntu the ordinary system libraries are:
 
 ```sh
-sudo apt install build-essential cmake ninja-build pkg-config python3-venv \
+sudo apt install build-essential cmake ninja-build pkg-config \
   libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev ffmpeg
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install triton==3.7.0
 
 cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 cmake --build --preset release --parallel 4
@@ -130,9 +122,9 @@ cmake --build --preset release --parallel 4
 ./build/release/gufo serve llm --model /path/to/model.gguf
 ```
 
-Install the ROCm/AOTriton dependencies from the table before configuring.
+Install the ROCm dependencies from the table before configuring.
 For nonstandard installations, pass ordinary CMake paths, for example
-`cmake --preset release -DCMAKE_PREFIX_PATH="/opt/rocm;/opt/aotriton"`.
+`cmake --preset release -DCMAKE_PREFIX_PATH="/opt/rocm"`.
 If compiler discovery picks a system Clang, also pass
 `-DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++`.
 Use `cmake --install build/release` to install Gufo,

@@ -29,7 +29,7 @@ Use the smallest independent oracle covering the change:
 | --- | --- |
 | Loader/tokenizer/API | malformed inventory, exact token IDs, lifecycle and protocol tests |
 | Sampler or schedule | analytic host/HIP layout, shifted grids, seeded noise, Euler trajectory, reuse ranking |
-| DiT operator/block | analytic primitives and one frozen 528-row block; profile one 1,872-row block |
+| DiT operator/block | analytic primitives, native attention tails/replay against FP64 and one frozen 528-row block; qualify the affected long shape separately |
 | Cross-block denoiser | one complete forward against the frozen conditioning and input latents |
 | VisualVAE | one selected-frame tile against its F32 teacher |
 | AudioVAE | one stereo waveform and deterministic STFT comparison |
@@ -57,7 +57,7 @@ Real-checkpoint tests use operator-owned artifacts and explicit
 
 ```sh
 GUFO_H3_MODEL_ROOT=/var/llms/huggingface/MiniMax-H3 \
-GUFO_H3_DENOISER_GOLDEN=/var/llms/huggingface/gufo-h3-oracles/denoiser-256x256x22-forward-v2 \
+GUFO_H3_DENOISER_GOLDEN=/var/llms/huggingface/strix-h3-oracles/denoiser-256x256x22-forward-v2 \
   nix develop -c ./build/gpu-test/minimax_h3_denoiser_hip_test --oracle-forward
 ```
 
@@ -79,13 +79,12 @@ nix develop -c python3 tools/h3/gufo-h3-quality.py verify \
   --artifact /var/llms/h3-oracles/sha256/<sha256>
 ```
 
-The following retained measurements document component evidence; this
-documentation cleanup does not rerun or extend it:
+The following retained measurements document component evidence:
 
 | Boundary | Relative L2 | Relative max |
 | --- | ---: | ---: |
 | prompt layers 1 and 50, six-token fox prompt | `0` | `0` |
-| 528-row block output | `0.00461029` | `0.00483092` |
+| 528-row block output, rechecked 2026-09-21 | `0.00461035` | `0.00483092` |
 | 512x512x22 refined text | `0.00469088` | `0.00167411` |
 | 512x512x22 block-0 modulation | `0.0022895` | `0.00478469` |
 | 512x512x22 video velocity | `0.0132707` | `0.0154553` |
@@ -93,6 +92,35 @@ documentation cleanup does not rerun or extend it:
 | selected VisualVAE frames | `8.14968e-7` | `2.24925e-6` |
 | AudioVAE waveform | `1.08936e-5` | max absolute `6.03162e-5` |
 | AudioVAE STFT | `3.62714e-6` | `5.8276e-6` |
+
+### Native attention qualification
+
+On 2026-09-21, the native HIP replacement was evaluated against independent formulas and
+checkpoint teachers. Agreement with the removed Triton kernel is not the
+quality oracle. The short CK route and frozen ceilings above are unchanged.
+
+- The maintained analytic test compares dense attention with FP64 softmax/PV
+  at 1/8/9, 31/32/33, 63/64/65, 127/128/129, 528 and 4096/4097 rows,
+  including uniform and peaked scores. Relative L2 stays below `0.004` and
+  relative max below `0.01`; all outputs are finite and repeated launches
+  are byte-identical. Input allocations end at the final head's tail, and
+  an output guard checks stores beyond the valid extent.
+- A separate 56-head control at 4097/7136/37716 rows gives FP64-relative L2
+  `0.0021471` / `0.0023339` / `0.0023794` on first/middle/last queries in
+  the first and last heads.
+- A real-weight 7136-row block, using the profiling input and independent
+  FP32 PyTorch teacher, gives output relative L2 `0.00387690`.
+  Relative max is `0.0104167`, the same pre-existing outlier as the removed
+  implementation. This additional stress case therefore exceeds the frozen
+  528-row fixture's 1% max ceiling; it demonstrates no added error on this
+  case, not a newly passed strict block gate. The frozen 528-row gate passes.
+- A short-path probability-refinement experiment improved one block but
+  worsened the complete-forward teacher result. It was rejected; its
+  arithmetic is absent from the retained kernel.
+
+Raw tensors and traces remain outside Git. The compact
+[qualification record](artifacts/native-attention.json) contains identities,
+metrics and measurement scope. No full denoising schedule or video was generated.
 
 Component agreement does not establish end-to-end semantic quality. Pre-audit
 multi-step latents and checkerboard video captures are invalid promotion

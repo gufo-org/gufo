@@ -4,7 +4,6 @@
   cmake,
   ninja,
   pkg-config,
-  python313,
   icu,
   curl,
   libpng,
@@ -17,7 +16,6 @@
 
 let
   sourceRoot = ../..;
-  h3TritonCompiler = python313.withPackages (ps: [ ps.triton ]);
   productionSource = lib.cleanSourceWith {
     src = sourceRoot;
     filter =
@@ -39,11 +37,7 @@ let
       || relativePath == "tests/models"
       || relativePath == "tests/models/deepseek_v4_flash"
       || relativePath == "tests/models/deepseek_v4_flash/fixtures"
-      || relativePath == "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
-      || relativePath == "tools"
-      || relativePath == "tools/gufo"
-      || relativePath == "tools/gufo/compile_h3_attention.py"
-      || relativePath == "tools/gufo/h3_attention_kernel.py";
+      || relativePath == "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json";
   };
 in
 stdenv.mkDerivation {
@@ -56,7 +50,6 @@ stdenv.mkDerivation {
     ninja
     pkg-config
     rocmPackages.clr
-    h3TritonCompiler
   ];
 
   buildInputs = [
@@ -75,7 +68,6 @@ stdenv.mkDerivation {
     rocmPackages.rocwmma
     rocmPackages.rocblas
     rocmPackages.composable_kernel
-    rocmPackages.aotriton
   ];
 
   cmakeFlags = [

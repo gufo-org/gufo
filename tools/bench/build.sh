@@ -52,9 +52,6 @@ for t in "${targets[@]}"; do
   if grep -q "hipblas" "$src"; then
     extra+=(-lhipblas -lhipblaslt -lrocblas)
   fi
-  if grep -q "aotriton" "$src"; then
-    extra+=(-laotriton_v2)
-  fi
   echo "==> $src -> $out"
   compile=(hipcc -O3 --offload-arch=gfx1151 -std=c++20
     -I. "${inc[@]}" -Rpass-analysis=kernel-resource-usage)

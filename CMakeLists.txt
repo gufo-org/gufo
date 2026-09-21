@@ -41,43 +41,16 @@ endif()
 
 if (ENGINE_ENABLE_HIP)
   enable_language(HIP)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   find_package(hip REQUIRED)
   find_package(hipblas REQUIRED)
   find_package(hipblaslt REQUIRED)
   find_package(rocblas REQUIRED)
   find_package(miopen REQUIRED)
-  find_package(aotriton CONFIG REQUIRED)
   find_path(HIPCUB_INCLUDE_DIR hipcub/hipcub.hpp REQUIRED)
   find_path(ROCPRIM_INCLUDE_DIR rocprim/rocprim.hpp REQUIRED)
   find_path(ROCWMMA_INCLUDE_DIR rocwmma/rocwmma.hpp REQUIRED)
   find_path(COMPOSABLE_KERNEL_INCLUDE_DIR ck/ck.hpp REQUIRED)
-  execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import triton"
-    RESULT_VARIABLE GUFO_TRITON_IMPORT OUTPUT_QUIET ERROR_QUIET)
-  if (NOT GUFO_TRITON_IMPORT EQUAL 0)
-    message(FATAL_ERROR "The build needs Python Triton to compile H3 attention; see README.md")
-  endif()
   message(STATUS "gufo: HIP target ${CMAKE_HIP_ARCHITECTURES}")
-
-  set(GUFO_H3_ATTENTION_GENERATED_DIR
-    "${CMAKE_CURRENT_BINARY_DIR}/generated")
-  set(GUFO_H3_ATTENTION_GENERATED_HEADER
-    "${GUFO_H3_ATTENTION_GENERATED_DIR}/h3_attention_gfx1151.hpp")
-  add_custom_command(
-    OUTPUT "${GUFO_H3_ATTENTION_GENERATED_HEADER}"
-    COMMAND "${CMAKE_COMMAND}" -E env
-      "HOME=${CMAKE_CURRENT_BINARY_DIR}/triton-home"
-      "XDG_CACHE_HOME=${CMAKE_CURRENT_BINARY_DIR}/triton-cache"
-      "TRITON_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/triton-cache"
-      "TRITON_F32_DEFAULT=ieee"
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tools/gufo/compile_h3_attention.py"
-      --output "${GUFO_H3_ATTENTION_GENERATED_HEADER}"
-    DEPENDS
-      "${CMAKE_CURRENT_SOURCE_DIR}/tools/gufo/compile_h3_attention.py"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tools/gufo/h3_attention_kernel.py"
-    COMMENT "Compiling spill-free gfx1151 MiniMax H3 attention"
-    VERBATIM)
 endif()
 
 if (ENGINE_ENABLE_HIP)
@@ -188,7 +161,7 @@ if (ENGINE_ENABLE_HIP)
     src/models/minimax_h3/prompt_encoder.hip
     src/models/minimax_h3/sampling.hip
     src/models/minimax_h3/video_vae.hip
-    "${GUFO_H3_ATTENTION_GENERATED_HEADER}"
+    src/models/minimax_h3/attention.hip
     src/core/speculative/speculative_verifier.cpp
   )
   target_compile_definitions(gufo_core PUBLIC ENGINE_ENABLE_HIP=1)
@@ -197,10 +170,8 @@ if (ENGINE_ENABLE_HIP)
     ${COMPOSABLE_KERNEL_INCLUDE_DIR}
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR})
-  target_include_directories(gufo_core PRIVATE
-    "${GUFO_H3_ATTENTION_GENERATED_DIR}")
   target_link_libraries(gufo_core PUBLIC hip::host roc::hipblas
-    roc::hipblaslt roc::rocblas aotriton_v2)
+    roc::hipblaslt roc::rocblas)
 endif()
 
 add_library(gufo_llm_cli STATIC

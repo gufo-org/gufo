@@ -311,7 +311,6 @@ nix develop -c tools/bench/build.sh tools/qwen27b/prefill_gemm_bench.hip
 /tmp/prefill_gemm_bench q8-swiglu 2048 12
 
 /tmp/bf16_gemm_bench -b 2048     # hipBLAS / hipBLASLt bar to beat
-/tmp/aotriton_attn_bench -i 5    # AOTriton flash-attention capability probe
 /tmp/asr_decode_gemv_bench       # batch-one decode GEMV vs the DRAM ceiling
 ```
 
@@ -350,6 +349,11 @@ nix develop -c python3 tools/prof/prof.py show /tmp/prof/prof_results.db --passe
 
 # A/B two runs, per stage and per kernel
 nix develop -c python3 tools/prof/prof.py diff before_results.db after_results.db
+
+# H3: one real-weight block, without generating a video
+GUFO_H3_MODEL_ROOT=/var/llms/huggingface/MiniMax-H3 \
+  nix develop -c python3 tools/prof/prof.py run --stages h3 -- \
+  ./build/gpu-test/minimax_h3_dit_hip_test --profile-7136-fused
 ```
 
 A benchmark trace holds several passes (model upload, a warm-up prefill, the

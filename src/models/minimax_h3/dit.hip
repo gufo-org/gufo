@@ -1,6 +1,5 @@
 #if defined(ENGINE_ENABLE_HIP)
 
-#include <aotriton/flash.h>
 #include <fcntl.h>
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
@@ -26,7 +25,7 @@
 #include "ck/tensor_operation/gpu/device/impl/device_batched_gemm_softmax_gemm_permute_wmma_cshuffle.hpp"
 #include "ck/tensor_operation/gpu/device/tensor_specialization.hpp"
 #include "ck/tensor_operation/gpu/element/element_wise_operation.hpp"
-#include "h3_attention_gfx1151.hpp"
+#include "src/models/minimax_h3/attention.hip.hpp"
 #include "src/models/minimax_h3/dit.hpp"
 #include "src/models/minimax_h3/dit_ops.hip.hpp"
 
@@ -39,16 +38,6 @@ constexpr std::size_t kWeightStagingBytes = 16ULL << 20U;
 constexpr std::size_t kMaximumAttentionRows = 131'072;
 constexpr std::size_t kMaximumScalarAttentionRows = 16'384;
 constexpr std::size_t kMaximumMaterializedAttentionRows = 4'096;
-// Below the materialized-attention threshold the CK fused kernel is selected
-// instead, so the Triton kernel only needs to cover the long sequences.
-constexpr std::size_t kMinimumTritonAttentionRows =
-    kMaximumMaterializedAttentionRows + 1;
-// The kernel is compiled with `tt.pointer_range = 32`, which is what keeps it
-// spill-free. Head 55 addresses `heads * sequence * head_dim` elements, so that
-// product must stay inside a signed 32-bit offset.
-constexpr std::size_t kMaximumTritonAttentionRows =
-    static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) /
-    (kDitAttentionHeads * kDitHeadDimension);
 // Pinned by byte-repeat validation on gfx1151 with the repository's ROCm
 // 7.2.3 toolchain. A changed rocBLAS database fails session construction.
 constexpr rocblas_int kGfx1151RocblasBf16Solution = -1162085109;
@@ -159,100 +148,6 @@ bool LaunchH3FusedAttention(const std::uint16_t* query,
   config.stream_id_ = stream;
   config.time_kernel_ = false;
   operation.MakeInvoker().Run(argument, config);
-  return true;
-}
-
-bool LaunchH3AotritonAttention(const std::uint16_t* query,
-                               const std::uint16_t* key,
-                               const std::uint16_t* value,
-                               std::uint16_t* output, float* softmax_lse,
-                               std::size_t sequence, hipStream_t stream) {
-  using aotriton::DType;
-  using aotriton::TensorView;
-  const std::uint64_t rows = sequence;
-  const std::uint64_t heads = kDitAttentionHeads;
-  const std::uint64_t dimension = kDitHeadDimension;
-  const std::array<std::uint64_t, 4> sizes{1, heads, rows, dimension};
-  const std::array<std::uint64_t, 4> strides{heads * rows * dimension,
-                                             rows * dimension, dimension, 1};
-  const std::array<std::uint64_t, 4> output_strides{
-      heads * rows * dimension, dimension, heads * dimension, 1};
-  const auto q = TensorView<4>(reinterpret_cast<intptr_t>(query), sizes,
-                               strides, DType::kBFloat16);
-  const auto k = TensorView<4>(reinterpret_cast<intptr_t>(key), sizes, strides,
-                               DType::kBFloat16);
-  const auto v = TensorView<4>(reinterpret_cast<intptr_t>(value), sizes,
-                               strides, DType::kBFloat16);
-  // Q/K/V are head-major for AOTriton. Write the result directly in the
-  // row-major layout consumed by the following projection, avoiding a
-  // full-tensor transpose.
-  const auto out = TensorView<4>(reinterpret_cast<intptr_t>(output), sizes,
-                                 output_strides, DType::kBFloat16);
-  const auto lse = TensorView<2>(reinterpret_cast<intptr_t>(softmax_lse),
-                                 {heads, rows}, {rows, 1}, DType::kFloat32);
-  const auto empty_bf16 = TensorView<4>::get_null_tensor(DType::kBFloat16);
-  const auto empty_float = TensorView<4>::get_null_tensor(DType::kFloat32);
-  const auto empty_u64 = TensorView<0>::get_null_tensor(DType::kUInt64);
-  const hipError_t status = aotriton::v2::flash::attn_fwd(
-      q, k, v, empty_bf16,
-      1.0F / std::sqrt(static_cast<float>(kDitHeadDimension)), lse, out, 0.0F,
-      empty_u64, empty_u64, 0, empty_u64, empty_u64, empty_float, false,
-      empty_u64, aotriton::Stream(stream));
-  return status == hipSuccess;
-}
-
-struct H3TritonAttentionKernel {
-  hipModule_t module{nullptr};
-  hipFunction_t function{nullptr};
-  hipError_t status{hipErrorUnknown};
-
-  H3TritonAttentionKernel() {
-    status = hipModuleLoadData(&module, generated::kH3AttentionCode.data());
-    if (status == hipSuccess) {
-      status = hipModuleGetFunction(&function, module, "h3_attention_forward");
-    }
-  }
-};
-
-bool LaunchH3TritonAttention(const std::uint16_t* query,
-                             const std::uint16_t* key,
-                             const std::uint16_t* value, std::uint16_t* output,
-                             std::size_t sequence, hipStream_t stream) {
-  // The kernel masks its query rows and peels a separately instantiated masked
-  // key tail, so it is correct for any length, not just the released canvas.
-  // Pinning it to one row count meant a prompt of any length other than six
-  // tokens silently fell back to the generic kernel.
-  if (sequence < kMinimumTritonAttentionRows ||
-      sequence > kMaximumTritonAttentionRows) {
-    return false;
-  }
-  static H3TritonAttentionKernel kernel;
-  if (kernel.status != hipSuccess || kernel.function == nullptr) {
-    return false;
-  }
-
-  auto* query_argument = const_cast<std::uint16_t*>(query);
-  auto* key_argument = const_cast<std::uint16_t*>(key);
-  auto* value_argument = const_cast<std::uint16_t*>(value);
-  auto* output_argument = output;
-  std::int32_t sequence_argument = static_cast<std::int32_t>(sequence);
-  void* global_scratch = nullptr;
-  void* profile_scratch = nullptr;
-  void* parameters[] = {
-      &query_argument,    &key_argument,   &value_argument,  &output_argument,
-      &sequence_argument, &global_scratch, &profile_scratch,
-  };
-  const std::uint32_t grid_x = static_cast<std::uint32_t>(
-      (sequence + generated::kH3AttentionBlockM - 1U) /
-      generated::kH3AttentionBlockM);
-  const hipError_t status = hipModuleLaunchKernel(
-      kernel.function, grid_x, kDitAttentionHeads, 1,
-      generated::kH3AttentionThreads, 1, 1, generated::kH3AttentionSharedBytes,
-      stream, parameters, nullptr);
-  if (status != hipSuccess) {
-    (void)hipGetLastError();
-    return false;
-  }
   return true;
 }
 
@@ -961,7 +856,6 @@ struct DitBlockSession::Impl {
   DeviceBuffer value;
   DeviceBuffer normalization_factors;
   DeviceBuffer attention_heads;
-  DeviceBuffer attention_lse;
   DeviceBuffer owned_attention_scores;
   DeviceBuffer owned_attention_probabilities;
   float* attention_scores{nullptr};
@@ -1192,9 +1086,6 @@ std::unique_ptr<DitBlockSession> DitBlockSession::Create(
                     normalization_factor_elements * sizeof(float)) ||
       !alias_region(&impl->attention_heads, layout.qkv_fc1,
                     bf16_bytes(attention_elements)) ||
-      (options.rows > kMaximumMaterializedAttentionRows &&
-       !alias_region(&impl->attention_lse, layout.normalization,
-                     options.rows * kDitAttentionHeads * sizeof(float))) ||
       !alias_region(&impl->attention_output, layout.value_outputs,
                     bf16_bytes(hidden_elements)) ||
       !alias_region(&impl->gated_attention, layout.state,
@@ -1582,7 +1473,6 @@ bool DitBlockSession::RunInternal(
   if (!CheckLaunch("H3 DiT grouped QKV norm/RoPE", error)) {
     return false;
   }
-  bool used_gfx1151_triton_attention = false;
   if (impl_->fused_attention) {
     bool launched = false;
     if (impl_->rows <= kMaximumMaterializedAttentionRows) {
@@ -1591,17 +1481,12 @@ bool DitBlockSession::RunInternal(
           impl_->value.As<std::uint16_t>(),
           impl_->attention_heads.As<std::uint16_t>(), impl_->rows, run_stream);
     } else {
-      used_gfx1151_triton_attention = LaunchH3TritonAttention(
-          impl_->query.As<std::uint16_t>(), impl_->key.As<std::uint16_t>(),
-          impl_->value.As<std::uint16_t>(),
-          impl_->attention_heads.As<std::uint16_t>(), impl_->rows, run_stream);
-      launched =
-          used_gfx1151_triton_attention ||
-          LaunchH3AotritonAttention(
-              impl_->query.As<std::uint16_t>(), impl_->key.As<std::uint16_t>(),
-              impl_->value.As<std::uint16_t>(),
-              impl_->attention_heads.As<std::uint16_t>(),
-              impl_->attention_lse.As<float>(), impl_->rows, run_stream);
+      dit_ops::LaunchWmmaAttention(impl_->query.As<std::uint16_t>(),
+                                   impl_->key.As<std::uint16_t>(),
+                                   impl_->value.As<std::uint16_t>(),
+                                   impl_->attention_heads.As<std::uint16_t>(),
+                                   rows, kDitAttentionHeads, run_stream);
+      launched = true;
     }
     if (!launched) {
       SetError(error, "MiniMax H3 fused attention rejected the prepared shape");
@@ -1708,11 +1593,9 @@ bool DitBlockSession::RunInternal(
                               : (input_rms_prepared ? 12 : 13);
   telemetry->attention_backend =
       impl_->fused_attention
-          ? (used_gfx1151_triton_attention
-                 ? "triton_gfx1151_bf16_flash"
-                 : (impl_->rows > kMaximumMaterializedAttentionRows
-                        ? "aotriton_bf16_flash"
-                        : "ck_bf16_wmma_fused"))
+          ? (impl_->rows > kMaximumMaterializedAttentionRows
+                 ? "hip_bf16_wmma_flash"
+                 : "ck_bf16_wmma_fused")
           : (impl_->row_parallel_attention ? "rocblas_materialized" : "scalar");
   if (device_run) {
     return true;

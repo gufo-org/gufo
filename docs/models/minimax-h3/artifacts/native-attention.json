@@ -1,0 +1,85 @@
+{
+  "date": "2026-09-21",
+  "baseline_revision": "1589ed791a843ff05685c74a37b3c2bdb4cf5c1b",
+  "candidate": "native M64/N32 HIP WMMA; CK unchanged for sequences <=4096",
+  "hardware": "AMD Strix Halo gfx1151",
+  "toolchain": {"rocm": "7.2.3", "gcc": "15.3", "hip_optimization": "-O2"},
+  "scope": {
+    "kernel": "BF16 Q/K/V and output, 56 heads x 128; one warm-up then two timed launches; production compiler flags",
+    "block": "real checkpoint block 0; ProfileBlock deterministic input; optimized diagnostic binary; model loading excluded; three paired process runs",
+    "full_generation": "not run"
+  },
+  "kernel_ms": [
+    {"rows": 4097, "triton": 14.8266, "native": 14.2014},
+    {"rows": 7136, "triton": 43.8240, "native": 42.8840},
+    {"rows": 37716, "triton": 1229.3945, "native": 1215.7029}
+  ],
+  "block_runs": [
+    {
+      "rows": 7136,
+      "triton_gpu_ms": [325.381, 322.012, 319.411],
+      "native_gpu_ms": [319.642, 320.228, 322.386],
+      "triton_wall_ms": [337.439, 334.409, 332.327],
+      "native_wall_ms": [332.238, 332.553, 336.266]
+    },
+    {
+      "rows": 37716,
+      "triton_gpu_ms": [2192.36, 2239.54, 2262.35],
+      "native_gpu_ms": [2177.75, 2259.68, 2219.87],
+      "triton_wall_ms": [2253.76, 2307.29, 2325.27],
+      "native_wall_ms": [2242.85, 2325.97, 2284.40]
+    }
+  ],
+  "profile_7136_inference": {
+    "dispatches": 13,
+    "gpu_ms": 319.28,
+    "span_ms": 319.32,
+    "projection_ms": 260.50,
+    "attention_ms": 43.48,
+    "excludes": "weight upload and GEMM plan validation"
+  },
+  "native_resources": {"lds_bytes": 17408, "vgpr": 190, "scratch_bytes": 0},
+  "nix_closure_bytes": {"baseline": 9677588096, "native": 8492487048},
+  "quality": {
+    "authority": "independent FP64 dense attention and maintained FP32 PyTorch checkpoint teacher; Triton is a speed baseline only",
+    "analytic": {
+      "rows": [1, 8, 9, 31, 32, 33, 63, 64, 65, 127, 128, 129, 528, 4096, 4097],
+      "heads": 3,
+      "checks": ["relative L2 <0.004", "relative max <0.01", "all outputs finite", "exact replay", "output guard", "final input head ends at allocation boundary", "uniform and peaked scores"]
+    },
+    "fp64_56_head_control": {
+      "sample": "first/middle/last query in first and last heads",
+      "rows": [4097, 7136, 37716],
+      "native_relative_l2": [0.0021470592, 0.0023338936, 0.0023794295],
+      "native_max_abs": [0.00010965912, 0.0001379454, 0.000048937161]
+    },
+    "frozen_528_block": {
+      "relative_l2": 0.00461035,
+      "relative_max": 0.00483092,
+      "strict_gate": "passed; short CK route unchanged"
+    },
+    "pytorch_7136_block": {
+      "teacher_source": "tools/gufo/h3_dit_golden.py at baseline_revision, with ProfileBlock input and block 0 checkpoint weights",
+      "model_source": "tests/fixtures/minimax_h3/dit-block0-oracle-v1.json",
+      "baseline_relative_l2": 0.003876928493197356,
+      "native_relative_l2": 0.0038768976051234776,
+      "baseline_relative_max": 0.010416666666666666,
+      "native_relative_max": 0.010416666666666666,
+      "limitation": "Same pre-existing maximum-error outlier, above the frozen 528-row fixture's 0.01 ceiling; diagnostic non-regression evidence, not a new strict gate pass.",
+      "payload_sha256": {
+        "hidden.bf16": "81661f7cefe9c692303a129616851dd0d2b500838b6affe7a99e4b70181478eb",
+        "modulation.bf16": "2772b5ed54cb8a767a4997bc75039af8e5badf5a819b6fa63035169f142b28f0",
+        "row_map.u32": "71c2d87da35caebe9e1e2e7652ea048f97bf76c2d145aa74cc06f5208e60b32f",
+        "rope_cos.bf16": "d6df806c54b81acf74f115d72269dddda954aa20841d69f7de497d5f92095501",
+        "rope_sin.bf16": "2cdd8facb1876cb531b4ad5d951bf792c8681034354d6e9ff64ca9267765c802",
+        "teacher_block_output.bf16": "723a564a1586e76e87559987d6d658a1699e8fb66f8a6fd0ae7a28fd78e4fe3b",
+        "native_block_output.bf16": "8b3f42767888914732bc4d60ddd6b5c3910f70895d6dc9a288aa1be1b469ab90"
+      }
+    },
+    "rejected_short_refinement": {
+      "frozen_forward_video_relative_l2_baseline": 0.0193639,
+      "frozen_forward_video_relative_l2_experiment": 0.0341796,
+      "decision": "rejected despite isolated block improvement; absent from retained implementation"
+    }
+  }
+}
