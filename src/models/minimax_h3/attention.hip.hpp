@@ -15,4 +15,12 @@ void LaunchWmmaAttention(const std::uint16_t* query, const std::uint16_t* key,
                          std::uint16_t* packed_values, std::uint32_t rows,
                          std::uint32_t heads, hipStream_t stream);
 
+// Long attention with QKV-provided packed values. Output is written directly
+// in [heads*128/16][row][16] layout for the native attention output projection.
+void LaunchProjectionAttention(const std::uint16_t* query,
+                               const std::uint16_t* key,
+                               const std::uint16_t* packed_values,
+                               std::uint16_t* output, std::uint32_t rows,
+                               std::uint32_t heads, hipStream_t stream);
+
 }  // namespace gufo::minimax_h3::dit_ops

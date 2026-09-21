@@ -1,78 +1,131 @@
 {
   "date": "2026-09-21",
   "baseline_revision": "f1206afabd5937904cea9c9230e976e0bdb781f9",
-  "candidate": "fused QKV RMSNorm/RoPE, eight-wave packed-value attention with shared LDS, native BF16 FFN down projection and fused SwiGLU/packing",
+  "candidate": "native BF16 projections, fused QKV/norm/RoPE and FFN gate/up/SwiGLU, packed AdaLN/attention outputs, interior/tail tiles, vector stores, shared scratch and in-place trunk",
   "hardware": "AMD Strix Halo gfx1151",
-  "toolchain": {"rocm": "7.2.3", "gcc": "15.3", "hip_optimization": "-O2"},
+  "toolchain": {
+    "rocm": "7.2.3",
+    "gcc": "15.3",
+    "hip_optimization": "-O2"
+  },
   "scope": {
-    "geometry": {"width": 1344, "height": 768, "frames": 124, "text_rows": 6, "sequence_rows": 37716},
-    "block": "real checkpoint block 0, deterministic ProfileBlock input, optimized diagnostic executable, loading excluded; two baseline controls and one final candidate",
-    "attention_micro": "BF16, 56 heads x 128, one warm-up and one timed launch including value packing",
-    "qkv_norm_rope_micro": "BF16, nonunit weights, nontrivial rotation, three timed launches after one warm-up",
-    "ffn_down_micro": "BF16 14336 -> 5376; exact packed GEMM qualified against pinned rocBLAS and sampled FP64 dots",
-    "swiglu_packing_micro": "BF16, one warm-up and one timed launch; compare separate SwiGLU/packing with fused output",
-    "full_forward": "one baseline and one final 50-block forward at 1344x768x124 with six conditioning rows, zero initial latents; setup/loading excluded; optimized diagnostic executable",
-    "full_generation": "not run"
+    "geometry": {
+      "width": 1344,
+      "height": 768,
+      "frames": 124,
+      "text_rows": 6,
+      "sequence_rows": 37716
+    },
+    "block": "real checkpoint block 0, deterministic ProfileBlock input, optimized diagnostic executable; loading excluded",
+    "full_forward": "one 50-block evaluation with six conditioning rows and zero initial latents; setup/loading excluded; optimized diagnostic executable",
+    "full_generation": "not run; exact schedule requires 49 evaluations plus VAE decoding",
+    "micro": "same process and inputs, one warm-up and one timed launch; independent FP64 samples where indicated"
   },
   "binaries_sha256": {
     "baseline_block": "8e953d967d1f497329805d576c311516db7c238581c0852e32e2e19a25c31429",
     "baseline_forward": "2a15f8123a89ec577832c2b8fd2261b021de24c1ad046cfbdc05047d56153edb",
-    "final_block": "5bd94c33083873928cbc8a573766be05cf48b769fde56baed995f1da0761dc47",
-    "final_forward": "1cc443980725d2faae234070515268ba7e025565dd5a485363dd3bb13164c816"
+    "final_block": "71804fa54663110dbf9213d574d56d556e2fd260fad69cb7ed8e2aa32b4c7830",
+    "final_forward": "030fe28f344177fff5c8c15238526637f14819aac3ebdd7685bcd7c7eea324a8"
   },
   "full_resolution_block": {
-    "baseline_gpu_ms": [2239.67, 2211.12],
-    "baseline_wall_ms": [2301.69, 2267.94],
-    "candidate_gpu_ms": [1874.15],
-    "candidate_wall_ms": [1933.16],
+    "baseline_gpu_ms": [
+      2239.67,
+      2211.12
+    ],
+    "baseline_wall_ms": [
+      2301.69,
+      2267.94
+    ],
+    "candidate_gpu_ms": [
+      1761.13
+    ],
+    "candidate_wall_ms": [
+      1823.9
+    ],
     "mismatched_bf16_outputs": 0,
     "output_elements": 202761216,
     "output_sha256": "04672f3615034c49142e480ac457b54c4a4e318f19626bda1d6ff2f9dd58b523",
     "baseline_activation_mib": 5051.36,
-    "candidate_activation_mib": 5035.39
+    "candidate_activation_mib": 2972.79,
+    "memory_accounting": "candidate includes library workspace; native block creates no BLAS handle; historical baseline excludes library reservations"
   },
   "shorter_block_control": {
-    "rows": 7136, "candidate_gpu_ms": 312.655, "candidate_wall_ms": 325.255,
+    "rows": 7136,
+    "candidate_gpu_ms": 312.854,
+    "candidate_wall_ms": 326.307,
     "output_sha256": "8b3f42767888914732bc4d60ddd6b5c3910f70895d6dc9a288aa1be1b469ab90"
   },
   "attention_micro": [
-    {"rows": 7136, "four_wave_packed_ms": 39.88073, "candidate_ms": 39.50114, "mismatched_bf16_outputs": 0, "output_elements": 51150848, "fp64_sample_relative_l2": 0.00233389358},
-    {"rows": 37716, "four_wave_packed_ms": 1130.37097, "candidate_ms": 1087.53015, "mismatched_bf16_outputs": 0, "output_elements": 270348288, "fp64_sample_relative_l2": 0.0023794295}
-  ],
-  "qkv_norm_rope_micro": [
-    {"rows": 7136, "baseline_ms": 8.087931, "candidate_ms": 3.986043, "mismatched_bf16_outputs": 0, "output_elements_per_plane": 51150848},
-    {"rows": 37716, "baseline_ms": 44.387653, "candidate_ms": 19.702486, "mismatched_bf16_outputs": 0, "output_elements_per_plane": 270348288}
+    {
+      "rows": 7136,
+      "four_wave_packed_ms": 39.88073,
+      "candidate_ms": 39.50114,
+      "mismatched_bf16_outputs": 0,
+      "output_elements": 51150848,
+      "fp64_sample_relative_l2": 0.00233389358
+    },
+    {
+      "rows": 37716,
+      "four_wave_packed_ms": 1130.37097,
+      "candidate_ms": 1087.53015,
+      "mismatched_bf16_outputs": 0,
+      "output_elements": 270348288,
+      "fp64_sample_relative_l2": 0.0023794295
+    }
   ],
   "ffn_down_micro": {
     "rows": 37716,
-    "mismatched_bf16_outputs": 0, "output_elements": 202761216,
+    "mismatched_bf16_outputs": 0,
+    "output_elements": 202761216,
     "baseline_fp64_sample_relative_l2": 0.00257994777,
-    "candidate_fp64_sample_relative_l2": 0.00257994777
-  },
-  "swiglu_packing_micro": {
-    "rows": 37716, "separate_ms": 27.394176, "fused_ms": 19.055920,
-    "mismatched_bf16_outputs": 0, "output_elements": 540696576
+    "candidate_fp64_sample_relative_l2": 0.00257994777,
+    "scalar_store_ms": 136.43782,
+    "vector_store_ms": 127.25457
   },
   "full_resolution_forward": {
-    "baseline_ms": 111121, "candidate_ms": 95667.3,
-    "baseline_scratch_gib": 4.95964, "candidate_scratch_gib": 4.94404,
-    "baseline_peak_gib": 43.5167, "candidate_peak_gib": 43.5011,
+    "baseline_ms": 111121,
+    "candidate_ms": 91003.7,
+    "baseline_scratch_gib": 4.95964,
+    "candidate_scratch_gib": 2.92979,
+    "baseline_peak_gib": 43.5167,
+    "candidate_peak_gib": 40.0075,
     "all_outputs_finite": true,
-    "full_resolution_teacher_comparison": "not available; frozen short complete-forward and full-resolution block/operator controls cover arithmetic changes"
+    "full_resolution_teacher_comparison": "not available; frozen short complete-forward and full-resolution block/operator controls cover arithmetic changes",
+    "video_elements": 3580416,
+    "audio_elements": 13248,
+    "mismatched_output_elements": 0,
+    "video_sha256": "0b41acdd79aaf0a84a877a44d12eb6206d18f6837ee35073b2f7d1b777e2b7bd",
+    "audio_sha256": "4f7235dcc7d26aa784f7507ae8723043a3be1568e0c92a46f62fe9f2ddf0bb36",
+    "memory_accounting": "candidate includes retained BLAS workspace; historical baseline excludes library reservations"
   },
   "inference_profile": {
-    "scope": "RmsInverseLongKernel through final GateRowKernel; constructor validation and copies excluded",
-    "kernel_ms": 1908.951845, "span_ms": 1908.988033, "dispatches": 13,
-    "attention_ms": 1115.667333, "value_packing_ms": 5.296684,
-    "qkv_projection_ms": 214.65873, "attention_output_projection_ms": 78.779314,
-    "ffn_up_projection_ms": 291.846059, "ffn_down_projection_ms": 142.430488,
-    "swiglu_packed_ms": 18.15353, "qkv_norm_rope_ms": 19.613705
+    "scope": "RmsInverseLongKernel through final GateRowKernel; loading and copies excluded",
+    "kernel_ms": 1800.336061,
+    "span_ms": 1800.378181,
+    "dispatches": 13,
+    "attention_ms": 1114.482756,
+    "qkv_projection_norm_rope_ms": 198.023003,
+    "attention_output_projection_ms": 65.339671,
+    "ffn_up_swiglu_ms": 269.13003,
+    "ffn_down_projection_ms": 131.240835,
+    "attention_vgpr": 192,
+    "attention_lds_bytes": 10240,
+    "attention_scratch_bytes": 0
   },
   "independent_quality": {
-    "analytic": "passed: FP64 attention, fused QKV norm/RoPE, exact sparse FFN projection, exhaustive BF16 SwiGLU/packing, tails, guards, replay",
-    "frozen_528_block": {"relative_l2": 0.00461035, "relative_max": 0.00483092},
-    "frozen_50_block_forward_video": {"relative_l2": 0.0193639, "relative_max": 0.0458577},
-    "frozen_50_block_forward_audio": {"relative_l2": 0.0112591, "relative_max": 0.0216204},
+    "analytic": "passed: FP64 attention in both layouts, sparse QKV/FFN/attention-output projections, exhaustive BF16 SwiGLU, packed AdaLN, tail/guard/replay and in-place residual/norm",
+    "frozen_528_block": {
+      "relative_l2": 0.00461035,
+      "relative_max": 0.00483092
+    },
+    "frozen_50_block_forward_video": {
+      "relative_l2": 0.0193639,
+      "relative_max": 0.0458577
+    },
+    "frozen_50_block_forward_audio": {
+      "relative_l2": 0.0112591,
+      "relative_max": 0.0216204
+    },
     "three_block_reuse": "passed",
     "ceilings_changed": false
   },
@@ -84,5 +137,34 @@
     "GUFO_H3_MODEL_ROOT=/var/llms/huggingface/MiniMax-H3 GUFO_H3_DIT_GOLDEN=/var/llms/huggingface/strix-h3-oracles/dit-block0-528-v2 build/gpu-test/minimax_h3_dit_hip_test --real",
     "GUFO_H3_MODEL_ROOT=/var/llms/huggingface/MiniMax-H3 GUFO_H3_DENOISER_GOLDEN=/var/llms/huggingface/strix-h3-oracles/denoiser-256x256x22-forward-v2 build/gpu-test/minimax_h3_denoiser_hip_test --oracle-forward",
     "GUFO_H3_MODEL_ROOT=/var/llms/huggingface/MiniMax-H3 GUFO_H3_LAYER50_CONDITIONING=/var/llms/huggingface/strix-h3-oracles/denoiser-256x256x22-forward-v2/conditioning.bf16 build/gpu-test/minimax_h3_denoiser_hip_test --profile-fullres-forward"
-  ]
+  ],
+  "qkv_projection_micro": {
+    "rows": 37716,
+    "separate_ms": 234.609421,
+    "fused_ms": 199.391846,
+    "mismatched_bf16_outputs": 0,
+    "qk_elements_each": 270348288,
+    "packed_v_elements": 270434304
+  },
+  "ffn_up_micro": {
+    "rows": 37716,
+    "bounded_ms": 278.96402,
+    "interior_tail_ms": 265.271515,
+    "mismatched_bf16_outputs": 0,
+    "output_elements": 540696576
+  },
+  "attention_output_micro": {
+    "rows": 37716,
+    "pinned_rocblas_ms": 80.312752,
+    "native_ms": 63.305466,
+    "mismatched_bf16_outputs": 0,
+    "output_elements": 202761216,
+    "fp64_sample_relative_l2": 0.00109254897
+  },
+  "allocation_audit": {
+    "previous_50_block_32mib_reservations": 102,
+    "current_short_50_block_32mib_reservations": 3,
+    "current_native_block_32mib_reservations": 0,
+    "note": "one short-block projection handle is shared; setup-only handle released; full-resolution blocks need none"
+  }
 }

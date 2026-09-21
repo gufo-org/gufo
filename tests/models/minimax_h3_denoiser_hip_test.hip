@@ -539,7 +539,7 @@ int CheckReuseSmoke() {
   CHECK(Finite(first_video));
   CHECK(Finite(first_audio));
   CHECK(first.forward_ms.size() == 3);
-  CHECK(first.dispatches == 130);
+  CHECK(first.dispatches == 142);
   CHECK(first.swap_bytes == 0);
 
   std::cout << "H3 denoiser reuse smoke active_blocks=3 steps=5 "
@@ -611,8 +611,14 @@ int ProfileFullResolutionForward() {
   CHECK(Finite(velocity.audio));
   CHECK(telemetry.first_non_finite.empty());
   CHECK(telemetry.forward_ms.size() == 1);
+  const auto hash = [](const std::vector<float>& values) {
+    return h3::Sha256({reinterpret_cast<const unsigned char*>(values.data()),
+                       values.size() * sizeof(float)});
+  };
   std::cout << "H3 full-resolution denoiser profile rows="
             << session->layout().rows() << " blocks=" << h3::kDitBlocks
+            << " video_sha256=" << hash(velocity.video)
+            << " audio_sha256=" << hash(velocity.audio)
             << " core_load_ms=" << telemetry.core_load_ms
             << " adaln_ms=" << telemetry.adaln_precompute_ms << " scratch_gib="
             << static_cast<double>(telemetry.scratch_bytes) /

@@ -393,35 +393,9 @@ inline void LaunchBf16SiluLookup(float* lookup, hipStream_t stream) {
                      dim3(kThreads), 0, stream, lookup);
 }
 
-// Produce the native projection layout directly, preserving the lookup's
-// FP32 product and BF16 rounding. Width is divisible by 64 for H3.
-static __global__ void SwiGluLookupPackedKernel(
-    const std::uint16_t* __restrict__ fused, std::uint16_t* __restrict__ output,
-    const float* __restrict__ silu_lookup, std::uint32_t rows,
-    std::uint32_t width) {
-  __shared__ __align__(16) std::uint16_t tile[64][72];
-  const unsigned tid = threadIdx.x, first_row = blockIdx.y * 64;
-  const unsigned first_column = blockIdx.x * 64;
-  const unsigned row = tid / 4, column = (tid % 4) * 16;
-  if (first_row + row < rows) {
-    const auto* gate = fused + std::size_t(first_row + row) * width * 2 +
-                       first_column + column;
-#pragma unroll
-    for (unsigned i = 0; i < 16; ++i)
-      tile[row][column + i] =
-          FloatToBf16(silu_lookup[gate[i]] * Bf16ToFloat(gate[width + i]));
-  }
-  __syncthreads();
-  const unsigned part = tid / 64, destination_row = tid % 64;
-  if (first_row + destination_row < rows) {
-    auto* destination = output +
-                        std::size_t(first_column / 16 + part) * rows * 16 +
-                        (first_row + destination_row) * 16;
-    *reinterpret_cast<uint4*>(destination) =
-        *reinterpret_cast<const uint4*>(&tile[destination_row][part * 16]);
-    *reinterpret_cast<uint4*>(destination + 8) =
-        *reinterpret_cast<const uint4*>(&tile[destination_row][part * 16 + 8]);
-  }
+__device__ __forceinline__ std::uint16_t ApplySwiGluLookup(
+    std::uint16_t gate, std::uint16_t up, const float* silu_lookup) {
+  return FloatToBf16(silu_lookup[gate] * Bf16ToFloat(up));
 }
 
 inline void LaunchSwiGlu(const std::uint16_t* fused, std::uint16_t* output,
@@ -444,16 +418,6 @@ inline void LaunchSwiGlu(const std::uint16_t* fused, std::uint16_t* output,
                        dim3((width + kThreads - 1U) / kThreads, rows),
                        dim3(kThreads), 0, stream, fused, output, rows, width);
   }
-}
-
-inline void LaunchSwiGluLookupPacked(const std::uint16_t* fused,
-                                     std::uint16_t* output,
-                                     const float* silu_lookup,
-                                     std::uint32_t rows, std::uint32_t width,
-                                     hipStream_t stream) {
-  hipLaunchKernelGGL(SwiGluLookupPackedKernel,
-                     dim3(width / 64, (rows + 63) / 64), dim3(256), 0, stream,
-                     fused, output, silu_lookup, rows, width);
 }
 
 static __global__ void RmsNormKernel(const std::uint16_t* input,
@@ -549,14 +513,11 @@ inline void LaunchLayerNorm(const std::uint16_t* input,
                      weight, bias, output, rows, width, epsilon);
 }
 
-static __global__ void AdaLnKernel(const std::uint16_t* input,
-                                   const std::uint16_t* weight,
-                                   const std::uint16_t* modulation,
-                                   const std::uint32_t* row_map,
-                                   std::uint16_t* output, std::uint32_t rows,
-                                   std::uint32_t width, std::uint32_t slots,
-                                   std::uint32_t shift_slot,
-                                   std::uint32_t scale_slot, float epsilon) {
+static __global__ void FinalAdaLnKernel(
+    const std::uint16_t* input, const std::uint16_t* weight,
+    const std::uint16_t* modulation, std::uint32_t modulation_row,
+    float* output, std::uint32_t rows, std::uint32_t width, std::uint32_t slots,
+    std::uint32_t shift_slot, std::uint32_t scale_slot, float epsilon) {
   const std::uint32_t row = blockIdx.x;
   const std::uint32_t lane = threadIdx.x;
   if (row >= rows) {
@@ -580,7 +541,7 @@ static __global__ void AdaLnKernel(const std::uint16_t* input,
   const float inverse =
       rsqrtf(reductions[0] / static_cast<float>(width) + epsilon);
   const std::size_t modulation_base =
-      static_cast<std::size_t>(row_map[row]) * slots * width;
+      static_cast<std::size_t>(modulation_row) * slots * width;
   for (std::uint32_t column = lane; column < width; column += blockDim.x) {
     const float normalized = Bf16ToFloat(input[row_base + column]) * inverse *
                              Bf16ToFloat(weight[column]);
@@ -590,21 +551,24 @@ static __global__ void AdaLnKernel(const std::uint16_t* input,
     const float shift = Bf16ToFloat(
         modulation[modulation_base +
                    static_cast<std::size_t>(shift_slot) * width + column]);
+    // The final F32 projection consumes the exact rounded BF16 boundary.
+    // Widen in registers instead of storing and rereading a BF16 tensor.
     output[row_base + column] =
-        FloatToBf16(normalized * (1.0F + scale) + shift);
+        Bf16ToFloat(FloatToBf16(normalized * (1.0F + scale) + shift));
   }
 }
 
-inline void LaunchAdaLn(const std::uint16_t* input, const std::uint16_t* weight,
-                        const std::uint16_t* modulation,
-                        const std::uint32_t* row_map, std::uint16_t* output,
-                        std::uint32_t rows, std::uint32_t width,
-                        std::uint32_t slots, std::uint32_t shift_slot,
-                        std::uint32_t scale_slot, float epsilon,
-                        hipStream_t stream) {
-  hipLaunchKernelGGL(AdaLnKernel, dim3(rows), dim3(256), 0, stream, input,
-                     weight, modulation, row_map, output, rows, width, slots,
-                     shift_slot, scale_slot, epsilon);
+inline void LaunchFinalAdaLn(const std::uint16_t* input,
+                             const std::uint16_t* weight,
+                             const std::uint16_t* modulation,
+                             std::uint32_t modulation_row, float* output,
+                             std::uint32_t rows, std::uint32_t width,
+                             std::uint32_t slots, std::uint32_t shift_slot,
+                             std::uint32_t scale_slot, float epsilon,
+                             hipStream_t stream) {
+  hipLaunchKernelGGL(FinalAdaLnKernel, dim3(rows), dim3(256), 0, stream, input,
+                     weight, modulation, modulation_row, output, rows, width,
+                     slots, shift_slot, scale_slot, epsilon);
 }
 
 static __global__ void RmsInverseKernel(const std::uint16_t* input,
@@ -824,6 +788,14 @@ inline void LaunchAdaLnSplit(const std::uint16_t* input,
                      scale_slot);
 }
 
+inline void LaunchAttentionRmsInverse(const std::uint16_t* input,
+                                      float* inverse, std::uint32_t rows,
+                                      std::uint32_t width, float epsilon,
+                                      hipStream_t stream) {
+  hipLaunchKernelGGL(RmsInverseLongKernel, dim3(rows), dim3(256), 0, stream,
+                     input, inverse, rows, width, epsilon);
+}
+
 inline void LaunchAdaLnApplyPrepared(
     const std::uint16_t* input, const std::uint16_t* weight,
     const std::uint16_t* modulation, const std::uint32_t* row_map,
@@ -848,13 +820,14 @@ inline void LaunchAdaLnApplyPrepared(
                      scale_slot);
 }
 
-static __global__ void GateKernel(const std::uint16_t* __restrict__ residual,
+// Residual and output may be identical: each element is read before its
+// sole writer updates it. Do not promise non-aliasing for these pointers.
+static __global__ void GateKernel(const std::uint16_t* residual,
                                   const std::uint16_t* __restrict__ branch,
                                   const std::uint16_t* __restrict__ modulation,
                                   const std::uint32_t* __restrict__ row_map,
-                                  std::uint16_t* __restrict__ output,
-                                  std::uint32_t rows, std::uint32_t width,
-                                  std::uint32_t slots,
+                                  std::uint16_t* output, std::uint32_t rows,
+                                  std::uint32_t width, std::uint32_t slots,
                                   std::uint32_t gate_slot) {
   const std::uint32_t column = blockIdx.x * blockDim.x + threadIdx.x;
   const std::uint32_t row = blockIdx.y;
@@ -871,12 +844,11 @@ static __global__ void GateKernel(const std::uint16_t* __restrict__ residual,
 }
 
 static __global__ void GateVector8Kernel(
-    const std::uint16_t* __restrict__ residual,
-    const std::uint16_t* __restrict__ branch,
+    const std::uint16_t* residual, const std::uint16_t* __restrict__ branch,
     const std::uint16_t* __restrict__ modulation,
-    const std::uint32_t* __restrict__ row_map,
-    std::uint16_t* __restrict__ output, std::uint32_t rows, std::uint32_t width,
-    std::uint32_t slots, std::uint32_t gate_slot) {
+    const std::uint32_t* __restrict__ row_map, std::uint16_t* output,
+    std::uint32_t rows, std::uint32_t width, std::uint32_t slots,
+    std::uint32_t gate_slot) {
   constexpr std::uint32_t kValuesPerThread = 8;
   const std::uint32_t vector_column = blockIdx.x * blockDim.x + threadIdx.x;
   const std::uint32_t column = vector_column * kValuesPerThread;
@@ -920,12 +892,11 @@ static __global__ void GateVector8Kernel(
 }
 
 static __global__ void GateRowKernel(
-    const std::uint16_t* __restrict__ residual,
-    const std::uint16_t* __restrict__ branch,
+    const std::uint16_t* residual, const std::uint16_t* __restrict__ branch,
     const std::uint16_t* __restrict__ modulation,
-    const std::uint32_t* __restrict__ row_map,
-    std::uint16_t* __restrict__ output, std::uint32_t rows, std::uint32_t width,
-    std::uint32_t slots, std::uint32_t gate_slot) {
+    const std::uint32_t* __restrict__ row_map, std::uint16_t* output,
+    std::uint32_t rows, std::uint32_t width, std::uint32_t slots,
+    std::uint32_t gate_slot) {
   const std::uint32_t row = blockIdx.x;
   const std::uint32_t lane = threadIdx.x;
   if (row >= rows) {
@@ -968,13 +939,11 @@ static __global__ void GateRowKernel(
 }
 
 static __global__ void GateRmsInverseLongKernel(
-    const std::uint16_t* __restrict__ residual,
-    const std::uint16_t* __restrict__ branch,
+    const std::uint16_t* residual, const std::uint16_t* __restrict__ branch,
     const std::uint16_t* __restrict__ modulation,
-    const std::uint32_t* __restrict__ row_map,
-    std::uint16_t* __restrict__ output, float* __restrict__ inverse,
-    std::uint32_t rows, std::uint32_t width, std::uint32_t slots,
-    std::uint32_t gate_slot, float epsilon) {
+    const std::uint32_t* __restrict__ row_map, std::uint16_t* output,
+    float* __restrict__ inverse, std::uint32_t rows, std::uint32_t width,
+    std::uint32_t slots, std::uint32_t gate_slot, float epsilon) {
   const std::uint32_t row = blockIdx.x;
   const std::uint32_t lane = threadIdx.x;
   if (row >= rows) {

@@ -28,6 +28,9 @@ struct DitBlockWorkspaceOptions {
   bool row_parallel_attention{true};
 };
 
+// Blocks sharing a workspace must execute sequentially. Scratch and the
+// rocBLAS handle are reused across those blocks; independent executions need
+// separate workspaces. Concurrent block loading is supported.
 class DitBlockWorkspace {
 public:
   ~DitBlockWorkspace();
@@ -84,6 +87,7 @@ struct DitBlockRetained {
 struct DitBlockTelemetry {
   std::uint64_t weight_bytes{0};
   std::uint64_t activation_bytes{0};
+  // Subset of the shared allocation included in activation_bytes.
   std::uint64_t gemm_workspace_bytes{0};
   std::uint64_t dispatches{0};
   double load_ms{0.0};

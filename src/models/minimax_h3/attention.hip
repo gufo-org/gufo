@@ -86,6 +86,7 @@ __global__ void PackValues(const std::uint16_t* input, std::uint16_t* output,
 // query's softmax reduction within two lanes. Q/K/V and PV inputs use BF16;
 // scores, normalization and value accumulation use FP32. No quadratic scratch
 // or global probability/LSE buffer. Qualified against the independent teacher.
+template<bool PackedOutput>
 __global__ __launch_bounds__(256, 1) void WmmaAttention(
     const std::uint16_t* query, const std::uint16_t* key,
     const std::uint16_t* value, std::uint16_t* output, std::uint32_t rows,
@@ -218,8 +219,11 @@ __global__ __launch_bounds__(256, 1) void WmmaAttention(
     for (int d = 0; d < 8; ++d) {
 #pragma unroll
       for (int i = 0; i < 8; ++i)
-        output[(std::size_t(row) * heads + blockIdx.y) * 128 + d * 16 + 2 * i +
-               lane / 16] = Bf16(result[d][i] * reciprocal);
+        output[PackedOutput
+                   ? ((std::size_t(blockIdx.y) * 8 + d) * rows + row) * 16 +
+                         2 * i + lane / 16
+                   : (std::size_t(row) * heads + blockIdx.y) * 128 + d * 16 +
+                         2 * i + lane / 16] = Bf16(result[d][i] * reciprocal);
     }
   }
 }
@@ -353,7 +357,16 @@ void LaunchWmmaAttention(const std::uint16_t* query, const std::uint16_t* key,
   }
   PackValues<<<dim3((rows + 31) / 32, heads), 256, 0, stream>>>(
       value, packed_values, rows);
-  WmmaAttention<<<dim3((rows + 127) / 128, heads), 256, 0, stream>>>(
+  WmmaAttention<false><<<dim3((rows + 127) / 128, heads), 256, 0, stream>>>(
+      query, key, packed_values, output, rows, heads);
+}
+
+void LaunchProjectionAttention(const std::uint16_t* query,
+                               const std::uint16_t* key,
+                               const std::uint16_t* packed_values,
+                               std::uint16_t* output, std::uint32_t rows,
+                               std::uint32_t heads, hipStream_t stream) {
+  WmmaAttention<true><<<dim3((rows + 127) / 128, heads), 256, 0, stream>>>(
       query, key, packed_values, output, rows, heads);
 }
 

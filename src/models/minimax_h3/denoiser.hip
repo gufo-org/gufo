@@ -326,10 +326,13 @@ public:
     (void)rocblas_set_atomics_mode(handle_, rocblas_atomics_not_allowed);
     plans_.reserve(8);
   }
-  ~Bf16Gemm() {
+  ~Bf16Gemm() { Reset(); }
+  void Reset() noexcept {
     if (handle_ != nullptr) {
       (void)rocblas_destroy_handle(handle_);
+      handle_ = nullptr;
     }
+    plans_.clear();
   }
   Bf16Gemm(const Bf16Gemm&) = delete;
   Bf16Gemm& operator=(const Bf16Gemm&) = delete;
@@ -476,6 +479,13 @@ public:
   F32Gemm(const F32Gemm&) = delete;
   F32Gemm& operator=(const F32Gemm&) = delete;
 
+  [[nodiscard]] std::size_t workspace_bytes() const noexcept {
+    std::size_t bytes = 0;
+    if (handle_ != nullptr)
+      (void)rocblas_get_device_memory_size(handle_, &bytes);
+    return bytes;
+  }
+
   bool Run(const float* weight, const float* input, float* output,
            std::size_t batch, std::size_t rows, std::size_t columns,
            hipStream_t stream, std::string* error) {
@@ -597,8 +607,6 @@ struct DenoiserSession::Impl {
   std::vector<std::uint16_t> final_modulation_host;
   std::vector<float> video_rows_host;
   std::vector<float> audio_rows_host;
-  std::vector<std::uint32_t> final_video_map_host;
-  std::vector<std::uint32_t> final_audio_map_host;
   std::vector<std::unique_ptr<DitBlockSession>> blocks;
   std::vector<double> forward_history;
 
@@ -622,17 +630,8 @@ struct DenoiserSession::Impl {
   DeviceBuffer video_sample;
   DeviceBuffer audio_sample;
   DeviceBuffer projection_scratch_f32;
-  DeviceBuffer video_projected;
-  DeviceBuffer audio_projected;
-  DeviceBuffer hidden_device_a;
-  DeviceBuffer hidden_device_b;
+  DeviceBuffer hidden_device;
   DeviceBuffer block_row_map;
-  DeviceBuffer final_video_input;
-  DeviceBuffer final_audio_input;
-  DeviceBuffer final_video_norm;
-  DeviceBuffer final_audio_norm;
-  DeviceBuffer final_video_row_map;
-  DeviceBuffer final_audio_row_map;
   DeviceBuffer video_velocity_f32;
   DeviceBuffer audio_velocity_f32;
   DeviceBuffer previous_video_velocity_f32;
@@ -1448,19 +1447,8 @@ struct DenoiserSession::Impl {
         !audio_sample.Allocate(audio_elements * sizeof(float), error) ||
         !projection_scratch_f32.Allocate(
             maximum_projection_rows * kDitHiddenSize * sizeof(float), error) ||
-        !video_projected.Allocate(bf16(video_rows * kDitHiddenSize), error) ||
-        !audio_projected.Allocate(bf16(audio_rows * kDitHiddenSize), error) ||
-        !hidden_device_a.Allocate(bf16(hidden_elements), error) ||
-        !hidden_device_b.Allocate(bf16(hidden_elements), error) ||
+        !hidden_device.Allocate(bf16(hidden_elements), error) ||
         !block_row_map.Allocate(layout.rows() * sizeof(std::uint32_t), error) ||
-        !final_video_input.Allocate(bf16(video_rows * kDitHiddenSize), error) ||
-        !final_audio_input.Allocate(bf16(audio_rows * kDitHiddenSize), error) ||
-        !final_video_norm.Allocate(bf16(video_rows * kDitHiddenSize), error) ||
-        !final_audio_norm.Allocate(bf16(audio_rows * kDitHiddenSize), error) ||
-        !final_video_row_map.Allocate(video_rows * sizeof(std::uint32_t),
-                                      error) ||
-        !final_audio_row_map.Allocate(audio_rows * sizeof(std::uint32_t),
-                                      error) ||
         !video_velocity_f32.Allocate(video_elements * sizeof(float), error) ||
         !audio_velocity_f32.Allocate(audio_elements * sizeof(float), error) ||
         (reuse_interval > 1 && (!previous_video_velocity_f32.Allocate(
@@ -1471,31 +1459,20 @@ struct DenoiserSession::Impl {
     }
     video_rows_host.resize(video_elements);
     audio_rows_host.resize(audio_elements);
-    final_video_map_host.resize(video_rows);
-    final_audio_map_host.resize(audio_rows);
     forward_history.reserve(static_cast<std::size_t>(schedule.evaluations()) +
                             16U);
-    const std::array<const DeviceBuffer*, 18> buffers = {
+    const std::array<const DeviceBuffer*, 9> buffers = {
         &video_sample,
         &audio_sample,
         &projection_scratch_f32,
-        &video_projected,
-        &audio_projected,
-        &hidden_device_a,
-        &hidden_device_b,
+        &hidden_device,
         &block_row_map,
-        &final_video_input,
-        &final_audio_input,
-        &final_video_norm,
-        &final_audio_norm,
-        &final_video_row_map,
-        &final_audio_row_map,
         &video_velocity_f32,
         &audio_velocity_f32,
         &previous_video_velocity_f32,
         &previous_audio_velocity_f32,
     };
-    std::uint64_t bytes = 0;
+    std::uint64_t bytes = projection_gemm.workspace_bytes();
     for (const DeviceBuffer* buffer : buffers) {
       bytes += buffer->bytes();
     }
@@ -1551,6 +1528,11 @@ struct DenoiserSession::Impl {
       return false;
     }
     const auto begin = Clock::now();
+    const std::size_t audio_offset = layout.text_rows * kDitHiddenSize;
+    const std::size_t video_offset =
+        (layout.text_rows + layout.audio_target_rows) * kDitHiddenSize;
+    // Compose the token sequence directly in its first trunk input buffer.
+    // Separate projected-token allocations and D2D copies serve no purpose.
     if (!projection_gemm.Run(
             video_patch_weight.As<float>(), video_sample.As<float>(),
             projection_scratch_f32.As<float>(), layout.video_target_rows,
@@ -1559,7 +1541,7 @@ struct DenoiserSession::Impl {
     }
     dit_ops::LaunchAddBiasF32ToBf16(
         projection_scratch_f32.As<float>(), video_patch_bias.As<float>(),
-        video_projected.As<std::uint16_t>(),
+        hidden_device.As<std::uint16_t>() + video_offset,
         static_cast<std::uint32_t>(layout.video_target_rows), kDitHiddenSize,
         stream);
     if (!projection_gemm.Run(
@@ -1570,25 +1552,14 @@ struct DenoiserSession::Impl {
     }
     dit_ops::LaunchAddBiasF32ToBf16(
         projection_scratch_f32.As<float>(), audio_patch_bias.As<float>(),
-        audio_projected.As<std::uint16_t>(),
+        hidden_device.As<std::uint16_t>() + audio_offset,
         static_cast<std::uint32_t>(layout.audio_target_rows), kDitHiddenSize,
         stream);
     const std::size_t text_bytes =
         refined_text_host.size() * sizeof(std::uint16_t);
-    const std::size_t audio_offset_bytes = text_bytes;
-    const std::size_t video_offset_bytes =
-        audio_offset_bytes + audio_projected.bytes();
     if (!CheckLaunch("H3 patch projections", error) ||
-        !CopyAsync(hidden_device_a.data(), refined_text_host.data(), text_bytes,
+        !CopyAsync(hidden_device.data(), refined_text_host.data(), text_bytes,
                    hipMemcpyHostToDevice, "copy H3 refined text", error) ||
-        !CopyAsync(static_cast<std::byte*>(hidden_device_a.data()) +
-                       audio_offset_bytes,
-                   audio_projected.data(), audio_projected.bytes(),
-                   hipMemcpyDeviceToDevice, "compose H3 audio tokens", error) ||
-        !CopyAsync(static_cast<std::byte*>(hidden_device_a.data()) +
-                       video_offset_bytes,
-                   video_projected.data(), video_projected.bytes(),
-                   hipMemcpyDeviceToDevice, "compose H3 video tokens", error) ||
         !CopyAsync(block_row_map.data(),
                    row_maps[static_cast<std::size_t>(step)].data(),
                    block_row_map.bytes(), hipMemcpyHostToDevice,
@@ -1597,8 +1568,9 @@ struct DenoiserSession::Impl {
     }
 
     std::uint64_t block_dispatches = 0;
-    std::uint16_t* hidden_input = hidden_device_a.As<std::uint16_t>();
-    std::uint16_t* hidden_output = hidden_device_b.As<std::uint16_t>();
+    // A block consumes its input before producing the final gated residual;
+    // carry the trunk in place instead of reserving a second full hidden state.
+    std::uint16_t* hidden_input = hidden_device.As<std::uint16_t>();
     for (std::size_t block = 0; block < blocks.size(); ++block) {
       if (IsCancelled(cancellation)) {
         SetError(error, "MiniMax H3 denoiser cancelled after block " +
@@ -1607,57 +1579,22 @@ struct DenoiserSession::Impl {
       }
       DitBlockTelemetry block_telemetry;
       if (!blocks[block]->RunPreparedDevice(
-              hidden_input, block_row_map.As<std::uint32_t>(), hidden_output,
+              hidden_input, block_row_map.As<std::uint32_t>(), hidden_input,
               static_cast<void*>(stream), block != 0,
               block + 1U < blocks.size(), cancellation, &block_telemetry,
               error)) {
         return false;
       }
       block_dispatches += block_telemetry.dispatches;
-      std::swap(hidden_input, hidden_output);
     }
 
-    const std::size_t audio_offset = layout.text_rows * kDitHiddenSize;
-    const std::size_t video_offset =
-        (layout.text_rows + layout.audio_target_rows) * kDitHiddenSize;
-    std::fill(final_audio_map_host.begin(), final_audio_map_host.end(),
-              time_rows.audio_rows[step]);
-    std::fill(final_video_map_host.begin(), final_video_map_host.end(),
-              time_rows.video_rows[step]);
-    if (!CopyAsync(final_audio_input.data(), hidden_input + audio_offset,
-                   final_audio_input.bytes(), hipMemcpyDeviceToDevice,
-                   "copy H3 final audio input", error) ||
-        !CopyAsync(final_video_input.data(), hidden_input + video_offset,
-                   final_video_input.bytes(), hipMemcpyDeviceToDevice,
-                   "copy H3 final video input", error) ||
-        !CopyAsync(final_audio_row_map.data(), final_audio_map_host.data(),
-                   final_audio_row_map.bytes(), hipMemcpyHostToDevice,
-                   "copy H3 final audio map", error) ||
-        !CopyAsync(final_video_row_map.data(), final_video_map_host.data(),
-                   final_video_row_map.bytes(), hipMemcpyHostToDevice,
-                   "copy H3 final video map", error)) {
-      return false;
-    }
-    dit_ops::LaunchAdaLn(final_audio_input.As<std::uint16_t>(),
-                         final_norm_weight.As<std::uint16_t>(),
-                         final_modulation.As<std::uint16_t>(),
-                         final_audio_row_map.As<std::uint32_t>(),
-                         final_audio_norm.As<std::uint16_t>(),
-                         static_cast<std::uint32_t>(layout.audio_target_rows),
-                         kDitHiddenSize, kFinalModulationSlots, 0, 1,
-                         kDitNormEpsilon, stream);
-    dit_ops::LaunchAdaLn(final_video_input.As<std::uint16_t>(),
-                         final_norm_weight.As<std::uint16_t>(),
-                         final_modulation.As<std::uint16_t>(),
-                         final_video_row_map.As<std::uint32_t>(),
-                         final_video_norm.As<std::uint16_t>(),
-                         static_cast<std::uint32_t>(layout.video_target_rows),
-                         kDitHiddenSize, kFinalModulationSlots, 0, 1,
-                         kDitNormEpsilon, stream);
-    dit_ops::LaunchBf16ToF32(final_audio_norm.As<std::uint16_t>(),
-                             projection_scratch_f32.As<float>(),
-                             layout.audio_target_rows * kDitHiddenSize, stream);
-    if (!CheckLaunch("H3 final audio projection conversion", error) ||
+    dit_ops::LaunchFinalAdaLn(
+        hidden_input + audio_offset, final_norm_weight.As<std::uint16_t>(),
+        final_modulation.As<std::uint16_t>(), time_rows.audio_rows[step],
+        projection_scratch_f32.As<float>(),
+        static_cast<std::uint32_t>(layout.audio_target_rows), kDitHiddenSize,
+        kFinalModulationSlots, 0, 1, kDitNormEpsilon, stream);
+    if (!CheckLaunch("H3 final audio normalization", error) ||
         !projection_gemm.Run(
             final_audio_weight.As<float>(), projection_scratch_f32.As<float>(),
             audio_velocity_f32.As<float>(), layout.audio_target_rows,
@@ -1668,10 +1605,13 @@ struct DenoiserSession::Impl {
         audio_velocity_f32.As<float>(), final_audio_bias.As<float>(),
         static_cast<std::uint32_t>(layout.audio_target_rows),
         kH3AudioLatentChannels, stream);
-    dit_ops::LaunchBf16ToF32(final_video_norm.As<std::uint16_t>(),
-                             projection_scratch_f32.As<float>(),
-                             layout.video_target_rows * kDitHiddenSize, stream);
-    if (!CheckLaunch("H3 final video projection conversion", error) ||
+    dit_ops::LaunchFinalAdaLn(
+        hidden_input + video_offset, final_norm_weight.As<std::uint16_t>(),
+        final_modulation.As<std::uint16_t>(), time_rows.video_rows[step],
+        projection_scratch_f32.As<float>(),
+        static_cast<std::uint32_t>(layout.video_target_rows), kDitHiddenSize,
+        kFinalModulationSlots, 0, 1, kDitNormEpsilon, stream);
+    if (!CheckLaunch("H3 final video normalization", error) ||
         !projection_gemm.Run(
             final_video_weight.As<float>(), projection_scratch_f32.As<float>(),
             video_velocity_f32.As<float>(), layout.video_target_rows,
@@ -1716,7 +1656,9 @@ struct DenoiserSession::Impl {
       return false;
     }
     forward_history.push_back(Milliseconds(begin, Clock::now()));
-    base_telemetry.dispatches += 2 + block_dispatches + 4;
+    // Two patch projections and their casts; two final norms, projections
+    // and biases. Memory copies are not model-kernel dispatches.
+    base_telemetry.dispatches += 4 + block_dispatches + 6;
     return true;
   }
 
@@ -1811,6 +1753,9 @@ std::unique_ptr<DenoiserSession> DenoiserSession::Create(
       !impl->LoadHeads(cancellation, error) || !impl->AllocateIo(error)) {
     return nullptr;
   }
+  // Text refinement and modulation precomputation are complete. Inference
+  // uses the blocks' shared handle and the FP32 projection handle.
+  impl->gemm.Reset();
   (void)hipHostFree(impl->staging);
   impl->staging = nullptr;
   impl->base_telemetry.setup_ms = Milliseconds(setup_begin, Clock::now());

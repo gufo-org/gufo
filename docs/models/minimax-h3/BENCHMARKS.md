@@ -33,30 +33,30 @@ not complete-generation latency.
 | 1,872 | 6.02 | TODO | TODO |
 | 4,096 | 27.33 | TODO | TODO |
 | 4,097 | 14.20 | TODO | TODO |
-| 7,136 | 39.50 | 312.66 | 325.26 |
-| 37,716 | 1,087.53 | 1,874.15 | 1,933.16 |
+| 7,136 | 39.50 | 312.85 | 326.31 |
+| 37,716 | 1,087.53 | 1,761.13 | 1,823.90 |
 
 Short attention averages ten timed launches after warm-up; the current long
 attention controls time one launch after warm-up, including value packing.
 Block controls use one process run per shape. Loading is excluded.
-At 37,716 rows, fused QKV normalization/RoPE takes **19.70 ms** and the
-fused SwiGLU/activation packing takes **19.06 ms**. Weights are packed once
-during loading; activations are written directly in the native projection's
-layout.
+Full-resolution QKV projection includes normalization/RoPE and packed V;
+FFN up includes SwiGLU. AdaLN and attention write directly in the next
+projection's packed layout. Packing replaces original weights during loading.
 
-**95.67 s is the time for one denoiser evaluation, not a complete video.**
+**91.00 s is the time for one denoiser evaluation, not a complete video.**
 The exact preset needs **49 evaluations**, followed by video/audio decoding.
 Complete-generation latency remains **TODO**.
 
 This single evaluation runs all 50 transformer blocks at **1344×768×124**,
 with six text rows and zero initial latents. Setup/loading is excluded.
 It does not run the denoising schedule or VAE.
-Peak retained memory is **43.50 GiB**, including **4.94 GiB** scratch.
+Peak retained memory is **40.01 GiB**, including **2.93 GiB** scratch and
+retained BLAS workspace. Full-resolution transformer blocks use only native
+projections and allocate no BLAS handles.
 
-The full-resolution block trace attributes 58.7% of GPU time to attention
-and its packing, and 38.1% to projections. Gaps between
-kernels total 0.036 ms. Block activation storage is **4.92 GiB**, with packing reusing existing
-buffers. No complete-video speedup is established.
+Attention remains the largest cost, followed by projections; the GPU is
+continuously busy during the transformer blocks. Block activation storage is
+**2.90 GiB**. No complete-video speedup is established.
 See [quality evidence](EVALUATION.md#full-resolution-kernel-qualification),
 the [current measurement record](artifacts/full-resolution-kernels.json), and
 the [short-attention record](artifacts/native-attention.json).
@@ -88,8 +88,10 @@ phase peaks must not be added as though all were resident together.
    AdaLN projection is loaded, used to precompute schedule constants, and
    released. Core loading is bounded to two workers. Construction validates
    BF16 GEMM plans and releases temporary validation/staging buffers.
-3. **Denoising:** retained core blocks stay resident. Two BF16 device buffers
-   carry hidden states on one ordered stream; per-block scratch is stable.
+3. **Denoising:** retained core blocks stay resident. One BF16 device buffer
+   carries hidden states in place on one ordered stream; scratch reuses dead
+   activations. Final normalization writes BF16-rounded values directly into
+   F32 projection scratch.
    F32 sample and velocity buffers implement Diffusers' two-stage Euler
    operation order. Reuse retains the previous video/audio velocities.
    Cancellation is checked at block and step boundaries.

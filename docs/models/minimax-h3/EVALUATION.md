@@ -132,29 +132,51 @@ metrics and measurement scope. No full denoising schedule or video was generated
 
 ### Full-resolution kernel qualification
 
-The fused QKV RMSNorm/RoPE, packed-value attention, native BF16 FFN down
-projection and fused SwiGLU/packing retain the same model arithmetic.
+The full-resolution route uses native BF16 projections throughout.
+QKV projection fuses RMSNorm/RoPE and value packing; attention writes the
+output projection's packed input directly. AdaLN packing and gate/up plus
+SwiGLU retain every BF16 rounding boundary.
 On 2026-09-21:
 
 - At 37,716 rows, all **202,761,216 BF16 elements** of real-weight block 0
   are byte-identical across the baseline and final implementation.
-- Full-size randomized controls also match every BF16 output: Q/K/V
-  (270,348,288 elements each), attention (270,348,288), and FFN down
-  (202,761,216). Independent FP64 sample relative L2 remains `0.00237943`
-  for attention and `0.00257995` for the projection.
+- A complete **50-block** evaluation at 1344×768×124 also matches the
+  unchanged baseline byte-for-byte: **3,580,416 video** and **13,248 audio**
+  FP32 velocity elements. This control uses six conditioning rows and zero
+  initial latents; it is not a full denoising schedule or a full-resolution
+  comparison against an independent teacher.
+- Full-size randomized controls also match every BF16 output: Q/K
+  (270,348,288 elements each), packed V (270,434,304, including zero padding),
+  attention (270,348,288), and both output projections (202,761,216 each).
+  Independent FP64 sample relative L2 is `0.00237943` for attention,
+  `0.00257995` for FFN down and `0.00109255` for attention output.
+- Full-size fused gate/up plus SwiGLU matches all **540,696,576 BF16**
+  activations; fused MLP AdaLN packing matches all **202,761,216 BF16**
+  outputs. Separate interior/tail dispatches and vector stores retain the
+  same bytes.
 - The frozen 528-row block and complete 50-block forward retain exactly
   the teacher errors in the table above; no thresholds changed.
 - Maintained analytic checks cover nonunit Q/K norm weights, partial rotary
-  dimensions, both output layouts, attention tails/replay and guarded packing,
-  and an independently solvable FFN projection with a partial 129-row tile.
-  Fused SwiGLU/packing matches all 65,536 BF16 gate encodings and a partial
-  row tile, including the original rounding and nonfinite behavior.
-  The existing three-block reuse smoke also passes.
+  dimensions, packed/row-major attention tails and replay, guarded packing,
+  independently solvable QKV/gate/up/down/attention-output projections and
+  FP64 AdaLN with a partial 129-row tile, plus diagnostic unpacking.
+  The fused SwiGLU helper matches all 65,536 BF16 gate encodings, including
+  the original rounding and nonfinite behavior.
+  In-place residual/norm checks and the existing three-block reuse smoke pass.
 
 Packing changes storage order only. Original FFN weights are released after
-packing, and SwiGLU writes packed activations directly. These checks establish
-no added error at the measured boundaries; full-video perceptual evaluation
-remains separate. Identities and measurement scopes are in the
+packing; AdaLN and SwiGLU write packed activations directly. Scratch aliases
+have disjoint live ranges; block input/output can share storage. Sequential
+short blocks share one BLAS workspace; full-resolution blocks need none.
+
+Sparse QKV tests account for the same tiny exact-cancellation residual in
+both native WMMA and pinned rocBLAS (at most `5.96e-8` in the control).
+Its independent check bounds that residual and one BF16 step after RoPE;
+checkpoint replay still requires byte equality. Existing teacher ceilings
+remain unchanged.
+
+These checks establish no added error at the measured boundaries; full-video
+perceptual evaluation remains separate. Identities and measurement scopes are in the
 [compact record](artifacts/full-resolution-kernels.json).
 
 Component agreement does not establish end-to-end semantic quality. Pre-audit

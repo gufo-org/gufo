@@ -130,6 +130,17 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   Reuse overlapping convolution windows in LDS while keeping the original
   channel/tap accumulation order. Fuse normalization/RoPE or activation only
   after preserving every intermediate BF16 rounding boundary.
+  H3's fused gate/up projections retain two BF16 results before FP32 SwiGLU;
+  AdaLN and SwiGLU then write directly in the next projection's packed layout.
+  This removed a large gate/up tensor and a packing pass. Pairing even/odd
+  WMMA output lanes enabled contiguous vector stores with identical bytes.
+  Split large projection interiors from their single ragged tail to remove
+  repeated bounds work. Paired-lane vector stores also sped up row-major
+  output projections; benchmark the complete block after each change.
+  Count library reservations too: H3 retained 32 MiB per rocBLAS handle.
+  Delete unused handles and share handles only across sequential work.
+  Reuse tensors after their last read; remove `restrict` where in-place
+  residual writes now alias an input.
   rocBLAS can rotate the K reduction per output tile: matching that rotation
   made native ASR convolutions byte-exact to PyTorch. For attention, lane
   swizzles change softmax sum groups; preserve those groups and explicit FMA
