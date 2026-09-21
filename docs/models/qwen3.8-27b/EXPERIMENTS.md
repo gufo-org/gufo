@@ -20,17 +20,22 @@
 | Wider shallow pipeline, removed broadcast and separate score/value passes | Rejected: worse cold-KV or eight-row costs than the retained two-position pipeline. |
 | Additional GEMV format specialization | Not promoted: Q8 cold components unchanged; Q6 gains at most 3% in the cold component test. |
 
-Active target: match llama.cpp generation speed, aiming for a further 10%,
+Current focus: **Q4_K_XL, AR, C1**. Profile and push this configuration first;
+do not repeat every candidate on other targets, speculative modes or concurrency
+levels. Keep the work on one PR branch with incremental, reviewable commits.
+
+Overall target: match llama.cpp generation speed, aiming for a further 10%,
 on Q4_K_XL and Q8_K_XL with AR and **Q4_K_M DFlash2** at C1/C2/C4/C6/C8.
 Cover both shallow (d0–d16K) and long-context (d32K–d128K) token generation:
 screen d0 and d32K, then expand where needed to isolate or qualify the change.
 Preserve prompt-processing speed, greedy AR/speculative agreement and sampled
 replay. Check cross-engine differences against each engine's AR output.
 
-Iterate with one affected shape and one control. Do not refresh the full
-benchmark sweep during exploration. Repeat only to resolve noise or a failure;
-broaden qualification when a retained change requires it. Remote GPU time is
-limited.
+Iterate with one affected Q4 AR C1 shape and one control. Do not refresh the
+full benchmark sweep during exploration. Repeat only to resolve noise or a
+failure. Qualify the other configurations after the focused optimization phase,
+or earlier only when a specific correctness concern requires it. Remote GPU time
+is limited.
 
 Published workload numbers live only in [benchmarks](BENCHMARKS.md); source and
 model qualification live in [evaluation](EVALUATION.md).
