@@ -455,13 +455,14 @@ struct SpeechDecoderHipRuntime::Impl {
       throw std::runtime_error(
           "Qwen3-TTS speech decoder supports integrated gfx1151 Strix Halo");
     }
-    if (model.mapped_regions.size() < 2) {
+    const auto decoder_regions = model.RegionsFor("decoder.");
+    if (decoder_regions.size() != 1) {
       throw std::runtime_error(
           "Qwen3-TTS speech-tokenizer safetensors mapping is missing");
     }
     RequireHip(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking),
                "hipStreamCreateWithFlags");
-    if (!speech_weights.Initialize(model.mapped_regions[1], nullptr)) {
+    if (!speech_weights.Initialize(decoder_regions.front(), nullptr)) {
       throw std::runtime_error(
           "cannot initialize Qwen3-TTS speech weight mapping");
     }

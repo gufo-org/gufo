@@ -45,6 +45,7 @@ public:
   void Clear() { tensors_.clear(); }
 
 private:
+  friend struct LoadResult;
   std::vector<Tensor> tensors_;
 };
 

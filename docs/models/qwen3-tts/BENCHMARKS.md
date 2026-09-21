@@ -12,15 +12,19 @@ predictor T 0.8 / top-k 30 / top-p 0.9.
 
 | Variant | Ready |
 | --- | ---: |
-| CustomVoice | 1.69 s |
-| VoiceDesign | 1.53 s |
-| Base ICL | 1.83 s |
+| CustomVoice | 1.59 s |
+| VoiceDesign | 1.48 s |
+| Base ICL | 1.84 s |
 
 Short seed-42 control, “Hello from Gufo.”: warm complete WAV latency is
 **0.57 / 0.51 / 0.74 s** respectively. Base uses that same 1.36-second speech
 as its reference; fresh-process and resident replay produce identical WAVs.
-Base's first request takes **1.49 s** including lazy reference encoders,
-versus **0.62 / 0.54 s** for CustomVoice/VoiceDesign.
+Base's first request takes **0.86 s** including lazy reference encoders,
+versus **0.60 / 0.54 s** for CustomVoice/VoiceDesign.
+
+Component-only uploads exclude **215 MiB** of unused speech-encoder weights
+from CustomVoice/VoiceDesign and **238 MiB** including Base's separately
+loaded speaker encoder.
 
 ## Single request
 

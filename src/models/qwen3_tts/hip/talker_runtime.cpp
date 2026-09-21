@@ -393,8 +393,9 @@ struct TalkerHipRuntime::Impl {
                            model.config.talker.num_code_groups),
         codec_embedding_tables(model.config.talker.num_code_groups),
         predictor_token(1) {
-    if (model.mapped_regions.empty() ||
-        !main_weights.Initialize(model.mapped_regions.front(), nullptr)) {
+    const auto talker_regions = model.RegionsFor("talker.");
+    if (talker_regions.size() != 1 ||
+        !main_weights.Initialize(talker_regions.front(), nullptr)) {
       throw std::runtime_error(
           "cannot initialize Qwen3-TTS GPU weight mapping");
     }

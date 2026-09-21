@@ -39,8 +39,7 @@ int main(int argc, char** argv) {
 
   auto config = qwen3_tts::LoadModelConfigFromPath(model_dir);
   Check(config.has_value(), "config parse");
-  Check(config->tts_model_type == "custom_voice",
-        "tts_model_type == custom_voice");
+  Check(qwen3_tts::IsSupportedModelConfig(*config), "supported 1.7B variant");
   Check(config->talker.hidden_size == 2048, "talker hidden 2048");
   Check(config->talker.num_hidden_layers == 28, "talker layers 28");
   Check(config->talker.num_attention_heads == 16, "talker heads 16");
@@ -73,13 +72,15 @@ int main(int argc, char** argv) {
             std::vector<std::uint32_t>({2, 2}),
         "speech decoder latent upsample ratios");
 
-  const auto spk = config->talker.spk_id.find("vivian");
-  Check(spk != config->talker.spk_id.end() && spk->second == 3065,
-        "vivian spk id 3065");
-  const auto dialect = config->talker.spk_dialect.find("eric");
-  Check(dialect != config->talker.spk_dialect.end() &&
-            dialect->second == "sichuan_dialect",
-        "Eric dialect is preserved");
+  if (config->variant == qwen3_tts::ModelVariant::kCustomVoice) {
+    const auto spk = config->talker.spk_id.find("vivian");
+    Check(spk != config->talker.spk_id.end() && spk->second == 3065,
+          "vivian spk id 3065");
+    const auto dialect = config->talker.spk_dialect.find("eric");
+    Check(dialect != config->talker.spk_dialect.end() &&
+              dialect->second == "sichuan_dialect",
+          "Eric dialect is preserved");
+  }
 
   auto loaded = qwen3_tts::LoadModelDirectory(model_dir);
   Check(loaded.ok, "load model dir: " + loaded.error);
@@ -97,7 +98,41 @@ int main(int argc, char** argv) {
   Check(waveform_weight != nullptr && waveform_weight->shape.size() == 3,
         "speech decoder output convolution present");
 
+  const auto talker_regions = loaded.RegionsFor("talker.");
+  const auto decoder_regions = loaded.RegionsFor("decoder.");
+  const auto contains = [](const auto& regions, const auto* tensor) {
+    if (!tensor)
+      return false;
+    const auto address = reinterpret_cast<std::uintptr_t>(tensor->data);
+    for (const auto& region : regions) {
+      const auto base = reinterpret_cast<std::uintptr_t>(region.data);
+      if (address >= base && address - base < region.size &&
+          tensor->byte_count <= region.size - (address - base))
+        return true;
+    }
+    return false;
+  };
+  Check(talker_regions.size() == 1 && decoder_regions.size() == 1 &&
+            contains(talker_regions, text_emb) &&
+            contains(decoder_regions, waveform_weight),
+        "selected component weights remain available");
+  const auto* encoder_weight =
+      loaded.store->Find("encoder.encoder.layers.0.conv.weight");
+  Check(encoder_weight && !contains(decoder_regions, encoder_weight) &&
+            !contains(talker_regions, waveform_weight),
+        "synthesis uploads must exclude unused component weights");
+  const auto* speaker_weight =
+      loaded.store->Find("speaker_encoder.blocks.0.conv.weight");
+  Check(!speaker_weight || !contains(talker_regions, speaker_weight),
+        "talker upload must exclude the independently loaded speaker encoder");
+  std::size_t selected_bytes = 0, all_bytes = 0;
+  for (const auto& region : loaded.mapped_regions)
+    all_bytes += region.size;
+  for (const auto& regions : {talker_regions, decoder_regions})
+    for (const auto& region : regions)
+      selected_bytes += region.size;
+  Check(selected_bytes < all_bytes, "unused weight bytes were not excluded");
   std::cout << "PASS qwen3_tts_loader_test (tensors=" << loaded.store->size()
-            << ")\n";
+            << ") avoided_upload_bytes=" << all_bytes - selected_bytes << '\n';
   return 0;
 }

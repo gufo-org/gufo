@@ -5,11 +5,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -188,6 +190,38 @@ bool LoadSafetensorsFile(const std::string& path, TensorStore* store,
 }
 
 }  // namespace
+
+std::vector<MappedRegion> LoadResult::RegionsFor(
+    std::string_view prefix) const {
+  std::vector<MappedRegion> result;
+  if (!store)
+    return result;
+  const auto page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0 || page_size % 16 != 0)
+    throw std::runtime_error("TTS cannot determine mapped weight alignment");
+  for (const auto& region : mapped_regions) {
+    std::size_t begin = region.size, end = 0;
+    const auto base = reinterpret_cast<std::uintptr_t>(region.data);
+    for (const auto& tensor : store->tensors_) {
+      if (!tensor.name.starts_with(prefix))
+        continue;
+      const auto address = reinterpret_cast<std::uintptr_t>(tensor.data);
+      if (address < base || address - base >= region.size)
+        continue;
+      const auto offset = address - base;
+      if (tensor.byte_count > region.size - offset)
+        throw std::runtime_error("TTS tensor exceeds its mapped shard");
+      begin = std::min(begin, offset);
+      end = std::max(end, offset + tensor.byte_count);
+    }
+    if (end != 0) {
+      begin -= begin % static_cast<std::size_t>(page_size);
+      result.push_back(
+          {region.data + begin, end - begin, region.payload_offset % 16U});
+    }
+  }
+  return result;
+}
 
 LoadResult LoadModelDirectory(const std::string& model_dir) {
   LoadResult result;

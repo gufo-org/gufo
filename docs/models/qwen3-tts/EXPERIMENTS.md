@@ -28,6 +28,7 @@
 | Generic talker hipBLASLt prefill | Rejected: failed the five-main-code oracle gate. |
 | Finish normalization within one wave | Retained: fewer barriers with the same sum tree; independent operator and exact waveform replay checks. |
 | Parallel mmap population before upload | Retained: cold startup includes weight reads; no additional persistent weight copy. |
+| Upload only talker and waveform-decoder components | Retained: unused encoder weights excluded; all variants load and preserve exact synthesis/decoder replay. |
 | Compact reference snapshots | Retained: only live convolution/attention rows, exact replacement/cancellation and 300-frame boundary replay. |
 | Speaker softmax scratch synchronization | Corrected: independent FP64 check and fresh-process voice-cloning replay; cached references previously hid nondeterminism. |
 

@@ -17,6 +17,9 @@ Official embedding cosine remains **0.999997**. The 64-frame synthesis check
 passes cancellation/reuse and exact buffered/streamed PCM. Decoder snapshots
 retain only live attention and convolution history, including reference
 replacement and endpoints around the 300-frame reset.
+Component-selected uploads pass the loader checks for all three variants and
+retain the decoder oracle's waveform MAE **1.33e-7**, maximum **1.28e-6**.
+The speaker and speech encoders remain independently available for Base input.
 
 Current complete-sentence checks use the same 37-word English paragraph,
 default sampling and automatic language selection. Native Qwen3-ASR-1.7B

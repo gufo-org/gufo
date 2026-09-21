@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/models/qwen3_tts/config.hpp"
@@ -31,6 +32,11 @@ struct LoadResult {
   // Owned file mappings; payload pointers in `store` point into these.
   std::vector<std::shared_ptr<void>> mappings;
   std::vector<MappedRegion> mapped_regions;
+
+  /// Page-aligned envelopes of the named component's tensors. Payload
+  /// alignment is preserved when these ranges are copied to device memory.
+  [[nodiscard]] std::vector<MappedRegion> RegionsFor(
+      std::string_view prefix) const;
 };
 
 /// Loads a quality-qualified Qwen3-TTS 12.5 Hz 1.7B model directory.
