@@ -155,6 +155,7 @@ if (ENGINE_ENABLE_HIP)
     src/models/minimax_h3/audio_vae.hip
     src/models/minimax_h3/denoiser.hip
     src/models/minimax_h3/dit.hip
+    src/models/minimax_h3/dense.hip
     src/models/minimax_h3/runtime_hip.cpp
     src/models/minimax_h3/prompt_encoder.hip
     src/models/minimax_h3/sampling.hip

@@ -20,7 +20,7 @@ Output is byte-identical to the previous loader. No full video was generated.
 One worker executes jobs, with one queued job. There is no parallel C>1 model
 execution; throughput/queue latency measurements are **TODO**.
 
-## Native attention components — 2026-09-21
+## Native DiT components — 2026-09-21
 
 gfx1151, ROCm 7.2.3, BF16 inputs/output, 56 heads of width 128. Kernel
 measurements use the production compiler flags; real-weight block controls
@@ -30,19 +30,32 @@ not complete-generation latency.
 | Sequence rows | Native attention, GPU ms | Real-weight block, GPU ms | Block wall ms |
 | --- | ---: | ---: | ---: |
 | 528 | 0.63 | TODO | TODO |
-| 1,872 | 6.02 | 59.24 | 63.68 |
+| 1,872 | 6.02 | TODO | TODO |
 | 4,096 | 27.33 | TODO | TODO |
 | 4,097 | 14.20 | TODO | TODO |
-| 7,136 | 42.88 | 320.23 | 332.55 |
-| 37,716 | 1,215.70 | 2,219.87 | 2,284.40 |
+| 7,136 | 39.50 | 312.66 | 325.26 |
+| 37,716 | 1,087.53 | 1,874.15 | 1,933.16 |
 
-Short attention averages ten timed launches after warm-up; long attention
-averages two. The 1,872-row block is one paired process control; long-block
-values are medians of three process runs. Model loading is excluded. The 7,136-row inference trace
-attributes 81.6% of GPU time to projections and 13.6% to attention, with 0.04 ms
-between kernels. No complete-video speedup is established.
-See [quality evidence](EVALUATION.md#native-attention-qualification)
-and the [measurement record](artifacts/native-attention.json).
+Short attention averages ten timed launches after warm-up; the current long
+attention controls time one launch after warm-up, including value packing.
+Block controls use one process run per shape. Loading is excluded.
+At 37,716 rows, fused QKV normalization/RoPE takes **19.70 ms** and the
+fused SwiGLU/activation packing takes **19.06 ms**. Weights are packed once
+during loading; activations are written directly in the native projection's
+layout.
+
+One complete 50-block denoiser forward at **1344×768×124**, with six text rows,
+takes **95.67 s**, excluding setup/loading. This is one diagnostic forward,
+with zero initial latents; it does not run the denoising schedule or VAE.
+Peak retained memory is **43.50 GiB**, including **4.94 GiB** scratch.
+
+The full-resolution block trace attributes 58.7% of GPU time to attention
+and its packing, and 38.1% to projections. Gaps between
+kernels total 0.036 ms. Block activation storage is **4.92 GiB**, with packing reusing existing
+buffers. No complete-video speedup is established.
+See [quality evidence](EVALUATION.md#full-resolution-kernel-qualification),
+the [current measurement record](artifacts/full-resolution-kernels.json), and
+the [short-attention record](artifacts/native-attention.json).
 
 The production Nix runtime closure is **3.82 GiB** with no Triton/AOTriton,
 Composable Kernel or MIOpen dependencies.

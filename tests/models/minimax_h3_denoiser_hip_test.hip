@@ -236,8 +236,7 @@ int CheckOracle() {
   const char* root = std::getenv("GUFO_H3_MODEL_ROOT");
   const char* golden_value = std::getenv("GUFO_H3_DENOISER_GOLDEN");
   if (root == nullptr || golden_value == nullptr) {
-    std::cout
-        << "SKIP: GUFO_H3_MODEL_ROOT or GUFO_H3_DENOISER_GOLDEN unset\n";
+    std::cout << "SKIP: GUFO_H3_MODEL_ROOT or GUFO_H3_DENOISER_GOLDEN unset\n";
     return 77;
   }
   const std::filesystem::path golden(golden_value);
@@ -540,7 +539,7 @@ int CheckReuseSmoke() {
   CHECK(Finite(first_video));
   CHECK(Finite(first_audio));
   CHECK(first.forward_ms.size() == 3);
-  CHECK(first.dispatches == 121);
+  CHECK(first.dispatches == 130);
   CHECK(first.swap_bytes == 0);
 
   std::cout << "H3 denoiser reuse smoke active_blocks=3 steps=5 "

@@ -130,6 +130,33 @@ Raw tensors and traces remain outside Git. The compact
 [qualification record](artifacts/native-attention.json) contains identities,
 metrics and measurement scope. No full denoising schedule or video was generated.
 
+### Full-resolution kernel qualification
+
+The fused QKV RMSNorm/RoPE, packed-value attention, native BF16 FFN down
+projection and fused SwiGLU/packing retain the same model arithmetic.
+On 2026-09-21:
+
+- At 37,716 rows, all **202,761,216 BF16 elements** of real-weight block 0
+  are byte-identical across the baseline and final implementation.
+- Full-size randomized controls also match every BF16 output: Q/K/V
+  (270,348,288 elements each), attention (270,348,288), and FFN down
+  (202,761,216). Independent FP64 sample relative L2 remains `0.00237943`
+  for attention and `0.00257995` for the projection.
+- The frozen 528-row block and complete 50-block forward retain exactly
+  the teacher errors in the table above; no thresholds changed.
+- Maintained analytic checks cover nonunit Q/K norm weights, partial rotary
+  dimensions, both output layouts, attention tails/replay and guarded packing,
+  and an independently solvable FFN projection with a partial 129-row tile.
+  Fused SwiGLU/packing matches all 65,536 BF16 gate encodings and a partial
+  row tile, including the original rounding and nonfinite behavior.
+  The existing three-block reuse smoke also passes.
+
+Packing changes storage order only. Original FFN weights are released after
+packing, and SwiGLU writes packed activations directly. These checks establish
+no added error at the measured boundaries; full-video perceptual evaluation
+remains separate. Identities and measurement scopes are in the
+[compact record](artifacts/full-resolution-kernels.json).
+
 Component agreement does not establish end-to-end semantic quality. Pre-audit
 multi-step latents and checkerboard video captures are invalid promotion
 evidence. Fast/aggressive delivery quality must be compared with the audited

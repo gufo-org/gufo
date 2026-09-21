@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "src/models/minimax_h3/attention.hip.hpp"
+#include "src/models/minimax_h3/dense.hip.hpp"
 #include "src/models/minimax_h3/dit.hpp"
 #include "src/models/minimax_h3/dit_ops.hip.hpp"
 
@@ -66,9 +67,6 @@ rocblas_int PinnedBf16Solution(std::size_t batch, std::size_t rows,
     }
     if (rows == 28672 && columns == 5376) {
       return -1162085118;
-    }
-    if (rows == 5376 && columns == 14336) {
-      return -1162085122;
     }
   }
   return kGfx1151RocblasBf16Solution;
@@ -247,7 +245,7 @@ SharedWorkspaceLayout MakeSharedWorkspaceLayout(std::size_t rows,
   layout.query_modulation_mlp = add(attention * bf16);
   layout.key_modulation_attention = add(attention * bf16);
   layout.value_outputs = add(attention * bf16);
-  layout.normalization = add(row_count * kDitAttentionHeads * 2U * f32);
+  layout.normalization = add(row_count * f32);
   if (row_parallel_attention && !fused_attention) {
     const unsigned __int128 matrix = row_count * row_count * kDitAttentionHeads;
     layout.attention_scores = add(matrix * f32);
@@ -753,6 +751,7 @@ struct DitBlockSession::Impl {
   std::size_t modulation_rows{0};
   bool row_parallel_attention{true};
   bool fused_attention{false};
+  bool native_ffn_down{false};
   int device{0};
   hipStream_t stream{nullptr};
   hipEvent_t start_event{nullptr};
@@ -854,6 +853,7 @@ std::unique_ptr<DitBlockSession> DitBlockSession::Create(
   auto impl = std::make_unique<Impl>();
   impl->block_index = options.block_index;
   impl->rows = options.rows;
+  impl->native_ffn_down = options.rows >= 32768;
   impl->modulation_rows = options.modulation_rows;
   impl->row_parallel_attention = options.row_parallel_attention;
   if (!ValidateTarget(&impl->device, error)) {
@@ -953,6 +953,22 @@ std::unique_ptr<DitBlockSession> DitBlockSession::Create(
   }
   (void)hipHostFree(impl->staging);
   impl->staging = nullptr;
+  if (impl->native_ffn_down) {
+    DeviceBuffer packed;
+    if (!packed.Allocate(impl->fc2_weight.storage.bytes(), error))
+      return nullptr;
+    dit_ops::LaunchPackDense(impl->fc2_weight.storage.As<std::uint16_t>(),
+                             packed.As<std::uint16_t>(), kDitHiddenSize,
+                             kDitFeedForwardSize, impl->stream);
+    status = hipGetLastError();
+    if (status == hipSuccess)
+      status = hipStreamSynchronize(impl->stream);
+    if (status != hipSuccess) {
+      SetError(error, HipError("pack H3 feed-forward weights", status));
+      return nullptr;
+    }
+    impl->fc2_weight.storage = std::move(packed);
+  }
   impl->load_ms = Milliseconds(load_begin, Clock::now());
 
   const auto bf16_bytes = [](std::size_t elements) {
@@ -961,8 +977,7 @@ std::unique_ptr<DitBlockSession> DitBlockSession::Create(
   const std::size_t hidden_elements = options.rows * kDitHiddenSize;
   const std::size_t attention_elements = options.rows * kDitAttentionWidth;
   const std::size_t qkv_elements = attention_elements * 3U;
-  const std::size_t normalization_factor_elements =
-      options.rows * kDitAttentionHeads * 2U;
+  const std::size_t normalization_factor_elements = options.rows;
   const std::size_t fc1_elements = options.rows * kDitFeedForwardSize * 2U;
   const std::size_t activated_elements = options.rows * kDitFeedForwardSize;
   const std::size_t modulation_elements =
@@ -1067,8 +1082,9 @@ std::unique_ptr<DitBlockSession> DitBlockSession::Create(
                           error) ||
       !impl->gemm.Prepare(options.rows, kDitFeedForwardSize * 2U,
                           kDitHiddenSize, error) ||
-      !impl->gemm.Prepare(options.rows, kDitHiddenSize, kDitFeedForwardSize,
-                          error)) {
+      (!impl->native_ffn_down &&
+       !impl->gemm.Prepare(options.rows, kDitHiddenSize, kDitFeedForwardSize,
+                           error))) {
     return nullptr;
   }
   if (options.validate_gemm_plans) {
@@ -1084,7 +1100,7 @@ std::unique_ptr<DitBlockSession> DitBlockSession::Create(
     if (!fill(&impl->hidden, 0x169001U) ||
         !fill(&impl->attention_heads, 0x169002U) ||
         !fill(&impl->modulation_mlp, 0x169003U) ||
-        !fill(&impl->activated, 0x169004U) ||
+        (!impl->native_ffn_down && !fill(&impl->activated, 0x169004U)) ||
         !impl->gemm.SelectDeterministic(
             impl->qkv_weight.storage.As<std::uint16_t>(),
             impl->hidden.As<std::uint16_t>(), impl->qkv.As<std::uint16_t>(),
@@ -1105,13 +1121,14 @@ std::unique_ptr<DitBlockSession> DitBlockSession::Create(
             impl->gemm_reference.As<std::uint16_t>(),
             impl->gemm_first_mismatch.As<unsigned long long>(), options.rows,
             kDitFeedForwardSize * 2U, kDitHiddenSize, impl->stream, error) ||
-        !impl->gemm.SelectDeterministic(
-            impl->fc2_weight.storage.As<std::uint16_t>(),
-            impl->activated.As<std::uint16_t>(),
-            impl->mlp_output.As<std::uint16_t>(),
-            impl->gemm_reference.As<std::uint16_t>(),
-            impl->gemm_first_mismatch.As<unsigned long long>(), options.rows,
-            kDitHiddenSize, kDitFeedForwardSize, impl->stream, error)) {
+        (!impl->native_ffn_down &&
+         !impl->gemm.SelectDeterministic(
+             impl->fc2_weight.storage.As<std::uint16_t>(),
+             impl->activated.As<std::uint16_t>(),
+             impl->mlp_output.As<std::uint16_t>(),
+             impl->gemm_reference.As<std::uint16_t>(),
+             impl->gemm_first_mismatch.As<unsigned long long>(), options.rows,
+             kDitHiddenSize, kDitFeedForwardSize, impl->stream, error))) {
       return nullptr;
     }
     status = hipStreamSynchronize(impl->stream);
@@ -1119,7 +1136,7 @@ std::unique_ptr<DitBlockSession> DitBlockSession::Create(
       SetError(error, HipError("validate MiniMax H3 DiT GEMMs", status));
       return nullptr;
     }
-    impl->gemm_plan_validations = 4;
+    impl->gemm_plan_validations = impl->native_ffn_down ? 3 : 4;
     impl->activation_bytes -=
         impl->gemm_reference.bytes() + impl->gemm_first_mismatch.bytes();
     impl->gemm_reference.Reset();
@@ -1132,8 +1149,9 @@ std::unique_ptr<DitBlockSession> DitBlockSession::Create(
              !impl->gemm.TrustPinnedSolution(options.rows,
                                              kDitFeedForwardSize * 2U,
                                              kDitHiddenSize, error) ||
-             !impl->gemm.TrustPinnedSolution(options.rows, kDitHiddenSize,
-                                             kDitFeedForwardSize, error)) {
+             (!impl->native_ffn_down &&
+              !impl->gemm.TrustPinnedSolution(options.rows, kDitHiddenSize,
+                                              kDitFeedForwardSize, error))) {
     return nullptr;
   }
   return std::unique_ptr<DitBlockSession>(new DitBlockSession(std::move(impl)));
@@ -1387,26 +1405,30 @@ bool DitBlockSession::RunInternal(
                        error)) {
     return false;
   }
-  dit_ops::LaunchGroupedQkvNormRopeSplit(
+  dit_ops::LaunchGroupedQkvNormRope(
       impl_->qkv.As<std::uint16_t>(),
       impl_->query_norm.storage.As<std::uint16_t>(),
       impl_->key_norm.storage.As<std::uint16_t>(),
       impl_->rope_cos.As<std::uint16_t>(), impl_->rope_sin.As<std::uint16_t>(),
-      impl_->normalization_factors.As<float>(),
       impl_->query.As<std::uint16_t>(), impl_->key.As<std::uint16_t>(),
       impl_->value.As<std::uint16_t>(), rows, kDitAttentionHeads,
-      kDitNormEpsilon,
-      impl_->fused_attention || impl_->rows > kMaximumMaterializedAttentionRows,
-      run_stream);
+      kDitHeadDimension, kDitRopeHalf, kDitNormEpsilon, run_stream,
+      impl_->fused_attention ||
+          impl_->rows > kMaximumMaterializedAttentionRows);
   if (!CheckLaunch("H3 DiT grouped QKV norm/RoPE", error)) {
     return false;
   }
   if (impl_->fused_attention) {
-    dit_ops::LaunchWmmaAttention(impl_->query.As<std::uint16_t>(),
-                                 impl_->key.As<std::uint16_t>(),
-                                 impl_->value.As<std::uint16_t>(),
-                                 impl_->attention_heads.As<std::uint16_t>(),
-                                 rows, kDitAttentionHeads, run_stream);
+    // QKV is dead after normalization. The attention result occupies its first
+    // plane; pack V after that plane, leaving source values and output
+    // disjoint.
+    auto* packed_values =
+        impl_->qkv.As<std::uint16_t>() + impl_->rows * kDitAttentionWidth;
+    dit_ops::LaunchWmmaAttention(
+        impl_->query.As<std::uint16_t>(), impl_->key.As<std::uint16_t>(),
+        impl_->value.As<std::uint16_t>(),
+        impl_->attention_heads.As<std::uint16_t>(), packed_values, rows,
+        kDitAttentionHeads, run_stream);
   } else if (impl_->row_parallel_attention) {
     if (!impl_->attention_gemm.Scores(
             impl_->query.As<std::uint16_t>(), impl_->key.As<std::uint16_t>(),
@@ -1469,8 +1491,8 @@ bool DitBlockSession::RunInternal(
                        error)) {
     return false;
   }
-  if (impl_->silu_lookup != nullptr) {
-    dit_ops::LaunchSwiGluLookup(
+  if (impl_->native_ffn_down) {
+    dit_ops::LaunchSwiGluLookupPacked(
         impl_->fc1.As<std::uint16_t>(), impl_->activated.As<std::uint16_t>(),
         impl_->silu_lookup, rows, kDitFeedForwardSize, run_stream);
   } else {
@@ -1478,12 +1500,20 @@ bool DitBlockSession::RunInternal(
                           impl_->activated.As<std::uint16_t>(), rows,
                           kDitFeedForwardSize, run_stream);
   }
-  if (!CheckLaunch("H3 DiT SwiGLU", error) ||
-      !impl_->gemm.Run(impl_->fc2_weight.storage.As<std::uint16_t>(),
-                       impl_->activated.As<std::uint16_t>(),
-                       impl_->mlp_output.As<std::uint16_t>(), impl_->rows,
-                       kDitHiddenSize, kDitFeedForwardSize, run_stream,
-                       error)) {
+  if (!CheckLaunch("H3 DiT SwiGLU", error))
+    return false;
+  if (impl_->native_ffn_down) {
+    dit_ops::LaunchFfnDown(impl_->fc2_weight.storage.As<std::uint16_t>(),
+                           impl_->activated.As<std::uint16_t>(),
+                           impl_->mlp_output.As<std::uint16_t>(), rows,
+                           run_stream);
+    if (!CheckLaunch("H3 DiT feed-forward output", error))
+      return false;
+  } else if (!impl_->gemm.Run(impl_->fc2_weight.storage.As<std::uint16_t>(),
+                              impl_->activated.As<std::uint16_t>(),
+                              impl_->mlp_output.As<std::uint16_t>(),
+                              impl_->rows, kDitHiddenSize, kDitFeedForwardSize,
+                              run_stream, error)) {
     return false;
   }
   if (output_rms_required) {
@@ -1503,9 +1533,12 @@ bool DitBlockSession::RunInternal(
   if (!CheckLaunch("H3 DiT MLP gated residual", error)) {
     return false;
   }
-  telemetry->dispatches = impl_->fused_attention
-                              ? (input_rms_prepared ? 10 : 11)
-                              : (input_rms_prepared ? 12 : 13);
+  const std::uint32_t attention_dispatches =
+      impl_->fused_attention
+          ? (rows > kMaximumMaterializedAttentionRows ? 2U : 1U)
+          : (impl_->row_parallel_attention ? 3U : 1U);
+  telemetry->dispatches =
+      (input_rms_prepared ? 10U : 11U) + attention_dispatches;
   telemetry->attention_backend =
       impl_->fused_attention
           ? "hip_bf16_wmma_flash"
