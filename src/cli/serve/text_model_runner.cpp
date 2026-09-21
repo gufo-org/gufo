@@ -677,6 +677,9 @@ struct TextRunnerPool::Request::Impl {
   std::vector<TextRunnerToken> generated;
   std::size_t prefill_offset{0};
   bool decode_ready{false};
+  // A throwing model call may have partially mutated device state. Never
+  // publish that state as a live continuation, even if its position is stale.
+  bool state_reusable{true};
   bool stopped{false};
   std::optional<TextDecodeSelection> pending_selection;
   sampling::SamplerState sampler;
@@ -807,6 +810,7 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   }
 
   const std::size_t remaining = impl_->prompt.size() - impl_->prefill_offset;
+  impl_->state_reusable = false;
   auto step = impl_->runner->Prefill(
       dynamic_cast<TextRunnerState&>(impl_->lease.state()), impl_->prompt,
       impl_->prefill_offset, max_input_tokens);
@@ -823,6 +827,7 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
         "text runner returned an inconsistent prefill boundary");
   }
   impl_->decode_ready = reached_frontier;
+  impl_->state_reusable = true;
   if (!impl_->boundaries.empty() &&
       impl_->boundaries.front() == impl_->prefill_offset) {
     impl_->boundaries.erase(impl_->boundaries.begin());
@@ -847,8 +852,10 @@ TextDecodeSelection TextRunnerPool::Request::SelectNext() {
     throw std::logic_error("text runner request already stopped");
   }
 
+  impl_->state_reusable = false;
   auto selection = impl_->runner->SelectNext(
       dynamic_cast<TextRunnerState&>(impl_->lease.state()), impl_->sampler);
+  impl_->state_reusable = true;
   if (selection.stop) {
     impl_->stopped = true;
     return selection;
@@ -868,9 +875,11 @@ void TextRunnerPool::Request::Advance() {
         "text runner request has no selected token to advance");
   }
   impl_->CapturePromptSnapshot();
+  impl_->state_reusable = false;
   impl_->runner->Advance(dynamic_cast<TextRunnerState&>(impl_->lease.state()),
                          impl_->pending_selection->token);
   impl_->pending_selection.reset();
+  impl_->state_reusable = true;
 }
 
 TextDecodeStep TextRunnerPool::Request::DecodeStep(std::size_t max_tokens) {
@@ -894,6 +903,7 @@ TextDecodeStep TextRunnerPool::Request::DecodeStep(std::size_t max_tokens) {
   }
 
   impl_->CapturePromptSnapshot();
+  impl_->state_reusable = false;
   auto step = impl_->runner->DecodeStep(
       dynamic_cast<TextRunnerState&>(impl_->lease.state()), max_tokens,
       impl_->sampler);
@@ -910,6 +920,7 @@ TextDecodeStep TextRunnerPool::Request::DecodeStep(std::size_t max_tokens) {
     impl_->generated.push_back(selection.token);
   }
   impl_->stopped = step.stop;
+  impl_->state_reusable = true;
   return step;
 }
 
@@ -962,6 +973,51 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
       impl_->lease.Commit(std::move(checkpoint), std::move(snapshot));
   impl_.reset();
   return metrics;
+}
+
+TextRunnerPool::Request::CommitMetrics
+TextRunnerPool::Request::Cancel() noexcept {
+  if (!*this)
+    return {};
+  try {
+    // Join only an existing capture; cancellation must not start a new copy
+    // or execute the pending selected token merely to retain the session.
+    if (impl_->snapshot_future.valid())
+      impl_->FinishPromptSnapshot();
+    auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
+    state.SetCancellationCheck({});
+    const auto capabilities = impl_->runner->Descriptor().capabilities;
+    if (!capabilities.prefix_reuse) {
+      Invalidate();
+      return {};
+    }
+    std::vector<ContinuationToken> checkpoint;
+    if (impl_->state_reusable && impl_->decode_ready) {
+      checkpoint = impl_->prompt;
+      checkpoint.insert(checkpoint.end(), impl_->generated.begin(),
+                        impl_->generated.end());
+      const auto position = impl_->runner->CheckpointPosition(state);
+      if (position < impl_->prompt.size() || position > checkpoint.size())
+        throw std::runtime_error(
+            "cancelled checkpoint is outside completed work");
+      checkpoint.resize(position);
+    } else {
+      state.Invalidate();
+    }
+    CommitMetrics metrics = impl_->snapshot_metrics;
+    if (capabilities.snapshot && capabilities.fork) {
+      metrics.snapshot_bytes = impl_->lease.Commit(
+          std::move(impl_->prompt), std::move(impl_->prompt_snapshot),
+          std::move(checkpoint));
+    } else {
+      metrics.snapshot_bytes = impl_->lease.Commit(std::move(checkpoint));
+    }
+    impl_.reset();
+    return metrics;
+  } catch (...) {
+    Invalidate();
+    return {};
+  }
 }
 
 void TextRunnerPool::Request::Invalidate() noexcept {
@@ -1068,12 +1124,16 @@ std::vector<std::exception_ptr> TextRunnerPool::AdvanceBatch(
     });
   }
 
-  for (auto* request : requests)
+  for (auto* request : requests) {
     request->CapturePromptSnapshot();
+    request->impl_->state_reusable = false;
+  }
   impl_->validated.runner->AdvanceBatch(advances);
   for (std::size_t i = 0; i < requests.size(); ++i) {
-    if (!failures[i])
+    if (!failures[i]) {
       requests[i]->impl_->pending_selection.reset();
+      requests[i]->impl_->state_reusable = true;
+    }
   }
   return failures;
 }
@@ -1116,8 +1176,10 @@ std::vector<TextDecodeStep> TextRunnerPool::DecodeBatch(
     });
   }
 
-  for (auto* request : requests)
+  for (auto* request : requests) {
     request->CapturePromptSnapshot();
+    request->impl_->state_reusable = false;
+  }
   auto steps = impl_->validated.runner->DecodeBatch(decodes);
   if (steps.size() != requests.size()) {
     throw std::runtime_error(
@@ -1149,6 +1211,7 @@ std::vector<TextDecodeStep> TextRunnerPool::DecodeBatch(
       request.generated.push_back(selection.token);
     }
     request.stopped = step.stop;
+    request.state_reusable = true;
   }
   return steps;
 }

@@ -303,6 +303,81 @@ std::optional<ReasoningOptions> ResolveReasoningDefaults(
   return options;
 }
 
+struct SpeechOptions {
+  std::filesystem::path model;
+  std::size_t context;
+  std::string served_model_name;
+  std::vector<std::pair<std::string, std::string>> voice_specs;
+  std::map<std::string, std::string> voice_text_specs;
+  std::map<std::string, std::string> voice_lang_specs;
+};
+
+void AddSpeechOptions(ArgParser& parser, bool tts, SpeechOptions* options) {
+  parser.AddOption("-m", "--model", "DIR",
+                   tts ? "Qwen3-TTS 12Hz 1.7B model directory"
+                       : "Qwen3-ASR 1.7B model directory",
+                   "Model", &options->model);
+  parser.AddOption("-c", "--context", "N",
+                   tts ? "Context capacity (default: 4096)"
+                       : "Context capacity per audio chunk (default: 1024)",
+                   "Model", &options->context);
+  parser.AddOption("", "--served-model-name", "NAME", "Public API model ID",
+                   "Model", &options->served_model_name);
+  if (!tts)
+    return;
+  parser.AddCustomOption(
+      "", "--voice", "NAME=PATH",
+      "Register a named Qwen3-TTS Base voice from a reference WAV "
+      "(repeatable)",
+      "Model",
+      [options](std::string_view, std::string_view value, std::string* err) {
+        std::string name;
+        std::string path;
+        if (!SplitNameValue(value, "--voice", &name, &path, err)) {
+          return false;
+        }
+        options->voice_specs.emplace_back(std::move(name), std::move(path));
+        return true;
+      });
+  parser.AddCustomOption(
+      "", "--voice-lang", "NAME=LANGUAGE",
+      "Language a --voice speaks; used when a request omits 'language' "
+      "(repeatable)",
+      "Model",
+      [options](std::string_view, std::string_view value, std::string* err) {
+        std::string name;
+        std::string language;
+        if (!SplitNameValue(value, "--voice-lang", &name, &language, err)) {
+          return false;
+        }
+        if (!options->voice_lang_specs
+                 .emplace(std::move(name), std::move(language))
+                 .second) {
+          *err = "duplicate --voice-lang name";
+          return false;
+        }
+        return true;
+      });
+  parser.AddCustomOption(
+      "", "--voice-text", "NAME=TEXT|PATH",
+      "Reference transcript for a --voice, given inline or as a file path; "
+      "defaults to a .txt sidecar beside the WAV (repeatable)",
+      "Model",
+      [options](std::string_view, std::string_view value, std::string* err) {
+        std::string name;
+        std::string text;
+        if (!SplitNameValue(value, "--voice-text", &name, &text, err)) {
+          return false;
+        }
+        if (!options->voice_text_specs.emplace(std::move(name), std::move(text))
+                 .second) {
+          *err = "duplicate --voice-text name";
+          return false;
+        }
+        return true;
+      });
+}
+
 }  // namespace
 
 void PrintServeHelp(std::string_view program_name,
@@ -348,45 +423,14 @@ void PrintServeHelp(std::string_view program_name,
     return;
   }
 
-  if (subcommand == "audio") {
-    std::filesystem::path tts_model;
-    std::filesystem::path asr_model;
-    std::size_t tts_context_tokens = 4096;
-    std::size_t asr_context_tokens = 1024;
-
-    gufo::cli::ArgParser parser(
-        std::string(program_name) + " serve audio",
-        "Start the Qwen3 audio HTTP server (Qwen3-TTS synthesis, Qwen3-ASR "
-        "transcription, or both).");
-    parser.AddOption("", "--tts-model", "DIR",
-                     "Qwen3-TTS 12Hz 1.7B model directory", "Model",
-                     &tts_model);
-    parser.AddOption("", "--asr-model", "DIR", "Qwen3-ASR-1.7B model directory",
-                     "Model", &asr_model);
-    parser.AddOption("", "--tts-context", "N",
-                     "Qwen3-TTS context capacity (default: 4096)", "Model",
-                     &tts_context_tokens);
-    parser.AddOption("", "--asr-context", "N",
-                     "Qwen3-ASR context capacity (default: 1024)", "Model",
-                     &asr_context_tokens);
-    parser.AddCustomOption(
-        "", "--voice", "NAME=PATH",
-        "Register a named Qwen3-TTS Base voice from a reference WAV "
-        "(repeatable)",
-        "Model",
-        [](std::string_view, std::string_view, std::string*) { return true; });
-    parser.AddCustomOption(
-        "", "--voice-lang", "NAME=LANGUAGE",
-        "Language a --voice speaks; used when a request omits 'language' "
-        "(repeatable)",
-        "Model",
-        [](std::string_view, std::string_view, std::string*) { return true; });
-    parser.AddCustomOption(
-        "", "--voice-text", "NAME=TEXT|PATH",
-        "Reference transcript for a --voice, given inline or as a file path; "
-        "defaults to a .txt sidecar beside the WAV (repeatable)",
-        "Model",
-        [](std::string_view, std::string_view, std::string*) { return true; });
+  if (subcommand == "tts" || subcommand == "asr") {
+    const bool tts = subcommand == "tts";
+    SpeechOptions options{.context = tts ? 4096U : 1024U};
+    ArgParser parser(
+        std::string(program_name) + " serve " + std::string(subcommand),
+        tts ? "Serve Qwen3-TTS speech synthesis."
+            : "Serve Qwen3-ASR transcription.");
+    AddSpeechOptions(parser, tts, &options);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
     parser.PrintHelp();
@@ -543,10 +587,9 @@ void PrintServeHelp(std::string_view program_name,
          "(/v1/video/generations)\n"
       << "  image     Serve Qwen-Image-2.1 (/v1/images/generations, "
          "/v1/images/edits)\n"
-      << "  audio     Serve Qwen3-TTS and/or Qwen3-ASR endpoints "
-         "(/v1/audio/speech,\n"
-      << "            /v1/audio/transcriptions) via --tts-model and "
-         "--asr-model\n\n"
+      << "  tts       Serve Qwen3-TTS speech synthesis (/v1/audio/speech)\n"
+      << "  asr       Serve Qwen3-ASR transcription "
+         "(/v1/audio/transcriptions)\n\n"
       << "Server Options:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
       << "  -p, --port <N>         Port to listen on (default: 8080)\n"
@@ -630,14 +673,15 @@ int RunServe(std::span<const char* const> args) {
       }
       continue;
     }
-    if (arg == "llm" || arg == "video" || arg == "audio" || arg == "image") {
+    if (arg == "llm" || arg == "video" || (arg == "tts" || arg == "asr") ||
+        arg == "image") {
       subcommand = arg;
       sub_args.erase(sub_args.begin() + static_cast<std::ptrdiff_t>(i));
     } else if (arg == "--help" || arg == "-h" || arg == "help") {
       const std::string_view topic =
           arg == "help" && i + 1 < args.size() ? args[i + 1] : "";
       if (!topic.empty() && topic != "llm" && topic != "video" &&
-          topic != "audio" && topic != "image") {
+          topic != "tts" && topic != "asr" && topic != "image") {
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
@@ -772,138 +816,48 @@ int RunServe(std::span<const char* const> args) {
     }
     load_log.Complete(
         "model=minimax-h3 sessions=1 queue_capacity=1 weights=lazy", false);
-  } else if (subcommand == "audio") {
-    // One audio server hosts Qwen3-TTS synthesis, Qwen3-ASR transcription, or
-    // both: HttpServer already dispatches /v1/audio/speech and
-    // /v1/audio/transcriptions from independent services. Each service is
-    // selected by naming its checkpoint.
-    const std::string_view help_topic = "audio";
-
-    std::filesystem::path tts_model;
-    std::filesystem::path asr_model;
-    std::size_t tts_context_tokens = 4096;
-    std::size_t asr_context_tokens = 1024;
-
-    gufo::cli::ArgParser audio_parser(
-        "gufo serve audio",
-        "Start the Qwen3 audio HTTP server (Qwen3-TTS synthesis, Qwen3-ASR "
-        "transcription, or both).");
-    audio_parser.AddOption("", "--tts-model", "DIR",
-                           "Qwen3-TTS 12Hz 1.7B model directory", "Model",
-                           &tts_model);
-    audio_parser.AddOption("", "--asr-model", "DIR",
-                           "Qwen3-ASR-1.7B model directory", "Model",
-                           &asr_model);
-    audio_parser.AddOption("", "--tts-context", "N",
-                           "Qwen3-TTS context capacity (default: 4096)",
-                           "Model", &tts_context_tokens);
-    audio_parser.AddOption("", "--asr-context", "N",
-                           "Qwen3-ASR context capacity (default: 1024)",
-                           "Model", &asr_context_tokens);
-
-    std::map<std::string, server::TtsVoicePreset> voice_presets;
-    std::vector<std::pair<std::string, std::string>> voice_specs;
-    std::map<std::string, std::string> voice_text_specs;
-    std::map<std::string, std::string> voice_lang_specs;
-    audio_parser.AddCustomOption(
-        "", "--voice", "NAME=PATH",
-        "Register a named Qwen3-TTS Base voice from a reference WAV "
-        "(repeatable)",
-        "Model",
-        [&voice_specs](std::string_view, std::string_view value,
-                       std::string* err) {
-          std::string name;
-          std::string path;
-          if (!SplitNameValue(value, "--voice", &name, &path, err)) {
-            return false;
-          }
-          voice_specs.emplace_back(std::move(name), std::move(path));
-          return true;
-        });
-    audio_parser.AddCustomOption(
-        "", "--voice-lang", "NAME=LANGUAGE",
-        "Language a --voice speaks; used when a request omits 'language' "
-        "(repeatable)",
-        "Model",
-        [&voice_lang_specs](std::string_view, std::string_view value,
-                            std::string* err) {
-          std::string name;
-          std::string language;
-          if (!SplitNameValue(value, "--voice-lang", &name, &language, err)) {
-            return false;
-          }
-          if (!voice_lang_specs.emplace(std::move(name), std::move(language))
-                   .second) {
-            *err = "duplicate --voice-lang name";
-            return false;
-          }
-          return true;
-        });
-    audio_parser.AddCustomOption(
-        "", "--voice-text", "NAME=TEXT|PATH",
-        "Reference transcript for a --voice, given inline or as a file path; "
-        "defaults to a .txt sidecar beside the WAV (repeatable)",
-        "Model",
-        [&voice_text_specs](std::string_view, std::string_view value,
-                            std::string* err) {
-          std::string name;
-          std::string text;
-          if (!SplitNameValue(value, "--voice-text", &name, &text, err)) {
-            return false;
-          }
-          if (!voice_text_specs.emplace(std::move(name), std::move(text))
-                   .second) {
-            *err = "duplicate --voice-text name";
-            return false;
-          }
-          return true;
-        });
-
-    add_server_options(audio_parser, false);
-    if (!audio_parser.Parse(sub_args, &parse_err)) {
-      std::cerr << "Error: " << parse_err << "\n";
-      PrintServeHelp("gufo", help_topic);
+  } else if (subcommand == "tts" || subcommand == "asr") {
+    const bool is_tts = subcommand == "tts";
+    SpeechOptions options{.context = is_tts ? 4096U : 1024U};
+    ArgParser parser("gufo serve " + subcommand,
+                     is_tts ? "Serve Qwen3-TTS speech synthesis."
+                            : "Serve Qwen3-ASR transcription.");
+    AddSpeechOptions(parser, is_tts, &options);
+    add_server_options(parser, false);
+    if (!parser.Parse(sub_args, &parse_err)) {
+      std::cerr << "Error: " << parse_err << '\n';
       return 2;
     }
-    if (audio_parser.IsHelpRequested()) {
-      PrintServeHelp("gufo", help_topic);
+    if (parser.IsHelpRequested()) {
+      PrintServeHelp("gufo", subcommand);
       return 0;
     }
-    if (!valid_server_options()) {
+    if (!valid_server_options())
+      return 2;
+    if (options.model.empty()) {
+      std::cerr << "Error: --model <DIR> is required for " << subcommand
+                << " server\n";
       return 2;
     }
-
-    if (!BuildVoicePresets(voice_specs, voice_text_specs, voice_lang_specs,
-                           &voice_presets, &parse_err)) {
-      std::cerr << "Error: " << parse_err << "\n";
-      PrintServeHelp("gufo", help_topic);
+    if (options.context < (is_tts ? 1U : 32U)) {
+      std::cerr << "Error: --context must be at least " << (is_tts ? 1 : 32)
+                << '\n';
       return 2;
     }
-
-    if (!voice_presets.empty() && tts_model.empty()) {
-      std::cerr << "Error: --voice requires a Qwen3-TTS checkpoint\n";
-      PrintServeHelp("gufo", help_topic);
-      return 2;
-    }
-    if (tts_model.empty() && asr_model.empty()) {
-      std::cerr << "Error: at least one of --tts-model <DIR> or --asr-model "
-                   "<DIR> is required for the audio server\n";
-      PrintServeHelp("gufo", help_topic);
-      return 2;
-    }
-    if (!asr_model.empty() && asr_context_tokens < 32U) {
-      std::cerr << "Error: the ASR context must be at least 32\n";
-      PrintServeHelp("gufo", help_topic);
-      return 2;
-    }
-
-    if (!tts_model.empty()) {
-      ModelLoadLog load_log("tts", tts_model);
+    ModelLoadLog load_log(subcommand, options.model);
+    if (is_tts) {
+      std::map<std::string, server::TtsVoicePreset> voice_presets;
+      if (!BuildVoicePresets(options.voice_specs, options.voice_text_specs,
+                             options.voice_lang_specs, &voice_presets,
+                             &parse_err)) {
+        std::cerr << "Error: " << parse_err << '\n';
+        return 2;
+      }
       tts = std::make_shared<server::TtsService>(server::TtsServiceOptions{
-          .model_root = tts_model,
-          .native_context_tokens = tts_context_tokens,
+          .model_root = options.model,
+          .native_context_tokens = options.context,
           .validate_model = true,
-          .model_id = {},
+          .model_id = options.served_model_name,
           .voices = {},
           .voice_presets = std::move(voice_presets),
           .runner = {},
@@ -915,16 +869,13 @@ int RunServe(std::span<const char* const> args) {
       }
       load_log.Complete(
           "model=" + tts->model_id() +
-          " sessions=1 context_tokens=" + std::to_string(tts_context_tokens));
-    }
-
-    if (!asr_model.empty()) {
-      ModelLoadLog load_log("asr", asr_model);
+          " sessions=1 context_tokens=" + std::to_string(options.context));
+    } else {
       asr = std::make_shared<server::AsrService>(server::AsrServiceOptions{
-          .model_root = asr_model,
-          .native_context_tokens = asr_context_tokens,
+          .model_root = options.model,
+          .native_context_tokens = options.context,
           .validate_model = true,
-          .model_id = {},
+          .model_id = options.served_model_name,
           .runner = {},
       });
       if (!asr->ready()) {
@@ -934,7 +885,7 @@ int RunServe(std::span<const char* const> args) {
       }
       load_log.Complete(
           "model=" + asr->model_id() +
-          " sessions=1 context_tokens=" + std::to_string(asr_context_tokens));
+          " sessions=1 context_tokens=" + std::to_string(options.context));
     }
   } else {
     // Default to LLM server

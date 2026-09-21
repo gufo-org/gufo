@@ -5,11 +5,26 @@ Production targets: **UD-Q4_K_XL / UD-Q8_K_XL**. Recommended DFlash2 draft:
 **Q4_K_M**, with **adaptive** as the default controller. Q8_0 and BF16 drafts
 remain supported; a full comparison across context depths is **TODO**.
 
-PNG/JPEG image input uses the matching BF16 projector with AR, DFlash2 or
-native MTP. [CLI/HTTP usage and vision quality checks](README.md#images).
+PNG/JPEG image input uses the matching BF16 projector with AR or DFlash2.
+Native MTP is CLI-only. [Image usage and quality checks](README.md#images).
 
 Each table identifies its workload and measurement date. Unmeasured points
 are **TODO**; the concurrency sweep still needs a performance refresh.
+
+## Loading and continuation
+
+2026-09-21, one cold-file-cache launch to HTTP readiness, including Q4_K_M
+DFlash2 and two sessions at context capacity 262144:
+
+| Target | Ready |
+| --- | ---: |
+| Q4 | 6.38 s |
+| Q8 | 8.60 s |
+
+A 626-token Q4+DFlash2 prompt snapshot occupies **216 MiB**, independent of
+unused context capacity. Cancel/continue reused 661 tokens and prefilled
+61 new tokens; restoring the prompt snapshot took **3.13 ms**.
+These are bounded controls, not a long-conversation latency distribution.
 
 ## Single user, autoregressive
 
@@ -30,12 +45,12 @@ mean of two controls (PP range 620.38–623.61 tok/s).
 ## Single user, DFlash2
 
 **pp2048 / tg128**, C1, greedy, Q4_K_M draft and adaptive controller.
-Cells are prefill / generation tok/s. Measured **2026-09-19**:
-one warmed sample per point.
+Cells are prefill / generation tok/s. Depth zero refreshed **2026-09-21**;
+32K measured **2026-09-19**. One warmed sample per point.
 
 | Context depth | Q4 target | Q8 target |
 | ---: | ---: | ---: |
-| 0 | **578.04 / 34.32** | **422.23 / 24.88** |
+| 0 | **635.75 / 27.86** | **464.32 / 25.03** |
 | 4,096 | TODO | TODO |
 | 8,192 | TODO | TODO |
 | 12,288 | TODO | TODO |

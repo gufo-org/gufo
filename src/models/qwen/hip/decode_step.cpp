@@ -199,10 +199,11 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
           ssm_scratch.beta.data(), static_cast<const float*>(layer.ssm_a.data),
           static_cast<const float*>(layer.ssm_dt.data),
           static_cast<const float*>(layer.ssm_norm.data),
-          ssm_scratch.gate.data(), ssm_scratch.out.data(), l, ssm_qkv_size,
-          config.ssm_group_count, config.ssm_time_step_rank,
-          config.ssm_state_size, config.SsmValueSize(), arena.stream,
-          arena.GetSsmReplayCapture(), arena.GetRecurrentStateStorage());
+          ssm_scratch.gate.data(), ssm_scratch.out.data(),
+          config.SsmLayerIndex(l), ssm_qkv_size, config.ssm_group_count,
+          config.ssm_time_step_rank, config.ssm_state_size,
+          config.SsmValueSize(), arena.stream, arena.GetSsmReplayCapture(),
+          arena.GetRecurrentStateStorage());
 
       LaunchGEMV(layer.ssm_out.data, layer.ssm_out.type, ssm_scratch.out.data(),
                  attention_scratch.output.data(), hidden_size, ssm_inner_size,

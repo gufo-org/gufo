@@ -236,6 +236,9 @@ __global__ void SoftmaxOverRowsKernel(float* values, std::size_t rows,
     __syncthreads();
   }
   maximum = shared[0];
+  // Every wave must read the maximum before thread zero reuses shared[0]
+  // for its partial exponential sum.
+  __syncthreads();
   float sum = 0.0F;
   for (std::size_t row = threadIdx.x; row < rows; row += blockDim.x) {
     const std::size_t index = row * channels + channel;

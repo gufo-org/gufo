@@ -130,25 +130,16 @@ TODO
 
 ### Audio (TTS and ASR)
 
-One `gufo serve audio` server can host Qwen3-TTS synthesis, Qwen3-ASR
-transcription, or both at once. Select each service with `--tts-model` or
-`--asr-model`.
+Use `gufo serve tts --model DIR --context 4096` for synthesis or
+`gufo serve asr --model DIR --context 1024` for transcription. Each process
+loads one checkpoint; llama-swap can route both services under one API URL.
+The Nix helper uses the same `modality`, `model`, `context`, and
+`servedModelName` fields.
 
-**Models**
-
-- `ttsModel` — path to the Qwen3-TTS safetensors directory (Base,
-  CustomVoice, or VoiceDesign). In practice: enables
-  `POST /v1/audio/speech`, text to spoken audio.
-- `asrModel` — path to the Qwen3-ASR-1.7B safetensors directory. In
-  practice: enables `POST /v1/audio/transcriptions`, audio to text.
-- Set both on one server and the same port offers speech in and speech out.
-
-**Size and memory**
-
-- `ttsContext` — the context budget reserved for TTS. In practice: how long
-  a script you can synthesize in one request; bigger costs memory.
-- `asrContext` — the context budget reserved for ASR. In practice: caps how
-  long an audio file can be in one transcription request.
+`--context` reserves the model's token capacity. ASR applies that capacity
+per audio chunk, so long files do not require one enormous context. The
+standalone `gufo transcribe` command also uses `--model` and `--context`;
+`--prompt` supplies optional transcription hints.
 
 **Voices**
 
@@ -162,8 +153,8 @@ transcription, or both at once. Select each service with `--tts-model` or
   caller does not need to repeat it. Voices require a TTS checkpoint.
 
 ```sh
-gufo serve audio \
-  --tts-model models/Qwen3-TTS-12Hz-1.7B-Base \
+gufo serve tts \
+  --model models/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_eng=/audio/clear-english-voice.wav \
   --voice-text narrator_eng=/audio/clear-english-voice.txt \
   --voice narrator_ita=/audio/clear-italian-voice.wav \
@@ -180,7 +171,8 @@ These apply to every modality, before or after the subcommand:
   port will not answer.
 - `sessions` (`-j`) — preallocated GPU request sessions. In practice: more
   sessions means more requests can compute at once, at the cost of memory
-  per session.
+  per session. This option applies to LLM serving; image and speech servers
+  use their own bounded queues.
 - `maxConnections` — maximum simultaneous HTTP connections. In practice:
   clients beyond the limit queue or are refused instead of piling up.
 - `maxRequestBytes` — maximum request body size. In practice: matters mostly
@@ -220,8 +212,8 @@ Gufo can be run as a server exposing OpenAI-compatible API HTTP endpoints, activ
 ```sh
 gufo serve --host 0.0.0.0 --port 8080 llm --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf
 # or
-gufo serve audio \
-  --tts-model ./models/Qwen3-TTS-12Hz-1.7B-Base \
+gufo serve tts \
+  --model ./models/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_ita=./audio/clear-italian-voice.wav \
   --voice-text "narrator_ita=Questo racconto e' cresciuto..." \
   --voice narrator_eng=./audio/clear-english-voice.wav \

@@ -48,7 +48,8 @@ server::ChatRequest ImageRequest(const std::filesystem::path& image) {
 void CheckConcurrent(Backend& backend,
                      std::span<const server::ChatRequest> requests,
                      std::span<const Backend::Result> expected,
-                     const sampling::SamplingConfig& sampling) {
+                     const sampling::SamplingConfig& sampling,
+                     bool timed_mtp = false) {
   std::vector<std::shared_ptr<Backend::GenerationRequest>> pending;
   for (const auto& request : requests)
     pending.push_back(backend.start_chat(request, 16, sampling));
@@ -57,10 +58,15 @@ void CheckConcurrent(Backend& backend,
     const auto result = pending[i]->Wait();
     Require(result.tokens == expected[i].tokens,
             "concurrent image request changed token IDs");
-    Require(
-        result.draft_tokens == expected[i].draft_tokens &&
-            result.draft_accepted_tokens == expected[i].draft_accepted_tokens,
-        "concurrent image request changed proposal/acceptance accounting");
+    Require(result.draft_accepted_tokens <= result.draft_tokens,
+            "image request accepted more tokens than it drafted");
+    // Flash-Next's greedy controller measures batch cost and may select a
+    // different depth at C4. Seeded sampling must replay both draws and depth.
+    if (!timed_mtp || sampling.uses_random_sampling())
+      Require(
+          result.draft_tokens == expected[i].draft_tokens &&
+              result.draft_accepted_tokens == expected[i].draft_accepted_tokens,
+          "concurrent image request changed proposal/acceptance accounting");
     width = std::max(width, result.physical_execution_width);
   }
   Require(width > 1, "image test did not exercise a shared decode batch");
@@ -249,6 +255,12 @@ int main(int argc, char** argv) {
     auto ar = load(false);
     sampling::SamplingConfig greedy;
     greedy.temperature = 0;
+    sampling::SamplingConfig sampled;
+    sampled.temperature = 0.8F;
+    sampled.top_k = 30;
+    sampled.top_p = 0.9F;
+    sampled.min_p = 0.05F;
+    sampled.seed = 47;
     std::array<Backend::Result, 4> references;
     std::unique_ptr<Backend> spec;
     if (!disk_only) {
@@ -284,17 +296,11 @@ int main(int argc, char** argv) {
         }
         spec.reset();
         spec = load(true);
-        CheckConcurrent(*spec, requests, speculative_references, greedy);
+        CheckConcurrent(*spec, requests, speculative_references, greedy, flash);
       }
       // Sampled replay and per-request RNG independence. Existing sampler
       // suites cover the distribution itself; this checks image-path
       // integration.
-      sampling::SamplingConfig sampled;
-      sampled.temperature = 0.8F;
-      sampled.top_k = 30;
-      sampled.top_p = 0.9F;
-      sampled.min_p = 0.05F;
-      sampled.seed = 47;
       for (auto* backend : {ar.get(), spec.get()}) {
         if (!backend)
           continue;
@@ -305,11 +311,36 @@ int main(int argc, char** argv) {
                       backend->chat(requests[i], 16, sampled).tokens,
                   "seeded image generation is not reproducible");
         }
-        CheckConcurrent(*backend, requests, expected, sampled);
+        CheckConcurrent(*backend, requests, expected, sampled,
+                        flash && backend == spec.get());
+        auto interrupted = requests[0];
+        interrupted.messages.back().content =
+            "Name the image color, then count from one to one hundred.";
+        for (const auto& sampling : {greedy, sampled}) {
+          const auto expected = backend->chat(interrupted, 8, sampling);
+          std::size_t pieces = 0;
+          const auto cancelled =
+              backend->chat(interrupted, 128, sampling, {},
+                            [&](std::string_view) { return ++pieces < 3; });
+          Require(cancelled.cancelled,
+                  "image cancellation fixture did not interrupt generation");
+          const auto resumed = backend->chat(interrupted, 8, sampling);
+          Require(resumed.cache_hit && resumed.prefill_tokens == 0 &&
+                      resumed.tokens == expected.tokens,
+                  "cancelled image request lost its exact reusable frontier");
+        }
+        std::cout << "image cancellation/resume exact, speculative="
+                  << (backend == spec.get()) << '\n';
       }
     } else {
       references[0] = ar->chat(requests[0], 16, greedy);
     }
+    // Cancellation above introduces a fifth independent prompt into four
+    // slots. Re-establish the conversation before requiring live-prefix reuse.
+    const auto root_replay = ar->chat(requests[0], 16, greedy);
+    Require(root_replay.tokens == references[0].tokens,
+            "image root changed after cancellation or cache eviction");
+    references[0] = root_replay;
     auto continuation = requests[0];
     continuation.messages.emplace_back(tokenization::ChatRole::kAssistant,
                                        references[0].text);
@@ -386,16 +417,28 @@ int main(int argc, char** argv) {
       cache.directory = cleanup.path / (use_spec ? "spec" : "ar");
       auto first = load(use_spec, cache);
       const auto red = first->chat(requests[0], 16, greedy);
+      const auto sampled_red = first->chat(requests[0], 16, sampled);
       // Shutdown drains bounded persistence. A GPU-backed Qwen snapshot can
       // occupy most of the staging budget; a second concurrent enqueue is
       // allowed to miss. Qualify restoration independently of disk speed.
       first.reset();
       first = load(use_spec, cache);
       const auto blue = first->chat(requests[1], 16, greedy);
+      const auto sampled_blue = first->chat(requests[1], 16, sampled);
       Require(
           red.cache_disk_queued_bytes > 0 && blue.cache_disk_queued_bytes > 0,
           "image snapshots did not reach disk");
       first.reset();
+      {
+        auto replay = load(use_spec, cache);
+        for (const auto i : {0U, 1U}) {
+          const auto result = replay->chat(requests[i], 16, sampled);
+          Require(result.cache_disk_hit && result.prefill_tokens == 0 &&
+                      result.tokens ==
+                          (i == 0 ? sampled_red.tokens : sampled_blue.tokens),
+                  "disk-restored sampled image replay differs");
+        }
+      }
       auto restored = load(use_spec, cache);
       for (const auto i : {0U, 1U}) {
         const auto result = restored->chat(requests[i], 16, greedy);

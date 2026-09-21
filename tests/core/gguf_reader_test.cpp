@@ -1,5 +1,6 @@
 #include "src/core/gguf_reader.hpp"
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/mapped_prefetch.hpp"
 #include "src/core/model_config.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 
@@ -573,9 +575,64 @@ void TestVisionMetadataArrays() {
          "deepstack flags are retained");
 }
 
+void TestIntegerRoutingTensor() {
+  GgufBuilder builder;
+  builder.AddMetadataString("general.architecture", "deepseek4");
+  // DS4 uses dense int32 token-to-expert tables, not quantized rows.
+  builder.AddTensor("blk.0.ffn_gate_tid2eid.weight", {6, 64},
+                    gufo::core::GgmlType::kI32, 0);
+  auto bytes = builder.Build(6 * 64 * sizeof(std::int32_t));
+  std::string error;
+  auto reader =
+      gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size(), &error);
+  Expect(reader != nullptr, "integer expert routing table loads: " + error);
+  const auto* table = reader->FindTensor("blk.0.ffn_gate_tid2eid.weight");
+  Expect(table && table->type == gufo::core::GgmlType::kI32 &&
+             table->size_bytes == 6 * 64 * sizeof(std::int32_t),
+         "integer routing payload retains its storage type and exact extent");
+  bytes.pop_back();
+  Expect(
+      !gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size(), &error),
+      "truncated integer routing table is rejected");
+  Expect(gufo::quant::EncodedSizeBytes(
+             gufo::core::GgmlType::kI32,
+             std::numeric_limits<std::size_t>::max() / 4 + 1) == 0,
+         "integer routing extent overflow is rejected");
+}
+
+void TestMappedPrefetch() {
+  char path[] = "/tmp/gufo-prefetch-XXXXXX";
+  const int fd = mkstemp(path);
+  Expect(fd >= 0, "create prefetch fixture");
+  unlink(path);
+  constexpr std::size_t bytes = (17U << 20) + 7;
+  Expect(ftruncate(fd, bytes) == 0, "size two-chunk prefetch fixture");
+  const char marker = 'Q';
+  Expect(pwrite(fd, &marker, 1, bytes - 1) == 1, "write tail marker");
+  auto* data = static_cast<const char*>(
+      mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0));
+  Expect(data != MAP_FAILED, "map prefetch fixture");
+  gufo::core::PrefaultMappedRange(data + 13, bytes - 13);
+  Expect(data[13] == 0 && data[bytes - 1] == marker,
+         "parallel unaligned prefetch preserves the complete readable range");
+  gufo::core::PrefaultMappedRange(nullptr, 0);
+  Expect(ftruncate(fd, 4096) == 0, "truncate mapped fixture");
+  bool rejected = false;
+  try {
+    gufo::core::PrefaultMappedRange(data, bytes);
+  } catch (const std::system_error&) {
+    rejected = true;
+  }
+  Expect(rejected, "failed parallel reads are joined and propagated");
+  munmap(const_cast<char*>(data), bytes);
+  close(fd);
+}
+
 }  // namespace
 
 int main() {
+  TestMappedPrefetch();
+  TestIntegerRoutingTensor();
   TestVisionMetadataArrays();
   std::cout << "Running GgufReader unit tests...\n";
   TestBasicGgufParsing();

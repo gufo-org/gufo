@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
+#include "src/core/mapped_prefetch.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
@@ -18,7 +19,7 @@
 namespace gufo::hip {
 namespace {
 
-constexpr std::size_t kPackChunkRows = 32;
+constexpr std::size_t kPackChunkBytes = 8ULL << 20;
 
 [[nodiscard]] std::uint16_t FloatToBfloat16Bits(float value) noexcept {
   std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
@@ -119,7 +120,17 @@ models::QwenTensorRef PackMatrixBf16(const models::QwenTensorRef& source,
   void* device = detail::AllocateDevice(total_bytes);
   allocations.push_back(device);
 
-  const std::size_t chunk_rows = std::min(rows, kPackChunkRows);
+  if (source.type == core::GgmlType::kBF16) {
+    CopyToDevice(device, source.data, total_bytes);
+    packed_bytes += total_bytes;
+    return {.data = device,
+            .type = core::GgmlType::kBF16,
+            .num_elements = total_elements};
+  }
+
+  const std::size_t chunk_rows = std::min(
+      rows, std::max<std::size_t>(
+                1, kPackChunkBytes / (columns * sizeof(std::uint16_t))));
   std::vector<float> float_rows(chunk_rows * columns);
   std::vector<std::uint16_t> bf16_rows(chunk_rows * columns);
   for (std::size_t start = 0; start < rows; start += chunk_rows) {
@@ -339,6 +350,8 @@ std::shared_ptr<const QwenDFlashGpuModel> QwenDFlashGpuModel::Create(
   std::size_t packed_bytes = 0;
   try {
     speculative::QwenDFlashWeights weights = *raw_weights;
+    for (const auto& region : dflash_reader->GetMappedRegions())
+      core::PrefaultMappedRange(region.data, region.size);
 
     // Pack all private DFlash matrices and vectors into GPU device memory
     PackDFlashWeights(weights, allocations, packed_bytes);

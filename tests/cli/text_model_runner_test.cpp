@@ -45,6 +45,7 @@ void Expect(bool condition, std::string_view message) {
 }
 
 struct FakeStats {
+  bool fail_after_advance{false};
   std::size_t states_created{0};
   std::size_t invalidations{0};
   std::size_t snapshot_restores{0};
@@ -251,6 +252,8 @@ public:
     stats_->advanced_tokens.push_back(token);
     ++fake.position;
     ++fake.decode_count;
+    if (stats_->fail_after_advance)
+      throw std::runtime_error("injected failure after state mutation");
   }
 
   void AdvanceBatch(
@@ -716,6 +719,52 @@ void TestSnapshotRetentionUsesPromptBoundary() {
   }
 }
 
+void TestCancellationRetainsOnlyCompletedWork() {
+  for (const bool pending : {false, true}) {
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
+    auto request = pool.Acquire({1, 2});
+    request.Prefill(2);
+    Expect(request.SelectNext().token == 90, "first cancellation token");
+    request.Advance();
+    if (pending)
+      Expect(request.SelectNext().token == 91, "selected but unexecuted token");
+    request.Cancel();
+    Expect(
+        stats->advanced_tokens.size() == 1 && stats->snapshot_captures == 1,
+        "cancellation neither advances a pending token nor starts a snapshot");
+    auto continuation = pool.Acquire({1, 2, 90, 91, 7});
+    Expect(continuation.cached_prompt_tokens() == 3 &&
+               continuation.cache_restore_bytes() == 0,
+           "cancelled conversation retains the exact completed live frontier");
+    continuation.Invalidate();
+    auto branch = pool.Acquire({1, 2, 8});
+    Expect(branch.cached_prompt_tokens() == 2,
+           "the original prompt remains available for branching after "
+           "cancellation");
+    branch.Invalidate();
+  }
+
+  auto stats = std::make_shared<FakeStats>();
+  TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
+  auto request = pool.Acquire({1, 2});
+  request.Prefill(2);
+  (void)request.SelectNext();
+  stats->fail_after_advance = true;
+  try {
+    request.Advance();
+    Expect(false, "mutating failure must throw");
+  } catch (const std::runtime_error&) {
+  }
+  request.Cancel();
+  auto continuation = pool.Acquire({1, 2, 90, 7});
+  Expect(
+      continuation.cached_prompt_tokens() == 2 &&
+          continuation.cache_restore_bytes() > 0,
+      "a failed operation restores the immutable prompt, never mutated state");
+  continuation.Invalidate();
+}
+
 void TestPersistentSnapshotRestoresAcrossPools() {
   TemporaryDirectory directory;
   const TextRunnerDiskCacheOptions disk_cache{
@@ -955,6 +1004,7 @@ void TestSnapshotCaptureFailureReleasesReservationAndKeepsRequestSuccessful() {
 }  // namespace
 
 int main() {
+  TestCancellationRetainsOnlyCompletedWork();
   TestDiskOnlyCaptureReservesBudgetBeforeCommit();
   TestDiskPreflightAvoidsUnusableCapture();
   TestBoundedPrefillDecodeAndPrefixReuse();

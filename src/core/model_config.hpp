@@ -43,6 +43,18 @@ struct ModelConfig {
                                         : num_layers / full_attention_interval;
   }
 
+  [[nodiscard]] constexpr std::uint32_t SsmLayerCount() const noexcept {
+    return num_layers - FullAttentionLayerCount();
+  }
+
+  /// Dense state index for a recurrent transformer layer.
+  [[nodiscard]] constexpr std::uint32_t SsmLayerIndex(
+      std::uint32_t layer) const noexcept {
+    return full_attention_interval == 0
+               ? layer
+               : layer - layer / full_attention_interval;
+  }
+
   [[nodiscard]] constexpr std::uint32_t SsmValueSize() const noexcept {
     return ssm_time_step_rank == 0 ? 0 : ssm_inner_size / ssm_time_step_rank;
   }

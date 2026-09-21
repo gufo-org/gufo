@@ -57,7 +57,34 @@ int main(int argc, char** argv) {
   Check(output != nullptr && output->shape == embedding->shape,
         "language-model output tensor must be present");
 
+  const auto text_regions =
+      loaded.RegionsFor({"thinker.model.", "thinker.lm_head."});
+  const auto contains = [](const auto& regions,
+                           const qwen3_asr::Tensor& tensor) {
+    const auto address = reinterpret_cast<std::uintptr_t>(tensor.data);
+    for (const auto& region : regions) {
+      const auto base = reinterpret_cast<std::uintptr_t>(region.data);
+      if (address >= base && address - base < region.size &&
+          tensor.byte_count <= region.size - (address - base))
+        return true;
+    }
+    return false;
+  };
+  Check(
+      contains(text_regions, *embedding) && contains(text_regions, *output) &&
+          !contains(text_regions, *conv),
+      "text uploads must retain both heads without duplicating audio weights");
+  const auto audio_regions = loaded.RegionsFor({"thinker.audio_tower."});
+  Check(contains(audio_regions, *conv) && !contains(audio_regions, *embedding),
+        "audio prefetch must not read the text decoder");
+  std::size_t all_bytes = 0, text_bytes = 0;
+  for (const auto& region : loaded.mapped_regions)
+    all_bytes += region.size;
+  for (const auto& region : text_regions)
+    text_bytes += region.size;
+  Check(text_bytes < all_bytes,
+        "text weight selection did not remove unused bytes");
   std::cout << "PASS qwen3_asr_loader_test tensors=" << loaded.store->size()
-            << '\n';
+            << " avoided_text_upload_bytes=" << all_bytes - text_bytes << '\n';
   return 0;
 }

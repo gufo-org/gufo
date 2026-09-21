@@ -779,6 +779,19 @@ Matrix Runtime::UploadFloat(std::span<const float> values, int rows, int cols) {
 Matrix Runtime::Weight(std::string_view name) {
   if (auto it = device_weights_.find(name); it != device_weights_.end())
     return it->second;
+  // Fault complete active components in parallel instead of serial faults
+  // during each HIP upload. Text-to-image never needs the visual encoder.
+  for (const std::string_view prefix :
+       {"transformer.", "text_encoder.model.language_model.",
+        "text_encoder.model.visual.", "vae.encoder.", "vae.decoder."}) {
+    if (name.starts_with(prefix) &&
+        std::ranges::find(prefetched_groups_, prefix) ==
+            prefetched_groups_.end()) {
+      weights_.Prefetch(prefix);
+      prefetched_groups_.push_back(prefix);
+      break;
+    }
+  }
   const auto& w = weights_.Get(name);
   const int rows = w.shape.empty() ? 1 : w.shape[0];
   const auto count = w.bytes / (w.bf16 ? 2 : 4);

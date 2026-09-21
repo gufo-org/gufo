@@ -18,12 +18,12 @@ def main():
             args, result.returncode, output)
         return output
 
-    for modality in ("llm", "audio", "video", "image"):
+    for modality in ("llm", "tts", "asr", "video", "image"):
         check(["serve", "--port", "0", modality, "--help"], 0, "--api-key")
         check(["serve", modality, "--port=0", "--help"], 0, "--api-key")
-        if modality in ("audio", "image"):
+        if modality in ("tts", "asr", "image"):
             help_text = check(["serve", modality, "--help"], 0,
-                              "--tts-context" if modality == "audio" else "--model")
+                              "--model")
             assert "--sessions" not in help_text
             check(["serve", modality, "--sessions", "2"], 2, "Unknown option")
             check(["serve", "--sessions", "2", modality], 2, "Unknown option")
@@ -34,6 +34,17 @@ def main():
         check(["serve", modality, "--port", "65536"], 2, "--port must")
         check(["serve", modality, "--host", "bad.address"], 2, "--host must")
     check(["serve", "image"], 2, "--model <DIR> is required")
+    for modality in ("tts", "asr"):
+        check(["serve", modality], 2, "--model <DIR> is required")
+        check(["serve", modality, "--model", "/missing", "--context", "0"],
+              2, "--context must be at least")
+        text = check(["serve", modality, "--help"], 0, "--context")
+        assert ("--voice " in text) == (modality == "tts")
+        assert "--served-model-name" in text
+    check(["serve", "asr", "--voice", "x=y"], 2, "Unknown option")
+    text = check(["transcribe", "--help"], 0, "--prompt")
+    assert "--context" in text
+
 
     # Values must stay attached to their options, including before a modality
     # was selected. All these deliberately fail at the named file lookup.

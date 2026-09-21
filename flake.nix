@@ -422,27 +422,16 @@
             let
               # Test command rendering without realizing the GPU package.
               mkServe = args: self.lib.${system}.mkGufoServe (args // { gufo = "/gufo-test"; });
-              audioCmd = mkServe {
-                modality = "audio";
+              ttsCmd = mkServe {
+                modality = "tts";
                 model = "/var/models/qwen3-tts";
                 context = 4096;
                 port = 9100;
-                sessions = 2;
-              };
-              ttsAliasCmd = mkServe {
-                modality = "tts";
-                model = "/var/models/qwen3-tts";
-              };
-              bothCmd = mkServe {
-                modality = "audio";
-                ttsModel = "/var/models/qwen3-tts";
-                asrModel = "/var/models/qwen3-asr";
-                ttsContext = 4096;
-                asrContext = 1024;
+                servedModelName = "voice-test";
               };
               voicesCmd = mkServe {
-                modality = "audio";
-                ttsModel = "/var/models/qwen3-tts";
+                modality = "tts";
+                model = "/var/models/qwen3-tts";
                 voices = {
                   plain = "/var/voices/plain.wav";
                   inline = {
@@ -460,10 +449,6 @@
                 model = "/var/models/qwen3-asr";
                 context = 1024;
               };
-              sttAliasCmd = mkServe {
-                modality = "stt";
-                model = "/var/models/qwen3-asr";
-              };
               cmd = mkServe {
                 model = "/var/models/qwen.gguf";
                 context = 4096;
@@ -473,6 +458,7 @@
                 port = 9000;
                 temperature = 0.8;
                 topK = 40;
+                draftPolicy = "fixed";
                 topP = 0.9;
                 minP = 0.05;
                 minKeep = 3;
@@ -516,6 +502,7 @@
               echo "$cmd_str" | grep -F -- "--served-model-name qwen-test"
               echo "$cmd_str" | grep -F -- "--speculative dflash2"
               echo "$cmd_str" | grep -F -- "--dflash-model /var/models/qwen-draft.gguf"
+              echo "$cmd_str" | grep -F -- "--draft-policy fixed"
               echo "$cmd_str" | grep -F -- "--port 9000"
               echo "$cmd_str" | grep -F -- "--temperature 0.800000"
               echo "$cmd_str" | grep -F -- "--top-k 40"
@@ -533,11 +520,9 @@
               echo "$cmd_str" | grep -F -- "--cache-disk-bytes 1024"
               echo "$cmd_str" | grep -F -- "--cache-disk-staging-bytes 512"
 
-              # Audio (Qwen3-TTS) and ASR (Qwen3-ASR) share the --model/--context
-              # surface. Server options must precede the modality subcommand.
-              audio_str="${audioCmd}"
-              echo "$audio_str" | grep -F -- "--port 9100 --sessions 2 audio"
-              echo "$audio_str" | grep -F -- "audio --model /var/models/qwen3-tts --context 4096"
+              tts_str="${ttsCmd}"
+              echo "$tts_str" | grep -F -- "--port 9100 tts"
+              echo "$tts_str" | grep -F -- "tts --model /var/models/qwen3-tts --served-model-name voice-test --context 4096"
 
               # Voices take a bare WAV (sidecar transcript) or {wav, text},
               # where text is either the transcript or a path holding it.
@@ -547,18 +532,8 @@
               echo "$voices_str" | grep -F -- "--voice-text 'sidecarfile=/var/voices/file.txt'"
               test "$(echo "$voices_str" | grep -o -- '--voice ' | wc -l)" = 3
 
-              # "asr"/"stt" are helper spellings over the single audio
-              # subcommand: a bare model routes to --asr-model.
               asr_str="${asrCmd}"
-              echo "$asr_str" | grep -F -- "audio --asr-model /var/models/qwen3-asr --asr-context 1024"
-
-              # One audio server may host both services at once.
-              both_str="${bothCmd}"
-              echo "$both_str" | grep -F -- "audio --tts-model /var/models/qwen3-tts --asr-model /var/models/qwen3-asr"
-              echo "$both_str" | grep -F -- "--tts-context 4096 --asr-context 1024"
-
-              echo "${ttsAliasCmd}" | grep -F -- " audio --model /var/models/qwen3-tts"
-              echo "${sttAliasCmd}" | grep -F -- " audio --asr-model /var/models/qwen3-asr"
+              echo "$asr_str" | grep -F -- "asr --model /var/models/qwen3-asr --context 1024"
 
               dspark_cmd="${dsparkCmd}"
               echo "$dspark_cmd" | grep -F -- "--speculative dspark"

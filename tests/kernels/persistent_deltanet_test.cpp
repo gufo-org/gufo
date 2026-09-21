@@ -78,13 +78,16 @@ void TestArenaRestoresOnlyMutableRecurrentState() {
   config.ssm_inner_size = 64;
   config.rotary_dim = 32;
 
-  gufo::hip::QwenGpuArena arena(config, config.context_length);
+  auto policy = gufo::hip::QwenExecutionPolicy::Production();
+  policy.kv_cache_storage = gufo::hip::QwenKvCacheStorage::kFp32;
+  gufo::hip::QwenGpuArena arena(config, config.context_length, policy);
+  HIP_CHECK(hipStreamSynchronize(arena.stream));
   const std::size_t conv_elements =
-      static_cast<std::size_t>(config.num_layers) * config.SsmQkvSize() *
+      static_cast<std::size_t>(config.SsmLayerCount()) * config.SsmQkvSize() *
       config.ssm_conv_kernel;
   const std::size_t deltanet_elements =
-      static_cast<std::size_t>(config.num_layers) * config.ssm_time_step_rank *
-      config.ssm_state_size * config.SsmValueSize();
+      static_cast<std::size_t>(config.SsmLayerCount()) *
+      config.ssm_time_step_rank * config.ssm_state_size * config.SsmValueSize();
   const std::size_t kv_elements =
       static_cast<std::size_t>(config.FullAttentionLayerCount()) *
       config.num_key_value_heads * config.context_length * config.head_dim * 2;
@@ -115,6 +118,7 @@ void TestArenaRestoresOnlyMutableRecurrentState() {
   HIP_CHECK(hipMemset(arena.d_ssm_deltanet_state, 0,
                       deltanet_initial.size() * sizeof(float)));
   HIP_CHECK(hipMemset(arena.d_kv_cache, 0, kv_initial.size() * sizeof(float)));
+  HIP_CHECK(hipDeviceSynchronize());
   arena.RestoreState();
 
   const auto conv_restored =

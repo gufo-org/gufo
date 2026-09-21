@@ -14,6 +14,11 @@ Target: `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-073
 `DeepSeek-V4-Flash-DSpark-support-0731.gguf`, revision
 `e7f04037032990db0346398d249baf9fb9df1ccc`.
 
+Cold-file-cache launch to HTTP readiness: **36.82 s** on 2026-09-21,
+including DSpark and two sessions at context capacity 4096. The integer
+expert-routing tensor loads without conversion; serving replay remains exact
+under the [state checks](EVALUATION.md).
+
 ## Single user, autoregressive
 
 Latest depth control: **2026-09-19**, two release measurements at d0/d32K.

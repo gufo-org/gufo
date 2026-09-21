@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "src/models/qwen3_tts/audio.hpp"
+#include "src/models/qwen3_tts/hip/encoder_ops.hpp"
+#include "src/models/qwen3_tts/hip/encoder_support.hpp"
 #include "src/models/qwen3_tts/hip/speaker_encoder_runtime.hpp"
 #include "src/models/qwen3_tts/hip/speech_decoder_runtime.hpp"
 #include "src/models/qwen3_tts/hip/speech_encoder_runtime.hpp"
@@ -245,13 +247,62 @@ void ReportSpeakerStage(const std::filesystem::path& artifacts,
             << '\n';
 }
 
+void CheckSoftmaxReplay() {
+  constexpr std::size_t channels = 1536;
+  for (const std::size_t rows : {1U, 31U, 33U, 65U, 127U, 257U, 1025U}) {
+    std::vector<float> input(rows * channels), expected(input.size());
+    for (std::size_t i = 0; i < input.size(); ++i)
+      input[i] = 7.0F * std::sin(static_cast<float>(i) * 0.37F);
+    for (std::size_t channel = 0; channel < channels; ++channel) {
+      double maximum = -std::numeric_limits<double>::infinity(), sum = 0;
+      for (std::size_t row = 0; row < rows; ++row)
+        maximum = std::max(maximum, double(input[row * channels + channel]));
+      for (std::size_t row = 0; row < rows; ++row)
+        sum += std::exp(double(input[row * channels + channel]) - maximum);
+      for (std::size_t row = 0; row < rows; ++row)
+        expected[row * channels + channel] =
+            std::exp(double(input[row * channels + channel]) - maximum) / sum;
+    }
+    qwen3_tts_hip::EncoderDeviceBuffer<float> device(input.size());
+    std::vector<float> actual(input.size()), first;
+    for (int repetition = 0; repetition < 8; ++repetition) {
+      qwen3_tts_hip::RequireEncoderHip(
+          hipMemcpy(device.get(), input.data(), input.size() * sizeof(float),
+                    hipMemcpyHostToDevice),
+          "softmax input");
+      qwen3_tts_hip::LaunchSoftmaxOverRows(device.get(), rows, channels,
+                                           nullptr);
+      qwen3_tts_hip::RequireEncoderHip(
+          hipMemcpy(actual.data(), device.get(), actual.size() * sizeof(float),
+                    hipMemcpyDeviceToHost),
+          "softmax output");
+      for (std::size_t i = 0; i < actual.size(); ++i)
+        Check(std::isfinite(actual[i]) &&
+                  std::abs(actual[i] - expected[i]) < 3e-6F,
+              "speaker softmax differs from independent FP64 normalization");
+      if (repetition == 0)
+        first = actual;
+      else
+        Check(actual == first, "speaker softmax replay changed bits");
+    }
+  }
+  std::cout << "speaker softmax: FP64 oracle and exact replay passed\n";
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  CheckSoftmaxReplay();
+  if (argc == 2 && std::string_view(argv[1]) == "--ops")
+    return 0;
+  Check(argc == 1 || argc == 3,
+        "usage: base_encoders_hip_test [model artifacts]");
   const std::filesystem::path model_root =
-      "/home/fbozzo/projects/audio.cpp/models/Qwen3-TTS-12Hz-1.7B-Base";
+      argc == 3
+          ? argv[1]
+          : "/home/fbozzo/projects/audio.cpp/models/Qwen3-TTS-12Hz-1.7B-Base";
   const std::filesystem::path artifacts =
-      "/home/fbozzo/projects/gufo/artifacts/qwen3_tts/base";
+      argc == 3 ? argv[2] : "artifacts/qwen3_tts/base";
   if (!std::filesystem::is_regular_file(model_root / "model.safetensors") ||
       !std::filesystem::is_regular_file(artifacts / "reference.wav")) {
     std::cerr << "SKIP qwen3_tts_base_encoders_hip_test: model or artifacts "
@@ -297,6 +348,17 @@ int main() {
   // threshold near 1 is what caught the Res2Net residual aliasing that 0.98
   // silently admitted.
   const bool speaker_parity = speaker_cosine > 0.9999;
+  qwen3_tts_hip::SpeakerEncoderOutput speaker_replay;
+  Check(speaker->Encode(audio, &speaker_replay, &error), error);
+  Check(speaker_replay.embedding == speaker_output.embedding,
+        "speaker encoding changes without diagnostic synchronization");
+  speaker.reset();
+  speaker = qwen3_tts_hip::SpeakerEncoderHipRuntime::Create(model_root.string(),
+                                                            &error);
+  Check(speaker != nullptr, error);
+  Check(speaker->Encode(audio, &speaker_replay, &error), error);
+  Check(speaker_replay.embedding == speaker_output.embedding,
+        "speaker encoding changes after runtime reload");
   speaker.reset();
 
   std::vector<std::size_t> code_shape;
@@ -308,6 +370,10 @@ int main() {
   qwen3_tts_hip::SpeechEncoderOutput speech_output;
   qwen3_tts_hip::SpeechEncoderTrace speech_trace;
   Check(speech->Encode(audio, &speech_output, &error, &speech_trace), error);
+  qwen3_tts_hip::SpeechEncoderOutput speech_replay;
+  Check(speech->Encode(audio, &speech_replay, &error), error);
+  Check(speech_replay.codes == speech_output.codes,
+        "speech encoding changes without diagnostic synchronization");
   for (std::size_t index = 0; index < speech_trace.layers.size(); ++index) {
     const auto& layer = speech_trace.layers[index];
     std::string name = "layer";

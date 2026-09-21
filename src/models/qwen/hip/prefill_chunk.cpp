@@ -456,8 +456,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       if (arena_.IsSsmReplayCaptureActive()) {
         LaunchCaptureBatchedSsmReplay(
             arena_.d_ssm_qkv, arena_.d_alpha_buf, arena_.d_beta_buf,
-            arena_.GetSsmReplayCapture(), l, start_pos, batch_size,
-            ssm_qkv_size, time_step_rank, arena_.stream);
+            arena_.GetSsmReplayCapture(), config.SsmLayerIndex(l), start_pos,
+            batch_size, ssm_qkv_size, time_step_rank, arena_.stream);
       }
 
       // The row-split recurrence parallelizes independent state rows. Its
@@ -480,8 +480,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             static_cast<const float*>(layer.ssm_norm.data), arena_.d_ssm_gate,
             arena_.d_ssm_out,
             ssm_epilogue_q8 ? arena_.d_scratch_q8_act : nullptr,
-            arena_.d_ssm_kq_scales, arena_.d_ssm_alpha_beta, l, batch_size,
-            ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
+            arena_.d_ssm_kq_scales, arena_.d_ssm_alpha_beta,
+            config.SsmLayerIndex(l), batch_size, ssm_qkv_size,
+            config.ssm_group_count, config.ssm_time_step_rank,
             config.ssm_state_size, config.SsmValueSize(), arena_.stream,
             arena_.GetRecurrentStateStorage(),
             half_prefill ? arena_.d_scratch_bf16 : nullptr);
@@ -493,7 +494,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             static_cast<const float*>(layer.ssm_a.data),
             static_cast<const float*>(layer.ssm_dt.data),
             static_cast<const float*>(layer.ssm_norm.data), arena_.d_ssm_gate,
-            arena_.d_ssm_out, l, batch_size, ssm_qkv_size,
+            arena_.d_ssm_out, config.SsmLayerIndex(l), batch_size, ssm_qkv_size,
             config.ssm_group_count, config.ssm_time_step_rank,
             config.ssm_state_size, config.SsmValueSize(), arena_.stream,
             arena_.GetRecurrentStateStorage());

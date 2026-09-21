@@ -232,6 +232,12 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
 std::size_t EncodedSizeBytes(core::GgmlType type,
                              std::size_t elements) noexcept {
   switch (type) {
+    case core::GgmlType::kI32:
+      if (elements >
+          std::numeric_limits<std::size_t>::max() / sizeof(std::int32_t)) {
+        return 0;
+      }
+      return elements * sizeof(std::int32_t);
     case core::GgmlType::kF32:
       if (elements > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
         return 0;

@@ -30,7 +30,7 @@ Q8_0 and BF16 drafts also work, with a full depth comparison still TODO.
 | --- | --- | --- |
 | AR | No speculative option | Target-only generation. |
 | DFlash2 | `--speculative dflash2 --dflash-model PATH` | Adaptive default; `--draft-tokens` caps proposals, `--draft-policy fixed` is a comparison mode. |
-| Native MTP | `--speculative mtp --mtp-model PATH` | Requires a matching sidecar; independent upstream qualification/performance remain TODO. |
+| Native MTP (CLI only) | `--speculative mtp --mtp-model PATH` | Requires a matching sidecar; independent upstream qualification/performance remain TODO. |
 
 Greedy speculation must match AR. Sampled modes preserve the target policy,
 but AR and speculation need not share the same-seed sequence. See the
@@ -63,7 +63,8 @@ print(urllib.request.urlopen(request).read().decode())
 ```
 
 Start that server with `--served-model-name vision-test`. Ordered text/image
-parts, multiple images and later turns work with AR/DFlash2/MTP and caches.
+parts, multiple images and later turns work with AR/DFlash2 and caches.
+Native MTP image input is available through the CLI.
 PNG/JPEG data URLs and public HTTPS are supported (`detail: auto`); requests
 share a 20 MiB encoded-byte, 16-image and 15-second download budget. Each image
 is capped at 32 megapixels; private/loopback/link-local destinations are rejected.

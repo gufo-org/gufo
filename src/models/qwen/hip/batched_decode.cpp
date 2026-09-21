@@ -335,7 +335,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
           static_cast<const float*>(layer.ssm_dt.data),
           static_cast<const float*>(layer.ssm_norm.data),
           scratch.ssm.gate.data(), scratch.ssm.out.data(),
-          std::span(ssm_sequences).first(batch_size), layer_index, ssm_qkv_size,
+          std::span(ssm_sequences).first(batch_size),
+          config.SsmLayerIndex(layer_index), ssm_qkv_size,
           config.ssm_group_count, config.ssm_time_step_rank,
           config.ssm_state_size, config.SsmValueSize(), controls.row_stride,
           ssm_inner_size, arena.stream, arena.GetRecurrentStateStorage());
@@ -712,8 +713,9 @@ QwenGpuExecutor::ForwardVerificationBatch(
           static_cast<const float*>(layer.ssm_dt.data),
           static_cast<const float*>(layer.ssm_norm.data),
           scratch.ssm.gate.data(), scratch.ssm.out.data(),
-          std::span(ssm_sequences).first(items.size()), layer_index,
-          ssm_qkv_size, config.ssm_group_count, config.ssm_time_step_rank,
+          std::span(ssm_sequences).first(items.size()),
+          config.SsmLayerIndex(layer_index), ssm_qkv_size,
+          config.ssm_group_count, config.ssm_time_step_rank,
           config.ssm_state_size, config.SsmValueSize(), controls.row_stride,
           ssm_inner_size, arena_.stream, arena_.GetRecurrentStateStorage());
 

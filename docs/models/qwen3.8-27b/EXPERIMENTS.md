@@ -12,6 +12,8 @@
 | 4096-patch vision attention tiles | Retained; byte-identical full embeddings, lower latency and 24 MiB less attention scratch. |
 | Alternate tiles/waves/pipeline depths (2026-09-19) | Rejected: no release throughput improvement. |
 | Dynamic verification chunk/controller alternatives | No new default retained; seeded private-acceptance policy remains. |
+| Parallel mapped-weight reads and larger DFlash packing chunks | Retained: faster cold startup, unchanged encoded weights. |
+| Compact active/saved recurrence and valid-prefix KV | Retained: unused attention-layer state and future KV rows excluded; Q4/Q8 sampling, rollback, image and disk replay pass. |
 
 Priorities: C2/C4/C6/C8 generation and deep-context prefill, with C1 regression
 controls. Optimize all three draft precisions before a full recommendation.

@@ -58,6 +58,8 @@ struct QwenGemmFormatCapabilities {
 [[nodiscard]] constexpr QwenGemmFormatCapabilities DescribeQwenGemmFormat(
     core::GgmlType type) noexcept {
   switch (type) {
+    case core::GgmlType::kI32:
+      return {};
     case core::GgmlType::kF32:
     case core::GgmlType::kBF16:
       return {.dense = true,

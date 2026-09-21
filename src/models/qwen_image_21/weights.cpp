@@ -13,6 +13,8 @@
 #include <set>
 #include <stdexcept>
 
+#include "src/core/mapped_prefetch.hpp"
+
 namespace gufo::models::qwen_image_21 {
 namespace {
 
@@ -282,6 +284,25 @@ void Weights::Load(const std::filesystem::path& path,
   if (cursor != payload_size)
     throw std::runtime_error("unexpected safetensors data");
   mappings_.push_back(std::move(owner));
+  regions_.emplace_back(static_cast<const std::byte*>(data), size);
+}
+
+void Weights::Prefetch(std::string_view prefix) const {
+  for (const auto region : regions_) {
+    const auto base = reinterpret_cast<std::uintptr_t>(region.data());
+    std::size_t begin = region.size(), end = 0;
+    for (auto it = weights_.lower_bound(prefix);
+         it != weights_.end() && it->first.starts_with(prefix); ++it) {
+      const auto address = reinterpret_cast<std::uintptr_t>(it->second.data);
+      if (address < base || address - base >= region.size())
+        continue;
+      const auto offset = address - base;
+      begin = std::min(begin, offset);
+      end = std::max(end, offset + it->second.bytes);
+    }
+    if (end > begin)
+      core::PrefaultMappedRange(region.data() + begin, end - begin);
+  }
 }
 
 const Weight& Weights::Get(std::string_view name) const {

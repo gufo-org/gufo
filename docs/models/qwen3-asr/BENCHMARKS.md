@@ -4,6 +4,11 @@
 (SHA-256 prefix). Resident model; one warmup and three timed requests.
 RTF = request time / input duration, lower is better.
 
+Cold-file-cache startup on 2026-09-21: **1.63 s** to HTTP readiness at context
+1024. A separate 1.36-second speech input takes **0.50 s** on the first request
+and **0.19 s** when warm. The decoder excludes the audio tower's weights,
+saving **606 MiB** of device storage; the complete 49-token oracle still passes.
+
 ## Single request
 
 15.05125-second English recording, 49 greedy output tokens matching the official

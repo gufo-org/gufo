@@ -109,6 +109,11 @@ QwenGpuMemoryUsage QwenGpuExecutor::EstimateMemoryUsage(
   return usage;
 }
 
+std::size_t QwenGpuExecutor::SnapshotPayloadBytes(
+    std::uint32_t valid_context) const {
+  return arena_.SnapshotPayloadBytes(valid_context);
+}
+
 QwenGpuMemoryUsage QwenGpuExecutor::GetMemoryUsage() const {
   auto usage = arena_.GetMemoryUsage();
   usage.temporary_scratch_bytes += verification_logits_capacity_ *
@@ -238,10 +243,10 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
           arena_.GetReplayBeta(layer_idx, start),
           static_cast<const float*>(layer.ssm_a.data),
           static_cast<const float*>(layer.ssm_dt.data), nullptr, nullptr,
-          nullptr, layer_idx, config.SsmQkvSize(), config.ssm_group_count,
-          config.ssm_time_step_rank, config.ssm_state_size,
-          config.SsmValueSize(), rows, config.ssm_time_step_rank,
-          config.ssm_inner_size, arena_.stream, {},
+          nullptr, config.SsmLayerIndex(layer_idx), config.SsmQkvSize(),
+          config.ssm_group_count, config.ssm_time_step_rank,
+          config.ssm_state_size, config.SsmValueSize(), rows,
+          config.ssm_time_step_rank, config.ssm_inner_size, arena_.stream, {},
           arena_.GetRecurrentStateStorage());
       offset += rows;
     }

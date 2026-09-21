@@ -31,9 +31,9 @@ public:
 
   void Copy2D(void* destination, std::size_t destination_pitch,
               const void* source, std::size_t source_pitch, std::size_t width,
-              std::size_t height) {
+              std::size_t height, hipMemcpyKind kind = hipMemcpyDeviceToHost) {
     Check(hipMemcpy2DAsync(destination, destination_pitch, source, source_pitch,
-                           width, height, hipMemcpyDeviceToHost, stream_));
+                           width, height, kind, stream_));
     Check(hipStreamSynchronize(stream_));
   }
 

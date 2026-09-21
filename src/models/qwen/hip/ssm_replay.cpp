@@ -11,47 +11,14 @@
 namespace gufo::hip {
 namespace {
 
-// Live state is indexed by transformer layer. A rollback snapshot only needs
-// recurrent layers: each complete group ends with an unused attention row.
-void CopyRecurrentState(void* live, void* packed, std::size_t layer_bytes,
+// Live and saved state contain only recurrent layers in the same order.
+void CopyRecurrentState(void* live, void* saved, std::size_t layer_bytes,
                         const core::ModelConfig& config, bool save,
                         hipStream_t stream) {
-  if (layer_bytes == 0 || config.num_layers == 0 ||
-      config.full_attention_interval == 1) {
-    return;
-  }
-  auto* destination = static_cast<std::uint8_t*>(save ? packed : live);
-  const auto* source = static_cast<const std::uint8_t*>(save ? live : packed);
-  const std::size_t interval = config.full_attention_interval;
-  if (interval == 0 || interval > config.num_layers) {
-    HIP_CHECK(hipMemcpyAsync(destination, source,
-                             config.num_layers * layer_bytes,
+  const auto bytes = config.SsmLayerCount() * layer_bytes;
+  if (bytes != 0)
+    HIP_CHECK(hipMemcpyAsync(save ? saved : live, save ? live : saved, bytes,
                              hipMemcpyDeviceToDevice, stream));
-    return;
-  }
-  const std::size_t groups = config.num_layers / interval;
-  const std::size_t live_pitch = interval * layer_bytes;
-  const std::size_t packed_pitch = (interval - 1) * layer_bytes;
-  const std::size_t destination_pitch = save ? packed_pitch : live_pitch;
-  const std::size_t source_pitch = save ? live_pitch : packed_pitch;
-  if (layer_bytes >= 1024 * 1024 && ((live_pitch | packed_pitch) & 15U) == 0 &&
-      groups <= std::numeric_limits<std::uint32_t>::max() / live_pitch) {
-    LaunchCopyRecurrentStateRows(destination, source,
-                                 static_cast<std::uint32_t>(packed_pitch),
-                                 static_cast<std::uint32_t>(destination_pitch),
-                                 static_cast<std::uint32_t>(source_pitch),
-                                 static_cast<std::uint32_t>(groups), stream);
-  } else {
-    HIP_CHECK(hipMemcpy2DAsync(destination, destination_pitch, source,
-                               source_pitch, packed_pitch, groups,
-                               hipMemcpyDeviceToDevice, stream));
-  }
-  const std::size_t tail_bytes = (config.num_layers % interval) * layer_bytes;
-  if (tail_bytes != 0) {
-    HIP_CHECK(hipMemcpyAsync(destination + groups * destination_pitch,
-                             source + groups * source_pitch, tail_bytes,
-                             hipMemcpyDeviceToDevice, stream));
-  }
 }
 
 }  // namespace
@@ -61,8 +28,7 @@ void QwenGpuArena::AllocateRecurrentSnapshot() {
     return;
   }
 
-  const std::size_t recurrent_layers =
-      config_.num_layers - config_.FullAttentionLayerCount();
+  const std::size_t recurrent_layers = config_.SsmLayerCount();
   const std::size_t total_conv =
       recurrent_layers * config_.SsmQkvSize() * config_.ssm_conv_kernel;
   const std::size_t total_deltanet =
@@ -125,7 +91,7 @@ bool QwenGpuArena::AllocateSsmReplayLog() {
   }
 
   const std::size_t layer_slots =
-      static_cast<std::size_t>(config_.num_layers) * kSsmReplayCapacity;
+      static_cast<std::size_t>(config_.SsmLayerCount()) * kSsmReplayCapacity;
   HIP_CHECK(hipMalloc(&d_ssm_replay_qkv_,
                       layer_slots * config_.SsmQkvSize() * sizeof(float)));
   HIP_CHECK(
@@ -192,7 +158,9 @@ const float* QwenGpuArena::GetReplayQkv(std::uint32_t layer,
   const std::size_t slot =
       static_cast<std::size_t>(position) % kSsmReplayCapacity;
   const std::size_t offset =
-      (static_cast<std::size_t>(layer) * kSsmReplayCapacity + slot) *
+      (static_cast<std::size_t>(config_.SsmLayerIndex(layer)) *
+           kSsmReplayCapacity +
+       slot) *
       config_.SsmQkvSize();
   return d_ssm_replay_qkv_ + offset;
 }
@@ -205,7 +173,9 @@ const float* QwenGpuArena::GetReplayAlpha(std::uint32_t layer,
   const std::size_t slot =
       static_cast<std::size_t>(position) % kSsmReplayCapacity;
   const std::size_t offset =
-      (static_cast<std::size_t>(layer) * kSsmReplayCapacity + slot) *
+      (static_cast<std::size_t>(config_.SsmLayerIndex(layer)) *
+           kSsmReplayCapacity +
+       slot) *
       config_.ssm_time_step_rank;
   return d_ssm_replay_alpha_ + offset;
 }
@@ -218,7 +188,9 @@ const float* QwenGpuArena::GetReplayBeta(std::uint32_t layer,
   const std::size_t slot =
       static_cast<std::size_t>(position) % kSsmReplayCapacity;
   const std::size_t offset =
-      (static_cast<std::size_t>(layer) * kSsmReplayCapacity + slot) *
+      (static_cast<std::size_t>(config_.SsmLayerIndex(layer)) *
+           kSsmReplayCapacity +
+       slot) *
       config_.ssm_time_step_rank;
   return d_ssm_replay_beta_ + offset;
 }

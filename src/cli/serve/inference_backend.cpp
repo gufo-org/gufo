@@ -594,7 +594,7 @@ public:
     return verifier_ != nullptr ? verifier_->Snapshot() : nullptr;
   }
   [[nodiscard]] std::size_t SnapshotPayloadBytes() const {
-    std::size_t bytes = executor_->GetMemoryUsage().request_state_bytes;
+    std::size_t bytes = executor_->SnapshotPayloadBytes(position_);
     const auto checked_add = [&bytes](std::size_t value) {
       if (value > std::numeric_limits<std::size_t>::max() - bytes) {
         throw std::overflow_error("Qwen snapshot size overflows");
@@ -2803,6 +2803,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     SetError(error, e.what());
     return false;
   }
+  Logger::Info("loader", "event=load_phase phase=target_weights " +
+                             Logger::MemoryStatus());
   auto model =
       hip::QwenGpuModel::CreateFromGguf(reader, &load_error, std::move(vision));
   if (model == nullptr) {
@@ -2847,6 +2849,10 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
   }
   if (speculative_config.backend == TextSpeculativeBackend::kDSpark) {
     SetError(error, "DSpark HTTP decoding requires a DeepSeek model");
+    return false;
+  }
+  if (speculative_config.backend == TextSpeculativeBackend::kMtp) {
+    SetError(error, "MTP HTTP decoding requires a Qwen Flash-Next model");
     return false;
   }
   if (session_count == 0) {
@@ -2908,6 +2914,8 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
                  "invalid");
         return false;
       }
+      Logger::Info("loader", "event=load_phase phase=draft_weights " +
+                                 Logger::MemoryStatus());
       dflash_model = hip::QwenDFlashGpuModel::Create(std::move(dflash_reader),
                                                      model, &dflash_error);
       if (dflash_model == nullptr) {
@@ -2941,6 +2949,8 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
           .staging_capacity_bytes = disk_cache_config.staging_capacity_bytes,
       };
     }
+    Logger::Info("loader",
+                 "event=load_phase phase=sessions " + Logger::MemoryStatus());
     auto runner_pool = std::make_shared<TextRunnerPool>(
         std::move(runner), session_count, std::move(runner_disk_cache));
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(

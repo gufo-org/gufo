@@ -96,12 +96,12 @@ void PrintTranscribeHelp(std::string_view program_name) {
   parser.AddOption("-l", "--language", "NAME",
                    "Optional language name or ISO code; auto-detect by default",
                    "Input", &language);
-  parser.AddOption("", "--context", "TEXT", "Optional transcription context",
+  parser.AddOption("", "--prompt", "TEXT", "Optional transcription context",
                    "Input", &context);
   parser.AddOption("-n", "--max-tokens", "N",
                    "Maximum generated tokens per audio chunk (default: 256)",
                    "Generation", &maximum_tokens);
-  parser.AddOption("-c", "--capacity", "N",
+  parser.AddOption("-c", "--context", "N",
                    "Prompt plus generation capacity (default: 1024)",
                    "Generation", &capacity);
   parser.AddOption(
@@ -139,12 +139,12 @@ int RunTranscribe(std::span<const char* const> args) {
   parser.AddOption("-l", "--language", "NAME",
                    "Optional language name or ISO code; auto-detect by default",
                    "Input", &language);
-  parser.AddOption("", "--context", "TEXT", "Optional transcription context",
+  parser.AddOption("", "--prompt", "TEXT", "Optional transcription context",
                    "Input", &context);
   parser.AddOption("-n", "--max-tokens", "N",
                    "Maximum generated tokens per audio chunk (default: 256)",
                    "Generation", &maximum_tokens);
-  parser.AddOption("-c", "--capacity", "N",
+  parser.AddOption("-c", "--context", "N",
                    "Prompt plus generation capacity (default: 1024)",
                    "Generation", &capacity);
   parser.AddOption(

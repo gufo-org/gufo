@@ -326,6 +326,8 @@ public:
       const core::ModelConfig& config, std::uint32_t max_context,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
+  [[nodiscard]] std::size_t SnapshotPayloadBytes(
+      std::uint32_t valid_context) const;
 
   [[nodiscard]] std::unique_ptr<QwenGpuSnapshot> SaveSnapshot(
       std::uint32_t valid_context);
@@ -511,6 +513,8 @@ public:
       const core::ModelConfig& config, std::uint32_t max_context,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
+  [[nodiscard]] std::size_t SnapshotPayloadBytes(
+      std::uint32_t valid_context) const;
   void ConfigureVision(
       std::shared_ptr<const models::qwen::vision::Prompt> prompt,
       std::shared_ptr<models::qwen::vision::Encoder> encoder);

@@ -3,6 +3,7 @@
 #include <string_view>
 #include <utility>
 
+#include "src/core/mapped_prefetch.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/hip/detail/weight_regions.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -72,6 +73,14 @@ namespace {
   for (std::size_t i = 0; i < source_regions.size(); ++i) {
     const auto& source = source_regions[i];
     auto& destination = weight_regions[i];
+    try {
+      core::PrefaultMappedRange(source.data, source.size);
+    } catch (const std::exception& e) {
+      ReleaseWeightRegions(weight_regions);
+      if (error_msg)
+        *error_msg = e.what();
+      return false;
+    }
     const auto map_error = MapRegisteredRegion(source, destination);
 
     if (destination.device_data == nullptr) {

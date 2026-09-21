@@ -346,9 +346,12 @@ if (BUILD_TESTING)
   set_tests_properties(gufo_transcribe_help PROPERTIES
     LABELS "cpu;server;cli;qwen3-asr")
 
-  add_test(NAME gufo_serve_audio_help COMMAND gufo serve audio --help)
-  set_tests_properties(gufo_serve_audio_help PROPERTIES
+  add_test(NAME gufo_serve_asr_help COMMAND gufo serve asr --help)
+  set_tests_properties(gufo_serve_asr_help PROPERTIES
     LABELS "cpu;server;cli;qwen3-asr")
+  add_test(NAME gufo_serve_tts_help COMMAND gufo serve tts --help)
+  set_tests_properties(gufo_serve_tts_help PROPERTIES
+    LABELS "cpu;server;cli;qwen3-tts")
 
   add_test(NAME strix_serve_help COMMAND gufo serve --help)
   set_tests_properties(strix_serve_help PROPERTIES LABELS "cpu;server;cli")

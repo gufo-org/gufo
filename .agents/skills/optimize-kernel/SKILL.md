@@ -99,6 +99,13 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   token tile cannot overwrite history still being read. UMA has placement
   costs: mapped quantized weights and copied reusable audio/DiT weights behave
   differently.
+  Cold HIP registration/upload can serialize page faults. Prefault existing
+  mappings in bounded parallel chunks; this improved text/audio/image startup
+  without another weight copy. Measure launch-to-ready and the first request,
+  since image components load lazily. Fault only active component ranges.
+  Size snapshots by valid KV rows and recurrent layers, not context capacity;
+  Qwen's FP16 KV is token-major but its FP32 reference KV is head-major.
+  Qualify dirty tails, cancellation, disk reload and image continuation.
   Recurrent rollback can retain one full state plus exact update operands,
   replaying only rejected prefixes; this cut Flash-Next's seven-draft reserve
   to about 147 MiB/session. Recording an intermediate changed fast-math
@@ -141,6 +148,10 @@ allocation boundary; oversized shared scratch can conceal invalid reads.
 Moving FP32 expressions into a device helper changed contraction here.
 Capture the first failing operator's inputs for a small replay; include
 unsaturated activations, since large synthetic values can hide the difference.
+Repeat across process/runtime reloads as well as cached requests. TTS reference
+caching concealed a speaker-softmax race: all waves must consume a shared
+maximum before scratch is reused for sums. The small shape passed; the real
+1536-channel shape failed an independent FP64 check.
 
 For state or speculative changes, cover greedy output, sampled p/q rejection
 and residual correction, seeded replay, EOS, multi-turn continuation and

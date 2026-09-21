@@ -269,6 +269,10 @@ void TestStreamingWithoutUsage() {
     Expect(output.find(R"("usage":)") == std::string::npos &&
                output.ends_with("data: [DONE]\n\n"),
            "Usage chunk is opt-in");
+    Expect(
+        output.find(R"("prompt_per_second":800)") != std::string::npos &&
+            output.find(R"("cache_n":5)") != std::string::npos,
+        "Terminal timings survive omitted or disabled usage on cached turns");
     Expect(response.stream_log &&
                response.stream_log->details.find("generated_tokens=1") !=
                    std::string::npos,
@@ -350,6 +354,9 @@ void TestCachedPrefillMetrics() {
   const auto body = gufo::json::parse(response.body);
   const auto* usage = body.find("usage");
   const auto* timings = body.find("timings");
+  Expect(body.find("metrics") == nullptr,
+         "One timing schema prevents proxies from subtracting cached tokens "
+         "twice");
   Expect(usage && usage->member_size("prompt_tokens") == 7,
          "Token usage includes cached tokens");
   Expect(timings && timings->member_size("prompt_n") == 2 &&

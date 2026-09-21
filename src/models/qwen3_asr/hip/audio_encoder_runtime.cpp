@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/mapped_prefetch.hpp"
 #include "src/models/qwen3_asr/hip/audio_ops.hpp"
 #include "src/models/qwen3_asr/hip/blas.hpp"
 #include "src/models/qwen3_asr/loader.hpp"
@@ -272,6 +273,8 @@ struct AudioEncoderHipRuntime::Impl {
                    "hipblasSetAtomicsMode Qwen3-ASR");
     RequireMiopen(miopenCreate(&miopen), "miopenCreate Qwen3-ASR");
     RequireMiopen(miopenSetStream(miopen, stream), "miopenSetStream Qwen3-ASR");
+    for (const auto& region : model.RegionsFor({"thinker.audio_tower."}))
+      core::PrefaultMappedRange(region.data, region.size);
     LoadWeights();
   }
 

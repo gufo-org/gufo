@@ -180,8 +180,36 @@ void TestCanonicalMemoryAccountingAndSnapshot() {
   auto snapshot = fp16_arena.SaveSnapshot(7);
   Expect(snapshot->KvStorage() == QwenKvCacheStorage::kFp16,
          "snapshot must record the canonical FP16 KV format");
-  Expect(snapshot->PayloadBytes() == fp16_usage.request_state_bytes,
+  Expect(snapshot->PayloadBytes() == fp16_arena.SnapshotPayloadBytes(7),
          "snapshot payload must account one canonical state representation");
+
+  // FP32 reference KV is head-major, unlike the production FP16 plane.
+  QwenGpuArena fp32_arena(config, context, fp32);
+  HIP_CHECK(hipStreamSynchronize(fp32_arena.stream));
+  std::vector<float> source(kv_elements), actual(kv_elements);
+  for (std::size_t i = 0; i < source.size(); ++i)
+    source[i] = static_cast<float>(i + 1);
+  HIP_CHECK(hipMemcpy(fp32_arena.d_kv_cache, source.data(),
+                      source.size() * sizeof(float), hipMemcpyHostToDevice));
+  auto saved = fp32_arena.SaveSnapshot(7);
+  std::vector<std::uint8_t> serialized(saved->CompactPayloadBytes());
+  saved->SerializeCompact(serialized);
+  for (const bool disk : {false, true}) {
+    HIP_CHECK(
+        hipMemset(fp32_arena.d_kv_cache, 0, source.size() * sizeof(float)));
+    HIP_CHECK(hipDeviceSynchronize());
+    if (disk)
+      fp32_arena.RestoreCompactSnapshot(serialized, 7);
+    else
+      fp32_arena.RestoreSnapshot(*saved);
+    HIP_CHECK(hipMemcpy(actual.data(), fp32_arena.d_kv_cache,
+                        actual.size() * sizeof(float), hipMemcpyDeviceToHost));
+    for (std::size_t i = 0; i < source.size(); ++i) {
+      const auto position = (i / config.head_dim) % context;
+      Expect(actual[i] == (position < 7 ? source[i] : 0.0F),
+             "FP32 snapshot lost a head's valid prefix or restored its tail");
+    }
+  }
 }
 
 void TestCompactPersistentSnapshotRoundTrip() {
@@ -205,13 +233,12 @@ void TestCompactPersistentSnapshotRoundTrip() {
   }
 
   const std::size_t conv_elements =
-      static_cast<std::size_t>(config.num_layers) * config.SsmQkvSize() *
+      static_cast<std::size_t>(config.SsmLayerCount()) * config.SsmQkvSize() *
       config.ssm_conv_kernel;
   const std::size_t deltanet_elements =
-      static_cast<std::size_t>(config.num_layers) * config.ssm_time_step_rank *
-      config.ssm_state_size * config.SsmValueSize();
-  const std::size_t recurrent_layers =
-      config.num_layers - config.FullAttentionLayerCount();
+      static_cast<std::size_t>(config.SsmLayerCount()) *
+      config.ssm_time_step_rank * config.ssm_state_size * config.SsmValueSize();
+  const std::size_t recurrent_layers = config.SsmLayerCount();
   const std::size_t conv_elements_per_layer =
       config.SsmQkvSize() * config.ssm_conv_kernel;
   const std::size_t deltanet_elements_per_layer =
@@ -244,14 +271,17 @@ void TestCompactPersistentSnapshotRoundTrip() {
       recurrent_layers * deltanet_elements_per_layer * sizeof(float);
   Expect(snapshot->CompactPayloadBytes() == expected_compact_bytes,
          "compact snapshot must contain only live KV rows and recurrent state");
-  Expect(snapshot->CompactPayloadBytes() < snapshot->PayloadBytes(),
-         "compact snapshot must omit the unused KV tail");
+  Expect(snapshot->CompactPayloadBytes() ==
+             snapshot->PayloadBytes() + header_bytes,
+         "GPU and disk snapshots must retain the same compact state");
 
   std::vector<std::uint8_t> payload(snapshot->CompactPayloadBytes());
   Expect(snapshot->SerializeCompact(payload) == payload.size(),
          "compact snapshot serializer byte count");
 
   QwenGpuArena restored(config, context, policy);
+  HIP_CHECK(hipMemset(restored.d_attention_kv_f16, 0xA5,
+                      source_kv.size() * sizeof(std::uint16_t)));
   restored.RestoreCompactSnapshot(payload, valid_context);
   std::vector<std::uint16_t> restored_kv(source_kv.size());
   std::vector<float> restored_conv(source_conv.size());
@@ -277,30 +307,17 @@ void TestCompactPersistentSnapshotRoundTrip() {
             Expect(restored_kv[index] == source_kv[index],
                    "compact snapshot changed a live KV element");
           } else {
-            Expect(restored_kv[index] == 0,
-                   "compact snapshot restored an unused KV-tail element");
+            Expect(restored_kv[index] == 0xA5A5,
+                   "compact snapshot touched an unused KV-tail element");
           }
         }
       }
     }
   }
-  for (std::size_t layer = 0; layer < config.num_layers; ++layer) {
-    const bool full_attention =
-        ((layer + 1U) % config.full_attention_interval) == 0;
-    for (std::size_t column = 0; column < conv_elements_per_layer; ++column) {
-      const std::size_t index = layer * conv_elements_per_layer + column;
-      Expect(
-          restored_conv[index] == (full_attention ? 0.0F : source_conv[index]),
-          "compact snapshot changed convolution state");
-    }
-    for (std::size_t column = 0; column < deltanet_elements_per_layer;
-         ++column) {
-      const std::size_t index = layer * deltanet_elements_per_layer + column;
-      Expect(restored_deltanet[index] ==
-                 (full_attention ? 0.0F : source_deltanet[index]),
-             "compact snapshot changed DeltaNet state");
-    }
-  }
+  Expect(restored_conv == source_conv,
+         "compact snapshot changed convolution state");
+  Expect(restored_deltanet == source_deltanet,
+         "compact snapshot changed DeltaNet state");
 
   const auto retained_kv = restored_kv;
   auto truncated = payload;
@@ -400,9 +417,9 @@ void TestOnlineAndGraphDecodeFp16Equivalence() {
                       hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(d_gate, gate.data(), gate.size() * sizeof(float),
                       hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemset(d_fp32_cache, 0, 2U * cache_elements * sizeof(float)));
-  HIP_CHECK(
-      hipMemset(d_fp16_cache, 0, 2U * cache_elements * sizeof(std::uint16_t)));
+  HIP_CHECK(hipMemset(d_fp32_cache, 0xFF, 2U * cache_elements * sizeof(float)));
+  HIP_CHECK(hipMemset(d_fp16_cache, 0xFF,
+                      2U * cache_elements * sizeof(std::uint16_t)));
 
   for (std::uint32_t position = 0; position < positions; ++position) {
     const std::size_t attention_offset =

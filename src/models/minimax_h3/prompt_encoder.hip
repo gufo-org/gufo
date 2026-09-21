@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/mapped_prefetch.hpp"
 #include "src/models/minimax_h3/prompt_encoder.hpp"
 #include "src/models/minimax_h3/prompt_encoder_ops.hip.hpp"
 
@@ -361,12 +362,12 @@ BatchLoadResult LoadBatch(const ModelInventory& inventory,
                        std::strerror(errno);
         return result;
       }
-      (void)madvise(host, length, MADV_SEQUENTIAL);
       HostMapping mapping;
       mapping.shard = interval.shard;
       mapping.host = host;
       mapping.bytes = length;
       mapping.file_offset = interval.begin;
+      core::PrefaultMappedRange(host, length);
       status = hipHostRegister(host, length,
                                hipHostRegisterMapped | hipHostRegisterReadOnly);
       if (status != hipSuccess) {
@@ -376,8 +377,8 @@ BatchLoadResult LoadBatch(const ModelInventory& inventory,
       mapping.registered = true;
       status = hipHostGetDevicePointer(&mapping.device, host, 0);
       if (status != hipSuccess) {
-        result.error = HipError("hipHostGetDevicePointer(H3 text weight)",
-                                status);
+        result.error =
+            HipError("hipHostGetDevicePointer(H3 text weight)", status);
         return result;
       }
       const std::uint64_t registered =
@@ -662,8 +663,8 @@ struct Activations {
   [[nodiscard]] std::uint64_t Bytes() const noexcept {
     return ids.bytes() + hidden.bytes() + norm.bytes() + query.bytes() +
            key.bytes() + rope_cosine.bytes() + rope_sine.bytes() +
-           value.bytes() + attention.bytes() +
-           projection.bytes() + gate.bytes() + up.bytes() + mlp.bytes();
+           value.bytes() + attention.bytes() + projection.bytes() +
+           gate.bytes() + up.bytes() + mlp.bytes();
   }
 };
 
@@ -949,8 +950,8 @@ bool EncodePromptLayer50(const ModelInventory& inventory,
   }
   ops::LaunchPrepareRope(
       activations.rope_cosine.As<float>(), activations.rope_sine.As<float>(),
-      static_cast<std::uint32_t>(token_ids.size()),
-      kPromptEncoderHeadDimension, kRopeTheta, compute_stream);
+      static_cast<std::uint32_t>(token_ids.size()), kPromptEncoderHeadDimension,
+      kRopeTheta, compute_stream);
 
   const TensorDescriptor* embedding_descriptor = RequireTensor(
       inventory, "model.language_model.embed_tokens.weight",

@@ -65,6 +65,10 @@ seeds, replay after changing image size, and disconnect recovery (0.32 s). OpenA
 two-reference multipart editing through the pinned llama-swap, including model
 aliases, non-square output and opaque alpha. All requests used localhost.
 
+The 2026-09-21 component-prefetch check preserves the exact generated PNG.
+Generation and editing also pass repeated/concurrent seeds, image-size
+replacement and disconnect recovery on the production binary.
+
 Focused commands:
 
 ```sh

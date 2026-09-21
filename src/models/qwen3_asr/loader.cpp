@@ -5,11 +5,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -171,6 +173,42 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
 }
 
 }  // namespace
+
+std::vector<MappedRegion> LoadResult::RegionsFor(
+    std::initializer_list<std::string_view> prefixes) const {
+  std::vector<MappedRegion> result;
+  if (!store)
+    return result;
+  const auto system_page_bytes = sysconf(_SC_PAGESIZE);
+  if (system_page_bytes <= 0 || system_page_bytes % 16 != 0)
+    throw std::runtime_error("ASR cannot determine mapped weight alignment");
+  const auto page_bytes = static_cast<std::size_t>(system_page_bytes);
+  for (const auto& region : mapped_regions) {
+    std::size_t begin = region.size, end = 0;
+    const auto base = reinterpret_cast<std::uintptr_t>(region.data);
+    for (const auto& [name, tensor] : store->tensors_) {
+      if (!std::ranges::any_of(
+              prefixes, [&](auto prefix) { return name.starts_with(prefix); }))
+        continue;
+      const auto address = reinterpret_cast<std::uintptr_t>(tensor.data);
+      if (address < base || address - base >= region.size)
+        continue;
+      const auto offset = address - base;
+      if (tensor.byte_count > region.size - offset)
+        throw std::runtime_error("ASR tensor exceeds its mapped shard");
+      begin = std::min(begin, offset);
+      end = std::max(end, offset + tensor.byte_count);
+    }
+    if (end == 0)
+      continue;
+    // Keep mapping fallback page aligned; all tensor offsets retain the
+    // original shard's alignment modulo 16 for the copied representation.
+    begin -= begin % page_bytes;
+    result.push_back(
+        {region.data + begin, end - begin, region.payload_offset % 16U});
+  }
+  return result;
+}
 
 LoadResult LoadModelDirectory(const std::string& model_dir) {
   LoadResult result;

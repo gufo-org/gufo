@@ -76,9 +76,10 @@ nix build
   --context 4096
 ```
 
-Cancellation and exceptions return a reset session to the pool. Model
-replacement is transactional, so active requests retain their original model
-until their lease ends. Generation responses include:
+Cancellation preserves successfully executed state for continuation; failed
+model operations invalidate mutable state. Model replacement is transactional,
+so active requests retain their original model until their lease ends.
+Generation responses include:
 
 ```text
 Server-Timing: ttft;dur=<milliseconds>, inter_token;dur=<milliseconds>
@@ -157,7 +158,7 @@ Conflicting controls return `invalid_reasoning`. In template kwargs,
 Jinja; a non-off top-level `reasoning_effort` explicitly enables reasoning.
 Generated reasoning is returned as `reasoning_content` in ordinary and
 streaming Chat Completions responses. Per-model effort mappings and history
-policies are documented in the model cards under `src/models/`.
+policies are documented in the model cards under `docs/models/`.
 
 The server uses compiled model-specific formatters and validates recognized
 artifact template hashes during model loading. It does not accept custom Jinja
@@ -167,45 +168,12 @@ Diagnostic telemetry is limited to status, token counts, timing, and
 cancellation state. It must not contain prompt text, model paths, machine
 identity, request IDs, or token IDs.
 
-The user provides weight artifacts and configuration:
-
-```toml
-bind = "127.0.0.1:8080"
-memory_policy = "guaranteed"
-
-[[models]]
-alias = "qwen-current-27b"
-kind = "QWEN38_27B_TEXT"
-weights = "/models/qwen-current/gufo-manifest.json"
-enable_gpu = true
-enable_npu = true
-
-[[models]]
-alias = "deepseek-flash"
-kind = "DEEPSEEK_V4_FLASH"
-weights = "/models/deepseek-flash/gufo-manifest.json"
-enable_gpu = true
-enable_npu = true
-```
-
-`kind` resolves through a closed compiled-in enum. The server verifies that the
-manifest, tensor inventory, dimensions, quantization, tokenizer, and state
-contract match that implementation.
-
-Qwen3.8-27B is the first production model; Qwen3.5-0.8B is the rapid-iteration
-fixture. The first production artifact is text-only, excludes the vision
-encoder, and rejects image/video input.
-
-Model artifacts cannot provide:
-
-- Host shared libraries.
-- HIP or generic GPU code objects.
-- AIE overlays or `ctrlcode`.
-- Tokenizer plugins.
-- Executable chat templates.
-
-Adding another model architecture requires rebuilding `gufo`.
-Changing weights for an already supported kind does not.
+Pass the supported GGUF or safetensors directory through `--model`, with the
+matching projector or speculative sidecar where needed. Loaders validate
+tensor inventory, dimensions, quantization and tokenizer metadata. Model
+artifacts supply weights and metadata; executable kernels and templates are
+compiled into Gufo. See [model cards](models/README.md) for concrete paths
+and supported modes.
 
 ## Process and State Ownership
 
@@ -253,25 +221,15 @@ Qwen3-TTS serving is enabled with a dedicated model process. All three 12Hz
 fields that are required:
 
 ```sh
-./result/bin/gufo serve --port 8080 audio \
+./result/bin/gufo serve --port 8080 tts \
   --model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-CustomVoice
 ```
 
-A single audio server can host Qwen3-TTS synthesis, Qwen3-ASR transcription,
-or both, since `/v1/audio/speech` and `/v1/audio/transcriptions` dispatch from
-independent services. Name each checkpoint explicitly to run both in one
-process:
-
-```sh
-./result/bin/gufo serve --port 8080 audio \
-  --tts-model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-CustomVoice \
-  --asr-model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision>
-```
-
-At least one of `--tts-model` or `--asr-model` is required.
-`--tts-context` (default 4096) and `--asr-context`
-(default 1024) size each service independently. Both checkpoints load eagerly at startup, so running
-them co-resident costs the sum of their weights.
+Start ASR separately with `gufo serve asr --model DIR`. Both speech
+commands accept `--model`, `--context`, and `--served-model-name`, plus the
+shared HTTP options. Context defaults are 4096 for TTS and 1024 per chunk
+for ASR. Route separate model processes through llama-swap when one public
+API URL should offer both synthesis and transcription.
 
 | Variant | Model id | Voices | Additional required fields |
 | --- | --- | --- | --- |
@@ -289,8 +247,8 @@ so clients select a speaker by name instead of uploading a reference clip on
 every request:
 
 ```sh
-./result/bin/gufo serve audio \
-  --tts-model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-Base \
+./result/bin/gufo serve tts \
+  --model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_eng=/persist/models/audio/clear-english-voice.wav \
   --voice narrator_ita=/persist/models/audio/clear-italian-voice.wav
 ```
@@ -300,8 +258,8 @@ every request:
 appear before or after its matching `--voice`:
 
 ```sh
-./result/bin/gufo serve audio \
-  --tts-model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-Base \
+./result/bin/gufo serve tts \
+  --model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_ita=/persist/models/audio/clear-italian-voice.wav \
   --voice-text "narrator_ita=Questo racconto e' cresciuto..." \
   --voice narrator_eng=/persist/models/audio/clear-english-voice.wav \
@@ -348,11 +306,11 @@ HTTP/1.1 streams use chunked transfer encoding; failed generation omits the
 terminal chunk so clients can detect truncated audio. SSE also reports an error
 event, while WebSocket speech reports an error without `audio.done`.
 
-Qwen3-ASR serving uses the same audio server, naming only the ASR checkpoint:
+Qwen3-ASR serving uses its own model process:
 
 ```sh
-./result/bin/gufo serve audio \
-  --asr-model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision>
+./result/bin/gufo serve asr \
+  --model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision>
 ```
 
 `POST /v1/audio/transcriptions` accepts OpenAI-compatible multipart fields
@@ -531,6 +489,12 @@ bounds admission and output buffering and propagates client cancellation to
 model runners. An in-flight GPU operation may finish before its request retires.
 See [CLI.md](CLI.md) for supported configuration flags.
 
+Cancellation retains the last successfully executed conversation frontier and
+the immutable prompt snapshot. It does not execute a selected but unfinished
+token to populate the cache. A failed model operation invalidates its mutable
+state; the prompt snapshot remains available for safe replay. Image identity,
+positions and speculative state participate in restoration and cache isolation.
+
 `GET /health` reports process liveness. `GET /ready` returns 503 until a model
 service is ready, then reports `status` and the active model. It does not expose
 a GPU health matrix. HTTP model replacement and persistent Responses
@@ -543,6 +507,11 @@ speeds. `Server-Timing`, generation `timings`, and Chat Completions
 `usage.gufo` provide request-level measurements. The legacy KV-utilization
 metric and `/slots`/`/props` metadata are placeholders; do not use them for
 capacity or admission decisions.
+
+Streaming terminal chunks always include llama.cpp-compatible `timings`, even
+without `stream_options.include_usage`. `prompt_n` counts newly processed
+tokens; `cache_n` counts reused tokens. llama-swap uses these fields on every
+turn. Gufo-specific details stay in `usage.gufo`.
 
 TODO: real slot/KV metrics, a validated administrative reload/drain interface,
 and automatic recovery after device reset or suspend/resume.

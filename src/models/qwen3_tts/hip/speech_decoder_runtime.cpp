@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/mapped_prefetch.hpp"
 #include "src/models/qwen3_tts/hip/speech_decoder_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
 
@@ -127,6 +128,7 @@ public:
     host_ = region.data;
     size_ = region.size;
     payload_offset_ = region.payload_offset;
+    core::PrefaultMappedRange(host_, size_);
     // The supported gfx1151 APU shares physical memory with the CPU, but
     // hipMalloc uses coarse-grained pages that the GPU caches and streams
     // faster than host-registered safetensors pages.
@@ -391,12 +393,12 @@ struct DecoderHistory {
   }
 
   void CopyFrom(const DecoderHistory& source, std::size_t attention_width,
-                hipStream_t stream) {
+                std::size_t attention_capacity, hipStream_t stream) {
     const auto copy = [stream](DeviceBuffer<float>& destination,
                                const DeviceBuffer<float>& input,
-                               std::size_t count) {
-      if (destination.size() < input.size())
-        destination.Reset(input.size());
+                               std::size_t count, std::size_t capacity) {
+      if (destination.size() < capacity)
+        destination.Reset(capacity);
       if (count != 0)
         RequireHip(hipMemcpyAsync(destination.get(), input.get(),
                                   count * sizeof(float),
@@ -406,15 +408,18 @@ struct DecoderHistory {
     ResetBlock();
     for (const auto& [weights, previous] : source.convolutions) {
       auto& next = convolutions[weights];
-      copy(next.input, previous.input, previous.rows * weights->input_channels);
+      const auto count = previous.rows * weights->input_channels;
+      copy(next.input, previous.input, count, count);
       next.rows = previous.rows;
     }
     attention.resize(source.attention.size());
     for (std::size_t layer = 0; layer < attention.size(); ++layer) {
       copy(attention[layer].key, source.attention[layer].key,
-           source.position * attention_width);
+           source.position * attention_width,
+           attention_capacity * attention_width);
       copy(attention[layer].value, source.attention[layer].value,
-           source.position * attention_width);
+           source.position * attention_width,
+           attention_capacity * attention_width);
     }
     codes = source.codes;
     position = source.position;
@@ -1244,12 +1249,14 @@ bool SpeechDecoderHipRuntime::DecodeAfterReference(
         if (!DecodeIncremental(prefix, prefix_frames, 0, &discarded, error))
           return false;
         auto replacement = std::make_unique<DecoderHistory>();
-        replacement->CopyFrom(impl_->history, width, impl_->stream);
+        replacement->CopyFrom(impl_->history, width, impl_->history.position,
+                              impl_->stream);
         RequireHip(hipStreamSynchronize(impl_->stream),
                    "capture decoder reference state");
         saved = std::move(replacement);
       } else {
-        impl_->history.CopyFrom(*saved, width, impl_->stream);
+        impl_->history.CopyFrom(
+            *saved, width, kChunkFrames + kLeftContextFrames, impl_->stream);
       }
     }
     if (!DecodeIncremental(codes, frames, prefix_frames, output, error))

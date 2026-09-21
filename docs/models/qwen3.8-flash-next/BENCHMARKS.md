@@ -12,6 +12,11 @@ preserved. PNG/JPEG input works with AR/MTP and `mmproj-BF16.gguf`; see
 [image usage and validation](README.md#images).
 **Original unquantized-model and GGUF-conversion parity remain unqualified.**
 
+Cold-file-cache launch to HTTP readiness: **14.91 s** on 2026-09-21,
+including all four target shards, MTP and two sessions at context capacity
+262144. A direct 4095-token snapshot occupies **221 MiB**; restore/replay
+qualification is in [evaluation](EVALUATION.md).
+
 ## Single user
 
 Tok/s, pp2048/tg128, greedy, seed 1, context capacity 133121. Depth precedes

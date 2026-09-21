@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/mapped_prefetch.hpp"
 #include "src/models/qwen3_asr/hip/blas.hpp"
 #include "src/models/qwen3_asr/hip/text_ops.hpp"
 #include "src/models/qwen3_asr/loader.hpp"
@@ -126,6 +127,7 @@ public:
     host_ = region.data;
     size_ = region.size;
     payload_offset_ = region.payload_offset;
+    core::PrefaultMappedRange(host_, size_);
     return TryCopy(stream) || TryMap();
   }
 
@@ -297,7 +299,8 @@ struct TextDecoderHipRuntime::Impl {
                    "hipblasSetAtomicsMode Qwen3-ASR text");
     prefill_lt = std::make_unique<GemmLt>();
     weight_regions.reserve(model.mapped_regions.size());
-    for (const MappedRegion region : model.mapped_regions) {
+    for (const MappedRegion region :
+         model.RegionsFor({"thinker.model.", "thinker.lm_head."})) {
       auto device_region = std::make_unique<DeviceRegion>();
       if (!device_region->Initialize(region, stream)) {
         throw std::runtime_error(

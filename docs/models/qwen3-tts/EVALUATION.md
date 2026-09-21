@@ -9,6 +9,15 @@ and the native C++ sampler use different random-number generators. Parity is
 therefore judged from exact tokens, tensor and logit metrics, near-exact decoder
 waveform comparison, and an end-to-end intelligibility gate.
 
+State/restart qualification, 2026-09-21: Base voice cloning reproduces its
+complete seeded WAV across fresh server processes and resident requests.
+The speaker softmax matches an independent FP64 calculation at 1536 channels;
+traced, untraced and reloaded encoders return identical embeddings.
+Official embedding cosine remains **0.999997**. The 64-frame synthesis check
+passes cancellation/reuse and exact buffered/streamed PCM. Decoder snapshots
+retain only live attention and convolution history, including reference
+replacement and endpoints around the 300-frame reset.
+
 Current complete-sentence checks use the same 37-word English paragraph,
 default sampling and automatic language selection. Native Qwen3-ASR-1.7B
 transcribes the output; WER measures intelligibility, not voice similarity or

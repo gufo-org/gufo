@@ -3,6 +3,12 @@
 Nix release on gfx1151. Current qualified end-to-end timing matrix is **TODO**;
 component traces and extrapolations are not complete-generation measurements.
 
+2026-09-21 loading control: metadata-only HTTP readiness **0.17 s**.
+The first four real prompt-encoder layers over six tokens take **1.48 s**,
+including **0.83 s** summed batch loading and **0.21 s** GPU execution;
+loading overlaps compute. Peak retained device memory is **1.88 GiB**.
+Output is byte-identical to the previous loader. No full video was generated.
+
 | Preset | Single request wall | Peak resident memory | Delivery quality |
 | --- | ---: | ---: | --- |
 | exact, 512x512 | TODO | TODO | Component evidence only |

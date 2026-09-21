@@ -187,8 +187,17 @@ void TestRecurrentRollbackRows(bool large_state) {
           config.ssm_time_step_rank * config.ssm_state_size *
           config.SsmValueSize() *
           gufo::hip::QwenRecurrentStateElementBytes(storage);
-      std::vector<std::uint8_t> conv(layers * conv_row),
-          delta(layers * delta_row);
+      std::vector<std::uint8_t> conv(config.SsmLayerCount() * conv_row),
+          delta(config.SsmLayerCount() * delta_row);
+      unsigned packed = 0;
+      for (unsigned layer = 0; layer < layers; ++layer) {
+        if (interval == 0 || (layer + 1) % interval) {
+          if (config.SsmLayerIndex(layer) != packed++)
+            throw std::runtime_error("incorrect dense recurrent layer index");
+        }
+      }
+      if (packed != config.SsmLayerCount())
+        throw std::runtime_error("incorrect recurrent layer count");
       // A second save must replace the first snapshot, including a tail group.
       for (unsigned generation = 0; generation < 2; ++generation) {
         for (auto* values : {&conv, &delta}) {
@@ -196,32 +205,29 @@ void TestRecurrentRollbackRows(bool large_state) {
             (*values)[i] = (i * 17U + i / 13U + generation * 23U) % 256U;
           }
         }
-        HIP_CHECK(hipMemcpy(arena.d_ssm_conv_state, conv.data(), conv.size(),
-                            hipMemcpyHostToDevice));
-        HIP_CHECK(hipMemcpy(arena.d_ssm_deltanet_state, delta.data(),
-                            delta.size(), hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpyAsync(arena.d_ssm_conv_state, conv.data(),
+                                 conv.size(), hipMemcpyHostToDevice,
+                                 arena.stream));
+        HIP_CHECK(hipMemcpyAsync(arena.d_ssm_deltanet_state, delta.data(),
+                                 delta.size(), hipMemcpyHostToDevice,
+                                 arena.stream));
         arena.SaveState(7);
-        HIP_CHECK(hipMemset(arena.d_ssm_conv_state, 0x5A, conv.size()));
-        HIP_CHECK(hipMemset(arena.d_ssm_deltanet_state, 0x5A, delta.size()));
+        HIP_CHECK(hipMemsetAsync(arena.d_ssm_conv_state, 0x5A, conv.size(),
+                                 arena.stream));
+        HIP_CHECK(hipMemsetAsync(arena.d_ssm_deltanet_state, 0x5A, delta.size(),
+                                 arena.stream));
         arena.RestoreState();
         const auto check = [&](const void* device,
-                               const std::vector<std::uint8_t>& expected,
-                               std::size_t row_bytes) {
+                               const std::vector<std::uint8_t>& expected) {
           std::vector<std::uint8_t> actual(expected.size());
-          HIP_CHECK(hipMemcpy(actual.data(), device, actual.size(),
-                              hipMemcpyDeviceToHost));
-          for (unsigned layer = 0; layer < layers; ++layer) {
-            const bool recurrent = interval == 0 || (layer + 1) % interval;
-            for (std::size_t i = layer * row_bytes; i < (layer + 1) * row_bytes;
-                 ++i) {
-              if (actual[i] != (recurrent ? expected[i] : 0x5A)) {
-                throw std::runtime_error("rollback changed recurrent state");
-              }
-            }
-          }
+          if (!actual.empty())
+            HIP_CHECK(hipMemcpy(actual.data(), device, actual.size(),
+                                hipMemcpyDeviceToHost));
+          if (actual != expected)
+            throw std::runtime_error("rollback changed recurrent state");
         };
-        check(arena.d_ssm_conv_state, conv, conv_row);
-        check(arena.d_ssm_deltanet_state, delta, delta_row);
+        check(arena.d_ssm_conv_state, conv);
+        check(arena.d_ssm_deltanet_state, delta);
       }
     }
   }
@@ -259,7 +265,7 @@ void TestBf16RecurrentMemoryAndSnapshot() {
   const auto bf16_usage = gufo::hip::QwenGpuArena::EstimateMemoryUsage(
       production, context, bf16_policy);
   const std::size_t recurrent_elements =
-      static_cast<std::size_t>(production.num_layers) *
+      static_cast<std::size_t>(production.SsmLayerCount()) *
       production.ssm_time_step_rank * production.ssm_state_size *
       production.SsmValueSize();
   const std::size_t expected_savings =
@@ -291,8 +297,6 @@ void TestBf16RecurrentMemoryAndSnapshot() {
   constexpr std::uint32_t small_context = 32;
   gufo::hip::QwenGpuArena fp32_arena(small, small_context, fp32_policy);
   gufo::hip::QwenGpuArena bf16_arena(small, small_context, bf16_policy);
-  const auto bf16_small_usage = gufo::hip::QwenGpuArena::EstimateMemoryUsage(
-      small, small_context, bf16_policy);
   auto fp32_snapshot = fp32_arena.SaveSnapshot(7);
   auto bf16_snapshot = bf16_arena.SaveSnapshot(7);
   if (bf16_snapshot->RecurrentStateStorage() !=
@@ -300,7 +304,7 @@ void TestBf16RecurrentMemoryAndSnapshot() {
     throw std::runtime_error(
         "snapshot did not record canonical BF16 recurrent storage");
   }
-  if (bf16_snapshot->PayloadBytes() != bf16_small_usage.request_state_bytes) {
+  if (bf16_snapshot->PayloadBytes() != bf16_arena.SnapshotPayloadBytes(7)) {
     throw std::runtime_error(
         "BF16 snapshot payload disagrees with state-byte accounting");
   }

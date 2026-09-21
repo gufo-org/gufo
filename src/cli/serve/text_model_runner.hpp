@@ -358,6 +358,9 @@ public:
     /// final live state. Mutable-state runners publish their reported
     /// checkpoint.
     CommitMetrics Commit();
+    /// Release a cancelled request, retaining only completed model work and
+    /// an already captured prompt snapshot. Does not advance or sample tokens.
+    CommitMetrics Cancel() noexcept;
     [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken();
     void CapturePromptSnapshot();
     /// Starts capture and polls completion without blocking other sessions.

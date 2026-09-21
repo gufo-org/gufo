@@ -131,6 +131,7 @@ private:
   hipblasHandle_t blas_{nullptr};
   Gemm gemm_;
   std::map<std::string, Matrix, std::less<>> device_weights_;
+  std::vector<std::string_view> prefetched_groups_;
   Matrix packed_source_, packed_input_;
   std::size_t weight_bytes_{0};
   Matrix Raw(std::size_t bytes);

@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/mapped_prefetch.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 #include "src/models/qwen3_tts/hip/talker_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
@@ -134,6 +135,7 @@ public:
     host_ = region.data;
     size_ = region.size;
     payload_offset_ = region.payload_offset;
+    core::PrefaultMappedRange(host_, size_);
     // gfx1151 shares one physical memory pool with the host, but
     // device-resident weights still use coarse-grained pages the GPU caches and
     // streams far faster than host-registered pages, so decode prefers the

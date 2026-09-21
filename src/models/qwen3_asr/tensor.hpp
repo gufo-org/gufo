@@ -40,6 +40,7 @@ public:
   [[nodiscard]] bool Add(Tensor tensor);
 
 private:
+  friend struct LoadResult;
   std::unordered_map<std::string, Tensor> tensors_;
 };
 

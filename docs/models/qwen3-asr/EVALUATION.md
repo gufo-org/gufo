@@ -19,6 +19,11 @@ token ID; a lower logit is never promoted through a tolerance window.
 Any nonfinite logit fails generation. Independent GPU checks cover near-ties,
 large negative logits, invalid values, and causal/cached attention boundaries.
 
+The 2026-09-21 component-only weight upload retains all 49 tokens and the
+long-audio, streaming, cancellation and concurrent-request checks. The loader
+test verifies that each selected tensor remains in range and aligned while
+audio-encoder weights are excluded from the text decoder's device copy.
+
 The current matched oracle explicitly uses **text eager / audio SDPA**.
 The old runner requested eager at the outer wrapper, but both nested attention
 modules actually used SDPA. The runner now selects and records their actual

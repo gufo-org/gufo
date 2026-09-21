@@ -308,7 +308,11 @@ struct TextGenerationScheduler::Impl {
       const std::shared_ptr<ScheduledRequest>& request) noexcept {
     try {
       if (request->runner_request) {
-        request->runner_request.Invalidate();
+        const auto retained = request->runner_request.Cancel();
+        request->result.cache_snapshot_bytes = retained.snapshot_bytes;
+        request->result.cache_snapshot_ms = retained.snapshot_ms;
+        request->result.cache_disk_queued_bytes = retained.disk_queued_bytes;
+        request->result.cache_disk_enqueue_ms = retained.disk_enqueue_ms;
       }
       request->result.cancelled = true;
       FinalizeResult(request, TextGenerationBackend::FinishReason::kCancelled);
@@ -456,7 +460,7 @@ struct TextGenerationScheduler::Impl {
   }
 
   void StepPrefill(const std::shared_ptr<ScheduledRequest>& request,
-                   bool decoder_runnable) {
+                   bool decoder_runnable, bool snapshot_pending = false) {
     try {
       if (CompleteIfStopped(request)) {
         return;
@@ -464,11 +468,11 @@ struct TextGenerationScheduler::Impl {
 
       request->phase.store(TextRequestPhase::kPrefilling,
                            std::memory_order_release);
-      // Runners yield after one model-sized prefill chunk. Only an active
-      // decoder needs the smaller latency budget; spare session slots must
-      // not change a lone request's prefill geometry.
-      const bool bounded_prefill =
-          incremental_prefill_supported && decoder_runnable;
+      // A published first token is also latency-sensitive while its frozen
+      // prompt is being captured. Bound other prefill work so we can poll
+      // that capture promptly. Spare slots alone do not change lone prefill.
+      const bool bounded_prefill = incremental_prefill_supported &&
+                                   (decoder_runnable || snapshot_pending);
       const std::size_t budget = bounded_prefill
                                      ? prefill_policy.decode_active_tokens
                                      : request->runner_request.prompt_tokens();
@@ -787,7 +791,8 @@ struct TextGenerationScheduler::Impl {
     } catch (...) {
       const auto failure = std::current_exception();
       for (const auto& item : prepared) {
-        CompleteFailure(item.request, failure);
+        if (!CompleteIfStopped(item.request))
+          CompleteFailure(item.request, failure);
       }
       return;
     }
@@ -797,7 +802,8 @@ struct TextGenerationScheduler::Impl {
     for (std::size_t i = 0; i < prepared.size(); ++i) {
       const auto& item = prepared[i];
       if (failures[i]) {
-        CompleteFailure(item.request, failures[i]);
+        if (!CompleteIfStopped(item.request))
+          CompleteFailure(item.request, failures[i]);
         continue;
       }
       item.request->result.physical_execution_width = std::max(
@@ -873,7 +879,8 @@ struct TextGenerationScheduler::Impl {
     } catch (...) {
       const auto failure = std::current_exception();
       for (const auto& item : prepared) {
-        CompleteFailure(item.request, failure);
+        if (!CompleteIfStopped(item.request))
+          CompleteFailure(item.request, failure);
       }
       return;
     }
@@ -882,7 +889,8 @@ struct TextGenerationScheduler::Impl {
       const auto& item = prepared[index];
       const auto& step = steps[index];
       if (step.failure) {
-        CompleteFailure(item.request, step.failure);
+        if (!CompleteIfStopped(item.request))
+          CompleteFailure(item.request, step.failure);
         continue;
       }
       if (step.execution_plan.physical_width >=
@@ -1091,7 +1099,7 @@ struct TextGenerationScheduler::Impl {
 
       auto request = std::move(prefilling.front());
       prefilling.pop_front();
-      StepPrefill(request, false);
+      StepPrefill(request, false, !capturing.empty());
       if (!IsTerminal(request)) {
         if (request->runner_request.prefill_complete()) {
           request->decode_due = true;

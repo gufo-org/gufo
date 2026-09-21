@@ -1,5 +1,11 @@
 # DeepSeek V4 Flash evaluation
 
+Serving qualification (2026-09-21): AR/DSpark prefix and disk restoration,
+mixed sampling, EOS isolation, cancellation and late-arriving prefill passed.
+Snapshots retain the live attention/compression windows and committed DSpark
+frontier. The loader accepts the checkpoint's integer expert-mapping tensor
+without weakening tensor extent validation.
+
 **Target parity is unresolved. No quality improvement is established by the
 current arithmetic audits.** Antirez's implementation is a differential control,
 not official ground truth. DSpark/AR agreement cannot detect shared target errors.

@@ -27,11 +27,13 @@ public:
   explicit Weights(const std::filesystem::path& root);
   const Weight& Get(std::string_view name) const;
   bool Contains(std::string_view name) const;
+  void Prefetch(std::string_view prefix) const;
   const json::Value& VaeConfig() const { return vae_config_; }
 
 private:
   void Load(const std::filesystem::path& file, const std::string& prefix);
   std::vector<std::shared_ptr<void>> mappings_;
+  std::vector<std::span<const std::byte>> regions_;
   std::map<std::string, Weight, std::less<>> weights_;
   json::Value vae_config_;
 };

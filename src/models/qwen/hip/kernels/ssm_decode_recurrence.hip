@@ -12,34 +12,6 @@
 
 namespace gufo::hip {
 
-__global__ void CopyRecurrentStateRowsKernel(
-    uint4* __restrict__ destination, const uint4* __restrict__ source,
-    std::uint32_t width, std::uint32_t destination_pitch,
-    std::uint32_t source_pitch) {
-  const std::uint32_t column = blockIdx.x * blockDim.x + threadIdx.x;
-  if (column < width) {
-    destination[blockIdx.y * destination_pitch + column] =
-        source[blockIdx.y * source_pitch + column];
-  }
-}
-
-void LaunchCopyRecurrentStateRows(
-    void* destination, const void* source, std::uint32_t width_bytes,
-    std::uint32_t destination_pitch_bytes, std::uint32_t source_pitch_bytes,
-    std::uint32_t groups, hipStream_t stream) {
-  if (width_bytes == 0 || groups == 0) {
-    return;
-  }
-  constexpr std::uint32_t kVectorBytes = sizeof(uint4);
-  constexpr unsigned kThreads = 256;
-  const std::uint32_t width = width_bytes / kVectorBytes;
-  CopyRecurrentStateRowsKernel<<<
-      dim3((width + kThreads - 1) / kThreads, groups), kThreads, 0, stream>>>(
-      static_cast<uint4*>(destination), static_cast<const uint4*>(source),
-      width, destination_pitch_bytes / kVectorBytes,
-      source_pitch_bytes / kVectorBytes);
-}
-
 __global__ void CaptureBatchedSsmReplayKernel(
     const float* __restrict__ qkv, const float* __restrict__ alpha,
     const float* __restrict__ beta, SsmReplayCapture replay_capture,
@@ -236,10 +208,10 @@ void LaunchSSMConvRecurrence(
 void LaunchSSMConvRecurrenceBatch(
     const float* qkv_in, const float* conv_weights, float* conv_out,
     const float* alpha_buf, const float* beta_buf, const float* ssm_a,
-    const float* ssm_dt, const float* ssm_norm, const float* gate, float* out_buf,
-    std::span<const SsmSequenceState> sequences, std::uint32_t layer_idx,
-    std::size_t qkv_size, std::uint32_t num_key_heads, std::uint32_t num_heads,
-    std::uint32_t key_dim, std::uint32_t val_dim,
+    const float* ssm_dt, const float* ssm_norm, const float* gate,
+    float* out_buf, std::span<const SsmSequenceState> sequences,
+    std::uint32_t layer_idx, std::size_t qkv_size, std::uint32_t num_key_heads,
+    std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim,
     std::size_t projection_row_stride, std::size_t inner_row_stride,
     hipStream_t stream, QwenRecurrentStateStorage state_storage) {
   if (sequences.empty())
@@ -271,9 +243,10 @@ void LaunchSSMConvRecurrenceBatch(
   const auto launch = [&]<typename StateT, bool Resident, bool WriteOutput>() {
     DeltaNetRecurrenceKernel<StateT, Resident, WriteOutput, SsmSequenceBatch>
         <<<dim3(num_heads, count), Resident ? 128 : 256, 0, stream>>>(
-            conv_out, nullptr, alpha_buf, beta_buf, ssm_a, ssm_dt, ssm_norm, gate,
-            out_buf, layer_idx, num_key_heads, num_heads, key_dim, val_dim, {}, 0,
-            qkv_size, projection_row_stride, inner_row_stride, batch);
+            conv_out, nullptr, alpha_buf, beta_buf, ssm_a, ssm_dt, ssm_norm,
+            gate, out_buf, layer_idx, num_key_heads, num_heads, key_dim,
+            val_dim, {}, 0, qkv_size, projection_row_stride, inner_row_stride,
+            batch);
   };
   const auto launch_output = [&]<typename StateT, bool Resident>() {
     if (out_buf)

@@ -6,6 +6,22 @@ The same [37-word paragraph](EVALUATION.md) is used for all three variants:
 seed 42, automatic language, talker T 0.7 / top-k 20 / top-p 0.85,
 predictor T 0.8 / top-k 30 / top-p 0.9.
 
+## Loading
+
+2026-09-21, one cold-file-cache launch to HTTP readiness at context 4096:
+
+| Variant | Ready |
+| --- | ---: |
+| CustomVoice | 1.69 s |
+| VoiceDesign | 1.53 s |
+| Base ICL | 1.83 s |
+
+Short seed-42 control, “Hello from Gufo.”: warm complete WAV latency is
+**0.57 / 0.51 / 0.74 s** respectively. Base uses that same 1.36-second speech
+as its reference; fresh-process and resident replay produce identical WAVs.
+Base's first request takes **1.49 s** including lazy reference encoders,
+versus **0.62 / 0.54 s** for CustomVoice/VoiceDesign.
+
 ## Single request
 
 64 codec frames = 5.12 seconds of audio. Buffered latency is the median of three

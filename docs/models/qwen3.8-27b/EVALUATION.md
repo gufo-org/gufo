@@ -4,6 +4,13 @@ Targets Q4/Q8; DFlash2 drafts Q4_K_M/Q8_0/BF16. Independent original-target,
 conversion and native MTP parity remain **TODO**. Packed-weight operator
 agreement is narrower evidence. [Artifact identities](artifacts/model-identities.json).
 
+The 2026-09-21 compact-state qualification preserves Q4/Q8 AR and DFlash2
+tokens across all 23 sampling cases and C2/C4/C6/C8. Active recurrence and
+rollback buffers contain only recurrent layers; snapshots retain only valid
+KV rows. Operator checks cover FP16 production and head-major FP32 reference
+snapshots, dirty unused tails and exact disk round trips. Matched production
+pp2048/tg128 controls show no material speed regression.
+
 ## Maintained checks
 
 Run on gfx1151 through Nix. Model-specific tests and tools live in
@@ -155,6 +162,13 @@ projections. The image suite requires identical logits across prefill chunk
 boundaries and identical greedy continuation text for cold, live and disk-restored
 sessions, with AR and DFlash2. It also requires reuse of generated history.
 `--disk-only` is a focused persistence check; qualification uses the full suite.
+
+State qualification also checks interruption of greedy and sampled image
+requests, immediate cached retry, replacement by another image/text request,
+and seeded replay after a fresh backend restores disk state. GPU snapshots
+contain only valid KV positions and recurrent layers; serialized snapshots
+retain the same state plus their header and image layout. Rollback checks
+require exact state bytes, including ragged recurrent-layer groups.
 
 ```sh
 nix develop -c cmake --build --preset gpu-test \

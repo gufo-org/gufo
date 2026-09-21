@@ -1068,30 +1068,6 @@ const char* FinishReason(const TextGenerationBackend::Result& result,
   return "stop";
 }
 
-json::Value Metrics(const TextGenerationBackend::Result& result) {
-  json::Value metrics = json::Value::object();
-  metrics["time_to_first_token_ms"] = result.ttft_ms;
-  metrics["generation_time_ms"] = result.decode_ms;
-  metrics["queue_time_ms"] = result.queue_ms;
-  metrics["mean_itl_ms"] = result.mean_inter_token_ms;
-  metrics["prompt_tokens"] = result.prompt_tokens;
-  metrics["completion_tokens"] = result.completion_tokens;
-  metrics["cached_tokens"] = result.cached_prompt_tokens;
-  metrics["cache_restore_bytes"] = result.cache_restore_bytes;
-  metrics["cache_snapshot_bytes"] = result.cache_snapshot_bytes;
-  metrics["cache_disk_queued_bytes"] = result.cache_disk_queued_bytes;
-  metrics["cache_shared_bytes"] = result.cache_shared_bytes;
-  metrics["cache_restore_ms"] = result.cache_restore_ms;
-  metrics["cache_snapshot_ms"] = result.cache_snapshot_ms;
-  metrics["cache_disk_enqueue_ms"] = result.cache_disk_enqueue_ms;
-  metrics["cache_disk_hit"] = result.cache_disk_hit;
-  metrics["cache_shared_prefix_snapshots"] =
-      result.cache_shared_prefix_snapshots;
-  metrics["cache_shared_prefix_bytes"] = result.cache_shared_prefix_bytes;
-  metrics["cache_shared_prefix_ms"] = result.cache_shared_prefix_ms;
-  return metrics;
-}
-
 json::Value Usage(const TextGenerationBackend::Result& result) {
   json::Value usage = json::Value::object();
   usage["prompt_tokens"] = result.prompt_tokens;
@@ -1380,7 +1356,6 @@ HttpResponse NonStreamingResponse(
   response["choices"] = std::move(choices);
   response["usage"] = Usage(result);
   response["timings"] = GenerationTimings(result);
-  response["metrics"] = Metrics(result);
   RecordServerMetrics(result);
 
   std::ostringstream timing;
@@ -1486,9 +1461,14 @@ HttpResponse StreamingResponse(
               }
 
               json::Value terminal_delta = json::Value::object();
-              if (!writer(Sse(ChoiceChunk(
-                      id, created, model, std::move(terminal_delta),
-                      FinishReason(result, !generated.tool_calls.empty()))))) {
+              auto terminal_chunk = ChoiceChunk(
+                  id, created, model, std::move(terminal_delta),
+                  FinishReason(result, !generated.tool_calls.empty()));
+              // llama.cpp reports timings on the terminal choice regardless
+              // of the optional OpenAI usage chunk. Proxies need these even
+              // when a client does not request stream_options.include_usage.
+              terminal_chunk["timings"] = GenerationTimings(result);
+              if (!writer(Sse(terminal_chunk))) {
                 return;
               }
               if (request.include_usage) {
@@ -1496,7 +1476,6 @@ HttpResponse StreamingResponse(
                 usage_chunk["choices"] = json::Value::array();
                 usage_chunk["usage"] = Usage(result);
                 usage_chunk["timings"] = GenerationTimings(result);
-                usage_chunk["metrics"] = Metrics(result);
                 if (!writer(Sse(usage_chunk))) {
                   return;
                 }

@@ -1266,17 +1266,21 @@ void TestSnapshotDoesNotBlockOtherRequests() {
         release.acquire();
       }
     };
-    auto scheduler = MakeScheduler(control, 2);
+    auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
     auto first = scheduler->Submit({1, 10}, 7, 0.0F);
     const bool started = entered.try_acquire_for(kTestTimeout);
-    auto second = scheduler->Submit({2, 20}, 7, 0.0F);
+    auto second = scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 7, 0.0F);
     auto result = std::async(std::launch::async, [&] { return second.Wait(); });
     const bool independent =
         result.wait_for(kTestTimeout) == std::future_status::ready;
     release.release();
     Expect(started && independent, "one capture must not block other requests");
-    Expect(result.get().tokens == ExpectedTokens(2, 7),
+    const auto second_result = result.get();
+    Expect(second_result.tokens == ExpectedTokens(2, 7),
            "other request stays independent");
+    Expect(second_result.max_prefill_chunk_tokens == 2 &&
+               second_result.prefill_chunks == 4,
+           "prefill stays bounded while an already-published request captures");
     const auto first_result = first.Wait();
     Expect(first_result.tokens == ExpectedTokens(1, 7),
            "captured request resumes exactly");

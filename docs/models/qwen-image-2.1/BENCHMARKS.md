@@ -5,6 +5,12 @@ Report wall time per complete image plus prompt, denoising and VAE time.
 Warm runs exclude model loading. HTTP timings use no profiler or correctness
 observer; GPU times come from a separate request-only profile.
 
+Cold-file-cache control, 2026-09-21: metadata readiness **0.27 s**;
+first 256×256/two-step generation **8.83 s**, subsequent identical request
+**0.42 s**. First-request time includes loading active components.
+Vision and VAE-encoder weights load only for editing. These short controls
+measure loading and replay, not normal 40-step generation quality.
+
 | Mode | Output | Steps | Prompt (s) | Denoising (s) | VAE (s) | Total (s) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | Generation, C1 | 1024×1024 | 40 | TODO | TODO | TODO | TODO |

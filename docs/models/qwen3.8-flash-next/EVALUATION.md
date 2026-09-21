@@ -1,5 +1,12 @@
 # Qwen3.8 Flash-Next evaluation
 
+State qualification (2026-09-21): AR/MTP image conversations passed greedy and
+seeded cancellation/retry, concurrent image/text isolation, and disk reload into
+a fresh backend. The direct snapshot test passed at 4,095 tokens, including
+mid-decode save, ring wrap, pending predictor state and RNG replay. Snapshots
+retain live KV, unpooled indexer rows, pooled keys, recurrence/PLE history and
+the required MTP frontier; temporary verifier scratch is excluded.
+
 The predictor uses one RMSNorm over all 10,240 hidden values, a shared
 2,560-wide hidden projection per HC branch, and one embedding projection
 broadcast to the four branches. It embeds shifted text token IDs; visual

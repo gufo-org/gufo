@@ -31,15 +31,6 @@ struct SsmSequenceState {
   std::uint32_t rows{0};
 };
 
-/// Copies aligned recurrent-state row groups without touching attention rows.
-/// Pointers, widths and pitches must be 16-byte aligned; all byte offsets must
-/// fit in uint32_t. The arena retains the general HIP copy for other layouts.
-void LaunchCopyRecurrentStateRows(void* destination, const void* source,
-                                  std::uint32_t width_bytes,
-                                  std::uint32_t destination_pitch_bytes,
-                                  std::uint32_t source_pitch_bytes,
-                                  std::uint32_t groups, hipStream_t stream);
-
 /// Captures the raw recurrent inputs for every row in a verification batch so
 /// a rejected speculative suffix can restore the checkpoint and replay only
 /// the committed SSM transitions.

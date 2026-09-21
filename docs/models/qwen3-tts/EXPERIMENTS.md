@@ -27,6 +27,9 @@
 | Non-temporal weight loads | Rejected: microbenchmark gains became about a 2% complete-request regression. |
 | Generic talker hipBLASLt prefill | Rejected: failed the five-main-code oracle gate. |
 | Finish normalization within one wave | Retained: fewer barriers with the same sum tree; independent operator and exact waveform replay checks. |
+| Parallel mmap population before upload | Retained: cold startup includes weight reads; no additional persistent weight copy. |
+| Compact reference snapshots | Retained: only live convolution/attention rows, exact replacement/cancellation and 300-frame boundary replay. |
+| Speaker softmax scratch synchronization | Corrected: independent FP64 check and fresh-process voice-cloning replay; cached references previously hid nondeterminism. |
 
 Next: broaden long-request replay coverage and qualify long reference clips
 before wider optimization. See [evaluation](EVALUATION.md); no lower-precision
