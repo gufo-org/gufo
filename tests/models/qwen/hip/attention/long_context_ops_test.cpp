@@ -29,13 +29,14 @@
 #include "tests/models/qwen/hip/support/comparisons.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
 
-void TestLongContextDecodeAttention() {
+void TestLongContextDecodeAttention(bool fp16) {
   constexpr std::uint32_t max_position = 32767;
   constexpr std::uint32_t max_context = max_position + 129;
   constexpr std::uint32_t num_heads = 6;
   constexpr std::uint32_t num_kv_heads = 1;
   constexpr std::uint32_t head_dim = 256;
-  constexpr std::uint32_t positions[] = {4095, 8191, 16383, max_position};
+  constexpr std::uint32_t positions[] = {126,  127,  128,   2047,
+                                         4095, 8191, 16383, max_position};
   const std::size_t attention_width =
       static_cast<std::size_t>(num_heads) * head_dim;
   const std::size_t kv_width =
@@ -64,16 +65,33 @@ void TestLongContextDecodeAttention() {
     h_cache[index] =
         0.03F * std::sin(static_cast<float>((index % 509) + 1) * 0.011F);
   }
+  std::vector<__half> half_cache;
+  if (fp16) {
+    // The FP64 oracle consumes exactly the values stored in the production KV
+    // cache, separating attention arithmetic error from FP16 input rounding.
+    for (auto* values : {&h_k, &h_v, &h_cache}) {
+      for (float& value : *values)
+        value = __half2float(__float2half_rn(value));
+    }
+    half_cache.reserve(cache_elements);
+    for (float value : h_cache)
+      half_cache.push_back(__float2half_rn(value));
+  }
+  const std::size_t cache_bytes =
+      cache_elements * (fp16 ? sizeof(__half) : sizeof(float));
+  const void* cache_data =
+      fp16 ? static_cast<const void*>(half_cache.data()) : h_cache.data();
 
   float *d_q = nullptr, *d_k = nullptr, *d_v = nullptr, *d_gate = nullptr;
-  float *d_k_cache = nullptr, *d_v_cache = nullptr, *d_out = nullptr;
+  void *d_k_cache = nullptr, *d_v_cache = nullptr;
+  float* d_out = nullptr;
   float* d_split_k_scratch = nullptr;
   HIP_CHECK(hipMalloc(&d_q, attention_width * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_k, kv_width * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_v, kv_width * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_gate, attention_width * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_k_cache, cache_elements * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_v_cache, cache_elements * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_k_cache, cache_bytes));
+  HIP_CHECK(hipMalloc(&d_v_cache, cache_bytes));
   HIP_CHECK(hipMalloc(&d_out, attention_width * sizeof(float)));
   HIP_CHECK(hipMalloc(
       &d_split_k_scratch,
@@ -92,15 +110,17 @@ void TestLongContextDecodeAttention() {
   std::vector<float> reference(attention_width);
   const double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));
   for (const std::uint32_t position : positions) {
-    HIP_CHECK(hipMemcpy(d_k_cache, h_cache.data(),
-                        cache_elements * sizeof(float), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_v_cache, h_cache.data(),
-                        cache_elements * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(
+        hipMemcpy(d_k_cache, cache_data, cache_bytes, hipMemcpyHostToDevice));
+    HIP_CHECK(
+        hipMemcpy(d_v_cache, cache_data, cache_bytes, hipMemcpyHostToDevice));
 
-    gufo::hip::LaunchAttention(d_q, d_k, d_v, d_gate, d_k_cache, d_v_cache,
-                               nullptr, nullptr, d_out, 0, position,
-                               max_context, num_heads, num_kv_heads, head_dim,
-                               nullptr, d_split_k_scratch);
+    gufo::hip::LaunchAttention(
+        d_q, d_k, d_v, d_gate, fp16 ? nullptr : static_cast<float*>(d_k_cache),
+        fp16 ? nullptr : static_cast<float*>(d_v_cache),
+        fp16 ? d_k_cache : nullptr, fp16 ? d_v_cache : nullptr, d_out, 0,
+        position, max_context, num_heads, num_kv_heads, head_dim, nullptr,
+        d_split_k_scratch);
     HIP_CHECK(hipGetLastError());
     HIP_CHECK(hipDeviceSynchronize());
     HIP_CHECK(hipMemcpy(output.data(), d_out, attention_width * sizeof(float),
@@ -158,8 +178,9 @@ void TestLongContextDecodeAttention() {
       }
       has_nonzero = has_nonzero || std::abs(value) > 1e-8F;
     }
-    std::cout << "Split-K decode attention context " << (position + 1)
-              << " max reference diff: " << max_reference_diff << "\n";
+    std::cout << (fp16 ? "FP16" : "FP32") << " decode attention context "
+              << (position + 1) << " max reference diff: " << max_reference_diff
+              << "\n";
     if (max_reference_diff >= 5e-4F) {
       std::cerr << "Long-context decode attention mismatch\n";
       std::abort();
@@ -332,7 +353,8 @@ int main() {
     return device_status;
   }
 
-  TestLongContextDecodeAttention();
+  TestLongContextDecodeAttention(false);
+  TestLongContextDecodeAttention(true);
   TestBaselineToTiledKvCacheTransition();
   std::cout << "Qwen long-context attention ops test passed on gfx1151.\n";
   return 0;

@@ -4,6 +4,22 @@ Targets Q4/Q8; DFlash2 drafts Q4_K_M/Q8_0/BF16. Independent original-target,
 conversion and native MTP parity remain **TODO**. Packed-weight operator
 agreement is narrower evidence. [Artifact identities](artifacts/model-identities.json).
 
+The 128-token split-K threshold is currently qualified on **Q4_K_XL AR C1**.
+The matched d0 pp2048/tg128 control retains all 128 greedy tokens and PP speed.
+Partitioning changes FP32 rounding: twelve controls at 128–4096 tokens and three
+query amplitudes have lower maximum error and RMSE against an independent FP64
+attention formula; the largest new absolute error is **1.17e-6**. Maintained
+FP16/FP32 reference checks retain their tolerances and cover the 128-token
+boundary. Q4 prefill/snapshot replay retains complete logits and features at
+128, 257 and 2048 tokens, plus an 8K cached prefix with a 1025-token suffix.
+This does not establish original-checkpoint parity.
+Disk-cache identity now includes the partition threshold and count, preventing
+restoration of snapshots computed with the old arithmetic. Broader target/mode
+qualification follows the focused Q4 AR phase.
+
+The following results describe the qualification through `b509c070`, before
+lowering the split-K threshold:
+
 Grouping verification queries by KV partition retains the existing arithmetic.
 The old/new FP16 kernels are byte-identical on 36 full-output cases through 64K
 plus six partition-boundary controls. Maintained checks cover FP16/FP32,

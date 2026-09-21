@@ -34,6 +34,7 @@
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
@@ -301,6 +302,10 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "state_abi=" << state_abi << '\n'
            << "payload_layout=qwen-gfx1151-live-prefix-v2\n"
            << "numerics=qwen-bf16-fp32-prefill-v1\n"
+           << "attention_split_min_context="
+           << hip::detail::kSplitKDecodeAttentionMinContext << '\n'
+           << "attention_split_count="
+           << hip::detail::kSplitKDecodeAttentionMaxSplits << '\n'
            << "kv_storage="
            << (execution_policy.UsesFp16AttentionKv() ? "fp16" : "fp32") << '\n'
            << "recurrent_storage="

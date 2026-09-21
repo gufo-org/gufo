@@ -17,8 +17,10 @@
 | Verification queries grouped by KV partition | Retained: unchanged arithmetic and storage; eight-token attention 2.95× faster at 32K and 3.66× at 64K. Matched d32K C1 HTTP TG improves 15.7% on Q4_K_XL and 20.2% on Q8_K_XL with Q4 DFlash2; shallow TG and PP remain comparable. |
 | Split-K two-position KV prefetch and DPP score reductions | Rejected: small single-row component gains did not consistently help eight-row verification. |
 | Shallow attention paired KV loads and DPP reduction | Retained: byte-exact; 12.6% less attention time in the complete AR profile. Matched d0 pp2048/tg128 controls improve TG by 1.4–2.6% across Q4/Q8 AR and Q4 DFlash2, with unchanged outputs and acceptance; PP remains comparable. No extra allocation. |
+| Parallel attention from 128 tokens | Q4 AR C1 qualification: **11.87 tg / 663.12 pp tok/s** at d0 pp2048/tg128; all 128 greedy tokens unchanged. Lower error against FP64 in all 12 component controls. Broader model/mode qualification is deferred. |
 | Wider shallow pipeline, removed broadcast and separate score/value passes | Rejected: worse cold-KV or eight-row costs than the retained two-position pipeline. |
 | Additional GEMV format specialization | Not promoted: Q8 cold components unchanged; Q6 gains at most 3% in the cold component test. |
+| Paired-row GEMV activation reuse | Not promoted: the dominant Q5_K cold component was essentially unchanged. |
 
 Current focus: **Q4_K_XL, AR, C1**. Profile and push this configuration first;
 do not repeat every candidate on other targets, speculative modes or concurrency

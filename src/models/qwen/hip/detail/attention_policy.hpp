@@ -13,7 +13,7 @@ inline constexpr std::size_t kOptimizedAttentionMinBatch{1024};
 inline constexpr std::uint32_t kTiledAttentionQueryHeads{24};
 inline constexpr std::uint32_t kTiledAttentionKvHeads{4};
 inline constexpr std::uint32_t kTiledAttentionHeadDim{256};
-inline constexpr std::size_t kSplitKDecodeAttentionMinContext{4096};
+inline constexpr std::size_t kSplitKDecodeAttentionMinContext{128};
 inline constexpr std::uint32_t kSplitKDecodeAttentionMaxSplits{32};
 inline constexpr std::uint32_t kFusedQkNormMaxHeadDim{256};
 

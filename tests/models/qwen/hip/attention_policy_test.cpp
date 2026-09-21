@@ -92,12 +92,14 @@ void TestDecodeSplitPolicy() {
   using gufo::hip::detail::IsSplitKDecodeAttentionSupported;
   using gufo::hip::detail::SelectDecodeAttentionSplitCount;
 
-  Check(SelectDecodeAttentionSplitCount(1024) == 1,
-        "1K decode uses one online-softmax partition");
-  Check(SelectDecodeAttentionSplitCount(4095) == 1,
-        "decode stays on one partition below 4K");
-  Check(SelectDecodeAttentionSplitCount(4096) == 32,
-        "4K decode fills the 32-wave-per-CU split ceiling");
+  Check(SelectDecodeAttentionSplitCount(1) == 1,
+        "the first decode token uses one online-softmax partition");
+  Check(SelectDecodeAttentionSplitCount(127) == 1,
+        "decode stays on one partition below 128 tokens");
+  Check(SelectDecodeAttentionSplitCount(128) == 32,
+        "128-token decode uses parallel attention partitions");
+  Check(SelectDecodeAttentionSplitCount(2048) == 32,
+        "2K decode uses parallel attention partitions");
   Check(SelectDecodeAttentionSplitCount(8192) == 32,
         "8K decode uses the measured split ceiling");
   Check(SelectDecodeAttentionSplitCount(16384) == 32,
@@ -107,8 +109,10 @@ void TestDecodeSplitPolicy() {
 
   Check(IsSplitKDecodeAttentionSupported(4096, 24, 4, 256),
         "Qwen3.8 long-context decode shape supports split-K");
-  Check(!IsSplitKDecodeAttentionSupported(2048, 24, 4, 256),
-        "short-context decode does not use split-K");
+  Check(IsSplitKDecodeAttentionSupported(2048, 24, 4, 256),
+        "Qwen3.8 shallow-context decode shape supports split-K");
+  Check(!IsSplitKDecodeAttentionSupported(127, 24, 4, 256),
+        "very short decode does not use split-K");
   Check(!IsSplitKDecodeAttentionSupported(4096, 24, 0, 256),
         "split-K rejects zero KV heads");
   Check(!IsSplitKDecodeAttentionSupported(4096, 22, 4, 256),
