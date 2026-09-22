@@ -25,6 +25,8 @@
 | 64–256 attention partitions | Rejected: no improvement at 32K, with different FP32 rounding. |
 | Split-attention graph replay | Rejected: matched Q4 AR C1 d0 remains 11.90 tok/s. The existing launch path is already 97.5% GPU-busy. |
 | Graph identity includes target feature taps | Correctness fix: changing captured layers or their order must replace the graph's feature-copy operations. |
+| Residual/RMSNorm fusion and fewer reduction barriers | Rejected: byte-exact component gains did not survive the full model. Q4 AR C1 remains 11.90 tok/s and profile GPU time slightly increases. |
+| Multiple attention heads per thread block | Not promoted: byte-exact through 32K, but cold-KV gains are at most 1.5%. |
 
 Current focus: **Q4_K_XL, AR, C1**. Profile and push this configuration first;
 do not repeat every candidate on other targets, speculative modes or concurrency
