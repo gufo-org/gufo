@@ -118,7 +118,19 @@ The matched deep control reuses the same 32,552-token prefix and prefills 2,011
 tokens per request, with comparable prefill times. C1 DFlash2 retains its output,
 acceptance and pp2048/tg128 speed. The
 [C4 artifact](artifacts/q4-c4-focused.json) records calibration, per-request
-timings and hashes. Broader depth/C6/C8 performance qualification remains pending.
+timings and hashes.
+
+The C6 cost table likewise uses complete measured cycles for 12–48 verification
+rows, while retaining the full-block probe at saturated acceptance. It changes
+only six-request greedy Q4 decisions. C1/C2/C4, Q8, fixed mode and sampled
+choices remain unchanged. The maintained model check passes sampled/mixed
+C2/C4/C6 isolation, exact probabilities, private RNG and persistent-state replay.
+New requests reset controller history before generating.
+All 18 shallow and six d32K candidate completions match C1 AR; repetition
+retains 100% acceptance. Deep requests reuse 32,552 tokens and prefill 2,011,
+with comparable PP times. The [C6 artifact](artifacts/q4-c6-focused.json)
+retains calibration, binary identities, individual timings and output hashes.
+Broader depths and C8 performance qualification remain pending.
 
 The fresh pinned llama.cpp `68d9053a` d0 controls use the same input messages,
 Q4 target/draft, greedy sampling and context capacity. Its DFlash2 output differs

@@ -85,7 +85,24 @@ interleave normally, with context capacity 36864 and one measured cohort.
 The same controller build retains C1 DFlash2 at **30.07 tok/s** and
 pp2048 at **618.34 tok/s**, with unchanged output and acceptance.
 [Focused C4 measurements and profile](artifacts/q4-c4-focused.json).
-C4 beyond d32K and current C6/C8 performance remain **TODO**.
+
+**C6**, same Q4 target/draft and sum of individual decode rates:
+
+| Workload | tok/s | Draft acceptance |
+| --- | ---: | ---: |
+| Word repetition | 113.85 | 100% |
+| Pangram / train problem | 77.91 | 74.8% |
+| Italian / Chinese explanations | 60.75 | 61.3% |
+| d32K continuation, pp2048/tg128 | 43.20 | 58.3% |
+
+One measured cohort per point; shallow controls have one warmup and no cache
+hits. All 24 complete outputs match C1 AR. The deep requests each reuse 32,552
+tokens and prefill 2,011, with comparable PP times and normal prefill/decode
+interleaving. [C6 measurements and profile](artifacts/q4-c6-focused.json).
+The matching Italian/Chinese AR control reaches **59.81 tok/s**, with all six
+outputs identical. Its small gap from DFlash2 is not a demonstrated speculative
+speedup from one sample.
+C4/C6 beyond d32K and current C8 performance remain **TODO**.
 
 ## Loading and continuation
 

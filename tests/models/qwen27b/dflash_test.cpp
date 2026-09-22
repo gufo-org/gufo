@@ -45,7 +45,7 @@ void TestLengthController() {
          "fixed blocks obey only the configured and remaining budgets");
   Expect(fixed.Choose(7, 131072) == 7,
          "context cost does not change the fixed comparison policy");
-  for (const auto users : {2U, 4U})
+  for (const auto users : {2U, 4U, 6U})
     Expect(fixed.Choose(3, 131072, users) == 3,
            "batched verification cannot change a fixed block");
   for (const bool q8_target : {false, true}) {
@@ -62,7 +62,7 @@ void TestLengthController() {
     for (const auto position : {2048U, 32768U, 65536U, 131072U, 262144U}) {
       Expect(adaptive.Choose(7, position) == 7,
              "sustained full acceptance probes the wider profitable block");
-      for (const auto users : {2U, 4U})
+      for (const auto users : {2U, 4U, 6U})
         Expect(adaptive.Choose(7, position, users) == 7,
                "batched full acceptance retains the full block at every depth");
     }
@@ -86,7 +86,7 @@ void TestLengthController() {
   DFlashLengthController shallow(DFlashDraftPolicy::kAdaptive, 7);
   const auto learned = shallow.State();
   Expect(shallow.Choose(7, 2048) > 3 && shallow.Choose(7, 2048, 2) == 3 &&
-             shallow.Choose(7, 2048, 4) == 3,
+             shallow.Choose(7, 2048, 4) == 3 && shallow.Choose(7, 2048, 6) == 1,
          "batched costs avoid the projection cliffs above eight/sixteen rows");
   Expect(shallow.Choose(7, 32768) < shallow.Choose(7, 2048),
          "long-context attention cost reduces speculative overwork");
@@ -97,7 +97,7 @@ void TestLengthController() {
       const auto expected = shallow.Choose(budget, position);
       Expect(replay.Choose(budget, position) == expected && expected <= budget,
              "restored history and position reproduce bounded decisions");
-      for (const auto users : {2U, 4U})
+      for (const auto users : {2U, 4U, 6U})
         Expect(replay.Choose(budget, position, users) ==
                        shallow.Choose(budget, position, users) &&
                    replay.Choose(budget, position, users) <= budget,
@@ -109,7 +109,7 @@ void TestLengthController() {
   DFlashLengthController q8(DFlashDraftPolicy::kAdaptive, 7, true);
   Expect(q8.Choose(7, 131072) == q8.Choose(7, 2048),
          "Q4 context calibration leaves the Q8 policy unchanged");
-  for (const auto users : {2U, 4U})
+  for (const auto users : {2U, 4U, 6U})
     Expect(q8.Choose(7, 131072, users) == q8.Choose(7, 131072),
            "batched Q4 calibration leaves the Q8 policy unchanged");
 
@@ -382,7 +382,7 @@ void TestConcurrentBlocks(
     }
     // Both sampled and mixed greedy/sampled cohorts must retain their
     // private proposal lengths, selector probabilities and random draws.
-    for (const std::size_t width : {2U, 4U}) {
+    for (const std::size_t width : {2U, 4U, 6U}) {
       for (const std::size_t first : {0U, 1U}) {
         const auto cohort = std::span(requests).subspan(first, width);
         const auto batch = cohort.front().backend->ProposeBatch(cohort);

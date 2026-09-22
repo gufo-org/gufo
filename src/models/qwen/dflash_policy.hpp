@@ -50,6 +50,10 @@ public:
     const auto cap = std::min(budget, limit_);
     if (policy_ == DFlashDraftPolicy::kFixed || cap == 0)
       return cap;
+    // Preserve the full-acceptance probe at C6. Extrapolating attention cost
+    // beyond the measured depths must not shorten a saturated block.
+    if (greedy_batch_size == 6 && mean_ == static_cast<float>(limit_))
+      return cap;
 
     // Weight reads impose a substantial cost even on a short verification.
     // gfx1151 profiles estimate draft-plus-verification cost at each width.
@@ -66,11 +70,13 @@ public:
     std::uint32_t best_length = 1;
     const float context_scale =
         static_cast<float>(position > 2048 ? position - 2048 : 0) / 30720.0F;
-    const auto& q4_costs = greedy_batch_size == 4   ? kQ4FourRequestRelativeCost
+    const auto& q4_costs = greedy_batch_size == 6   ? kQ4SixRequestRelativeCost
+                           : greedy_batch_size == 4 ? kQ4FourRequestRelativeCost
                            : greedy_batch_size == 2 ? kQ4PairedRelativeCost
                                                     : kQ4RelativeCost;
     const float q4_context_scale =
-        context_scale * (greedy_batch_size == 4   ? 3.20F
+        context_scale * (greedy_batch_size == 6   ? 3.50F
+                         : greedy_batch_size == 4 ? 3.20F
                          : greedy_batch_size == 2 ? 1.92F
                                                   : 1.0F);
     for (std::uint32_t length = 1; length <= cap; ++length) {
@@ -128,6 +134,10 @@ private:
   static constexpr std::array<float, kMaxDraftTokens>
       kQ4FourRequestRelativeCost{1.0F,  1.30F, 1.33F, 1.97F,
                                  2.12F, 2.29F, 2.32F};
+  // Six requests verify 12–48 rows. Measured complete cycles cost
+  // 171/247/273/323/378/416/423 ms; the context multiplier is 6 * 100 / 171.
+  static constexpr std::array<float, kMaxDraftTokens> kQ4SixRequestRelativeCost{
+      1.0F, 1.44F, 1.59F, 1.89F, 2.21F, 2.43F, 2.47F};
   // Extra cost from 2K to 32K for the target's 16 full-attention layers,
   // relative to the roughly 100 ms shallow draft/verification cycle. These
   // cold-KV measurements include the anchor plus 1–7 proposals and preserve
