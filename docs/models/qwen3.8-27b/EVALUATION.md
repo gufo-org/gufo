@@ -34,10 +34,29 @@ and scalar/batched comparisons through 64K pass, including dispatch boundaries
 and scratch fallback. All 15 full-model logit/feature fingerprints are unchanged,
 including verification and snapshot replay after an 8K prefix. Shared memory
 remains 4 KiB per active block; persistent state and snapshot formats are unchanged.
-Matched C1 pp2048/tg128 controls retain greedy AR/DFlash2 agreement and acceptance
-counts at d0/d32K. Measurements:
+Matched C1 pp2048/tg128 controls retain greedy AR/DFlash2 agreement at d0/d32K.
+Current measurements:
 [AR](artifacts/q4-ar-c1-focused.json),
 [DFlash2](artifacts/q4-dflash2-c1-focused.json).
+
+The Q4 adaptive controller includes measured attention-cost growth with context.
+At saturation, its accepted-run estimate remains censored; it probes wider
+profitable blocks instead of treating the configured cap as a rejection.
+Single and batched requests use their own positions and acceptance history.
+The maintained draft check passes exact layers, logits, selector probabilities,
+private RNG and persistent-state replay at C2/C4/C6/C8. A separate 1,147,160-point
+comparison retains the previous shallow controller decisions.
+The final release also reproduces all 32 sampled tokens and draft counts between
+cold and cached requests at 32,573 prompt tokens: temperature 0.8, top-k 40,
+top-p 0.9, min-p 0.05, seed 1. The cached replay prefills zero tokens.
+
+Matched Q4 C1 pp2048/tg128 controls retain both complete AR output hashes and PP.
+The 128-token repetition controls retain the same output and 100% acceptance at
+d0/d32K. Context-cost calibration, fixed-three-proposal controls and current
+measurements are in the existing
+[DFlash2 artifact](artifacts/q4-dflash2-c1-focused.json).
+These controller measurements cover Q4 C1; other concurrency levels still need
+performance qualification.
 
 The following results describe the qualification through `b509c070`, before
 lowering the split-K threshold:
@@ -156,8 +175,9 @@ so equal seeds need not produce identical continuations across the two modes.
 Repeated runs within one configuration must reproduce IDs, including cache hits.
 
 Adaptive chooses the block length before drawing proposals using accepted-length
-history and offline verification costs. It never uses live timing or the current
-sample. Controller state persists within a request and resets for a new one.
+history and offline verification costs, including context-dependent Q4 attention
+cost. It never uses live timing or the current sample. Controller state persists
+within a request and resets for a new one.
 `--draft-tokens` caps length; `--draft-policy fixed` selects the comparison policy.
 
 | Entry point | Contract |

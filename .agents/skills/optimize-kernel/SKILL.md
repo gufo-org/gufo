@@ -64,6 +64,10 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   rows before touching state, and keep descriptor storage alive until completion.
   Test both shared and disjoint expert routing: weight reuse benefits shared
   experts, but single-request experts need a compact path.
+  Qualify draft controllers on both ordinary and perfect-acceptance prompts.
+  Context-dependent attention cost favored shorter blocks here, but treating
+  a capped accepted-run estimate as uncensored slowed perfect acceptance.
+  Compare completed-token rates; raw acceptance fractions depend on draft width.
   Group independent small projections in the launch grid and quantize batch
   activations once in idle prefill scratch. Preserve each row's original
   dot-product specialization; larger generic GEMV tiles can be slower.

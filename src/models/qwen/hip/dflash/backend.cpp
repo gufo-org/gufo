@@ -347,8 +347,8 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
         request.position < backend.config_.max_context
             ? backend.config_.max_context - request.position - 1U
             : 0U;
-    const auto count =
-        backend.controller_.Choose(std::min(request.max_tokens, budget));
+    const auto count = backend.controller_.Choose(
+        std::min(request.max_tokens, budget), request.position);
     if (count == 0)
       continue;
     backend.proposed_tokens_.clear();
@@ -450,7 +450,7 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
       current_pos < config_.max_context ? config_.max_context - current_pos - 1U
                                         : 0;
   const std::uint32_t count =
-      controller_.Choose(std::min(max_tokens, context_budget));
+      controller_.Choose(std::min(max_tokens, context_budget), current_pos);
   if (count == 0) {
     return proposal;
   }

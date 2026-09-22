@@ -44,7 +44,8 @@ public:
     Reset();
   }
 
-  [[nodiscard]] std::uint32_t Choose(std::uint32_t budget) const noexcept {
+  [[nodiscard]] std::uint32_t Choose(
+      std::uint32_t budget, std::uint32_t position = 0) const noexcept {
     const auto cap = std::min(budget, limit_);
     if (policy_ == DFlashDraftPolicy::kFixed || cap == 0)
       return cap;
@@ -53,16 +54,24 @@ public:
     // gfx1151 profiles estimate draft-plus-verification cost at each width.
     // Use that offline estimate, never request timings, and maximize expected
     // emitted tokens (including the target correction) per unit of work.
-    const float probability = mean_ / (mean_ + 1.0F);
+    // At the cap, full acceptance is still censored: the actual accepted run
+    // can be longer than our limit. Probe the wider profitable block instead
+    // of imposing an artificial rejection probability (1/8 at limit seven).
+    const float probability =
+        mean_ == static_cast<float>(limit_) ? 1.0F : mean_ / (mean_ + 1.0F);
     float survival = 1.0F;
     float expected_tokens = 1.0F;
     float best_score = 0.0F;
     std::uint32_t best_length = 1;
+    const float context_scale =
+        static_cast<float>(position > 2048 ? position - 2048 : 0) / 30720.0F;
     for (std::uint32_t length = 1; length <= cap; ++length) {
       survival *= probability;
       expected_tokens += survival;
-      const float cost = q8_target_ ? 1.0F + 0.02F * static_cast<float>(length)
-                                    : kQ4RelativeCost[length - 1];
+      const float cost = q8_target_
+                             ? 1.0F + 0.02F * static_cast<float>(length)
+                             : kQ4RelativeCost[length - 1] +
+                                   context_scale * kQ4ContextCost[length - 1];
       const float score = expected_tokens / cost;
       if (score > best_score) {
         best_score = score;
@@ -94,6 +103,13 @@ public:
 private:
   static constexpr std::array<float, kMaxDraftTokens> kQ4RelativeCost{
       1.0F, 1.02F, 1.045F, 1.08F, 1.14F, 1.20F, 1.29F};
+  // Extra cost from 2K to 32K for the target's 16 full-attention layers,
+  // relative to the roughly 100 ms shallow draft/verification cycle. These
+  // cold-KV measurements include the anchor plus 1–7 proposals and preserve
+  // the actual row-tile boundaries. Position is deterministic on replay;
+  // request timings and sampled proposals never enter the decision.
+  static constexpr std::array<float, kMaxDraftTokens> kQ4ContextCost{
+      0.11F, 0.14F, 0.21F, 0.23F, 0.25F, 0.31F, 0.35F};
   DFlashDraftPolicy policy_;
   std::uint32_t limit_;
   bool q8_target_;

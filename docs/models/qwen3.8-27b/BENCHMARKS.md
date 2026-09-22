@@ -31,8 +31,12 @@ The full comparison tables below remain the September 21 sweep.
 | --- | ---: | ---: | ---: | ---: |
 | AR | 0 | 664.80 | 11.93 | — |
 | AR | 32,768 | 503.55 | 10.77 | — |
-| DFlash2 | 0 | 615.16 | 27.57 | 43.1% |
-| DFlash2 | 32,768 | 474.37 | 20.21 | 40.6% |
+| DFlash2 | 0 | 617.96 | 27.63 | 43.1% |
+| DFlash2 | 32,768 | 475.74 | 20.81 | 42.9% |
+
+The separate tg128 word-repetition control reaches **68.72 tok/s** at d0
+and **51.19 tok/s** at d32K, both with **100% draft acceptance**. It adds
+38/41 prompt tokens, respectively; it is not a pp2048 workload.
 
 ## Loading and continuation
 
