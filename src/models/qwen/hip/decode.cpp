@@ -46,16 +46,24 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
                            arena_.stream));
 
   EmitDecodeRouteTelemetry(weights_, policy_);
+  auto graph_key = graph_key_;
+  const auto target_layers = arena_.GetTargetLayerCapture();
+  graph_key.workload_identity = ExtendQwenGraphWorkloadIdentity(
+      graph_key.workload_identity, target_layers.size());
+  for (const auto layer : target_layers) {
+    graph_key.workload_identity =
+        ExtendQwenGraphWorkloadIdentity(graph_key.workload_identity, layer);
+  }
   const QwenGraphRejection graph_rejections = ResolveQwenGraphRejections(
       compute_logits, use_split_k_decode,
       graph_executor_.IsEnabled() &&
           pos >= vision_input_.layout().PrefixLength());
   detail::EmitQwenGraphEligibility(
-      graph_key_.execution_identity, graph_key_.workload_identity,
+      graph_key.execution_identity, graph_key.workload_identity,
       static_cast<std::uint32_t>(graph_rejections));
 
   const auto launch_captured_graph = [&]() {
-    if (!graph_executor_.Launch(arena_.stream, graph_key_)) {
+    if (!graph_executor_.Launch(arena_.stream, graph_key)) {
       graph_executor_.Reset();
       throw std::runtime_error(
           "Qwen HIP graph launch failed; captured graph was invalidated");
@@ -63,11 +71,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
   };
 
   if (graph_rejections == QwenGraphRejection::kNone) {
-    if (graph_executor_.IsCapturedFor(graph_key_)) {
+    if (graph_executor_.IsCapturedFor(graph_key)) {
       launch_captured_graph();
     } else {
+      // Target feature taps change the captured copy operations.
+      if (graph_executor_.IsCaptured())
+        graph_executor_.Reset();
       const bool ok =
-          graph_executor_.TryCapture(arena_.stream, graph_key_, [&]() {
+          graph_executor_.TryCapture(arena_.stream, graph_key, [&]() {
             ExecuteDecodeStep(arena_, weights_, policy_, token_id, pos,
                               compute_logits, &vision_input_);
           });

@@ -17,6 +17,11 @@ Disk-cache identity now includes the partition threshold and count, preventing
 restoration of snapshots computed with the old arithmetic. Broader target/mode
 qualification follows the focused Q4 AR phase.
 
+Graph identity includes the target hidden-layer taps and their order. The Q4
+64-token replay check changes that order after capture and verifies every
+feature value against the reordered reference, with unchanged full logits.
+The 128/257/2048-token and 8K-prefix replay fingerprints also remain unchanged.
+
 The following results describe the qualification through `b509c070`, before
 lowering the split-K threshold:
 

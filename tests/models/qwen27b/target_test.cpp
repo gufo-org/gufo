@@ -85,8 +85,8 @@ void CheckPrefillReplay(
   // A deep ragged suffix also checks restored attention state and the feature
   // taps consumed by DFlash2 after prefill uses temporary KV layouts.
   for (const auto [depth, length] :
-       {std::pair{0U, 128U}, std::pair{0U, 257U}, std::pair{0U, 2048U},
-        std::pair{8192U, 1025U}}) {
+       {std::pair{0U, 64U}, std::pair{0U, 128U}, std::pair{0U, 257U},
+        std::pair{0U, 2048U}, std::pair{8192U, 1025U}}) {
     const std::uint32_t end = depth + length;
     std::vector<Token> tokens(end + 2);
     for (std::size_t i = 0; i < tokens.size(); ++i)
@@ -131,12 +131,28 @@ void CheckPrefillReplay(
     const std::vector<float> verified_features(hidden.begin(), hidden.end());
     executor->RestoreSnapshot(*snapshot);
     for (std::size_t row = 0; row < suffix.size(); ++row) {
+      // Changing taps after the first capture must replace its copy nodes.
+      const bool reverse_taps = length == 64 && row == 1;
+      if (reverse_taps) {
+        auto reversed = layers;
+        std::reverse(reversed.begin(), reversed.end());
+        executor->SetPromptHiddenCapture(true, reversed);
+      }
       (void)executor->ForwardToken(suffix[row], end + row);
       const auto last_hidden = executor->CopyLastHidden();
+      const auto reference =
+          std::span(verified_features)
+              .subspan(row * last_hidden.size(), last_hidden.size());
+      std::vector<float> expected_features(reference.begin(), reference.end());
+      if (reverse_taps) {
+        const auto width = executor->GetConfig().hidden_size;
+        for (std::size_t layer = 0; layer < layers.size(); ++layer) {
+          std::copy_n(reference.data() + (layers.size() - 1 - layer) * width,
+                      width, expected_features.data() + layer * width);
+        }
+      }
       Expect(ByteEqual(Logits(*executor), verified[row]) &&
-                 ByteEqual(last_hidden, std::span(verified_features)
-                                            .subspan(row * last_hidden.size(),
-                                                     last_hidden.size())),
+                 ByteEqual(last_hidden, expected_features),
              "verification after matrix prefill changed logits or features");
       std::cout << "prefill continuation tokens=" << length << " row=" << row
                 << " logits=" << Fingerprint(verified[row])

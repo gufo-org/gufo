@@ -21,6 +21,10 @@
 | Wider shallow pipeline, removed broadcast and separate score/value passes | Rejected: worse cold-KV or eight-row costs than the retained two-position pipeline. |
 | Additional GEMV format specialization | Not promoted: Q8 cold components unchanged; Q6 gains at most 3% in the cold component test. |
 | Paired-row GEMV activation reuse | Not promoted: the dominant Q5_K cold component was essentially unchanged. |
+| Fused SSM format specialization and larger output-row groups | Not promoted: no useful cold-weight gain; larger groups were slower despite byte-exact outputs. |
+| 64–256 attention partitions | Rejected: no improvement at 32K, with different FP32 rounding. |
+| Split-attention graph replay | Rejected: matched Q4 AR C1 d0 remains 11.90 tok/s. The existing launch path is already 97.5% GPU-busy. |
+| Graph identity includes target feature taps | Correctness fix: changing captured layers or their order must replace the graph's feature-copy operations. |
 
 Current focus: **Q4_K_XL, AR, C1**. Profile and push this configuration first;
 do not repeat every candidate on other targets, speculative modes or concurrency
