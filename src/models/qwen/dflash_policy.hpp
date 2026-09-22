@@ -27,11 +27,11 @@ enum class DFlashDraftPolicy : std::uint32_t { kFixed, kAdaptive };
   return policy == DFlashDraftPolicy::kFixed ? "fixed" : "adaptive";
 }
 
-// Select the whole block before drawing any proposals. Decisions depend only
-// on committed acceptance history, so scheduling and timing cannot change RNG
-// consumption on a replay. Full acceptance is a censored observation: probe
-// upward instead of treating the current block limit as the true stopping
-// point.
+// Select the whole block before drawing any proposals. Sampled decisions use
+// private acceptance history and position, preserving RNG consumption on
+// replay. Paired greedy requests use their measured wider-verification cost.
+// Full acceptance is censored: probe upward instead of treating the block limit
+// as the true stopping point.
 class DFlashLengthController {
 public:
   static constexpr std::uint32_t kMaxDraftTokens = 7;
@@ -45,7 +45,8 @@ public:
   }
 
   [[nodiscard]] std::uint32_t Choose(
-      std::uint32_t budget, std::uint32_t position = 0) const noexcept {
+      std::uint32_t budget, std::uint32_t position = 0,
+      bool paired_greedy = false) const noexcept {
     const auto cap = std::min(budget, limit_);
     if (policy_ == DFlashDraftPolicy::kFixed || cap == 0)
       return cap;
@@ -65,13 +66,17 @@ public:
     std::uint32_t best_length = 1;
     const float context_scale =
         static_cast<float>(position > 2048 ? position - 2048 : 0) / 30720.0F;
+    const auto& q4_costs =
+        paired_greedy ? kQ4PairedRelativeCost : kQ4RelativeCost;
+    const float q4_context_scale =
+        context_scale * (paired_greedy ? 1.92F : 1.0F);
     for (std::uint32_t length = 1; length <= cap; ++length) {
       survival *= probability;
       expected_tokens += survival;
-      const float cost = q8_target_
-                             ? 1.0F + 0.02F * static_cast<float>(length)
-                             : kQ4RelativeCost[length - 1] +
-                                   context_scale * kQ4ContextCost[length - 1];
+      const float cost =
+          q8_target_ ? 1.0F + 0.02F * static_cast<float>(length)
+                     : q4_costs[length - 1] +
+                           q4_context_scale * kQ4ContextCost[length - 1];
       const float score = expected_tokens / cost;
       if (score > best_score) {
         best_score = score;
@@ -108,6 +113,12 @@ public:
 private:
   static constexpr std::array<float, kMaxDraftTokens> kQ4RelativeCost{
       1.0F, 1.02F, 1.045F, 1.08F, 1.14F, 1.20F, 1.29F};
+  // Two greedy requests verify 4–16 rows together. Crossing eight rows has a
+  // large projection cost that the C1 estimate misses. Complete-cycle release
+  // controls normalize to 104 ms at one draft; the paired context multiplier
+  // is 2 * 100 / 104, using the existing per-request attention calibration.
+  static constexpr std::array<float, kMaxDraftTokens> kQ4PairedRelativeCost{
+      1.0F, 1.04F, 1.10F, 1.48F, 1.45F, 1.50F, 1.50F};
   // Extra cost from 2K to 32K for the target's 16 full-attention layers,
   // relative to the roughly 100 ms shallow draft/verification cycle. These
   // cold-KV measurements include the anchor plus 1–7 proposals and preserve

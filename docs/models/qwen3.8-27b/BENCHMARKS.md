@@ -27,15 +27,16 @@ to resolve PP variation. The matching control retains PP; both samples are
 recorded, and small timing differences remain provisional.
 Counts, output hashes and binary identities:
 [AR](artifacts/q4-ar-c1-focused.json),
-[DFlash2](artifacts/q4-dflash2-c1-focused.json).
+[DFlash2](artifacts/q4-dflash2-c1-focused.json),
+[paired-controller and C1 controls](artifacts/q4-c2-focused.json).
 The full comparison tables below remain the September 21 sweep.
 
 | Mode | Depth | pp tok/s | tg tok/s | Draft acceptance |
 | --- | ---: | ---: | ---: | ---: |
-| AR | 0 | 664.80 | 11.93 | — |
+| AR | 0 | 665.99 | 11.97 | — |
 | AR | 32,768 | 503.55 | 10.77 | — |
 | AR | 65,536 | 413.81 | 9.82 | — |
-| DFlash2 | 0 | 615.58 | 29.97 | 47.3% |
+| DFlash2 | 0 | 610.18 | 30.05 | 47.3% |
 | DFlash2 | 32,768 | 473.11 | 21.38 | 44.1% |
 | DFlash2 | 65,536 | 394.63 | 17.03 | 44.5% |
 
@@ -50,11 +51,22 @@ and **41.40 tok/s** at d64K, both with
 **100% draft acceptance**. It adds
 38/41 prompt tokens, respectively; it is not a pp2048 workload.
 
-At **C2**, the same 38-token repetition prompt reaches **23.26 tok/s AR**
-and **97.13 tok/s adaptive DFlash2**, summed across the two individual request
-decode rates. Both 128-token outputs match C1 AR, with zero cache hits and
-100% draft acceptance. Fresh servers, context 4096, one warmup and one measured
-round per mode. [Measurements and focused profile](artifacts/q4-c2-focused.json).
+**C2**, sum of the two individual request decode rates. Fresh servers,
+context 4096, 30–53 prompt tokens, tg128, one warmup and one measured round.
+Every output matches C1 AR; no prompt-cache hits. Adaptive uses measured
+Q4 pair costs for greedy requests.
+[Measurements and focused profile](artifacts/q4-c2-focused.json).
+
+| Workload | AR tok/s | DFlash2 tok/s | Draft acceptance |
+| --- | ---: | ---: | ---: |
+| Word repetition | 23.26 | 103.35 | 100% |
+| Pangram / train problem | 23.27 | 69.79 | 68.1% |
+| Italian / Chinese explanations | TODO | 41.11 | 45.0% |
+
+At **d32K**, C2 DFlash2 reaches **32.55 tok/s** on the pp2048/tg128
+continuation, with **58.3% acceptance**. Each request reuses 32,552 cached
+tokens and prefills 2,011 new tokens; both complete outputs match C1 AR.
+Context capacity 36864, one measured pair.
 
 ## Loading and continuation
 

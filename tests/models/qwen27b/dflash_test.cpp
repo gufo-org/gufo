@@ -45,6 +45,8 @@ void TestLengthController() {
          "fixed blocks obey only the configured and remaining budgets");
   Expect(fixed.Choose(7, 131072) == 7,
          "context cost does not change the fixed comparison policy");
+  Expect(fixed.Choose(3, 131072, true) == 3,
+         "paired verification cannot change a fixed block");
   for (const bool q8_target : {false, true}) {
     DFlashLengthController adaptive(DFlashDraftPolicy::kAdaptive, 7, q8_target);
     for (int round = 0; round < 32; ++round)
@@ -59,6 +61,8 @@ void TestLengthController() {
     for (const auto position : {2048U, 32768U, 65536U, 131072U, 262144U}) {
       Expect(adaptive.Choose(7, position) == 7,
              "sustained full acceptance probes the wider profitable block");
+      Expect(adaptive.Choose(7, position, true) == 7,
+             "paired full acceptance retains the full block at every depth");
     }
     const auto saved = adaptive.State();
     adaptive.Reset();
@@ -79,6 +83,8 @@ void TestLengthController() {
   }
   DFlashLengthController shallow(DFlashDraftPolicy::kAdaptive, 7);
   const auto learned = shallow.State();
+  Expect(shallow.Choose(7, 2048) > 3 && shallow.Choose(7, 2048, true) == 3,
+         "paired cost avoids the projection cliff above eight total rows");
   Expect(shallow.Choose(7, 32768) < shallow.Choose(7, 2048),
          "long-context attention cost reduces speculative overwork");
   for (const auto position : {0U, 2048U, 32768U, 65536U, 131072U}) {
@@ -88,6 +94,10 @@ void TestLengthController() {
       const auto expected = shallow.Choose(budget, position);
       Expect(replay.Choose(budget, position) == expected && expected <= budget,
              "restored history and position reproduce bounded decisions");
+      Expect(replay.Choose(budget, position, true) ==
+                     shallow.Choose(budget, position, true) &&
+                 replay.Choose(budget, position, true) <= budget,
+             "paired decisions preserve restored history and budgets");
       Expect(shallow.State() == learned,
              "cost evaluation does not mutate acceptance history");
     }
@@ -95,6 +105,8 @@ void TestLengthController() {
   DFlashLengthController q8(DFlashDraftPolicy::kAdaptive, 7, true);
   Expect(q8.Choose(7, 131072) == q8.Choose(7, 2048),
          "Q4 context calibration leaves the Q8 policy unchanged");
+  Expect(q8.Choose(7, 131072, true) == q8.Choose(7, 131072),
+         "paired Q4 calibration leaves the Q8 policy unchanged");
 
   // Enumerate every outcome of a censored geometric run. At the true mean,
   // expected feedback must have zero drift regardless of the chosen width.
@@ -335,13 +347,19 @@ void TestConcurrentBlocks(
   for (std::size_t round = 0; round < 2; ++round) {
     std::array<DraftProposal, 8> expected;
     std::array<std::vector<std::uint8_t>, 8> expected_state;
+    std::array<std::unique_ptr<gufo::speculative::IDraftBackendSnapshot>, 8>
+        initial_state;
+    const auto initial_rng = rng;
     auto expected_rng = rng;
     std::vector<gufo::speculative::DraftProposalRequest> requests;
     std::array<std::size_t, 8> accepted{};
     for (std::size_t index = 0; index < backends.size(); ++index) {
       auto& backend = *backends[index];
-      const auto saved = backend.Snapshot();
-      const auto limit = 1U + static_cast<std::uint32_t>(index % 7U);
+      initial_state[index] = backend.Snapshot();
+      // The paired probes need a budget at which the two cost models choose
+      // different lengths; a tiny cap would conceal accidental policy changes.
+      const auto limit =
+          index < 3 ? 7U : 1U + static_cast<std::uint32_t>(index % 7U);
       expected[index] =
           temperatures[index] > 0.0F
               ? backend.ProposeSampled(sequences[index], positions[index],
@@ -352,10 +370,28 @@ void TestConcurrentBlocks(
       backend.AcceptFeedback(
           std::span(expected[index].tokens).first(accepted[index]), 4);
       expected_state[index] = payload(backend);
-      backend.RestoreSnapshot(*saved);
+      backend.RestoreSnapshot(*initial_state[index]);
       requests.push_back({&backend, sequences[index], positions[index], limit,
                           temperatures[index],
                           temperatures[index] > 0.0F ? &rng[index] : nullptr});
+    }
+    // Both a sampled pair and a mixed greedy/sampled pair must retain their
+    // private proposal lengths, selector probabilities and random draws.
+    for (const std::size_t first : {0U, 1U}) {
+      const auto pair = std::span(requests).subspan(first, 2);
+      const auto paired = pair.front().backend->ProposeBatch(pair);
+      Expect(paired.size() == 2, "sampled pair result count");
+      for (std::size_t row = 0; row < paired.size(); ++row) {
+        const auto index = first + row;
+        Expect(paired[row].tokens == expected[index].tokens &&
+                   paired[row].candidate_ids == expected[index].candidate_ids &&
+                   exact(paired[row].candidate_probabilities,
+                         expected[index].candidate_probabilities) &&
+                   rng[index] == expected_rng[index],
+               "paired cost cannot alter sampled or mixed-cohort replay");
+        backends[index]->RestoreSnapshot(*initial_state[index]);
+        rng[index] = initial_rng[index];
+      }
     }
     const auto actual = backends.front()->ProposeBatch(requests);
     Expect(rng == expected_rng,

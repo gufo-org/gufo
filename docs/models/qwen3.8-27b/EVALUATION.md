@@ -55,8 +55,9 @@ Completed blocks update that estimate in proportion to their accepted tokens.
 An independent geometric-distribution check verifies zero expected feedback
 drift at every width 1–7, away from the saturation cap; a fixed success
 increment biased the estimate according to block width.
-Single and batched requests use their own positions and acceptance history
-before drawing proposals. Fixed mode and the cost tables are unchanged.
+Sampled requests use private positions and acceptance history before drawing
+proposals. Greedy Q4 pairs additionally select measured paired costs; fixed
+mode, C1 and Q8 cost tables are unchanged.
 The maintained draft check passes exact layers, logits, selector probabilities,
 private RNG and persistent-state replay at C2/C4/C6/C8.
 The current release reproduces all 32 sampled tokens and draft counts between
@@ -72,20 +73,30 @@ The 128-token repetition controls retain the same output and 100% acceptance at
 d0/d64K. Context-cost calibration, fixed-three-proposal controls and current
 measurements are in the existing
 [DFlash2 artifact](artifacts/q4-dflash2-c1-focused.json).
-These controller measurements cover Q4 C1; other concurrency levels still need
-performance qualification.
+These controls cover Q4 C1; the focused C2 qualification follows.
 
-The focused Q4 C2 repetition check retains both complete 128-token C1 AR output
-hashes with AR, adaptive DFlash2 and fixed six-proposal DFlash2. Each mode runs
-on a fresh server with `cache_prompt: false`; every request prefills all 38
-prompt tokens. Both speculative modes accept every proposal. Adaptive is
-faster and remains the default.
-The [C2 artifact](artifacts/q4-c2-focused.json) retains per-request timings and
-a separate profile of four consecutive saturated decode cycles: 97.0%
-GPU-busy, with quantized projections accounting for 87.6% of kernel time.
-Target verification takes 85.9% of kernel time; draft generation and committed
-context injection account for the remainder. This focused control does not
-replace mixed-prompt, sampled or long-context concurrency qualification.
+The focused Q4 C2 release checks retain all six complete 128-token C1 AR
+outputs: repetition, pangram/train and Italian/Chinese pairs. Fresh servers
+use `cache_prompt: false`; every request prefills its 30–53 prompt tokens.
+Paired greedy costs account for the projection jump above eight total rows.
+Fixed-three controls improve low acceptance but lose on the higher-acceptance
+pair, so adaptive remains the default. The maintained draft test additionally
+compares sampled and mixed greedy/sampled pairs with isolated execution:
+proposal lengths, IDs, probabilities, private RNG and restored state match.
+The paired calibration applies only to two greedy drafters, including a
+larger cohort that shrinks to two; sampled choices remain private.
+The matched C2 d32K continuation also retains both 128-token C1 AR outputs:
+each request reuses 32,552 tokens and prefills 2,011. New and previous
+builds receive byte-identical messages, execute a physical two-request batch,
+and retain matching prefill times. C1 d0 PP stays within 1% of the previous
+control, with unchanged greedy output and DFlash2 acceptance counts.
+
+The [C2 artifact](artifacts/q4-c2-focused.json) retains per-request timings,
+fixed-width cost calibration, d32K continuation, C1 pp2048/tg128 controls and a separate
+profile of four saturated decode cycles: 97.0% GPU-busy, with quantized
+projections accounting for 87.6% of kernel time. Target verification takes
+85.9%; draft generation and committed context injection account for the
+remainder. Wider concurrency still needs performance qualification.
 
 The fresh pinned llama.cpp `68d9053a` d0 controls use the same input messages,
 Q4 target/draft, greedy sampling and context capacity. Its DFlash2 output differs
