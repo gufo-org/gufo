@@ -4,6 +4,25 @@ Targets Q4/Q8; DFlash2 drafts Q4_K_M/Q8_0/BF16. Independent original-target,
 conversion and native MTP parity remain **TODO**. Packed-weight operator
 agreement is narrower evidence. [Artifact identities](artifacts/model-identities.json).
 
+The latest C1 AR cleanup retains the RMSNorm reduction tree and caches its
+5120 input values and weights in registers. All 24 independent FP64-formula
+controls pass at the unchanged 1e-4 tolerance, including neighboring dimensions,
+three input scales and optional weights. Eight direct comparisons with the
+previous compiled kernel are byte-identical.
+
+C1 reuses the tiled argmax and idle FFN scratch. The maintained GPU sampler
+check passes its 216 AR policies, speculative p/q/residual checks, ties,
+nonfinite rows and tile boundaries. Snapshot sizing uses the vocabulary size
+without downloading logits. Matched d0/d32K HTTP controls preserve all 128
+greedy tokens and cached-prefix reuse; the repeated d0 output also matches.
+No persistent allocation or snapshot format changes.
+
+In a separate 16-token, depth-2048 profile, normalization falls from 23.99 to
+6.54 ms and argmax from 2.53 to 0.12 ms; total kernel time falls from 1324.26 to
+1304.37 ms. This explains approximately 1.24 ms saved per token.
+[Measurements and scope](artifacts/q4-ar-c1-pruning.json).
+Q8 and DFlash2 qualification of this increment follows the C1 Q4 AR phase.
+
 The 128-token split-K threshold is currently qualified on **Q4_K_XL C1 with
 AR and Q4_K_M DFlash2**. Matched d0/d32K pp2048/tg128 controls retain all 128
 greedy tokens and PP speed; DFlash2 matches AR at both depths.

@@ -1,0 +1,653 @@
+{
+  "date": "2026-09-22",
+  "scope": "Q4_K_XL C1 autoregressive, pp2048/tg128; repeated d0 only to resolve the narrow reference lead",
+  "implementation": "register-cached 5120-wide RMSNorm, tiled argmax, snapshot sizing without logits download",
+  "source_parent": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
+  "source_files_sha256": {
+    "src/cli/serve/inference_backend.cpp": "9e49b24d7bfbc17185890af12265d539c2474c39cd5577f4beff615d08a6beec",
+    "src/models/qwen/hip/decode_step.cpp": "ca724ca0d1af7e6fd7a6a9174da4aaf4df681f6b014719a07928f4359dd4217f",
+    "src/models/qwen/hip/kernels/norm.hip": "a5fdf6329e20ed83ba604d1b533faea74ec4f670f6d3da9e7ad644e8620a70f9",
+    "tests/models/qwen/hip/basic/elementwise_ops_test.cpp": "91418e4eb38494d40c4f4d0db0e649f92b02395c1f2133e68d3e0379672badf5"
+  },
+  "controls": {
+    "ar-baseline-d0": {
+      "source": {
+        "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
+        "binary_path": "/nix/store/n043k1hsjh205v3n0byg72r7p2mxadxa-gufo-154a892-dirty/bin/gufo",
+        "binary_sha256": "a7b3a45282242927509594da08811b918695d6c00488c0c16f67a9cb7575d3f5",
+        "buildMode": "nix-release"
+      },
+      "implementation": "gufo",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 0,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 2033,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 128,
+        "prefill_tokens": 2033,
+        "wall_ms": 13732.43659597938,
+        "client_ttft_ms": 3008.0183089885395,
+        "client_event_inter_token_ms": 83.77863736213625,
+        "queue_ms": 1.357442,
+        "prefill_ms": 3006.123478,
+        "decode_ms": 10708.466550000003,
+        "server_ttft_ms": 3007.483855,
+        "server_inter_token_ms": 83.77888854330712,
+        "server_max_inter_token_ms": 99.340561,
+        "requested_logical_concurrency": 1,
+        "physical_execution_width": 1,
+        "execution_plan": "serial-c1",
+        "metrics_source": "gufo",
+        "cache_hit": false,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+        "prefill_tokens_per_second": 676.2862586578023,
+        "decode_tokens_per_second": 11.953158690120759,
+        "whole_request_tokens_per_second": 157.364644278256
+      }
+    },
+    "ar-prune-d0": {
+      "source": {
+        "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
+        "binary_path": "/nix/store/vjir5wgp3nfha7gj3wr4szvkyrv7gf1f-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_sha256": "b59185d2e331a64647b51957628118b7c8047d3f6194d4c891e712ea265e1862",
+        "buildMode": "nix-release"
+      },
+      "implementation": "gufo",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 0,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 2033,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 128,
+        "prefill_tokens": 2033,
+        "wall_ms": 13714.180529001169,
+        "client_ttft_ms": 3007.9295320028905,
+        "client_event_inter_token_ms": 83.637552322796,
+        "queue_ms": 1.208631,
+        "prefill_ms": 3006.287686,
+        "decode_ms": 10690.472041000005,
+        "server_ttft_ms": 3007.501027,
+        "server_inter_token_ms": 83.63740163779526,
+        "server_max_inter_token_ms": 99.094858,
+        "requested_logical_concurrency": 1,
+        "physical_execution_width": 1,
+        "execution_plan": "serial-c1",
+        "metrics_source": "gufo",
+        "cache_hit": false,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+        "prefill_tokens_per_second": 676.2493188750666,
+        "decode_tokens_per_second": 11.97327858948562,
+        "whole_request_tokens_per_second": 157.57412522244155
+      }
+    },
+    "ar-norm-d0": {
+      "source": {
+        "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
+        "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_sha256": "a87a20eded2b0b7377c4e133d60e213585c94c72e2ed009bd0e72ea2800e934b",
+        "buildMode": "nix-release"
+      },
+      "implementation": "gufo",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 0,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 2033,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 128,
+        "prefill_tokens": 2033,
+        "wall_ms": 13590.009400009876,
+        "client_ttft_ms": 3022.017962008249,
+        "client_event_inter_token_ms": 82.55714705506318,
+        "queue_ms": 1.387137,
+        "prefill_ms": 3020.041426,
+        "decode_ms": 10552.29725900001,
+        "server_ttft_ms": 3021.440987,
+        "server_inter_token_ms": 82.55776451181102,
+        "server_max_inter_token_ms": 97.950967,
+        "requested_logical_concurrency": 1,
+        "physical_execution_width": 1,
+        "execution_plan": "serial-c1",
+        "metrics_source": "gufo",
+        "cache_hit": false,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+        "prefill_tokens_per_second": 673.1695739328577,
+        "decode_tokens_per_second": 12.130060105237211,
+        "whole_request_tokens_per_second": 159.01387088065073
+      }
+    },
+    "ar-norm-d0-repeat": {
+      "source": {
+        "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
+        "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_sha256": "a87a20eded2b0b7377c4e133d60e213585c94c72e2ed009bd0e72ea2800e934b",
+        "buildMode": "nix-release"
+      },
+      "implementation": "gufo",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 0,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 2033,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 128,
+        "prefill_tokens": 2033,
+        "wall_ms": 13608.495539985597,
+        "client_ttft_ms": 3042.1261669835076,
+        "client_event_inter_token_ms": 82.54425671670263,
+        "queue_ms": 1.440588,
+        "prefill_ms": 3040.189276,
+        "decode_ms": 10550.580482000001,
+        "server_ttft_ms": 3041.632508,
+        "server_inter_token_ms": 82.54435083464578,
+        "server_max_inter_token_ms": 97.998517,
+        "requested_logical_concurrency": 1,
+        "physical_execution_width": 1,
+        "execution_plan": "serial-c1",
+        "metrics_source": "gufo",
+        "cache_hit": false,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+        "prefill_tokens_per_second": 668.7083649853648,
+        "decode_tokens_per_second": 12.132033893147073,
+        "whole_request_tokens_per_second": 158.79786223615775
+      }
+    },
+    "ar-baseline-d32": {
+      "source": {
+        "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
+        "binary_path": "/nix/store/n043k1hsjh205v3n0byg72r7p2mxadxa-gufo-154a892-dirty/bin/gufo",
+        "binary_sha256": "a7b3a45282242927509594da08811b918695d6c00488c0c16f67a9cb7575d3f5",
+        "buildMode": "nix-release"
+      },
+      "implementation": "gufo",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 32768,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 34563,
+        "cached_prompt_tokens": 32553,
+        "completion_tokens": 128,
+        "prefill_tokens": 2010,
+        "wall_ms": 15979.770306003047,
+        "client_ttft_ms": 3987.3251779936254,
+        "client_event_inter_token_ms": 93.66932795263871,
+        "queue_ms": 7.858041,
+        "prefill_ms": 3978.452309,
+        "decode_ms": 11853.293129000003,
+        "server_ttft_ms": 3986.320879,
+        "server_inter_token_ms": 93.67090706299213,
+        "server_max_inter_token_ms": 228.644735,
+        "requested_logical_concurrency": 1,
+        "physical_execution_width": 1,
+        "execution_plan": "serial-c1",
+        "metrics_source": "gufo",
+        "cache_hit": true,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+        "prefill_tokens_per_second": 505.2215896752126,
+        "decode_tokens_per_second": 10.798686795894556,
+        "whole_request_tokens_per_second": 133.79416343655623
+      }
+    },
+    "ar-norm-d32": {
+      "source": {
+        "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
+        "binary_path": "/nix/store/xx8y5xgyxbkaa0dxns3jiz7qy5h52xv3-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_sha256": "a87a20eded2b0b7377c4e133d60e213585c94c72e2ed009bd0e72ea2800e934b",
+        "buildMode": "nix-release"
+      },
+      "implementation": "gufo",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 32768,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 34563,
+        "cached_prompt_tokens": 32553,
+        "completion_tokens": 128,
+        "prefill_tokens": 2010,
+        "wall_ms": 15833.482938993257,
+        "client_ttft_ms": 3996.2615340191405,
+        "client_event_inter_token_ms": 92.4565612361858,
+        "queue_ms": 7.608633,
+        "prefill_ms": 3987.439731,
+        "decode_ms": 11698.61788299999,
+        "server_ttft_ms": 3995.066688,
+        "server_inter_token_ms": 92.4584007559055,
+        "server_max_inter_token_ms": 226.917488,
+        "requested_logical_concurrency": 1,
+        "physical_execution_width": 1,
+        "execution_plan": "serial-c1",
+        "metrics_source": "gufo",
+        "cache_hit": true,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+        "prefill_tokens_per_second": 504.0828540613245,
+        "decode_tokens_per_second": 10.941463451507804,
+        "whole_request_tokens_per_second": 135.03030307594096
+      }
+    },
+    "reference-ar-d0": {
+      "source": {
+        "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+        "binary_path": "/nix/store/2kjf867i1dhvscdjn2mlfyizb2dxq042-llama-cpp-11069/bin/llama-server",
+        "binary_sha256": "81dee29e5fbc234bbb4ae90c022de9c9d8513d1cefa960550b0bb59d9fc5346f",
+        "buildMode": "nix-release"
+      },
+      "implementation": "reference",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 0,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 2033,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 128,
+        "prefill_tokens": 2033,
+        "wall_ms": 16368.006690987386,
+        "client_ttft_ms": 5773.175907001132,
+        "client_event_inter_token_ms": 83.42261903155705,
+        "queue_ms": null,
+        "prefill_ms": 5656.92,
+        "decode_ms": 10594.84,
+        "server_ttft_ms": null,
+        "server_inter_token_ms": 83.42393700787402,
+        "server_max_inter_token_ms": null,
+        "requested_logical_concurrency": null,
+        "physical_execution_width": null,
+        "execution_plan": null,
+        "metrics_source": "llama_timings",
+        "cache_hit": false,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "e7f8f5eab02855d011317ea6c155d5eb581e589f9007ccceec3664eb397fb017",
+        "prefill_tokens_per_second": 359.3828443746774,
+        "decode_tokens_per_second": 12.081352809480842,
+        "whole_request_tokens_per_second": 132.02585023318068
+      }
+    },
+    "reference-ar-d0-repeat": {
+      "source": {
+        "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+        "binary_path": "/nix/store/2kjf867i1dhvscdjn2mlfyizb2dxq042-llama-cpp-11069/bin/llama-server",
+        "binary_sha256": "81dee29e5fbc234bbb4ae90c022de9c9d8513d1cefa960550b0bb59d9fc5346f",
+        "buildMode": "nix-release"
+      },
+      "implementation": "reference",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 0,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 2033,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 128,
+        "prefill_tokens": 2033,
+        "wall_ms": 16559.49372300529,
+        "client_ttft_ms": 5966.089680005098,
+        "client_event_inter_token_ms": 83.41113074799985,
+        "queue_ms": null,
+        "prefill_ms": 5842.555,
+        "decode_ms": 10593.584,
+        "server_ttft_ms": null,
+        "server_inter_token_ms": 83.41404724409449,
+        "server_max_inter_token_ms": null,
+        "requested_logical_concurrency": null,
+        "physical_execution_width": null,
+        "execution_plan": null,
+        "metrics_source": "llama_timings",
+        "cache_hit": false,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "e7f8f5eab02855d011317ea6c155d5eb581e589f9007ccceec3664eb397fb017",
+        "prefill_tokens_per_second": 347.964204016907,
+        "decode_tokens_per_second": 12.082785202817101,
+        "whole_request_tokens_per_second": 130.4991587392451
+      }
+    },
+    "reference-ar-d32": {
+      "source": {
+        "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+        "binary_path": "/nix/store/2kjf867i1dhvscdjn2mlfyizb2dxq042-llama-cpp-11069/bin/llama-server",
+        "binary_sha256": "81dee29e5fbc234bbb4ae90c022de9c9d8513d1cefa960550b0bb59d9fc5346f",
+        "buildMode": "nix-release"
+      },
+      "implementation": "reference",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 32768,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 34563,
+        "cached_prompt_tokens": 32552,
+        "completion_tokens": 128,
+        "prefill_tokens": 2011,
+        "wall_ms": 19800.401134009007,
+        "client_ttft_ms": 8058.756347018061,
+        "client_event_inter_token_ms": 92.44917196063068,
+        "queue_ms": null,
+        "prefill_ms": 8021.887,
+        "decode_ms": 11741.42,
+        "server_ttft_ms": null,
+        "server_inter_token_ms": 92.45212598425196,
+        "server_max_inter_token_ms": null,
+        "requested_logical_concurrency": null,
+        "physical_execution_width": null,
+        "execution_plan": null,
+        "metrics_source": "llama_timings",
+        "cache_hit": true,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "80c3cf1a0db09a2805a91e9d64b6a284dbd0162d05b4772b157b6d98e1166485",
+        "prefill_tokens_per_second": 250.68914583314375,
+        "decode_tokens_per_second": 10.90157749233057,
+        "whole_request_tokens_per_second": 108.0281144570385
+      }
+    },
+    "ar-stream-d0": {
+      "source": {
+        "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
+        "binary_path": "/nix/store/jn5vyv64n5ib5f1mm4qsnvz4xadhn9gh-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_sha256": "6e897c7ed3ca26f56670bdd949f788aa3da91f2edd7e652464bdf1e88093bb47",
+        "buildMode": "nix-release"
+      },
+      "implementation": "gufo",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 0,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 2033,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 128,
+        "prefill_tokens": 2033,
+        "wall_ms": 13878.576482995413,
+        "client_ttft_ms": 3047.0236200198997,
+        "client_event_inter_token_ms": 84.61581663765732,
+        "queue_ms": 1.321403,
+        "prefill_ms": 3044.923101,
+        "decode_ms": 10810.233273,
+        "server_ttft_ms": 3046.258561,
+        "server_inter_token_ms": 84.61793762992126,
+        "server_max_inter_token_ms": 105.821243,
+        "requested_logical_concurrency": 1,
+        "physical_execution_width": 1,
+        "execution_plan": "serial-c1",
+        "metrics_source": "gufo",
+        "cache_hit": false,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+        "prefill_tokens_per_second": 667.6687497731326,
+        "decode_tokens_per_second": 11.840632553202814,
+        "whole_request_tokens_per_second": 155.70761184677286
+      }
+    },
+    "ar-pair-d0": {
+      "source": {
+        "revision": "ae1e99aa98bf3d8d65e6dbf8b1446c63b8619a64",
+        "binary_path": "/nix/store/74mghf54szy7f0s50npq0nmbyr82blsg-gufo-ae1e99a-dirty/bin/gufo",
+        "binary_sha256": "e5fe169f9a7de24a058b4c9ab18549c37dd92ecf508e7bd8a3a0d03d4a7662a3",
+        "buildMode": "nix-release"
+      },
+      "implementation": "gufo",
+      "variant": "Q4_K_XL",
+      "mode": "ar",
+      "depth": 0,
+      "concurrency": 1,
+      "context_capacity": 36864,
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "request": {
+        "concurrency": 1,
+        "repetition": 1,
+        "request_index": 0,
+        "prompt_tokens": 2033,
+        "cached_prompt_tokens": 0,
+        "completion_tokens": 128,
+        "prefill_tokens": 2033,
+        "wall_ms": 13588.915179017931,
+        "client_ttft_ms": 3011.0360860126093,
+        "client_event_inter_token_ms": 82.63431248822484,
+        "queue_ms": 1.350248,
+        "prefill_ms": 3009.199994,
+        "decode_ms": 10561.044561999995,
+        "server_ttft_ms": 3010.561814,
+        "server_inter_token_ms": 82.63440723622047,
+        "server_max_inter_token_ms": 99.12254,
+        "requested_logical_concurrency": 1,
+        "physical_execution_width": 1,
+        "execution_plan": "serial-c1",
+        "metrics_source": "gufo",
+        "cache_hit": false,
+        "draft_tokens": 0,
+        "draft_accepted_tokens": 0,
+        "draft_acceptance": null,
+        "case_id": null,
+        "category": null,
+        "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+        "prefill_tokens_per_second": 675.5948438301107,
+        "decode_tokens_per_second": 12.120013247606261,
+        "whole_request_tokens_per_second": 159.0266751636443
+      }
+    }
+  },
+  "profiles": {
+    "before-norm": {
+      "tokens": 16,
+      "dispatches": 10847,
+      "kernel_ms": 1324.2621590000008,
+      "gpu_busy_ms": 1324.262159,
+      "wall_span_ms": 1354.425037,
+      "stages": {
+        "other": [
+          559,
+          1.7688089999999974
+        ],
+        "row_norm": [
+          2064,
+          23.98522100000004
+        ],
+        "ssm_input_projections": [
+          768,
+          203.58848300000005
+        ],
+        "recurrent": [
+          1536,
+          23.03810000000003
+        ],
+        "other_projections": [
+          2048,
+          388.14519800000045
+        ],
+        "residual": [
+          2048,
+          2.6744359999999854
+        ],
+        "ffn_gate_up": [
+          1024,
+          527.8252100000002
+        ],
+        "attention_projections": [
+          256,
+          61.606009
+        ],
+        "attention": [
+          512,
+          13.388970000000002
+        ],
+        "vocabulary_projection": [
+          16,
+          75.71024
+        ],
+        "argmax": [
+          16,
+          2.5314829999999997
+        ]
+      }
+    },
+    "norm": {
+      "tokens": 16,
+      "dispatches": 10863,
+      "kernel_ms": 1304.3734259999992,
+      "gpu_busy_ms": 1304.373426,
+      "wall_span_ms": 1332.898903,
+      "stages": {
+        "other": [
+          559,
+          1.758054000000002
+        ],
+        "row_norm": [
+          2064,
+          6.542949999999996
+        ],
+        "ssm_input_projections": [
+          768,
+          203.55483200000006
+        ],
+        "recurrent": [
+          1536,
+          22.949056000000002
+        ],
+        "other_projections": [
+          2048,
+          388.14231199999904
+        ],
+        "residual": [
+          2048,
+          2.690696999999989
+        ],
+        "ffn_gate_up": [
+          1024,
+          528.040597
+        ],
+        "attention_projections": [
+          256,
+          61.599266999999976
+        ],
+        "attention": [
+          512,
+          13.373880999999994
+        ],
+        "vocabulary_projection": [
+          16,
+          75.60307499999999
+        ],
+        "argmax": [
+          32,
+          0.11870499999999999
+        ]
+      }
+    }
+  },
+  "quality": {
+    "independent_rms": "24 FP64-formula controls, dimensions 256/5119/5120/5121, three input scales, weighted/unweighted; unchanged 1e-4 tolerance",
+    "legacy_rms": "8 byte-exact production-kernel comparisons, four input amplitudes, weighted/unweighted",
+    "sampling": "qwen_sampling_hip_test passed, including 216 AR policies, p/q and residual CDFs, tiled argmax ties/nonfinite rows/tails at C1/2/4/6/8",
+    "http": "All candidate Q4 greedy tg128 hashes match the baseline at d0 and d32K; prompt bytes and cache histories are pinned",
+    "limits": "Quantized execution regression controls, not independent original-checkpoint parity. Q8 and DFlash2 qualification of this increment remains pending."
+  },
+  "rejected_experiments": [
+    "Streaming Q4/Q5 weight loads: byte-exact; cold component gain did not survive the full model (ar-stream-d0).",
+    "Q6 static format: byte-exact; under 1% component gain.",
+    "Paired SSM rows: byte-exact; 1-4% slower. Separate SSM projections: at most 2.4% component gain with extra launches; not promoted.",
+    "Precomputed input sums: byte-exact; no consistent cold-projection gain.",
+    "Gate/up input sharing: byte-exact component and verification checks; ar-pair-d0 stays flat. No production change retained."
+  ]
+}

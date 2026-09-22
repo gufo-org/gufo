@@ -71,11 +71,16 @@
 | Wave64 scalar projections and uniform row addresses | Not promoted: cold-weight gains are flat or mixed; some Q4/Q6 shapes regress. |
 | Copied weights, including a complete GGUF allocation | Not promoted: the complete-copy control has 3–8% lower cold-weight throughput than mapped weights, with identical outputs. |
 | Exact zero-exponent fast path, scalar score broadcast and LDS-only barriers | Not promoted: byte-exact, but no useful gain after shared KV staging. |
+| Register-cached decode RMSNorm, tiled C1 argmax and snapshot sizing | Retained: original normalization arithmetic, existing exact argmax and no logits download merely to count them. Matched Q4 C1 AR gains 1.3–1.5% at d0/d32K, with unchanged output and comparable PP. |
+| Streaming Q4/Q5 payload loads | Rejected: byte-exact cold-kernel gains regress full-model AR by about 1%. |
+| Q6 format specialization and paired/split SSM projections | Not promoted: byte-exact, but negligible gains or regressions; split SSM adds launches. |
+| Precomputed affine input sums | Rejected: byte-exact, but no consistent cold-projection benefit after including the preparation pass. |
+| Gate/up input sharing, including four simultaneous dots | Not retained: exact kernel outputs and verification checks, but the paired implementation stays flat in full-model Q4 C1 AR despite cold-kernel gains. |
 
-Current focus: **Q4_K_XL with Q4_K_M DFlash2, C8**, after retaining the C1 AR,
-C1 speculative and C2/C4/C6 controller improvements above. Keep C1 AR as the regression
-control. Optimize this configuration before expanding to other targets or wider
-batches.
+Current focus: **Q4_K_XL, C1 autoregressive**, at shallow and long context.
+First beat the pinned llama.cpp AR controls, then qualify the improvements with
+Q4_K_M DFlash2. Next apply and qualify them on Q8_K_XL, first AR and then
+DFlash2. Resume C>1 optimization only after those single-user steps.
 Keep the work on one PR branch with incremental, reviewable commits.
 
 Overall target: match llama.cpp generation speed, aiming for a further 10%,

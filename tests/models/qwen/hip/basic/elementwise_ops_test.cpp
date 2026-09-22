@@ -31,20 +31,36 @@
 #include "tests/models/qwen/hip/support/device_buffer.hpp"
 
 void TestGpuRMSNorm() {
-  constexpr std::size_t dim = 256;
-  const std::vector<float> host_input(dim, 1.0F);
-  const std::vector<float> host_weight(dim, 2.0F);
-  const std::vector<float> expected(dim, 2.0F);
-  gufo::test::DeviceBuffer<float> input(host_input);
-  gufo::test::DeviceBuffer<float> weight(host_weight);
-  gufo::test::DeviceBuffer<float> output(dim);
-
-  gufo::hip::LaunchRMSNorm(input.data(), weight.data(), output.data(), dim,
-                           1e-6F);
-  HIP_CHECK(hipDeviceSynchronize());
-
-  const auto actual = output.CopyToHost();
-  gufo::test::ExpectSpanNear(expected, actual, 1e-4F, "GPU RMSNorm output");
+  // Cover the real decode width and both neighboring generic-path tails.
+  for (const std::size_t dim : {256U, 5119U, 5120U, 5121U}) {
+    for (const float scale : {0.001F, 1.0F, 100.0F}) {
+      std::vector<float> host_input(dim), host_weight(dim), expected(dim);
+      double sum_squared = 0.0;
+      for (std::size_t i = 0; i < dim; ++i) {
+        host_input[i] =
+            scale * static_cast<float>(static_cast<int>(i % 127) - 63) / 64.0F;
+        host_weight[i] = 0.5F + static_cast<float>(i % 31) / 32.0F;
+        sum_squared += static_cast<double>(host_input[i]) * host_input[i];
+      }
+      const double inverse_rms =
+          1.0 / std::sqrt(sum_squared / static_cast<double>(dim) + 1e-6F);
+      gufo::test::DeviceBuffer<float> input(host_input);
+      gufo::test::DeviceBuffer<float> weight(host_weight);
+      gufo::test::DeviceBuffer<float> output(dim);
+      for (const bool weighted : {false, true}) {
+        for (std::size_t i = 0; i < dim; ++i) {
+          expected[i] = static_cast<float>(host_input[i] * inverse_rms *
+                                           (weighted ? host_weight[i] : 1.0F));
+        }
+        gufo::hip::LaunchRMSNorm(input.data(),
+                                 weighted ? weight.data() : nullptr,
+                                 output.data(), dim, 1e-6F);
+        const auto actual = output.CopyToHost();
+        gufo::test::ExpectSpanNear(expected, actual, 1e-4F,
+                                   "GPU RMSNorm output");
+      }
+    }
+  }
 }
 
 void TestGpuResidualAdd() {

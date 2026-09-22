@@ -626,7 +626,7 @@ public:
       bytes += value;
     };
     const std::size_t logits_count = frontier_logits_.empty()
-                                         ? executor_->CopyLastLogits().size()
+                                         ? model_->GetConfig().vocab_size
                                          : frontier_logits_.size();
     if (logits_count >
         std::numeric_limits<std::size_t>::max() / sizeof(float)) {

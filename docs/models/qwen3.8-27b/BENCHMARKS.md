@@ -29,20 +29,28 @@ Counts, output hashes and binary identities:
 [AR](artifacts/q4-ar-c1-focused.json),
 [DFlash2](artifacts/q4-dflash2-c1-focused.json),
 [paired-controller controls](artifacts/q4-c2-focused.json),
-[C4 and latest C1 controls](artifacts/q4-c4-focused.json).
+[C4 controls](artifacts/q4-c4-focused.json),
+[latest C1 AR controls](artifacts/q4-ar-c1-pruning.json).
 The full comparison tables below remain the September 21 sweep.
 
 | Mode | Depth | pp tok/s | tg tok/s | Draft acceptance |
 | --- | ---: | ---: | ---: | ---: |
-| AR | 0 | 664.15 | 11.97 | — |
-| AR | 32,768 | 503.55 | 10.77 | — |
+| AR | 0 | 673.17 | 12.13 | — |
+| AR | 32,768 | 504.08 | 10.94 | — |
 | AR | 65,536 | 413.81 | 9.82 | — |
 | DFlash2 | 0 | 618.34 | 30.07 | 47.3% |
 | DFlash2 | 32,768 | 473.11 | 21.38 | 44.1% |
 | DFlash2 | 65,536 | 394.63 | 17.03 | 44.5% |
 
-Fresh pinned llama.cpp d0 controls reach **12.01 tok/s AR** and **27.16 tok/s
-DFlash2**, with PP **359.53/344.56 tok/s**, respectively. At d64K its
+The latest AR d0 repeat reaches **12.13 tok/s**, with PP **668.71 tok/s**.
+Fresh pinned llama.cpp AR controls reach **12.08 tok/s** at d0 and
+**10.90 tok/s** at d32K, with PP **359.38/250.69 tok/s**; its d0 repeat
+also reaches **12.08 tok/s**. The AR lead is narrow. Both engines receive
+identical request messages; at d32K Gufo reuses 32,553 prompt tokens and
+llama.cpp 32,552. These are quantized-execution comparisons.
+
+The retained llama.cpp d0 DFlash2 control reaches **27.16 tok/s**, with PP
+**344.56 tok/s**. At d64K its
 DFlash2 reaches **19.52 tok/s TG** and **196.58 tok/s PP** with the same
 request messages as Gufo. Its greedy d0 AR/DFlash2 outputs differ; see
 [evaluation](EVALUATION.md).

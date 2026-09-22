@@ -261,8 +261,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
                vocab_size, hidden_size, arena.stream);
 
     // 5. Parallel GPU Argmax
-    LaunchGPUArgmax(decode_scratch.logits.data(), d_out_token, vocab_size,
-                    arena.stream);
+    LaunchBatchedGPUArgmax(decode_scratch.logits.data(), d_out_token, 1,
+                           vocab_size, ffn_scratch.out, arena.stream);
   }
 }
 

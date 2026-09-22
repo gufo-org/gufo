@@ -9,17 +9,36 @@
 
 namespace gufo::hip {
 
+template<std::size_t CachedDim = 0>
 __global__ void RMSNormKernel(const float* __restrict__ x,
                               const float* __restrict__ weight,
                               float* __restrict__ out, std::size_t dim,
                               float eps) {
   __shared__ float s_sum[256];
   const std::size_t tid = threadIdx.x;
+  static_assert(CachedDim % 256 == 0);
+  constexpr std::size_t cached_items = CachedDim == 0 ? 1 : CachedDim / 256;
+  float values[cached_items];
+  float weights[cached_items];
+  if constexpr (CachedDim != 0) {
+    dim = CachedDim;
+  }
 
   float sum_sq = 0.0F;
-  for (std::size_t i = tid; i < dim; i += blockDim.x) {
-    const float val = x[i];
-    sum_sq += val * val;
+  if constexpr (CachedDim != 0) {
+#pragma unroll
+    for (std::size_t item = 0; item < cached_items; ++item) {
+      const std::size_t i = tid + item * 256;
+      const float val = x[i];
+      values[item] = val;
+      weights[item] = weight != nullptr ? weight[i] : 1.0F;
+      sum_sq += val * val;
+    }
+  } else {
+    for (std::size_t i = tid; i < dim; i += blockDim.x) {
+      const float val = x[i];
+      sum_sq += val * val;
+    }
   }
   s_sum[tid] = sum_sq;
   __syncthreads();
@@ -34,9 +53,16 @@ __global__ void RMSNormKernel(const float* __restrict__ x,
   const float mean_sq = s_sum[0] / static_cast<float>(dim);
   const float inv_rms = rsqrtf(mean_sq + eps);
 
-  for (std::size_t i = tid; i < dim; i += blockDim.x) {
-    const float w = (weight != nullptr) ? weight[i] : 1.0F;
-    out[i] = (x[i] * inv_rms) * w;
+  if constexpr (CachedDim != 0) {
+#pragma unroll
+    for (std::size_t item = 0; item < cached_items; ++item) {
+      out[tid + item * 256] = (values[item] * inv_rms) * weights[item];
+    }
+  } else {
+    for (std::size_t i = tid; i < dim; i += blockDim.x) {
+      const float w = (weight != nullptr) ? weight[i] : 1.0F;
+      out[i] = (x[i] * inv_rms) * w;
+    }
   }
 }
 __global__ void PerHeadRMSNormKernel(const float* __restrict__ x,
@@ -79,7 +105,13 @@ __global__ void PerHeadRMSNormKernel(const float* __restrict__ x,
 }
 void LaunchRMSNorm(const float* x, const float* weight, float* out,
                    std::size_t dim, float eps, hipStream_t stream) {
-  RMSNormKernel<<<1, 256, 0, stream>>>(x, weight, out, dim, eps);
+  // Qwen27B decode reuses this complete row after the reduction. Retain it
+  // in registers, including its weights, without changing the sum tree.
+  if (dim == 5120) {
+    RMSNormKernel<5120><<<1, 256, 0, stream>>>(x, weight, out, dim, eps);
+  } else {
+    RMSNormKernel<><<<1, 256, 0, stream>>>(x, weight, out, dim, eps);
+  }
 }
 void LaunchPerHeadRMSNorm(const float* x, const float* weight, float* out,
                           std::uint32_t num_heads, std::uint32_t head_dim,
