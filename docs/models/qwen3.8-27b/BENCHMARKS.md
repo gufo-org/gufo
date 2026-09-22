@@ -40,13 +40,21 @@ The full comparison tables below remain the September 21 sweep.
 | DFlash2 | 65,536 | 394.63 | 17.03 | 44.5% |
 
 Fresh pinned llama.cpp d0 controls reach **12.01 tok/s AR** and **27.16 tok/s
-DFlash2**, with PP **359.53/344.56 tok/s**, respectively. Its greedy
-AR/DFlash2 outputs differ; see [evaluation](EVALUATION.md).
+DFlash2**, with PP **359.53/344.56 tok/s**, respectively. At d64K its
+DFlash2 reaches **19.52 tok/s TG** and **196.58 tok/s PP** with the same
+request messages as Gufo. Its greedy d0 AR/DFlash2 outputs differ; see
+[evaluation](EVALUATION.md).
 
 The separate tg128 word-repetition check reaches **68.51 tok/s** at d0
 and **41.40 tok/s** at d64K, both with
 **100% draft acceptance**. It adds
 38/41 prompt tokens, respectively; it is not a pp2048 workload.
+
+At **C2**, the same 38-token repetition prompt reaches **23.26 tok/s AR**
+and **97.13 tok/s adaptive DFlash2**, summed across the two individual request
+decode rates. Both 128-token outputs match C1 AR, with zero cache hits and
+100% draft acceptance. Fresh servers, context 4096, one warmup and one measured
+round per mode. [Measurements and focused profile](artifacts/q4-c2-focused.json).
 
 ## Loading and continuation
 

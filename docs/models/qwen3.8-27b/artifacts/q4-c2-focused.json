@@ -1,0 +1,200 @@
+{
+  "date": "2026-09-22",
+  "revision": "07934876848d096558fef58af78debb5239a6ed7",
+  "binary_sha256": "e41234a9bf4f5fc862654ddbbc9de946e64607150693bfaecddaf55cd1fece2c",
+  "model": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+  "model_snapshot": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+  "draft": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+  "draft_snapshot": "2d9571f8ce46e151f61c6499c99dee6079e1d610",
+  "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+  "canonical": {
+    "cppStandard": "C++20",
+    "cpuArchitecture": "x86_64",
+    "cpuLogicalCores": 32,
+    "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "cpuPhysicalCores": 16,
+    "cxxCompiler": "GCC 15.3.0",
+    "gpuArchitecture": "gfx1151",
+    "gpuComputeUnits": 20,
+    "gpuDriver": "amdgpu",
+    "gpuName": "AMD Radeon 8060S Graphics",
+    "gpuPciId": "1002:1586",
+    "kernelRelease": "7.1.8",
+    "memoryTotalBytes": 134309883904,
+    "memoryType": "LPDDR5X (Unified)",
+    "rocmVersion": "7.2.3",
+    "schemaVersion": "1.0.0"
+  },
+  "workload": {
+    "case_id": "repetition_word",
+    "suite_sha256": "b88da26d719c0fa810935f91ea03109e4019c4da6ae35fa339776446dfc049e7",
+    "concurrency": 2,
+    "context_capacity": 4096,
+    "temperature": 0,
+    "seed": 1,
+    "generated_tokens_per_request": 128,
+    "warmup_rounds": 1,
+    "measured_rounds": 1,
+    "cache_prompt": false
+  },
+  "controls": [
+    {
+      "mode": "ar",
+      "decode_tokens_per_second_sum": 23.25912409601709,
+      "rounds": 1,
+      "requests": [
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 192.881412,
+          "decode_ms": 11008.290129,
+          "prefill_tokens_per_second": 197.01224501612418,
+          "decode_tokens_per_second": 11.62760051743182,
+          "draft_tokens": 0,
+          "draft_accepted_tokens": 0,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false
+        },
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 194.782177,
+          "decode_ms": 11004.577270999996,
+          "prefill_tokens_per_second": 195.0897180905828,
+          "decode_tokens_per_second": 11.63152357858527,
+          "draft_tokens": 0,
+          "draft_accepted_tokens": 0,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false
+        }
+      ],
+      "exact_requests": 2
+    },
+    {
+      "mode": "adaptive",
+      "decode_tokens_per_second_sum": 97.12520852702329,
+      "rounds": 1,
+      "requests": [
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 198.654588,
+          "decode_ms": 2636.0688999999998,
+          "prefill_tokens_per_second": 191.28679776577826,
+          "decode_tokens_per_second": 48.557152660159986,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false
+        },
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 201.346802,
+          "decode_ms": 2635.4771199999996,
+          "prefill_tokens_per_second": 188.7290963777016,
+          "decode_tokens_per_second": 48.56805586686331,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false
+        }
+      ],
+      "exact_requests": 2
+    },
+    {
+      "mode": "fixed-six",
+      "decode_tokens_per_second_sum": 86.44943787748328,
+      "rounds": 1,
+      "requests": [
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 198.187136,
+          "decode_ms": 2969.4704480000005,
+          "prefill_tokens_per_second": 191.73797435571197,
+          "decode_tokens_per_second": 43.10532879228033,
+          "draft_tokens": 108,
+          "draft_accepted_tokens": 108,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false
+        },
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 198.445893,
+          "decode_ms": 2953.1117999999997,
+          "prefill_tokens_per_second": 191.48796392576386,
+          "decode_tokens_per_second": 43.344109085202945,
+          "draft_tokens": 108,
+          "draft_accepted_tokens": 108,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false
+        }
+      ],
+      "exact_requests": 2
+    }
+  ],
+  "profile": {
+    "binary_sha256": "e41234a9bf4f5fc862654ddbbc9de946e64607150693bfaecddaf55cd1fece2c",
+    "scope": "Four consecutive saturated decode cycles from the measured second round; excludes startup and prefill. Boundaries follow one target vocabulary projection to the next. Instrumented, not headline timing.",
+    "first_dispatch": 34501,
+    "last_dispatch": 39344,
+    "dispatch_count": 4844,
+    "gpu_kernel_ms": 619.061394,
+    "gpu_busy_ms": 619.061394,
+    "span_ms": 638.051576,
+    "gpu_busy_fraction": 0.9702372304774308,
+    "quantized_projection_gpu_ms": 542.377641,
+    "quantized_projection_fraction": 0.8761290015122474,
+    "cycles": [
+      {
+        "first_dispatch": 34501,
+        "last_dispatch": 35711,
+        "target_first_dispatch": 34746,
+        "draft_and_commit_gpu_ms": 21.648856,
+        "target_gpu_ms": 132.510304
+      },
+      {
+        "first_dispatch": 35712,
+        "last_dispatch": 36922,
+        "target_first_dispatch": 35957,
+        "draft_and_commit_gpu_ms": 22.062253,
+        "target_gpu_ms": 136.539252
+      },
+      {
+        "first_dispatch": 36923,
+        "last_dispatch": 38133,
+        "target_first_dispatch": 37168,
+        "draft_and_commit_gpu_ms": 21.704461,
+        "target_gpu_ms": 130.857563
+      },
+      {
+        "first_dispatch": 38134,
+        "last_dispatch": 39344,
+        "target_first_dispatch": 38379,
+        "draft_and_commit_gpu_ms": 21.598821,
+        "target_gpu_ms": 132.139884
+      }
+    ]
+  },
+  "notes": [
+    "Each mode uses a fresh Nix release server and the same prompt. All measured output hashes equal the C1 AR reference.",
+    "Throughput is the sum of individual server decode rates.",
+    "Background desktop crash reporting remains active. No build or other GPU workload overlaps these controls.",
+    "Fixed-six is a rejected experiment; adaptive remains the default.",
+    "Two earlier AR attempts failed at benchmark report construction because the temporary harness supplied invalid fingerprint metadata; they are not retained measurements."
+  ]
+}

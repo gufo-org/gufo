@@ -75,6 +75,18 @@ measurements are in the existing
 These controller measurements cover Q4 C1; other concurrency levels still need
 performance qualification.
 
+The focused Q4 C2 repetition check retains both complete 128-token C1 AR output
+hashes with AR, adaptive DFlash2 and fixed six-proposal DFlash2. Each mode runs
+on a fresh server with `cache_prompt: false`; every request prefills all 38
+prompt tokens. Both speculative modes accept every proposal. Adaptive is
+faster and remains the default.
+The [C2 artifact](artifacts/q4-c2-focused.json) retains per-request timings and
+a separate profile of four consecutive saturated decode cycles: 97.0%
+GPU-busy, with quantized projections accounting for 87.6% of kernel time.
+Target verification takes 85.9% of kernel time; draft generation and committed
+context injection account for the remainder. This focused control does not
+replace mixed-prompt, sampled or long-context concurrency qualification.
+
 The fresh pinned llama.cpp `68d9053a` d0 controls use the same input messages,
 Q4 target/draft, greedy sampling and context capacity. Its DFlash2 output differs
 from its own AR output after “disjointed, repetitive, and”: AR continues with
@@ -84,6 +96,10 @@ DFlash2 output hashes agree on this prompt. This isolates the observed mismatch
 from Gufo's speculative acceptance, but does not establish which engine better
 matches the original checkpoint. Counts, hashes and pinned binary identity are
 retained in the [focused artifact](artifacts/q4-dflash2-c1-focused.json).
+Its fresh d64K DFlash2 control also uses byte-identical request messages and
+the same context capacity as Gufo. The reference's own d64K AR output has not
+been measured, so its d64K output difference does not establish a speculative
+verification mismatch.
 
 The following results describe the qualification through `b509c070`, before
 lowering the split-K threshold:

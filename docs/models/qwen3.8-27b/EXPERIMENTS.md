@@ -25,6 +25,7 @@
 | Seven-row Q5 token scheduling and output-row groups | Not promoted: byte-exact across three projection shapes and input scales, but cold-weight gains are at most 1.5%; several variants regress. |
 | Compact seven-row Q5 activation staging | Rejected: byte-exact and lower register/LDS use, but cold-weight gains are under 1% on gate/up; down and attention projections regress. Token-step and wave-count variants do not recover a useful gain. |
 | Seven-row Q5 row-first FMA scheduling | Rejected: byte-exact on three cold-weight projection shapes; most variants are 1–3% slower. |
+| Seven-row Q5 wave32 and row-first scheduling | Rejected: byte-exact on three cold-weight shapes and three input scales; no consistent useful gain over wave64. |
 | Fused SSM format specialization and larger output-row groups | Not promoted: no useful cold-weight gain; larger groups were slower despite byte-exact outputs. |
 | 64–256 attention partitions | Rejected: no improvement at 32K, with different FP32 rounding. |
 | Split-attention graph replay | Rejected: matched Q4 AR C1 d0 remains 11.90 tok/s. The existing launch path is already 97.5% GPU-busy. |
@@ -46,14 +47,20 @@
 | Next-tile KV prefetch | Rejected: 144 byte-exact controls through 64K; scalar AR is flat and verification is slower. |
 | Query-row workgroup ordering | Not promoted: 144 byte-exact controls; component gains are at most 1.5%, and padded row groups regress. |
 | FP32 KV staging in shared memory | Rejected: 192 byte-exact controls; sharing conversions does not offset the extra shared-memory cost. |
+| Distributed encoded K/V loads | Rejected: 144 byte-exact partial/output comparisons through 64K; plane-, token- and vector-interleaved loads are slower. |
+| Sixteen-row Q5 activation staging in smaller token groups | Rejected: byte-exact on three cold-weight shapes; halving or quartering shared memory adds more work than it saves. |
+| Sixteen-row Q5 row-first FMA operand schedules | Rejected: byte-exact on three cold-weight shapes; no throughput gain. |
+| Sixteen-row Q5 packed header loads and scalar scale decoding | Rejected: byte-exact on three cold-weight shapes, but slower than the existing shared-scale decoder. |
+| Sixteen-row Q5 wave32 | Rejected: byte-exact on three cold-weight shapes, but substantially slower than wave64; the smaller row group also spills registers. |
+| Six fixed drafts at Q4 C2 | Rejected on perfect-acceptance repetition: exact output, but slower than adaptive. |
 | Two/three query heads per shared KV tile | Rejected: byte-exact, but slower than six-head sharing at 2K and 32K. |
 | Wave64 scalar projections and uniform row addresses | Not promoted: cold-weight gains are flat or mixed; some Q4/Q6 shapes regress. |
 | Copied weights, including a complete GGUF allocation | Not promoted: the complete-copy control has 3–8% lower cold-weight throughput than mapped weights, with identical outputs. |
 | Exact zero-exponent fast path, scalar score broadcast and LDS-only barriers | Not promoted: byte-exact, but no useful gain after shared KV staging. |
 
-Current focus: **Q4_K_XL with Q4_K_M DFlash2, C1**, after retaining the AR
-improvements above. Keep AR as the regression control; optimize this
-configuration before expanding to other targets or concurrency levels.
+Current focus: **Q4_K_XL with Q4_K_M DFlash2, C2**, after retaining the C1 AR
+and speculative improvements above. Keep C1 AR as the regression control;
+optimize this configuration before expanding to other targets or wider batches.
 Keep the work on one PR branch with incremental, reviewable commits.
 
 Overall target: match llama.cpp generation speed, aiming for a further 10%,
@@ -63,7 +70,7 @@ screen d0 and d32K, then expand where needed to isolate or qualify the change.
 Preserve prompt-processing speed, greedy AR/speculative agreement and sampled
 replay. Check cross-engine differences against each engine's AR output.
 
-Iterate with one affected Q4 C1 shape and one control. Do not refresh the
+Iterate with one affected Q4 shape and one control. Do not refresh the
 full benchmark sweep during exploration. Repeat only to resolve noise or a
 failure. Qualify the other configurations after the focused optimization phase,
 or earlier only when a specific correctness concern requires it. Remote GPU time

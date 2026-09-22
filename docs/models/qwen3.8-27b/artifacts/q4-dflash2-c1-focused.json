@@ -397,5 +397,30 @@
     ],
     "maximum_expected_drift_tolerance": 1e-06,
     "maintained_model_check": "qwen_dflash_gpu_test: exact batched layers, logits, selector probabilities, private RNG, adaptive state and persistent replay; all passed."
+  },
+  "reference_deep_control": {
+    "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+    "binary_sha256": "81dee29e5fbc234bbb4ae90c022de9c9d8513d1cefa960550b0bb59d9fc5346f",
+    "nominal_depth": 65536,
+    "context_capacity": 133760,
+    "temperature": 0,
+    "seed": 1,
+    "draft_proposals_limit": 3,
+    "messages_sha256": "a5fcef8fc3147207cc7081ada0c24237dff26444ae9233b207b3aae3e1491ef8",
+    "messages_hash_encoding": "Exact UTF-8 bytes of json.dumps(messages, ensure_ascii=False); checked with cmp against Gufo input.",
+    "same_messages_as_gufo": true,
+    "autoregressive_reference_run": false,
+    "prompt_tokens": 67152,
+    "cached_prompt_tokens": 65111,
+    "prefill_tokens": 2041,
+    "completion_tokens": 128,
+    "prefill_ms": 10382.623,
+    "decode_ms": 6556.979,
+    "prefill_tokens_per_second": 196.57845613772167,
+    "decode_tokens_per_second": 19.521184984731534,
+    "draft_tokens": 140,
+    "draft_accepted_tokens": 79,
+    "completion_sha256": "4b08175e56abe7c2164a91259eb017c9f03fde7d9dbab95189fe2626e45a8616",
+    "cache_hit": true
   }
 }
