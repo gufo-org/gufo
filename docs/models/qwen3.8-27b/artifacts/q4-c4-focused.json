@@ -243,5 +243,728 @@
     "C1 controls use pp2048/tg128 at context capacity 36864; actual prompt length is 2033 tokens. Prior C1 values are retained in q4-c2-focused.json.",
     "The full September 21 benchmark sweep is unchanged. No new Q8 or C6/C8 performance claim is made.",
     "The small end-to-end timing gain is provisional from this focused pair. Projection time also varies in the instrumented profiles; do not attribute its variation to selector fusion."
-  ]
+  ],
+  "four_request_controller": {
+    "source_base_revision": "00de62d3bde2dc490b97a3850d94e6f583bd7edd",
+    "source_dirty": true,
+    "controller_source_patch_sha256": "14bb05a9543d1947a9c931aed6c1f718a75304f22863aebe4ec51be7294ae877",
+    "binary_sha256": "c5ed58565a7aeb132281268c13df58e11160e3b6a4f9c61ecf9982fc9b448806",
+    "relative_costs": [
+      1,
+      1.3,
+      1.33,
+      1.97,
+      2.12,
+      2.29,
+      2.32
+    ],
+    "context_multiplier": 3.2,
+    "calibration": [
+      {
+        "draft_tokens": 1,
+        "requests": 4,
+        "target_rows": 8,
+        "scope": "Four middle complete saturated cycles in the measured second round; instrumented. One fixed-width profile per point.",
+        "median_kernel_ms": 119.72855150000001,
+        "median_span_ms": 124.9035985,
+        "cycles": [
+          {
+            "first_dispatch": 133971,
+            "last_dispatch": 135257,
+            "kernel_ms": 119.680001,
+            "span_ms": 124.917339
+          },
+          {
+            "first_dispatch": 135258,
+            "last_dispatch": 136544,
+            "kernel_ms": 119.646112,
+            "span_ms": 124.889858
+          },
+          {
+            "first_dispatch": 136545,
+            "last_dispatch": 137831,
+            "kernel_ms": 119.845271,
+            "span_ms": 124.772536
+          },
+          {
+            "first_dispatch": 137832,
+            "last_dispatch": 139118,
+            "kernel_ms": 119.777102,
+            "span_ms": 124.940714
+          }
+        ]
+      },
+      {
+        "draft_tokens": 2,
+        "requests": 4,
+        "target_rows": 12,
+        "scope": "Four middle complete saturated cycles in the measured second round; instrumented. One fixed-width profile per point.",
+        "median_kernel_ms": 156.91461249999998,
+        "median_span_ms": 162.971703,
+        "cycles": [
+          {
+            "first_dispatch": 103950,
+            "last_dispatch": 105431,
+            "kernel_ms": 156.538767,
+            "span_ms": 162.572757
+          },
+          {
+            "first_dispatch": 105432,
+            "last_dispatch": 106913,
+            "kernel_ms": 157.430659,
+            "span_ms": 163.693307
+          },
+          {
+            "first_dispatch": 106914,
+            "last_dispatch": 108395,
+            "kernel_ms": 156.938394,
+            "span_ms": 162.774637
+          },
+          {
+            "first_dispatch": 108396,
+            "last_dispatch": 109877,
+            "kernel_ms": 156.890831,
+            "span_ms": 163.168769
+          }
+        ]
+      },
+      {
+        "draft_tokens": 3,
+        "requests": 4,
+        "target_rows": 16,
+        "scope": "Four middle complete saturated cycles in the measured second round; instrumented. One fixed-width profile per point.",
+        "median_kernel_ms": 160.2300975,
+        "median_span_ms": 166.516935,
+        "cycles": [
+          {
+            "first_dispatch": 75086,
+            "last_dispatch": 76442,
+            "kernel_ms": 160.438081,
+            "span_ms": 166.502107
+          },
+          {
+            "first_dispatch": 76443,
+            "last_dispatch": 77799,
+            "kernel_ms": 160.001081,
+            "span_ms": 166.531763
+          },
+          {
+            "first_dispatch": 77800,
+            "last_dispatch": 79156,
+            "kernel_ms": 160.049473,
+            "span_ms": 166.117312
+          },
+          {
+            "first_dispatch": 79157,
+            "last_dispatch": 80513,
+            "kernel_ms": 160.410722,
+            "span_ms": 166.681543
+          }
+        ]
+      },
+      {
+        "draft_tokens": 4,
+        "requests": 4,
+        "target_rows": 20,
+        "scope": "Four middle complete saturated cycles in the measured second round; instrumented. One fixed-width profile per point.",
+        "median_kernel_ms": 237.95577550000002,
+        "median_span_ms": 245.792553,
+        "cycles": [
+          {
+            "first_dispatch": 80583,
+            "last_dispatch": 82442,
+            "kernel_ms": 238.023547,
+            "span_ms": 245.989259
+          },
+          {
+            "first_dispatch": 82443,
+            "last_dispatch": 84302,
+            "kernel_ms": 237.992389,
+            "span_ms": 245.685828
+          },
+          {
+            "first_dispatch": 84303,
+            "last_dispatch": 86162,
+            "kernel_ms": 237.77003,
+            "span_ms": 245.01296
+          },
+          {
+            "first_dispatch": 86163,
+            "last_dispatch": 88022,
+            "kernel_ms": 237.919162,
+            "span_ms": 245.899278
+          }
+        ]
+      },
+      {
+        "draft_tokens": 5,
+        "requests": 4,
+        "target_rows": 24,
+        "scope": "Four middle complete saturated cycles in the measured second round; instrumented. One fixed-width profile per point.",
+        "median_kernel_ms": 257.06994050000003,
+        "median_span_ms": 265.0528915,
+        "cycles": [
+          {
+            "first_dispatch": 69042,
+            "last_dispatch": 70903,
+            "kernel_ms": 256.237074,
+            "span_ms": 264.164088
+          },
+          {
+            "first_dispatch": 70904,
+            "last_dispatch": 72765,
+            "kernel_ms": 256.922952,
+            "span_ms": 264.896057
+          },
+          {
+            "first_dispatch": 72766,
+            "last_dispatch": 74627,
+            "kernel_ms": 257.216929,
+            "span_ms": 265.209726
+          },
+          {
+            "first_dispatch": 74628,
+            "last_dispatch": 76489,
+            "kernel_ms": 257.297269,
+            "span_ms": 265.36537
+          }
+        ]
+      },
+      {
+        "draft_tokens": 6,
+        "requests": 4,
+        "target_rows": 28,
+        "scope": "Four middle complete saturated cycles in the measured second round; instrumented. One fixed-width profile per point.",
+        "median_kernel_ms": 277.53646849999996,
+        "median_span_ms": 285.7048945,
+        "cycles": [
+          {
+            "first_dispatch": 58625,
+            "last_dispatch": 60440,
+            "kernel_ms": 277.562711,
+            "span_ms": 285.662464
+          },
+          {
+            "first_dispatch": 60441,
+            "last_dispatch": 62256,
+            "kernel_ms": 277.487082,
+            "span_ms": 285.747325
+          },
+          {
+            "first_dispatch": 62257,
+            "last_dispatch": 64072,
+            "kernel_ms": 277.710922,
+            "span_ms": 285.921924
+          },
+          {
+            "first_dispatch": 64073,
+            "last_dispatch": 65888,
+            "kernel_ms": 277.510226,
+            "span_ms": 285.630263
+          }
+        ]
+      },
+      {
+        "draft_tokens": 7,
+        "requests": 4,
+        "target_rows": 32,
+        "scope": "Four middle complete saturated cycles in the measured second round; instrumented. One fixed-width profile per point.",
+        "median_kernel_ms": 281.55686649999996,
+        "median_span_ms": 289.37268800000004,
+        "cycles": [
+          {
+            "first_dispatch": 47946,
+            "last_dispatch": 49527,
+            "kernel_ms": 273.907951,
+            "span_ms": 281.649933
+          },
+          {
+            "first_dispatch": 49528,
+            "last_dispatch": 51109,
+            "kernel_ms": 282.247604,
+            "span_ms": 289.910761
+          },
+          {
+            "first_dispatch": 51110,
+            "last_dispatch": 52691,
+            "kernel_ms": 281.32435,
+            "span_ms": 289.14544
+          },
+          {
+            "first_dispatch": 52692,
+            "last_dispatch": 54273,
+            "kernel_ms": 281.789383,
+            "span_ms": 289.599936
+          }
+        ]
+      }
+    ],
+    "controls": {
+      "c4-hard-adaptive": {
+        "binary_sha256": "acb4ef9ce1a8052adcbc85d997f9271dfd2a859e020a3e6f79dadad334d01eda",
+        "decode_tokens_per_second_sum": 47.25987142427732,
+        "requests": [
+          {
+            "case_id": "italian_explanation",
+            "prompt_tokens": 35,
+            "prefill_tokens": 35,
+            "completion_tokens": 128,
+            "decode_ms": 10586.71774,
+            "decode_tokens_per_second": 12.090621771880734,
+            "draft_tokens": 205,
+            "draft_accepted_tokens": 81,
+            "completion_sha256": "32d2d08118d4884222b098facea60e72476e4681782caec643f15d7dd888da84"
+          },
+          {
+            "case_id": "chinese_explanation",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 11091.816273,
+            "decode_tokens_per_second": 11.540039687781439,
+            "draft_tokens": 199,
+            "draft_accepted_tokens": 77,
+            "completion_sha256": "5d9a1d0fb05e0b93f53c79f46005b02a45d962e42fa77c6d4b0983c79e870ef2"
+          },
+          {
+            "case_id": "italian_explanation",
+            "prompt_tokens": 35,
+            "prefill_tokens": 35,
+            "completion_tokens": 128,
+            "decode_ms": 10585.518174000003,
+            "decode_tokens_per_second": 12.09199189836467,
+            "draft_tokens": 205,
+            "draft_accepted_tokens": 81,
+            "completion_sha256": "32d2d08118d4884222b098facea60e72476e4681782caec643f15d7dd888da84"
+          },
+          {
+            "case_id": "chinese_explanation",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 11094.528963999997,
+            "decode_tokens_per_second": 11.53721806625048,
+            "draft_tokens": 199,
+            "draft_accepted_tokens": 77,
+            "completion_sha256": "5d9a1d0fb05e0b93f53c79f46005b02a45d962e42fa77c6d4b0983c79e870ef2"
+          }
+        ]
+      },
+      "c4-hard-fixed3": {
+        "binary_sha256": "acb4ef9ce1a8052adcbc85d997f9271dfd2a859e020a3e6f79dadad334d01eda",
+        "decode_tokens_per_second_sum": 53.76651004441845,
+        "requests": [
+          {
+            "case_id": "italian_explanation",
+            "prompt_tokens": 35,
+            "prefill_tokens": 35,
+            "completion_tokens": 128,
+            "decode_ms": 9095.261747999999,
+            "decode_tokens_per_second": 14.073261830880957,
+            "draft_tokens": 140,
+            "draft_accepted_tokens": 80,
+            "completion_sha256": "32d2d08118d4884222b098facea60e72476e4681782caec643f15d7dd888da84"
+          },
+          {
+            "case_id": "chinese_explanation",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 9948.083950999999,
+            "decode_tokens_per_second": 12.866799338493038,
+            "draft_tokens": 160,
+            "draft_accepted_tokens": 73,
+            "completion_sha256": "5d9a1d0fb05e0b93f53c79f46005b02a45d962e42fa77c6d4b0983c79e870ef2"
+          },
+          {
+            "case_id": "italian_explanation",
+            "prompt_tokens": 35,
+            "prefill_tokens": 35,
+            "completion_tokens": 128,
+            "decode_ms": 9150.778638000002,
+            "decode_tokens_per_second": 13.987880710878581,
+            "draft_tokens": 140,
+            "draft_accepted_tokens": 80,
+            "completion_sha256": "32d2d08118d4884222b098facea60e72476e4681782caec643f15d7dd888da84"
+          },
+          {
+            "case_id": "chinese_explanation",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 9969.959138999997,
+            "decode_tokens_per_second": 12.838568164165878,
+            "draft_tokens": 160,
+            "draft_accepted_tokens": 73,
+            "completion_sha256": "5d9a1d0fb05e0b93f53c79f46005b02a45d962e42fa77c6d4b0983c79e870ef2"
+          }
+        ]
+      },
+      "four-hard": {
+        "binary_sha256": "c5ed58565a7aeb132281268c13df58e11160e3b6a4f9c61ecf9982fc9b448806",
+        "decode_tokens_per_second_sum": 59.993615721791784,
+        "requests": [
+          {
+            "case_id": "italian_explanation",
+            "prompt_tokens": 35,
+            "prefill_tokens": 35,
+            "completion_tokens": 128,
+            "decode_ms": 8024.423128,
+            "decode_tokens_per_second": 15.951302412426823,
+            "draft_tokens": 137,
+            "draft_accepted_tokens": 79,
+            "completion_sha256": "32d2d08118d4884222b098facea60e72476e4681782caec643f15d7dd888da84"
+          },
+          {
+            "case_id": "chinese_explanation",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 9197.166366000001,
+            "decode_tokens_per_second": 13.917330067355223,
+            "draft_tokens": 126,
+            "draft_accepted_tokens": 69,
+            "completion_sha256": "5d9a1d0fb05e0b93f53c79f46005b02a45d962e42fa77c6d4b0983c79e870ef2"
+          },
+          {
+            "case_id": "italian_explanation",
+            "prompt_tokens": 35,
+            "prefill_tokens": 35,
+            "completion_tokens": 128,
+            "decode_ms": 7908.441150000001,
+            "decode_tokens_per_second": 16.185237719066798,
+            "draft_tokens": 138,
+            "draft_accepted_tokens": 80,
+            "completion_sha256": "32d2d08118d4884222b098facea60e72476e4681782caec643f15d7dd888da84"
+          },
+          {
+            "case_id": "chinese_explanation",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 9182.377095,
+            "decode_tokens_per_second": 13.939745522942935,
+            "draft_tokens": 126,
+            "draft_accepted_tokens": 69,
+            "completion_sha256": "5d9a1d0fb05e0b93f53c79f46005b02a45d962e42fa77c6d4b0983c79e870ef2"
+          }
+        ]
+      },
+      "four-repetition": {
+        "binary_sha256": "c5ed58565a7aeb132281268c13df58e11160e3b6a4f9c61ecf9982fc9b448806",
+        "decode_tokens_per_second_sum": 109.33398095304545,
+        "requests": [
+          {
+            "case_id": "repetition_word",
+            "prompt_tokens": 38,
+            "prefill_tokens": 38,
+            "completion_tokens": 128,
+            "decode_ms": 4707.078727,
+            "decode_tokens_per_second": 27.193086715500776,
+            "draft_tokens": 108,
+            "draft_accepted_tokens": 108,
+            "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
+          },
+          {
+            "case_id": "repetition_word",
+            "prompt_tokens": 38,
+            "prefill_tokens": 38,
+            "completion_tokens": 128,
+            "decode_ms": 4659.652801,
+            "decode_tokens_per_second": 27.469857834156684,
+            "draft_tokens": 108,
+            "draft_accepted_tokens": 108,
+            "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
+          },
+          {
+            "case_id": "repetition_word",
+            "prompt_tokens": 38,
+            "prefill_tokens": 38,
+            "completion_tokens": 128,
+            "decode_ms": 4660.843448,
+            "decode_tokens_per_second": 27.462840455395618,
+            "draft_tokens": 108,
+            "draft_accepted_tokens": 108,
+            "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
+          },
+          {
+            "case_id": "repetition_word",
+            "prompt_tokens": 38,
+            "prefill_tokens": 38,
+            "completion_tokens": 128,
+            "decode_ms": 4704.464795999999,
+            "decode_tokens_per_second": 27.208195947992383,
+            "draft_tokens": 108,
+            "draft_accepted_tokens": 108,
+            "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
+          }
+        ]
+      },
+      "four-baseline-mixed": {
+        "binary_sha256": "acb4ef9ce1a8052adcbc85d997f9271dfd2a859e020a3e6f79dadad334d01eda",
+        "decode_tokens_per_second_sum": 66.9122405455013,
+        "requests": [
+          {
+            "case_id": "expository_pangram",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 7393.669867999999,
+            "decode_tokens_per_second": 17.312106475566,
+            "draft_tokens": 140,
+            "draft_accepted_tokens": 104,
+            "completion_sha256": "27c5becfc3161ccfb9eee411e72e02e924900e0bbbe09da0747f459fbc782d16"
+          },
+          {
+            "case_id": "reasoning_train",
+            "prompt_tokens": 53,
+            "prefill_tokens": 53,
+            "completion_tokens": 128,
+            "decode_ms": 7794.625870000002,
+            "decode_tokens_per_second": 16.42157072511294,
+            "draft_tokens": 152,
+            "draft_accepted_tokens": 102,
+            "completion_sha256": "6e286858188df36e9c6c9b6e6aad95b68c862d127625bd3a6fbfd2d9eeef4500"
+          },
+          {
+            "case_id": "expository_pangram",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 7523.871700000001,
+            "decode_tokens_per_second": 17.012517637694433,
+            "draft_tokens": 143,
+            "draft_accepted_tokens": 104,
+            "completion_sha256": "27c5becfc3161ccfb9eee411e72e02e924900e0bbbe09da0747f459fbc782d16"
+          },
+          {
+            "case_id": "reasoning_train",
+            "prompt_tokens": 53,
+            "prefill_tokens": 53,
+            "completion_tokens": 128,
+            "decode_ms": 7917.829896,
+            "decode_tokens_per_second": 16.16604570712793,
+            "draft_tokens": 150,
+            "draft_accepted_tokens": 101,
+            "completion_sha256": "6e286858188df36e9c6c9b6e6aad95b68c862d127625bd3a6fbfd2d9eeef4500"
+          }
+        ]
+      },
+      "four-mixed": {
+        "binary_sha256": "c5ed58565a7aeb132281268c13df58e11160e3b6a4f9c61ecf9982fc9b448806",
+        "decode_tokens_per_second_sum": 75.64212702784208,
+        "requests": [
+          {
+            "case_id": "expository_pangram",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 6467.895705000002,
+            "decode_tokens_per_second": 19.79005318546644,
+            "draft_tokens": 113,
+            "draft_accepted_tokens": 96,
+            "completion_sha256": "27c5becfc3161ccfb9eee411e72e02e924900e0bbbe09da0747f459fbc782d16"
+          },
+          {
+            "case_id": "reasoning_train",
+            "prompt_tokens": 53,
+            "prefill_tokens": 53,
+            "completion_tokens": 128,
+            "decode_ms": 7011.762558000001,
+            "decode_tokens_per_second": 18.25503914903103,
+            "draft_tokens": 128,
+            "draft_accepted_tokens": 93,
+            "completion_sha256": "6e286858188df36e9c6c9b6e6aad95b68c862d127625bd3a6fbfd2d9eeef4500"
+          },
+          {
+            "case_id": "expository_pangram",
+            "prompt_tokens": 30,
+            "prefill_tokens": 30,
+            "completion_tokens": 128,
+            "decode_ms": 6598.547696000001,
+            "decode_tokens_per_second": 19.3982078931691,
+            "draft_tokens": 113,
+            "draft_accepted_tokens": 96,
+            "completion_sha256": "27c5becfc3161ccfb9eee411e72e02e924900e0bbbe09da0747f459fbc782d16"
+          },
+          {
+            "case_id": "reasoning_train",
+            "prompt_tokens": 53,
+            "prefill_tokens": 53,
+            "completion_tokens": 128,
+            "decode_ms": 7033.420417999999,
+            "decode_tokens_per_second": 18.198826800175507,
+            "draft_tokens": 124,
+            "draft_accepted_tokens": 93,
+            "completion_sha256": "6e286858188df36e9c6c9b6e6aad95b68c862d127625bd3a6fbfd2d9eeef4500"
+          }
+        ]
+      },
+      "four-baseline-d32": {
+        "binary_sha256": "acb4ef9ce1a8052adcbc85d997f9271dfd2a859e020a3e6f79dadad334d01eda",
+        "decode_tokens_per_second_sum": 37.85921532336325,
+        "requests": [
+          {
+            "case_id": null,
+            "prompt_tokens": 34563,
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "prefill_ms": 5551.81067,
+            "decode_ms": 13846.894739999998,
+            "prefill_tokens_per_second": 362.22416784972967,
+            "decode_tokens_per_second": 9.243949809934065,
+            "draft_tokens": 184,
+            "draft_accepted_tokens": 83,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+            "cache_hit": true,
+            "physical_execution_width": 4
+          },
+          {
+            "case_id": null,
+            "prompt_tokens": 34563,
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "prefill_ms": 4205.458619,
+            "decode_ms": 12946.982892,
+            "prefill_tokens_per_second": 478.1880365947313,
+            "decode_tokens_per_second": 9.886473247685512,
+            "draft_tokens": 186,
+            "draft_accepted_tokens": 82,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+            "cache_hit": true,
+            "physical_execution_width": 4
+          },
+          {
+            "case_id": null,
+            "prompt_tokens": 34563,
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "prefill_ms": 5418.576205,
+            "decode_ms": 13503.515428,
+            "prefill_tokens_per_second": 371.13070369746697,
+            "decode_tokens_per_second": 9.479013126803085,
+            "draft_tokens": 184,
+            "draft_accepted_tokens": 83,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+            "cache_hit": true,
+            "physical_execution_width": 4
+          },
+          {
+            "case_id": null,
+            "prompt_tokens": 34563,
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "prefill_ms": 5439.588582,
+            "decode_ms": 13838.168249999999,
+            "prefill_tokens_per_second": 369.6970772117853,
+            "decode_tokens_per_second": 9.24977913894059,
+            "draft_tokens": 184,
+            "draft_accepted_tokens": 83,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+            "cache_hit": true,
+            "physical_execution_width": 4
+          }
+        ]
+      },
+      "four-d32": {
+        "binary_sha256": "c5ed58565a7aeb132281268c13df58e11160e3b6a4f9c61ecf9982fc9b448806",
+        "decode_tokens_per_second_sum": 38.44371588599222,
+        "requests": [
+          {
+            "case_id": null,
+            "prompt_tokens": 34563,
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "prefill_ms": 5483.972264,
+            "decode_ms": 14295.38732,
+            "prefill_tokens_per_second": 366.70499105208455,
+            "decode_tokens_per_second": 8.953937178107882,
+            "draft_tokens": 144,
+            "draft_accepted_tokens": 74,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+            "cache_hit": true,
+            "physical_execution_width": 4
+          },
+          {
+            "case_id": null,
+            "prompt_tokens": 34563,
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "prefill_ms": 4205.644549,
+            "decode_ms": 11040.793591999993,
+            "prefill_tokens_per_second": 478.1668960773604,
+            "decode_tokens_per_second": 11.593369528504459,
+            "draft_tokens": 142,
+            "draft_accepted_tokens": 80,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+            "cache_hit": true,
+            "physical_execution_width": 4
+          },
+          {
+            "case_id": null,
+            "prompt_tokens": 34563,
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "prefill_ms": 5442.944933999999,
+            "decode_ms": 14139.992392999999,
+            "prefill_tokens_per_second": 369.4691062255748,
+            "decode_tokens_per_second": 9.052338674762398,
+            "draft_tokens": 143,
+            "draft_accepted_tokens": 74,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+            "cache_hit": true,
+            "physical_execution_width": 4
+          },
+          {
+            "case_id": null,
+            "prompt_tokens": 34563,
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "prefill_ms": 5412.691692,
+            "decode_ms": 14472.973721000004,
+            "prefill_tokens_per_second": 371.53418565706846,
+            "decode_tokens_per_second": 8.844070504617477,
+            "draft_tokens": 139,
+            "draft_accepted_tokens": 73,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+            "cache_hit": true,
+            "physical_execution_width": 4
+          }
+        ]
+      }
+    },
+    "c1_dflash_control": {
+      "case_id": null,
+      "prompt_tokens": 2033,
+      "cached_prompt_tokens": 0,
+      "prefill_tokens": 2033,
+      "completion_tokens": 128,
+      "prefill_ms": 3287.827768,
+      "decode_ms": 4256.234622999999,
+      "prefill_tokens_per_second": 618.3413923888971,
+      "decode_tokens_per_second": 30.07353008885103,
+      "draft_tokens": 186,
+      "draft_accepted_tokens": 88,
+      "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+      "cache_hit": false,
+      "physical_execution_width": 1
+    },
+    "deep_input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+    "notes": [
+      "Only four greedy Q4 drafters select these costs; C1, C2, fixed mode and Q8 choices remain unchanged. Sampled and mixed cohorts retain private decisions and RNG consumption.",
+      "Shallow controls use a fresh server, one warmed measured round, context 4096 and no prompt-cache hits. All candidate outputs match C1 AR.",
+      "The d32K controls use context 36864 and the same cached-prefix/pp2048/tg128 continuation. Each request caches 32552 of 34563 prompt tokens. Prefill and decode interleave as in normal HTTP serving; this is not a synchronized steady-state decode-only measurement.",
+      "Four middle complete GPU cycles per width provide the offline cost estimate. These instrumented runs are calibration, not headline throughput.",
+      "Maintained full-model checks pass, including exact sampled/mixed C2/C4 proposal lengths, IDs, probabilities, private RNG and restored state. Nix release and canonical PR checks passed.",
+      "The 1.5% deep-context timing difference is provisional from one pair; prefill timings are comparable. The larger shallow gains are 26.9% and 13.0%."
+    ]
+  }
 }

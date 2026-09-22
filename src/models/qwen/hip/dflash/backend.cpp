@@ -340,12 +340,12 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
   blocks.reserve(requests.size());
   indices.reserve(requests.size());
   // Sampled and mixed cohorts retain private block choices and RNG replay.
-  // Larger cohorts can split verification into chunks and need separate costs.
-  const bool paired_greedy =
-      requests.size() == 2 &&
-      std::ranges::all_of(requests, [](const auto& request) {
-        return request.temperature == 0.0F;
-      });
+  const auto greedy_batch_size =
+      std::ranges::all_of(
+          requests,
+          [](const auto& request) { return request.temperature == 0.0F; })
+          ? requests.size()
+          : 1U;
   for (std::size_t index = 0; index < requests.size(); ++index) {
     const auto& request = requests[index];
     auto& backend = *backends[index];
@@ -354,8 +354,9 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
         request.position < backend.config_.max_context
             ? backend.config_.max_context - request.position - 1U
             : 0U;
-    const auto count = backend.controller_.Choose(
-        std::min(request.max_tokens, budget), request.position, paired_greedy);
+    const auto count =
+        backend.controller_.Choose(std::min(request.max_tokens, budget),
+                                   request.position, greedy_batch_size);
     if (count == 0)
       continue;
     backend.proposed_tokens_.clear();

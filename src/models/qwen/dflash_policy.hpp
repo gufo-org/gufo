@@ -29,7 +29,7 @@ enum class DFlashDraftPolicy : std::uint32_t { kFixed, kAdaptive };
 
 // Select the whole block before drawing any proposals. Sampled decisions use
 // private acceptance history and position, preserving RNG consumption on
-// replay. Paired greedy requests use their measured wider-verification cost.
+// replay. Greedy cohorts use their measured wider-verification cost.
 // Full acceptance is censored: probe upward instead of treating the block limit
 // as the true stopping point.
 class DFlashLengthController {
@@ -46,7 +46,7 @@ public:
 
   [[nodiscard]] std::uint32_t Choose(
       std::uint32_t budget, std::uint32_t position = 0,
-      bool paired_greedy = false) const noexcept {
+      std::size_t greedy_batch_size = 1) const noexcept {
     const auto cap = std::min(budget, limit_);
     if (policy_ == DFlashDraftPolicy::kFixed || cap == 0)
       return cap;
@@ -66,10 +66,13 @@ public:
     std::uint32_t best_length = 1;
     const float context_scale =
         static_cast<float>(position > 2048 ? position - 2048 : 0) / 30720.0F;
-    const auto& q4_costs =
-        paired_greedy ? kQ4PairedRelativeCost : kQ4RelativeCost;
+    const auto& q4_costs = greedy_batch_size == 4   ? kQ4FourRequestRelativeCost
+                           : greedy_batch_size == 2 ? kQ4PairedRelativeCost
+                                                    : kQ4RelativeCost;
     const float q4_context_scale =
-        context_scale * (paired_greedy ? 1.92F : 1.0F);
+        context_scale * (greedy_batch_size == 4   ? 3.20F
+                         : greedy_batch_size == 2 ? 1.92F
+                                                  : 1.0F);
     for (std::uint32_t length = 1; length <= cap; ++length) {
       survival *= probability;
       expected_tokens += survival;
@@ -119,6 +122,12 @@ private:
   // is 2 * 100 / 104, using the existing per-request attention calibration.
   static constexpr std::array<float, kMaxDraftTokens> kQ4PairedRelativeCost{
       1.0F, 1.04F, 1.10F, 1.48F, 1.45F, 1.50F, 1.50F};
+  // Four-request cycles cross another projection cliff above sixteen rows.
+  // One fixed-width profile per point gives 125/163/167/246/265/286/289 ms.
+  // The context multiplier is 4 * 100 / 125.
+  static constexpr std::array<float, kMaxDraftTokens>
+      kQ4FourRequestRelativeCost{1.0F,  1.30F, 1.33F, 1.97F,
+                                 2.12F, 2.29F, 2.32F};
   // Extra cost from 2K to 32K for the target's 16 full-attention layers,
   // relative to the roughly 100 ms shallow draft/verification cycle. These
   // cold-KV measurements include the anchor plus 1–7 proposals and preserve

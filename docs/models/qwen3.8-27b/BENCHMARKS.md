@@ -28,15 +28,16 @@ recorded, and small timing differences remain provisional.
 Counts, output hashes and binary identities:
 [AR](artifacts/q4-ar-c1-focused.json),
 [DFlash2](artifacts/q4-dflash2-c1-focused.json),
-[paired-controller and C1 controls](artifacts/q4-c2-focused.json).
+[paired-controller controls](artifacts/q4-c2-focused.json),
+[C4 and latest C1 controls](artifacts/q4-c4-focused.json).
 The full comparison tables below remain the September 21 sweep.
 
 | Mode | Depth | pp tok/s | tg tok/s | Draft acceptance |
 | --- | ---: | ---: | ---: | ---: |
-| AR | 0 | 665.99 | 11.97 | — |
+| AR | 0 | 664.15 | 11.97 | — |
 | AR | 32,768 | 503.55 | 10.77 | — |
 | AR | 65,536 | 413.81 | 9.82 | — |
-| DFlash2 | 0 | 610.18 | 30.05 | 47.3% |
+| DFlash2 | 0 | 618.34 | 30.07 | 47.3% |
 | DFlash2 | 32,768 | 473.11 | 21.38 | 44.1% |
 | DFlash2 | 65,536 | 394.63 | 17.03 | 44.5% |
 
@@ -68,14 +69,23 @@ continuation, with **58.3% acceptance**. Each request reuses 32,552 cached
 tokens and prefills 2,011 new tokens; both complete outputs match C1 AR.
 Context capacity 36864, one measured pair.
 
-**C4**, Q4 adaptive DFlash2 word repetition: **109.02 tok/s**, summing
-individual decode rates. Each request prefills 38 tokens and generates 128;
-all outputs match C1 AR, with **100% acceptance** and no cache hits.
-Fresh server, context 4096, one warmup and one measured round.
-The same build retains C1 AR/DFlash2 at **11.97/30.05 tok/s** and
-pp2048 at **664.15/613.00 tok/s**.
+**C4**, Q4 adaptive DFlash2, sum of individual decode rates:
+
+| Workload | tok/s | Draft acceptance |
+| --- | ---: | ---: |
+| Word repetition | 109.33 | 100% |
+| Pangram / train problem | 75.64 | 79.1% |
+| Italian / Chinese explanations | 59.99 | 56.4% |
+| d32K continuation, pp2048/tg128 | 38.44 | 53.0% |
+
+All 16 complete outputs match C1 AR. Shallow controls use context 4096,
+30–53 prompt tokens, tg128, no cache hits and one warmed measured round.
+At d32K, each request reuses 32,552 tokens and prefills 2,011; prefill and decode
+interleave normally, with context capacity 36864 and one measured cohort.
+The same controller build retains C1 DFlash2 at **30.07 tok/s** and
+pp2048 at **618.34 tok/s**, with unchanged output and acceptance.
 [Focused C4 measurements and profile](artifacts/q4-c4-focused.json).
-Ordinary C4 prompts and deeper C4 performance remain **TODO**.
+C4 beyond d32K and current C6/C8 performance remain **TODO**.
 
 ## Loading and continuation
 

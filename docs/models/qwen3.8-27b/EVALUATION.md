@@ -56,7 +56,7 @@ An independent geometric-distribution check verifies zero expected feedback
 drift at every width 1–7, away from the saturation cap; a fixed success
 increment biased the estimate according to block width.
 Sampled requests use private positions and acceptance history before drawing
-proposals. Greedy Q4 pairs additionally select measured paired costs; fixed
+proposals. Greedy Q4 cohorts of two or four select their measured costs; fixed
 mode, C1 and Q8 cost tables are unchanged.
 The maintained draft check passes exact layers, logits, selector probabilities,
 private RNG and persistent-state replay at C2/C4/C6/C8.
@@ -107,7 +107,18 @@ layers, logits, proposals, probabilities, private RNG and persistent replay.
 Batch partial lists reuse finished FFN buffers; cache formats are unchanged.
 The [focused C4 control](artifacts/q4-c4-focused.json) retains all four complete
 C1 AR outputs and full acceptance. C1 pp2048/tg128 AR and DFlash2 retain output,
-acceptance and speed. Ordinary/deep C4 and C6/C8 performance remain to qualify.
+acceptance and speed.
+
+The C4 cost table covers complete cycles at widths 1–7 and the projection jump
+above sixteen verification rows. It applies only to four greedy Q4 drafters;
+C1, C2, Q8, fixed mode and sampled choices remain unchanged. Sampled and mixed
+C2/C4 cohorts match isolated lengths, token IDs, probabilities, RNG and restored
+state. All twelve shallow and four d32K candidate completions match C1 AR.
+The matched deep control reuses the same 32,552-token prefix and prefills 2,011
+tokens per request, with comparable prefill times. C1 DFlash2 retains its output,
+acceptance and pp2048/tg128 speed. The
+[C4 artifact](artifacts/q4-c4-focused.json) records calibration, per-request
+timings and hashes. Broader depth/C6/C8 performance qualification remains pending.
 
 The fresh pinned llama.cpp `68d9053a` d0 controls use the same input messages,
 Q4 target/draft, greedy sampling and context capacity. Its DFlash2 output differs
