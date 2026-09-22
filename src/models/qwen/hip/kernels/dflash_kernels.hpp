@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
@@ -69,6 +70,24 @@ void LaunchDFlashSelectorStep(
     std::uint32_t* candidate_ids, float* candidate_probabilities,
     std::uint32_t vocab_size, std::uint32_t selector_rank,
     std::uint32_t selector_top_k, hipStream_t stream);
+
+struct DFlashSelectorSequence {
+  std::uint32_t count;
+  float temperature;
+};
+
+// Proposal rows are contiguous by sequence. Each token sequence includes its
+// anchor before the proposal slots; all other buffers contain proposals only.
+// Partial buffers need DFlashSelectorScratchElements(vocab_size) per proposal.
+void LaunchDFlashSelectorBatch(
+    const float* logits, const float* projected_hidden,
+    const void* predecessor_codebook_bf16, const void* successor_codebook_bf16,
+    std::uint32_t* tokens, float* confidences, float* partial_scores,
+    std::uint32_t* partial_ids, const float* uniforms,
+    std::uint32_t* candidate_ids, float* candidate_probabilities,
+    std::span<const DFlashSelectorSequence> sequences, std::uint32_t vocab_size,
+    std::uint32_t selector_rank, std::uint32_t selector_top_k,
+    hipStream_t stream);
 
 }  // namespace gufo::hip::kernels
 #endif  // defined(ENGINE_ENABLE_HIP)

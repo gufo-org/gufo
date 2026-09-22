@@ -96,7 +96,18 @@ fixed-width cost calibration, d32K continuation, C1 pp2048/tg128 controls and a 
 profile of four saturated decode cycles: 97.0% GPU-busy, with quantized
 projections accounting for 87.6% of kernel time. Target verification takes
 85.9%; draft generation and committed context injection account for the
-remainder. Wider concurrency still needs performance qualification.
+remainder.
+
+The batched selector retains exact private token chains and probabilities.
+Ragged operator checks cover C2/C4/C6/C8, top-k 1/7/16, greedy and sampled
+temperatures, tiny positive temperature and zero random draws. A separate
+full-vocabulary comparison matches the original scalar kernel byte-for-byte,
+including the refactored C1 path. The real-weight draft check retains exact
+layers, logits, proposals, probabilities, private RNG and persistent replay.
+Batch partial lists reuse finished FFN buffers; cache formats are unchanged.
+The [focused C4 control](artifacts/q4-c4-focused.json) retains all four complete
+C1 AR outputs and full acceptance. C1 pp2048/tg128 AR and DFlash2 retain output,
+acceptance and speed. Ordinary/deep C4 and C6/C8 performance remain to qualify.
 
 The fresh pinned llama.cpp `68d9053a` d0 controls use the same input messages,
 Q4 target/draft, greedy sampling and context capacity. Its DFlash2 output differs

@@ -306,6 +306,121 @@ void TestSelectorZeroUniform() {
       "a zero random draw must not select zero probability");
 }
 
+void TestBatchedSelector() {
+  using gufo::hip::kernels::DFlashSelectorSequence;
+  using gufo::test::DeviceBuffer;
+  using gufo::test::Expect;
+  constexpr std::uint32_t vocab = 2065, rank = 32;
+  std::vector<std::uint16_t> predecessor(vocab * rank), successor(vocab * rank);
+  for (std::size_t index = 0; index < predecessor.size(); ++index) {
+    predecessor[index] = static_cast<std::uint16_t>(
+        std::bit_cast<std::uint32_t>(Sample(index, 31)) >> 16);
+    successor[index] = static_cast<std::uint16_t>(
+        std::bit_cast<std::uint32_t>(Sample(index, 47)) >> 16);
+  }
+  DeviceBuffer<std::uint16_t> d_predecessor(predecessor),
+      d_successor(successor);
+  const auto exact = [](const auto& left, const auto& right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin(),
+                      [](float a, float b) {
+                        return std::bit_cast<std::uint32_t>(a) ==
+                               std::bit_cast<std::uint32_t>(b);
+                      });
+  };
+  for (const auto users : {2U, 4U, 6U, 8U}) {
+    std::vector<DFlashSelectorSequence> sequences(users);
+    std::uint32_t rows = 0;
+    for (std::uint32_t index = 0; index < users; ++index) {
+      sequences[index] = {1U + (index * 3U) % 7U,
+                          std::array{0.0F, 0.8F, 1e-38F, 1.2F}[index % 4]};
+      rows += sequences[index].count;
+    }
+    std::vector<std::uint32_t> tokens(rows + users, 0);
+    for (std::uint32_t index = 0, offset = 0; index < users; ++index) {
+      tokens[offset] = 7U + index;
+      offset += sequences[index].count + 1U;
+    }
+    std::vector<float> logits(rows * vocab), hidden(rows * rank),
+        uniforms(rows);
+    for (std::size_t index = 0; index < logits.size(); ++index)
+      logits[index] = Sample(index, 73);
+    for (std::size_t index = 0; index < hidden.size(); ++index)
+      hidden[index] = Sample(index, 89);
+    for (std::uint32_t row = 0; row < rows; ++row)
+      uniforms[row] = static_cast<float>((row * 37U) % 101U) / 101.0F;
+    DeviceBuffer<float> d_logits(logits), d_hidden(hidden),
+        d_uniforms(uniforms), d_confidences(rows);
+    DeviceBuffer<std::uint32_t> d_tokens(tokens);
+    const auto partials =
+        gufo::hip::kernels::DFlashSelectorScratchElements(vocab);
+    DeviceBuffer<float> d_scores(rows * partials);
+    DeviceBuffer<std::uint32_t> d_ids(rows * partials);
+    for (const auto top_k : {1U, 7U, 16U}) {
+      DeviceBuffer<float> d_probabilities(
+          std::vector<float>(rows * top_k, -1.0F));
+      DeviceBuffer<std::uint32_t> d_candidates(
+          std::vector<std::uint32_t>(rows * top_k, vocab));
+      d_tokens.CopyFrom(tokens);
+      for (std::uint32_t index = 0, first_row = 0; index < users; ++index) {
+        const auto sequence = sequences[index];
+        for (std::uint32_t step = 0; step < sequence.count; ++step) {
+          const auto row = first_row + step;
+          gufo::hip::kernels::LaunchDFlashSelectorStep(
+              d_logits.data() + row * vocab, d_hidden.data() + row * rank,
+              d_predecessor.data(), d_successor.data(),
+              d_tokens.data() + row + index, d_tokens.data() + row + index + 1U,
+              d_confidences.data() + row, d_scores.data(), d_ids.data(),
+              sequence.temperature, d_uniforms.data() + row,
+              sequence.temperature > 0 ? d_candidates.data() + row * top_k
+                                       : nullptr,
+              sequence.temperature > 0 ? d_probabilities.data() + row * top_k
+                                       : nullptr,
+              vocab, rank, top_k, nullptr);
+        }
+        first_row += sequence.count;
+      }
+      const auto expected_tokens = d_tokens.CopyToHost();
+      const auto expected_candidates = d_candidates.CopyToHost();
+      const auto expected_probabilities = d_probabilities.CopyToHost();
+      const auto expected_confidences = d_confidences.CopyToHost();
+      d_tokens.CopyFrom(tokens);
+      d_candidates.CopyFrom(std::vector<std::uint32_t>(rows * top_k, vocab));
+      d_probabilities.CopyFrom(std::vector<float>(rows * top_k, -1.0F));
+      d_confidences.CopyFrom(std::vector<float>(rows, -1.0F));
+      d_scores.CopyFrom(std::vector<float>(rows * partials, 1e20F));
+      d_ids.CopyFrom(std::vector<std::uint32_t>(rows * partials, vocab - 1));
+      gufo::hip::kernels::LaunchDFlashSelectorBatch(
+          d_logits.data(), d_hidden.data(), d_predecessor.data(),
+          d_successor.data(), d_tokens.data(), d_confidences.data(),
+          d_scores.data(), d_ids.data(), d_uniforms.data(), d_candidates.data(),
+          d_probabilities.data(), sequences, vocab, rank, top_k, nullptr);
+      const auto actual_tokens = d_tokens.CopyToHost();
+      const auto actual_candidates = d_candidates.CopyToHost();
+      const auto actual_probabilities = d_probabilities.CopyToHost();
+      const auto actual_confidences = d_confidences.CopyToHost();
+      const bool matches =
+          actual_tokens == expected_tokens &&
+          actual_candidates == expected_candidates &&
+          exact(actual_probabilities, expected_probabilities) &&
+          exact(actual_confidences, expected_confidences);
+      if (!matches) {
+        std::cerr << "selector C=" << users << " top_k=" << top_k
+                  << " tokens=" << (actual_tokens == expected_tokens)
+                  << " candidates="
+                  << (actual_candidates == expected_candidates)
+                  << " probabilities="
+                  << exact(actual_probabilities, expected_probabilities)
+                  << " confidences="
+                  << exact(actual_confidences, expected_confidences) << '\n';
+      }
+      Expect(matches,
+             "batched selectors must preserve ragged private token chains, "
+             "sampled probabilities and uniforms");
+    }
+  }
+}
+
 /// Runs the reference and one candidate route over the same operands and
 /// reports the largest absolute difference. The kernels accumulate the QK dot
 /// product in a different order -- the reference walks head_dim in one thread,
@@ -492,6 +607,7 @@ int main() {
   TestSelectorZeroUniform();
   TestSelector(2065);
   TestSelector(248320);
+  TestBatchedSelector();
   // No injected history at all: only the eight in-block keys are attended.
   TestRouteEquivalence(0, 0, "empty history");
   // Shallow: the whole history is inside the sliding window.

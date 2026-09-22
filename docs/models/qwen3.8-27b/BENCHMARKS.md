@@ -68,6 +68,15 @@ continuation, with **58.3% acceptance**. Each request reuses 32,552 cached
 tokens and prefills 2,011 new tokens; both complete outputs match C1 AR.
 Context capacity 36864, one measured pair.
 
+**C4**, Q4 adaptive DFlash2 word repetition: **109.02 tok/s**, summing
+individual decode rates. Each request prefills 38 tokens and generates 128;
+all outputs match C1 AR, with **100% acceptance** and no cache hits.
+Fresh server, context 4096, one warmup and one measured round.
+The same build retains C1 AR/DFlash2 at **11.97/30.05 tok/s** and
+pp2048 at **664.15/613.00 tok/s**.
+[Focused C4 measurements and profile](artifacts/q4-c4-focused.json).
+Ordinary C4 prompts and deeper C4 performance remain **TODO**.
+
 ## Loading and continuation
 
 The cold-file-cache loading table is **not measured**: the refresh host has

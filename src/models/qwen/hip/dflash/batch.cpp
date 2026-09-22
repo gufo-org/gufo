@@ -68,8 +68,12 @@ struct BlockWorkspace {
     confidences = take(rows);
     const auto partials =
         kernels::DFlashSelectorScratchElements(config.vocab_size);
-    partial_scores = take(partials);
-    partial_ids = reinterpret_cast<std::uint32_t*>(take(partials));
+    // The FFN buffers are dead before selection. Reuse them for independent
+    // top-k rows instead of reserving another batch-sized allocation.
+    partial_scores =
+        partials <= config.intermediate_size ? gate : take(rows * partials);
+    partial_ids = reinterpret_cast<std::uint32_t*>(
+        partials <= config.intermediate_size ? up : take(rows * partials));
   }
 
   [[nodiscard]] std::size_t Bytes() const { return elements_ * sizeof(float); }
@@ -263,7 +267,6 @@ QwenDFlashGpuExecutor::ForwardBlockBatch(
   const auto& weights = coordinator.model_->GetWeights();
   std::array<std::size_t, 9> offsets{};
   std::array<std::uint32_t, 8> counts{};
-  std::uint32_t max_count = 0;
   for (std::size_t index = 0; index < requests.size(); ++index) {
     const auto& request = requests[index];
     const auto* executor = request.executor;
@@ -284,7 +287,6 @@ QwenDFlashGpuExecutor::ForwardBlockBatch(
       throw std::invalid_argument(
           "DFlash2 block batch is missing sampling draws");
     offsets[index + 1] = offsets[index] + counts[index] + 1U;
-    max_count = std::max(max_count, counts[index]);
   }
   std::vector<speculative::DraftProposal> proposals(requests.size());
   // Keep the single-user path and uncommon topology handling unchanged.
@@ -485,28 +487,16 @@ QwenDFlashGpuExecutor::ForwardBlockBatch(
   ProjectBlock(weights.output, scratch.hidden, scratch.logits, proposal_rows,
                config.vocab_size, hidden_size, stream);
   emit("logits", scratch.logits, config.vocab_size, true);
-  for (std::size_t step = 0; step < max_count; ++step) {
-    for (std::size_t index = 0; index < requests.size(); ++index) {
-      if (step >= counts[index])
-        continue;
-      const auto& request = requests[index];
-      const auto row = offsets[index] - index + step;
-      const auto candidate = row * draft.selector_top_k;
-      kernels::LaunchDFlashSelectorStep(
-          scratch.logits + row * config.vocab_size,
-          scratch.selector + row * draft.selector_rank,
-          weights.selector_predecessor.data, weights.selector_successor.data,
-          scratch.tokens + offsets[index] + step,
-          scratch.tokens + offsets[index] + step + 1U,
-          scratch.confidences + row, scratch.partial_scores,
-          scratch.partial_ids, request.temperature,
-          request.temperature > 0.0F ? scratch.uniforms + row : nullptr,
-          request.temperature > 0.0F ? scratch.candidates + candidate : nullptr,
-          request.temperature > 0.0F ? scratch.probabilities + candidate
-                                     : nullptr,
-          config.vocab_size, draft.selector_rank, draft.selector_top_k, stream);
-    }
-  }
+  std::array<kernels::DFlashSelectorSequence, 8> sequences{};
+  for (std::size_t index = 0; index < requests.size(); ++index)
+    sequences[index] = {counts[index], requests[index].temperature};
+  kernels::LaunchDFlashSelectorBatch(
+      scratch.logits, scratch.selector, weights.selector_predecessor.data,
+      weights.selector_successor.data, scratch.tokens, scratch.confidences,
+      scratch.partial_scores, scratch.partial_ids, scratch.uniforms,
+      scratch.candidates, scratch.probabilities,
+      std::span(sequences).first(requests.size()), config.vocab_size,
+      draft.selector_rank, draft.selector_top_k, stream);
   for (std::size_t index = 0; index < requests.size(); ++index) {
     const auto& request = requests[index];
     auto& proposal = proposals[index];

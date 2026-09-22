@@ -1,0 +1,247 @@
+{
+  "date": "2026-09-22",
+  "model": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+  "model_snapshot": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+  "draft": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+  "draft_snapshot": "2d9571f8ce46e151f61c6499c99dee6079e1d610",
+  "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+  "canonical": {
+    "cppStandard": "C++20",
+    "cpuArchitecture": "x86_64",
+    "cpuLogicalCores": 32,
+    "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "cpuPhysicalCores": 16,
+    "cxxCompiler": "GCC 15.3.0",
+    "gpuArchitecture": "gfx1151",
+    "gpuComputeUnits": 20,
+    "gpuDriver": "amdgpu",
+    "gpuName": "AMD Radeon 8060S Graphics",
+    "gpuPciId": "1002:1586",
+    "kernelRelease": "7.1.8",
+    "memoryTotalBytes": 134309883904,
+    "memoryType": "LPDDR5X (Unified)",
+    "rocmVersion": "7.2.3",
+    "schemaVersion": "1.0.0"
+  },
+  "source_base_revision": "00de62d3bde2dc490b97a3850d94e6f583bd7edd",
+  "source_dirty": true,
+  "selector_source_patch_sha256": "13d7533e728fe7ddf4178a39cb01f6f663b517ec9d5feebcb3f375bb8e8c276c",
+  "controller_artifact": "q4-c2-focused.json",
+  "workload": {
+    "case_id": "repetition_word",
+    "suite_sha256": "b88da26d719c0fa810935f91ea03109e4019c4da6ae35fa339776446dfc049e7",
+    "concurrency": 4,
+    "context_capacity": 4096,
+    "temperature": 0,
+    "seed": 1,
+    "generated_tokens_per_request": 128,
+    "warmup_rounds": 1,
+    "measured_rounds": 1,
+    "cache_prompt": false
+  },
+  "controls": {
+    "baseline": {
+      "binary_sha256": "66c641f25afb090f0e662446a5407f6a221f1532187d24538a8083764d7c2a1e",
+      "decode_tokens_per_second_sum": 107.57889487488835,
+      "requests": [
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 197.012351,
+          "decode_ms": 4756.304024,
+          "prefill_tokens_per_second": 192.88130823838551,
+          "decode_tokens_per_second": 26.91165227330304,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false,
+          "physical_execution_width": 4
+        },
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 199.637718,
+          "decode_ms": 4763.0152990000015,
+          "prefill_tokens_per_second": 190.3447924605109,
+          "decode_tokens_per_second": 26.873732701818888,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false,
+          "physical_execution_width": 4
+        },
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 200.181454,
+          "decode_ms": 4753.968657000002,
+          "prefill_tokens_per_second": 189.82777495461693,
+          "decode_tokens_per_second": 26.924872508683,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false,
+          "physical_execution_width": 4
+        },
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 196.978741,
+          "decode_ms": 4763.918547,
+          "prefill_tokens_per_second": 192.91421910347165,
+          "decode_tokens_per_second": 26.868637391083418,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false,
+          "physical_execution_width": 4
+        }
+      ]
+    },
+    "candidate": {
+      "binary_sha256": "acb4ef9ce1a8052adcbc85d997f9271dfd2a859e020a3e6f79dadad334d01eda",
+      "decode_tokens_per_second_sum": 109.01749704521015,
+      "requests": [
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 198.389617,
+          "decode_ms": 4701.093558999999,
+          "prefill_tokens_per_second": 191.54228217497896,
+          "decode_tokens_per_second": 27.227707424573726,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false,
+          "physical_execution_width": 4
+        },
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 197.963058,
+          "decode_ms": 4693.478048999999,
+          "prefill_tokens_per_second": 191.95500606986988,
+          "decode_tokens_per_second": 27.271886363093124,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false,
+          "physical_execution_width": 4
+        },
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 199.564568,
+          "decode_ms": 4691.191846000001,
+          "prefill_tokens_per_second": 190.41456296991558,
+          "decode_tokens_per_second": 27.285177030042096,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false,
+          "physical_execution_width": 4
+        },
+        {
+          "prompt_tokens": 38,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 38,
+          "completion_tokens": 128,
+          "prefill_ms": 198.550361,
+          "decode_ms": 4700.227179999999,
+          "prefill_tokens_per_second": 191.38721183186365,
+          "decode_tokens_per_second": 27.232726227501207,
+          "draft_tokens": 110,
+          "draft_accepted_tokens": 110,
+          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
+          "cache_hit": false,
+          "physical_execution_width": 4
+        }
+      ]
+    }
+  },
+  "candidate_c1_controls": {
+    "ar": {
+      "prompt_tokens": 2033,
+      "cached_prompt_tokens": 0,
+      "prefill_tokens": 2033,
+      "completion_tokens": 128,
+      "prefill_ms": 3061.064127,
+      "decode_ms": 10694.77519,
+      "prefill_tokens_per_second": 664.1481248524003,
+      "decode_tokens_per_second": 11.968461021946922,
+      "draft_tokens": 0,
+      "draft_accepted_tokens": 0,
+      "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+      "cache_hit": false,
+      "physical_execution_width": 1
+    },
+    "dflash": {
+      "prompt_tokens": 2033,
+      "cached_prompt_tokens": 0,
+      "prefill_tokens": 2033,
+      "completion_tokens": 128,
+      "prefill_ms": 3316.502154,
+      "decode_ms": 4259.2179129999995,
+      "prefill_tokens_per_second": 612.9952297929369,
+      "decode_tokens_per_second": 30.052465643825823,
+      "draft_tokens": 186,
+      "draft_accepted_tokens": 88,
+      "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+      "cache_hit": false,
+      "physical_execution_width": 1
+    }
+  },
+  "profile": {
+    "scope": "Four steady saturated cycles during the measured second C4 round. Boundaries follow one target vocabulary projection to the next. Instrumented; excluded from headline throughput.",
+    "baseline": {
+      "first_dispatch": 52220,
+      "last_dispatch": 58763,
+      "dispatch_count": 6544,
+      "gpu_kernel_ms": 1143.391605,
+      "gpu_busy_ms": 1143.391605,
+      "span_ms": 1170.503683,
+      "quantized_projection_gpu_ms": 1004.889831,
+      "selector_dispatch_count": 224,
+      "selector_gpu_ms": 11.163802
+    },
+    "candidate": {
+      "first_dispatch": 51116,
+      "last_dispatch": 57443,
+      "dispatch_count": 6328,
+      "gpu_kernel_ms": 1120.361571,
+      "gpu_busy_ms": 1120.361571,
+      "span_ms": 1151.788807,
+      "quantized_projection_gpu_ms": 987.38891,
+      "selector_dispatch_count": 8,
+      "selector_gpu_ms": 6.457801
+    }
+  },
+  "qualification": {
+    "original_scalar_bytes": "Exact tokens, candidates, probabilities and confidence at vocab=248320/rank=128/top_k=16, seven proposals, C2/C4/C8, mixed greedy/temperature-0.8 sequences. Both refactored scalar and batch match the original kernel.",
+    "maintained_operator": "Independent selector formulas and exact ragged C2/C4/C6/C8 chains; top_k=1/7/16; temperature=0/0.8/1e-38/1.2; private uniforms including zero.",
+    "real_weights": "Q4 target/Q4_K_M draft: exact layers, logits, proposals, probabilities, private RNG/history and persistent replay at C2/C4/C6/C8.",
+    "nix": "Release and canonical PR checks passed; shared C++ formatting and explicit HIP formatting passed.",
+    "memory": "Batch partial lists reuse dead FFN gate/up scratch; no added persistent allocation or changed snapshot format."
+  },
+  "notes": [
+    "Throughput is the sum of individual request decode rates. Each build uses a fresh server and one warmed measured round; all outputs match the C1 AR reference.",
+    "The candidate was measured before the matched baseline. No build or other GPU workload overlaps these controls.",
+    "C1 controls use pp2048/tg128 at context capacity 36864; actual prompt length is 2033 tokens. Prior C1 values are retained in q4-c2-focused.json.",
+    "The full September 21 benchmark sweep is unchanged. No new Q8 or C6/C8 performance claim is made.",
+    "The small end-to-end timing gain is provisional from this focused pair. Projection time also varies in the instrumented profiles; do not attribute its variation to selector fusion."
+  ]
+}

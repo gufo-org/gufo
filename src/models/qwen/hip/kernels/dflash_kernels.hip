@@ -5,6 +5,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
@@ -487,6 +488,9 @@ __global__ void dflash_selector_partial_topk_kernel(
     const float* __restrict__ logits, float* __restrict__ partial_scores,
     uint32_t* __restrict__ partial_ids, uint32_t vocab_size,
     uint32_t selector_top_k) {
+  logits += uint64_t(blockIdx.y) * vocab_size;
+  partial_scores += uint64_t(blockIdx.y) * gridDim.x * selector_top_k;
+  partial_ids += uint64_t(blockIdx.y) * gridDim.x * selector_top_k;
   __shared__ float shared_scores[kSelectorThreads * kMaxSelectorTopK];
   __shared__ uint32_t shared_ids[kSelectorThreads * kMaxSelectorTopK];
 
@@ -523,7 +527,7 @@ __global__ void dflash_selector_partial_topk_kernel(
   }
 }
 
-__global__ void dflash_selector_finalize_kernel(
+__device__ __forceinline__ void FinalizeSelector(
     const float* __restrict__ partial_scores,
     const uint32_t* __restrict__ partial_ids,
     const float* __restrict__ projected_hidden,
@@ -664,6 +668,66 @@ __global__ void dflash_selector_finalize_kernel(
     if (output_confidence != nullptr) {
       *output_confidence = 1.0F;
     }
+  }
+}
+
+__global__ void dflash_selector_finalize_kernel(
+    const float* partial_scores, const uint32_t* partial_ids,
+    const float* projected_hidden, const hip_bfloat16* predecessor_codebook,
+    const hip_bfloat16* successor_codebook, const uint32_t* predecessor_token,
+    uint32_t* output_token, float* output_confidence, float temperature,
+    const float* sample_uniform, uint32_t* candidate_ids,
+    float* candidate_probabilities, uint32_t partial_count,
+    uint32_t selector_rank, uint32_t selector_top_k) {
+  FinalizeSelector(partial_scores, partial_ids, projected_hidden,
+                   predecessor_codebook, successor_codebook, predecessor_token,
+                   output_token, output_confidence, temperature, sample_uniform,
+                   candidate_ids, candidate_probabilities, partial_count,
+                   selector_rank, selector_top_k);
+}
+
+struct SelectorBatch {
+  DFlashSelectorSequence sequences[8];
+  uint32_t row_offsets[8];
+  uint32_t token_offsets[8];
+};
+
+__global__ void dflash_selector_finalize_batch_kernel(
+    const float* partial_scores, const uint32_t* partial_ids,
+    const float* projected_hidden, const hip_bfloat16* predecessor_codebook,
+    const hip_bfloat16* successor_codebook, uint32_t* tokens,
+    float* confidences, const float* uniforms, uint32_t* candidate_ids,
+    float* candidate_probabilities, SelectorBatch batch, uint32_t partial_count,
+    uint32_t selector_rank, uint32_t selector_top_k) {
+  const auto sequence = batch.sequences[blockIdx.x];
+  __shared__ uint32_t predecessor;
+  if (threadIdx.x == 0U)
+    predecessor = tokens[batch.token_offsets[blockIdx.x]];
+  __syncthreads();
+  for (uint32_t step = 0; step < sequence.count; ++step) {
+    const uint32_t row = batch.row_offsets[blockIdx.x] + step;
+    const uint32_t token = batch.token_offsets[blockIdx.x] + step;
+    const uint64_t partial = uint64_t(row) * partial_count * selector_top_k;
+    const uint64_t candidate = uint64_t(row) * selector_top_k;
+    FinalizeSelector(
+        partial_scores + partial, partial_ids + partial,
+        projected_hidden + uint64_t(row) * selector_rank, predecessor_codebook,
+        successor_codebook, &predecessor, tokens + token + 1U,
+        confidences == nullptr ? nullptr : confidences + row,
+        sequence.temperature,
+        sequence.temperature > 0.0F ? uniforms + row : nullptr,
+        sequence.temperature > 0.0F && candidate_ids != nullptr
+            ? candidate_ids + candidate
+            : nullptr,
+        sequence.temperature > 0.0F && candidate_probabilities != nullptr
+            ? candidate_probabilities + candidate
+            : nullptr,
+        partial_count, selector_rank, selector_top_k);
+    // Thread zero publishes the predecessor for this sequence's next step.
+    // Other sequences own separate token, probability and partial buffers.
+    if (threadIdx.x == 0U)
+      predecessor = tokens[token + 1U];
+    __syncthreads();
   }
 }
 
@@ -812,6 +876,52 @@ void LaunchDFlashSelectorStep(
       predecessor_token, output_token, output_confidence, temperature,
       sample_uniform, candidate_ids, candidate_probabilities, partial_count,
       selector_rank, selector_top_k);
+}
+
+void LaunchDFlashSelectorBatch(
+    const float* logits, const float* projected_hidden,
+    const void* predecessor_codebook_bf16, const void* successor_codebook_bf16,
+    std::uint32_t* tokens, float* confidences, float* partial_scores,
+    std::uint32_t* partial_ids, const float* uniforms,
+    std::uint32_t* candidate_ids, float* candidate_probabilities,
+    std::span<const DFlashSelectorSequence> sequences, std::uint32_t vocab_size,
+    std::uint32_t selector_rank, std::uint32_t selector_top_k,
+    hipStream_t stream) {
+  if (sequences.empty() || sequences.size() > 8 || logits == nullptr ||
+      projected_hidden == nullptr || predecessor_codebook_bf16 == nullptr ||
+      successor_codebook_bf16 == nullptr || tokens == nullptr ||
+      partial_scores == nullptr || partial_ids == nullptr || vocab_size == 0 ||
+      selector_rank == 0 || selector_top_k == 0 ||
+      selector_top_k > kMaxSelectorTopK || selector_top_k > vocab_size)
+    throw std::invalid_argument("invalid DFlash selector batch or scratch");
+  SelectorBatch batch{};
+  std::uint32_t rows = 0;
+  for (std::size_t index = 0; index < sequences.size(); ++index) {
+    const auto sequence = sequences[index];
+    if (sequence.count == 0 ||
+        sequence.count >
+            std::numeric_limits<std::uint32_t>::max() - 8U - rows ||
+        !std::isfinite(sequence.temperature) || sequence.temperature < 0.0F ||
+        (sequence.temperature > 0.0F && uniforms == nullptr))
+      throw std::invalid_argument("invalid DFlash selector sequence");
+    batch.sequences[index] = sequence;
+    batch.row_offsets[index] = rows;
+    batch.token_offsets[index] = rows + static_cast<std::uint32_t>(index);
+    rows += sequence.count;
+  }
+  const auto partial_count = static_cast<std::uint32_t>(
+      (static_cast<std::uint64_t>(vocab_size) + kSelectorTokensPerBlock - 1U) /
+      kSelectorTokensPerBlock);
+  dflash_selector_partial_topk_kernel<<<dim3(partial_count, rows),
+                                        kSelectorThreads, 0, stream>>>(
+      logits, partial_scores, partial_ids, vocab_size, selector_top_k);
+  dflash_selector_finalize_batch_kernel<<<sequences.size(), kSelectorThreads, 0,
+                                          stream>>>(
+      partial_scores, partial_ids, projected_hidden,
+      static_cast<const hip_bfloat16*>(predecessor_codebook_bf16),
+      static_cast<const hip_bfloat16*>(successor_codebook_bf16), tokens,
+      confidences, uniforms, candidate_ids, candidate_probabilities, batch,
+      partial_count, selector_rank, selector_top_k);
 }
 
 }  // namespace gufo::hip::kernels
