@@ -31,8 +31,8 @@ The full comparison tables below remain the September 21 sweep.
 | --- | ---: | ---: | ---: | ---: |
 | AR | 0 | 664.80 | 11.93 | — |
 | AR | 32,768 | 503.55 | 10.77 | — |
-| DFlash2 | 0 | 611.00 | 27.47 | 43.1% |
-| DFlash2 | 32,768 | 474.60 | 19.10 | 40.6% |
+| DFlash2 | 0 | 615.16 | 27.57 | 43.1% |
+| DFlash2 | 32,768 | 474.37 | 20.21 | 40.6% |
 
 ## Loading and continuation
 

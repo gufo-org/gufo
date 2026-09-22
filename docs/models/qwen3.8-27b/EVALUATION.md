@@ -23,25 +23,21 @@ Graph identity includes the target hidden-layer taps and their order. The Q4
 feature value against the reordered reference, with unchanged full logits.
 The 128/257/2048-token and 8K-prefix replay fingerprints also remain unchanged.
 
-Shared FP16 KV tiles preserve the scalar product/FMA order and every head's
-softmax sequence. Thirty direct comparisons cover shared/unshared execution,
-partition boundaries, three input scales and contexts through 32K; partial
-state and complete outputs are byte-identical. Maintained FP64 checks and
-scalar/batched verification comparisons through 64K pass, including the
-512-token dispatch boundary. All 15 Q4 prefill/continuation full-logit and feature
-fingerprints remain unchanged. Matched Q4 AR C1 pp2048/tg128 HTTP controls at d0
-and d32K retain both output hashes and PP speed. This adds only 4 KiB of shared
-memory per active thread block; persistent cache and snapshot formats are unchanged.
-[Focused measurements](artifacts/q4-ar-c1-focused.json).
+Shared FP16 KV tiles preserve each head's scalar product/FMA order and softmax
+sequence. Scalar AR uses 32 lanes per head; verification pairs two 16-lane
+heads per wave. Each half keeps the original lane partials separate until their
+original offset-16 addition, preserving the full reduction tree.
 
-Verification now uses the same shared KV tile. Eighteen additional direct
-comparisons cover 3/8 query rows, three input scales and lengths 511/2048/32765:
-all partial state and complete outputs are byte-identical. Existing
-scalar/batched attention and independent FP64 checks pass. Q4 C1 HTTP controls
-retain both complete outputs and accepted/proposed counts at d0/d32K.
-All 15 prefill/continuation full-logit and feature fingerprints remain unchanged,
-including verification and snapshot replay after the 8K prefix.
-[DFlash2 measurements](artifacts/q4-dflash2-c1-focused.json).
+All 63 direct comparisons are byte-identical in both partial state and output:
+widths 2–8, three input scales and contexts 512/2048/32765. Maintained FP64 checks
+and scalar/batched comparisons through 64K pass, including dispatch boundaries
+and scratch fallback. All 15 full-model logit/feature fingerprints are unchanged,
+including verification and snapshot replay after an 8K prefix. Shared memory
+remains 4 KiB per active block; persistent state and snapshot formats are unchanged.
+Matched C1 pp2048/tg128 controls retain greedy AR/DFlash2 agreement and acceptance
+counts at d0/d32K. Measurements:
+[AR](artifacts/q4-ar-c1-focused.json),
+[DFlash2](artifacts/q4-dflash2-c1-focused.json).
 
 The following results describe the qualification through `b509c070`, before
 lowering the split-K threshold:

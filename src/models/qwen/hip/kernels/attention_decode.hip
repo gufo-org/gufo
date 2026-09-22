@@ -621,17 +621,18 @@ __launch_bounds__(32) __global__ void QwenDecodeSplitKAttentionPartialsKernel(
   }
 }
 
-template<bool ShareKv = false>
-__launch_bounds__(ShareKv ? 192 : 32) __global__
+template<bool ShareKv = false, unsigned Lanes = 32>
+__launch_bounds__(ShareKv ? 6 * Lanes : 32) __global__
     void QwenDecodeSplitKAttentionHalfPartialsKernel(
         const float* __restrict__ q, const __half* __restrict__ k_cache,
         const __half* __restrict__ v_cache, float* __restrict__ scratch,
         std::uint32_t layer_idx, std::uint32_t pos, std::uint32_t max_context,
         std::uint32_t num_heads, std::uint32_t num_kv_heads,
         std::uint32_t split_count) {
+  static_assert(Lanes == 32 || (ShareKv && Lanes == 16));
   constexpr std::uint32_t head_dim = 256;
   constexpr std::uint32_t vector_width = head_dim / 4;
-  constexpr std::uint32_t vectors_per_lane = vector_width / 32;
+  constexpr std::uint32_t vectors_per_lane = vector_width / Lanes;
 
   const std::size_t row = blockIdx.y;
   q += row * num_heads * head_dim;
@@ -640,10 +641,10 @@ __launch_bounds__(ShareKv ? 192 : 32) __global__
   pos += blockIdx.y;
 
   constexpr std::uint32_t heads_per_block = ShareKv ? 6 : 1;
-  const std::uint32_t head = blockIdx.x * heads_per_block + threadIdx.x / 32;
+  const std::uint32_t head = blockIdx.x * heads_per_block + threadIdx.x / Lanes;
   const std::uint32_t split = blockIdx.z;
-  const std::uint32_t lane = threadIdx.x % 32;
-  if (head >= num_heads || split >= split_count || lane >= 32) {
+  const std::uint32_t lane = threadIdx.x % Lanes;
+  if (head >= num_heads || split >= split_count) {
     return;
   }
 
@@ -669,25 +670,45 @@ __launch_bounds__(ShareKv ? 192 : 32) __global__
   float4 output_values[vectors_per_lane] = {};
 #pragma unroll
   for (std::uint32_t vector = 0; vector < vectors_per_lane; ++vector) {
-    query_values[vector] = query[lane + (vector * 32)];
+    query_values[vector] =
+        query[lane + (vector / 2) * Lanes + (vector % 2) * 32];
   }
 
   float running_max = -INFINITY;
   float running_sum = 0.0F;
   const auto accumulate = [&](const __half* key, const __half* value) {
     float score = 0.0F;
+    if constexpr (Lanes == 32) {
 #pragma unroll
-    for (std::uint32_t vector = 0; vector < vectors_per_lane; ++vector) {
-      const float4 query_value = query_values[vector];
-      const float4 key_value = LoadHalf4(key + ((lane + (vector * 32)) * 4));
-      score += (query_value.x * key_value.x) + (query_value.y * key_value.y) +
-               (query_value.z * key_value.z) + (query_value.w * key_value.w);
+      for (std::uint32_t vector = 0; vector < vectors_per_lane; ++vector) {
+        const float4 query_value = query_values[vector];
+        const float4 key_value = LoadHalf4(key + ((lane + (vector * 32)) * 4));
+        score += (query_value.x * key_value.x) + (query_value.y * key_value.y) +
+                 (query_value.z * key_value.z) + (query_value.w * key_value.w);
+      }
+    } else {
+      // Two query heads share a hardware wave. Keep both original lane
+      // partials independent until the original offset-16 reduction stage.
+      float partial[2] = {};
+#pragma unroll
+      for (unsigned half = 0; half < 2; ++half) {
+#pragma unroll
+        for (unsigned vector = 0; vector < 2; ++vector) {
+          const float4 query_value = query_values[half * 2 + vector];
+          const float4 key_value =
+              LoadHalf4(key + ((lane + half * 16 + vector * 32) * 4));
+          partial[half] +=
+              (query_value.x * key_value.x) + (query_value.y * key_value.y) +
+              (query_value.z * key_value.z) + (query_value.w * key_value.w);
+        }
+      }
+      score = partial[0] + partial[1];
     }
 #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-      score += __shfl_down(score, offset);
+    for (int offset = Lanes / 2; offset > 0; offset /= 2) {
+      score += __shfl_down(score, offset, Lanes);
     }
-    score = __shfl(score, 0) * scale;
+    score = __shfl(score, 0, Lanes) * scale;
 
     const float new_max = fmaxf(running_max, score);
     const float previous_scale = expf(running_max - new_max);
@@ -697,7 +718,8 @@ __launch_bounds__(ShareKv ? 192 : 32) __global__
 
 #pragma unroll
     for (std::uint32_t vector = 0; vector < vectors_per_lane; ++vector) {
-      const float4 value_data = LoadHalf4(value + ((lane + (vector * 32)) * 4));
+      const float4 value_data = LoadHalf4(
+          value + ((lane + (vector / 2) * Lanes + (vector % 2) * 32) * 4));
       float4& output = output_values[vector];
       // Preserve the scalar kernel's rounded product and FMA operands.
       output.x =
@@ -721,7 +743,7 @@ __launch_bounds__(ShareKv ? 192 : 32) __global__
       const unsigned count =
           static_cast<unsigned>(min(std::size_t{tile}, partition_end - begin));
       for (unsigned vector = threadIdx.x; vector < count * 32;
-           vector += heads_per_block * 32) {
+           vector += heads_per_block * Lanes) {
         const unsigned token = vector / 32;
         const unsigned dim = (vector % 32) * 8;
         const std::size_t offset =
@@ -759,7 +781,8 @@ __launch_bounds__(ShareKv ? 192 : 32) __global__
   auto* partial_output = partial_outputs + (partition_index * vector_width);
 #pragma unroll
   for (std::uint32_t vector = 0; vector < vectors_per_lane; ++vector) {
-    partial_output[lane + (vector * 32)] = output_values[vector];
+    partial_output[lane + (vector / 2) * Lanes + (vector % 2) * 32] =
+        output_values[vector];
   }
 }
 
@@ -850,10 +873,17 @@ static void LaunchSplitKAttentionHalfPartials(
   // and verification. Rows retain independent causal endpoints and scratch.
   if (num_heads == 6 * num_kv_heads &&
       static_cast<std::size_t>(start_pos) + 1 >= 512) {
-    QwenDecodeSplitKAttentionHalfPartialsKernel<true>
-        <<<dim3(num_kv_heads, rows, splits), 192, 0, stream>>>(
-            q, k_cache, v_cache, scratch, layer_idx, start_pos, max_context,
-            num_heads, num_kv_heads, splits);
+    if (rows > 1) {
+      QwenDecodeSplitKAttentionHalfPartialsKernel<true, 16>
+          <<<dim3(num_kv_heads, rows, splits), 96, 0, stream>>>(
+              q, k_cache, v_cache, scratch, layer_idx, start_pos, max_context,
+              num_heads, num_kv_heads, splits);
+    } else {
+      QwenDecodeSplitKAttentionHalfPartialsKernel<true>
+          <<<dim3(num_kv_heads, rows, splits), 192, 0, stream>>>(
+              q, k_cache, v_cache, scratch, layer_idx, start_pos, max_context,
+              num_heads, num_kv_heads, splits);
+    }
   } else {
     QwenDecodeSplitKAttentionHalfPartialsKernel<>
         <<<dim3(num_heads, rows, splits), 32, 0, stream>>>(

@@ -90,7 +90,7 @@ void TestCausalDecodeRows() {
   DeviceBuffer<float> scratch(rows * row_scratch);
   for (bool fp16 : {false, true}) {
     for (bool gated : {false, true}) {
-      for (unsigned batch : {1U, 3U, rows}) {
+      for (unsigned batch : {1U, 2U, 3U, rows}) {
         for (unsigned start : {0U, 17U, 120U, 124U, 127U, 128U, 504U, 508U,
                                511U, 512U, 8192U, 32768U, 65536U}) {
           float* const cache32 = fp16 ? nullptr : kv.data();

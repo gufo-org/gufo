@@ -88,6 +88,9 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   context. Preserve tie ordering and FP32 ranking. Pack existing KV bytes into
   bounded scratch/head groups without changing persistent precision. Do not
   change softmax reduction order without the model's numerical qualification.
+  Two 16-lane query heads per wave helped verification after preserving both
+  original 32-lane dot partials and their offset-16 addition. Scalar AR stayed
+  faster at 32 lanes; sharing KV across different query rows was slower.
   For long H3 attention, packing V once into dead projection scratch replaced
   repeated scalar LDS gathers. Sharing K/V LDS in sequential phases retained
   occupancy; transposing V anew inside every attention tile was slower.
