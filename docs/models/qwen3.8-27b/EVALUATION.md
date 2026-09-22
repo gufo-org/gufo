@@ -56,8 +56,8 @@ An independent geometric-distribution check verifies zero expected feedback
 drift at every width 1–7, away from the saturation cap; a fixed success
 increment biased the estimate according to block width.
 Sampled requests use private positions and acceptance history before drawing
-proposals. Greedy Q4 cohorts of two or four select their measured costs; fixed
-mode, C1 and Q8 cost tables are unchanged.
+proposals. Greedy Q4 cohorts of two, four, six or eight select their measured
+costs; fixed mode, C1 and Q8 cost tables are unchanged.
 The maintained draft check passes exact layers, logits, selector probabilities,
 private RNG and persistent-state replay at C2/C4/C6/C8.
 The current release reproduces all 32 sampled tokens and draft counts between
@@ -130,7 +130,19 @@ All 18 shallow and six d32K candidate completions match C1 AR; repetition
 retains 100% acceptance. Deep requests reuse 32,552 tokens and prefill 2,011,
 with comparable PP times. The [C6 artifact](artifacts/q4-c6-focused.json)
 retains calibration, binary identities, individual timings and output hashes.
-Broader depths and C8 performance qualification remain pending.
+Broader depths remain pending.
+
+The C8 table covers 16–64 verification rows. A comparison against the previous
+controller retains all 1,511,622 decisions outside adaptive Q4 C8 across
+histories, limits, budgets, positions, cohort sizes, Q8 and fixed mode. Maintained controller
+invariants and the full-weight draft test pass, including independent sampled
+and mixed C8 requests, selector probabilities, RNG and persistent replay.
+All 24 shallow and both eight-request d32K candidate cohorts match C1 AR.
+The second deep cohort checks a 7.48-second PP outlier; it does not recur, and
+typical PP times remain comparable. Both cohorts are retained in the
+[C8 artifact](artifacts/q4-c8-focused.json). The matched AR Italian/Chinese
+control is still faster than DFlash2; these improvements do not establish
+universal speculative profitability or original-checkpoint parity.
 
 The fresh pinned llama.cpp `68d9053a` d0 controls use the same input messages,
 Q4 target/draft, greedy sampling and context capacity. Its DFlash2 output differs

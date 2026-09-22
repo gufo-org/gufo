@@ -50,9 +50,10 @@ public:
     const auto cap = std::min(budget, limit_);
     if (policy_ == DFlashDraftPolicy::kFixed || cap == 0)
       return cap;
-    // Preserve the full-acceptance probe at C6. Extrapolating attention cost
-    // beyond the measured depths must not shorten a saturated block.
-    if (greedy_batch_size == 6 && mean_ == static_cast<float>(limit_))
+    // Preserve the full-acceptance probe at C6/C8. Extrapolating attention
+    // cost beyond the measured depths must not shorten a saturated block.
+    if ((greedy_batch_size == 6 || greedy_batch_size == 8) &&
+        mean_ == static_cast<float>(limit_))
       return cap;
 
     // Weight reads impose a substantial cost even on a short verification.
@@ -70,21 +71,33 @@ public:
     std::uint32_t best_length = 1;
     const float context_scale =
         static_cast<float>(position > 2048 ? position - 2048 : 0) / 30720.0F;
-    const auto& q4_costs = greedy_batch_size == 6   ? kQ4SixRequestRelativeCost
-                           : greedy_batch_size == 4 ? kQ4FourRequestRelativeCost
-                           : greedy_batch_size == 2 ? kQ4PairedRelativeCost
-                                                    : kQ4RelativeCost;
-    const float q4_context_scale =
-        context_scale * (greedy_batch_size == 6   ? 3.50F
-                         : greedy_batch_size == 4 ? 3.20F
-                         : greedy_batch_size == 2 ? 1.92F
-                                                  : 1.0F);
+    const auto* q4_costs = &kQ4RelativeCost;
+    float context_multiplier = 1.0F;
+    switch (greedy_batch_size) {
+      case 2:
+        q4_costs = &kQ4PairedRelativeCost;
+        context_multiplier = 1.92F;
+        break;
+      case 4:
+        q4_costs = &kQ4FourRequestRelativeCost;
+        context_multiplier = 3.20F;
+        break;
+      case 6:
+        q4_costs = &kQ4SixRequestRelativeCost;
+        context_multiplier = 3.50F;
+        break;
+      case 8:
+        q4_costs = &kQ4EightRequestRelativeCost;
+        context_multiplier = 4.42F;
+        break;
+    }
+    const float q4_context_scale = context_scale * context_multiplier;
     for (std::uint32_t length = 1; length <= cap; ++length) {
       survival *= probability;
       expected_tokens += survival;
       const float cost =
           q8_target_ ? 1.0F + 0.02F * static_cast<float>(length)
-                     : q4_costs[length - 1] +
+                     : (*q4_costs)[length - 1] +
                            q4_context_scale * kQ4ContextCost[length - 1];
       const float score = expected_tokens / cost;
       if (score > best_score) {
@@ -138,6 +151,11 @@ private:
   // 171/247/273/323/378/416/423 ms; the context multiplier is 6 * 100 / 171.
   static constexpr std::array<float, kMaxDraftTokens> kQ4SixRequestRelativeCost{
       1.0F, 1.44F, 1.59F, 1.89F, 2.21F, 2.43F, 2.47F};
+  // Eight requests verify 16–64 rows. Measured complete cycles cost
+  // 181/276/304/400/430/523/558 ms; the context multiplier is 8 * 100 / 181.
+  static constexpr std::array<float, kMaxDraftTokens>
+      kQ4EightRequestRelativeCost{1.0F,  1.52F, 1.68F, 2.21F,
+                                  2.38F, 2.89F, 3.08F};
   // Extra cost from 2K to 32K for the target's 16 full-attention layers,
   // relative to the roughly 100 ms shallow draft/verification cycle. These
   // cold-KV measurements include the anchor plus 1–7 proposals and preserve

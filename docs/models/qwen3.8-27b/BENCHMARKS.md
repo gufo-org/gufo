@@ -102,7 +102,23 @@ interleaving. [C6 measurements and profile](artifacts/q4-c6-focused.json).
 The matching Italian/Chinese AR control reaches **59.81 tok/s**, with all six
 outputs identical. Its small gap from DFlash2 is not a demonstrated speculative
 speedup from one sample.
-C4/C6 beyond d32K and current C8 performance remain **TODO**.
+
+**C8**, same Q4 target/draft and sum of individual decode rates:
+
+| Workload | DFlash2 tok/s | Draft acceptance |
+| --- | ---: | ---: |
+| Word repetition | 117.45 | 100% |
+| Pangram / train problem | 85.55 | 78.2% |
+| Italian / Chinese explanations | 67.77 | 61.9% |
+| d32K continuation, pp2048/tg128 | 46.99 | 53.5% |
+
+All outputs match C1 AR. Shallow controls use one warmed measured cohort
+without cache hits. The deep point was repeated once to check a PP outlier;
+both samples are retained, typical PP times match the baseline, and small TG
+differences remain provisional. The same Italian/Chinese control reaches
+**72.97 tok/s with AR**, so speculation is still unprofitable on this case.
+[C8 measurements, calibration and quality checks](artifacts/q4-c8-focused.json).
+C4/C6/C8 beyond d32K remain **TODO**.
 
 ## Loading and continuation
 
