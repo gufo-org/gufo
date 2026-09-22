@@ -51,17 +51,25 @@ and cache formats are unchanged.
 The Q4 adaptive controller includes measured attention-cost growth with context.
 At saturation, its accepted-run estimate remains censored; it probes wider
 profitable blocks instead of treating the configured cap as a rejection.
-Single and batched requests use their own positions and acceptance history.
+Completed blocks update that estimate in proportion to their accepted tokens.
+An independent geometric-distribution check verifies zero expected feedback
+drift at every width 1–7, away from the saturation cap; a fixed success
+increment biased the estimate according to block width.
+Single and batched requests use their own positions and acceptance history
+before drawing proposals. Fixed mode and the cost tables are unchanged.
 The maintained draft check passes exact layers, logits, selector probabilities,
-private RNG and persistent-state replay at C2/C4/C6/C8. A separate 1,147,160-point
-comparison retains the previous shallow controller decisions.
-The controller release at `ddb97672` reproduces all 32 sampled tokens and draft
-counts between cold and cached requests at 32,573 prompt tokens: temperature 0.8,
-top-k 40, top-p 0.9, min-p 0.05, seed 1. The cached replay prefills zero tokens.
+private RNG and persistent-state replay at C2/C4/C6/C8.
+The current release reproduces all 32 sampled tokens and draft counts between
+cold and cached requests at **65,138 prompt tokens**, temperature 0.8 and seed 1.
+The cached replay prefills zero tokens. Changed draft widths can change sampled
+sequences across builds; within-build replay remains deterministic.
 
-Matched Q4 C1 pp2048/tg128 controls retain both complete AR output hashes and PP.
+Matched Q4 C1 pp2048/tg128 controls retain all three complete AR output hashes
+at d0/d32K/d64K. The initial d32K PP reading was lower; the subsequent
+baseline/candidate control agrees at 473.1 tok/s. Both candidate samples are
+retained in the artifact.
 The 128-token repetition controls retain the same output and 100% acceptance at
-d0/d32K. Context-cost calibration, fixed-three-proposal controls and current
+d0/d64K. Context-cost calibration, fixed-three-proposal controls and current
 measurements are in the existing
 [DFlash2 artifact](artifacts/q4-dflash2-c1-focused.json).
 These controller measurements cover Q4 C1; other concurrency levels still need

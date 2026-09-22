@@ -86,8 +86,13 @@ public:
       return;
     drafted = std::min<std::size_t>(drafted, limit_);
     accepted = std::min(accepted, drafted);
+    // For a geometric accepted run with mean m, censoring at any block width
+    // preserves E[accepted - m * rejected] == 0. Weight a completed block by
+    // its accepted tokens too; a fixed increment biases short blocks upward
+    // and long blocks downward.
     mean_ = accepted == drafted
-                ? std::min(mean_ + 1.0F, static_cast<float>(limit_))
+                ? std::min(mean_ + 0.25F * static_cast<float>(accepted),
+                           static_cast<float>(limit_))
                 : 0.75F * mean_ + 0.25F * static_cast<float>(accepted);
   }
 

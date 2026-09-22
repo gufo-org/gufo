@@ -19,9 +19,12 @@ Unmeasured points are **TODO**; the reason is stated next to each table.
 
 ## Current focused controls
 
-**2026-09-22**, Q4_K_XL C1, pp2048/tg128, greedy, context capacity 36864.
-One release sample per point; depth is the nominal cached prefix. Both complete
-128-token outputs match between AR and adaptive Q4_K_M DFlash2, with PP retained.
+**2026-09-22**, Q4_K_XL C1, pp2048/tg128, greedy. Context capacity is 36864
+through d32K and 133760 at d64K. Depth is the nominal cached prefix.
+All three complete 128-token outputs match between AR and adaptive Q4_K_M
+DFlash2. One release sample per point; the DFlash2 d32K control was repeated
+to resolve PP variation. The matching control retains PP; both samples are
+recorded, and small timing differences remain provisional.
 Counts, output hashes and binary identities:
 [AR](artifacts/q4-ar-c1-focused.json),
 [DFlash2](artifacts/q4-dflash2-c1-focused.json).
@@ -31,15 +34,17 @@ The full comparison tables below remain the September 21 sweep.
 | --- | ---: | ---: | ---: | ---: |
 | AR | 0 | 664.80 | 11.93 | — |
 | AR | 32,768 | 503.55 | 10.77 | — |
-| DFlash2 | 0 | 610.58 | 27.87 | 43.1% |
-| DFlash2 | 32,768 | 474.83 | 20.98 | 42.9% |
+| AR | 65,536 | 413.81 | 9.82 | — |
+| DFlash2 | 0 | 615.58 | 29.97 | 47.3% |
+| DFlash2 | 32,768 | 473.11 | 21.38 | 44.1% |
+| DFlash2 | 65,536 | 394.63 | 17.03 | 44.5% |
 
 Fresh pinned llama.cpp d0 controls reach **12.01 tok/s AR** and **27.16 tok/s
 DFlash2**, with PP **359.53/344.56 tok/s**, respectively. Its greedy
 AR/DFlash2 outputs differ; see [evaluation](EVALUATION.md).
 
-The separate tg128 word-repetition check on controller release `ddb97672`
-reaches **68.72 tok/s** at d0 and **51.19 tok/s** at d32K, both with
+The separate tg128 word-repetition check reaches **68.51 tok/s** at d0
+and **41.40 tok/s** at d64K, both with
 **100% draft acceptance**. It adds
 38/41 prompt tokens, respectively; it is not a pp2048 workload.
 

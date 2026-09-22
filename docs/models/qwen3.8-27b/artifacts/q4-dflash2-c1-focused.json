@@ -5,7 +5,6 @@
   "hardware": "gfx1151",
   "mode": "dflash2",
   "concurrency": 1,
-  "context_capacity": 36864,
   "requested_prefill_tokens": 2048,
   "generated_tokens": 128,
   "temperature": 0,
@@ -15,20 +14,21 @@
   "draft_snapshot": "2d9571f8ce46e151f61c6499c99dee6079e1d610",
   "draft_policy": "adaptive",
   "baseline": {
-    "revision": "ddb976722409e34256d44059e568baab2d3bfddb",
-    "binary_sha256": "e49403cd28a143c4d1f3b8a1ea69730a64622f83453813cb2ac7ba7ecbeb9a45"
+    "revision": "29be53156076fc1f3e502d72f907cc4ff00122af",
+    "binary_sha256": "f2b9d7dedba2b17ba7f8fc69bc4511de79a141a53be5085baababfac0f3fc384"
   },
   "candidate": {
-    "base_revision": "ddb976722409e34256d44059e568baab2d3bfddb",
+    "base_revision": "29be53156076fc1f3e502d72f907cc4ff00122af",
     "dirty": true,
-    "binary_sha256": "f2b9d7dedba2b17ba7f8fc69bc4511de79a141a53be5085baababfac0f3fc384",
+    "binary_sha256": "e41234a9bf4f5fc862654ddbbc9de946e64607150693bfaecddaf55cd1fece2c",
     "attention_source_sha256": "b9cbfc5387fd657f0d155ccf97a1cc2ce33564118dd7e686b464a262fbda0f44",
-    "policy_source_sha256": "459ea67ad80bac471199e87461ae700efc1427318429dcae3f37310f1653490c",
+    "policy_source_sha256": "b7333096f4c1c10a075cdd198ea1a1a6644bd411e23d1d285d3d9d6c5e0624c9",
     "draft_attention_source_sha256": "c73878b3a8a718dde3e98c0fe52f945906a1914ab8d595f390655136306bc09f"
   },
   "runs": [
     {
       "nominal_depth": 0,
+      "context_capacity": 36864,
       "prompt_tokens": 2033,
       "cached_prompt_tokens": 0,
       "prefill_tokens": 2033,
@@ -36,24 +36,25 @@
       "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
       "matches_ar_output": true,
       "baseline": {
-        "prefill_ms": 3293.479722,
-        "decode_ms": 4637.236304,
-        "prefill_tokens_per_second": 617.2802542003931,
-        "decode_tokens_per_second": 27.602647699792527,
+        "prefill_ms": 3351.379505,
+        "decode_ms": 4598.414494000001,
+        "prefill_tokens_per_second": 606.6158717527874,
+        "decode_tokens_per_second": 27.835681225999544,
         "draft_tokens": 197,
         "draft_accepted_tokens": 85
       },
       "candidate": {
-        "prefill_ms": 3329.622978,
-        "decode_ms": 4593.180499999999,
-        "prefill_tokens_per_second": 610.5796402273627,
-        "decode_tokens_per_second": 27.86740037758151,
-        "draft_tokens": 197,
-        "draft_accepted_tokens": 85
+        "prefill_ms": 3302.584175,
+        "decode_ms": 4270.817816000001,
+        "prefill_tokens_per_second": 615.5785567524558,
+        "decode_tokens_per_second": 29.97084060117632,
+        "draft_tokens": 186,
+        "draft_accepted_tokens": 88
       }
     },
     {
       "nominal_depth": 32768,
+      "context_capacity": 36864,
       "prompt_tokens": 34563,
       "cached_prompt_tokens": 32552,
       "prefill_tokens": 2011,
@@ -61,20 +62,46 @@
       "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
       "matches_ar_output": true,
       "baseline": {
-        "prefill_ms": 4228.103948,
-        "decode_ms": 6146.424085,
-        "prefill_tokens_per_second": 475.6269062285599,
-        "decode_tokens_per_second": 20.825116885829072,
+        "prefill_ms": 4250.686832,
+        "decode_ms": 6106.055058000001,
+        "prefill_tokens_per_second": 473.10001406379774,
+        "decode_tokens_per_second": 20.962798203448493,
         "draft_tokens": 189,
         "draft_accepted_tokens": 81
       },
       "candidate": {
-        "prefill_ms": 4235.174297,
-        "decode_ms": 6099.645654000001,
-        "prefill_tokens_per_second": 474.8328779347992,
-        "decode_tokens_per_second": 20.984825555573163,
-        "draft_tokens": 189,
-        "draft_accepted_tokens": 81
+        "prefill_ms": 4250.553757,
+        "decode_ms": 5986.84655,
+        "prefill_tokens_per_second": 473.1148257302231,
+        "decode_tokens_per_second": 21.380203907180483,
+        "draft_tokens": 186,
+        "draft_accepted_tokens": 82
+      }
+    },
+    {
+      "nominal_depth": 65536,
+      "context_capacity": 133760,
+      "prompt_tokens": 67152,
+      "cached_prompt_tokens": 65111,
+      "prefill_tokens": 2041,
+      "completion_tokens": 128,
+      "completion_sha256": "d1c24023054df84c662179849627e78085f8368c71c58539615cad7445514baf",
+      "matches_ar_output": true,
+      "baseline": {
+        "prefill_ms": 5175.141936,
+        "decode_ms": 7622.539685,
+        "prefill_tokens_per_second": 394.38531836240634,
+        "decode_tokens_per_second": 16.792303522129842,
+        "draft_tokens": 183,
+        "draft_accepted_tokens": 77
+      },
+      "candidate": {
+        "prefill_ms": 5171.92329,
+        "decode_ms": 7513.962452000002,
+        "prefill_tokens_per_second": 394.63075640474165,
+        "decode_tokens_per_second": 17.034953370831666,
+        "draft_tokens": 173,
+        "draft_accepted_tokens": 77
       }
     }
   ],
@@ -94,52 +121,47 @@
   "repetition_controls": [
     {
       "nominal_depth": 0,
+      "context_capacity": 36864,
       "prompt_tokens": 38,
       "cached_prompt_tokens": 0,
+      "prefill_tokens": 38,
       "completion_tokens": 128,
       "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-      "baseline": {
-        "prefill_ms": 199.036866,
-        "decode_ms": 1867.4244540000002,
-        "prefill_tokens_per_second": 190.9194048503557,
-        "decode_tokens_per_second": 68.54360278180226,
-        "draft_tokens": 110,
-        "draft_accepted_tokens": 110,
-        "binary_sha256": "62fb3add07b011aece82338d7f965440909618ac21b808197912089c8cb6eb0a"
-      },
       "candidate": {
-        "prefill_ms": 197.915065,
-        "decode_ms": 1862.750145,
-        "prefill_tokens_per_second": 192.00155379783746,
-        "decode_tokens_per_second": 68.715603294182,
+        "prefill_ms": 198.071688,
+        "decode_ms": 1868.460758,
+        "prefill_tokens_per_second": 191.84973068942594,
+        "decode_tokens_per_second": 68.50558645770606,
         "draft_tokens": 110,
         "draft_accepted_tokens": 110,
-        "binary_sha256": "e49403cd28a143c4d1f3b8a1ea69730a64622f83453813cb2ac7ba7ecbeb9a45"
+        "binary_sha256": "e41234a9bf4f5fc862654ddbbc9de946e64607150693bfaecddaf55cd1fece2c"
+      },
+      "baseline": {
+        "prefill_ms": 198.788246,
+        "decode_ms": 1871.0984279999998,
+        "prefill_tokens_per_second": 191.15818346724586,
+        "decode_tokens_per_second": 68.4090147715094,
+        "draft_tokens": 110,
+        "draft_accepted_tokens": 110,
+        "binary_sha256": "f2b9d7dedba2b17ba7f8fc69bc4511de79a141a53be5085baababfac0f3fc384"
       }
     },
     {
-      "nominal_depth": 32768,
-      "prompt_tokens": 32593,
-      "cached_prompt_tokens": 32552,
+      "nominal_depth": 65536,
+      "context_capacity": 133760,
+      "prompt_tokens": 65152,
+      "cached_prompt_tokens": 65111,
+      "prefill_tokens": 41,
       "completion_tokens": 128,
       "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-      "baseline": {
-        "prefill_ms": 256.656756,
-        "decode_ms": 2520.650602,
-        "prefill_tokens_per_second": 159.74642802701052,
-        "decode_tokens_per_second": 50.78054050745427,
-        "draft_tokens": 110,
-        "draft_accepted_tokens": 110,
-        "binary_sha256": "62fb3add07b011aece82338d7f965440909618ac21b808197912089c8cb6eb0a"
-      },
       "candidate": {
-        "prefill_ms": 256.595677,
-        "decode_ms": 2500.512963,
-        "prefill_tokens_per_second": 159.78445342241676,
-        "decode_tokens_per_second": 51.18949667288727,
+        "prefill_ms": 312.799902,
+        "decode_ms": 3091.687607,
+        "prefill_tokens_per_second": 131.07420986340335,
+        "decode_tokens_per_second": 41.401336833058636,
         "draft_tokens": 110,
         "draft_accepted_tokens": 110,
-        "binary_sha256": "e49403cd28a143c4d1f3b8a1ea69730a64622f83453813cb2ac7ba7ecbeb9a45"
+        "binary_sha256": "e41234a9bf4f5fc862654ddbbc9de946e64607150693bfaecddaf55cd1fece2c"
       }
     }
   ],
@@ -165,6 +187,22 @@
       "decode_tokens_per_second": 21.38350144762905,
       "draft_tokens": 138,
       "draft_accepted_tokens": 80
+    },
+    {
+      "nominal_depth": 65536,
+      "context_capacity": 133760,
+      "binary_sha256": "f2b9d7dedba2b17ba7f8fc69bc4511de79a141a53be5085baababfac0f3fc384",
+      "prompt_tokens": 67152,
+      "cached_prompt_tokens": 65111,
+      "prefill_tokens": 2041,
+      "completion_tokens": 128,
+      "completion_sha256": "d1c24023054df84c662179849627e78085f8368c71c58539615cad7445514baf",
+      "prefill_ms": 5172.55432,
+      "decode_ms": 7697.801036,
+      "prefill_tokens_per_second": 394.5826131024565,
+      "decode_tokens_per_second": 16.62812527907483,
+      "draft_tokens": 153,
+      "draft_accepted_tokens": 76
     }
   ],
   "controller_cost_calibration": {
@@ -210,19 +248,17 @@
     ]
   },
   "sampled_replay": {
-    "binary_sha256": "e49403cd28a143c4d1f3b8a1ea69730a64622f83453813cb2ac7ba7ecbeb9a45",
+    "binary_sha256": "e41234a9bf4f5fc862654ddbbc9de946e64607150693bfaecddaf55cd1fece2c",
     "temperature": 0.8,
-    "top_k": 40,
-    "top_p": 0.9,
-    "min_p": 0.05,
     "seed": 1,
-    "prompt_tokens": 32573,
+    "other_sampling_options": "server defaults",
+    "prompt_tokens": 65138,
     "completion_tokens": 32,
-    "completion_sha256": "2fe80a78557e5f1fb6069f61742dc7d03b988f6c5af849b8e1c20e568ff6ac91",
+    "completion_sha256": "b4da479b494f5716e55bee3dbf77635f309cb6c6093dad5b0bbe57d97e6b3be2",
     "cold_cached_tokens": 0,
-    "replay_cached_tokens": 32573,
-    "draft_tokens": 51,
-    "draft_accepted_tokens": 19,
+    "replay_cached_tokens": 65138,
+    "draft_tokens": 39,
+    "draft_accepted_tokens": 21,
     "matches_output_and_draft_counts": true
   },
   "draft_attention_qualification": {
@@ -301,5 +337,65 @@
       "dflash2": "syntactically broken phrases",
       "scope": "Observed reference self-disagreement; not original-checkpoint qualification."
     }
+  },
+  "measurement_notes": [
+    "One fresh-server release sample per point, with the standard warmup. Nominal depth tolerance is 2%.",
+    "Desktop crash reporting was active during both binaries. No other GPU workload or build overlapped; small timing differences remain provisional.",
+    "The matched d0 baseline was run after the candidate. At d32 the additional initial candidate sample had lower PP; the subsequent baseline/candidate control agrees on PP. Both candidate samples are retained. The d64 baseline is from earlier the same day."
+  ],
+  "additional_controls": [
+    {
+      "nominal_depth": 32768,
+      "kind": "initial_candidate",
+      "binary_sha256": "e41234a9bf4f5fc862654ddbbc9de946e64607150693bfaecddaf55cd1fece2c",
+      "prompt_tokens": 34563,
+      "cached_prompt_tokens": 32552,
+      "prefill_tokens": 2011,
+      "completion_tokens": 128,
+      "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+      "prefill_ms": 4395.684611,
+      "decode_ms": 6060.121129999999,
+      "prefill_tokens_per_second": 457.4941511880913,
+      "decode_tokens_per_second": 21.121690021400617,
+      "draft_tokens": 186,
+      "draft_accepted_tokens": 82
+    }
+  ],
+  "ar_deep_control": {
+    "nominal_depth": 65536,
+    "context_capacity": 133760,
+    "revision": "29be53156076fc1f3e502d72f907cc4ff00122af",
+    "binary_sha256": "f2b9d7dedba2b17ba7f8fc69bc4511de79a141a53be5085baababfac0f3fc384",
+    "prompt_tokens": 67152,
+    "cached_prompt_tokens": 65112,
+    "prefill_tokens": 2040,
+    "completion_tokens": 128,
+    "completion_sha256": "d1c24023054df84c662179849627e78085f8368c71c58539615cad7445514baf",
+    "prefill_ms": 4929.759866,
+    "decode_ms": 13037.210358999995,
+    "prefill_tokens_per_second": 413.8132597633509,
+    "decode_tokens_per_second": 9.818051291290056,
+    "draft_tokens": 0,
+    "draft_accepted_tokens": 0
+  },
+  "controller_feedback_qualification": {
+    "method": "Enumerate the complete censored geometric distribution at its true mean; expected feedback has zero drift at every width away from the saturation cap.",
+    "means": [
+      0.5,
+      1,
+      3,
+      4
+    ],
+    "draft_widths": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "maximum_expected_drift_tolerance": 1e-06,
+    "maintained_model_check": "qwen_dflash_gpu_test: exact batched layers, logits, selector probabilities, private RNG, adaptive state and persistent replay; all passed."
   }
 }

@@ -62,5 +62,22 @@
         "decode_tokens_per_second": 10.773396207053162
       }
     }
-  ]
+  ],
+  "deep_control": {
+    "nominal_depth": 65536,
+    "context_capacity": 133760,
+    "revision": "29be53156076fc1f3e502d72f907cc4ff00122af",
+    "binary_sha256": "f2b9d7dedba2b17ba7f8fc69bc4511de79a141a53be5085baababfac0f3fc384",
+    "prompt_tokens": 67152,
+    "cached_prompt_tokens": 65112,
+    "prefill_tokens": 2040,
+    "completion_tokens": 128,
+    "completion_sha256": "d1c24023054df84c662179849627e78085f8368c71c58539615cad7445514baf",
+    "prefill_ms": 4929.759866,
+    "decode_ms": 13037.210358999995,
+    "prefill_tokens_per_second": 413.8132597633509,
+    "decode_tokens_per_second": 9.818051291290056,
+    "draft_tokens": 0,
+    "draft_accepted_tokens": 0
+  }
 }

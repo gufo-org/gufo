@@ -95,6 +95,28 @@ void TestLengthController() {
   DFlashLengthController q8(DFlashDraftPolicy::kAdaptive, 7, true);
   Expect(q8.Choose(7, 131072) == q8.Choose(7, 2048),
          "Q4 context calibration leaves the Q8 policy unchanged");
+
+  // Enumerate every outcome of a censored geometric run. At the true mean,
+  // expected feedback must have zero drift regardless of the chosen width.
+  // These means stay below the saturation cap for every possible update.
+  for (const float mean : {0.5F, 1.0F, 3.0F, 4.0F}) {
+    const double probability = mean / (static_cast<double>(mean) + 1.0);
+    for (std::uint32_t width = 1; width <= 7; ++width) {
+      double expected = 0.0;
+      double survival = 1.0;
+      for (std::uint32_t accepted = 0; accepted <= width; ++accepted) {
+        DFlashLengthController estimate(DFlashDraftPolicy::kAdaptive, 7);
+        estimate.Restore(mean);
+        estimate.Observe(accepted, width);
+        const double mass =
+            survival * (accepted < width ? 1.0 - probability : 1.0);
+        expected += mass * estimate.State();
+        survival *= probability;
+      }
+      Expect(std::abs(expected - mean) < 1e-6,
+             "censored feedback must not depend on speculative block width");
+    }
+  }
 }
 
 void TestConcurrentBlocks(
