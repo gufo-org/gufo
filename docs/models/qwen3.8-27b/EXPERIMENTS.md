@@ -20,7 +20,8 @@
 | Parallel attention from 128 tokens | Retained for Q4 AR C1: all 128 greedy tokens unchanged; lower error against FP64 in all 12 component controls. Broader model/mode qualification is deferred. |
 | Wider shallow pipeline, removed broadcast and separate score/value passes | Rejected: worse cold-KV or eight-row costs than the retained two-position pipeline. |
 | Additional GEMV format specialization | Not promoted: Q8 cold components unchanged; Q6 gains at most 3% in the cold component test. |
-| Paired-row GEMV activation reuse | Not promoted: the dominant Q5_K cold component was essentially unchanged. |
+| Paired-row activation reuse and shared input sums | Not promoted: dominant Q5_K cold components were unchanged or slower. |
+| Two-block Q5 weight prefetch | Rejected: byte-exact, but cold-weight throughput is 8–12% lower. |
 | Fused SSM format specialization and larger output-row groups | Not promoted: no useful cold-weight gain; larger groups were slower despite byte-exact outputs. |
 | 64–256 attention partitions | Rejected: no improvement at 32K, with different FP32 rounding. |
 | Split-attention graph replay | Rejected: matched Q4 AR C1 d0 remains 11.90 tok/s. The existing launch path is already 97.5% GPU-busy. |
@@ -28,8 +29,9 @@
 | Residual/RMSNorm fusion and fewer reduction barriers | Rejected: byte-exact component gains did not survive the full model. Q4 AR C1 remains 11.90 tok/s and profile GPU time slightly increases. |
 | Multiple attention heads per thread block | Not promoted: byte-exact through 32K, but cold-KV gains are at most 1.5%. |
 | Shared four-position KV tile across six query heads | Retained: byte-exact; Q4 AR C1 d32K TG improves 2.9%, with shallow TG and PP retained. Existing scalar/batched and full-logit replay checks pass. |
-| Wave64 scalar projections, uniform row addresses and copied weight buffers | Not promoted: cold-weight gains are flat or mixed; some Q4/Q6 shapes regress. |
-| Exact zero-exponent fast path and scalar score broadcast | Not promoted: byte-exact, but no useful gain after shared KV staging. |
+| Wave64 scalar projections and uniform row addresses | Not promoted: cold-weight gains are flat or mixed; some Q4/Q6 shapes regress. |
+| Copied weights, including a complete GGUF allocation | Not promoted: the complete-copy control has 3–8% lower cold-weight throughput than mapped weights, with identical outputs. |
+| Exact zero-exponent fast path, scalar score broadcast and LDS-only barriers | Not promoted: byte-exact, but no useful gain after shared KV staging. |
 
 Current focus: **Q4_K_XL, AR, C1**. Profile and push this configuration first;
 do not repeat every candidate on other targets, speculative modes or concurrency
