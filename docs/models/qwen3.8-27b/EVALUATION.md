@@ -4,8 +4,9 @@ Targets Q4/Q8; DFlash2 drafts Q4_K_M/Q8_0/BF16. Independent original-target,
 conversion and native MTP parity remain **TODO**. Packed-weight operator
 agreement is narrower evidence. [Artifact identities](artifacts/model-identities.json).
 
-The 128-token split-K threshold is currently qualified on **Q4_K_XL AR C1**.
-The matched d0 pp2048/tg128 control retains all 128 greedy tokens and PP speed.
+The 128-token split-K threshold is currently qualified on **Q4_K_XL C1 with
+AR and Q4_K_M DFlash2**. Matched d0/d32K pp2048/tg128 controls retain all 128
+greedy tokens and PP speed; DFlash2 matches AR at both depths.
 Partitioning changes FP32 rounding: twelve controls at 128–4096 tokens and three
 query amplitudes have lower maximum error and RMSE against an independent FP64
 attention formula; the largest new absolute error is **1.17e-6**. Maintained
@@ -14,8 +15,8 @@ boundary. Q4 prefill/snapshot replay retains complete logits and features at
 128, 257 and 2048 tokens, plus an 8K cached prefix with a 1025-token suffix.
 This does not establish original-checkpoint parity.
 Disk-cache identity now includes the partition threshold and count, preventing
-restoration of snapshots computed with the old arithmetic. Broader target/mode
-qualification follows the focused Q4 AR phase.
+restoration of snapshots computed with the old arithmetic. Broader target and
+concurrency qualification follows the focused Q4 C1 phase.
 
 Graph identity includes the target hidden-layer taps and their order. The Q4
 64-token replay check changes that order after capture and verifies every
@@ -32,6 +33,15 @@ fingerprints remain unchanged. Matched Q4 AR C1 pp2048/tg128 HTTP controls at d0
 and d32K retain both output hashes and PP speed. This adds only 4 KiB of shared
 memory per active thread block; persistent cache and snapshot formats are unchanged.
 [Focused measurements](artifacts/q4-ar-c1-focused.json).
+
+Verification now uses the same shared KV tile. Eighteen additional direct
+comparisons cover 3/8 query rows, three input scales and lengths 511/2048/32765:
+all partial state and complete outputs are byte-identical. Existing
+scalar/batched attention and independent FP64 checks pass. Q4 C1 HTTP controls
+retain both complete outputs and accepted/proposed counts at d0/d32K.
+All 15 prefill/continuation full-logit and feature fingerprints remain unchanged,
+including verification and snapshot replay after the 8K prefix.
+[DFlash2 measurements](artifacts/q4-dflash2-c1-focused.json).
 
 The following results describe the qualification through `b509c070`, before
 lowering the split-K threshold:

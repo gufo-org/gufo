@@ -1,0 +1,75 @@
+{
+  "date": "2026-09-22",
+  "model": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+  "model_snapshot": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+  "hardware": "gfx1151",
+  "mode": "dflash2",
+  "concurrency": 1,
+  "context_capacity": 36864,
+  "requested_prefill_tokens": 2048,
+  "generated_tokens": 128,
+  "temperature": 0,
+  "seed": 1,
+  "repetitions": 1,
+  "draft": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+  "draft_snapshot": "2d9571f8ce46e151f61c6499c99dee6079e1d610",
+  "draft_policy": "adaptive",
+  "baseline": {
+    "revision": "40ad73ab5b68a940c76f597bec32b686ec9a8f62",
+    "binary_sha256": "4ff8e51ab37a26274287d15d4836b76a4af90ebe0d7d3998100f0951c7d6d427"
+  },
+  "candidate": {
+    "base_revision": "40ad73ab5b68a940c76f597bec32b686ec9a8f62",
+    "dirty": true,
+    "binary_sha256": "e1ed8ccba2ba488385d1758a73ab181897dd0dba3e0aac844e7ad7c6364590b7",
+    "attention_source_sha256": "c45c7e734bb6662277ecd0a1945e17f1142ef85af06c972c9cd547fc27863bab"
+  },
+  "runs": [
+    {
+      "nominal_depth": 0,
+      "prompt_tokens": 2033,
+      "cached_prompt_tokens": 0,
+      "prefill_tokens": 2033,
+      "completion_tokens": 128,
+      "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+      "draft_tokens": 197,
+      "draft_accepted_tokens": 85,
+      "matches_ar_output": true,
+      "baseline": {
+        "prefill_ms": 3290.237614,
+        "decode_ms": 4667.944988000001,
+        "prefill_tokens_per_second": 617.8885048756239,
+        "decode_tokens_per_second": 27.421060087265957
+      },
+      "candidate": {
+        "prefill_ms": 3327.346491,
+        "decode_ms": 4660.397654,
+        "prefill_tokens_per_second": 610.9973835003287,
+        "decode_tokens_per_second": 27.465467434981246
+      }
+    },
+    {
+      "nominal_depth": 32768,
+      "prompt_tokens": 34563,
+      "cached_prompt_tokens": 32552,
+      "prefill_tokens": 2011,
+      "completion_tokens": 128,
+      "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+      "draft_tokens": 197,
+      "draft_accepted_tokens": 80,
+      "matches_ar_output": true,
+      "baseline": {
+        "prefill_ms": 4236.609091,
+        "decode_ms": 6996.163156,
+        "prefill_tokens_per_second": 474.6720683463689,
+        "decode_tokens_per_second": 18.295742558580205
+      },
+      "candidate": {
+        "prefill_ms": 4237.270078,
+        "decode_ms": 6703.129940999998,
+        "prefill_tokens_per_second": 474.59802254313615,
+        "decode_tokens_per_second": 19.095557019875475
+      }
+    }
+  ]
+}

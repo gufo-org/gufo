@@ -19,16 +19,20 @@ Unmeasured points are **TODO**; the reason is stated next to each table.
 
 ## Current focused controls
 
-**2026-09-22**, Q4_K_XL AR C1, pp2048/tg128, greedy, context capacity 36864.
+**2026-09-22**, Q4_K_XL C1, pp2048/tg128, greedy, context capacity 36864.
 One release sample per point; depth is the nominal cached prefix. Both complete
-128-token outputs match the preceding implementation, with PP retained.
-[Counts, output hashes and binary identities](artifacts/q4-ar-c1-focused.json).
+128-token outputs match between AR and adaptive Q4_K_M DFlash2, with PP retained.
+Counts, output hashes and binary identities:
+[AR](artifacts/q4-ar-c1-focused.json),
+[DFlash2](artifacts/q4-dflash2-c1-focused.json).
 The full comparison tables below remain the September 21 sweep.
 
-| Depth | pp tok/s | tg tok/s |
-| ---: | ---: | ---: |
-| 0 | 664.80 | 11.93 |
-| 32,768 | 503.55 | 10.77 |
+| Mode | Depth | pp tok/s | tg tok/s | Draft acceptance |
+| --- | ---: | ---: | ---: | ---: |
+| AR | 0 | 664.80 | 11.93 | — |
+| AR | 32,768 | 503.55 | 10.77 | — |
+| DFlash2 | 0 | 611.00 | 27.47 | 43.1% |
+| DFlash2 | 32,768 | 474.60 | 19.10 | 40.6% |
 
 ## Loading and continuation
 

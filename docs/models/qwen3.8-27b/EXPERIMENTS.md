@@ -17,7 +17,7 @@
 | Verification queries grouped by KV partition | Retained: unchanged arithmetic and storage; eight-token attention 2.95× faster at 32K and 3.66× at 64K. Matched d32K C1 HTTP TG improves 15.7% on Q4_K_XL and 20.2% on Q8_K_XL with Q4 DFlash2; shallow TG and PP remain comparable. |
 | Split-K two-position KV prefetch and DPP score reductions | Rejected: small single-row component gains did not consistently help eight-row verification. |
 | Shallow attention paired KV loads and DPP reduction | Retained: byte-exact; 12.6% less attention time in the complete AR profile. Matched d0 pp2048/tg128 controls improve TG by 1.4–2.6% across Q4/Q8 AR and Q4 DFlash2, with unchanged outputs and acceptance; PP remains comparable. No extra allocation. |
-| Parallel attention from 128 tokens | Retained for Q4 AR C1: all 128 greedy tokens unchanged; lower error against FP64 in all 12 component controls. Broader model/mode qualification is deferred. |
+| Parallel attention from 128 tokens | Retained for Q4 C1 AR and Q4 DFlash2: greedy outputs match; lower error against FP64 in all 12 component controls. Other targets/concurrency remain to qualify. |
 | Wider shallow pipeline, removed broadcast and separate score/value passes | Rejected: worse cold-KV or eight-row costs than the retained two-position pipeline. |
 | Additional GEMV format specialization | Not promoted: Q8 cold components unchanged; Q6 gains at most 3% in the cold component test. |
 | Paired-row activation reuse and shared input sums | Not promoted: dominant Q5_K cold components were unchanged or slower. |
@@ -29,13 +29,18 @@
 | Residual/RMSNorm fusion and fewer reduction barriers | Rejected: byte-exact component gains did not survive the full model. Q4 AR C1 remains 11.90 tok/s and profile GPU time slightly increases. |
 | Multiple attention heads per thread block | Not promoted: byte-exact through 32K, but cold-KV gains are at most 1.5%. |
 | Shared four-position KV tile across six query heads | Retained: byte-exact; Q4 AR C1 d32K TG improves 2.9%, with shallow TG and PP retained. Existing scalar/batched and full-logit replay checks pass. |
+| Shared KV tile for verification rows | Retained: byte-exact; Q4 DFlash2 C1 d32K TG improves 4.4%. Shallow TG, PP, output hashes and acceptance counts are retained. |
+| KV sharing between adjacent verification rows | Rejected: byte-exact, but slower at 2K/32K than independent row tiles. |
+| Eight-position verification tiles and LDS-only barriers | Not promoted: byte-exact, but gains are small or mixed across 3/7/8 rows, with shallow regressions. |
+| Two/three query heads per shared KV tile | Rejected: byte-exact, but slower than six-head sharing at 2K and 32K. |
 | Wave64 scalar projections and uniform row addresses | Not promoted: cold-weight gains are flat or mixed; some Q4/Q6 shapes regress. |
 | Copied weights, including a complete GGUF allocation | Not promoted: the complete-copy control has 3–8% lower cold-weight throughput than mapped weights, with identical outputs. |
 | Exact zero-exponent fast path, scalar score broadcast and LDS-only barriers | Not promoted: byte-exact, but no useful gain after shared KV staging. |
 
-Current focus: **Q4_K_XL, AR, C1**. Profile and push this configuration first;
-do not repeat every candidate on other targets, speculative modes or concurrency
-levels. Keep the work on one PR branch with incremental, reviewable commits.
+Current focus: **Q4_K_XL with Q4_K_M DFlash2, C1**, after retaining the AR
+improvements above. Keep AR as the regression control; optimize this
+configuration before expanding to other targets or concurrency levels.
+Keep the work on one PR branch with incremental, reviewable commits.
 
 Overall target: match llama.cpp generation speed, aiming for a further 10%,
 on Q4_K_XL and Q8_K_XL with AR and **Q4_K_M DFlash2** at C1/C2/C4/C6/C8.
@@ -44,7 +49,7 @@ screen d0 and d32K, then expand where needed to isolate or qualify the change.
 Preserve prompt-processing speed, greedy AR/speculative agreement and sampled
 replay. Check cross-engine differences against each engine's AR output.
 
-Iterate with one affected Q4 AR C1 shape and one control. Do not refresh the
+Iterate with one affected Q4 C1 shape and one control. Do not refresh the
 full benchmark sweep during exploration. Repeat only to resolve noise or a
 failure. Qualify the other configurations after the focused optimization phase,
 or earlier only when a specific correctness concern requires it. Remote GPU time
