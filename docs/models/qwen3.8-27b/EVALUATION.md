@@ -39,6 +39,15 @@ Current measurements:
 [AR](artifacts/q4-ar-c1-focused.json),
 [DFlash2](artifacts/q4-dflash2-c1-focused.json).
 
+Draft attention prefetches 32 values and shares K/V reads across two query heads
+for blocks of at least four rows. It preserves the original FP32 dot-product,
+softmax and ascending-key value accumulation. All 216 full-output comparisons
+with the previous kernel are byte-identical: widths 1–8, three input scales,
+empty history, prefetch boundaries and ring wrap through 32K. The maintained
+independent FP64 checks and draft/state tests pass, including unequal widths,
+selector probabilities, private RNG and C2/C4/C6/C8. Persistent allocations
+and cache formats are unchanged.
+
 The Q4 adaptive controller includes measured attention-cost growth with context.
 At saturation, its accepted-run estimate remains censored; it probes wider
 profitable blocks instead of treating the configured cap as a rejection.
@@ -46,9 +55,9 @@ Single and batched requests use their own positions and acceptance history.
 The maintained draft check passes exact layers, logits, selector probabilities,
 private RNG and persistent-state replay at C2/C4/C6/C8. A separate 1,147,160-point
 comparison retains the previous shallow controller decisions.
-The final release also reproduces all 32 sampled tokens and draft counts between
-cold and cached requests at 32,573 prompt tokens: temperature 0.8, top-k 40,
-top-p 0.9, min-p 0.05, seed 1. The cached replay prefills zero tokens.
+The controller release at `ddb97672` reproduces all 32 sampled tokens and draft
+counts between cold and cached requests at 32,573 prompt tokens: temperature 0.8,
+top-k 40, top-p 0.9, min-p 0.05, seed 1. The cached replay prefills zero tokens.
 
 Matched Q4 C1 pp2048/tg128 controls retain both complete AR output hashes and PP.
 The 128-token repetition controls retain the same output and 100% acceptance at
@@ -57,6 +66,16 @@ measurements are in the existing
 [DFlash2 artifact](artifacts/q4-dflash2-c1-focused.json).
 These controller measurements cover Q4 C1; other concurrency levels still need
 performance qualification.
+
+The fresh pinned llama.cpp `68d9053a` d0 controls use the same input messages,
+Q4 target/draft, greedy sampling and context capacity. Its DFlash2 output differs
+from its own AR output after “disjointed, repetitive, and”: AR continues with
+“grammatically fragmented phrases,” DFlash2 with “syntactically broken phrases.”
+Its default limit is three proposals; Gufo remains adaptive. Gufo's AR and
+DFlash2 output hashes agree on this prompt. This isolates the observed mismatch
+from Gufo's speculative acceptance, but does not establish which engine better
+matches the original checkpoint. Counts, hashes and pinned binary identity are
+retained in the [focused artifact](artifacts/q4-dflash2-c1-focused.json).
 
 The following results describe the qualification through `b509c070`, before
 lowering the split-K threshold:

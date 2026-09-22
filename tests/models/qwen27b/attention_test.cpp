@@ -312,13 +312,14 @@ void TestSelectorZeroUniform() {
 /// the candidates reduce across a wave -- so the comparison is a float
 /// tolerance, not bit equality.
 float MaxRouteDifference(Route route, std::uint32_t current_pos,
-                         std::uint32_t history_length) {
+                         std::uint32_t history_length,
+                         std::uint32_t block_count) {
   const std::size_t q_dim = static_cast<std::size_t>(kNumQueryHeads) * kHeadDim;
   const std::size_t kv_dim = static_cast<std::size_t>(kNumKvHeads) * kHeadDim;
-  const std::size_t q_elements = kBlockCount * q_dim;
-  const std::size_t block_elements = kBlockCount * kv_dim;
+  const std::size_t q_elements = block_count * q_dim;
+  const std::size_t block_elements = block_count * kv_dim;
   const std::size_t history_elements =
-      static_cast<std::size_t>(current_pos + kBlockCount) * kv_dim;
+      static_cast<std::size_t>(current_pos + block_count) * kv_dim;
 
   std::vector<float> h_q(q_elements);
   std::vector<float> h_block_k(block_elements);
@@ -374,18 +375,18 @@ float MaxRouteDifference(Route route, std::uint32_t current_pos,
   const float scale = 1.0F / std::sqrt(static_cast<float>(kHeadDim));
   gufo::hip::kernels::LaunchDFlashNonCausalAttentionScalar(
       d_q, d_injected_k, d_injected_v, d_block_k, d_block_v, d_scalar_out,
-      current_pos, history_length, kBlockCount, kSlidingWindow, kNumQueryHeads,
-      kNumKvHeads, kHeadDim, scale, nullptr, current_pos + kBlockCount);
+      current_pos, history_length, block_count, kSlidingWindow, kNumQueryHeads,
+      kNumKvHeads, kHeadDim, scale, nullptr, current_pos + block_count);
   if (route == Route::kWave) {
     gufo::hip::kernels::LaunchDFlashNonCausalAttentionWave(
         d_q, d_ring_k, d_ring_v, d_block_k, d_block_v, d_wave_out, current_pos,
-        history_length, kBlockCount, kSlidingWindow, kNumQueryHeads,
+        history_length, block_count, kSlidingWindow, kNumQueryHeads,
         kNumKvHeads, kHeadDim, scale, nullptr, kSlidingWindow);
   }
   if (route == Route::kScalar) {
     gufo::hip::kernels::LaunchDFlashNonCausalAttentionScalar(
         d_q, d_ring_k, d_ring_v, d_block_k, d_block_v, d_wave_out, current_pos,
-        history_length, kBlockCount, kSlidingWindow, kNumQueryHeads,
+        history_length, block_count, kSlidingWindow, kNumQueryHeads,
         kNumKvHeads, kHeadDim, scale, nullptr, kSlidingWindow);
   }
   HIP_CHECK(hipDeviceSynchronize());
@@ -417,11 +418,11 @@ float MaxRouteDifference(Route route, std::uint32_t current_pos,
   }
   // Independent double-precision softmax for the first/last query and GQA
   // group. All proposal keys are visible; only historical keys are windowed.
-  for (const auto query : {0U, kBlockCount - 1}) {
+  for (const auto query : {0U, block_count - 1}) {
     for (const auto head : {0U, kNumQueryHeads - 1}) {
       const auto kv_head = head / (kNumQueryHeads / kNumKvHeads);
       const auto q_offset = query * q_dim + head * kHeadDim;
-      std::vector<double> scores(history_length + kBlockCount, -INFINITY);
+      std::vector<double> scores(history_length + block_count, -INFINITY);
       double maximum = -INFINITY;
       for (std::size_t key = 0; key < scores.size(); ++key) {
         if (key < history_length && current_pos + query - key >= kSlidingWindow)
@@ -461,12 +462,13 @@ float MaxRouteDifference(Route route, std::uint32_t current_pos,
 }
 
 void TestRouteEquivalence(std::uint32_t current_pos,
-                          std::uint32_t history_length, const char* label) {
-  gufo::test::Expect(
-      MaxRouteDifference(Route::kScalar, current_pos, history_length) == 0.0F,
-      "ring addressing must preserve scalar attention exactly");
-  const float wave =
-      MaxRouteDifference(Route::kWave, current_pos, history_length);
+                          std::uint32_t history_length, const char* label,
+                          std::uint32_t block_count = kBlockCount) {
+  gufo::test::Expect(MaxRouteDifference(Route::kScalar, current_pos,
+                                        history_length, block_count) == 0.0F,
+                     "ring addressing must preserve scalar attention exactly");
+  const float wave = MaxRouteDifference(Route::kWave, current_pos,
+                                        history_length, block_count);
   std::cout << "DFlash non-causal attention " << label
             << ": max |scalar - wave| = " << wave << "\n";
   gufo::test::Expect(wave < 1e-5F,
@@ -494,6 +496,13 @@ int main() {
   TestRouteEquivalence(0, 0, "empty history");
   // Shallow: the whole history is inside the sliding window.
   TestRouteEquivalence(128, 128, "128-token history");
+  // Prefetch boundaries and unequal draft widths cover both head-group routes.
+  for (const auto rows : {1U, 3U, 4U, 7U}) {
+    TestRouteEquivalence(31, 31, "short prefetch tail", rows);
+    TestRouteEquivalence(32, 32, "complete prefetch tile", rows);
+    TestRouteEquivalence(33, 33, "prefetch tile plus tail", rows);
+    TestRouteEquivalence(2051, 2051, "ragged wrapped window", rows);
+  }
   // Deep enough that the window clips the history, which is the case the
   // coalesced route exists for.
   TestRouteEquivalence(2047, 2047, "window minus one");

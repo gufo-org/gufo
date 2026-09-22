@@ -95,6 +95,10 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   Two 16-lane query heads per wave helped verification after preserving both
   original 32-lane dot partials and their offset-16 addition. Scalar AR stayed
   faster at 32 lanes; sharing KV across different query rows was slower.
+  In draft attention, prefetching 32 V rows before their original sequential
+  FMAs hid load latency; advance the ring slot instead of dividing each time.
+  Pairing query heads helped wider blocks. Wider prefetch and four-head groups
+  regressed; the component gain translated to about 1% in the complete model.
   For long H3 attention, packing V once into dead projection scratch replaced
   repeated scalar LDS gathers. Sharing K/V LDS in sequential phases retained
   occupancy; transposing V anew inside every attention tile was slower.
