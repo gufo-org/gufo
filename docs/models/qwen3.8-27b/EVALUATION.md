@@ -22,6 +22,17 @@ Graph identity includes the target hidden-layer taps and their order. The Q4
 feature value against the reordered reference, with unchanged full logits.
 The 128/257/2048-token and 8K-prefix replay fingerprints also remain unchanged.
 
+Shared FP16 KV tiles preserve the scalar product/FMA order and every head's
+softmax sequence. Thirty direct comparisons cover shared/unshared execution,
+partition boundaries, three input scales and contexts through 32K; partial
+state and complete outputs are byte-identical. Maintained FP64 checks and
+scalar/batched verification comparisons through 64K pass, including the
+512-token dispatch boundary. All 15 Q4 prefill/continuation full-logit and feature
+fingerprints remain unchanged. Matched Q4 AR C1 pp2048/tg128 HTTP controls at d0
+and d32K retain both output hashes and PP speed. This adds only 4 KiB of shared
+memory per active thread block; persistent cache and snapshot formats are unchanged.
+[Focused measurements](artifacts/q4-ar-c1-focused.json).
+
 The following results describe the qualification through `b509c070`, before
 lowering the split-K threshold:
 

@@ -17,6 +17,19 @@ PNG/JPEG image input uses the matching BF16 projector with AR or DFlash2;
 native MTP is CLI-only. [Image usage and quality checks](README.md#images).
 Unmeasured points are **TODO**; the reason is stated next to each table.
 
+## Current focused controls
+
+**2026-09-22**, Q4_K_XL AR C1, pp2048/tg128, greedy, context capacity 36864.
+One release sample per point; depth is the nominal cached prefix. Both complete
+128-token outputs match the preceding implementation, with PP retained.
+[Counts, output hashes and binary identities](artifacts/q4-ar-c1-focused.json).
+The full comparison tables below remain the September 21 sweep.
+
+| Depth | pp tok/s | tg tok/s |
+| ---: | ---: | ---: |
+| 0 | 664.80 | 11.93 |
+| 32,768 | 503.55 | 10.77 |
+
 ## Loading and continuation
 
 The cold-file-cache loading table is **not measured**: the refresh host has
@@ -85,15 +98,9 @@ Artifacts: `artifacts/single-ar-{q4,q8}-{gufo,reference}.json`.
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q8.svg)
 
-Gufo prefill is 1.7–2.1× llama.cpp at every depth; autoregressive decode is
-2–8% slower than llama.cpp from 4K onwards. The **depth-0 decode deficit is
-larger (−20% Q4, −17% Q8) and reproducible**: a three-sample control
-(2026-09-21, same driver, Q4) gave 9.66 ± 0.03 tok/s at d0 against
-11.58 ± 0.01 tok/s at d4096, and the server log shows every request that
-starts a conversation without a cached prefix (`cache=miss`) decoding at
-9.6–9.7 tok/s while continuations of a restored snapshot (`cache=memory`)
-decode at 11.6 tok/s. This is a Gufo behavior to investigate, not a driver
-artifact.
+The September 21 shallow decode deficit came from serial attention below 4K.
+The current Q4 AR controls above use parallel attention from 128 tokens and
+shared KV loads from 512 tokens. A full comparative refresh is **TODO**.
 
 ## Single user, DFlash2
 

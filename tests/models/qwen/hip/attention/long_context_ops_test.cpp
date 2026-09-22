@@ -35,7 +35,7 @@ void TestLongContextDecodeAttention(bool fp16) {
   constexpr std::uint32_t num_heads = 6;
   constexpr std::uint32_t num_kv_heads = 1;
   constexpr std::uint32_t head_dim = 256;
-  constexpr std::uint32_t positions[] = {126,  127,  128,   2047,
+  constexpr std::uint32_t positions[] = {126,  127,  128,   511,         2047,
                                          4095, 8191, 16383, max_position};
   const std::size_t attention_width =
       static_cast<std::size_t>(num_heads) * head_dim;

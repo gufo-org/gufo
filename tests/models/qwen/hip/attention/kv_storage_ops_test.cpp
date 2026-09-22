@@ -65,8 +65,8 @@ gufo::core::ModelConfig ProductionQwen27BConfig() {
   return config;
 }
 
-// Verification must preserve every scalar attention bit, including a block
-// straddling the online/split-K boundary and a single-row scratch fallback.
+// Verification must preserve every scalar attention bit across the online,
+// split-K and shared-KV routes, including a single-row scratch fallback.
 void TestCausalDecodeRows() {
   using gufo::test::DeviceBuffer;
   constexpr unsigned heads = 6, kv_heads = 1, dim = 256, rows = 8;
@@ -91,8 +91,8 @@ void TestCausalDecodeRows() {
   for (bool fp16 : {false, true}) {
     for (bool gated : {false, true}) {
       for (unsigned batch : {1U, 3U, rows}) {
-        for (unsigned start : {0U, 17U, 120U, 124U, 127U, 128U, 4088U, 4092U,
-                               4095U, 8192U, 32768U, 65536U}) {
+        for (unsigned start : {0U, 17U, 120U, 124U, 127U, 128U, 504U, 508U,
+                               511U, 512U, 8192U, 32768U, 65536U}) {
           float* const cache32 = fp16 ? nullptr : kv.data();
           void* const cache16 = fp16 ? kv_half.data() : nullptr;
           for (unsigned row = 0; row < batch; ++row) {

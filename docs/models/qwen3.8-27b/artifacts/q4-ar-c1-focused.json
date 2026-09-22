@@ -1,0 +1,66 @@
+{
+  "date": "2026-09-22",
+  "model": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+  "model_snapshot": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+  "hardware": "gfx1151",
+  "mode": "autoregressive",
+  "concurrency": 1,
+  "context_capacity": 36864,
+  "requested_prefill_tokens": 2048,
+  "generated_tokens": 128,
+  "temperature": 0,
+  "seed": 1,
+  "repetitions": 1,
+  "baseline": {
+    "revision": "75c80a0ce1ad24f911572a73629e6872bc19f7e2",
+    "binary_sha256": "9a1ccd2b0068e4ac188179806a5b601ba68c92d2f3b0ec377e65b953c9457681"
+  },
+  "candidate": {
+    "base_revision": "d1f55cf820f113861fc4b2c29edf343d0f78b840",
+    "dirty": true,
+    "binary_sha256": "4ff8e51ab37a26274287d15d4836b76a4af90ebe0d7d3998100f0951c7d6d427",
+    "attention_source_sha256": "55e41cdb5e82c58bfb06eae774fc129b2182049db017fa2b188d94134a3816c0"
+  },
+  "runs": [
+    {
+      "nominal_depth": 0,
+      "prompt_tokens": 2033,
+      "cached_prompt_tokens": 0,
+      "prefill_tokens": 2033,
+      "completion_tokens": 128,
+      "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+      "baseline": {
+        "prefill_ms": 3094.316924,
+        "decode_ms": 10754.830462999995,
+        "prefill_tokens_per_second": 657.0109170885949,
+        "decode_tokens_per_second": 11.901628802086684
+      },
+      "candidate": {
+        "prefill_ms": 3058.054028,
+        "decode_ms": 10730.842652999994,
+        "prefill_tokens_per_second": 664.8018581050393,
+        "decode_tokens_per_second": 11.928233796645538
+      }
+    },
+    {
+      "nominal_depth": 32768,
+      "prompt_tokens": 34563,
+      "cached_prompt_tokens": 32553,
+      "prefill_tokens": 2010,
+      "completion_tokens": 128,
+      "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+      "baseline": {
+        "prefill_ms": 3992.229073,
+        "decode_ms": 12222.027904000008,
+        "prefill_tokens_per_second": 503.47812293485595,
+        "decode_tokens_per_second": 10.472893778790043
+      },
+      "candidate": {
+        "prefill_ms": 3991.636394,
+        "decode_ms": 11881.118779999992,
+        "prefill_tokens_per_second": 503.5528794710153,
+        "decode_tokens_per_second": 10.773396207053162
+      }
+    }
+  ]
+}
