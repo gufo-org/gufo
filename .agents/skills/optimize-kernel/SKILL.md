@@ -113,6 +113,11 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   token tile cannot overwrite history still being read. UMA has placement
   costs: mapped quantized weights and copied reusable audio/DiT weights behave
   differently.
+  Match production allocation in GEMV microbenchmarks: gate/up gains on
+  `hipMalloc` buffers disappeared with read-only mapped weights. Anonymous
+  huge pages improved Q4 AR by about 2%; bounded parallel copying kept warm
+  readiness below one second. Include startup cost and separate anonymous
+  model memory from the reclaimable file cache when judging that tradeoff.
   Cold HIP registration/upload can serialize page faults. Prefault existing
   mappings in bounded parallel chunks; this improved text/audio/image startup
   without another weight copy. Measure launch-to-ready and the first request,

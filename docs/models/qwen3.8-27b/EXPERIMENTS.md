@@ -76,6 +76,9 @@
 | Q6 format specialization and paired/split SSM projections | Not promoted: byte-exact, but negligible gains or regressions; split SSM adds launches. |
 | Precomputed affine input sums | Rejected: byte-exact, but no consistent cold-projection benefit after including the preparation pass. |
 | Gate/up input sharing, including four simultaneous dots | Not retained: exact kernel outputs and verification checks, but the paired implementation stays flat in full-model Q4 C1 AR despite cold-kernel gains. |
+| Huge-page-backed immutable weights | Retained for the focused Q4 C1 phase: identical encoded bytes and greedy/cache results, approximately 2% more TG at d0/d32K, comparable PP and unchanged process RSS. Parallel chunk copies keep warm readiness below one second; cold loading and other modes still need qualification. |
+| Residual/RMSNorm fusion after register caching | Rejected: byte-exact and faster as a component, but full-model AR is slower. |
+| Separate gate/up waves, staged inputs, fixed FFN geometry and `-O3` | Not retained: byte-exact controls, but no useful isolated mapped-weight gain. Stage weights as production does; device-allocated microbenchmarks overstated earlier gains. |
 
 Current focus: **Q4_K_XL, C1 autoregressive**, at shallow and long context.
 First beat the pinned llama.cpp AR controls, then qualify the improvements with

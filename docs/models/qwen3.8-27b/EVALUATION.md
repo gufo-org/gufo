@@ -4,7 +4,7 @@ Targets Q4/Q8; DFlash2 drafts Q4_K_M/Q8_0/BF16. Independent original-target,
 conversion and native MTP parity remain **TODO**. Packed-weight operator
 agreement is narrower evidence. [Artifact identities](artifacts/model-identities.json).
 
-The latest C1 AR cleanup retains the RMSNorm reduction tree and caches its
+The C1 AR kernel cleanup retains the RMSNorm reduction tree and caches its
 5120 input values and weights in registers. All 24 independent FP64-formula
 controls pass at the unchanged 1e-4 tolerance, including neighboring dimensions,
 three input scales and optional weights. Eight direct comparisons with the
@@ -22,6 +22,24 @@ In a separate 16-token, depth-2048 profile, normalization falls from 23.99 to
 1304.37 ms. This explains approximately 1.24 ms saved per token.
 [Measurements and scope](artifacts/q4-ar-c1-pruning.json).
 Q8 and DFlash2 qualification of this increment follows the C1 Q4 AR phase.
+
+The latest loader keeps the encoded weights unchanged in a read-only registered
+anonymous mapping, with transparent huge pages. Sixteen bounded workers populate
+and copy file chunks, then release their original mapping pages. A complete
+17,559,178,144-byte copy check passes with both 4 and 16 workers. Target arithmetic,
+sampling and snapshot formats are unchanged.
+
+The Q4 d0/d32K controls retain all 128 greedy tokens; the deep request reuses
+32,553 tokens and prefills 2,010. The maintained continuation smoke test passes
+cold, exact-prompt and suffix reuse. Its visible-answer fixture now explicitly
+disables thinking, matching the full cache suite and preserving its assertions.
+The 16-token profile has the same 10,863 dispatches and 1,280.71 ms of kernel
+time, saving approximately 1.48 ms/token over the preceding kernel cleanup.
+Process RSS remains about 16.70 GiB. Warm readiness is 0.82–0.97 s; the matched
+original mapping took 0.72 s. Anonymous weights replace the resident file mapping,
+but the OS can retain an additional reclaimable file cache. This is a decode
+speed/startup tradeoff, with no new quantization or original-checkpoint parity claim.
+Q8 and DFlash2 qualification of this memory layout remains **TODO**.
 
 The 128-token split-K threshold is currently qualified on **Q4_K_XL C1 with
 AR and Q4_K_M DFlash2**. Matched d0/d32K pp2048/tg128 controls retain all 128

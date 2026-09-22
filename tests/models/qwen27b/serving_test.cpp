@@ -173,22 +173,32 @@ private:
 void RunPromptReuseSmoke(
     const std::shared_ptr<const gufo::hip::QwenGpuModel>& model,
     gufo::server::InferenceBackend& backend) {
+  // This fixture supplies a visible assistant answer, not a reasoning trace.
+  // Match the full cache suite's template so it extends the original prefix.
+  const gufo::tokenization::ChatTemplateOptions cache_template{
+      .enable_thinking = false};
+  const auto cache_request = [](const auto& messages) {
+    gufo::server::ChatRequest request(messages);
+    request.reasoning.enabled = false;
+    return request;
+  };
   const std::vector<gufo::tokenization::ChatMessage> messages = {
       {gufo::tokenization::ChatRole::kSystem, "Answer with one short sentence.",
        "", ""},
       {gufo::tokenization::ChatRole::kUser, "Name one primary color.", "", ""},
   };
   const auto rendered_chat =
-      gufo::tokenization::QwenChatTemplate::Render(messages);
+      gufo::tokenization::QwenChatTemplate::Render(messages, cache_template);
   Expect(rendered_chat.has_value() && !rendered_chat->empty(),
          "prefix-reuse chat prompt rendering");
   const auto prompt = model->GetTokenizer().Encode(*rendered_chat);
-  const auto root = backend.chat(messages, 1, {});
+  std::cout << "Prefix-reuse prompt tokens: " << prompt.size() << '\n';
+  const auto root = backend.chat(cache_request(messages), 1, {});
   Expect(
       !root.tokens.empty() && !root.cache_hit && root.cache_snapshot_bytes > 0,
       "cold prefix-reuse chat must publish one prompt snapshot");
 
-  const auto repeated = backend.chat(messages, 1, {});
+  const auto repeated = backend.chat(cache_request(messages), 1, {});
   Expect(repeated.cache_hit && repeated.cached_prompt_tokens == prompt.size() &&
              repeated.prefill_tokens == 0,
          "repeated chat must restore the complete prompt boundary");
@@ -203,12 +213,15 @@ void RunPromptReuseSmoke(
   continued_messages.emplace_back(gufo::tokenization::ChatRole::kUser,
                                   "Name a different primary color.");
   const auto rendered_continuation =
-      gufo::tokenization::QwenChatTemplate::Render(continued_messages);
+      gufo::tokenization::QwenChatTemplate::Render(continued_messages,
+                                                   cache_template);
   Expect(rendered_continuation.has_value(),
          "prefix-reuse continuation prompt rendering");
   const auto continuation_prompt =
       model->GetTokenizer().Encode(*rendered_continuation);
-  const auto continued = backend.chat(continued_messages, 1, {});
+  std::cout << "Prefix-reuse continuation tokens: "
+            << continuation_prompt.size() << '\n';
+  const auto continued = backend.chat(cache_request(continued_messages), 1, {});
   Expect(continued.cache_hit &&
              continued.cached_prompt_tokens == prompt.size() &&
              continued.prefill_tokens ==
