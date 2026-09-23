@@ -320,6 +320,9 @@ public:
 
   void Reset() noexcept override;
   void BeginRequest() noexcept override { controller_.Reset(); }
+  /// The most recent verification has not yet injected these target rows.
+  /// Discard them when the target returns to its saved verification frontier.
+  void DiscardPendingTargetContext(std::uint32_t position);
 
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept {
     return executor_->GetMemoryUsage();

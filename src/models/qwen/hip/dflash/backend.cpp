@@ -509,6 +509,13 @@ void QwenDFlashGpuDraftBackend::UpdateTargetHidden(
                                   hidden.begin(), hidden.end());
 }
 
+void QwenDFlashGpuDraftBackend::DiscardPendingTargetContext(
+    std::uint32_t position) {
+  if (proposal_active_ || executor_->GetInjectedContextLength() != position)
+    throw std::logic_error("DFlash cancellation frontier is not retained");
+  pending_target_features_.clear();
+}
+
 std::size_t QwenDFlashGpuDraftBackend::SnapshotPayloadBytes() const {
   const std::size_t gpu_bytes =
       CheckedPersistentAdd(executor_->SnapshotPayloadBytes(), sizeof(float));

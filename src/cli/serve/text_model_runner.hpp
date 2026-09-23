@@ -271,6 +271,9 @@ public:
   virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
+  /// Retain a safe executed frontier when cancellation interrupts publication
+  /// of a completed speculative block. Called with cancellation checks cleared.
+  virtual void PrepareCancellation(TextRunnerState&) const {}
 
   /// Captures an immutable exact continuation at CheckpointPosition(state).
   ///

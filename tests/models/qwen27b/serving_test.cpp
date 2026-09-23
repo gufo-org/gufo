@@ -231,6 +231,137 @@ void RunPromptReuseSmoke(
          "cached continuation must generate at least one token");
 }
 
+void CheckGeneratedFrontierReuse(
+    const std::shared_ptr<const gufo::hip::QwenGpuModel>& model,
+    const char* draft_path) {
+  using Backend = gufo::server::InferenceBackend;
+  using Role = gufo::tokenization::ChatRole;
+  const gufo::server::TextSpeculativeConfig draft{
+      .backend = gufo::server::TextSpeculativeBackend::kDFlash,
+      .draft_model_path = draft_path,
+  };
+  const auto request = [](const auto& messages) {
+    gufo::server::ChatRequest result(messages);
+    result.reasoning.enabled = false;
+    return result;
+  };
+  std::string error;
+  for (const std::size_t count : {1U, 8U}) {
+    Backend ar, spec;
+    Expect(ar.load(model, &error, 256, 1), error);
+    Expect(spec.load(model, &error, 256, 1, {}, {}, draft), error);
+    const std::vector<gufo::tokenization::ChatMessage> messages{
+        {Role::kUser,
+         "Explain why careful reasoning and clear examples make technical "
+         "writing useful. Include several contrasting examples."}};
+    const auto root_ar = ar.chat(request(messages), count, {});
+    const auto root_spec = spec.chat(request(messages), count, {});
+    Expect(root_ar.tokens.size() == count && root_ar.tokens == root_spec.tokens,
+           "AR/DFlash2 generated root differs");
+    auto continuation = messages;
+    continuation.emplace_back(Role::kAssistant, root_ar.text);
+    continuation.emplace_back(
+        Role::kUser, "Continue the explanation with concrete examples.");
+    const auto continued_ar = ar.chat(request(continuation), 24, {});
+    const auto continued_spec = spec.chat(request(continuation), 24, {});
+    Expect(continued_ar.cache_hit && continued_spec.cache_hit &&
+               continued_spec.cached_prompt_tokens ==
+                   root_spec.prompt_tokens + count - 1,
+           "DFlash2 must retain its executed generation frontier");
+    Expect(continued_ar.tokens == continued_spec.tokens,
+           "AR/DFlash2 differ after resuming their generated frontier");
+
+    const gufo::sampling::SamplingConfig sampling{
+        .temperature = 0.8F, .top_k = 40, .top_p = 0.9F, .seed = 47};
+    const auto sampled_ar = ar.chat(request(continuation), 8, sampling);
+    const auto sampled_spec = spec.chat(request(continuation), 8, sampling);
+    Expect(sampled_ar.tokens.front() == sampled_spec.tokens.front(),
+           "resumed AR/DFlash2 first-token distribution differs");
+    Expect(ar.chat(request(continuation), 8, sampling).tokens ==
+                   sampled_ar.tokens &&
+               spec.chat(request(continuation), 8, sampling).tokens ==
+                   sampled_spec.tokens,
+           "resumed sampled requests must replay their seed");
+    Expect(
+        ar.chat(request(continuation), 24, {}).tokens == continued_ar.tokens &&
+            spec.chat(request(continuation), 24, {}).tokens ==
+                continued_spec.tokens,
+        "switching from sampled replay to greedy changed the frontier");
+
+    if (count == 1) {
+      // The prompt checkpoint has a published but unconsumed token. Persist
+      // both AR and DFlash2 checkpoints, then restore into fresh sessions.
+      for (const bool speculative : {false, true}) {
+        TemporaryDirectory directory;
+        const gufo::server::TextDiskCacheConfig disk{
+            .directory = directory.path(),
+            .model_artifact_fingerprint = std::string(64, 'a'),
+            .draft_model_artifact_fingerprint =
+                speculative ? std::string(64, 'b') : "",
+        };
+        const auto mode =
+            speculative ? draft : gufo::server::TextSpeculativeConfig{};
+        {
+          Backend writer;
+          Expect(writer.load(model, &error, 256, 1, {}, {}, mode, disk), error);
+          const auto root = writer.chat(request(messages), 1, {});
+          Expect(
+              root.tokens == root_ar.tokens && root.cache_disk_queued_bytes > 0,
+              "published-frontier checkpoint was not persisted");
+        }
+        Backend restored;
+        Expect(restored.load(model, &error, 256, 1, {}, {}, mode, disk), error);
+        const auto replay = restored.chat(request(continuation), 24, {});
+        Expect(replay.cache_disk_hit && replay.tokens == continued_ar.tokens,
+               "disk restore changed pending-token continuation");
+      }
+    }
+    std::cout << "Generated-frontier continuation length=" << count
+              << " AR/DFlash2, sampling and restore exact\n";
+  }
+
+  for (const bool speculative : {false, true}) {
+    Backend interrupted, reference;
+    const auto mode =
+        speculative ? draft : gufo::server::TextSpeculativeConfig{};
+    Expect(interrupted.load(model, &error, 256, 1, {}, {}, mode), error);
+    Expect(reference.load(model, &error, 256, 1), error);
+    const std::vector<gufo::tokenization::ChatMessage> messages{
+        {Role::kUser, "Describe a quiet mountain village in detail."}};
+    std::size_t pieces = 0;
+    const auto stopped = interrupted.chat(
+        request(messages), 64, gufo::sampling::SamplingConfig{}, {},
+        [&pieces](std::string_view) { return ++pieces < 24; });
+    Expect(stopped.finish_reason == Backend::FinishReason::kCancelled &&
+               !stopped.tokens.empty(),
+           "frontier fixture must cancel during generation");
+    const auto root =
+        reference.chat(request(messages), stopped.tokens.size(), {});
+    Expect(root.tokens == stopped.tokens,
+           "cancelled output differs from the same AR history");
+    auto continuation = messages;
+    continuation.emplace_back(Role::kAssistant, stopped.text);
+    continuation.emplace_back(Role::kUser, "Continue.");
+    const auto resumed = interrupted.chat(request(continuation), 24, {});
+    const auto expected = reference.chat(request(continuation), 24, {});
+    // Cancellation may interrupt publication of one complete DFlash2 block.
+    // Keep its pre-verification checkpoint and replay at most that block's
+    // anchor, seven proposals and bonus through the original decode path.
+    const std::size_t replay_limit = speculative ? 9 : 1;
+    Expect(stopped.tokens.size() > replay_limit &&
+               resumed.cached_prompt_tokens >=
+                   stopped.prompt_tokens + stopped.tokens.size() - replay_limit,
+           "cancellation discarded completed generation state: root=" +
+               std::to_string(stopped.prompt_tokens) +
+               " generated=" + std::to_string(stopped.tokens.size()) +
+               " cached=" + std::to_string(resumed.cached_prompt_tokens));
+    Expect(resumed.tokens == expected.tokens,
+           "cancel/continue changed decode arithmetic");
+    std::cout << "Cancelled frontier " << (speculative ? "DFlash2" : "AR")
+              << " history replay exact\n";
+  }
+}
+
 }  // namespace
 
 int main(int argc, const char* const* argv) {
@@ -247,6 +378,7 @@ int main(int argc, const char* const* argv) {
     bool run_full_suite = draft_model_path != nullptr;
     bool sampling_only = false;
     bool cache_only = false;
+    bool continuation_only = false;
     auto sampling_policy = gufo::speculative::DFlashDraftPolicy::kAdaptive;
     for (int index = 2; index < argc; ++index) {
       const std::string_view argument = argv[index];
@@ -256,6 +388,8 @@ int main(int argc, const char* const* argv) {
         run_full_suite = sampling_only = true;
       } else if (argument == "--cache-only") {
         run_full_suite = cache_only = true;
+      } else if (argument == "--continuation-only") {
+        continuation_only = true;
       } else if (argument == "--fixed") {
         sampling_policy = gufo::speculative::DFlashDraftPolicy::kFixed;
       } else if (argument.starts_with("--")) {
@@ -278,6 +412,14 @@ int main(int argc, const char* const* argv) {
     Expect(model->GetWeightRegionCount() == reader->GetMappedRegions().size(),
            "every mapped GGUF shard must have one shared GPU region");
 
+    if (continuation_only ||
+        (run_full_suite && draft_model_path != nullptr && !sampling_only)) {
+      Expect(draft_model_path != nullptr,
+             "continuation qualification requires a DFlash2 model");
+      CheckGeneratedFrontierReuse(model, draft_model_path);
+      if (continuation_only)
+        return 0;
+    }
     const std::uint32_t context = run_full_suite ? 256U : 64U;
     const std::size_t state_count = run_full_suite ? 8U : 1U;
     gufo::server::InferenceBackend backend;

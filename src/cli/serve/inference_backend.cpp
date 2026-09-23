@@ -166,9 +166,11 @@ constexpr std::string_view kDeepSeekStateAbi =
     "deepseek-v4-flash-gfx1151-state-v4";
 constexpr std::array<std::uint8_t, 8> kQwenPersistentSnapshotMagic = {
     'G', 'Q', 'W', 'R', 'U', 'N', '0', '1'};
-constexpr std::uint32_t kQwenPersistentPayloadVersion = 2;
-constexpr std::size_t kQwenPersistentSnapshotHeaderBytes = 64;
+constexpr std::uint32_t kQwenPersistentPayloadVersion = 3;
+constexpr std::size_t kQwenMaxResumeTokens = 9;
+constexpr std::size_t kQwenPersistentSnapshotHeaderBytes = 112;
 constexpr std::uint32_t kQwenPersistentSpeculativeFlag = 1U << 0U;
+constexpr std::uint32_t kQwenPersistentPendingTokenFlag = 1U << 1U;
 
 constexpr std::string_view QwenStateAbi(bool speculative,
                                         bool fp16_attention_kv,
@@ -300,7 +302,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "chat_template_reference_sha256="
            << tokenization::QwenChatTemplate::OfficialTemplateSha256() << '\n'
            << "state_abi=" << state_abi << '\n'
-           << "payload_layout=qwen-gfx1151-live-prefix-v2\n"
+           << "payload_layout=qwen-gfx1151-live-prefix-v3\n"
            << "numerics=qwen-bf16-fp32-prefill-v1\n"
            << "rmsnorm=fused-square-sum-v1\n"
            << "attention_split_min_context="
@@ -400,6 +402,8 @@ public:
       speculative::SpeculativeOptions speculative_options,
       hip::QwenExecutionPolicy execution_policy)
       : model_(std::move(model)) {
+    resume_tokens_.reserve(kQwenMaxResumeTokens);
+    rollback_tokens_.reserve(kQwenMaxResumeTokens);
     std::string error;
     executor_ = hip::QwenGpuExecutor::Create(model_, &error, max_context,
                                              execution_policy);
@@ -434,6 +438,10 @@ public:
     frontier_.reset();
     frontier_logits_.clear();
     frontier_published_ = false;
+    resume_tokens_.clear();
+    rollback_position_.reset();
+    rollback_tokens_.clear();
+    rollback_logits_.clear();
   }
 
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
@@ -472,19 +480,54 @@ public:
     sequence_.assign(prompt.begin(), prompt.end());
     position_ = prompt.size();
     frontier_published_ = false;
+    resume_tokens_.clear();
+    rollback_position_.reset();
   }
 
   void PreparePrefixReuse(std::span<const TextRunnerToken> prefix) {
-    if (verifier_ == nullptr) {
-      return;
-    }
     if (position_ != prefix.size() || !frontier_.has_value()) {
       throw std::logic_error(
-          "Qwen DFlash retained prefix does not match its target state");
+          "Qwen retained prefix does not match its target state");
     }
-    verifier_->BeginRequest();
-    sequence_.assign(prefix.begin(), prefix.end());
+    if (verifier_ != nullptr) {
+      verifier_->BeginRequest();
+      sequence_.assign(prefix.begin(), prefix.end());
+      // Verification's frontier may be a sampled draw. A new request must
+      // select from its distribution again, including when it switches to
+      // greedy sampling or omits the previously published pending token.
+      if (!resume_tokens_.empty() && !frontier_logits_.empty()) {
+        sampling::SamplerState greedy;
+        frontier_ = greedy.Sample(frontier_logits_);
+      }
+    }
     frontier_published_ = false;
+    rollback_position_.reset();
+  }
+
+  bool ResumeGeneratedToken(TextRunnerToken token, bool decode_ready) {
+    if (resume_tokens_.empty())
+      return false;
+    if (resume_tokens_.front() != token) {
+      resume_tokens_.clear();
+      return false;
+    }
+    resume_tokens_.erase(resume_tokens_.begin());
+    // This token was already published by the previous request. Consume it
+    // with decode arithmetic, exactly as AR did, before chunking the new
+    // prompt suffix. Including it in a prefill chunk changes recurrent state.
+    const auto position = static_cast<std::uint32_t>(position_);
+    frontier_ = verifier_ != nullptr
+                    ? verifier_->AdvanceCommittedToken(token, position)
+                    : executor_->ForwardToken(token, position);
+    if (verifier_ != nullptr)
+      sequence_.push_back(token);
+    ++position_;
+    frontier_logits_.clear();
+    if (decode_ready) {
+      const auto logits = executor_->CopyLastLogits();
+      frontier_logits_.assign(logits.begin(), logits.end());
+    }
+    return true;
   }
 
   void ExtendSpeculative(std::span<const TextRunnerToken> suffix,
@@ -532,6 +575,7 @@ public:
       throw std::invalid_argument(
           "Qwen speculative decode budget must be at least one token");
     }
+    resume_tokens_.clear();
     if (!frontier_published_) {
       if (!sampler.config().can_use_unmodified_argmax())
         frontier_ = SelectFrontier(sampler);
@@ -544,6 +588,9 @@ public:
 
   [[nodiscard]] speculative::SpeculativeVerifier::StepRequest
   VerificationRequest(std::size_t remaining, sampling::SamplerState& sampler) {
+    rollback_position_ = position_;
+    rollback_tokens_.assign(1, *frontier_);
+    rollback_logits_ = std::move(frontier_logits_);
     return {*verifier_,
             sequence_,
             static_cast<std::uint32_t>(position_),
@@ -571,10 +618,37 @@ public:
       ++position_;
       if (!AppendSpeculativeSelection(token, sampler, result))
         break;
+      rollback_tokens_.push_back(token);
     }
     frontier_ = verification.next_token;
     frontier_logits_ = std::move(verification.next_token_logits);
     frontier_published_ = !result.stop;
+    set_pending_token(frontier_published_ ? frontier_ : std::nullopt);
+    if (verification.draft_count == 0)
+      rollback_position_.reset();
+  }
+
+  void PrepareCancellation() {
+    if (!rollback_position_)
+      return;
+    if (rollback_tokens_.empty() ||
+        rollback_tokens_.size() > kQwenMaxResumeTokens ||
+        rollback_logits_.empty())
+      throw std::logic_error(
+          "Qwen cancelled verification has no exact frontier");
+    // Verification already saved the target state. Its target features are
+    // still pending in the draft, so rewinding needs no new per-step copy.
+    draft_backend_->DiscardPendingTargetContext(
+        static_cast<std::uint32_t>(*rollback_position_));
+    executor_->RestoreState();
+    position_ = *rollback_position_;
+    sequence_.resize(position_);
+    frontier_logits_ = std::move(rollback_logits_);
+    sampling::SamplerState greedy;
+    frontier_ = greedy.Sample(frontier_logits_);
+    frontier_published_ = false;
+    resume_tokens_ = std::move(rollback_tokens_);
+    rollback_position_.reset();
   }
 
   [[nodiscard]] TextDecodeStep DecodeSpeculative(
@@ -603,6 +677,8 @@ public:
   void set_frontier(TextRunnerToken frontier) noexcept {
     frontier_ = frontier;
     frontier_logits_.clear();
+    frontier_published_ = false;
+    resume_tokens_.clear();
   }
   [[nodiscard]] std::vector<float> CopyFrontierLogits() const {
     if (!frontier_logits_.empty()) {
@@ -613,6 +689,19 @@ public:
   }
   void RestoreFrontierLogits(std::vector<float> logits) {
     frontier_logits_ = std::move(logits);
+  }
+  [[nodiscard]] const std::vector<TextRunnerToken>& pending_tokens()
+      const noexcept {
+    return resume_tokens_;
+  }
+  void set_pending_token(std::optional<TextRunnerToken> token) {
+    resume_tokens_.clear();
+    if (token)
+      resume_tokens_.push_back(*token);
+  }
+  void RestorePendingTokens(std::span<const TextRunnerToken> tokens) {
+    resume_tokens_.assign(tokens.begin(), tokens.end());
+    rollback_position_.reset();
   }
   [[nodiscard]] std::unique_ptr<speculative::SpeculativeVerifierSnapshot>
   SaveVerifierSnapshot() const {
@@ -634,6 +723,7 @@ public:
       throw std::overflow_error("Qwen snapshot size overflows");
     }
     checked_add(logits_count * sizeof(float));
+    checked_add(resume_tokens_.size() * sizeof(TextRunnerToken));
     checked_add(executor_->VisionLayout().images.size() *
                 sizeof(models::qwen::vision::ImageGrid));
     if (verifier_ != nullptr) {
@@ -673,6 +763,7 @@ private:
         .piece = std::string(model_->GetTokenizer().DecodeToken(token)),
     });
     sequence_.push_back(token);
+    set_pending_token(token);
     sampler.Accept(token);
     return true;
   }
@@ -687,6 +778,10 @@ private:
   std::optional<TextRunnerToken> frontier_;
   std::vector<float> frontier_logits_;
   bool frontier_published_{false};
+  std::vector<TextRunnerToken> resume_tokens_;
+  std::optional<std::size_t> rollback_position_;
+  std::vector<TextRunnerToken> rollback_tokens_;
+  std::vector<float> rollback_logits_;
 };
 
 class QwenTextRunnerSnapshot final : public TextRunnerSnapshot {
@@ -696,6 +791,7 @@ public:
       std::unique_ptr<hip::QwenGpuSnapshot> snapshot, std::size_t position,
       std::optional<TextRunnerToken> frontier,
       std::vector<float> frontier_logits,
+      std::vector<TextRunnerToken> pending_tokens,
       std::unique_ptr<speculative::SpeculativeVerifierSnapshot>
           verifier_snapshot)
       : model(std::move(model)),
@@ -703,11 +799,13 @@ public:
         position(position),
         frontier(frontier),
         frontier_logits(std::move(frontier_logits)),
+        pending_tokens(std::move(pending_tokens)),
         verifier_snapshot(std::move(verifier_snapshot)) {}
 
   [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
     return (snapshot != nullptr ? snapshot->PayloadBytes() : 0) +
            frontier_logits.size() * sizeof(float) +
+           pending_tokens.size() * sizeof(TextRunnerToken) +
            (verifier_snapshot != nullptr ? verifier_snapshot->PayloadBytes()
                                          : 0);
   }
@@ -717,6 +815,7 @@ public:
   std::size_t position;
   std::optional<TextRunnerToken> frontier;
   std::vector<float> frontier_logits;
+  std::vector<TextRunnerToken> pending_tokens;
   std::unique_ptr<speculative::SpeculativeVerifierSnapshot> verifier_snapshot;
 };
 
@@ -880,9 +979,7 @@ public:
       TextRunnerState& state,
       std::span<const TextRunnerToken> prefix) const override {
     auto& qwen = RequireQwenState(state);
-    if (qwen.speculative()) {
-      qwen.PreparePrefixReuse(prefix);
-    }
+    qwen.PreparePrefixReuse(prefix);
   }
 
   [[nodiscard]] TextPrefillStep Prefill(
@@ -898,6 +995,12 @@ public:
     }
     max_input_tokens = std::min<std::size_t>(
         max_input_tokens, qwen.executor().GetMaxPromptBatch());
+    if (max_input_tokens != 0 && offset != 0 &&
+        qwen.ResumeGeneratedToken(prompt[offset],
+                                  offset + 1 == prompt.size())) {
+      return {.consumed_tokens = 1,
+              .decode_ready = offset + 1 == prompt.size()};
+    }
     if (qwen.speculative()) {
       if (offset == 0) {
         const auto consumed = std::min(max_input_tokens, prompt.size());
@@ -951,6 +1054,9 @@ public:
           .piece = {},
       };
     }
+    // Keep the selected token separate from the argmax frontier: sampled
+    // cancellation and prompt snapshot restore must not replace that argmax.
+    qwen.set_pending_token(token);
     return {
         .stop = false,
         .token = token,
@@ -1069,6 +1175,9 @@ public:
       const TextRunnerState& state) const override {
     return RequireQwenState(state).position();
   }
+  void PrepareCancellation(TextRunnerState& state) const override {
+    RequireQwenState(state).PrepareCancellation();
+  }
 
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       const TextRunnerState& state) const override {
@@ -1086,7 +1195,7 @@ public:
         qwen.executor().SaveSnapshot(
             static_cast<std::uint32_t>(qwen.position())),
         qwen.position(), qwen.frontier(), qwen.CopyFrontierLogits(),
-        qwen.SaveVerifierSnapshot());
+        qwen.pending_tokens(), qwen.SaveVerifierSnapshot());
   }
 
   void RestoreOrFork(TextRunnerState& state,
@@ -1110,6 +1219,7 @@ public:
     restored.set_position(qwen_snapshot->position);
     restored.set_frontier(*qwen_snapshot->frontier);
     restored.RestoreFrontierLogits(qwen_snapshot->frontier_logits);
+    restored.RestorePendingTokens(qwen_snapshot->pending_tokens);
     if (qwen_snapshot->verifier_snapshot != nullptr) {
       restored.RestoreVerifierSnapshot(*qwen_snapshot->verifier_snapshot);
     }
@@ -1126,6 +1236,7 @@ public:
         !qwen_snapshot->frontier.has_value() ||
         (qwen_snapshot->verifier_snapshot != nullptr) != speculative ||
         qwen_snapshot->position != qwen_snapshot->snapshot->ValidContext() ||
+        qwen_snapshot->pending_tokens.size() > kQwenMaxResumeTokens ||
         qwen_snapshot->frontier_logits.size() !=
             model_->GetConfig().vocab_size) {
       throw std::invalid_argument(
@@ -1176,9 +1287,12 @@ public:
         destination, 16, static_cast<std::uint64_t>(qwen_snapshot->position));
     PutLittleEndian<std::uint32_t>(destination, 24, *qwen_snapshot->frontier);
     PutLittleEndian<std::uint32_t>(destination, 28,
-                                   qwen_snapshot->verifier_snapshot != nullptr
-                                       ? kQwenPersistentSpeculativeFlag
-                                       : 0U);
+                                   (qwen_snapshot->verifier_snapshot != nullptr
+                                        ? kQwenPersistentSpeculativeFlag
+                                        : 0U) |
+                                       (!qwen_snapshot->pending_tokens.empty()
+                                            ? kQwenPersistentPendingTokenFlag
+                                            : 0U));
     PutLittleEndian<std::uint64_t>(
         destination, 32,
         static_cast<std::uint64_t>(qwen_snapshot->frontier_logits.size()));
@@ -1188,6 +1302,13 @@ public:
                                    static_cast<std::uint64_t>(expected_bytes));
     PutLittleEndian<std::uint64_t>(
         destination, 56, static_cast<std::uint64_t>(verifier_payload_bytes));
+    PutLittleEndian<std::uint32_t>(
+        destination, 64,
+        static_cast<std::uint32_t>(qwen_snapshot->pending_tokens.size()));
+    for (std::size_t i = 0; i < qwen_snapshot->pending_tokens.size(); ++i)
+      PutLittleEndian<std::uint32_t>(destination,
+                                     72 + i * sizeof(std::uint32_t),
+                                     qwen_snapshot->pending_tokens[i]);
     const std::size_t gpu_offset = kQwenPersistentSnapshotHeaderBytes;
     const std::size_t logits_offset =
         CheckedPersistentAdd(gpu_offset, gpu_payload_bytes);
@@ -1240,9 +1361,18 @@ public:
     const std::size_t verifier_payload_bytes =
         PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 56));
     const bool speculative = (flags & kQwenPersistentSpeculativeFlag) != 0;
+    const bool has_pending_token =
+        (flags & kQwenPersistentPendingTokenFlag) != 0;
+    const std::uint32_t pending_count =
+        GetLittleEndian<std::uint32_t>(payload, 64);
     if (position == 0 || position > max_context_ ||
         position > std::numeric_limits<std::uint32_t>::max() ||
-        (flags & ~kQwenPersistentSpeculativeFlag) != 0 ||
+        (flags & ~(kQwenPersistentSpeculativeFlag |
+                   kQwenPersistentPendingTokenFlag)) != 0 ||
+        has_pending_token != (pending_count != 0) ||
+        pending_count > kQwenMaxResumeTokens ||
+        GetLittleEndian<std::uint32_t>(payload, 68) != 0 ||
+        GetLittleEndian<std::uint32_t>(payload, 108) != 0 ||
         speculative != restored.speculative() ||
         frontier >= model_->GetConfig().vocab_size ||
         logits_count != model_->GetConfig().vocab_size ||
@@ -1253,6 +1383,19 @@ public:
         total_bytes != payload.size()) {
       throw std::invalid_argument(
           "Qwen persistent snapshot metadata is invalid");
+    }
+    std::vector<TextRunnerToken> pending_tokens;
+    for (std::size_t i = 0; i < kQwenMaxResumeTokens; ++i) {
+      const auto token = GetLittleEndian<std::uint32_t>(
+          payload, 72 + i * sizeof(std::uint32_t));
+      if (i < pending_count) {
+        if (token >= model_->GetConfig().vocab_size)
+          throw std::invalid_argument("Qwen snapshot pending token is invalid");
+        pending_tokens.push_back(token);
+      } else if (token != 0) {
+        throw std::invalid_argument(
+            "Qwen snapshot has nonzero reserved tokens");
+      }
     }
     const std::size_t logits_bytes = logits_count * sizeof(float);
     const std::size_t gpu_offset = kQwenPersistentSnapshotHeaderBytes;
@@ -1279,6 +1422,7 @@ public:
     restored.set_position(position);
     restored.set_frontier(frontier);
     restored.RestoreFrontierLogits(std::move(frontier_logits));
+    restored.RestorePendingTokens(pending_tokens);
   }
 
 private:

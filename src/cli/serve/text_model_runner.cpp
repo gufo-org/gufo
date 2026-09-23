@@ -1025,6 +1025,8 @@ TextRunnerPool::Request::Cancel() noexcept {
     if (impl_->state_reusable &&
         (impl_->decode_ready ||
          impl_->prefill_offset == impl_->snapshot_tokens.size())) {
+      if (impl_->decode_ready)
+        impl_->runner->PrepareCancellation(state);
       checkpoint.assign(impl_->prompt.begin(),
                         impl_->prompt.begin() + impl_->prefill_offset);
       if (impl_->decode_ready)
