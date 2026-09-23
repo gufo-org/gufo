@@ -3,18 +3,18 @@
   "category": "llm",
   "model": {
     "id": "DeepSeek-V4-Flash",
-    "docs": "deepseek-v4-flash"
+    "docs": "deepseek-v4-flash",
+    "label": "DS4 Flash IQ2XXS"
   },
   "files": {
-    "gguf": "target GGUF (IQ2XXS mixed, antirez/deepseek-v4-gguf)",
-    "dspark": "DSpark support GGUF"
+    "gguf": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+    "dspark": "DeepSeek-V4-Flash-DSpark-support-0731.gguf"
   },
   "variants": {
     "default": {
-      "label": "Flash 0731",
+      "label": "IQ2XXS",
       "requires": [
-        "gguf",
-        "dspark"
+        "gguf"
       ]
     }
   },
@@ -31,26 +31,13 @@
     ],
     "reference": {
       "args": [
-        "--spec-type",
-        "draft-dspark",
-        "--spec-draft-model",
-        "{dspark}",
-        "--spec-draft-ngl",
-        "999"
+        "--dspark",
+        "--mtp-model",
+        "{dspark}"
       ]
     }
   },
   "tables": {
-    "loading": {
-      "title": "Cold-file-cache launch to readiness",
-      "per_variant": false,
-      "context": 4096,
-      "sessions": 2,
-      "repetitions": 1,
-      "metric": "seconds",
-      "better": "lower",
-      "rows": "variants"
-    },
     "single-ar": {
       "title": "Single user, autoregressive",
       "per_variant": false,
@@ -101,72 +88,22 @@
       "repetitions": 1,
       "metric": "tok/s",
       "better": "higher",
-      "workload": "prose"
+      "workloads": {
+        "single-dspark": {
+          "label": "mixed",
+          "workload": "prose"
+        },
+        "single-dspark-repetition": {
+          "label": "repetitive",
+          "workload": "repetition"
+        }
+      }
     },
-    "single-dspark-repetition": {
-      "title": "Single user, DSpark, repetitive",
-      "per_variant": false,
-      "speculative": true,
-      "prompt_tokens": 2048,
-      "output_tokens": 128,
-      "depths": [
-        0,
-        4096,
-        8192,
-        12288,
-        16384,
-        32768,
-        65536,
-        131072
-      ],
-      "context": 133760,
-      "depth_tolerance": 0.005,
-      "prefix": {
-        "generator": "synthetic-paragraphs",
-        "seed": 1
-      },
-      "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher",
-      "workload": "repetition"
-    },
-    "single-dspark-thinking": {
-      "title": "Single user, DSpark, thinking",
-      "per_variant": false,
-      "speculative": true,
-      "prompt_tokens": 2048,
-      "output_tokens": 128,
-      "depths": [
-        0,
-        4096,
-        8192,
-        12288,
-        16384,
-        32768,
-        65536,
-        131072
-      ],
-      "context": 133760,
-      "depth_tolerance": 0.005,
-      "prefix": {
-        "generator": "synthetic-paragraphs",
-        "seed": 1
-      },
-      "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher",
-      "workload": "thinking"
-    },
-    "multi-repetition": {
-      "title": "Multiple users, repetition",
+    "multi-ar": {
+      "title": "Multiple users, autoregressive",
       "per_variant": false,
       "modes": [
-        "ar",
-        "dspark"
-      ],
-      "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
-      "cases": [
-        "repetition_word"
+        "ar"
       ],
       "corpus_layout": "homogeneous",
       "concurrency": [
@@ -178,32 +115,21 @@
       ],
       "context": 4096,
       "output_tokens": 128,
-      "cache_prompt": false,
+      "cache_prompt": true,
       "warmup": 1,
       "repetitions": 1,
       "metric": "tok/s",
-      "better": "higher"
+      "better": "higher",
+      "prompt_tokens": 2048,
+      "workload": "prose",
+      "prefill_first": true
     },
-    "multi-mixed": {
-      "title": "Multiple users, mixed corpus",
+    "multi-dspark": {
+      "title": "Multiple users, DSpark",
       "per_variant": false,
       "modes": [
-        "ar",
         "dspark"
       ],
-      "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
-      "cases": [
-        "expository_pangram",
-        "cpp_ring_buffer",
-        "reasoning_train",
-        "summary_gpu",
-        "italian_explanation",
-        "chinese_explanation",
-        "json_schedule",
-        "creative_station",
-        "instruction_debug"
-      ],
-      "corpus_layout": "distinct",
       "concurrency": [
         1,
         2,
@@ -213,14 +139,38 @@
       ],
       "context": 4096,
       "output_tokens": 128,
-      "cache_prompt": false,
+      "cache_prompt": true,
       "warmup": 1,
       "repetitions": 1,
       "metric": "tok/s",
-      "better": "higher"
+      "better": "higher",
+      "workloads": {
+        "multi-mixed": {
+          "label": "mixed",
+          "corpus_layout": "homogeneous",
+          "workload": "prose"
+        },
+        "multi-repetition": {
+          "label": "repetitive",
+          "corpus_layout": "homogeneous",
+          "workload": "repetition"
+        }
+      },
+      "prompt_tokens": 2048,
+      "prefill_first": true
+    },
+    "loading": {
+      "title": "Loading time",
+      "per_variant": false,
+      "context": 262144,
+      "sessions": 1,
+      "repetitions": 1,
+      "metric": "seconds",
+      "better": "lower",
+      "rows": "variants"
     },
     "memory": {
-      "title": "GPU-visible allocation",
+      "title": "Memory occupation",
       "per_variant": false,
       "context": 262144,
       "workloads": [
@@ -253,22 +203,15 @@
     "readiness": "/ready"
   },
   "reference": {
-    "name": "llama.cpp",
-    "server": "llama-server",
+    "name": "antirez/ds4",
+    "kind": "ds4",
+    "server": "ds4-server",
+    "revision": "0aaea5a238fb41a35106a551e73c8409dfb751ac",
     "args": [
-      "-ngl",
-      "999",
-      "-fa",
-      "on",
-      "--cache-reuse",
-      "0",
-      "--jinja",
-      "--reasoning",
-      "off",
-      "--cache-ram",
-      "0"
+      "--rocm"
     ],
     "endpoint_profile": "openai",
-    "readiness": "/health"
+    "readiness": "/v1/models",
+    "stage_timings": false
   }
 }

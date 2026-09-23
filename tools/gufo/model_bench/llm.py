@@ -10,6 +10,7 @@ import json
 import struct
 import zlib
 import random
+import shutil
 import statistics
 import subprocess
 import threading
@@ -99,6 +100,10 @@ class Session:
     def cache_prompt(self) -> bool | None:
         return None if self.target == "gufo" else True
 
+    @property
+    def reference_kind(self) -> str:
+        return self.config.data["reference"].get("kind", "llama.cpp")
+
     # ----- server commands -------------------------------------------------
 
     def gufo_command(self, table: TableSpec, *, mode: str | None, context: int, sessions: int, port: int) -> list[str]:
@@ -126,8 +131,19 @@ class Session:
         cfg = self.config
         gguf = cfg.file("gguf", table.variant)
         args = list(cfg.data["reference"]["args"])
-        command = [self.reference_binary_for(mode), "-m", str(gguf), "-c", str(context), "-np", str(parallel),
-                   "--port", str(port), "--host", "127.0.0.1", "--alias", MODEL_ALIAS, *args]
+        if self.reference_kind == "ds4":
+            if parallel > 1 and mode and mode != "ar":
+                raise RuntimeError("the pinned ds4 ROCm server disables DSpark in native session batching")
+            # The caller supplies total reference context; ds4 allocates per session.
+            command = [self.reference_binary_for(mode), "--model", str(gguf),
+                       "--ctx", str(context // parallel),
+                       "--port", str(port), "--host", "127.0.0.1", *args]
+            # Even --batched-session 1 disables DSpark in this upstream pin.
+            if parallel > 1:
+                command += ["--batched-session", str(parallel)]
+        else:
+            command = [self.reference_binary_for(mode), "-m", str(gguf), "-c", str(context), "-np", str(parallel),
+                       "--port", str(port), "--host", "127.0.0.1", "--alias", MODEL_ALIAS, *args]
         if table.kind == "image-encoder":
             command += ["--mmproj", str(cfg.file("mmproj", table.variant))]
         if mode and mode != "ar":
@@ -145,6 +161,12 @@ class Session:
             command = self.gufo_command(table, mode=mode, context=context, sessions=sessions, port=placeholder.port)
         else:
             command = self.reference_command(table, mode=mode, context=context, parallel=sessions, port=placeholder.port)
+            if shutil.which(command[0]) is None:
+                raise RuntimeError(
+                    f"{command[0]} not on PATH; select its optional Nix reference package "
+                    "(see docs/BENCHMARKS.md)"
+                )
+            self.reference_version(mode)
         placeholder.command = command
         return placeholder
 
@@ -154,6 +176,14 @@ class Session:
         binary = self.reference_binary_for(mode)
         cache = self.__dict__.setdefault("_reference_versions", {})
         if binary not in cache:
+            if self.reference_kind == "ds4":
+                executable = Path(shutil.which(binary) or binary).resolve()
+                revision = (executable.parent.parent / "share" / "ds4-revision").read_text().strip()
+                expected = self.config.data["reference"]["revision"]
+                if revision != expected:
+                    raise RuntimeError(f"ds4 reference revision {revision} differs from configured {expected}")
+                cache[binary] = f"ds4 {revision}"
+                return cache[binary]
             completed = subprocess.run([binary, "--version"], capture_output=True, text=True)
             lines = (completed.stdout + completed.stderr).splitlines()
             versions = [line.strip() for line in lines if line.strip().startswith("version:")]
@@ -176,6 +206,8 @@ class Session:
                 messages: list[dict[str, Any]] | None = None,
                 cache_prompt: bool | None = "default",  # type: ignore[assignment]
                 extra_body: dict[str, Any] | None = None) -> RequestObservation:
+        if self.target == "reference" and self.reference_kind == "ds4":
+            extra_body = {"thinking": {"type": "disabled"}, **(extra_body or {})}
         return run_request(
             base_url=base_url, model=MODEL_ALIAS, prompt=prompt, max_tokens=max_tokens,
             temperature=float(self.config.data["sampling"]["temperature"]),
@@ -190,6 +222,8 @@ class Session:
         """Non-streaming completion text, used to build a reusable conversation prefix."""
         payload = {"model": MODEL_ALIAS, "messages": messages, "max_tokens": max_tokens,
                    "temperature": float(self.config.data["sampling"]["temperature"]), "stream": False}
+        if self.target == "reference" and self.reference_kind == "ds4":
+            payload["thinking"] = {"type": "disabled"}
         if self.cache_prompt is not None:
             payload["cache_prompt"] = self.cache_prompt
         if extra_body:
@@ -771,4 +805,11 @@ RUNNERS = {
 
 
 def run_table(session: Session, table: TableSpec) -> None:
+    if (session.target == "reference" and table.kind != "loading"
+            and not session.config.data["reference"].get("stage_timings", True)):
+        raise RuntimeError(
+            f"{session.config.reference_name} does not expose qualified per-request stage timings; "
+            "qualify timing and prepared-session reuse before running its throughput/memory tables. "
+            "Whole-request wall time cannot substitute for decode time."
+        )
     RUNNERS[table.kind](session, table)

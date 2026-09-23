@@ -1,0 +1,52 @@
+{
+  "schema": "gufo-reference-smoke/1",
+  "date_utc": "2026-09-23",
+  "purpose": "Bounded build/functionality checks, not throughput or original-model qualification.",
+  "reference": {
+    "project": "antirez/ds4",
+    "revision": "0aaea5a238fb41a35106a551e73c8409dfb751ac",
+    "source_hash": "sha256-Bo/td1HwVjw6bwz3BDwTP+ZSudkVFCo2aIVK4axvmXg=",
+    "rocm": "7.2.3",
+    "gpu": "gfx1151",
+    "bench_sha256": "716dab03ddc11169ef55c11632cd5d4cd9e9cdaa546d7798ea0cb9729ac90644",
+    "inference_patches": false
+  },
+  "models": {
+    "target": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+    "target_revision": "1cd7b564460821938add0475a60b942c409295e0",
+    "dspark": "DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+    "dspark_revision": "e7f04037032990db0346398d249baf9fb9df1ccc"
+  },
+  "http": {
+    "context_per_session": 4096,
+    "temperature": 0,
+    "thinking": false,
+    "c1_ar_requests": 2,
+    "c2_ar_requests": 2,
+    "generated_tokens_each": 32,
+    "all_completions_equal": true,
+    "completion_sha256": "5bc351611354785ab17898ed2a703901ff3709459159fb6d8cbf87f56812f79e",
+    "c2_sidecar_loaded_but_speculation_disabled_by_upstream": true,
+    "pp_tg_timings_available": false
+  },
+  "native_bench": {
+    "mode": "dspark",
+    "context_allocation": 4096,
+    "frontiers": [
+      16,
+      32
+    ],
+    "prefill_tokens_each": 16,
+    "generated_tokens_each": 8,
+    "snapshot_restore_between_frontiers": true,
+    "finite_positive_csv_rates": true,
+    "supports_multiple_sessions": false
+  },
+  "optional_packages": {
+    "default_gufo_reference_dependency": false,
+    "default_dev_shell_reference_dependency": false,
+    "hosted_pr_check_reference_dependency": false,
+    "llama_release_runtime_unchanged": true,
+    "llama_mtp_runtime_unchanged": true
+  }
+}

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 from pathlib import Path
 
 from gufo.serving_bench import load_fingerprint, source_identity
@@ -116,11 +115,6 @@ def cmd_run(config: BenchConfig, args: argparse.Namespace) -> int:
     if not gufo_binary.exists():
         raise SystemExit(f"Gufo binary not found: {gufo_binary} (run `nix build`)")
     reference_binary = args.reference_binary or config.data["reference"]["server"]
-    if args.target == "reference":
-        binaries = [reference_binary, config.speculative.get("reference", {}).get("server")]
-        for binary in filter(None, binaries):
-            if shutil.which(binary) is None:
-                raise SystemExit(f"{binary} not on PATH; enter `nix develop`")
     revision, dirty = source_identity(root)
     fingerprint = load_fingerprint(None, gufo_binary)
     document = config.benchmarks_path.read_text(encoding="utf-8") if config.benchmarks_path.exists() else ""

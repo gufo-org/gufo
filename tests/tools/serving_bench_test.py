@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from gufo import serving_bench
 from gufo.model_bench.charts import render_charts
 from gufo.model_bench.config import BenchConfig, load_config
-from gufo.model_bench.llm import Session, _measure_depth, run_loading, run_multi, run_single
+from gufo.model_bench.llm import Session, _measure_depth, run_loading, run_multi, run_single, run_table
 from gufo.model_bench.render import _serving_rate, layout_for, parse_table, render_table
 from gufo.model_bench.servers import Server
 
@@ -959,5 +959,58 @@ with tempfile.TemporaryDirectory() as directory:
             check(not save.called, "quality failures cannot become speed results")
             ar_reference.unlink()
             table.spec["modes"] = ["ar"]
+
+# Optional reference builds use their native flags and reject unsupported metrics
+# before spending time loading the model.
+with tempfile.TemporaryDirectory() as directory:
+    config = load_config(ROOT, "deepseek-v4-flash")
+    config.files = {role: {"default": Path(directory) / role} for role in ("gguf", "dspark")}
+    session = Session(
+        config, "reference", gufo_binary=Path("gufo"), reference_binary="ds4-server",
+        source={"revision": "a" * 40, "dirty": False}, fingerprint={},
+        log_dir=Path(directory), document="", todo_only=False,
+    )
+    command = session.reference_command(config.table("multi-ar"), mode="ar",
+                                        context=4 * 4096, parallel=4, port=8081)
+    check(command[command.index("--ctx") + 1] == "4096"
+          and command[command.index("--batched-session") + 1] == "4",
+          "ds4 context is per session, not the total llama.cpp allocation")
+    command = session.reference_command(config.table("single-dspark"), mode="dspark",
+                                        context=4096, parallel=1, port=8081)
+    check("--dspark" in command and "--mtp-model" in command and "--batched-session" not in command
+          and "--alias" not in command and "-np" not in command,
+          "C1 DSpark omits the upstream flag that silently disables speculation")
+    try:
+        session.reference_command(config.table("multi-dspark"), mode="dspark",
+                                  context=8192, parallel=2, port=8081)
+    except RuntimeError as failure:
+        check("disables DSpark" in str(failure), "unsupported speculation must not become an AR baseline")
+    else:
+        raise AssertionError("the pinned reference cannot batch DSpark")
+    with patch("gufo.model_bench.llm.run_request") as request:
+        session.request("http://unused", "prompt", 1)
+        check(request.call_args.kwargs["extra_body"]["thinking"] == {"type": "disabled"},
+              "reference HTTP requests disable DeepSeek's default thinking")
+    session.server = MagicMock()
+    try:
+        run_table(session, config.table("single-ar"))
+    except RuntimeError as failure:
+        check("stage timings" in str(failure), "missing reference metrics fail explicitly")
+    else:
+        raise AssertionError("missing reference stage timing must not become a benchmark")
+    check(not session.server.called, "unsupported timing fails before model loading")
+
+# An AR-only benchmark must not require the optional MTP build on PATH.
+config = load_config(ROOT, "qwen3.8-flash-next")
+config.files = {"gguf": {"default": Path("target.gguf")}}
+session = Session(
+    config, "reference", gufo_binary=Path("gufo"), reference_binary="llama-server",
+    source={"revision": "a" * 40, "dirty": False}, fingerprint={},
+    log_dir=Path("/tmp"), document="", todo_only=False,
+)
+with patch("gufo.model_bench.llm.shutil.which", return_value="/bin/llama-server") as which, \
+        patch.object(session, "reference_version"):
+    session.server(config.table("single-ar"), mode="ar", context=4096, sessions=1, tag="test")
+    which.assert_called_once_with("llama-server")
 
 print("Serving benchmark harness tests passed.")

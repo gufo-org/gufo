@@ -14,10 +14,35 @@ results and qualification gaps live in:
 
 `tools/bench/model-bench.py` measures the tables of a model's `BENCHMARKS.md`
 over HTTP for Gufo and for the reference project of its category (llama.cpp
-for GGUF language models), writes per-table artifacts, and renders the tables
+for Qwen; antirez/ds4 for DeepSeek), writes per-table artifacts, and renders the tables
 and SVG charts between the `<!-- bench:<id> -->` markers. Workloads and table
 layouts are declared in `docs/models/<model>/artifacts/bench.json`; the
 `benchmark-model` skill in `.agents/skills` describes the procedure.
+
+Reference runtimes are explicitly selected Nix packages, excluded from Gufo,
+the normal development shell and hosted checks:
+
+| Reference | Package | Executable |
+| --- | --- | --- |
+| Qwen AR / DFlash2 | `.#llama-cpp-reference` | `llama-server` |
+| Flash-Next MTP | `.#llama-cpp-mtp-reference` | `llama-server-mtp` |
+| DeepSeek AR / DSpark | `.#ds4-reference` | `ds4-server`, `ds4-bench` |
+
+For example, enter the development shell and add only the needed baseline:
+
+```sh
+nix develop
+nix shell .#llama-cpp-reference .#llama-cpp-mtp-reference
+python3 tools/bench/model-bench.py --model qwen3.8-flash-next --gguf "$MODEL" \
+  --mtp "$MTP" run --target reference --table single-mtp
+```
+
+DeepSeek's pinned HTTP server lacks separate pp/tg durations. Its native
+`ds4-bench` supports single-session AR and DSpark with per-frontier CSV timing;
+it does not implement concurrency. The pinned ROCm server also disables DSpark
+in native batching. See the
+[DS4 measurement status](models/deepseek-v4-flash/EVALUATION.md#benchmark-method)
+before running its reference sweep.
 
 New or refreshed text-model cards use the same pp2048 prose/copying prompts
 for single-user d0 and concurrency, with tg128. The driver shares their prompt

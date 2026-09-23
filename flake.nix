@@ -25,66 +25,9 @@
         pkgs.${system}.callPackage ./.devops/nix/scope.nix { inherit version; }
       );
 
-      # Reference LLM runtime for benchmark comparisons (llama-server,
-      # llama-bench), built for gfx1151 with unified memory like the Strix
-      # Halo toolbox. The source is pinned to a release that carries DFlash2
-      # (#27816), Qwen3.8-Flash-Next (#27742) and DSpark support; nixpkgs'
-      # b10273 predates them.
-      llamaCppVersion = "11069"; # release tag b11069, 2026-09-21
-      llamaCppCommit = "68d9053afd4f4d0752ced6187585f862355a40be";
-      llamaCpp = system:
-        (pkgs.${system}.llama-cpp.override {
-          rocmSupport = true;
-          rocmGpuTargets = [ "gfx1151" ];
-        }).overrideAttrs
-          (oldAttrs: {
-            version = llamaCppVersion;
-            src = pkgs.${system}.fetchFromGitHub {
-              owner = "ggml-org";
-              repo = "llama.cpp";
-              rev = llamaCppCommit;
-              hash = "sha256-BnGWYIkVe9y4aufhS5s3Jco1j/BY0MgBlzXrRQFMW3o=";
-            };
-            npmDepsHash = "sha256-2Q7XhaLAArmviOLdQsNbYTfdyDE5pW9lR26cRHEVl9k=";
-            cmakeFlags = (oldAttrs.cmakeFlags or [ ]) ++ [
-              "-DLLAMA_HIP_UMA=ON" # unified memory
-              # The fetched tree has no git metadata; stamp the release commit
-              # so `llama-server --version` identifies the build in artifacts.
-              "-DLLAMA_BUILD_COMMIT:STRING=${builtins.substring 0 8 llamaCppCommit}"
-            ];
-            # Pin the ROCm path explicitly and raise the local unroll
-            # threshold for gfx1151 kernels.
-            preConfigure = (oldAttrs.preConfigure or "") + ''
-              cmakeFlagsArray+=("-DCMAKE_HIP_FLAGS=--rocm-path=${pkgs.${system}.rocmPackages.clr} -mllvm --amdgpu-unroll-threshold-local=600")
-            '';
-          });
-
-      # llama.cpp built from the open Qwen3.8-Flash-Next MTP pull request
-      # (ggml-org/llama.cpp#28243), exposed as `llama-server-mtp` next to the
-      # release build so only the sidecar-dependent cells use it. Drop this
-      # once the release pin includes the merged change.
-      llamaCppMtpCommit = "6fcaa16f4b360649933a54d1f91ad40ed35c0e11";
-      llamaCppMtp = system:
-        (llamaCpp system).overrideAttrs (oldAttrs: {
-          pname = "llama-cpp-mtp";
-          version = "11069"; # LLAMA_BUILD_NUMBER must be numeric; the PR branch is based near b11069
-          src = pkgs.${system}.fetchFromGitHub {
-            owner = "danielhanchen";
-            repo = "llama.cpp";
-            rev = llamaCppMtpCommit;
-            hash = "sha256-YgIkYHiV1LNA1OvTcB8SSdOeqr37+cEFAOQjEBfXcK4=";
-          };
-          npmDepsHash = "sha256-2Q7XhaLAArmviOLdQsNbYTfdyDE5pW9lR26cRHEVl9k=";
-          cmakeFlags = builtins.filter (f: !(pkgs.${system}.lib.hasPrefix "-DLLAMA_BUILD_COMMIT" f)) (oldAttrs.cmakeFlags or [ ]) ++ [
-            "-DLLAMA_BUILD_COMMIT:STRING=${builtins.substring 0 8 llamaCppMtpCommit}"
-          ];
-        });
-      llamaCppMtpBin = system:
-        pkgs.${system}.runCommand "llama-cpp-mtp-bin" { } ''
-          mkdir -p $out/bin
-          ln -s ${llamaCppMtp system}/bin/llama-server $out/bin/llama-server-mtp
-          ln -s ${llamaCppMtp system}/bin/llama-bench $out/bin/llama-bench-mtp
-        '';
+      llamaReferences = forAllSystems (
+        system: pkgs.${system}.callPackage ./.devops/nix/llama-cpp-reference.nix { }
+      );
 
       alexnetWeights = system:
         pkgs.${system}.fetchurl {
@@ -171,6 +114,11 @@
         in
         {
           default = base;
+          # Optional benchmark packages: excluded from Gufo, the default
+          # development shell and hosted checks.
+          ds4-reference = pkgs.${system}.callPackage ./.devops/nix/ds4-reference.nix { };
+          llama-cpp-reference = llamaReferences.${system}.release;
+          llama-cpp-mtp-reference = llamaReferences.${system}.mtp;
         }
       );
 
@@ -188,9 +136,6 @@
               pkgs.${system}.sox
               pkgs.${system}.rocmPackages.rocprofiler-sdk
               pkgs.${system}.sqlite
-              # Benchmark comparison baselines (see .agents/skills/benchmark-model).
-              (llamaCpp system)
-              (llamaCppMtpBin system)
               audio-cpp.packages.${system}.rocm-gfx1151
             ];
             env = {

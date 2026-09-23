@@ -31,11 +31,14 @@ runtime libraries. Skip loading if neither method is available.
 
 ## Measurement model
 
-Everything is measured **over HTTP on both sides** so the prompt, timed scope
+Use **HTTP on both sides** by default so the prompt, timed scope
 and transport are identical: Gufo through `gufo serve`, the reference through
 its own OpenAI-compatible server. `gufo bench` and the standalone CLIs are
-kernel-iteration tools; their numbers are not published in the comparison
-tables.
+kernel-iteration tools unless the user authorizes a native reference benchmark.
+For DeepSeek, the user permits `ds4-bench` single-session AR/DSpark comparisons.
+Match prompt tokens, prefill interval, decode accounting and cache frontier first;
+label the native timing scope. Never silently compare it with whole-request HTTP
+wall time. `ds4-bench` does not implement C>1.
 
 The driver is `tools/bench/model-bench.py`. `docs/models/<model>/artifacts/bench.json`
 declares the category, variant ids, sweep grid, workloads and reference server
@@ -50,7 +53,7 @@ nix build   # production Gufo binary at result/bin/gufo
 FILES="--gguf q4=/path/to/target-q4.gguf --draft q4=/path/to/draft-q4.gguf"
 nix develop -c python3 tools/bench/model-bench.py --model <model> tables            # ids and existing artifacts
 nix develop -c python3 tools/bench/model-bench.py --model <model> $FILES run --target gufo --table single-ar-q4,single-dflash2-q4
-nix develop -c python3 tools/bench/model-bench.py --model <model> $FILES run --target reference --table single-ar-q4,single-dflash2-q4
+nix develop -c nix shell .#llama-cpp-reference -c python3 tools/bench/model-bench.py --model <model> $FILES run --target reference --table single-ar-q4,single-dflash2-q4
 nix develop -c python3 tools/bench/model-bench.py --model <model> render           # or render --check
 ```
 
@@ -102,8 +105,14 @@ against); `tables` keyed by table id with that table's workload, and
 `gufo.serve` / `reference.server` + `args` for the two servers. Readiness is
 `GET /ready` on Gufo and `GET /health` on llama-server.
 
-Reference servers (llama.cpp, audio.cpp, stable-diffusion.cpp) come from this
-repository's `flake.nix`; do not use ad-hoc installs.
+Select reference runtimes explicitly: `nix shell .#llama-cpp-reference` for
+Qwen AR/DFlash2, `.#llama-cpp-mtp-reference` for Flash-Next MTP, or
+`.#ds4-reference` for DeepSeek AR/DSpark. Combine the two llama packages when
+refreshing both modes. None is part of Gufo, the default dev shell or hosted
+checks. Preserve the pinned recipes under `.devops/nix`; do not use ad-hoc builds.
+Antirez readiness is `/v1/models`. Its unmodified server lacks stage timings;
+qualify native single-user timing and HTTP prepared-cohort timing/reuse before
+publishing DS4 comparisons.
 
 Request-level timing comes from the response, not the client clock, whenever
 the server provides it: Gufo and llama-server both return llama.cpp-compatible
@@ -140,10 +149,10 @@ and the table says so.
    `context` to raise. Run model jobs sequentially; nothing else on the GPU.
 4. Before publishing a speed refresh of unchanged code, run the model's fast
    correctness suite when it has one (Qwen3.8 27B: `nix develop -c python3
-   tools/qwen27b/check.py fast`; Qwen3.8-Flash-Next and DeepSeek V4 Flash:
-   none today — say so in the card and rely on the concurrency `Exact`
-   checks); the full `EVALUATION.md` suites are for changed kernels or
-   models. Greedy speculative output must match AR token
+   tools/qwen27b/check.py fast`; DeepSeek: `nix develop -c tools/ds4/check.py fast`;
+   Flash-Next has no dedicated fast model suite). Contract tests and concurrency
+   hashes do not replace independent model qualification; the full
+   `EVALUATION.md` suites are for changed kernels or models. Greedy speculative output must match AR token
    IDs in the model checks. HTTP runs retain completion hashes: concurrency
    compares them against the Gufo AR C1 reference, while matching single-user
    AR/speculative depth rows allow the same text-consistency check. These hashes
@@ -217,7 +226,7 @@ around them (dates, acceptance notes, caveats) is hand-maintained.
 ## LLM (GGUF text and vision models)
 
 Models: `deepseek-v4-flash`, `qwen3.8-27b`, `qwen3.8-flash-next`.
-Reference: **llama.cpp** `llama-server`, same GGUF, ROCm build,
+Qwen reference: **llama.cpp** `llama-server`, same GGUF, ROCm build,
 `-ngl 999 -fa on --cache-reuse 0 --cache-ram 0 --jinja --reasoning off`,
 `-np C` and total `-c` covering every session's context. `--cache-ram 0`
 disables llama-server's separate host snapshot cache; live slot prefix reuse
@@ -231,6 +240,17 @@ Gufo: `gufo serve llm --think off --max-pending-per-client 8`, greedy, seed
 (llama.cpp `-np C -c 4096·C`) for concurrency tables, and attaches `--mmproj`
 only for the image-encoder table. The sweep parameters are identical across
 the three models so the documents stay comparable.
+
+DeepSeek reference: **antirez/ds4**, pinned by `.#ds4-reference`, same target
+and DSpark GGUF. The server uses `--rocm --ctx <per-session-capacity>`;
+AR C>1 adds `--batched-session C`. At pin `0aaea5a2`, any `--batched-session`
+value disables DSpark on ROCm, including 1. Omit it for C1 DSpark; keep C>1
+DSpark reference cells TODO until a build supports them. DSpark adds
+`--dspark --mtp-model <support>`. Disable
+thinking in each HTTP request. Native `ds4-bench` supports the sidecar but
+uses one session; its `ctx_tokens` is the post-prefill frontier, not cached
+depth, and `prefill_tokens` is the increment from the preceding frontier.
+Reject short/EOS-truncated rows and retain full `gen_tps`, not steady-only rates.
 
 Tables (append `-<quant>` for several quantizations, e.g. `single-ar-q4`);
 place loading immediately before memory in the rendered card:
@@ -268,7 +288,7 @@ place loading immediately before memory in the rendered card:
    pp. The renderer selects the highest pp per engine/depth, preserving that
    measurement's standard deviation, and recalculates pp gain from the maxima.
    llama.cpp runs the same draft file through `--spec-type draft-dflash`,
-   `draft-mtp` or `draft-dspark` (`speculative.reference.args` in
+   `draft-mtp` (`speculative.reference.args` in
    `bench.json`, otherwise llama.cpp's defaults; tune them only when the
    reference project documents better values, and record the change). When
    the pinned llama.cpp cannot load the sidecar (Qwen3.8-Flash-Next MTP with

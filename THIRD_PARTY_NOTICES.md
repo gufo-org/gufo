@@ -71,6 +71,8 @@ its upstream MIT notice. External model files are never part of the binary packa
 | NumPy / SciPy | Evaluation arrays and signal analysis | `BSD-3-Clause` | flake.lock | [NumPy](https://github.com/numpy/numpy), [SciPy](https://github.com/scipy/scipy) |
 | Requests | Evaluation HTTP client | `Apache-2.0` | flake.lock | [Requests](https://github.com/psf/requests) |
 | SoX | Development audio utility | `GPL-2.0-or-later` | flake.lock | [SoX](https://sourceforge.net/projects/sox/) |
+| antirez/ds4 | Optional benchmark package; not shipped with Gufo | `MIT` | `0aaea5a238fb41a35106a551e73c8409dfb751ac` | [Nix recipe](.devops/nix/ds4-reference.nix) |
+| llama.cpp reference builds | Optional benchmark packages; not shipped with Gufo | `MIT` | Release `68d9053a`; Flash-Next MTP `6fcaa16f` | [Nix recipes](.devops/nix/llama-cpp-reference.nix) |
 | Torchvision AlexNet weights | Evaluation data only; not shipped | `NOASSERTION` | SHA-256 `7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02` | [PyTorch model distribution](https://download.pytorch.org/models/alexnet-owt-7be5be79.pth) |
 
 Python/PyTorch and reference scripts are not installed with Gufo. Their own

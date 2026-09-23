@@ -88,7 +88,10 @@ nix build
 
 [flake.lock](flake.lock) pins the dependencies. `nix develop` adds profiling,
 model-download and independent evaluation tools; these are not runtime
-requirements. See [testing](docs/TESTING.md) for the small hosted CI suite and
+requirements. Optional benchmark baselines are selected separately with
+`nix shell .#ds4-reference`, `.#llama-cpp-reference` or
+`.#llama-cpp-mtp-reference`; see [benchmarking](docs/BENCHMARKS.md).
+See [testing](docs/TESTING.md) for the small hosted CI suite and
 explicit local quality checks.
 
 ### Without Nix

@@ -1,46 +1,71 @@
 # DeepSeek V4 Flash evaluation
 
-Serving qualification (2026-09-21): AR/DSpark prefix and disk restoration,
-mixed sampling, EOS isolation, cancellation and late-arriving prefill passed.
-Snapshots retain the live attention/compression windows and committed DSpark
-frontier. The loader accepts the checkpoint's integer expert-mapping tensor
-without weakening tensor extent validation.
-
-The interrupted-chat check also passes on the production AR/DSpark server at
-262,144-token capacity: stop inside reasoning or visible text, retain or omit
-reasoning, replay greedy/seeded requests, continue a third turn, and restart
-from disk. Reasoning removal retains the stable prompt prefix; explicit
-`cache_prompt: false` reports no reuse. Run
-[`check-continuation.py`](../../../tools/serving/check-continuation.py) as
-described in [server documentation](../../SERVER.md). Exact replay uses the
-same prefill/decode history; it does not close the target arithmetic gaps below.
-
-Focused C1 startup controls at the same capacity: target upload **14.49 s**,
-DSpark upload **0.56 s**. An empty digest cache required **46.72 s** for the
-target's full SHA-256 and **3.26 s** for DSpark; total load **65.55 s**.
-Both digests exactly match the previous full-file scans. Reused digests avoid
-that work. These are startup controls, not a refreshed performance sweep.
-The discarded scratch warmup before first prefill has been removed.
-
-**Target parity is unresolved. No quality improvement is established by the
-current arithmetic audits.** Antirez's implementation is a differential control,
+**Target parity remains unresolved.** Antirez/ds4 is an independent comparison,
 not official ground truth. DSpark/AR agreement cannot detect shared target errors.
+This documentation/build update does not establish a quality improvement.
+
+## Quality status
+
+| Check | Retained result |
+| --- | --- |
+| Optimized trajectory, September 19 | **115/128** top-1, rank sum 145, worst rank 4; required ≥116, ≤142, ≤3 |
+| Optimized versus Debug | **33/2327** greedy choices differ; cause isolated to build-sensitive `backend.hip.cpp`, not resolved |
+| Hosted continuation likelihood | 100 prompts / 2313 tokens; optimized-minus-Debug NLL +0.001169, 95% interval −0.003416 to +0.005655 |
+| Post-prefill full logits | **4/20** checks fail against the historical antirez control; post-decode vectors pass |
+| Deterministic replay | **1280/1280** choices and 20 logit vectors repeat exactly |
+| Operator/state controls | Independent FP64 formulas, 156 exact top-k cases and 736 DSpark replay choices pass |
+| Serving, September 21 | AR/DSpark prefix/disk restore, sampled replay, EOS isolation, cancellation and late prefill pass |
+| Capability, September 10 | **53/75**, 22 failures, zero execution errors; nine length finishes (context 32768, output limit 16000) |
+| Current original-checkpoint / capability qualification | **TODO**; ask before rerunning the full 75-question comparison |
+
+The [prefill comparison](artifacts/antirez-ds4-ar-comparison.json) and
+[formula audit](artifacts/prefill-formula-audit.json) retain the four alerts:
+
+| Context / call size | RMSE | Cosine | Max logit error | Max probability difference |
+| --- | ---: | ---: | ---: | ---: |
+| 4K / 4K | 0.9691 | 0.98006 | 5.3386 | 5.90 percentage points |
+| 12K / 4K | 1.1819 | 0.96935 | 5.4680 | 39.81 percentage points |
+| 16K / 2K | 0.8128 | 0.98681 | 5.8521 | 11.63 percentage points |
+| 16K / 4K | 1.3476 | 0.96214 | 5.8032 | 9.80 percentage points |
+
+Limits remain RMSE ≤1.12, cosine ≥0.979 and maximum error ≤5. Never relax
+quality gates to admit an optimization. The official HC formula projects raw
+activations before RMS scaling; Gufo follows that order. Copying the historical
+antirez FP16 rounding fails the independent formula oracle. The
+[captured-input audit](artifacts/captured-operator-audit.json) finds accumulated
+attention error, without proving a single root cause. Resolution still requires
+operator/layer ablation and original-checkpoint continuation checks.
+
+Historical quality sources: official Flash 0731
+[`7872f01b`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/tree/7872f01b1d1fe23eabc4c98b48bffcef5a386062),
+antirez/ds4 [`6289c516`](https://github.com/antirez/ds4/tree/6289c516273979173abbc062209a81dd3706b804).
+These results do not qualify the newer performance-reference pin below.
+
+## DSpark
+
+p/q acceptance and normalized residual correction preserve the target sampling
+distribution. Request-private RNG/controller state supports seeded replay for
+the same execution configuration and schedule; live timings do not affect
+sampled token decisions. [Sampling evidence](artifacts/dspark-sampling.json),
+[controller costs](artifacts/cost-calibration.json) and
+[qualification summary](artifacts/quality-qualification.json) retain their own
+build identities and acceptance metrics.
+
+Interrupted-chat checks cover reasoning/visible output, retained/omitted
+reasoning, a third turn and disk restart at 262144-token capacity. Replay uses
+the same prefill/decode history; it does not close the target arithmetic gaps.
 
 ## Maintained checks
 
-Tests live in `tests/models/deepseek_v4_flash`; commands in
-[tools/ds4](../../../tools/ds4/README.md). Run affected checks while iterating.
+Tests: `tests/models/deepseek_v4_flash`; commands: [tools/ds4](../../../tools/ds4/README.md).
+Run affected checks while iterating; retain full model gates for arithmetic changes.
 
-| Check | Required coverage |
+| Suite | Coverage |
 | --- | --- |
-| `ds4.template`, `ds4.cli`, `ds4.dataset`, `ds4.eval` | Framing, wiring, pinned fixtures and probability/grading invariants |
-| `ds4.sampling` | Exact p/q and residual distributions, conditional proposals, penalties, seed replay and confidence stopping |
-| `ds4.projections` | Independent weight decoding, FP64 formulas, all IQ2 signs, MoE ownership, exact batch/scalar outputs, official HC/Sinkhorn equations |
-| `ds4.attention` | Independent attention, DSpark Markov/confidence and window formulas; exact prefill scores, masks, poisoned rows, ties, scratch bounds and top-k ordering |
-| `ds4.target` | Official tokens, pinned trajectory, full logits, replay, capacity equality and state isolation |
-| `ds4.dspark` | Exact scalar tokens/frontier logits through C8/16K, acceptance, policy, snapshots and forks |
-| `ds4.serving` | Sampling, physical batching, EOS checkpoint isolation, bounded prefill, prefix/disk caches, cancellation and exhaustion |
-| `ds4.chat` | Real sampled prompt and three-turn chat after length/EOS stops, AR/DSpark token identity and active drafting |
+| `fast` | Template, CLI, dataset, evaluation and sampling contracts |
+| `kernels` | Independent projection/HC formulas, attention and exact top-k |
+| `model` | Target trajectories/full logits, DSpark C1–C8/state restore, HTTP sampling, caching, cancellation and three-turn chat |
+| `reference` | Matched antirez differential comparison; not official-model parity |
 
 ```sh
 nix develop -c tools/ds4/check.py fast
@@ -50,88 +75,54 @@ nix develop -c tools/ds4/check.py reference --model "$MODEL" \
   --upstream /path/to/pinned-antirez-checkout --output /tmp/ds4-reference
 ```
 
-The trajectory guard requires **116/128 top-1**, rank sum ≤142, worst rank ≤3.
-State controls require finite logits, **RMSE ≤1.12, cosine ≥0.979, max error ≤5**.
-Never relax limits to admit an optimization. Recent indexer changes preserve ten
-full-logit prefill vectors across 2K/4K calls and five depths, plus five vectors
-across a 64K disk snapshot, continued prefill and decode. Independent FP64
-operators, 156 exact top-k cases and 736 DSpark replay choices pass.
+## Benchmark method
 
-## Target arithmetic
+The proposed grid is pp2048/tg128 at cached depths 0, 4K, 8K, 12K, 16K, 32K,
+64K and 128K; C1/2/4/6/8 use the same d0 mixed/repetitive prompts. Prefill all
+sessions before timed decoding, then sum individual request decode rates.
+One warmed sample per point; repeat only to investigate a discrepancy. Preserve
+AR/speculative completion hashes and acceptance details in artifacts.
+Loading uses C1/DSpark at capacity 262144; memory uses C1/AR at the same capacity.
 
-The optimized 2026-09-19 build scores **115/128, rank sum 145, worst rank 4**;
-legacy Debug scores 116/128, 142, 3. The unchanged optimized baseline has
-identical logits. Mixed-library controls isolate build sensitivity to
-`backend.hip.cpp`; both use `-O3`, while `NDEBUG` changes assertion control flow
-in HIP shuffle wrappers. The precise cause remains TODO.
+The unmodified antirez server returns token/cache counts but **no per-request
+prefill/decode durations**. On ROCm, `--batched-session` disables DSpark even
+at C1; omit it for single-user speculation. C>1 DSpark reference cells remain
+**TODO** pending upstream support. Stage timing and prepared-cohort reuse must be
+qualified before its throughput sweep; the driver rejects those unqualified
+runs before loading a model. Whole-request wall time cannot fill a tg cell.
+`ds4-bench` supports single-user AR and DSpark (`--dspark --mtp-model`), with
+per-frontier pp/tg CSV rates; it has no multi-session loop. It is a candidate
+for the single-user comparison: match Gufo's exact prompt/frontier and decode
+token accounting first. `ctx_tokens` includes the newest prefill; `prefill_tokens`
+is only the increment. Retain full `gen_tps`, not its steady-only alternative.
+Existing CLI rates are not reused. The full sweep waits for template review.
 
-Hosted-checkpoint continuation likelihood covers 100 prompts / 2313 tokens,
-plus five smoke prompts / 14 tokens. API probabilities are saturated, so this
-is not full-distribution parity:
+Reference: [`antirez/ds4 0aaea5a2`](https://github.com/antirez/ds4/tree/0aaea5a238fb41a35106a551e73c8409dfb751ac),
+ROCm 7.2.3 / gfx1151, official
+[`strix-halo` build](https://github.com/antirez/ds4/blob/0aaea5a238fb41a35106a551e73c8409dfb751ac/Makefile).
+The optional [Nix recipe](../../../.devops/nix/ds4-reference.nix) follows the
+[upstream prerequisites](https://github.com/antirez/ds4/blob/0aaea5a238fb41a35106a551e73c8409dfb751ac/docs/STRIX_HALO.md);
+[`fedeizzo/ds4`](https://github.com/fedeizzo/ds4/blob/f386629c5217ced3003d2b0d67b461c9265d3f6c/flake.nix)
+provided an earlier packaging example. It is excluded from Gufo, the normal
+dev shell and hosted checks.
 
-| 100-case run | Average NLL ↓ |
+[Reference smoke, September 23 UTC](artifacts/reference-smoke.json): Nix build
+and installed commands pass; four C1/C2 AR HTTP replies match (32 tokens each).
+Native DSpark completes two frontiers × eight tokens with snapshot restoration
+and valid CSV rates. These bounded checks do not establish model quality or
+benchmark performance.
 
-Optimized/Debug disagree on **33/2327 greedy choices**. Their paired 100-case
-NLL delta is +0.001169 (95% case-bootstrap interval −0.003416 to +0.005655).
-Both retain 14/14 smoke tokens, but Gufo smoke NLL is 0.034343 versus 0.010908
-for the same-machine upstream control. This finite sample establishes neither
-equivalence nor an improvement.
+```sh
+nix build .#ds4-reference --out-link result-ds4-reference
+./result-ds4-reference/bin/ds4-server --rocm --model "$MODEL" \
+  --ctx 4096 --host 127.0.0.1 --port 8081
+# DSpark: append --dspark --mtp-model "$DSPARK"
+# HTTP requests: set thinking.type="disabled" and temperature=0.
+# Native single-user AR; append the same DSpark options for speculation:
+./result-ds4-reference/bin/ds4-bench --rocm --model "$MODEL" \
+  --chat-prompt-file /path/to/prompt.txt --ctx-start 2048 --ctx-max 2048 \
+  --gen-tokens 128 --csv /tmp/ds4.csv
 
-[Matched prefill comparison](artifacts/antirez-ds4-ar-comparison.json): four of
-20 full-logit checks fail immediately after prefill; post-decode vectors pass.
-Gufo repeats exactly across 1280 choices and 20 vectors. The
-[formula audit](artifacts/prefill-formula-audit.json) retains all four alerts:
-
-| Context / call size | RMSE | Cosine | Max logit error | Max probability difference |
-| --- | ---: | ---: | ---: | ---: |
-| 4K / 4K | 0.9691 | 0.98006 | 5.3386 | 5.90 percentage points |
-| 12K / 4K | 1.1819 | 0.96935 | 5.4680 | 39.81 percentage points |
-| 16K / 2K | 0.8128 | 0.98681 | 5.8521 | 11.63 percentage points |
-| 16K / 4K | 1.3476 | 0.96214 | 5.8032 | 9.80 percentage points |
-
-The official Flash 0731 formula projects raw FP32 HC activations before RMS
-scaling. Gufo follows that order with F16 GGUF weights; the Antirez wide path
-normalizes first and rounds inputs to F16. Its own 12K probabilities change by
-up to 40.58 percentage points across call sizes, versus 6.00 for Gufo.
-Imitating that rounding fails the independent formula oracle and worsens two
-probability comparisons. It is rejected.
-
-[Captured-input audit](artifacts/captured-operator-audit.json), layers 0/2/3/42:
-HC projection, Sinkhorn, reduction and normalization match independent equations;
-raw FP8 KV bytes and sampled selectors match. F16 router/compressor rounding can
-change nearly tied expert choices. FP32 compressor/router prototypes nevertheless
-fail end-to-end qualification and were removed. The 16K trace shows accumulated
-post-attention error (RMSE 0.000404 at layer 0, 0.994 at layer 42), without proving
-one root cause. Local precision alone is insufficient evidence of better output.
-
-Next correction: controlled operator/layer ablation, captured-input regression,
-all four frontiers, reproducibility and official continuation checks. Full
-original-checkpoint distribution and capability qualification remain **TODO**.
-
-Source pins: official `deepseek-ai/DeepSeek-V4-Flash-0731`
-`7872f01b1d1fe23eabc4c98b48bffcef5a386062`; differential `antirez/ds4`
-`6289c516273979173abbc062209a81dd3706b804`. Artifact hashes and methods remain
-in the retained audit JSONs.
-
-## DSpark
-
-Exact p/q acceptance and normalized residual correction preserve the target
-distribution. Filtered sampled C>1 uses hybrid top-8 proposals; C1/unfiltered
-sampling retains point-mass proposals. Offline costs, acceptance history and
-checkpoint confidence choose work; live timings never change token decisions.
-RNG, policy and acceptance state are request-private and reset on prefix reuse.
-Seeded replay requires the same execution configuration/schedule.
-
-[Sampling evidence](artifacts/dspark-sampling.json) retains the 2026-09-19 C2
-controls at T=1, top-p 0.95, seed 7: 17.40/21.01/15.27 per-user tok/s for
-explanation/repetition/naming. [Controller costs](artifacts/cost-calibration.json)
-and [qualification summary](artifacts/quality-qualification.json) retain their
-own release identities; they are not a new whole-model qualification.
-
-## Capability
-
-The 2026-09-10 greedy C1 baseline passes **53/75** questions, with 22 failures,
-zero execution errors and nine length finishes (context 32768, output limit
-16000). A complete current comparison is **TODO**. The first 16 candidate cases
-repeat exactly: 13/16 versus baseline 14/16; the changed answer also changes in
-AR and matches DSpark. Request confirmation before the full 75-question rerun.
+nix develop -c python3 tools/bench/model-bench.py --model deepseek-v4-flash tables
+nix develop -c python3 tools/bench/model-bench.py --model deepseek-v4-flash render
+```
