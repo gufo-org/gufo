@@ -43,15 +43,6 @@
     }
   },
   "tables": {
-    "loading": {
-      "title": "Cold-file-cache launch to readiness",
-      "per_variant": false,
-      "sessions": 2,
-      "repetitions": 1,
-      "metric": "seconds",
-      "better": "lower",
-      "rows": "variants"
-    },
     "single-ar": {
       "title": "Single user, autoregressive",
       "per_variant": false,
@@ -184,17 +175,12 @@
       "metric": "tok/s",
       "better": "higher"
     },
-    "multi-repetition": {
-      "title": "Multiple users, <SPEC>, repetition",
+    "multi-<spec>": {
       "per_variant": false,
       "modes": [
         "mtp"
       ],
       "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
-      "cases": [
-        "repetition_word"
-      ],
-      "corpus_layout": "homogeneous",
       "concurrency": [
         1,
         2,
@@ -208,38 +194,38 @@
       "warmup": 1,
       "repetitions": 1,
       "metric": "tok/s",
-      "better": "higher"
+      "better": "higher",
+      "title": "Multiple users, <SPEC>",
+      "workloads": {
+        "multi-mixed": {
+          "label": "mixed",
+          "cases": [
+            "expository_pangram",
+            "cpp_ring_buffer",
+            "reasoning_train"
+          ],
+          "corpus_layout": "distinct"
+        },
+        "multi-repetition": {
+          "label": "repetitive",
+          "cases": [
+            "repetition_word"
+          ],
+          "corpus_layout": "homogeneous"
+        }
+      }
     },
-    "multi-mixed": {
-      "title": "Multiple users, <SPEC>, mixed corpus",
+    "loading": {
+      "title": "Loading time",
       "per_variant": false,
-      "modes": [
-        "mtp"
-      ],
-      "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
-      "cases": [
-        "expository_pangram",
-        "cpp_ring_buffer",
-        "reasoning_train"
-      ],
-      "corpus_layout": "distinct",
-      "concurrency": [
-        1,
-        2,
-        4,
-        6,
-        8
-      ],
-      "context": 4096,
-      "output_tokens": 128,
-      "cache_prompt": false,
-      "warmup": 1,
+      "sessions": 2,
       "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher"
+      "metric": "seconds",
+      "better": "lower",
+      "rows": "variants"
     },
     "memory": {
-      "title": "GPU-visible allocation",
+      "title": "Memory occupation",
       "per_variant": false,
       "context": 133121,
       "workloads": [

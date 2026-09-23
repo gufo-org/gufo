@@ -477,12 +477,23 @@ def _measure_depth(session: Session, base_url: str, tokenizer: Tokenizer, *, dep
     raise RuntimeError(f"depth {depth}: cached prefix outside tolerance after 4 attempts")
 
 
-def run_multi(session: Session, table: TableSpec) -> None:
+def run_multi(session: Session, table: TableSpec, display_table: TableSpec | None = None) -> None:
+    workloads = table.workload_tables()
+    if workloads:
+        for workload in workloads:
+            run_multi(session, workload, display_table=table)
+        return
     cfg = session.config
     spec = table.spec
     cfg.require_files(table.variant)
     levels = [int(c) for c in spec["concurrency"]]
-    keys = _selected_rows(session, table, {c: str(c) for c in levels})
+    if display_table is not None and session.todo_only:
+        from .render import todo_rows
+
+        pending = todo_rows(cfg, session.document, display_table, session.target, table.spec["label"])
+        keys = [c for c in levels if pending is None or str(c) in pending]
+    else:
+        keys = _selected_rows(session, table, {c: str(c) for c in levels})
     if not keys:
         print(f"{table.id}: nothing to do")
         return

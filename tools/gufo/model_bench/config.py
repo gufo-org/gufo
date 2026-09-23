@@ -30,6 +30,17 @@ class TableSpec:
     def speculative(self) -> bool:
         return bool(self.spec.get("speculative"))
 
+    def workload_tables(self) -> list[TableSpec]:
+        """Keep each workload's measurements under its existing artifact identity."""
+        if self.kind != "multi":
+            return []
+        common = {k: v for k, v in self.spec.items() if k != "workloads"}
+        return [
+            TableSpec(f"{base}-{self.variant}" if self.variant else base, base,
+                      self.variant, {**common, **workload})
+            for base, workload in self.spec.get("workloads", {}).items()
+        ]
+
 
 @dataclass
 class BenchConfig:

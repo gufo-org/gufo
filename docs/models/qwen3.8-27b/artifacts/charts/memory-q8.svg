@@ -226,7 +226,7 @@ z
    </g>
   </g>
   <g id="text_12">
-   <text style="font-size: 10px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #0b0b0b" x="3.744" y="11.918437" transform="rotate(-0 3.744 11.918437)">GPU-visible allocation (Q8)</text>
+   <text style="font-size: 10px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #0b0b0b" x="3.744" y="11.918437" transform="rotate(-0 3.744 11.918437)">Qwen27B Q8 AR · Memory occupation</text>
   </g>
  </g>
  <defs>

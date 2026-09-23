@@ -172,6 +172,18 @@ and the table says so.
 6. Retained JSON goes to `docs/models/<model>/artifacts/`; raw samples,
    traces, audio, images and videos stay in the ignored top-level `artifacts/`.
 
+## Results-card format
+
+Keep the results card numerical and concise. Put model, quantization and mode
+in the first column header as well as the row dimension (depth/users/workload).
+Throughput headers must say `tok/s`; loading, memory and encoder latency retain
+seconds, GiB and ms. Add `---` between each Q4 table/figure and its Q8 counterpart.
+Keep acceptance statistics in artifacts, not Markdown columns or charts. Group
+mixed/repetitive speculative concurrency into one table and figure per quantization,
+while retaining independent workload data. Keep TODO cells. Place **Loading time**
+immediately before **Memory occupation**. Put commands and detailed methodology in
+`EVALUATION.md`; keep only interpretation-critical notes beside the tables.
+
 ## Comparison columns
 
 Every headline table carries the reference project next to Gufo:
@@ -229,8 +241,8 @@ Gufo: `gufo serve llm --think off --max-pending-per-client 8`, greedy, seed
 only for the image-encoder table. The sweep parameters are identical across
 the three models so the documents stay comparable.
 
-Tables, in order (table ids in parentheses; append `-<quant>` when the
-model has several quantizations, e.g. `single-ar-q4`):
+Tables (append `-<quant>` for several quantizations, e.g. `single-ar-q4`);
+place loading immediately before memory in the rendered card:
 
 1. **Loading** (`loading`). Cold-file-cache launch to readiness (`/ready` on
    Gufo, `/health` on llama-server)
@@ -258,8 +270,8 @@ model has several quantizations, e.g. `single-ar-q4`):
    `Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain`.
 3. **Single user, speculative** (`single-<spec>` and
    `single-<spec>-repetition`, DFlash2 / DSpark / MTP as the model supports).
-   Same grid plus accepted draft tokens per step from each server's
-   usage/timings. Two workloads, because speculative decoding depends on the
+   Same depth grid. Retain accepted draft tokens per step in the
+   artifacts, without displaying them in the results card. Two workloads, because speculative decoding depends on the
    output: the measured turn of `single-<spec>` asks for a detailed summary
    and a story (generic prose, `workload: prose`); `single-<spec>-repetition`
    asks the model to repeat the passage word for word (fully predictable
@@ -278,7 +290,7 @@ model has several quantizations, e.g. `single-ar-q4`):
    speculative reference comes from that branch. Without such a build,
    record the error once, run the reference with `--mode ar`, and leave its
    speculative cells `TODO`.
-   `Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain | Gufo accepted/step | llama.cpp accepted/step`.
+   `Model / depth | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain`.
    `accepted/step` is the mean number of accepted draft tokens per
    verification step, `draft_n_accepted / (predicted_n − draft_n_accepted)`
    (each step also yields one target token, so tokens per step is this plus
@@ -290,10 +302,14 @@ model has several quantizations, e.g. `single-ar-q4`):
    column falls back to llama.cpp AR and is labelled `Gain vs llama.cpp AR`.
 4. **Multiple users**. Measure AR once in `multi-ar` (`modes: ["ar"]`),
    using `repetition_word` and 128 output tokens to keep the batch full.
-   `multi-mixed` and `multi-repetition` use only the model's speculative mode
-   in `modes`, so they never schedule or report another AR performance sweep.
-   Each table compares Gufo with the reference in that same mode:
-   `Users | Gufo <mode> | llama.cpp <mode> | Gain`.
+   `multi-<spec>` groups mixed and repetitive workloads, using only the model's
+   speculative mode in `modes`. Its `workloads` map keeps `multi-mixed` and
+   `multi-repetition` artifact identities, case lists and corpus layouts.
+   Shared context/concurrency parameters belong to the parent. The renderer
+   displays both workloads side by side; the runner measures them separately.
+   `--todo` selects missing cells independently by workload. No extra AR
+   performance sweep runs. Each workload compares Gufo and the reference
+   in the same mode, with explicit `tok/s` units.
    Existing combined-mode cards remain supported until migrated.
    `C = 1,2,4,6,8`, context capacity 4096, fresh server per point,
    `cache_prompt=false`. Workloads come from
@@ -422,11 +438,9 @@ explicit approval and `--allow-full-generation`.
 ## Finish
 
 Render the tables, check that every Gufo/reference pair used the same
-workload identity, and rewrite the prose around each table: dates, method,
-server versions and flags, artifact file names, caveats such as a skipped
-loading table, and the reproduction block with the exact `model-bench.py`
-commands (paths as placeholders). Remove statements the new numbers
-contradict. List the remaining `TODO` cells with the reason (tool missing,
+workload identity, and keep only concise interpretation notes beside them. Put dates, method,
+server flags, artifact provenance and reproduction commands in `EVALUATION.md`.
+Remove statements the new numbers contradict. List the remaining `TODO` cells with the reason (tool missing,
 reference unsupported, time budget). Update `EXPERIMENTS.md` only when a measurement changes a
 retained decision. Summarize per table: Gufo, reference, best and worst gain,
 and every cell where completion hashes or transcripts did not match.

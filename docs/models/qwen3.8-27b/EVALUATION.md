@@ -371,3 +371,35 @@ axial vision RoPE, normalization and GELU variants, language mRoPE, Flash
 indexer positions, and shifted MTP inputs. Secondary implementation controls:
 llama.cpp `18a04f09c24616898792bcfaa17f3550bdc78912` and
 vLLM `63d9ad0a3a435cdf3a44495028b10f390a38f960`.
+
+## Benchmark method
+
+The comparison tables use HTTP on both engines, greedy decoding with thinking
+off, one warmup and one measured repetition per point. Single-user controls
+request pp2048/tg128; actual appended lengths are 2010–2060 tokens, with context
+capacity 36864 for the focused d0/d32K checks. Q4 replays a one-token prefix reply;
+Q8 replays eight tokens. Paired engine controls use the same message history.
+
+Concurrency uses 4096 context tokens per request and up to 128 output tokens.
+AR uses `repetition_word`; DFlash2 has mixed and repetitive workloads. Its summary
+case ends early. Rates sum individual request decode rates and average complete
+cohorts, excluding prefill and scheduling. Mixed and repetitive results stay
+separate in artifacts even though each quantization now has one comparison table.
+
+September 23 controls: Gufo Q4 C1 AR; Q4 mixed DFlash2 C4/C6/C8 and repetitive C8;
+Q4 mixed C4 DFlash2 reference; and current Q8_K_XL rows. Older Q4 values are from
+September 21 and include Gufo prompt-cache reuse. Refreshed rows have zero cache
+hits. Memory measurements remain September 21 controls; Q8 uses Q8_K_L and awaits
+Q8_K_XL replacement. The image encoder's 1024² result is a September 20 hand
+measurement, excluding first weight upload, preprocessing and text prefill.
+Artifact rows retain exact inputs, binary identities, dates and draft statistics.
+
+Refresh selected rows with `tools/bench/model-bench.py --model qwen3.8-27b`:
+`run --target gufo --table <table>` or `run --target reference --table <table>`
+with the model paths supplied as documented in the
+[benchmark skill](../../../.agents/skills/benchmark-model/SKILL.md).
+`multi-dflash2-q4` / `multi-dflash2-q8` run both workloads; `--todo` selects missing
+cells separately for each workload. Use `render` to regenerate the results card
+and charts without running a model. Run the affected checks above before
+publishing new performance measurements. Original-target qualification remains
+TODO; output agreement alone is not proof of official-model parity.

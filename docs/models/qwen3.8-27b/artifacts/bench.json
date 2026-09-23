@@ -3,7 +3,8 @@
   "category": "llm",
   "model": {
     "id": "Qwen3.8-27B",
-    "docs": "qwen3.8-27b"
+    "docs": "qwen3.8-27b",
+    "label": "Qwen27B"
   },
   "files": {
     "gguf": "target GGUF (UD-Q4_K_XL / UD-Q8_K_XL)",
@@ -49,16 +50,6 @@
     }
   },
   "tables": {
-    "loading": {
-      "title": "Cold-file-cache launch to readiness",
-      "per_variant": false,
-      "context": 262144,
-      "sessions": 2,
-      "repetitions": 1,
-      "metric": "seconds",
-      "better": "lower",
-      "rows": "variants"
-    },
     "single-ar": {
       "title": "Single user, autoregressive",
       "per_variant": true,
@@ -164,17 +155,12 @@
       "metric": "tok/s",
       "better": "higher"
     },
-    "multi-repetition": {
-      "title": "Multiple users, DFlash2, repetition",
+    "multi-dflash2": {
       "per_variant": true,
       "modes": [
         "dflash2"
       ],
       "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
-      "cases": [
-        "repetition_word"
-      ],
-      "corpus_layout": "homogeneous",
       "concurrency": [
         1,
         2,
@@ -188,44 +174,45 @@
       "warmup": 1,
       "repetitions": 1,
       "metric": "tok/s",
-      "better": "higher"
+      "better": "higher",
+      "title": "Multiple users, DFlash2",
+      "workloads": {
+        "multi-mixed": {
+          "label": "mixed",
+          "cases": [
+            "expository_pangram",
+            "cpp_ring_buffer",
+            "reasoning_train",
+            "summary_gpu",
+            "italian_explanation",
+            "chinese_explanation",
+            "json_schedule",
+            "creative_station",
+            "instruction_debug"
+          ],
+          "corpus_layout": "distinct"
+        },
+        "multi-repetition": {
+          "label": "repetitive",
+          "cases": [
+            "repetition_word"
+          ],
+          "corpus_layout": "homogeneous"
+        }
+      }
     },
-    "multi-mixed": {
-      "title": "Multiple users, DFlash2, mixed corpus",
-      "per_variant": true,
-      "modes": [
-        "dflash2"
-      ],
-      "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
-      "cases": [
-        "expository_pangram",
-        "cpp_ring_buffer",
-        "reasoning_train",
-        "summary_gpu",
-        "italian_explanation",
-        "chinese_explanation",
-        "json_schedule",
-        "creative_station",
-        "instruction_debug"
-      ],
-      "corpus_layout": "distinct",
-      "concurrency": [
-        1,
-        2,
-        4,
-        6,
-        8
-      ],
-      "context": 4096,
-      "output_tokens": 128,
-      "cache_prompt": false,
-      "warmup": 1,
+    "loading": {
+      "title": "Loading time",
+      "per_variant": false,
+      "context": 262144,
+      "sessions": 2,
       "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher"
+      "metric": "seconds",
+      "better": "lower",
+      "rows": "variants"
     },
     "memory": {
-      "title": "GPU-visible allocation",
+      "title": "Memory occupation",
       "per_variant": true,
       "context": 262144,
       "workloads": [

@@ -566,7 +566,7 @@ L 554.739609 191.679297
    </g>
   </g>
   <g id="text_38">
-   <text style="font-size: 10px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #0b0b0b" x="5.76" y="12.206437" transform="rotate(-0 5.76 12.206437)">Single user, autoregressive (Q8)</text>
+   <text style="font-size: 10px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #0b0b0b" x="5.76" y="12.206437" transform="rotate(-0 5.76 12.206437)">Qwen27B Q8 AR · Single user, autoregressive</text>
   </g>
  </g>
  <defs>

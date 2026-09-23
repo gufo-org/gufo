@@ -69,8 +69,10 @@ def cmd_tables(config: BenchConfig) -> int:
         paths = [artifact_path(config, table, target) for target in TARGETS]
         if table.kind == "multi":
             modes = table.spec.get("modes", ["ar"])
-            paths = [artifact_path(config, table, "gufo", m) for m in modes]
-            paths += [artifact_path(config, table, "reference", None if m == "ar" else m) for m in modes]
+            sources = table.workload_tables() or [table]
+            paths = [artifact_path(config, source, "gufo", m) for source in sources for m in modes]
+            paths += [artifact_path(config, source, "reference", None if m == "ar" else m)
+                      for source in sources for m in modes]
         present = [p.name for p in paths if p.exists()]
         print(f"{table.id:28} {table.kind:14} {', '.join(present) or '-'}")
     return 0

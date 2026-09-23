@@ -648,7 +648,7 @@ with patch("gufo.model_bench.charts.chart_for", return_value=True) as draw:
     check(all(call.args[1].id == "multi-mixed" for call in draw.call_args_list),
           "partial rendering does not redraw unrelated charts")
 
-# Speculative tables reuse AR quality hashes without scheduling AR performance runs.
+# Grouped comparisons retain separate workloads and never rerun AR performance.
 with tempfile.TemporaryDirectory() as directory:
     config = load_config(ROOT, "qwen3.8-27b")
     config.artifacts_override = Path(directory)
@@ -656,60 +656,83 @@ with tempfile.TemporaryDirectory() as directory:
     for quant in ("q4", "q8"):
         ar = config.table(f"multi-ar-{quant}")
         check(ar.spec["modes"] == ["ar"], "one dedicated AR concurrency sweep")
-        check([c.header for c in layout_for(config, ar).columns] ==
-              ["Users", "Gufo AR", "llama.cpp AR", "Gain"], "AR table has only AR columns")
-        for workload in ("mixed", "repetition"):
-            table = config.table(f"multi-{workload}-{quant}")
-            check(table.spec["modes"] == ["dflash2"], "speculative tables never schedule AR")
-            check([c.header for c in layout_for(config, table).columns] ==
-                  ["Users", "Gufo DFlash2", "llama.cpp DFlash2", "Gain"],
-                  "speculative tables have no duplicate AR columns")
-            ar_path = config.artifacts_dir / f"{table.id}-gufo-ar.json"
-            ar_path.write_text(json.dumps({"results": {"c1": {"cases": {
-                case: {"completionHashes": ["a" * 64]} for case in table.spec["cases"]
+        check([c.header for c in layout_for(config, ar).columns[1:]] ==
+              ["Gufo AR", "llama.cpp AR", "Gain"], "AR table has only AR columns")
+        table = config.table(f"multi-dflash2-{quant}")
+        workloads = table.workload_tables()
+        check([w.id for w in workloads] == [f"multi-mixed-{quant}", f"multi-repetition-{quant}"],
+              "merged presentation retains the existing artifact identities")
+        layout = layout_for(config, table)
+        check(f"Qwen27B {quant.upper()} DFlash2" in layout.columns[0].header,
+              "first column identifies model, quantization and execution mode")
+        check(all(c.unit == "tok/s" for c in layout.columns if c.owner in ("gufo", "reference")),
+              "every throughput column states its unit")
+        for workload in workloads:
+            check(workload.spec["modes"] == ["dflash2"], "speculative tables never schedule AR")
+            path = config.artifacts_dir / f"{workload.id}-gufo-ar.json"
+            path.write_text(json.dumps({"results": {"c1": {"cases": {
+                case: {"completionHashes": ["a" * 64]} for case in workload.spec["cases"]
             }}}}))
-            for target in ("gufo", "reference"):
-                session = Session(
-                    config, target, gufo_binary=Path("gufo"), reference_binary="llama-server",
-                    source={"revision": "a" * 40, "dirty": False}, fingerprint={},
-                    log_dir=Path(directory), document="", todo_only=False, fresh=True,
-                )
-                server = MagicMock()
-                session.server = MagicMock(return_value=server)
-                session.reference_version = lambda mode: None
-                with patch("gufo.model_bench.llm.run_corpus_benchmark") as bench, \
-                        patch("gufo.model_bench.llm.wait_process_exit"), \
-                        patch("gufo.model_bench.llm.save_artifact"), \
-                        patch("sys.stdout", new=io.StringIO()):
-                    bench.side_effect = lambda **kw: {
-                        "artifactType": "servingBenchmark",
-                        "results": {f"c{kw['concurrency_levels'][0]}": {}},
-                    }
-                    run_multi(session, table)
-                    check(bench.call_count == len(table.spec["concurrency"]),
-                          "each concurrency runs once, with no extra AR sweep")
-                    check(all(call.kwargs["mode"] == "dflash2"
-                              for call in session.server.call_args_list),
-                          "both engines start only DFlash2 servers")
-                    check(all(set(call.kwargs["reference"]["hashes"]) == set(table.spec["cases"])
-                              for call in bench.call_args_list),
-                          "every speculative workload retains the complete AR quality reference")
+        # Only Gufo repetitive C4 and reference mixed C6 need new measurements.
+        body = "| " + " | ".join(c.label for c in layout.columns) + " |\n"
+        body += "| " + " | ".join(c.align for c in layout.columns) + " |\n"
+        for users in table.spec["concurrency"]:
+            cells = [str(users), "20", "TODO" if users == 6 else "10", "100%",
+                     "TODO" if users == 4 else "40", "30", "33%"]
+            body += "| " + " | ".join(cells) + " |\n"
+        document = f"<!-- bench:{table.id} -->\n{body}<!-- /bench -->"
+        for target in ("gufo", "reference"):
+            session = Session(
+                config, target, gufo_binary=Path("gufo"), reference_binary="llama-server",
+                source={"revision": "a" * 40, "dirty": False}, fingerprint={},
+                log_dir=Path(directory), document=document, todo_only=False, fresh=True,
+            )
+            session.server = MagicMock(return_value=MagicMock())
+            session.reference_version = lambda mode: None
+            with patch("gufo.model_bench.llm.run_corpus_benchmark") as bench, \
+                    patch("gufo.model_bench.llm.wait_process_exit"), \
+                    patch("gufo.model_bench.llm.save_artifact"), \
+                    patch("sys.stdout", new=io.StringIO()):
+                bench.side_effect = lambda **kw: {
+                    "artifactType": "servingBenchmark",
+                    "results": {f"c{kw['concurrency_levels'][0]}": {}},
+                }
+                run_multi(session, table)
+                check(bench.call_count == 2 * len(table.spec["concurrency"]),
+                      "each workload/concurrency runs once without an AR sweep")
+                check(all(call.kwargs["mode"] == "dflash2" for call in session.server.call_args_list),
+                      "both engines start only DFlash2 servers")
+                check(all(set(call.kwargs["reference"]["hashes"]) ==
+                          {case.identifier for case in call.kwargs["cases"]}
+                          for call in bench.call_args_list), "each workload keeps its own AR reference")
+                session.todo_only = True
                 session.server.reset_mock()
-                with patch("gufo.model_bench.llm.load_reference_report",
-                           return_value={"hashes": {}}):
-                    try:
-                        run_multi(session, table)
-                    except RuntimeError as exception:
-                        check("missing isolated AR completion hashes" in str(exception),
-                              "missing quality references fail explicitly")
-                    else:
-                        raise AssertionError("speculative runs require AR quality references")
-                session.server.assert_not_called()
-            with patch("gufo.model_bench.render.load_artifact", return_value=None) as load:
-                rendered = render_table(config, table, None)
-                check("Gufo AR" not in rendered and "llama.cpp AR" not in rendered,
-                      "rendering cannot reintroduce AR performance columns")
-                check(all(call.args[0].name.endswith("-dflash2.json") for call in load.call_args_list),
-                      "performance rendering reads only the configured mode")
+                bench.reset_mock()
+                run_multi(session, table)
+                check(bench.call_count == 1, "TODO refresh measures only the missing workload cell")
+                expected = (f"multi-repetition-{quant}", 4) if target == "gufo" else (f"multi-mixed-{quant}", 6)
+                call = session.server.call_args
+                check((call.args[0].id, call.kwargs["sessions"]) == expected,
+                      "merged TODO columns select the correct workload and concurrency")
+            session.todo_only = False
+            session.server.reset_mock()
+            with patch("gufo.model_bench.llm.load_reference_report", return_value={"hashes": {}}):
+                try:
+                    run_multi(session, table)
+                except RuntimeError as exception:
+                    check("missing isolated AR completion hashes" in str(exception),
+                          "missing quality references fail explicitly")
+                else:
+                    raise AssertionError("speculative runs require AR quality references")
+            session.server.assert_not_called()
+        with patch("gufo.model_bench.render.load_artifact", return_value=None) as load:
+            rendered = render_table(config, table, None)
+            check("Gufo AR" not in rendered and "llama.cpp AR" not in rendered,
+                  "merged rendering cannot reintroduce AR performance columns")
+            check(all(call.args[0].name.endswith("-dflash2.json") for call in load.call_args_list),
+                  "performance rendering reads only the configured mode")
+        single = render_table(config, config.table(f"single-dflash2-{quant}"), None)
+        check("accepted/step" not in single and "tok/s" in single,
+              "single-user tables show throughput units without acceptance columns")
 
 print("Serving benchmark harness tests passed.")
