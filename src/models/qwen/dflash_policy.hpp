@@ -115,7 +115,7 @@ public:
     return best_length;
   }
 
-  // Only the measured all-adaptive Q8 C4 cohort uses a shared width. Its
+  // Measured all-adaptive Q8 C4/C8 cohorts use a shared width. Their
   // target cost depends on the total row count: mixing individually cheap
   // widths can require two expensive projection launches. Keep each history
   // private, sum its expected tokens and choose one physical batch shape.
@@ -123,10 +123,16 @@ public:
       std::span<const DFlashLengthController* const> controllers,
       std::span<const std::uint32_t> budgets,
       std::span<const std::uint32_t> positions) noexcept {
-    if (controllers.size() != 4 || budgets.size() != 4 || positions.size() != 4)
+    const auto users = controllers.size();
+    if ((users != 4 && users != 8) || budgets.size() != users ||
+        positions.size() != users)
       return std::nullopt;
+    const auto& relative_costs =
+        users == 4 ? kQ8FourRequestRelativeCost : kQ8EightRequestRelativeCost;
+    const double base_ms = users == 4 ? 170.66 : 209.20;
+    const std::uint32_t probe_width = users == 4 ? 3 : 1;
     std::uint32_t cap = kMaxDraftTokens;
-    std::array<double, 4> probabilities{};
+    std::array<double, 8> probabilities{};
     double attention_cost_scale = 0.0;
     bool full_tile = true;
     for (std::size_t index = 0; index < controllers.size(); ++index) {
@@ -141,24 +147,25 @@ public:
       attention_cost_scale +=
           static_cast<double>(positions[index] > 2048 ? positions[index] - 2048
                                                       : 0) /
-          30720.0 * 100.0 / 170.66;
-      full_tile &= controller->last_full_width_ >= 3;
+          30720.0 * 100.0 / base_ms;
+      full_tile &= controller->last_full_width_ >= probe_width;
     }
     if (cap == 0)
       return std::nullopt;
-    // All four fully accepted a short tile. Probe wider together; one lucky
+    // All requests fully accepted a short tile. Probe wider together; one lucky
     // request must not force its peers into a costly ragged verification.
     if (full_tile)
       return cap;
-    std::array<double, 4> survival{1.0, 1.0, 1.0, 1.0};
-    double expected_tokens = 4.0, best_score = 0.0;
+    std::array<double, 8> survival{};
+    survival.fill(1.0);
+    double expected_tokens = static_cast<double>(users), best_score = 0.0;
     std::uint32_t best_length = 1;
     for (std::uint32_t length = 1; length <= cap; ++length) {
       for (std::size_t index = 0; index < controllers.size(); ++index) {
         survival[index] *= probabilities[index];
         expected_tokens += survival[index];
       }
-      const double cost = kQ8FourRequestRelativeCost[length - 1] +
+      const double cost = relative_costs[length - 1] +
                           attention_cost_scale * kQ4ContextCost[length - 1];
       const double score = expected_tokens / cost;
       if (score > best_score) {
@@ -211,6 +218,13 @@ private:
   static constexpr std::array<float, kMaxDraftTokens>
       kQ8FourRequestRelativeCost{1.0F,   1.06F,  1.153F, 1.914F,
                                  1.907F, 2.089F, 1.853F};
+  // C8 complete cycles cost 209/337/326/467/457/596/589 ms for 1–7 drafts.
+  // Ragged 24/40/56-row projections cost more than their adjacent full tiles.
+  // These selector-to-selector spans include target verification, context
+  // injection, the next draft and host acceptance work.
+  static constexpr std::array<float, kMaxDraftTokens>
+      kQ8EightRequestRelativeCost{1.0F,   1.610F, 1.561F, 2.231F,
+                                  2.183F, 2.850F, 2.813F};
   static constexpr std::array<float, kMaxDraftTokens> kQ4RelativeCost{
       1.0F, 1.02F, 1.045F, 1.08F, 1.14F, 1.20F, 1.29F};
   // Two greedy requests verify 4–16 rows together. Crossing eight rows has a

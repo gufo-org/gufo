@@ -364,7 +364,7 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
     positions[index] = request.position;
   }
   const auto shared_count =
-      greedy_batch_size == 4
+      greedy_batch_size > 1
           ? speculative::DFlashLengthController::ChooseGreedyBatch(
                 std::span(controllers).first(requests.size()),
                 std::span(budgets).first(requests.size()),

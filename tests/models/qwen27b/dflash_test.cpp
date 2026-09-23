@@ -135,42 +135,59 @@ void TestLengthController() {
                  replay.Choose(budget, position, 4) <= budget,
              "Q8 C4 replay preserves history and remaining budgets");
   }
-  std::array<DFlashLengthController, 4> cohort{q8, q8, q8, q8};
-  std::array<const DFlashLengthController*, 4> controllers{
-      &cohort[0], &cohort[1], &cohort[2], &cohort[3]};
-  std::array<std::uint32_t, 4> budgets{7, 7, 7, 7};
-  const std::array<std::uint32_t, 4> positions{2048, 2048, 2048, 2048};
-  const auto choose_cohort = [&] {
-    return DFlashLengthController::ChooseGreedyBatch(controllers, budgets,
-                                                     positions);
-  };
-  Expect(choose_cohort() == 3, "Q8 C4 chooses one efficient target tile");
-  cohort[0].Observe(3, 3);
-  Expect(choose_cohort() == 3, "one full block cannot force a cohort probe");
-  for (std::size_t index = 1; index < cohort.size(); ++index)
-    cohort[index].Observe(3, 3);
-  const auto saved_mean = cohort[0].State();
-  const auto saved_width = cohort[0].LastFullWidth();
-  cohort[0].Reset();
-  cohort[0].Restore(saved_mean, saved_width);
-  Expect(choose_cohort() == 7,
-         "restoration retains the shared full-block probe");
-  budgets[1] = 2;
-  Expect(choose_cohort() == 2, "a shared block obeys every remaining budget");
-  budgets[1] = 0;
-  Expect(!choose_cohort(), "an exhausted row falls back to private choices");
-  budgets[1] = 7;
-  DFlashLengthController q8_fixed(DFlashDraftPolicy::kFixed, 7, true);
-  controllers[1] = &q8_fixed;
-  Expect(!choose_cohort(), "a fixed request keeps its own requested width");
-  controllers[1] = &shallow;
-  Expect(!choose_cohort(), "Q4 does not use the Q8 cost model");
-  controllers[1] = &cohort[1];
-  cohort[0].Observe(0, 7);
-  Expect(choose_cohort() != 7, "a rejected probe resumes cost-based selection");
-  for (auto& controller : cohort)
-    controller.Reset();
-  Expect(choose_cohort() == 3, "new requests cannot inherit a cohort probe");
+  for (const std::size_t users : {4U, 8U}) {
+    std::array<DFlashLengthController, 8> cohort{q8, q8, q8, q8,
+                                                 q8, q8, q8, q8};
+    std::array<const DFlashLengthController*, 8> controllers{};
+    for (std::size_t index = 0; index < users; ++index)
+      controllers[index] = &cohort[index];
+    std::array<std::uint32_t, 8> budgets{7, 7, 7, 7, 7, 7, 7, 7};
+    const std::array<std::uint32_t, 8> positions{2048, 2048, 2048, 2048,
+                                                 2048, 2048, 2048, 2048};
+    const auto choose_cohort = [&] {
+      return DFlashLengthController::ChooseGreedyBatch(
+          std::span(controllers).first(users), std::span(budgets).first(users),
+          std::span(positions).first(users));
+    };
+    Expect(choose_cohort() == 3, "Q8 cohort chooses an efficient target tile");
+    cohort[0].Observe(3, 3);
+    Expect(choose_cohort() == 3, "one full block cannot force a cohort probe");
+    for (std::size_t index = 1; index < users; ++index)
+      cohort[index].Observe(3, 3);
+    const auto saved_mean = cohort[0].State();
+    const auto saved_width = cohort[0].LastFullWidth();
+    cohort[0].Reset();
+    cohort[0].Restore(saved_mean, saved_width);
+    Expect(choose_cohort() == 7,
+           "restoration retains the shared full-block probe");
+    budgets[1] = 2;
+    Expect(choose_cohort() == 2, "a shared block obeys every remaining budget");
+    budgets[1] = 0;
+    Expect(!choose_cohort(), "an exhausted row falls back to private choices");
+    budgets[1] = 7;
+    DFlashLengthController q8_fixed(DFlashDraftPolicy::kFixed, 7, true);
+    controllers[1] = &q8_fixed;
+    Expect(!choose_cohort(), "a fixed request keeps its own requested width");
+    controllers[1] = &shallow;
+    Expect(!choose_cohort(), "Q4 does not use the Q8 cost model");
+    controllers[1] = &cohort[1];
+    cohort[0].Observe(0, 7);
+    Expect(choose_cohort() != 7,
+           "a rejected probe resumes cost-based selection");
+    for (auto& controller : cohort)
+      controller.Reset();
+    Expect(choose_cohort() == 3, "new requests cannot inherit a cohort probe");
+    if (users == 8) {
+      for (auto& controller : cohort)
+        controller.Observe(0, 3);
+      Expect(choose_cohort() == 1,
+             "Q8 C8 avoids wider verification when acceptance falls");
+      for (auto& controller : cohort)
+        controller.Observe(1, 1);
+      Expect(choose_cohort() == 7,
+             "Q8 C8 can probe from its cheapest fully accepted tile");
+    }
+  }
 
   // Enumerate every outcome of a censored geometric run. At the true mean,
   // expected feedback must have zero drift regardless of the chosen width.
