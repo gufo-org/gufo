@@ -11,11 +11,11 @@ model accuracy. [Artifact identities](artifacts/model-identities.json).
 | --- | --- |
 | Target execution | Full logits and all five feature taps match scalar execution at verification widths 2–8, mixed FP16/FP32 KV, C1/2/4/6/8, shrinking cohorts, snapshots and 8K + 1025-token continuation. Both target quants pass. |
 | RMSNorm | 90 maintained FP64 controls at absolute tolerance 1e-5, dimensions 5119/5120/5121, rows 1/7/33/64/65, three scales and optional weights; scalar/batched output is byte-identical. Explicit fused square accumulation prevents compiler contraction drift. |
-| Target attention | Independent FP64 checks, FP16/FP32 KV and dispatch boundaries pass. Shared partition scales retain 128 byte-exact comparisons through 64K; the split-K threshold has maximum absolute error 1.17e-6 against FP64. |
+| Target attention | Independent FP64 checks, FP16/FP32 KV and dispatch boundaries pass. Shared partition scales retain 128 byte-exact comparisons through 64K; the split-K threshold has maximum absolute error 1.17e-6 against FP64. Prefill causal tails retain byte-exact chunk/packing controls; maximum absolute error against original-input FP64 attention is 2.11e-4. |
 | Draft attention / selector | 216 byte-exact attention controls include ring wrap and ragged blocks. Real-weight layer traces, complete logits, conditional probabilities, private RNG and persistent replay pass through C8. |
 | Sampling | Maintained GPU sampler covers 216 AR policies, p/q acceptance and residual sampling, ties, nonfinite rows and tile boundaries. Seeded cold/cache replay retains IDs and proposal counts. |
 | Weight placement | Complete 17,559,178,144-byte Q4 encoded-weight copy matches; read-only huge pages retain target arithmetic. Q8 full-target qualification also passes with this layout. |
-| Serving | Q4/Q8 AR and DFlash2 pass live continuation, disk restoration, sampled/greedy transitions and cancellation inside a verified block. |
+| Serving | Q4/Q8 AR and DFlash2 pass live continuation, disk restoration, C4 generated-history forks, sampled/greedy transitions and cancellation inside a verified block. |
 
 Current controls and binary/source identities:
 [Q4 AR](artifacts/q4-ar-c1-pruning.json),
@@ -43,19 +43,28 @@ nix develop -c build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test \
   "$MODEL" "$DRAFT" --continuation-only
 ```
 
-The corrected Q8 C1 HTTP controls retain all 128 AR tokens with DFlash2 at d0
-and d32K, including the same generated prefix history. The earlier deep DFlash2
-rate used different output and is excluded from the benchmark table. The full
-Q8 target test and shared runner/scheduler tests pass. The compact Q8 artifact
-records request hashes, counts and validation log hashes.
+The Q8 C1 HTTP controls retain all 128 AR tokens with DFlash2 at d0 and d32K,
+including the same generated prefix history. The full Q8 target test and shared
+runner/scheduler tests pass. The compact Q8 artifact records request hashes,
+counts and validation log hashes.
 
-**Open generated-history fork issue:** the 32K continuation fails when four
-requests fork one completed conversation. One request reuses the live generated
-frontier; three restore the earlier prompt snapshot and prefill the generated
-reply with different arithmetic. This reproduces on `82a947a0`, before the Q8
-C4 controller change. The failed equality gate is retained in the Q8 artifact
-and excluded from speed qualification. Passing live reuse and direct snapshot
-tests does not close this serving-cache case.
+Concurrent continuations freeze the live generated frontier before its first
+branch mutates it. Peers restore that checkpoint instead of prefilling the
+generated reply; the original prompt checkpoint remains available for branching.
+This is budgeted and applies only to pools with multiple sessions. C1 retains
+its copy-free live path. The 32K Q8 HTTP control reuses 32,764 tokens on all four
+DFlash2 requests, and every 128-token continuation matches isolated AR.
+
+Scheduled prefill also needs consistent attention at chunk boundaries. A
+masked populated future value could change WMMA rounding compared with absent
+padding. Each query's final partial tile now accumulates visible keys with FP32
+FMA; complete tiles keep WMMA. At 8,193 + 2,059 tokens, Q8 full logits and all
+five feature taps match whole-chunk execution exactly with 512/2,048-row
+scheduling budgets. Independent FP64 attention and packed/unpacked operator
+checks pass, including shallow packed chunks of 1,025/2,048 rows. Q4's distinct
+large-prefill projection precision is outside that whole-model chunk equality
+claim. The persistent arithmetic identity rejects
+snapshots made before the attention fix.
 
 ## Adaptive decoding and concurrency
 
@@ -82,9 +91,10 @@ the last fully accepted width and rejects the previous layout.
 The focused C4 controls retain all 128 AR tokens on Italian/Chinese prompts,
 full-acceptance repetition and a complete 34,824-token prompt checkpoint.
 Generation improves 12.3% on the difficult pair and 13.2% at that deep checkpoint;
-repetition and C1 pp/tg are retained. The deep control has zero new prefill and
-does **not** qualify generated-history forks. Real-weight draft traces, private
-sampled RNG, RAM/persistent controller replay and snapshot accounting pass through C8.
+repetition and C1 pp/tg are retained. The deep speed control has zero new prefill;
+generated-history forks are qualified separately above. Real-weight draft traces,
+private sampled RNG, RAM/persistent controller replay and snapshot accounting
+pass through C8.
 
 ## Meaning of Exact
 

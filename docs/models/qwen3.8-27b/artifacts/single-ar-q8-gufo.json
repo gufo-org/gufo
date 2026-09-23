@@ -31,7 +31,8 @@
   "notes": [
     "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task: prose; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
     "synthetic text: 1.159 tokens/word, template overhead 12 tokens",
-    "Q8_K_XL; prior Q8_K_L depth rows are superseded, not combined with these results."
+    "Q8_K_XL; prior Q8_K_L depth rows are superseded, not combined with these results.",
+    "Causal-tail continuation controls retain isolated AR output; updated rows record their own build identity. Other rows retain their earlier provenance."
   ],
   "referenceName": "llama.cpp",
   "rows": {
@@ -53,21 +54,28 @@
       "tg_sd": null
     },
     "32768": {
-      "command": "gufo serve --port 51189 --sessions 1 llm --model Qwen3.8-27B-UD-Q8_K_XL.gguf --context 36864 --served-model-name bench --think off --max-pending-per-client 8",
+      "pp": 386.60856371939116,
+      "tg": 6.760895093005774,
+      "samples": 1,
       "counts": [
         {
           "cache_n": 32765,
-          "draft_n": 0,
-          "draft_n_accepted": 0,
           "predicted_n": 128,
-          "prompt_n": 2059
+          "prompt_n": 2059,
+          "draft_n": 0,
+          "draft_n_accepted": 0
         }
       ],
-      "pp": 386.43,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 6.76,
-      "tg_sd": null
+      "completion_sha256": "a13240903764d7212a116dc5f32a6538efc9cd070b6decf864751f41297741fb",
+      "measuredOn": "2026-09-23",
+      "provenance": "q8-tg-focused.json",
+      "context_capacity": 36864,
+      "source": {
+        "revision": "ebd967a8f61c01781bf562cb09cc715ebc34cbb8",
+        "dirty": true,
+        "binary_sha256": "ab93b2e187337bc3c654fcf65deaf37a924b1384aadcfc4a9f1818c275ff99d6"
+      },
+      "qualified_revision": "147c6608fc2755f8aa40d33278eecc5aef9b6df7"
     }
   },
   "schemaVersion": 1,

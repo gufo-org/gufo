@@ -31,89 +31,60 @@
   "notes": [
     "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task: prose; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
     "synthetic text: 1.159 tokens/word, template overhead 12 tokens",
-    "Q8_K_XL; prior Q8_K_L depth rows are superseded, not combined with these results."
+    "Q8_K_XL; prior Q8_K_L depth rows are superseded, not combined with these results.",
+    "Causal-tail continuation controls retain isolated AR output; updated rows record their own build identity. Other rows retain their earlier provenance."
   ],
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "pp": 471.09039157040274,
-      "tg": 16.12744219915676,
+      "pp": 473.78672213119984,
+      "tg": 16.108085440562665,
       "samples": 1,
       "counts": [
         {
           "cache_n": 0,
           "predicted_n": 128,
-          "prompt_n": 2040
+          "prompt_n": 2040,
+          "draft_n": 292,
+          "draft_n_accepted": 78
         }
       ],
-      "accepted_per_step": 1.56,
       "completion_sha256": "fad485940c3413ecb84fe8a240543ceec6c58f06a49ec4ef7f3a6d5a16fd2341",
       "measuredOn": "2026-09-23",
       "provenance": "q8-tg-focused.json",
       "context_capacity": 36864,
-      "command": [
-        "/nix/store/8qlhs22xbvkhcwchdk77mc30ym7f06pr-gufo-4c8888f-dirty/bin/gufo",
-        "serve",
-        "--port",
-        "35225",
-        "--sessions",
-        "1",
-        "llm",
-        "--model",
-        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf",
-        "--context",
-        "36864",
-        "--served-model-name",
-        "bench",
-        "--think",
-        "off",
-        "--max-pending-per-client",
-        "8",
-        "--speculative",
-        "dflash2",
-        "--dflash-model",
-        "/var/llms/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2-GGUF/snapshots/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
-      ]
+      "source": {
+        "revision": "ebd967a8f61c01781bf562cb09cc715ebc34cbb8",
+        "dirty": true,
+        "binary_sha256": "8ccabcc4d8d3ff3d113c39ba532c04fc06e9baf4565e9a83f164662697083731"
+      },
+      "qualified_revision": "147c6608fc2755f8aa40d33278eecc5aef9b6df7",
+      "accepted_per_step": 1.56
     },
     "32768": {
-      "pp": 361.35207315709545,
-      "tg": 12.754265567041998,
+      "pp": 359.27694801239613,
+      "tg": 16.223073687540865,
       "samples": 1,
       "counts": [
         {
           "cache_n": 32764,
           "predicted_n": 128,
-          "prompt_n": 2060
+          "prompt_n": 2060,
+          "draft_n": 263,
+          "draft_n_accepted": 87
         }
       ],
-      "accepted_per_step": 1.3703703703703705,
-      "completion_sha256": "b438aaac15d31c44523e5b1c9320f7edbf9ff83bd5091b4a50905df3e5da48ab",
+      "completion_sha256": "a13240903764d7212a116dc5f32a6538efc9cd070b6decf864751f41297741fb",
       "measuredOn": "2026-09-23",
       "provenance": "q8-tg-focused.json",
       "context_capacity": 36864,
-      "command": [
-        "/nix/store/8qlhs22xbvkhcwchdk77mc30ym7f06pr-gufo-4c8888f-dirty/bin/gufo",
-        "serve",
-        "--port",
-        "35225",
-        "--sessions",
-        "1",
-        "llm",
-        "--model",
-        "/var/llms/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf",
-        "--context",
-        "36864",
-        "--served-model-name",
-        "bench",
-        "--think",
-        "off",
-        "--max-pending-per-client",
-        "8",
-        "--speculative",
-        "dflash2",
-        "--dflash-model",
-        "/var/llms/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2-GGUF/snapshots/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
-      ]
+      "source": {
+        "revision": "ebd967a8f61c01781bf562cb09cc715ebc34cbb8",
+        "dirty": true,
+        "binary_sha256": "ab93b2e187337bc3c654fcf65deaf37a924b1384aadcfc4a9f1818c275ff99d6"
+      },
+      "qualified_revision": "147c6608fc2755f8aa40d33278eecc5aef9b6df7",
+      "accepted_per_step": 2.1219512195121952
     }
   },
   "schemaVersion": 1,

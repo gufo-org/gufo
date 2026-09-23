@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Host | Linux x86-64, AMD `gfx1151`, 128 GB unified memory |
-| Gufo | Focused C1 results: `4c8888f4` / `82a947a0`, `nix build`; each artifact records its binary identity. Unrefreshed concurrency/memory controls are dated below |
+| Gufo | Focused C1 results through `147c6608`, `nix build`; each updated artifact row records its binary identity. Unrefreshed concurrency/memory controls are dated below |
 | Targets | `unsloth/Qwen3.8-27B-GGUF` snapshot `4ca72078`: **UD-Q4_K_XL** (16.35 GiB), **UD-Q8_K_XL** (29.30 GiB). Historical multi-user/memory Q8 rows use **UD-Q8_K_L** (26.12 GiB) and await replacement |
 | Speculative | DFlash2 draft **Q4_K_M** with the **adaptive** controller |
 | Reference | llama.cpp `llama-server` release `b11069` (`0.4.1-dev (build 11069)`), ROCm gfx1151, `LLAMA_HIP_UMA=ON`, from `flake.nix`, same GGUF files and same draft through `--spec-type draft-dflash` |
@@ -75,7 +75,7 @@ Artifacts: `artifacts/single-ar-{q4,q8}-{gufo,reference}.json`.
 | 8,192 | TODO | TODO | TODO | TODO | TODO | TODO |
 | 12,288 | TODO | TODO | TODO | TODO | TODO | TODO |
 | 16,384 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 32,768 | 386.43 | 249.07 | +55.1% | 6.76 | 6.76 | +0.0% |
+| 32,768 | 386.61 | 249.07 | +55.2% | 6.76 | 6.76 | +0.0% |
 | 65,536 | TODO | TODO | TODO | TODO | TODO | TODO |
 | 131,072 | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->
@@ -93,8 +93,8 @@ llama.cpp uses `--spec-type draft-dflash` with its default draft parameters.
 `accepted/step = accepted / (generated − accepted)`; emitted tokens per
 verification step is this plus one. DFlash2 prefill includes feature capture
 and draft context injection. Q4 d32K's paired reference cell remains **TODO**.
-The corrected Q8 continuation retains all 128 AR tokens at both depths;
-its earlier mismatching deep result is excluded.
+Q8 DFlash2 retains all 128 AR tokens at both depths, including when the
+generated prefix is forked across four requests at d32K.
 Artifacts: `artifacts/single-dflash2-{q4,q8}-{gufo,reference}.json`.
 
 <!-- bench:single-dflash2-q4 -->
@@ -133,12 +133,12 @@ analogue of the `repetition` corpus below.
 <!-- bench:single-dflash2-q8 -->
 | Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain | Gufo accepted/step | llama.cpp accepted/step |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 471.09 | 336.19 | +40.1% | 16.13 | 15.02 | +7.4% | 1.56 | 1.46 |
+| 0 | 473.79 | 336.19 | +40.9% | 16.11 | 15.02 | +7.3% | 1.56 | 1.46 |
 | 4,096 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 | 8,192 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 | 12,288 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 | 16,384 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 32,768 | 361.35 | 232.53 | +55.4% | 12.75 | 13.89 | -8.2% | 1.37 | 1.46 |
+| 32,768 | 359.28 | 232.53 | +54.5% | 16.22 | 13.89 | +16.8% | 2.12 | 1.46 |
 | 65,536 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 | 131,072 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->

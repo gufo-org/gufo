@@ -6,7 +6,7 @@
 | Shared DFlash2 body/context injection | Retained across requests; independent attention, convolution, history and selector state. |
 | Partial verification after rejection | Retained with the complete original proposal and unchanged consumed-prefix feedback. |
 | BF16 draft gate/up reuse and tiled argmax | Retained; complete head, finite filtering and lowest-ID ties; no extra persistent buffer. |
-| Long-context KV packing | Retained in idle FFN scratch with bounded head groups; exact attention output/log-sum-exp, cache bytes unchanged. |
+| Large-chunk KV packing | Retained at shallow and long depths in idle FFN scratch with bounded head groups; exact attention output/log-sum-exp, cache bytes unchanged. |
 | BF16 target projection reduction | Fixed per-row FP32 order retained for chunk/cache/continued-image equivalence. |
 | Register-cached vision softmax | Retained; byte-identical embeddings with the shared Q4/Q8 projector, unchanged reduction order and memory allocation. |
 | 4096-patch vision attention tiles | Retained; byte-identical full embeddings, lower latency and 24 MiB less attention scratch. |
@@ -88,12 +88,14 @@
 | Q8 verification staging four/eight activation rows | Rejected: byte-exact on 32-row gate/up and down projections, but extra staging phases outweigh the smaller shared-memory allocation. |
 | Private Q8 C4 width costs and per-request full-block probes | Rejected: private costs slow repetition; per-request probes recover it but regress ordinary output. |
 | Shared Q8 C4 greedy width | Retained: summed private acceptance histories avoid costly ragged verification. Difficult-pair TG improves 12.3%, deep full-checkpoint TG 13.2%; full acceptance, AR output, private sampled replay and C1 pp/tg are retained. |
-| Concurrent generated-reply forks | Open correctness issue: one live frontier and three earlier prompt snapshots replay the same conversation differently on the unchanged baseline. The failed deep equality gate is excluded from speed qualification. |
+| Concurrent generated-reply forks | Retained: freeze the live generated checkpoint before branching, within the snapshot budget. C1 avoids the copy; Q4/Q8 greedy/seeded forks, disk restoration and cancellation pass. |
+| Visible causal attention tails | Retained: FP32 FMA over visible tail keys removes chunk-boundary drift while complete tiles keep WMMA. Q8 full logits/features match at 8K across scheduling budgets; four 32K DFlash2 continuations match isolated AR. Later packed V loads and row-first scale reuse recover PP speed without spills; large shallow chunks use the same packed route. |
+| Separate causal-tail passes, helper functions and deeper V prefetch | Rejected: exact outputs, but extra work or register pressure makes attention slower. |
 
-Current focus: resolve generated-history cache forks, then **Q8_K_XL DFlash2**
+Current focus: **Q8_K_XL DFlash2**
 and Q4/Q8 concurrency. Q4 C1 AR
-leads the pinned d0/d32K controls; Q8 C1 AR matches them. Correct Q8 DFlash2
-retains AR output and needs more long-context speed. Profile complete batched
+leads the pinned d0/d32K controls; Q8 C1 AR matches them. Q8 DFlash2 now
+retains AR output and leads both retained C1 reference points. Profile complete batched
 cycles and avoid speculation that does not pay for its verification cost.
 Keep the work on one PR branch with incremental, reviewable commits.
 
