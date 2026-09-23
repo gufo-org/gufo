@@ -9,7 +9,7 @@ model accuracy. [Artifact identities](artifacts/model-identities.json).
 
 | Area | Retained evidence |
 | --- | --- |
-| Target execution | Full logits and all five feature taps match scalar execution at verification widths 2–8, mixed FP16/FP32 KV, C1/2/4/6/8, shrinking cohorts, snapshots and 8K + 1025-token continuation. Both target quants pass. |
+| Target execution | Full logits and all five feature taps match scalar execution at verification widths 2–8, including ragged 17–36-row cohorts, mixed FP16/FP32 KV, shrinking cohorts, snapshots and 8K + 1025-token continuation. Both target quants pass; grouped Q8 projections retain scalar FP32 bits and guarded output bounds. |
 | RMSNorm | 90 maintained FP64 controls at absolute tolerance 1e-5, dimensions 5119/5120/5121, rows 1/7/33/64/65, three scales and optional weights; scalar/batched output is byte-identical. Explicit fused square accumulation prevents compiler contraction drift. |
 | Target attention | Independent FP64 checks, FP16/FP32 KV and dispatch boundaries pass. Shared partition scales retain 128 byte-exact comparisons through 64K; the split-K threshold has maximum absolute error 1.17e-6 against FP64. Prefill causal tails retain byte-exact chunk/packing controls; maximum absolute error against original-input FP64 attention is 2.11e-4. |
 | Draft attention / selector | 216 byte-exact attention controls include ring wrap and ragged blocks. Real-weight layer traces, complete logits, conditional probabilities, private RNG and persistent replay pass through C8. |
@@ -82,35 +82,34 @@ acceptance is preserved. Evidence: [C2](artifacts/q4-c2-focused.json),
 [C8](artifacts/q4-c8-focused.json). The difficult Italian/Chinese C8 pair remains
 faster under AR; these controls do not establish universal speculative profitability.
 
-Q8 greedy C2/C4/C6/C8 use one shared width chosen from private acceptance histories
-and complete measured cycle costs. A wider probe requires the whole cohort to
-have fully accepted the preceding short block. Fixed, sampled and mixed cohorts
-retain private choices; C1 keeps its existing Q8 policy. Persistent draft
-state includes the last fully accepted width and rejects the previous layout.
+Q8 greedy cohorts of two through eight requests use one shared width chosen from
+private acceptance histories and measured cycle costs. Odd cohorts use the next
+measured capacity's estimate. Full-acceptance probes also cover growing cohorts
+when two established histories support the probe and the remaining estimates
+are neutral or fully accepted. Fixed, sampled and mixed cohorts retain private
+choices; C1 keeps its existing policy. Real-weight checks cover layers, logits,
+selector probabilities, RNG and persistent state at every cohort size C2–C8.
 
-The focused C4 controls retain all 128 AR tokens on Italian/Chinese prompts,
-full-acceptance repetition and a complete 34,824-token prompt checkpoint.
-Generation improves 12.3% on the difficult pair and 13.2% at that deep checkpoint;
-repetition and C1 pp/tg are retained. The deep speed control has zero new prefill;
-generated-history forks are qualified separately above. Real-weight draft traces,
-private sampled RNG, RAM/persistent controller replay and snapshot accounting
-pass through C8.
+Current Q8_K_XL C8 controls reach **65.96 tok/s** on the nine-case mixed corpus
+and **116.90 tok/s** on repetition, as sums of individual decode rates.
+All 16 mixed completions and all eight repetitive completions match isolated
+AR; repetition accepts all 880 proposed tokens. Matched llama.cpp controls reach
+**63.02 / 86.53 tok/s** for mixed/repetition. Ragged projections group weight reads without
+changing per-row arithmetic, and shared widths avoid excessive proposals when
+the active cohort shrinks.
 
-The C8 control reaches **54.84 tok/s** on the Italian/Chinese pair,
-**115.18 tok/s** on repetition and **40.51 tok/s** on d32K generated-history
-forks, as sums of individual decode rates. Every completion matches isolated
-AR; each deep request reuses 32,764 tokens and prefills 2,060 new tokens.
-The paired C1 control retains identical output and acceptance, with overlapping
-PP ranges and TG around 16.1 tok/s. Complete cycle profiles, forward/reverse C1
-controls and source identities are in the compact Q8 artifact.
+At d32K, C8 reaches **41.52 tok/s**: all eight requests reuse 32,764 tokens,
+prefill 2,060 new tokens and match the isolated 128-token AR continuation.
+The C1 kernel control retains its output and 292/78 proposal/acceptance counts
+at **463.44 pp / 16.12 tg tok/s**.
 
-C2/C6 reach **30.24 / 51.86 tok/s** on the difficult pair,
-**86.43 / 108.15 tok/s** on repetition and **26.61 / 34.77 tok/s** on
-d32K generated-history forks. Every completion matches isolated AR; deep
-requests retain the same 32,764-token frontier and 2,060-token suffix.
-The C1 control retains output and acceptance at 16.13 tok/s, with prefill
-inside the preceding paired range. These are focused controls, not a
-refreshed nine-case concurrency matrix.
+C6's Italian/Chinese control varies with admission order: the retained candidate
+measured **49.25–52.84 tok/s**, while unchanged-baseline controls ranged
+**44.67–51.86**. The paired repeat was **52.84 versus 51.85**, with every
+completion matching AR. This does not establish a uniform C6 speed gain.
+Profiles, ablations, earlier C2/C4 controls and source identities are retained
+in the [compact Q8 artifact](artifacts/q8-tg-focused.json); the full concurrency
+and depth matrix is still pending.
 
 ## Meaning of Exact
 
@@ -128,6 +127,11 @@ same messages, model files and greedy settings within that engine; Gufo retains
 AR/DFlash2 agreement. The Q8 d0 outputs match across all four modes. These
 observations do not determine which arithmetic matches the original checkpoint.
 Original-target qualification is still needed to resolve that question.
+
+On the current Q8_K_XL nine-case corpus, cross-engine C1 AR agreement is 7/9.
+At C8, llama.cpp preserves 10/16 of its own C1 AR completions with AR and 6/16
+with DFlash2; Gufo preserves 16/16 with both. These are execution-consistency
+checks, not evidence that either engine matches the unquantized checkpoint.
 
 ## Maintained checks
 

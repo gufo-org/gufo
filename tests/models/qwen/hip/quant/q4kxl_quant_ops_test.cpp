@@ -361,7 +361,10 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
   void* d_single = nullptr;
   HIP_CHECK(hipMalloc(&d_w, weights.size()));
   HIP_CHECK(hipMalloc(&d_x, x.size() * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_batched, batch * rows * sizeof(float)));
+  constexpr std::size_t guard_rows = 8;
+  HIP_CHECK(hipMalloc(&d_batched, (batch + guard_rows) * rows * sizeof(float)));
+  HIP_CHECK(
+      hipMemset(d_batched, 0xA5, (batch + guard_rows) * rows * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_single, rows * sizeof(float)));
   HIP_CHECK(
       hipMemcpy(d_w, weights.data(), weights.size(), hipMemcpyHostToDevice));
@@ -372,11 +375,13 @@ void TestSmallBatchExactness(const FormatCase& format, std::size_t batch,
       format.type, d_w, static_cast<const float*>(d_x),
       static_cast<float*>(d_batched), batch, rows, columns, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
-  std::vector<float> batched(batch * rows);
+  std::vector<float> batched((batch + guard_rows) * rows);
   HIP_CHECK(hipMemcpy(batched.data(), d_batched, batched.size() * sizeof(float),
                       hipMemcpyDeviceToHost));
 
   std::size_t mismatches = 0;
+  for (std::size_t index = batch * rows; index < batched.size(); ++index)
+    mismatches += std::bit_cast<std::uint32_t>(batched[index]) != 0xA5A5A5A5U;
   std::vector<float> single(rows);
   for (std::size_t token = 0; token < batch; ++token) {
     gufo::hip::LaunchQ8KBlockGEMV(
@@ -836,6 +841,16 @@ int main() {
   TestSmallBatchExactness(q8, 16, 34816, 5120);
   TestSmallBatchExactness(q8, 32, 10240, 5120);
   TestSmallBatchExactness(q8, 64, 5120, 17408);
+  TestSmallBatchExactness(q8, 24, 34816, 5120);
+  TestSmallBatchExactness(q8, 24, 10240, 5120);
+  TestSmallBatchExactness(q8, 36, 5120, 17408);
+  TestSmallBatchExactness(q8, 36, 5120, 6144);
+  for (const auto batch : {17U, 23U, 25U, 31U, 33U, 35U}) {
+    TestSmallBatchExactness(q8, batch, 34816, 5120);
+    TestSmallBatchExactness(q8, batch, 5120, 17408);
+  }
+  TestSmallBatchExactness(q8, 19, 10240, 5120);
+  TestSmallBatchExactness(q8, 28, 5120, 6144);
   // Production IQ4 verification shapes cover the two lane partials, grouped
   // requests and the longer down projection with independent token inputs.
   const FormatCase iq4{gufo::core::GgmlType::kIQ4_XS, "IQ4_XS"};

@@ -338,8 +338,9 @@ void CheckConcurrencyWidths(const Executor& owner) {
     }
     std::cout << "concurrency width=" << width << " logits/features exact=1\n";
 
-    for (const std::size_t cohort_rows : {0U, 9U, 10U, 11U, 12U, 13U, 14U, 15U,
-                                          16U, 28U, 32U, 42U, 48U, 56U, 64U}) {
+    for (const std::size_t cohort_rows :
+         {0U,  9U,  10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U, 23U, 24U,
+          25U, 28U, 31U, 32U, 33U, 35U, 36U, 42U, 48U, 56U, 64U}) {
       if ((cohort_rows > 16 && width != count) ||
           (cohort_rows > 0 && cohort_rows <= 16 && width != 2))
         continue;

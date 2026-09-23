@@ -115,7 +115,7 @@ public:
     return best_length;
   }
 
-  // Measured all-adaptive Q8 C2/C4/C6/C8 cohorts use a shared width. Their
+  // All-adaptive Q8 cohorts use a shared width. Their
   // target cost depends on the total row count: mixing individually cheap
   // widths can require two expensive projection launches. Keep each history
   // private, sum its expected tokens and choose one physical batch shape.
@@ -129,18 +129,23 @@ public:
     const auto* relative_costs = &kQ8FourRequestRelativeCost;
     double base_ms = 170.66;
     std::uint32_t probe_width = 3;
+    // Odd cohorts use the next measured capacity's costs. A finishing request
+    // must not send its remaining peers back to C1's cheap-wide-block estimate.
     switch (users) {
       case 2:
         relative_costs = &kQ8PairedRelativeCost;
         base_ms = 158.26;
         break;
+      case 3:
       case 4:
         break;
+      case 5:
       case 6:
         relative_costs = &kQ8SixRequestRelativeCost;
         base_ms = 189.32;
         probe_width = 1;
         break;
+      case 7:
       case 8:
         relative_costs = &kQ8EightRequestRelativeCost;
         base_ms = 209.20;
@@ -153,6 +158,8 @@ public:
     std::array<double, 8> probabilities{};
     double attention_cost_scale = 0.0;
     bool full_tile = true;
+    bool neutral_or_full = users % 2 != 0;
+    std::size_t full_histories = 0;
     for (std::size_t index = 0; index < controllers.size(); ++index) {
       const auto* controller = controllers[index];
       if (controller == nullptr || !controller->q8_target_ ||
@@ -167,12 +174,23 @@ public:
                                                       : 0) /
           30720.0 * 100.0 / base_ms;
       full_tile &= controller->last_full_width_ >= probe_width;
+      const bool full_history = controller->last_full_width_ >= 3;
+      // A single accepted short block is too weak to carry new peers into a
+      // full probe. Two such blocks raise a neutral estimate from 3 to 4.5.
+      full_histories += full_history && mean >= 4.5;
+      neutral_or_full &=
+          full_history ||
+          (controller->last_full_width_ == 0 &&
+           mean == std::min(3.0F, static_cast<float>(controller->limit_)));
     }
     if (cap == 0)
       return std::nullopt;
     // All requests fully accepted a short tile. Probe wider together; one lucky
     // request must not force its peers into a costly ragged verification.
-    if (full_tile)
+    // Two established full blocks can carry a growing odd cohort through the
+    // probe when its other estimates remain neutral. Other histories use the
+    // ordinary shared cost decision.
+    if (full_tile || (neutral_or_full && full_histories >= 2))
       return cap;
     std::array<double, 8> survival{};
     survival.fill(1.0);

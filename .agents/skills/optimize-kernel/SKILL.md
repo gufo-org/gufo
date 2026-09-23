@@ -71,6 +71,9 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   Group independent small projections in the launch grid and quantize batch
   activations once in idle prefill scratch. Preserve each row's original
   dot-product specialization; larger generic GEMV tiles can be slower.
+  Ragged Q8 groups benefited from masking the final group's loads/stores,
+  avoiding a separate weight pass. Profile mixed cohorts too: saturated
+  full-block costs miss repeated partial verification and odd-cohort fallbacks.
   For Q4 experts, grouping across the full batch improved weight reuse.
   A bounded grid can consume a compact device list without downloading its
   count. Qualify disjoint routing too; the same approach slowed Q5 mixed work.

@@ -135,7 +135,7 @@ void TestLengthController() {
                  replay.Choose(budget, position, 4) <= budget,
              "Q8 C4 replay preserves history and remaining budgets");
   }
-  for (const std::size_t users : {2U, 4U, 6U, 8U}) {
+  for (const std::size_t users : {2U, 3U, 4U, 5U, 6U, 7U, 8U}) {
     std::array<DFlashLengthController, 8> cohort{q8, q8, q8, q8,
                                                  q8, q8, q8, q8};
     std::array<const DFlashLengthController*, 8> controllers{};
@@ -150,16 +150,16 @@ void TestLengthController() {
           std::span(positions).first(users));
     };
     const auto initial = choose_cohort();
-    Expect(initial == (users == 2   ? 7U
-                       : users == 6 ? 1U
-                                    : 3U),
+    Expect(initial == (users == 2                 ? 7U
+                       : users == 5 || users == 6 ? 1U
+                                                  : 3U),
            "Q8 cohort chooses an efficient target tile");
     // Start the probe check below saturation, including C2 where a fresh
     // history already makes a full block profitable.
     if (users == 2)
       for (auto& controller : cohort)
         controller.Restore(1.0F);
-    const auto probe_width = users == 2 || users == 4 ? 3U : 1U;
+    const auto probe_width = users <= 4 ? 3U : 1U;
     Expect(choose_cohort() != 7, "probe fixture starts with a short block");
     cohort[0].Observe(probe_width, probe_width);
     Expect(choose_cohort() != 7, "one full block cannot force a cohort probe");
@@ -189,7 +189,24 @@ void TestLengthController() {
       controller.Reset();
     Expect(choose_cohort() == initial,
            "new requests cannot inherit a cohort probe");
-    if (users == 6 || users == 8) {
+    if (users % 2 != 0) {
+      cohort[0].Observe(3, 3);
+      Expect(choose_cohort() != 7,
+             "one fully accepted history cannot carry neutral peers");
+      cohort[1].Observe(3, 3);
+      Expect(choose_cohort() != 7,
+             "isolated short successes do not justify a growing-cohort probe");
+      cohort[0].Observe(3, 3);
+      cohort[1].Observe(3, 3);
+      Expect(choose_cohort() == 7,
+             "growing cohorts retain an established full-acceptance probe");
+      cohort[2].Observe(0, 7);
+      Expect(choose_cohort() != 7,
+             "a rejecting peer prevents the growing-cohort probe");
+      for (auto& controller : cohort)
+        controller.Reset();
+    }
+    if (users >= 5) {
       for (auto& controller : cohort)
         controller.Observe(0, 3);
       Expect(choose_cohort() == 1,
@@ -295,7 +312,7 @@ void TestConcurrentBlocks(
            (actual.empty() || std::memcmp(actual.data(), expected.data(),
                                           actual.size_bytes()) == 0);
   };
-  for (const std::size_t width : {2U, 4U, 6U, 8U}) {
+  for (const std::size_t width : {2U, 3U, 4U, 5U, 6U, 7U, 8U}) {
     std::vector<QwenDFlashContextRequest> contexts;
     std::array<std::set<std::string>, 8> visited;
     std::vector<std::size_t> order;
@@ -350,7 +367,7 @@ void TestConcurrentBlocks(
                                      : nullptr,
           trace);
     }
-    for (const std::size_t width : {2U, 4U, 6U, 8U}) {
+    for (const std::size_t width : {2U, 3U, 4U, 5U, 6U, 7U, 8U}) {
       std::vector<QwenDFlashBlockRequest> requests;
       std::vector<std::size_t> order;
       std::array<std::set<std::string>, 8> visited;
@@ -403,9 +420,8 @@ void TestConcurrentBlocks(
       }
     }
   }
-  std::cout
-      << "DFlash2 C2/C4/C6/C8: exact layers, logits, selector probabilities; "
-         "ragged/full blocks, distinct positions/temperatures/draws\n";
+  std::cout << "DFlash2 C2-C8: exact layers, logits, selector probabilities; "
+               "ragged/full blocks, distinct positions/temperatures/draws\n";
   for (auto& executor : executors)
     executor.reset();
   std::array<std::unique_ptr<QwenDFlashGpuDraftBackend>, 8> backends;
@@ -472,7 +488,7 @@ void TestConcurrentBlocks(
     }
     // Both sampled and mixed greedy/sampled cohorts must retain their
     // private proposal lengths, selector probabilities and random draws.
-    for (const std::size_t width : {2U, 4U, 6U}) {
+    for (const std::size_t width : {2U, 3U, 4U, 5U, 6U, 7U}) {
       for (const std::size_t first : {0U, 1U}) {
         const auto cohort = std::span(requests).subspan(first, width);
         const auto batch = cohort.front().backend->ProposeBatch(cohort);

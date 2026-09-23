@@ -286,6 +286,33 @@ bool TryLaunchQ8SmallBatchWave64(const void* w, const float* x, float* y,
   const bool down = m == 5120 && k == 17408;
   const bool medium =
       (k == 5120 && (m == 6144 || m == 10240)) || (m == 5120 && k == 6144);
+  const bool grouped_projection = (k == 5120 && (m == 34816 || m == 10240)) ||
+                                  (m == 5120 && (k == 17408 || k == 6144));
+  if (groups == 1 && batch > 16 && batch <= 36 && grouped_projection) {
+    // Mask only the final group's loads/stores. Keeping adjacent groups in
+    // one launch reuses weights instead of rereading them for a short tail.
+    const auto launch = [&]<std::size_t Width, std::size_t Groups,
+                            std::size_t Rows, std::size_t Step = Width,
+                            bool Distributed = false>() {
+      SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Width, Rows, true, true, 64,
+                                           Groups, Step, Distributed, true>
+          <<<((m + 16 * Rows - 1) / (16 * Rows)) * Groups, 512, 0, stream>>>(
+              w, x, y, m, k, batch);
+    };
+    if (batch <= 24) {
+      launch.template operator()<12, 2, 4>();
+    } else if (batch <= 32) {
+      if (k == 5120)
+        launch.template operator()<16, 2, 3, 1, true>();
+      else if (k == 17408)
+        launch.template operator()<16, 2, 3, 1, false>();
+      else
+        launch.template operator()<16, 2, 3, 16, true>();
+    } else {
+      launch.template operator()<12, 3, 4>();
+    }
+    return true;
+  }
   if (batch == 16 && groups >= 1 && groups <= 4 && (up || down || medium)) {
     const auto launch = [&]<std::size_t Groups>() {
       const auto launch_shape = [&]<std::size_t Step, bool Distributed>() {
@@ -325,15 +352,14 @@ bool TryLaunchQ8SmallBatchWave64(const void* w, const float* x, float* y,
   }
   if (groups != 1)
     return false;
+  if (batch == 12 && grouped_projection) {
+    SmallBatchQ8_0ExactFp32VecGEMMKernel<16, 12, 4, true, true, 64>
+        <<<(m + 63) / 64, 512, 0, stream>>>(w, x, y, m, k);
+    return true;
+  }
   if (batch == 6 && m == 5120 && k == 17408) {
     SmallBatchQ8_0ExactFp32VecGEMMKernel<8, 6, 4, true, false, 64>
         <<<(m + 31) / 32, 256, 0, stream>>>(w, x, y, m, k);
-    return true;
-  }
-  if (batch == 12 && ((k == 5120 && (m == 34816 || m == 10240)) ||
-                      (m == 5120 && (k == 17408 || k == 6144)))) {
-    SmallBatchQ8_0ExactFp32VecGEMMKernel<16, 12, 4, true, true, 64>
-        <<<(m + 63) / 64, 512, 0, stream>>>(w, x, y, m, k);
     return true;
   }
   return false;

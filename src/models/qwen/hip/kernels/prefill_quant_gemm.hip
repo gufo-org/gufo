@@ -1567,7 +1567,8 @@ void LaunchBatchedDualQuantGEMMPreQuantized(
   // 128-row blocked macro tile the activation panel is already cheap, and two
   // blocked launches measured faster than a blocked dual (23.0 vs 24.4 ms for
   // the FFN shape at batch 2048) because the dual doubles LDS and halves
-  // occupancy. See opt-c163-blocked-dual in docs/models/qwen3.8-27b/BENCHMARKS.md.
+  // occupancy. See opt-c163-blocked-dual in
+  // docs/models/qwen3.8-27b/BENCHMARKS.md.
   LaunchBatchedQuantGEMMPreQuantized(type, w_gate, q8_1_x, y_gate, batch, m, k,
                                      stream);
   LaunchBatchedQuantGEMMPreQuantized(type, w_up, q8_1_x, y_up, batch, m, k,
@@ -1729,6 +1730,13 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
         type == core::GgmlType::kQ8_0 &&
         (ffn || (k == 5120 && (m == 6144 || m == 10240)) ||
          (m == 5120 && k == 6144));
+    // Group ragged verification rows without rereading weights for the tail.
+    // Full sixteen-row groups and unsupported shapes keep their own route.
+    if (q8_projection && batch > 16 && batch <= 36 && batch != 32 &&
+        detail::TryLaunchQ8SmallBatchWave64(w, fp32_x, y, batch, m, k,
+                                            stream)) {
+      return;
+    }
     const auto launch_q8 = [&]<std::size_t Batch>(const float* input,
                                                   float* output) {
       if constexpr (Batch == 12 || Batch == 16) {

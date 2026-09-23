@@ -233,13 +233,14 @@ template<std::uint32_t WavesPerBlock, std::size_t Batch,
          std::size_t RowsPerWave, bool NarrowIndex = false,
          bool XorStage = false, std::uint32_t HardwareWaveSize = 32,
          std::size_t TokenGroups = 1, std::size_t TokensPerStep = Batch,
-         bool DistributedOutput = false>
+         bool DistributedOutput = false, bool Ragged = false>
 __launch_bounds__(WavesPerBlock * 32, 1) __global__
     void SmallBatchQ8_0ExactFp32VecGEMMKernel(const void* __restrict__ w,
                                               const float* __restrict__ x,
                                               float* __restrict__ y,
                                               std::size_t wide_m,
-                                              std::size_t wide_k) {
+                                              std::size_t wide_k,
+                                              std::size_t valid_rows = 0) {
   static_assert(HardwareWaveSize == 32 || HardwareWaveSize == 64);
   static_assert(TokenGroups > 0 && TokensPerStep > 0 &&
                 Batch % TokensPerStep == 0);
@@ -278,7 +279,8 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
       const Index vector = within % kVectorsPerBlock;
       const Index source_block = tile_base + block;
       float4 value = {0.0F, 0.0F, 0.0F, 0.0F};
-      if (source_block < num_blocks) {
+      if ((!Ragged || token_group * Batch + token < valid_rows) &&
+          source_block < num_blocks) {
         value = *reinterpret_cast<const float4*>(
             x + (token * k) + (source_block * kQ8_0BlockSize) + (vector * 4));
       }
@@ -391,7 +393,8 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
     for (Index r = 0; r < RowsPerWave; ++r) {
       const float value = ReduceKQuantColumns<Batch, 16>(sums[r]);
       const Index row = row_base + r;
-      if ((lane & 1U) == 0 && row < m)
+      if ((lane & 1U) == 0 && row < m &&
+          (!Ragged || token_group * Batch + lane / 2 < valid_rows))
         y[(lane / 2) * m + row] = value;
     }
   } else {
@@ -417,7 +420,8 @@ __launch_bounds__(WavesPerBlock * 32, 1) __global__
         }
 #pragma unroll
         for (Index token = 0; token < Batch; ++token) {
-          y[(token * m) + row] = sums[r][token];
+          if (!Ragged || token_group * Batch + token < valid_rows)
+            y[(token * m) + row] = sums[r][token];
         }
       }
     }
