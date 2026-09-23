@@ -342,7 +342,7 @@ def run_request(
         "stream_options": {"include_usage": True},
     }
     if cache_prompt is not None:
-        # llama-server honours this field; gufo ignores unknown fields.
+        # Both Gufo and llama-server honor this request-level cache policy.
         payload["cache_prompt"] = cache_prompt
     if extra_body:
         payload.update(extra_body)
@@ -670,6 +670,7 @@ def _run_corpus_round(
     group_index: int,
     endpoint_profile: str = "gufo",
     cache_prompt: bool | None = None,
+    pin_slots: bool = False,
 ) -> RoundObservation:
     if len(cases) != concurrency:
         raise ValueError("corpus round must contain exactly C prompt cases")
@@ -696,6 +697,7 @@ def _run_corpus_round(
             start_gate=start_gate,
             endpoint_profile=endpoint_profile,
             cache_prompt=cache_prompt,
+            extra_body={"id_slot": index} if pin_slots else None,
         )
 
     with concurrent.futures.ThreadPoolExecutor(
@@ -1141,6 +1143,8 @@ def run_corpus_benchmark(
     cache_prompt: bool | None = None,
     reference: dict[str, Any] | None = None,
     notes: list[str] | None = None,
+    prefill_first: bool = False,
+    pin_slots: bool = False,
 ) -> dict[str, Any]:
     if not model:
         raise ValueError("model must not be empty")
@@ -1154,6 +1158,8 @@ def run_corpus_benchmark(
         raise ValueError("corpus layout must be distinct or homogeneous")
     if endpoint_profile not in ENDPOINT_PROFILES:
         raise ValueError("endpoint profile must be gufo or openai")
+    if prefill_first and cache_prompt is not True:
+        raise ValueError("prepared decoding requires cache_prompt=true")
 
     results: dict[str, Any] = {}
     warnings: list[str] = []
@@ -1172,7 +1178,7 @@ def run_corpus_benchmark(
                 scheduled[index : index + concurrency]
                 for index in range(0, padded_count, concurrency)
             ]
-        for warmup in range(warmup_rounds):
+        for warmup in range(0 if prefill_first else warmup_rounds):
             _run_corpus_round(
                 base_url=base_url,
                 model=model,
@@ -1185,11 +1191,36 @@ def run_corpus_benchmark(
                 group_index=0,
                 endpoint_profile=endpoint_profile,
                 cache_prompt=cache_prompt,
+                pin_slots=pin_slots,
             )
 
         rounds: list[RoundObservation] = []
+        preparations: list[dict[str, Any]] = []
         for repetition in range(repetitions):
             for group_index, group in enumerate(groups):
+                if prefill_first:
+                    # Finish every prompt before releasing the measured cohort.
+                    # One output token leaves a reusable prompt frontier; the
+                    # measured request repeats the exact prompt, not its output.
+                    prepared = _run_corpus_round(
+                        base_url=base_url, model=model, cases=group,
+                        max_tokens=1, temperature=temperature,
+                        timeout_seconds=timeout_seconds, concurrency=concurrency,
+                        repetition=-(repetition + 1), group_index=group_index,
+                        endpoint_profile=endpoint_profile, cache_prompt=True,
+                        pin_slots=pin_slots,
+                    )
+                    if any(sample.completion_tokens != 1 for sample in prepared.samples):
+                        raise RuntimeError("prompt preparation did not complete")
+                    preparations.append({
+                        "repetition": repetition, "group": group_index,
+                        "samples": [{
+                            key: getattr(sample, key)
+                            for key in ("request_index", "prompt_tokens", "cached_prompt_tokens",
+                                        "prefill_tokens", "completion_tokens", "completion_sha256",
+                                        "prefill_ms", "wall_ms")
+                        } for sample in prepared.samples],
+                    })
                 rounds.append(
                     _run_corpus_round(
                         base_url=base_url,
@@ -1203,9 +1234,24 @@ def run_corpus_benchmark(
                         group_index=group_index,
                         endpoint_profile=endpoint_profile,
                         cache_prompt=cache_prompt,
+                        pin_slots=pin_slots,
                     )
                 )
+                if prefill_first:
+                    for sample in rounds[-1].samples:
+                        # llama.cpp's recurrent checkpoints end four tokens
+                        # before the prompt frontier (server-context.cpp,
+                        # checkpoint_offsets). Reject longer prompt replays.
+                        if sample.cached_prompt_tokens < sample.prompt_tokens - 4 or sample.prefill_tokens > 4:
+                            raise RuntimeError(
+                                f"C={concurrency}: prepared session was not reused "
+                                f"(cached={sample.cached_prompt_tokens}, "
+                                f"prefill={sample.prefill_tokens}, prompt={sample.prompt_tokens})")
+                        if sample.completion_tokens != max_tokens:
+                            raise RuntimeError(f"C={concurrency}: incomplete prepared decode")
         summary = _summarize_rounds(rounds)
+        if preparations:
+            summary["preparations"] = preparations
         summary["corpusPromptCount"] = len(cases)
         summary["scheduledPromptCount"] = padded_count
         results[f"c{concurrency}"] = summary
@@ -1217,7 +1263,7 @@ def run_corpus_benchmark(
                 f"C={concurrency}: server ignored cache_prompt=false "
                 f"({cache_hits} cache hits); refusing an incomparable benchmark"
             )
-        if cache_hits:
+        if cache_hits and not prefill_first:
             warnings.append(
                 f"C={concurrency} observed {cache_hits} prompt-cache hits; "
                 "use a fresh server for acceptance qualification"
@@ -1261,8 +1307,8 @@ def run_corpus_benchmark(
                 if corpus_layout == "homogeneous"
                 else "cycle-from-start"
             ),
-            "warmupPolicy": "first-cohort",
-            "warmupMaxOutputTokens": min(max_tokens, 16),
+            "warmupPolicy": "prepare-every-session" if prefill_first else "first-cohort",
+            "warmupMaxOutputTokens": 1 if prefill_first else min(max_tokens, 16),
             "maxOutputTokens": max_tokens,
             "temperature": temperature,
             "warmupRounds": warmup_rounds,
@@ -1270,6 +1316,8 @@ def run_corpus_benchmark(
             "concurrency": concurrency_levels,
             "endpointProfile": endpoint_profile,
             "cachePrompt": cache_prompt,
+            "prefillFirst": prefill_first,
+            "pinnedReferenceSlots": pin_slots,
         },
         "notes": list(notes or []),
         "reference": (

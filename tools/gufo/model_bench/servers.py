@@ -86,6 +86,7 @@ class Server:
         self.port = free_port()
         self.process: subprocess.Popen[bytes] | None = None
         self.ready_seconds: float | None = None
+        self.failure_exit_code: int | None = None
 
     @property
     def base_url(self) -> str:
@@ -106,6 +107,7 @@ class Server:
         url = self.base_url + self.readiness
         while time.perf_counter() < deadline:
             if self.process.poll() is not None:
+                self.failure_exit_code = self.process.returncode
                 raise RuntimeError(
                     f"server exited with {self.process.returncode} before readiness; see {self.log_path}"
                 )
@@ -134,6 +136,10 @@ class Server:
         return self.start()
 
     def __exit__(self, *exc: Any) -> None:
+        if exc and exc[0] is not None and self.process is not None:
+            # Preserve the actual failure state before our own SIGTERM.
+            # A benchmark validation error is not a server crash.
+            self.failure_exit_code = self.process.poll()
         self.stop()
 
 

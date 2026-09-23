@@ -13,9 +13,27 @@
   "benchmarks-2026-09-22": {
     "reference": "llama.cpp b11069 from flake.nix (0.4.1-dev build 11069, commit 68d9053a), ROCm gfx1151",
     "gufoArMemory": "revision 89d58eb7 (tree dirty only by docs/models/qwen3.8-flash-next), nix build, binary sha256 prefix 4b1e592acb7e4a56",
-    "gufoSingleMtp": "revision 55ed44ad3f9928bcb4353d9a5ff16c789c17a48a; Nix release, per-artifact source/commands retained",
     "referenceMtp": "llama-server-mtp, llama.cpp commit 6fcaa16f, pinned ROCm recipe in flake.nix",
-    "note": "Retained measurements, not a new refresh. Per-artifact source revisions and commands are authoritative. Concurrency tables use summed individual decode rates; matched C1 loading remains unmeasured."
+    "note": "Retained single-user AR, reference single-user MTP and memory measurements. Per-artifact source revisions and commands are authoritative."
   },
-  "scope": "Retained 2026-09-22 text benchmarks and qualification; layout reorganized without running inference."
+  "scope": "Current retained benchmark and qualification evidence; per-table dates and source revisions identify partial refreshes.",
+  "benchmarks-2026-09-23": {
+    "scope": "Gufo single-user MTP mixed/repetitive, matched pp2048 concurrency on both engines, C1/MTP loading at capacity 262144",
+    "gufo": {
+      "revision": "c650f786e08b07ab2476308cf20e7af59ab6f87f",
+      "build": "nix build; inference unchanged during measurement",
+      "binarySha256": "fc4e05dbd2419e18698d1e0653fb46fb06c8edf79d8e39dc614c0ff985f2e850"
+    },
+    "referenceAr": {
+      "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+      "build": "llama.cpp b11069, pinned Nix ROCm gfx1151 recipe",
+      "binarySha256": "81dee29e5fbc234bbb4ae90c022de9c9d8513d1cefa960550b0bb59d9fc5346f"
+    },
+    "referenceMtp": {
+      "revision": "6fcaa16f4b360649933a54d1f91ad40ed35c0e11",
+      "build": "pinned Nix ROCm gfx1151 recipe; archive fetch matches the declared source hash",
+      "binarySha256": "66a42853bde76ef09e0574298819559003ef7fa5a9aa55bdbe3c0e4c085a484f"
+    },
+    "measurement": "One measured sample per point. Concurrency uses the same synthetic pp2048 prompt generator as single-user d0. Every session completes prompt preparation before timed tg128; measured requests reuse the full prefix, allowing at most four final prompt tokens to be evaluated again. Rates sum individual server decode rates. Gufo outputs match independent fresh AR controls. Inference and weights are unchanged."
+  }
 }

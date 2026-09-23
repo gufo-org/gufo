@@ -3,12 +3,12 @@
   "category": "llm",
   "model": {
     "id": "<Model name>",
-    "docs": "<model directory>"
+    "docs": "<model directory>",
+    "label": "<Model + quantization>"
   },
   "files": {
     "gguf": "target GGUF (first shard when sharded)",
-    "<sidecar role>": "speculative sidecar or draft GGUF",
-    "mmproj": "BF16 vision projector (vision models only)"
+    "<sidecar role>": "speculative sidecar or draft GGUF"
   },
   "variants": {
     "default": {
@@ -110,10 +110,6 @@
       "modes": [
         "ar"
       ],
-      "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
-      "cases": [
-        "repetition_word"
-      ],
       "corpus_layout": "homogeneous",
       "concurrency": [
         1,
@@ -124,18 +120,20 @@
       ],
       "context": 4096,
       "output_tokens": 128,
-      "cache_prompt": false,
+      "cache_prompt": true,
       "warmup": 1,
       "repetitions": 1,
       "metric": "tok/s",
-      "better": "higher"
+      "better": "higher",
+      "prompt_tokens": 2048,
+      "workload": "prose",
+      "prefill_first": true
     },
     "multi-<spec>": {
       "per_variant": false,
       "modes": [
-        "mtp"
+        "<spec>"
       ],
-      "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
       "concurrency": [
         1,
         2,
@@ -145,7 +143,7 @@
       ],
       "context": 4096,
       "output_tokens": 128,
-      "cache_prompt": false,
+      "cache_prompt": true,
       "warmup": 1,
       "repetitions": 1,
       "metric": "tok/s",
@@ -154,30 +152,27 @@
       "workloads": {
         "multi-mixed": {
           "label": "mixed",
-          "cases": [
-            "expository_pangram",
-            "cpp_ring_buffer",
-            "reasoning_train"
-          ],
-          "corpus_layout": "distinct"
+          "corpus_layout": "homogeneous",
+          "workload": "prose"
         },
         "multi-repetition": {
           "label": "repetitive",
-          "cases": [
-            "repetition_word"
-          ],
-          "corpus_layout": "homogeneous"
+          "corpus_layout": "homogeneous",
+          "workload": "repetition"
         }
-      }
+      },
+      "prompt_tokens": 2048,
+      "prefill_first": true
     },
     "loading": {
       "title": "Loading time",
       "per_variant": false,
-      "sessions": 2,
+      "sessions": 1,
       "repetitions": 1,
       "metric": "seconds",
       "better": "lower",
-      "rows": "variants"
+      "rows": "variants",
+      "context": 262144
     },
     "memory": {
       "title": "Memory occupation",
@@ -200,18 +195,6 @@
       "metric": "GiB",
       "better": "lower",
       "mode": "ar"
-    },
-    "image-encoder": {
-      "title": "Image encoder",
-      "per_variant": false,
-      "sizes": [
-        256,
-        1024
-      ],
-      "warmup": 1,
-      "repetitions": 3,
-      "metric": "ms",
-      "better": "lower"
     }
   },
   "gufo": {

@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,8 +16,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 from gufo import serving_bench
 from gufo.model_bench.charts import render_charts
 from gufo.model_bench.config import BenchConfig, load_config
-from gufo.model_bench.llm import Session, run_multi, run_single
+from gufo.model_bench.llm import Session, _measure_depth, run_loading, run_multi, run_single
 from gufo.model_bench.render import _serving_rate, layout_for, parse_table, render_table
+from gufo.model_bench.servers import Server
 
 
 def check(condition, message):
@@ -502,6 +504,72 @@ check(
     "reference hashes come from the report's C=1 cases",
 )
 
+# Prepared cohorts finish every prompt before the measured phase. Explicit
+# reference slots prevent two quick preparation requests from warming one slot.
+prepared_slots = set()
+preparation_lock = threading.Lock()
+
+
+def prepared_response(request, timeout):
+    del timeout
+    body = json.loads(request.data)
+    slot = body["id_slot"]
+    check(body["cache_prompt"] is True, "both phases allow exact prefix reuse")
+    if body["max_tokens"] == 1:
+        with preparation_lock:
+            prepared_slots.add(slot)
+        return FakeResponse(
+            usage={**OPENAI_USAGE, "completion_tokens": 1},
+            timings={**LLAMA_TIMINGS, "prompt_n": 12, "cache_n": 0, "predicted_n": 1},
+            content=("one",),
+        )
+    with preparation_lock:
+        check(prepared_slots == {0, 1}, "all slots are prepared before any tg request")
+    return FakeResponse(usage=OPENAI_USAGE,
+                        timings={**LLAMA_TIMINGS, "prompt_n": 4, "cache_n": 8})
+
+
+prepared_args = dict(
+    base_url="http://unused", model="test-model",
+    cases=[serving_bench.PromptCase("same", "prose", "matching pp2048 prompt")],
+    workload_id="prepared-decode", max_tokens=2, temperature=0.0,
+    concurrency_levels=[2], warmup_rounds=1, repetitions=1,
+    timeout_seconds=5, fingerprint=fingerprint,
+    source_revision="a" * 40, source_dirty=False, suite_bytes=b"test",
+    corpus_layout="homogeneous", endpoint_profile="openai",
+    cache_prompt=True, prefill_first=True, pin_slots=True,
+)
+with patch.object(serving_bench.urllib.request, "urlopen", prepared_response):
+    prepared_report = serving_bench.run_corpus_benchmark(**prepared_args)
+check(len(prepared_report["results"]["c2"]["samples"]) == 2,
+      "preparation is excluded from timed samples")
+check(len(prepared_report["results"]["c2"]["preparations"][0]["samples"]) == 2,
+      "preparation evidence is retained")
+check(not prepared_report["warnings"], "intentional prepared cache hits are not warnings")
+with patch.object(serving_bench.urllib.request, "urlopen",
+                  lambda request, timeout: FakeResponse(
+                      usage={**OPENAI_USAGE,
+                             "completion_tokens": json.loads(request.data)["max_tokens"]},
+                      timings=LLAMA_TIMINGS)):
+    try:
+        serving_bench.run_corpus_benchmark(**prepared_args)
+    except RuntimeError as error:
+        check("prepared session was not reused" in str(error),
+              "a cold replay cannot be labeled prepared decoding")
+    else:
+        raise AssertionError("prepared decoding must fail if the prefix is lost")
+
+server = Server([], "/health", Path("/unused"))
+server.process = MagicMock()
+server.process.poll.return_value = None
+server.stop = MagicMock()
+server.__exit__(RuntimeError, RuntimeError("wrong cache frontier"), None)
+check(server.failure_exit_code is None and server.stop.called,
+      "benchmark failure must not become a server crash after intentional cleanup")
+server.process.poll.return_value = -9
+server.__exit__(RuntimeError, RuntimeError("connection closed"), None)
+check(server.failure_exit_code == -9, "an actual process failure remains distinguishable")
+
 
 def fake_urlopen_diverging(request, timeout):
     del timeout
@@ -700,6 +768,7 @@ with tempfile.TemporaryDirectory() as directory:
                     patch("sys.stdout", new=io.StringIO()):
                 bench.side_effect = lambda **kw: {
                     "artifactType": "servingBenchmark",
+                    "workload": {},
                     "results": {f"c{kw['concurrency_levels'][0]}": {}},
                 }
                 run_multi(session, table)
@@ -802,5 +871,93 @@ with tempfile.TemporaryDirectory() as directory:
                   "single-user grouping starts no redundant server")
             check(session.store.call_args.args[0].name == f"{expected.id}-{target}.json",
                   "single-user refresh writes the original workload artifact")
+
+# Loading provenance must identify the actual speculative reference binary.
+with tempfile.TemporaryDirectory() as directory:
+    config = load_config(ROOT, "qwen3.8-flash-next")
+    config.artifacts_override = Path(directory)
+    config.files = {"gguf": {"default": Path(__file__)}}
+    session = Session(
+        config, "reference", gufo_binary=Path("gufo"), reference_binary="llama-server",
+        source={"revision": "a" * 40, "dirty": False}, fingerprint={},
+        log_dir=Path(directory), document="", todo_only=False,
+    )
+    server = MagicMock(ready_seconds=0.25)
+    server.command = ["llama-server-mtp"]
+    session.server = MagicMock(return_value=server)
+    session.reference_version = MagicMock(return_value="reference MTP version")
+    session.store = MagicMock()
+    with patch("gufo.model_bench.llm.drop_file_cache"), \
+            patch("gufo.model_bench.llm.wait_process_exit"), \
+            patch("sys.stdout", new=io.StringIO()):
+        run_loading(session, config.table("loading"))
+    check(session.store.call_args.args[1]["mode"] == "mtp",
+          "loading records its actual speculative execution mode")
+    session.reference_version.assert_called_once_with("mtp")
+
+# Single-user d0 and concurrency C1 must send the same pp2048 prompt.
+with tempfile.TemporaryDirectory() as directory:
+    config = load_config(ROOT, "qwen3.8-flash-next")
+    config.artifacts_override = Path(directory)
+    config.files = {"gguf": {"default": Path(__file__)}}
+    table = config.table("multi-ar")
+    table.spec["concurrency"] = [1]
+    for task in ("prose", "repetition"):
+        table.spec["workload"] = task
+        session = Session(
+            config, "gufo", gufo_binary=Path("gufo"), reference_binary="llama-server",
+            source={"revision": "a" * 40, "dirty": False}, fingerprint={},
+            log_dir=Path(directory), document="", todo_only=False, fresh=True,
+        )
+        session.server = MagicMock(return_value=MagicMock())
+        session.reference_version = lambda mode: None
+        session.request = MagicMock(return_value=MagicMock(
+            prefill_tokens=2048, cached_prompt_tokens=0, completion_tokens=128))
+        tokenizer = MagicMock(overhead=12, ratio=1.3)
+        _measure_depth(session, "http://unused", tokenizer, depth=0,
+                       prompt_tokens=2048, output_tokens=128, fraction=0.005,
+                       seed=1, repetition=0, task=task)
+        single_prompt = session.request.call_args.args[1]
+        report = {"artifactType": "servingBenchmark", "workload": {},
+                  "results": {"c1": {"samples": [{"prompt_tokens": 2048, "prefill_tokens": 0,
+                                                 "completion_tokens": 128}]}}}
+        with patch("gufo.model_bench.llm.Tokenizer", return_value=tokenizer), \
+                patch("gufo.model_bench.llm.run_corpus_benchmark", return_value=report) as bench, \
+                patch("gufo.model_bench.llm.wait_process_exit"), \
+                patch("gufo.model_bench.llm.save_artifact") as save, \
+                patch("sys.stdout", new=io.StringIO()):
+            run_multi(session, table)
+            check(bench.call_args.kwargs["cases"][0].text == single_prompt,
+                  "both benchmark paths send byte-identical mixed/repetitive prompts")
+            check(bench.call_args.kwargs["cache_prompt"] is True
+                  and bench.call_args.kwargs["prefill_first"],
+                  "matched concurrency prepares all sessions before timing decoding")
+            report["results"]["c1"]["samples"][0]["completion_tokens"] = 127
+            save.reset_mock()
+            try:
+                run_multi(session, table)
+            except RuntimeError as failure:
+                check("incomplete generated output" in str(failure),
+                      "short generations cannot become throughput results")
+            else:
+                raise AssertionError("incomplete benchmark output must fail")
+            check(not save.called, "invalid measurements are not published")
+            table.spec["modes"] = ["mtp"]
+            ar_reference = Path(directory) / "multi-ar-gufo-ar.json"
+            ar_reference.write_text(json.dumps({"results": {"c1": {"cases": {
+                f"synthetic_{task}_pp2048": {"completionHashes": ["a" * 64]}
+            }}}}))
+            report["results"]["c1"]["samples"][0]["completion_tokens"] = 128
+            report["results"]["c1"]["completionExactness"] = {"exactRate": 0.0}
+            try:
+                run_multi(session, table)
+            except RuntimeError as failure:
+                check("differs from its isolated AR reference" in str(failure),
+                      "a target-output mismatch is a failed benchmark")
+            else:
+                raise AssertionError("wrong speculative output must fail")
+            check(not save.called, "quality failures cannot become speed results")
+            ar_reference.unlink()
+            table.spec["modes"] = ["ar"]
 
 print("Serving benchmark harness tests passed.")

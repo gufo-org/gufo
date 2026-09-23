@@ -1,20 +1,61 @@
 {
-  "schemaVersion": "1.0.0",
+  "artifactType": "model-bench-quality-reference",
+  "benchmarkSchema": "gufo.serving-benchmark.v1",
+  "canonical": {
+    "cppStandard": "C++20",
+    "cpuArchitecture": "x86_64",
+    "cpuLogicalCores": 32,
+    "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "cpuPhysicalCores": 16,
+    "cxxCompiler": "GCC 15.3.0",
+    "gpuArchitecture": "gfx1151",
+    "gpuComputeUnits": 20,
+    "gpuDriver": "amdgpu",
+    "gpuName": "AMD Radeon 8060S Graphics",
+    "gpuPciId": "1002:1586",
+    "kernelRelease": "7.1.8",
+    "memoryTotalBytes": 134309883904,
+    "memoryType": "LPDDR5X (Unified)",
+    "rocmVersion": "7.2.3",
+    "schemaVersion": "1.0.0"
+  },
+  "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
   "model": {
     "id": "bench"
   },
+  "modelBench": {
+    "measuredOn": "2026-09-23",
+    "mode": "ar",
+    "table": "multi-repetition",
+    "target": "gufo"
+  },
+  "notes": [
+    "Fresh full-prefill C1 AR completion hashes for the matching pp2048 workload; independent of the prepared decode path."
+  ],
+  "results": {
+    "c1": {
+      "cases": {
+        "synthetic_repetition_pp2048": {
+          "completionHashes": [
+            "82fd84fded8d257a194ac1eca43b70a866a79bac1e97e45d19f0292d6a7118bd"
+          ]
+        }
+      }
+    }
+  },
+  "schemaVersion": "1.0.0",
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "89d58eb7e68eb0cc8bfe3a79917e913a9a543be8"
+    "revision": "c650f786e08b07ab2476308cf20e7af59ab6f87f"
   },
   "workload": {
     "cachePrompt": false,
     "caseIds": [
-      "repetition_word"
+      "synthetic_repetition_pp2048"
     ],
     "categories": [
-      "repetitive"
+      "repetition"
     ],
     "concurrency": [
       1
@@ -26,274 +67,20 @@
     "mode": "corpus",
     "paddingPolicy": "repeat-each-case",
     "promptCount": 1,
+    "promptGenerator": {
+      "promptSha256": "b7b9e6a3b00182fca0a28476a01d18e4427b014950c99d9dd2ec789b237f2674",
+      "recipe": "single-user-d0",
+      "requestedTokens": 2048,
+      "task": "repetition",
+      "templateOverhead": 12,
+      "tokensPerWord": 1.167
+    },
     "repetitions": 1,
-    "suiteSha256": "b88da26d719c0fa810935f91ea03109e4019c4da6ae35fa339776446dfc049e7",
+    "suiteSha256": "807c9ced8cbebf372cb3364ecb96e120ccde7f072c2d9a65a887bd2ad3610d51",
     "temperature": 0.0,
     "transport": "openai-chat-completions-sse",
+    "warmupMaxOutputTokens": 16,
+    "warmupPolicy": "first-cohort",
     "warmupRounds": 1
-  },
-  "modelBench": {
-    "measuredOn": "2026-09-22",
-    "mode": "ar",
-    "table": "multi-repetition",
-    "target": "gufo"
-  },
-  "fingerprintId": "34bee0c70b5847b76a43f2c6da016bafed74530bff113cc4ffc5f43f21fe2f96",
-  "reference": {
-    "source": "self-c1"
-  },
-  "artifactType": "model-bench-quality-reference",
-  "originalReportSha256": "b0efd2528269a6378165acd785b913b2a0fa76bc51af86e2e01dc3936728045c",
-  "notes": [
-    "Retained AR completion hashes and batch consistency, without performance timings. Refresh when model arithmetic, weights, tokenizer or request settings change."
-  ],
-  "results": {
-    "c1": {
-      "completionExactness": {
-        "comparedCases": 1,
-        "comparedRequests": 1,
-        "exactRate": 1.0,
-        "exactRequests": 1,
-        "matchedCases": 1,
-        "matchedRoundOutputTokensPerSecond": 26.096498881813805,
-        "matchedRounds": 1
-      },
-      "cases": {
-        "repetition_word": {
-          "completionHashes": [
-            "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
-          ]
-        }
-      },
-      "samples": [
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
-    },
-    "c2": {
-      "completionExactness": {
-        "comparedCases": 1,
-        "comparedRequests": 2,
-        "exactRate": 1.0,
-        "exactRequests": 2,
-        "matchedCases": 1,
-        "matchedRoundOutputTokensPerSecond": 43.37759175639004,
-        "matchedRounds": 1
-      },
-      "cases": {
-        "repetition_word": {
-          "completionHashes": [
-            "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
-          ]
-        }
-      },
-      "samples": [
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
-    },
-    "c4": {
-      "completionExactness": {
-        "comparedCases": 1,
-        "comparedRequests": 4,
-        "exactRate": 1.0,
-        "exactRequests": 4,
-        "matchedCases": 1,
-        "matchedRoundOutputTokensPerSecond": 68.94142481360409,
-        "matchedRounds": 1
-      },
-      "cases": {
-        "repetition_word": {
-          "completionHashes": [
-            "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
-          ]
-        }
-      },
-      "samples": [
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
-    },
-    "c6": {
-      "completionExactness": {
-        "comparedCases": 1,
-        "comparedRequests": 6,
-        "exactRate": 1.0,
-        "exactRequests": 6,
-        "matchedCases": 1,
-        "matchedRoundOutputTokensPerSecond": 83.87122365234698,
-        "matchedRounds": 1
-      },
-      "cases": {
-        "repetition_word": {
-          "completionHashes": [
-            "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
-          ]
-        }
-      },
-      "samples": [
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
-    },
-    "c8": {
-      "completionExactness": {
-        "comparedCases": 1,
-        "comparedRequests": 8,
-        "exactRate": 1.0,
-        "exactRequests": 8,
-        "matchedCases": 1,
-        "matchedRoundOutputTokensPerSecond": 94.18989086070907,
-        "matchedRounds": 1
-      },
-      "cases": {
-        "repetition_word": {
-          "completionHashes": [
-            "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
-          ]
-        }
-      },
-      "samples": [
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "repetition_word",
-          "completion_tokens": 128,
-          "completion_sha256": "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
-    }
   }
 }

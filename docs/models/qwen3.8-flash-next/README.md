@@ -12,7 +12,7 @@ Original unquantized-model and GGUF-conversion parity remain unqualified.
 ```sh
 nix develop -c hf download unsloth/Qwen3.8-Flash-Next-GGUF \
   --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
-  --include "UD-Q4_K_XL/*" "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" "mmproj-BF16.gguf" \
+  --include "UD-Q4_K_XL/*" "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" "mmproj-BF16.gguf" \
   --local-dir models/qwen3.8-flash-next
 nix build
 MODEL=/path/to/first-target-shard.gguf

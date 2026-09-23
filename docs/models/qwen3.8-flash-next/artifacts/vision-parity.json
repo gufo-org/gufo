@@ -1,0 +1,27 @@
+{
+  "measuredOn": "2026-09-20",
+  "scope": "Gufo native vision encoder versus official Transformers operators with identical converted BF16 GGUF weights; no llama.cpp comparison or image-answer accuracy measurement",
+  "reference": {
+    "implementation": "tools/qwen27b/vision_reference.py",
+    "transformersRevision": "3713bd839e580d07e4b70f2c89e986cb3c0e8ddf",
+    "weightsRepository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "weightsRevision": "38bb39ee97821de2c9009abb7e93950eec396e66",
+    "file": "mmproj-BF16.gguf"
+  },
+  "input": {
+    "width": 1024,
+    "height": 1024,
+    "format": "RGB uint8",
+    "pixels": "pixels[i] = (137*i + 53*(i//3072)) % 256"
+  },
+  "embedding": {
+    "gufoVsTransformersBf16RelativeL2": 0.06473733539168468,
+    "gufoVsTransformersBf16MaxAbs": 0.06298828125,
+    "gufoVsTransformersBf16Cosine": 0.9979055120968646,
+    "relativeL2Limit": 0.05,
+    "passed": false,
+    "gufoVsFp32RelativeL2": 0.07834453725861269,
+    "transformersBf16VsFp32RelativeL2": 0.08099561331103852
+  },
+  "provenance": "Retained native baseline from the September 20 BF16-only and FP32 vision controls. The experimental PV candidate was rejected; its measurements are excluded."
+}

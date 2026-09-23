@@ -1,8 +1,8 @@
 # Qwen3.8 Flash-Next evaluation
 
-Operator and execution-consistency checks pass. **Original unquantized-model
+Text/MTP operator and execution-consistency checks pass. **Original unquantized-model
 and GGUF-conversion parity remain unqualified.** The independent vision check
-below still exceeds its tolerance. Qualification dates: September 20–22, 2026.
+below still exceeds its tolerance. Qualification dates: September 20–23, 2026.
 
 ## Quality results
 
@@ -13,18 +13,18 @@ below still exceeds its tolerance. Qualification dates: September 20–22, 2026.
 | Batching and kernels | C2/C4/C6/C8 retain logits, tokens, acceptance, residual draws and RNG with ragged budgets and every 1–8-token rollback prefix. Q4/Q8 projection and GDN rollback controls retain FP32 bytes; sparse rankings/masks match through 128K. |
 | Prefill | Chunk-boundary checks cover 1/8/9/32/33-token tails through 4096 tokens. The 2176-token scalar/prefill control retains top-1 with logit RMSE 0.18. |
 | Sessions and serving | AR/MTP cancellation, third-turn continuation, reasoning removal/preservation, concurrent image/text isolation and disk restart pass. A 4095-token snapshot check covers mid-decode save, ring wrap, pending MTP state and RNG. |
-| HTTP corpus | Retained Gufo hashes match AR for 21/21 repetitive AR requests, 25/25 mixed MTP requests and 21/21 repetitive MTP requests; zero prompt-cache hits. These are text-consistency checks, not original-model accuracy. |
+| HTTP corpus | All 63 Gufo tg128 requests (21 AR, 21 mixed MTP, 21 repetitive MTP) match independent fresh-prefill AR hashes. Prepared sessions reuse every prompt token. These are text-consistency checks, not original-model accuracy. |
 | Vision optimizations | Complete 256×256/1024×1024 embeddings and a 736×736 ragged control retain native output bytes. Independent upstream parity has the gap below. |
 
-**Vision gap:** a 1024×1024 synthetic texture has 6.47% embedding relative L2
-error against the pinned BF16 reference, above the unchanged 5% gate. Native
-and upstream BF16 errors against FP32 are 7.83% and 8.10%, respectively; this
-does not establish which produces better model output. Reproduce with
-`pixels[i] = (137*i + 53*(i//3072)) % 256` and the
-[vision reference commands](../qwen3.8-27b/EVALUATION.md#vision).
+**Vision:** Gufo exceeds one encoder parity gate: a 1024×1024 synthetic texture
+produces 6.47% embedding relative L2 error versus official Transformers BF16
+operators (limit: 5%). Both use the same converted GGUF weights; **llama.cpp
+was not tested**. Against the FP32 control, Gufo and Transformers BF16 differ
+by 7.83% and 8.10%, respectively. This measures numerical drift, not image-answer
+accuracy. [Retained evidence](artifacts/vision-parity.json) ·
+[Reproduction](../qwen3.8-27b/EVALUATION.md#vision).
 
-The CPU oracle uses converted GGUF weights, so it cannot qualify conversion
-or the original checkpoint. Pinned Transformers ignores MTP weights. Seeded
+Pinned Transformers ignores MTP weights. Seeded
 replay requires the same build, seed, request budget, capacity and sampling
 settings; sampled MTP need not match AR's same-seed sequence. Greedy output
 must remain independent of draft width and batching.
@@ -35,7 +35,7 @@ Tests live in `tests/models/qwen38_flash_next/`; run only the affected check.
 
 | Target / mode | Contract |
 | --- | --- |
-| `qwen38_flash_next_tests` | 14 operator, configuration and I/O checks: scalar/FP64 references, malformed metadata, unsupported geometry and sidecar compatibility. |
+| `qwen38_flash_next_tests` | Operator, configuration and I/O checks: scalar/FP64 references, malformed metadata, unsupported geometry and sidecar compatibility. |
 | `qwen38_flash_next_session_test --batch-only` | Independent logits/state/RNG at C2/C4/C6/C8, rollback, cancellation and images. |
 | `qwen38_flash_next_session_test --sampling-only` | 23 AR/MTP sampling configurations, penalties, residual correction and short budgets. |
 | `qwen38_flash_next_session_test --prefill-only` | Full logits across chunk boundaries and short tails. |
@@ -66,13 +66,13 @@ Gufo follows vLLM's text-only MTP input semantics. Official checkpoint:
 
 ## Benchmark method
 
-The [card](BENCHMARKS.md) retains September 22 measurements. This layout change
-runs no inference: concurrency rates are recalculated from the original
-individual decode rates, summed per cohort and averaged across cohorts.
-Per-artifact revisions and commands remain authoritative; see
-[model identities](artifacts/model-identities.json).
+The [card](BENCHMARKS.md) refreshes Gufo single-user MTP, both engines’
+concurrency and loading on September 23; other values remain from September 22.
+One measured run per point; concurrency sums individual decode rates.
+Versions and commands are in [model identities](artifacts/model-identities.json)
+and the table artifacts.
 
-Single-user rows use approximately pp2048/tg128, greedy, thinking off, seed 1.
+Single-user rows use approximately pp2048/tg128, greedy, thinking off.
 Each mode generates its own eight-token reply before the measured continuation.
 Depth/prefill tolerance is max(32 tokens, 0.5%). Gufo capacity is 133760;
 reference AR uses 35456 through 32K, 68224 at 64K and 133760 at 128K.
@@ -81,24 +81,29 @@ invalidate deeper measurements. MTP pp takes each engine's maximum across
 mixed/repetitive workloads. AR reference: `b11069`; MTP: pinned
 `llama-server-mtp` at `6fcaa16f` ([upstream change](https://github.com/ggml-org/llama.cpp/pull/28243)).
 
-Concurrency uses fresh servers, context 4096 per user and tg128. AR uses
-`repetition_word`; MTP adds `expository_pangram`, `cpp_ring_buffer` and
-`reasoning_train`. Short C1 corpus prompts differ from the pp2048 depth sweep;
-MoE routing also makes throughput workload-dependent. Reference MTP C8 was
-OOM-killed. Compact `multi-{mixed,repetition}-gufo-ar.json` files retain C1
-hashes for MTP qualification; refresh them when arithmetic, weights, tokenizer
-or request settings change. Reference-engine agreement is not an accuracy score.
+Concurrency uses the **same pp2048 d0 prompts**: prose for AR/mixed MTP,
+passage-copying for repetitive MTP, tg128, context 4096 per user. Every user
+receives the same prompt; servers are fresh per C1/C2/C4/C6/C8. All sessions
+finish a one-token preparation request before the timed tg128 cohort repeats
+those prompts with caching enabled. llama.cpp slots are pinned; at most four
+final prompt tokens may be reevaluated. This excludes peers' long prefills from
+llama.cpp's elapsed generation clock; Gufo reports active decode time.
+The reference clock can still include interference from the four-token tail.
+Gufo MTP d0/C1 rates agree within 0.4%, with matching completions and draft counts.
+llama.cpp's mixed-MTP completions vary with concurrency; the artifacts retain their hashes.
+Gufo completions must match the fresh AR controls in
+`multi-{mixed,repetition}-gufo-ar.json`. Refresh those when prompts, arithmetic,
+weights or tokenizer change. Cross-engine agreement is not an accuracy score.
 
-Matched C1/MTP loading at capacity 262144 is TODO. Historical
-[Gufo](artifacts/loading-2026-09-22-gufo.json) and
-[reference](artifacts/loading-2026-09-22-reference.json) runs used C2/MTP/262144
-and C2/AR/35456 total, respectively, so they cannot supply that comparison.
+Loading uses C1/MTP/capacity 262144, from cold model files to HTTP readiness.
+`POSIX_FADV_DONTNEED` plus `mincore` verified zero resident pages for all four
+target shards and the sidecar. The reference ran inside a 120 GiB memory
+cgroup with a 3 GiB host-availability floor; neither limit interrupted startup.
+Readiness does not qualify a filled 262K context.
 Memory uses C1 AR at capacity 133121, sampling global HIP allocation every
 250 ms including 2.38 GiB idle allocation.
 
-`artifacts/bench.json` declares six tables. Use
-`tools/bench/model-bench.py --model qwen3.8-flash-next render` through Nix to
-regenerate the card without model execution. Approved runs take
-`--gguf "$MODEL" --mtp "$MTP" run --target <gufo|reference> --table <table> --fresh`;
-select reference depths/capacities explicitly. See the
-[benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).
+`artifacts/bench.json` declares six tables.
+Run `tools/bench/model-bench.py --model qwen3.8-flash-next render` through Nix to
+regenerate the card without model execution. Measurement commands and scoped
+quality controls are in the [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).

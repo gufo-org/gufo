@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import functools
+import hashlib
 import json
 import struct
 import zlib
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from gufo.serving_bench import (
+    PromptCase,
     RequestObservation,
     load_prompt_suite,
     load_reference_report,
@@ -155,7 +157,7 @@ class Session:
             completed = subprocess.run([binary, "--version"], capture_output=True, text=True)
             lines = (completed.stdout + completed.stderr).splitlines()
             versions = [line.strip() for line in lines if line.strip().startswith("version:")]
-            cache[binary] = f"{binary} {versions[0] if versions else 'version unknown'}"
+            cache[binary] = f"{Path(binary).name} {versions[0] if versions else 'version unknown'}"
         return cache[binary]
 
     def artifact(self, table: TableSpec, *, mode: str | None, command: list[str], notes: list[str]) -> dict[str, Any]:
@@ -305,7 +307,7 @@ def run_loading(session: Session, table: TableSpec) -> None:
         rows[variant] = {"ready_s": round(mean, 3), "ready_s_sd": None if sd is None else round(sd, 3),
                          "samples": len(samples), "command": " ".join(public_command(command))}
         print(f"{table.id} {variant}: ready {mean:.2f} s")
-    artifact = session.artifact(table, mode=None, command=command,
+    artifact = session.artifact(table, mode=mode, command=command,
                                 notes=["file cache reset before each launch with " +
                                        ("the supplied --drop-caches command" if session.drop_caches else
                                         "`echo 3 > /proc/sys/vm/drop_caches`"),
@@ -440,6 +442,14 @@ TASKS = {
 THINKING_WORKLOAD = "thinking"
 
 
+def turn_prompt(new_target: int, ratio: float, *, task: str, depth: int = 0,
+                repetition: int = 0, attempt: int = 0) -> str:
+    """One shared prompt recipe for depth sweeps and pp-matched concurrency."""
+    instruction = TASKS[task]
+    words = max(1, round(new_target / ratio) - len(instruction.split()))
+    return synthetic_text(100_000 + depth * 10 + repetition * 100 + attempt, words) + instruction
+
+
 def _measure_depth(session: Session, base_url: str, tokenizer: Tokenizer, *, depth: int, prompt_tokens: int,
                    output_tokens: int, fraction: float, seed: int, repetition: int,
                    task: str = "prose") -> RequestObservation:
@@ -466,9 +476,8 @@ def _measure_depth(session: Session, base_url: str, tokenizer: Tokenizer, *, dep
             reply = session.chat_text(base_url, [{"role": "user", "content": prefix}], PREFIX_REPLY_TOKENS,
                                       extra_body=extra)
             messages = [{"role": "user", "content": prefix}, {"role": "assistant", "content": reply}]
-        instruction = TASKS[task]
-        new_words = max(1, round(new_target / ratio) - len(instruction.split()))
-        new_text = synthetic_text(100_000 + depth * 10 + repetition * 100 + attempt, new_words) + instruction
+        new_text = turn_prompt(new_target, ratio, task=task, depth=depth,
+                               repetition=repetition, attempt=attempt)
         messages.append({"role": "user", "content": new_text})
         observation = session.request(base_url, new_text, output_tokens, index=attempt, messages=messages,
                                       extra_body=extra)
@@ -508,8 +517,18 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
     if not keys:
         print(f"{table.id}: nothing to do")
         return
-    suite = (cfg.model_dir / "artifacts" / spec["suite"]).resolve()
-    cases = load_prompt_suite(suite, selected=set(spec["cases"]))
+    matched_prompt = spec.get("prompt_tokens")
+    prefill_first = bool(spec.get("prefill_first", False))
+    if matched_prompt:
+        task = spec["workload"]
+        case_ids = {f"synthetic_{task}_pp{matched_prompt}"}
+        cases: list[PromptCase] = []
+        suite_bytes = b""
+    else:
+        suite = (cfg.model_dir / "artifacts" / spec["suite"]).resolve()
+        cases = load_prompt_suite(suite, selected=set(spec["cases"]))
+        case_ids = {case.identifier for case in cases}
+        suite_bytes = suite.read_bytes()
     modes = list(spec.get("modes", ["ar"]))
     if session.target != "gufo":
         modes = [m for m in modes if m == "ar" or cfg.reference_speculative is not None]
@@ -523,7 +542,7 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
         if path != ar_path and ar_path.exists():
             reference = load_reference_report(ar_path)
         if mode != "ar":
-            missing = {case.identifier for case in cases} - set((reference or {}).get("hashes", {}))
+            missing = case_ids - set((reference or {}).get("hashes", {}))
             if missing:
                 raise RuntimeError(
                     f"{table.id}: missing isolated AR completion hashes for {', '.join(sorted(missing))}; "
@@ -539,23 +558,35 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
                                     sessions=users, tag=f"{mode or 'ref'}-c{users}")
             try:
                 with server:
+                    if matched_prompt:
+                        tokenizer = Tokenizer(session, server.base_url, table.variant)
+                        prompt = turn_prompt(int(matched_prompt) - tokenizer.overhead,
+                                             tokenizer.ratio, task=task)
+                        cases = [PromptCase(next(iter(case_ids)), task, prompt)]
+                        suite_bytes = json.dumps(
+                            {"recipe": "single-user-d0", "task": task, "prompt": prompt},
+                            sort_keys=True).encode()
                     report = run_corpus_benchmark(
-                    base_url=server.base_url, model=MODEL_ALIAS, cases=cases,
-                    workload_id=f"{cfg.model}-{table.id}-{session.target}-{mode}",
-                    max_tokens=int(spec["output_tokens"]),
-                    temperature=float(cfg.data["sampling"]["temperature"]),
-                    concurrency_levels=[users], warmup_rounds=int(spec.get("warmup", 1)),
-                    repetitions=session.reps(spec), timeout_seconds=REQUEST_TIMEOUT,
-                    fingerprint=session.fingerprint or {}, source_revision=session.source["revision"],
-                    source_dirty=session.source["dirty"], suite_bytes=suite.read_bytes(),
-                    corpus_layout=spec.get("corpus_layout", "distinct"), endpoint_profile=session.profile,
-                    cache_prompt=False if not spec.get("cache_prompt", False) else None,
-                    reference=reference,
-                    notes=[note for note in (session.reference_version(mode), " ".join(public_command(server.command)),
-                                             "fresh server per concurrency level") if note],
+                        base_url=server.base_url, model=MODEL_ALIAS, cases=cases,
+                        workload_id=f"{cfg.model}-{table.id}-{session.target}-{mode}",
+                        max_tokens=int(spec["output_tokens"]),
+                        temperature=float(cfg.data["sampling"]["temperature"]),
+                        concurrency_levels=[users], warmup_rounds=int(spec.get("warmup", 1)),
+                        repetitions=session.reps(spec), timeout_seconds=REQUEST_TIMEOUT,
+                        fingerprint=session.fingerprint or {}, source_revision=session.source["revision"],
+                        source_dirty=session.source["dirty"], suite_bytes=suite_bytes,
+                        corpus_layout=spec.get("corpus_layout", "distinct"), endpoint_profile=session.profile,
+                        cache_prompt=(True if prefill_first else
+                                      (False if not spec.get("cache_prompt", False) else None)),
+                        prefill_first=prefill_first,
+                        pin_slots=prefill_first and session.target == "reference",
+                        reference=reference,
+                        notes=[note for note in (
+                            session.reference_version(mode), " ".join(public_command(server.command)),
+                            "fresh server per concurrency level") if note],
                     )
-            except (RuntimeError, OSError) as failure:
-                exit_code = server.process.poll() if server.process else None
+            except (RuntimeError, OSError):
+                exit_code = server.failure_exit_code
                 wait_process_exit(server)
                 if exit_code is None:
                     raise
@@ -571,11 +602,31 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
                 save_artifact(path, combined)
                 break
             wait_process_exit(server)
+            if matched_prompt:
+                result = report["results"][f"c{users}"]
+                for sample in result["samples"]:
+                    actual = sample["prompt_tokens"] if prefill_first else sample["prefill_tokens"]
+                    if abs(actual - int(matched_prompt)) > _tolerance(int(matched_prompt), 0.005):
+                        raise RuntimeError(
+                            f"{table.id}: expected pp{matched_prompt}, got {actual}; recalibrate the prompt")
+                    if sample["completion_tokens"] != int(spec["output_tokens"]):
+                        raise RuntimeError(f"{table.id}: incomplete generated output at C{users}")
+                if session.target == "gufo" and reference and result["completionExactness"]["exactRate"] != 1.0:
+                    raise RuntimeError(f"{table.id}: C{users} output differs from its isolated AR reference")
+                report["workload"]["promptGenerator"] = {
+                    "recipe": "single-user-d0", "task": task,
+                    "requestedTokens": int(matched_prompt),
+                    "templateOverhead": tokenizer.overhead,
+                    "tokensPerWord": tokenizer.ratio,
+                    "promptSha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                }
             if combined is None or combined.get("artifactType") != report.get("artifactType"):
                 combined = report
             else:
                 combined["results"].update(report["results"])
                 combined["notes"] = report.get("notes", combined.get("notes"))
+            combined["workload"]["concurrency"] = [
+                int(key[1:]) for key in combined["results"] if key.startswith("c")]
             combined["modelBench"] = {"table": table.id, "target": session.target, "mode": mode,
                                       "measuredOn": dt.date.today().isoformat()}
             save_artifact(path, combined)

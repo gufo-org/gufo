@@ -73,7 +73,6 @@
             repo = "llama.cpp";
             rev = llamaCppMtpCommit;
             hash = "sha256-YgIkYHiV1LNA1OvTcB8SSdOeqr37+cEFAOQjEBfXcK4=";
-            leaveDotGit = true;
           };
           npmDepsHash = "sha256-2Q7XhaLAArmviOLdQsNbYTfdyDE5pW9lR26cRHEVl9k=";
           cmakeFlags = builtins.filter (f: !(pkgs.${system}.lib.hasPrefix "-DLLAMA_BUILD_COMMIT" f)) (oldAttrs.cmakeFlags or [ ]) ++ [

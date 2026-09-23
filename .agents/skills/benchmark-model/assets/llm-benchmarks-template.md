@@ -21,21 +21,24 @@ pp is the highest measured rate per engine and depth across both text types.
 
 ## Multiple users, autoregressive
 
-Context 4096 per user, tg128. Sum individual request decode rates; exclude
-prefill and scheduling. Measure AR once per concurrency.
+Same pp2048 prose prompt as single-user d0, tg128, context 4096 per user.
+Prefill every session before timed decoding; sum individual request decode rates.
 
 <!-- bench:multi-ar -->
 <!-- /bench -->
 
 ## Multiple users, speculative
 
-Mixed prompts and repetitive output share a table and figure per quantization.
-Retain separate workload measurements and C1 AR quality references.
+Same pp2048 mixed/repetitive prompts as single-user d0, tg128. C1 directly
+cross-checks that row. Prefill every session before timed decoding.
+One table and figure per quantization.
 
 <!-- bench:multi-<spec> -->
 <!-- /bench -->
 
 ## Loading time
+
+C1, capacity <tokens>, <speculative mode>. Cold model files to HTTP readiness.
 
 <!-- bench:loading -->
 <!-- /bench -->
@@ -45,11 +48,4 @@ Retain separate workload measurements and C1 AR quality references.
 <Context capacity and any artifact mismatch needed to interpret these numbers.>
 
 <!-- bench:memory -->
-<!-- /bench -->
-
-## Image encoder
-
-<State whether time includes image preprocessing or text prefill.>
-
-<!-- bench:image-encoder -->
 <!-- /bench -->

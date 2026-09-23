@@ -1,381 +1,86 @@
 {
-  "schemaVersion": "1.0.0",
+  "artifactType": "model-bench-quality-reference",
+  "benchmarkSchema": "gufo.serving-benchmark.v1",
+  "canonical": {
+    "cppStandard": "C++20",
+    "cpuArchitecture": "x86_64",
+    "cpuLogicalCores": 32,
+    "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "cpuPhysicalCores": 16,
+    "cxxCompiler": "GCC 15.3.0",
+    "gpuArchitecture": "gfx1151",
+    "gpuComputeUnits": 20,
+    "gpuDriver": "amdgpu",
+    "gpuName": "AMD Radeon 8060S Graphics",
+    "gpuPciId": "1002:1586",
+    "kernelRelease": "7.1.8",
+    "memoryTotalBytes": 134309883904,
+    "memoryType": "LPDDR5X (Unified)",
+    "rocmVersion": "7.2.3",
+    "schemaVersion": "1.0.0"
+  },
+  "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
   "model": {
     "id": "bench"
   },
-  "source": {
-    "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "89d58eb7e68eb0cc8bfe3a79917e913a9a543be8"
-  },
-  "workload": {
-    "cachePrompt": false,
-    "caseIds": [
-      "expository_pangram",
-      "cpp_ring_buffer",
-      "reasoning_train"
-    ],
-    "categories": [
-      "code",
-      "expository",
-      "reasoning"
-    ],
-    "concurrency": [
-      1
-    ],
-    "corpusLayout": "distinct",
-    "endpointProfile": "gufo",
-    "id": "qwen3.8-flash-next-multi-mixed-gufo-ar",
-    "maxOutputTokens": 128,
-    "mode": "corpus",
-    "paddingPolicy": "cycle-from-start",
-    "promptCount": 3,
-    "repetitions": 1,
-    "suiteSha256": "b88da26d719c0fa810935f91ea03109e4019c4da6ae35fa339776446dfc049e7",
-    "temperature": 0.0,
-    "transport": "openai-chat-completions-sse",
-    "warmupRounds": 1
-  },
   "modelBench": {
-    "measuredOn": "2026-09-22",
+    "measuredOn": "2026-09-23",
     "mode": "ar",
     "table": "multi-mixed",
     "target": "gufo"
   },
-  "fingerprintId": "34bee0c70b5847b76a43f2c6da016bafed74530bff113cc4ffc5f43f21fe2f96",
-  "reference": {
-    "source": "self-c1"
-  },
-  "artifactType": "model-bench-quality-reference",
-  "originalReportSha256": "59867c2356bbe059c37d174d2ab06f4aff157d40609f66460601f7227388b2b4",
   "notes": [
-    "Retained AR completion hashes and batch consistency, without performance timings. Refresh when model arithmetic, weights, tokenizer or request settings change."
+    "Fresh full-prefill C1 AR completion hashes for the matching pp2048 workload; independent of the prepared decode path."
   ],
   "results": {
     "c1": {
-      "completionExactness": {
-        "comparedCases": 3,
-        "comparedRequests": 3,
-        "exactRate": 1.0,
-        "exactRequests": 3,
-        "matchedCases": 3,
-        "matchedRoundOutputTokensPerSecond": 25.869036778609047,
-        "matchedRounds": 3
-      },
       "cases": {
-        "cpp_ring_buffer": {
+        "synthetic_prose_pp2048": {
           "completionHashes": [
-            "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2"
-          ]
-        },
-        "expository_pangram": {
-          "completionHashes": [
-            "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a"
-          ]
-        },
-        "reasoning_train": {
-          "completionHashes": [
-            "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780"
+            "b7df29a4a061aef9f0eb72057935f0523ab707463a2ad1f9767d77922f866839"
           ]
         }
-      },
-      "samples": [
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "cpp_ring_buffer",
-          "completion_tokens": 128,
-          "completion_sha256": "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "reasoning_train",
-          "completion_tokens": 128,
-          "completion_sha256": "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
-    },
-    "c2": {
-      "completionExactness": {
-        "comparedCases": 3,
-        "comparedRequests": 4,
-        "exactRate": 1.0,
-        "exactRequests": 4,
-        "matchedCases": 3,
-        "matchedRoundOutputTokensPerSecond": 40.43259744156053,
-        "matchedRounds": 2
-      },
-      "cases": {
-        "cpp_ring_buffer": {
-          "completionHashes": [
-            "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2"
-          ]
-        },
-        "expository_pangram": {
-          "completionHashes": [
-            "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a"
-          ]
-        },
-        "reasoning_train": {
-          "completionHashes": [
-            "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780"
-          ]
-        }
-      },
-      "samples": [
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "cpp_ring_buffer",
-          "completion_tokens": 128,
-          "completion_sha256": "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "reasoning_train",
-          "completion_tokens": 128,
-          "completion_sha256": "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
-    },
-    "c4": {
-      "completionExactness": {
-        "comparedCases": 3,
-        "comparedRequests": 4,
-        "exactRate": 1.0,
-        "exactRequests": 4,
-        "matchedCases": 3,
-        "matchedRoundOutputTokensPerSecond": 58.41467320151543,
-        "matchedRounds": 1
-      },
-      "cases": {
-        "cpp_ring_buffer": {
-          "completionHashes": [
-            "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2"
-          ]
-        },
-        "expository_pangram": {
-          "completionHashes": [
-            "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a"
-          ]
-        },
-        "reasoning_train": {
-          "completionHashes": [
-            "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780"
-          ]
-        }
-      },
-      "samples": [
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "cpp_ring_buffer",
-          "completion_tokens": 128,
-          "completion_sha256": "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "reasoning_train",
-          "completion_tokens": 128,
-          "completion_sha256": "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
-    },
-    "c6": {
-      "completionExactness": {
-        "comparedCases": 3,
-        "comparedRequests": 6,
-        "exactRate": 1.0,
-        "exactRequests": 6,
-        "matchedCases": 3,
-        "matchedRoundOutputTokensPerSecond": 71.68626337650016,
-        "matchedRounds": 1
-      },
-      "cases": {
-        "cpp_ring_buffer": {
-          "completionHashes": [
-            "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2"
-          ]
-        },
-        "expository_pangram": {
-          "completionHashes": [
-            "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a"
-          ]
-        },
-        "reasoning_train": {
-          "completionHashes": [
-            "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780"
-          ]
-        }
-      },
-      "samples": [
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "cpp_ring_buffer",
-          "completion_tokens": 128,
-          "completion_sha256": "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "reasoning_train",
-          "completion_tokens": 128,
-          "completion_sha256": "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "cpp_ring_buffer",
-          "completion_tokens": 128,
-          "completion_sha256": "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "reasoning_train",
-          "completion_tokens": 128,
-          "completion_sha256": "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
-    },
-    "c8": {
-      "completionExactness": {
-        "comparedCases": 3,
-        "comparedRequests": 8,
-        "exactRate": 1.0,
-        "exactRequests": 8,
-        "matchedCases": 3,
-        "matchedRoundOutputTokensPerSecond": 78.3016947826119,
-        "matchedRounds": 1
-      },
-      "cases": {
-        "cpp_ring_buffer": {
-          "completionHashes": [
-            "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2"
-          ]
-        },
-        "expository_pangram": {
-          "completionHashes": [
-            "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a"
-          ]
-        },
-        "reasoning_train": {
-          "completionHashes": [
-            "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780"
-          ]
-        }
-      },
-      "samples": [
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "cpp_ring_buffer",
-          "completion_tokens": 128,
-          "completion_sha256": "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "reasoning_train",
-          "completion_tokens": 128,
-          "completion_sha256": "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "cpp_ring_buffer",
-          "completion_tokens": 128,
-          "completion_sha256": "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "reasoning_train",
-          "completion_tokens": 128,
-          "completion_sha256": "9cdd0e33152bfbc8d3e7ab64560991f75269f479b72e5190cc3f5c8df6b9c780",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "expository_pangram",
-          "completion_tokens": 128,
-          "completion_sha256": "a1fe525c6af387def72ca9ada338b4b8f73f0a24cecf36141cb5bacc5b63905a",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        },
-        {
-          "case_id": "cpp_ring_buffer",
-          "completion_tokens": 128,
-          "completion_sha256": "b0928339389cda7aad47bb78417e0e8cd207b08e6128c8f0c47423c95deedcf2",
-          "cache_hit": false,
-          "cached_prompt_tokens": 0
-        }
-      ]
+      }
     }
+  },
+  "schemaVersion": "1.0.0",
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "c650f786e08b07ab2476308cf20e7af59ab6f87f"
+  },
+  "workload": {
+    "cachePrompt": false,
+    "caseIds": [
+      "synthetic_prose_pp2048"
+    ],
+    "categories": [
+      "prose"
+    ],
+    "concurrency": [
+      1
+    ],
+    "corpusLayout": "homogeneous",
+    "endpointProfile": "gufo",
+    "id": "qwen3.8-flash-next-multi-ar-gufo-ar",
+    "maxOutputTokens": 128,
+    "mode": "corpus",
+    "paddingPolicy": "repeat-each-case",
+    "promptCount": 1,
+    "promptGenerator": {
+      "promptSha256": "93945d40fdbc2aa69ecdcaf8c36552788c7f8e756a1b4c863d2aae43683f3383",
+      "recipe": "single-user-d0",
+      "requestedTokens": 2048,
+      "task": "prose",
+      "templateOverhead": 12,
+      "tokensPerWord": 1.167
+    },
+    "repetitions": 1,
+    "suiteSha256": "22bff8dede12378649a976ff1c28a1dd66f94d41ae301af44d48336ea62dfea3",
+    "temperature": 0.0,
+    "transport": "openai-chat-completions-sse",
+    "warmupMaxOutputTokens": 16,
+    "warmupPolicy": "first-cohort",
+    "warmupRounds": 1
   }
 }

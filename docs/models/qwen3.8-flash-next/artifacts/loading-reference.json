@@ -1,0 +1,123 @@
+{
+  "artifactType": "model-bench-table",
+  "coldFiles": {
+    "files": [
+      {
+        "bytes": 10946624,
+        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+        "residentPagesAfter": 0
+      },
+      {
+        "bytes": 49859583136,
+        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+        "residentPagesAfter": 0
+      },
+      {
+        "bytes": 49376141504,
+        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+        "residentPagesAfter": 0
+      },
+      {
+        "bytes": 12087983520,
+        "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+        "residentPagesAfter": 0
+      },
+      {
+        "bytes": 2786568256,
+        "file": "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+        "residentPagesAfter": 0
+      }
+    ],
+    "method": "POSIX_FADV_DONTNEED + mincore"
+  },
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.1.8",
+      "memoryTotalBytes": 134309883904,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-23",
+  "mode": "mtp",
+  "model": {
+    "id": "Qwen3.8-Flash-Next",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: llama-server-mtp version: 0.4.1-dev (build 11069, commit 6fcaa16f)",
+    "C1 MTP, context 262144; cold target and sidecar files verified with POSIX_FADV_DONTNEED + mincore",
+    "Startup isolated in a 120 GiB memory cgroup, no swap; abort if host available memory falls below 3 GiB",
+    "Result=success\nOOMPolicy=stop\nMemoryPeak=46540365824"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "default": {
+      "ready_s": 117.826,
+      "ready_s_sd": null,
+      "samples": 1
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      "-c",
+      "262144",
+      "-np",
+      "1",
+      "--port",
+      "56079",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-mtp",
+      "--spec-draft-model",
+      "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "--spec-draft-ngl",
+      "999"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "c650f786e08b07ab2476308cf20e7af59ab6f87f"
+  },
+  "startupControl": {
+    "elapsedSeconds": 117.82653159997426,
+    "hostMemoryGuardTriggered": false,
+    "minimumHostAvailableGiB": 3.118366241455078,
+    "systemd": "Result=success\nOOMPolicy=stop\nMemoryPeak=46540365824\n"
+  },
+  "table": "loading",
+  "target": "reference"
+}

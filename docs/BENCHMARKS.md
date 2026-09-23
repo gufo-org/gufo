@@ -19,6 +19,20 @@ and SVG charts between the `<!-- bench:<id> -->` markers. Workloads and table
 layouts are declared in `docs/models/<model>/artifacts/bench.json`; the
 `benchmark-model` skill in `.agents/skills` describes the procedure.
 
+New or refreshed text-model cards use the same pp2048 prose/copying prompts
+for single-user d0 and concurrency, with tg128. The driver shares their prompt
+generator and records prompt hashes. C1 should cross-check d0; investigate
+input, cache, controller and timing differences before attributing a gap to
+batching. Short repeated-word corpora remain useful quality probes, but their
+rates cannot replace these matched workloads.
+
+For decode comparisons, set `prefill_first: true` in the concurrency table.
+Prepare every session with the full prompt and one output token, wait for all
+preparations, then time identical tg128 requests with prefix reuse. The driver
+pins llama.cpp slots and rejects replay exceeding four prompt tokens. This keeps
+peers' long prefills outside llama.cpp's elapsed generation timer; Gufo reports
+active decode time. Preserve a separate fresh AR completion-hash control.
+
 ## Direct and serving measurements
 
 `gufo bench` measures the model path. Keep model artifact, prompt length,
