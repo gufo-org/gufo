@@ -15,8 +15,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 from gufo import serving_bench
 from gufo.model_bench.charts import render_charts
 from gufo.model_bench.config import BenchConfig, load_config
-from gufo.model_bench.llm import Session, run_multi
-from gufo.model_bench.render import _serving_rate, layout_for, render_table
+from gufo.model_bench.llm import Session, run_multi, run_single
+from gufo.model_bench.render import _serving_rate, layout_for, parse_table, render_table
 
 
 def check(condition, message):
@@ -734,5 +734,68 @@ with tempfile.TemporaryDirectory() as directory:
         single = render_table(config, config.table(f"single-dflash2-{quant}"), None)
         check("accepted/step" not in single and "tok/s" in single,
               "single-user tables show throughput units without acceptance columns")
+        single_table = config.table(f"single-dflash2-{quant}")
+        workloads = single_table.workload_tables()
+        check([w.id for w in workloads] ==
+              [f"single-dflash2-{quant}", f"single-dflash2-repetition-{quant}"],
+              "single-user grouping preserves workload artifact identities")
+        data = [
+            {"pp": 100, "pp_sd": 2, "tg": 10},
+            {"pp": 80, "pp_sd": 1, "tg": 8},
+            {"pp": 90, "pp_sd": 7, "tg": 30},
+            {"pp": 120, "pp_sd": 4, "tg": 20},
+        ]
+        for index, row in enumerate(data):
+            target = ("gufo", "reference")[index % 2]
+            path = config.artifacts_dir / f"{workloads[index // 2].id}-{target}.json"
+            path.write_text(json.dumps({"rows": {"0": row}}))
+        rendered = render_table(config, single_table, None)
+        row = parse_table(rendered)["0"]
+        check((row["Gufo pp"], row["llama.cpp pp"], row["Gain pp"]) ==
+              ("100.00 ± 2.00", "120.00 ± 4.00", "-16.7%"),
+              "pp selects each engine's maximum and its own deviation before computing gain")
+        check((row["Gufo tg mixed"], row["Gain mixed"], row["Gufo tg repetitive"],
+               row["Gain repetitive"]) == ("10.00", "+25.0%", "30.00", "+50.0%"),
+              "generation and gains stay independent by text type")
+        for target, metric, expected in [
+            ("gufo", "Gufo tg repetitive", workloads[1]),
+            ("reference", "llama.cpp tg mixed", workloads[0]),
+        ]:
+            layout = layout_for(config, single_table)
+            cells = [c.label for c in layout.columns]
+            document = "| " + " | ".join(cells) + " |\n"
+            document += "| " + " | ".join(c.align for c in layout.columns) + " |\n"
+            document += "| 0 | " + " | ".join(
+                "TODO" if c.header == metric else row[c.header] for c in layout.columns[1:]
+            ) + " |\n"
+            document = f"<!-- bench:{single_table.id} -->\n{document}<!-- /bench -->"
+            session = Session(
+                config, target, gufo_binary=Path("gufo"), reference_binary="llama-server",
+                source={}, fingerprint={}, log_dir=Path(directory), document=document,
+                todo_only=True, depths=[0],
+            )
+            session.server = MagicMock(return_value=MagicMock())
+            session.request = MagicMock()
+            session.artifact = MagicMock(return_value={})
+            session.store = MagicMock()
+            observation = MagicMock(
+                prefill_tokens_per_second=100.0, decode_tokens_per_second=30.0,
+                draft_acceptance=None, draft_tokens=0, draft_accepted_tokens=0,
+                completion_tokens=128, cached_prompt_tokens=0, prefill_tokens=2048,
+            )
+            with patch("gufo.model_bench.llm.Tokenizer") as tokenizer, \
+                    patch("gufo.model_bench.llm._measure_depth", return_value=observation) as measure, \
+                    patch("gufo.model_bench.llm.wait_process_exit"), \
+                    patch("sys.stdout", new=io.StringIO()):
+                tokenizer.return_value.words_for.return_value = 64
+                tokenizer.return_value.ratio = 1.0
+                tokenizer.return_value.overhead = 0
+                run_single(session, single_table)
+            check(measure.call_count == 1 and measure.call_args.kwargs["task"] == expected.spec["workload"],
+                  "single-user TODO refresh measures only the missing workload")
+            check(session.server.call_count == 1 and session.server.call_args.args[0].id == expected.id,
+                  "single-user grouping starts no redundant server")
+            check(session.store.call_args.args[0].name == f"{expected.id}-{target}.json",
+                  "single-user refresh writes the original workload artifact")
 
 print("Serving benchmark harness tests passed.")

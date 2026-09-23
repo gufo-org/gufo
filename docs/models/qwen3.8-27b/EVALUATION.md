@@ -379,6 +379,10 @@ off, one warmup and one measured repetition per point. Single-user controls
 request pp2048/tg128; actual appended lengths are 2010–2060 tokens, with context
 capacity 36864 for the focused d0/d32K checks. Q4 replays a one-token prefix reply;
 Q8 replays eight tokens. Paired engine controls use the same message history.
+Single-user DFlash2 combines mixed/repetitive text in one table per quantization.
+Each engine's pp cell takes the highest measured rate at that depth across the
+two workloads; pp gain compares those maxima. tg and its gain stay separate by
+text type. The original pp/tg samples remain unchanged in workload artifacts.
 
 Concurrency uses 4096 context tokens per request and up to 128 output tokens.
 AR uses `repetition_word`; DFlash2 has mixed and repetitive workloads. Its summary
@@ -398,8 +402,10 @@ Refresh selected rows with `tools/bench/model-bench.py --model qwen3.8-27b`:
 `run --target gufo --table <table>` or `run --target reference --table <table>`
 with the model paths supplied as documented in the
 [benchmark skill](../../../.agents/skills/benchmark-model/SKILL.md).
+`single-dflash2-q4` / `single-dflash2-q8` and
 `multi-dflash2-q4` / `multi-dflash2-q8` run both workloads; `--todo` selects missing
-cells separately for each workload. Use `render` to regenerate the results card
+cells separately for each workload (including missing shared pp for single-user
+tables). Use `render` to regenerate the results card
 and charts without running a model. Run the affected checks above before
 publishing new performance measurements. Original-target qualification remains
 TODO; output agreement alone is not proof of official-model parity.

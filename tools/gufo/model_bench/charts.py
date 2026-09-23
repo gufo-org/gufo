@@ -97,7 +97,30 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
     title = f"{model_label(config, table)} · {table.spec.get('title', table.id)}"
     plt = _plt()
 
-    if kind == "single":
+    if kind == "single" and table.workload_tables():
+        workloads = table.workload_tables()
+        panels = [("Prefill", "pp", "prefill tok/s")]
+        panels += [(w.spec["label"].capitalize(), f"tg {w.spec['label']}", "generation tok/s")
+                   for w in workloads]
+        matched_mode = config.reference_speculative
+        series = [
+            (_series(rows, labels, f"Gufo {metric}"),
+             _series(rows, labels, f"{ref if matched_mode or metric == 'pp' else ref + ' AR'} {metric}"))
+            for _, metric, _ in panels
+        ]
+        if not any(_has_data(g, r) for g, r in series):
+            return False
+        fig, axes = plt.subplots(1, len(panels), figsize=(4 * len(panels), 3.2), squeeze=False)
+        for ax, (panel, _, unit), (g, r) in zip(axes[0], panels, series):
+            _lines(ax, labels, [("Gufo", g, COLORS["spec"]),
+                               (ref if matched_mode else f"{ref} AR", r, COLORS["ref_spec"])],
+                   unit, _depth_ticks(labels))
+            ax.set_title(panel)
+            ax.set_xlabel("context depth (tokens)")
+            ax.legend(loc="lower left")
+            if not _has_data(g, r):
+                ax.text(0.5, 0.5, "TODO", transform=ax.transAxes, ha="center")
+    elif kind == "single":
         gp, gt = (_series(rows, labels, h) for h in ("Gufo pp", "Gufo tg"))
         if not _has_data(gp, gt):
             return False

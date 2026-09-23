@@ -32,7 +32,7 @@ class TableSpec:
 
     def workload_tables(self) -> list[TableSpec]:
         """Keep each workload's measurements under its existing artifact identity."""
-        if self.kind != "multi":
+        if self.kind not in ("single", "multi"):
             return []
         common = {k: v for k, v in self.spec.items() if k != "workloads"}
         return [

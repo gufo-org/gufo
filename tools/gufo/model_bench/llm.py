@@ -249,13 +249,15 @@ def _mean_sd(values: list[float]) -> tuple[float, float | None]:
 # ----- tables ----------------------------------------------------------------
 
 
-def _selected_rows(session: Session, table: TableSpec, labels: dict[Any, str]) -> list[Any]:
+def _selected_rows(session: Session, table: TableSpec, labels: dict[Any, str],
+                   display_table: TableSpec | None = None) -> list[Any]:
     """Row keys to measure, honouring --todo against the current document."""
     if not session.todo_only:
         return list(labels)
     from .render import todo_rows
 
-    todo = todo_rows(session.config, session.document, table, session.target)
+    todo = todo_rows(session.config, session.document, display_table or table, session.target,
+                     table.spec["label"] if display_table else None)
     if todo is None:
         return list(labels)
     return [key for key, label in labels.items() if label in todo]
@@ -303,7 +305,12 @@ def run_loading(session: Session, table: TableSpec) -> None:
     session.store(artifact_path(cfg, table, session.target), artifact)
 
 
-def run_single(session: Session, table: TableSpec) -> None:
+def run_single(session: Session, table: TableSpec, display_table: TableSpec | None = None) -> None:
+    workloads = table.workload_tables()
+    if workloads:
+        for workload in workloads:
+            run_single(session, workload, display_table=table)
+        return
     cfg = session.config
     spec = table.spec
     if session.modes and ("ar" if not table.speculative else cfg.speculative["mode"]) not in session.modes:
@@ -316,7 +323,7 @@ def run_single(session: Session, table: TableSpec) -> None:
     depths = [int(d) for d in spec["depths"]]
     if session.depths:
         depths = [d for d in depths if d in session.depths]
-    keys = _selected_rows(session, table, {d: f"{d:,}" for d in depths})
+    keys = _selected_rows(session, table, {d: f"{d:,}" for d in depths}, display_table)
     if not keys:
         print(f"{table.id}: nothing to do")
         return
@@ -487,13 +494,7 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
     spec = table.spec
     cfg.require_files(table.variant)
     levels = [int(c) for c in spec["concurrency"]]
-    if display_table is not None and session.todo_only:
-        from .render import todo_rows
-
-        pending = todo_rows(cfg, session.document, display_table, session.target, table.spec["label"])
-        keys = [c for c in levels if pending is None or str(c) in pending]
-    else:
-        keys = _selected_rows(session, table, {c: str(c) for c in levels})
+    keys = _selected_rows(session, table, {c: str(c) for c in levels}, display_table)
     if not keys:
         print(f"{table.id}: nothing to do")
         return

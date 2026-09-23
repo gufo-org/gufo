@@ -45,20 +45,21 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 
 ## Single user, DFlash2
 
-Same depth workload. Gufo retains AR output; llama.cpp differs in some
-controls ([quality details](EVALUATION.md#meaning-of-exact)).
+pp is the highest measured rate per engine and depth across mixed/repetitive
+text. Gufo retains AR output; llama.cpp differs in some controls
+([quality details](EVALUATION.md#meaning-of-exact)).
 
 <!-- bench:single-dflash2-q4 -->
-| Qwen27B Q4 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 619.74 | 344.56 | +79.9% | 30.66 | 27.16 | +12.9% |
-| 4,096 | TODO | 298.19 | TODO | TODO | 23.03 | TODO |
-| 8,192 | TODO | 284.44 | TODO | TODO | 21.76 | TODO |
-| 12,288 | TODO | 272.58 | TODO | TODO | 22.66 | TODO |
-| 16,384 | TODO | 260.16 | TODO | TODO | 21.87 | TODO |
-| 32,768 | 476.85 | TODO | TODO | 21.91 | TODO | TODO |
-| 65,536 | TODO | 177.90 | TODO | TODO | 18.32 | TODO |
-| 131,072 | TODO | 126.64 | TODO | TODO | 14.16 | TODO |
+| Qwen27B Q4 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 619.74 | 344.56 | +79.9% | 30.66 | 27.16 | +12.9% | TODO | TODO | TODO |
+| 4,096 | TODO | 298.19 | TODO | TODO | 23.03 | TODO | TODO | TODO | TODO |
+| 8,192 | TODO | 284.44 | TODO | TODO | 21.76 | TODO | TODO | TODO | TODO |
+| 12,288 | TODO | 272.58 | TODO | TODO | 22.66 | TODO | TODO | TODO | TODO |
+| 16,384 | TODO | 260.16 | TODO | TODO | 21.87 | TODO | TODO | TODO | TODO |
+| 32,768 | 476.85 | TODO | TODO | 21.91 | TODO | TODO | TODO | TODO | TODO |
+| 65,536 | TODO | 177.90 | TODO | TODO | 18.32 | TODO | TODO | TODO | TODO |
+| 131,072 | TODO | 126.64 | TODO | TODO | 14.16 | TODO | TODO | TODO | TODO |
 <!-- /bench -->
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q4.svg)
@@ -66,49 +67,19 @@ controls ([quality details](EVALUATION.md#meaning-of-exact)).
 ---
 
 <!-- bench:single-dflash2-q8 -->
-| Qwen27B Q8 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 473.79 | 336.19 | +40.9% | 16.11 | 15.02 | +7.3% |
-| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 8,192 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 12,288 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 32,768 | 359.28 | 232.53 | +54.5% | 16.22 | 13.89 | +16.8% |
-| 65,536 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 131,072 | TODO | TODO | TODO | TODO | TODO | TODO |
+| Qwen27B Q8 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 473.79 | 336.19 | +40.9% | 16.11 | 15.02 | +7.3% | TODO | TODO | TODO |
+| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 8,192 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 12,288 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 32,768 | 359.28 | 232.53 | +54.5% | 16.22 | 13.89 | +16.8% | TODO | TODO | TODO |
+| 65,536 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 131,072 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q8.svg)
-
-## Single user, DFlash2, repetitive
-
-<!-- bench:single-dflash2-repetition-q4 -->
-| Qwen27B Q4 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 8,192 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 12,288 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 32,768 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 65,536 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 131,072 | TODO | TODO | TODO | TODO | TODO | TODO |
-<!-- /bench -->
-
----
-
-<!-- bench:single-dflash2-repetition-q8 -->
-| Qwen27B Q8 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 8,192 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 12,288 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 32,768 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 65,536 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 131,072 | TODO | TODO | TODO | TODO | TODO | TODO |
-<!-- /bench -->
 
 ## Multiple users, autoregressive
 

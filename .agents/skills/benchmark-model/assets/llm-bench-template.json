@@ -69,7 +69,7 @@
       "better": "higher"
     },
     "single-<spec>": {
-      "title": "Single user, MTP",
+      "title": "Single user, <SPEC>",
       "per_variant": false,
       "speculative": true,
       "prompt_tokens": 2048,
@@ -93,61 +93,16 @@
       "repetitions": 1,
       "metric": "tok/s",
       "better": "higher",
-      "workload": "prose"
-    },
-    "single-<spec>-repetition": {
-      "title": "Single user, MTP, repetitive",
-      "per_variant": false,
-      "speculative": true,
-      "prompt_tokens": 2048,
-      "output_tokens": 128,
-      "depths": [
-        0,
-        4096,
-        8192,
-        12288,
-        16384,
-        32768,
-        65536,
-        131072
-      ],
-      "context": 133760,
-      "depth_tolerance": 0.005,
-      "prefix": {
-        "generator": "synthetic-paragraphs",
-        "seed": 1
-      },
-      "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher",
-      "workload": "repetition"
-    },
-    "single-<spec>-thinking": {
-      "title": "Single user, MTP, thinking",
-      "per_variant": false,
-      "speculative": true,
-      "prompt_tokens": 2048,
-      "output_tokens": 128,
-      "depths": [
-        0,
-        4096,
-        8192,
-        12288,
-        16384,
-        32768,
-        65536,
-        131072
-      ],
-      "context": 133760,
-      "depth_tolerance": 0.005,
-      "prefix": {
-        "generator": "synthetic-paragraphs",
-        "seed": 1
-      },
-      "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher",
-      "workload": "thinking"
+      "workloads": {
+        "single-<spec>": {
+          "label": "mixed",
+          "workload": "prose"
+        },
+        "single-<spec>-repetition": {
+          "label": "repetitive",
+          "workload": "repetition"
+        }
+      }
     },
     "multi-ar": {
       "title": "Multiple users, autoregressive",

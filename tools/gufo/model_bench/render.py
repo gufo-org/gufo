@@ -130,6 +130,18 @@ def _layout_for(config: BenchConfig, table: TableSpec) -> Layout:
             [_depth_label(d) for d in table.spec["depths"]],
         )
     if kind == "single":
+        workloads = table.workload_tables()
+        if workloads:
+            columns = [Column("Depth (tokens)", "label"), Column("Gufo pp", "gufo")]
+            if config.reference_speculative:
+                columns += [Column(f"{ref} pp", "reference"), Column("Gain pp", "gain")]
+            for workload in workloads:
+                label = workload.spec["label"]
+                reference = ref if config.reference_speculative else f"{ref} AR"
+                columns += [Column(f"Gufo tg {label}", "gufo"),
+                            Column(f"{reference} tg {label}", "reference"),
+                            Column(f"Gain {label}", "gain")]
+            return Layout(columns, [_depth_label(d) for d in table.spec["depths"]])
         if config.reference_speculative:
             columns = [Column("Depth (tokens)", "label"),
                        Column("Gufo pp", "gufo"), Column(f"{ref} pp", "reference"), Column("Gain", "gain"),
@@ -203,18 +215,18 @@ def _row_values(config: BenchConfig, table: TableSpec) -> dict[str, dict[str, st
     """Fresh cell text per row label from artifacts; None means no artifact value."""
     values: dict[str, dict[str, str | None]] = {}
     kind = table.kind
+    workloads = table.workload_tables()
+    if workloads:
+        for workload in workloads:
+            unavailable = unavailable_rows(config, workload) or set()
+            for label, row in _row_values(config, workload).items():
+                if "*" in unavailable or label in unavailable:
+                    row["ref_unavailable"] = True
+                values.setdefault(label, {}).update(
+                    {f"{key}_{workload.spec['label']}": value for key, value in row.items()}
+                )
+        return values
     if kind == "multi":
-        workloads = table.workload_tables()
-        if workloads:
-            for workload in workloads:
-                unavailable = unavailable_rows(config, workload) or set()
-                for users, row in _row_values(config, workload).items():
-                    if "*" in unavailable or users in unavailable:
-                        row["ref_unavailable"] = True
-                    values.setdefault(users, {}).update(
-                        {f"{key}_{workload.spec['label']}": value for key, value in row.items()}
-                    )
-            return values
         modes = table.spec.get("modes", ["ar"])
         if len(modes) == 1:
             mode = modes[0]
@@ -374,6 +386,27 @@ def render_table(config: BenchConfig, table: TableSpec, existing: dict[str, dict
             cells = [gp, rp, gain(_number(gp), _number(rp), better, rp == NA),
                      gt, rt, gain(_number(gt), _number(rt), better, rt == NA)]
         elif kind == "single":
+            workloads = table.workload_tables()
+            if workloads:
+                def best_pp(engine: str) -> str | None:
+                    candidates = [fresh.get(f"{engine}_pp_{w.spec['label']}") for w in workloads]
+                    return max((v for v in candidates if _number(v) is not None),
+                               key=_number, default=None)
+
+                gp = _pick(best_pp("gufo"), cell("Gufo pp"))
+                cells = [gp]
+                if config.reference_speculative:
+                    rp = _ref(best_pp("ref"), na or all(
+                        fresh.get(f"ref_unavailable_{w.spec['label']}") for w in workloads))
+                    cells += [rp, gain(_number(gp), _number(rp), better, rp == NA)]
+                for workload in workloads:
+                    name = workload.spec["label"]
+                    gt = _pick(fresh.get(f"gufo_tg_{name}"), cell(f"Gufo tg {name}"))
+                    rt = _ref(fresh.get(f"ref_tg_{name}"),
+                              na or bool(fresh.get(f"ref_unavailable_{name}")))
+                    cells += [gt, rt, gain(_number(gt), _number(rt), better, rt == NA)]
+                lines.append("| " + " | ".join([label, *cells]) + " |")
+                continue
             gp = _pick(fresh.get("gufo_pp"), cell("Gufo pp")); gt = _pick(fresh.get("gufo_tg"), cell("Gufo tg"))
             rp = _ref(fresh.get("ref_pp"), na); rt = _ref(fresh.get("ref_tg"), na)
             if config.reference_speculative:
@@ -495,7 +528,8 @@ def todo_rows(config: BenchConfig, document: str, table: TableSpec, target: str,
     layout = layout_for(config, table)
     owned = [c.header for c in layout.columns[1:]
              if (c.owner == target or (target == "reference" and c.owner == "exact"))
-             and (workload is None or c.header.endswith(f" {workload}"))]
+             and (workload is None or c.header.endswith(f" {workload}")
+                  or (table.kind == "single" and c.header.endswith(" pp")))]
     todo: set[str] = set()
     for label, cells in tables[table.id].items():
         if any(cells.get(h, TODO) == TODO for h in owned):

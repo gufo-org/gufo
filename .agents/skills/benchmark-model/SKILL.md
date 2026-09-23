@@ -75,8 +75,8 @@ nix develop -c python3 tools/bench/model-bench.py --model <model> render        
 `run` flags: `--table <id>[,<id>]` selects tables (without it every table
 runs in `bench.json` order; loading and image-encoder are skipped with a
 message when they cannot run); `--todo` measures only rows that have a
-`TODO` in a cell owned by the target (row-granular: one `TODO` acceptance
-cell re-measures that row's pp and tg too); `--fresh` discards the rows of
+`TODO` in a cell owned by the target (row-granular: a missing tg cell
+re-measures that workload's pp and tg too); `--fresh` discards the rows of
 an existing artifact instead of merging into them — use it for a full
 refresh so an interrupted run cannot leave mixed-date rows; `--repetitions N`
 overrides every table's repetition count (mean ± sd above 1);
@@ -179,8 +179,11 @@ in the first column header as well as the row dimension (depth/users/workload).
 Throughput headers must say `tok/s`; loading, memory and encoder latency retain
 seconds, GiB and ms. Add `---` between each Q4 table/figure and its Q8 counterpart.
 Keep acceptance statistics in artifacts, not Markdown columns or charts. Group
-mixed/repetitive speculative concurrency into one table and figure per quantization,
-while retaining independent workload data. Keep TODO cells. Place **Loading time**
+mixed/repetitive speculative results into one table and figure per quantization
+for single-user depth sweeps and for concurrency. Single-user tables share pp
+columns and show separate tg/gain columns per text type; choose the highest
+measured pp per engine/depth across the workloads and state this beside the table.
+Retain independent workload artifacts and TODO cells. Place **Loading time**
 immediately before **Memory occupation**. Put commands and detailed methodology in
 `EVALUATION.md`; keep only interpretation-critical notes beside the tables.
 
@@ -268,16 +271,21 @@ place loading immediately before memory in the rendered card:
    prompt-cache miss on Gufo and decodes measurably slower than a cached
    continuation; d0 is therefore a different regime from d4096+, not noise.
    `Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain`.
-3. **Single user, speculative** (`single-<spec>` and
-   `single-<spec>-repetition`, DFlash2 / DSpark / MTP as the model supports).
+3. **Single user, speculative** (`single-<spec>`,
+   DFlash2 / DSpark / MTP as the model supports).
    Same depth grid. Retain accepted draft tokens per step in the
    artifacts, without displaying them in the results card. Two workloads, because speculative decoding depends on the
-   output: the measured turn of `single-<spec>` asks for a detailed summary
-   and a story (generic prose, `workload: prose`); `single-<spec>-repetition`
+   output: the mixed workload asks for a detailed summary
+   and a story (generic prose, `workload: prose`); the repetitive workload
    asks the model to repeat the passage word for word (fully predictable
    output, `workload: repetition`, the single-user analogue of the
    `repetition` corpus). The AR depth table uses the prose task; keep one AR workload for each
    fixed depth and batch configuration instead of repeating it by text category.
+   The table's `workloads` map retains `single-<spec>` and
+   `single-<spec>-repetition` artifact identities. The runner measures each
+   workload separately; `--todo` selects its missing tg cells or missing shared
+   pp. The renderer selects the highest pp per engine/depth, preserving that
+   measurement's standard deviation, and recalculates pp gain from the maxima.
    llama.cpp runs the same draft file through `--spec-type draft-dflash`,
    `draft-mtp` or `draft-dspark` (`speculative.reference.args` in
    `bench.json`, otherwise llama.cpp's defaults; tune them only when the
@@ -290,7 +298,7 @@ place loading immediately before memory in the rendered card:
    speculative reference comes from that branch. Without such a build,
    record the error once, run the reference with `--mode ar`, and leave its
    speculative cells `TODO`.
-   `Model / depth | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain`.
+   `Model / depth | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive`.
    `accepted/step` is the mean number of accepted draft tokens per
    verification step, `draft_n_accepted / (predicted_n − draft_n_accepted)`
    (each step also yields one target token, so tokens per step is this plus

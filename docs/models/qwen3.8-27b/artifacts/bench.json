@@ -100,34 +100,16 @@
       "repetitions": 1,
       "metric": "tok/s",
       "better": "higher",
-      "workload": "prose"
-    },
-    "single-dflash2-repetition": {
-      "title": "Single user, DFlash2, repetitive",
-      "per_variant": true,
-      "speculative": true,
-      "prompt_tokens": 2048,
-      "output_tokens": 128,
-      "depths": [
-        0,
-        4096,
-        8192,
-        12288,
-        16384,
-        32768,
-        65536,
-        131072
-      ],
-      "context": 133760,
-      "depth_tolerance": 0.005,
-      "prefix": {
-        "generator": "synthetic-paragraphs",
-        "seed": 1
-      },
-      "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher",
-      "workload": "repetition"
+      "workloads": {
+        "single-dflash2": {
+          "label": "mixed",
+          "workload": "prose"
+        },
+        "single-dflash2-repetition": {
+          "label": "repetitive",
+          "workload": "repetition"
+        }
+      }
     },
     "multi-ar": {
       "title": "Multiple users, autoregressive",

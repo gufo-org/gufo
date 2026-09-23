@@ -13,17 +13,10 @@ pp2048 / tg128; depth is the cached prefix in tokens.
 
 ## Single user, speculative
 
+One table per quantization: shared pp, separate mixed/repetitive tg and gains.
+pp is the highest measured rate per engine and depth across both text types.
+
 <!-- bench:single-<spec> -->
-<!-- /bench -->
-
-## Single user, speculative, repetitive
-
-<!-- bench:single-<spec>-repetition -->
-<!-- /bench -->
-
-## Single user, speculative, thinking
-
-<!-- bench:single-<spec>-thinking -->
 <!-- /bench -->
 
 ## Multiple users, autoregressive
