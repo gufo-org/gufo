@@ -52,9 +52,9 @@ public:
     const auto cap = std::min(budget, limit_);
     if (policy_ == DFlashDraftPolicy::kFixed || cap == 0)
       return cap;
-    // Preserve the full-acceptance probe at C6/C8. Extrapolating attention
+    // Preserve the full-acceptance probe at C5-C8. Extrapolating attention
     // cost beyond the measured depths must not shorten a saturated block.
-    if ((greedy_batch_size == 6 || greedy_batch_size == 8) &&
+    if (greedy_batch_size >= 5 && greedy_batch_size <= 8 &&
         mean_ == static_cast<float>(limit_))
       return cap;
 
@@ -80,14 +80,19 @@ public:
         relative_costs = &kQ4PairedRelativeCost;
         context_multiplier = 1.92F;
         break;
+      // A finishing request does not make the remaining weight reads cheap.
+      // Use the next measured capacity for odd cohorts too.
+      case 3:
       case 4:
         relative_costs = &kQ4FourRequestRelativeCost;
         context_multiplier = 3.20F;
         break;
+      case 5:
       case 6:
         relative_costs = &kQ4SixRequestRelativeCost;
         context_multiplier = 3.50F;
         break;
+      case 7:
       case 8:
         relative_costs = &kQ4EightRequestRelativeCost;
         context_multiplier = 4.42F;
