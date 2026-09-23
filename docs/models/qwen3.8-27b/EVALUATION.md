@@ -74,13 +74,16 @@ history probes wider blocks. An independent geometric-distribution check verifie
 zero expected feedback drift at every width 1–7 below saturation. Request timings
 never enter sampled decisions; controller history resets for a new request.
 
-Q4 greedy C2/C4/C6/C8 costs use complete measured cycles and context growth.
-Private sampled/mixed cohorts match isolated proposal IDs, probabilities, RNG
-and restored state. Focused shallow and d32K cohorts retain C1 AR output; perfect
-acceptance is preserved. Evidence: [C2](artifacts/q4-c2-focused.json),
-[C4](artifacts/q4-c4-focused.json), [C6](artifacts/q4-c6-focused.json),
-[C8](artifacts/q4-c8-focused.json). The difficult Italian/Chinese C8 pair remains
-faster under AR; these controls do not establish universal speculative profitability.
+Q4 greedy costs account for complete measured cycles and context growth,
+including odd cohorts as requests finish. Private sampled/mixed cohorts match
+isolated proposal IDs, probabilities, RNG and restored state. Current C4/C6/C8
+mixed throughput is **71.76 / 79.78 / 85.27 tok/s**; all completions match AR.
+C8 repetition reaches **121.68 tok/s**. At d32K, C4 reaches **39.87 tok/s**:
+all four requests reuse 32,552 tokens, prefill 2,011 new tokens and match the
+128-token AR continuation. C1 AR retains **12.42 tok/s** on both corpus and
+repetition controls. Evidence: [current qualification](artifacts/q4-c4-focused.json),
+[earlier C2](artifacts/q4-c2-focused.json), [C6](artifacts/q4-c6-focused.json)
+and [C8](artifacts/q4-c8-focused.json). Profitability remains workload-dependent.
 
 Q8 greedy cohorts of two through eight requests use one shared width chosen from
 private acceptance histories and measured cycle costs. Odd cohorts use the next
@@ -94,9 +97,17 @@ Current Q8_K_XL C8 controls reach **65.96 tok/s** on the nine-case mixed corpus
 and **116.90 tok/s** on repetition, as sums of individual decode rates.
 All 16 mixed completions and all eight repetitive completions match isolated
 AR; repetition accepts all 880 proposed tokens. Matched llama.cpp controls reach
-**63.02 / 86.53 tok/s** for mixed/repetition. Ragged projections group weight reads without
-changing per-row arithmetic, and shared widths avoid excessive proposals when
-the active cohort shrinks.
+**63.02 / 86.53 tok/s** for mixed/repetition. C4/C6 mixed controls reach
+**49.28 / 56.65 tok/s**, versus **42.00 / 48.76** for the matched reference,
+with all 12 Gufo completions matching AR at each concurrency.
+C2 reaches **43.28 versus 31.27 tok/s**, with all ten Gufo completions matching AR.
+Ragged projections group weight reads without changing per-row arithmetic,
+and shared widths avoid excessive proposals when the active cohort shrinks.
+The mixed corpus caps output at 128 tokens; its summary case ends earlier.
+
+Q8 AR repetition reaches **14.45 / 27.81 / 39.96 tok/s** at C2/C4/C6,
+versus **13.78 / 25.35 / 34.72** for the matched reference. All requests
+retain the isolated 128-token AR output on both engines.
 
 At d32K, C8 reaches **41.52 tok/s**: all eight requests reuse 32,764 tokens,
 prefill 2,060 new tokens and match the isolated 128-token AR continuation.
@@ -108,8 +119,8 @@ measured **49.25–52.84 tok/s**, while unchanged-baseline controls ranged
 **44.67–51.86**. The paired repeat was **52.84 versus 51.85**, with every
 completion matching AR. This does not establish a uniform C6 speed gain.
 Profiles, ablations, earlier C2/C4 controls and source identities are retained
-in the [compact Q8 artifact](artifacts/q8-tg-focused.json); the full concurrency
-and depth matrix is still pending.
+in the [compact Q8 artifact](artifacts/q8-tg-focused.json). Current comparison
+rows are in [benchmarks](BENCHMARKS.md); unmeasured cells remain TODO.
 
 ## Meaning of Exact
 

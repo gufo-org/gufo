@@ -3,11 +3,11 @@
 | | |
 | --- | --- |
 | Host | Linux x86-64, AMD `gfx1151`, 128 GB unified memory |
-| Gufo | Focused C1 results through `147c6608`, `nix build`; each updated artifact row records its binary identity. Unrefreshed concurrency/memory controls are dated below |
-| Targets | `unsloth/Qwen3.8-27B-GGUF` snapshot `4ca72078`: **UD-Q4_K_XL** (16.35 GiB), **UD-Q8_K_XL** (29.30 GiB). Historical multi-user/memory Q8 rows use **UD-Q8_K_L** (26.12 GiB) and await replacement |
+| Gufo | Focused C1 and concurrency results through `d0843504`, `nix build`; updated artifact rows record binary identities. Retained older controls are dated below |
+| Targets | `unsloth/Qwen3.8-27B-GGUF` snapshot `4ca72078`: **UD-Q4_K_XL** (16.35 GiB), **UD-Q8_K_XL** (29.30 GiB). Historical memory Q8 rows use **UD-Q8_K_L** (26.12 GiB) and await replacement |
 | Speculative | DFlash2 draft **Q4_K_M** with the **adaptive** controller |
 | Reference | llama.cpp `llama-server` release `b11069` (`0.4.1-dev (build 11069)`), ROCm gfx1151, `LLAMA_HIP_UMA=ON`, from `flake.nix`, same GGUF files and same draft through `--spec-type draft-dflash` |
-| Method | HTTP, greedy, thinking off, one warmed sample per point, isolated servers. Focused single-user controls: 2026-09-23; historical concurrency/memory: 2026-09-21 |
+| Method | HTTP, greedy, thinking off, one warmed sample per point, isolated servers. Focused single-user/concurrency controls: 2026-09-23; retained older controls: 2026-09-21 |
 | Gain | Gufo over llama.cpp, positive when Gufo is better |
 | Quality gate | Full Q4/Q8 target replay, affected operators and generated-frontier continuation pass; [scope and independent-reference limits](EVALUATION.md) |
 | Identities | [`artifacts/model-identities.json`](artifacts/model-identities.json) |
@@ -65,8 +65,6 @@ Artifacts: `artifacts/single-ar-{q4,q8}-{gufo,reference}.json`.
 | 131,072 | TODO | 131.74 | TODO | TODO | 8.47 | TODO |
 <!-- /bench -->
 
-![Single user, autoregressive](artifacts/charts/single-ar-q4.svg)
-
 <!-- bench:single-ar-q8 -->
 | Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -79,8 +77,6 @@ Artifacts: `artifacts/single-ar-{q4,q8}-{gufo,reference}.json`.
 | 65,536 | TODO | TODO | TODO | TODO | TODO | TODO |
 | 131,072 | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->
-
-![Single user, autoregressive](artifacts/charts/single-ar-q8.svg)
 
 Q4 AR reaches **12.38 tok/s at d0** and **11.14 at d32K**. Q8_K_XL
 reaches **7.20 / 6.76 tok/s**, matching the pinned reference at those points.
@@ -110,9 +106,7 @@ Artifacts: `artifacts/single-dflash2-{q4,q8}-{gufo,reference}.json`.
 | 131,072 | TODO | 126.64 | TODO | TODO | 14.16 | TODO | TODO | 1.37 |
 <!-- /bench -->
 
-![Single user, DFlash2](artifacts/charts/single-dflash2-q4.svg)
-
-Repetitive workload (**TODO**, pending the 27B DFlash2 changes in progress):
+Repetitive workload (**TODO**, not included in the focused depth controls):
 same prefixes and depths, the measured turn asks the model to repeat the
 passage word for word, so the output is fully predictable — the single-user
 analogue of the `repetition` corpus below.
@@ -143,8 +137,6 @@ analogue of the `repetition` corpus below.
 | 131,072 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->
 
-![Single user, DFlash2](artifacts/charts/single-dflash2-q8.svg)
-
 At d32K, llama.cpp DFlash2 differs from its own AR output; the speed comparison
 does not establish equivalent output. See [evaluation](EVALUATION.md#meaning-of-exact).
 
@@ -165,34 +157,36 @@ does not establish equivalent output. See [evaluation](EVALUATION.md#meaning-of-
 
 ## Multiple users
 
-These are the retained **2026-09-21** controls; the current concurrency refresh
-is pending. Q8 here is the older **Q8_K_L**, not the Q8_K_XL single-user rows.
+Q8 uses **Q8_K_XL**, measured **2026-09-23**; unrefreshed cells are **TODO**.
+Q4 Gufo C1 AR, C4/C6/C8 mixed DFlash2 and C8 repetitive DFlash2 are refreshed,
+along with the C4 mixed DFlash2 reference. Other Q4 cells retain
+**2026-09-21** controls. Artifact rows record their dates and binary identities.
 
 Sum of individual request decode rates, averaged across measured cohorts.
 Context capacity 4096 per user (Gufo `--sessions C --context 4096`, llama.cpp
-`-np C -c 4096·C`), greedy, thinking off, **128 output tokens**, one warmup
+`-np C -c 4096·C`), greedy, thinking off, **up to 128 output tokens**, one warmup
 round, one measured repetition, fresh server per concurrency level. Workloads
 come from the [speculative corpus](artifacts/speculative-corpus.json):
 `repetition` runs `repetition_word` on every user; `mixed` cycles through the
-nine distinct corpus cases. DFlash2 uses the Q4_K_M draft on both servers
+nine distinct corpus cases. The two-sentence summary ends earlier; rates use
+actual emitted token counts. DFlash2 uses the Q4_K_M draft on both servers
 (Gufo adaptive controller; llama.cpp `draft-dflash` defaults). `Exact` counts
 llama.cpp AR completions whose hash matches the Gufo AR C1 reference; every
-Gufo AR and Gufo DFlash2 completion at C2–C8 matched that reference.
+refreshed Gufo AR and Gufo DFlash2 completion matched its own C1 AR reference.
 Artifacts: `artifacts/multi-{mixed,repetition}-{q4,q8}-{gufo-ar,gufo-dflash2,reference,reference-dflash2}.json`.
 
-Older September 21 Gufo concurrency rows reused prompt snapshots despite
-`cache_prompt: false`; the current server honors that option. These are
-decode rates, excluding prefill and scheduling. Fresh measurements must
-have zero prompt-cache hits.
+Refreshed rows have zero prompt-cache hits; retained September 21 Gufo
+controls included prompt-cache reuse. These decode rates exclude prefill
+and scheduling.
 
 <!-- bench:multi-mixed-q4 -->
 | Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 11.76 | 12.22 | -3.8% | 33.99 | 26.55 | +28.0% | 3/9 |
+| 1 | 12.42 | 12.22 | +1.6% | 33.99 | 26.55 | +28.0% | 3/9 |
 | 2 | 22.99 | 22.65 | +1.5% | 47.29 | 36.33 | +30.2% | 5/10 |
-| 4 | 41.96 | 38.69 | +8.5% | 55.55 | 71.42 | -22.2% | 8/12 |
-| 6 | 57.43 | 39.23 | +46.4% | 63.01 | 68.03 | -7.4% | 8/12 |
-| 8 | 69.62 | 39.34 | +77.0% | 64.28 | 67.87 | -5.3% | 11/16 |
+| 4 | 41.96 | 38.69 | +8.5% | 71.76 | 65.64 | +9.3% | 8/12 |
+| 6 | 57.43 | 39.23 | +46.4% | 79.78 | 68.03 | +17.3% | 8/12 |
+| 8 | 69.62 | 39.34 | +77.0% | 85.27 | 67.87 | +25.6% | 11/16 |
 <!-- /bench -->
 
 ![Multiple users, mixed corpus](artifacts/charts/multi-mixed-q4.svg)
@@ -200,11 +194,11 @@ have zero prompt-cache hits.
 <!-- bench:multi-repetition-q4 -->
 | Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 11.84 | 12.20 | -3.0% | 66.10 | 37.00 | +78.6% | 1/1 |
+| 1 | 12.42 | 12.20 | +1.8% | 66.10 | 37.00 | +78.6% | 1/1 |
 | 2 | 23.04 | 22.46 | +2.6% | 89.32 | 47.09 | +89.7% | 2/2 |
 | 4 | 41.97 | 38.32 | +9.5% | 97.26 | 92.76 | +4.9% | 4/4 |
 | 6 | 56.96 | 44.74 | +27.3% | 97.16 | 95.00 | +2.3% | 6/6 |
-| 8 | 67.94 | 46.02 | +47.6% | 101.37 | 110.97 | -8.7% | 8/8 |
+| 8 | 67.94 | 46.02 | +47.6% | 121.68 | 110.97 | +9.7% | 8/8 |
 <!-- /bench -->
 
 ![Multiple users, repetition](artifacts/charts/multi-repetition-q4.svg)
@@ -212,11 +206,11 @@ have zero prompt-cache hits.
 <!-- bench:multi-mixed-q8 -->
 | Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 7.50 | 8.07 | -7.1% | 25.82 | 19.58 | +31.9% | 4/9 |
-| 2 | 15.62 | 15.41 | +1.4% | 39.70 | 33.56 | +18.3% | 6/10 |
-| 4 | 29.62 | 28.06 | +5.6% | 42.66 | 57.86 | -26.3% | 4/12 |
-| 6 | 42.56 | 32.21 | +32.1% | 48.12 | 53.69 | -10.4% | 3/12 |
-| 8 | 53.93 | 39.02 | +38.2% | 50.53 | 64.29 | -21.4% | 4/16 |
+| 1 | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 2 | TODO | TODO | TODO | 43.28 | 31.27 | +38.4% | TODO |
+| 4 | TODO | TODO | TODO | 49.28 | 42.00 | +17.3% | TODO |
+| 6 | TODO | TODO | TODO | 56.65 | 48.76 | +16.2% | TODO |
+| 8 | 51.92 | 42.74 | +21.5% | 65.96 | 63.02 | +4.7% | 9/16 |
 <!-- /bench -->
 
 ![Multiple users, mixed corpus](artifacts/charts/multi-mixed-q8.svg)
@@ -224,11 +218,11 @@ have zero prompt-cache hits.
 <!-- bench:multi-repetition-q8 -->
 | Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 7.50 | 8.06 | -6.9% | 53.73 | 27.08 | +98.4% | 1/1 |
-| 2 | 15.67 | 15.32 | +2.3% | 79.61 | 45.49 | +75.0% | 2/2 |
-| 4 | 29.84 | 27.79 | +7.4% | 85.90 | 76.78 | +11.9% | 4/4 |
-| 6 | 42.24 | 37.21 | +13.5% | 88.80 | 79.04 | +12.3% | 6/6 |
-| 8 | 53.25 | 43.52 | +22.4% | 90.49 | 93.44 | -3.2% | 8/8 |
+| 1 | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 2 | 14.45 | 13.78 | +4.9% | TODO | TODO | TODO | 2/2 |
+| 4 | 27.81 | 25.35 | +9.7% | TODO | TODO | TODO | 4/4 |
+| 6 | 39.96 | 34.72 | +15.1% | TODO | TODO | TODO | 6/6 |
+| 8 | TODO | TODO | TODO | 116.90 | 86.53 | +35.1% | TODO |
 <!-- /bench -->
 
 ![Multiple users, repetition](artifacts/charts/multi-repetition-q8.svg)
@@ -263,16 +257,12 @@ Artifacts: `artifacts/memory-{q4,q8}-{gufo,reference}.json`.
 | 16K prefix, pp4096 + tg128 | 39.89 | 37.42 | -6.2% |
 <!-- /bench -->
 
-![GPU-visible allocation](artifacts/charts/memory-q4.svg)
-
 <!-- bench:memory-q8 -->
 | Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
 | pp2048 + tg128 | 47.76 | 46.32 | -3.0% |
 | 16K prefix, pp4096 + tg128 | 49.65 | 47.01 | -5.3% |
 <!-- /bench -->
-
-![GPU-visible allocation](artifacts/charts/memory-q8.svg)
 
 Gufo uses 3–6% more device memory than llama.cpp at the same context
 capacity, with the gap widening as the prefix grows. An earlier version of
@@ -295,8 +285,6 @@ same file remain **TODO**.
 | 256×256 | 64 | TODO | TODO | TODO |
 | 1024×1024 | 1024 | 1252 | TODO | TODO |
 <!-- /bench -->
-
-![Image encoder](artifacts/charts/image-encoder.svg)
 
 ## Reproduce and maintain quality
 

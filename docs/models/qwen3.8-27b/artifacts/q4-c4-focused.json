@@ -966,5 +966,307 @@
       "Maintained full-model checks pass, including exact sampled/mixed C2/C4 proposal lengths, IDs, probabilities, private RNG and restored state. Nix release and canonical PR checks passed.",
       "The 1.5% deep-context timing difference is provisional from one pair; prefill timings are comparable. The larger shallow gains are 26.9% and 13.0%."
     ]
+  },
+  "odd_cohorts": {
+    "date": "2026-09-23",
+    "source": {
+      "base": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+      "qualified_revision": "d08435048a3fac2bf5d3c1ba4d7023962b50f108",
+      "diff_sha256": "c16e55a3907e08ad0b6b821f4f661682be5f3d99ad020166d71d01699a78a952",
+      "files_sha256": {
+        "src/models/qwen/dflash_policy.hpp": "7576122f3161e997ccb6af68546e4105e3c6d9d76cdfe19a6f8669db684ab78f",
+        "tests/models/qwen27b/dflash_test.cpp": "0610e71ab60196c7f2e96cd4551c7f4a2d5468205c54d04baa057373dac2c6ef"
+      }
+    },
+    "binary_sha256": "e68072e41fa4a9e348cc088c5abd8a486f4c864cf6325c304ebe9ce66c9f0ea1",
+    "scope": "Q4 greedy cohorts of three, five or seven requests use the next measured capacity, preserving private histories. C1, sampled/mixed decisions, fixed mode and target arithmetic are unchanged.",
+    "method": "Same nine-case corpus, greedy, thinking off, up to 128 output tokens; summary ends at EOS. One warmup and one measured repetition on fresh servers, zero prompt-cache hits. Deep controls replay the same generated prefix. Rates sum individual request decode rates and average complete cohorts.",
+    "profile": {
+      "scope": "Selector-to-selector cycles in the second half of dispatches; excludes inter-request spans above 1.5s. Profile timings, not benchmark rates.",
+      "cycles": 28,
+      "span_ms": 6325.317553,
+      "gpu_ms": 6130.846866,
+      "passes_per_cycle": {
+        "1": 26,
+        "2": 2
+      },
+      "draft_shapes": {
+        "C2/draftrows6": 1,
+        "C4/draftrows12": 10,
+        "C4/draftrows16": 1,
+        "C3/draftrows19": 6,
+        "C3/draftrows18": 5,
+        "C3/draftrows20": 4,
+        "C3/draftrows15": 1
+      },
+      "target_shapes": {
+        "2": {
+          "calls": 2,
+          "total_ms": 164.62851,
+          "median_ms": 82.314255
+        },
+        "8": {
+          "calls": 1,
+          "total_ms": 94.708131,
+          "median_ms": 94.708131
+        },
+        "14": {
+          "calls": 2,
+          "total_ms": 270.886616,
+          "median_ms": 135.443308
+        },
+        "16": {
+          "calls": 8,
+          "total_ms": 1074.20009,
+          "median_ms": 134.42168750000002
+        },
+        "18": {
+          "calls": 1,
+          "total_ms": 201.500548,
+          "median_ms": 201.500548
+        },
+        "20": {
+          "calls": 1,
+          "total_ms": 210.266934,
+          "median_ms": 210.266934
+        },
+        "21": {
+          "calls": 5,
+          "total_ms": 1058.506388,
+          "median_ms": 211.462832
+        },
+        "22": {
+          "calls": 6,
+          "total_ms": 1290.047354,
+          "median_ms": 215.0206545
+        },
+        "23": {
+          "calls": 4,
+          "total_ms": 874.22351,
+          "median_ms": 217.95081499999998
+        }
+      }
+    },
+    "controls": {
+      "c4_mixed": {
+        "baseline": {
+          "decode_tps_sum": 68.5930599401054,
+          "request_count": 12,
+          "cohorts": 3,
+          "emitted_tokens": 1442,
+          "proposed_tokens": 1573,
+          "accepted_tokens": 973,
+          "source": {
+            "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+            "dirty": true,
+            "binary_sha256": "bcbf874450295afbceac6d5d93f9c570ef314f3781e9f601372de20911594508"
+          },
+          "summary_sha256": "64b6698b943f34b91237410741953a9248dca46df934693e0df4348741192707",
+          "own_ar_exact": 12
+        },
+        "retained": {
+          "decode_tps_sum": 71.76438005319305,
+          "request_count": 12,
+          "cohorts": 3,
+          "emitted_tokens": 1442,
+          "proposed_tokens": 1465,
+          "accepted_tokens": 953,
+          "source": {
+            "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+            "dirty": true,
+            "binary_sha256": "e68072e41fa4a9e348cc088c5abd8a486f4c864cf6325c304ebe9ce66c9f0ea1"
+          },
+          "summary_sha256": "18ee4b85b52de2a31521fd04d3e2ea998e76f8cf3e92118cf0b3f78b8ec517bd",
+          "own_ar_exact": 12
+        }
+      },
+      "c6_mixed": {
+        "baseline": {
+          "decode_tps_sum": 75.6503372463793,
+          "request_count": 12,
+          "cohorts": 2,
+          "emitted_tokens": 1442,
+          "proposed_tokens": 1561,
+          "accepted_tokens": 968,
+          "source": {
+            "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+            "dirty": true,
+            "binary_sha256": "bcbf874450295afbceac6d5d93f9c570ef314f3781e9f601372de20911594508"
+          },
+          "summary_sha256": "3deaf931cfd50bad288286cc13212ea28c71be967472389d3c546bd3b07c2dec",
+          "own_ar_exact": 12
+        },
+        "retained": {
+          "decode_tps_sum": 79.77610979784978,
+          "request_count": 12,
+          "cohorts": 2,
+          "emitted_tokens": 1442,
+          "proposed_tokens": 1396,
+          "accepted_tokens": 927,
+          "source": {
+            "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+            "dirty": true,
+            "binary_sha256": "e68072e41fa4a9e348cc088c5abd8a486f4c864cf6325c304ebe9ce66c9f0ea1"
+          },
+          "summary_sha256": "39bba5b77633277be7b9ff2b30c7cfbb114e0b90a1d71ef4c1103443e696d628",
+          "own_ar_exact": 12
+        }
+      },
+      "c8_mixed": {
+        "baseline": {
+          "decode_tps_sum": 73.91421897405579,
+          "request_count": 16,
+          "cohorts": 2,
+          "emitted_tokens": 1860,
+          "proposed_tokens": 2168,
+          "accepted_tokens": 1215,
+          "source": {
+            "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+            "dirty": true,
+            "binary_sha256": "bcbf874450295afbceac6d5d93f9c570ef314f3781e9f601372de20911594508"
+          },
+          "summary_sha256": "128d928627f68149e546994ddcd4c891d51f193bc49fbaeb2cbd24361ad1e9b3",
+          "own_ar_exact": 16
+        },
+        "retained": {
+          "decode_tps_sum": 85.26672267353352,
+          "request_count": 16,
+          "cohorts": 2,
+          "emitted_tokens": 1860,
+          "proposed_tokens": 1523,
+          "accepted_tokens": 1081,
+          "source": {
+            "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+            "dirty": true,
+            "binary_sha256": "e68072e41fa4a9e348cc088c5abd8a486f4c864cf6325c304ebe9ce66c9f0ea1"
+          },
+          "summary_sha256": "cd06b9a21d3c7cc0ced867b5d731c3fd2b61d7a6edabbb489d680612eb10c106",
+          "own_ar_exact": 16
+        }
+      }
+    },
+    "repetition": {
+      "baseline": {
+        "decode_tps_sum": 114.92345720259458,
+        "request_count": 8,
+        "cohorts": 1,
+        "emitted_tokens": 1024,
+        "proposed_tokens": 865,
+        "accepted_tokens": 865,
+        "source": {
+          "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+          "dirty": true,
+          "binary_sha256": "bcbf874450295afbceac6d5d93f9c570ef314f3781e9f601372de20911594508"
+        },
+        "summary_sha256": "eb324cf237e7a2ab518c6396ba225fabe5052e74a859d38216cd094299a983ea",
+        "own_ar_exact": 8
+      },
+      "retained": {
+        "decode_tps_sum": 121.67799397489591,
+        "request_count": 8,
+        "cohorts": 1,
+        "emitted_tokens": 1024,
+        "proposed_tokens": 845,
+        "accepted_tokens": 845,
+        "source": {
+          "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+          "dirty": true,
+          "binary_sha256": "e68072e41fa4a9e348cc088c5abd8a486f4c864cf6325c304ebe9ce66c9f0ea1"
+        },
+        "summary_sha256": "bac9a883d9fed41185bea877c6550f03d7c8454865f0f1039ca079c6d784348f",
+        "own_ar_exact": 8
+      }
+    },
+    "deep_c4": {
+      "baseline": {
+        "decode_tps_sum": 38.60832830959808,
+        "request_count": 4,
+        "cohorts": 1,
+        "emitted_tokens": 512,
+        "proposed_tokens": 564,
+        "accepted_tokens": 299,
+        "source": {
+          "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+          "dirty": false,
+          "binary_sha256": "bcbf874450295afbceac6d5d93f9c570ef314f3781e9f601372de20911594508"
+        },
+        "summary_sha256": "e5dc701f197fae3ffe5c1581e42f64a108629606b987ee7f3f181bb75bc7b724",
+        "own_ar_exact": 4,
+        "input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+        "requests": [
+          {
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24"
+          },
+          {
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24"
+          },
+          {
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24"
+          },
+          {
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24"
+          }
+        ]
+      },
+      "retained": {
+        "decode_tps_sum": 39.871694737125225,
+        "request_count": 4,
+        "cohorts": 1,
+        "emitted_tokens": 512,
+        "proposed_tokens": 504,
+        "accepted_tokens": 297,
+        "source": {
+          "revision": "b1567e86a9cd58ee123f915d6ce035aefcd53f92",
+          "dirty": true,
+          "binary_sha256": "e68072e41fa4a9e348cc088c5abd8a486f4c864cf6325c304ebe9ce66c9f0ea1"
+        },
+        "summary_sha256": "5e4f4a2165bbdbf8f4af9197ed3cbb43f6ac5f4f07ac3a2d48458e38f20bf674",
+        "own_ar_exact": 4,
+        "input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+        "requests": [
+          {
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24"
+          },
+          {
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24"
+          },
+          {
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24"
+          },
+          {
+            "cached_prompt_tokens": 32552,
+            "prefill_tokens": 2011,
+            "completion_tokens": 128,
+            "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24"
+          }
+        ]
+      }
+    },
+    "quality": {
+      "log_sha256": "ef592863362d3971b09f40988281483fb15f647d9069413c7862ef2ea68a5ad0",
+      "checks": "Real-weight C2-C8 layers, logits, selector probabilities, private fixed/adaptive RNG, pending feature injection and persistent state. Analytic controls cover every cohort size and bounded/deep/saturated histories. Target operator/logit qualification is unchanged from the preceding ragged-Q8 increment.",
+      "original_checkpoint_parity": "Not established; AR consistency is not an accuracy score."
+    }
   }
 }
