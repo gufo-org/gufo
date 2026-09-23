@@ -135,7 +135,7 @@ void TestLengthController() {
                  replay.Choose(budget, position, 4) <= budget,
              "Q8 C4 replay preserves history and remaining budgets");
   }
-  for (const std::size_t users : {4U, 8U}) {
+  for (const std::size_t users : {2U, 4U, 6U, 8U}) {
     std::array<DFlashLengthController, 8> cohort{q8, q8, q8, q8,
                                                  q8, q8, q8, q8};
     std::array<const DFlashLengthController*, 8> controllers{};
@@ -149,11 +149,22 @@ void TestLengthController() {
           std::span(controllers).first(users), std::span(budgets).first(users),
           std::span(positions).first(users));
     };
-    Expect(choose_cohort() == 3, "Q8 cohort chooses an efficient target tile");
-    cohort[0].Observe(3, 3);
-    Expect(choose_cohort() == 3, "one full block cannot force a cohort probe");
+    const auto initial = choose_cohort();
+    Expect(initial == (users == 2   ? 7U
+                       : users == 6 ? 1U
+                                    : 3U),
+           "Q8 cohort chooses an efficient target tile");
+    // Start the probe check below saturation, including C2 where a fresh
+    // history already makes a full block profitable.
+    if (users == 2)
+      for (auto& controller : cohort)
+        controller.Restore(1.0F);
+    const auto probe_width = users == 2 || users == 4 ? 3U : 1U;
+    Expect(choose_cohort() != 7, "probe fixture starts with a short block");
+    cohort[0].Observe(probe_width, probe_width);
+    Expect(choose_cohort() != 7, "one full block cannot force a cohort probe");
     for (std::size_t index = 1; index < users; ++index)
-      cohort[index].Observe(3, 3);
+      cohort[index].Observe(probe_width, probe_width);
     const auto saved_mean = cohort[0].State();
     const auto saved_width = cohort[0].LastFullWidth();
     cohort[0].Reset();
@@ -176,16 +187,17 @@ void TestLengthController() {
            "a rejected probe resumes cost-based selection");
     for (auto& controller : cohort)
       controller.Reset();
-    Expect(choose_cohort() == 3, "new requests cannot inherit a cohort probe");
-    if (users == 8) {
+    Expect(choose_cohort() == initial,
+           "new requests cannot inherit a cohort probe");
+    if (users == 6 || users == 8) {
       for (auto& controller : cohort)
         controller.Observe(0, 3);
       Expect(choose_cohort() == 1,
-             "Q8 C8 avoids wider verification when acceptance falls");
+             "wide Q8 cohorts avoid overwork when acceptance falls");
       for (auto& controller : cohort)
         controller.Observe(1, 1);
       Expect(choose_cohort() == 7,
-             "Q8 C8 can probe from its cheapest fully accepted tile");
+             "wide Q8 cohorts can probe from a fully accepted short tile");
     }
   }
 

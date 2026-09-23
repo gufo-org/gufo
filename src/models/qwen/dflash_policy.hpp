@@ -115,7 +115,7 @@ public:
     return best_length;
   }
 
-  // Measured all-adaptive Q8 C4/C8 cohorts use a shared width. Their
+  // Measured all-adaptive Q8 C2/C4/C6/C8 cohorts use a shared width. Their
   // target cost depends on the total row count: mixing individually cheap
   // widths can require two expensive projection launches. Keep each history
   // private, sum its expected tokens and choose one physical batch shape.
@@ -124,13 +124,31 @@ public:
       std::span<const std::uint32_t> budgets,
       std::span<const std::uint32_t> positions) noexcept {
     const auto users = controllers.size();
-    if ((users != 4 && users != 8) || budgets.size() != users ||
-        positions.size() != users)
+    if (budgets.size() != users || positions.size() != users)
       return std::nullopt;
-    const auto& relative_costs =
-        users == 4 ? kQ8FourRequestRelativeCost : kQ8EightRequestRelativeCost;
-    const double base_ms = users == 4 ? 170.66 : 209.20;
-    const std::uint32_t probe_width = users == 4 ? 3 : 1;
+    const auto* relative_costs = &kQ8FourRequestRelativeCost;
+    double base_ms = 170.66;
+    std::uint32_t probe_width = 3;
+    switch (users) {
+      case 2:
+        relative_costs = &kQ8PairedRelativeCost;
+        base_ms = 158.26;
+        break;
+      case 4:
+        break;
+      case 6:
+        relative_costs = &kQ8SixRequestRelativeCost;
+        base_ms = 189.32;
+        probe_width = 1;
+        break;
+      case 8:
+        relative_costs = &kQ8EightRequestRelativeCost;
+        base_ms = 209.20;
+        probe_width = 1;
+        break;
+      default:
+        return std::nullopt;
+    }
     std::uint32_t cap = kMaxDraftTokens;
     std::array<double, 8> probabilities{};
     double attention_cost_scale = 0.0;
@@ -165,7 +183,7 @@ public:
         survival[index] *= probabilities[index];
         expected_tokens += survival[index];
       }
-      const double cost = relative_costs[length - 1] +
+      const double cost = (*relative_costs)[length - 1] +
                           attention_cost_scale * kQ4ContextCost[length - 1];
       const double score = expected_tokens / cost;
       if (score > best_score) {
@@ -210,6 +228,10 @@ public:
   }
 
 private:
+  // Q8 C2 complete cycles cost 158/161/161/172/178/211/187 ms.
+  // The fourteen-row verification at six drafts is slower than sixteen rows.
+  static constexpr std::array<float, kMaxDraftTokens> kQ8PairedRelativeCost{
+      1.0F, 1.015F, 1.020F, 1.089F, 1.127F, 1.333F, 1.182F};
   // Q8_K_XL C4 complete cycles cost 171/181/197/327/325/357/316 ms.
   // Four through six drafts split verification into separate launches;
   // seven fills two adjacent sixteen-row groups and reuses their weights.
@@ -218,6 +240,10 @@ private:
   static constexpr std::array<float, kMaxDraftTokens>
       kQ8FourRequestRelativeCost{1.0F,   1.06F,  1.153F, 1.914F,
                                  1.907F, 2.089F, 1.853F};
+  // C6 complete cycles cost 189/333/334/405/445/474/455 ms.
+  // A short twelve-row tile avoids the wider target projection launches.
+  static constexpr std::array<float, kMaxDraftTokens> kQ8SixRequestRelativeCost{
+      1.0F, 1.760F, 1.763F, 2.141F, 2.352F, 2.505F, 2.404F};
   // C8 complete cycles cost 209/337/326/467/457/596/589 ms for 1–7 drafts.
   // Ragged 24/40/56-row projections cost more than their adjacent full tiles.
   // These selector-to-selector spans include target verification, context
