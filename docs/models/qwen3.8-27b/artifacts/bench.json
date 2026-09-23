@@ -8,8 +8,7 @@
   },
   "files": {
     "gguf": "target GGUF (UD-Q4_K_XL / UD-Q8_K_XL)",
-    "draft": "DFlash2 Q4_K_M draft GGUF",
-    "mmproj": "BF16 vision projector, shared by both variants"
+    "draft": "DFlash2 Q4_K_M draft GGUF"
   },
   "variants": {
     "q4": {
@@ -187,7 +186,7 @@
       "title": "Loading time",
       "per_variant": false,
       "context": 262144,
-      "sessions": 2,
+      "sessions": 1,
       "repetitions": 1,
       "metric": "seconds",
       "better": "lower",
@@ -214,18 +213,6 @@
       "metric": "GiB",
       "better": "lower",
       "mode": "ar"
-    },
-    "image-encoder": {
-      "title": "Image encoder",
-      "per_variant": false,
-      "sizes": [
-        256,
-        1024
-      ],
-      "warmup": 1,
-      "repetitions": 3,
-      "metric": "ms",
-      "better": "lower"
     }
   },
   "gufo": {

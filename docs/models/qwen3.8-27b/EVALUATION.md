@@ -76,12 +76,10 @@ never enter sampled decisions; controller history resets for a new request.
 
 Q4 greedy costs account for complete measured cycles and context growth,
 including odd cohorts as requests finish. Private sampled/mixed cohorts match
-isolated proposal IDs, probabilities, RNG and restored state. Current C4/C6/C8
-mixed throughput is **71.76 / 79.78 / 85.27 tok/s**; all completions match AR.
-C8 repetition reaches **121.68 tok/s**. At d32K, C4 reaches **39.87 tok/s**:
-all four requests reuse 32,552 tokens, prefill 2,011 new tokens and match the
-128-token AR continuation. C1 AR retains **12.42 tok/s** on both corpus and
-repetition controls. Evidence: [current qualification](artifacts/q4-c4-focused.json),
+isolated proposal IDs, probabilities, RNG and restored state. The retained d32K
+C4 continuation reuses 32,552 tokens per request, prefills 2,011 new tokens and
+matches the 128-token AR continuation. Evidence:
+[current qualification](artifacts/q4-c4-focused.json),
 [earlier C2](artifacts/q4-c2-focused.json), [C6](artifacts/q4-c6-focused.json)
 and [C8](artifacts/q4-c8-focused.json). Profitability remains workload-dependent.
 
@@ -93,33 +91,18 @@ are neutral or fully accepted. Fixed, sampled and mixed cohorts retain private
 choices; C1 keeps its existing policy. Real-weight checks cover layers, logits,
 selector probabilities, RNG and persistent state at every cohort size C2–C8.
 
-Current Q8_K_XL C8 controls reach **65.96 tok/s** on the nine-case mixed corpus
-and **116.90 tok/s** on repetition, as sums of individual decode rates.
-All 16 mixed completions and all eight repetitive completions match isolated
-AR; repetition accepts all 880 proposed tokens. Matched llama.cpp controls reach
-**63.02 / 86.53 tok/s** for mixed/repetition. C4/C6 mixed controls reach
-**49.28 / 56.65 tok/s**, versus **42.00 / 48.76** for the matched reference,
-with all 12 Gufo completions matching AR at each concurrency.
-C2 reaches **43.28 versus 31.27 tok/s**, with all ten Gufo completions matching AR.
-Ragged projections group weight reads without changing per-row arithmetic,
-and shared widths avoid excessive proposals when the active cohort shrinks.
-The mixed corpus caps output at 128 tokens; its summary case ends earlier.
+Q8_K_XL controls cover the nine-case mixed corpus, repetitive output and
+C2–C8, comparing every Gufo completion with isolated AR. Ragged projections group
+weight reads without changing per-row arithmetic, and shared widths avoid
+excessive proposals when the active cohort shrinks. At d32K, all eight requests
+reuse 32,764 tokens, prefill 2,060 new tokens and match the isolated 128-token
+AR continuation. Real-weight continuation tests also retain generated-history
+forks and cancellation replay.
 
-Q8 AR controls at C2/C4/C6 retain the isolated 128-token output on both
-engines. Performance is reported once in the dedicated AR concurrency tables.
-
-At d32K, C8 reaches **41.52 tok/s**: all eight requests reuse 32,764 tokens,
-prefill 2,060 new tokens and match the isolated 128-token AR continuation.
-The C1 kernel control retains its output and 292/78 proposal/acceptance counts
-at **463.44 pp / 16.12 tg tok/s**.
-
-C6's Italian/Chinese control varies with admission order: the retained candidate
-measured **49.25–52.84 tok/s**, while unchanged-baseline controls ranged
-**44.67–51.86**. The paired repeat was **52.84 versus 51.85**, with every
-completion matching AR. This does not establish a uniform C6 speed gain.
-Profiles, ablations, earlier C2/C4 controls and source identities are retained
-in the [compact Q8 artifact](artifacts/q8-tg-focused.json). Current comparison
-rows are in [benchmarks](BENCHMARKS.md); unmeasured cells remain TODO.
+Profiles, ablations and source identities remain in the
+[compact Q8 artifact](artifacts/q8-tg-focused.json). Current measured rates live
+only in [benchmarks](BENCHMARKS.md). Admission order affects mixed-cohort timings;
+a single measured run does not establish a confidence interval for small gains.
 
 ## Meaning of Exact
 
@@ -374,38 +357,60 @@ vLLM `63d9ad0a3a435cdf3a44495028b10f390a38f960`.
 
 ## Benchmark method
 
-The comparison tables use HTTP on both engines, greedy decoding with thinking
-off, one warmup and one measured repetition per point. Single-user controls
-request pp2048/tg128; actual appended lengths are 2010–2060 tokens, with context
-capacity 36864 for the focused d0/d32K checks. Q4 replays a one-token prefix reply;
-Q8 replays eight tokens. Paired engine controls use the same message history.
-Single-user DFlash2 combines mixed/repetitive text in one table per quantization.
-Each engine's pp cell takes the highest measured rate at that depth across the
-two workloads; pp gain compares those maxima. tg and its gain stay separate by
-text type. The original pp/tg samples remain unchanged in workload artifacts.
+The September 23 refresh uses Nix release Gufo `628ed18e` and pinned llama.cpp
+`68d9053a`, over HTTP with identical Q4_K_XL / Q8_K_XL files, greedy decoding
+and thinking off. Inference code is unchanged during the refresh.
+The fast correctness suite passes; full binary hashes are in
+[model identities](artifacts/model-identities.json).
 
-Concurrency uses 4096 context tokens per request and up to 128 output tokens.
-AR uses `repetition_word`; DFlash2 has mixed and repetitive workloads. Its summary
-case ends early. Rates sum individual request decode rates and average complete
-cohorts, excluding prefill and scheduling. Mixed and repetitive results stay
-separate in artifacts even though each quantization now has one comparison table.
+| Refresh consistency check | Q4_K_XL | Q8_K_XL |
+| --- | ---: | ---: |
+| AR/DFlash2 mixed continuation hashes, depths 0–128K | 8/8 | 8/8 |
+| AR C2/C4/C6/C8 hashes matching C1 | 20/20 | 20/20 |
+| DFlash2 mixed hashes matching isolated AR | 59/59 | 59/59 |
+| DFlash2 repetitive hashes matching isolated AR | 21/21 | 21/21 |
+| Concurrency prompt-cache hits | 0 | 0 |
 
-September 23 controls: Gufo Q4 C1 AR; Q4 mixed DFlash2 C4/C6/C8 and repetitive C8;
-Q4 mixed C4 DFlash2 reference; and current Q8_K_XL rows. Older Q4 values are from
-September 21 and include Gufo prompt-cache reuse. Refreshed rows have zero cache
-hits. Memory measurements remain September 21 controls; Q8 uses Q8_K_L and awaits
-Q8_K_XL replacement. The image encoder's 1024² result is a September 20 hand
-measurement, excluding first weight upload, preprocessing and text prefill.
-Artifact rows retain exact inputs, binary identities, dates and draft statistics.
+The same AR/DFlash2 depth check matches 2/8 completions per quantization in
+pinned llama.cpp. Each mode generates its own prefix reply, as described below;
+this result does not identify which engine matches the original checkpoint.
+
+Each point has one measured run. Throughput tables warm once per server;
+concurrency warms only its first cohort, capped at 16 output tokens. Existing
+isolated AR completion hashes qualify the mixed/repetitive workloads without
+another AR performance sweep. Every measured corpus group still runs, padding
+its last group to the requested concurrency.
+
+Single-user controls request pp2048/tg128 at depths 0–128K, seed 1, with context
+capacity 133760. Both engines receive the same synthetic user turns; each mode
+continues its own eight-token generated prefix reply. Prefix replies can differ
+across engines, so these controls do not establish equal internal histories.
+Actual prefix/new-token counts are retained and must fit the configured tolerance
+(maximum of 32 tokens or 0.5%). Each engine's DFlash2 pp cell takes the highest
+measured rate across mixed/repetitive text at that depth; pp gain compares those
+maxima. tg and its gain stay separate by text type.
+
+Concurrency uses context 4096 per request and up to 128 output tokens. AR uses
+`repetition_word`; DFlash2 has mixed and repetitive workloads. The summary case
+ends early. Rates sum individual request decode rates and average complete
+cohorts, excluding prefill and scheduling. Every concurrency starts a fresh
+server, and a prompt-cache hit fails qualification. Its C1 workload has a short
+prompt, so its rate need not equal the single-user pp2048 depth sweep.
+
+Loading measures cold target/draft files to HTTP readiness, C1 with DFlash2 and
+context capacity 262144. `POSIX_FADV_DONTNEED` evicts the model files;
+`mincore` must confirm zero resident pages before launch. Runtime libraries can
+remain cached. Memory uses AR at the same capacity and records the peak global
+HIP allocation every 250 ms, including the separately recorded idle allocation.
 
 Refresh selected rows with `tools/bench/model-bench.py --model qwen3.8-27b`:
 `run --target gufo --table <table>` or `run --target reference --table <table>`
 with the model paths supplied as documented in the
 [benchmark skill](../../../.agents/skills/benchmark-model/SKILL.md).
+Pass `--reference-binary PATH` for the pinned Nix `llama-server`.
 `single-dflash2-q4` / `single-dflash2-q8` and
 `multi-dflash2-q4` / `multi-dflash2-q8` run both workloads; `--todo` selects missing
 cells separately for each workload (including missing shared pp for single-user
-tables). Use `render` to regenerate the results card
-and charts without running a model. Run the affected checks above before
-publishing new performance measurements. Original-target qualification remains
-TODO; output agreement alone is not proof of official-model parity.
+tables). Use `render` to regenerate the results card and charts without running
+a model. Artifact rows retain commands, counts, dates and draft statistics;
+completion hashes test execution consistency, not original-model accuracy.

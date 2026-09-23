@@ -31,43 +31,152 @@
   "notes": [
     "llama.cpp: /nix/store/2kjf867i1dhvscdjn2mlfyizb2dxq042-llama-cpp-11069/bin/llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
     "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task: prose; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
-    "synthetic text: 1.159 tokens/word, template overhead 12 tokens",
-    "Q8_K_XL; prior Q8_K_L depth rows are superseded, not combined with these results."
+    "synthetic text: 1.161 tokens/word, template overhead 12 tokens"
   ],
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 36864 -np 1 --port 48531 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 35153 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
       "counts": [
         {
           "cache_n": 0,
+          "completion_sha256": "fad485940c3413ecb84fe8a240543ceec6c58f06a49ec4ef7f3a6d5a16fd2341",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2040
         }
       ],
-      "pp": 355.17,
+      "pp": 337.08,
       "pp_sd": null,
       "samples": 1,
       "tg": 7.2,
       "tg_sd": null
     },
-    "32768": {
-      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 36864 -np 1 --port 48531 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+    "12288": {
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 35153 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
       "counts": [
         {
-          "cache_n": 32764,
+          "cache_n": 12249,
+          "completion_sha256": "e8e9585d084e890ae7aa237539232b5bec932a96cb504d3a1958f17d014f08e0",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
-          "prompt_n": 2060
+          "prompt_n": 2047
         }
       ],
-      "pp": 249.07,
+      "pp": 289.19,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 7.02,
+      "tg_sd": null
+    },
+    "131072": {
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 35153 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 130932,
+          "completion_sha256": "4c3a413c304b1f0ff15ee24c3bfd6917a4bb62b76ca8079e182a03be73388494",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2047
+        }
+      ],
+      "pp": 133.34,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 5.74,
+      "tg_sd": null
+    },
+    "16384": {
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 35153 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 16324,
+          "completion_sha256": "a30973f183249b18901f802b01e83a6ea6bec1035ba48d347bea5ec9621a5d55",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2047
+        }
+      ],
+      "pp": 276.91,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 6.97,
+      "tg_sd": null
+    },
+    "32768": {
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 35153 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 32718,
+          "completion_sha256": "0eed94e2adb58bd1fa18e522fd2fb896a9571c25cc2f07f3f1d392dd2b5ebe43",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2029
+        }
+      ],
+      "pp": 236.32,
       "pp_sd": null,
       "samples": 1,
       "tg": 6.76,
+      "tg_sd": null
+    },
+    "4096": {
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 35153 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 4095,
+          "completion_sha256": "dd554f7aaf67e0fc4eebcdbcfe4f077be6d232240fedd8463edb3f4dff095e1c",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2043
+        }
+      ],
+      "pp": 317.96,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 7.14,
+      "tg_sd": null
+    },
+    "65536": {
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 35153 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 65447,
+          "completion_sha256": "b89fba2187130f50b8fa3e82f756cf145e82303d51b99ec34d2b4b44c14b2bdb",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2058
+        }
+      ],
+      "pp": 186.67,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 6.38,
+      "tg_sd": null
+    },
+    "8192": {
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 35153 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "counts": [
+        {
+          "cache_n": 8184,
+          "completion_sha256": "1b1c9c13d24daab3c0cf9382ac322faf60e9c9d9439e234b947289ffceaa7a08",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2048
+        }
+      ],
+      "pp": 306.22,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 7.08,
       "tg_sd": null
     }
   },
@@ -78,11 +187,11 @@
       "-m",
       "Qwen3.8-27B-UD-Q8_K_XL.gguf",
       "-c",
-      "36864",
+      "133760",
       "-np",
       "1",
       "--port",
-      "48531",
+      "35153",
       "--host",
       "127.0.0.1",
       "--alias",
@@ -102,8 +211,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": false,
-    "revision": "4c8888f47713258c543f6e258304582360c03644"
+    "dirty": true,
+    "revision": "628ed18ee92a973d5026b33644d9cb906116ff9d"
   },
   "table": "single-ar-q8",
   "target": "reference"

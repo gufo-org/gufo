@@ -84,6 +84,7 @@ class Session:
         self.depths = depths
         self.modes = modes
         self.context = context
+        self.tokenizer_calibration: dict[str | None, tuple[int, float]] = {}
 
     def reps(self, spec: dict[str, Any], default: int = 1) -> int:
         return self.repetitions or int(spec.get("repetitions", default))
@@ -223,14 +224,18 @@ def synthetic_text(seed: int, words: int) -> str:
 class Tokenizer:
     """Estimates token counts for synthetic text from server-reported usage."""
 
-    def __init__(self, session: Session, base_url: str):
+    def __init__(self, session: Session, base_url: str, variant: str | None = None):
         self.session = session
         self.base_url = base_url
+        if variant in session.tokenizer_calibration:
+            self.overhead, self.ratio = session.tokenizer_calibration[variant]
+            return
         overhead = session.request(base_url, "Hi", 1).prompt_tokens - 1
         probe_words = 3000
         probe = session.request(base_url, synthetic_text(7777, probe_words), 1).prompt_tokens
         self.overhead = overhead
         self.ratio = (probe - overhead) / probe_words
+        session.tokenizer_calibration[variant] = (self.overhead, self.ratio)
 
     def words_for(self, tokens: int) -> int:
         return max(1, round(tokens / self.ratio))
@@ -272,23 +277,25 @@ def run_loading(session: Session, table: TableSpec) -> None:
         return
     rows: dict[str, Any] = {}
     command: list[str] = []
-    try:
-        drop_file_cache(session.drop_caches)
-    except SystemExit as reason:
-        print(f"{table.id}: skipped; {reason}")
-        return
     for variant in keys:
         sub = TableSpec(table.id, table.base, variant, spec)
         cfg.require_files(variant)
         samples: list[float] = []
         for repetition in range(session.reps(spec)):
-            drop_file_cache(session.drop_caches)
+            try:
+                drop_file_cache(session.drop_caches)
+            except SystemExit as reason:
+                print(f"{table.id}: skipped; {reason}")
+                return
             # Load with the speculative support files on both sides when the reference has the mode.
             mode = cfg.speculative["mode"] if (session.target == "gufo" or cfg.reference_speculative) else None
             if session.modes and mode not in session.modes:
                 mode = "ar"
-            server = session.server(sub, mode=mode, context=session.context or int(spec["context"]),
-                                    sessions=int(spec.get("sessions", 2)), tag=f"{variant}-{repetition}")
+            sessions = int(spec.get("sessions", 1))
+            context = session.context or int(spec["context"])
+            server = session.server(sub, mode=mode,
+                                    context=context if session.target == "gufo" else context * sessions,
+                                    sessions=sessions, tag=f"{variant}-{repetition}")
             command = server.command
             with server:
                 assert server.ready_seconds is not None
@@ -299,7 +306,9 @@ def run_loading(session: Session, table: TableSpec) -> None:
                          "samples": len(samples), "command": " ".join(public_command(command))}
         print(f"{table.id} {variant}: ready {mean:.2f} s")
     artifact = session.artifact(table, mode=None, command=command,
-                                notes=["cold file cache: `echo 3 > /proc/sys/vm/drop_caches` before each launch",
+                                notes=["file cache reset before each launch with " +
+                                       ("the supplied --drop-caches command" if session.drop_caches else
+                                        "`echo 3 > /proc/sys/vm/drop_caches`"),
                                        f"readiness = HTTP 200 on {cfg.data['gufo' if session.target == 'gufo' else 'reference']['readiness']}"])
     artifact["rows"] = rows
     session.store(artifact_path(cfg, table, session.target), artifact)
@@ -338,7 +347,7 @@ def run_single(session: Session, table: TableSpec, display_table: TableSpec | No
     server = session.server(table, mode=mode, context=context, sessions=1, tag="single")
     rows: dict[str, Any] = {}
     with server:
-        tokenizer = Tokenizer(session, server.base_url)
+        tokenizer = Tokenizer(session, server.base_url, table.variant)
         # Warm kernels and allocations with an untimed full-size request.
         session.request(server.base_url, synthetic_text(8888, tokenizer.words_for(prompt_tokens)), 16)
         failures: list[str] = []
@@ -346,7 +355,7 @@ def run_single(session: Session, table: TableSpec, display_table: TableSpec | No
             pps: list[float] = []
             tgs: list[float] = []
             accepts: list[float] = []
-            counts: list[dict[str, int]] = []
+            counts: list[dict[str, Any]] = []
             try:
                 observations = [
                     _measure_depth(session, server.base_url, tokenizer, depth=depth,
@@ -387,7 +396,8 @@ def run_single(session: Session, table: TableSpec, display_table: TableSpec | No
                                "prompt_n": observation.prefill_tokens,
                                "predicted_n": observation.completion_tokens,
                                "draft_n": observation.draft_tokens,
-                               "draft_n_accepted": accepted})
+                               "draft_n_accepted": accepted,
+                               "completion_sha256": observation.completion_sha256})
             row: dict[str, Any] = {"counts": counts, "samples": repetitions,
                                    "command": " ".join(public_command(server.command))}
             for name, values in (("pp", pps), ("tg", tgs), ("acceptance", accepts), ("accepted_per_step", per_step)):
@@ -618,7 +628,7 @@ def run_memory(session: Session, table: TableSpec) -> None:
     server = session.server(table, mode=mode, context=int(spec["context"]), sessions=1, tag="memory")
     rows: dict[str, Any] = {}
     with server:
-        tokenizer = Tokenizer(session, server.base_url)
+        tokenizer = Tokenizer(session, server.base_url, table.variant)
         for key in keys:
             workload = workloads[key]
             depth = int(workload["depth"])

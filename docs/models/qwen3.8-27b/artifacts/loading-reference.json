@@ -1,0 +1,133 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.1.8",
+      "memoryTotalBytes": 134309883904,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-23",
+  "mode": null,
+  "model": {
+    "id": "Qwen3.8-27B",
+    "variant": null
+  },
+  "notes": [
+    "Cold target/draft file pages: POSIX_FADV_DONTNEED followed by mincore confirming zero resident pages before each launch. Runtime libraries may remain cached.",
+    "file cache reset before each launch with the supplied --drop-caches command",
+    "readiness = HTTP 200 on /health"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "q4": {
+      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 262144 -np 1 --port 52693 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "fileCacheAudit": [
+        {
+          "afterBytes": 0,
+          "at": "2026-09-23T19:42:02.991255+02:00",
+          "beforeBytes": 0,
+          "file": "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        },
+        {
+          "afterBytes": 0,
+          "at": "2026-09-23T19:42:05.918852+02:00",
+          "beforeBytes": 31457992704,
+          "file": "Qwen3.8-27B-UD-Q8_K_XL.gguf"
+        },
+        {
+          "afterBytes": 0,
+          "at": "2026-09-23T19:42:06.011423+02:00",
+          "beforeBytes": 1143009280,
+          "file": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        }
+      ],
+      "ready_s": 23.326,
+      "ready_s_sd": null,
+      "samples": 1
+    },
+    "q8": {
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 262144 -np 1 --port 56577 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "fileCacheAudit": [
+        {
+          "afterBytes": 0,
+          "at": "2026-09-23T19:42:33.303143+02:00",
+          "beforeBytes": 17215016960,
+          "file": "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        },
+        {
+          "afterBytes": 0,
+          "at": "2026-09-23T19:42:34.449949+02:00",
+          "beforeBytes": 0,
+          "file": "Qwen3.8-27B-UD-Q8_K_XL.gguf"
+        },
+        {
+          "afterBytes": 0,
+          "at": "2026-09-23T19:42:34.549736+02:00",
+          "beforeBytes": 1143009280,
+          "file": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        }
+      ],
+      "ready_s": 36.467,
+      "ready_s_sd": null,
+      "samples": 1
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+      "-c",
+      "262144",
+      "-np",
+      "1",
+      "--port",
+      "56577",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-dflash",
+      "--spec-draft-model",
+      "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "--spec-draft-ngl",
+      "999"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "628ed18ee92a973d5026b33644d9cb906116ff9d"
+  },
+  "table": "loading",
+  "target": "reference"
+}

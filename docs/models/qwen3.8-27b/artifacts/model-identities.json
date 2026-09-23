@@ -18,10 +18,10 @@
       "Target UD-Q8_K_L"
     ],
     "draft": "Draft Q4_K_M",
-    "note": "Historical multi-user and memory Q8 measurements use UD-Q8_K_L. The focused 2026-09-23 single-user controls use UD-Q8_K_XL."
+    "note": "Historical Q8 controls use UD-Q8_K_L. All current headline tables use the Q4_K_XL / Q8_K_XL full refresh below."
   },
   "scope": "Pinned artifacts for qualification and dated benchmark controls; never combine Q8_K_L and Q8_K_XL measurements.",
-  "benchmarks-2026-09-23": {
+  "focused-controls-2026-09-23": {
     "gufo": "4c8888f4 / 82a947a0, Nix release; full binary hashes in each focused artifact",
     "reference": "llama.cpp b11069, revision 68d9053afd4f4d0752ced6187585f862355a40be",
     "targets": [
@@ -29,6 +29,78 @@
       "Target UD-Q8_K_XL"
     ],
     "draft": "Draft Q4_K_M",
-    "scope": "Focused C1 d0/d32K controls; other depths and historical concurrency rows are not refreshed."
+    "scope": "Earlier focused C1 d0/d32K controls; the full refresh below replaces their headline benchmark cells."
+  },
+  "benchmarks-2026-09-23": {
+    "gufo": {
+      "revision": "628ed18ee92a973d5026b33644d9cb906116ff9d",
+      "build": "nix release",
+      "store": "v02s0pfcy7xsinn8iarzddspi948z2gd-gufo-628ed18",
+      "binarySha256": "8734dac79fadbb4550b9d5e07655545975b330c20c2f273cae96adb588503551",
+      "note": "Benchmark tooling changed during the refresh; inference code and the measured ELF stayed at this revision."
+    },
+    "reference": {
+      "name": "llama.cpp",
+      "build": 11069,
+      "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+      "backend": "ROCm gfx1151, LLAMA_HIP_UMA=ON",
+      "store": "2kjf867i1dhvscdjn2mlfyizb2dxq042-llama-cpp-11069",
+      "binarySha256": "81dee29e5fbc234bbb4ae90c022de9c9d8513d1cefa960550b0bb59d9fc5346f"
+    },
+    "targets": [
+      "Target UD-Q4_K_XL",
+      "Target UD-Q8_K_XL"
+    ],
+    "draft": "Draft Q4_K_M",
+    "scope": "Full HTTP AR and mixed/repetitive DFlash2 depth and concurrency grids, loading and memory; image benchmarks excluded.",
+    "depths": [
+      0,
+      4096,
+      8192,
+      12288,
+      16384,
+      32768,
+      65536,
+      131072
+    ],
+    "concurrency": [
+      1,
+      2,
+      4,
+      6,
+      8
+    ],
+    "sampling": {
+      "temperature": 0,
+      "thinking": false,
+      "depthAndMemorySeed": 1,
+      "corpusSeed": null
+    },
+    "timedRunsPerPoint": 1,
+    "warmup": "Throughput tables warm once per server; corpus warmup uses its first cohort with at most 16 output tokens.",
+    "gufoConsistency": {
+      "mixedDepthArDflash2MatchingCompletions": 16,
+      "mixedDepthComparisons": 16,
+      "arPeersMatchingC1": 40,
+      "arPeerComparisons": 40,
+      "dflash2MatchingArCompletions": 160,
+      "dflash2Comparisons": 160,
+      "concurrencyPromptCacheHits": 0,
+      "metric": "SHA-256 of completion text; does not establish original-checkpoint accuracy."
+    },
+    "started": "2026-09-23T15:29:40.944095+02:00",
+    "finished": "2026-09-23T19:43:13.444682+02:00",
+    "loading": {
+      "sessions": 1,
+      "contextCapacity": 262144,
+      "mode": "dflash2",
+      "fileCacheReset": "POSIX_FADV_DONTNEED; mincore verified zero resident pages before each launch",
+      "verifiedFiles": 12,
+      "runtimeLibrariesMayRemainCached": true,
+      "evidence": [
+        "loading-gufo.json",
+        "loading-reference.json"
+      ]
+    }
   }
 }

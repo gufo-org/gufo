@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--todo", action="store_true", help="measure only rows that are TODO in BENCHMARKS.md")
     run.add_argument("--reference-binary", default=None, help="reference server executable (default from bench.json)")
     run.add_argument("--drop-caches", default=None,
-                     help="privileged shell command that drops the page cache before a loading launch")
+                     help="shell command that evicts model file pages before each loading launch")
     run.add_argument("--repetitions", type=int, default=None,
                      help="override each table's repetitions (mean ± sd is reported above 1)")
     run.add_argument("--fresh", action="store_true",

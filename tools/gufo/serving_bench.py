@@ -1173,20 +1173,19 @@ def run_corpus_benchmark(
                 for index in range(0, padded_count, concurrency)
             ]
         for warmup in range(warmup_rounds):
-            for group_index, group in enumerate(groups):
-                _run_corpus_round(
-                    base_url=base_url,
-                    model=model,
-                    cases=group,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    timeout_seconds=timeout_seconds,
-                    concurrency=concurrency,
-                    repetition=-(warmup + 1),
-                    group_index=group_index,
-                    endpoint_profile=endpoint_profile,
-                    cache_prompt=cache_prompt,
-                )
+            _run_corpus_round(
+                base_url=base_url,
+                model=model,
+                cases=groups[0],
+                max_tokens=min(max_tokens, 16),
+                temperature=temperature,
+                timeout_seconds=timeout_seconds,
+                concurrency=concurrency,
+                repetition=-(warmup + 1),
+                group_index=0,
+                endpoint_profile=endpoint_profile,
+                cache_prompt=cache_prompt,
+            )
 
         rounds: list[RoundObservation] = []
         for repetition in range(repetitions):
@@ -1262,6 +1261,8 @@ def run_corpus_benchmark(
                 if corpus_layout == "homogeneous"
                 else "cycle-from-start"
             ),
+            "warmupPolicy": "first-cohort",
+            "warmupMaxOutputTokens": min(max_tokens, 16),
             "maxOutputTokens": max_tokens,
             "temperature": temperature,
             "warmupRounds": warmup_rounds,

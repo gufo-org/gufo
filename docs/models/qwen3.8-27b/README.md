@@ -1,7 +1,7 @@
 # Qwen3.8 27B
 
 Dense text/image model on gfx1151. Production target GGUFs are **UD-Q4_K_XL**
-(16.35 GiB weights) and **UD-Q8_K_XL** (26.12 GiB); request state and an optional
+(16.35 GiB weights) and **UD-Q8_K_XL** (29.30 GiB); request state and an optional
 draft/projector need additional memory. BF16 targets are reference-only.
 
 [Benchmarks](BENCHMARKS.md) · [Evaluation](EVALUATION.md) · [Experiments](EXPERIMENTS.md)

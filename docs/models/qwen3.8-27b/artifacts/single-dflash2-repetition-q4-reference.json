@@ -1,0 +1,257 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.1.8",
+      "memoryTotalBytes": 134309883904,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-23",
+  "mode": "dflash2",
+  "model": {
+    "id": "Qwen3.8-27B",
+    "variant": "q4"
+  },
+  "notes": [
+    "llama.cpp: /nix/store/2kjf867i1dhvscdjn2mlfyizb2dxq042-llama-cpp-11069/bin/llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task: repetition; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.160 tokens/word, template overhead 12 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "acceptance": 100.0,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.88,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 38503 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "82fd84fded8d257a194ac1eca43b70a866a79bac1e97e45d19f0292d6a7118bd",
+          "draft_n": 95,
+          "draft_n_accepted": 95,
+          "predicted_n": 128,
+          "prompt_n": 2034
+        }
+      ],
+      "pp": 347.51,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 35.86,
+      "tg_sd": null
+    },
+    "12288": {
+      "acceptance": 100.0,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.88,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 38503 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 12255,
+          "completion_sha256": "7436c885335ec9d98c541d8ca85c0f343694b9ba0702a28073d90d6e1e9f6aed",
+          "draft_n": 95,
+          "draft_n_accepted": 95,
+          "predicted_n": 128,
+          "prompt_n": 2044
+        }
+      ],
+      "pp": 289.98,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 34.19,
+      "tg_sd": null
+    },
+    "131072": {
+      "acceptance": 95.92,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.76,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 38503 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 130999,
+          "completion_sha256": "863825807579c48004a4978cdc2c7427fb6f2b4962ed1d230b2914f4d7df4c39",
+          "draft_n": 98,
+          "draft_n_accepted": 94,
+          "predicted_n": 128,
+          "prompt_n": 2041
+        }
+      ],
+      "pp": 133.37,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 22.93,
+      "tg_sd": null
+    },
+    "16384": {
+      "acceptance": 98.96,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.88,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 38503 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 16331,
+          "completion_sha256": "feabbf7a97b0f534ff3ea683bfe7f0eaf7bca76e05d20289c9381767883b6c0b",
+          "draft_n": 96,
+          "draft_n_accepted": 95,
+          "predicted_n": 128,
+          "prompt_n": 2042
+        }
+      ],
+      "pp": 278.53,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 33.75,
+      "tg_sd": null
+    },
+    "32768": {
+      "acceptance": 98.96,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.88,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 38503 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 32733,
+          "completion_sha256": "c6100761990cae0e50e5871ed0f97077d858aaa224b4cca19cf5bcfb45dad358",
+          "draft_n": 96,
+          "draft_n_accepted": 95,
+          "predicted_n": 128,
+          "prompt_n": 2023
+        }
+      ],
+      "pp": 239.21,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 31.75,
+      "tg_sd": null
+    },
+    "4096": {
+      "acceptance": 97.92,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.76,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 38503 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 4095,
+          "completion_sha256": "8ddd067c8205a20751b56c3ac48d2daad70e29da600a6ec2ce3cf4ee007c77f3",
+          "draft_n": 96,
+          "draft_n_accepted": 94,
+          "predicted_n": 128,
+          "prompt_n": 2039
+        }
+      ],
+      "pp": 316.58,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 34.47,
+      "tg_sd": null
+    },
+    "65536": {
+      "acceptance": 90.2,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.56,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 38503 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 65480,
+          "completion_sha256": "262ee2e28900a107ea493604f21b4c2ce682b1054b98c27593a2f6aa694a96f5",
+          "draft_n": 102,
+          "draft_n_accepted": 92,
+          "predicted_n": 128,
+          "prompt_n": 2053
+        }
+      ],
+      "pp": 190.92,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 26.33,
+      "tg_sd": null
+    },
+    "8192": {
+      "acceptance": 100.0,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.88,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 38503 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 8188,
+          "completion_sha256": "d41deb81970acd64ba9ad9f5e72a070a0c979e8f4a94cca94acae44c9f5e61f9",
+          "draft_n": 95,
+          "draft_n_accepted": 95,
+          "predicted_n": 128,
+          "prompt_n": 2043
+        }
+      ],
+      "pp": 302.47,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 34.73,
+      "tg_sd": null
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "-c",
+      "133760",
+      "-np",
+      "1",
+      "--port",
+      "38503",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-dflash",
+      "--spec-draft-model",
+      "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+      "--spec-draft-ngl",
+      "999"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "628ed18ee92a973d5026b33644d9cb906116ff9d"
+  },
+  "table": "single-dflash2-repetition-q4",
+  "target": "reference"
+}

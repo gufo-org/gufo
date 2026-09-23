@@ -267,8 +267,13 @@ for concurrency, expected in [
             if repetition < 0
             for case in cases
         ]
+        == expected[:concurrency],
+        "warmup uses only the first cohort",
+    )
+    check(
+        [case for _, repetition, cases in observed_rounds if repetition >= 0 for case in cases]
         == expected,
-        "warmup visits every scheduled prompt, including the padded tail",
+        "measurement still visits every scheduled prompt, including the padded tail",
     )
     phases = [repetition for _, repetition, _ in observed_rounds]
     check(phases == sorted(phases), "all warmups precede measurement")

@@ -14,35 +14,35 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309879808,
+      "memoryTotalBytes": 134309883904,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "34bee0c70b5847b76a43f2c6da016bafed74530bff113cc4ffc5f43f21fe2f96",
+    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-21",
+  "measuredOn": "2026-09-23",
   "mode": null,
   "model": {
     "id": "Qwen3.8-27B",
     "variant": "q8"
   },
   "notes": [
-    "llama.cpp: version: 0.4.1-dev (build 11069, commit 68d9053a)",
+    "llama.cpp: /nix/store/2kjf867i1dhvscdjn2mlfyizb2dxq042-llama-cpp-11069/bin/llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
     "peak device-global hipMemGetInfo used bytes (total - free), sampled every 250 ms during the request; idle_gib is the same counter before the server started",
     "server mode: ar"
   ],
   "referenceName": "llama.cpp",
   "rows": {
     "16K prefix, pp4096 + tg128": {
-      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_L.gguf -c 262144 -np 1 --port 50311 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off",
-      "gib": 47.01,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 262144 -np 1 --port 38379 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "gib": 49.02,
       "idle_gib": 2.38
     },
     "pp2048 + tg128": {
-      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_L.gguf -c 262144 -np 1 --port 50311 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off",
-      "gib": 46.32,
+      "command": "llama-server -m Qwen3.8-27B-UD-Q8_K_XL.gguf -c 262144 -np 1 --port 38379 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "gib": 48.6,
       "idle_gib": 2.38
     }
   },
@@ -51,13 +51,13 @@
     "command": [
       "llama-server",
       "-m",
-      "Qwen3.8-27B-UD-Q8_K_L.gguf",
+      "Qwen3.8-27B-UD-Q8_K_XL.gguf",
       "-c",
       "262144",
       "-np",
       "1",
       "--port",
-      "50311",
+      "38379",
       "--host",
       "127.0.0.1",
       "--alias",
@@ -70,13 +70,15 @@
       "0",
       "--jinja",
       "--reasoning",
-      "off"
+      "off",
+      "--cache-ram",
+      "0"
     ]
   },
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "1651963f0861ce962dddefe0733980ae58363cfa"
+    "revision": "628ed18ee92a973d5026b33644d9cb906116ff9d"
   },
   "table": "memory-q8",
   "target": "reference"

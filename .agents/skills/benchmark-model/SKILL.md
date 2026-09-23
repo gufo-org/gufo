@@ -28,13 +28,11 @@ Ask the user before measuring anything:
    bench`, an older prompt) must be refreshed whole, because one Gain column
    cannot mix two methods.
 
-Then confirm the time budget. Measured on Strix Halo with Qwen3.8 27B:
-a single-user depth table (0–32K, six depths) takes 4–7 min for Gufo and
-about 10 min for llama.cpp; the 64K and 128K rows add roughly as much again
-because the prefix itself must be prefilled; memory 1–2 min per target; each
-concurrency table about 5 min per target and mode; loading about 1 min per
-variant. One variant with both targets and both modes is about 1 h 20 min;
-Q4 + Q8 took 2 h 41 min. When the budget cannot hold everything, measure in
+Then confirm the time budget. The September 23 Qwen3.8 27B pass took 4 h 14 min
+for Q4 + Q8, both engines, AR plus mixed/repetitive DFlash2, eight depths through
+128K and C1/C2/C4/C6/C8, memory and loading. One depth workload took 12–17 min
+on Gufo and 22–24 min on llama.cpp; large-prefix setup dominates. These are
+single measured runs, with shortened warmup. When the budget cannot hold everything, measure in
 this order and say what was left: Q4 before Q8, single-user AR, single-user
 speculative, concurrency, memory, loading.
 
@@ -42,10 +40,11 @@ Driver commands run longer than a tool call may; start each one in the
 background with its output redirected to a log, then block on that log with
 an `until grep -q ... ; do sleep 30; done` loop (repeat the loop when it
 times out) — a turn that ends while the driver runs does not resume by
-itself. Progress lines are flushed as they happen. Before starting, check
-whether the host lets you drop the page cache (`sudo -n true` or `doas -n
-true`); without it the loading table is skipped, so say so up front instead
-of discovering it in the run.
+itself. Progress lines are flushed as they happen. Before starting, establish
+how loading will get cold model files. Use a privileged page-cache drop, or
+`POSIX_FADV_DONTNEED` on every target/sidecar file and verify zero resident
+pages with `mincore`. Record the method; cold model files do not imply cold
+runtime libraries. Skip loading if neither method is available.
 
 ## Measurement model
 
@@ -92,9 +91,8 @@ so only d0 is measurable today.
 `--depths 0,4096` restricts single-user tables to those depths and
 `--mode ar` / `--mode <spec>` restricts to one mode (use it to skip a
 reference speculative mode the reference cannot load);
-`--drop-caches "<privileged command>"` gives the loading table its
-page-cache drop (`sync; echo 3 > /proc/sys/vm/drop_caches`) on hosts without
-passwordless sudo/doas; `--config` and `--artifacts-dir` point at an
+`--drop-caches "<command>"` supplies a checked cache-reset command before
+each loading launch; `--config` and `--artifacts-dir` point at an
 alternative `bench.json` and output directory for experiments. A depth that
 fails is reported, left as it was, and listed in the artifact notes; the
 other depths are still stored. A partial
@@ -152,7 +150,10 @@ and the table says so.
    point, no prompt-cache hits unless the cell says so. If the reference cannot
    match (different quantization, no equivalent speculative mode, no batching),
    measure the closest configuration and state the mismatch under the table.
-3. Warm once, then time. One warmed sample per point is acceptable for a
+3. Warm once, then time. Corpus warmup uses only the first concurrent group,
+   capped at 16 output tokens; every corpus group is still measured. Single-user
+   runs share tokenizer calibration across modes of the same target variant.
+   One warmed sample per point is acceptable for a
    sweep; add repetitions when two runs differ by more than about 2% or a
    regression is suspected, and report mean ± sd. A sample whose generated
    token count is below the requested output length (context overflow, early
@@ -164,9 +165,10 @@ and the table says so.
    none today — say so in the card and rely on the concurrency `Exact`
    checks); the full `EVALUATION.md` suites are for changed kernels or
    models. Greedy speculative output must match AR token
-   IDs. Concurrency runs compare every completion hash against the Gufo AR
-   C1 reference and retain the counts in quality artifacts; single-user tables
-   check token counts only. A mismatch or device fault is not a result.
+   IDs in the model checks. HTTP runs retain completion hashes: concurrency
+   compares them against the Gufo AR C1 reference, while matching single-user
+   AR/speculative depth rows allow the same text-consistency check. These hashes
+   do not prove original-model accuracy. A mismatch or device fault is not a result.
 5. A cell without a current qualified measurement is `TODO`, never a stale
    number. Keep dates per table; do not sum stage medians into a headline.
 6. Retained JSON goes to `docs/models/<model>/artifacts/`; raw samples,
@@ -352,7 +354,7 @@ Concurrency performance artifacts are `gufo-serving-bench` corpus reports:
 `multi-ar[-<quant>]-gufo-ar.json` and `multi-ar[-<quant>]-reference.json` for AR;
 `<table>-gufo-<spec>.json` and `<table>-reference-<spec>.json` for speculative runs.
 Speculative tables also retain `<table>-gufo-ar.json` as a C1 quality reference;
-the other tables use the compact `model-bench-table` schema with one entry per
+   the other tables use the compact `model-bench-table` schema with one entry per
 row and the actual `cache_n`/`prompt_n` counts.
 
 ## ASR (audio to text)
