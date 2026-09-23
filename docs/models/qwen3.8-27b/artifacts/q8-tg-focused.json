@@ -1694,5 +1694,350 @@
     },
     "timing_control": "Sequential isolated Nix release servers; KDE crash-reporting user socket paused for matched controls and restored afterward. No concurrent GPU workload or build.",
     "scope": "Focused hard pair, repetition and generated-history d32K forks; this is not a refreshed nine-case concurrency matrix. Deep requests append 2,060 tokens each and interleave prefill with decoding."
+  },
+  "c2_c6": {
+    "source_before": "6bc84e14e80c90445a9f4dc47ca663ae7c526778",
+    "binary_before": "6e7994103ef7b6246efbf9ff4d8e84418fbee4a7bf23287ae884a2c1b27e3a72",
+    "source_after_base": "a4d414a861030b9737106e61c61ba5de58fbb328",
+    "binary_after": "660e473b22769450994c8143825bbfcdc10bba70c39db2a34726bcbac5b09966",
+    "profiles": {
+      "c2": [
+        {
+          "draft_tokens": 1,
+          "target_rows": 4,
+          "median_span_ms": 158.2585445,
+          "median_kernel_ms": 155.092699,
+          "summary_sha256": "28efc2f71166a5d9963e08820fb6b37fcce39b23b64df04d5857bc620a6acf17"
+        },
+        {
+          "draft_tokens": 2,
+          "target_rows": 6,
+          "median_span_ms": 160.575503,
+          "median_kernel_ms": 157.361127,
+          "summary_sha256": "eb7cf190c27cbdf88917c4083baf0a62ee310ec7dd19441c4350f477379aa1ae"
+        },
+        {
+          "draft_tokens": 3,
+          "target_rows": 8,
+          "median_span_ms": 161.4840505,
+          "median_kernel_ms": 158.2065905,
+          "summary_sha256": "fed33792e228bba9169c1a9a178757afd8f688b7e47196e95796c1de92e997de"
+        },
+        {
+          "draft_tokens": 4,
+          "target_rows": 10,
+          "median_span_ms": 172.33185500000002,
+          "median_kernel_ms": 168.5848355,
+          "summary_sha256": "065aded9b6549e9d2194d8fb48be9153d1c7db49cd1d82690df6832a0b6cf526"
+        },
+        {
+          "draft_tokens": 5,
+          "target_rows": 12,
+          "median_span_ms": 178.33475800000002,
+          "median_kernel_ms": 174.8349445,
+          "summary_sha256": "3d35ff21d0d4b245dc95eb4feba2318ac9b498d302d1228f1a9d38309c5f6631"
+        },
+        {
+          "draft_tokens": 6,
+          "target_rows": 14,
+          "median_span_ms": 211.0189685,
+          "median_kernel_ms": 207.21597350000002,
+          "summary_sha256": "85dd3975336c7e9a3ba3da5a53a160a5b2c3d8fd34a39f06922609b7510aca0d"
+        },
+        {
+          "draft_tokens": 7,
+          "target_rows": 16,
+          "median_span_ms": 187.1076765,
+          "median_kernel_ms": 183.456043,
+          "summary_sha256": "290a947ee314e931539d54aad0b41f1c77f19e721343e134f540dd6fd821d9c5"
+        }
+      ],
+      "c6": [
+        {
+          "draft_tokens": 1,
+          "target_rows": 12,
+          "median_span_ms": 189.320156,
+          "median_kernel_ms": 184.333142,
+          "summary_sha256": "8a77c1b78536ab26626f407c904f66d24758336896e40b9ca13329b8796071a6"
+        },
+        {
+          "draft_tokens": 2,
+          "target_rows": 18,
+          "median_span_ms": 333.22672750000004,
+          "median_kernel_ms": 326.7133785,
+          "summary_sha256": "b0e425e51d80f3943cedaa8e921b1f9f550deeedf44f217aae6c9cb98fa8795a"
+        },
+        {
+          "draft_tokens": 3,
+          "target_rows": 24,
+          "median_span_ms": 333.83552199999997,
+          "median_kernel_ms": 325.84457599999996,
+          "summary_sha256": "628d5a4a31180c1598c44ba58124fd8a4f2ff4b72ee0a980046cd28833744115"
+        },
+        {
+          "draft_tokens": 4,
+          "target_rows": 30,
+          "median_span_ms": 405.266745,
+          "median_kernel_ms": 396.5605755,
+          "summary_sha256": "9fe1c5bd00a912e6cfba6473f9faf0dfbb20758d070376b4877b2abea2e6ba74"
+        },
+        {
+          "draft_tokens": 5,
+          "target_rows": 36,
+          "median_span_ms": 445.2862655,
+          "median_kernel_ms": 436.322451,
+          "summary_sha256": "3ec99ca318fc57a038f1f5e3697088b04622c38b8a500861538c565d227c9d41"
+        },
+        {
+          "draft_tokens": 6,
+          "target_rows": 42,
+          "median_span_ms": 474.295294,
+          "median_kernel_ms": 463.991842,
+          "summary_sha256": "d86e5a438e004e897c847be747cd7dbd178d2e1842ec75d64db10dc26fd3e0ec"
+        },
+        {
+          "draft_tokens": 7,
+          "target_rows": 48,
+          "median_span_ms": 455.1243375,
+          "median_kernel_ms": 445.43708200000003,
+          "summary_sha256": "deb4a4c7e22603b8e82ca8c1354a9a32be381cbedc14f983d68892d1b727d1f6"
+        }
+      ]
+    },
+    "controls": {
+      "c2": {
+        "hard": {
+          "before": {
+            "decode_tokens_per_second_sum": 28.494539609801627,
+            "request_count": 2,
+            "summary_sha256": "40a97cc4174b8f29e010d80519cab757d74159b4bce1d5bd8bfc475362535d1a",
+            "completion_hashes": [
+              "63fff3fdcee8218767c3f4ca1d243b9cf21fa4a0d641712b9493bd0d65dc9dde",
+              "9176f9ec7a6348c042f620dde6131b0965c2a98bcf62a8b25d628dd36809c0ed"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 525,
+            "draft_accepted_tokens": 162
+          },
+          "after": {
+            "decode_tokens_per_second_sum": 30.238056367005328,
+            "request_count": 2,
+            "summary_sha256": "e3266a2899c2361613ca5b50f066b66172338a644edcb84f718a201105d47a92",
+            "completion_hashes": [
+              "63fff3fdcee8218767c3f4ca1d243b9cf21fa4a0d641712b9493bd0d65dc9dde",
+              "9176f9ec7a6348c042f620dde6131b0965c2a98bcf62a8b25d628dd36809c0ed"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 471,
+            "draft_accepted_tokens": 158
+          },
+          "gain_pct": 6.1187749690960525
+        },
+        "repetition": {
+          "before": {
+            "decode_tokens_per_second_sum": 85.53644104100425,
+            "request_count": 2,
+            "summary_sha256": "69ce7b852f2ab9107b8898a0967fd516b072411e757e0794e5f1a30ef3b06e10",
+            "completion_hashes": [
+              "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 222,
+            "draft_accepted_tokens": 222
+          },
+          "after": {
+            "decode_tokens_per_second_sum": 86.42632896083884,
+            "request_count": 2,
+            "summary_sha256": "169157f2e619c6354ee1dccee30be98f75f8b3661d7e2bd53ea68cefa9d92706",
+            "completion_hashes": [
+              "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 222,
+            "draft_accepted_tokens": 222
+          },
+          "gain_pct": 1.0403611712205718
+        },
+        "deep": {
+          "before": {
+            "decode_tokens_per_second_sum": 23.57404885330424,
+            "request_count": 2,
+            "summary_sha256": "0774a97a718134f93d6f1cde8dbfacf059902645801d21855e33766d7d71eba2",
+            "completion_hashes": [
+              "a13240903764d7212a116dc5f32a6538efc9cd070b6decf864751f41297741fb"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 526,
+            "draft_accepted_tokens": 174,
+            "input_sha256": "8b9d6901470d5c1ea75ff48cf0dc80d301dfbee01cf08e83aefbefc9dd674070",
+            "cached_prompt_tokens": [
+              32764
+            ],
+            "prefill_tokens": [
+              2060
+            ]
+          },
+          "after": {
+            "decode_tokens_per_second_sum": 26.60787740950741,
+            "request_count": 2,
+            "summary_sha256": "44cfa5b7c1e34795c52096d092e6e1d9c1381930941872034cd977d82d106bb9",
+            "completion_hashes": [
+              "a13240903764d7212a116dc5f32a6538efc9cd070b6decf864751f41297741fb"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 385,
+            "draft_accepted_tokens": 171,
+            "input_sha256": "8b9d6901470d5c1ea75ff48cf0dc80d301dfbee01cf08e83aefbefc9dd674070",
+            "cached_prompt_tokens": [
+              32764
+            ],
+            "prefill_tokens": [
+              2060
+            ]
+          },
+          "gain_pct": 12.869357211745713
+        }
+      },
+      "c6": {
+        "hard": {
+          "before": {
+            "decode_tokens_per_second_sum": 40.243895447415426,
+            "request_count": 6,
+            "summary_sha256": "1e43f2c199755de305c1995b15908826d906a4d5ba863b24700be2d8056d08bd",
+            "completion_hashes": [
+              "63fff3fdcee8218767c3f4ca1d243b9cf21fa4a0d641712b9493bd0d65dc9dde",
+              "9176f9ec7a6348c042f620dde6131b0965c2a98bcf62a8b25d628dd36809c0ed"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 1561,
+            "draft_accepted_tokens": 485
+          },
+          "after": {
+            "decode_tokens_per_second_sum": 51.860435476160184,
+            "request_count": 6,
+            "summary_sha256": "cbc9691d3b13b3bf8b91304fe8800d78cd4d2ace610c64bc6f6feed333349009",
+            "completion_hashes": [
+              "63fff3fdcee8218767c3f4ca1d243b9cf21fa4a0d641712b9493bd0d65dc9dde",
+              "9176f9ec7a6348c042f620dde6131b0965c2a98bcf62a8b25d628dd36809c0ed"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 680,
+            "draft_accepted_tokens": 368
+          },
+          "gain_pct": 28.865346904410583
+        },
+        "repetition": {
+          "before": {
+            "decode_tokens_per_second_sum": 107.65259662969513,
+            "request_count": 6,
+            "summary_sha256": "21ab7229bac8a16d6118c868bb9a538cc869508b565853e723562a44ca9babe5",
+            "completion_hashes": [
+              "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 660,
+            "draft_accepted_tokens": 660
+          },
+          "after": {
+            "decode_tokens_per_second_sum": 108.14550984278978,
+            "request_count": 6,
+            "summary_sha256": "21ebf5d86d711f8b17761523a3a0ecbfdb63bf239462444babb380cfe36caf44",
+            "completion_hashes": [
+              "24d4b2ba40bd0f337229c9a0a75682732b31e562ebd2fd6882a9f72a5b319675"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 660,
+            "draft_accepted_tokens": 660
+          },
+          "gain_pct": 0.4578739654466313
+        },
+        "deep": {
+          "before": {
+            "decode_tokens_per_second_sum": 31.539809306548634,
+            "request_count": 6,
+            "summary_sha256": "b7e866a1474412049d026b6719e26155dcae0f0f70347df75905ed464d7d914f",
+            "completion_hashes": [
+              "a13240903764d7212a116dc5f32a6538efc9cd070b6decf864751f41297741fb"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 1573,
+            "draft_accepted_tokens": 516,
+            "input_sha256": "8b9d6901470d5c1ea75ff48cf0dc80d301dfbee01cf08e83aefbefc9dd674070",
+            "cached_prompt_tokens": [
+              32764
+            ],
+            "prefill_tokens": [
+              2060
+            ]
+          },
+          "after": {
+            "decode_tokens_per_second_sum": 34.76889068168669,
+            "request_count": 6,
+            "summary_sha256": "652aa6de7490e320af41175d473d41ac8b478aa8293d1a8f72c60daecc21a679",
+            "completion_hashes": [
+              "a13240903764d7212a116dc5f32a6538efc9cd070b6decf864751f41297741fb"
+            ],
+            "completion_tokens": [
+              128
+            ],
+            "draft_tokens": 1322,
+            "draft_accepted_tokens": 466,
+            "input_sha256": "8b9d6901470d5c1ea75ff48cf0dc80d301dfbee01cf08e83aefbefc9dd674070",
+            "cached_prompt_tokens": [
+              32764
+            ],
+            "prefill_tokens": [
+              2060
+            ]
+          },
+          "gain_pct": 10.238113185001406
+        }
+      }
+    },
+    "quality_log_sha256": "ff6ad41c28ad61b3ca6d6a88b6b0388784f4674dbea621df006e144c40dc5a95",
+    "c1": {
+      "prompt_tokens": 2040,
+      "prefill_tokens": 2040,
+      "completion_tokens": 128,
+      "prefill_ms": 4400.64183,
+      "decode_ms": 7934.764821,
+      "prefill_tokens_per_second": 463.5687426531598,
+      "decode_tokens_per_second": 16.131543011991685,
+      "draft_tokens": 292,
+      "draft_accepted_tokens": 78,
+      "completion_sha256": "fad485940c3413ecb84fe8a240543ceec6c58f06a49ec4ef7f3a6d5a16fd2341"
+    },
+    "qualified_revision": "01657a52b767eca7a39b173fbbec516e66613e39",
+    "policy": "Q8 all-adaptive greedy C2/C6 choose one width using summed private acceptance histories and complete measured cycle costs. Full short blocks probe wider together. C1, fixed, sampled and mixed cohorts retain their previous decisions.",
+    "source_files_sha256": {
+      "src/models/qwen/dflash_policy.hpp": "d2e0f5e33d2e9c31fc660aa0ca53a2c9c85588f0ee6f7def4dd1b43c3bc06f0a",
+      "tests/models/qwen27b/dflash_test.cpp": "4f7ca5627fe5260fd01e50f9d5117fa19768c974d79fc219dcd48207618bd2be"
+    },
+    "profile_scope": "Four middle complete selector-to-selector cycles per fixed width, after a warm repetitive cohort; includes verification, host acceptance, context injection and next draft. Used to choose shapes, not as headline speeds.",
+    "control_scope": "One warmed shallow hard-pair/repetition cohort and one matched d32K generated-history continuation per binary/concurrency. Deep requests reuse 32,764 tokens and append 2,060 tokens; new prefill interleaves with decoding. All rates are sums of individual request decode rates.",
+    "timing_control": "Sequential isolated release servers, no GPU peer or build; the KDE crash-reporting launch socket was paused for the controls and restored afterward.",
+    "quality": "Every measured completion matches isolated AR. Real-weight C2/C4/C6/C8 layers, logits, selector probabilities, private sampled RNG, fixed/adaptive history, pending injection and persistent state pass. C1 retains the same 128 output tokens and 292/78 draft/accepted counts, with PP in the preceding paired range and TG 16.13 tok/s."
   }
 }

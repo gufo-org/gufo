@@ -20,7 +20,7 @@ model accuracy. [Artifact identities](artifacts/model-identities.json).
 Current controls and binary/source identities:
 [Q4 AR](artifacts/q4-ar-c1-pruning.json),
 [Q4 DFlash2](artifacts/q4-dflash2-c1-focused.json),
-[Q8 C1/C4 and continuation](artifacts/q8-tg-focused.json).
+[Q8 decoding and continuation](artifacts/q8-tg-focused.json).
 No equality gate or tolerance was relaxed. Full-logit captures stay outside Git.
 
 Generated history must retain **decode arithmetic** when a conversation resumes.
@@ -82,10 +82,10 @@ acceptance is preserved. Evidence: [C2](artifacts/q4-c2-focused.json),
 [C8](artifacts/q4-c8-focused.json). The difficult Italian/Chinese C8 pair remains
 faster under AR; these controls do not establish universal speculative profitability.
 
-Q8 greedy C4/C8 use one shared width chosen from private acceptance histories
+Q8 greedy C2/C4/C6/C8 use one shared width chosen from private acceptance histories
 and complete measured cycle costs. A wider probe requires the whole cohort to
 have fully accepted the preceding short block. Fixed, sampled and mixed cohorts
-retain private choices; C1/C2/C6 keep their existing Q8 policy. Persistent draft
+retain private choices; C1 keeps its existing Q8 policy. Persistent draft
 state includes the last fully accepted width and rejects the previous layout.
 
 The focused C4 controls retain all 128 AR tokens on Italian/Chinese prompts,
@@ -103,6 +103,14 @@ AR; each deep request reuses 32,764 tokens and prefills 2,060 new tokens.
 The paired C1 control retains identical output and acceptance, with overlapping
 PP ranges and TG around 16.1 tok/s. Complete cycle profiles, forward/reverse C1
 controls and source identities are in the compact Q8 artifact.
+
+C2/C6 reach **30.24 / 51.86 tok/s** on the difficult pair,
+**86.43 / 108.15 tok/s** on repetition and **26.61 / 34.77 tok/s** on
+d32K generated-history forks. Every completion matches isolated AR; deep
+requests retain the same 32,764-token frontier and 2,060-token suffix.
+The C1 control retains output and acceptance at 16.13 tok/s, with prefill
+inside the preceding paired range. These are focused controls, not a
+refreshed nine-case concurrency matrix.
 
 ## Meaning of Exact
 
