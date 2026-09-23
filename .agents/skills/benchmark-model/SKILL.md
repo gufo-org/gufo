@@ -164,8 +164,8 @@ and the table says so.
    none today — say so in the card and rely on the concurrency `Exact`
    checks); the full `EVALUATION.md` suites are for changed kernels or
    models. Greedy speculative output must match AR token
-   IDs. Concurrency tables compare every completion hash against the Gufo AR
-   C1 reference and report the match count (`Exact`); single-user tables
+   IDs. Concurrency runs compare every completion hash against the Gufo AR
+   C1 reference and retain the counts in quality artifacts; single-user tables
    check token counts only. A mismatch or device fault is not a result.
 5. A cell without a current qualified measurement is `TODO`, never a stale
    number. Keep dates per table; do not sum stage medians into a headline.
@@ -196,9 +196,10 @@ Every headline table carries the reference project next to Gufo:
   `-speculative` on a concurrency table id targets only its speculative
   reference column) and state the reason under the table. `render` prints
   `n/a` there and in the matching Gain cell.
-- When Gufo runs a mode the reference lacks (DFlash2, DSpark, MTP without a
-  matching draft), compare against the reference's AR number and label the
-  column `Gain vs <ref> AR`.
+- Keep AR comparisons in the dedicated AR table. If the reference lacks a
+  speculative mode, leave that mode's cells TODO; do not launch another AR
+  sweep for each speculative workload. Existing combined-mode cards label
+  their fallback explicitly as `Gain vs <ref> AR`.
 - One table per quantization and per mode; never pack `pp / tg` pairs or two
   quantizations into one cell.
 
@@ -263,8 +264,8 @@ model has several quantizations, e.g. `single-ar-q4`):
    and a story (generic prose, `workload: prose`); `single-<spec>-repetition`
    asks the model to repeat the passage word for word (fully predictable
    output, `workload: repetition`, the single-user analogue of the
-   `repetition` corpus). The AR table uses the prose task; AR speed does not
-   depend on the generated text.
+   `repetition` corpus). The AR depth table uses the prose task; keep one AR workload for each
+   fixed depth and batch configuration instead of repeating it by text category.
    llama.cpp runs the same draft file through `--spec-type draft-dflash`,
    `draft-mtp` or `draft-dspark` (`speculative.reference.args` in
    `bench.json`, otherwise llama.cpp's defaults; tune them only when the
@@ -287,19 +288,25 @@ model has several quantizations, e.g. `single-ar-q4`):
    makes the rate meaningless as a comparison.
    When a model's `bench.json` has no `speculative.reference`, the reference
    column falls back to llama.cpp AR and is labelled `Gain vs llama.cpp AR`.
-4. **Multiple users** (`multi-mixed`, `multi-repetition`). `C = 1,2,4,6,8`,
-   context capacity 4096, 128 output tokens, fresh server per point,
-   `cache_prompt=false`. Two workloads from
-   `docs/models/qwen3.8-27b/artifacts/speculative-corpus.json`: `repetition`
-   and `mixed` (distinct layout). Metric: sum of individual request decode
-   rates per concurrent group, averaged across groups. `Exact` is the count of
-   llama.cpp AR completions whose hash matches the Gufo AR C1 reference.
-   Report C8 median / p95 latency and accepted draft tokens per step under
-   the table (`render` prints both per artifact).
-   `Users | Gufo AR | llama.cpp AR | Gain | Gufo <spec> | llama.cpp <spec> | Gain | Exact`.
-   Every artifact, including Gufo AR, compares its C2+ completions against
-   the Gufo AR C1 hashes. Reject any corpus run with cache hits when it sent
-   `cache_prompt=false`; do not publish cache-assisted comparisons.
+4. **Multiple users**. Measure AR once in `multi-ar` (`modes: ["ar"]`),
+   using `repetition_word` and 128 output tokens to keep the batch full.
+   `multi-mixed` and `multi-repetition` use only the model's speculative mode
+   in `modes`, so they never schedule or report another AR performance sweep.
+   Each table compares Gufo with the reference in that same mode:
+   `Users | Gufo <mode> | llama.cpp <mode> | Gain`.
+   Existing combined-mode cards remain supported until migrated.
+   `C = 1,2,4,6,8`, context capacity 4096, fresh server per point,
+   `cache_prompt=false`. Workloads come from
+   `docs/models/qwen3.8-27b/artifacts/speculative-corpus.json`; mixed cases
+   may end before the output cap, so retain actual token counts.
+   Metric: sum of individual request decode rates, averaged across cohorts.
+   Save isolated Gufo C1 AR completion hashes once per workload in
+   `<table>-gufo-ar.json`; these are reusable quality references, not another
+   performance table. Refresh them when target arithmetic, weights, tokenizer
+   or request settings change. The driver rejects missing speculative case
+   references before loading a model. Keep cross-engine agreement and batch
+   consistency in `EVALUATION.md`; agreement is not an accuracy score.
+   Reject cache-assisted corpus measurements when `cache_prompt=false`.
 5. **Memory** (`memory`). Peak device-global HIP memory in use
    (`hipMemGetInfo` total − free, the counter Gufo's loader logs as
    `gpu_device_used_mib`, sampled every 250 ms by the driver through the
@@ -317,9 +324,10 @@ model has several quantizations, e.g. `single-ar-q4`):
    tokens; the encode alone is not separable over HTTP.
    `RGB image | Merged tokens | Gufo ms | llama.cpp ms | Gain`.
 
-Concurrency artifacts are `gufo-serving-bench` corpus reports named
-`<table>-gufo-ar.json`, `<table>-gufo-<spec>.json`, `<table>-reference.json`
-(llama.cpp AR) and `<table>-reference-<spec>.json`;
+Concurrency performance artifacts are `gufo-serving-bench` corpus reports:
+`multi-ar[-<quant>]-gufo-ar.json` and `multi-ar[-<quant>]-reference.json` for AR;
+`<table>-gufo-<spec>.json` and `<table>-reference-<spec>.json` for speculative runs.
+Speculative tables also retain `<table>-gufo-ar.json` as a C1 quality reference;
 the other tables use the compact `model-bench-table` schema with one entry per
 row and the actual `cache_n`/`prompt_n` counts.
 

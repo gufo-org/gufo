@@ -105,9 +105,8 @@ Ragged projections group weight reads without changing per-row arithmetic,
 and shared widths avoid excessive proposals when the active cohort shrinks.
 The mixed corpus caps output at 128 tokens; its summary case ends earlier.
 
-Q8 AR repetition reaches **14.45 / 27.81 / 39.96 tok/s** at C2/C4/C6,
-versus **13.78 / 25.35 / 34.72** for the matched reference. All requests
-retain the isolated 128-token AR output on both engines.
+Q8 AR controls at C2/C4/C6 retain the isolated 128-token output on both
+engines. Performance is reported once in the dedicated AR concurrency tables.
 
 At d32K, C8 reaches **41.52 tok/s**: all eight requests reuse 32,764 tokens,
 prefill 2,060 new tokens and match the isolated 128-token AR continuation.
@@ -124,8 +123,16 @@ rows are in [benchmarks](BENCHMARKS.md); unmeasured cells remain TODO.
 
 ## Meaning of Exact
 
-`Exact` in the benchmark tables compares llama.cpp AR text hashes with Gufo C1
-AR. It is **cross-engine agreement**, not an accuracy percentage. In the retained
+Concurrency benchmarks measure AR once per quantization, then run DFlash2
+workloads independently. The `multi-{mixed,repetition}-<quant>-gufo-ar.json`
+files retain reusable C1 hashes; mixed AR/reference files also retain batch
+consistency evidence. These quality records contain no performance timings.
+Refresh the isolated AR reference when target arithmetic, weights, tokenizer
+or request settings change. DFlash2 benchmarking rejects a missing case hash
+before starting a model server; it never silently runs an extra AR sweep.
+
+`Exact` in the retained quality artifacts compares llama.cpp AR text hashes with
+Gufo C1 AR. It is **cross-engine agreement**, not an accuracy percentage. In the retained
 September 21 corpus, each engine's C1 DFlash2 matches its own AR on all nine cases.
 Cross-engine C1 agreement is 3/9 for Q4 and 4/9 for the historical Q8_K_L file.
 Compared with its own C1, llama.cpp AR agrees on 7/10, 7/12, 8/12 and 10/16 Q4

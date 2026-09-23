@@ -14,15 +14,13 @@
     "q4": {
       "label": "Q4",
       "requires": [
-        "gguf",
-        "draft"
+        "gguf"
       ]
     },
     "q8": {
       "label": "Q8",
       "requires": [
-        "gguf",
-        "draft"
+        "gguf"
       ]
     }
   },
@@ -140,11 +138,36 @@
       "better": "higher",
       "workload": "repetition"
     },
-    "multi-repetition": {
-      "title": "Multiple users, repetition",
+    "multi-ar": {
+      "title": "Multiple users, autoregressive",
       "per_variant": true,
       "modes": [
-        "ar",
+        "ar"
+      ],
+      "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
+      "cases": [
+        "repetition_word"
+      ],
+      "corpus_layout": "homogeneous",
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "context": 4096,
+      "output_tokens": 128,
+      "cache_prompt": false,
+      "warmup": 1,
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher"
+    },
+    "multi-repetition": {
+      "title": "Multiple users, DFlash2, repetition",
+      "per_variant": true,
+      "modes": [
         "dflash2"
       ],
       "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
@@ -168,10 +191,9 @@
       "better": "higher"
     },
     "multi-mixed": {
-      "title": "Multiple users, mixed corpus",
+      "title": "Multiple users, DFlash2, mixed corpus",
       "per_variant": true,
       "modes": [
-        "ar",
         "dflash2"
       ],
       "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",

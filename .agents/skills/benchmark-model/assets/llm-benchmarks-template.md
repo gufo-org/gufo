@@ -87,7 +87,15 @@ above.
 pin, the cost of speculation in prefill, and where each workload changes the
 picture.>
 
-## Multiple users
+## Multiple users, autoregressive
+
+One fixed workload per concurrency: `repetition_word`, 128 output tokens.
+Do not repeat AR performance sweeps for different speculative text categories.
+
+<!-- bench:multi-ar -->
+<!-- /bench -->
+
+## Multiple users, speculative
 
 Sum of individual request decode rates, averaged across measured cohorts.
 Context 4096 per user, greedy, thinking
@@ -96,8 +104,8 @@ server per point (`gufo serve --sessions C`; `llama-server -np C -c 4096·C`).
 Workloads come from the
 `../qwen3.8-27b/artifacts/speculative-corpus.json` (link after copying): `repetition`
 runs `repetition_word`; `mixed` cycles distinct requests through
-<case ids>. `Exact` counts llama.cpp AR completions whose hash matches the
-Gufo AR C1 reference.
+<case ids>. These tables run only the speculative mode. Saved C1 AR hashes
+qualify completions; report cross-engine agreement in `EVALUATION.md`.
 
 <!-- bench:multi-repetition -->
 <!-- /bench -->
@@ -105,8 +113,7 @@ Gufo AR C1 reference.
 <!-- bench:multi-mixed -->
 <!-- /bench -->
 
-<Cache-hit outcome, what `Exact` means for these completions, and why any
-cell is n/a.>
+<Cache-hit outcome, quality-reference scope, and why any cell is n/a.>
 
 ## Memory
 

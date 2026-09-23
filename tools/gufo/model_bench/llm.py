@@ -500,6 +500,13 @@ def run_multi(session: Session, table: TableSpec) -> None:
         ar_path = artifact_path(cfg, table, "gufo", "ar")
         if path != ar_path and ar_path.exists():
             reference = load_reference_report(ar_path)
+        if mode != "ar":
+            missing = {case.identifier for case in cases} - set((reference or {}).get("hashes", {}))
+            if missing:
+                raise RuntimeError(
+                    f"{table.id}: missing isolated AR completion hashes for {', '.join(sorted(missing))}; "
+                    f"qualify C1 AR once and save its report to {ar_path}"
+                )
         combined = None if session.fresh else load_artifact(path)
         for users in keys:
             if path == ar_path and reference is None and combined is not None and "c1" in combined.get("results", {}):

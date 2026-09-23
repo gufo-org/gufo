@@ -109,6 +109,14 @@ def layout_for(config: BenchConfig, table: TableSpec) -> Layout:
                        Column(f"Gain vs {ref} AR", "gain")]
         return Layout(columns, [_depth_label(d) for d in table.spec["depths"]])
     if kind == "multi":
+        modes = table.spec.get("modes", ["ar"])
+        if len(modes) == 1:
+            label = "AR" if modes[0] == "ar" else spec_label
+            return Layout(
+                [Column("Users", "label"), Column(f"Gufo {label}", "gufo"),
+                 Column(f"{ref} {label}", "reference"), Column("Gain", "gain")],
+                [str(c) for c in table.spec["concurrency"]],
+            )
         if config.reference_speculative:
             speculative = [Column(f"Gufo {spec_label}", "gufo"), Column(f"{ref} {spec_label}", "reference"),
                            Column("Gain", "gain")]
@@ -159,6 +167,19 @@ def _row_values(config: BenchConfig, table: TableSpec) -> dict[str, dict[str, st
     values: dict[str, dict[str, str | None]] = {}
     kind = table.kind
     if kind == "multi":
+        modes = table.spec.get("modes", ["ar"])
+        if len(modes) == 1:
+            mode = modes[0]
+            gufo = load_artifact(artifact_path(config, table, "gufo", mode))
+            reference = load_artifact(artifact_path(config, table, "reference", None if mode == "ar" else mode))
+            for users in table.spec["concurrency"]:
+                g, r = _serving_rate(gufo, users), _serving_rate(reference, users)
+                values[str(users)] = {
+                    "gufo": None if g is None else _fmt(g),
+                    "reference": None if r is None else _fmt(r),
+                    "ref_unavailable": _serving_unavailable(reference, users),
+                }
+            return values
         mode = config.speculative["mode"]
         gufo_ar = load_artifact(artifact_path(config, table, "gufo", "ar"))
         gufo_spec = load_artifact(artifact_path(config, table, "gufo", mode))
@@ -316,6 +337,10 @@ def render_table(config: BenchConfig, table: TableSpec, existing: dict[str, dict
                          acc, _ref(fresh.get("ref_acceptance"), na)]
             else:
                 cells = [gp, gt, acc, rt, gain(_number(gt), _number(rt), better, rt == NA)]
+        elif kind == "multi" and len(table.spec.get("modes", ["ar"])) == 1:
+            g = _pick(fresh.get("gufo"), cell(layout.columns[1].header))
+            r = _ref(fresh.get("reference"), na)
+            cells = [g, r, gain(_number(g), _number(r), better, r == NA)]
         elif kind == "multi":
             ga = _pick(fresh.get("gufo_ar"), cell("Gufo AR")); ra = _ref(fresh.get("reference"), na)
             gs = _pick(fresh.get("gufo_spec"), cell(f"Gufo {config.speculative['label']}")); ex = _ref(fresh.get("exact"), na)
@@ -361,11 +386,12 @@ def _serving_output_tokens(result: dict[str, Any]) -> int | None:
 def multi_summary(config: BenchConfig) -> list[str]:
     """One line per concurrency artifact: top-level request latency, acceptance and cache hits."""
     lines: list[str] = []
-    mode = config.speculative["mode"]
     for table in config.tables():
         if table.kind != "multi":
             continue
-        for target, suffix in (("gufo", "ar"), ("gufo", mode), ("reference", None), ("reference", mode)):
+        pairs = [(target, None if target == "reference" and mode == "ar" else mode)
+                 for target in ("gufo", "reference") for mode in table.spec.get("modes", ["ar"])]
+        for target, suffix in pairs:
             report = load_artifact(artifact_path(config, table, target, suffix))
             if report is None:
                 continue

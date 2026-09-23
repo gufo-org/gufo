@@ -163,77 +163,113 @@ does not establish equivalent output. See [evaluation](EVALUATION.md#meaning-of-
 
 [Prompts, artifact identities and quality checks](EVALUATION.md).
 
-## Multiple users
+## Multiple users, autoregressive
 
-Q8 uses **Q8_K_XL**, measured **2026-09-23**; unrefreshed cells are **TODO**.
-Q4 Gufo C1 AR, C4/C6/C8 mixed DFlash2 and C8 repetitive DFlash2 are refreshed,
-along with the C4 mixed DFlash2 reference. Other Q4 cells retain
-**2026-09-21** controls. Artifact rows record their dates and binary identities.
+One AR workload per quantization and concurrency: `repetition_word`, exactly
+128 output tokens. Context capacity is 4096 per user, greedy, thinking off,
+one warmup and one measured repetition. Rates sum individual request decode
+rates and average complete cohorts; prefill and scheduling are excluded.
+Depth and batch size have separate controls; text categories do not trigger
+additional AR performance sweeps.
 
-Sum of individual request decode rates, averaged across measured cohorts.
-Context capacity 4096 per user (Gufo `--sessions C --context 4096`, llama.cpp
-`-np C -c 4096·C`), greedy, thinking off, **up to 128 output tokens**, one warmup
-round, one measured repetition, fresh server per concurrency level. Workloads
-come from the [speculative corpus](artifacts/speculative-corpus.json):
-`repetition` runs `repetition_word` on every user; `mixed` cycles through the
-nine distinct corpus cases. The two-sentence summary ends earlier; rates use
-actual emitted token counts. DFlash2 uses the Q4_K_M draft on both servers
-(Gufo adaptive controller; llama.cpp `draft-dflash` defaults). `Exact` counts
-llama.cpp AR completions whose hash matches the Gufo AR C1 reference; every
-refreshed Gufo AR and Gufo DFlash2 completion matched its own C1 AR reference.
-Artifacts: `artifacts/multi-{mixed,repetition}-{q4,q8}-{gufo-ar,gufo-dflash2,reference,reference-dflash2}.json`.
+Gufo Q4 C1 and both engines' Q8 C2/C4/C6 are from **2026-09-23**, with zero
+cache hits. Other Q4 values retain **2026-09-21** controls; those Gufo rows
+include prompt-cache reuse. Unmeasured Q8 cells remain **TODO**.
+Artifacts: `artifacts/multi-ar-{q4,q8}-{gufo-ar,reference}.json`.
 
-Refreshed rows have zero prompt-cache hits; retained September 21 Gufo
-controls included prompt-cache reuse. These decode rates exclude prefill
-and scheduling.
+<!-- bench:multi-ar-q4 -->
+| Users | Gufo AR | llama.cpp AR | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | 12.42 | 12.20 | +1.8% |
+| 2 | 23.04 | 22.46 | +2.6% |
+| 4 | 41.97 | 38.32 | +9.5% |
+| 6 | 56.96 | 44.74 | +27.3% |
+| 8 | 67.94 | 46.02 | +47.6% |
+<!-- /bench -->
+
+![Multiple users, autoregressive](artifacts/charts/multi-ar-q4.svg)
+
+<!-- bench:multi-ar-q8 -->
+| Users | Gufo AR | llama.cpp AR | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | TODO | TODO | TODO |
+| 2 | 14.45 | 13.78 | +4.9% |
+| 4 | 27.81 | 25.35 | +9.7% |
+| 6 | 39.96 | 34.72 | +15.1% |
+| 8 | TODO | TODO | TODO |
+<!-- /bench -->
+
+![Multiple users, autoregressive](artifacts/charts/multi-ar-q8.svg)
+
+## Multiple users, DFlash2
+
+These tables run and compare **DFlash2 only**, with the Q4_K_M draft on both
+servers (Gufo adaptive controller; llama.cpp `draft-dflash` defaults).
+Context capacity is 4096 per user (`--sessions C --context 4096` on Gufo,
+`-np C -c 4096·C` on llama.cpp), greedy, thinking off, up to 128 output tokens,
+one warmup and one measured repetition on a fresh server at each concurrency.
+Rates use the same sum of individual request decode rates as the AR tables.
+
+The [corpus](artifacts/speculative-corpus.json) has two workloads:
+`repetition` runs `repetition_word` on every user; `mixed` cycles through nine
+cases. Its two-sentence summary ends early; rates use actual emitted counts.
+Q8_K_XL rows are from **2026-09-23**. Q4 Gufo mixed C4/C6/C8 and repetition C8,
+plus the C4 mixed reference, are refreshed; other Q4 cells retain **2026-09-21**
+controls. Refreshed rows have zero cache hits; older Gufo rows used prompt-cache
+reuse. Source dates and binary identities are recorded per artifact row.
+
+Saved C1 AR hashes qualify each DFlash2 workload without repeating an AR
+performance sweep. All refreshed Gufo completions match AR; reference-engine
+agreement and its limits are in [evaluation](EVALUATION.md#meaning-of-exact).
+Artifacts: `artifacts/multi-{mixed,repetition}-{q4,q8}-{gufo,reference}-dflash2.json`.
 
 <!-- bench:multi-mixed-q4 -->
-| Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 12.42 | 12.22 | +1.6% | 33.99 | 26.55 | +28.0% | 3/9 |
-| 2 | 22.99 | 22.65 | +1.5% | 47.29 | 36.33 | +30.2% | 5/10 |
-| 4 | 41.96 | 38.69 | +8.5% | 71.76 | 65.64 | +9.3% | 8/12 |
-| 6 | 57.43 | 39.23 | +46.4% | 79.78 | 68.03 | +17.3% | 8/12 |
-| 8 | 69.62 | 39.34 | +77.0% | 85.27 | 67.87 | +25.6% | 11/16 |
+| Users | Gufo DFlash2 | llama.cpp DFlash2 | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | 33.99 | 26.55 | +28.0% |
+| 2 | 47.29 | 36.33 | +30.2% |
+| 4 | 71.76 | 65.64 | +9.3% |
+| 6 | 79.78 | 68.03 | +17.3% |
+| 8 | 85.27 | 67.87 | +25.6% |
 <!-- /bench -->
 
-![Multiple users, mixed corpus](artifacts/charts/multi-mixed-q4.svg)
+![Multiple users, DFlash2, mixed corpus](artifacts/charts/multi-mixed-q4.svg)
 
 <!-- bench:multi-repetition-q4 -->
-| Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 12.42 | 12.20 | +1.8% | 66.10 | 37.00 | +78.6% | 1/1 |
-| 2 | 23.04 | 22.46 | +2.6% | 89.32 | 47.09 | +89.7% | 2/2 |
-| 4 | 41.97 | 38.32 | +9.5% | 97.26 | 92.76 | +4.9% | 4/4 |
-| 6 | 56.96 | 44.74 | +27.3% | 97.16 | 95.00 | +2.3% | 6/6 |
-| 8 | 67.94 | 46.02 | +47.6% | 121.68 | 110.97 | +9.7% | 8/8 |
+| Users | Gufo DFlash2 | llama.cpp DFlash2 | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | 66.10 | 37.00 | +78.6% |
+| 2 | 89.32 | 47.09 | +89.7% |
+| 4 | 97.26 | 92.76 | +4.9% |
+| 6 | 97.16 | 95.00 | +2.3% |
+| 8 | 121.68 | 110.97 | +9.7% |
 <!-- /bench -->
 
-![Multiple users, repetition](artifacts/charts/multi-repetition-q4.svg)
+![Multiple users, DFlash2, repetition](artifacts/charts/multi-repetition-q4.svg)
 
 <!-- bench:multi-mixed-q8 -->
-| Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 2 | TODO | TODO | TODO | 43.28 | 31.27 | +38.4% | TODO |
-| 4 | TODO | TODO | TODO | 49.28 | 42.00 | +17.3% | TODO |
-| 6 | TODO | TODO | TODO | 56.65 | 48.76 | +16.2% | TODO |
-| 8 | 51.92 | 42.74 | +21.5% | 65.96 | 63.02 | +4.7% | 9/16 |
+| Users | Gufo DFlash2 | llama.cpp DFlash2 | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | TODO | TODO | TODO |
+| 2 | 43.28 | 31.27 | +38.4% |
+| 4 | 49.28 | 42.00 | +17.3% |
+| 6 | 56.65 | 48.76 | +16.2% |
+| 8 | 65.96 | 63.02 | +4.7% |
 <!-- /bench -->
 
-![Multiple users, mixed corpus](artifacts/charts/multi-mixed-q8.svg)
+![Multiple users, DFlash2, mixed corpus](artifacts/charts/multi-mixed-q8.svg)
 
 <!-- bench:multi-repetition-q8 -->
-| Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 2 | 14.45 | 13.78 | +4.9% | TODO | TODO | TODO | 2/2 |
-| 4 | 27.81 | 25.35 | +9.7% | TODO | TODO | TODO | 4/4 |
-| 6 | 39.96 | 34.72 | +15.1% | TODO | TODO | TODO | 6/6 |
-| 8 | TODO | TODO | TODO | 116.90 | 86.53 | +35.1% | TODO |
+| Users | Gufo DFlash2 | llama.cpp DFlash2 | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | TODO | TODO | TODO |
+| 2 | TODO | TODO | TODO |
+| 4 | TODO | TODO | TODO |
+| 6 | TODO | TODO | TODO |
+| 8 | 116.90 | 86.53 | +35.1% |
 <!-- /bench -->
 
-![Multiple users, repetition](artifacts/charts/multi-repetition-q8.svg)
+![Multiple users, DFlash2, repetition](artifacts/charts/multi-repetition-q8.svg)
 
 Earlier tg64 short-generation controls (2026-09-15/16, `prose_tides` and a
 24-request mixed corpus) and the 2026-09-16 one-process-per-sweep tables

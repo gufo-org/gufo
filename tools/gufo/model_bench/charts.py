@@ -137,13 +137,22 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
         a2.set_xlabel("context depth (tokens)")
         a1.legend(loc="lower left")
     elif kind == "multi":
-        ga, ra, gs = (_series(rows, labels, h) for h in ("Gufo AR", f"{ref} AR", f"Gufo {spec_label}"))
-        if not _has_data(ga, gs):
-            return False
-        series = [("Gufo AR", ga, COLORS["gufo"]), (f"{ref} AR", ra, COLORS["reference"]),
-                  (f"Gufo {spec_label}", gs, COLORS["spec"])]
-        if config.reference_speculative:
-            series.append((f"{ref} {spec_label}", _series(rows, labels, f"{ref} {spec_label}"), COLORS["ref_spec"]))
+        modes = table.spec.get("modes", ["ar"])
+        if len(modes) == 1:
+            g, r = (_series(rows, labels, c.header) for c in layout.columns[1:3])
+            if not _has_data(g):
+                return False
+            colors = ("gufo", "reference") if modes[0] == "ar" else ("spec", "ref_spec")
+            series = [(layout.columns[1].header, g, COLORS[colors[0]]),
+                      (layout.columns[2].header, r, COLORS[colors[1]])]
+        else:
+            ga, ra, gs = (_series(rows, labels, h) for h in ("Gufo AR", f"{ref} AR", f"Gufo {spec_label}"))
+            if not _has_data(ga, gs):
+                return False
+            series = [("Gufo AR", ga, COLORS["gufo"]), (f"{ref} AR", ra, COLORS["reference"]),
+                      (f"Gufo {spec_label}", gs, COLORS["spec"])]
+            if config.reference_speculative:
+                series.append((f"{ref} {spec_label}", _series(rows, labels, f"{ref} {spec_label}"), COLORS["ref_spec"]))
         fig, ax = plt.subplots(figsize=(6.5, 3.2))
         _bars(ax, labels, series, "sum of request decode tok/s")
         ax.set_xlabel("concurrent users")
