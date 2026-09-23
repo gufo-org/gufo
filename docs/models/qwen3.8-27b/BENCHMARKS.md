@@ -65,6 +65,8 @@ Artifacts: `artifacts/single-ar-{q4,q8}-{gufo,reference}.json`.
 | 131,072 | TODO | 131.74 | TODO | TODO | 8.47 | TODO |
 <!-- /bench -->
 
+![Single user, autoregressive](artifacts/charts/single-ar-q4.svg)
+
 <!-- bench:single-ar-q8 -->
 | Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -77,6 +79,8 @@ Artifacts: `artifacts/single-ar-{q4,q8}-{gufo,reference}.json`.
 | 65,536 | TODO | TODO | TODO | TODO | TODO | TODO |
 | 131,072 | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->
+
+![Single user, autoregressive](artifacts/charts/single-ar-q8.svg)
 
 Q4 AR reaches **12.38 tok/s at d0** and **11.14 at d32K**. Q8_K_XL
 reaches **7.20 / 6.76 tok/s**, matching the pinned reference at those points.
@@ -105,6 +109,8 @@ Artifacts: `artifacts/single-dflash2-{q4,q8}-{gufo,reference}.json`.
 | 65,536 | TODO | 177.90 | TODO | TODO | 18.32 | TODO | TODO | 1.51 |
 | 131,072 | TODO | 126.64 | TODO | TODO | 14.16 | TODO | TODO | 1.37 |
 <!-- /bench -->
+
+![Single user, DFlash2](artifacts/charts/single-dflash2-q4.svg)
 
 Repetitive workload (**TODO**, not included in the focused depth controls):
 same prefixes and depths, the measured turn asks the model to repeat the
@@ -136,6 +142,8 @@ analogue of the `repetition` corpus below.
 | 65,536 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 | 131,072 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->
+
+![Single user, DFlash2](artifacts/charts/single-dflash2-q8.svg)
 
 At d32K, llama.cpp DFlash2 differs from its own AR output; the speed comparison
 does not establish equivalent output. See [evaluation](EVALUATION.md#meaning-of-exact).
@@ -257,12 +265,16 @@ Artifacts: `artifacts/memory-{q4,q8}-{gufo,reference}.json`.
 | 16K prefix, pp4096 + tg128 | 39.89 | 37.42 | -6.2% |
 <!-- /bench -->
 
+![GPU-visible allocation](artifacts/charts/memory-q4.svg)
+
 <!-- bench:memory-q8 -->
 | Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
 | pp2048 + tg128 | 47.76 | 46.32 | -3.0% |
 | 16K prefix, pp4096 + tg128 | 49.65 | 47.01 | -5.3% |
 <!-- /bench -->
+
+![GPU-visible allocation](artifacts/charts/memory-q8.svg)
 
 Gufo uses 3–6% more device memory than llama.cpp at the same context
 capacity, with the gap widening as the prefix grows. An earlier version of
@@ -285,6 +297,8 @@ same file remain **TODO**.
 | 256×256 | 64 | TODO | TODO | TODO |
 | 1024×1024 | 1024 | 1252 | TODO | TODO |
 <!-- /bench -->
+
+![Image encoder](artifacts/charts/image-encoder.svg)
 
 ## Reproduce and maintain quality
 

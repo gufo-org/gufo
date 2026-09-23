@@ -186,7 +186,8 @@ def render_charts(config: BenchConfig, document: str, only: set[str] | None = No
             return block + f"\n\n![{known[table_id].spec.get('title', table_id)}]({CHART_DIR}/{table_id}.svg)"
         return block
 
-    # Strip existing image lines so the pass is idempotent, then re-add for tables with data.
+    # Replace only selected charts; untouched table links must survive a partial render.
     for table_id in known:
-        document = re.sub(IMAGE_RE.format(id=re.escape(table_id)), "", document)
+        if not only or table_id in only:
+            document = re.sub(IMAGE_RE.format(id=re.escape(table_id)), "", document)
     return MARKER_RE.sub(replace, document), written

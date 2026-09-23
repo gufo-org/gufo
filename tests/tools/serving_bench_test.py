@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
 from gufo import serving_bench
+from gufo.model_bench.charts import render_charts
+from gufo.model_bench.config import BenchConfig
 from gufo.model_bench.render import _serving_rate
 
 
@@ -616,5 +618,33 @@ rate_report["results"]["c2"]["samples"][0]["decode_tokens_per_second"] = 10
 rate_report["results"]["c2"]["rounds"].pop()
 check(_serving_rate(rate_report, 2) is None,
       "missing round metadata must not inflate summed decode rates")
+
+chart_config = BenchConfig("test", ROOT, {"tables": {
+    "single-ar": {"title": "AR"}, "multi-mixed": {"title": "Mixed"},
+}})
+chart_document = """<!-- bench:single-ar -->
+| Depth | Gufo tg |
+| ---: | ---: |
+| 0 | 12 |
+<!-- /bench -->
+
+![AR](artifacts/charts/single-ar.svg)
+
+<!-- bench:multi-mixed -->
+| Users | Gufo AR |
+| ---: | ---: |
+| 2 | 24 |
+<!-- /bench -->
+
+![Mixed](artifacts/charts/multi-mixed.svg)
+"""
+with patch("gufo.model_bench.charts.chart_for", return_value=True) as draw:
+    updated, written = render_charts(chart_config, chart_document, {"multi-mixed"})
+    check(updated == chart_document, "partial rendering preserves untouched chart links")
+    check(written == ["multi-mixed"], "partial rendering updates only the selected chart")
+    repeated, _ = render_charts(chart_config, updated, {"multi-mixed"})
+    check(repeated == updated, "repeated chart rendering is idempotent")
+    check(all(call.args[1].id == "multi-mixed" for call in draw.call_args_list),
+          "partial rendering does not redraw unrelated charts")
 
 print("Serving benchmark harness tests passed.")
