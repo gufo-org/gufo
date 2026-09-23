@@ -67,8 +67,9 @@ Gufo follows vLLM's text-only MTP input semantics. Official checkpoint:
 ## Benchmark method
 
 The [card](BENCHMARKS.md) refreshes Gufo single-user MTP, both engines’
-concurrency and loading on September 23; other values remain from September 22.
-One measured run per point; concurrency sums individual decode rates.
+concurrency/loading and reference MTP at 64K/128K on September 23 (UTC);
+other values remain from September 22.
+One qualified sample per point; concurrency sums individual decode rates.
 Versions and commands are in [model identities](artifacts/model-identities.json)
 and the table artifacts.
 
@@ -76,10 +77,11 @@ Single-user rows use approximately pp2048/tg128, greedy, thinking off.
 Each mode generates its own eight-token reply before the measured continuation.
 Depth/prefill tolerance is max(32 tokens, 0.5%). Gufo capacity is 133760;
 reference AR uses 35456 through 32K, 68224 at 64K and 133760 at 128K.
-Reference MTP uses 35456 through 32K. Its September 22 64K run repeatedly
-reread evicted weights; the 128K server was OOM-killed during loading.
-These points retain **n/a** and were not rerun on September 23. The successful
-262K-capacity startup below does not establish deep-context inference performance.
+Reference MTP uses the same capacities as AR. All four refreshed 64K/128K
+workload points generated 128 tokens with valid prefix/prefill counts. Prefix
+setup and timed requests had zero disk reads and major page faults; the 120 GiB
+cgroup and 3 GiB host-memory guard did not interrupt any run. At 128K, the two
+workloads share one warmed server and reset to the prefix before each measurement.
 MTP pp takes each engine's maximum across mixed/repetitive workloads.
 AR reference: `b11069`; MTP: pinned
 `llama-server-mtp` at `6fcaa16f` ([upstream change](https://github.com/ggml-org/llama.cpp/pull/28243)).

@@ -14,25 +14,27 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309879808,
+      "memoryTotalBytes": 134309883904,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "34bee0c70b5847b76a43f2c6da016bafed74530bff113cc4ffc5f43f21fe2f96",
+    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-22",
+  "measuredOn": "2026-09-23",
   "mode": "mtp",
   "model": {
     "id": "Qwen3.8-Flash-Next",
     "variant": null
   },
   "notes": [
-    "llama.cpp: llama-server-mtp version: 0.4.1-dev (build 11069, commit 6fcaa16f)",
-    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task: repetition; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
-    "synthetic text: 1.160 tokens/word, template overhead 12 tokens",
-    "llama.cpp with the MTP draft exhausts the host's 125 GiB: the 128K server is OOM-killed while loading (-c 133760) and the 64K run completes only with the mapped weights being evicted and re-read, which is not a valid speed measurement"
+    "llama.cpp: llama-server version: 0.4.1-dev (build 11069, commit 6fcaa16f)",
+    "pp2048/tg128, greedy, thinking off. Depth is a cached conversation prefix with an eight-token reply; actual cache/prefill/output counts are retained per row.",
+    "Only 65536/131072 refreshed on 2026-09-23 UTC; other rows retain their September 22 measurements. Per-row commands and dates identify both sets.",
+    "One accepted pp2048/tg128 sample per workload/depth. Token-count calibration attempts are excluded from the published rates.",
+    "The two 131072 workloads share one warmed server; each resets to the prefix before measurement and independently validates cache_n and prompt_n.",
+    "Isolated 120 GiB reference cgroup, no swap, 3 GiB host memory floor. Prefix setup and accepted timed requests had no disk reads or major page faults."
   ],
   "referenceName": "llama.cpp",
   "rows": {
@@ -51,9 +53,15 @@
           "prompt_n": 2034
         }
       ],
+      "measuredOn": "2026-09-22",
       "pp": 468.76,
       "pp_sd": null,
       "samples": 1,
+      "source": {
+        "buildMode": "nix-release",
+        "dirty": true,
+        "revision": "ff539ca5a1b321c917dbed2f19a868a17e1383f7"
+      },
       "tg": 48.12,
       "tg_sd": null
     },
@@ -72,14 +80,72 @@
           "prompt_n": 2044
         }
       ],
+      "measuredOn": "2026-09-22",
       "pp": 365.91,
       "pp_sd": null,
       "samples": 1,
+      "source": {
+        "buildMode": "nix-release",
+        "dirty": true,
+        "revision": "ff539ca5a1b321c917dbed2f19a868a17e1383f7"
+      },
       "tg": 43.53,
       "tg_sd": null
     },
     "131072": {
-      "unavailable": "llama.cpp with the MTP draft exhausts the host's 125 GiB: the 128K server is OOM-killed while loading (-c 133760) and the 64K run completes only with the mapped weights being evicted and re-read, which is not a valid speed measurement"
+      "acceptance": 91.18,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.66,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf -c 133760 -np 1 --port 49849 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 131056,
+          "completion_sha256": "863825807579c48004a4978cdc2c7427fb6f2b4962ed1d230b2914f4d7df4c39",
+          "draft_n": 102,
+          "draft_n_accepted": 93,
+          "predicted_n": 128,
+          "prompt_n": 2042
+        }
+      ],
+      "measuredOn": "2026-09-23",
+      "pp": 135.42,
+      "pp_sd": null,
+      "resourceControl": {
+        "hostAvailableFloorGiB": 3,
+        "hostMemoryGuardTriggered": false,
+        "memoryMaxGiB": 120,
+        "minimumHostAvailableGiB": 4.854,
+        "minimumHostAvailableGiBByPhase": {
+          "measured": 4.854,
+          "prefix": 5.197,
+          "startup": 7.364,
+          "warmup": 7.192
+        },
+        "requests": [
+          {
+            "majorFaults": 0,
+            "phase": "prefix",
+            "readBytes": 0,
+            "wallSeconds": 1.494
+          },
+          {
+            "majorFaults": 0,
+            "phase": "measured",
+            "readBytes": 0,
+            "wallSeconds": 21.319
+          }
+        ],
+        "systemd": "Result=success\nOOMPolicy=stop\nMemoryPeak=41064161280"
+      },
+      "samples": 1,
+      "source": {
+        "buildMode": "nix-release",
+        "dirty": false,
+        "revision": "26a659daf5310a8d5125d77bdea0a8c54860ddfb"
+      },
+      "tg": 20.96,
+      "tg_sd": null
     },
     "16384": {
       "acceptance": 96.91,
@@ -96,9 +162,15 @@
           "prompt_n": 2042
         }
       ],
+      "measuredOn": "2026-09-22",
       "pp": 341.87,
       "pp_sd": null,
       "samples": 1,
+      "source": {
+        "buildMode": "nix-release",
+        "dirty": true,
+        "revision": "ff539ca5a1b321c917dbed2f19a868a17e1383f7"
+      },
       "tg": 43.66,
       "tg_sd": null
     },
@@ -117,9 +189,15 @@
           "prompt_n": 2023
         }
       ],
+      "measuredOn": "2026-09-22",
       "pp": 277.61,
       "pp_sd": null,
       "samples": 1,
+      "source": {
+        "buildMode": "nix-release",
+        "dirty": true,
+        "revision": "ff539ca5a1b321c917dbed2f19a868a17e1383f7"
+      },
       "tg": 39.28,
       "tg_sd": null
     },
@@ -138,14 +216,90 @@
           "prompt_n": 2039
         }
       ],
+      "measuredOn": "2026-09-22",
       "pp": 423.77,
       "pp_sd": null,
       "samples": 1,
+      "source": {
+        "buildMode": "nix-release",
+        "dirty": true,
+        "revision": "ff539ca5a1b321c917dbed2f19a868a17e1383f7"
+      },
       "tg": 45.71,
       "tg_sd": null
     },
     "65536": {
-      "unavailable": "llama.cpp with the MTP draft exhausts the host's 125 GiB: the 128K server is OOM-killed while loading (-c 133760) and the 64K run completes only with the mapped weights being evicted and re-read, which is not a valid speed measurement"
+      "acceptance": 92.08,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.66,
+      "accepted_per_step_sd": null,
+      "command": "llama-server -m Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf -c 68224 -np 1 --port 38803 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf --spec-draft-ngl 999",
+      "counts": [
+        {
+          "cache_n": 65513,
+          "completion_sha256": "7b13607dc750c137c973c6a512248cbc09edb8d829cfee4ad017104787a7ecbf",
+          "draft_n": 101,
+          "draft_n_accepted": 93,
+          "predicted_n": 128,
+          "prompt_n": 2032
+        }
+      ],
+      "measuredOn": "2026-09-23",
+      "pp": 206.71,
+      "pp_sd": null,
+      "resourceControl": {
+        "hostAvailableFloorGiB": 3,
+        "hostMemoryGuardTriggered": false,
+        "memoryMaxGiB": 120,
+        "minimumHostAvailableGiB": 7.999,
+        "minimumHostAvailableGiBByPhase": {
+          "measured": 7.999,
+          "prefix": 8.605,
+          "startup": 9.959,
+          "warmup": 9.651
+        },
+        "requests": [
+          {
+            "majorFaults": 0,
+            "phase": "warmup",
+            "readBytes": 0,
+            "wallSeconds": 5.304
+          },
+          {
+            "majorFaults": 0,
+            "phase": "prefix",
+            "readBytes": 0,
+            "wallSeconds": 219.323
+          },
+          {
+            "majorFaults": 0,
+            "phase": "measured",
+            "readBytes": 0,
+            "wallSeconds": 13.904
+          },
+          {
+            "majorFaults": 0,
+            "phase": "prefix",
+            "readBytes": 0,
+            "wallSeconds": 4.977
+          },
+          {
+            "majorFaults": 0,
+            "phase": "measured",
+            "readBytes": 0,
+            "wallSeconds": 14.511
+          }
+        ],
+        "systemd": "Result=success\nOOMPolicy=stop\nMemoryPeak=39054680064"
+      },
+      "samples": 1,
+      "source": {
+        "buildMode": "nix-release",
+        "dirty": false,
+        "revision": "26a659daf5310a8d5125d77bdea0a8c54860ddfb"
+      },
+      "tg": 27.75,
+      "tg_sd": null
     },
     "8192": {
       "acceptance": 95.92,
@@ -162,9 +316,15 @@
           "prompt_n": 2043
         }
       ],
+      "measuredOn": "2026-09-22",
       "pp": 394.98,
       "pp_sd": null,
       "samples": 1,
+      "source": {
+        "buildMode": "nix-release",
+        "dirty": true,
+        "revision": "ff539ca5a1b321c917dbed2f19a868a17e1383f7"
+      },
       "tg": 44.31,
       "tg_sd": null
     }
@@ -172,15 +332,15 @@
   "schemaVersion": 1,
   "server": {
     "command": [
-      "llama-server-mtp",
+      "llama-server",
       "-m",
       "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
       "-c",
-      "68224",
+      "133760",
       "-np",
       "1",
       "--port",
-      "47673",
+      "49849",
       "--host",
       "127.0.0.1",
       "--alias",
@@ -206,8 +366,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "ff539ca5a1b321c917dbed2f19a868a17e1383f7"
+    "dirty": false,
+    "revision": "26a659daf5310a8d5125d77bdea0a8c54860ddfb"
   },
   "table": "single-mtp-repetition",
   "target": "reference"

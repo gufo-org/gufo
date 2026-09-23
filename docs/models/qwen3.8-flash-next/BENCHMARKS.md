@@ -2,11 +2,11 @@
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target and
 shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.
-Gufo single-user MTP, concurrency and loading: September 23, 2026;
-other results: September 22. llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
+Gufo single-user MTP, concurrency, loading and llama.cpp MTP at 64K/128K:
+September 23, 2026; other results: September 22.
+llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
 
-Positive gain favors Gufo. **TODO** means unmeasured; **n/a** means the recorded
-run produced no valid measurement.
+Positive gain favors Gufo.
 [Quality and measurement details](EVALUATION.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
 
 ## Single user, autoregressive
@@ -34,10 +34,6 @@ Context capacities differ between engines; see the measurement details.
 pp is the highest measured rate per engine and depth across mixed/repetitive
 text, including Gufo predictor catch-up.
 
-llama.cpp's 64K/128K **n/a** cells retain September 22 failures: weight eviction
-at 64K; startup OOM at 128K. Startup at 262K capacity succeeded on September 23,
-but those deep-context inference points have not been rerun.
-
 <!-- bench:single-mtp -->
 | Flash-Next Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -47,8 +43,8 @@ but those deep-context inference points have not been rerun.
 | 12,288 | 1488.03 | 365.91 | +306.7% | 35.18 | 32.32 | +8.8% | 39.95 | 43.53 | -8.2% |
 | 16,384 | 1471.81 | 341.98 | +330.4% | 33.84 | 32.07 | +5.5% | 50.55 | 43.66 | +15.8% |
 | 32,768 | 1449.56 | 277.61 | +422.2% | 30.67 | 25.41 | +20.7% | 46.81 | 39.28 | +19.2% |
-| 65,536 | 1316.70 | n/a | n/a | 31.78 | n/a | n/a | 45.12 | n/a | n/a |
-| 131,072 | 1335.91 | n/a | n/a | 28.12 | n/a | n/a | 42.32 | n/a | n/a |
+| 65,536 | 1316.70 | 208.04 | +532.9% | 31.78 | 19.65 | +61.7% | 45.12 | 27.75 | +62.6% |
+| 131,072 | 1335.91 | 135.42 | +886.5% | 28.12 | 14.63 | +92.2% | 42.32 | 20.96 | +101.9% |
 <!-- /bench -->
 
 ![Single user, MTP](artifacts/charts/single-mtp.svg)
