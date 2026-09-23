@@ -15,7 +15,7 @@ model accuracy. [Artifact identities](artifacts/model-identities.json).
 | Draft attention / selector | 216 byte-exact attention controls include ring wrap and ragged blocks. Real-weight layer traces, complete logits, conditional probabilities, private RNG and persistent replay pass through C8. |
 | Sampling | Maintained GPU sampler covers 216 AR policies, p/q acceptance and residual sampling, ties, nonfinite rows and tile boundaries. Seeded cold/cache replay retains IDs and proposal counts. |
 | Weight placement | Complete 17,559,178,144-byte Q4 encoded-weight copy matches; read-only huge pages retain target arithmetic. Q8 full-target qualification also passes with this layout. |
-| Serving | Q4/Q8 AR and DFlash2 pass live continuation, disk restoration, C4 generated-history forks, sampled/greedy transitions and cancellation inside a verified block. |
+| Serving | Q4/Q8 AR and DFlash2 pass live continuation, disk restoration, C4 generated-history forks, sampled/greedy transitions and cancellation inside a verified block. Q8 also retains all eight d32K generated-history forks. |
 
 Current controls and binary/source identities:
 [Q4 AR](artifacts/q4-ar-c1-pruning.json),
@@ -82,11 +82,11 @@ acceptance is preserved. Evidence: [C2](artifacts/q4-c2-focused.json),
 [C8](artifacts/q4-c8-focused.json). The difficult Italian/Chinese C8 pair remains
 faster under AR; these controls do not establish universal speculative profitability.
 
-Q8 greedy C4 uses one shared width chosen from four private acceptance histories
-and complete measured cycle costs. A wider probe requires all four to have fully
-accepted the preceding block. Fixed, sampled and mixed cohorts retain private
-choices; C1/C2/C6/C8 keep their existing Q8 policy. Persistent draft state includes
-the last fully accepted width and rejects the previous layout.
+Q8 greedy C4/C8 use one shared width chosen from private acceptance histories
+and complete measured cycle costs. A wider probe requires the whole cohort to
+have fully accepted the preceding short block. Fixed, sampled and mixed cohorts
+retain private choices; C1/C2/C6 keep their existing Q8 policy. Persistent draft
+state includes the last fully accepted width and rejects the previous layout.
 
 The focused C4 controls retain all 128 AR tokens on Italian/Chinese prompts,
 full-acceptance repetition and a complete 34,824-token prompt checkpoint.
@@ -95,6 +95,14 @@ repetition and C1 pp/tg are retained. The deep speed control has zero new prefil
 generated-history forks are qualified separately above. Real-weight draft traces,
 private sampled RNG, RAM/persistent controller replay and snapshot accounting
 pass through C8.
+
+The C8 control reaches **54.84 tok/s** on the Italian/Chinese pair,
+**115.18 tok/s** on repetition and **40.51 tok/s** on d32K generated-history
+forks, as sums of individual decode rates. Every completion matches isolated
+AR; each deep request reuses 32,764 tokens and prefills 2,060 new tokens.
+The paired C1 control retains identical output and acceptance, with overlapping
+PP ranges and TG around 16.1 tok/s. Complete cycle profiles, forward/reverse C1
+controls and source identities are in the compact Q8 artifact.
 
 ## Meaning of Exact
 
