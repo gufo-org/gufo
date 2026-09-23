@@ -716,12 +716,9 @@ __global__ void dflash_selector_finalize_batch_kernel(
         confidences == nullptr ? nullptr : confidences + row,
         sequence.temperature,
         sequence.temperature > 0.0F ? uniforms + row : nullptr,
-        sequence.temperature > 0.0F && candidate_ids != nullptr
-            ? candidate_ids + candidate
-            : nullptr,
-        sequence.temperature > 0.0F && candidate_probabilities != nullptr
-            ? candidate_probabilities + candidate
-            : nullptr,
+        candidate_ids != nullptr ? candidate_ids + candidate : nullptr,
+        candidate_probabilities != nullptr ? candidate_probabilities + candidate
+                                           : nullptr,
         partial_count, selector_rank, selector_top_k);
     // Thread zero publishes the predecessor for this sequence's next step.
     // Other sequences own separate token, probability and partial buffers.

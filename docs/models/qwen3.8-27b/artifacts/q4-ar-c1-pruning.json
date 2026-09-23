@@ -641,7 +641,7 @@
     "legacy_rms": "8 byte-exact production-kernel comparisons, four input amplitudes, weighted/unweighted",
     "sampling": "qwen_sampling_hip_test passed, including 216 AR policies, p/q and residual CDFs, tiled argmax ties/nonfinite rows/tails at C1/2/4/6/8",
     "http": "All candidate Q4 greedy tg128 hashes match the baseline at d0 and d32K; prompt bytes and cache histories are pinned",
-    "limits": "Quantized execution regression controls, not independent original-checkpoint parity. Q8 and DFlash2 qualification of this increment remains pending."
+    "limits": "Historical controls only: expanded September 23 checks caught scalar RMSNorm contraction drift; see reductions_qualification. Original-checkpoint and Q8 parity remain unproven."
   },
   "rejected_experiments": [
     "Streaming Q4/Q5 weight loads: byte-exact; cold component gain did not survive the full model (ar-stream-d0).",
@@ -928,5 +928,187 @@
         "decision": "Separate O2/O3 objects pass byte equality; mapped Q5/Q4+Q5/IQ4 rates stay within 0.3% of baseline."
       }
     ]
+  },
+  "reductions_qualification": {
+    "date": "2026-09-23",
+    "source_parent": "f7a6effc8fef2d26753b7b6e86028280e4d9a6fd",
+    "source_files_sha256": {
+      "src/cli/serve/inference_backend.cpp": "83aa020e3beacd5befe91bc54c3430a1e4a6bcf7da4844706530c1c3a7a64120",
+      "src/models/qwen/hip/dflash.hpp": "c03847992533edb23e3d47bd8ce6d758b8a27a288c068ee7d3da3b6eb937b00b",
+      "src/models/qwen/hip/dflash/executor.cpp": "4db95d1eb5a93751e25eec9ee4ffd36422d2a56f6e3674e75c52c86fd5e1a7a5",
+      "src/models/qwen/hip/kernels/attention_decode.hip": "c10cd2dfc435d8daea0095f250ea6d29e3e511222ec519f478c478a2b98f1e43",
+      "src/models/qwen/hip/kernels/dflash_kernels.hip": "0ec8a3e3424ec67b3378cbebf090bc9a9ac9f3b597ed550f4bf69b5f0d1da45c",
+      "src/models/qwen/hip/kernels/dflash_kernels.hpp": "205a57964bcb0950351940ee14e06dc37222d17fcf8755fd4872f3b1c8e1a8f4",
+      "src/models/qwen/hip/kernels/norm.hip": "541ca4d1398c7179fd346cd923410ad9202e7c655babada8b769106fc29ebf0a",
+      "src/models/qwen/hip/kernels/prefill_norm.hip": "4305d442a89d2e716451921aa25174892ba1be820aaf8367bed41861dd8b074d",
+      "src/models/qwen/hip/prefill_chunk.cpp": "5132b6c1f5947211213d68c73bf58ab2a24b423eda408ccabdb1396097a65513",
+      "tests/models/qwen/hip/basic/elementwise_ops_test.cpp": "9c6fc1d2fa39b23f0279219ea4d104ac09b1a32430365c0bfe6e85a323725995",
+      "tests/models/qwen27b/attention_test.cpp": "22205e66769bddafba3f3360a2d52b1b475515201200a514e73e7613a88f8587",
+      "tests/models/qwen27b/target_test.cpp": "a096c925712f9dd205474b90705938f45b927ec29c6507bfccc7283d8778d558"
+    },
+    "controls": {
+      "final-reductions-ar-d0": {
+        "source": {
+          "revision": "f7a6eff-dirty",
+          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
+          "buildMode": "nix-release"
+        },
+        "implementation": "gufo",
+        "variant": "Q4_K_XL",
+        "mode": "ar",
+        "depth": 0,
+        "concurrency": 1,
+        "context_capacity": 36864,
+        "ready_seconds": 0.9707471500150859,
+        "load_memory_kib": {
+          "Rss": 17505912,
+          "Pss": 17502018,
+          "Anonymous": 17315304,
+          "AnonHugePages": 17166336,
+          "Locked": 0
+        },
+        "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+        "request": {
+          "concurrency": 1,
+          "repetition": 1,
+          "request_index": 0,
+          "prompt_tokens": 2033,
+          "cached_prompt_tokens": 0,
+          "completion_tokens": 128,
+          "prefill_tokens": 2033,
+          "wall_ms": 13373.408733023098,
+          "client_ttft_ms": 3017.9811990237795,
+          "client_event_inter_token_ms": 80.89655207852304,
+          "queue_ms": 1.226171,
+          "prefill_ms": 3016.262916,
+          "decode_ms": 10338.831000999995,
+          "server_ttft_ms": 3017.491882,
+          "server_inter_token_ms": 80.89679513385829,
+          "server_max_inter_token_ms": 97.119842,
+          "requested_logical_concurrency": 1,
+          "physical_execution_width": 1,
+          "execution_plan": "serial-c1",
+          "metrics_source": "gufo",
+          "cache_hit": false,
+          "draft_tokens": 0,
+          "draft_accepted_tokens": 0,
+          "draft_acceptance": null,
+          "case_id": null,
+          "category": null,
+          "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+          "prefill_tokens_per_second": 674.0128618151269,
+          "decode_tokens_per_second": 12.38050994233483
+        }
+      },
+      "final-reductions-ar-d32": {
+        "source": {
+          "revision": "f7a6eff-dirty",
+          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
+          "buildMode": "nix-release"
+        },
+        "implementation": "gufo",
+        "variant": "Q4_K_XL",
+        "mode": "ar",
+        "depth": 32768,
+        "concurrency": 1,
+        "context_capacity": 36864,
+        "ready_seconds": 0.9206473790109158,
+        "load_memory_kib": {
+          "Rss": 17475448,
+          "Pss": 17471554,
+          "Anonymous": 17304748,
+          "AnonHugePages": 17166336,
+          "Locked": 0
+        },
+        "input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+        "request": {
+          "concurrency": 1,
+          "repetition": 1,
+          "request_index": 0,
+          "prompt_tokens": 34563,
+          "cached_prompt_tokens": 32553,
+          "completion_tokens": 128,
+          "prefill_tokens": 2010,
+          "wall_ms": 15640.431278006872,
+          "client_ttft_ms": 4010.818481008755,
+          "client_event_inter_token_ms": 90.83381479520783,
+          "queue_ms": 8.183061,
+          "prefill_ms": 4001.682821,
+          "decode_ms": 11490.11139900001,
+          "server_ttft_ms": 4009.881783,
+          "server_inter_token_ms": 90.83427818110236,
+          "server_max_inter_token_ms": 225.738592,
+          "requested_logical_concurrency": 1,
+          "physical_execution_width": 1,
+          "execution_plan": "serial-c1",
+          "metrics_source": "gufo",
+          "cache_hit": true,
+          "draft_tokens": 0,
+          "draft_accepted_tokens": 0,
+          "draft_acceptance": null,
+          "case_id": null,
+          "category": null,
+          "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+          "prefill_tokens_per_second": 502.28868451340963,
+          "decode_tokens_per_second": 11.140013839303586
+        }
+      }
+    },
+    "sampled_replay": {
+      "source": {
+        "revision": "f7a6eff-dirty",
+        "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+        "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
+        "buildMode": "nix-release"
+      },
+      "mode": "ar",
+      "temperature": 0.8,
+      "sampling": {
+        "seed": 47,
+        "top_k": 40,
+        "top_p": 0.9,
+        "min_p": 0.05,
+        "frequency_penalty": 0.1,
+        "presence_penalty": 0.1,
+        "repeat_penalty": 1.05
+      },
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "requests": [
+        {
+          "prompt_tokens": 2033,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 2033,
+          "completion_tokens": 32,
+          "draft_tokens": 0,
+          "draft_accepted_tokens": 0,
+          "completion_sha256": "54b1893d2fff5dbedc05363b0071acf81f533355514ef309d077dc8cbb963473"
+        },
+        {
+          "prompt_tokens": 2033,
+          "cached_prompt_tokens": 2033,
+          "prefill_tokens": 0,
+          "completion_tokens": 32,
+          "draft_tokens": 0,
+          "draft_accepted_tokens": 0,
+          "completion_sha256": "54b1893d2fff5dbedc05363b0071acf81f533355514ef309d077dc8cbb963473"
+        }
+      ]
+    },
+    "quality": {
+      "scalar_norm_correction": "Expanded testing exposed an implicit-FMA contraction difference in f7a6eff cached scalar RMSNorm. Explicit fused accumulation and a runtime denominator retain the original generic arithmetic. Earlier eight byte-exact controls were insufficient.",
+      "rmsnorm_operator": "90 maintained FP64-formula controls at 1e-5 absolute tolerance, exact scalar/batch equality, BF16 RNE and optional FP32 output; dimensions 5119/5120/5121, rows 1/7/33/64/65, scales .001/.3/30, weighted/unweighted.",
+      "rmsnorm_ablation": "512 rows compare the original generic scalar, corrected cached scalar, generic batched and cached batched outputs without a differing float; separate 112 batched FP32/BF16 controls are byte-exact, maximum FP64 absolute error 2.42300728e-7.",
+      "attention": "128 byte-exact output comparisons at widths 1/3/7/8, depths 128/2048/32768/65536, four amplitudes, gated/ungated; maintained independent FP64 FP16/FP32 attention check passes through 32K.",
+      "selector": "C1/C2/C4/C6/C8 scalar/batched token chains, confidences and candidate probabilities match. Greedy optional candidates retain one-hot probabilities. Real-weight allocation equals its estimator; 15,616 bytes of separate partial storage removed.",
+      "replay_correction": "Missing verification records previously fell back to prefill arithmetic, reproducing with the original generic norm kernels (mixed-context FP16 KV max logit discrepancy 0.0477962). Reuse the recorded prefix, then execute only unrecorded rows using ForwardToken without logits.",
+      "target_model": "qwen27b_target_test passed: full logits/features, verification widths 2-8, mixed-context FP16/FP32 KV with/without replay, C1/C2/C4/C6/C8 including appended rows, context 262144 allocation, prefill 64/128/257/2048 and 8192-prefix/1025-suffix replay.",
+      "draft_model": "qwen_dflash_gpu_test passed: exact layers/logits/probabilities, ragged/full C2/C4/C6/C8, private fixed/adaptive RNG and policy, pending injection, RAM/persistent replay and ring wrap.",
+      "compatibility": "Snapshot payload unchanged; rmsnorm=fused-square-sum-v1 added to cache identity to reject old arithmetic states.",
+      "http_greedy": "All four d0/d32K release outputs match the pinned 128-token Q4 AR hashes; DFlash proposal/acceptance counts unchanged; PP retained.",
+      "limits": "Quantized execution consistency and independent operator formulas, not original-checkpoint parity. Q8, d64K/d128K and concurrent throughput are not refreshed in this increment; timing changes near 1% remain provisional."
+    },
+    "profile_artifact": "q4-dflash2-c1-focused.json:reductions_increment.profiles"
   }
 }

@@ -79,6 +79,7 @@ struct DFlashSelectorSequence {
 // Proposal rows are contiguous by sequence. Each token sequence includes its
 // anchor before the proposal slots; all other buffers contain proposals only.
 // Partial buffers need DFlashSelectorScratchElements(vocab_size) per proposal.
+// Requested candidates include one-hot probabilities for greedy sequences.
 void LaunchDFlashSelectorBatch(
     const float* logits, const float* projected_hidden,
     const void* predecessor_codebook_bf16, const void* successor_codebook_bf16,

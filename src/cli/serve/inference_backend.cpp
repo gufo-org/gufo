@@ -302,6 +302,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "state_abi=" << state_abi << '\n'
            << "payload_layout=qwen-gfx1151-live-prefix-v2\n"
            << "numerics=qwen-bf16-fp32-prefill-v1\n"
+           << "rmsnorm=fused-square-sum-v1\n"
            << "attention_split_min_context="
            << hip::detail::kSplitKDecodeAttentionMinContext << '\n'
            << "attention_split_count="

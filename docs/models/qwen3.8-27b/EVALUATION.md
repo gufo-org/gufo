@@ -4,24 +4,35 @@ Targets Q4/Q8; DFlash2 drafts Q4_K_M/Q8_0/BF16. Independent original-target,
 conversion and native MTP parity remain **TODO**. Packed-weight operator
 agreement is narrower evidence. [Artifact identities](artifacts/model-identities.json).
 
-The C1 AR kernel cleanup retains the RMSNorm reduction tree and caches its
-5120 input values and weights in registers. All 24 independent FP64-formula
-controls pass at the unchanged 1e-4 tolerance, including neighboring dimensions,
-three input scales and optional weights. Eight direct comparisons with the
-previous compiled kernel are byte-identical.
+The current scalar and small-batch RMSNorm cache the 5120 input values and
+weights in registers, retaining the descending reduction tree. An expanded
+check caught a contraction difference in the earlier cached scalar path:
+unrolling did not always retain the generic loop's fused square accumulation.
+The cached paths now request that FMA explicitly and keep the runtime
+normalization denominator. The earlier eight byte-identical controls were
+insufficient to establish equivalence.
+
+All 90 maintained batched controls pass the independent FP64 formula at
+1e-5 absolute tolerance and require byte-identical scalar/batched results:
+dimensions 5119/5120/5121, rows 1/7/33/64/65, three input scales and optional
+weights. BF16 round-to-nearest-even and BF16-only output also pass. The
+separate generic-versus-cached ablation has no differing values across
+512 rows; the batched optimization preserves the original kernel in
+112 FP32/BF16 controls.
 
 C1 reuses the tiled argmax and idle FFN scratch. The maintained GPU sampler
 check passes its 216 AR policies, speculative p/q/residual checks, ties,
 nonfinite rows and tile boundaries. Snapshot sizing uses the vocabulary size
 without downloading logits. Matched d0/d32K HTTP controls preserve all 128
 greedy tokens and cached-prefix reuse; the repeated d0 output also matches.
-No persistent allocation or snapshot format changes.
+Snapshot payload formats are unchanged. Cache compatibility includes the
+corrected normalization arithmetic, excluding snapshots from older builds.
 
 In a separate 16-token, depth-2048 profile, normalization falls from 23.99 to
 6.54 ms and argmax from 2.53 to 0.12 ms; total kernel time falls from 1324.26 to
 1304.37 ms. This explains approximately 1.24 ms saved per token.
 [Measurements and scope](artifacts/q4-ar-c1-pruning.json).
-Q8 and DFlash2 qualification of this increment follows the C1 Q4 AR phase.
+Q4 DFlash2 qualification is included below; Q8 remains **TODO**.
 
 The latest loader keeps the encoded weights unchanged in a read-only registered
 anonymous mapping, with transparent huge pages. Sixteen bounded workers populate
@@ -39,7 +50,46 @@ Process RSS remains about 16.70 GiB. Warm readiness is 0.82–0.97 s; the matche
 original mapping took 0.72 s. Anonymous weights replace the resident file mapping,
 but the OS can retain an additional reclaimable file cache. This is a decode
 speed/startup tradeoff, with no new quantization or original-checkpoint parity claim.
-Q8 and DFlash2 qualification of this memory layout remains **TODO**.
+Q4 DFlash2 now passes the same d0/d32K controls with this memory layout.
+Its warm readiness is 2.23 s with 17.80 GiB process RSS. Q8 qualification
+remains **TODO**.
+
+Attention reduction shares each partition exponential across the denominator
+and both output vectors, retaining each sum's order. All 128 direct comparisons
+are byte-identical through 64K, and the maintained independent FP64
+FP16/FP32 attention checks pass through 32K.
+
+C1 DFlash2 reuses the batched selector and finished FFN scratch, removing
+15,616 bytes of separate partial buffers for the supported draft. Requested
+greedy candidate outputs retain one-hot probabilities. Operator checks cover
+C1/C2/C4/C6/C8, and the real-weight draft test retains exact layers, logits,
+probabilities, private RNG, pending injection and RAM/persistent replay.
+Allocation accounting matches the estimator.
+
+The full target test exposed a second issue: when verification replay records
+are missing, the fallback used prefill arithmetic to rebuild recurrent state.
+The failure also reproduces with the original generic normalization kernels.
+The fallback now reuses the recorded prefix and decodes only unrecorded rows.
+The complete target check passes full-logit and feature equality across
+verification widths 2–8, mixed-context FP16/FP32 KV, C1/C2/C4/C6/C8,
+prefill/snapshot replay and an 8K prefix with a 1025-token continuation.
+No equality gate or tolerance was relaxed.
+
+The current release retains all 128 greedy tokens, acceptance counts and PP
+in matched d0/d32K AR/DFlash2 controls. Separate 32-token HTTP requests at
+temperature 0.8 and seed 47 combine top-k/top-p/min-p and repetition,
+frequency and presence penalties. Each mode reproduces its output after
+an exact 2033-token cache hit with zero prefill; DFlash2 also reproduces
+all proposal and acceptance counts.
+
+A separate four-cycle fixed-three-proposal profile attributes the speed gain
+to normalization (6.72 to 1.99 ms) and attention reduction (0.99 to 0.59 ms).
+Total kernel time falls from 415.77 to 411.06 ms; selector consolidation
+removes 14 launches but is roughly speed-neutral. This profile explains the
+mechanism; published throughput uses the adaptive HTTP controls.
+[Current measurements and checks](artifacts/q4-dflash2-c1-focused.json).
+These checks establish quantized execution consistency, not independent
+original-checkpoint parity.
 
 The 128-token split-K threshold is currently qualified on **Q4_K_XL C1 with
 AR and Q4_K_M DFlash2**. Matched d0/d32K pp2048/tg128 controls retain all 128

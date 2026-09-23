@@ -20,10 +20,6 @@ __global__ void RMSNormKernel(const float* __restrict__ x,
   constexpr std::size_t cached_items = CachedDim == 0 ? 1 : CachedDim / 256;
   float values[cached_items];
   float weights[cached_items];
-  if constexpr (CachedDim != 0) {
-    dim = CachedDim;
-  }
-
   float sum_sq = 0.0F;
   if constexpr (CachedDim != 0) {
 #pragma unroll
@@ -32,7 +28,8 @@ __global__ void RMSNormKernel(const float* __restrict__ x,
       const float val = x[i];
       values[item] = val;
       weights[item] = weight != nullptr ? weight[i] : 1.0F;
-      sum_sq += val * val;
+      // Keep the generic loop's FMA when the compiler unrolls the row.
+      sum_sq = __fmaf_rn(val, val, sum_sq);
     }
   } else {
     for (std::size_t i = tid; i < dim; i += blockDim.x) {

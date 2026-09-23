@@ -422,5 +422,538 @@
     "draft_accepted_tokens": 79,
     "completion_sha256": "4b08175e56abe7c2164a91259eb017c9f03fde7d9dbab95189fe2626e45a8616",
     "cache_hit": true
+  },
+  "reductions_increment": {
+    "date": "2026-09-23",
+    "source_parent": "f7a6effc8fef2d26753b7b6e86028280e4d9a6fd",
+    "source_files_sha256": {
+      "src/cli/serve/inference_backend.cpp": "83aa020e3beacd5befe91bc54c3430a1e4a6bcf7da4844706530c1c3a7a64120",
+      "src/models/qwen/hip/dflash.hpp": "c03847992533edb23e3d47bd8ce6d758b8a27a288c068ee7d3da3b6eb937b00b",
+      "src/models/qwen/hip/dflash/executor.cpp": "4db95d1eb5a93751e25eec9ee4ffd36422d2a56f6e3674e75c52c86fd5e1a7a5",
+      "src/models/qwen/hip/kernels/attention_decode.hip": "c10cd2dfc435d8daea0095f250ea6d29e3e511222ec519f478c478a2b98f1e43",
+      "src/models/qwen/hip/kernels/dflash_kernels.hip": "0ec8a3e3424ec67b3378cbebf090bc9a9ac9f3b597ed550f4bf69b5f0d1da45c",
+      "src/models/qwen/hip/kernels/dflash_kernels.hpp": "205a57964bcb0950351940ee14e06dc37222d17fcf8755fd4872f3b1c8e1a8f4",
+      "src/models/qwen/hip/kernels/norm.hip": "541ca4d1398c7179fd346cd923410ad9202e7c655babada8b769106fc29ebf0a",
+      "src/models/qwen/hip/kernels/prefill_norm.hip": "4305d442a89d2e716451921aa25174892ba1be820aaf8367bed41861dd8b074d",
+      "src/models/qwen/hip/prefill_chunk.cpp": "5132b6c1f5947211213d68c73bf58ab2a24b423eda408ccabdb1396097a65513",
+      "tests/models/qwen/hip/basic/elementwise_ops_test.cpp": "9c6fc1d2fa39b23f0279219ea4d104ac09b1a32430365c0bfe6e85a323725995",
+      "tests/models/qwen27b/attention_test.cpp": "22205e66769bddafba3f3360a2d52b1b475515201200a514e73e7613a88f8587",
+      "tests/models/qwen27b/target_test.cpp": "a096c925712f9dd205474b90705938f45b927ec29c6507bfccc7283d8778d558"
+    },
+    "implementation": "Register-cached small-batch RMSNorm with explicit FMA, reused attention partition exponentials, C1 batched selector/FFN scratch, scalar normalization and missing-record replay corrections.",
+    "controls": {
+      "huge-dflash-d0": {
+        "source": {
+          "revision": "f7a6effc8fef2d26753b7b6e86028280e4d9a6fd",
+          "binary_path": "/nix/store/fiynhkji5j5kwg7135v5lgjhfh89ljfb-gufo-9b23369-dirty/bin/gufo",
+          "binary_sha256": "00e3940504b2e77dc1864c15fdb4c7e7c27d0f835c894a3acd31043346f1274b",
+          "buildMode": "nix-release"
+        },
+        "implementation": "gufo",
+        "variant": "Q4_K_XL",
+        "mode": "dflash2",
+        "depth": 0,
+        "concurrency": 1,
+        "context_capacity": 36864,
+        "ready_seconds": 2.2795158549852204,
+        "load_memory_kib": {
+          "Rss": 18700860,
+          "Pss": 18697276,
+          "Anonymous": 17393776,
+          "AnonHugePages": 17182720,
+          "Locked": 0
+        },
+        "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+        "request": {
+          "concurrency": 1,
+          "repetition": 1,
+          "request_index": 0,
+          "prompt_tokens": 2033,
+          "cached_prompt_tokens": 0,
+          "completion_tokens": 128,
+          "prefill_tokens": 2033,
+          "wall_ms": 7539.932068990311,
+          "client_ttft_ms": 3294.992774986895,
+          "client_event_inter_token_ms": 33.41210073233201,
+          "queue_ms": 1.001387,
+          "prefill_ms": 3293.409219,
+          "decode_ms": 4223.20237,
+          "server_ttft_ms": 3294.424022,
+          "server_inter_token_ms": 33.41186525196849,
+          "server_max_inter_token_ms": 130.632244,
+          "requested_logical_concurrency": 1,
+          "physical_execution_width": 1,
+          "execution_plan": "serial-c1",
+          "metrics_source": "gufo",
+          "cache_hit": false,
+          "draft_tokens": 186,
+          "draft_accepted_tokens": 88,
+          "draft_acceptance": 0.4731182795698925,
+          "case_id": null,
+          "category": null,
+          "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+          "prefill_tokens_per_second": 617.2934685041337,
+          "decode_tokens_per_second": 30.308753591649456
+        }
+      },
+      "huge-dflash-d32": {
+        "source": {
+          "revision": "f7a6effc8fef2d26753b7b6e86028280e4d9a6fd",
+          "binary_path": "/nix/store/fiynhkji5j5kwg7135v5lgjhfh89ljfb-gufo-9b23369-dirty/bin/gufo",
+          "binary_sha256": "00e3940504b2e77dc1864c15fdb4c7e7c27d0f835c894a3acd31043346f1274b",
+          "buildMode": "nix-release"
+        },
+        "implementation": "gufo",
+        "variant": "Q4_K_XL",
+        "mode": "dflash2",
+        "depth": 32768,
+        "concurrency": 1,
+        "context_capacity": 36864,
+        "ready_seconds": 2.2794113410054706,
+        "load_memory_kib": {
+          "Rss": 18700796,
+          "Pss": 18697212,
+          "Anonymous": 17393712,
+          "AnonHugePages": 17182720,
+          "Locked": 0
+        },
+        "input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+        "request": {
+          "concurrency": 1,
+          "repetition": 1,
+          "request_index": 0,
+          "prompt_tokens": 34563,
+          "cached_prompt_tokens": 32552,
+          "completion_tokens": 128,
+          "prefill_tokens": 2011,
+          "wall_ms": 10288.661464001052,
+          "client_ttft_ms": 4236.117953987559,
+          "client_event_inter_token_ms": 47.61332133074482,
+          "queue_ms": 8.503871,
+          "prefill_ms": 4226.781545,
+          "decode_ms": 5906.618999000001,
+          "server_ttft_ms": 4235.304773,
+          "server_inter_token_ms": 47.61338917322834,
+          "server_max_inter_token_ms": 272.060979,
+          "requested_logical_concurrency": 1,
+          "physical_execution_width": 1,
+          "execution_plan": "serial-c1",
+          "metrics_source": "gufo",
+          "cache_hit": true,
+          "draft_tokens": 186,
+          "draft_accepted_tokens": 82,
+          "draft_acceptance": 0.44086021505376344,
+          "case_id": null,
+          "category": null,
+          "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+          "prefill_tokens_per_second": 475.77571222692563,
+          "decode_tokens_per_second": 21.67060377885734
+        }
+      },
+      "cached-batch-norm-dflash-d0": {
+        "source": {
+          "revision": "f7a6eff-dirty",
+          "binary_path": "/nix/store/rqlr2b6abwmxzvzk2ic8zlcr1nz3jang-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_sha256": "0690c467d631874cad73b938e04776bdd4ecbe09b8b8a8266123e057ffc22e5d",
+          "buildMode": "nix-release"
+        },
+        "implementation": "gufo",
+        "variant": "Q4_K_XL",
+        "mode": "dflash2",
+        "depth": 0,
+        "concurrency": 1,
+        "context_capacity": 36864,
+        "ready_seconds": 2.2297775570186786,
+        "load_memory_kib": {
+          "Rss": 18700688,
+          "Pss": 18697104,
+          "Anonymous": 17393732,
+          "AnonHugePages": 17182720,
+          "Locked": 0
+        },
+        "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+        "request": {
+          "concurrency": 1,
+          "repetition": 1,
+          "request_index": 0,
+          "prompt_tokens": 2033,
+          "cached_prompt_tokens": 0,
+          "completion_tokens": 128,
+          "prefill_tokens": 2033,
+          "wall_ms": 7453.74894500128,
+          "client_ttft_ms": 3263.0957220098935,
+          "client_event_inter_token_ms": 32.988951921208184,
+          "queue_ms": 1.350744,
+          "prefill_ms": 3261.236571,
+          "decode_ms": 4169.4640660000005,
+          "server_ttft_ms": 3262.599798,
+          "server_inter_token_ms": 32.98882017322836,
+          "server_max_inter_token_ms": 129.167556,
+          "requested_logical_concurrency": 1,
+          "physical_execution_width": 1,
+          "execution_plan": "serial-c1",
+          "metrics_source": "gufo",
+          "cache_hit": false,
+          "draft_tokens": 186,
+          "draft_accepted_tokens": 88,
+          "draft_acceptance": 0.4731182795698925,
+          "case_id": null,
+          "category": null,
+          "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+          "prefill_tokens_per_second": 623.3831725297429,
+          "decode_tokens_per_second": 30.699389171807287
+        }
+      },
+      "reductions-dflash-d0": {
+        "source": {
+          "revision": "f7a6eff-dirty",
+          "binary_path": "/nix/store/fx9bvv4basxdygr28dj3zfm23lvsg1a8-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_sha256": "eb807a7b10e42fd466786384dc045b7fe7d14a4bb685cf696b05450cc97f5627",
+          "buildMode": "nix-release"
+        },
+        "implementation": "gufo",
+        "variant": "Q4_K_XL",
+        "mode": "dflash2",
+        "depth": 0,
+        "concurrency": 1,
+        "context_capacity": 36864,
+        "ready_seconds": 2.230445838999003,
+        "load_memory_kib": {
+          "Rss": 18700688,
+          "Pss": 18697104,
+          "Anonymous": 17393732,
+          "AnonHugePages": 17182720,
+          "Locked": 0
+        },
+        "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+        "request": {
+          "concurrency": 1,
+          "repetition": 1,
+          "request_index": 0,
+          "prompt_tokens": 2033,
+          "cached_prompt_tokens": 0,
+          "completion_tokens": 128,
+          "prefill_tokens": 2033,
+          "wall_ms": 7440.5485760071315,
+          "client_ttft_ms": 3260.8661350095645,
+          "client_event_inter_token_ms": 32.902408535381426,
+          "queue_ms": 1.388214,
+          "prefill_ms": 3258.795728,
+          "decode_ms": 4158.620653,
+          "server_ttft_ms": 3260.196645,
+          "server_inter_token_ms": 32.90378546456696,
+          "server_max_inter_token_ms": 128.972182,
+          "requested_logical_concurrency": 1,
+          "physical_execution_width": 1,
+          "execution_plan": "serial-c1",
+          "metrics_source": "gufo",
+          "cache_hit": false,
+          "draft_tokens": 186,
+          "draft_accepted_tokens": 88,
+          "draft_acceptance": 0.4731182795698925,
+          "case_id": null,
+          "category": null,
+          "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+          "prefill_tokens_per_second": 623.8500874823781,
+          "decode_tokens_per_second": 30.7794364238685
+        }
+      },
+      "reductions-dflash-d32": {
+        "source": {
+          "revision": "f7a6eff-dirty",
+          "binary_path": "/nix/store/fx9bvv4basxdygr28dj3zfm23lvsg1a8-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_sha256": "eb807a7b10e42fd466786384dc045b7fe7d14a4bb685cf696b05450cc97f5627",
+          "buildMode": "nix-release"
+        },
+        "implementation": "gufo",
+        "variant": "Q4_K_XL",
+        "mode": "dflash2",
+        "depth": 32768,
+        "concurrency": 1,
+        "context_capacity": 36864,
+        "ready_seconds": 2.230626975011546,
+        "load_memory_kib": {
+          "Rss": 18700688,
+          "Pss": 18697104,
+          "Anonymous": 17393732,
+          "AnonHugePages": 17182720,
+          "Locked": 0
+        },
+        "input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+        "request": {
+          "concurrency": 1,
+          "repetition": 1,
+          "request_index": 0,
+          "prompt_tokens": 34563,
+          "cached_prompt_tokens": 32552,
+          "completion_tokens": 128,
+          "prefill_tokens": 2011,
+          "wall_ms": 10218.164560006699,
+          "client_ttft_ms": 4228.179571015062,
+          "client_event_inter_token_ms": 47.11887588189167,
+          "queue_ms": 8.43088,
+          "prefill_ms": 4218.912948,
+          "decode_ms": 5843.612200999998,
+          "server_ttft_ms": 4227.362323,
+          "server_inter_token_ms": 47.118429999999975,
+          "server_max_inter_token_ms": 270.956836,
+          "requested_logical_concurrency": 1,
+          "physical_execution_width": 1,
+          "execution_plan": "serial-c1",
+          "metrics_source": "gufo",
+          "cache_hit": true,
+          "draft_tokens": 186,
+          "draft_accepted_tokens": 82,
+          "draft_acceptance": 0.44086021505376344,
+          "case_id": null,
+          "category": null,
+          "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+          "prefill_tokens_per_second": 476.66307050808575,
+          "decode_tokens_per_second": 21.904259830605422
+        }
+      },
+      "final-reductions-dflash-d0": {
+        "source": {
+          "revision": "f7a6eff-dirty",
+          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
+          "buildMode": "nix-release"
+        },
+        "implementation": "gufo",
+        "variant": "Q4_K_XL",
+        "mode": "dflash2",
+        "depth": 0,
+        "concurrency": 1,
+        "context_capacity": 36864,
+        "ready_seconds": 2.230690436990699,
+        "load_memory_kib": {
+          "Rss": 18668420,
+          "Pss": 18664526,
+          "Anonymous": 17381372,
+          "AnonHugePages": 17182720,
+          "Locked": 0
+        },
+        "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+        "request": {
+          "concurrency": 1,
+          "repetition": 1,
+          "request_index": 0,
+          "prompt_tokens": 2033,
+          "cached_prompt_tokens": 0,
+          "completion_tokens": 128,
+          "prefill_tokens": 2033,
+          "wall_ms": 7487.363117019413,
+          "client_ttft_ms": 3282.473444007337,
+          "client_event_inter_token_ms": 33.09675541731133,
+          "queue_ms": 1.202396,
+          "prefill_ms": 3280.399312,
+          "decode_ms": 4174.759064,
+          "server_ttft_ms": 3281.620643,
+          "server_inter_token_ms": 33.09850129921258,
+          "server_max_inter_token_ms": 138.234445,
+          "requested_logical_concurrency": 1,
+          "physical_execution_width": 1,
+          "execution_plan": "serial-c1",
+          "metrics_source": "gufo",
+          "cache_hit": false,
+          "draft_tokens": 186,
+          "draft_accepted_tokens": 88,
+          "draft_acceptance": 0.4731182795698925,
+          "case_id": null,
+          "category": null,
+          "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+          "prefill_tokens_per_second": 619.7416249183751,
+          "decode_tokens_per_second": 30.660452025549517
+        }
+      },
+      "final-reductions-dflash-d32": {
+        "source": {
+          "revision": "f7a6eff-dirty",
+          "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+          "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
+          "buildMode": "nix-release"
+        },
+        "implementation": "gufo",
+        "variant": "Q4_K_XL",
+        "mode": "dflash2",
+        "depth": 32768,
+        "concurrency": 1,
+        "context_capacity": 36864,
+        "ready_seconds": 2.2308232779905666,
+        "load_memory_kib": {
+          "Rss": 18668420,
+          "Pss": 18664526,
+          "Anonymous": 17381372,
+          "AnonHugePages": 17182720,
+          "Locked": 0
+        },
+        "input_sha256": "7444310f6e9f16337a70cf45980260809b8601a91adb667f8a9618ba62414f51",
+        "request": {
+          "concurrency": 1,
+          "repetition": 1,
+          "request_index": 0,
+          "prompt_tokens": 34563,
+          "cached_prompt_tokens": 32552,
+          "completion_tokens": 128,
+          "prefill_tokens": 2011,
+          "wall_ms": 10214.978254021844,
+          "client_ttft_ms": 4225.655122019816,
+          "client_event_inter_token_ms": 47.11285866127812,
+          "queue_ms": 7.388135,
+          "prefill_ms": 4217.281598,
+          "decode_ms": 5843.280197,
+          "server_ttft_ms": 4224.685313,
+          "server_inter_token_ms": 47.11418728346455,
+          "server_max_inter_token_ms": 270.654552,
+          "requested_logical_concurrency": 1,
+          "physical_execution_width": 1,
+          "execution_plan": "serial-c1",
+          "metrics_source": "gufo",
+          "cache_hit": true,
+          "draft_tokens": 186,
+          "draft_accepted_tokens": 82,
+          "draft_acceptance": 0.44086021505376344,
+          "case_id": null,
+          "category": null,
+          "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+          "prefill_tokens_per_second": 476.84745570551775,
+          "decode_tokens_per_second": 21.9055043887364
+        }
+      }
+    },
+    "method": "Fresh HTTP C1 per point, greedy seed 1, adaptive Q4_K_M DFlash2, pinned pp2048/tg128 messages, context 36864, one warmup and one measured request. Intermediate controls are ablations, not final-build numbers. No build or other GPU work overlaps timings.",
+    "profiles": {
+      "before": {
+        "scope": "last complete fixed-three-proposal cycles, from draft embedding through target verification and next context injection",
+        "cycles": 4,
+        "dispatch_count": 4574,
+        "kernel_ms": 415.773184,
+        "busy_ms": 410.024909,
+        "wall_span_ms": 422.151857,
+        "stages": {
+          "other": {
+            "calls": 1880,
+            "ms": 28.32313299999998
+          },
+          "rmsnorm": {
+            "calls": 564,
+            "ms": 6.717920000000002
+          },
+          "projections": {
+            "calls": 1872,
+            "ms": 361.99718000000024
+          },
+          "selector": {
+            "calls": 22,
+            "ms": 0.9700199999999999
+          },
+          "copy_fill": {
+            "calls": 108,
+            "ms": 11.415944000000007
+          },
+          "attention_partials": {
+            "calls": 64,
+            "ms": 5.3568109999999995
+          },
+          "attention_reduce": {
+            "calls": 64,
+            "ms": 0.9921760000000002
+          }
+        }
+      },
+      "after": {
+        "scope": "last complete fixed-three-proposal cycles, from draft embedding through target verification and next context injection",
+        "cycles": 4,
+        "dispatch_count": 4560,
+        "kernel_ms": 411.064371,
+        "busy_ms": 405.329556,
+        "wall_span_ms": 417.317222,
+        "stages": {
+          "other": {
+            "calls": 1880,
+            "ms": 28.365108999999972
+          },
+          "rmsnorm": {
+            "calls": 564,
+            "ms": 1.9930439999999998
+          },
+          "projections": {
+            "calls": 1872,
+            "ms": 362.24868399999957
+          },
+          "selector": {
+            "calls": 8,
+            "ms": 1.091889
+          },
+          "copy_fill": {
+            "calls": 108,
+            "ms": 11.409017000000002
+          },
+          "attention_partials": {
+            "calls": 64,
+            "ms": 5.370962999999999
+          },
+          "attention_reduce": {
+            "calls": 64,
+            "ms": 0.5856650000000001
+          }
+        }
+      },
+      "method": "Separate CLI profile: Q4_K_XL, Q4_K_M DFlash2, fixed three proposals, depth 2048, 16 generated tokens, one process per build. Same last four complete cycles; headline rates use HTTP adaptive requests.",
+      "interpretation": "Normalization and attention reduction explain the gain. Selector launches decrease from 22 to 8; its own kernel time increases by 0.12 ms across four cycles, so no isolated selector speed gain is claimed."
+    },
+    "quality": {
+      "scalar_norm_correction": "Expanded testing exposed an implicit-FMA contraction difference in f7a6eff cached scalar RMSNorm. Explicit fused accumulation and a runtime denominator retain the original generic arithmetic. Earlier eight byte-exact controls were insufficient.",
+      "rmsnorm_operator": "90 maintained FP64-formula controls at 1e-5 absolute tolerance, exact scalar/batch equality, BF16 RNE and optional FP32 output; dimensions 5119/5120/5121, rows 1/7/33/64/65, scales .001/.3/30, weighted/unweighted.",
+      "rmsnorm_ablation": "512 rows compare the original generic scalar, corrected cached scalar, generic batched and cached batched outputs without a differing float; separate 112 batched FP32/BF16 controls are byte-exact, maximum FP64 absolute error 2.42300728e-7.",
+      "attention": "128 byte-exact output comparisons at widths 1/3/7/8, depths 128/2048/32768/65536, four amplitudes, gated/ungated; maintained independent FP64 FP16/FP32 attention check passes through 32K.",
+      "selector": "C1/C2/C4/C6/C8 scalar/batched token chains, confidences and candidate probabilities match. Greedy optional candidates retain one-hot probabilities. Real-weight allocation equals its estimator; 15,616 bytes of separate partial storage removed.",
+      "replay_correction": "Missing verification records previously fell back to prefill arithmetic, reproducing with the original generic norm kernels (mixed-context FP16 KV max logit discrepancy 0.0477962). Reuse the recorded prefix, then execute only unrecorded rows using ForwardToken without logits.",
+      "target_model": "qwen27b_target_test passed: full logits/features, verification widths 2-8, mixed-context FP16/FP32 KV with/without replay, C1/C2/C4/C6/C8 including appended rows, context 262144 allocation, prefill 64/128/257/2048 and 8192-prefix/1025-suffix replay.",
+      "draft_model": "qwen_dflash_gpu_test passed: exact layers/logits/probabilities, ragged/full C2/C4/C6/C8, private fixed/adaptive RNG and policy, pending injection, RAM/persistent replay and ring wrap.",
+      "compatibility": "Snapshot payload unchanged; rmsnorm=fused-square-sum-v1 added to cache identity to reject old arithmetic states.",
+      "http_greedy": "All four d0/d32K release outputs match the pinned 128-token Q4 AR hashes; DFlash proposal/acceptance counts unchanged; PP retained.",
+      "limits": "Quantized execution consistency and independent operator formulas, not original-checkpoint parity. Q8, d64K/d128K and concurrent throughput are not refreshed in this increment; timing changes near 1% remain provisional."
+    },
+    "sampled_replay": {
+      "source": {
+        "revision": "f7a6eff-dirty",
+        "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+        "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
+        "buildMode": "nix-release"
+      },
+      "mode": "dflash2",
+      "temperature": 0.8,
+      "sampling": {
+        "seed": 47,
+        "top_k": 40,
+        "top_p": 0.9,
+        "min_p": 0.05,
+        "frequency_penalty": 0.1,
+        "presence_penalty": 0.1,
+        "repeat_penalty": 1.05
+      },
+      "input_sha256": "72e0e890fe139f5120679fd5a363ec73bfd63a22bc81920b9f368587063aabd7",
+      "requests": [
+        {
+          "prompt_tokens": 2033,
+          "cached_prompt_tokens": 0,
+          "prefill_tokens": 2033,
+          "completion_tokens": 32,
+          "draft_tokens": 53,
+          "draft_accepted_tokens": 18,
+          "completion_sha256": "d3f1c07cf23d0f5e4c52e912d54bd6d1aa7865c8ab1a07f91bacdd2326530ed1"
+        },
+        {
+          "prompt_tokens": 2033,
+          "cached_prompt_tokens": 2033,
+          "prefill_tokens": 0,
+          "completion_tokens": 32,
+          "draft_tokens": 53,
+          "draft_accepted_tokens": 18,
+          "completion_sha256": "d3f1c07cf23d0f5e4c52e912d54bd6d1aa7865c8ab1a07f91bacdd2326530ed1"
+        }
+      ]
+    }
   }
 }

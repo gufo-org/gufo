@@ -328,11 +328,11 @@ void TestBatchedSelector() {
                                std::bit_cast<std::uint32_t>(b);
                       });
   };
-  for (const auto users : {2U, 4U, 6U, 8U}) {
+  for (const auto users : {1U, 2U, 4U, 6U, 8U}) {
     std::vector<DFlashSelectorSequence> sequences(users);
     std::uint32_t rows = 0;
     for (std::uint32_t index = 0; index < users; ++index) {
-      sequences[index] = {1U + (index * 3U) % 7U,
+      sequences[index] = {users == 1 ? 7U : 1U + (index * 3U) % 7U,
                           std::array{0.0F, 0.8F, 1e-38F, 1.2F}[index % 4]};
       rows += sequences[index].count;
     }
@@ -372,11 +372,9 @@ void TestBatchedSelector() {
               d_tokens.data() + row + index, d_tokens.data() + row + index + 1U,
               d_confidences.data() + row, d_scores.data(), d_ids.data(),
               sequence.temperature, d_uniforms.data() + row,
-              sequence.temperature > 0 ? d_candidates.data() + row * top_k
-                                       : nullptr,
-              sequence.temperature > 0 ? d_probabilities.data() + row * top_k
-                                       : nullptr,
-              vocab, rank, top_k, nullptr);
+              d_candidates.data() + row * top_k,
+              d_probabilities.data() + row * top_k, vocab, rank, top_k,
+              nullptr);
         }
         first_row += sequence.count;
       }

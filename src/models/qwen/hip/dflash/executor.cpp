@@ -297,15 +297,15 @@ void QwenDFlashGpuExecutor::Allocate() {
   allocate_scratch(d_dynamic_coefficients_, block_size * dynamic_size);
   allocate_scratch(d_q_, block_size * q_dim);
   allocate_scratch(d_attn_out_, block_size * q_dim);
-  allocate_scratch(d_ffn_gate_, block_size * intermediate_size);
-  allocate_scratch(d_ffn_up_, block_size * intermediate_size);
+  const auto selector_scratch_elements =
+      kernels::DFlashSelectorScratchElements(cfg.vocab_size);
+  const auto ffn_scratch_width =
+      std::max(intermediate_size, selector_scratch_elements);
+  allocate_scratch(d_ffn_gate_, block_size * ffn_scratch_width);
+  allocate_scratch(d_ffn_up_, block_size * ffn_scratch_width);
   allocate_scratch(d_ffn_down_, block_size * hidden_size);
   allocate_scratch(d_logits_, block_size * cfg.vocab_size);
   allocate_scratch(d_selector_hidden_, block_size * df_cfg.selector_rank);
-  const std::size_t selector_scratch_elements =
-      kernels::DFlashSelectorScratchElements(cfg.vocab_size);
-  allocate_scratch(d_selector_partial_scores_, selector_scratch_elements);
-  allocate_scratch(d_selector_partial_ids_, selector_scratch_elements);
   allocate_scratch(d_selector_candidate_ids_,
                    block_size * df_cfg.selector_top_k);
   allocate_scratch(d_selector_candidate_probabilities_,
@@ -522,12 +522,6 @@ void QwenDFlashGpuExecutor::Free() noexcept {
     (void)hipFree(d_logits_);
   if (d_selector_hidden_ != nullptr)
     (void)hipFree(d_selector_hidden_);
-  if (d_selector_partial_scores_ != nullptr) {
-    (void)hipFree(d_selector_partial_scores_);
-  }
-  if (d_selector_partial_ids_ != nullptr) {
-    (void)hipFree(d_selector_partial_ids_);
-  }
   if (d_selector_candidate_ids_ != nullptr) {
     (void)hipFree(d_selector_candidate_ids_);
   }
@@ -584,13 +578,15 @@ QwenGpuMemoryUsage QwenDFlashGpuExecutor::EstimateMemoryUsage(
   const std::size_t shared = std::max(injection, block);
   const std::size_t dynamic =
       2U * draft.conv_kernel_size * (hidden / draft.conv_group_size);
+  const auto ffn_scratch_width = std::max<std::size_t>(
+      config.intermediate_size,
+      kernels::DFlashSelectorScratchElements(config.vocab_size));
   const std::size_t scratch_elements =
       injection * draft.target_layer_ids.size() * hidden +
       shared * (2U * hidden + 2U * kv) +
       block * (3U * hidden + dynamic + 2U * config.AttentionSize() +
-               2U * config.intermediate_size + config.vocab_size +
-               draft.selector_rank + 2U * draft.selector_top_k + 3U) +
-      2U * kernels::DFlashSelectorScratchElements(config.vocab_size);
+               2U * ffn_scratch_width + config.vocab_size +
+               draft.selector_rank + 2U * draft.selector_top_k + 3U);
   QwenGpuMemoryUsage usage{
       .request_state_bytes = 2U * draft.num_layers *
                              static_cast<std::size_t>(
@@ -1094,24 +1090,21 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
       throw std::runtime_error("DFlash GPU sampling upload failed");
     }
   }
-  for (std::size_t proposal = 0; proposal < draft_count; ++proposal) {
-    const std::size_t candidate_offset = proposal * df_cfg.selector_top_k;
-    kernels::LaunchDFlashSelectorStep(
-        d_logits_ + (proposal * vocab_size),
-        d_selector_hidden_ + (proposal * df_cfg.selector_rank),
-        weights.selector_predecessor.data, weights.selector_successor.data,
-        d_out_token_ + proposal, d_out_token_ + proposal + 1U,
-        d_confidences_ + proposal, d_selector_partial_scores_,
-        d_selector_partial_ids_, temperature,
-        temperature > 0.0F ? d_selector_uniforms_ + proposal : nullptr,
-        out_candidate_ids != nullptr
-            ? d_selector_candidate_ids_ + candidate_offset
-            : nullptr,
-        out_candidate_probabilities != nullptr
-            ? d_selector_candidate_probabilities_ + candidate_offset
-            : nullptr,
-        vocab_size, df_cfg.selector_rank, df_cfg.selector_top_k, stream_);
-  }
+  // The FFN is finished. Its buffers hold all independent top-k partials;
+  // one selector launch then walks this request's predecessor chain.
+  const std::array sequences{
+      kernels::DFlashSelectorSequence{draft_count, temperature}};
+  kernels::LaunchDFlashSelectorBatch(
+      d_logits_, d_selector_hidden_, weights.selector_predecessor.data,
+      weights.selector_successor.data, d_out_token_, d_confidences_,
+      d_ffn_gate_, reinterpret_cast<std::uint32_t*>(d_ffn_up_),
+      temperature > 0.0F ? d_selector_uniforms_ : nullptr,
+      out_candidate_ids != nullptr ? d_selector_candidate_ids_ : nullptr,
+      out_candidate_probabilities != nullptr
+          ? d_selector_candidate_probabilities_
+          : nullptr,
+      sequences, vocab_size, df_cfg.selector_rank, df_cfg.selector_top_k,
+      stream_);
 
   const auto token_copy =
       hipMemcpyAsync(tokens.data(), d_out_token_ + 1U,

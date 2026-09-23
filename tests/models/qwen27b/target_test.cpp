@@ -221,8 +221,17 @@ void CheckMixedContextBatch(const Executor& owner, bool replay) {
       Expect(predictions.size() == sessions.size(),
              "mixed-context batch returned the wrong number of rows");
       for (std::size_t row = 0; row < sessions.size(); ++row) {
-        Expect(ByteEqual(Logits(*sessions[row]), expected[row][step]),
-               "mixed-context batching changed target logits");
+        const auto actual = Logits(*sessions[row]);
+        const bool exact = ByteEqual(actual, expected[row][step]);
+        if (!exact) {
+          const auto comparison =
+              gufo::testing::CompareLogits(actual, expected[row][step]);
+          std::cerr << "mixed-context storage=" << static_cast<int>(storage)
+                    << " replay=" << replay << " row=" << row
+                    << " step=" << step
+                    << " max_abs=" << comparison.max_abs_diff << '\n';
+        }
+        Expect(exact, "mixed-context batching changed target logits");
         const auto& logits = expected[row][step];
         const auto next = static_cast<Token>(std::ranges::max_element(logits) -
                                              logits.begin());

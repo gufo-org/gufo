@@ -239,8 +239,6 @@ private:
   float* d_ffn_down_{nullptr};
   float* d_logits_{nullptr};
   float* d_selector_hidden_{nullptr};
-  float* d_selector_partial_scores_{nullptr};
-  std::uint32_t* d_selector_partial_ids_{nullptr};
   std::uint32_t* d_selector_candidate_ids_{nullptr};
   float* d_selector_candidate_probabilities_{nullptr};
   float* d_selector_uniforms_{nullptr};

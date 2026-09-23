@@ -815,13 +815,6 @@ __launch_bounds__(32) __global__ void QwenDecodeSplitKAttentionReduceKernel(
         fmaxf(global_max, scratch[((head_partition_offset + split) * 2) + 0]);
   }
 
-  float global_sum = 0.0F;
-  for (std::uint32_t split = 0; split < split_count; ++split) {
-    const std::size_t stats_offset = (head_partition_offset + split) * 2;
-    const float partition_scale = expf(scratch[stats_offset] - global_max);
-    global_sum += scratch[stats_offset + 1] * partition_scale;
-  }
-
   const std::size_t stats_elements =
       static_cast<std::size_t>(num_heads) * max_splits * 2;
   const auto* partial_outputs =
@@ -832,23 +825,31 @@ __launch_bounds__(32) __global__ void QwenDecodeSplitKAttentionReduceKernel(
       gate == nullptr ? nullptr
                       : reinterpret_cast<const float4*>(
                             gate + (static_cast<std::size_t>(head) * head_dim));
-  const float inverse_sum = 1.0F / global_sum;
-
+  // Each output vector and the denominator visit partitions in the same
+  // order. Share their scale instead of recomputing its exponential.
+  float global_sum = 0.0F;
+  float4 results[vectors_per_lane]{};
+  for (std::uint32_t split = 0; split < split_count; ++split) {
+    const std::size_t partition_index = head_partition_offset + split;
+    const float partition_scale =
+        expf(scratch[partition_index * 2] - global_max);
+    global_sum += scratch[partition_index * 2 + 1] * partition_scale;
 #pragma unroll
-  for (std::uint32_t vector = 0; vector < vectors_per_lane; ++vector) {
-    float4 result{};
-    for (std::uint32_t split = 0; split < split_count; ++split) {
-      const std::size_t partition_index = head_partition_offset + split;
-      const float partition_scale =
-          expf(scratch[partition_index * 2] - global_max);
+    for (std::uint32_t vector = 0; vector < vectors_per_lane; ++vector) {
       const float4 partial = partial_outputs[(partition_index * vector_width) +
                                              lane + (vector * 32)];
+      auto& result = results[vector];
       result.x += partial.x * partition_scale;
       result.y += partial.y * partition_scale;
       result.z += partial.z * partition_scale;
       result.w += partial.w * partition_scale;
     }
+  }
+  const float inverse_sum = 1.0F / global_sum;
 
+#pragma unroll
+  for (std::uint32_t vector = 0; vector < vectors_per_lane; ++vector) {
+    auto result = results[vector];
     result.x *= inverse_sum;
     result.y *= inverse_sum;
     result.z *= inverse_sum;

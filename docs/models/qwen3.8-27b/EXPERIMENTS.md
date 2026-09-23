@@ -71,18 +71,22 @@
 | Wave64 scalar projections and uniform row addresses | Not promoted: cold-weight gains are flat or mixed; some Q4/Q6 shapes regress. |
 | Copied weights, including a complete GGUF allocation | Not promoted: the complete-copy control has 3–8% lower cold-weight throughput than mapped weights, with identical outputs. |
 | Exact zero-exponent fast path, scalar score broadcast and LDS-only barriers | Not promoted: byte-exact, but no useful gain after shared KV staging. |
-| Register-cached decode RMSNorm, tiled C1 argmax and snapshot sizing | Retained: original normalization arithmetic, existing exact argmax and no logits download merely to count them. Matched Q4 C1 AR gains 1.3–1.5% at d0/d32K, with unchanged output and comparable PP. |
+| Register-cached decode RMSNorm, tiled C1 argmax and snapshot sizing | Retained with explicit fused square accumulation after expanded tests caught a contraction difference. Existing exact argmax and no logits download merely to count them; full-logit replay now passes. |
 | Streaming Q4/Q5 payload loads | Rejected: byte-exact cold-kernel gains regress full-model AR by about 1%. |
 | Q6 format specialization and paired/split SSM projections | Not promoted: byte-exact, but negligible gains or regressions; split SSM adds launches. |
 | Precomputed affine input sums | Rejected: byte-exact, but no consistent cold-projection benefit after including the preparation pass. |
 | Gate/up input sharing, including four simultaneous dots | Not retained: exact kernel outputs and verification checks, but the paired implementation stays flat in full-model Q4 C1 AR despite cold-kernel gains. |
-| Huge-page-backed immutable weights | Retained for the focused Q4 C1 phase: identical encoded bytes and greedy/cache results, approximately 2% more TG at d0/d32K, comparable PP and unchanged process RSS. Parallel chunk copies keep warm readiness below one second; cold loading and other modes still need qualification. |
+| Huge-page-backed immutable weights | Retained for Q4 C1 AR/DFlash2: identical encoded bytes and greedy/cache results, approximately 2% more AR TG at d0/d32K, comparable PP and unchanged process RSS. Warm AR readiness stays below one second; cold loading and Q8 still need qualification. |
 | Residual/RMSNorm fusion after register caching | Rejected: byte-exact and faster as a component, but full-model AR is slower. |
 | Separate gate/up waves, staged inputs, fixed FFN geometry and `-O3` | Not retained: byte-exact controls, but no useful isolated mapped-weight gain. Stage weights as production does; device-allocated microbenchmarks overstated earlier gains. |
+| Cached small-batch RMSNorm and shared attention partition scales | Retained: explicit FMA and unchanged sum trees pass independent FP64 and byte-exact controls. Q4 C1 DFlash2 gains about 1.1% at d0/d32K; AR, PP, greedy output and sampled cache replay are retained. |
+| C1 batched selector and FFN scratch reuse | Retained as simplification: exact token chains/probabilities, fewer launches and 15,616 fewer allocated bytes. The focused profile does not show an isolated selector speed gain. |
+| Decode fallback for missing verification replay records | Correctness fix: reuse recorded rows and decode unrecorded rows with the original arithmetic. Full mixed-context and C1–C8 target replay checks pass; the complete recorded fast path is unchanged. |
 
-Current focus: **Q4_K_XL, C1 autoregressive**, at shallow and long context.
-First beat the pinned llama.cpp AR controls, then qualify the improvements with
-Q4_K_M DFlash2. Next apply and qualify them on Q8_K_XL, first AR and then
+Current focus: **Q4_K_XL, C1**, at shallow and long context.
+AR now leads the pinned llama.cpp d0/d32K controls by about 2%; Q4_K_M
+DFlash2 retains those improvements and needs more long-context work.
+Next apply and qualify the improvements on Q8_K_XL, first AR and then
 DFlash2. Resume C>1 optimization only after those single-user steps.
 Keep the work on one PR branch with incremental, reviewable commits.
 

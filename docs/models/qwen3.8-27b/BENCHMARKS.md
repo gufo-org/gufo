@@ -19,12 +19,12 @@ Unmeasured points are **TODO**; the reason is stated next to each table.
 
 ## Current focused controls
 
-**2026-09-22**, Q4_K_XL C1, pp2048/tg128, greedy. Context capacity is 36864
+**2026-09-23**, Q4_K_XL C1, pp2048/tg128, greedy. Context capacity is 36864
 through d32K and 133760 at d64K. Depth is the nominal cached prefix.
-All three complete 128-token outputs match between AR and adaptive Q4_K_M
-DFlash2. One release sample per point; the DFlash2 d32K control was repeated
-to resolve PP variation. The matching control retains PP; both samples are
-recorded, and small timing differences remain provisional.
+The d0/d32K rows use binary SHA-256 `d3845c81f3eb…`; d64K retains the
+September 22 qualification. Complete 128-token outputs match between AR
+and adaptive Q4_K_M DFlash2 at each depth. One release sample per current
+point; small timing differences remain provisional.
 Counts, output hashes and binary identities:
 [AR](artifacts/q4-ar-c1-focused.json),
 [DFlash2](artifacts/q4-dflash2-c1-focused.json),
@@ -35,16 +35,16 @@ The full comparison tables below remain the September 21 sweep.
 
 | Mode | Depth | pp tok/s | tg tok/s | Draft acceptance |
 | --- | ---: | ---: | ---: | ---: |
-| AR | 0 | 674.78 | 12.36 | — |
-| AR | 32,768 | 503.75 | 11.14 | — |
+| AR | 0 | 674.01 | 12.38 | — |
+| AR | 32,768 | 502.29 | 11.14 | — |
 | AR | 65,536 | 413.81 | 9.82 | — |
-| DFlash2 | 0 | 618.34 | 30.07 | 47.3% |
-| DFlash2 | 32,768 | 473.11 | 21.38 | 44.1% |
+| DFlash2 | 0 | 619.74 | 30.66 | 47.3% |
+| DFlash2 | 32,768 | 476.85 | 21.91 | 44.1% |
 | DFlash2 | 65,536 | 394.63 | 17.03 | 44.5% |
 
-The latest AR d0/d32K controls use read-only weights backed by larger pages;
-the other rows retain their last qualified builds.
-Warm launch-to-ready is **0.82–0.97 s**, with **16.70 GiB process RSS**.
+The latest d0/d32K controls use read-only weights backed by larger pages.
+Warm launch-to-ready is **0.92–0.97 s** for AR and **2.23 s** with DFlash2;
+process RSS is **16.67–16.70 GiB** and **17.80 GiB**, respectively.
 The file page cache is reclaimable; it is separate from the anonymous weight
 allocation. Cold loading remains **TODO**.
 Pinned llama.cpp AR controls reach **12.08 tok/s** at d0 and
@@ -94,8 +94,8 @@ All 16 complete outputs match C1 AR. Shallow controls use context 4096,
 30–53 prompt tokens, tg128, no cache hits and one warmed measured round.
 At d32K, each request reuses 32,552 tokens and prefills 2,011; prefill and decode
 interleave normally, with context capacity 36864 and one measured cohort.
-The same controller build retains C1 DFlash2 at **30.07 tok/s** and
-pp2048 at **618.34 tok/s**, with unchanged output and acceptance.
+These concurrency rows retain their September 22 qualification; they have
+not been refreshed for the latest C1 kernel increment.
 [Focused C4 measurements and profile](artifacts/q4-c4-focused.json).
 
 **C6**, same Q4 target/draft and sum of individual decode rates:

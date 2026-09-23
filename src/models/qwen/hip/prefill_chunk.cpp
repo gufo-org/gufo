@@ -685,27 +685,28 @@ void QwenGpuExecutor::CommitVerificationChunk(
   if (committed_tokens.empty()) {
     return;
   }
+  std::size_t replayed = 0;
   if (replaying_ssm_state_) {
-    bool can_replay = true;
-    for (std::size_t row = 0; row < committed_tokens.size(); ++row) {
-      can_replay = can_replay &&
-                   arena_.CanReplaySsmPosition(start_pos +
-                                               static_cast<std::uint32_t>(row));
-    }
-    if (can_replay) {
-      ReplaySsmState(start_pos,
-                     static_cast<std::uint32_t>(committed_tokens.size()));
-      replaying_ssm_state_ = false;
-      return;
-    }
+    while (replayed < committed_tokens.size() &&
+           arena_.CanReplaySsmPosition(start_pos +
+                                       static_cast<std::uint32_t>(replayed)))
+      ++replayed;
+    if (replayed != 0)
+      ReplaySsmState(start_pos, static_cast<std::uint32_t>(replayed));
   }
   replaying_ssm_state_ = false;
+  if (replayed == committed_tokens.size())
+    return;
   arena_.DisableSsmReplayCapture();
 
   const bool capture_hidden = capture_prompt_hidden_;
   capture_prompt_hidden_ = false;
   try {
-    (void)ForwardPromptChunk(committed_tokens, start_pos, false);
+    // Unrecorded rows must use the original decode arithmetic. Prefill
+    // projections can round differently and leave a different recurrent state.
+    for (std::size_t row = replayed; row < committed_tokens.size(); ++row)
+      (void)ForwardToken(committed_tokens[row],
+                         start_pos + static_cast<std::uint32_t>(row), false);
   } catch (...) {
     capture_prompt_hidden_ = capture_hidden;
     throw;

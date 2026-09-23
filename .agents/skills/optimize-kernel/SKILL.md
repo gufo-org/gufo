@@ -139,6 +139,9 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
   This saved more complete-request time than faster individual TTS GEMVs.
   Finish a norm's existing descending sum tree within one wave to remove
   barriers without reordering additions. Check the BF16 output boundaries.
+  Unrolling cached RMSNorm changed FMA contraction despite passing greedy
+  replay. Explicit fused square accumulation restored scalar/batched full-logit
+  agreement; test small unsaturated inputs and every verification width.
   For BF16 image kernels, branchless round-to-nearest-even conversion and
   fused gate/up, SiLU and output packing helped; retain NaN payload handling.
   A BF16 activation has only 65,536 inputs: exhaust that domain before

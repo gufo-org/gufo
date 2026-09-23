@@ -13,6 +13,7 @@
 
 namespace gufo::hip {
 
+template<std::size_t CachedDim = 0>
 __global__ void BatchedRMSNormKernel(const float* __restrict__ x,
                                      const float* __restrict__ weight,
                                      float* __restrict__ out,
@@ -31,19 +32,49 @@ __global__ void BatchedRMSNormKernel(const float* __restrict__ x,
   hip_bfloat16* out_bf16_row =
       (out_bf16 != nullptr) ? out_bf16 + (b * dim) : nullptr;
 
+  static_assert(CachedDim % 256 == 0);
+  constexpr std::size_t cached_items = CachedDim == 0 ? 1 : CachedDim / 256;
+  float values[cached_items];
+  float weights[cached_items];
   float sum_sq = 0.0F;
-  for (std::size_t i = tid; i < dim; i += block_size) {
-    const float val = in_row[i];
-    sum_sq += val * val;
+  if constexpr (CachedDim != 0) {
+#pragma unroll
+    for (std::size_t item = 0; item < cached_items; ++item) {
+      const std::size_t i = tid + item * 256;
+      const float val = in_row[i];
+      values[item] = val;
+      weights[item] = weight != nullptr ? weight[i] : 1.0F;
+      // Unrolling must retain the generic loop's fused accumulation.
+      sum_sq = __fmaf_rn(val, val, sum_sq);
+    }
+  } else {
+    for (std::size_t i = tid; i < dim; i += block_size) {
+      const float val = in_row[i];
+      sum_sq += val * val;
+    }
   }
 
   __shared__ float s_sum[256];
   s_sum[tid] = sum_sq;
   __syncthreads();
 
-  for (std::size_t stride = block_size / 2; stride > 0; stride /= 2) {
+  for (std::size_t stride = block_size / 2;
+       stride > (CachedDim != 0 ? 16U : 0U); stride /= 2) {
     if (tid < stride) {
       s_sum[tid] += s_sum[tid + stride];
+    }
+    __syncthreads();
+  }
+  if constexpr (CachedDim != 0) {
+    // Finish the same descending tree in its first wave.
+    if (tid < 32) {
+      float sum = s_sum[tid];
+#pragma unroll
+      for (unsigned offset = 16; offset > 0; offset /= 2) {
+        sum += __shfl_down(sum, offset);
+      }
+      if (tid == 0)
+        s_sum[0] = sum;
     }
     __syncthreads();
   }
@@ -51,14 +82,24 @@ __global__ void BatchedRMSNormKernel(const float* __restrict__ x,
   const float mean_sq = s_sum[0] / static_cast<float>(dim);
   const float inv_rms = rsqrtf(mean_sq + eps);
 
-  for (std::size_t i = tid; i < dim; i += block_size) {
-    const float w = (weight != nullptr) ? weight[i] : 1.0F;
-    const float normed = (in_row[i] * inv_rms) * w;
-    if (out_row != nullptr) {
-      out_row[i] = normed;
+  if constexpr (CachedDim != 0) {
+#pragma unroll
+    for (std::size_t item = 0; item < cached_items; ++item) {
+      const std::size_t i = tid + item * 256;
+      const float normed = (values[item] * inv_rms) * weights[item];
+      if (out_row != nullptr)
+        out_row[i] = normed;
+      if (out_bf16_row != nullptr)
+        out_bf16_row[i] = hip_bfloat16(normed);
     }
-    if (out_bf16_row != nullptr) {
-      out_bf16_row[i] = hip_bfloat16(normed);
+  } else {
+    for (std::size_t i = tid; i < dim; i += block_size) {
+      const float w = (weight != nullptr) ? weight[i] : 1.0F;
+      const float normed = (in_row[i] * inv_rms) * w;
+      if (out_row != nullptr)
+        out_row[i] = normed;
+      if (out_bf16_row != nullptr)
+        out_bf16_row[i] = hip_bfloat16(normed);
     }
   }
 }
@@ -66,7 +107,15 @@ __global__ void BatchedRMSNormKernel(const float* __restrict__ x,
 void LaunchBatchedRMSNorm(const float* x, const float* weight, float* out,
                           void* out_bf16, std::size_t batch_size,
                           std::size_t dim, float eps, hipStream_t stream) {
-  BatchedRMSNormKernel<<<batch_size, 256, 0, stream>>>(
+  // Verification and draft rows can retain the hidden vector across the
+  // reduction. Large prefill batches keep the generic occupancy profile.
+  if (dim == 5120 && batch_size <= 64) {
+    BatchedRMSNormKernel<5120><<<batch_size, 256, 0, stream>>>(
+        x, weight, out, static_cast<hip_bfloat16*>(out_bf16), batch_size, dim,
+        eps);
+    return;
+  }
+  BatchedRMSNormKernel<><<<batch_size, 256, 0, stream>>>(
       x, weight, out, static_cast<hip_bfloat16*>(out_bf16), batch_size, dim,
       eps);
 }
