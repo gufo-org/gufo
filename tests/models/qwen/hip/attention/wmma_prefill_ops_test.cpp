@@ -191,6 +191,47 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
                       hipMemcpyDeviceToHost));
   Compare("context", got, ref, 2e-3);
 
+  // Independent FP64 attention over the original FP32 inputs, before the
+  // kernel rounds Q/K/V and probabilities. Include the first and last query
+  // of head zero so partial causal tiles cannot hide behind kernel agreement.
+  std::vector<float> oracle, selected;
+  for (const auto row : {std::size_t{0}, batch_size - 1}) {
+    const auto end = start_pos + row + 1;
+    std::vector<double> scores(end, -INFINITY);
+    double maximum = -INFINITY;
+    for (std::size_t key = key_begin; key < end; ++key) {
+      double dot = 0;
+      for (std::size_t dim = 0; dim < kHeadDim; ++dim) {
+        const float value = key < start_pos
+                                ? h_cache[key * kHeadDim + dim]
+                                : h_k[(key - start_pos) * kv_size + dim];
+        dot += double(h_q[row * attention_size + dim]) * value;
+      }
+      scores[key] = dot / std::sqrt(double(kHeadDim));
+      maximum = std::max(maximum, scores[key]);
+    }
+    double sum = 0;
+    for (std::size_t key = key_begin; key < end; ++key) {
+      scores[key] = std::exp(scores[key] - maximum);
+      sum += scores[key];
+    }
+    for (std::size_t dim = 0; dim < kHeadDim; ++dim) {
+      double value = 0;
+      for (std::size_t key = key_begin; key < end; ++key) {
+        const float v = key < start_pos
+                            ? h_cache[total_kv + key * kHeadDim + dim]
+                            : h_v[(key - start_pos) * kv_size + dim];
+        value += scores[key] * v;
+      }
+      value = sum > 0 ? value / sum : 0;
+      if (!want_lse)
+        value /= 1 + std::exp(-double(h_gate[row * attention_size + dim]));
+      oracle.push_back(static_cast<float>(value));
+      selected.push_back(got[row * attention_size + dim]);
+    }
+  }
+  Compare("FP64 original-input oracle", selected, oracle, 2e-3);
+
   // Same launch again: the prefetch must not let a register from one tile reach
   // another, which would show up here as run-to-run drift.
   HIP_CHECK(hipMemset(d_out_new, 0, q_elements * sizeof(float)));
@@ -217,7 +258,41 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
   }
   std::cout << "  replay: byte-identical over " << q_elements << " elements\n";
 
-  if (start_pos >= 8192) {
+  if (!want_lse && batch_size > 1) {
+    // Populate future KV once, then vary only the chunk boundaries. A masked
+    // future value must have exactly the same effect as absent padding.
+    for (const std::size_t budget : {std::size_t{31}, std::size_t{512}}) {
+      for (std::size_t offset = 0; offset < batch_size; offset += budget) {
+        const auto count = std::min(budget, batch_size - offset);
+        if (!gufo::hip::LaunchQwenWmmaAttention(
+                d_q + offset * attention_size, d_k, d_v,
+                d_gate + offset * attention_size, d_cache, v_cache, d_cache_f16,
+                cache_f16_v, d_out_new + offset * attention_size, 0,
+                start_pos + offset, count, kMaxContext, kNumHeads, kNumKvHeads,
+                kHeadDim, nullptr, nullptr, key_begin, true))
+          std::abort();
+      }
+      HIP_CHECK(hipMemcpy(again.data(), d_out_new, q_elements * sizeof(float),
+                          hipMemcpyDeviceToHost));
+      if (std::memcmp(again.data(), got.data(), q_elements * sizeof(float)) !=
+          0) {
+        std::cerr << "WMMA attention changed across chunk boundaries: budget="
+                  << budget << '\n';
+        for (std::size_t i = 0; i < got.size(); ++i)
+          if (again[i] != got[i]) {
+            std::cerr << "first row=" << i / attention_size
+                      << " dim=" << i % attention_size
+                      << " got=" << std::hexfloat << again[i]
+                      << " expected=" << got[i] << std::defaultfloat << '\n';
+            break;
+          }
+        std::abort();
+      }
+    }
+    std::cout << "  chunk boundaries: byte-identical\n";
+  }
+
+  if (start_pos >= 8192 || batch_size >= 1024) {
     const std::size_t length = start_pos + batch_size;
     const std::array<std::size_t, 2> words{
         length * kv_size / 2,
@@ -332,6 +407,9 @@ int main() {
   RunCase(0, 16, false);
   // Exactly two, so it fires once and then has to be suppressed.
   RunCase(0, 32, false);
+  // Large shallow chunks use packed heads too, including a ragged final tile.
+  RunCase(0, 1025, false);
+  RunCase(0, 2048, true);
   // At depth: the whole visible range, prefix and diagonal, in one pass.
   RunCase(1024, 512, false);
   // A depth that is not a multiple of the 16-key tile.

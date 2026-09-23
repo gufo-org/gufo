@@ -326,7 +326,8 @@ __launch_bounds__(256, 2) __global__
     const std::uint32_t next_start = key_start + kKeys;
     if (next_start < max_visible) {
       load_k(next_start, k_pre);
-      load_v(next_start, v_pre);
+      if constexpr (!kHeadMajor)
+        load_v(next_start, v_pre);
     }
 
     // --- S = Q K^T ---
@@ -399,21 +400,23 @@ __launch_bounds__(256, 2) __global__
     }
     __syncthreads();
 
-    // --- rescale the running O by the new maximum. A lane touches only rows
-    // 2i + half_id, so the factors are read once and reused across its dim
-    // tiles.
+    // The unpacked path shares each scale across both dimension tiles. Packed
+    // V instead rescales immediately before PV, shortening register lifetimes
+    // enough to retain six waves per SIMD with the causal-tail correction.
+    if constexpr (!kHeadMajor) {
 #pragma unroll
-    for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
-      float scale[8];
-#pragma unroll
-      for (std::uint32_t i = 0; i < 8; ++i) {
-        scale[i] = row_scale[(rb * 16) + (2 * i) + half_id];
-      }
-#pragma unroll
-      for (std::uint32_t t = 0; t < 2; ++t) {
+      for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
+        float scale[8];
 #pragma unroll
         for (std::uint32_t i = 0; i < 8; ++i) {
-          o_acc[rb][t][i] *= scale[i];
+          scale[i] = row_scale[(rb * 16) + (2 * i) + half_id];
+        }
+#pragma unroll
+        for (std::uint32_t t = 0; t < 2; ++t) {
+#pragma unroll
+          for (std::uint32_t i = 0; i < 8; ++i) {
+            o_acc[rb][t][i] *= scale[i];
+          }
         }
       }
     }
@@ -441,24 +444,80 @@ __launch_bounds__(256, 2) __global__
     }
 
     // --- O += P V ---
+    // Packed V is in registers: visit each row block's two dimension tiles
+    // together, sharing its scales. Unpacked V comes from LDS: visit dimension
+    // tiles first so the compiler can share their fragments across row blocks.
+    // The order is compile-time constant and both paths keep the same
+    // arithmetic.
 #pragma unroll
-    for (std::uint32_t t = 0; t < 2; ++t) {
-      const std::uint32_t dim_tile = wave + (t * 8);
-      v16h v_frag[kKeyBlocks];
+    for (std::uint32_t outer = 0; outer < (kHeadMajor ? kRowBlocks : 2);
+         ++outer) {
+      float scale[8];
+      if constexpr (kHeadMajor) {
 #pragma unroll
-      for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
-        if constexpr (kHeadMajor)
-          v_frag[kb] = v_cur[t];
-        else
-          v_frag[kb] = LoadFrag(
-              &kv_lds[(((dim_tile * 16) + sub) * kVtStride) + (kb * 16)]);
+        for (std::uint32_t i = 0; i < 8; ++i)
+          scale[i] = row_scale[outer * 16 + 2 * i + half_id];
       }
 #pragma unroll
-      for (std::uint32_t rb = 0; rb < kRowBlocks; ++rb) {
+      for (std::uint32_t inner = 0; inner < (kHeadMajor ? 2 : kRowBlocks);
+           ++inner) {
+        const std::uint32_t rb = kHeadMajor ? outer : inner;
+        const std::uint32_t t = kHeadMajor ? inner : outer;
+        const std::uint32_t dim_tile = wave + t * 8;
+        v16h v_frag[kKeyBlocks];
+#pragma unroll
+        for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
+          if constexpr (kHeadMajor)
+            v_frag[kb] = v_cur[t];
+          else
+            v_frag[kb] =
+                LoadFrag(&kv_lds[(dim_tile * 16 + sub) * kVtStride + kb * 16]);
+        }
+        if constexpr (kHeadMajor) {
+#pragma unroll
+          for (std::uint32_t i = 0; i < 8; ++i)
+            o_acc[rb][t][i] *= scale[i];
+        }
 #pragma unroll
         for (std::uint32_t kb = 0; kb < kKeyBlocks; ++kb) {
           const v16h p_frag = LoadFrag(&p_lds[(rb * 16) + sub][kb * 16]);
-          o_acc[rb][t] = Wmma(p_frag, v_frag[kb], o_acc[rb][t]);
+          v8f next = Wmma(p_frag, v_frag[kb], o_acc[rb][t]);
+          const auto first_key = key_start + kb * 16;
+          // Like Flash-Next, sum a query's final partial tile over visible
+          // keys only. WMMA can round differently when a zero probability
+          // multiplies a populated future value instead of chunk padding.
+          // Complete tiles keep the matrix-core path and its original order.
+          if (first_key + 15 > start_pos + query_start) {
+            v8f tail = o_acc[rb][t];
+            // Keep the position difference uniform across the wave; only the
+            // even/odd row owner varies between its two half-waves.
+            const int relative_key = static_cast<int>(first_key) -
+                                     static_cast<int>(start_pos + query_start +
+                                                      row_block_offset(rb));
+#pragma unroll
+            for (std::uint32_t key = 0; key < 16; ++key) {
+              const float value = static_cast<float>(v_frag[kb][key]);
+#pragma unroll
+              for (std::uint32_t i = 0; i < 8; ++i) {
+                if (static_cast<int>(half_id) <
+                        relative_key + 15 - static_cast<int>(2 * i) &&
+                    static_cast<int>(half_id) >= relative_key +
+                                                     static_cast<int>(key) -
+                                                     static_cast<int>(2 * i)) {
+                  tail[i] =
+                      fmaf(__half2float(
+                               p_lds[rb * 16 + 2 * i + half_id][kb * 16 + key]),
+                           value, tail[i]);
+                }
+              }
+            }
+#pragma unroll
+            for (std::uint32_t i = 0; i < 8; ++i)
+              if (static_cast<int>(half_id) <
+                  relative_key + 15 - static_cast<int>(2 * i))
+                next[i] = tail[i];
+          }
+          o_acc[rb][t] = next;
         }
       }
     }
@@ -467,9 +526,16 @@ __launch_bounds__(256, 2) __global__
     for (std::uint32_t n = 0; n < kKRegs; ++n) {
       k_cur[n] = k_pre[n];
     }
+    if constexpr (kHeadMajor) {
+      // Packed V is already in WMMA order. Load it after the current PV work;
+      // the next QK/softmax hides its latency without retaining a second set
+      // of fragments across the causal-tail calculation.
+      if (next_start < max_visible)
+        load_v(next_start, v_cur);
+    } else {
 #pragma unroll
-    for (std::uint32_t n = 0; n < kValueFragments; ++n) {
-      v_cur[n] = v_pre[n];
+      for (std::uint32_t n = 0; n < kValueFragments; ++n)
+        v_cur[n] = v_pre[n];
     }
   }
   if (tid % kSoftmaxLanes == 0) {
@@ -629,8 +695,8 @@ bool LaunchQwenWmmaAttention(
   // and speculative commit replays retain the canonical cache directly.
   // Reuse the same workspace for bounded groups at depths where all four
   // heads no longer fit; every head keeps its original key order.
-  if (batch_size >= 1024 && start_pos >= 8192 && heads_per_group != 0 &&
-      key_begin < length && key_begin % kWmmaKeys == 0) {
+  if (batch_size >= 1024 && heads_per_group != 0 && key_begin < length &&
+      key_begin % kWmmaKeys == 0) {
     auto* packed_k = reinterpret_cast<__half*>(packed_k_workspace.data());
     auto* packed_v = reinterpret_cast<__half*>(packed_v_workspace.data());
     for (std::uint32_t first = 0; first < kKvHeads; first += heads_per_group) {

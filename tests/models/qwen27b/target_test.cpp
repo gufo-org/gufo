@@ -86,7 +86,14 @@ void CheckPrefillReplay(
   // taps consumed by DFlash2 after prefill uses temporary KV layouts.
   for (const auto [depth, length] :
        {std::pair{0U, 64U}, std::pair{0U, 128U}, std::pair{0U, 257U},
-        std::pair{0U, 2048U}, std::pair{8192U, 1025U}}) {
+        std::pair{0U, 2048U}, std::pair{8192U, 1025U},
+        std::pair{8193U, 2059U}}) {
+    const bool check_chunks = depth == 8193;
+    // Q8 uses the same projection precision at every chunk size. Q4's
+    // separately qualified large-prefill route uses FP16 activations.
+    if (check_chunks && model->GetWeights().layers.front().ffn_gate.type !=
+                            gufo::core::GgmlType::kQ8_0)
+      continue;
     const std::uint32_t end = depth + length;
     std::vector<Token> tokens(end + 2);
     for (std::size_t i = 0; i < tokens.size(); ++i)
@@ -96,7 +103,11 @@ void CheckPrefillReplay(
     executor->SetPromptHiddenCapture(false);
     std::unique_ptr<gufo::hip::QwenGpuSnapshot> prefix;
     if (depth != 0) {
-      (void)executor->ForwardPromptBatch(std::span(tokens).first(depth));
+      const auto prefill_depth = check_chunks ? depth - 1 : depth;
+      (void)executor->ForwardPromptBatch(
+          std::span(tokens).first(prefill_depth));
+      if (check_chunks)
+        (void)executor->ForwardToken(tokens[depth - 1], depth - 1);
       prefix = executor->SaveSnapshot(depth);
       Expect(prefix != nullptr, "deep prefill snapshot");
     }
@@ -118,6 +129,25 @@ void CheckPrefillReplay(
     std::cout << "prefill fingerprint depth=" << depth << " tokens=" << length
               << " logits=" << Fingerprint(expected) << " features=" << features
               << '\n';
+
+    if (check_chunks) {
+      for (const std::uint32_t budget : {512U, 2048U}) {
+        executor->RestoreSnapshot(*prefix);
+        std::vector<float> captured;
+        for (std::uint32_t offset = 0; offset < length; offset += budget) {
+          const auto count = std::min(budget, length - offset);
+          (void)executor->ForwardPromptBatch(prompt.subspan(offset, count),
+                                             depth + offset);
+          const auto part = executor->GetPromptHiddenStates();
+          captured.insert(captured.end(), part.begin(), part.end());
+        }
+        Expect(ByteEqual(Logits(*executor), expected) &&
+                   Fingerprint(captured) == features,
+               "scheduled prefill chunks changed logits or draft features");
+        std::cout << "prefill chunk budget=" << budget
+                  << ": full logits and all feature rows exact\n";
+      }
+    }
 
     const auto snapshot = executor->SaveSnapshot(end);
     const auto suffix = std::span(tokens).subspan(end);
