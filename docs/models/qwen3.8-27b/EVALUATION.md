@@ -1,287 +1,107 @@
 # Qwen3.8 27B evaluation
 
-Targets Q4/Q8; DFlash2 drafts Q4_K_M/Q8_0/BF16. Independent original-target,
-conversion and native MTP parity remain **TODO**. Packed-weight operator
-agreement is narrower evidence. [Artifact identities](artifacts/model-identities.json).
+Targets **Q4_K_XL / Q8_K_XL**, DFlash2 draft **Q4_K_M**. Independent
+original-target, GGUF conversion and native MTP parity remain **TODO**.
+Agreement between Gufo paths is execution consistency, not proof of upstream
+model accuracy. [Artifact identities](artifacts/model-identities.json).
 
-The current scalar and small-batch RMSNorm cache the 5120 input values and
-weights in registers, retaining the descending reduction tree. An expanded
-check caught a contraction difference in the earlier cached scalar path:
-unrolling did not always retain the generic loop's fused square accumulation.
-The cached paths now request that FMA explicitly and keep the runtime
-normalization denominator. The earlier eight byte-identical controls were
-insufficient to establish equivalence.
+## Current qualification
 
-All 90 maintained batched controls pass the independent FP64 formula at
-1e-5 absolute tolerance and require byte-identical scalar/batched results:
-dimensions 5119/5120/5121, rows 1/7/33/64/65, three input scales and optional
-weights. BF16 round-to-nearest-even and BF16-only output also pass. The
-separate generic-versus-cached ablation has no differing values across
-512 rows; the batched optimization preserves the original kernel in
-112 FP32/BF16 controls.
+| Area | Retained evidence |
+| --- | --- |
+| Target execution | Full logits and all five feature taps match scalar execution at verification widths 2–8, mixed FP16/FP32 KV, C1/2/4/6/8, shrinking cohorts, snapshots and 8K + 1025-token continuation. Both target quants pass. |
+| RMSNorm | 90 maintained FP64 controls at absolute tolerance 1e-5, dimensions 5119/5120/5121, rows 1/7/33/64/65, three scales and optional weights; scalar/batched output is byte-identical. Explicit fused square accumulation prevents compiler contraction drift. |
+| Target attention | Independent FP64 checks, FP16/FP32 KV and dispatch boundaries pass. Shared partition scales retain 128 byte-exact comparisons through 64K; the split-K threshold has maximum absolute error 1.17e-6 against FP64. |
+| Draft attention / selector | 216 byte-exact attention controls include ring wrap and ragged blocks. Real-weight layer traces, complete logits, conditional probabilities, private RNG and persistent replay pass through C8. |
+| Sampling | Maintained GPU sampler covers 216 AR policies, p/q acceptance and residual sampling, ties, nonfinite rows and tile boundaries. Seeded cold/cache replay retains IDs and proposal counts. |
+| Weight placement | Complete 17,559,178,144-byte Q4 encoded-weight copy matches; read-only huge pages retain target arithmetic. Q8 full-target qualification also passes with this layout. |
+| Serving | Q4/Q8 AR and DFlash2 pass live continuation, disk restoration, sampled/greedy transitions and cancellation inside a verified block. |
 
-C1 reuses the tiled argmax and idle FFN scratch. The maintained GPU sampler
-check passes its 216 AR policies, speculative p/q/residual checks, ties,
-nonfinite rows and tile boundaries. Snapshot sizing uses the vocabulary size
-without downloading logits. Matched d0/d32K HTTP controls preserve all 128
-greedy tokens and cached-prefix reuse; the repeated d0 output also matches.
-Snapshot payload formats are unchanged. Cache compatibility includes the
-corrected normalization arithmetic, excluding snapshots from older builds.
+Current controls and binary/source identities:
+[Q4 AR](artifacts/q4-ar-c1-pruning.json),
+[Q4 DFlash2](artifacts/q4-dflash2-c1-focused.json),
+[Q8 C1/C4 and continuation](artifacts/q8-tg-focused.json).
+No equality gate or tolerance was relaxed. Full-logit captures stay outside Git.
 
-In a separate 16-token, depth-2048 profile, normalization falls from 23.99 to
-6.54 ms and argmax from 2.53 to 0.12 ms; total kernel time falls from 1324.26 to
-1304.37 ms. This explains approximately 1.24 ms saved per token.
-[Measurements and scope](artifacts/q4-ar-c1-pruning.json).
-Q4 DFlash2 qualification is included below; Q8 remains **TODO**.
+Generated history must retain **decode arithmetic** when a conversation resumes.
+Qwen prefill and decode use different projection arithmetic: putting an unconsumed
+output token into a new prefill chunk can change recurrent state. The server now
+records published pending IDs separately from the greedy frontier and replays
+those IDs with decode before prefilling the new suffix.
 
-The latest loader keeps the encoded weights unchanged in a read-only registered
-anonymous mapping, with transparent huge pages. Sixteen bounded workers populate
-and copy file chunks, then release their original mapping pages. A complete
-17,559,178,144-byte copy check passes with both 4 and 16 workers. Target arithmetic,
-sampling and snapshot formats are unchanged.
+Cancellation can arrive while a verified block is being published. The runner
+reuses its existing verification rollback, retains the completed frontier and
+replays at most the latest block (nine tokens; one for AR). This adds no GPU copy
+to normal decoding. The focused test covers first-token cancellation, longer
+output, sampled replay and fresh-backend disk restore on both target quants.
+A single rollback checkpoint does not cover a client lagging several complete
+blocks. Disk payload/layout version 3 includes pending IDs and rejects stale
+arithmetic/policy identities.
 
-The Q4 d0/d32K controls retain all 128 greedy tokens; the deep request reuses
-32,553 tokens and prefills 2,010. The maintained continuation smoke test passes
-cold, exact-prompt and suffix reuse. Its visible-answer fixture now explicitly
-disables thinking, matching the full cache suite and preserving its assertions.
-The 16-token profile has the same 10,863 dispatches and 1,280.71 ms of kernel
-time, saving approximately 1.48 ms/token over the preceding kernel cleanup.
-Process RSS remains about 16.70 GiB. Warm readiness is 0.82–0.97 s; the matched
-original mapping took 0.72 s. Anonymous weights replace the resident file mapping,
-but the OS can retain an additional reclaimable file cache. This is a decode
-speed/startup tradeoff, with no new quantization or original-checkpoint parity claim.
-Q4 DFlash2 now passes the same d0/d32K controls with this memory layout.
-Its warm readiness is 2.23 s with 17.80 GiB process RSS. Q8 qualification
-remains **TODO**.
+```sh
+nix develop -c build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test \
+  "$MODEL" "$DRAFT" --continuation-only
+```
 
-Attention reduction shares each partition exponential across the denominator
-and both output vectors, retaining each sum's order. All 128 direct comparisons
-are byte-identical through 64K, and the maintained independent FP64
-FP16/FP32 attention checks pass through 32K.
+The corrected Q8 C1 HTTP controls retain all 128 AR tokens with DFlash2 at d0
+and d32K, including the same generated prefix history. The earlier deep DFlash2
+rate used different output and is excluded from the benchmark table. The full
+Q8 target test and shared runner/scheduler tests pass. The compact Q8 artifact
+records request hashes, counts and validation log hashes.
 
-C1 DFlash2 reuses the batched selector and finished FFN scratch, removing
-15,616 bytes of separate partial buffers for the supported draft. Requested
-greedy candidate outputs retain one-hot probabilities. Operator checks cover
-C1/C2/C4/C6/C8, and the real-weight draft test retains exact layers, logits,
-probabilities, private RNG, pending injection and RAM/persistent replay.
-Allocation accounting matches the estimator.
+**Open generated-history fork issue:** the 32K continuation fails when four
+requests fork one completed conversation. One request reuses the live generated
+frontier; three restore the earlier prompt snapshot and prefill the generated
+reply with different arithmetic. This reproduces on `82a947a0`, before the Q8
+C4 controller change. The failed equality gate is retained in the Q8 artifact
+and excluded from speed qualification. Passing live reuse and direct snapshot
+tests does not close this serving-cache case.
 
-The full target test exposed a second issue: when verification replay records
-are missing, the fallback used prefill arithmetic to rebuild recurrent state.
-The failure also reproduces with the original generic normalization kernels.
-The fallback now reuses the recorded prefix and decodes only unrecorded rows.
-The complete target check passes full-logit and feature equality across
-verification widths 2–8, mixed-context FP16/FP32 KV, C1/C2/C4/C6/C8,
-prefill/snapshot replay and an 8K prefix with a 1025-token continuation.
-No equality gate or tolerance was relaxed.
+## Adaptive decoding and concurrency
 
-The current release retains all 128 greedy tokens, acceptance counts and PP
-in matched d0/d32K AR/DFlash2 controls. Separate 32-token HTTP requests at
-temperature 0.8 and seed 47 combine top-k/top-p/min-p and repetition,
-frequency and presence penalties. Each mode reproduces its output after
-an exact 2033-token cache hit with zero prefill; DFlash2 also reproduces
-all proposal and acceptance counts.
+The controller chooses a block before sampling from private accepted-length
+history and deterministic position. Full acceptance is censored: a saturated
+history probes wider blocks. An independent geometric-distribution check verifies
+zero expected feedback drift at every width 1–7 below saturation. Request timings
+never enter sampled decisions; controller history resets for a new request.
 
-A separate four-cycle fixed-three-proposal profile attributes the speed gain
-to normalization (6.72 to 1.99 ms) and attention reduction (0.99 to 0.59 ms).
-Total kernel time falls from 415.77 to 411.06 ms; selector consolidation
-removes 14 launches but is roughly speed-neutral. This profile explains the
-mechanism; published throughput uses the adaptive HTTP controls.
-[Current measurements and checks](artifacts/q4-dflash2-c1-focused.json).
-These checks establish quantized execution consistency, not independent
-original-checkpoint parity.
+Q4 greedy C2/C4/C6/C8 costs use complete measured cycles and context growth.
+Private sampled/mixed cohorts match isolated proposal IDs, probabilities, RNG
+and restored state. Focused shallow and d32K cohorts retain C1 AR output; perfect
+acceptance is preserved. Evidence: [C2](artifacts/q4-c2-focused.json),
+[C4](artifacts/q4-c4-focused.json), [C6](artifacts/q4-c6-focused.json),
+[C8](artifacts/q4-c8-focused.json). The difficult Italian/Chinese C8 pair remains
+faster under AR; these controls do not establish universal speculative profitability.
 
-The 128-token split-K threshold is currently qualified on **Q4_K_XL C1 with
-AR and Q4_K_M DFlash2**. Matched d0/d32K pp2048/tg128 controls retain all 128
-greedy tokens and PP speed; DFlash2 matches AR at both depths.
-Partitioning changes FP32 rounding: twelve controls at 128–4096 tokens and three
-query amplitudes have lower maximum error and RMSE against an independent FP64
-attention formula; the largest new absolute error is **1.17e-6**. Maintained
-FP16/FP32 reference checks retain their tolerances and cover the 128-token
-boundary. Q4 prefill/snapshot replay retains complete logits and features at
-128, 257 and 2048 tokens, plus an 8K cached prefix with a 1025-token suffix.
-This does not establish original-checkpoint parity.
-Disk-cache identity now includes the partition threshold and count, preventing
-restoration of snapshots computed with the old arithmetic. Broader target and
-concurrency qualification follows the focused Q4 C1 phase.
+Q8 greedy C4 uses one shared width chosen from four private acceptance histories
+and complete measured cycle costs. A wider probe requires all four to have fully
+accepted the preceding block. Fixed, sampled and mixed cohorts retain private
+choices; C1/C2/C6/C8 keep their existing Q8 policy. Persistent draft state includes
+the last fully accepted width and rejects the previous layout.
 
-Graph identity includes the target hidden-layer taps and their order. The Q4
-64-token replay check changes that order after capture and verifies every
-feature value against the reordered reference, with unchanged full logits.
-The 128/257/2048-token and 8K-prefix replay fingerprints also remain unchanged.
+The focused C4 controls retain all 128 AR tokens on Italian/Chinese prompts,
+full-acceptance repetition and a complete 34,824-token prompt checkpoint.
+Generation improves 12.3% on the difficult pair and 13.2% at that deep checkpoint;
+repetition and C1 pp/tg are retained. The deep control has zero new prefill and
+does **not** qualify generated-history forks. Real-weight draft traces, private
+sampled RNG, RAM/persistent controller replay and snapshot accounting pass through C8.
 
-Shared FP16 KV tiles preserve each head's scalar product/FMA order and softmax
-sequence. Scalar AR uses 32 lanes per head; verification pairs two 16-lane
-heads per wave. Each half keeps the original lane partials separate until their
-original offset-16 addition, preserving the full reduction tree.
+## Meaning of Exact
 
-All 63 direct comparisons are byte-identical in both partial state and output:
-widths 2–8, three input scales and contexts 512/2048/32765. Maintained FP64 checks
-and scalar/batched comparisons through 64K pass, including dispatch boundaries
-and scratch fallback. All 15 full-model logit/feature fingerprints are unchanged,
-including verification and snapshot replay after an 8K prefix. Shared memory
-remains 4 KiB per active block; persistent state and snapshot formats are unchanged.
-Matched C1 pp2048/tg128 controls retain greedy AR/DFlash2 agreement at d0/d32K.
-Current measurements:
-[AR](artifacts/q4-ar-c1-focused.json),
-[DFlash2](artifacts/q4-dflash2-c1-focused.json).
+`Exact` in the benchmark tables compares llama.cpp AR text hashes with Gufo C1
+AR. It is **cross-engine agreement**, not an accuracy percentage. In the retained
+September 21 corpus, each engine's C1 DFlash2 matches its own AR on all nine cases.
+Cross-engine C1 agreement is 3/9 for Q4 and 4/9 for the historical Q8_K_L file.
+Compared with its own C1, llama.cpp AR agrees on 7/10, 7/12, 8/12 and 10/16 Q4
+requests at C2/C4/C6/C8; historical Q8_K_L agrees on 7/10, 3/12, 4/12 and 6/16.
+The [hash audit](artifacts/q4-dflash2-c1-focused.json) records source identities.
 
-Draft attention prefetches 32 values and shares K/V reads across two query heads
-for blocks of at least four rows. It preserves the original FP32 dot-product,
-softmax and ascending-key value accumulation. All 216 full-output comparisons
-with the previous kernel are byte-identical: widths 1–8, three input scales,
-empty history, prefetch boundaries and ring wrap through 32K. The maintained
-independent FP64 checks and draft/state tests pass, including unequal widths,
-selector probabilities, private RNG and C2/C4/C6/C8. Persistent allocations
-and cache formats are unchanged.
-
-The Q4 adaptive controller includes measured attention-cost growth with context.
-At saturation, its accepted-run estimate remains censored; it probes wider
-profitable blocks instead of treating the configured cap as a rejection.
-Completed blocks update that estimate in proportion to their accepted tokens.
-An independent geometric-distribution check verifies zero expected feedback
-drift at every width 1–7, away from the saturation cap; a fixed success
-increment biased the estimate according to block width.
-Sampled requests use private positions and acceptance history before drawing
-proposals. Greedy Q4 cohorts of two, four, six or eight select their measured
-costs; fixed mode, C1 and Q8 cost tables are unchanged.
-The maintained draft check passes exact layers, logits, selector probabilities,
-private RNG and persistent-state replay at C2/C4/C6/C8.
-The current release reproduces all 32 sampled tokens and draft counts between
-cold and cached requests at **65,138 prompt tokens**, temperature 0.8 and seed 1.
-The cached replay prefills zero tokens. Changed draft widths can change sampled
-sequences across builds; within-build replay remains deterministic.
-
-Matched Q4 C1 pp2048/tg128 controls retain all three complete AR output hashes
-at d0/d32K/d64K. The initial d32K PP reading was lower; the subsequent
-baseline/candidate control agrees at 473.1 tok/s. Both candidate samples are
-retained in the artifact.
-The 128-token repetition controls retain the same output and 100% acceptance at
-d0/d64K. Context-cost calibration, fixed-three-proposal controls and current
-measurements are in the existing
-[DFlash2 artifact](artifacts/q4-dflash2-c1-focused.json).
-These controls cover Q4 C1; the focused C2 qualification follows.
-
-The focused Q4 C2 release checks retain all six complete 128-token C1 AR
-outputs: repetition, pangram/train and Italian/Chinese pairs. Fresh servers
-use `cache_prompt: false`; every request prefills its 30–53 prompt tokens.
-Paired greedy costs account for the projection jump above eight total rows.
-Fixed-three controls improve low acceptance but lose on the higher-acceptance
-pair, so adaptive remains the default. The maintained draft test additionally
-compares sampled and mixed greedy/sampled pairs with isolated execution:
-proposal lengths, IDs, probabilities, private RNG and restored state match.
-The paired calibration applies only to two greedy drafters, including a
-larger cohort that shrinks to two; sampled choices remain private.
-The matched C2 d32K continuation also retains both 128-token C1 AR outputs:
-each request reuses 32,552 tokens and prefills 2,011. New and previous
-builds receive byte-identical messages, execute a physical two-request batch,
-and retain matching prefill times. C1 d0 PP stays within 1% of the previous
-control, with unchanged greedy output and DFlash2 acceptance counts.
-
-The [C2 artifact](artifacts/q4-c2-focused.json) retains per-request timings,
-fixed-width cost calibration, d32K continuation, C1 pp2048/tg128 controls and a separate
-profile of four saturated decode cycles: 97.0% GPU-busy, with quantized
-projections accounting for 87.6% of kernel time. Target verification takes
-85.9%; draft generation and committed context injection account for the
-remainder.
-
-The batched selector retains exact private token chains and probabilities.
-Ragged operator checks cover C2/C4/C6/C8, top-k 1/7/16, greedy and sampled
-temperatures, tiny positive temperature and zero random draws. A separate
-full-vocabulary comparison matches the original scalar kernel byte-for-byte,
-including the refactored C1 path. The real-weight draft check retains exact
-layers, logits, proposals, probabilities, private RNG and persistent replay.
-Batch partial lists reuse finished FFN buffers; cache formats are unchanged.
-The [focused C4 control](artifacts/q4-c4-focused.json) retains all four complete
-C1 AR outputs and full acceptance. C1 pp2048/tg128 AR and DFlash2 retain output,
-acceptance and speed.
-
-The C4 cost table covers complete cycles at widths 1–7 and the projection jump
-above sixteen verification rows. It applies only to four greedy Q4 drafters;
-C1, C2, Q8, fixed mode and sampled choices remain unchanged. Sampled and mixed
-C2/C4 cohorts match isolated lengths, token IDs, probabilities, RNG and restored
-state. All twelve shallow and four d32K candidate completions match C1 AR.
-The matched deep control reuses the same 32,552-token prefix and prefills 2,011
-tokens per request, with comparable prefill times. C1 DFlash2 retains its output,
-acceptance and pp2048/tg128 speed. The
-[C4 artifact](artifacts/q4-c4-focused.json) records calibration, per-request
-timings and hashes.
-
-The C6 cost table likewise uses complete measured cycles for 12–48 verification
-rows, while retaining the full-block probe at saturated acceptance. It changes
-only six-request greedy Q4 decisions. C1/C2/C4, Q8, fixed mode and sampled
-choices remain unchanged. The maintained model check passes sampled/mixed
-C2/C4/C6 isolation, exact probabilities, private RNG and persistent-state replay.
-New requests reset controller history before generating.
-All 18 shallow and six d32K candidate completions match C1 AR; repetition
-retains 100% acceptance. Deep requests reuse 32,552 tokens and prefill 2,011,
-with comparable PP times. The [C6 artifact](artifacts/q4-c6-focused.json)
-retains calibration, binary identities, individual timings and output hashes.
-Broader depths remain pending.
-
-The C8 table covers 16–64 verification rows. A comparison against the previous
-controller retains all 1,511,622 decisions outside adaptive Q4 C8 across
-histories, limits, budgets, positions, cohort sizes, Q8 and fixed mode. Maintained controller
-invariants and the full-weight draft test pass, including independent sampled
-and mixed C8 requests, selector probabilities, RNG and persistent replay.
-All 24 shallow and both eight-request d32K candidate cohorts match C1 AR.
-The second deep cohort checks a 7.48-second PP outlier; it does not recur, and
-typical PP times remain comparable. Both cohorts are retained in the
-[C8 artifact](artifacts/q4-c8-focused.json). The matched AR Italian/Chinese
-control is still faster than DFlash2; these improvements do not establish
-universal speculative profitability or original-checkpoint parity.
-
-The fresh pinned llama.cpp `68d9053a` d0 controls use the same input messages,
-Q4 target/draft, greedy sampling and context capacity. Its DFlash2 output differs
-from its own AR output after “disjointed, repetitive, and”: AR continues with
-“grammatically fragmented phrases,” DFlash2 with “syntactically broken phrases.”
-Its default limit is three proposals; Gufo remains adaptive. Gufo's AR and
-DFlash2 output hashes agree on this prompt. This isolates the observed mismatch
-from Gufo's speculative acceptance, but does not establish which engine better
-matches the original checkpoint. Counts, hashes and pinned binary identity are
-retained in the [focused artifact](artifacts/q4-dflash2-c1-focused.json).
-Its fresh d64K DFlash2 control also uses byte-identical request messages and
-the same context capacity as Gufo. The reference's own d64K AR output has not
-been measured, so its d64K output difference does not establish a speculative
-verification mismatch.
-
-The following results describe the qualification through `b509c070`, before
-lowering the split-K threshold:
-
-Grouping verification queries by KV partition retains the existing arithmetic.
-The old/new FP16 kernels are byte-identical on 36 full-output cases through 64K
-plus six partition-boundary controls. Maintained checks cover FP16/FP32,
-1/3/8 query rows, scratch fallback and compact snapshot restoration. Matched
-pp2048/tg128 C1 HTTP controls on Q4_K_XL and Q8_K_XL with Q4 DFlash2 retain output
-hashes and accepted/proposed counts at d0 and d32K, with comparable PP speed.
-Fresh AR requests match DFlash2 on all four 128-token outputs at those depths.
-These focused controls do not refresh the benchmark sweep.
-
-The shallow FP16 attention pipeline retains the original product/FMA order and
-lane-zero sum tree. Scalar, batched and device-position paths match the previous
-kernel byte-for-byte on 72 controls across amplitudes and ragged lengths.
-Focused attention, graph and KV/snapshot tests pass. Q4_K_XL and Q8_K_XL retain
-all four d0 pp2048/tg128 AR/DFlash2 output hashes and both acceptance counts.
-Both targets also pass C2/C4/C6/C8 full-logit, feature and verification-replay
-checks, including ragged cohorts and shrinking batches.
-The full AR profile confirms lower attention time; the deep split-K path and
-prefill kernels are unchanged.
-
-The 2026-09-21 compact-state qualification preserves Q4/Q8 AR and DFlash2
-tokens across all 23 sampling cases and C2/C4/C6/C8. Active recurrence and
-rollback buffers contain only recurrent layers; snapshots retain only valid
-KV rows. Operator checks cover FP16 production and head-major FP32 reference
-snapshots, dirty unused tails and exact disk round trips. Matched production
-pp2048/tg128 controls show no material speed regression.
-
-Interrupted-chat qualification also passes on Q4_K_XL and **Q8_K_XL**, both
-AR and Q4 DFlash2: reasoning/visible-text cancellation, preserved/removed
-reasoning, greedy/seeded replay, a third turn, images and disk restart.
-The native vision checks retain their cold-versus-live equality gate and
-concurrent image/text isolation. The HTTP check requires exact replay with
-the same history and verifies that `cache_prompt: false` bypasses reuse.
-See [server check instructions](../../SERVER.md). Existing benchmark tables
-were not refreshed by this cache qualification.
+Fresh pinned llama.cpp `68d9053a` controls also show AR/DFlash2 differences on a
+Q4 prose prompt and on the Q8_K_XL d32K continuation. Each comparison uses the
+same messages, model files and greedy settings within that engine; Gufo retains
+AR/DFlash2 agreement. The Q8 d0 outputs match across all four modes. These
+observations do not determine which arithmetic matches the original checkpoint.
+Original-target qualification is still needed to resolve that question.
 
 ## Maintained checks
 
@@ -323,7 +143,7 @@ nix develop -c build/gpu-test/tests/models/qwen27b/inference_backend_gpu_test \
 
 For an optimization, first check the affected operator against independent
 formulas or scalar decode. Then check model replay on each affected target and
-draft precision. Compare full logits/features and token IDs, including cached
+supported draft. Compare full logits/features and token IDs, including cached
 replay; retain the established tolerances. Run short warmed release timings
 with matched artifacts and prompts, alternating binaries during experiments.
 Profile separately. Broaden to depth/concurrency sweeps only when needed.
@@ -362,7 +182,7 @@ so equal seeds need not produce identical continuations across the two modes.
 Repeated runs within one configuration must reproduce IDs, including cache hits.
 
 Adaptive chooses the block length before drawing proposals using accepted-length
-history and offline verification costs, including context-dependent Q4 attention
+history and offline verification costs, including context-dependent attention
 cost. It never uses live timing or the current sample. Controller state persists
 within a request and resets for a new one.
 `--draft-tokens` caps length; `--draft-policy fixed` selects the comparison policy.
@@ -375,7 +195,7 @@ within a request and resets for a new one.
 | `eval` | Uses server draft configuration and sampling defaults. |
 | Audio/video, diagnostics and probes | Do not run Qwen27B DFlash2; unsupported draft flags are rejected. |
 
-The retained matrix covers 23 named strategies on Q4/Q8 AR and every draft under
+The retained matrix covers 23 named strategies on Q4/Q8 AR and Q4 DFlash2 under
 fixed/adaptive controllers; 15 executable/HTTP configurations exercise six
 adapters, request overrides, cold/cached replay, streaming, multi-turn EOS,
 C2 isolation and cancellation. See
@@ -397,14 +217,10 @@ windowed noncausal attention, causal dynamic convolution and selector transition
 scores. Each layer is checked both cumulatively and with captured layer inputs;
 the head and conditional selector probabilities are also isolated.
 
-One real 24-token Q4 target prefix, seven proposals, temperature 0.8: all three
-drafts pass; all 21 candidate sets and random draws match.
-
-| Draft | Worst stage relative RMSE | Full-logit max error | Proposal max total variation |
-| --- | ---: | ---: | ---: |
-| Q4_K_M | 5.83e-6 | 7.72e-5 | 1.60e-5 |
-| Q8_0 | 5.74e-6 | 9.54e-5 | 1.25e-5 |
-| BF16 | 6.16e-6 | 1.13e-4 | 7.01e-6 |
+One real 24-token Q4 target prefix, seven proposals, temperature 0.8:
+all seven candidate sets and random draws match with the Q4_K_M draft.
+Worst stage relative RMSE is **5.83e-6**, full-logit maximum error **7.72e-5**,
+and proposal maximum total variation **1.60e-5**.
 
 Gates: stage relative RMSE ≤1e-4; full-logit maximum error ≤1e-3; proposal total
 variation ≤1e-4; isolated selector probability error ≤5e-6.

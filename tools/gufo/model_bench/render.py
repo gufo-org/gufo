@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -218,13 +219,22 @@ def _row_values(config: BenchConfig, table: TableSpec) -> dict[str, dict[str, st
 
 
 def _serving_rate(report: dict[str, Any] | None, users: int) -> float | None:
-    """Aggregate delivered output tok/s: output tokens over the sum of measured round spans."""
+    """Mean of the summed individual decode rates in each measured cohort."""
     if report is None:
         return None
     result = report.get("results", {}).get(f"c{users}")
     if result is None or "unavailable" in result:
         return None
-    return result["aggregate"]["output_tokens_per_second"]["overall"]
+    rounds = result.get("rounds", [])
+    samples = result.get("samples", [])
+    if not rounds or not samples:
+        return None
+    if sum(round_.get("sampleCount", 0) for round_ in rounds) != len(samples):
+        return None
+    rates = [sample.get("decode_tokens_per_second") for sample in samples]
+    if any(rate is None or not math.isfinite(rate) or rate < 0 for rate in rates):
+        return None
+    return math.fsum(rates) / len(rounds)
 
 
 def _serving_unavailable(report: dict[str, Any] | None, users: int) -> bool:

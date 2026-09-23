@@ -133,7 +133,6 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
                "generation tok/s", ticks)
         _lines(a2, labels, acceptance, "accepted draft tokens per step", ticks)
         a2.legend(loc="lower right")
-        pass
         a1.set_xlabel("context depth (tokens)")
         a2.set_xlabel("context depth (tokens)")
         a1.legend(loc="lower left")
@@ -146,7 +145,7 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
         if config.reference_speculative:
             series.append((f"{ref} {spec_label}", _series(rows, labels, f"{ref} {spec_label}"), COLORS["ref_spec"]))
         fig, ax = plt.subplots(figsize=(6.5, 3.2))
-        _bars(ax, labels, series, "aggregate output tok/s")
+        _bars(ax, labels, series, "sum of request decode tok/s")
         ax.set_xlabel("concurrent users")
         ax.legend(loc="upper left")
     elif kind in ("loading", "memory", "image-encoder"):
@@ -166,6 +165,7 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, format="svg", metadata={"Date": None, "Creator": None})
     plt.close(fig)
+    path.write_text("\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n")
     return True
 
 

@@ -955,5 +955,89 @@
         }
       ]
     }
+  },
+  "retained_exactness_audit": {
+    "date": "2026-09-23",
+    "scope": "Audit of retained September 21 mixed-corpus hashes. Q8 here is the historical Q8_K_L artifact, not a new Q8_K_XL qualification.",
+    "definition": "Exact in BENCHMARKS.md compares llama.cpp AR completions with Gufo C1 AR. It does not measure agreement against the official model.",
+    "targets": {
+      "q4": {
+        "source_artifacts_sha256": {
+          "multi-mixed-q4-gufo-ar.json": "ed6fccf7944fa1893bfaf01340f8ce3ed395dc71839463f112653c576f0710b2",
+          "multi-mixed-q4-gufo-dflash2.json": "8a31e0f3438d3dfeee3f2e1ed55a47cf4eaedaa40de9eaa177e9c4d344bb199c",
+          "multi-mixed-q4-reference.json": "f70e94b2c169f144bd16cae312017b585d05f6e748631603d872d2dde829ab87",
+          "multi-mixed-q4-reference-dflash2.json": "7e85564d5cc895b0ba775178a57be613a2b5eb850c0cc86aee857f7c7396f624"
+        },
+        "c1_cases": 9,
+        "own_ar_speculative_exact": {
+          "gufo-ar": 9,
+          "reference": 9
+        },
+        "cross_engine_c1_mismatches": [
+          "cpp_ring_buffer",
+          "summary_gpu",
+          "italian_explanation",
+          "json_schedule",
+          "creative_station",
+          "instruction_debug"
+        ],
+        "reference_ar_batch_vs_own_c1": {
+          "2": {
+            "exact": 7,
+            "requests": 10
+          },
+          "4": {
+            "exact": 7,
+            "requests": 12
+          },
+          "6": {
+            "exact": 8,
+            "requests": 12
+          },
+          "8": {
+            "exact": 10,
+            "requests": 16
+          }
+        }
+      },
+      "q8": {
+        "source_artifacts_sha256": {
+          "multi-mixed-q8-gufo-ar.json": "ebf7de0e4b897ba3bbda8d920a4128127e7a0104d3009867fe66f33ed2a364b1",
+          "multi-mixed-q8-gufo-dflash2.json": "9c0d97002936cc0157a99e35f2da3959adf4077871438867609bcadac2a48721",
+          "multi-mixed-q8-reference.json": "af2d610afd133aeac1685a24c9fe24944a14b25f82db1eeb9db2ae253cb75711",
+          "multi-mixed-q8-reference-dflash2.json": "ac69833807dbc3a2b2286fe2716af4ef447b0156bac5ed6aff44ab77b766795b"
+        },
+        "c1_cases": 9,
+        "own_ar_speculative_exact": {
+          "gufo-ar": 9,
+          "reference": 9
+        },
+        "cross_engine_c1_mismatches": [
+          "cpp_ring_buffer",
+          "italian_explanation",
+          "chinese_explanation",
+          "creative_station",
+          "instruction_debug"
+        ],
+        "reference_ar_batch_vs_own_c1": {
+          "2": {
+            "exact": 7,
+            "requests": 10
+          },
+          "4": {
+            "exact": 3,
+            "requests": 12
+          },
+          "6": {
+            "exact": 4,
+            "requests": 12
+          },
+          "8": {
+            "exact": 6,
+            "requests": 16
+          }
+        }
+      }
+    }
   }
 }

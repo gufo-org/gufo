@@ -19,8 +19,8 @@ otherwise have to derive. Never restate numbers that sit in the table above.
 | Reference | llama.cpp `llama-server` release `<bNNNNN>` (`<version string>`), ROCm gfx1151 from `flake.nix`, same GGUF |
 | Method | HTTP on both servers, same prompts and timed scope, greedy, thinking off (except the thinking table), one sample per point, fresh server per table and concurrency level; `tools/bench/model-bench.py`, <date>. llama.cpp runs `--cache-ram 0` since the driver never reuses prompts. Every artifact records its server command |
 | Gain | Gufo over llama.cpp, positive when Gufo is better |
-| Identities | [`artifacts/model-identities.json`](artifacts/model-identities.json) |
-| Layout | [benchmark-model skill](../../../.agents/skills/benchmark-model/SKILL.md) |
+| Identities | `artifacts/model-identities.json` (link after copying the template) |
+| Layout | `../../../.agents/skills/benchmark-model/SKILL.md` (link after copying) |
 
 <Model-specific caveats: chat template and default reasoning mode, image
 support, which parity claims are unqualified, which correctness suite ran.>
@@ -89,13 +89,12 @@ picture.>
 
 ## Multiple users
 
-Aggregate delivered output tok/s
-(`aggregate.output_tokens_per_second.overall`: total output tokens divided
-by the sum of measured round spans). Context 4096 per user, greedy, thinking
+Sum of individual request decode rates, averaged across measured cohorts.
+Context 4096 per user, greedy, thinking
 off, 128 output tokens, `cache_prompt=false`, one warm-up round, fresh
 server per point (`gufo serve --sessions C`; `llama-server -np C -c 4096·C`).
 Workloads come from the
-[corpus](../qwen3.8-27b/artifacts/speculative-corpus.json): `repetition`
+`../qwen3.8-27b/artifacts/speculative-corpus.json` (link after copying): `repetition`
 runs `repetition_word`; `mixed` cycles distinct requests through
 <case ids>. `Exact` counts llama.cpp AR completions whose hash matches the
 Gufo AR C1 reference.

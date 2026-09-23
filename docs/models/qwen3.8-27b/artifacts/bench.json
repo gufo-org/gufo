@@ -7,7 +7,7 @@
   },
   "files": {
     "gguf": "target GGUF (UD-Q4_K_XL / UD-Q8_K_XL)",
-    "draft": "DFlash2 draft GGUF (Q4_K_M recommended)",
+    "draft": "DFlash2 Q4_K_M draft GGUF",
     "mmproj": "BF16 vision projector, shared by both variants"
   },
   "variants": {
@@ -139,33 +139,6 @@
       "metric": "tok/s",
       "better": "higher",
       "workload": "repetition"
-    },
-    "single-dflash2-thinking": {
-      "title": "Single user, DFlash2, thinking",
-      "per_variant": true,
-      "speculative": true,
-      "prompt_tokens": 2048,
-      "output_tokens": 128,
-      "depths": [
-        0,
-        4096,
-        8192,
-        12288,
-        16384,
-        32768,
-        65536,
-        131072
-      ],
-      "context": 133760,
-      "depth_tolerance": 0.005,
-      "prefix": {
-        "generator": "synthetic-paragraphs",
-        "seed": 1
-      },
-      "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher",
-      "workload": "thinking"
     },
     "multi-repetition": {
       "title": "Multiple users, repetition",

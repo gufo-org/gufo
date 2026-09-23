@@ -36,7 +36,9 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 35456 -np 1 --port 55429 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off",
+      "pp": 359.3828443746774,
+      "tg": 12.081352809480842,
+      "samples": 1,
       "counts": [
         {
           "cache_n": 0,
@@ -44,11 +46,17 @@
           "prompt_n": 2033
         }
       ],
-      "pp": 326.21,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 12.09,
-      "tg_sd": null
+      "accepted_per_step": null,
+      "completion_sha256": "e7f8f5eab02855d011317ea6c155d5eb581e589f9007ccceec3664eb397fb017",
+      "measuredOn": "2026-09-22",
+      "provenance": "q4-ar-c1-pruning.json",
+      "source": {
+        "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+        "binary_path": "/nix/store/2kjf867i1dhvscdjn2mlfyizb2dxq042-llama-cpp-11069/bin/llama-server",
+        "binary_sha256": "81dee29e5fbc234bbb4ae90c022de9c9d8513d1cefa960550b0bb59d9fc5346f",
+        "buildMode": "nix-release"
+      },
+      "context_capacity": 36864
     },
     "12288": {
       "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 35456 -np 1 --port 55429 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off",
@@ -96,19 +104,27 @@
       "tg_sd": null
     },
     "32768": {
-      "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 35456 -np 1 --port 55429 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off",
+      "pp": 250.68914583314375,
+      "tg": 10.90157749233057,
+      "samples": 1,
       "counts": [
         {
-          "cache_n": 32778,
+          "cache_n": 32552,
           "predicted_n": 128,
-          "prompt_n": 2056
+          "prompt_n": 2011
         }
       ],
-      "pp": 228.96,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 10.91,
-      "tg_sd": null
+      "accepted_per_step": null,
+      "completion_sha256": "80c3cf1a0db09a2805a91e9d64b6a284dbd0162d05b4772b157b6d98e1166485",
+      "measuredOn": "2026-09-22",
+      "provenance": "q4-ar-c1-pruning.json",
+      "source": {
+        "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+        "binary_path": "/nix/store/2kjf867i1dhvscdjn2mlfyizb2dxq042-llama-cpp-11069/bin/llama-server",
+        "binary_sha256": "81dee29e5fbc234bbb4ae90c022de9c9d8513d1cefa960550b0bb59d9fc5346f",
+        "buildMode": "nix-release"
+      },
+      "context_capacity": 36864
     },
     "4096": {
       "command": "llama-server -m Qwen3.8-27B-UD-Q4_K_XL.gguf -c 35456 -np 1 --port 55429 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off",

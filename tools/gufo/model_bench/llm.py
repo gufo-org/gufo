@@ -550,8 +550,11 @@ def run_multi(session: Session, table: TableSpec) -> None:
             combined["modelBench"] = {"table": table.id, "target": session.target, "mode": mode,
                                       "measuredOn": dt.date.today().isoformat()}
             save_artifact(path, combined)
-            rate = report["results"][f"c{users}"]["aggregate"]["output_tokens_per_second"]["overall"]
-            print(f"{table.id} {session.target} {mode} C{users}: {rate:.2f} tok/s -> {path}")
+            from .render import _serving_rate
+
+            rate = _serving_rate(report, users)
+            formatted = f"{rate:.2f}" if rate is not None else "unavailable"
+            print(f"{table.id} {session.target} {mode} C{users}: {formatted} decode tok/s -> {path}")
 
 
 class MemoryPoller:

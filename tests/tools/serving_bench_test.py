@@ -608,5 +608,13 @@ check(_serving_rate(rate_report, 2) == 50,
 rate_report["results"]["c2"]["samples"][0]["decode_tokens_per_second"] = None
 check(_serving_rate(rate_report, 2) is None,
       "missing decode timings must not fall back to whole-request throughput")
+for invalid in (float("nan"), float("inf"), -1):
+    rate_report["results"]["c2"]["samples"][0]["decode_tokens_per_second"] = invalid
+    check(_serving_rate(rate_report, 2) is None,
+          "invalid decode timings must not produce a table rate")
+rate_report["results"]["c2"]["samples"][0]["decode_tokens_per_second"] = 10
+rate_report["results"]["c2"]["rounds"].pop()
+check(_serving_rate(rate_report, 2) is None,
+      "missing round metadata must not inflate summed decode rates")
 
 print("Serving benchmark harness tests passed.")

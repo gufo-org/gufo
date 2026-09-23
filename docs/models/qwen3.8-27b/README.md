@@ -23,8 +23,7 @@ DRAFT=models/qwen3.8-27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
 ```
 
 Substitute `Qwen3.8-27B-UD-Q8_K_XL.gguf` for Q8. Targets and drafts need not
-have matching precision. Q4_K_M is the current DFlash2 recommendation;
-Q8_0 and BF16 drafts also work, with a full depth comparison still TODO.
+have matching precision. Use the Q4_K_M DFlash2 draft with either target.
 
 | Mode | Selection | Behavior |
 | --- | --- | --- |

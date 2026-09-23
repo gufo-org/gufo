@@ -1,11 +1,12 @@
 // DFlash2 exact small-batch GEMM ablations, using the production templates.
 // Build inside Nix with tools/bench/build.sh and this source path.
 // Run: /tmp/dflash_gemm_bench bf16|q8|q4|q5|iq4|q6|q3|iq4-nl M K [iterations]
-// [batch] Scalar Q4/Q5/IQ4/Q6 use batch=1; append swiglu [up-quant] for
+// [batch] Scalar Q8/Q4/Q5/IQ4/Q6 use batch=1; append swiglu [up-quant] for
 // gate/up. Defaults: 24 iterations, batch 7 for Q6 and 8 otherwise; widths 2–8
 // supported. BF16/Q8/Q4/Q5/IQ4 also accept widths 12/16 for shared
-// verification. Weights use read-only host registration, matching production
-// GGUF mapping. Quantized projections rotate matrices beyond cache capacity.
+// verification. Weights use anonymous huge-page advice and read-only host
+// registration, matching production. Quantized projections rotate matrices
+// beyond cache capacity.
 // Wide BF16 repeats one matrix across chunks, including the production K/V
 // cache hint. Every geometry must be bit-exact with the reference before timing
 // counts. Q3_K/IQ4_NL ablations cover their native widths 14 and 16.
@@ -57,7 +58,10 @@ public:
     if (host_ == MAP_FAILED)
       throw std::runtime_error("weight mmap failed");
     try {
+      (void)madvise(host_, bytes_, MADV_HUGEPAGE);
       Check(hipMemcpy(host_, source, bytes_, hipMemcpyDeviceToHost));
+      if (mprotect(host_, bytes_, PROT_READ) != 0)
+        throw std::runtime_error("weight mprotect failed");
       Check(hipHostRegister(host_, bytes_,
                             hipHostRegisterMapped | hipHostRegisterReadOnly));
       registered_ = true;
@@ -175,8 +179,8 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
       throw std::invalid_argument("24/32-row ablations require bf16");
   }
   if constexpr (Batch == 1) {
-    if (type == "bf16" || type == "q8")
-      throw std::invalid_argument("scalar ablations require q4|q5|iq4|q6");
+    if (type == "bf16")
+      throw std::invalid_argument("scalar ablations require q8|q4|q5|iq4|q6");
   }
   const bool mixed = !up_type.empty() && up_type != type;
   if (mixed && (!fused || Batch != 1 ||
@@ -272,7 +276,9 @@ void Run(const std::string& type, std::size_t rows, std::size_t columns,
                        launch.template operator()<Type, UpType>(w);
                      }}};
     };
-    if (type == "q4") {
+    if (type == "q8") {
+      scalar.template operator()<core::GgmlType::kQ8_0>();
+    } else if (type == "q4") {
       if (up_type == "q5")
         scalar.template
         operator()<core::GgmlType::kQ4_K, core::GgmlType::kQ5_K>();

@@ -22,20 +22,21 @@
     "fingerprintId": "34bee0c70b5847b76a43f2c6da016bafed74530bff113cc4ffc5f43f21fe2f96",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-21",
+  "measuredOn": "2026-09-23",
   "mode": null,
   "model": {
     "id": "Qwen3.8-27B",
     "variant": "q4"
   },
   "notes": [
-    "pp2048/tg128; depth is a cached prefix of synthetic text; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
-    "synthetic text: 1.167 tokens/word, template overhead 12 tokens"
+    "Focused pp2048/tg128, exact pinned message history, context 36864. Requested depth 32K; actual prefix and new-token counts retained. Other depths await refresh."
   ],
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "command": "gufo serve --port 35199 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 35456 --served-model-name bench --think off --max-pending-per-client 8",
+      "pp": 674.0128618151269,
+      "tg": 12.38050994233483,
+      "samples": 1,
       "counts": [
         {
           "cache_n": 0,
@@ -43,116 +44,40 @@
           "prompt_n": 2033
         }
       ],
-      "pp": 633.08,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 9.68,
-      "tg_sd": null
-    },
-    "12288": {
-      "command": "gufo serve --port 35199 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 35456 --served-model-name bench --think off --max-pending-per-client 8",
-      "counts": [
-        {
-          "cache_n": 12276,
-          "predicted_n": 128,
-          "prompt_n": 2054
-        }
-      ],
-      "pp": 489.85,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 11.24,
-      "tg_sd": null
-    },
-    "131072": {
-      "command": "gufo serve --port 32911 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
-      "counts": [
-        {
-          "cache_n": 131068,
-          "predicted_n": 128,
-          "prompt_n": 2048
-        }
-      ],
-      "pp": 267.41,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 7.38,
-      "tg_sd": null
-    },
-    "16384": {
-      "command": "gufo serve --port 35199 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 35456 --served-model-name bench --think off --max-pending-per-client 8",
-      "counts": [
-        {
-          "cache_n": 16374,
-          "predicted_n": 128,
-          "prompt_n": 2049
-        }
-      ],
-      "pp": 459.05,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 11.03,
-      "tg_sd": null
+      "accepted_per_step": null,
+      "completion_sha256": "31ec3290777e44ce3901428eb5f9f738d4401e2b7eccb8cfee393f5dc5ec25d0",
+      "measuredOn": "2026-09-23",
+      "provenance": "q4-ar-c1-pruning.json",
+      "source": {
+        "revision": "f7a6eff-dirty",
+        "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+        "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
+        "buildMode": "nix-release"
+      },
+      "context_capacity": 36864
     },
     "32768": {
-      "command": "gufo serve --port 35199 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 35456 --served-model-name bench --think off --max-pending-per-client 8",
+      "pp": 502.28868451340963,
+      "tg": 11.140013839303586,
+      "samples": 1,
       "counts": [
         {
-          "cache_n": 32779,
+          "cache_n": 32553,
           "predicted_n": 128,
-          "prompt_n": 2055
+          "prompt_n": 2010
         }
       ],
-      "pp": 415.94,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 10.33,
-      "tg_sd": null
-    },
-    "4096": {
-      "command": "gufo serve --port 35199 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 35456 --served-model-name bench --think off --max-pending-per-client 8",
-      "counts": [
-        {
-          "cache_n": 4095,
-          "predicted_n": 128,
-          "prompt_n": 2036
-        }
-      ],
-      "pp": 583.61,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 11.7,
-      "tg_sd": null
-    },
-    "65536": {
-      "command": "gufo serve --port 32911 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
-      "counts": [
-        {
-          "cache_n": 65522,
-          "predicted_n": 128,
-          "prompt_n": 2030
-        }
-      ],
-      "pp": 376.89,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 9.26,
-      "tg_sd": null
-    },
-    "8192": {
-      "command": "gufo serve --port 35199 --sessions 1 llm --model Qwen3.8-27B-UD-Q4_K_XL.gguf --context 35456 --served-model-name bench --think off --max-pending-per-client 8",
-      "counts": [
-        {
-          "cache_n": 8200,
-          "predicted_n": 128,
-          "prompt_n": 2042
-        }
-      ],
-      "pp": 553.05,
-      "pp_sd": null,
-      "samples": 1,
-      "tg": 11.32,
-      "tg_sd": null
+      "accepted_per_step": null,
+      "completion_sha256": "13297fd0b21d81b9b1d952f559616a797e8e56596905dc4f19a8a24ff5f9bb24",
+      "measuredOn": "2026-09-23",
+      "provenance": "q4-ar-c1-pruning.json",
+      "source": {
+        "revision": "f7a6eff-dirty",
+        "binary_path": "/nix/store/cd37m3pf6s0pxg25kycl08ysrd5iqcgw-gufo-f7a6eff-dirty/bin/gufo",
+        "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4",
+        "buildMode": "nix-release"
+      },
+      "context_capacity": 36864
     }
   },
   "schemaVersion": 1,
@@ -178,9 +103,8 @@
     ]
   },
   "source": {
-    "buildMode": "nix-release",
-    "dirty": false,
-    "revision": "8e496f82b370f84308b04c8f6112102f5ae8eb50"
+    "revision": "4c8888f4",
+    "binary_sha256": "d3845c81f3eb30ef61333bb88788e7f3bdc46c85b712c6344db7f6a2390b18f4"
   },
   "table": "single-ar-q4",
   "target": "gufo"

@@ -76,18 +76,25 @@
 | Q6 format specialization and paired/split SSM projections | Not promoted: byte-exact, but negligible gains or regressions; split SSM adds launches. |
 | Precomputed affine input sums | Rejected: byte-exact, but no consistent cold-projection benefit after including the preparation pass. |
 | Gate/up input sharing, including four simultaneous dots | Not retained: exact kernel outputs and verification checks, but the paired implementation stays flat in full-model Q4 C1 AR despite cold-kernel gains. |
-| Huge-page-backed immutable weights | Retained for Q4 C1 AR/DFlash2: identical encoded bytes and greedy/cache results, approximately 2% more AR TG at d0/d32K, comparable PP and unchanged process RSS. Warm AR readiness stays below one second; cold loading and Q8 still need qualification. |
+| Huge-page-backed immutable weights | Retained for Q4 C1 AR/DFlash2: identical encoded bytes and greedy/cache results, approximately 2% more AR TG at d0/d32K, comparable PP and unchanged process RSS. Warm AR readiness stays below one second; cold loading remains unmeasured; Q8 execution checks now pass. |
 | Residual/RMSNorm fusion after register caching | Rejected: byte-exact and faster as a component, but full-model AR is slower. |
 | Separate gate/up waves, staged inputs, fixed FFN geometry and `-O3` | Not retained: byte-exact controls, but no useful isolated mapped-weight gain. Stage weights as production does; device-allocated microbenchmarks overstated earlier gains. |
 | Cached small-batch RMSNorm and shared attention partition scales | Retained: explicit FMA and unchanged sum trees pass independent FP64 and byte-exact controls. Q4 C1 DFlash2 gains about 1.1% at d0/d32K; AR, PP, greedy output and sampled cache replay are retained. |
 | C1 batched selector and FFN scratch reuse | Retained as simplification: exact token chains/probabilities, fewer launches and 15,616 fewer allocated bytes. The focused profile does not show an isolated selector speed gain. |
 | Decode fallback for missing verification replay records | Correctness fix: reuse recorded rows and decode unrecorded rows with the original arithmetic. Full mixed-context and C1–C8 target replay checks pass; the complete recorded fast path is unchanged. |
+| Generated-frontier replay and cancellation rollback | Correctness fix: retain decode arithmetic for pending output IDs; reuse the existing verification backup when cancellation interrupts publication. Q4/Q8 live, disk and seeded continuation checks pass without adding a normal-cycle GPU copy. |
+| Q8 scalar row interleaving and packed coefficients | Rejected: byte-exact but slower than the existing read-only mapped-weight kernel; static type specialization is speed-neutral. |
+| Q8 C1 measured width costs | Rejected: exact d0/d32K output, but no end-to-end gain; the existing policy remains. |
+| Q8 verification staging four/eight activation rows | Rejected: byte-exact on 32-row gate/up and down projections, but extra staging phases outweigh the smaller shared-memory allocation. |
+| Private Q8 C4 width costs and per-request full-block probes | Rejected: private costs slow repetition; per-request probes recover it but regress ordinary output. |
+| Shared Q8 C4 greedy width | Retained: summed private acceptance histories avoid costly ragged verification. Difficult-pair TG improves 12.3%, deep full-checkpoint TG 13.2%; full acceptance, AR output, private sampled replay and C1 pp/tg are retained. |
+| Concurrent generated-reply forks | Open correctness issue: one live frontier and three earlier prompt snapshots replay the same conversation differently on the unchanged baseline. The failed deep equality gate is excluded from speed qualification. |
 
-Current focus: **Q4_K_XL, C1**, at shallow and long context.
-AR now leads the pinned llama.cpp d0/d32K controls by about 2%; Q4_K_M
-DFlash2 retains those improvements and needs more long-context work.
-Next apply and qualify the improvements on Q8_K_XL, first AR and then
-DFlash2. Resume C>1 optimization only after those single-user steps.
+Current focus: resolve generated-history cache forks, then **Q8_K_XL DFlash2**
+and Q4/Q8 concurrency. Q4 C1 AR
+leads the pinned d0/d32K controls; Q8 C1 AR matches them. Correct Q8 DFlash2
+retains AR output and needs more long-context speed. Profile complete batched
+cycles and avoid speculation that does not pay for its verification cost.
 Keep the work on one PR branch with incremental, reviewable commits.
 
 Overall target: match llama.cpp generation speed, aiming for a further 10%,
@@ -97,7 +104,7 @@ screen d0 and d32K, then expand where needed to isolate or qualify the change.
 Preserve prompt-processing speed, greedy AR/speculative agreement and sampled
 replay. Check cross-engine differences against each engine's AR output.
 
-Iterate with one affected Q4 shape and one control. Do not refresh the
+Iterate with one affected shape and one control. Do not refresh the
 full benchmark sweep during exploration. Repeat only to resolve noise or a
 failure. Qualify the other configurations after the focused optimization phase,
 or earlier only when a specific correctness concern requires it. Remote GPU time

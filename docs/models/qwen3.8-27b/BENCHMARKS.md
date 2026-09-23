@@ -3,134 +3,19 @@
 | | |
 | --- | --- |
 | Host | Linux x86-64, AMD `gfx1151`, 128 GB unified memory |
-| Gufo | `nix build` at revision `1589ed79` (dirty tree), binary SHA-256 `73590c9c12fb…` |
-| Targets | `unsloth/Qwen3.8-27B-GGUF` snapshot `4ca72078`: **UD-Q4_K_XL** (16.35 GiB) and **UD-Q8_K_L** (26.12 GiB; the snapshot ships Q8_K_L, not the Q8_K_XL named in earlier revisions of this card) |
-| Speculative | DFlash2 draft **Q4_K_M** with the **adaptive** controller; Q8_0 and BF16 drafts supported, their depth comparison is **TODO** |
+| Gufo | Focused C1 results: `4c8888f4` / `82a947a0`, `nix build`; each artifact records its binary identity. Unrefreshed concurrency/memory controls are dated below |
+| Targets | `unsloth/Qwen3.8-27B-GGUF` snapshot `4ca72078`: **UD-Q4_K_XL** (16.35 GiB), **UD-Q8_K_XL** (29.30 GiB). Historical multi-user/memory Q8 rows use **UD-Q8_K_L** (26.12 GiB) and await replacement |
+| Speculative | DFlash2 draft **Q4_K_M** with the **adaptive** controller |
 | Reference | llama.cpp `llama-server` release `b11069` (`0.4.1-dev (build 11069)`), ROCm gfx1151, `LLAMA_HIP_UMA=ON`, from `flake.nix`, same GGUF files and same draft through `--spec-type draft-dflash` |
-| Method | HTTP on both servers, same prompts and timed scope, greedy, thinking off, one sample per point, fresh server per table and concurrency level; `tools/bench/model-bench.py`, 2026-09-21/22. Every artifact records its server command |
+| Method | HTTP, greedy, thinking off, one warmed sample per point, isolated servers. Focused single-user controls: 2026-09-23; historical concurrency/memory: 2026-09-21 |
 | Gain | Gufo over llama.cpp, positive when Gufo is better |
-| Quality gate | `tools/qwen27b/check.py fast` passed (8/8) on the same build before the refresh |
+| Quality gate | Full Q4/Q8 target replay, affected operators and generated-frontier continuation pass; [scope and independent-reference limits](EVALUATION.md) |
 | Identities | [`artifacts/model-identities.json`](artifacts/model-identities.json) |
 | Layout | [benchmark-model skill](../../../.agents/skills/benchmark-model/SKILL.md) |
 
 PNG/JPEG image input uses the matching BF16 projector with AR or DFlash2;
 native MTP is CLI-only. [Image usage and quality checks](README.md#images).
 Unmeasured points are **TODO**; the reason is stated next to each table.
-
-## Current focused controls
-
-**2026-09-23**, Q4_K_XL C1, pp2048/tg128, greedy. Context capacity is 36864
-through d32K and 133760 at d64K. Depth is the nominal cached prefix.
-The d0/d32K rows use binary SHA-256 `d3845c81f3eb…`; d64K retains the
-September 22 qualification. Complete 128-token outputs match between AR
-and adaptive Q4_K_M DFlash2 at each depth. One release sample per current
-point; small timing differences remain provisional.
-Counts, output hashes and binary identities:
-[AR](artifacts/q4-ar-c1-focused.json),
-[DFlash2](artifacts/q4-dflash2-c1-focused.json),
-[paired-controller controls](artifacts/q4-c2-focused.json),
-[C4 controls](artifacts/q4-c4-focused.json),
-[latest C1 AR controls](artifacts/q4-ar-c1-pruning.json).
-The full comparison tables below remain the September 21 sweep.
-
-| Mode | Depth | pp tok/s | tg tok/s | Draft acceptance |
-| --- | ---: | ---: | ---: | ---: |
-| AR | 0 | 674.01 | 12.38 | — |
-| AR | 32,768 | 502.29 | 11.14 | — |
-| AR | 65,536 | 413.81 | 9.82 | — |
-| DFlash2 | 0 | 619.74 | 30.66 | 47.3% |
-| DFlash2 | 32,768 | 476.85 | 21.91 | 44.1% |
-| DFlash2 | 65,536 | 394.63 | 17.03 | 44.5% |
-
-The latest d0/d32K controls use read-only weights backed by larger pages.
-Warm launch-to-ready is **0.92–0.97 s** for AR and **2.23 s** with DFlash2;
-process RSS is **16.67–16.70 GiB** and **17.80 GiB**, respectively.
-The file page cache is reclaimable; it is separate from the anonymous weight
-allocation. Cold loading remains **TODO**.
-Pinned llama.cpp AR controls reach **12.08 tok/s** at d0 and
-**10.90 tok/s** at d32K, with PP **359.38/250.69 tok/s**; its d0 repeat
-also reaches **12.08 tok/s**. Gufo's lead is about 2% on these controls.
-Both engines receive identical request messages; at d32K Gufo reuses 32,553 prompt tokens and
-llama.cpp 32,552. These are quantized-execution comparisons.
-
-The retained llama.cpp d0 DFlash2 control reaches **27.16 tok/s**, with PP
-**344.56 tok/s**. At d64K its
-DFlash2 reaches **19.52 tok/s TG** and **196.58 tok/s PP** with the same
-request messages as Gufo. Its greedy d0 AR/DFlash2 outputs differ; see
-[evaluation](EVALUATION.md).
-
-The separate tg128 word-repetition check reaches **68.51 tok/s** at d0
-and **41.40 tok/s** at d64K, both with
-**100% draft acceptance**. It adds
-38/41 prompt tokens, respectively; it is not a pp2048 workload.
-
-**C2**, sum of the two individual request decode rates. Fresh servers,
-context 4096, 30–53 prompt tokens, tg128, one warmup and one measured round.
-Every output matches C1 AR; no prompt-cache hits. Adaptive uses measured
-Q4 pair costs for greedy requests.
-[Measurements and focused profile](artifacts/q4-c2-focused.json).
-
-| Workload | AR tok/s | DFlash2 tok/s | Draft acceptance |
-| --- | ---: | ---: | ---: |
-| Word repetition | 23.26 | 103.35 | 100% |
-| Pangram / train problem | 23.27 | 69.79 | 68.1% |
-| Italian / Chinese explanations | TODO | 41.11 | 45.0% |
-
-At **d32K**, C2 DFlash2 reaches **32.55 tok/s** on the pp2048/tg128
-continuation, with **58.3% acceptance**. Each request reuses 32,552 cached
-tokens and prefills 2,011 new tokens; both complete outputs match C1 AR.
-Context capacity 36864, one measured pair.
-
-**C4**, Q4 adaptive DFlash2, sum of individual decode rates:
-
-| Workload | tok/s | Draft acceptance |
-| --- | ---: | ---: |
-| Word repetition | 109.33 | 100% |
-| Pangram / train problem | 75.64 | 79.1% |
-| Italian / Chinese explanations | 59.99 | 56.4% |
-| d32K continuation, pp2048/tg128 | 38.44 | 53.0% |
-
-All 16 complete outputs match C1 AR. Shallow controls use context 4096,
-30–53 prompt tokens, tg128, no cache hits and one warmed measured round.
-At d32K, each request reuses 32,552 tokens and prefills 2,011; prefill and decode
-interleave normally, with context capacity 36864 and one measured cohort.
-These concurrency rows retain their September 22 qualification; they have
-not been refreshed for the latest C1 kernel increment.
-[Focused C4 measurements and profile](artifacts/q4-c4-focused.json).
-
-**C6**, same Q4 target/draft and sum of individual decode rates:
-
-| Workload | tok/s | Draft acceptance |
-| --- | ---: | ---: |
-| Word repetition | 113.85 | 100% |
-| Pangram / train problem | 77.91 | 74.8% |
-| Italian / Chinese explanations | 60.75 | 61.3% |
-| d32K continuation, pp2048/tg128 | 43.20 | 58.3% |
-
-One measured cohort per point; shallow controls have one warmup and no cache
-hits. All 24 complete outputs match C1 AR. The deep requests each reuse 32,552
-tokens and prefill 2,011, with comparable PP times and normal prefill/decode
-interleaving. [C6 measurements and profile](artifacts/q4-c6-focused.json).
-The matching Italian/Chinese AR control reaches **59.81 tok/s**, with all six
-outputs identical. Its small gap from DFlash2 is not a demonstrated speculative
-speedup from one sample.
-
-**C8**, same Q4 target/draft and sum of individual decode rates:
-
-| Workload | DFlash2 tok/s | Draft acceptance |
-| --- | ---: | ---: |
-| Word repetition | 117.45 | 100% |
-| Pangram / train problem | 85.55 | 78.2% |
-| Italian / Chinese explanations | 67.77 | 61.9% |
-| d32K continuation, pp2048/tg128 | 46.99 | 53.5% |
-
-All outputs match C1 AR. Shallow controls use one warmed measured cohort
-without cache hits. The deep point was repeated once to check a PP outlier;
-both samples are retained, typical PP times match the baseline, and small TG
-differences remain provisional. The same Italian/Chinese control reaches
-**72.97 tok/s with AR**, so speculation is still unprofitable on this case.
-[C8 measurements, calibration and quality checks](artifacts/q4-c8-focused.json).
-C4/C6/C8 beyond d32K remain **TODO**.
 
 ## Loading and continuation
 
@@ -158,29 +43,26 @@ a long-conversation latency distribution).
 
 ## Single user, autoregressive
 
-Standard sweep: **pp2048 / tg128**, C1, greedy. Cells are tok/s from the
-servers' own `timings`; depth is a cached conversation prefix (a prior user
-turn of about `d` tokens answered with one token), and the timed request
-continues that conversation with a new ~2048-token user turn. Synthetic
-paragraph text (1.167 tokens/word, 12-token template overhead); the driver
-accepted a point only when `cache_n` was within 0.5% of `d` and `prompt_n`
-within 0.5% of 2048 (actual counts per sample are in the artifacts).
-Context capacity 35456 on both servers for the 0–32K rows and 133760 for
-the 64K and 128K rows (measured 2026-09-21 in a later pass with the same
-method); one warmed sample per point.
+Requested **pp2048 / tg128**, C1. Depth is a cached conversation prefix;
+the measured turn appends synthetic paragraphs and requests ordinary prose.
+The focused d0/d32K controls use context 36864, actual new-token counts
+2010–2060 and a prefix of about 32K; exact counts/history are in the artifacts.
+Q4 replays the pinned one-token prefix reply, Q8 an eight-token reply.
+Unrefreshed Gufo depths are **TODO**. Retained Q4 reference-only rows are from
+the earlier depth sweep; paired refreshed cells use the same input history.
 Artifacts: `artifacts/single-ar-{q4,q8}-{gufo,reference}.json`.
 
 <!-- bench:single-ar-q4 -->
 | Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 633.08 | 326.21 | +94.1% | 9.68 | 12.09 | -19.9% |
-| 4,096 | 583.61 | 302.46 | +93.0% | 11.70 | 11.92 | -1.8% |
-| 8,192 | 553.05 | 287.14 | +92.6% | 11.32 | 11.77 | -3.8% |
-| 12,288 | 489.85 | 275.09 | +78.1% | 11.24 | 11.61 | -3.2% |
-| 16,384 | 459.05 | 264.36 | +73.6% | 11.03 | 11.45 | -3.7% |
-| 32,768 | 415.94 | 228.96 | +81.7% | 10.33 | 10.91 | -5.3% |
-| 65,536 | 376.89 | 179.00 | +110.6% | 9.26 | 9.95 | -6.9% |
-| 131,072 | 267.41 | 131.74 | +103.0% | 7.38 | 8.47 | -12.9% |
+| 0 | 674.01 | 359.38 | +87.5% | 12.38 | 12.08 | +2.5% |
+| 4,096 | TODO | 302.46 | TODO | TODO | 11.92 | TODO |
+| 8,192 | TODO | 287.14 | TODO | TODO | 11.77 | TODO |
+| 12,288 | TODO | 275.09 | TODO | TODO | 11.61 | TODO |
+| 16,384 | TODO | 264.36 | TODO | TODO | 11.45 | TODO |
+| 32,768 | 502.29 | 250.69 | +100.4% | 11.14 | 10.90 | +2.2% |
+| 65,536 | TODO | 179.00 | TODO | TODO | 9.95 | TODO |
+| 131,072 | TODO | 131.74 | TODO | TODO | 8.47 | TODO |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q4.svg)
@@ -188,49 +70,44 @@ Artifacts: `artifacts/single-ar-{q4,q8}-{gufo,reference}.json`.
 <!-- bench:single-ar-q8 -->
 | Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 679.77 | 317.30 | +114.2% | 6.62 | 8.01 | -17.4% |
-| 4,096 | 632.28 | 297.17 | +112.8% | 7.42 | 7.93 | -6.4% |
-| 8,192 | 606.46 | 284.36 | +113.3% | 7.34 | 7.86 | -6.6% |
-| 12,288 | 533.89 | 273.43 | +95.3% | 7.27 | 7.79 | -6.7% |
-| 16,384 | 507.32 | 262.89 | +93.0% | 7.19 | 7.73 | -7.0% |
-| 32,768 | 442.06 | 226.12 | +95.5% | 6.90 | 7.48 | -7.8% |
-| 65,536 | 361.73 | 179.05 | +102.0% | 6.37 | 7.01 | -9.1% |
-| 131,072 | 261.72 | 131.10 | +99.6% | 5.43 | 6.24 | -13.0% |
+| 0 | 489.22 | 355.17 | +37.7% | 7.20 | 7.20 | +0.0% |
+| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 8,192 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 12,288 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 32,768 | 386.43 | 249.07 | +55.1% | 6.76 | 6.76 | +0.0% |
+| 65,536 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 131,072 | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q8.svg)
 
-The September 21 shallow decode deficit came from serial attention below 4K.
-The current Q4 AR controls above use parallel attention from 128 tokens and
-shared KV loads from 512 tokens. A full comparative refresh is **TODO**.
+Q4 AR reaches **12.38 tok/s at d0** and **11.14 at d32K**. Q8_K_XL
+reaches **7.20 / 6.76 tok/s**, matching the pinned reference at those points.
+These measurements supersede the earlier cold-conversation decode deficit.
 
 ## Single user, DFlash2
 
-**pp2048 / tg128**, C1, greedy, Q4_K_M draft, adaptive controller, same
-prompts, depths and context capacity as the autoregressive table, one warmed
-sample per point. llama.cpp `b11069` runs the same draft through
-`--spec-type draft-dflash --spec-draft-model <draft> --spec-draft-ngl 999`
-with its default draft parameters, so the reference column is a real DFlash2
-comparison. `accepted/step` is the mean number of accepted draft tokens per
-verification step (`draft_n_accepted / (predicted_n − draft_n_accepted)`);
-tokens per step is this plus one, so it is proportional to the speculative
-speedup and, unlike an acceptance rate, does not reward a controller for
-proposing less. The measured turn asks for a detailed summary and a story,
-so the generated text is ordinary prose; the repetitive workload has its own
-table. The 64K and 128K rows were measured at context 133760.
+Same focused method as AR, **Q4_K_M draft**, adaptive controller.
+llama.cpp uses `--spec-type draft-dflash` with its default draft parameters.
+`accepted/step = accepted / (generated − accepted)`; emitted tokens per
+verification step is this plus one. DFlash2 prefill includes feature capture
+and draft context injection. Q4 d32K's paired reference cell remains **TODO**.
+The corrected Q8 continuation retains all 128 AR tokens at both depths;
+its earlier mismatching deep result is excluded.
 Artifacts: `artifacts/single-dflash2-{q4,q8}-{gufo,reference}.json`.
 
 <!-- bench:single-dflash2-q4 -->
 | Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain | Gufo accepted/step | llama.cpp accepted/step |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 596.64 | 317.38 | +88.0% | 21.97 | 23.41 | -6.2% | 1.72 | 1.51 |
-| 4,096 | 555.70 | 298.19 | +86.4% | 25.48 | 23.03 | +10.6% | 1.91 | 1.51 |
-| 8,192 | 537.88 | 284.44 | +89.1% | 24.18 | 21.76 | +11.1% | 1.98 | 1.42 |
-| 12,288 | 521.47 | 272.58 | +91.3% | 21.46 | 22.66 | -5.3% | 1.72 | 1.61 |
-| 16,384 | 499.96 | 260.16 | +92.2% | 20.34 | 21.87 | -7.0% | 1.72 | 1.51 |
-| 32,768 | 440.44 | 224.69 | +96.0% | 15.10 | 18.77 | -19.6% | 1.51 | 1.29 |
-| 65,536 | 338.23 | 177.90 | +90.1% | 8.84 | 18.32 | -51.7% | 2.05 | 1.51 |
-| 131,072 | 258.41 | 126.64 | +104.1% | 4.38 | 14.16 | -69.1% | 2.12 | 1.37 |
+| 0 | 619.74 | 344.56 | +79.9% | 30.66 | 27.16 | +12.9% | 2.20 | 1.91 |
+| 4,096 | TODO | 298.19 | TODO | TODO | 23.03 | TODO | TODO | 1.51 |
+| 8,192 | TODO | 284.44 | TODO | TODO | 21.76 | TODO | TODO | 1.42 |
+| 12,288 | TODO | 272.58 | TODO | TODO | 22.66 | TODO | TODO | 1.61 |
+| 16,384 | TODO | 260.16 | TODO | TODO | 21.87 | TODO | TODO | 1.51 |
+| 32,768 | 476.85 | TODO | TODO | 21.91 | TODO | TODO | 1.78 | TODO |
+| 65,536 | TODO | 177.90 | TODO | TODO | 18.32 | TODO | TODO | 1.51 |
+| 131,072 | TODO | 126.64 | TODO | TODO | 14.16 | TODO | TODO | 1.37 |
 <!-- /bench -->
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q4.svg)
@@ -256,19 +133,20 @@ analogue of the `repetition` corpus below.
 <!-- bench:single-dflash2-q8 -->
 | Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain | Gufo accepted/step | llama.cpp accepted/step |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 558.66 | 302.75 | +84.5% | 15.29 | 17.21 | -11.2% | 1.56 | 1.51 |
-| 4,096 | 534.82 | 279.73 | +91.2% | 16.78 | 17.72 | -5.3% | 1.67 | 1.61 |
-| 8,192 | 511.24 | 268.09 | +90.7% | 13.40 | 17.51 | -23.5% | 1.21 | 1.61 |
-| 12,288 | 504.53 | 258.92 | +94.9% | 14.93 | 14.84 | +0.6% | 1.61 | 1.25 |
-| 16,384 | 486.49 | 251.53 | +93.4% | 13.88 | 15.79 | -12.1% | 1.51 | 1.42 |
-| 32,768 | 428.83 | 216.95 | +97.7% | 11.04 | 18.26 | -39.5% | 1.46 | 1.91 |
-| 65,536 | 333.39 | 172.91 | +92.8% | 6.32 | 14.20 | -55.5% | 1.91 | 1.46 |
-| 131,072 | 256.23 | 123.84 | +106.9% | 2.98 | 12.74 | -76.6% | 1.61 | 1.56 |
+| 0 | 471.09 | 336.19 | +40.1% | 16.13 | 15.02 | +7.4% | 1.56 | 1.46 |
+| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 8,192 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 12,288 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 32,768 | 361.35 | 232.53 | +55.4% | 12.75 | 13.89 | -8.2% | 1.37 | 1.46 |
+| 65,536 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 131,072 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q8.svg)
 
-
+At d32K, llama.cpp DFlash2 differs from its own AR output; the speed comparison
+does not establish equivalent output. See [evaluation](EVALUATION.md#meaning-of-exact).
 
 <!-- bench:single-dflash2-repetition-q8 -->
 | Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain | Gufo accepted/step | llama.cpp accepted/step |
@@ -283,62 +161,14 @@ analogue of the `repetition` corpus below.
 | 131,072 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 <!-- /bench -->
 
-Thinking workload (**TODO**, pending the 27B DFlash2 changes in progress):
-thinking left on, the measured turn asks a question that requires reasoning,
-so the timed tokens are chain-of-thought rather than prose.
-
-<!-- bench:single-dflash2-thinking-q4 -->
-| Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain | Gufo accepted/step | llama.cpp accepted/step |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 8,192 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 12,288 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 32,768 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 65,536 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 131,072 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-<!-- /bench -->
-
-<!-- bench:single-dflash2-thinking-q8 -->
-| Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain | Gufo accepted/step | llama.cpp accepted/step |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 8,192 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 12,288 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 32,768 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 65,536 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 131,072 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-<!-- /bench -->
-
-On generic prose Gufo accepts **more draft tokens per step than llama.cpp**
-at every depth (Q4 1.5–2.1 vs 1.3–1.6; Q8 1.4–1.9 vs 1.2–1.5), yet its
-DFlash2 decode is only within ±11% of llama.cpp up to 16K, falls behind by
-20% at 32K and collapses beyond: 8.8 / 4.4 tok/s (Q4) and 6.3 / 3.0 tok/s
-(Q8) at 64K / 128K, **slower than Gufo AR at the same depth** (9.3 / 7.4 and
-6.4 / 5.4), while llama.cpp DFlash2 holds 18.3 / 14.2 and 15.4 / 12.9. With
-draft quality equal or better, the loss is entirely in the per-step cost of
-verification at depth. Greedy DFlash2 output matches AR token IDs (verified
-by the concurrency `Exact` checks below at C1).
-
-Draft-precision control, **2026-09-16**: cached `prose_tides`, **tg64**,
-adaptive, greedy C1, one warmed release sample per draft. Generation tok/s:
-
-| Draft | Q4 target | Q8 target |
-| --- | ---: | ---: |
-| Q4_K_M | **23.51** | **15.61** |
-| Q8_0 | 22.66 | 15.33 |
-| BF16 | 21.96 | 14.11 |
-
-Full depth comparison across all three drafts and MTP performance: **TODO**.
 [Prompts, artifact identities and quality checks](EVALUATION.md).
 
 ## Multiple users
 
-Aggregate delivered output tok/s (`aggregate.output_tokens_per_second.overall`):
-total output tokens divided by the sum of measured request-group spans.
+These are the retained **2026-09-21** controls; the current concurrency refresh
+is pending. Q8 here is the older **Q8_K_L**, not the Q8_K_XL single-user rows.
+
+Sum of individual request decode rates, averaged across measured cohorts.
 Context capacity 4096 per user (Gufo `--sessions C --context 4096`, llama.cpp
 `-np C -c 4096·C`), greedy, thinking off, **128 output tokens**, one warmup
 round, one measured repetition, fresh server per concurrency level. Workloads
@@ -350,24 +180,19 @@ llama.cpp AR completions whose hash matches the Gufo AR C1 reference; every
 Gufo AR and Gufo DFlash2 completion at C2–C8 matched that reference.
 Artifacts: `artifacts/multi-{mixed,repetition}-{q4,q8}-{gufo-ar,gufo-dflash2,reference,reference-dflash2}.json`.
 
-Prompt-cache mismatch ([#245](https://github.com/gufo-org/gufo/issues/245)):
-the driver sends `cache_prompt=false`, which llama-server honours (0 cache
-hits) but Gufo ignores, so Gufo reused its
-prompt snapshot for repeated prompts (all `repetition` requests; 14 of 16
-`mixed` requests at C8). The prompts are 30–53 tokens, so the skipped
-prefill is about 0.2 s of a 15–19 s request (≈1–2% of the Gufo AR span);
-llama.cpp's C8 prefill of the same prompts takes 1.4–1.5 s per request. The
-`summary_gpu` case stops at EOS after 34–38 tokens on both servers; all other
-completions reach 128 tokens.
+Older September 21 Gufo concurrency rows reused prompt snapshots despite
+`cache_prompt: false`; the current server honors that option. These are
+decode rates, excluding prefill and scheduling. Fresh measurements must
+have zero prompt-cache hits.
 
 <!-- bench:multi-mixed-q4 -->
 | Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 11.50 | 11.81 | -2.6% | 29.05 | 23.80 | +22.1% | 3/9 |
-| 2 | 20.45 | 19.96 | +2.5% | 34.77 | 29.39 | +18.3% | 5/10 |
-| 4 | 37.10 | 33.50 | +10.7% | 41.98 | 49.91 | -15.9% | 8/12 |
-| 6 | 50.37 | 32.75 | +53.8% | 44.18 | 46.45 | -4.9% | 8/12 |
-| 8 | 61.40 | 32.21 | +90.6% | 47.61 | 43.88 | +8.5% | 11/16 |
+| 1 | 11.76 | 12.22 | -3.8% | 33.99 | 26.55 | +28.0% | 3/9 |
+| 2 | 22.99 | 22.65 | +1.5% | 47.29 | 36.33 | +30.2% | 5/10 |
+| 4 | 41.96 | 38.69 | +8.5% | 55.55 | 71.42 | -22.2% | 8/12 |
+| 6 | 57.43 | 39.23 | +46.4% | 63.01 | 68.03 | -7.4% | 8/12 |
+| 8 | 69.62 | 39.34 | +77.0% | 64.28 | 67.87 | -5.3% | 11/16 |
 <!-- /bench -->
 
 ![Multiple users, mixed corpus](artifacts/charts/multi-mixed-q4.svg)
@@ -375,37 +200,23 @@ completions reach 128 tokens.
 <!-- bench:multi-repetition-q4 -->
 | Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 11.84 | 11.78 | +0.5% | 65.98 | 33.04 | +99.7% | 1/1 |
-| 2 | 23.02 | 21.40 | +7.6% | 89.12 | 42.46 | +109.9% | 2/2 |
-| 4 | 41.93 | 35.92 | +16.7% | 97.04 | 79.15 | +22.6% | 4/4 |
-| 6 | 56.88 | 41.76 | +36.2% | 96.94 | 81.90 | +18.4% | 6/6 |
-| 8 | 67.84 | 42.95 | +58.0% | 101.14 | 93.84 | +7.8% | 8/8 |
+| 1 | 11.84 | 12.20 | -3.0% | 66.10 | 37.00 | +78.6% | 1/1 |
+| 2 | 23.04 | 22.46 | +2.6% | 89.32 | 47.09 | +89.7% | 2/2 |
+| 4 | 41.97 | 38.32 | +9.5% | 97.26 | 92.76 | +4.9% | 4/4 |
+| 6 | 56.96 | 44.74 | +27.3% | 97.16 | 95.00 | +2.3% | 6/6 |
+| 8 | 67.94 | 46.02 | +47.6% | 101.37 | 110.97 | -8.7% | 8/8 |
 <!-- /bench -->
 
 ![Multiple users, repetition](artifacts/charts/multi-repetition-q4.svg)
 
-Q4 at C8, request latency median / p95: Gufo AR 15.0 / 15.2 s, Gufo DFlash2
-14.6 / 19.4 s, llama.cpp AR 28.9 / 28.9 s, llama.cpp DFlash2 17.4 / 21.4 s
-(mixed); Gufo AR 15.3 s, Gufo DFlash2 10.4 s, llama.cpp AR 23.8 s, llama.cpp
-DFlash2 10.9 s (repetition, all requests identical). Accepted draft tokens
-per step at C8: Gufo DFlash2 2.5 on mixed and 6.1 on repetition, llama.cpp
-DFlash2 1.9 and 2.9 (`render` prints them per artifact). The mixed `Exact` counts show
-that llama.cpp's greedy text diverges from Gufo's in most distinct cases
-(3 of 9 identical at C1), so those throughputs compare equal token budgets,
-not identical outputs. Gufo AR scales to 1.9× llama.cpp at C8; Gufo DFlash2
-leads llama.cpp DFlash2 at C1–C2 and C8 but not at C4–C6 on the mixed
-corpus, and above C4 delivers less than Gufo AR, so the **100 tok/s at C2 /
-150 tok/s at C4** targets remain unmet on mixed prompts (repetition reaches
-88 / 95 tok/s).
-
 <!-- bench:multi-mixed-q8 -->
 | Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 7.40 | 7.86 | -5.9% | 22.17 | 17.66 | +25.5% | 4/9 |
-| 2 | 14.02 | 13.75 | +2.0% | 29.33 | 26.25 | +11.7% | 6/10 |
-| 4 | 26.68 | 24.70 | +8.0% | 33.03 | 41.61 | -20.6% | 4/12 |
-| 6 | 37.64 | 26.23 | +43.5% | 34.87 | 37.50 | -7.0% | 3/12 |
-| 8 | 47.70 | 30.90 | +54.4% | 37.06 | 39.35 | -5.8% | 4/16 |
+| 1 | 7.50 | 8.07 | -7.1% | 25.82 | 19.58 | +31.9% | 4/9 |
+| 2 | 15.62 | 15.41 | +1.4% | 39.70 | 33.56 | +18.3% | 6/10 |
+| 4 | 29.62 | 28.06 | +5.6% | 42.66 | 57.86 | -26.3% | 4/12 |
+| 6 | 42.56 | 32.21 | +32.1% | 48.12 | 53.69 | -10.4% | 3/12 |
+| 8 | 53.93 | 39.02 | +38.2% | 50.53 | 64.29 | -21.4% | 4/16 |
 <!-- /bench -->
 
 ![Multiple users, mixed corpus](artifacts/charts/multi-mixed-q8.svg)
@@ -413,22 +224,14 @@ corpus, and above C4 delivers less than Gufo AR, so the **100 tok/s at C2 /
 <!-- bench:multi-repetition-q8 -->
 | Users | Gufo AR | llama.cpp AR | Gain | Gufo DFlash2 | llama.cpp DFlash2 | Gain | Exact |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 7.50 | 7.85 | -4.5% | 53.65 | 24.62 | +117.9% | 1/1 |
-| 2 | 15.66 | 14.82 | +5.7% | 79.44 | 40.95 | +94.0% | 2/2 |
-| 4 | 29.82 | 26.46 | +12.7% | 85.72 | 66.94 | +28.1% | 4/4 |
-| 6 | 42.19 | 35.07 | +20.3% | 88.62 | 69.40 | +27.7% | 6/6 |
-| 8 | 53.19 | 40.65 | +30.8% | 90.30 | 80.57 | +12.1% | 8/8 |
+| 1 | 7.50 | 8.06 | -6.9% | 53.73 | 27.08 | +98.4% | 1/1 |
+| 2 | 15.67 | 15.32 | +2.3% | 79.61 | 45.49 | +75.0% | 2/2 |
+| 4 | 29.84 | 27.79 | +7.4% | 85.90 | 76.78 | +11.9% | 4/4 |
+| 6 | 42.24 | 37.21 | +13.5% | 88.80 | 79.04 | +12.3% | 6/6 |
+| 8 | 53.25 | 43.52 | +22.4% | 90.49 | 93.44 | -3.2% | 8/8 |
 <!-- /bench -->
 
 ![Multiple users, repetition](artifacts/charts/multi-repetition-q8.svg)
-
-Q8 at C8, request latency median / p95: Gufo AR 19.2 / 19.4 s, Gufo DFlash2
-18.3 / 25.2 s, llama.cpp AR 24.9 / 35.5 s, llama.cpp DFlash2 17.0 / 23.6 s
-(mixed); Gufo AR 19.3 s, Gufo DFlash2 11.3 s, llama.cpp AR 25.2 s, llama.cpp
-DFlash2 12.7 s (repetition). Accepted draft tokens per step at C8: Gufo
-DFlash2 2.4 on mixed and 6.5 on repetition, llama.cpp DFlash2 1.8 and 2.9. Q8 follows the Q4
-pattern with lower absolute rates: Gufo AR leads from C2, Gufo DFlash2 trails
-llama.cpp DFlash2 at C4–C8 on mixed prompts.
 
 Earlier tg64 short-generation controls (2026-09-15/16, `prose_tides` and a
 24-request mixed corpus) and the 2026-09-16 one-process-per-sweep tables
@@ -439,6 +242,9 @@ retain their performance. Controller and verification details:
 [evaluation](EVALUATION.md).
 
 ## Memory
+
+Retained **2026-09-21** measurements; Q8 uses the historical **Q8_K_L** file.
+Current Q8_K_XL memory qualification is **TODO**.
 
 Peak device-global HIP memory in use (`hipMemGetInfo` total − free, the
 counter Gufo's loader logs as `gpu_device_used_mib`), sampled every 250 ms by
@@ -498,7 +304,7 @@ same file remain **TODO**.
 nix build
 nix develop -c python3 tools/qwen27b/check.py fast
 Q4=/path/to/Qwen3.8-27B-UD-Q4_K_XL.gguf
-Q8=/path/to/Qwen3.8-27B-UD-Q8_K_L.gguf
+Q8=/path/to/Qwen3.8-27B-UD-Q8_K_XL.gguf
 DRAFT=/path/to/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
 MMPROJ=/path/to/mmproj-BF16.gguf
 FILES="--gguf q4=$Q4 --gguf q8=$Q8 --draft $DRAFT --mmproj $MMPROJ"
@@ -517,8 +323,13 @@ nix develop -c python3 tools/bench/model-bench.py --model qwen3.8-27b $FILES \
 nix develop -c python3 tools/bench/model-bench.py --model qwen3.8-27b render
 ```
 
-Run Gufo before llama.cpp for the concurrency tables: the reference `Exact`
-column compares against the Gufo AR C1 artifact. The 2026-09-21 refresh took
+The `Exact` column compares llama.cpp AR against Gufo AR C1; it is cross-engine
+text agreement, not a correctness percentage. In the retained nine-case C1
+corpus, each engine matches its own AR output with DFlash2 (9/9). llama.cpp
+also changes some outputs across batch sizes. A separate pinned prose control
+shows a llama.cpp AR/DFlash2 difference; Gufo retains agreement. Neither
+cross-engine disagreement nor greedy agreement establishes official-model
+parity. See [evaluation](EVALUATION.md) for counts and scope. The 2026-09-21 refresh took
 34 min (Gufo Q4), 39 min (llama.cpp Q4), 41 min (Gufo Q8) and 47 min
 (llama.cpp Q8) of driver wall time. `gufo bench` is greedy and C1 and is the
 kernel-iteration tool; published comparison tables are measured over HTTP on
