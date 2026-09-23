@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 
@@ -71,35 +73,94 @@ public:
     std::uint32_t best_length = 1;
     const float context_scale =
         static_cast<float>(position > 2048 ? position - 2048 : 0) / 30720.0F;
-    const auto* q4_costs = &kQ4RelativeCost;
+    const auto* relative_costs = &kQ4RelativeCost;
     float context_multiplier = 1.0F;
     switch (greedy_batch_size) {
       case 2:
-        q4_costs = &kQ4PairedRelativeCost;
+        relative_costs = &kQ4PairedRelativeCost;
         context_multiplier = 1.92F;
         break;
       case 4:
-        q4_costs = &kQ4FourRequestRelativeCost;
+        relative_costs = &kQ4FourRequestRelativeCost;
         context_multiplier = 3.20F;
         break;
       case 6:
-        q4_costs = &kQ4SixRequestRelativeCost;
+        relative_costs = &kQ4SixRequestRelativeCost;
         context_multiplier = 3.50F;
         break;
       case 8:
-        q4_costs = &kQ4EightRequestRelativeCost;
+        relative_costs = &kQ4EightRequestRelativeCost;
         context_multiplier = 4.42F;
         break;
     }
-    const float q4_context_scale = context_scale * context_multiplier;
+    if (q8_target_ && greedy_batch_size == 4) {
+      relative_costs = &kQ8FourRequestRelativeCost;
+      context_multiplier = 4.0F * 100.0F / 170.66F;
+    }
+    const float attention_cost_scale = context_scale * context_multiplier;
     for (std::uint32_t length = 1; length <= cap; ++length) {
       survival *= probability;
       expected_tokens += survival;
       const float cost =
-          q8_target_ ? 1.0F + 0.02F * static_cast<float>(length)
-                     : (*q4_costs)[length - 1] +
-                           q4_context_scale * kQ4ContextCost[length - 1];
+          q8_target_ && greedy_batch_size != 4
+              ? 1.0F + 0.02F * static_cast<float>(length)
+              : (*relative_costs)[length - 1] +
+                    attention_cost_scale * kQ4ContextCost[length - 1];
       const float score = expected_tokens / cost;
+      if (score > best_score) {
+        best_score = score;
+        best_length = length;
+      }
+    }
+    return best_length;
+  }
+
+  // Only the measured all-adaptive Q8 C4 cohort uses a shared width. Its
+  // target cost depends on the total row count: mixing individually cheap
+  // widths can require two expensive projection launches. Keep each history
+  // private, sum its expected tokens and choose one physical batch shape.
+  [[nodiscard]] static std::optional<std::uint32_t> ChooseGreedyBatch(
+      std::span<const DFlashLengthController* const> controllers,
+      std::span<const std::uint32_t> budgets,
+      std::span<const std::uint32_t> positions) noexcept {
+    if (controllers.size() != 4 || budgets.size() != 4 || positions.size() != 4)
+      return std::nullopt;
+    std::uint32_t cap = kMaxDraftTokens;
+    std::array<double, 4> probabilities{};
+    double attention_cost_scale = 0.0;
+    bool full_tile = true;
+    for (std::size_t index = 0; index < controllers.size(); ++index) {
+      const auto* controller = controllers[index];
+      if (controller == nullptr || !controller->q8_target_ ||
+          controller->policy_ != DFlashDraftPolicy::kAdaptive)
+        return std::nullopt;
+      cap = std::min(cap, std::min(budgets[index], controller->limit_));
+      const double mean = controller->mean_;
+      probabilities[index] =
+          mean == controller->limit_ ? 1.0 : mean / (mean + 1.0);
+      attention_cost_scale +=
+          static_cast<double>(positions[index] > 2048 ? positions[index] - 2048
+                                                      : 0) /
+          30720.0 * 100.0 / 170.66;
+      full_tile &= controller->last_full_width_ >= 3;
+    }
+    if (cap == 0)
+      return std::nullopt;
+    // All four fully accepted a short tile. Probe wider together; one lucky
+    // request must not force its peers into a costly ragged verification.
+    if (full_tile)
+      return cap;
+    std::array<double, 4> survival{1.0, 1.0, 1.0, 1.0};
+    double expected_tokens = 4.0, best_score = 0.0;
+    std::uint32_t best_length = 1;
+    for (std::uint32_t length = 1; length <= cap; ++length) {
+      for (std::size_t index = 0; index < controllers.size(); ++index) {
+        survival[index] *= probabilities[index];
+        expected_tokens += survival[index];
+      }
+      const double cost = kQ8FourRequestRelativeCost[length - 1] +
+                          attention_cost_scale * kQ4ContextCost[length - 1];
+      const double score = expected_tokens / cost;
       if (score > best_score) {
         best_score = score;
         best_length = length;
@@ -113,6 +174,8 @@ public:
       return;
     drafted = std::min<std::size_t>(drafted, limit_);
     accepted = std::min(accepted, drafted);
+    last_full_width_ =
+        accepted == drafted ? static_cast<std::uint32_t>(drafted) : 0U;
     // For a geometric accepted run with mean m, censoring at any block width
     // preserves E[accepted - m * rejected] == 0. Weight a completed block by
     // its accepted tokens too; a fixed increment biases short blocks upward
@@ -123,16 +186,31 @@ public:
                 : 0.75F * mean_ + 0.25F * static_cast<float>(accepted);
   }
 
-  void Reset() noexcept { mean_ = std::min(3.0F, static_cast<float>(limit_)); }
+  void Reset() noexcept {
+    mean_ = std::min(3.0F, static_cast<float>(limit_));
+    last_full_width_ = 0;
+  }
   [[nodiscard]] float State() const noexcept { return mean_; }
-  void Restore(float mean) {
+  [[nodiscard]] std::uint32_t LastFullWidth() const noexcept {
+    return last_full_width_;
+  }
+  void Restore(float mean, std::uint32_t last_full_width = 0) {
     if (!std::isfinite(mean) || mean < 0.0F ||
-        mean > static_cast<float>(limit_))
+        mean > static_cast<float>(limit_) || last_full_width > limit_)
       throw std::invalid_argument("DFlash2 controller state is invalid");
     mean_ = mean;
+    last_full_width_ = last_full_width;
   }
 
 private:
+  // Q8_K_XL C4 complete cycles cost 171/181/197/327/325/357/316 ms.
+  // Four through six drafts split verification into separate launches;
+  // seven fills two adjacent sixteen-row groups and reuses their weights.
+  // The same attention geometry uses the measured absolute per-request
+  // context delta below, normalized to this cohort's one-draft cycle.
+  static constexpr std::array<float, kMaxDraftTokens>
+      kQ8FourRequestRelativeCost{1.0F,   1.06F,  1.153F, 1.914F,
+                                 1.907F, 2.089F, 1.853F};
   static constexpr std::array<float, kMaxDraftTokens> kQ4RelativeCost{
       1.0F, 1.02F, 1.045F, 1.08F, 1.14F, 1.20F, 1.29F};
   // Two greedy requests verify 4–16 rows together. Crossing eight rows has a
@@ -167,6 +245,7 @@ private:
   std::uint32_t limit_;
   bool q8_target_;
   float mean_{0.0F};
+  std::uint32_t last_full_width_{0};
 };
 
 }  // namespace gufo::speculative

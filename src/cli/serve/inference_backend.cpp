@@ -323,10 +323,10 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
         << "draft_backend=dflash2-gfx1151-v1\n"
         << "draft_artifact_id=" << core::kGgufIdentityScheme << ':'
         << draft_artifact_fingerprint << '\n'
-        << "draft_state_layout=dflash-window-kv-and-frontier-v3\n"
+        << "draft_state_layout=dflash-window-kv-and-frontier-v4\n"
         << "draft_policy="
         << speculative::DFlashDraftPolicyName(speculative_options.dflash_policy)
-        << "-v2\n"
+        << "-v3\n"
         << "draft_max_tokens=" << speculative_options.max_draft_tokens << '\n'
         << "draft_min_tokens=" << speculative_options.min_draft_tokens << '\n'
         << "draft_initial_tokens=" << speculative_options.initial_draft_tokens
