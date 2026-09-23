@@ -1,211 +1,104 @@
 # Qwen3.8 Flash-Next evaluation
 
-State qualification (2026-09-21): AR/MTP image conversations passed greedy and
-seeded cancellation/retry, concurrent image/text isolation, and disk reload into
-a fresh backend. The direct snapshot test passed at 4,095 tokens, including
-mid-decode save, ring wrap, pending predictor state and RNG replay. Snapshots
-retain live KV, unpooled indexer rows, pooled keys, recurrence/PLE history and
-the required MTP frontier; temporary verifier scratch is excluded.
+Operator and execution-consistency checks pass. **Original unquantized-model
+and GGUF-conversion parity remain unqualified.** The independent vision check
+below still exceeds its tolerance. Qualification dates: September 20–22, 2026.
 
-Production HTTP checks also pass for AR/MTP interruption inside reasoning and
-visible text, preserved/removed reasoning, greedy/seeded replay, third-turn
-continuation, images and disk restart. Removing prior reasoning retains the
-stable prompt checkpoint. `cache_prompt: false` bypasses both live and disk
-reuse. The native image checks retain exact cold-versus-live output and
-independent concurrent sessions; see [server check instructions](../../SERVER.md).
+## Quality results
 
-The predictor uses one RMSNorm over all 10,240 hidden values, a shared
-2,560-wide hidden projection per HC branch, and one embedding projection
-broadcast to the four branches. It embeds shifted text token IDs; visual
-information comes from the target hidden stream and mRoPE positions.
+| Area | Retained evidence |
+| --- | --- |
+| MTP predictor | Eight text/image states audited against scalar CPU operators using original GGUF weights. Fusion/attention relative RMS <0.0008; gate 0.002. Checks cover full-width 10,240-value RMSNorm, split projections, recursive carry, text-only shifted inputs, full Q8 head, and serial/batched/headless catch-up. Norm tolerance: 2e-6; MoE/head: 5e-5. |
+| Sampling | AR and MTP verification share FP64 target filtering, normalization and CDFs, with 53-bit target RNG. Tests cover top-p/min-p boundaries, p/q acceptance, residual correction and seeded replay. Proposals use the full head's top 64 logits; upstream draft-sampler equivalence is not claimed. |
+| Batching and kernels | C2/C4/C6/C8 retain logits, tokens, acceptance, residual draws and RNG with ragged budgets and every 1–8-token rollback prefix. Q4/Q8 projection and GDN rollback controls retain FP32 bytes; sparse rankings/masks match through 128K. |
+| Prefill | Chunk-boundary checks cover 1/8/9/32/33-token tails through 4096 tokens. The 2176-token scalar/prefill control retains top-1 with logit RMSE 0.18. |
+| Sessions and serving | AR/MTP cancellation, third-turn continuation, reasoning removal/preservation, concurrent image/text isolation and disk restart pass. A 4095-token snapshot check covers mid-decode save, ring wrap, pending MTP state and RNG. |
+| HTTP corpus | Retained Gufo hashes match AR for 21/21 repetitive AR requests, 25/25 mixed MTP requests and 21/21 repetitive MTP requests; zero prompt-cache hits. These are text-consistency checks, not original-model accuracy. |
+| Vision optimizations | Complete 256×256/1024×1024 embeddings and a 736×736 ragged control retain native output bytes. Independent upstream parity has the gap below. |
 
-Source pins:
+**Vision gap:** a 1024×1024 synthetic texture has 6.47% embedding relative L2
+error against the pinned BF16 reference, above the unchanged 5% gate. Native
+and upstream BF16 errors against FP32 are 7.83% and 8.10%, respectively; this
+does not establish which produces better model output. Reproduce with
+`pixels[i] = (137*i + 53*(i//3072)) % 256` and the
+[vision reference commands](../qwen3.8-27b/EVALUATION.md#vision).
 
-- [vLLM AMD predictor, 751f6807](https://github.com/vllm-project/vllm/blob/751f6807d9cb3de50c27a5f27188c4fb04fe0e2b/vllm/models/qwen4_exp/amd/mtp.py):
-  full-width normalization, separate projections, recursive pre-mixer carry
-  and text-only inputs.
-- [vLLM proposer, same revision](https://github.com/vllm-project/vllm/blob/751f6807d9cb3de50c27a5f27188c4fb04fe0e2b/vllm/v1/spec_decode/llm_base_proposer.py):
-  shifts token IDs while retaining target positions; disables external
-  multimodal embeddings for draft classes that do not support them.
-- [SGLang predictor, 993d1fcc](https://github.com/sgl-project/sglang/blob/993d1fccbaafe3e79d91567d2fc1d665cc94fa50/python/sglang/srt/models/qwen4_exp_mtp.py):
-  the same normalization/fusion; also permits supplied multimodal embeddings.
-  Gufo follows the text-only vLLM input path.
-- Official checkpoint `Qwen/Qwen3.8-Flash-Next`,
-  `de4b8e4d43b917e7706784d8bb445c9af86a3540`: its safetensors index contains
-  `mtp.fc_embedding`, `mtp.fc_hidden`, `mtp.pre_fc_norm_embedding` and
-  `mtp.pre_fc_norm_hidden`.
-
-The GGUF stores `[fc_embedding | fc_hidden]` in each projection row. Loading
-splits those encoded rows without dequantization or requantization.
-The target's original Q8 output head scores every vocabulary row. There is no
-private Q4 head or fixed vocabulary subset. Greedy proposals use full-head
-argmax. Sampled proposals use its exact top 64 logits and Gufo's bounded
-proposal policy; this does **not** claim upstream draft-sampler equivalence.
-Full-vocabulary target verification uses the same FP64 filtered distribution
-as AR, with p/q acceptance and residual correction. Boundary tests cover
-top-p/min-p support, acceptance, residual draws and seeded replay. Target RNG
-draws retain 53 bits; compact proposal masses remain exact multiples of 2^-24.
+The CPU oracle uses converted GGUF weights, so it cannot qualify conversion
+or the original checkpoint. Pinned Transformers ignores MTP weights. Seeded
+replay requires the same build, seed, request budget, capacity and sampling
+settings; sampled MTP need not match AR's same-seed sequence. Greedy output
+must remain independent of draft width and batching.
 
 ## Maintained checks
 
+Tests live in `tests/models/qwen38_flash_next/`; run only the affected check.
+
+| Target / mode | Contract |
+| --- | --- |
+| `qwen38_flash_next_tests` | 14 operator, configuration and I/O checks: scalar/FP64 references, malformed metadata, unsupported geometry and sidecar compatibility. |
+| `qwen38_flash_next_session_test --batch-only` | Independent logits/state/RNG at C2/C4/C6/C8, rollback, cancellation and images. |
+| `qwen38_flash_next_session_test --sampling-only` | 23 AR/MTP sampling configurations, penalties, residual correction and short budgets. |
+| `qwen38_flash_next_session_test --prefill-only` | Full logits across chunk boundaries and short tails. |
+| `qwen38_flash_next_snapshot_test` | Persistence, image attachment and continuation replay; AR/MTP states cannot cross modes. |
+| `qwen38_flash_next_gpu_probe --mtp-audit` | Original encoded weights and scalar predictor stages; add `--batch 2048` for ragged/aligned catch-up. |
+
+Build the required targets with Nix, for example:
+
 ```sh
 nix develop -c cmake --build --preset gpu-test \
-  --target qwen38_flash_next_gpu_probe
-nix develop -c build/gpu-test/tests/models/qwen38_flash_next/qwen38_flash_next_gpu_probe \
+  --target qwen38_flash_next_model_tests qwen38_flash_next_gpu_probe
+PROBES=build/gpu-test/tests/models/qwen38_flash_next
+nix develop -c "$PROBES/qwen38_flash_next_gpu_probe" \
   --model "$MODEL" --mtp-model "$MTP" --mtp-audit
 ```
 
-The audit uses scalar CPU operators and the original GGUF weights, independently
-of device repacking and HIP kernels. Its reference library is built only by the
-explicit probes, outside the production/default test build. It checks:
+Operator tests can be selected with CTest, for example
+`-R 'qwen38_flash_next[.]select_ops' --no-tests=error --output-on-failure`.
+The GPU probe's `--cost-audit C --depth N` measures predictor/verification costs;
+`C=0` selects C1/C2/C4/C6/C8. Performance uses Nix release binaries and the
+[profiling workflow](../../PERFORMANCE.md), separately from correctness runs.
 
-- Exact encoded weight bytes after splitting; adversarial unequal HC scales
-  distinguish full-width RMSNorm from branch-wise normalization.
-- Normalized hidden input, fusion, attention, MoE residual and head mixer,
-  with independently computed attention caches and recursive input carry.
-- Text and image-pad IDs, image mRoPE positions and continuation beyond the
-  image. An attached image must not cause predictor-side vision encoding.
-- Independent batched versus serial predictor bodies and heads, including
-  recursive chains. Candidate IDs/scores match host sorting of the full Q8
-  head; operator tests separately check Q8 dots against FP64.
-- Full predictor versus headless catch-up, including FFN input/output and the
-  next recursive step across the sparse-attention boundary. Use `--batch 2048`
-  to cover 224/257/2047/2048 rows: the minimum final tile, a two-tile tail,
-  and large ragged/aligned chunks. Candidates and recorded stages match exactly.
-- Short batched catch-up at 9/10/16 total rows against independent full
-  predictor execution, including the scalar tail. Full-head candidates and
-  subsequent recursive stages must match exactly.
+Formula references: pinned [vLLM predictor](https://github.com/vllm-project/vllm/blob/751f6807d9cb3de50c27a5f27188c4fb04fe0e2b/vllm/models/qwen4_exp/amd/mtp.py),
+[vLLM proposer](https://github.com/vllm-project/vllm/blob/751f6807d9cb3de50c27a5f27188c4fb04fe0e2b/vllm/v1/spec_decode/llm_base_proposer.py)
+and [SGLang predictor](https://github.com/sgl-project/sglang/blob/993d1fccbaafe3e79d91567d2fc1d665cc94fa50/python/sglang/srt/models/qwen4_exp_mtp.py).
+Gufo follows vLLM's text-only MTP input semantics. Official checkpoint:
+`Qwen/Qwen3.8-Flash-Next`, revision `de4b8e4d43b917e7706784d8bb445c9af86a3540`.
 
-Stage comparisons supply the same recorded input to each CPU/GPU stage and
-emulate Q8 activation/F16 cache storage on the CPU. This separates operation
-errors from accumulated quantization and MoE routing changes. The scalar
-`ReferenceModel::MtpStep` also supports uninterrupted float32 execution;
-the stage audit is not an end-to-end float32 equivalence claim.
+## Benchmark method
 
-Norm tolerance is 2e-6 relative RMS; fusion/attention 0.002; MoE/head 5e-5.
-The initial eight-state text/image audit passed, with maximum fusion/attention
-relative RMS below 0.0008. Full-model session tests additionally cover
-C2/C4/C6/C8, ragged budgets, sampled acceptance/rejection and cache restoration;
-selector/attention operator tests cover sparse deep contexts.
+The [card](BENCHMARKS.md) retains September 22 measurements. This layout change
+runs no inference: concurrency rates are recalculated from the original
+individual decode rates, summed per cohort and averaged across cohorts.
+Per-artifact revisions and commands remain authoritative; see
+[model identities](artifacts/model-identities.json).
 
-Current optimization qualification (2026-09-20, shared-expert rows 2026-09-21):
+Single-user rows use approximately pp2048/tg128, greedy, thinking off, seed 1.
+Each mode generates its own eight-token reply before the measured continuation.
+Depth/prefill tolerance is max(32 tokens, 0.5%). Gufo capacity is 133760;
+reference AR uses 35456 through 32K, 68224 at 64K and 133760 at 128K.
+Reference MTP uses 35456 through 32K; weight eviction at 64K and OOM at 128K
+invalidate deeper measurements. MTP pp takes each engine's maximum across
+mixed/repetitive workloads. AR reference: `b11069`; MTP: pinned
+`llama-server-mtp` at `6fcaa16f` ([upstream change](https://github.com/ggml-org/llama.cpp/pull/28243)).
 
-- The shared expert's SwiGLU rows for its F16 down projection live in a
-  private buffer, so the routed experts read the token rows the router
-  narrowed instead of a second narrowing pass. Every GEMM input is byte for
-  byte the same: greedy pp2048 output, the 4096-token chunk-boundary logits
-  (`--prefill-only`) and the C2/C4/C6/C8 batch checks (`--batch-only`) are
-  unchanged.
-- Projection checks retain exact scalar/batch FP32 output through 64 input and
-  640 expert-down rows, including mixed activation scales, duplicate/inactive
-  experts, nonfinite scales and output guards. Ragged Q8 inputs end at the
-  allocation boundary. Captured model inputs also check FP32 contraction.
-- Batched Q4 gate/up uses wave64 with independent 32-lane reductions.
-  Shared, disjoint and mixed routing retain exact outputs, including small
-  unsaturated activations and captured model inputs. C1 keeps its vector path.
-- Q8 matrix verification retains the vector path's four K8 partials, rounded
-  products, FMA chain and reduction order. Complete FP32 outputs match through
-  48 inputs for 12,289/65,537-row matrices and 32 inputs for the 2,561-row
-  control, including partial input waves.
-- Routed Q8 checks repeat identical activations across column minitiles,
-  reordered expert slots and a ragged final tile. FP64 dots use unambiguous
-  activation codes, isolating accumulation from quantizer tie semantics.
-- Selector load scheduling preserves exact FP32 scores and top-k masks through
-  d128K, including ties, tight strides and replay. Independent FP64 score
-  error remains below 1e-5; full prefill logits match across chunk boundaries
-  through 4096 tokens.
-- Full `--batch-only` checks retain exact logits, tokens, acceptance, residual
-  draws and RNG at C2/C4/C6/C8, with independent state, every 1–8-token rollback
-  prefix, cancellation/recovery and image restoration. A frozen peer's
-  snapshot is copied during decode graph capture; snapshot bytes and
-  capture/replay logits remain exact.
-- Compact GDN rollback saves one full state and exact FP32 keys, decay, beta
-  and error values. A host FMA oracle and fresh-prefix GPU execution check
-  every retained prefix, with guarded, independently addressed allocations.
-  Scalar and batched output/state agree; original and optimized kernels also
-  match byte for byte in a separate ablation. Recording intermediate values
-  must preserve the original rounded-product and FMA contraction order.
-- All ten fresh C1/C2/C4/C6/C8 repetitive/mixed serving cohorts match AR
-  completion hashes with zero cache hits.
-- Scheduler tests check that decode time covers measured model work even
-  when asynchronous prompt capture overlaps other requests. AR and MTP time
-  selection/execution directly, excluding capture and waits between steps.
-- Vision softmax checks match every probability byte over 256–16384 patch
-  rows. The 4096-patch attention specialization retains complete QK/PV FP32
-  output. Full Flash-Next 256×256/1024×1024 and Qwen27B 1024×1024 embeddings
-  match byte for byte; a 736×736 ragged control also matches.
+Concurrency uses fresh servers, context 4096 per user and tg128. AR uses
+`repetition_word`; MTP adds `expository_pangram`, `cpp_ring_buffer` and
+`reasoning_train`. Short C1 corpus prompts differ from the pp2048 depth sweep;
+MoE routing also makes throughput workload-dependent. Reference MTP C8 was
+OOM-killed. Compact `multi-{mixed,repetition}-gufo-ar.json` files retain C1
+hashes for MTP qualification; refresh them when arithmetic, weights, tokenizer
+or request settings change. Reference-engine agreement is not an accuracy score.
 
-**Open vision parity gap:** a 1024×1024 synthetic texture produces 6.47%
-embedding relative L2 error against the pinned BF16 reference, above the 5%
-gate. This also occurs before the retained byte-exact optimizations. Against
-the FP32 control, native and upstream BF16 errors are 7.83% and 8.10%; the
-discrepancy alone does not establish worse model quality. Cumulative rounding
-needs investigation; keep the existing gate. Reproduce with RGB byte
-`pixels[i] = (137*i + 53*(i//3072)) % 256` and the vision reference commands in
-[Qwen27B evaluation](../qwen3.8-27b/EVALUATION.md#vision).
+Matched C1/MTP loading at capacity 262144 is TODO. Historical
+[Gufo](artifacts/loading-2026-09-22-gufo.json) and
+[reference](artifacts/loading-2026-09-22-reference.json) runs used C2/MTP/262144
+and C2/AR/35456 total, respectively, so they cannot supply that comparison.
+Memory uses C1 AR at capacity 133121, sampling global HIP allocation every
+250 ms including 2.38 GiB idle allocation.
 
-**Remaining limit:** these checks use converted GGUF weights. They do not
-establish unquantized-checkpoint equivalence or detect every conversion error.
-Pinned Transformers ignores the MTP weights, so its trunk forward is not an
-MTP oracle.
-
-## Session, prefill and serving checks
-
-All eight greedy depth points and all fresh-server cohorts match AR. The
-2176-token scalar/prefill control retains the same top-1 token (logit RMSE 0.18).
-
-Tests/probes live in `tests/models/qwen38_flash_next/`. The
-`qwen38_flash_next_tests` target contains 14 focused operator/configuration/I/O
-checks. Build only affected targets during iteration:
-
-```sh
-nix develop -c cmake --build --preset gpu-test --target qwen38_flash_next_select_ops_test
-nix develop -c ctest --test-dir build/gpu-test -R 'qwen38_flash_next[.]select_ops' \
-  --no-tests=error --output-on-failure
-```
-
-- **Operators and loading:** independent scalar/FP64 references, exact FP32
-  selector scores, near-tie ranking cases, ragged shapes, guards and replay.
-  Malformed compression/mRoPE metadata, unsupported kernel geometry and
-  incompatible MTP sidecars fail loading.
-- **State and sampling:** `qwen38_flash_next_session_test --batch-only` compares
-  tokens/full logits and sampled RNG/acceptance against isolated execution at
-  C2/C4/C6/C8, including ragged budgets, reordered requests, bounded rollback,
-  cancellation recovery and image attachments. `--sampling-only` covers 23
-  AR/MTP configurations, penalties, residual correction and short budgets.
-  `qwen38_flash_next_snapshot_test` checks persistence and continuation replay.
-  AR sessions sharing an MTP-capable model allocate no predictor state;
-  mixed-mode target logits match exactly and snapshots cannot cross modes.
-- **Prefill and serving:** `--prefill-only` checks full logits across boundaries
-  through 4096 tokens, including 1/8/9/32/33-token tails. Image checks cover
-  AR/MTP, concurrency, RAM reuse and disk restoration. Official template and
-  Unicode/NFC token goldens cover both Qwen models. HTTP tests require complete
-  UTF-8 in every streamed JSON event and schema-correct tool arguments, including
-  quoted closing markers and calls after unclosed reasoning.
-- **Audits:** `qwen38_flash_next_gpu_probe --mtp-audit` checks original encoded
-  weights, full-width normalization, predictor stages with independently
-  computed caches, recursive carry and independent text/image batches against
-  a scalar CPU oracle. `--cost-audit C` measures catch-up/proposal/verification
-  costs: median of three complete warmed cycles, with two warm-ups per shape.
-  `0` selects C1/C2/C4/C6/C8; `--depth N` restricts the default d0/d4K/d32K
-  calibration for focused iteration. Neither audit stores logit fixtures.
-
-The model tests/probes accept `--model "$MODEL" --mtp-model "$MTP"`; build the
-session/snapshot tests with `qwen38_flash_next_model_tests`. Preserve arithmetic
-and replay when optimizing layout/fusion. Arithmetic corrections additionally
-need independent references and `gufo bench --validate-prefill N`. Measure with
-Nix release binaries, matching artifacts, capacity, prompts and sampling;
-profile separately using `tools/prof/prof.py run --stages qwen-flash -- ...`.
-
-Sampled MTP and AR share the same FP64 target filtering, normalization and CDF.
-Proposal acceptance and residual correction use that canonical distribution;
-shared target RNG draws retain 53 bits. Greedy verification stays on the GPU.
-Replay requires the same build, seed, request budget, configured capacity and sampling
-settings; sampled MTP need not match AR's same-seed sequence. Greedy output must
-remain independent of draft width and batching.
-
-The pinned official image processor allows 64–16384 merged tokens; a 1024-token
-cap changes resolution and output. Short prefill tails retain the arithmetic of
-larger chunks. The artifact uses native RoPE without YaRN extension. Official
-Transformers `c587bc884db2c2e31fc2b8102314656b17aa07b1` defines FP32 QSA but ignores
-MTP weights; operator/export audits do not close original-model parity.
+`artifacts/bench.json` declares six tables. Use
+`tools/bench/model-bench.py --model qwen3.8-flash-next render` through Nix to
+regenerate the card without model execution. Approved runs take
+`--gguf "$MODEL" --mtp "$MTP" run --target <gufo|reference> --table <table> --fresh`;
+select reference depths/capacities explicitly. See the
+[benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).

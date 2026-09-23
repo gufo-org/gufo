@@ -11,10 +11,11 @@
     "mtp": "unsloth/Qwen3.8-Flash-Next-GGUF, same revision, mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
   },
   "benchmarks-2026-09-22": {
-    "gufo": "revision 89d58eb7 (tree dirty only by docs/models/qwen3.8-flash-next), nix build, binary sha256 prefix 4b1e592acb7e4a56",
     "reference": "llama.cpp b11069 from flake.nix (0.4.1-dev build 11069, commit 68d9053a), ROCm gfx1151",
-    "mmproj": "not present on the refresh host; image-encoder table not measured",
-    "note": "Depth rows (d4096+) and the 16K-prefix memory row are unmeasured on both targets: the driver's one-token prefix turn makes both servers stop after echoing that token. llama.cpp b11069 cannot load the MTP sidecar as a draft model."
+    "gufoArMemory": "revision 89d58eb7 (tree dirty only by docs/models/qwen3.8-flash-next), nix build, binary sha256 prefix 4b1e592acb7e4a56",
+    "gufoSingleMtp": "revision 55ed44ad3f9928bcb4353d9a5ff16c789c17a48a; Nix release, per-artifact source/commands retained",
+    "referenceMtp": "llama-server-mtp, llama.cpp commit 6fcaa16f, pinned ROCm recipe in flake.nix",
+    "note": "Retained measurements, not a new refresh. Per-artifact source revisions and commands are authoritative. Concurrency tables use summed individual decode rates; matched C1 loading remains unmeasured."
   },
-  "scope": "Artifacts of the 2026-09-22 HTTP benchmark refresh."
+  "scope": "Retained 2026-09-22 text benchmarks and qualification; layout reorganized without running inference."
 }

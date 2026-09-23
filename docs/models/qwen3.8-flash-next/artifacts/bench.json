@@ -3,19 +3,18 @@
   "category": "llm",
   "model": {
     "id": "Qwen3.8-Flash-Next",
-    "docs": "qwen3.8-flash-next"
+    "docs": "qwen3.8-flash-next",
+    "label": "Flash-Next Q4"
   },
   "files": {
     "gguf": "first shard of the sharded UD-Q4_K_XL GGUF",
-    "mtp": "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
-    "mmproj": "BF16 vision projector"
+    "mtp": "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
   },
   "variants": {
     "default": {
-      "label": "UD-Q4_K_XL",
+      "label": "Q4",
       "requires": [
-        "gguf",
-        "mtp"
+        "gguf"
       ]
     }
   },
@@ -45,16 +44,6 @@
     }
   },
   "tables": {
-    "loading": {
-      "title": "Cold-file-cache launch to readiness",
-      "per_variant": false,
-      "context": 262144,
-      "sessions": 2,
-      "repetitions": 1,
-      "metric": "seconds",
-      "better": "lower",
-      "rows": "variants"
-    },
     "single-ar": {
       "title": "Single user, autoregressive",
       "per_variant": false,
@@ -105,68 +94,22 @@
       "repetitions": 1,
       "metric": "tok/s",
       "better": "higher",
-      "workload": "prose"
+      "workloads": {
+        "single-mtp": {
+          "label": "mixed",
+          "workload": "prose"
+        },
+        "single-mtp-repetition": {
+          "label": "repetitive",
+          "workload": "repetition"
+        }
+      }
     },
-    "single-mtp-repetition": {
-      "title": "Single user, MTP, repetitive",
-      "per_variant": false,
-      "speculative": true,
-      "prompt_tokens": 2048,
-      "output_tokens": 128,
-      "depths": [
-        0,
-        4096,
-        8192,
-        12288,
-        16384,
-        32768,
-        65536,
-        131072
-      ],
-      "context": 133760,
-      "depth_tolerance": 0.005,
-      "prefix": {
-        "generator": "synthetic-paragraphs",
-        "seed": 1
-      },
-      "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher",
-      "workload": "repetition"
-    },
-    "single-mtp-thinking": {
-      "title": "Single user, MTP, thinking",
-      "per_variant": false,
-      "speculative": true,
-      "prompt_tokens": 2048,
-      "output_tokens": 128,
-      "depths": [
-        0,
-        4096,
-        8192,
-        12288,
-        16384,
-        32768,
-        65536,
-        131072
-      ],
-      "context": 133760,
-      "depth_tolerance": 0.005,
-      "prefix": {
-        "generator": "synthetic-paragraphs",
-        "seed": 1
-      },
-      "repetitions": 1,
-      "metric": "tok/s",
-      "better": "higher",
-      "workload": "thinking"
-    },
-    "multi-repetition": {
-      "title": "Multiple users, repetition",
+    "multi-ar": {
+      "title": "Multiple users, autoregressive",
       "per_variant": false,
       "modes": [
-        "ar",
-        "mtp"
+        "ar"
       ],
       "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
       "cases": [
@@ -188,20 +131,13 @@
       "metric": "tok/s",
       "better": "higher"
     },
-    "multi-mixed": {
-      "title": "Multiple users, mixed corpus",
+    "multi-mtp": {
+      "title": "Multiple users, MTP",
       "per_variant": false,
       "modes": [
-        "ar",
         "mtp"
       ],
       "suite": "../../qwen3.8-27b/artifacts/speculative-corpus.json",
-      "cases": [
-        "expository_pangram",
-        "cpp_ring_buffer",
-        "reasoning_train"
-      ],
-      "corpus_layout": "distinct",
       "concurrency": [
         1,
         2,
@@ -215,10 +151,38 @@
       "warmup": 1,
       "repetitions": 1,
       "metric": "tok/s",
-      "better": "higher"
+      "better": "higher",
+      "workloads": {
+        "multi-mixed": {
+          "label": "mixed",
+          "cases": [
+            "expository_pangram",
+            "cpp_ring_buffer",
+            "reasoning_train"
+          ],
+          "corpus_layout": "distinct"
+        },
+        "multi-repetition": {
+          "label": "repetitive",
+          "cases": [
+            "repetition_word"
+          ],
+          "corpus_layout": "homogeneous"
+        }
+      }
+    },
+    "loading": {
+      "title": "Loading time",
+      "per_variant": false,
+      "context": 262144,
+      "sessions": 1,
+      "repetitions": 1,
+      "metric": "seconds",
+      "better": "lower",
+      "rows": "variants"
     },
     "memory": {
-      "title": "GPU-visible allocation",
+      "title": "Memory occupation",
       "per_variant": false,
       "context": 133121,
       "workloads": [
@@ -238,18 +202,6 @@
       "metric": "GiB",
       "better": "lower",
       "mode": "ar"
-    },
-    "image-encoder": {
-      "title": "Image encoder",
-      "per_variant": false,
-      "sizes": [
-        256,
-        1024
-      ],
-      "warmup": 1,
-      "repetitions": 3,
-      "metric": "ms",
-      "better": "lower"
     }
   },
   "gufo": {

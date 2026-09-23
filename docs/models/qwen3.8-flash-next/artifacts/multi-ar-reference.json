@@ -35,13 +35,14 @@
   "modelBench": {
     "measuredOn": "2026-09-22",
     "mode": "ar",
-    "table": "multi-repetition",
+    "table": "multi-ar",
     "target": "reference"
   },
   "notes": [
     "version: 0.4.1-dev (build 11069, commit 68d9053a)",
     "llama-server -m Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf -c 32768 -np 8 --port 51873 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off",
-    "fresh server per concurrency level"
+    "fresh server per concurrency level",
+    "Dedicated AR table; retained multi-repetition measurements from 2026-09-22, without rerunning inference."
   ],
   "reference": {
     "modelId": "bench",
