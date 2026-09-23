@@ -1,12 +1,12 @@
 # Qwen3.8 Flash-Next benchmarks
 
-AMD Strix Halo `gfx1151`, 128 GB unified memory. UD-Q4_K_XL target and
+AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth `UD-Q4_K_XL` target and
 shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.
 Gufo single-user MTP, concurrency and loading: September 23, 2026;
 other results: September 22. llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
 
-Positive gain favors Gufo. **TODO** means unmeasured; **n/a** marks the recorded
-reference memory limit.
+Positive gain favors Gufo. **TODO** means unmeasured; **n/a** means the recorded
+run produced no valid measurement.
 [Quality and measurement details](EVALUATION.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
 
 ## Single user, autoregressive
@@ -32,8 +32,11 @@ Context capacities differ between engines; see the measurement details.
 ## Single user, MTP
 
 pp is the highest measured rate per engine and depth across mixed/repetitive
-text, including Gufo predictor catch-up. The reference exceeded available
-memory at 64K/128K.
+text, including Gufo predictor catch-up.
+
+llama.cpp's 64K/128K **n/a** cells retain September 22 failures: weight eviction
+at 64K; startup OOM at 128K. Startup at 262K capacity succeeded on September 23,
+but those deep-context inference points have not been rerun.
 
 <!-- bench:single-mtp -->
 | Flash-Next Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |

@@ -76,9 +76,12 @@ Single-user rows use approximately pp2048/tg128, greedy, thinking off.
 Each mode generates its own eight-token reply before the measured continuation.
 Depth/prefill tolerance is max(32 tokens, 0.5%). Gufo capacity is 133760;
 reference AR uses 35456 through 32K, 68224 at 64K and 133760 at 128K.
-Reference MTP uses 35456 through 32K; weight eviction at 64K and OOM at 128K
-invalidate deeper measurements. MTP pp takes each engine's maximum across
-mixed/repetitive workloads. AR reference: `b11069`; MTP: pinned
+Reference MTP uses 35456 through 32K. Its September 22 64K run repeatedly
+reread evicted weights; the 128K server was OOM-killed during loading.
+These points retain **n/a** and were not rerun on September 23. The successful
+262K-capacity startup below does not establish deep-context inference performance.
+MTP pp takes each engine's maximum across mixed/repetitive workloads.
+AR reference: `b11069`; MTP: pinned
 `llama-server-mtp` at `6fcaa16f` ([upstream change](https://github.com/ggml-org/llama.cpp/pull/28243)).
 
 Concurrency uses the **same pp2048 d0 prompts**: prose for AR/mixed MTP,
