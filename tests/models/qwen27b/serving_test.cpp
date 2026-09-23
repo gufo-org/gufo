@@ -321,6 +321,53 @@ void CheckGeneratedFrontierReuse(
   }
 
   for (const bool speculative : {false, true}) {
+    Backend oracle, forks;
+    const auto mode =
+        speculative ? draft : gufo::server::TextSpeculativeConfig{};
+    Expect(oracle.load(model, &error, 256, 1, {}, {}, mode), error);
+    Expect(forks.load(model, &error, 256, 4, {}, {}, mode), error);
+    const std::vector<gufo::tokenization::ChatMessage> messages{
+        {Role::kUser,
+         "Explain why careful reasoning and clear examples make technical "
+         "writing useful. Include several contrasting examples."}};
+    const auto root = oracle.chat(request(messages), 8, {});
+    const auto shared_root = forks.chat(request(messages), 8, {});
+    Expect(root.tokens.size() == 8 && root.tokens == shared_root.tokens,
+           "independent and shared roots must have the same generated history");
+    auto continuation = messages;
+    continuation.emplace_back(Role::kAssistant, root.text);
+    continuation.emplace_back(
+        Role::kUser, "Continue the explanation with concrete examples.");
+    for (const auto& sampling :
+         {gufo::sampling::SamplingConfig{},
+          gufo::sampling::SamplingConfig{
+              .temperature = 0.8F, .top_k = 40, .top_p = 0.9F, .seed = 47}}) {
+      const auto expected = oracle.chat(request(continuation), 24, sampling);
+      std::vector<std::shared_ptr<Backend::GenerationRequest>> pending;
+      for (std::size_t index = 0; index < 4; ++index) {
+        auto branch = request(continuation);
+        branch.client_id = "generated-frontier-" + std::to_string(index);
+        pending.push_back(forks.start_chat(branch, 24, sampling));
+      }
+      for (const auto& branch : pending) {
+        const auto result = branch->Wait();
+        Expect(result.cache_hit &&
+                   result.cached_prompt_tokens >= root.prompt_tokens + 7 &&
+                   result.tokens == expected.tokens,
+               "a concurrent fork re-prefilled generated tokens or changed "
+               "the isolated replay");
+        if (sampling.temperature > 0.0F)
+          Expect(result.draft_tokens == expected.draft_tokens &&
+                     result.draft_accepted_tokens ==
+                         expected.draft_accepted_tokens,
+                 "snapshot forks must retain private sampled policy/RNG");
+      }
+    }
+    std::cout << "Generated-frontier C4 " << (speculative ? "DFlash2" : "AR")
+              << " greedy and seeded forks exact\n";
+  }
+
+  for (const bool speculative : {false, true}) {
     Backend interrupted, reference;
     const auto mode =
         speculative ? draft : gufo::server::TextSpeculativeConfig{};

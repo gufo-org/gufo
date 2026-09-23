@@ -134,11 +134,18 @@ public:
     ///
     /// Byte-pressure evictions happen synchronously before this returns true.
     [[nodiscard]] bool TryReserveSnapshot(std::size_t snapshot_bytes,
-                                          std::size_t token_count);
+                                          std::size_t token_count,
+                                          bool preserve_source = false);
 
     /// Releases an admitted reservation and records a sanitized skip reason.
     void SkipSnapshot(SnapshotEventReason reason, std::size_t snapshot_bytes,
                       std::size_t token_count) noexcept;
+
+    /// Publishes a reserved immutable checkpoint without releasing this state.
+    /// Peers can fork it before this lease advances the live continuation.
+    std::size_t PublishSnapshot(
+        std::vector<ContinuationToken> tokens,
+        std::shared_ptr<const ContinuationSnapshot> snapshot);
 
     /// Atomically publishes the state and the exact tokens it represents.
     ///
@@ -200,7 +207,8 @@ private:
   [[nodiscard]] ContinuationState& StateAt(std::size_t index);
   [[nodiscard]] bool ReserveSnapshot(std::size_t source_index,
                                      std::size_t snapshot_bytes,
-                                     std::size_t token_count);
+                                     std::size_t token_count,
+                                     bool preserve_source);
   void SkipSnapshot(std::size_t reservation_bytes, SnapshotEventReason reason,
                     std::size_t snapshot_bytes,
                     std::size_t token_count) noexcept;
@@ -209,7 +217,7 @@ private:
       std::size_t reservation_bytes, std::vector<ContinuationToken> tokens,
       std::shared_ptr<const ContinuationSnapshot> snapshot,
       std::vector<std::uint8_t> input_identity,
-      std::vector<ContinuationToken> live_tokens);
+      std::vector<ContinuationToken> live_tokens, bool release_state = true);
   void Invalidate(std::size_t index, std::size_t reservation_bytes) noexcept;
 
   struct Impl;

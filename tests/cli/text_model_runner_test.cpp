@@ -719,6 +719,67 @@ void TestSnapshotRetentionUsesPromptBoundary() {
   }
 }
 
+void TestGeneratedFrontierForksBeforeMutation() {
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<SnapshotRunner>(stats);
+  TextRunnerPool pool(runner, 2);
+  {
+    auto root = pool.Acquire({1, 2, 3, 4});
+    root.Prefill(4);
+    Expect(root.SelectNext().token == 90, "generated root token");
+    root.Advance();
+    root.Commit();
+  }
+  auto first = pool.Acquire({1, 2, 3, 4, 90, 5});
+  auto second = pool.Acquire({1, 2, 3, 4, 90, 6});
+  Expect(
+      first.cached_prompt_tokens() == 5 && second.cached_prompt_tokens() == 5,
+      "concurrent forks must reuse the generated frontier, not re-prefill "
+      "its output");
+  Expect(first.cache_restore_bytes() == 0 &&
+             second.cache_restore_bytes() == sizeof(FakeSnapshot),
+         "one live frontier is frozen for its peer");
+  Expect(stats->snapshot_captures == 2 && stats->snapshot_restores == 1,
+         "the generated frontier is copied once while the prompt is retained");
+  auto blocked = pool.Acquire({9}, [] { return true; });
+  Expect(!blocked, "publishing a snapshot must not release either live lease");
+  Expect(first.Prefill(64).consumed_tokens == 1 &&
+             second.Prefill(64).consumed_tokens == 1,
+         "neither fork puts generated history into a prefill chunk");
+  first.Invalidate();
+  second.Invalidate();
+  auto root_branch = pool.Acquire({1, 2, 3, 4, 7});
+  Expect(root_branch.cached_prompt_tokens() == 4,
+         "freezing a generated frontier preserves the original prompt branch");
+}
+
+void TestGeneratedFrontierPersistsForForks() {
+  TemporaryDirectory directory;
+  const TextRunnerDiskCacheOptions disk{.directory = directory.path(),
+                                        .capacity_bytes = 4096,
+                                        .staging_capacity_bytes = 4096};
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentSnapshotRunner>(stats, "artifact-A");
+  {
+    TextRunnerPool pool(runner, 2, disk);
+    auto root = pool.Acquire({1, 2, 3});
+    root.Prefill(3);
+    (void)root.SelectNext();
+    root.Advance();
+    root.Commit();
+    auto continuation = pool.Acquire({1, 2, 3, 90, 4});
+    Expect(continuation.cached_prompt_tokens() == 4,
+           "the live frontier includes generated output");
+    continuation.Invalidate();
+  }
+  TextRunnerPool restarted(runner, 1, disk);
+  auto restored = restarted.Acquire({1, 2, 3, 90, 5});
+  Expect(restored.cache_disk_hit() && restored.cached_prompt_tokens() == 4,
+         "disk forks restore the generated checkpoint before suffix prefill");
+  Expect(restored.Prefill(16).consumed_tokens == 1,
+         "disk restoration does not re-prefill known generated tokens");
+}
+
 void TestCancellationRetainsOnlyCompletedWork() {
   for (const bool pending : {false, true}) {
     auto stats = std::make_shared<FakeStats>();
@@ -1085,6 +1146,8 @@ void TestSnapshotCaptureFailureReleasesReservationAndKeepsRequestSuccessful() {
 }  // namespace
 
 int main() {
+  TestGeneratedFrontierForksBeforeMutation();
+  TestGeneratedFrontierPersistsForForks();
   TestCancellationRetainsOnlyCompletedWork();
   TestPromptReuseCanBeDisabledPerRequest();
   TestStableChatPrefixSurvivesInterruptedFraming();

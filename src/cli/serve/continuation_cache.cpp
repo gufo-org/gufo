@@ -149,7 +149,8 @@ void ContinuationCache::Lease::AdoptRestoredPrefix(std::size_t cached_tokens,
 }
 
 bool ContinuationCache::Lease::TryReserveSnapshot(std::size_t snapshot_bytes,
-                                                  std::size_t token_count) {
+                                                  std::size_t token_count,
+                                                  bool preserve_source) {
   if (cache_ == nullptr) {
     throw std::logic_error("continuation cache lease is empty");
   }
@@ -157,7 +158,8 @@ bool ContinuationCache::Lease::TryReserveSnapshot(std::size_t snapshot_bytes,
     throw std::logic_error(
         "continuation cache lease already has a snapshot reservation");
   }
-  if (!cache_->ReserveSnapshot(source_index_, snapshot_bytes, token_count)) {
+  if (!cache_->ReserveSnapshot(source_index_, snapshot_bytes, token_count,
+                               preserve_source)) {
     return false;
   }
   reserved_snapshot_bytes_ = snapshot_bytes;
@@ -186,6 +188,18 @@ std::size_t ContinuationCache::Lease::Commit(
       index_, source_index_, reserved_snapshot_bytes_, std::move(tokens),
       std::move(snapshot), std::move(input_identity_), std::move(live_tokens));
   cache_ = nullptr;
+  reserved_snapshot_bytes_ = 0;
+  return retained;
+}
+
+std::size_t ContinuationCache::Lease::PublishSnapshot(
+    std::vector<ContinuationToken> tokens,
+    std::shared_ptr<const ContinuationSnapshot> snapshot) {
+  if (cache_ == nullptr)
+    throw std::logic_error("continuation cache lease is empty");
+  const auto retained = cache_->Commit(
+      index_, source_index_, reserved_snapshot_bytes_, std::move(tokens),
+      std::move(snapshot), input_identity_, {}, false);
   reserved_snapshot_bytes_ = 0;
   return retained;
 }
@@ -237,12 +251,11 @@ bool ContinuationCache::Lease::HasSnapshotFor(
   if (!cache_)
     return false;
   const std::lock_guard lock(cache_->impl_->mutex);
-  if (source_index_ >= cache_->impl_->entries.size())
-    return false;
-  const auto& source = *cache_->impl_->entries[source_index_];
-  return source.valid && source.snapshot &&
-         source.input_identity == input_identity_ &&
-         std::ranges::equal(source.tokens, tokens);
+  return std::ranges::any_of(cache_->impl_->entries, [&](const auto& source) {
+    return source->valid && source->snapshot &&
+           source->input_identity == input_identity_ &&
+           std::ranges::equal(source->tokens, tokens);
+  });
 }
 
 ContinuationCache::Lease ContinuationCache::Acquire(
@@ -425,7 +438,8 @@ ContinuationState& ContinuationCache::StateAt(std::size_t index) {
 
 bool ContinuationCache::ReserveSnapshot(std::size_t source_index,
                                         std::size_t snapshot_bytes,
-                                        std::size_t token_count) {
+                                        std::size_t token_count,
+                                        bool preserve_source) {
   std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
   std::vector<SnapshotEvent> events;
   bool admitted = false;
@@ -475,7 +489,7 @@ bool ContinuationCache::ReserveSnapshot(std::size_t source_index,
             impl_->snapshot_capacity_bytes - impl_->reserved_snapshot_bytes;
     while (can_fit_after_eviction && !fits()) {
       std::size_t target = oldest_snapshot(false);
-      if (target == impl_->entries.size()) {
+      if (target == impl_->entries.size() && !preserve_source) {
         target = oldest_snapshot(true);
       }
       if (target == impl_->entries.size()) {
@@ -539,7 +553,7 @@ std::size_t ContinuationCache::Commit(
     std::vector<ContinuationToken> tokens,
     std::shared_ptr<const ContinuationSnapshot> snapshot,
     std::vector<std::uint8_t> input_identity,
-    std::vector<ContinuationToken> live_tokens) {
+    std::vector<ContinuationToken> live_tokens, bool release_state) {
   const std::size_t token_count = tokens.size();
   const std::size_t snapshot_bytes =
       snapshot != nullptr ? snapshot->PayloadBytes() : 0;
@@ -588,8 +602,10 @@ std::size_t ContinuationCache::Commit(
 
     auto& state_entry = *impl_->entries.at(index);
     if (impl_->snapshot_mode()) {
-      state_entry.live_tokens = std::move(live_tokens);
-      state_entry.live_identity = input_identity;
+      if (release_state) {
+        state_entry.live_tokens = std::move(live_tokens);
+        state_entry.live_identity = input_identity;
+      }
       if (retain_snapshot) {
         const std::size_t no_entry = impl_->entries.size();
         std::size_t target = no_entry;
@@ -676,9 +692,11 @@ std::size_t ContinuationCache::Commit(
       state_entry.input_identity = std::move(input_identity);
       state_entry.valid = !state_entry.tokens.empty();
     }
-    state_entry.dirty = true;
-    state_entry.available = true;
-    state_entry.state_last_used = ++impl_->clock;
+    if (release_state) {
+      state_entry.dirty = true;
+      state_entry.available = true;
+      state_entry.state_last_used = ++impl_->clock;
+    }
   }
   removed_snapshots.clear();
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);

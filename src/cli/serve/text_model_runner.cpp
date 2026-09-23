@@ -432,6 +432,9 @@ struct TextRunnerPool::Impl {
 
   ValidatedRunner validated;
   ContinuationCache cache;
+  // Publish a live checkpoint before another admission can fall back to the
+  // older prompt snapshot. Decode/prefill work never holds this mutex.
+  std::timed_mutex admission_mutex;
   std::shared_ptr<ContinuationDiskStore> disk_store;
   std::size_t shared_prefix_min_tokens{0};
   std::size_t shared_prefix_max_boundaries{0};
@@ -1269,6 +1272,12 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   if (cache_prefix_tokens > prompt.size())
     throw std::invalid_argument("cache prefix exceeds prompt length");
 
+  std::unique_lock admission(impl_->admission_mutex, std::defer_lock);
+  while (!admission.try_lock_for(std::chrono::milliseconds(10))) {
+    if (is_cancelled && is_cancelled())
+      return {};
+  }
+
   const std::span<const std::uint8_t> identity =
       context ? std::span<const std::uint8_t>(context->cache_identity)
               : std::span<const std::uint8_t>{};
@@ -1287,6 +1296,58 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       reuse_prompt);
   if (!lease) {
     return {};
+  }
+  // A live frontier can contain generated tokens beyond the prompt snapshot.
+  // Freeze it before the first branch mutates it, so peers restore the same
+  // decode history instead of feeding generated output through prefill.
+  // C1 keeps its copy-free live path and its original branching checkpoint.
+  if (impl_->cache.capacity() > 1 && lease.cache_hit() &&
+      impl_->validated.descriptor.capabilities.snapshot &&
+      impl_->validated.descriptor.capabilities.fork &&
+      !(is_cancelled && is_cancelled())) {
+    const auto prefix = reusable.first(lease.cached_tokens());
+    if (!lease.HasSnapshotFor(prefix)) {
+      auto& runner = *impl_->validated.runner;
+      auto& state = dynamic_cast<TextRunnerState&>(lease.state());
+      std::size_t bytes = 0;
+      std::shared_ptr<const TextRunnerSnapshot> snapshot;
+      const auto started = std::chrono::steady_clock::now();
+      try {
+        if (runner.CheckpointPosition(state) != prefix.size())
+          throw std::logic_error("live checkpoint position mismatch");
+        bytes = runner.SnapshotPayloadBytes(state);
+        if (lease.TryReserveSnapshot(bytes, prefix.size(), true)) {
+          snapshot = runner.Snapshot(state);
+          if (snapshot == nullptr)
+            throw std::runtime_error("live checkpoint capture failed");
+          if (lease.PublishSnapshot({prefix.begin(), prefix.end()}, snapshot) ==
+              0)
+            snapshot.reset();
+        }
+      } catch (...) {
+        snapshot.reset();
+        lease.SkipSnapshot(SnapshotEventReason::kCaptureFailure, bytes,
+                           prefix.size());
+      }
+      if (snapshot) {
+        if (impl_->disk_store) {
+          try {
+            (void)impl_->disk_store->SaveAsync(
+                impl_->validated.runner, {prefix.begin(), prefix.end()},
+                snapshot, {identity.begin(), identity.end()});
+          } catch (...) {
+            // RAM branching does not depend on optional disk admission.
+          }
+        }
+        std::ostringstream line;
+        line << "event=live_checkpoint tokens=" << prefix.size()
+             << " bytes=" << bytes << " capture_ms="
+             << std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started)
+                    .count();
+        Logger::Info("cache", line.str());
+      }
+    }
   }
   if (reuse_prompt && !lease.cache_hit() && impl_->disk_store != nullptr &&
       !(is_cancelled && is_cancelled())) {
