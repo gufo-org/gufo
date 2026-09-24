@@ -515,13 +515,14 @@ def prepared_response(request, timeout):
     body = json.loads(request.data)
     slot = body["id_slot"]
     check(body["cache_prompt"] is True, "both phases allow exact prefix reuse")
-    if body["max_tokens"] == 1:
+    if body["max_tokens"] in (0, 1):
+        generated = body["max_tokens"]
         with preparation_lock:
             prepared_slots.add(slot)
         return FakeResponse(
-            usage={**OPENAI_USAGE, "completion_tokens": 1},
-            timings={**LLAMA_TIMINGS, "prompt_n": 12, "cache_n": 0, "predicted_n": 1},
-            content=("one",),
+            usage={**OPENAI_USAGE, "completion_tokens": generated},
+            timings={**LLAMA_TIMINGS, "prompt_n": 12, "cache_n": 0, "predicted_n": generated},
+            content=("one",) if generated else (),
         )
     with preparation_lock:
         check(prepared_slots == {0, 1}, "all slots are prepared before any tg request")
@@ -546,6 +547,14 @@ check(len(prepared_report["results"]["c2"]["samples"]) == 2,
 check(len(prepared_report["results"]["c2"]["preparations"][0]["samples"]) == 2,
       "preparation evidence is retained")
 check(not prepared_report["warnings"], "intentional prepared cache hits are not warnings")
+prepared_slots.clear()
+with patch.object(serving_bench.urllib.request, "urlopen", prepared_response):
+    zero_prepared = serving_bench.run_corpus_benchmark(**prepared_args, preparation_tokens=0)
+check(all(s["completion_tokens"] == 0
+          for s in zero_prepared["results"]["c2"]["preparations"][0]["samples"]),
+      "zero-token preparation retains the prompt frontier without generating a token")
+check(zero_prepared["workload"]["warmupMaxOutputTokens"] == 0,
+      "the actual preparation policy is recorded")
 with patch.object(serving_bench.urllib.request, "urlopen",
                   lambda request, timeout: FakeResponse(
                       usage={**OPENAI_USAGE,
@@ -831,6 +840,13 @@ with tempfile.TemporaryDirectory() as directory:
         check((row["Gufo tg mixed"], row["Gain mixed"], row["Gufo tg repetitive"],
                row["Gain repetitive"]) == ("10.00", "+25.0%", "30.00", "+50.0%"),
               "generation and gains stay independent by text type")
+        exclusions = config.artifacts_dir / "unavailable.json"
+        exclusions.write_text(json.dumps({workloads[1].id: {"0": "unqualified comparison"}}))
+        excluded = parse_table(render_table(config, single_table, None))["0"]
+        check(excluded["llama.cpp tg repetitive"] == excluded["Gain repetitive"] == "N/A"
+              and excluded["llama.cpp pp"] == "80.00 ± 1.00",
+              "explicit exclusions override retained rates and cannot supply the shared pp maximum")
+        exclusions.unlink()
         for target, metric, expected in [
             ("gufo", "Gufo tg repetitive", workloads[1]),
             ("reference", "llama.cpp tg mixed", workloads[0]),
@@ -987,11 +1003,15 @@ with tempfile.TemporaryDirectory() as directory:
         check("disables DSpark" in str(failure), "unsupported speculation must not become an AR baseline")
     else:
         raise AssertionError("the pinned reference cannot batch DSpark")
-    with patch("gufo.model_bench.llm.run_request") as request:
+    session.active_log = Path(directory) / "server.log"
+    session.active_log.write_text("")
+    with patch("gufo.model_bench.llm.run_request") as request, \
+            patch("ds4.server_metrics.request_metrics"):
         session.request("http://unused", "prompt", 1)
         check(request.call_args.kwargs["extra_body"]["thinking"] == {"type": "disabled"},
               "reference HTTP requests disable DeepSeek's default thinking")
     session.server = MagicMock()
+    config.data["reference"]["stage_timings"] = False
     try:
         run_table(session, config.table("single-ar"))
     except RuntimeError as failure:
@@ -999,6 +1019,36 @@ with tempfile.TemporaryDirectory() as directory:
     else:
         raise AssertionError("missing reference stage timing must not become a benchmark")
     check(not session.server.called, "unsupported timing fails before model loading")
+
+    config.artifacts_override = Path(directory)
+    config.files = {"gguf": {"default": Path(__file__)}}
+    table = config.table("multi-ar")
+    table.spec["concurrency"] = [2]
+    session.target = "gufo"
+    session.server = MagicMock(return_value=MagicMock())
+    session.reference_version = lambda mode: None
+    phases = []
+    session.request = lambda *args, **kwargs: phases.append("C1 checkpoint")
+    report = {"artifactType": "servingBenchmark", "workload": {}, "results": {
+        "c2": {"samples": [{"prompt_tokens": 2048, "completion_tokens": 128}] * 2}}}
+
+    def prepared_cohort(**kwargs):
+        phases.append("prepared cohort")
+        check(kwargs["prefill_first"] and kwargs["preparation_tokens"] == 1,
+              "Gufo DS4 still prepares every session before timing decoding")
+        return report
+
+    with patch("gufo.model_bench.llm.Tokenizer", return_value=MagicMock(overhead=4, ratio=1.143)), \
+            patch("gufo.model_bench.llm.run_corpus_benchmark", side_effect=prepared_cohort), \
+            patch("gufo.model_bench.llm.wait_process_exit"), \
+            patch("gufo.model_bench.llm.save_artifact"), \
+            patch("sys.stdout", new=io.StringIO()):
+        run_multi(session, table)
+    check(phases == ["C1 checkpoint", "prepared cohort"],
+          "DS4 builds the scalar prompt checkpoint before concurrent preparation")
+    check(report["results"]["c2"]["promptPreparation"] ==
+          "C1 checkpoint followed by concurrent preparation",
+          "the artifact records the prefill arithmetic control")
 
 # An AR-only benchmark must not require the optional MTP build on PATH.
 config = load_config(ROOT, "qwen3.8-flash-next")
@@ -1012,5 +1062,27 @@ with patch("gufo.model_bench.llm.shutil.which", return_value="/bin/llama-server"
         patch.object(session, "reference_version"):
     session.server(config.table("single-ar"), mode="ar", context=4096, sessions=1, tag="test")
     which.assert_called_once_with("llama-server")
+
+# Existing server log timers must match HTTP counts; never infer stage time from wall time.
+from ds4.server_metrics import request_metrics, cohort_metrics
+log = (
+    "0924 01:00:00 ds4-server: chat ctx=2..12:10 prompt done 0.020s\n"
+    "0924 01:00:00 ds4-server: chat ctx=12..14:2 gen=2 decoding chunk=200.00 t/s avg=200.00 t/s 0.010s\n"
+)
+parsed = request_metrics(log, sample)
+check(parsed.prefill_ms == 20 and parsed.decode_ms == 10, "native stage timers are milliseconds")
+check(parsed.prefill_tokens_per_second == 500 and parsed.decode_tokens_per_second == 200,
+      "native pp/tg use HTTP counts and independent timers")
+for invalid in (log + log, log.replace("2..12:10", "0..12:12"), log.replace("0.010s", "0.000s")):
+    try:
+        request_metrics(invalid, sample)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("ambiguous, mismatched or invalid native timers must fail")
+cohort = {"samples": [sample.public(), sample.public()], "rounds": [{"sampleCount": 2}]}
+cohort_metrics(log + log.replace("0.010s", "0.020s"), cohort, 2)
+check(_serving_rate({"results": {"c2": cohort}}, 2) == 300,
+      "concurrency sums logged per-request rates without inventing client/log ID mapping")
 
 print("Serving benchmark harness tests passed.")

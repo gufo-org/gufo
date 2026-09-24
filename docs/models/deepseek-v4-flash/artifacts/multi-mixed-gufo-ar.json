@@ -1,0 +1,29 @@
+{
+  "artifactType": "servingBenchmark",
+  "model": {
+    "id": "DeepSeek-V4-Flash"
+  },
+  "notes": [
+    "Fresh AR d0 completion from single-ar-gufo.json; no duplicate AR speed sweep."
+  ],
+  "results": {
+    "c1": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "cases": {
+        "synthetic_prose_pp2048": {
+          "completionHashes": [
+            "5c68d0345d10a072cb0e25d37689205e84b07d4a5fe3d10927b327ac9ba0890a"
+          ]
+        }
+      }
+    }
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd"
+  },
+  "workload": {
+    "id": "single-ar-d0-mixed-control"
+  }
+}

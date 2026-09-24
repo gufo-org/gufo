@@ -1,0 +1,73 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.1.8",
+      "memoryTotalBytes": 134309883904,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-24",
+  "mode": null,
+  "model": {
+    "id": "DeepSeek-V4-Flash",
+    "variant": null
+  },
+  "notes": [
+    "antirez/ds4: ds4 0aaea5a238fb41a35106a551e73c8409dfb751ac",
+    "peak device-global hipMemGetInfo used bytes (total - free), sampled every 250 ms during the request; idle_gib is the same counter before the server started",
+    "server mode: ar"
+  ],
+  "referenceName": "antirez/ds4",
+  "rows": {
+    "16K prefix, pp4096 + tg128": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 262144 --port 36697 --host 127.0.0.1 --rocm",
+      "gib": 100.01,
+      "idle_gib": 2.38
+    },
+    "pp2048 + tg128": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 262144 --port 36697 --host 127.0.0.1 --rocm",
+      "gib": 99.96,
+      "idle_gib": 2.38
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "ds4-server",
+      "--model",
+      "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+      "--ctx",
+      "262144",
+      "--port",
+      "36697",
+      "--host",
+      "127.0.0.1",
+      "--rocm"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd"
+  },
+  "table": "memory",
+  "target": "reference"
+}

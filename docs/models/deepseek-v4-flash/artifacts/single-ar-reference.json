@@ -1,0 +1,221 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.1.8",
+      "memoryTotalBytes": 134309883904,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-24",
+  "mode": null,
+  "model": {
+    "id": "DeepSeek-V4-Flash",
+    "variant": null
+  },
+  "notes": [
+    "antirez/ds4: ds4 0aaea5a238fb41a35106a551e73c8409dfb751ac",
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.138 tokens/word, template overhead 4 tokens"
+  ],
+  "referenceName": "antirez/ds4",
+  "rows": {
+    "0": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43089 --host 127.0.0.1 --rocm",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "a3feec2968666d13af0ac8ee77c7a0d776437a049a5bd4e5ab029e223c93a366",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2035
+        }
+      ],
+      "pp": 248.41,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 14.83,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "counts": [
+        {
+          "cache_n": 12242,
+          "completion_sha256": "4abb0fe9f5bb2f02cc44528a173d1b650871059445d562b2d84a080d7cbdd386",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2041
+        }
+      ],
+      "pp": 212.41,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 13.78,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "counts": [
+        {
+          "cache_n": 131249,
+          "completion_sha256": "3600ae1a59f8b53cc4134fd3d7ffea910a327c814c31d8d379170b8db9d0774d",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2051
+        }
+      ],
+      "pp": 140.04,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 10.15,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "counts": [
+        {
+          "cache_n": 16365,
+          "completion_sha256": "c6333437ae1ed5749f66875de6509bef9679090c76ce81b8d32feb2ebc6ae3dc",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2053
+        }
+      ],
+      "pp": 214.97,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 13.64,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "counts": [
+        {
+          "cache_n": 32799,
+          "completion_sha256": "ab2b9b7f8925b0dd03ebd0fd726dce0c20ab24073f92faa99fe091b47a3bab40",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2034
+        }
+      ],
+      "pp": 205.7,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 12.96,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 43089 --host 127.0.0.1 --rocm",
+      "counts": [
+        {
+          "cache_n": 4117,
+          "completion_sha256": "3079cfcd00e0d7d38bbd82703fe850759d0ee10bccd757711d434a679bb60132",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2039
+        }
+      ],
+      "pp": 238.93,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 14.12,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "counts": [
+        {
+          "cache_n": 65570,
+          "completion_sha256": "ecea793ebd581c802d945d126aea59ddfe3a3313df4574d1f1b84974bc15a29f",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2055
+        }
+      ],
+      "pp": 177.43,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 12.0,
+      "tg_sd": null,
+      "workload": "story"
+    },
+    "8192": {
+      "binary_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+      "command": "ds4-server --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --ctx 133760 --port 37507 --host 127.0.0.1 --rocm",
+      "counts": [
+        {
+          "cache_n": 8178,
+          "completion_sha256": "ed2e1059b1c9057b598abafb105772176d5257a09b729595634d2777e800f39b",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2027
+        }
+      ],
+      "pp": 223.24,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 13.9,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "ds4-server",
+      "--model",
+      "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+      "--ctx",
+      "133760",
+      "--port",
+      "37507",
+      "--host",
+      "127.0.0.1",
+      "--rocm"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd"
+  },
+  "table": "single-ar",
+  "target": "reference"
+}

@@ -1145,6 +1145,7 @@ def run_corpus_benchmark(
     notes: list[str] | None = None,
     prefill_first: bool = False,
     pin_slots: bool = False,
+    preparation_tokens: int = 1,
 ) -> dict[str, Any]:
     if not model:
         raise ValueError("model must not be empty")
@@ -1160,6 +1161,8 @@ def run_corpus_benchmark(
         raise ValueError("endpoint profile must be gufo or openai")
     if prefill_first and cache_prompt is not True:
         raise ValueError("prepared decoding requires cache_prompt=true")
+    if preparation_tokens not in (0, 1):
+        raise ValueError("prompt preparation supports zero or one output token")
 
     results: dict[str, Any] = {}
     warnings: list[str] = []
@@ -1200,17 +1203,18 @@ def run_corpus_benchmark(
             for group_index, group in enumerate(groups):
                 if prefill_first:
                     # Finish every prompt before releasing the measured cohort.
-                    # One output token leaves a reusable prompt frontier; the
-                    # measured request repeats the exact prompt, not its output.
+                    # Antirez accepts zero-token prefill; one generated token
+                    # would advance its state beyond the reusable frontier.
+                    # Gufo/llama.cpp retain a prompt checkpoint after one token.
                     prepared = _run_corpus_round(
                         base_url=base_url, model=model, cases=group,
-                        max_tokens=1, temperature=temperature,
+                        max_tokens=preparation_tokens, temperature=temperature,
                         timeout_seconds=timeout_seconds, concurrency=concurrency,
                         repetition=-(repetition + 1), group_index=group_index,
                         endpoint_profile=endpoint_profile, cache_prompt=True,
                         pin_slots=pin_slots,
                     )
-                    if any(sample.completion_tokens != 1 for sample in prepared.samples):
+                    if any(sample.completion_tokens != preparation_tokens for sample in prepared.samples):
                         raise RuntimeError("prompt preparation did not complete")
                     preparations.append({
                         "repetition": repetition, "group": group_index,
@@ -1308,7 +1312,7 @@ def run_corpus_benchmark(
                 else "cycle-from-start"
             ),
             "warmupPolicy": "prepare-every-session" if prefill_first else "first-cohort",
-            "warmupMaxOutputTokens": 1 if prefill_first else min(max_tokens, 16),
+            "warmupMaxOutputTokens": preparation_tokens if prefill_first else min(max_tokens, 16),
             "maxOutputTokens": max_tokens,
             "temperature": temperature,
             "warmupRounds": warmup_rounds,

@@ -1,0 +1,22 @@
+{
+  "multi-mixed": {
+    "2": "Pinned antirez/ds4 0aaea5a2 disables DSpark in ROCm native batching.",
+    "4": "Pinned antirez/ds4 0aaea5a2 disables DSpark in ROCm native batching.",
+    "6": "Pinned antirez/ds4 0aaea5a2 disables DSpark in ROCm native batching.",
+    "8": "Pinned antirez/ds4 0aaea5a2 disables DSpark in ROCm native batching.",
+    "1": "Pinned antirez/ds4 C1 DSpark fails greedy AR-equivalence on the matched pp2048/tg128 control, after both fresh and prepared prefill."
+  },
+  "multi-repetition": {
+    "2": "Pinned antirez/ds4 0aaea5a2 disables DSpark in ROCm native batching.",
+    "4": "Pinned antirez/ds4 0aaea5a2 disables DSpark in ROCm native batching.",
+    "6": "Pinned antirez/ds4 0aaea5a2 disables DSpark in ROCm native batching.",
+    "8": "Pinned antirez/ds4 0aaea5a2 disables DSpark in ROCm native batching.",
+    "1": "Pinned antirez/ds4 C1 DSpark fails greedy AR-equivalence on the matched pp2048/tg128 control, after both fresh and prepared prefill."
+  },
+  "single-dspark": {
+    "*": "Pinned antirez/ds4 C1 DSpark fails greedy AR-equivalence on the matched pp2048/tg128 control, after both fresh and prepared prefill."
+  },
+  "single-dspark-repetition": {
+    "*": "Pinned antirez/ds4 C1 DSpark fails greedy AR-equivalence on the matched pp2048/tg128 control, after both fresh and prepared prefill."
+  }
+}

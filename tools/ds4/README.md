@@ -10,6 +10,7 @@ are in [the DS4 benchmark README](../../docs/models/deepseek-v4-flash/BENCHMARKS
 | `tools/ds4/check.py reference --model "$MODEL" --upstream "$UPSTREAM" --output /tmp/ds4-reference` | Repeated AR scoring against 105 official continuations; independent full logits and 128 forced tokens at 0/4K/8K/12K/16K, with matched 2K/4K prefill calls |
 | `tools/ds4/check.py reference --prefill-only --model "$MODEL" --upstream "$UPSTREAM" --output /tmp/ds4-prefill` | Same matched prefill grid and exact repeat check; skip continuation scoring and decode replay |
 | `tools/ds4/check.py all --model "$MODEL" --dspark-model "$DSPARK"` | All maintained DS4 CTest checks, including changing concurrency, snapshots through 16K, mixed sampling, and prefix/disk reuse |
+| `build/gpu-test/tests/models/deepseek_v4_flash/ds4_quality_test --indexer-boundary` | Focused DSpark C1 / AR C2 full-logit replay across the first sparse-indexer boundary; set `GUFO_DEEPSEEK_V4_FLASH_MODEL` and `GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL` |
 | `tools/ds4/import-eval.py` | Rebuild pinned fixtures from an upstream checkout; default capability subset, `--suite official` for the 0731 continuations |
 | `result/bin/gufo eval --questions 75 --greedy --output /tmp/ds4-quality.json` | Pinned capability evaluation through the real HTTP server (add `--base-url`) |
 | `result/bin/gufo bench -c 1,2,4,6,8 -p 2048 -n 128 -d 0,4096,8192,12288,16384 -r 2 -v` | Release model sweep; per-request output hashes and draft counters (add model paths) |
@@ -17,6 +18,7 @@ are in [the DS4 benchmark README](../../docs/models/deepseek-v4-flash/BENCHMARKS
 | `result/bin/gufo bench -c 1,2,4 -p 2048 -n 128 -d 0,4096,8192,12288,16384 -r 2 -v --temperature 0.6 --top-p 0.95 --seed 7` | Filtered sampled sweep; C1 retains AR seed identity, while C>1 uses exact probabilistic proposals |
 | `tools/ds4/check.py benchmark --concurrency 1,2,4 --temperature 0.6 --top-p 0.95 --seed 7 --ar-log /tmp/ar-t06.log --dspark-log /tmp/dspark-t06.log --output /tmp/bench-t06.json` | Repeated output/counters, AR identity for point-mass cohorts, acceptance and proposal policy |
 | `tools/serving/gufo-serving-bench.py` | Shared HTTP concurrency, scheduling, and acceptance measurement |
+| `tools/bench/model-bench.py --model deepseek-v4-flash` | Retained HTTP tables; `server_metrics.py` reads antirez's existing pp/tg log timers |
 | `tools/bench/speculative-corpus.py` | Shared AR/speculative text comparison on the fixed corpus |
 | `tools/prof/prof.py` | Shared rocprofv3 capture, rollup, and A/B diff |
 

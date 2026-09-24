@@ -1,0 +1,40 @@
+{
+  "schema": "gufo-ds4-reference-qualification/1",
+  "measured_on": "2026-09-24",
+  "reference_revision": "0aaea5a238fb41a35106a551e73c8409dfb751ac",
+  "control": {
+    "prompt_recipe": "single-user-d0 prose",
+    "prompt_sha256": "85507b80bee13a6b6a66661b1c4282e30cf597da1dac519841d978b61ff1bef5",
+    "prompt_tokens": 2035,
+    "completion_tokens": 128,
+    "temperature": 0,
+    "thinking": false
+  },
+  "completion_sha256": {
+    "ar_fresh": "a3feec2968666d13af0ac8ee77c7a0d776437a049a5bd4e5ab029e223c93a366",
+    "ar_prepared": "a3feec2968666d13af0ac8ee77c7a0d776437a049a5bd4e5ab029e223c93a366",
+    "dspark_fresh": "b3bbd4a04944d1cb82f9d04d0040425f2b0b9aaa0be6a5b4b427bde3dd8bbd0f",
+    "dspark_prepared": "b3bbd4a04944d1cb82f9d04d0040425f2b0b9aaa0be6a5b4b427bde3dd8bbd0f"
+  },
+  "qualification": {
+    "ar_prepared_replay": true,
+    "dspark_ar_equivalent": false,
+    "dspark_comparison_eligible": false
+  },
+  "limitations": [
+    "The control compares the pinned reference with itself; it does not establish official target-model accuracy.",
+    "ROCm native batching disables DSpark at every configured width; C>1 DSpark is unsupported."
+  ],
+  "ar_prepared_concurrency": {
+    "levels": [
+      1,
+      2,
+      4,
+      6,
+      8
+    ],
+    "all_responses_match_own_c1": true,
+    "new_prompt_tokens_per_request": 0,
+    "completion_tokens_per_request": 128
+  }
+}

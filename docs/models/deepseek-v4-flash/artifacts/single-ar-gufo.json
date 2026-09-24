@@ -1,0 +1,231 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.1.8",
+      "memoryTotalBytes": 134309883904,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-23",
+  "measurement_window_utc": [
+    "2026-09-23",
+    "2026-09-24"
+  ],
+  "mode": null,
+  "model": {
+    "id": "DeepSeek-V4-Flash",
+    "variant": null
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.143 tokens/word, template overhead 4 tokens"
+  ],
+  "referenceName": "antirez/ds4",
+  "rows": {
+    "0": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "5c68d0345d10a072cb0e25d37689205e84b07d4a5fe3d10927b327ac9ba0890a",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2035
+        }
+      ],
+      "pp": 484.62,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 16.28,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 12241,
+          "completion_sha256": "a12e2e45d43a23d3cdbddb964708269cf18955c393fdc47c208857b7d34487d3",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2042
+        }
+      ],
+      "pp": 393.95,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 15.64,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 131248,
+          "completion_sha256": "c1dda723760ecbb43d6c2b21c86a90e98a9b1d962b9669397eac48426b0b917c",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2052
+        }
+      ],
+      "pp": 279.95,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 12.04,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 16364,
+          "completion_sha256": "d2afc8c2e9ebf87c60f581843802ef4d6c6aca53bab863c670430c2f661da1d1",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2054
+        }
+      ],
+      "pp": 358.41,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 15.5,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 32798,
+          "completion_sha256": "8221920d34d610692373895963d9021228dcdffbbfdc6619315c5c928e311b30",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2035
+        }
+      ],
+      "pp": 370.1,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 14.87,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 4116,
+          "completion_sha256": "ceb9a340750d2e09c7fb1b1b11533983378235dd1a9d9371a63b57c1cb9e6768",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2040
+        }
+      ],
+      "pp": 399.75,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 15.97,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "command": "gufo serve --port 52501 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 65293,
+          "completion_sha256": "f79f9bb227088507106ffc656c8d6b3c077950d0784e609e51a98d643151b72f",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2047
+        }
+      ],
+      "pp": 321.28,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 13.95,
+      "tg_sd": null,
+      "workload": "story"
+    },
+    "8192": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "command": "gufo serve --port 50603 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 8177,
+          "completion_sha256": "ef4ee36cd48f152bf267f3f5147d54732e7b98c9aa144d01f2b6d27975b5e283",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2028
+        }
+      ],
+      "pp": 368.17,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 15.82,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "52501",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd"
+  },
+  "table": "single-ar",
+  "target": "gufo"
+}

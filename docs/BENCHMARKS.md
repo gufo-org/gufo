@@ -37,12 +37,12 @@ python3 tools/bench/model-bench.py --model qwen3.8-flash-next --gguf "$MODEL" \
   --mtp "$MTP" run --target reference --table single-mtp
 ```
 
-DeepSeek's pinned HTTP server lacks separate pp/tg durations. Its native
-`ds4-bench` supports single-session AR and DSpark with per-frontier CSV timing;
-it does not implement concurrency. The pinned ROCm server also disables DSpark
-in native batching. See the
-[DS4 measurement status](models/deepseek-v4-flash/EVALUATION.md#benchmark-method)
-before running its reference sweep.
+DeepSeek's HTTP payload omits pp/tg durations. The driver reads the pinned
+server's existing stage timers from its log and checks them against HTTP token
+counts. Native `ds4-bench` also supports single-session AR/DSpark, but not
+concurrency. The pinned ROCm server disables DSpark when batching, so C>1
+DSpark comparisons are **N/A**. See the
+[DS4 method](models/deepseek-v4-flash/EVALUATION.md#benchmark-method).
 
 New or refreshed text-model cards use the same pp2048 prose/copying prompts
 for single-user d0 and concurrency, with tg128. The driver shares their prompt
@@ -73,8 +73,9 @@ when prompt, cache state, sampling, speculation, and timed scope match.
 
 Model tables report the **sum of individual request decode rates** in each
 concurrent group, averaged across measured groups. Prefill and queue time
-remain in the latency diagnostics. Missing decode timings are **TODO**;
-whole-request throughput is not a substitute.
+remain in the latency diagnostics. Pending measurements are **TODO**;
+comparisons prevented by missing reference features are **N/A**, with a reason.
+Whole-request throughput is not a substitute for decode timings.
 
 `--endpoint-profile openai` supports other OpenAI-compatible servers. Missing
 server-stage metrics remain null. `--reference-report` compares completion

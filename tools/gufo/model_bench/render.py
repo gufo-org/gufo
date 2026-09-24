@@ -12,7 +12,7 @@ from .artifacts import artifact_path, load_artifact
 from .config import BenchConfig, TableSpec
 
 TODO = "TODO"
-NA = "n/a"  # reference cell that cannot be measured on this host (see artifacts/unavailable.json)
+NA = "N/A"  # unavailable comparison (see artifacts/unavailable.json)
 MARKER_RE = re.compile(
     r"<!-- bench:(?P<id>[\w-]+) -->\n(?P<body>.*?)<!-- /bench -->", re.DOTALL
 )
@@ -310,6 +310,15 @@ def _serving_rate(report: dict[str, Any] | None, users: int) -> float | None:
         return None
     if sum(round_.get("sampleCount", 0) for round_ in rounds) != len(samples):
         return None
+    logged = result.get("loggedDecodeTimers")
+    if logged:
+        durations = logged.get("durations_ms", [])
+        tokens = logged.get("tokens_per_request", 0)
+        if (logged.get("source") != "antirez-server-log" or len(durations) != len(samples)
+                or tokens <= 0 or any(sample["completion_tokens"] != tokens for sample in samples)
+                or any(not math.isfinite(ms) or ms <= 0 for ms in durations)):
+            return None
+        return math.fsum(tokens * 1000 / ms for ms in durations) / len(rounds)
     rates = [sample.get("decode_tokens_per_second") for sample in samples]
     if any(rate is None or not math.isfinite(rate) or rate < 0 for rate in rates):
         return None
@@ -344,9 +353,11 @@ def _pick(fresh: str | None, existing: str | None) -> str:
 
 def _ref(fresh: str | None, unavailable: bool = False) -> str:
     """Reference cells come from artifacts only, so layout changes never carry stale values."""
+    if unavailable:
+        return NA
     if fresh is not None:
         return fresh
-    return NA if unavailable else TODO
+    return TODO
 
 
 def unavailable_rows(config: BenchConfig, table: TableSpec) -> set[str] | None:
@@ -389,7 +400,8 @@ def render_table(config: BenchConfig, table: TableSpec, existing: dict[str, dict
             workloads = table.workload_tables()
             if workloads:
                 def best_pp(engine: str) -> str | None:
-                    candidates = [fresh.get(f"{engine}_pp_{w.spec['label']}") for w in workloads]
+                    candidates = [fresh.get(f"{engine}_pp_{w.spec['label']}") for w in workloads
+                                  if engine != "ref" or not fresh.get(f"ref_unavailable_{w.spec['label']}")]
                     return max((v for v in candidates if _number(v) is not None),
                                key=_number, default=None)
 

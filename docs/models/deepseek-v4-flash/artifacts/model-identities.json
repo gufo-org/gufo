@@ -1,0 +1,47 @@
+{
+  "schema": "gufo-benchmark-identities/1",
+  "gufo": {
+    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd",
+    "build": "nix build, ROCm 7.2.3, gfx1151",
+    "production_source_changes_during_measurement": true,
+    "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+    "source_changes": "Sparse-indexer boundary guard in rocm_graph.cpp; full-logit replay recorded in indexer-boundary.json.",
+    "earlier_build": {
+      "binary_sha256": "9fcb41de6ae9739dcdcd249e4742dc4a667adce63030454ac86ba032d49de672",
+      "retained_rows": "Single AR, loading, AR C1/C2, and mixed DSpark depths >=4096. The boundary guard is not entered by these operations."
+    },
+    "changed_production_files": {
+      "src/models/deepseek_v4_flash/runtime/rocm_graph.cpp": "9699201d4f96ece2b31891be23f514a53cafa8de036b9c2d15c649043ae7c120"
+    }
+  },
+  "reference": {
+    "project": "antirez/ds4",
+    "revision": "0aaea5a238fb41a35106a551e73c8409dfb751ac",
+    "server_sha256": "43b178469fa14174aa8424c9a0095830dd3a4b85e03d5cd8a9cf5dc2a166507a",
+    "build": "nix build .#ds4-reference, ROCm 7.2.3, gfx1151",
+    "inference_patches": false
+  },
+  "models": {
+    "repository": "antirez/deepseek-v4-gguf",
+    "target": {
+      "file": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+      "revision": "1cd7b564460821938add0475a60b942c409295e0",
+      "sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0"
+    },
+    "dspark": {
+      "file": "DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "revision": "e7f04037032990db0346398d249baf9fb9df1ccc",
+      "sha256": "7e319924541db3f7a163ed7e11d7532a70d48228ab59d36cb81e1d4511885360"
+    },
+    "digest_source": "Previously verified identical cached revisions; quality-qualification.json."
+  },
+  "loading": {
+    "mode": "C1 DSpark, context capacity 262144",
+    "cold_files": "POSIX_FADV_DONTNEED on target and sidecar; mincore verified zero resident pages before each launch.",
+    "runtime_libraries": "Not evicted."
+  },
+  "measurement_window_utc": [
+    "2026-09-23",
+    "2026-09-24"
+  ]
+}

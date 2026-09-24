@@ -67,7 +67,7 @@ refresh so an interrupted run cannot leave mixed-date rows; `--repetitions N`
 overrides every table's repetition count (mean ± sd above 1);
 When a reference server is killed mid-table (SIGKILL is the kernel OOM
 killer on this host), the driver marks that row and every deeper depth or
-larger concurrency `unavailable` in the artifact and `render` shows `n/a`
+larger concurrency `unavailable` in the artifact and `render` shows `N/A`
 for them, since they are a host limit rather than missing work.
 `--depths 0,4096` restricts single-user tables to those depths and
 `--mode ar` / `--mode <spec>` restricts to one mode (use it to skip a
@@ -110,9 +110,11 @@ Qwen AR/DFlash2, `.#llama-cpp-mtp-reference` for Flash-Next MTP, or
 `.#ds4-reference` for DeepSeek AR/DSpark. Combine the two llama packages when
 refreshing both modes. None is part of Gufo, the default dev shell or hosted
 checks. Preserve the pinned recipes under `.devops/nix`; do not use ad-hoc builds.
-Antirez readiness is `/v1/models`. Its unmodified server lacks stage timings;
-qualify native single-user timing and HTTP prepared-cohort timing/reuse before
-publishing DS4 comparisons.
+Antirez readiness is `/v1/models`. Its HTTP payload lacks stage timings;
+`tools/ds4/server_metrics.py` reads the pinned server's existing prompt-done
+and final-decode timers, verifies token counts and retains the per-request
+cohort durations. Do not substitute client wall time or infer client IDs from
+interleaved log lines. Qualify prepared-prefix reuse before publishing C>1.
 
 Request-level timing comes from the response, not the client clock, whenever
 the server provides it: Gufo and llama-server both return llama.cpp-compatible
@@ -133,10 +135,10 @@ and the table says so.
    enter Git.
 2. Same input, same artifact, same timed scope on both sides: same GGUF or
    safetensors, same prompt or audio file, same output length, same
-   seed/temperature, same context depth, same concurrency, fresh server per
-   point, no prompt-cache hits unless the cell says so. If the reference cannot
-   match (different quantization, no equivalent speculative mode, no batching),
-   measure the closest configuration and state the mismatch under the table.
+   seed/temperature, same context depth and same concurrency. Start a fresh
+   server per depth sweep or concurrency point; allow only the prefix reuse
+   declared by the workload. If a missing reference feature prevents a close
+   match, mark those reference cells `N/A` and explain why.
 3. Warm once, then time. Prepared decode cohorts use one output token to
    finish all prompts before timing tg128. Other corpus warmups use only the
    first concurrent group, capped at 16 output tokens. Single-user
@@ -157,8 +159,12 @@ and the table says so.
    compares them against the Gufo AR C1 reference, while matching single-user
    AR/speculative depth rows allow the same text-consistency check. These hashes
    do not prove original-model accuracy. A mismatch or device fault is not a result.
-5. A cell without a current qualified measurement is `TODO`, never a stale
-   number. Keep dates per table; do not sum stage medians into a headline.
+   Qualify the reference's speculative path against its own AR on the matched
+   pp2048 control before a full sweep, including prepared C1 reuse. If that
+   equivalence fails, retain compact evidence and mark the comparison `N/A`.
+5. A supported cell without a current qualified measurement is `TODO`, never a
+   stale number; an unsupported comparison is `N/A`. Keep measurement dates;
+   do not sum stage medians into a headline.
 6. Retained JSON goes to `docs/models/<model>/artifacts/`; raw samples,
    traces, audio, images and videos stay in the ignored top-level `artifacts/`.
 
@@ -202,15 +208,14 @@ Every headline table carries the reference project next to Gufo:
 - `TODO` on either side leaves `Gain` as `TODO`.
 - A reference cell the host cannot produce for hardware reasons — the
   reference is OOM-killed at the required context, the model does not fit —
-  is `n/a`, not `TODO`. A missing software feature (the reference cannot
-  load a sidecar yet) stays `TODO` with the upstream reference noted, since
-  a newer pin can fill it. Declare `n/a` cells in `docs/models/<model>/artifacts/unavailable.json`
+  is `N/A`. Missing reference features that prevent a close comparison are also
+  `N/A`, with a concise reason. `TODO` means a supported measurement is pending. Declare `N/A` cells in `docs/models/<model>/artifacts/unavailable.json`
   (`{"<table id>": {"<row label>" | "*": "<reason>"}}`; the suffix
   `-speculative` on a concurrency table id targets only its speculative
   reference column) and state the reason under the table. `render` prints
-  `n/a` there and in the matching Gain cell.
+  `N/A` there and in the matching Gain cell.
 - Keep AR comparisons in the dedicated AR table. If the reference lacks a
-  speculative mode, leave that mode's cells TODO; do not launch another AR
+  speculative mode, mark that mode's cells N/A; do not launch another AR
   sweep for each speculative workload. Existing combined-mode cards label
   their fallback explicitly as `Gain vs <ref> AR`.
 - One table per quantization and per mode; never pack `pp / tg` pairs or two
@@ -232,7 +237,7 @@ Qwen reference: **llama.cpp** `llama-server`, same GGUF, ROCm build,
 disables llama-server's separate host snapshot cache; live slot prefix reuse
 remains available. On a unified-memory host, avoiding that extra allocation
 can decide whether a deep sweep fits. When a reference row
-still dies, check `free` and the kernel log before recording `n/a` — a run
+still dies, check `free` and the kernel log before recording `N/A` — a run
 that finishes only by evicting and re-reading its mapped weights is not a
 speed measurement either.
 Gufo: `gufo serve llm --think off --max-pending-per-client 8`, greedy, seed
@@ -245,7 +250,7 @@ DeepSeek reference: **antirez/ds4**, pinned by `.#ds4-reference`, same target
 and DSpark GGUF. The server uses `--rocm --ctx <per-session-capacity>`;
 AR C>1 adds `--batched-session C`. At pin `0aaea5a2`, any `--batched-session`
 value disables DSpark on ROCm, including 1. Omit it for C1 DSpark; keep C>1
-DSpark reference cells TODO until a build supports them. DSpark adds
+DSpark reference cells N/A until a build supports them. DSpark adds
 `--dspark --mtp-model <support>`. Disable
 thinking in each HTTP request. Native `ds4-bench` supports the sidecar but
 uses one session; its `ctx_tokens` is the post-prefill frontier, not cached
@@ -297,11 +302,11 @@ place loading immediately before memory in the rendered card:
    for the speculative cells only — `flake.nix` exposes `llama-server-mtp`
    from the pinned ggml-org/llama.cpp#28243 branch — and the card must say the
    speculative reference comes from that branch. Without such a build,
-   record the error once and leave its speculative cells `TODO`.
+   record the error once and mark its speculative cells `N/A`.
    `Model / depth | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive`.
    Retain proposed/accepted draft counts in artifacts, never in card columns
    or figures. Do not replace a missing speculative reference with another AR
-   sweep; leave its cells TODO and explain the missing support.
+   sweep; mark its cells `N/A` and explain the missing support.
 3. **Multiple users, autoregressive**, followed by **4. Multiple users,
    speculative**. Use the **same pp2048 prompts as single-user d0**,
    tg128 and `C = 1,2,4,6,8`; context capacity 4096 per user is sufficient.
@@ -325,6 +330,10 @@ place loading immediately before memory in the rendered card:
    distinct `id_slot` values in both phases. Validate that each measured
    request reuses the entire prompt (at most four final tokens may be reevaluated)
    and generates all 128 tokens. Retain preparation evidence separately.
+   Antirez DS4 uses a zero-output preparation request because generating a
+   token advances its live cache past the prompt. Gufo DS4 first builds a C1
+   prompt checkpoint, then prepares the concurrent sessions from it to keep
+   prefill arithmetic consistent. Record both choices in the artifacts.
    llama.cpp's recurrent checkpoint is four tokens before the prompt frontier;
    other models may only need the final token for logits. This avoids mixing
    Gufo's active decode clock with llama.cpp's elapsed
@@ -393,7 +402,7 @@ compared against the official reference transcript.
 Model: `qwen3-tts`. Reference: **audio.cpp** server (`qwen3_tts` model spec,
 ROCm), `/v1/audio/speech`, same text, seed, sampling and variant
 (CustomVoice / VoiceDesign / Base ICL); variants audio.cpp does not expose
-are `n/a`.
+are `N/A`.
 
 1. **Loading.** Cold-file-cache readiness per variant; first-request and warm
    latency for a short sentence.
@@ -461,7 +470,7 @@ explicit approval and `--allow-full-generation`.
 Render the tables, check that every Gufo/reference pair used the same
 workload identity, and keep only concise interpretation notes beside them. Put dates, method,
 server flags, artifact provenance and reproduction commands in `EVALUATION.md`.
-Remove statements the new numbers contradict. List the remaining `TODO` cells with the reason (tool missing,
-reference unsupported, time budget). Update `EXPERIMENTS.md` only when a measurement changes a
+Remove statements the new numbers contradict. Explain any remaining `TODO`
+measurements and `N/A` comparisons separately. Update `EXPERIMENTS.md` only when a measurement changes a
 retained decision. Summarize per table: Gufo, reference, best and worst gain,
 and every cell where completion hashes or transcripts did not match.

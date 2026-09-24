@@ -1,0 +1,261 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.1.8",
+      "memoryTotalBytes": 134309883904,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-09-24",
+  "mode": "dspark",
+  "model": {
+    "id": "DeepSeek-V4-Flash",
+    "variant": null
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.138 tokens/word, template overhead 4 tokens"
+  ],
+  "referenceName": "antirez/ds4",
+  "rows": {
+    "0": {
+      "acceptance": 61.81,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.28,
+      "accepted_per_step_sd": null,
+      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+      "command": "gufo serve --port 43459 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "5f24c5392d1f7daf95ba57db154752b6ff7cf0c4d491eb2fecd288a3d6572860",
+          "draft_n": 144,
+          "draft_n_accepted": 89,
+          "predicted_n": 128,
+          "prompt_n": 2033
+        }
+      ],
+      "pp": 483.11,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 26.62,
+      "tg_sd": null,
+      "workload": "repetition"
+    },
+    "12288": {
+      "acceptance": 58.11,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.05,
+      "accepted_per_step_sd": null,
+      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+      "command": "gufo serve --port 50293 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "counts": [
+        {
+          "cache_n": 12242,
+          "completion_sha256": "c4ab5d3cebeb51a35f9db091508303d939df41a91df36abed2f3649664493240",
+          "draft_n": 148,
+          "draft_n_accepted": 86,
+          "predicted_n": 128,
+          "prompt_n": 2043
+        }
+      ],
+      "pp": 356.99,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 23.87,
+      "tg_sd": null,
+      "workload": "copy"
+    },
+    "131072": {
+      "acceptance": 59.72,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.05,
+      "accepted_per_step_sd": null,
+      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+      "command": "gufo serve --port 50293 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "counts": [
+        {
+          "cache_n": 131222,
+          "completion_sha256": "43f06b2717b27d993e7835433145b290484a2cd24376d79d1da86225ff26fbc7",
+          "draft_n": 144,
+          "draft_n_accepted": 86,
+          "predicted_n": 128,
+          "prompt_n": 2053
+        }
+      ],
+      "pp": 278.15,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 15.17,
+      "tg_sd": null,
+      "workload": "copy"
+    },
+    "16384": {
+      "acceptance": 57.89,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.2,
+      "accepted_per_step_sd": null,
+      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+      "command": "gufo serve --port 50293 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "counts": [
+        {
+          "cache_n": 16362,
+          "completion_sha256": "70a8f45f44416622393f71231df587bf90204ae9c9c953339c2e354cc6a3ecfa",
+          "draft_n": 152,
+          "draft_n_accepted": 88,
+          "predicted_n": 128,
+          "prompt_n": 2054
+        }
+      ],
+      "pp": 355.68,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 23.81,
+      "tg_sd": null,
+      "workload": "copy"
+    },
+    "32768": {
+      "acceptance": 61.38,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.28,
+      "accepted_per_step_sd": null,
+      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+      "command": "gufo serve --port 50293 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "counts": [
+        {
+          "cache_n": 32794,
+          "completion_sha256": "08d2923ae28139962e19b060b8c55968db190ab350b2f888a3e709d5172db00f",
+          "draft_n": 145,
+          "draft_n_accepted": 89,
+          "predicted_n": 128,
+          "prompt_n": 2034
+        }
+      ],
+      "pp": 367.12,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 22.9,
+      "tg_sd": null,
+      "workload": "copy"
+    },
+    "4096": {
+      "acceptance": 60.27,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.2,
+      "accepted_per_step_sd": null,
+      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+      "command": "gufo serve --port 59861 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "counts": [
+        {
+          "cache_n": 4117,
+          "completion_sha256": "b469de3c7d4e46b23dc2dc0b4825659c984f07e88d3b963b8d4f7efb1fb4ee95",
+          "draft_n": 146,
+          "draft_n_accepted": 88,
+          "predicted_n": 128,
+          "prompt_n": 2041
+        }
+      ],
+      "pp": 396.54,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 25.54,
+      "tg_sd": null,
+      "workload": "copy"
+    },
+    "65536": {
+      "acceptance": 60.69,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.2,
+      "accepted_per_step_sd": null,
+      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+      "command": "gufo serve --port 50293 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "counts": [
+        {
+          "cache_n": 65561,
+          "completion_sha256": "c79fc98ad8d3b3ded108027bc1d54abcc575dfb63b4f9fa4c08361012ac103fb",
+          "draft_n": 145,
+          "draft_n_accepted": 88,
+          "predicted_n": 128,
+          "prompt_n": 2058
+        }
+      ],
+      "pp": 336.67,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 19.76,
+      "tg_sd": null,
+      "workload": "copy"
+    },
+    "8192": {
+      "acceptance": 61.27,
+      "acceptance_sd": null,
+      "accepted_per_step": 2.12,
+      "accepted_per_step_sd": null,
+      "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+      "command": "gufo serve --port 50293 --sessions 1 llm --model DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --dspark-model DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+      "counts": [
+        {
+          "cache_n": 8178,
+          "completion_sha256": "ffbc03e8788264f9c82f4fd48930010f86dc174c8327c7465d67118e08fcf5ae",
+          "draft_n": 142,
+          "draft_n_accepted": 87,
+          "predicted_n": 128,
+          "prompt_n": 2026
+        }
+      ],
+      "pp": 366.37,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 25.03,
+      "tg_sd": null,
+      "workload": "copy"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "50293",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--dspark-model",
+      "DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "bb6b59ee2dac055460af8949ec469725406ee4dd"
+  },
+  "table": "single-dspark-repetition",
+  "target": "gufo"
+}

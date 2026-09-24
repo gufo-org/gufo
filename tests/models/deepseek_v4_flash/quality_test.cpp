@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <span>
@@ -37,6 +39,92 @@ void Expect(bool condition, const char* message) {
 
 void Expect(bool condition, const std::string& message) {
   Expect(condition, message.c_str());
+}
+
+void CheckIndexerBoundary(
+    const std::shared_ptr<gufo::models::deepseek_v4_flash::Model>& model,
+    bool batched) {
+  // Shared pp2048 benchmark recipe, seed 100000, at 2035 actual tokens.
+  // Generation crosses ratio-4's 512-entry sparse attention boundary.
+  std::ifstream file(GUFO_DS4_BOUNDARY_PROMPT);
+  Expect(file.good(), "open indexer boundary prompt");
+  const std::string text{std::istreambuf_iterator<char>(file), {}};
+  const auto prompt = model->EncodeChat("", text);
+  Expect(prompt.size() == 2035, "indexer boundary prompt token identity");
+  std::string error;
+  auto ar = model->CreateSession(gufo::core::SessionMode::kAutoregressive,
+                                 133760, &error);
+  auto spec =
+      model->CreateSession(batched ? gufo::core::SessionMode::kAutoregressive
+                                   : gufo::core::SessionMode::kSpeculative,
+                           133760, &error);
+  auto peer =
+      batched ? model->CreateSession(gufo::core::SessionMode::kAutoregressive,
+                                     133760, &error)
+              : nullptr;
+  Expect(ar && spec, error);
+  // Match HTTP's stable prompt checkpoint followed by its final three tokens.
+  std::vector<int> prefix(prompt.begin(), prompt.end() - 3);
+  Expect(ar->Sync(prefix, &error) && ar->Sync(prompt, &error), error);
+  Expect(spec->Sync(prefix, &error) && spec->Sync(prompt, &error), error);
+  if (batched)
+    Expect(peer && peer->Sync(prefix, &error) && peer->Sync(prompt, &error),
+           error);
+  float worst_error = 0;
+  const auto compare = [&](std::size_t generated) {
+    const auto a = ar->CopyLogits(&error);
+    const auto b = spec->CopyLogits(&error);
+    if (peer)
+      Expect(peer->CopyLogits(&error) == b, "independent AR batch rows agree");
+    Expect(!a.empty() && a.size() == b.size(), "replay logit shape");
+    double squared = 0;
+    float maximum = 0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      Expect(std::isfinite(a[i]) && std::isfinite(b[i]),
+             "finite replay logits");
+      const double delta = static_cast<double>(a[i]) - b[i];
+      squared += delta * delta;
+      maximum = std::max(maximum, std::abs(a[i] - b[i]));
+    }
+    if (maximum != 0 && worst_error == 0)
+      std::cout << "Indexer boundary first logit difference at=" << generated
+                << " max_error=" << maximum
+                << " rmse=" << std::sqrt(squared / a.size()) << '\n';
+    worst_error = std::max(worst_error, maximum);
+    return maximum == 0;
+  };
+  bool exact = compare(0);
+  std::size_t generated = 0;
+  std::size_t mismatches = 0;
+  while (generated < 128) {
+    std::vector<int> emitted;
+    if (batched) {
+      const int token = spec->SelectNext(0.0F, nullptr);
+      const std::array<gufo::models::deepseek_v4_flash::SessionBatchItem, 2>
+          items{{{spec.get(), token}, {peer.get(), token}}};
+      Expect(model->EvaluateBatch(items, &error), error);
+      emitted.push_back(token);
+    } else {
+      Expect(spec->DsparkStep(128 - generated, 7, &emitted, &error), error);
+    }
+    Expect(!emitted.empty(), "DSpark replay progress");
+    for (const int token : emitted) {
+      const int expected = ar->SelectNext(0.0F, nullptr);
+      if (token != expected) {
+        ++mismatches;
+        std::cout << "Prompt replay mismatch at=" << generated
+                  << " candidate=" << token << " expected=" << expected << '\n';
+      }
+      Expect(ar->Evaluate(token, &error), error);
+      ++generated;
+    }
+    exact = compare(generated) && exact;
+  }
+  std::cout << "Indexer boundary " << (batched ? "AR C2" : "DSpark C1")
+            << ": mismatches=" << mismatches << "/128 max_error=" << worst_error
+            << '\n';
+  Expect(exact && mismatches == 0,
+         "indexer boundary matches scalar tokens/logits");
 }
 
 constexpr std::string_view kTrajectoryPrompt =
@@ -1317,8 +1405,10 @@ int main(int argc, char** argv) try {
 
   const bool dspark_replay =
       argc == 2 && std::string_view(argv[1]) == "--dspark-replay";
-  const bool dspark =
-      dspark_replay || (argc == 2 && std::string_view(argv[1]) == "--dspark");
+  const bool indexer_boundary =
+      argc == 2 && std::string_view(argv[1]) == "--indexer-boundary";
+  const bool dspark = indexer_boundary || dspark_replay ||
+                      (argc == 2 && std::string_view(argv[1]) == "--dspark");
   const bool wide_prefill =
       argc == 2 && std::string_view(argv[1]) == "--wide-prefill";
   const bool template_only =
@@ -1331,7 +1421,8 @@ int main(int argc, char** argv) try {
   if (argc > 1 && !dspark && !wide_prefill && !official && !frontiers &&
       !template_only) {
     std::cerr << "usage: ds4_quality_test "
-                 "[--template-only|--dspark|--dspark-replay|--wide-prefill|--"
+                 "[--template-only|--dspark|--dspark-replay|--indexer-boundary|"
+                 "--wide-prefill|--"
                  "official OUT.json|"
                  "--reference-frontiers OUT-DIR [--prefill-only]]\n";
     return 2;
@@ -1371,7 +1462,14 @@ int main(int argc, char** argv) try {
     CheckDsparkScalarQuality(model);
     return 0;
   }
+  if (indexer_boundary) {
+    CheckIndexerBoundary(model, false);
+    CheckIndexerBoundary(model, true);
+    return 0;
+  }
   if (dspark) {
+    CheckIndexerBoundary(model, false);
+    CheckIndexerBoundary(model, true);
     CheckDsparkReproducibility(model);
     CheckDsparkChangingMembership(model);
     CheckConcurrentPolicySnapshot(model);

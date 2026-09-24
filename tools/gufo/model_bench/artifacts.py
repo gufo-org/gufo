@@ -52,7 +52,7 @@ def new_artifact(
         "mode": mode,
         "referenceName": config.reference_name,
         "model": {"id": config.data["model"]["id"], "variant": table.variant},
-        "measuredOn": dt.date.today().isoformat(),
+        "measuredOn": dt.datetime.now(dt.timezone.utc).date().isoformat(),
         "source": source,
         "fingerprint": fingerprint,
         "server": {"command": public_command(command)},

@@ -3244,7 +3244,14 @@ static bool rocm_graph_encode_layer_attention_batch(
         }
         if (ratio == 4) GUFO_DEEPSEEK_ROCM_PROFILE_ATTN_STAGE("indexer_setup");
 
-        if (ok && !zero_prefix && n_tokens <= g->raw_cap) {
+        // A verifier block may cross the first sparse-indexer boundary. Rows
+        // before it still use scalar's dense compressed attention order.
+        const bool crosses_indexer_boundary =
+            g->spec_capture_prefixes && ratio == 4 &&
+            n_comp > DS4_N_INDEXER_TOP_K &&
+            (pos0 + 1u) / ratio <= DS4_N_INDEXER_TOP_K;
+        if (ok && !zero_prefix && n_tokens <= g->raw_cap &&
+            !crosses_indexer_boundary) {
             const uint32_t n_raw = rocm_graph_raw_span_for_batch(g, pos0, n_tokens);
             /* See the raw-only branch above: batched mixed attention also
              * consumes a logical raw window, linearized out of the ring. */

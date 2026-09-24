@@ -36,6 +36,7 @@ if(ENGINE_ENABLE_HIP)
   add_executable(ds4_quality_test quality_test.cpp token_goldens.cpp
     official_reference.cpp)
   target_compile_definitions(ds4_quality_test PRIVATE
+    GUFO_DS4_BOUNDARY_PROMPT="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/indexer-boundary-prompt.txt"
     GUFO_DS4_OFFICIAL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/official-0731.json"
     GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
   target_link_libraries(ds4_quality_test PRIVATE gufo_deepseek_v4_flash)

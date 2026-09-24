@@ -61,7 +61,10 @@
       },
       "repetitions": 1,
       "metric": "tok/s",
-      "better": "higher"
+      "better": "higher",
+      "depth_workloads": {
+        "65536": "story"
+      }
     },
     "single-dspark": {
       "title": "Single user, DSpark",
@@ -91,11 +94,23 @@
       "workloads": {
         "single-dspark": {
           "label": "mixed",
-          "workload": "prose"
+          "workload": "prose",
+          "depth_workloads": {
+            "65536": "story"
+          }
         },
         "single-dspark-repetition": {
           "label": "repetitive",
-          "workload": "repetition"
+          "workload": "repetition",
+          "depth_workloads": {
+            "4096": "copy",
+            "8192": "copy",
+            "12288": "copy",
+            "16384": "copy",
+            "32768": "copy",
+            "65536": "copy",
+            "131072": "copy"
+          }
         }
       }
     },
@@ -212,6 +227,6 @@
     ],
     "endpoint_profile": "openai",
     "readiness": "/v1/models",
-    "stage_timings": false
+    "stage_timings": true
   }
 }

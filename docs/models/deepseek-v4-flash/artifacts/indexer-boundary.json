@@ -1,0 +1,53 @@
+{
+  "schema": "gufo-ds4-boundary-replay/1",
+  "measured_on": "2026-09-24",
+  "test": "ds4_quality_test --indexer-boundary",
+  "build": "Nix gpu-test RelWithDebInfo, assertions enabled",
+  "prompt": {
+    "fixture": "tests/models/deepseek_v4_flash/fixtures/indexer-boundary-prompt.txt",
+    "sha256": "85507b80bee13a6b6a66661b1c4282e30cf597da1dac519841d978b61ff1bef5",
+    "tokens": 2035,
+    "prefill_calls": [
+      2032,
+      3
+    ]
+  },
+  "reference": "Gufo autoregressive, identical target weights and fixed token history",
+  "cases": {
+    "dspark_c1": {
+      "generated_tokens": 128,
+      "greedy_mismatches": 0,
+      "full_logit_max_absolute_error": 0
+    },
+    "ar_c2": {
+      "generated_tokens_per_session": 128,
+      "greedy_mismatches": 0,
+      "full_logit_max_absolute_error": 0,
+      "independent_session_logits_identical": true
+    }
+  },
+  "scope": "First ratio-4 transition beyond 512 compressed entries. Does not establish official target-model parity.",
+  "production_http": {
+    "binary_sha256": "db424fea727a9939ede90b3075d4d7e63bf420f76bd4ebcb6c312fce10cc2312",
+    "prompt_tokens": 2035,
+    "generated_tokens": 128,
+    "ar_dspark_completion_sha256": "5c68d0345d10a072cb0e25d37689205e84b07d4a5fe3d10927b327ac9ba0890a",
+    "prepared_cohorts": {
+      "depth": 0,
+      "prompt_recipe": "matched pp2048 single-user prompt",
+      "workloads": [
+        "mixed",
+        "repetitive"
+      ],
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "all_responses_match_fresh_ar": true,
+      "completion_tokens_per_request": 128
+    }
+  }
+}
