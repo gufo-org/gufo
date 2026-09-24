@@ -1,7 +1,8 @@
 # Third-party notices
 
 Gufo's original source is MIT licensed; this does not relicense dependencies or
-model weights. This inventory covers direct dependencies and adapted code.
+model weights. This inventory covers direct dependencies, adapted code and
+acknowledged optimization references.
 Transitive system/toolchain dependencies retain their upstream licenses.
 `flake.lock` pins Nixpkgs revision `2fcb964de67fcf60b43471c55d5d99e61a9ccb5a`;
 its package expressions record source revisions, patches and build options.
@@ -57,6 +58,20 @@ The official 0731 DeepSeek continuations in
 `tests/models/deepseek_v4_flash/fixtures/official-0731.json` come from DS4 revision
 `6289c516273979173abbc062209a81dd3706b804`; the fixture retains source hashes and
 its upstream MIT notice. External model files are never part of the binary package.
+
+## Optimization inspiration
+
+The following projects informed Gufo's Strix Halo optimization work:
+
+- [LaurentZuijdwijk/llama.cpp](https://github.com/LaurentZuijdwijk/llama.cpp) — [MIT license](https://github.com/LaurentZuijdwijk/llama.cpp/blob/11bfe8a633fa02bac251db6cf21bd5ddab282a64/LICENSE).
+- [Nathanw1014/strix-halo-llamacpp](https://github.com/Nathanw1014/strix-halo-llamacpp) — [MIT license](https://github.com/Nathanw1014/strix-halo-llamacpp/blob/ce15ecca66e5e5a9aefa1ebc82357cb901330c86/LICENSE).
+- [gaetan-puleo/llama-cpp-strix-halo](https://github.com/gaetan-puleo/llama-cpp-strix-halo) — [MIT license](https://github.com/gaetan-puleo/llama-cpp-strix-halo/blob/860c828363988d3e4b3d5c2b701dcba3d7b9f26c/LICENSE).
+
+License links pin the notices reviewed for these inspiration credits.
+The two llama.cpp forks share the
+ggml authors' notice in [licenses/llama.cpp.txt](licenses/llama.cpp.txt);
+Nathan Wilson's notice is retained in
+[licenses/strix-halo-llamacpp.txt](licenses/strix-halo-llamacpp.txt).
 
 ## Build and development only
 

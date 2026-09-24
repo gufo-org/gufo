@@ -17,6 +17,14 @@ Adapted code includes:
 - ROCm kernels/headers: AMD and the contributors identified in their notices.
 - hipCUB: Duane Merrill, NVIDIA CORPORATION and AMD (BSD-3-Clause).
 
+Strix Halo optimization inspiration also came from these MIT-licensed projects:
+- LaurentZuijdwijk/llama.cpp: https://github.com/LaurentZuijdwijk/llama.cpp
+- Nathanw1014/strix-halo-llamacpp: https://github.com/Nathanw1014/strix-halo-llamacpp
+- gaetan-puleo/llama-cpp-strix-halo: https://github.com/gaetan-puleo/llama-cpp-strix-halo
+The llama.cpp forks retain the ggml authors' notice above. Nathan Wilson's
+Copyright (c) 2026 notice is retained in licenses/strix-halo-llamacpp.txt
+(installed in third-party/).
+
 This software is based in part on the work of the Independent JPEG Group.
 
 Gufo invokes FFmpeg/ffprobe as separate executables. Their license and source
