@@ -121,7 +121,7 @@ model oracles stay out of the hosted set.
 a `gufo_<model>` library, attach it with `add_subdirectory`, keep kernels under
 `kernels/` and the CPU reference behind `EXCLUDE_FROM_ALL`. Add tests under
 `tests/models/<model>`, a row in [the model index](models/README.md), and the
-four required documents `README.md`, `BENCHMARKS.md`, `EVALUATION.md` and
+four required documents `README.md`, `BENCHMARKS.md`, `QUALITY.md` and
 `EXPERIMENTS.md` under `docs/models/<model>/`.
 
 **A dependency.** Record it in `THIRD_PARTY_NOTICES.md`; `tools/ci/check-dependencies.py`

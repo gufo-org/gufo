@@ -2,7 +2,7 @@
 
 <Hardware, model/quantization, Gufo/reference versions and sampling setup.>
 Positive gain favors Gufo. **TODO** means unmeasured.
-Quality and measurement details belong in `EVALUATION.md`.
+Quality and measurement details belong in `QUALITY.md`.
 
 ## Single user, autoregressive
 

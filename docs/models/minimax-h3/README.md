@@ -1,6 +1,6 @@
 # MiniMax H3
 
-[Benchmarks](BENCHMARKS.md) · [Evaluation](EVALUATION.md) · [Experiments](EXPERIMENTS.md)
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
 Gufo runs the text-only FL2VA path on Linux gfx1151: prompt encoding, the
 50-block BF16 transformer, F32 Euler integration, VisualVAE, AudioVAE, and

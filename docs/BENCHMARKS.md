@@ -42,7 +42,7 @@ server's existing stage timers from its log and checks them against HTTP token
 counts. Native `ds4-bench` also supports single-session AR/DSpark, but not
 concurrency. The pinned ROCm server disables DSpark when batching, so C>1
 DSpark comparisons are **N/A**. See the
-[DS4 method](models/deepseek-v4-flash/EVALUATION.md#benchmark-method).
+[DS4 method](models/deepseek-v4-flash/QUALITY.md#benchmark-method).
 
 New or refreshed text-model cards use the same pp2048 prose/copying prompts
 for single-user d0 and concurrency, with tg128. The driver shares their prompt

@@ -54,7 +54,7 @@ executes the direct MiniMax H3 route used by the asynchronous video worker.
 `transcribe` executes the native Qwen3-ASR-1.7B route used by the synchronous
 audio transcription endpoint.
 Their detailed contracts are defined in [Command-Line Interface](CLI.md) and
-[MiniMax H3 upstream contract](models/minimax-h3/EVALUATION.md).
+[MiniMax H3 upstream contract](models/minimax-h3/QUALITY.md).
 
 ### HIP execution
 
@@ -360,7 +360,7 @@ no per-server streaming flag or extra model is required.
 The MiniMax H3 subset follows the asynchronous OpenAI-style video resource
 shape and is versioned independently as `gufo.video-api.v1`. Its supported
 fields, frozen presets, queue behavior, and deliberate conditioning
-omissions are documented in the [H3 upstream contract](models/minimax-h3/EVALUATION.md).
+omissions are documented in the [H3 upstream contract](models/minimax-h3/QUALITY.md).
 Create requests accept both `application/json` and OpenAI-client-compatible
 `multipart/form-data`; duplicate form fields, malformed boundaries, unsupported
 media types, and reference-image parts fail explicitly.

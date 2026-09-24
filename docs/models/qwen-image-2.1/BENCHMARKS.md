@@ -30,7 +30,7 @@ A separate profile records **5.76 s of GPU work**: native projections 1.72 s,
 fused feed-forward 1.41 s, fused attention 1.49 s and native convolution 0.55 s.
 GPU idle time is 0.5% of the request span. The 5 s target has not been reached.
 This control is for kernel iteration; the default 40-step performance remains
-TODO and quality is measured separately in [EVALUATION.md](EVALUATION.md).
+TODO and quality is measured separately in [QUALITY.md](QUALITY.md).
 
 PNG uses low compression with adaptive filters and preserves every RGBA pixel.
 The control's response PNG is approximately 1.00 MB; compression trades response

@@ -57,7 +57,7 @@ projections and allocate no BLAS handles.
 Attention remains the largest cost, followed by projections; the GPU is
 continuously busy during the transformer blocks. Block activation storage is
 **2.90 GiB**. No complete-video speedup is established.
-See [quality evidence](EVALUATION.md#full-resolution-kernel-qualification),
+See [quality evidence](QUALITY.md#full-resolution-kernel-qualification),
 the [current measurement record](artifacts/full-resolution-kernels.json), and
 the [short-attention record](artifacts/native-attention.json).
 
@@ -117,4 +117,4 @@ memory peaks. Record model/engine, seed, geometry, schedule and input hashes.
 
 `tools/gufo/h3_profile.py` handles telemetry; full generation requires explicit
 `--allow-full-generation`. Routine iteration uses one block/forward or selected
-frames with independent [quality gates](EVALUATION.md), not full videos.
+frames with independent [quality gates](QUALITY.md), not full videos.

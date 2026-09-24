@@ -26,7 +26,7 @@ Stage medians are measured separately; do not sum them into another headline.
 Native convolutions remove MIOpen and improve the encoder by 8.2% in the matched
 control. Complete-request latency remains about 0.99 s because text generation
 dominates; no substantial whole-model gain is claimed.
-See [evaluation](EVALUATION.md) and the
+See [quality](QUALITY.md) and the
 [measurement record](artifacts/native-convolution.json).
 
 ## Concurrent HTTP

@@ -12,6 +12,6 @@
 | Paired IQ2 gate/up | Rejected (2026-09-19): exact forms slower; smaller tiles spill and fail exactness. |
 | Transposed sparse values | Rejected (2026-09-19): no retained end-to-end gain. |
 
-Next: resolve the [target arithmetic gaps](EVALUATION.md) before claiming parity;
+Next: resolve the [target arithmetic gaps](QUALITY.md) before claiming parity;
 refresh only affected cells in [benchmarks](BENCHMARKS.md). Raw profiles and
 abandoned implementations belong outside the working tree, with history in Git.

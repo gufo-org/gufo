@@ -33,5 +33,5 @@
 | Speaker softmax scratch synchronization | Corrected: independent FP64 check and fresh-process voice-cloning replay; cached references previously hid nondeterminism. |
 
 Next: broaden long-request replay coverage and qualify long reference clips
-before wider optimization. See [evaluation](EVALUATION.md); no lower-precision
+before wider optimization. See [quality](QUALITY.md); no lower-precision
 production change is justified by these measurements.

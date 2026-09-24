@@ -7,7 +7,7 @@ metadata:
 
 # Optimize gfx1151 kernels
 
-Read the affected model's `docs/models/<model>/{BENCHMARKS,EVALUATION,EXPERIMENTS}.md`
+Read the affected model's `docs/models/<model>/{BENCHMARKS,QUALITY,EXPERIMENTS}.md`
 and its launch code. Establish the timed scope and arithmetic contract before
 changing dispatch. Follow the user's machine, time, and Git instructions.
 
@@ -35,7 +35,7 @@ changing dispatch. Follow the user's machine, time, and Git instructions.
 6. Keep the winning implementation as default. Delete rejected/dead routes;
    do not add environment switches or duplicate tests to preserve experiments.
    Record one concise retained/rejected row in `EXPERIMENTS.md`, current speeds
-   in `BENCHMARKS.md`, and actual quality evidence in `EVALUATION.md`.
+   in `BENCHMARKS.md`, and actual quality evidence in `QUALITY.md`.
 
 ## Techniques that worked here
 

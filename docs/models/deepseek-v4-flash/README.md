@@ -3,10 +3,10 @@
 Text generation on gfx1151 from the Flash 0731 mixed IQ2/Q2/Q8 GGUF.
 Target weights occupy **80.76 GiB**; use a 128 GiB system and leave room for
 request state. AR and optional DSpark support prompt, chat and HTTP serving.
-Target-model parity remains open; see the evaluation limits before relying on
+Target-model parity remains open; see the quality limits before relying on
 AR/DSpark agreement as a quality claim.
 
-[Benchmarks](BENCHMARKS.md) · [Evaluation](EVALUATION.md) · [Experiments](EXPERIMENTS.md)
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
 ## Load and run
 

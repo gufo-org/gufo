@@ -6,7 +6,7 @@ Both use the Q4_K_M DFlash2 draft; Gufo uses its adaptive controller.
 HTTP, greedy, thinking off. Measured September 23, 2026.
 
 Positive gain favors Gufo.
-[Quality and measurement details](EVALUATION.md) · [Model identities](artifacts/model-identities.json)
+[Quality and measurement details](QUALITY.md) · [Model identities](artifacts/model-identities.json)
 
 ## Single user, autoregressive
 
@@ -48,7 +48,7 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 
 pp is the highest measured rate per engine and depth across mixed/repetitive
 text. Gufo retains AR output; llama.cpp differs in some controls
-([quality details](EVALUATION.md#meaning-of-exact)).
+([quality details](QUALITY.md#meaning-of-exact)).
 
 <!-- bench:single-dflash2-q4 -->
 | Qwen27B Q4 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |

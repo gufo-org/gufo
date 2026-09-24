@@ -712,7 +712,9 @@ int main(int argc, const char* const* argv) {
       (void)Capture(model, true, CheckMode::kConcurrency);
       return 0;
     }
-    const auto candidate = Capture(model, true);
+    // Reference mode measures quantization on fixed histories. Replay,
+    // concurrency and long-context checks belong to the normal model suite.
+    const auto candidate = Capture(model, argc <= 2);
     if (argc > 2) {
       // Load one model at a time: a reference check must not require both
       // targets to remain resident in unified memory.

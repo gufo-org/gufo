@@ -102,7 +102,7 @@
 Q4 C1 AR leads the pinned d0/d32K controls; Q8 C1 AR matches them.
 DFlash2 retains AR output in the focused shallow/deep and concurrent checks.
 Current comparisons and unmeasured cells are in [benchmarks](BENCHMARKS.md);
-[evaluation](EVALUATION.md) records the quality scope.
+[quality](QUALITY.md) records the quality scope.
 Keep the work on one PR branch with incremental, reviewable commits.
 
 Overall target: match llama.cpp generation speed, aiming for a further 10%,
@@ -119,4 +119,4 @@ or earlier only when a specific correctness concern requires it. Remote GPU time
 is limited.
 
 Published workload numbers live only in [benchmarks](BENCHMARKS.md); source and
-model qualification live in [evaluation](EVALUATION.md).
+model qualification live in [quality](QUALITY.md).

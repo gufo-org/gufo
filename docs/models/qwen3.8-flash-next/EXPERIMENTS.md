@@ -77,5 +77,5 @@ work; this is not pure scheduler overhead. These are profile observations,
 not unprofiled throughput measurements.
 
 Next: improve prefill at depth and target/draft batch projection reuse while
-preserving [quality](EVALUATION.md). The 1700 tok/s PP and flat d0–d128K
+preserving [quality](QUALITY.md). The 1700 tok/s PP and flat d0–d128K
 objectives remain unmet; see [current benchmarks](BENCHMARKS.md).

@@ -32,4 +32,4 @@ Use `tools/prof/prof.py` with `--stages qwen-image`. The maintained
 `tools/models/qwen_image_21/qwen_image_gemm_bench.hip` rotates weights beyond
 cache capacity and checks sampled FP64 dot products. Keep transient profiles,
 failed microbenchmarks and tensor dumps outside Git; qualification is in
-[EVALUATION.md](EVALUATION.md).
+[QUALITY.md](QUALITY.md).

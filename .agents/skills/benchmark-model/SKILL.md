@@ -10,7 +10,7 @@ metadata:
 Fill or refresh `docs/models/<model>/BENCHMARKS.md` for one model. Which
 tables exist and which external project is the comparison baseline depend on
 the model category below. Read the model's `README.md`, `BENCHMARKS.md` and
-`EVALUATION.md` first, then [docs/BENCHMARKS.md](../../../docs/BENCHMARKS.md)
+`QUALITY.md` first, then [docs/BENCHMARKS.md](../../../docs/BENCHMARKS.md)
 for methodology. Follow the user's machine, time and Git instructions.
 
 ## Start
@@ -154,7 +154,7 @@ and the table says so.
    tools/qwen27b/check.py fast`; DeepSeek: `nix develop -c tools/ds4/check.py fast`;
    Flash-Next has no dedicated fast model suite). Contract tests and concurrency
    hashes do not replace independent model qualification; the full
-   `EVALUATION.md` suites are for changed kernels or models. Greedy speculative output must match AR token
+   `QUALITY.md` suites are for changed kernels or models. Greedy speculative output must match AR token
    IDs in the model checks. HTTP runs retain completion hashes: concurrency
    compares them against the Gufo AR C1 reference, while matching single-user
    AR/speculative depth rows allow the same text-consistency check. These hashes
@@ -174,9 +174,15 @@ Use six sections in this order: single-user AR, single-user speculative,
 multiple-user AR, multiple-user speculative, loading time, memory occupation.
 Keep only interpretation-critical notes beside the numbers. Exclude thinking
 sweeps and image-plus-text prefill from the default text-model card. Keep
-`EVALUATION.md` concise: key quality metrics/limits, essential reproduction
+`QUALITY.md` concise: key quality metrics/limits, essential reproduction
 commands and measurement provenance; link detailed evidence under `artifacts/`.
 Identify the actual implementation and precision behind each quality comparison.
+State measured scope beside each guarantee: greedy speculative versus AR,
+seeded replay within a fixed configuration, and independent upstream agreement
+are different checks. Use model-appropriate metrics (KL/total variation for
+distributions, WER for speech recognition, relative L2/cosine/PSNR for tensors
+or images), with sample counts and failed gates visible. Reuse retained evidence;
+run only missing focused comparisons, and store summaries rather than logits.
 
 Keep the results card numerical and concise. Put model, quantization and mode
 in the first column header as well as the row dimension (depth/users/workload).
@@ -189,7 +195,7 @@ columns and show separate tg/gain columns per text type; choose the highest
 measured pp per engine/depth across the workloads and state this beside the table.
 Retain independent workload artifacts and TODO cells. Place **Loading time**
 immediately before **Memory occupation**. Put commands and detailed methodology in
-`EVALUATION.md`; keep only interpretation-critical notes beside the tables.
+`QUALITY.md`; keep only interpretation-critical notes beside the tables.
 
 ## Comparison columns
 
@@ -357,7 +363,7 @@ place loading immediately before memory in the rendered card:
    speculative-only table.
    Keep a fresh AR hash control independent of the prepared cache path.
    Gufo speculative output must match its AR reference before publishing.
-   Cross-engine agreement belongs in `EVALUATION.md`, not as an accuracy score.
+   Cross-engine agreement belongs in `QUALITY.md`, not as an accuracy score.
 5. **Loading time** (`loading`). Cold model files to HTTP readiness (`/ready`
    on Gufo, `/health` on llama-server), at the same C1 context capacity and
    speculative mode. `Model / target | Gufo ready (s) | llama.cpp ready (s) | Gain`.
@@ -419,7 +425,7 @@ are `N/A`.
 5. **Profile** (Gufo only). Dispatches, GPU work, GPU busy, projection share
    per variant from `tools/prof/prof.py --stages qwen-tts`.
 
-Natural-EOS duration and intelligibility belong to `EVALUATION.md`.
+Natural-EOS duration and intelligibility belong to `QUALITY.md`.
 
 ## Image generation and editing
 
@@ -443,7 +449,7 @@ steps, scheduler and guidance.
    that no batching is implemented.
 
 A two-step smoke check is a development control, never the headline. Image
-quality is measured in `EVALUATION.md`.
+quality is measured in `QUALITY.md`.
 
 ## Video / audiovisual generation
 
@@ -469,7 +475,7 @@ explicit approval and `--allow-full-generation`.
 
 Render the tables, check that every Gufo/reference pair used the same
 workload identity, and keep only concise interpretation notes beside them. Put dates, method,
-server flags, artifact provenance and reproduction commands in `EVALUATION.md`.
+server flags, artifact provenance and reproduction commands in `QUALITY.md`.
 Remove statements the new numbers contradict. Explain any remaining `TODO`
 measurements and `N/A` comparisons separately. Update `EXPERIMENTS.md` only when a measurement changes a
 retained decision. Summarize per table: Gufo, reference, best and worst gain,

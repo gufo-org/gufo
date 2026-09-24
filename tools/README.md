@@ -25,7 +25,7 @@ MiniMax's manifest and quality tooling. Both support model verification.
 
 See [performance commands](../docs/PERFORMANCE.md),
 [benchmark methodology](../docs/BENCHMARKS.md), and
-[MiniMax validation](../docs/models/minimax-h3/EVALUATION.md).
+[MiniMax validation](../docs/models/minimax-h3/QUALITY.md).
 
 ## Qwen27B
 

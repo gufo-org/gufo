@@ -11,34 +11,40 @@ Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unifie
 
 All model documentation lives under [docs/models](docs/models/README.md):
 
-| Model | Inference modes | Performance and quality |
-| --- | --- | --- |
-| [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2, native MTP | [Benchmarks](docs/models/qwen3.8-27b/BENCHMARKS.md) · [Evaluation](docs/models/qwen3.8-27b/EVALUATION.md) |
-| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Images, AR, MTP | [Benchmarks](docs/models/qwen3.8-flash-next/BENCHMARKS.md) · [Evaluation](docs/models/qwen3.8-flash-next/EVALUATION.md) |
-| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) · [Evaluation](docs/models/deepseek-v4-flash/EVALUATION.md) |
-| [Qwen3-ASR](docs/models/qwen3-asr/README.md) | Speech recognition | [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) · [Evaluation](docs/models/qwen3-asr/EVALUATION.md) |
-| [Qwen3-TTS](docs/models/qwen3-tts/README.md) | CustomVoice, VoiceDesign, Base cloning | [Benchmarks](docs/models/qwen3-tts/BENCHMARKS.md) · [Evaluation](docs/models/qwen3-tts/EVALUATION.md) |
-| [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation and editing | [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md) · [Evaluation](docs/models/qwen-image-2.1/EVALUATION.md) |
-| [MiniMax H3](docs/models/minimax-h3/README.md) | Text to video/audio, exact and approximate presets | [Benchmarks](docs/models/minimax-h3/BENCHMARKS.md) · [Evaluation](docs/models/minimax-h3/EVALUATION.md) |
+| Model | Inference modes | Hugging Face weights | Performance and quality |
+| --- | --- | --- | --- |
+| [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [Vision](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/mmproj-BF16.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | [Benchmarks](docs/models/qwen3.8-27b/BENCHMARKS.md) · [Quality](docs/models/qwen3.8-27b/QUALITY.md) |
+| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL (four shards)](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/38bb39ee97821de2c9009abb7e93950eec396e66/UD-Q4_K_XL) · [Vision](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/38bb39ee97821de2c9009abb7e93950eec396e66/mmproj-BF16.gguf) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/38bb39ee97821de2c9009abb7e93950eec396e66/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | [Benchmarks](docs/models/qwen3.8-flash-next/BENCHMARKS.md) · [Quality](docs/models/qwen3.8-flash-next/QUALITY.md) |
+| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [Flash 0731 IQ2/Q2/Q8](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) · [Quality](docs/models/deepseek-v4-flash/QUALITY.md) |
+| [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) · [Quality](docs/models/qwen3-asr/QUALITY.md) |
+| [Qwen3-TTS 1.7B](docs/models/qwen3-tts/README.md) | Speech synthesis and voice cloning | BF16 [CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) / [Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | [Benchmarks](docs/models/qwen3-tts/BENCHMARKS.md) · [Quality](docs/models/qwen3-tts/QUALITY.md) |
+| [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md) · [Quality](docs/models/qwen-image-2.1/QUALITY.md) |
+| [MiniMax H3](docs/models/minimax-h3/README.md) | BF16 text to video/audio | [FL2VA pipeline](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA) | [Benchmarks](docs/models/minimax-h3/BENCHMARKS.md) · [Quality](docs/models/minimax-h3/QUALITY.md) |
 
-## Manifest/Philosophy
+Drafts and vision projectors are separate downloads even when they share a
+repository with the target. Audio and image pipelines include their required
+encoders and decoders; download the complete directories described in each guide.
+AR means autoregressive, target-only generation.
 
-- The project is vertical on the AMD Strix Halo 128 GiB; our goal is solely to optimize it. This enables optimizations that otherwise wouldn't be possible if we were focusing on other chips as well. Smaller models should fit the 32 and 64 GiB hardware, but no test was conducted on them.
-- Quality over speed: we want to squeeze the most out of this chip without compromising on quality compared to other available tools (llama.cpp, audio.cpp, dwarfstar, etc.). To guarantee this we ensure several steps during the development, such as logits checks, internal eval, and a harness + model evaluation framework (coming soon). If at some point a breakthrough novelty brings a lot of speed at the cost of a little accuracy, the feature would be opt-in and the user will be responsible for enabling it, acknowledging the accuracy degradation.
-- We only support a few models to allow us to run extremely long optimization sessions to improve kernels based on the Strix Halo architecture. Models are selected based on evidence collected by the community on "the best model for task X for Strix Halo".
-- Code duplication over code re-utilization across models and quants. Despite being counterintuitive, it allows us to make models evolve independently without huge refactors when an optimization works only for a model and not for another.
-- We would like this project to be the reference for the community using Strix Halo, and every PR is welcome.
-- We don't to sacrificate multi-agent scenarios, concurrent requests are a first class citizen gufo.
+## Design principles
+
+- Optimize for Strix Halo with 128 GiB. Smaller configurations have not been qualified.
+- Preserve quality when optimizing. Each model's quality report records independent numerical checks, execution consistency and unresolved gaps.
+- Support a focused set of models with kernels that can evolve independently.
+- Treat concurrent requests, cancellation and conversation caching as first-class workloads.
+- Keep production dependencies small and development tools separate. Contributions are welcome.
 
 ## Quickstart
 
 ```sh
 hf download unsloth/Qwen3.8-27B-GGUF \
   Qwen3.8-27B-UD-Q8_K_XL.gguf \
+  --revision 4ca720788d1e01f1bff70c033e0d0028fd02e502 \
   --repo-type model \
   --local-dir models/Qwen3.8-27B-GGUF
-nix develop -c hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
-  Qwen3.8-27B-DFlash2-Q8_0.gguf \
+hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
+  Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
+  --revision 2d9571f8ce46e151f61c6499c99dee6079e1d610 \
   --repo-type model \
   --local-dir models/Qwen3.8-27B-DFlash2-GGUF
 podman pull ghcr.io/gufo-org/toolboxes/gufo-runtime:latest
@@ -54,7 +60,7 @@ podman run --rm \
   gufo serve --host 0.0.0.0 --port 8080 llm \
   --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf \
   --speculative dflash2 \
-  --dflash-model /models/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q8_0.gguf
+  --dflash-model /models/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
 ```
 
 Then, from another terminal, ask it something through the OpenAI-compatible API:

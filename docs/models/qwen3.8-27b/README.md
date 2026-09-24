@@ -4,7 +4,7 @@ Dense text/image model on gfx1151. Production target GGUFs are **UD-Q4_K_XL**
 (16.35 GiB weights) and **UD-Q8_K_XL** (29.30 GiB); request state and an optional
 draft/projector need additional memory. BF16 targets are reference-only.
 
-[Benchmarks](BENCHMARKS.md) · [Evaluation](EVALUATION.md) · [Experiments](EXPERIMENTS.md)
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
 ## Load and run
 
@@ -29,11 +29,10 @@ have matching precision. Use the Q4_K_M DFlash2 draft with either target.
 | --- | --- | --- |
 | AR | No speculative option | Target-only generation. |
 | DFlash2 | `--speculative dflash2 --dflash-model PATH` | Adaptive default; `--draft-tokens` caps proposals, `--draft-policy fixed` is a comparison mode. |
-| Native MTP (CLI only) | `--speculative mtp --mtp-model PATH` | Requires a matching sidecar; independent upstream qualification/performance remain TODO. |
 
 Greedy speculation must match AR. Sampled modes preserve the target policy,
 but AR and speculation need not share the same-seed sequence. See the
-[evaluation contract](EVALUATION.md). Thinking/template controls and HTTP
+[quality contract](QUALITY.md). Thinking/template controls and HTTP
 sampling defaults are described in [the server guide](../../SERVER.md#reasoning-controls).
 
 ## Images
@@ -63,7 +62,6 @@ print(urllib.request.urlopen(request).read().decode())
 
 Start that server with `--served-model-name vision-test`. Ordered text/image
 parts, multiple images and later turns work with AR/DFlash2 and caches.
-Native MTP image input is available through the CLI.
 PNG/JPEG data URLs and public HTTPS are supported (`detail: auto`); requests
 share a 20 MiB encoded-byte, 16-image and 15-second download budget. Each image
 is capped at 32 megapixels; private/loopback/link-local destinations are rejected.
@@ -72,4 +70,4 @@ Official dynamic resizing allows 64–16384 merged image tokens.
 Image numbering is off by default; `--add-vision-id` or
 `chat_template_kwargs: {"add_vision_id": true}` adds `Picture N:` prefixes.
 Cache identity includes processed pixels, placement, preprocessing version and
-projector contents. See [vision checks and limits](EVALUATION.md#vision).
+projector contents. See [vision checks and limits](QUALITY.md#vision).

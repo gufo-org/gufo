@@ -41,7 +41,7 @@ adapted code. Model-private changes and import boundaries are recorded in the
 [DS4 provenance](src/models/deepseek_v4_flash/UPSTREAM.md),
 [DS4 HIP import](src/models/deepseek_v4_flash/kernels/rocm/mmq/VENDOR.md),
 [Flash-Next HIP import](src/models/qwen38_flash_next/kernels/rocm/mmq/VENDOR.md)
-and [H3 evaluation record](docs/models/minimax-h3/EVALUATION.md).
+and [H3 quality record](docs/models/minimax-h3/QUALITY.md).
 
 This software is based in part on the work of the Independent JPEG Group.
 

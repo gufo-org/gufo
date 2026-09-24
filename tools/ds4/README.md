@@ -61,4 +61,4 @@ variant. The ordinary `--prompt` benchmark inserts a random nonce into the
 prompt; separate invocations therefore cannot establish identical-input output
 or acceptance comparisons. Report cache hits explicitly. Sampling contracts
 and the retained confidence/proposal controls are in the
-[DSpark sampling report](../../docs/models/deepseek-v4-flash/EVALUATION.md).
+[DSpark sampling report](../../docs/models/deepseek-v4-flash/QUALITY.md).

@@ -1,0 +1,116 @@
+{
+  "schema": "gufo-quantization-quality/1",
+  "measured_on": "2026-09-24",
+  "source_revision": "00d3996a168c77b086f54e94a85539f2481c0d41",
+  "source_changes": "Test reference mode skips unrelated replay/concurrency sweeps; inference unchanged.",
+  "test_source": "tests/models/qwen27b/target_test.cpp",
+  "test_source_sha256": "f1fd721272460d6a2ba2a8b518333deb0126b4b83500033d2e60d3cc3efb00b5",
+  "binary_sha256": "f9bc02e8e0c55a5588069b31b8f4cf0034953dd71432afd5ad9e2baf100236b7",
+  "build": "Nix package development environment; gpu-test RelWithDebInfo with assertions; gfx1151",
+  "reference": {
+    "runtime": "Gufo BF16, not an independent official-model implementation",
+    "files": {
+      "Qwen3.8-27B-BF16-00001-of-00002.gguf": "b9966e82b7a4d87028b5eae061d578ee826305ebf8baea5bfc6e09bad0ba191f",
+      "Qwen3.8-27B-BF16-00002-of-00002.gguf": "92e3943c4f9bd6292a7bef82369f65fed9bfed088b9df0fb2fa2ce17c9edfa02"
+    }
+  },
+  "scope": {
+    "fixtures": 3,
+    "topics": [
+      "virtual memory",
+      "train word problem",
+      "C++ ring buffer"
+    ],
+    "prefill_tokens": [
+      24,
+      29,
+      24
+    ],
+    "teacher_forced_tokens_per_fixture": 8,
+    "logit_rows_per_fixture": 9,
+    "vocabulary_size": 248320,
+    "temperature": 1,
+    "filters": false,
+    "runs_per_quant": 1,
+    "tokenization_identical": true,
+    "all_logits_finite": true,
+    "models_loaded_sequentially": true,
+    "original_checkpoint_or_conversion_parity": false
+  },
+  "metric_definitions": {
+    "kl": "Mean KL(reference || candidate), natural-log nats, full-vocabulary softmax.",
+    "tv": "Mean total variation, 0.5 * sum(abs(p_reference - p_candidate)).",
+    "top1": "Equal highest-logit token on identical histories.",
+    "rmse": "Arithmetic mean of per-row full-logit RMSE; calculated from printed row metrics.",
+    "nll_delta": "Mean candidate NLL minus reference NLL on the 24 forced continuation labels; not a corpus perplexity score."
+  },
+  "results": {
+    "UD-Q4_K_XL": {
+      "model_file": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "model_sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+      "source_log_sha256": "ff836090734311edacc3e1f4fcb378c6e57e0ef3b7d2c3143f18ebb1813237f0",
+      "logit_rows": 27,
+      "top1_matches": 27,
+      "mean_kl_nats": 0.00165018,
+      "mean_total_variation": 0.0156633,
+      "mean_logit_rmse": 0.09658294814814815,
+      "maximum_row_kl_nats": 0.00506701,
+      "maximum_row_total_variation": 0.035197,
+      "mean_nll_delta_nats": -0.0114159,
+      "per_fixture": [
+        {
+          "fixture": 0,
+          "top1_matches": 9,
+          "mean_kl_nats": 0.0016945934999999998,
+          "mean_total_variation": 0.01661498888888889
+        },
+        {
+          "fixture": 1,
+          "top1_matches": 9,
+          "mean_kl_nats": 0.002037268777777778,
+          "mean_total_variation": 0.020410018888888888
+        },
+        {
+          "fixture": 2,
+          "top1_matches": 9,
+          "mean_kl_nats": 0.00121868647,
+          "mean_total_variation": 0.009964964466666667
+        }
+      ]
+    },
+    "UD-Q8_K_XL": {
+      "model_file": "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+      "model_sha256": "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377",
+      "source_log_sha256": "ef0344952dd8665604580dc5e3c11b1852c3a29b0409f3177b04c241a10afe24",
+      "logit_rows": 27,
+      "top1_matches": 27,
+      "mean_kl_nats": 6.53688e-05,
+      "mean_total_variation": 0.0031279,
+      "mean_logit_rmse": 0.019841707407407407,
+      "maximum_row_kl_nats": 0.000266941,
+      "maximum_row_total_variation": 0.0101198,
+      "mean_nll_delta_nats": 0.000378541,
+      "per_fixture": [
+        {
+          "fixture": 0,
+          "top1_matches": 9,
+          "mean_kl_nats": 6.823093333333334e-05,
+          "mean_total_variation": 0.0035399967777777776
+        },
+        {
+          "fixture": 1,
+          "top1_matches": 9,
+          "mean_kl_nats": 7.441982666666666e-05,
+          "mean_total_variation": 0.0037601073444444443
+        },
+        {
+          "fixture": 2,
+          "top1_matches": 9,
+          "mean_kl_nats": 5.3455461333333326e-05,
+          "mean_total_variation": 0.002083592522222222
+        }
+      ]
+    }
+  },
+  "reproduce": "nix develop -c python3 tools/qwen27b/check.py reference --model TARGET --reference-model BF16_SHARD_1"
+}

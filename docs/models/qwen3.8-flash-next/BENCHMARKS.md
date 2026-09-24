@@ -7,7 +7,7 @@ September 23, 2026; other results: September 22.
 llama.cpp uses `b11069` for AR and `6fcaa16f` for MTP.
 
 Positive gain favors Gufo.
-[Quality and measurement details](EVALUATION.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
+[Quality and measurement details](QUALITY.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
 
 ## Single user, autoregressive
 

@@ -5,7 +5,7 @@ AMD Strix Halo `gfx1151`, 128 GB unified memory. Antirez Flash 0731 mixed
 Reference: antirez/ds4 `0aaea5a2` (ROCm).
 
 Measured 2026-09-23–24. One warmed sample per point. Positive gain favors Gufo.
-[Quality and measurement details](EVALUATION.md#benchmark-method).
+[Quality and measurement details](QUALITY.md#benchmark-method).
 
 ## Single user, autoregressive
 

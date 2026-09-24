@@ -2,7 +2,7 @@
 
 2026-09-20, Linux gfx1151, BF16, Nix production build
 `8e4ba46f9dd0` (binary SHA-256 prefix). Resident models; ASR 1.7B loaded but idle.
-The same [37-word paragraph](EVALUATION.md) is used for all three variants:
+The same [37-word paragraph](QUALITY.md) is used for all three variants:
 seed 42, automatic language, talker T 0.7 / top-k 20 / top-p 0.85,
 predictor T 0.8 / top-k 30 / top-p 0.9.
 
@@ -47,7 +47,7 @@ Its latency is not directly comparable to text-only CustomVoice/VoiceDesign.
 The first streamed chunk contains four codec frames (320 ms of audio);
 subsequent chunks contain 16. This changes delivery latency, not generated audio.
 Natural-EOS duration and intelligibility are reported in
-[evaluation](EVALUATION.md), separately from fixed-work speed checks.
+[quality](QUALITY.md), separately from fixed-work speed checks.
 
 ## Transports and concurrency
 

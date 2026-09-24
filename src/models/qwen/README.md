@@ -5,7 +5,7 @@ Shared Qwen tokenization, chat templates, vision and sampling are also used by
 Flash-Next. Audio implementations are model-private.
 
 [27B usage](../../../docs/models/qwen3.8-27b/README.md) ·
-[27B evaluation](../../../docs/models/qwen3.8-27b/EVALUATION.md) ·
+[27B quality](../../../docs/models/qwen3.8-27b/QUALITY.md) ·
 [Flash-Next](../../../docs/models/qwen3.8-flash-next/README.md)
 
 ## Source ownership
