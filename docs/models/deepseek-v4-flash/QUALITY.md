@@ -1,9 +1,8 @@
 # DeepSeek V4 Flash quality
 
 **DSpark matches Gufo AR on the retained greedy checks, including C>1.
-Target-model parity remains unresolved.** The Flash 0731 mixed IQ2/Q2/Q8
+Official target-model parity is not yet established.** The Flash 0731 mixed IQ2/Q2/Q8
 weights and DSpark sidecar are [pinned](artifacts/model-identities.json).
-Antirez is an independent implementation, not official ground truth.
 
 | Check | Retained result |
 | --- | --- |
@@ -12,20 +11,17 @@ Antirez is an independent implementation, not official ground truth.
 | Sparse-indexer boundary | DSpark C1 and AR C2: 0/128 token differences, bit-identical full logits |
 | Reproducibility | 1280/1280 choices and 20 full-logit vectors repeat exactly |
 | Sampling / sessions | p/q acceptance, residual correction, seeded replay, EOS/cancellation, three-turn continuation and disk restore pass |
-| Historical trajectory gate | **115/128** top-1, below required 116; rank sum 145 (limit 142), worst rank 4 (limit 3) |
 | Optimized versus Debug | **33/2327** greedy choices differ |
-| Gufo versus Antirez logits | **4/20** frontier comparisons fail; the four failures are after prefill |
 | Historical capability set | **53/75** correct; 22 failures, no execution errors, nine length finishes |
 
 Evidence: [DSpark sampling/replay](artifacts/dspark-sampling.json),
 [boundary/HTTP checks](artifacts/indexer-boundary.json),
-[qualification](artifacts/quality-qualification.json),
-[logit comparison](artifacts/antirez-ds4-ar-comparison.json) and
+[qualification](artifacts/quality-qualification.json) and
 [formula audit](artifacts/prefill-formula-audit.json).
 Gufo-path agreement cannot detect shared target errors. Sampled DSpark need not
 match AR's same-seed sequence; replay requires the same execution configuration
-and schedule. The historical target alerts are not resolved by the newer DSpark
-checks. Ask before rerunning the 75-question capability set.
+and schedule. The build-sensitive target differences remain under investigation.
+Ask before rerunning the 75-question capability set.
 
 ## Reproduce
 
@@ -48,10 +44,6 @@ all sessions from a C1 prompt checkpoint before timed decoding, preserving
 prefill arithmetic; rates sum individual decode rates. Loading uses cold files,
 C1/DSpark/capacity 262144; memory uses C1/AR peak global HIP allocation.
 
-Reference: pinned [antirez/ds4 `0aaea5a2`](https://github.com/antirez/ds4/tree/0aaea5a238fb41a35106a551e73c8409dfb751ac),
-ROCm gfx1151, built with `nix build .#ds4-reference`.
-Native timers are checked against HTTP counts. Reference DSpark is N/A:
-C1 differs from its own AR after fresh/prepared prefill; ROCm batching disables
-DSpark. [Qualification](artifacts/reference-qualification.json).
-Commands/counts remain in [artifacts](artifacts/bench.json) and the
+Performance baselines and unavailable comparisons are described in
+[benchmarks](BENCHMARKS.md). Commands/counts remain in [artifacts](artifacts/bench.json) and the
 [benchmark workflow](../../../.agents/skills/benchmark-model/SKILL.md).

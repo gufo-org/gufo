@@ -58,7 +58,6 @@ define the external payloads; [model tools](../../../tools/README.md)
 verify their hashes before comparison. Never loosen a ceiling for an optimization.
 
 The exact route follows Diffusers' 50-point/49-forward schedule and decoder
-context. Adaptations from [h3.c `8974cc0`](https://github.com/antirez/h3.c/tree/8974cc055ea9c02fcd14cc27dfda3e1027c05153)
-retain Salvatore Sanfilippo's MIT attribution in
+context. Implementation attribution remains in
 [third-party notices](../../../THIRD_PARTY_NOTICES.md); model weights retain
 their separate terms in the [model guide](README.md#model-acquisition).
