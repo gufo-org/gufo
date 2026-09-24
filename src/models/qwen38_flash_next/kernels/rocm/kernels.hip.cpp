@@ -3530,6 +3530,9 @@ __launch_bounds__(256) __global__ void W8A8BlockedWmmaGEMMKernel(
           }
         }
       }
+      // Hoisting the next K block's operands above this one's WMMAs spills
+      // registers on gfx1151 and halves occupancy.
+      __builtin_amdgcn_sched_barrier(0);
     }
     __syncthreads();
   }
