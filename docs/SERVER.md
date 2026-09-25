@@ -485,7 +485,10 @@ Use appropriate HTTP status codes:
 - `503` model or backend unavailable
 
 Generation stops at the request budget or context capacity and reports a
-length finish reason when either limit is reached.
+length finish reason when either limit is reached. A prompt longer than the
+configured context returns `400` with code `context_length_exceeded`, naming
+both the prompt and the context token counts. `GET /props` reports `n_ctx`,
+the context capacity set by `--context`.
 
 ## Authentication and Exposure
 
@@ -534,8 +537,8 @@ conversations are not implemented.
 `/metrics` exposes total prompt/generated tokens and the latest prompt/decode
 speeds. `Server-Timing`, generation `timings`, and Chat Completions
 `usage.gufo` provide request-level measurements. The legacy KV-utilization
-metric and `/slots`/`/props` metadata are placeholders; do not use them for
-capacity or admission decisions.
+metric and `/slots` metadata are placeholders; do not use them for capacity or
+admission decisions.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
 without `stream_options.include_usage`. `prompt_n` counts newly processed

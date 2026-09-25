@@ -202,6 +202,9 @@ public:
   TextGenerationBackend& operator=(TextGenerationBackend&&) = delete;
 
   [[nodiscard]] virtual std::string model_id() const = 0;
+  /// Maximum tokens the loaded model accepts in one context, as configured by
+  /// --context. Zero when no model is loaded.
+  [[nodiscard]] virtual std::uint32_t max_context() const { return 0; }
   [[nodiscard]] virtual bool ready() const = 0;
   [[nodiscard]] virtual SamplingDefaults sampling_defaults() const {
     return {};

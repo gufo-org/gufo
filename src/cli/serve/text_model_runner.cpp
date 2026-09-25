@@ -1267,7 +1267,11 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     throw std::invalid_argument("text runner prompt must not be empty");
   }
   if (prompt.size() > impl_->validated.descriptor.max_context) {
-    throw std::length_error("text runner prompt exceeds model context");
+    throw std::length_error("prompt of " + std::to_string(prompt.size()) +
+                            " tokens exceeds the " +
+                            std::to_string(static_cast<std::size_t>(
+                                impl_->validated.descriptor.max_context)) +
+                            "-token model context");
   }
   if (cache_prefix_tokens > prompt.size())
     throw std::invalid_argument("cache prefix exceeds prompt length");
