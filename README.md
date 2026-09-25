@@ -68,6 +68,14 @@ podman run --rm \
   --dflash-model /models/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
 ```
 
+Rootless Podman needs `crun` for `--group-add keep-groups`. Your host user must
+have read/write access to `/dev/kfd` and `/dev/dri/renderD*`, usually through the
+`render` and `video` groups; log out and back in after changing membership.
+Container groups named `video`/`render` do not preserve host supplementary
+groups. Check `id`, `ls -l /dev/kfd /dev/dri/renderD*`, and
+`podman info --format '{{.Host.OCIRuntime.Name}}'` if ROCm reports no device.
+See [Podman's rootless group-access guidance](https://github.com/containers/podman/blob/main/troubleshooting.md#20-passed-in-devices-or-files-cant-be-accessed-in-rootless-container).
+
 On Fedora or another SELinux-enforcing host, GPU enumeration can succeed while
 SELinux blocks mapping `/dev/kfd`, causing ROCr to report a misleading
 “Memory critical” error. Check the **host** audit log:

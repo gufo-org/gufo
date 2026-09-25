@@ -27,19 +27,22 @@ See [performance commands](../docs/PERFORMANCE.md),
 [benchmark methodology](../docs/BENCHMARKS.md), and
 [MiniMax validation](../docs/models/minimax-h3/QUALITY.md).
 
-## Responses client check
+## OpenAI client check
 
 With a local Gufo text server running, use its API model name from `/v1/models`
 (`qwen` here), rather than its weights path:
 
 ```sh
-nix develop -c python3 tools/serving/check-responses-sdk.py \
+nix develop -c python3 tools/serving/check-openai-sdk.py \
   --base-url http://127.0.0.1:8080/v1 --model qwen
 ```
 
 Add `--expect-reasoning` when the server defaults to thinking. This uses the
 official OpenAI SDK with strict schema validation: buffered/streamed output,
 reasoning, conversation replay, async concurrency, limits and disconnects.
+Chat stop checks cover Unicode, sampled output, reasoning, tool arguments,
+concurrent isolation and cached continuation. Use `--suite stops` or
+`--suite responses` to check only the affected API behavior.
 
 ## Qwen27B
 
