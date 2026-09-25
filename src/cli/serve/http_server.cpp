@@ -458,6 +458,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
                                   "tool_choice",
                                   "parallel_tool_calls",
                                   "response_format",
+                                  "output_config",
                                   "text",
                                   "reasoning",
                                   "reasoning_effort",

@@ -413,6 +413,8 @@ The other compatibility routes are deliberately limited:
 All four routes validate the loaded model, positive integer limits and shared
 sampling controls. They reject unsupported streaming and multiple candidates.
 Responses and Messages honor the server's configured thinking defaults.
+Native Messages rejects tools, streaming, `thinking`, and `output_config`;
+use Chat Completions for Gufo's tool/reasoning controls.
 Completions routes accept `stop`; Messages accepts `stop_sequences`.
 Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
@@ -461,6 +463,7 @@ markup, before streaming or response parsing. Partial prefixes are buffered;
 matched sequences and subsequent text are excluded. OpenAI reports
 `finish_reason: "stop"`; Messages reports `stop_reason: "stop_sequence"` and
 the matched `stop_sequence`. EOS and length limits flush unmatched prefixes.
+Interrupted tool calls are omitted; complete preceding calls are retained.
 Usage includes the token completing the match. Each request has independent
 matching state, including speculative batches; caches retain only correctly
 labelled executed model state. Stops must be nonempty, at most 4 KiB each and

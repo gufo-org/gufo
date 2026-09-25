@@ -49,6 +49,7 @@ struct ParsedGeneration {
   std::string text;
   std::string reasoning_content;
   std::vector<ParsedToolCall> tool_calls;
+  bool hide_tool_markup{false};
 };
 
 constexpr std::array<std::string_view, 7> kToolMarkers{
@@ -465,7 +466,8 @@ bool ParseReasoningOptions(const json::Value& body, ReasoningOptions* options,
     }
   }
 
-  if (const json::Value* effort = body.find("reasoning_effort")) {
+  if (const json::Value* effort = body.find("reasoning_effort");
+      effort != nullptr && !effort->is_null()) {
     if (!effort->is_string() ||
         !AssignReasoningEffort(options, effort->get_str(), error)) {
       if (error->empty()) {
@@ -1102,8 +1104,11 @@ ParsedGeneration ParseGeneration(
       return std::ranges::none_of(
           tools, [&](const auto& tool) { return tool.name == call.name; });
     });
-    if (!parsed.tool_calls.empty()) {
+    // An explicit stop can interrupt a call before its closing tags. Keep
+    // complete calls, but do not expose an unfinished call as ordinary text.
+    if (!parsed.tool_calls.empty() || !enforce_required) {
       parsed.text = text_before_tools;
+      parsed.hide_tool_markup = true;
     }
   }
   if (enforce_required && choice == ChatRequest::ToolChoice::kRequired &&
@@ -1349,7 +1354,7 @@ public:
     return true;
   }
 
-  bool Finish(bool valid_tool_calls) {
+  bool Finish(bool hide_tool_markup) {
     if (!tool_mode_) {
       if (!pending_.empty()) {
         const bool is_reasoning = (state_ == State::kThinking);
@@ -1359,7 +1364,7 @@ public:
       }
       return true;
     }
-    if (!valid_tool_calls && !hidden_.empty()) {
+    if (!hide_tool_markup && !hidden_.empty()) {
       return emit_piece_(hidden_, false);
     }
     return true;
@@ -1504,7 +1509,7 @@ HttpResponse StreamingResponse(
                   request.chat.tool_choice,
                   result.finish_reason !=
                       TextGenerationBackend::FinishReason::kStopSequence);
-              if (!filter.Finish(!generated.tool_calls.empty())) {
+              if (!filter.Finish(generated.hide_tool_markup)) {
                 return;
               }
               for (std::size_t index = 0; index < generated.tool_calls.size();
