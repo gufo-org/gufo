@@ -1,13 +1,16 @@
 #include "src/models/qwen/chat_template.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "src/core/crypto/sha256.hpp"
@@ -584,6 +587,86 @@ void TestToolReplayPreservesGeneratedPrefix() {
          "Structured tool replay is byte-identical to generated syntax");
 }
 
+// Serving checkpoints a thinking prompt for reuse by the next turn. When that
+// turn replays the assistant without reasoning, the generation suffix
+// "<think>\n" is re-rendered as "<think>\n\n", which BPE merges into one
+// token: the full prompt is no longer a token prefix, the prompt before the
+// generation suffix still is.
+void TestEmptyReasoningReplayChangesThinkingSuffixTokens() {
+  using gufo::tokenization::ChatMessage;
+  using gufo::tokenization::ChatRole;
+  using gufo::tokenization::TokenId;
+
+  std::vector<std::string> vocab;
+  for (int i = 0; i < 256; ++i)
+    vocab.emplace_back(1, static_cast<char>(i));
+  vocab.emplace_back("<|im_start|>");
+  vocab.emplace_back("<|im_end|>");
+  vocab.emplace_back("<think>");
+  vocab.emplace_back("</think>");
+  vocab.emplace_back("\n\n");
+  const std::vector<std::string> merges = {"\n \n"};
+  const std::unordered_map<std::string, TokenId> specials = {
+      {"<|im_start|>", 256},
+      {"<|im_end|>", 257},
+      {"<think>", 258},
+      {"</think>", 259},
+  };
+  std::string error;
+  const auto tokenizer =
+      gufo::tokenization::QwenTokenizer::CreateFromVocabulary(vocab, merges,
+                                                              specials, &error);
+  Expect(tokenizer != nullptr, "Tokenizer with a newline merge: " + error);
+
+  const auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
+  gufo::tokenization::ChatTemplateOptions options;
+  options.add_generation_prompt = true;
+  options.enable_thinking = true;
+  options.preserve_thinking = true;
+
+  const std::vector<ChatMessage> first = {{ChatRole::kUser, "Hello"}};
+  const auto prompt =
+      tpl->RenderAndTokenize(*tokenizer, first, options, &error);
+  Expect(prompt.has_value(), "First turn tokenizes: " + error);
+  const auto suffix = tokenizer->Encode(
+      gufo::tokenization::GenerationPrompt(options.enable_thinking),
+      {.add_bos = false, .add_eos = false, .parse_special_tokens = true});
+  Expect(prompt->size() > suffix.size() &&
+             std::equal(
+                 suffix.begin(), suffix.end(),
+                 prompt->end() - static_cast<std::ptrdiff_t>(suffix.size())),
+         "First turn ends with the thinking generation suffix");
+
+  const auto is_prefix = [](std::span<const TokenId> prefix,
+                            std::span<const TokenId> tokens) {
+    return prefix.size() <= tokens.size() &&
+           std::equal(prefix.begin(), prefix.end(), tokens.begin());
+  };
+  const auto next_turn = [&](std::string thought) {
+    const std::vector<ChatMessage> messages = {
+        {ChatRole::kUser, "Hello"},
+        {ChatRole::kAssistant, "Hi", "", std::move(thought)},
+        {ChatRole::kUser, "Again"},
+    };
+    const auto tokens =
+        tpl->RenderAndTokenize(*tokenizer, messages, options, &error);
+    Expect(tokens.has_value(), "Next turn tokenizes: " + error);
+    return *tokens;
+  };
+  const auto stable =
+      std::span<const TokenId>(*prompt).first(prompt->size() - suffix.size());
+
+  const auto dropped = next_turn("");
+  Expect(!is_prefix(*prompt, dropped),
+         "Empty reasoning replay merges the suffix newline");
+  Expect(is_prefix(stable, dropped),
+         "Prompt before the generation suffix survives empty reasoning");
+
+  const auto replayed = next_turn("Greeting.");
+  Expect(is_prefix(*prompt, replayed),
+         "Replayed reasoning keeps the full prompt as a prefix");
+}
+
 }  // namespace
 
 int main() {
@@ -599,6 +682,7 @@ int main() {
   TestChatCorpusConformance();
   TestToolRendering();
   TestToolReplayPreservesGeneratedPrefix();
+  TestEmptyReasoningReplayChangesThinkingSuffixTokens();
   std::cout << "All QwenChatTemplate tests passed successfully!\n";
   return 0;
 }
