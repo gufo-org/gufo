@@ -1177,7 +1177,7 @@ int RunServe(std::span<const char* const> args) {
     std::cerr << "Error starting HTTP server: " << err << "\n";
     return 1;
   }
-  server.run();
+  server.run(/*handle_signals=*/true);
   return 0;
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Gufo's Responses and Chat stops with the official OpenAI Python SDK.
+"""Check Gufo's text APIs with the official OpenAI Python SDK.
 
 Run with nix develop -c python3. Start a Gufo text server first; all requests
 go to the explicitly supplied loopback endpoint.
@@ -7,9 +7,12 @@ go to the explicitly supplied loopback endpoint.
 
 import argparse
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
+import struct
 import sys
+import zlib
 from urllib.parse import urlsplit
 
 import openai
@@ -184,6 +187,204 @@ def check_stops(client, model, checks):
     record("stop_invalid_schema", {"status": 400, "cases": 4})
 
 
+def check_conversations(client, model, checks, vision=False):
+    """Exercise thinking controls and cache reuse after a client disconnect."""
+
+    def image(color):
+        rgb = {"red": (255, 0, 0), "blue": (0, 0, 255)}[color]
+
+        def chunk(kind, payload):
+            return (
+                struct.pack(">I", len(payload))
+                + kind
+                + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+            )
+
+        png = (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", 128, 128, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress((b"\0" + bytes(rgb) * 128) * 128))
+            + chunk(b"IEND", b"")
+        )
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/png;base64," + base64.b64encode(png).decode()
+            },
+        }
+
+    def signature(result):
+        return result["text"], result["reasoning"], result["finish"]
+
+    def save(label, result):
+        checks[label] = result
+        print(f"CHECK {label}", file=sys.stderr, flush=True)
+        return result
+
+    def chat(label, request, stream=False):
+        return save(label, chat_result(client, request, stream))
+
+    def body(prompt="Compute 123 times 456.", thinking=False, **kwargs):
+        return {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "seed": 31,
+            "max_completion_tokens": 12,
+            "extra_body": {
+                "chat_template_kwargs": {
+                    "enable_thinking": thinking,
+                    "reasoning_effort": "low",
+                },
+                "cache_prompt": False,
+            },
+            **kwargs,
+        }
+
+    for effort in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
+        request = body()
+        request["extra_body"] = {"cache_prompt": False}
+        request["reasoning_effort"] = effort
+        r = chat("effort_" + effort, request, True)
+        assert bool(r["reasoning"]) == (effort != "off"), r
+    for enabled in (False, True):
+        for shape in ("kwargs", "thinking"):
+            request = body(thinking=enabled)
+            if shape == "thinking":
+                request["extra_body"] = {
+                    "cache_prompt": False,
+                    "thinking": {"type": "enabled" if enabled else "disabled"},
+                }
+            r = chat(f"{shape}_{enabled}", request)
+            assert bool(r["reasoning"]) == enabled, r
+    for override in (
+        {"reasoning_effort": "bogus"},
+        {
+            "reasoning_effort": "high",
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+        },
+    ):
+        try:
+            client.chat.completions.create(**{**body(), **override})
+        except openai.BadRequestError as e:
+            assert e.code == "invalid_reasoning", e
+        else:
+            raise AssertionError("invalid reasoning accepted")
+    save("invalid_reasoning", {"cases": 2, "status": 400})
+    for thinking in (False, True):
+        for retain in (False, True):
+            label = f"cancel_thinking{thinking}_retain{retain}"
+            request = body(
+                "Derive the sum of the first 1000 squares step by step."
+                if thinking
+                else "Count from one to one hundred, separated by commas.",
+                thinking=thinking,
+                max_completion_tokens=128,
+            )
+            request["messages"].insert(
+                0,
+                {
+                    "role": "system",
+                    "content": label
+                    + ". "
+                    + "Follow the user instruction carefully and answer accurately. "
+                    * 32,
+                },
+            )
+            request["extra_body"]["chat_template_kwargs"]["preserve_thinking"] = retain
+            if vision:
+                request["messages"][-1]["content"] = [
+                    image("red"),
+                    {"type": "text", "text": request["messages"][-1]["content"]},
+                ]
+            assistant = {"role": "assistant", "content": "", "reasoning_content": ""}
+            count = 0
+            with client.chat.completions.create(**request, stream=True) as stream:
+                for chunk in stream:
+                    for choice in chunk.choices:
+                        a = choice.delta.content or ""
+                        b = getattr(choice.delta, "reasoning_content", "") or ""
+                        assistant["content"] += a
+                        assistant["reasoning_content"] += b
+                        count += bool(b if thinking else a)
+                    if count >= 3:
+                        break
+                else:
+                    raise AssertionError("never reached cancellation point")
+            request["extra_body"]["cache_prompt"] = True
+            request["messages"] += ([assistant] if retain else []) + [
+                {
+                    "role": "user",
+                    "content": "Now reply with only the number 7." if retain else ".",
+                }
+            ]
+            request["max_completion_tokens"] = 8
+            warm = chat(label + "_resume", request)
+            assert warm["usage"]["cached_tokens"] >= 128, warm
+            if not retain:
+                assert warm["usage"]["gufo"]["prefill_tokens"] <= 16, warm
+            replay = chat(label + "_replay", request, True)
+            assert (
+                warm["text"].strip(),
+                warm["reasoning"].strip(),
+                warm["finish"],
+            ) == (
+                replay["text"].strip(),
+                replay["reasoning"].strip(),
+                replay["finish"],
+            ), (warm, replay)
+    candidates = []
+    if vision:
+        for color in ("red", "blue"):
+            request = body(
+                [
+                    image(color),
+                    {
+                        "type": "text",
+                        "text": "Name the dominant color in the image in a full sentence.",
+                    },
+                ],
+                max_completion_tokens=24,
+            )
+            request["messages"].insert(
+                0,
+                {
+                    "role": "system",
+                    "content": "Describe the actual image carefully. " * 32,
+                },
+            )
+            cold = chat("vision_" + color + "_cold", request)
+            assert color in cold["text"].lower() and not cold["reasoning"], cold
+            request["extra_body"]["cache_prompt"] = True
+            warm = chat("vision_" + color + "_warm", request)
+            repeated = chat("vision_" + color + "_replay", request, True)
+            assert signature(cold) == signature(warm) == signature(repeated), (
+                cold,
+                warm,
+                repeated,
+            )
+            assert (
+                repeated["usage"]["cached_tokens"] > 0
+                and repeated["usage"]["gufo"]["prefill_tokens"] == 0
+            ), repeated
+            candidates.append((request, cold))
+        with ThreadPoolExecutor(2) as pool:
+            results = list(
+                pool.map(lambda item: chat_result(client, item[0], True), candidates)
+            )
+        for (_, expected), r in zip(candidates, results):
+            assert signature(r) == signature(expected), (r, expected)
+        save("vision_concurrent", results)
+        request, expected = candidates[0]
+        marker = expected["text"][6:12]
+        assert marker
+        r = chat("vision_stop", {**request, "stop": marker}, True)
+        assert (
+            r["text"] == expected["text"].split(marker)[0] and r["finish"] == "stop"
+        ), r
+
+
 def check_response(response, reasoning):
     assert response.status in ("completed", "incomplete"), response
     assert response.parallel_tool_calls is False
@@ -219,8 +420,12 @@ def main():
     parser.add_argument("--base-url", required=True, help="http://127.0.0.1:PORT/v1")
     parser.add_argument("--model", required=True, help="Gufo served model name")
     parser.add_argument("--expect-reasoning", action="store_true")
-    parser.add_argument("--suite", choices=("all", "stops", "responses"), default="all")
+    parser.add_argument("--suite", choices=("all", "stops", "responses", "conversation"), default="all")
+    parser.add_argument("--vision", action="store_true",
+                        help="Add image checks; the server needs its matching --mmproj")
     args = parser.parse_args()
+    if args.vision and args.suite not in ("all", "conversation"):
+        parser.error("--vision requires --suite all or conversation")
     url = urlsplit(args.base_url)
     if (url.scheme != "http" or url.hostname not in ("127.0.0.1", "::1")
             or url.path.rstrip("/") != "/v1" or url.username or url.password
@@ -248,9 +453,11 @@ def main():
     with OpenAI(**options, http_client=DefaultHttpxClient(
         trust_env=False, event_hooks={"request": [local_only]}
     )) as client:
-        if args.suite != "responses":
+        if args.suite in ("all", "stops"):
             check_stops(client, args.model, checks)
-        if args.suite == "stops":
+        if args.suite in ("all", "conversation"):
+            check_conversations(client, args.model, checks, args.vision)
+        if args.suite in ("stops", "conversation"):
             print(json.dumps(report, indent=2))
             return
         first = client.responses.create(**request)

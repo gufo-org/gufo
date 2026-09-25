@@ -2,11 +2,13 @@
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <csignal>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -129,7 +131,8 @@ private:
 
 class RunningServer {
 public:
-  explicit RunningServer(gufo::server::HttpServerOptions options = {})
+  explicit RunningServer(gufo::server::HttpServerOptions options = {},
+                         bool handle_signals = false)
       : backend(std::make_shared<FakeBackend>()),
         server("127.0.0.1", 0, backend, nullptr, nullptr, nullptr,
                std::move(options)) {
@@ -161,7 +164,10 @@ public:
     });
     std::string error;
     assert(server.start(&error));
-    worker = std::jthread([this] { server.run(); });
+    worker = std::jthread([this, handle_signals] {
+      server.run(handle_signals);
+      run_finished.release();
+    });
   }
   ~RunningServer() {
     server.stop();
@@ -215,6 +221,7 @@ public:
 
   std::shared_ptr<FakeBackend> backend;
   HttpServer server;
+  std::binary_semaphore run_finished{0};
   std::jthread worker;
 };
 
@@ -684,6 +691,48 @@ void TestStreamingFraming() {
          std::string("a\0bend", 6));
 }
 
+void TestSignalShutdown() {
+  // Process signals must never terminate the test runner itself. Prove that
+  // both idle listeners and active generation return through normal cleanup.
+  for (const int signal : {SIGINT, SIGTERM}) {
+    for (const bool active : {false, true}) {
+      const pid_t child = ::fork();
+      assert(child >= 0);
+      if (child == 0) {
+        ::alarm(5);
+        {
+          RunningServer server({}, true);
+          // Accepting a request proves run() installed its handlers.
+          ExpectStatus(server.Post("/echo", "ready"), 200);
+          int fd = -1;
+          if (active) {
+            server.backend->wait_for_disconnect = true;
+            fd = server.Connect();
+            const std::string body = R"({"prompt":"hello"})";
+            const std::string request =
+                "POST /v1/completions HTTP/1.1\r\nContent-Length: " +
+                std::to_string(body.size()) + "\r\n\r\n" + body;
+            assert(::send(fd, request.data(), request.size(), MSG_NOSIGNAL) ==
+                   static_cast<ssize_t>(request.size()));
+            assert(server.backend->entered.try_acquire_for(
+                std::chrono::seconds(2)));
+          }
+          assert(::kill(::getpid(), signal) == 0);
+          assert(server.run_finished.try_acquire_for(std::chrono::seconds(2)));
+          if (active) {
+            assert(server.backend->disconnected);
+            ::close(fd);
+          }
+        }
+        ::_exit(0);
+      }
+      int status = 0;
+      assert(::waitpid(child, &status, 0) == child);
+      assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -698,5 +747,6 @@ int main() {
   TestCompatibilityUtf8();
   TestPeerDisconnect();
   TestStreamingFraming();
+  TestSignalShutdown();
   std::cout << "HTTP transport checks passed.\n";
 }
