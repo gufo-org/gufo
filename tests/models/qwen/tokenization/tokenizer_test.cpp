@@ -213,6 +213,37 @@ void TestGgufTokenizerLoading() {
          "Qwen tool-response markers are parsed as special tokens");
 }
 
+void TestStopTokensFollowVocabulary() {
+  const std::vector<std::string> vocab{"text", "<|endoftext|>", "<|im_start|>",
+                                       "<|im_end|>", "<|image_pad|>"};
+  const std::unordered_map<std::string, gufo::tokenization::TokenId> specials{
+      {"<|endoftext|>", 1},
+      {"<|im_start|>", 2},
+      {"<|im_end|>", 3},
+      {"<|image_pad|>", 4}};
+  auto direct = gufo::tokenization::QwenTokenizer::CreateFromVocabulary(
+      vocab, {}, specials);
+  Expect(direct && direct->IsStopToken(1) && direct->IsStopToken(3),
+         "direct vocabulary derives both generation terminators");
+  Expect(!direct->IsStopToken(0) && !direct->IsStopToken(4) &&
+             !direct->IsStopToken(151643) && !direct->IsStopToken(248044) &&
+             !direct->IsStopToken(248046) &&
+             !direct->IsStopToken(gufo::tokenization::kInvalidTokenId),
+         "ordinary, image and foreign-vocabulary IDs do not end generation");
+
+  GgufTokenizerBuilder builder;
+  builder.AddMetadataStringArray("tokenizer.ggml.tokens", vocab);
+  builder.AddMetadataUint32("tokenizer.ggml.eos_token_id", 3);
+  builder.AddMetadataUint32("tokenizer.ggml.padding_token_id", 4);
+  auto bytes = builder.Build();
+  auto reader = gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size());
+  Expect(reader != nullptr, "stop-token GGUF opens");
+  auto gguf = gufo::tokenization::QwenTokenizer::CreateFromGguf(*reader);
+  Expect(gguf && gguf->IsStopToken(1) && gguf->IsStopToken(3) &&
+             !gguf->IsStopToken(gguf->GetPadTokenId()),
+         "GGUF padding is not a generation terminator");
+}
+
 void TestUnicodeContractionBoundary() {
   GgufTokenizerBuilder builder;
   builder.AddMetadataString("tokenizer.ggml.model", "gpt2");
@@ -305,6 +336,7 @@ int main() {
   std::cout << "Running QwenTokenizer unit tests...\n";
   TestDirectVocabularyTokenizer();
   TestGgufTokenizerLoading();
+  TestStopTokensFollowVocabulary();
   TestUnicodeContractionBoundary();
   TestEmptyAndSpecialEdgeCases();
   TestCorpusConformance();

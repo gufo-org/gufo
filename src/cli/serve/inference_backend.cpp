@@ -388,13 +388,6 @@ std::size_t PersistentSizeFromU64(std::uint64_t value) {
   return static_cast<std::size_t>(value);
 }
 
-bool IsQwenStopToken(const tokenization::QwenTokenizer& tokenizer,
-                     TextRunnerToken token) noexcept {
-  return token == tokenizer.GetEosTokenId() ||
-         token == tokenization::kDefaultQwenEndoftextId || token == 248044U ||
-         token == 248046U;
-}
-
 class QwenTextRunnerState final : public TextRunnerState {
 public:
   QwenTextRunnerState(
@@ -754,7 +747,7 @@ private:
   bool AppendSpeculativeSelection(TextRunnerToken token,
                                   sampling::SamplerState& sampler,
                                   TextDecodeStep& result) {
-    if (IsQwenStopToken(model_->GetTokenizer(), token)) {
+    if (model_->GetTokenizer().IsStopToken(token)) {
       result.stop = true;
       return false;
     }
@@ -1049,7 +1042,7 @@ public:
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     auto& qwen = RequireQwenState(state);
     const TextRunnerToken token = qwen.SelectFrontier(sampler);
-    if (IsQwenStopToken(model_->GetTokenizer(), token)) {
+    if (model_->GetTokenizer().IsStopToken(token)) {
       return {
           .stop = true,
           .token = 0,

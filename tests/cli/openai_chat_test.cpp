@@ -1174,6 +1174,7 @@ void TestImagePartsRetainOrderAndIdentity() {
   backend.pieces = {"ok"};
   const auto response = gufo::server::HandleOpenAiChat(Request(R"({
     "model":"test-model",
+    "stop":["END"],
     "messages":[{"role":"user","content":[
       {"type":"text","text":"left"},
       {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID","detail":"auto"}},
@@ -1183,6 +1184,8 @@ void TestImagePartsRetainOrderAndIdentity() {
   })"),
                                                        backend);
   Expect(response.status == 200, "image content parts reach the backend");
+  Expect(backend.last_request.stop_sequences == std::vector<std::string>{"END"},
+         "image requests preserve explicit stop sequences");
   const auto& message = backend.last_request.messages.front();
   Expect(message.content == "leftright" && message.images.size() == 2,
          "images do not become text placeholders before model preparation");

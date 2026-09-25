@@ -190,8 +190,7 @@ std::int32_t Model::EosToken() const noexcept {
 }
 
 bool Model::IsStopToken(std::int32_t token) const noexcept {
-  return token == EosToken() ||
-         token == static_cast<std::int32_t>(tokenizer_->GetPadTokenId());
+  return tokenizer_->IsStopToken(static_cast<tokenization::TokenId>(token));
 }
 
 std::uint32_t Model::VocabSize() const noexcept {
