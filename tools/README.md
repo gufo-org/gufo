@@ -43,6 +43,10 @@ reasoning, conversation replay, async concurrency, limits and disconnects.
 Chat stop checks cover Unicode, sampled output, reasoning, tool arguments,
 concurrent isolation and cached continuation. Use `--suite stops` or
 `--suite responses` to check only the affected API behavior.
+`--suite conversation` checks every exposed reasoning effort and cache reuse
+after disconnecting during thinking or visible output. Add `--vision` when
+the server has its matching `--mmproj`; this also checks image identity,
+concurrent red/blue requests and image-prompt replay.
 
 ## Qwen27B
 

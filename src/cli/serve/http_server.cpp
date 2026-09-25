@@ -1,6 +1,7 @@
 #include "src/cli/serve/http_server.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -47,6 +48,44 @@
 
 namespace gufo::server {
 namespace {
+
+std::atomic<int> shutdown_signal{0};
+static_assert(std::atomic<int>::is_always_lock_free);
+
+void RequestShutdown(int signal) noexcept {
+  // A signal may arrive on any model/HTTP worker. Only a lock-free atomic
+  // operation belongs here; socket shutdown and joins run in the accept loop.
+  shutdown_signal.store(signal, std::memory_order_relaxed);
+}
+
+class ShutdownSignals {
+public:
+  ShutdownSignals() {
+    shutdown_signal.store(0, std::memory_order_relaxed);
+    struct sigaction action{};
+    action.sa_handler = RequestShutdown;
+    ::sigemptyset(&action.sa_mask);
+    if (::sigaction(SIGINT, &action, &previous_interrupt_) != 0)
+      throw std::system_error(errno, std::generic_category(),
+                              "install SIGINT handler");
+    if (::sigaction(SIGTERM, &action, &previous_terminate_) != 0) {
+      const int error = errno;
+      (void)::sigaction(SIGINT, &previous_interrupt_, nullptr);
+      throw std::system_error(error, std::generic_category(),
+                              "install SIGTERM handler");
+    }
+  }
+  ~ShutdownSignals() {
+    (void)::sigaction(SIGTERM, &previous_terminate_, nullptr);
+    (void)::sigaction(SIGINT, &previous_interrupt_, nullptr);
+  }
+  ShutdownSignals(const ShutdownSignals&) = delete;
+  ShutdownSignals& operator=(const ShutdownSignals&) = delete;
+
+private:
+  struct sigaction previous_interrupt_{};
+  struct sigaction previous_terminate_{};
+};
 
 // ---------------------------------------------------------------------------
 // Socket I/O helpers
@@ -1065,7 +1104,17 @@ bool HttpServer::start(std::string* error) {
   return true;
 }
 
-void HttpServer::run() {
+void HttpServer::run(bool handle_signals) {
+  std::optional<ShutdownSignals> signals;
+  if (handle_signals) {
+    signals.emplace();
+    // A connection may disappear between poll and accept. Never let that
+    // race put the signal-aware loop back into an uninterruptible accept.
+    const int flags = ::fcntl(listen_fd_, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK) != 0)
+      throw std::system_error(errno, std::generic_category(),
+                              "configure HTTP listener");
+  }
   Logger::Info(
       "server",
       "event=listening address=http://" + host_ + ":" + std::to_string(port_) +
@@ -1073,6 +1122,22 @@ void HttpServer::run() {
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
   while (!stopped_.load(std::memory_order_acquire)) {
+    if (handle_signals) {
+      const int signal = shutdown_signal.load(std::memory_order_relaxed);
+      if (signal != 0) {
+        Logger::Info("server", "event=shutdown_requested signal=" +
+                                   std::to_string(signal));
+        stop();
+        break;
+      }
+      pollfd descriptor{.fd = listen_fd_, .events = POLLIN, .revents = 0};
+      const int ready = ::poll(&descriptor, 1, 100);
+      if (ready < 0 && errno != EINTR)
+        throw std::system_error(errno, std::generic_category(),
+                                "poll HTTP listener");
+      if (ready <= 0)
+        continue;
+    }
     const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
     if (client_fd < 0) {
       if (stopped_.load(std::memory_order_acquire)) {

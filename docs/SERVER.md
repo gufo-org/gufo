@@ -156,6 +156,10 @@ and newly processed tokens separately; resuming from the checkpoint processes
 the short suffix. System instructions, tool definitions and image identities
 must match the retained prefix.
 
+`SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
+before exiting. Disk persistence remains bounded: an exhausted staging budget
+can skip a disk snapshot without invalidating the live conversation state.
+
 For a focused cancellation check, run
 `python3 tools/serving/check-continuation.py --output /tmp/cache-check.json`
 against a private server named `cache-test` on port 5815.

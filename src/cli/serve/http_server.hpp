@@ -110,8 +110,9 @@ public:
   /// Bind + listen. Returns false and sets *error on failure.
   bool start(std::string* error);
 
-  /// Blocking accept loop.
-  void run();
+  /// Blocking accept loop. The CLI handles SIGINT/SIGTERM; embedded callers
+  /// retain their own process signal handlers and call stop() explicitly.
+  void run(bool handle_signals = false);
 
   void stop();
 
