@@ -149,6 +149,16 @@ if (OpenMP_CXX_FOUND)
 endif()
 
 if (ENGINE_ENABLE_HIP)
+  # ROCm 10 ships AMD clang 23, whose SLP vectorizer widens the blocked WMMA
+  # GEMM inner loops past the 256-VGPR budget: 67 of 214 instantiations spill
+  # (8570 VGPRs total) where clang 22 spilled none, costing 16-19% of pp2048.
+  # Disabling SLP for this translation unit restores it (+3.0% over ROCm 7.2.3
+  # at d4096, 3 repetitions). Scoped to the file and to clang 23 or newer so the
+  # pinned 7.2.3 toolchain is unaffected. See docs and rocm10-spike.md.
+  if (CMAKE_HIP_COMPILER_VERSION VERSION_GREATER_EQUAL 23)
+    set_property(SOURCE src/models/qwen/hip/kernels/prefill_quant_gemm.hip
+      APPEND PROPERTY COMPILE_OPTIONS -fno-slp-vectorize)
+  endif()
   set_property(SOURCE src/models/minimax_h3/dit.hip
     APPEND PROPERTY COMPILE_OPTIONS -O2)
   target_sources(gufo_core PRIVATE
