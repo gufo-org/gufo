@@ -2776,12 +2776,24 @@ struct InferenceBackend::Impl {
   public:
     ScheduledGenerationRequest(
         std::shared_ptr<const State> model_state,
-        TextGenerationScheduler::Request scheduled_request)
+        TextGenerationScheduler::Request scheduled_request,
+        InitialOutputState initial = InitialOutputState::kContent)
         : state_(std::move(model_state)),
-          request_(std::move(scheduled_request)) {}
+          request_(std::move(scheduled_request)) {
+      if (initial == InitialOutputState::kReasoning)
+        reasoning_end_ = state_->scheduler->runner().Tokenize("</think>");
+    }
 
     Result Wait(const TokenCallback& on_token) override {
-      return request_.Wait(on_token);
+      auto result = request_.Wait(on_token);
+      if (!reasoning_end_.empty()) {
+        const auto end =
+            std::search(result.tokens.begin(), result.tokens.end(),
+                        reasoning_end_.begin(), reasoning_end_.end());
+        result.reasoning_tokens =
+            static_cast<std::size_t>(end - result.tokens.begin());
+      }
+      return result;
     }
 
     void Cancel() noexcept override { request_.Cancel(); }
@@ -2789,6 +2801,7 @@ struct InferenceBackend::Impl {
   private:
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
+    std::vector<tokenization::TokenId> reasoning_end_;
   };
 
   [[nodiscard]] std::shared_ptr<const State> Snapshot() const {
@@ -2805,7 +2818,8 @@ struct InferenceBackend::Impl {
       std::string client_id,
       std::shared_ptr<const TextPromptContext> context = {},
       bool cache_prompt = true, std::size_t cache_prefix_tokens = 0,
-      const std::vector<std::string>& stop_sequences = {}) const {
+      const std::vector<std::string>& stop_sequences = {},
+      InitialOutputState initial = InitialOutputState::kContent) const {
     Result result;
     result.prompt_tokens = prompt_tokens.size();
     result.client_id = client_id.empty() ? "anonymous" : client_id;
@@ -2829,9 +2843,9 @@ struct InferenceBackend::Impl {
             .cache_prefix_tokens = cache_prefix_tokens,
             .stop_sequences = stop_sequences,
         });
-    result = request.Wait(on_token);
-
-    return result;
+    ScheduledGenerationRequest generation(std::move(current),
+                                          std::move(request), initial);
+    return generation.Wait(on_token);
   }
 
   mutable std::mutex state_mutex;
@@ -3505,7 +3519,8 @@ InferenceBackend::Result InferenceBackend::chat(
       state, std::move(prompt->tokens), request_start, max_tokens,
       sampling_config, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
-      prompt->cache_prefix_tokens, request.stop_sequences);
+      prompt->cache_prefix_tokens, request.stop_sequences,
+      state->scheduler->runner().InitialOutputState(request));
 #else
   (void)request;
   (void)max_tokens;
@@ -3550,7 +3565,8 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .stop_sequences = request.stop_sequences,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
-      state, std::move(scheduled_request));
+      state, std::move(scheduled_request),
+      state->scheduler->runner().InitialOutputState(request));
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);

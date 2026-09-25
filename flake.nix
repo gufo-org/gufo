@@ -42,7 +42,7 @@
             "$out/hub/checkpoints/alexnet-owt-7be5be79.pth"
         '';
 
-      # Offline model-conversion toolchain. Python-only; never a transitive
+      # Model reference and client-validation tools; never a transitive
       # dependency of the server (see tools/README.md for the offline toolchain).
       # Unified python313 + torchWithRocm: every Strix Halo box ships ROCm, so
       # the single toolchain serves CPU flows and the --device cuda
@@ -73,6 +73,7 @@
             ps.safetensors
             ps.huggingface-hub
             ps.requests
+            ps.openai # official SDK for local API compatibility checks
             lpipsRocm
             ps.numpy
             ps.scipy

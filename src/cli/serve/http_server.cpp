@@ -1422,11 +1422,11 @@ void HttpServer::handle_connection(int client_fd) {
                                             : SendAll(client_fd, chunk));
           return connected;
         });
-        // Without the final chunk, HTTP clients report an incomplete body.
-        // Closing an unframed PCM stream would silently look like shorter
-        // audio.
+        // An SSE error is a complete protocol response. A failed raw PCM
+        // stream must remain incomplete, or it looks like valid shorter audio.
         if (connected && chunked &&
-            (!resp.stream_log || resp.stream_log->error_code.empty()))
+            (!resp.stream_log || resp.stream_log->error_code.empty() ||
+             resp.stream_log->error_event_sent))
           connected = SendAll(client_fd, "0\r\n\r\n");
       }
     } else {

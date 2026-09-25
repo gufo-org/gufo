@@ -458,7 +458,8 @@ HttpResponse Speech(const HttpRequest& request, TtsService& service,
           auto event = json::Value::object();
           event["type"] = "error";
           event["message"] = error;
-          (void)write("event: error\ndata: " + event.dump() + "\n\n");
+          log->error_event_sent =
+              write("event: error\ndata: " + event.dump() + "\n\n");
         }
       } else if (sse) {
         (void)write(

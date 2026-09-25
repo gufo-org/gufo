@@ -1413,6 +1413,9 @@ public:
     response_["usage"] = json::Value();
     response_["output"] = json::Value::array();
     response_["store"] = false;
+    response_["parallel_tool_calls"] = false;
+    response_["tool_choice"] = "none";
+    response_["tools"] = json::Value::array();
   }
 
   bool Begin() {
@@ -1465,7 +1468,10 @@ public:
     usage["input_tokens"] = result.prompt_tokens;
     usage["input_tokens_details"]["cached_tokens"] =
         result.cached_prompt_tokens;
+    usage["input_tokens_details"]["cache_write_tokens"] = result.prefill_tokens;
     usage["output_tokens"] = result.completion_tokens;
+    usage["output_tokens_details"]["reasoning_tokens"] =
+        result.reasoning_tokens;
     usage["total_tokens"] = result.prompt_tokens + result.completion_tokens;
     response_["usage"] = std::move(usage);
     response_["timings"] = GenerationTimings(result);
@@ -1473,11 +1479,13 @@ public:
     return response_;
   }
 
-  void Fail(std::string_view code, std::string_view message) {
+  bool Fail(std::string_view message) {
     response_["status"] = "failed";
-    response_["error"]["code"] = std::string(code);
+    // Responses defines a closed error-code enum. Keep the specific runtime
+    // code in the request log, rather than emitting an invalid wire value.
+    response_["error"]["code"] = "server_error";
     response_["error"]["message"] = std::string(message);
-    Lifecycle("response.failed");
+    return Lifecycle("response.failed");
   }
 
 private:
@@ -1736,7 +1744,7 @@ HttpResponse StreamingResponse(
               detail["type"] = "server_error";
               detail["code"] = exception.stable_code();
               error["error"] = std::move(detail);
-              (void)writer(Sse(error));
+              stream_log->error_event_sent = writer(Sse(error));
               (void)writer("data: [DONE]\n\n");
             } catch (const std::exception&) {
               stream_log->error_code = "generation_failed";
@@ -1746,7 +1754,7 @@ HttpResponse StreamingResponse(
               detail["type"] = "server_error";
               detail["code"] = "generation_failed";
               error["error"] = std::move(detail);
-              (void)writer(Sse(error));
+              stream_log->error_event_sent = writer(Sse(error));
               (void)writer("data: [DONE]\n\n");
             }
           },
@@ -1814,8 +1822,8 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
       stream_log->error_code = generation_error
                                    ? generation_error->stable_code()
                                    : "generation_failed";
-      output.Fail(stream_log->error_code,
-                  generation_error ? error.what() : "generation failed");
+      stream_log->error_event_sent =
+          output.Fail(generation_error ? error.what() : "generation failed");
       generation->Cancel();
       return json::Value();
     }

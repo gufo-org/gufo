@@ -431,6 +431,23 @@ text/reasoning deltas and terminal status. Local reasoning is exposed as
 `reasoning` items with `summary_text`; visible answers use `output_text`.
 Disconnects cancel generation through the same scheduler as Chat Completions.
 
+The official [OpenAI Python SDK](https://github.com/openai/openai-python) is
+included in `nix develop`. Use the model name from `/v1/models`
+(for example, `qwen` with `--served-model-name qwen`):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local")
+for event in client.responses.create(
+    model="qwen", input="Hello", store=False, stream=True
+):
+    if event.type == "response.output_text.delta":
+        print(event.delta, end="", flush=True)
+    elif event.type == "response.failed":
+        raise RuntimeError(event.response.error.message)
+```
+
 The other compatibility routes are deliberately limited:
 
 | Route | Supported request | Output limit |

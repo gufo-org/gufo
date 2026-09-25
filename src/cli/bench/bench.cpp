@@ -78,10 +78,9 @@ std::optional<std::vector<std::size_t>> ParseCommaSeparatedSizes(
 void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
                           bool& explicit_p, bool& explicit_n,
                           bool& speculative_explicit) {
-  parser.AddOption(
-      "-m", "--model", "PATH",
-      "Path to GGUF model file (default: models/Qwen3.5-4B-BF16.gguf)", "Model",
-      &opt.model_path);
+  parser.AddOption("-m", "--model", "PATH",
+                   "Path to GGUF model file (required)", "Model",
+                   &opt.model_path);
 
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
@@ -1244,6 +1243,10 @@ int RunBench(std::span<const char* const> args) {
   }
 
   const auto& opt = *opt_res;
+  if (opt.model_path.empty()) {
+    std::cerr << "Error: --model <PATH> is required\n";
+    return 2;
+  }
 
   const auto model_load_start = std::chrono::steady_clock::now();
   std::string err;

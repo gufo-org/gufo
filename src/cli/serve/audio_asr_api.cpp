@@ -373,7 +373,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
               event["type"] = "error";
               event["code"] = log->error_code;
               event["message"] = error;
-              send(std::move(event));
+              log->error_event_sent = send(std::move(event));
             }
             return;
           }

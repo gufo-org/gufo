@@ -85,6 +85,7 @@ Nathan Wilson's notice is retained in
 | Transformers / Accelerate / Safetensors / Hugging Face Hub | Evaluation, artifact inspection and model acquisition | `Apache-2.0` | flake.lock | [Hugging Face](https://github.com/huggingface) |
 | NumPy / SciPy | Evaluation arrays and signal analysis | `BSD-3-Clause` | flake.lock | [NumPy](https://github.com/numpy/numpy), [SciPy](https://github.com/scipy/scipy) |
 | Requests | Evaluation HTTP client | `Apache-2.0` | flake.lock | [Requests](https://github.com/psf/requests) |
+| OpenAI Python SDK | Local API compatibility checks; not shipped | `Apache-2.0` | 2.41.1; flake.lock | [openai-python](https://github.com/openai/openai-python) |
 | SoX | Development audio utility | `GPL-2.0-or-later` | flake.lock | [SoX](https://sourceforge.net/projects/sox/) |
 | antirez/ds4 | Optional benchmark package; not shipped with Gufo | `MIT` | `0aaea5a238fb41a35106a551e73c8409dfb751ac` | [Nix recipe](.devops/nix/ds4-reference.nix) |
 | llama.cpp reference builds | Optional benchmark packages; not shipped with Gufo | `MIT` | Release `68d9053a`; Flash-Next MTP `6fcaa16f` | [Nix recipes](.devops/nix/llama-cpp-reference.nix) |
