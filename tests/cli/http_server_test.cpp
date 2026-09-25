@@ -397,8 +397,9 @@ void TestCompatibilityRequests() {
       invalid[endpoint.limit] = parse(value);
       ExpectStatus(server.Post(endpoint.path, invalid.dump()), 400);
     }
-    for (const auto field : {"stream", "echo", "store", "background", "tools",
-                             "stop", "reasoning", "logit_bias"}) {
+    for (const auto field :
+         {"stream", "echo", "store", "background", "tools", "stop", "reasoning",
+          "output_config", "logit_bias"}) {
       auto invalid = body;
       invalid[field] = true;
       ExpectStatus(server.Post(endpoint.path, invalid.dump()), 400);

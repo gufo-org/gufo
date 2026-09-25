@@ -1270,7 +1270,7 @@ void TestStopSequencesAndDefaultFields() {
        {"tools", "tool_choice", "stream", "stream_options", "n", "max_tokens",
         "max_completion_tokens", "logprobs", "top_logprobs", "response_format",
         "modalities", "audio", "temperature", "top_p", "seed", "logit_bias",
-        "frequency_penalty", "presence_penalty"})
+        "frequency_penalty", "presence_penalty", "reasoning_effort"})
     body[field] = Value();
   Expect(gufo::server::HandleOpenAiChat(Request(body.dump()), backend).status ==
              200,
@@ -1348,11 +1348,69 @@ void TestExplicitStopOutputFraming() {
   }
 }
 
+void TestStopInsideToolArguments() {
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  for (const bool stream : {false, true}) {
+    for (const bool thinking : {false, true}) {
+      for (const auto* partial :
+           {"<tool_call><function=f><parameter=text>partial-",
+            "<｜DSML｜tool_calls｜><｜DSML｜invoke name=\"f\">"
+            "<｜DSML｜parameter name=\"text\" string=\"true\">partial-"}) {
+        for (const bool earlier_call : {false, true}) {
+          FakeBackend backend;
+          backend.finish_reason = Finish::kStopSequence;
+          backend.stop_sequence = "STOP";
+          const std::string raw =
+              std::string(earlier_call
+                              ? "<tool_call><function=f></function></tool_call>"
+                              : "") +
+              partial;
+          backend.pieces = {"safe"};
+          // Exercise splits inside XML delimiters and multibyte DSML tags.
+          for (const char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+          auto body = gufo::json::parse(
+              R"({"model":"test-model","messages":[{"role":"user","content":"call f"}],
+                  "tools":[{"type":"function","function":{"name":"f","parameters":{}}}],
+                  "tool_choice":"required","stop":"STOP"})");
+          body["stream"] = stream;
+          body["chat_template_kwargs"] = gufo::json::Value::object();
+          body["chat_template_kwargs"]["enable_thinking"] = thinking;
+          const auto response =
+              gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          Expect(response.status == 200,
+                 "a stop inside a tool argument succeeds");
+          std::string output = response.body;
+          if (response.streaming_body)
+            response.streaming_body([&](std::string_view piece) {
+              output += piece;
+              return true;
+            });
+          Expect(output.find("partial-") == std::string::npos &&
+                     output.find("<tool_call>") == std::string::npos &&
+                     output.find("DSML") == std::string::npos,
+                 "unfinished tool markup is never emitted as ordinary content");
+          Expect((output.find("\"tool_calls\":") != std::string::npos) ==
+                     earlier_call,
+                 "only calls completed before the stop can be emitted");
+          Expect(
+              output.find("\"finish_reason\":\"stop\"") != std::string::npos &&
+                  output.find(thinking ? "\"reasoning_content\":\"safe\""
+                                       : "\"content\":\"safe\"") !=
+                      std::string::npos,
+              "preceding text and reasoning survive interrupted calls");
+        }
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
   TestStopSequencesAndDefaultFields();
   TestExplicitStopOutputFraming();
+  TestStopInsideToolArguments();
   TestCachePromptOption();
   TestToolChoiceEnforcement();
   TestStreamingIsLive();
