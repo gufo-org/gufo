@@ -1349,6 +1349,14 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   if (prompt.empty()) {
     throw std::invalid_argument("text scheduler prompt must not be empty");
   }
+  const auto context = impl_->runner_pool->runner().Descriptor().max_context;
+  if (prompt.size() >= context) {
+    throw std::length_error("prompt has " + std::to_string(prompt.size()) +
+                            " tokens but the context is " +
+                            std::to_string(context) +
+                            "; increase --context or shorten the conversation");
+  }
+  const std::size_t available = context - prompt.size();
   sampling.Validate();
   ValidateStopSequences(metadata.stop_sequences);
   if (!metadata.stop_sequences.empty() && !impl_->incremental_text_is_exact)
@@ -1372,7 +1380,8 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->prompt_context = std::move(metadata.prompt_context);
   request->cache_prompt = metadata.cache_prompt;
   request->cache_prefix_tokens = metadata.cache_prefix_tokens;
-  request->token_limit = max_tokens > 0 ? max_tokens : 1;
+  request->token_limit =
+      max_tokens > 0 ? std::min(max_tokens, available) : available;
   request->sampling = sampling;
   request->external_cancellation = is_cancelled;
   request->publish_token_pieces = publish_token_pieces;

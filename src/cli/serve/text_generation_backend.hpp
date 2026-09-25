@@ -126,7 +126,8 @@ public:
   };
 
   struct SamplingDefaults {
-    std::size_t max_tokens{128};
+    /// Zero means generate until EOS or the remaining context is exhausted.
+    std::size_t max_tokens{0};
     sampling::SamplingConfig sampling;
   };
 

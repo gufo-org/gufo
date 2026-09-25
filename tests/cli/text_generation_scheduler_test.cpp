@@ -160,6 +160,8 @@ struct FakeControl {
   bool prefix_reuse{true};
   bool preview_first_token{false};
   std::vector<std::string> output_pieces;
+  std::uint32_t max_context{128};
+  std::optional<std::size_t> stop_after;
   std::function<void()> snapshot_callback;
 };
 
@@ -208,7 +210,7 @@ public:
     return {
         .model_id = "scheduler-fake",
         .state_abi = "scheduler-fake-v1",
-        .max_context = 128,
+        .max_context = control_->max_context,
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = control_->incremental_prefill,
@@ -340,6 +342,8 @@ public:
     if (!fake.frontier.has_value()) {
       throw std::logic_error("scheduler fake has no frontier");
     }
+    if (control_->stop_after && fake.decode_count >= *control_->stop_after)
+      return {.stop = true};
     if (!control_->output_pieces.empty()) {
       const auto index =
           static_cast<std::size_t>(*fake.frontier - fake.label * 100);
@@ -1529,6 +1533,47 @@ int main() {
   TestStopSequencesPreserveExecutedState();
   TestStopPrefixFlushAndBatchIsolation();
   TestCancellationWithBufferedStopPrefix();
+  for (const bool speculative : {false, true}) {
+    for (const bool preview : {false, true}) {
+      auto control = std::make_shared<FakeControl>();
+      control->max_context = 256;
+      control->multi_token_decode = speculative;
+      control->preview_first_token = preview;
+      auto scheduler = MakeScheduler(control, 2);
+      const auto run = [&](std::size_t limit, std::size_t expected) {
+        auto first = scheduler->Submit({1, 10}, limit, 0.0F);
+        auto second = scheduler->Submit({2, 20, 30}, limit, 0.0F);
+        const auto a = first.Wait();
+        const auto b = second.Wait();
+        Expect(a.tokens.size() == expected,
+               "default/explicit limit respects remaining context");
+        Expect(b.tokens.size() == (limit == 0 || limit > 253 ? 253 : limit),
+               "concurrent requests have independent context budgets");
+        Expect(a.finish_reason ==
+                   gufo::server::TextGenerationBackend::FinishReason::kLength,
+               "exhausted context is reported as length");
+      };
+      run(0, 254);
+      run(1000, 254);
+      run(2, 2);
+      control->stop_after = 150;
+      const auto stopped = scheduler->Submit({3}, 0, 0.0F).Wait();
+      Expect(stopped.tokens.size() == 150 &&
+                 stopped.finish_reason ==
+                     gufo::server::TextGenerationBackend::FinishReason::kStop,
+             "unlimited default passes 128 tokens and still respects EOS");
+      for (const auto size : {256, 257}) {
+        bool rejected = false;
+        try {
+          (void)scheduler->Submit(std::vector<TextRunnerToken>(size, 1), 0,
+                                  0.0F);
+        } catch (const std::length_error&) {
+          rejected = true;
+        }
+        Expect(rejected, "full context is rejected before generation");
+      }
+    }
+  }
   TestCapturesAtCapacityAllowQueuedProgress();
   TestShutdownCancelsRunnerAcquisition();
   TestSnapshotDoesNotBlockOtherRequests();

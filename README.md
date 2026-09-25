@@ -68,6 +68,25 @@ podman run --rm \
   --dflash-model /models/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
 ```
 
+On Fedora or another SELinux-enforcing host, GPU enumeration can succeed while
+SELinux blocks mapping `/dev/kfd`, causing ROCr to report a misleading
+“Memory critical” error. Check the **host** audit log:
+
+```sh
+sudo ausearch -m avc -ts recent | grep -E '/dev/kfd|hsa_device_t'
+```
+
+If it shows a denied `map` for the container, Podman documents this fix:
+
+```sh
+sudo setsebool -P container_use_devices true
+```
+
+This persistently allows containers to access device labels for devices passed
+into them; it affects all containers on that host. Review that policy scope
+before enabling it. See [Podman's device documentation](https://docs.podman.io/en/latest/markdown/podman-run.1.html#device-host-device-container-device-permissions)
+and the [SELinux container policy](https://github.com/containers/container-selinux/blob/main/container.te).
+
 Then, from another terminal, ask it something through the OpenAI-compatible API:
 
 ```sh
@@ -79,8 +98,14 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-The server also exposes `/v1/completions`, `/v1/responses`, `/v1/models`, and
-`/health`. Any OpenAI-compatible client can point at `http://localhost:8080`.
+For Open WebUI, VS Code and OpenAI SDK clients, set the API base URL to
+`http://localhost:8080/v1`. Chat Completions supports text, images, tools and
+streaming; Responses supports text and streaming. See the [API contract](docs/SERVER.md).
+
+The text server uses the model's native context by default and generates until
+EOS or the context is full. `--context N` sets context capacity per session;
+`--max-tokens N` sets a default response limit that clients can override.
+Reasoning tokens count toward that response limit.
 
 ## Build from source
 

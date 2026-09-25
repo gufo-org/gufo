@@ -244,7 +244,9 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
   const auto append = [&](std::string_view text) {
     auto tokens = tokenizer.Encode(text, tok_options);
     if (tokens.size() > max_context - prompt.tokens.size()) {
-      throw std::length_error("image prompt exceeds model context");
+      throw std::length_error(
+          "prompt exceeds the " + std::to_string(max_context) +
+          "-token context; increase --context or shorten the conversation");
     }
     prompt.tokens.insert(prompt.tokens.end(), tokens.begin(), tokens.end());
   };

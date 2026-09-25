@@ -1408,12 +1408,111 @@ void TestStopInsideToolArguments() {
   }
 }
 
+void TestResponsesOutput() {
+  using Backend = gufo::server::TextGenerationBackend;
+  for (const bool reasoning : {false, true}) {
+    for (const bool limited : {false, true}) {
+      FakeBackend backend;
+      backend.pieces =
+          reasoning ? std::vector<std::string>{"Check ", "\xE2\x94",
+                                               "\x8C</think>", "\nAnswer"}
+                    : std::vector<std::string>{"Answer ", "\xE2\x94", "\x8C"};
+      backend.finish_reason = limited ? Backend::FinishReason::kLength
+                                      : Backend::FinishReason::kStop;
+      gufo::server::ChatRequest chat;
+      chat.reasoning.enabled = reasoning;
+      const auto buffered = gufo::server::CreateOpenAiResponse(
+          Request("{}"), backend, chat, 0, {}, false);
+      const auto body = gufo::json::parse(buffered.body);
+      const auto stream = gufo::server::CreateOpenAiResponse(
+          Request("{}"), backend, chat, 0, {}, true);
+      std::vector<gufo::json::Value> events;
+      std::string text, thought;
+      stream.streaming_body([&](std::string_view chunk) {
+        const auto begin = chunk.find("\ndata: ");
+        Expect(begin != std::string::npos, "Responses SSE has event and data");
+        auto event = gufo::json::parse(chunk.substr(begin + 7));
+        const auto type = event.member_str("type");
+        Expect(chunk.starts_with("event: " + type + "\n"),
+               "SSE name matches the semantic event type");
+        Expect(event.member_size("sequence_number") == events.size(),
+               "Responses events have consecutive sequence numbers");
+        if (type == "response.output_text.delta")
+          text += event.member_str("delta");
+        if (type == "response.reasoning_summary_text.delta")
+          thought += event.member_str("delta");
+        events.push_back(std::move(event));
+        return true;
+      });
+      Expect(events.front().member_str("type") == "response.created" &&
+                 events[1].member_str("type") == "response.in_progress",
+             "Responses starts with the lifecycle events");
+      Expect(events.back().member_str("type") ==
+                 (limited ? "response.incomplete" : "response.completed"),
+             "Responses reports its terminal status");
+      const auto& terminal = *events.back().find("response");
+      Expect(text == (reasoning ? "Answer" : "Answer ┌") &&
+                 thought == (reasoning ? "Check ┌" : ""),
+             "Responses preserves UTF-8 and separates reasoning from text");
+      const auto& items = terminal.find("output")->items();
+      const auto& buffered_items = body.find("output")->items();
+      Expect(items.size() == buffered_items.size(),
+             "Buffered and streamed Responses have the same output items");
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto field =
+            items[i].member_str("type") == "reasoning" ? "summary" : "content";
+        Expect(items[i].find(field)->dump() ==
+                   buffered_items[i].find(field)->dump(),
+               "Buffered and streamed text/reasoning agree");
+      }
+      Expect(terminal.find("usage")
+                     ->find("input_tokens_details")
+                     ->member_size("cached_tokens") == 5,
+             "Responses retains prompt-cache usage");
+    }
+  }
+}
+
+void TestResponsesLiveAndCancellation() {
+  FakeBackend backend;
+  backend.pieces = {"first", "second"};
+  backend.block_after_first_piece = true;
+  auto response = gufo::server::CreateOpenAiResponse(Request("{}"), backend, {},
+                                                     0, {}, true);
+  std::atomic<bool> first{false};
+  std::jthread writer([&] {
+    response.streaming_body([&](std::string_view chunk) {
+      if (chunk.find("event: response.output_text.delta") != std::string::npos)
+        first = true;
+      return true;
+    });
+  });
+  Expect(backend.WaitForFirstPiece() && first && !backend.completed,
+         "Responses sends text before generation completes");
+  backend.Release();
+  writer.join();
+
+  backend.block_after_first_piece = false;
+  backend.completed = false;
+  auto cancelled = gufo::server::CreateOpenAiResponse(Request("{}"), backend,
+                                                      {}, 0, {}, true);
+  bool terminal = false;
+  cancelled.streaming_body([&](std::string_view chunk) {
+    terminal |= chunk.find("event: response.completed") != std::string::npos;
+    return chunk.find("event: response.output_text.delta") == std::string::npos;
+  });
+  Expect(!terminal && !backend.completed,
+         "Responses disconnect cancels generation without a completed event");
+}
+
 }  // namespace
 
 int main() {
   TestStopSequencesAndDefaultFields();
   TestExplicitStopOutputFraming();
   TestStopInsideToolArguments();
+  TestResponsesOutput();
+  TestResponsesLiveAndCancellation();
   TestCachePromptOption();
   TestToolChoiceEnforcement();
   TestStreamingIsLive();

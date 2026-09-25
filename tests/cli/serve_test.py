@@ -55,6 +55,15 @@ def main():
                  ["llm", "--served-model-name", "--verbose", "--model", "audio"]):
         check(["serve", *args], 1, "Error loading model 'audio'")
     check(["serve", "help", "unknown"], 2, "unknown serve command")
+    help_text = check(["serve", "llm", "--help"], 0, "model native context")
+    assert "-1 = until EOS or context full" in help_text
+    for limit in ("-1", "1", "16384"):
+        check(["serve", "llm", "--model", "missing.gguf",
+               "--context", "0", "--max-tokens", limit],
+              1, "Error loading model")
+    for limit in ("0", "-2", "4294967296"):
+        check(["serve", "llm", "--max-tokens", limit], 2,
+              "sampling and scheduling limits are invalid")
 
     for command in ("prompt", "chat", "bench"):
         check([command, "--help"], 0, "--draft-policy")

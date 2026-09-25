@@ -2768,6 +2768,7 @@ struct InferenceBackend::Impl {
     std::shared_ptr<TextGenerationScheduler> scheduler;
     std::string model_id;
     SamplingDefaults sampling_defaults;
+    std::uint32_t max_context{0};
     ReasoningOptions reasoning_defaults;
   };
 
@@ -2859,6 +2860,20 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     return false;
   }
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
+  if (max_context == 0) {
+    const auto architecture =
+        reader->GetMetadataString("general.architecture").value_or("");
+    const auto native =
+        reader->GetMetadataUint64(std::string(architecture) + ".context_length")
+            .value_or(0);
+    if (native < 2 || native > std::numeric_limits<std::uint32_t>::max()) {
+      SetError(error,
+               "GGUF has no valid native context length; specify --context");
+      return false;
+    }
+    max_context = static_cast<std::uint32_t>(native);
+  }
+
   if (reader->GetMetadataString("general.architecture") == "deepseek4") {
     if (!vision_model_path.empty()) {
       SetError(error, "DeepSeek does not support --mmproj");
@@ -3041,6 +3056,13 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     SetError(error, "Qwen GPU model must not be null");
     return false;
   }
+  if (max_context == 0)
+    max_context = model->GetConfig().context_length;
+  if (max_context < 2 || max_context > model->GetConfig().context_length) {
+    SetError(error, "HTTP context exceeds the loaded Qwen model context");
+    return false;
+  }
+
   if (speculative_config.backend == TextSpeculativeBackend::kDSpark) {
     SetError(error, "DSpark HTTP decoding requires a DeepSeek model");
     return false;
@@ -3135,6 +3157,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
         speculative_options, disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
     if (DiskCacheEnabled(disk_cache_config)) {
       runner_disk_cache = TextRunnerDiskCacheOptions{
@@ -3170,6 +3193,9 @@ bool InferenceBackend::load(
     SetError(error, "DeepSeek model must not be null");
     return false;
   }
+  if (max_context == 0)
+    max_context = model->MaxContext();
+
   const bool use_dspark =
       speculative_config.backend == TextSpeculativeBackend::kDSpark;
   if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
@@ -3216,6 +3242,7 @@ bool InferenceBackend::load(
         disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
     if (DiskCacheEnabled(disk_cache_config)) {
       runner_disk_cache = TextRunnerDiskCacheOptions{
@@ -3249,6 +3276,9 @@ bool InferenceBackend::load(
     SetError(error, "Qwen3.8-Flash-Next model must not be null");
     return false;
   }
+  if (max_context == 0)
+    max_context = model->MaxContext();
+
   if (session_count == 0) {
     SetError(error, "HTTP session count must be at least one");
     return false;
@@ -3294,6 +3324,7 @@ bool InferenceBackend::load(
         disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
     if (DiskCacheEnabled(disk_cache_config)) {
       runner_disk_cache = TextRunnerDiskCacheOptions{
@@ -3332,6 +3363,15 @@ bool InferenceBackend::ready() const {
   return impl_->Snapshot() != nullptr;
 #else
   return false;
+#endif
+}
+
+std::uint32_t InferenceBackend::max_context() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr ? state->max_context : 0;
+#else
+  return 0;
 #endif
 }
 

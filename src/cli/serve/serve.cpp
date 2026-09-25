@@ -440,8 +440,8 @@ void PrintServeHelp(std::string_view program_name,
   if (subcommand == "llm") {
     std::string model = "models/Qwen3.5-4B-BF16.gguf";
     std::string served_model_name;
-    std::uint32_t max_context = 4096;
-    std::size_t max_tokens = 128;
+    std::uint32_t max_context = 0;
+    std::int64_t max_tokens = -1;
     sampling::SamplingConfig sampling_config;
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
@@ -485,14 +485,16 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--served-model-name", "ID",
                      "Model identifier exposed by the OpenAI API", "Model",
                      &served_model_name);
-    parser.AddOption("-c", "--context", "N",
-                     "Maximum context tokens (default: 4096)", "Model",
-                     &max_context);
+    parser.AddOption(
+        "-c", "--context", "N",
+        "Context tokens per session (default: 0 = model native context)",
+        "Model", &max_context);
 
     // Sampling Defaults
-    parser.AddOption("-n", "--max-tokens", "N",
-                     "Default maximum new tokens per response (default: 128)",
-                     "Sampling Defaults", &max_tokens);
+    parser.AddOption(
+        "-n", "--max-tokens", "N",
+        "Default new-token limit (default: -1 = until EOS or context full)",
+        "Sampling Defaults", &max_tokens);
     RegisterSamplingOptions(parser, &sampling_config, "Sampling Defaults");
 
     // Reasoning Defaults
@@ -891,8 +893,8 @@ int RunServe(std::span<const char* const> args) {
     // Default to LLM server
     std::string model = "models/Qwen3.5-4B-BF16.gguf";
     std::string served_model_name;
-    std::uint32_t max_context = 4096;
-    std::size_t max_tokens = 128;
+    std::uint32_t max_context = 0;
+    std::int64_t max_tokens = -1;
     sampling::SamplingConfig sampling_config;
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
@@ -935,12 +937,13 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--served-model-name", "ID",
                          "Model identifier exposed by the OpenAI API", "Model",
                          &served_model_name);
-    llm_parser.AddOption("-c", "--context", "N",
-                         "Maximum context tokens (default: 4096)", "Model",
-                         &max_context);
+    llm_parser.AddOption(
+        "-c", "--context", "N",
+        "Context tokens per session (default: 0 = model native context)",
+        "Model", &max_context);
     llm_parser.AddOption(
         "-n", "--max-tokens", "N",
-        "Default maximum new tokens per response (default: 128)",
+        "Default new-token limit (default: -1 = until EOS or context full)",
         "Sampling Defaults", &max_tokens);
     RegisterSamplingOptions(llm_parser, &sampling_config, "Sampling Defaults");
     llm_parser.AddOption(
@@ -1037,8 +1040,10 @@ int RunServe(std::span<const char* const> args) {
     } catch (const std::invalid_argument&) {
       sampling_valid = false;
     }
-    if (max_tokens == 0 || prefill_chunk_tokens == 0 ||
-        max_pending_requests == 0 || max_pending_requests_per_client == 0 ||
+    if (max_tokens < -1 || max_tokens == 0 ||
+        max_tokens > std::numeric_limits<std::uint32_t>::max() ||
+        prefill_chunk_tokens == 0 || max_pending_requests == 0 ||
+        max_pending_requests_per_client == 0 ||
         max_pending_requests_per_client > max_pending_requests ||
         max_output_bytes == 0 || max_buffered_output_bytes == 0 ||
         max_buffered_output_bytes_total == 0 ||
@@ -1139,7 +1144,9 @@ int RunServe(std::span<const char* const> args) {
       return 1;
     }
     backend->set_model_id(served_model_name);
-    backend->set_sampling_defaults(max_tokens, sampling_config);
+    backend->set_sampling_defaults(
+        max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
+        sampling_config);
     backend->set_reasoning_defaults(*reasoning_defaults);
     const char* speculation =
         speculative_config.backend == server::TextSpeculativeBackend::kDFlash
@@ -1152,7 +1159,7 @@ int RunServe(std::span<const char* const> args) {
     load_log.Complete(
         "model=" + backend->model_id() +
         " sessions=" + std::to_string(session_count) + " context_tokens=" +
-        std::to_string(max_context) + " speculative=" + speculation +
+        std::to_string(backend->max_context()) + " speculative=" + speculation +
         " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
         " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled"));
   }
