@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "src/cli/serve/sampling_request.hpp"
+#include "src/cli/serve/stop_sequences.hpp"
 #include "src/core/image.hpp"
 #include "src/core/json.hpp"
 #include "src/core/utf8.hpp"
@@ -300,7 +301,7 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
 bool ParseTools(const json::Value* tools,
                 std::vector<tokenization::ChatTool>* output,
                 std::string* error) {
-  if (tools == nullptr) {
+  if (tools == nullptr || tools->is_null()) {
     return true;
   }
   if (!tools->is_array()) {
@@ -367,7 +368,7 @@ bool ParseTools(const json::Value* tools,
 
 bool ParseToolChoice(const json::Value* value, ParsedChatRequest* request,
                      std::string* error) {
-  if (value == nullptr) {
+  if (value == nullptr || value->is_null()) {
     return true;
   }
   if (value->is_string()) {
@@ -562,6 +563,11 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     }
     output->chat.cache_prompt = cache_prompt->as_bool();
   }
+  if (const auto error =
+          ParseStopSequences(body.find("stop"), StopSequenceFormat::kOpenAi,
+                             &output->chat.stop_sequences)) {
+    return Error(400, "Bad Request", *error, "invalid_stop");
+  }
 
   const json::Value* messages = body.find("messages");
   if (messages == nullptr || !messages->is_array() || messages->empty()) {
@@ -615,14 +621,16 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     output->chat.reasoning.preserve_thinking = defaults.preserve_thinking;
   }
 
-  if (const json::Value* stream = body.find("stream")) {
+  if (const json::Value* stream = body.find("stream");
+      stream != nullptr && !stream->is_null()) {
     if (!stream->is_bool()) {
       return Error(400, "Bad Request", "'stream' must be a boolean",
                    "invalid_stream");
     }
     output->stream = stream->as_bool();
   }
-  if (const json::Value* options = body.find("stream_options")) {
+  if (const json::Value* options = body.find("stream_options");
+      options != nullptr && !options->is_null()) {
     if (!options->is_object()) {
       return Error(400, "Bad Request", "'stream_options' must be an object",
                    "invalid_stream_options");
@@ -638,10 +646,10 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   }
 
   const json::Value* max_tokens = body.find("max_completion_tokens");
-  if (max_tokens == nullptr) {
+  if (max_tokens == nullptr || max_tokens->is_null()) {
     max_tokens = body.find("max_tokens");
   }
-  if (max_tokens != nullptr) {
+  if (max_tokens != nullptr && !max_tokens->is_null()) {
     const double value =
         max_tokens->is_number() ? max_tokens->as_double() : 0.0;
     if (!max_tokens->is_number() || !std::isfinite(value) ||
@@ -668,14 +676,22 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   output->sampling = parsed_sampling;
 
   if (const json::Value* choices = body.find("n");
-      choices != nullptr &&
+      choices != nullptr && !choices->is_null() &&
       (!choices->is_number() || choices->as_double() != 1.0)) {
     return Error(400, "Bad Request", "only n=1 is supported", "unsupported_n");
   }
   for (const std::string_view unsupported :
-       {"logprobs", "top_logprobs", "stop", "response_format", "modalities",
-        "audio"}) {
-    if (body.contains(std::string(unsupported))) {
+       {"logprobs", "top_logprobs", "response_format", "modalities", "audio"}) {
+    if (const auto* value = body.find(std::string(unsupported));
+        value != nullptr && !value->is_null()) {
+      if ((unsupported == "logprobs" && value->is_bool() &&
+           !value->as_bool()) ||
+          (unsupported == "response_format" && value->is_object() &&
+           value->size() == 1 && value->member_str("type") == "text") ||
+          (unsupported == "modalities" && value->is_array() &&
+           value->size() == 1 && value->items().front().is_string() &&
+           value->items().front().str() == "text"))
+        continue;
       return Error(
           400, "Bad Request",
           "request field '" + std::string(unsupported) + "' is not implemented",
@@ -1003,7 +1019,7 @@ ParsedGeneration ParseGeneration(
     std::string_view raw,
     TextGenerationBackend::InitialOutputState initial_output_state,
     std::span<const tokenization::ChatTool> tools,
-    ChatRequest::ToolChoice choice) {
+    ChatRequest::ToolChoice choice, bool enforce_required) {
   ParsedGeneration parsed;
   std::string_view content = raw;
 
@@ -1021,7 +1037,7 @@ ParsedGeneration ParseGeneration(
       const auto marker = EarliestMarker(content);
       parsed.reasoning_content = std::string(Trim(content.substr(0, marker)));
       if (marker == std::string_view::npos) {
-        if (choice == ChatRequest::ToolChoice::kRequired)
+        if (enforce_required && choice == ChatRequest::ToolChoice::kRequired)
           throw TextGenerationError(
               TextGenerationErrorCode::kToolChoiceUnsatisfied,
               "model did not produce a declared tool call");
@@ -1090,7 +1106,8 @@ ParsedGeneration ParseGeneration(
       parsed.text = text_before_tools;
     }
   }
-  if (choice == ChatRequest::ToolChoice::kRequired && parsed.tool_calls.empty())
+  if (enforce_required && choice == ChatRequest::ToolChoice::kRequired &&
+      parsed.tool_calls.empty())
     throw TextGenerationError(TextGenerationErrorCode::kToolChoiceUnsatisfied,
                               "model did not produce a declared tool call");
   return parsed;
@@ -1098,6 +1115,9 @@ ParsedGeneration ParseGeneration(
 
 const char* FinishReason(const TextGenerationBackend::Result& result,
                          bool has_tool_calls) {
+  if (result.finish_reason ==
+      TextGenerationBackend::FinishReason::kStopSequence)
+    return "stop";
   if (has_tool_calls) {
     return "tool_calls";
   }
@@ -1371,7 +1391,9 @@ HttpResponse NonStreamingResponse(
   core::Utf8Decoder decoder;
   const ParsedGeneration generated =
       ParseGeneration(decoder.Push(result.text, true), initial_output_state,
-                      request.chat.tools, request.chat.tool_choice);
+                      request.chat.tools, request.chat.tool_choice,
+                      result.finish_reason !=
+                          TextGenerationBackend::FinishReason::kStopSequence);
 
   json::Value response = json::Value::object();
   response["id"] = RandomId("chatcmpl-");
@@ -1477,9 +1499,11 @@ HttpResponse StreamingResponse(
               if (!filter.Push({}, true))
                 return;
 
-              const ParsedGeneration generated =
-                  ParseGeneration(filter.raw(), initial_output_state,
-                                  request.chat.tools, request.chat.tool_choice);
+              const ParsedGeneration generated = ParseGeneration(
+                  filter.raw(), initial_output_state, request.chat.tools,
+                  request.chat.tool_choice,
+                  result.finish_reason !=
+                      TextGenerationBackend::FinishReason::kStopSequence);
               if (!filter.Finish(!generated.tool_calls.empty())) {
                 return;
               }

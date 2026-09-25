@@ -130,7 +130,8 @@ public:
                   const sampling::SamplingConfig& sampling,
                   const CancellationCheck& is_cancelled = {},
                   const TokenCallback& on_token = {},
-                  std::string_view client_id = "anonymous") override;
+                  std::string_view client_id = "anonymous",
+                  const std::vector<std::string>& stop_sequences = {}) override;
 
   /// Framed chat conversation; returns the assistant reply.
   Result chat(const ChatRequest& request, std::size_t max_tokens,

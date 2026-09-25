@@ -21,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/stop_sequences.hpp"
+
 namespace {
 
 using gufo::server::ChatRequest;
@@ -157,6 +159,7 @@ struct FakeControl {
   std::size_t actual_batch_width{4};
   bool prefix_reuse{true};
   bool preview_first_token{false};
+  std::vector<std::string> output_pieces;
   std::function<void()> snapshot_callback;
 };
 
@@ -337,6 +340,13 @@ public:
     if (!fake.frontier.has_value()) {
       throw std::logic_error("scheduler fake has no frontier");
     }
+    if (!control_->output_pieces.empty()) {
+      const auto index =
+          static_cast<std::size_t>(*fake.frontier - fake.label * 100);
+      if (index >= control_->output_pieces.size())
+        return {.stop = true};
+      return {.token = *fake.frontier, .piece = control_->output_pieces[index]};
+    }
     return {
         .stop = false,
         .token = *fake.frontier,
@@ -441,13 +451,13 @@ public:
     TextDecodeStep step;
     step.selections.reserve(count);
     for (std::size_t index = 0; index < count; ++index) {
-      const TextRunnerToken token = *fake.frontier;
-      step.selections.push_back({
-          .stop = false,
-          .token = token,
-          .piece = std::to_string(token),
-      });
-      Advance(state, token);
+      auto selection = SelectNext(state, sampler);
+      if (selection.stop) {
+        step.stop = true;
+        break;
+      }
+      Advance(state, selection.token);
+      step.selections.push_back(std::move(selection));
     }
     step.draft_tokens = count + 1;
     step.draft_accepted_tokens = count;
@@ -1206,6 +1216,157 @@ void TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement() {
          "replacement request succeeds after runner failure");
 }
 
+void TestStopSequenceChunkBoundaries() {
+  using gufo::server::StopSequenceFilter;
+  const auto check = [](std::vector<std::string> stops, std::string text,
+                        std::string expected, std::string matched) {
+    // Include single-byte token pieces and every two-piece boundary.
+    for (std::size_t split = 0; split <= text.size() + 1; ++split) {
+      StopSequenceFilter filter(stops);
+      std::string output;
+      if (split > text.size()) {
+        for (const char byte : text)
+          output += filter.Push(std::string_view(&byte, 1));
+      } else {
+        output += filter.Push(std::string_view(text).substr(0, split));
+        output += filter.Push(std::string_view(text).substr(split));
+      }
+      output += filter.Finish();
+      Expect(output == expected,
+             "stop matching is independent of token boundaries");
+      Expect(filter.stopped() == !matched.empty(), "correct stop detection");
+      if (filter.stopped())
+        Expect(filter.matched_sequence() == matched,
+               "correct matched sequence");
+    }
+  };
+  check({"<STOP>"}, "before<STOP>after", "before", "<STOP>");
+  check({"END", "STOP"}, "stENDlaterSTOP", "st", "END");
+  check({"abc", "b"}, "abc", "a", "b");
+  check({"aba", "ba"}, "aba", "", "aba");
+  check({"abab"}, "aaababtail", "aa", "abab");
+  check({"┌終"}, "hi┌終later", "hi", "┌終");
+  check({"STOP"}, "SSTOSTxST", "SSTOSTxST", "");
+  check({"STOP"}, "STOP", "", "STOP");
+}
+
+void TestStopSequencesPreserveExecutedState() {
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  for (const bool multi : {false, true}) {
+    for (const bool preview : {false, true}) {
+      for (const bool first : {false, true}) {
+        auto control = std::make_shared<FakeControl>();
+        control->incremental_text_is_exact = true;
+        control->multi_token_decode = multi;
+        control->preview_first_token = preview;
+        control->snapshot_callback = [] {};
+        control->output_pieces =
+            first ? std::vector<std::string>{"<STOP>tail", "later", "last"}
+                  : std::vector<std::string>{"ab<ST", "OP>tail", "later"};
+        auto scheduler = MakeScheduler(control, 1);
+        TextGenerationScheduler::RequestMetadata metadata;
+        metadata.stop_sequences = {"<STOP>"};
+        std::string streamed;
+        auto request = scheduler->Submit({1, 10}, 8, 0.0F, {}, true, metadata);
+        const auto result = request.Wait([&](std::string_view piece) {
+          streamed += piece;
+          return true;
+        });
+        Expect(
+            result.finish_reason == Finish::kStopSequence && !result.cancelled,
+            "stop sequence is a successful completion");
+        Expect(result.stop_sequence == "<STOP>" &&
+                   result.text == (first ? "" : "ab") &&
+                   streamed == result.text,
+               "neither the stop marker nor speculative tail leaks");
+        Expect(result.tokens.size() == (first ? 1U : 2U) &&
+                   result.completion_tokens == result.tokens.size(),
+               "usage includes the token that completed the stop");
+        // Repeating the prompt must not resume from an incorrectly labelled
+        // generated frontier, including when preview or a speculative tail ran.
+        const auto replay =
+            scheduler->Submit({1, 10}, 8, 0.0F, {}, true, metadata).Wait();
+        Expect(replay.tokens == result.tokens && replay.text == result.text,
+               "a stopped request leaves a safe reusable prompt cache");
+      }
+    }
+  }
+}
+
+void TestStopPrefixFlushAndBatchIsolation() {
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  for (const bool multi : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->incremental_text_is_exact = true;
+    control->multi_token_decode = multi;
+    control->batched_multi_token_decode = multi;
+    control->supports_batched_advance = true;
+    control->block_prefill_label = 1;
+    control->output_pieces = {"hello", "<ST", "OP>tail", "ST"};
+    auto scheduler = MakeScheduler(control, 2);
+    TextGenerationScheduler::RequestMetadata metadata;
+    metadata.stop_sequences = {"<STOP>"};
+    auto first = scheduler->Submit({1}, 8, 0.0F, {}, true, metadata);
+    control->WaitForPrefill(1);
+    auto peer = scheduler->Submit({2}, 4, 0.0F);
+    control->ReleasePrefill();
+    const auto stopped = first.Wait();
+    const auto full = peer.Wait();
+    Expect(stopped.text == "hello" &&
+               stopped.finish_reason == Finish::kStopSequence,
+           "batched request stops on its own marker");
+    Expect(full.text == "hello<STOP>tailST" &&
+               full.finish_reason == Finish::kLength,
+           "peer without stop sequences keeps every accepted token");
+    metadata.stop_sequences = {"STXYZ"};
+    for (const std::size_t limit : {4U, 8U}) {
+      std::string streamed;
+      const auto result =
+          scheduler->Submit({4}, limit, 0.0F, {}, true, metadata)
+              .Wait([&](std::string_view piece) {
+                streamed += piece;
+                return true;
+              });
+      Expect(result.text == "hello<STOP>tailST" && streamed == result.text &&
+                 result.stop_sequence.empty() &&
+                 result.finish_reason ==
+                     (limit == 4 ? Finish::kLength : Finish::kStop),
+             "unmatched stop prefix is flushed on both EOS and length");
+    }
+  }
+}
+
+void TestCancellationWithBufferedStopPrefix() {
+  for (const bool multi : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->incremental_text_is_exact = true;
+    control->multi_token_decode = multi;
+    control->block_advance_label = 1;
+    control->output_pieces = {"safe<ST", "OP>tail", "end"};
+    auto scheduler = MakeScheduler(control, 1);
+    TextGenerationScheduler::RequestMetadata metadata;
+    metadata.stop_sequences = {"<STOP>"};
+    auto request = scheduler->Submit({1}, 8, 0.0F, {}, true, metadata);
+    control->WaitForAdvance(1);
+    request.Cancel();
+    control->ReleaseAdvance();
+    std::string streamed;
+    const auto result = request.Wait([&](std::string_view piece) {
+      streamed += piece;
+      return true;
+    });
+    Expect(
+        result.cancelled &&
+            result.finish_reason ==
+                gufo::server::TextGenerationBackend::FinishReason::kCancelled &&
+            streamed.find("<ST") == std::string::npos,
+        "cancellation does not flush a buffered stop prefix");
+    const auto replacement = scheduler->Submit({2}, 3, 0.0F).Wait();
+    Expect(!replacement.cancelled && replacement.text == "safe<STOP>tailend",
+           "cancellation with a partial stop releases the runner");
+  }
+}
+
 }  // namespace
 
 void TestFirstTokenPrecedesSnapshotAndPreservesBudget() {
@@ -1364,6 +1525,10 @@ void TestShutdownCancelsRunnerAcquisition() {
 }
 
 int main() {
+  TestStopSequenceChunkBoundaries();
+  TestStopSequencesPreserveExecutedState();
+  TestStopPrefixFlushAndBatchIsolation();
+  TestCancellationWithBufferedStopPrefix();
   TestCapturesAtCapacityAllowQueuedProgress();
   TestShutdownCancelsRunnerAcquisition();
   TestSnapshotDoesNotBlockOtherRequests();

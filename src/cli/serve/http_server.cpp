@@ -35,6 +35,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/sampling_request.hpp"
+#include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_api.hpp"
 #include "src/cli/serve/video_jobs.hpp"
@@ -423,7 +424,8 @@ HttpResponse InvalidCompatibilityRequest(std::string_view message) {
 std::optional<HttpResponse> ReadCompatibilityOptions(
     const json::Value& body, TextGenerationBackend& backend,
     std::string_view token_field, std::size_t* max_tokens,
-    sampling::SamplingConfig* sampling_config) {
+    sampling::SamplingConfig* sampling_config,
+    std::string_view stop_field = {}) {
   if (!body.is_object())
     return InvalidCompatibilityRequest("request body must be an object");
   if (const auto* model = body.find("model"); model != nullptr) {
@@ -467,7 +469,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
                                   "truncation",
                                   "modalities",
                                   "audio"}) {
-    if (body.contains(field)) {
+    if (field != stop_field && body.contains(field)) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }
@@ -578,9 +580,13 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                            &sampling_config)) {
+                                            &sampling_config, "stop")) {
     return std::move(*error);
   }
+  std::vector<std::string> stop_sequences;
+  if (const auto error = ParseStopSequences(
+          body.find("stop"), StopSequenceFormat::kOpenAi, &stop_sequences))
+    return InvalidCompatibilityRequest(*error);
 
   const auto* input = body.find("prompt");
   if (input == nullptr || !input->is_string()) {
@@ -592,8 +598,9 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                "invalid_request_error", "missing_prompt");
   }
 
-  const auto res = b.complete(prompt, max_tokens, sampling_config,
-                              req.is_cancelled, {}, req.client_id);
+  const auto res =
+      b.complete(prompt, max_tokens, sampling_config, req.is_cancelled, {},
+                 req.client_id, stop_sequences);
 
   json::Value resp = json::Value::object();
   resp["id"] = "cmpl-" + RandomId();
@@ -658,6 +665,7 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
 
   ChatRequest chat{std::move(messages)};
   chat.client_id = req.client_id;
+  chat.reasoning = b.reasoning_defaults();
   const auto res = b.chat(chat, max_tokens, sampling_config, req.is_cancelled);
 
   json::Value resp = json::Value::object();
@@ -714,8 +722,9 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error = ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                            &sampling_config)) {
+  if (auto error =
+          ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
+                                   &sampling_config, "stop_sequences")) {
     return std::move(*error);
   }
 
@@ -736,6 +745,11 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
 
   ChatRequest chat{std::move(messages)};
   chat.client_id = req.client_id;
+  chat.reasoning = b.reasoning_defaults();
+  if (const auto error = ParseStopSequences(body.find("stop_sequences"),
+                                            StopSequenceFormat::kAnthropic,
+                                            &chat.stop_sequences))
+    return InvalidCompatibilityRequest(*error);
   const auto res = b.chat(chat, max_tokens, sampling_config, req.is_cancelled);
 
   json::Value resp = json::Value::object();
@@ -752,8 +766,13 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   resp["stop_reason"] =
       res.finish_reason == TextGenerationBackend::FinishReason::kLength
           ? "max_tokens"
+      : res.finish_reason == TextGenerationBackend::FinishReason::kStopSequence
+          ? "stop_sequence"
           : "end_turn";
-  resp["stop_sequence"] = json::Value();
+  resp["stop_sequence"] =
+      res.finish_reason == TextGenerationBackend::FinishReason::kStopSequence
+          ? json::Value(res.stop_sequence)
+          : json::Value();
   json::Value usage = json::Value::object();
   usage["input_tokens"] = res.prompt_tokens;
   usage["output_tokens"] = res.completion_tokens;
@@ -783,7 +802,7 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(body, b, "n_predict", &max_tokens,
-                                            &sampling_config)) {
+                                            &sampling_config, "stop")) {
     return std::move(*error);
   }
 
@@ -792,20 +811,27 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
     return InvalidCompatibilityRequest("'prompt' must be a nonempty string");
   }
   const std::string prompt = input->str();
+  std::vector<std::string> stop_sequences;
+  if (const auto error = ParseStopSequences(
+          body.find("stop"), StopSequenceFormat::kOpenAi, &stop_sequences))
+    return InvalidCompatibilityRequest(*error);
 
-  const auto res = b.complete(prompt, max_tokens, sampling_config,
-                              req.is_cancelled, {}, req.client_id);
+  const auto res =
+      b.complete(prompt, max_tokens, sampling_config, req.is_cancelled, {},
+                 req.client_id, stop_sequences);
 
   json::Value resp = json::Value::object();
   resp["content"] = core::Utf8Decoder{}.Push(res.text, true);
   resp["stop"] = true;
   const bool limited =
       res.finish_reason == TextGenerationBackend::FinishReason::kLength;
-  resp["stopped_eos"] = !limited && !res.cancelled;
+  const bool matched =
+      res.finish_reason == TextGenerationBackend::FinishReason::kStopSequence;
+  resp["stopped_eos"] = !limited && !res.cancelled && !matched;
   resp["stopped_length"] = limited;
-  resp["stopped_word"] = false;
+  resp["stopped_word"] = matched;
   resp["stopped_limit"] = limited;
-  resp["stopping_word"] = "";
+  resp["stopping_word"] = res.stop_sequence;
   resp["tokens_predicted"] = res.completion_tokens;
   resp["tokens_evaluated"] = res.prompt_tokens;
   resp["tokens_cached"] = res.cached_prompt_tokens;

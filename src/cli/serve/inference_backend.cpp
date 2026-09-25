@@ -874,6 +874,7 @@ public:
                 .snapshot = true,
                 .fork = true,
                 .final_token_advance_required = !speculative_enabled,
+                .incremental_text_is_exact = true,
                 .multi_token_decode = speculative_enabled,
                 .batched_multi_token_decode =
                     speculative_enabled && MaximumDecodeBatchWidth() > 1,
@@ -2809,7 +2810,8 @@ struct InferenceBackend::Impl {
       const CancellationCheck& is_cancelled, const TokenCallback& on_token,
       std::string client_id,
       std::shared_ptr<const TextPromptContext> context = {},
-      bool cache_prompt = true, std::size_t cache_prefix_tokens = 0) const {
+      bool cache_prompt = true, std::size_t cache_prefix_tokens = 0,
+      const std::vector<std::string>& stop_sequences = {}) const {
     Result result;
     result.prompt_tokens = prompt_tokens.size();
     result.client_id = client_id.empty() ? "anonymous" : client_id;
@@ -2831,6 +2833,7 @@ struct InferenceBackend::Impl {
             .prompt_context = std::move(context),
             .cache_prompt = cache_prompt,
             .cache_prefix_tokens = cache_prefix_tokens,
+            .stop_sequences = stop_sequences,
         });
     result = request.Wait(on_token);
 
@@ -3426,7 +3429,8 @@ InferenceBackend::Result InferenceBackend::complete(
     std::string_view prompt, std::size_t max_tokens,
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled, const TokenCallback& on_token,
-    std::string_view client_id) {
+    std::string_view client_id,
+    const std::vector<std::string>& stop_sequences) {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
@@ -3436,9 +3440,11 @@ InferenceBackend::Result InferenceBackend::complete(
   auto prompt_tokens = state->scheduler->runner().Tokenize(prompt);
   return impl_->GenerateScheduled(
       state, std::move(prompt_tokens), request_start, max_tokens,
-      sampling_config, is_cancelled, on_token, std::string(client_id));
+      sampling_config, is_cancelled, on_token, std::string(client_id), {}, true,
+      0, stop_sequences);
 #else
   (void)client_id;
+  (void)stop_sequences;
   (void)prompt;
   (void)max_tokens;
   (void)sampling_config;
@@ -3466,7 +3472,7 @@ InferenceBackend::Result InferenceBackend::chat(
       state, std::move(prompt->tokens), request_start, max_tokens,
       sampling_config, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
-      prompt->cache_prefix_tokens);
+      prompt->cache_prefix_tokens, request.stop_sequences);
 #else
   (void)request;
   (void)max_tokens;
@@ -3508,6 +3514,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .prompt_context = std::move(prompt->context),
           .cache_prompt = request.cache_prompt,
           .cache_prefix_tokens = prompt->cache_prefix_tokens,
+          .stop_sequences = request.stop_sequences,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
       state, std::move(scheduled_request));

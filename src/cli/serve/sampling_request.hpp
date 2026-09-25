@@ -37,9 +37,10 @@ inline std::string SamplingErrorCode(std::string_view field) {
 }
 
 inline std::optional<SamplingRequestError> ReadSamplingFloat(
-    const json::Value& body, std::string_view field, float* output) {
+    const json::Value& body, std::string_view field, float* output,
+    bool nullable = false) {
   const json::Value* value = body.find(std::string(field));
-  if (value == nullptr) {
+  if (value == nullptr || (nullable && value->is_null())) {
     return std::nullopt;
   }
   if (!value->is_number() || !std::isfinite(value->as_double()) ||
@@ -59,9 +60,9 @@ inline std::optional<SamplingRequestError> ReadSamplingFloat(
 template<typename Integer>
 inline std::optional<SamplingRequestError> ReadSamplingInteger(
     const json::Value& body, std::string_view field, Integer minimum,
-    Integer maximum, Integer* output) {
+    Integer maximum, Integer* output, bool nullable = false) {
   const json::Value* value = body.find(std::string(field));
-  if (value == nullptr) {
+  if (value == nullptr || (nullable && value->is_null())) {
     return std::nullopt;
   }
   const double number = value->is_number() ? value->as_double() : 0.0;
@@ -95,6 +96,9 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
   // These controls alter proposal/target probabilities. Reject unsupported
   // spellings instead of accepting a request with a different distribution.
   for (const auto& [field, value] : body.members()) {
+    if (field == "logit_bias" &&
+        (value.is_null() || (value.is_object() && value.empty())))
+      continue;
     const bool draft_control = field.starts_with("draft_") ||
                                field.ends_with("_draft") || field == "draft" ||
                                field == "speculative";
@@ -112,7 +116,7 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
   }
 
   if (auto error = detail::ReadSamplingFloat(body, "temperature",
-                                             &output->temperature)) {
+                                             &output->temperature, true)) {
     return error;
   }
   if (auto error = detail::ReadSamplingInteger(
@@ -120,7 +124,8 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
           std::numeric_limits<std::int32_t>::max(), &output->top_k)) {
     return error;
   }
-  if (auto error = detail::ReadSamplingFloat(body, "top_p", &output->top_p)) {
+  if (auto error =
+          detail::ReadSamplingFloat(body, "top_p", &output->top_p, true)) {
     return error;
   }
   if (auto error = detail::ReadSamplingFloat(body, "min_p", &output->min_p)) {
@@ -133,7 +138,7 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
   }
   if (auto error = detail::ReadSamplingInteger(body, "seed", std::int64_t{-1},
                                                detail::kMaxExactJsonInteger,
-                                               &output->seed)) {
+                                               &output->seed, true)) {
     return error;
   }
   if (auto error = detail::ReadSamplingFloat(body, "repeat_penalty",
@@ -145,12 +150,12 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
           &output->repeat_last_n)) {
     return error;
   }
-  if (auto error = detail::ReadSamplingFloat(body, "frequency_penalty",
-                                             &output->frequency_penalty)) {
+  if (auto error = detail::ReadSamplingFloat(
+          body, "frequency_penalty", &output->frequency_penalty, true)) {
     return error;
   }
   if (auto error = detail::ReadSamplingFloat(body, "presence_penalty",
-                                             &output->presence_penalty)) {
+                                             &output->presence_penalty, true)) {
     return error;
   }
 
