@@ -31,6 +31,7 @@ public:
     std::size_t max_tokens = 0;
     gufo::sampling::SamplingConfig sampling;
     std::string client_id;
+    std::vector<std::string> stop_sequences;
   };
   Call LastCall() {
     const std::lock_guard lock(mutex_);
@@ -42,13 +43,18 @@ public:
   }
   std::string model_id() const override { return "test"; }
   bool ready() const override { return true; }
+  gufo::ReasoningOptions reasoning_defaults() const override {
+    return reasoning;
+  }
   std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
-  Result complete(std::string_view prompt, std::size_t limit,
-                  const gufo::sampling::SamplingConfig& sampling,
-                  const CancellationCheck& cancel, const TokenCallback& token,
-                  std::string_view client_id = "anonymous") override {
+  Result complete(
+      std::string_view prompt, std::size_t limit,
+      const gufo::sampling::SamplingConfig& sampling,
+      const CancellationCheck& cancel, const TokenCallback& token,
+      std::string_view client_id = "anonymous",
+      const std::vector<std::string>& stop_sequences = {}) override {
     ++calls;
     if (failure == 1)
       throw std::length_error("context exceeded");
@@ -71,7 +77,8 @@ public:
       last_ = {.prompt = std::string(prompt),
                .max_tokens = limit,
                .sampling = sampling,
-               .client_id = std::string(client_id)};
+               .client_id = std::string(client_id),
+               .stop_sequences = stop_sequences};
       result.text = output_;
     }
     result.prompt_tokens = 10;
@@ -85,6 +92,10 @@ public:
     result.decode_ms = 2;
     result.finish_reason =
         limit == 1 ? FinishReason::kLength : FinishReason::kStop;
+    if (!forced_stop_sequence.empty()) {
+      result.finish_reason = FinishReason::kStopSequence;
+      result.stop_sequence = forced_stop_sequence;
+    }
     if (token)
       (void)token(result.text);
     return result;
@@ -93,8 +104,8 @@ public:
               const gufo::sampling::SamplingConfig& sampling,
               const CancellationCheck& cancel,
               const TokenCallback& token) override {
-    auto result =
-        complete("", limit, sampling, cancel, token, request.client_id);
+    auto result = complete("", limit, sampling, cancel, token,
+                           request.client_id, request.stop_sequences);
     {
       const std::lock_guard lock(mutex_);
       last_.chat = request;
@@ -103,6 +114,8 @@ public:
   }
   std::atomic<int> calls{0};
   std::atomic<int> failure{0};
+  std::string forced_stop_sequence;
+  gufo::ReasoningOptions reasoning;
   bool wait_for_disconnect{false};
   std::atomic<bool> disconnected{false};
   std::binary_semaphore entered{0};
@@ -513,6 +526,92 @@ void TestPeerDisconnect() {
   assert(server.backend->disconnected);
 }
 
+void TestCompatibilityStopSequences() {
+  RunningServer server;
+  server.backend->forced_stop_sequence = "END";
+  for (
+      const auto& [path, body] : {
+          std::pair{"/v1/completions", R"({"prompt":"hello","stop":"END"})"},
+          std::pair{"/completion", R"({"prompt":"hello","stop":["END"]})"},
+          std::pair{
+              "/v1/messages",
+              R"({"messages":[{"role":"user","content":"hello"}],"max_tokens":32,"stop_sequences":["END"]})"},
+      }) {
+    const auto response = server.Post(path, body);
+    ExpectStatus(response, 200);
+    assert(server.backend->LastCall().stop_sequences ==
+           std::vector<std::string>{"END"});
+    const auto output =
+        gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+    if (std::string_view(path) == "/v1/messages") {
+      assert(output.member_str("stop_reason") == "stop_sequence");
+      assert(output.member_str("stop_sequence") == "END");
+    } else if (std::string_view(path) == "/completion") {
+      assert(output.find("stopped_word")->as_bool());
+      assert(!output.find("stopped_eos")->as_bool());
+      assert(output.member_str("stopping_word") == "END");
+    } else {
+      assert(output.find("choices")->items()[0].member_str("finish_reason") ==
+             "stop");
+    }
+  }
+  const auto before = server.backend->calls.load();
+  for (const auto* stop : {"null", "\"END\"", "[null]", "[\"\"]", "true"}) {
+    auto body = gufo::json::parse(
+        R"({"messages":[{"role":"user","content":"hello"}],"max_tokens":32})");
+    body["stop_sequences"] = gufo::json::parse(stop);
+    ExpectStatus(server.Post("/v1/messages", body.dump()), 400);
+  }
+  ExpectStatus(server.Post("/v1/responses", R"({"input":"hi","stop":"END"})"),
+               400);
+  assert(server.backend->calls == before);
+  auto body = gufo::json::parse(
+      R"({"messages":[{"role":"user","content":"hello"}],"max_tokens":32,"stop_sequences":[]})");
+  for (int i = 0; i < 65; ++i)
+    body["stop_sequences"].push_back(std::to_string(i));
+  ExpectStatus(server.Post("/v1/messages", body.dump()), 400);
+  body["stop_sequences"] = gufo::json::Value::array();
+  for (int i = 0; i < 5; ++i)
+    body["stop_sequences"].push_back(std::string(4096, 'x'));
+  ExpectStatus(server.Post("/v1/messages", body.dump()), 400);
+  server.backend->forced_stop_sequence.clear();
+  for (const int limit : {1, 32}) {
+    body["stop_sequences"] = gufo::json::Value::array();
+    body["max_tokens"] = limit;
+    const auto response = server.Post("/v1/messages", body.dump());
+    ExpectStatus(response, 200);
+    const auto output =
+        gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+    assert(output.member_str("stop_reason") ==
+           (limit == 1 ? "max_tokens" : "end_turn"));
+    assert(output.find("stop_sequence")->is_null());
+  }
+}
+
+void TestCompatibilityThinkingDefaults() {
+  RunningServer server;
+  for (const bool enabled : {false, true}) {
+    server.backend->reasoning = {
+        .enabled = enabled,
+        .effort = gufo::ReasoningEffort::kHigh,
+        .preserve_thinking = true,
+    };
+    for (
+        const auto& [path, body] : {
+            std::pair{"/v1/responses", R"({"input":"hello"})"},
+            std::pair{
+                "/v1/messages",
+                R"({"messages":[{"role":"user","content":"hello"}],"max_tokens":32})"},
+        }) {
+      ExpectStatus(server.Post(path, body), 200);
+      const auto reasoning = server.backend->LastCall().chat.reasoning;
+      assert(reasoning.enabled == enabled);
+      assert(reasoning.effort == gufo::ReasoningEffort::kHigh);
+      assert(reasoning.preserve_thinking == true);
+    }
+  }
+}
+
 void TestStreamingFraming() {
   RunningServer server;
   const std::string chunks = std::string("3\r\na\0b\r\n", 8) + "3\r\nend\r\n";
@@ -542,6 +641,8 @@ int main() {
   TestAuthorization();
   TestFramingAndMetrics();
   TestCompatibilityRequests();
+  TestCompatibilityStopSequences();
+  TestCompatibilityThinkingDefaults();
   TestCompatibilityUtf8();
   TestPeerDisconnect();
   TestStreamingFraming();

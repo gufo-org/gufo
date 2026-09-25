@@ -47,7 +47,7 @@ public:
   Result complete(std::string_view, std::size_t,
                   const gufo::sampling::SamplingConfig&,
                   const CancellationCheck&, const TokenCallback&,
-                  std::string_view) override {
+                  std::string_view, const std::vector<std::string>&) override {
     return {};
   }
 
@@ -108,6 +108,7 @@ public:
     }
     result.completion_tokens = result.tokens.size();
     result.finish_reason = finish_reason;
+    result.stop_sequence = stop_sequence;
     completed.store(true);
     return result;
   }
@@ -144,6 +145,7 @@ public:
   std::vector<std::string> pieces;
   std::string cache_miss_reason;
   FinishReason finish_reason{FinishReason::kStop};
+  std::string stop_sequence;
   bool block_after_first_piece{false};
   std::atomic<bool> completed{false};
   std::atomic<int> chat_calls{0};
@@ -1214,9 +1216,143 @@ void TestAggregateImageLimit() {
          "image budget must cover all messages, not each separately");
 }
 
+void TestStopSequencesAndDefaultFields() {
+  using gufo::json::Value;
+  const auto base = gufo::json::parse(
+      R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
+  for (const auto* stop : {"null", "[]", "\"END\"", "[\"END\",\"終\"]"}) {
+    auto body = base;
+    body["stop"] = gufo::json::parse(stop);
+    FakeBackend backend;
+    backend.pieces = {"hello"};
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+    Expect(response.status == 200, "supported stop forms are accepted");
+    const auto& expected = body["stop"];
+    const std::size_t count = expected.is_null()     ? 0
+                              : expected.is_string() ? 1
+                                                     : expected.items().size();
+    Expect(backend.last_request.stop_sequences.size() == count,
+           "stop sequences reach the backend");
+    if (count)
+      Expect(backend.last_request.stop_sequences.front() == "END",
+             "stop string bytes are preserved");
+  }
+  for (const bool stream : {false, true}) {
+    for (const auto* stop :
+         {"true", "123", "{}", "\"\"", "[\"\"]", "[\"END\",null]",
+          "[\"1\",\"2\",\"3\",\"4\",\"5\"]"}) {
+      auto body = base;
+      body["stream"] = stream;
+      body["stop"] = gufo::json::parse(stop);
+      FakeBackend backend;
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 400 && backend.chat_calls == 0 &&
+                 !response.streaming_body,
+             "invalid stops fail before generation or streaming headers");
+    }
+  }
+  auto body = base;
+  body["stop"] = std::string(4097, 's');
+  FakeBackend backend;
+  Expect(gufo::server::HandleOpenAiChat(Request(body.dump()), backend).status ==
+             400,
+         "oversized stop sequences are bounded");
+  backend.defaults.max_tokens = 37;
+  backend.defaults.sampling.temperature = 0.7F;
+  backend.defaults.sampling.top_p = 0.9F;
+  backend.defaults.sampling.seed = 123;
+  backend.defaults.sampling.frequency_penalty = 0.5F;
+  backend.defaults.sampling.presence_penalty = 0.3F;
+  body = base;
+  for (const auto* field :
+       {"tools", "tool_choice", "stream", "stream_options", "n", "max_tokens",
+        "max_completion_tokens", "logprobs", "top_logprobs", "response_format",
+        "modalities", "audio", "temperature", "top_p", "seed", "logit_bias",
+        "frequency_penalty", "presence_penalty"})
+    body[field] = Value();
+  Expect(gufo::server::HandleOpenAiChat(Request(body.dump()), backend).status ==
+             200,
+         "nullable API defaults do not enable unsupported features");
+  Expect(backend.last_max_tokens == backend.defaults.max_tokens,
+         "null token limits retain the configured default");
+  Expect(backend.last_sampling.temperature ==
+                 backend.defaults.sampling.temperature &&
+             backend.last_sampling.top_p == backend.defaults.sampling.top_p &&
+             backend.last_sampling.seed == backend.defaults.sampling.seed &&
+             backend.last_sampling.frequency_penalty ==
+                 backend.defaults.sampling.frequency_penalty &&
+             backend.last_sampling.presence_penalty ==
+                 backend.defaults.sampling.presence_penalty,
+         "null sampling fields retain server defaults");
+  body["logprobs"] = false;
+  body["logit_bias"] = Value::object();
+  body["response_format"] = gufo::json::parse(R"({"type":"text"})");
+  body["modalities"] = gufo::json::parse(R"(["text"])");
+  Expect(gufo::server::HandleOpenAiChat(Request(body.dump()), backend).status ==
+             200,
+         "explicit text-only and disabled logprobs defaults work");
+  for (const auto* request :
+       {R"({"logprobs":true})", R"({"top_logprobs":3})",
+        R"({"response_format":{"type":"json_object"}})",
+        R"({"modalities":["text","audio"]})", R"({"audio":{}})",
+        R"({"response_format":{"type":"text","unexpected":true}})"}) {
+    auto invalid = base;
+    const auto fields = gufo::json::parse(request);
+    for (const auto& [key, value] : fields.members())
+      invalid[key] = value;
+    const auto before = backend.chat_calls.load();
+    Expect(gufo::server::HandleOpenAiChat(Request(invalid.dump()), backend)
+                       .status == 400 &&
+               backend.chat_calls == before,
+           "actual unsupported feature requests remain explicit errors");
+  }
+}
+
+void TestExplicitStopOutputFraming() {
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  for (const bool stream : {false, true}) {
+    for (const bool thinking : {false, true}) {
+      FakeBackend backend;
+      // The scheduler already removed the stop marker. Test protocol framing
+      // independently, including a required tool interrupted before its call.
+      backend.pieces = {"safe"};
+      backend.finish_reason = Finish::kStopSequence;
+      backend.stop_sequence = "END";
+      auto body = gufo::json::parse(
+          R"({"model":"test-model","messages":[{"role":"user","content":"hello"}],
+              "tools":[{"type":"function","function":{"name":"f","parameters":{}}}],
+              "tool_choice":"required","stop":"END"})");
+      body["stream"] = stream;
+      body["chat_template_kwargs"] = gufo::json::Value::object();
+      body["chat_template_kwargs"]["enable_thinking"] = thinking;
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 200, "explicit stop completes successfully");
+      std::string output = response.body;
+      if (response.streaming_body)
+        response.streaming_body([&](std::string_view piece) {
+          output += piece;
+          return true;
+        });
+      Expect(output.find("\"finish_reason\":\"stop\"") != std::string::npos &&
+                 output.find("tool_choice_unsatisfied") == std::string::npos &&
+                 output.find("END") == std::string::npos,
+             "explicit stop wins over required tools and hides its marker");
+      Expect(
+          output.find(thinking ? "\"reasoning_content\":\"safe\""
+                               : "\"content\":\"safe\"") != std::string::npos,
+          "stopped text retains reasoning/content framing");
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
+  TestStopSequencesAndDefaultFields();
+  TestExplicitStopOutputFraming();
   TestCachePromptOption();
   TestToolChoiceEnforcement();
   TestStreamingIsLive();

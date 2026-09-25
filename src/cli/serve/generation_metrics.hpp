@@ -26,6 +26,9 @@ inline std::string GenerationLogDetails(
       << (result.cancelled ? "cancelled"
           : result.finish_reason == TextGenerationBackend::FinishReason::kLength
               ? "length"
+          : result.finish_reason ==
+                  TextGenerationBackend::FinishReason::kStopSequence
+              ? "stop_sequence"
               : "stop")
       << " cache="
       << (result.cache_disk_hit ? "disk"

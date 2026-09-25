@@ -14,6 +14,8 @@
 #include <thread>
 #include <utility>
 
+#include "src/cli/serve/stop_sequences.hpp"
+
 namespace gufo::server {
 namespace {
 
@@ -81,6 +83,7 @@ struct ScheduledRequest {
   bool advance_pending{false};
   bool preview_stops{false};
   std::size_t generated_output_bytes{0};
+  StopSequenceFilter stop_filter;
 
   std::mutex output_mutex;
   std::condition_variable output_condition;
@@ -360,7 +363,21 @@ struct TextGenerationScheduler::Impl {
 
   void CompleteSuccess(const std::shared_ptr<ScheduledRequest>& request,
                        TextGenerationBackend::FinishReason finish_reason) {
-    const auto cache_commit = request->runner_request.Commit();
+    if (request->stop_filter.enabled()) {
+      auto tail = request->stop_filter.Finish();
+      request->result.text += tail;
+      if (!tail.empty() && !PublishPiece(request, std::move(tail)))
+        throw TextGenerationError(
+            TextGenerationErrorCode::kOutputBackpressure,
+            "text generation buffered output limit exceeded");
+    }
+    // A stop may land on a preview, an unadvanced AR token, or inside an
+    // accepted speculative block. Retain only correctly labelled executed
+    // state, using the same cache reconciliation as an interrupted request.
+    const auto cache_commit =
+        finish_reason == TextGenerationBackend::FinishReason::kStopSequence
+            ? request->runner_request.Cancel()
+            : request->runner_request.Commit();
     request->result.cache_snapshot_bytes = cache_commit.snapshot_bytes;
     request->result.cache_snapshot_ms = cache_commit.snapshot_ms;
     request->result.cache_disk_queued_bytes = cache_commit.disk_queued_bytes;
@@ -560,6 +577,11 @@ struct TextGenerationScheduler::Impl {
     request->result.decode_ms +=
         std::chrono::duration<double, std::milli>(Clock::now() - decode_start)
             .count();
+    if (request->stop_filter.stopped()) {
+      CompleteSuccess(request,
+                      TextGenerationBackend::FinishReason::kStopSequence);
+      return std::nullopt;
+    }
     request->advance_pending = true;
     return PrepareDecode(request);
   }
@@ -591,7 +613,10 @@ struct TextGenerationScheduler::Impl {
     }
     request->generated_output_bytes += selection.piece.size();
     request->result.tokens.push_back(selection.token);
-    if (!PublishPiece(request, selection.piece)) {
+    const auto piece = request->stop_filter.enabled()
+                           ? request->stop_filter.Push(selection.piece)
+                           : selection.piece;
+    if (!piece.empty() && !PublishPiece(request, piece)) {
       CompleteFailure(request,
                       std::make_exception_ptr(TextGenerationError(
                           TextGenerationErrorCode::kOutputBackpressure,
@@ -599,8 +624,10 @@ struct TextGenerationScheduler::Impl {
       return false;
     }
     if (incremental_text_is_exact) {
-      request->result.text += selection.piece;
+      request->result.text += piece;
     }
+    if (request->stop_filter.stopped())
+      request->result.stop_sequence = request->stop_filter.matched_sequence();
     if (CompleteIfStopped(request)) {
       return false;
     }
@@ -665,11 +692,18 @@ struct TextGenerationScheduler::Impl {
         if (!PublishDecodedSelection(request, selection)) {
           return;
         }
+        if (request->stop_filter.stopped())
+          break;
       }
 
       request->result.decode_ms +=
           std::chrono::duration<double, std::milli>(Clock::now() - decode_start)
               .count();
+      if (request->stop_filter.stopped()) {
+        CompleteSuccess(request,
+                        TextGenerationBackend::FinishReason::kStopSequence);
+        return;
+      }
       if (step.stop) {
         CompleteSuccess(request, TextGenerationBackend::FinishReason::kStop);
         return;
@@ -698,6 +732,11 @@ struct TextGenerationScheduler::Impl {
       request->result.decode_ms += std::chrono::duration<double, std::milli>(
                                        Clock::now() - preview_start)
                                        .count();
+    }
+    if (request->stop_filter.stopped()) {
+      CompleteSuccess(request,
+                      TextGenerationBackend::FinishReason::kStopSequence);
+      return false;
     }
     if (!request->runner_request.PreparePromptSnapshot())
       return false;
@@ -927,6 +966,8 @@ struct TextGenerationScheduler::Impl {
           published = false;
           break;
         }
+        if (item.request->stop_filter.stopped())
+          break;
       }
       item.request->result.decode_ms +=
           std::chrono::duration<double, std::milli>(Clock::now() -
@@ -935,13 +976,20 @@ struct TextGenerationScheduler::Impl {
       if (!published || IsTerminal(item.request)) {
         continue;
       }
-      if (step.stop) {
-        CompleteSuccess(item.request,
-                        TextGenerationBackend::FinishReason::kStop);
-      } else if (item.request->result.tokens.size() >=
-                 item.request->token_limit) {
-        CompleteSuccess(item.request,
-                        TextGenerationBackend::FinishReason::kLength);
+      try {
+        if (item.request->stop_filter.stopped()) {
+          CompleteSuccess(item.request,
+                          TextGenerationBackend::FinishReason::kStopSequence);
+        } else if (step.stop) {
+          CompleteSuccess(item.request,
+                          TextGenerationBackend::FinishReason::kStop);
+        } else if (item.request->result.tokens.size() >=
+                   item.request->token_limit) {
+          CompleteSuccess(item.request,
+                          TextGenerationBackend::FinishReason::kLength);
+        }
+      } catch (...) {
+        CompleteFailure(item.request, std::current_exception());
       }
     }
   }
@@ -1302,8 +1350,13 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
     throw std::invalid_argument("text scheduler prompt must not be empty");
   }
   sampling.Validate();
+  ValidateStopSequences(metadata.stop_sequences);
+  if (!metadata.stop_sequences.empty() && !impl_->incremental_text_is_exact)
+    throw std::invalid_argument(
+        "stop sequences require exact incremental token decoding");
 
   auto request = std::make_shared<ScheduledRequest>();
+  request->stop_filter = StopSequenceFilter(std::move(metadata.stop_sequences));
   request->id = impl_->next_request_id.fetch_add(1, std::memory_order_relaxed);
   request->client_id =
       metadata.client_id.empty() ? "anonymous" : std::move(metadata.client_id);

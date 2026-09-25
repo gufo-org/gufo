@@ -1,6 +1,6 @@
 # OpenAI-Compatible Server
 
-Status: implemented subset, 2026-09-19
+Status: implemented subset, 2026-09-25
 
 ## Purpose
 
@@ -16,6 +16,7 @@ The reference protocols are:
 - https://developers.openai.com/api/reference/resources/responses/methods/create/
 - https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create/
 - https://developers.openai.com/api/reference/resources/models/methods/list/
+- https://platform.claude.com/docs/en/api/handling-stop-reasons
 
 The local server does not need to reproduce OpenAI-hosted storage, billing,
 organization, or account behavior.
@@ -410,8 +411,10 @@ The other compatibility routes are deliberately limited:
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
-sampling controls. They reject unsupported streaming, multiple candidates,
-stop strings and other generation controls instead of ignoring them.
+sampling controls. They reject unsupported streaming and multiple candidates.
+Responses and Messages honor the server's configured thinking defaults.
+Completions routes accept `stop`; Messages accepts `stop_sequences`.
+Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
 and template-aware message counting are not implemented.
 
@@ -425,6 +428,7 @@ and template-aware message counting are not implemented.
 - `temperature`
 - `top_p`
 - `seed`
+- `stop`: null, one string, or an array of up to four strings
 - `stream`
 - `stream_options.include_usage`
 - `tools` and `tool_choice` when supported. Function tools accept the nested
@@ -449,7 +453,24 @@ sampling replay retains independent request histories.
 
 Tool calls are emitted only for declared functions when `tool_choice` allows
 calling tools. An unmet `required` choice returns `tool_choice_unsatisfied`
-(HTTP 502, or an SSE error after streaming starts).
+(HTTP 502, or an SSE error after streaming starts), unless a requested stop
+sequence interrupted generation first.
+
+Stop sequences match accepted output bytes, including reasoning and tool
+markup, before streaming or response parsing. Partial prefixes are buffered;
+matched sequences and subsequent text are excluded. OpenAI reports
+`finish_reason: "stop"`; Messages reports `stop_reason: "stop_sequence"` and
+the matched `stop_sequence`. EOS and length limits flush unmatched prefixes.
+Usage includes the token completing the match. Each request has independent
+matching state, including speculative batches; caches retain only correctly
+labelled executed model state. Stops must be nonempty, at most 4 KiB each and
+16 KiB combined. Messages allows up to 64 sequences.
+
+Nullable Chat Completions defaults retain server settings, including sampling
+and token limits. `logprobs: false`, empty `logit_bias`,
+`response_format: {"type":"text"}` and `modalities: ["text"]` are accepted.
+Actual log probabilities, token biases, structured outputs and audio output
+remain unsupported and return explicit errors.
 
 Admission groups text requests by the socket peer's IP address across chat and
 compatibility endpoints. Caller-provided identity headers do not affect quotas;
