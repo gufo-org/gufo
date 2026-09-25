@@ -72,6 +72,8 @@ struct HttpResponse {
   struct StreamLog {
     std::string details;
     std::string error_code;
+    /// A terminal error was successfully written in the stream's protocol.
+    bool error_event_sent{false};
   };
   std::shared_ptr<StreamLog> stream_log{};
   std::function<void(WebSocket&)> websocket{};

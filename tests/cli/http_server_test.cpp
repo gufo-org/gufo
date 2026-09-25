@@ -147,12 +147,14 @@ public:
       auto log = std::make_shared<gufo::server::HttpResponse::StreamLog>();
       return gufo::server::HttpResponse{
           .streaming_body =
-              [log, fail = request.body == "fail"](const auto& write) {
+              [log, fail = !request.body.empty(),
+               reported = request.body == "reported"](const auto& write) {
                 (void)write(std::string_view("a\0b", 3));
                 (void)write("");
                 (void)write("end");
                 if (fail)
                   log->error_code = "injected";
+                log->error_event_sent = reported;
               },
           .stream_log = log,
       };
@@ -468,6 +470,16 @@ void TestCompatibilityRequests() {
   ExpectStatus(failed_stream, 200);  // Fake backend fails after headers.
   assert(failed_stream.find("event: response.failed") != std::string::npos);
   assert(failed_stream.find("event: response.completed") == std::string::npos);
+  const auto failed_data = failed_stream.find(
+      "data: ", failed_stream.find("event: response.failed"));
+  assert(failed_data != std::string::npos);
+  const auto failed_event = gufo::json::parse(
+      std::string_view(failed_stream)
+          .substr(failed_data + 6,
+                  failed_stream.find("\n\n", failed_data) - failed_data - 6));
+  assert(failed_event.find("response")->find("error")->member_str("code") ==
+         "server_error");
+  assert(failed_stream.ends_with("0\r\n\r\n"));
   server.backend->failure = 0;
   const auto continued = response_body(
       server.Post("/v1/responses",
@@ -655,13 +667,13 @@ void TestCompatibilityThinkingDefaults() {
 void TestStreamingFraming() {
   RunningServer server;
   const std::string chunks = std::string("3\r\na\0b\r\n", 8) + "3\r\nend\r\n";
-  for (const bool fail : {false, true}) {
-    const auto response = server.Post("/stream", fail ? "fail" : "");
+  for (const std::string body : {"", "fail", "reported"}) {
+    const auto response = server.Post("/stream", body);
     ExpectStatus(response, 200);
     assert(response.find("Transfer-Encoding: chunked\r\n") !=
            std::string::npos);
     assert(response.substr(response.find("\r\n\r\n") + 4) ==
-           chunks + (fail ? "" : "0\r\n\r\n"));
+           chunks + (body == "fail" ? "" : "0\r\n\r\n"));
   }
   const auto thrown = server.Post("/stream-error", "");
   assert(thrown.substr(thrown.find("\r\n\r\n") + 4) == "b\r\nfirst chunk\r\n");

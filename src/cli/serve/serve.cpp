@@ -438,7 +438,7 @@ void PrintServeHelp(std::string_view program_name,
   }
 
   if (subcommand == "llm") {
-    std::string model = "models/Qwen3.5-4B-BF16.gguf";
+    std::string model;
     std::string served_model_name;
     std::uint32_t max_context = 0;
     std::int64_t max_tokens = -1;
@@ -475,10 +475,8 @@ void PrintServeHelp(std::string_view program_name,
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
 
     // Model & Context
-    parser.AddOption(
-        "-m", "--model", "PATH",
-        "Path to GGUF model file (default: models/Qwen3.5-4B-BF16.gguf)",
-        "Model", &model);
+    parser.AddOption("-m", "--model", "PATH",
+                     "Path to GGUF model file (required)", "Model", &model);
     parser.AddOption("", "--mmproj", "PATH",
                      "Qwen BF16 vision sidecar (auto-discovered beside model)",
                      "Model", &vision_model_path);
@@ -891,7 +889,7 @@ int RunServe(std::span<const char* const> args) {
     }
   } else {
     // Default to LLM server
-    std::string model = "models/Qwen3.5-4B-BF16.gguf";
+    std::string model;
     std::string served_model_name;
     std::uint32_t max_context = 0;
     std::int64_t max_tokens = -1;
@@ -926,10 +924,8 @@ int RunServe(std::span<const char* const> args) {
     gufo::cli::ArgParser llm_parser(
         "gufo serve llm",
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
-    llm_parser.AddOption(
-        "-m", "--model", "PATH",
-        "Path to GGUF model file (default: models/Qwen3.5-4B-BF16.gguf)",
-        "Model", &model);
+    llm_parser.AddOption("-m", "--model", "PATH",
+                         "Path to GGUF model file (required)", "Model", &model);
     llm_parser.AddOption(
         "", "--mmproj", "PATH",
         "Qwen BF16 vision sidecar (auto-discovered beside model)", "Model",
@@ -1111,6 +1107,10 @@ int RunServe(std::span<const char* const> args) {
         static_cast<std::uint32_t>(draft_tokens);
     speculative_config.min_draft_tokens =
         static_cast<std::uint32_t>(min_draft_tokens);
+    if (model.empty()) {
+      std::cerr << "Error: --model <PATH> is required\n";
+      return 2;
+    }
     std::string err;
     ModelLoadLog load_log("text", model);
     backend = std::make_shared<server::InferenceBackend>();

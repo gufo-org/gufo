@@ -19,6 +19,7 @@ void TestDefaultOptions() {
   const std::array<const char*, 0> args{};
   const auto options = gufo::cli::ParseBenchOptions(args);
   Expect(options.has_value(), "default options parse");
+  Expect(options->model_path.empty(), "no implicit model path");
   Expect(options->n_prompts == std::vector<std::size_t>{2048},
          "default prefill is 2048 tokens");
   Expect(options->n_depths == std::vector<std::size_t>{0},

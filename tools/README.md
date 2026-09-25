@@ -10,7 +10,7 @@ benchmark/tuning executables; Python tools run from this source tree.
 | --- | --- |
 | `bench/` | Kernel microbenchmarks, hipBLASLt tuning, and direct speculative-corpus checks; `model-bench.py` drives per-model BENCHMARKS.md tables against each model's reference |
 | `prof/` | rocprofv3 capture, stage summaries, and ISA inspection |
-| `serving/` | Concurrent HTTP benchmarks and interrupted-chat/disk replay checks |
+| `serving/` | HTTP benchmarks, interrupted-chat/disk replay and official OpenAI SDK checks |
 | `ds4/` | DeepSeek-specific validation and experiments |
 | `qwen27b/` | Qwen27B/DFlash2 kernels, reference checks, and vision validation |
 | `qwen-flash/` | Flash-Next projection and MoE microbenchmarks |
@@ -26,6 +26,20 @@ MiniMax's manifest and quality tooling. Both support model verification.
 See [performance commands](../docs/PERFORMANCE.md),
 [benchmark methodology](../docs/BENCHMARKS.md), and
 [MiniMax validation](../docs/models/minimax-h3/QUALITY.md).
+
+## Responses client check
+
+With a local Gufo text server running, use its API model name from `/v1/models`
+(`qwen` here), rather than its weights path:
+
+```sh
+nix develop -c python3 tools/serving/check-responses-sdk.py \
+  --base-url http://127.0.0.1:8080/v1 --model qwen
+```
+
+Add `--expect-reasoning` when the server defaults to thinking. This uses the
+official OpenAI SDK with strict schema validation: buffered/streamed output,
+reasoning, conversation replay, async concurrency, limits and disconnects.
 
 ## Qwen27B
 

@@ -65,6 +65,7 @@ public:
     result.prompt_tokens = 7;
     result.cached_prompt_tokens = 5;
     result.prefill_tokens = 2;
+    result.reasoning_tokens = reasoning_tokens;
     result.prefill_chunks = 1;
     result.queue_depth_at_submit = 3;
     result.client_queue_depth_at_submit = 1;
@@ -153,6 +154,7 @@ public:
   SamplingDefaults defaults;
   gufo::ReasoningOptions reasoning_defaults_value;
   std::size_t last_max_tokens{0};
+  std::size_t reasoning_tokens{0};
   float last_temperature{0.0F};
   gufo::sampling::SamplingConfig last_sampling;
   std::optional<gufo::server::TextGenerationErrorCode> reject_on_start;
@@ -1419,6 +1421,7 @@ void TestResponsesOutput() {
                     : std::vector<std::string>{"Answer ", "\xE2\x94", "\x8C"};
       backend.finish_reason = limited ? Backend::FinishReason::kLength
                                       : Backend::FinishReason::kStop;
+      backend.reasoning_tokens = reasoning ? 3 : 0;
       gufo::server::ChatRequest chat;
       chat.reasoning.enabled = reasoning;
       const auto buffered = gufo::server::CreateOpenAiResponse(
@@ -1441,6 +1444,13 @@ void TestResponsesOutput() {
           text += event.member_str("delta");
         if (type == "response.reasoning_summary_text.delta")
           thought += event.member_str("delta");
+        if (const auto* response = event.find("response")) {
+          Expect(response->find("parallel_tool_calls") &&
+                     !response->find("parallel_tool_calls")->as_bool() &&
+                     response->member_str("tool_choice") == "none" &&
+                     response->find("tools")->items().empty(),
+                 "Lifecycle events declare the supported tool policy");
+        }
         events.push_back(std::move(event));
         return true;
       });
@@ -1469,6 +1479,21 @@ void TestResponsesOutput() {
                      ->find("input_tokens_details")
                      ->member_size("cached_tokens") == 5,
              "Responses retains prompt-cache usage");
+      for (const auto* response : {&body, &terminal}) {
+        Expect(response->find("parallel_tool_calls") &&
+                   !response->find("parallel_tool_calls")->as_bool() &&
+                   response->member_str("tool_choice") == "none" &&
+                   response->find("tools")->items().empty(),
+               "Responses includes SDK-required tool fields");
+        const auto& usage = *response->find("usage");
+        Expect(usage.find("input_tokens_details")
+                           ->member_size("cache_write_tokens") == 2 &&
+                   usage.find("output_tokens_details")
+                           ->member_size("reasoning_tokens") ==
+                       backend.reasoning_tokens &&
+                   usage.member_size("output_tokens") == backend.pieces.size(),
+               "Responses includes new-cache and actual reasoning usage");
+      }
     }
   }
 }
