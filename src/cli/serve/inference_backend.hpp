@@ -115,6 +115,7 @@ public:
 
   /// Stable model identifier used in API responses.
   [[nodiscard]] std::string model_id() const override;
+  [[nodiscard]] std::uint32_t max_context() const override;
   [[nodiscard]] bool ready() const override;
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;

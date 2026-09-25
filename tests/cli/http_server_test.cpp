@@ -41,6 +41,7 @@ public:
     output_ = std::move(text);
   }
   std::string model_id() const override { return "test"; }
+  std::uint32_t max_context() const override { return 4096; }
   bool ready() const override { return true; }
   std::size_t count_tokens(std::string_view text) const override {
     return text.size();
@@ -437,6 +438,13 @@ void TestCompatibilityRequests() {
           "max_tokens":2})"));
   assert(anthropic.member_str("stop_reason") == "end_turn");
   assert(server.backend->LastCall().chat.messages[0].content == "Be concise.");
+
+  for (const std::string path : {"/props", "/props?model=test"}) {
+    const auto props =
+        response_body(server.Send("GET " + path + " HTTP/1.1\r\n\r\n"));
+    assert(props.member_str("model") == "test");
+    assert(props.member_double("n_ctx") == 4096);
+  }
 }
 
 void TestInvalidBindSettings() {

@@ -820,14 +820,12 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
              "invalid_prompt");
 }
 
-HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend&) {
-  const std::string model = req.query_param("model");
-  if (model.empty()) {
-    return Err(400, "Bad Request", "'model' query parameter is required",
-               "invalid_request_error", "missing_model");
-  }
+HttpResponse LlamaProps(const HttpRequest& req,
+                        TextGenerationBackend& backend) {
+  const std::string requested = req.query_param("model");
   json::Value resp = json::Value::object();
-  resp["model"] = model;
+  resp["model"] = requested.empty() ? backend.model_id() : requested;
+  resp["n_ctx"] = static_cast<long long>(backend.max_context());
   resp["template"] = "";
   json::Value model_info = json::Value::object();
   resp["model_info"] = std::move(model_info);

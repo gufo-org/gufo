@@ -2773,6 +2773,7 @@ struct InferenceBackend::Impl {
   struct State {
     std::shared_ptr<TextGenerationScheduler> scheduler;
     std::string model_id;
+    std::uint32_t max_context{0};
     SamplingDefaults sampling_defaults;
     ReasoningOptions reasoning_defaults;
   };
@@ -3139,6 +3140,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
         speculative_options, disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = runner->Descriptor().max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
     if (DiskCacheEnabled(disk_cache_config)) {
       runner_disk_cache = TextRunnerDiskCacheOptions{
@@ -3220,6 +3222,7 @@ bool InferenceBackend::load(
         disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = runner->Descriptor().max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
     if (DiskCacheEnabled(disk_cache_config)) {
       runner_disk_cache = TextRunnerDiskCacheOptions{
@@ -3298,6 +3301,7 @@ bool InferenceBackend::load(
         disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = runner->Descriptor().max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
     if (DiskCacheEnabled(disk_cache_config)) {
       runner_disk_cache = TextRunnerDiskCacheOptions{
@@ -3328,6 +3332,15 @@ std::string InferenceBackend::model_id() const {
   return state != nullptr ? state->model_id : "unknown";
 #else
   return "unknown";
+#endif
+}
+
+std::uint32_t InferenceBackend::max_context() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr ? state->max_context : 0;
+#else
+  return 0;
 #endif
 }
 
