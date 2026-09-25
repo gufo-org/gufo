@@ -10,13 +10,15 @@ versioned contract: supported fields behave as documented, and unsupported
 fields return explicit errors.
 
 Chat Completions is the main API, including streaming, images and tools.
-Responses and Anthropic Messages currently expose synchronous text subsets.
+Responses supports text with optional streaming; Anthropic Messages exposes a
+synchronous text subset.
 The reference protocols are:
 
 - https://developers.openai.com/api/reference/resources/responses/methods/create/
 - https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create/
 - https://developers.openai.com/api/reference/resources/models/methods/list/
 - https://platform.claude.com/docs/en/api/handling-stop-reasons
+- https://developers.openai.com/api/docs/guides/streaming-responses
 
 The local server does not need to reproduce OpenAI-hosted storage, billing,
 organization, or account behavior.
@@ -27,7 +29,7 @@ The only supported production platform is Linux x86-64 on Strix Halo.
 
 The C++20 runtime uses bounded HTTP/1.1 requests, one connection worker per
 request, and a separate inference scheduler. Connections close after each
-response. Chat Completions supports Server-Sent Events; socket closure
+response. Chat Completions and Responses support Server-Sent Events; socket closure
 propagates cancellation to the scheduler. JSON parsing rejects duplicate keys,
 invalid numbers and nesting beyond 128 containers.
 
@@ -37,7 +39,7 @@ not be required to serve requests.
 ## Single Executable and Model Configuration
 
 The deployed product is one `gufo` executable. Supported model graphs,
-tokenizers, HIP kernels, and AIE programs are compiled into it.
+tokenizers and HIP kernels are compiled into it.
 
 The executable provides subcommands rather than separate inference binaries:
 
@@ -64,6 +66,28 @@ weights and tokenizer. Each request leases a preallocated `QwenGpuExecutor`
 with independent KV, recurrent, graph, activation, and logit state.
 `--sessions N` controls the bounded session pool. The scheduler batches ready
 requests when the model runner supports their execution mode.
+
+Text serving defaults match llama.cpp for context and generation length:
+
+| Setting | Default |
+| --- | --- |
+| `--context` | `0`: native context from model metadata, per session |
+| `--max-tokens` | `-1`: until EOS or remaining context is exhausted |
+| `--sessions` | `1` |
+| Thinking / reasoning effort | Model template defaults |
+
+Clients can set a positive `max_tokens` / `max_completion_tokens` (Chat
+Completions) or `max_output_tokens` (Responses). These include reasoning tokens.
+Omitting the field uses the server default. A response cannot exceed remaining
+context; exhaustion reports `length` or `incomplete`, without discarding earlier
+conversation tokens. Reduce `--context` or `--sessions` if their state exceeds
+available memory.
+
+Gufo retains greedy sampling by default. llama.cpp instead defaults to temperature
+0.8, top-k 40, top-p 0.95 and min-p 0.05; set these explicitly to match its sampler.
+Both leave repetition, frequency and presence penalties disabled.
+Reference: [llama.cpp parameters](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/common.h)
+and [server options](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/tools/server/README.md).
 
 ```sh
 nix build
@@ -219,7 +243,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/models` | List loaded model aliases and capabilities |
-| `POST` | `/v1/responses` | Synchronous text subset |
+| `POST` | `/v1/responses` | Text, optional SSE streaming |
 | `POST` | `/v1/chat/completions` | Main chat, streaming, image and tool API |
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
 | `GET` | `/health` | Process liveness (aliases: `/v1/health`, `/healthz`) |
@@ -393,14 +417,19 @@ request limits, cancellation, cache accounting and completion state.
 ## Responses API Subset
 
 `POST /v1/responses` accepts `model`, `input` as text or text-message arrays,
-`instructions`, `max_output_tokens`, and the shared sampling controls. Clients
-supply the complete conversation. `store`, `background` and `stream` must be
-false when present. Images, tools, structured output, server-side conversations
-and `previous_response_id` are rejected on this route. Use Chat Completions for
-validated image, tool and streaming support.
+`instructions`, `max_output_tokens`, `stream`, and the shared sampling controls.
+Clients supply the complete conversation, including prior Gufo `output` items
+when retaining reasoning. `store` and `background` must be false
+when present. Images, tools, structured output, server-side conversations and
+`previous_response_id` are rejected on this route. Use Chat Completions for images
+and tools.
 
 Responses report `incomplete` with reason `max_output_tokens` when generation
-hits its limit. Otherwise they report `completed`.
+hits its limit. Otherwise they report `completed`. `stream: true` sends typed
+SSE events with consecutive `sequence_number` values: lifecycle, output items,
+text/reasoning deltas and terminal status. Local reasoning is exposed as
+`reasoning` items with `summary_text`; visible answers use `output_text`.
+Disconnects cancel generation through the same scheduler as Chat Completions.
 
 The other compatibility routes are deliberately limited:
 
@@ -411,12 +440,11 @@ The other compatibility routes are deliberately limited:
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
-sampling controls. They reject unsupported streaming and multiple candidates.
-Responses and Messages honor the server's configured thinking defaults.
-Native Messages rejects tools, streaming, `thinking`, and `output_config`;
-use Chat Completions for Gufo's tool/reasoning controls.
-Completions routes accept `stop`; Messages accepts `stop_sequences`.
-Responses has no stop-sequence field.
+sampling controls. The three routes above reject streaming; all reject multiple
+candidates. Responses and Messages honor the server's thinking defaults.
+Native Messages rejects tools, `thinking`, and `output_config`; use Chat
+Completions for tool/reasoning controls. Completions routes accept `stop`;
+Messages accepts `stop_sequences`. Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
 and template-aware message counting are not implemented.
 

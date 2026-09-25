@@ -1307,11 +1307,9 @@ public:
         }
         std::string_view remaining = pending_;
         remaining.remove_prefix(end_pos + kThinkEnd.size());
-        if (!remaining.empty() && remaining.front() == '\n') {
-          remaining.remove_prefix(1);
-        }
         pending_ = std::string(remaining);
         state_ = State::kContent;
+        trim_reasoning_separator_ = true;
       } else {
         std::size_t held = HeldMarkerPrefix(pending_);
         for (std::size_t len = std::min(pending_.size(), kThinkEnd.size() - 1);
@@ -1331,6 +1329,15 @@ public:
     }
 
     if (state_ == State::kContent) {
+      if (trim_reasoning_separator_) {
+        const auto first = pending_.find_first_not_of("\r\n");
+        if (first == std::string::npos) {
+          pending_.clear();
+          return true;
+        }
+        pending_.erase(0, first);
+        trim_reasoning_separator_ = false;
+      }
       const std::size_t marker = EarliestMarker(pending_);
       if (marker != std::string::npos) {
         if (marker > 0 && !emit_piece_(pending_.substr(0, marker), false)) {
@@ -1386,6 +1393,173 @@ private:
   std::string hidden_;
   State state_{State::kInitial};
   bool tool_mode_{false};
+  bool trim_reasoning_separator_{false};
+};
+
+// Responses uses semantic SSE events, rather than Chat Completions chunks.
+// Build the same output items for streaming and buffered responses.
+class ResponsesOutput {
+public:
+  ResponsesOutput(std::string model, HttpResponse::BodyWriter writer)
+      : writer_(std::move(writer)) {
+    response_ = json::Value::object();
+    response_["id"] = RandomId("resp_");
+    response_["object"] = "response";
+    response_["created_at"] = Now();
+    response_["model"] = std::move(model);
+    response_["status"] = "in_progress";
+    response_["error"] = json::Value();
+    response_["incomplete_details"] = json::Value();
+    response_["usage"] = json::Value();
+    response_["output"] = json::Value::array();
+    response_["store"] = false;
+  }
+
+  bool Begin() {
+    return Lifecycle("response.created") && Lifecycle("response.in_progress");
+  }
+
+  bool Append(std::string_view text, bool reasoning) {
+    if (text.empty())
+      return true;
+    if (!active_ || reasoning_ != reasoning) {
+      if (!CloseItem("completed"))
+        return false;
+      reasoning_ = reasoning;
+      active_ = true;
+      item_ = json::Value::object();
+      item_["id"] = RandomId(reasoning ? "rs_" : "msg_");
+      item_["type"] = reasoning ? "reasoning" : "message";
+      item_["status"] = "in_progress";
+      item_[reasoning ? "summary" : "content"] = json::Value::array();
+      if (!reasoning)
+        item_["role"] = "assistant";
+      auto added = IndexedEvent("response.output_item.added");
+      added["item"] = item_;
+      if (!Emit(std::move(added)))
+        return false;
+      text_.clear();
+      auto part = PartEvent(reasoning ? "response.reasoning_summary_part.added"
+                                      : "response.content_part.added");
+      part["part"] = Part();
+      if (!Emit(std::move(part)))
+        return false;
+    }
+    text_.append(text);
+    auto delta = PartEvent(reasoning ? "response.reasoning_summary_text.delta"
+                                     : "response.output_text.delta");
+    delta["delta"] = std::string(text);
+    if (!reasoning)
+      delta["logprobs"] = json::Value::array();
+    return Emit(std::move(delta));
+  }
+
+  json::Value Complete(const TextGenerationBackend::Result& result) {
+    const bool limited =
+        result.finish_reason == TextGenerationBackend::FinishReason::kLength;
+    CloseItem(limited ? "incomplete" : "completed");
+    response_["status"] = limited ? "incomplete" : "completed";
+    if (limited)
+      response_["incomplete_details"]["reason"] = "max_output_tokens";
+    auto usage = json::Value::object();
+    usage["input_tokens"] = result.prompt_tokens;
+    usage["input_tokens_details"]["cached_tokens"] =
+        result.cached_prompt_tokens;
+    usage["output_tokens"] = result.completion_tokens;
+    usage["total_tokens"] = result.prompt_tokens + result.completion_tokens;
+    response_["usage"] = std::move(usage);
+    response_["timings"] = GenerationTimings(result);
+    Lifecycle(limited ? "response.incomplete" : "response.completed");
+    return response_;
+  }
+
+  void Fail(std::string_view code, std::string_view message) {
+    response_["status"] = "failed";
+    response_["error"]["code"] = std::string(code);
+    response_["error"]["message"] = std::string(message);
+    Lifecycle("response.failed");
+  }
+
+private:
+  json::Value IndexedEvent(std::string_view type) const {
+    auto event = json::Value::object();
+    event["type"] = std::string(type);
+    event["output_index"] = output_index_;
+    return event;
+  }
+
+  json::Value PartEvent(std::string_view type) const {
+    auto event = IndexedEvent(type);
+    event["item_id"] = item_.member_str("id");
+    event[reasoning_ ? "summary_index" : "content_index"] = 0;
+    return event;
+  }
+
+  json::Value Part() const {
+    auto part = json::Value::object();
+    part["type"] = reasoning_ ? "summary_text" : "output_text";
+    part["text"] = text_;
+    if (!reasoning_) {
+      part["annotations"] = json::Value::array();
+      part["logprobs"] = json::Value::array();
+    }
+    return part;
+  }
+
+  bool CloseItem(const char* status) {
+    if (!active_)
+      return connected_;
+    auto done = PartEvent(reasoning_ ? "response.reasoning_summary_text.done"
+                                     : "response.output_text.done");
+    done["text"] = text_;
+    if (!reasoning_)
+      done["logprobs"] = json::Value::array();
+    if (!Emit(std::move(done)))
+      return false;
+    auto part = Part();
+    auto part_done =
+        PartEvent(reasoning_ ? "response.reasoning_summary_part.done"
+                             : "response.content_part.done");
+    part_done["part"] = part;
+    if (!Emit(std::move(part_done)))
+      return false;
+    item_[reasoning_ ? "summary" : "content"].push_back(std::move(part));
+    item_["status"] = status;
+    auto item_done = IndexedEvent("response.output_item.done");
+    item_done["item"] = item_;
+    response_["output"].push_back(item_);
+    active_ = false;
+    ++output_index_;
+    return Emit(std::move(item_done));
+  }
+
+  bool Lifecycle(std::string_view type) {
+    auto event = json::Value::object();
+    event["type"] = std::string(type);
+    event["response"] = response_;
+    return Emit(std::move(event));
+  }
+
+  bool Emit(json::Value event) {
+    if (!writer_)
+      return true;
+    if (!connected_)
+      return false;
+    event["sequence_number"] = sequence_++;
+    connected_ =
+        writer_("event: " + event.member_str("type") + "\n" + Sse(event));
+    return connected_;
+  }
+
+  HttpResponse::BodyWriter writer_;
+  json::Value response_;
+  json::Value item_;
+  std::string text_;
+  std::size_t sequence_{0};
+  std::size_t output_index_{0};
+  bool active_{false};
+  bool reasoning_{false};
+  bool connected_{true};
 };
 
 HttpResponse NonStreamingResponse(
@@ -1581,6 +1755,91 @@ HttpResponse StreamingResponse(
 }
 
 }  // namespace
+
+HttpResponse CreateOpenAiResponse(const HttpRequest& request,
+                                  TextGenerationBackend& backend,
+                                  const ChatRequest& chat,
+                                  std::size_t max_tokens,
+                                  const sampling::SamplingConfig& sampling,
+                                  bool stream) {
+  const auto initial = backend.initial_output_state(chat);
+  auto generation = backend.start_chat(chat, max_tokens, sampling,
+                                       request.is_cancelled, stream);
+  auto stream_log = std::make_shared<HttpResponse::StreamLog>();
+  auto timing = std::make_shared<std::string>();
+  const auto run = [generation, initial, model = backend.model_id(), stream_log,
+                    timing](const HttpResponse::BodyWriter& writer) {
+    ResponsesOutput output(model, writer);
+    if (!output.Begin()) {
+      generation->Cancel();
+      return json::Value();
+    }
+    StreamingTextFilter filter(initial,
+                               [&](std::string_view piece, bool reasoning) {
+                                 if (output.Append(piece, reasoning))
+                                   return true;
+                                 generation->Cancel();
+                                 return false;
+                               });
+    try {
+      const auto result = writer
+                              ? generation->Wait([&](std::string_view piece) {
+                                  return filter.Push(piece);
+                                })
+                              : generation->Wait();
+      stream_log->details = GenerationLogDetails(result);
+      RecordServerMetrics(result);
+      if (!writer) {
+        std::ostringstream value;
+        value << std::fixed << std::setprecision(3)
+              << "ttft;dur=" << result.ttft_ms
+              << ", inter_token;dur=" << result.mean_inter_token_ms
+              << ", max_inter_token;dur=" << result.max_inter_token_ms;
+        *timing = value.str();
+      }
+      if (result.cancelled)
+        return json::Value();
+      if (!writer)
+        filter.Push(result.text);
+      if (!filter.Push({}, true) || !filter.Finish(false)) {
+        generation->Cancel();
+        return json::Value();
+      }
+      return output.Complete(result);
+    } catch (const std::exception& error) {
+      if (!writer)
+        throw;
+      const auto* generation_error =
+          dynamic_cast<const TextGenerationError*>(&error);
+      stream_log->error_code = generation_error
+                                   ? generation_error->stable_code()
+                                   : "generation_failed";
+      output.Fail(stream_log->error_code,
+                  generation_error ? error.what() : "generation failed");
+      generation->Cancel();
+      return json::Value();
+    }
+  };
+  if (stream) {
+    return {.status = 200,
+            .reason = "OK",
+            .body = {},
+            .headers = {{"Content-Type", "text/event-stream"},
+                        {"Cache-Control", "no-cache"},
+                        {"X-Accel-Buffering", "no"}},
+            .streaming_body =
+                [run](const HttpResponse::BodyWriter& writer) {
+                  (void)run(writer);
+                },
+            .stream_log = std::move(stream_log)};
+  }
+  auto response = run({});
+  return {.status = 200,
+          .reason = "OK",
+          .body = response.dump(),
+          .headers = {{"Server-Timing", *timing}},
+          .log_details = stream_log->details};
+}
 
 HttpResponse HandleOpenAiChat(const HttpRequest& request,
                               TextGenerationBackend& backend) {

@@ -11,6 +11,15 @@ namespace gufo::server {
 HttpResponse HandleOpenAiChat(const HttpRequest& request,
                               TextGenerationBackend& backend);
 
+/// Responses text output uses the same reasoning/UTF-8 filter and scheduler
+/// as Chat Completions, including streaming cancellation and cache retention.
+HttpResponse CreateOpenAiResponse(const HttpRequest& request,
+                                  TextGenerationBackend& backend,
+                                  const ChatRequest& chat,
+                                  std::size_t max_tokens,
+                                  const sampling::SamplingConfig& sampling,
+                                  bool stream);
+
 }  // namespace gufo::server
 
 #endif  // GUFO_SERVER_OPENAI_CHAT_HPP_

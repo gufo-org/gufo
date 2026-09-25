@@ -393,10 +393,30 @@ bool ReadTextContent(const json::Value* content, std::string* out) {
 }
 
 bool ReadTextMessages(const json::Value* input,
-                      std::vector<tokenization::ChatMessage>* messages) {
+                      std::vector<tokenization::ChatMessage>* messages,
+                      bool responses = false) {
   if (input == nullptr || !input->is_array() || input->empty())
     return false;
   for (const auto& item : input->items()) {
+    if (responses && item.member_str("type") == "reasoning") {
+      const auto* summary = item.find("summary");
+      const auto* encrypted = item.find("encrypted_content");
+      if (summary == nullptr || !summary->is_array() ||
+          (encrypted != nullptr && !encrypted->is_null()) ||
+          item.contains("content"))
+        return false;
+      tokenization::ChatMessage reasoning;
+      reasoning.role = tokenization::ChatRole::kAssistant;
+      for (const auto& part : summary->items()) {
+        const auto* text = part.find("text");
+        if (part.member_str("type") != "summary_text" || text == nullptr ||
+            !text->is_string())
+          return false;
+        reasoning.thought += text->str();
+      }
+      messages->push_back(std::move(reasoning));
+      continue;
+    }
     const auto role = item.member_str("role");
     if (!item.is_object() ||
         (role != "user" && role != "assistant" && role != "system" &&
@@ -409,7 +429,14 @@ bool ReadTextMessages(const json::Value* input,
     message.role = RoleFrom(role);
     if (!ReadTextContent(item.find("content"), &message.content))
       return false;
-    messages->push_back(std::move(message));
+    if (responses && message.role == tokenization::ChatRole::kAssistant &&
+        !messages->empty() &&
+        messages->back().role == tokenization::ChatRole::kAssistant &&
+        messages->back().content.empty() && !messages->back().thought.empty()) {
+      messages->back().content = std::move(message.content);
+    } else {
+      messages->push_back(std::move(message));
+    }
   }
   return true;
 }
@@ -419,13 +446,13 @@ HttpResponse InvalidCompatibilityRequest(std::string_view message) {
              "invalid_request_error", "invalid_request");
 }
 
-// Compatibility routes implement a synchronous text subset. Validate options
-// before dispatch so a client never gets an answer to a different request.
+// Validate the text subset before dispatch so a client never gets an answer
+// to a different request. Responses also supports streamed output.
 std::optional<HttpResponse> ReadCompatibilityOptions(
     const json::Value& body, TextGenerationBackend& backend,
     std::string_view token_field, std::size_t* max_tokens,
-    sampling::SamplingConfig* sampling_config,
-    std::string_view stop_field = {}) {
+    sampling::SamplingConfig* sampling_config, std::string_view stop_field = {},
+    bool allow_stream = false) {
   if (!body.is_object())
     return InvalidCompatibilityRequest("request body must be an object");
   if (const auto* model = body.find("model"); model != nullptr) {
@@ -437,7 +464,9 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
   }
   for (const std::string field : {"stream", "echo", "store", "background"}) {
     if (const auto* value = body.find(field);
-        value != nullptr && (!value->is_bool() || value->as_bool())) {
+        value != nullptr &&
+        (!value->is_bool() ||
+         (value->as_bool() && !(allow_stream && field == "stream")))) {
       return InvalidCompatibilityRequest("'" + field + "' must be false");
     }
   }
@@ -642,8 +671,9 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error = ReadCompatibilityOptions(body, b, "max_output_tokens",
-                                            &max_tokens, &sampling_config)) {
+  if (auto error =
+          ReadCompatibilityOptions(body, b, "max_output_tokens", &max_tokens,
+                                   &sampling_config, {}, true)) {
     return std::move(*error);
   }
 
@@ -658,51 +688,19 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
   const auto* input = body.find("input");
   if (input != nullptr && input->is_string() && !input->str().empty()) {
     messages.push_back({tokenization::ChatRole::kUser, input->str(), "", ""});
-  } else if (!ReadTextMessages(input, &messages)) {
+  } else if (!ReadTextMessages(input, &messages, true)) {
     return InvalidCompatibilityRequest(
-        "'input' must be nonempty text or text messages; use "
+        "'input' must be nonempty text, text messages or Gufo reasoning items; "
+        "use "
         "/v1/chat/completions for images and tools");
   }
 
   ChatRequest chat{std::move(messages)};
   chat.client_id = req.client_id;
   chat.reasoning = b.reasoning_defaults();
-  const auto res = b.chat(chat, max_tokens, sampling_config, req.is_cancelled);
-
-  json::Value resp = json::Value::object();
-  resp["id"] = "resp_" + RandomId();
-  resp["object"] = "response";
-  const bool limited =
-      res.finish_reason == TextGenerationBackend::FinishReason::kLength;
-  resp["status"] = limited ? "incomplete" : "completed";
-  resp["incomplete_details"] = json::Value();
-  if (limited) {
-    resp["incomplete_details"]["reason"] = "max_output_tokens";
-  }
-  resp["model"] = b.model_id();
-  json::Value output = json::Value::array();
-  json::Value msg = json::Value::object();
-  msg["type"] = "message";
-  msg["id"] = "msg_" + RandomId();
-  msg["role"] = "assistant";
-  json::Value content = json::Value::array();
-  json::Value txt = json::Value::object();
-  txt["type"] = "output_text";
-  txt["text"] = core::Utf8Decoder{}.Push(res.text, true);
-  content.push_back(std::move(txt));
-  msg["content"] = std::move(content);
-  output.push_back(std::move(msg));
-  resp["output"] = std::move(output);
-  json::Value usage = json::Value::object();
-  usage["input_tokens"] = res.prompt_tokens;
-  usage["output_tokens"] = res.completion_tokens;
-  usage["total_tokens"] = res.prompt_tokens + res.completion_tokens;
-  json::Value input_details = json::Value::object();
-  input_details["cached_tokens"] = res.cached_prompt_tokens;
-  usage["input_tokens_details"] = std::move(input_details);
-  resp["usage"] = std::move(usage);
-  resp["timings"] = GenerationTimings(res);
-  return WithTiming(Ok(resp), res);
+  return CreateOpenAiResponse(
+      req, b, chat, max_tokens, sampling_config,
+      body.find("stream") != nullptr && body.find("stream")->as_bool());
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");

@@ -355,6 +355,8 @@ void TestCompatibilityRequests() {
            Endpoint{"/completion", R"({"prompt":"hi"})", "n_predict"},
        }) {
     auto body = parse(endpoint.body);
+    response_body(server.Post(endpoint.path, body.dump()));
+    assert(server.backend->LastCall().max_tokens == 0);
     body["model"] = "test";
     body[endpoint.limit] = 1;
     body["temperature"] = 0.6;
@@ -400,6 +402,9 @@ void TestCompatibilityRequests() {
     for (const auto field :
          {"stream", "echo", "store", "background", "tools", "stop", "reasoning",
           "output_config", "logit_bias"}) {
+      if (std::string_view(endpoint.path) == "/v1/responses" &&
+          std::string_view(field) == "stream")
+        continue;
       auto invalid = body;
       invalid[field] = true;
       ExpectStatus(server.Post(endpoint.path, invalid.dump()), 400);
@@ -443,6 +448,40 @@ void TestCompatibilityRequests() {
   assert(messages.size() == 2);
   assert(messages[0].role == gufo::tokenization::ChatRole::kSystem &&
          messages[0].content == "Be concise." && messages[1].content == "hi");
+  for (const auto limit : {1, 2}) {
+    const auto streaming = server.Post(
+        "/v1/responses",
+        std::string(R"({"input":"hi","stream":true,"max_output_tokens":)") +
+            std::to_string(limit) + "}");
+    ExpectStatus(streaming, 200);
+    assert(streaming.find("text/event-stream") != std::string::npos);
+    assert(streaming.find("event: response.created") != std::string::npos);
+    assert(streaming.find("event: response.output_text.delta") !=
+           std::string::npos);
+    assert(streaming.find(limit == 1 ? "event: response.incomplete"
+                                     : "event: response.completed") !=
+           std::string::npos);
+  }
+  server.backend->failure = 1;
+  const auto failed_stream =
+      server.Post("/v1/responses", R"({"input":"hi","stream":true})");
+  ExpectStatus(failed_stream, 200);  // Fake backend fails after headers.
+  assert(failed_stream.find("event: response.failed") != std::string::npos);
+  assert(failed_stream.find("event: response.completed") == std::string::npos);
+  server.backend->failure = 0;
+  const auto continued = response_body(
+      server.Post("/v1/responses",
+                  R"({"input":[{"role":"user","content":"First question"},
+        {"type":"reasoning","id":"rs_1","status":"completed",
+         "summary":[{"type":"summary_text","text":"Thoughts"}]},
+        {"type":"message","role":"assistant","content":[
+          {"type":"output_text","text":"Answer","annotations":[]}]},
+        {"role":"user","content":"Next question"}]})"));
+  assert(continued.member_str("status") == "completed");
+  const auto replay_messages = server.backend->LastCall().chat.messages;
+  assert(replay_messages.size() == 3 &&
+         replay_messages[1].thought == "Thoughts" &&
+         replay_messages[1].content == "Answer");
 
   const auto anthropic = response_body(
       server.Post("/v1/messages",
