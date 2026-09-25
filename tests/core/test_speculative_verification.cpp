@@ -31,8 +31,12 @@ void Expect(bool condition, std::string_view message) {
 class ScriptedTargetExecutor final
     : public gufo::speculative::ISpeculativeTargetExecutor {
 public:
-  ScriptedTargetExecutor(std::vector<TokenId> generated_tokens, TokenId eos_id)
-      : generated_tokens_(std::move(generated_tokens)), eos_id_(eos_id) {}
+  ScriptedTargetExecutor(
+      std::vector<TokenId> generated_tokens, TokenId eos_id,
+      TokenId endoftext_id = gufo::tokenization::kInvalidTokenId)
+      : generated_tokens_(std::move(generated_tokens)),
+        eos_id_(eos_id),
+        endoftext_id_(endoftext_id) {}
 
   void Reset() noexcept override {
     prompt_.clear();
@@ -100,6 +104,9 @@ public:
   std::span<const float> CopyLastHidden() override { return last_hidden_; }
 
   TokenId GetEosTokenId() const noexcept override { return eos_id_; }
+  bool IsStopToken(TokenId token) const noexcept override {
+    return token == eos_id_ || token == endoftext_id_;
+  }
 
   std::string_view DecodeToken(TokenId token_id) const noexcept override {
     (void)token_id;
@@ -121,6 +128,7 @@ public:
 private:
   std::vector<TokenId> generated_tokens_;
   TokenId eos_id_;
+  TokenId endoftext_id_;
   std::vector<TokenId> prompt_;
   std::vector<float> prompt_hidden_;
   std::vector<float> last_hidden_;
@@ -486,11 +494,9 @@ private:
   std::uint32_t marker_{0};
 };
 
-gufo::models::GenerationOptions GenerationOptions(std::size_t max_tokens,
-                                                  TokenId eos_id) {
+gufo::models::GenerationOptions GenerationOptions(std::size_t max_tokens) {
   gufo::models::GenerationOptions options;
   options.max_new_tokens = max_tokens;
-  options.eos_token_id = eos_id;
   return options;
 }
 
@@ -520,6 +526,24 @@ void TestSpeculativeStats() {
          "non-empty acceptance rate");
 }
 
+void TestStopTokensFollowTargetVocabulary() {
+  const std::vector<TokenId> generated{10, 151643, 248044, 248046, 11, 37, 12};
+  for (const bool batched : {false, true}) {
+    ScriptedTargetExecutor target(generated, 900, 37);
+    auto draft = std::make_unique<gufo::speculative::MockDraftBackend>(
+        std::vector<TokenId>{151643, 248044, 248046, 11, 37, 12});
+    gufo::speculative::SpeculativeOptions policy;
+    policy.use_batched_verification = batched;
+    gufo::speculative::SpeculativeVerifier verifier(target, std::move(draft),
+                                                    policy);
+    const auto output = verifier.Generate(std::array<TokenId, 3>{1, 2, 3},
+                                          GenerationOptions(16));
+    Expect(output == std::vector<TokenId>({10, 151643, 248044, 248046, 11}),
+           "verification emits foreign EOS IDs and stops at the target's "
+           "additional end-of-text token");
+  }
+}
+
 void TestFullAcceptanceProducesTargetBonusToken() {
   constexpr TokenId eos_id = 900;
   ScriptedTargetExecutor target({10, 11, 12, 13}, eos_id);
@@ -528,7 +552,7 @@ void TestFullAcceptanceProducesTargetBonusToken() {
   gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend));
   const std::vector<TokenId> prompt = {1, 2, 3};
 
-  const auto output = verifier.Generate(prompt, GenerationOptions(4, eos_id));
+  const auto output = verifier.Generate(prompt, GenerationOptions(4));
 
   Expect(output == std::vector<TokenId>({10, 11, 12, 13}),
          "full acceptance must emit the target bonus token");
@@ -549,7 +573,7 @@ void TestHiddenAwareBackendReceivesCommittedTargetState() {
   gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend));
   const std::vector<TokenId> prompt = {1, 2, 3};
 
-  const auto output = verifier.Generate(prompt, GenerationOptions(3, eos_id));
+  const auto output = verifier.Generate(prompt, GenerationOptions(3));
 
   Expect(output == std::vector<TokenId>({10, 11, 12}),
          "hidden-aware output must match greedy target");
@@ -640,13 +664,12 @@ void TestFirstPrefillTokenHonorsBudgetAndCallback() {
   const std::vector<TokenId> prompt = {1, 2, 3};
   std::vector<TokenId> callback_tokens;
 
-  const auto output =
-      verifier.Generate(prompt, GenerationOptions(1, eos_id),
-                        [&](TokenId token, std::string_view piece) {
-                          callback_tokens.push_back(token);
-                          Expect(piece == "token", "callback decoded token");
-                          return true;
-                        });
+  const auto output = verifier.Generate(
+      prompt, GenerationOptions(1), [&](TokenId token, std::string_view piece) {
+        callback_tokens.push_back(token);
+        Expect(piece == "token", "callback decoded token");
+        return true;
+      });
 
   Expect(output == std::vector<TokenId>({10}), "one-token output budget");
   Expect(callback_tokens == output, "first token callback");
@@ -663,7 +686,7 @@ void TestFirstPrefillEosIsNotEmitted() {
   const std::vector<TokenId> prompt = {1, 2, 3};
   std::size_t callback_count = 0;
 
-  const auto output = verifier.Generate(prompt, GenerationOptions(4, eos_id),
+  const auto output = verifier.Generate(prompt, GenerationOptions(4),
                                         [&](TokenId, std::string_view) {
                                           ++callback_count;
                                           return true;
@@ -677,7 +700,7 @@ void TestFirstPrefillEosIsNotEmitted() {
 void TestFirstTokenUsesTargetSampler() {
   SampledTargetExecutor target({0.0F, -INFINITY, -INFINITY});
   gufo::speculative::SpeculativeVerifier verifier(target, nullptr);
-  auto options = GenerationOptions(1, 99);
+  auto options = GenerationOptions(1);
   options.sampling.temperature = 0.8F;
   options.sampling.seed = 73;
   const std::vector<TokenId> prompt{1};
@@ -943,7 +966,7 @@ void TestStopAndBudgetKeepExactFrontier() {
         std::vector<TokenId>{11, 12, 13});
     gufo::speculative::SpeculativeVerifier verifier(target, std::move(backend));
     const std::vector<TokenId> prompt{1, 2, 3};
-    const auto output = verifier.Generate(prompt, GenerationOptions(2, 900));
+    const auto output = verifier.Generate(prompt, GenerationOptions(2));
     Expect(output == std::vector<TokenId>({10, 11}) &&
                target.State() == std::vector<TokenId>({1, 2, 3, 10}),
            "greedy generation must not commit beyond its output budget");
@@ -1273,8 +1296,7 @@ void TestPersistentVerifierSnapshotRoundTrip() {
   gufo::speculative::SpeculativeVerifier source(
       source_target, std::move(source_backend), options);
 
-  const auto generated_tokens =
-      source.Generate(prompt, GenerationOptions(6, eos_id));
+  const auto generated_tokens = source.Generate(prompt, GenerationOptions(6));
   Expect(generated_tokens ==
              std::vector<TokenId>(generated.begin(), generated.begin() + 6),
          "persistent verifier source output");
@@ -1337,6 +1359,7 @@ void TestPersistentVerifierSnapshotRoundTrip() {
 int main() {
   TestSpeculativeDraftBackendInterface();
   TestSpeculativeStats();
+  TestStopTokensFollowTargetVocabulary();
   TestFullAcceptanceProducesTargetBonusToken();
   TestPartialRejectionRestoresAndReplaysState();
   TestImmediateRejectionRestoresGreedyState();

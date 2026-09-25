@@ -194,6 +194,9 @@ public:
   tokenization::TokenId GetEosTokenId() const noexcept override {
     return executor_.GetTokenizer().GetEosTokenId();
   }
+  bool IsStopToken(tokenization::TokenId token) const noexcept override {
+    return executor_.GetTokenizer().IsStopToken(token);
+  }
 
   std::size_t VocabularySize() const noexcept override {
     return executor_.GetConfig().vocab_size;
@@ -233,13 +236,12 @@ private:
   hip::QwenGpuExecutor& executor_;
 };
 
-bool IsStopToken(tokenization::TokenId token,
-                 tokenization::TokenId eos_id) noexcept {
-  return token == eos_id || token == tokenization::kDefaultQwenEndoftextId ||
-         token == 248044U || token == 248046U;
-}
-
 }  // namespace
+
+bool SpeculativeVerifier::IsStopToken(
+    tokenization::TokenId token, tokenization::TokenId eos_id) const noexcept {
+  return token == eos_id || target_executor_->IsStopToken(token);
+}
 
 SpeculativeVerifier::SpeculativeVerifier(
     hip::QwenGpuExecutor& target_executor,

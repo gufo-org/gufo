@@ -74,8 +74,7 @@ std::vector<tokenization::TokenId> QwenGenerator::Generate(
 
   // 3. Auto-regressive decode loop
   while (output_tokens.size() < options.max_new_tokens) {
-    if (next_token == options.eos_token_id ||
-        next_token == options.endoftext_token_id) {
+    if (tokenizer_->IsStopToken(next_token)) {
       break;
     }
 

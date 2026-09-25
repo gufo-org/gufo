@@ -22,8 +22,6 @@ namespace gufo::models {
 struct GenerationOptions {
   std::size_t max_new_tokens = 128;
   sampling::SamplingConfig sampling;
-  std::uint32_t eos_token_id = tokenization::kDefaultQwenEosTokenId;
-  std::uint32_t endoftext_token_id = tokenization::kDefaultQwenEndoftextId;
 };
 
 /// End-to-end Qwen auto-regressive generation engine.

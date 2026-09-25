@@ -453,6 +453,13 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromVocabulary(
     }
   }
 
+  tokenizer->endoftext_token_id_ =
+      tokenizer->FindSpecialToken("<|endoftext|>").value_or(kInvalidTokenId);
+  tokenizer->eos_token_id_ = tokenizer->FindSpecialToken("<|im_end|>")
+                                 .value_or(tokenizer->endoftext_token_id_);
+  tokenizer->bos_token_id_ =
+      tokenizer->FindSpecialToken("<|im_start|>").value_or(kInvalidTokenId);
+  tokenizer->pad_token_id_ = tokenizer->endoftext_token_id_;
   tokenizer->InitializeByteTokens(load_options.eager_decoded_tokens);
   return tokenizer;
 }

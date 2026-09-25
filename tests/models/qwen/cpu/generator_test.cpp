@@ -79,7 +79,6 @@ void TestSyntheticGeneration() {
                                                            2};  // "hello world"
   gufo::models::GenerationOptions gen_opts;
   gen_opts.max_new_tokens = 4;
-  gen_opts.eos_token_id = 7;
 
   std::vector<gufo::tokenization::TokenId> generated;
   auto out = generator.Generate(

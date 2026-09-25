@@ -476,7 +476,6 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::GenerateFromPrefix(
   }
 
   std::size_t cur_pos = prompt_tokens.size();
-  const auto eos_id = tokenizer_->GetEosTokenId();
   sampling::SamplerState sampler(options.sampling, prompt_tokens);
   if (!options.sampling.can_use_unmodified_argmax()) {
     next_token = SampleLastLogits(sampler);
@@ -484,8 +483,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::GenerateFromPrefix(
 
   // 2. Auto-regressive decode generation loop
   while (output_tokens.size() < options.max_new_tokens) {
-    if (next_token == eos_id || next_token == 151643U ||
-        next_token == 248044U || next_token == 248046U) {
+    if (tokenizer_->IsStopToken(next_token)) {
       break;
     }
 

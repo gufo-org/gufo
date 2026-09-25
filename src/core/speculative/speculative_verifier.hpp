@@ -227,6 +227,10 @@ public:
   }
   [[nodiscard]] virtual tokenization::TokenId GetEosTokenId()
       const noexcept = 0;
+  [[nodiscard]] virtual bool IsStopToken(
+      tokenization::TokenId token) const noexcept {
+    return token == GetEosTokenId();
+  }
   [[nodiscard]] virtual std::string_view DecodeToken(
       tokenization::TokenId token_id) const noexcept = 0;
 };
@@ -356,6 +360,8 @@ public:
   void Reset() noexcept;
 
 private:
+  [[nodiscard]] bool IsStopToken(tokenization::TokenId token,
+                                 tokenization::TokenId eos_id) const noexcept;
   void ConfigureAdaptiveDraftPolicy();
   void ResetAdaptiveDraftLength() noexcept;
   void UpdateAdaptiveDraftLength(std::size_t accepted, std::size_t drafted);

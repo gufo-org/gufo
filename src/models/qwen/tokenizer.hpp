@@ -22,8 +22,6 @@ namespace gufo::tokenization {
 using TokenId = std::uint32_t;
 
 constexpr TokenId kInvalidTokenId = 0xFFFFFFFFU;
-constexpr TokenId kDefaultQwenEosTokenId = 151645U;   // <|im_end|>
-constexpr TokenId kDefaultQwenEndoftextId = 151643U;  // <|endoftext|>
 
 /// Configuration options for the tokenizer encoding pass.
 struct TokenizerOptions {
@@ -79,6 +77,10 @@ public:
   [[nodiscard]] TokenId GetEosTokenId() const noexcept { return eos_token_id_; }
   [[nodiscard]] TokenId GetBosTokenId() const noexcept { return bos_token_id_; }
   [[nodiscard]] TokenId GetPadTokenId() const noexcept { return pad_token_id_; }
+  [[nodiscard]] bool IsStopToken(TokenId token) const noexcept {
+    return token != kInvalidTokenId &&
+           (token == eos_token_id_ || token == endoftext_token_id_);
+  }
 
   [[nodiscard]] std::optional<TokenId> FindSpecialToken(
       std::string_view token_str) const noexcept;
@@ -114,8 +116,9 @@ private:
 
   std::array<TokenId, 256> byte_tokens_{};
   TokenId bos_token_id_{kInvalidTokenId};
-  TokenId eos_token_id_{kDefaultQwenEosTokenId};
-  TokenId pad_token_id_{kDefaultQwenEndoftextId};
+  TokenId eos_token_id_{kInvalidTokenId};
+  TokenId endoftext_token_id_{kInvalidTokenId};
+  TokenId pad_token_id_{kInvalidTokenId};
   PreTokenizer pre_tokenizer_{PreTokenizer::kNone};
 };
 
