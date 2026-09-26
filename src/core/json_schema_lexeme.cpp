@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace gufo::sampling {
@@ -440,9 +441,15 @@ icu::UnicodeSet PatternAlphabet(const icu::UnicodeString& pattern) {
       }
       if (i == pattern.length())
         return all;
+      const auto expression = pattern.tempSubStringBetween(begin, i + 1);
+      // Regex character-class shorthands (notably \w and \s) do not have
+      // the same meaning in UnicodeSet patterns. Keep a conservative
+      // alphabet; the RegexMatcher remains the authority for these classes.
+      if (expression.indexOf('\\') >= 0)
+        return all;
       UErrorCode status = U_ZERO_ERROR;
-      icu::UnicodeSet characters(pattern.tempSubStringBetween(begin, ++i),
-                                 status);
+      ++i;
+      icu::UnicodeSet characters(expression, status);
       if (U_FAILURE(status) || characters.hasStrings())
         return all;
       alphabet.addAll(characters);
@@ -463,7 +470,8 @@ icu::UnicodeSet PatternAlphabet(const icu::UnicodeString& pattern) {
     }
   }
   if (pattern.endsWith("$"))
-    alphabet.add('\n').add('\r').add(0x85).add(0x2028).add(0x2029);
+    alphabet.add('\n').add('\r').add('\v').add('\f').add(0x85).add(0x2028).add(
+        0x2029);
   return alphabet;
 }
 
@@ -541,6 +549,408 @@ icu::UnicodeSet PendingCharacters(std::string_view bytes) {
   return result;
 }
 
+// ICU hitEnd() reports that a match needs more input, but not how much.
+// Intersect ordinary regular patterns with the remaining string length before
+// admitting a prefix. This auxiliary NFA only prunes provably dead prefixes;
+// ICU remains authoritative, including for constructs this guard cannot parse.
+class PatternLengthGuard {
+  struct Unsupported {};
+  struct Node {
+    enum Kind { kEmpty, kChars, kSequence, kAlternative, kRepeat } kind{kEmpty};
+    icu::UnicodeSet chars;
+    std::vector<Node> children;
+    unsigned minimum{0}, maximum{0};
+  };
+  struct State {
+    std::vector<unsigned> epsilon;
+    std::vector<std::pair<icu::UnicodeSet, unsigned>> edges;
+  };
+  using Active = std::vector<unsigned>;
+  static constexpr unsigned kInfinity = std::numeric_limits<unsigned>::max();
+
+public:
+  static std::optional<PatternLengthGuard> Compile(
+      const icu::UnicodeString& expression, std::size_t maximum) {
+    try {
+      return PatternLengthGuard(expression, maximum);
+    } catch (const Unsupported&) {
+      return std::nullopt;
+    }
+  }
+
+  bool Possible(const icu::UnicodeString& text, std::size_t minimum,
+                std::size_t maximum,
+                const icu::UnicodeSet* pending = nullptr) const {
+    const auto length = static_cast<std::size_t>(text.countChar32());
+    if (length > maximum || (pending && length == maximum))
+      return false;
+    // Avoid spending an unbounded CPU budget on unusually large minLength.
+    if (minimum > 4096)
+      return true;
+    Active active = Closure({start_});
+    for (int32_t i = 0; i < text.length();) {
+      const auto cp = text.char32At(i);
+      i += U16_LENGTH(cp);
+      const icu::UnicodeSet character(cp, cp);
+      active = Step(active, &character);
+      if (active.empty())
+        return false;
+    }
+    auto used = length;
+    if (pending) {
+      active = Step(active, pending);
+      ++used;
+    }
+    // Walk the required number of characters, then use the shortest accepting
+    // suffix. This respects gaps such as (ab)+ with minLength=maxLength=3.
+    while (used < minimum && !active.empty()) {
+      auto next = Step(active, nullptr);
+      ++used;
+      if (next == active) {
+        used = minimum;
+        break;
+      }
+      active = std::move(next);
+    }
+    return std::ranges::any_of(active, [&](unsigned state) {
+      return distance_[state] != kInfinity &&
+             distance_[state] <= maximum - used;
+    });
+  }
+
+private:
+  explicit PatternLengthGuard(icu::UnicodeString expression,
+                              std::size_t maximum)
+      : maximum_(maximum) {
+    if (expression.length() > 16384)
+      throw Unsupported{};
+    const bool anchored_start = expression.startsWith("^");
+    if (anchored_start)
+      expression.remove(0, 1);
+    bool anchored_end = false, terminal_newline = false;
+    int slashes = 0;
+    for (int32_t i = expression.length() - 2;
+         i >= 0 && expression.charAt(i) == '\\'; --i)
+      ++slashes;
+    if (expression.endsWith("$") && slashes % 2 == 0) {
+      expression.truncate(expression.length() - 1);
+      anchored_end = terminal_newline = true;
+    } else if (expression.endsWith("\\z") && slashes % 2 == 1) {
+      expression.truncate(expression.length() - 2);
+      anchored_end = true;
+    }
+    source_ = std::move(expression);
+    Node root = Alternatives(0);
+    if (position_ != source_.length() ||
+        ((anchored_start || anchored_end) && top_alternative_))
+      throw Unsupported{};
+    auto any = Character(icu::UnicodeSet(0, 0x10ffff));
+    Node sequence{Node::kSequence};
+    if (!anchored_start)
+      sequence.children.push_back(Repeat(any, 0, kInfinity));
+    sequence.children.push_back(std::move(root));
+    if (terminal_newline) {
+      icu::UnicodeSet endings;
+      endings.add('\n').add('\r').add('\v').add('\f').add(0x85).add(0x2028).add(
+          0x2029);
+      Node ending{Node::kAlternative};
+      ending.children.push_back(Node{});
+      ending.children.push_back(Character(endings));
+      Node crlf{Node::kSequence};
+      crlf.children.push_back(Character(icu::UnicodeSet('\r', '\r')));
+      crlf.children.push_back(Character(icu::UnicodeSet('\n', '\n')));
+      ending.children.push_back(std::move(crlf));
+      sequence.children.push_back(std::move(ending));
+    }
+    if (!anchored_end)
+      sequence.children.push_back(Repeat(any, 0, kInfinity));
+    std::tie(start_, end_) = Build(sequence);
+    distance_.assign(states_.size(), kInfinity);
+    distance_[end_] = 0;
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (unsigned i = 0; i < states_.size(); ++i) {
+        auto best = distance_[i];
+        for (auto next : states_[i].epsilon)
+          best = std::min(best, distance_[next]);
+        for (const auto& [chars, next] : states_[i].edges)
+          if (!chars.isEmpty() && distance_[next] != kInfinity)
+            best = std::min(best, distance_[next] + 1);
+        changed |= best != distance_[i];
+        distance_[i] = best;
+      }
+    }
+  }
+
+  static Node Character(icu::UnicodeSet chars) {
+    chars.remove(0xd800, 0xdfff);
+    Node node{Node::kChars};
+    node.chars = std::move(chars);
+    return node;
+  }
+  static Node Repeat(Node child, unsigned low, unsigned high) {
+    Node node{Node::kRepeat};
+    node.children.push_back(std::move(child));
+    node.minimum = low;
+    node.maximum = high;
+    return node;
+  }
+  UChar32 Take() {
+    if (position_ >= source_.length())
+      throw Unsupported{};
+    auto cp = source_.char32At(position_);
+    position_ += U16_LENGTH(cp);
+    return cp;
+  }
+  unsigned Count() {
+    unsigned value = 0;
+    bool found = false;
+    while (source_.charAt(position_) >= '0' &&
+           source_.charAt(position_) <= '9') {
+      found = true;
+      const unsigned digit = Take() - '0';
+      if (value > (kInfinity - digit) / 10)
+        throw Unsupported{};
+      value = value * 10 + digit;
+    }
+    if (!found)
+      throw Unsupported{};
+    return value;
+  }
+  icu::UnicodeSet Escaped() {
+    auto cp = Take();
+    std::string property;
+    switch (cp) {
+      case 'd':
+      case 'D':
+        property = "[\\p{Nd}]";
+        break;
+      case 's':
+      case 'S':
+        property = "[\\p{White_Space}]";
+        break;
+      case 'w':
+      case 'W':
+        property = "[\\p{Alphabetic}\\p{Mark}\\p{Nd}\\p{Pc}\\u200c\\u200d]";
+        break;
+      case 'n':
+        cp = '\n';
+        break;
+      case 'r':
+        cp = '\r';
+        break;
+      case 't':
+        cp = '\t';
+        break;
+      case 'f':
+        cp = '\f';
+        break;
+      default:
+        if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
+            (cp >= '0' && cp <= '9'))
+          throw Unsupported{};
+    }
+    if (property.empty())
+      return icu::UnicodeSet(cp, cp);
+    UErrorCode status = U_ZERO_ERROR;
+    icu::UnicodeSet result(icu::UnicodeString::fromUTF8(property), status);
+    if (U_FAILURE(status))
+      throw Unsupported{};
+    if (cp == 'D' || cp == 'S' || cp == 'W')
+      result.complement();
+    return result;
+  }
+  icu::UnicodeSet Class() {
+    icu::UnicodeSet result;
+    const bool negate = source_.charAt(position_) == '^';
+    if (negate)
+      ++position_;
+    if (source_.charAt(position_) == ']')
+      throw Unsupported{};
+    auto character = [&] {
+      auto cp = Take();
+      if (cp == '[' || cp == '&')
+        throw Unsupported{};
+      return cp == '\\' ? Escaped() : icu::UnicodeSet(cp, cp);
+    };
+    while (source_.charAt(position_) != ']') {
+      auto chars = character();
+      if (source_.charAt(position_) == '-' &&
+          source_.charAt(position_ + 1) != ']') {
+        ++position_;
+        const auto last = character();
+        if (chars.size() != 1 || last.size() != 1 ||
+            chars.charAt(0) > last.charAt(0))
+          throw Unsupported{};
+        chars.add(chars.charAt(0), last.charAt(0));
+      }
+      result.addAll(chars);
+    }
+    ++position_;
+    if (negate)
+      result.complement();
+    return result;
+  }
+  Node Alternatives(unsigned depth) {
+    if (depth > 16)
+      throw Unsupported{};
+    Node alternatives{Node::kAlternative};
+    do {
+      Node sequence{Node::kSequence};
+      while (position_ < source_.length() && source_.charAt(position_) != ')' &&
+             source_.charAt(position_) != '|') {
+        const auto cp = Take();
+        Node atom;
+        if (cp == '(') {
+          if (source_.charAt(position_) == '?') {
+            ++position_;
+            if (Take() != ':')
+              throw Unsupported{};
+          }
+          atom = Alternatives(depth + 1);
+          if (Take() != ')')
+            throw Unsupported{};
+        } else if (cp == '[') {
+          atom = Character(Class());
+        } else if (cp == '\\') {
+          atom = Character(Escaped());
+        } else if (cp == '.') {
+          icu::UnicodeSet chars(0, 0x10ffff);
+          for (auto c : {'\n', '\r', '\v', '\f'})
+            chars.remove(c);
+          chars.remove(0x85).remove(0x2028).remove(0x2029);
+          atom = Character(chars);
+        } else {
+          if (cp < 128 &&
+              std::string_view("^$*+?{}").find(cp) != std::string_view::npos)
+            throw Unsupported{};
+          atom = Character(icu::UnicodeSet(cp, cp));
+        }
+        const auto quantifier = source_.charAt(position_);
+        if (quantifier == '*' || quantifier == '+' || quantifier == '?' ||
+            quantifier == '{') {
+          ++position_;
+          unsigned low = quantifier == '+' ? 1 : 0;
+          unsigned high = quantifier == '?' ? 1 : kInfinity;
+          if (quantifier == '{') {
+            low = high = Count();
+            if (source_.charAt(position_) == ',') {
+              ++position_;
+              high = source_.charAt(position_) == '}' ? kInfinity : Count();
+            }
+            if (Take() != '}' || high < low)
+              throw Unsupported{};
+          }
+          atom = Repeat(std::move(atom), low, high);
+          if (source_.charAt(position_) == '?')
+            ++position_;  // Lazy repetition has the same language.
+        }
+        sequence.children.push_back(std::move(atom));
+      }
+      alternatives.children.push_back(std::move(sequence));
+      if (source_.charAt(position_) != '|')
+        break;
+      top_alternative_ |= depth == 0;
+      ++position_;
+    } while (true);
+    return alternatives;
+  }
+  unsigned NewState() {
+    if (states_.size() >= 384)
+      throw Unsupported{};
+    states_.emplace_back();
+    return states_.size() - 1;
+  }
+  std::size_t Minimum(const Node& node) const {
+    const auto cap = maximum_ + 1;
+    if (node.kind == Node::kChars)
+      return node.chars.isEmpty() ? cap : 1;
+    if (node.kind == Node::kRepeat)
+      return std::min(cap, Minimum(node.children[0]) * node.minimum);
+    std::size_t result = node.kind == Node::kAlternative ? cap : 0;
+    for (const auto& child : node.children)
+      result = node.kind == Node::kAlternative
+                   ? std::min(result, Minimum(child))
+                   : std::min(cap, result + Minimum(child));
+    return result;
+  }
+  std::pair<unsigned, unsigned> Build(const Node& node) {
+    const auto begin = NewState(), end = NewState();
+    if (Minimum(node) > maximum_)
+      return {begin, end};
+    auto append = [&](const Node& child, unsigned from) {
+      const auto [first, last] = Build(child);
+      states_[from].epsilon.push_back(first);
+      return last;
+    };
+    if (node.kind == Node::kChars)
+      states_[begin].edges.emplace_back(node.chars, end);
+    else if (node.kind == Node::kAlternative) {
+      for (const auto& child : node.children) {
+        auto last = append(child, begin);
+        states_[last].epsilon.push_back(end);
+      }
+    } else if (node.kind == Node::kRepeat) {
+      auto last = begin;
+      for (unsigned i = 0; i < node.minimum; ++i)
+        last = append(node.children[0], last);
+      states_[last].epsilon.push_back(end);
+      if (node.maximum == kInfinity) {
+        auto tail = append(node.children[0], last);
+        states_[tail].epsilon.push_back(last);
+      } else {
+        const auto width = Minimum(node.children[0]);
+        const auto high =
+            width ? std::min<std::size_t>(node.maximum, maximum_ / width)
+                  : node.maximum;
+        for (unsigned i = node.minimum; i < high; ++i) {
+          last = append(node.children[0], last);
+          states_[last].epsilon.push_back(end);
+        }
+      }
+    } else {
+      auto last = begin;
+      for (const auto& child : node.children)
+        last = append(child, last);
+      states_[last].epsilon.push_back(end);
+    }
+    return {begin, end};
+  }
+  Active Closure(Active active) const {
+    std::vector<bool> seen(states_.size());
+    Active result;
+    while (!active.empty()) {
+      auto state = active.back();
+      active.pop_back();
+      if (seen[state])
+        continue;
+      seen[state] = true;
+      result.push_back(state);
+      for (auto next : states_[state].epsilon)
+        active.push_back(next);
+    }
+    std::ranges::sort(result);
+    return result;
+  }
+  Active Step(const Active& active, const icu::UnicodeSet* chars) const {
+    Active next;
+    for (auto state : active)
+      for (const auto& [allowed, target] : states_[state].edges)
+        if (chars ? allowed.containsSome(*chars) : !allowed.isEmpty())
+          next.push_back(target);
+    return Closure(std::move(next));
+  }
+
+  icu::UnicodeString source_;
+  std::size_t maximum_;
+  int32_t position_{0};
+  bool top_alternative_{false};
+  unsigned start_{0}, end_{0};
+  std::vector<State> states_;
+  std::vector<unsigned> distance_;
+};
+
 class StringLexeme final : public JsonSchemaLexeme {
 public:
   explicit StringLexeme(const json::Value& schema) {
@@ -578,6 +988,10 @@ public:
         Invalid("invalid regular expression");
       alphabet_.retainAll(PatternAlphabet(pattern->pattern()));
       prefixes_.push_back(PatternPrefix(pattern->pattern()));
+      guards_.push_back(
+          PatternLengthGuard::Compile(pattern->pattern(), maximum_));
+      if (guards_.back() && !guards_.back()->Possible({}, minimum_, maximum_))
+        Invalid("pattern and length constraints have no matching string");
       patterns_.push_back(std::move(pattern));
     }
   }
@@ -681,6 +1095,9 @@ public:
     const auto length = static_cast<std::size_t>(text.countChar32());
     if (length > maximum_)
       return {};
+    for (const auto& guard : guards_)
+      if (guard && !guard->Possible(text, minimum_, maximum_))
+        return {};
     bool matches = length >= minimum_;
     for (const auto& pattern : patterns_) {
       UErrorCode status = U_ZERO_ERROR;
@@ -705,6 +1122,9 @@ public:
         return {};
       auto candidates = PendingCharacters(bytes.substr(cut));
       candidates.retainAll(alphabet_);
+      for (const auto& guard : guards_)
+        if (guard && !guard->Possible(text, minimum_, maximum_, &candidates))
+          return {};
       for (const auto& prefix : prefixes_)
         if (text.length() < prefix.length() && prefix.startsWith(text))
           candidates.retain(prefix.char32At(text.length()));
@@ -748,6 +1168,7 @@ private:
   std::size_t minimum_{0}, maximum_{1048576};
   icu::UnicodeSet alphabet_{0, 0x10ffff};
   std::vector<icu::UnicodeString> prefixes_;
+  std::vector<std::optional<PatternLengthGuard>> guards_;
   std::vector<std::unique_ptr<icu::RegexPattern>> patterns_;
 };
 

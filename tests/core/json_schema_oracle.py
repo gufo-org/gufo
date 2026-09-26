@@ -9,6 +9,7 @@ multipleOf rounding and the grammar's intentional integer spelling policy.
 import argparse
 from decimal import Decimal
 import json
+import itertools
 import random
 import subprocess
 
@@ -51,12 +52,22 @@ def main():
     words = ["", "a", "ab", "abc", "c0", "abc1", "c5abc3", "ABC", "aABC0",
              "é", "é😀", "e\u0301😀", "@name_12", "x@name", "\n", "OK\n"]
     for pattern in ("^@[a-zA-Z0-9_]+$", "^(?:ab|c[0-9])+$", "[A-Z]",
-                    "^(?=.*[A-Z])(?=.*[0-9]).+$", "^é😀$", "^OK$"):
+                    "^(?=.*[A-Z])(?=.*[0-9]).+$", "^é😀$", "^OK$",
+                    r"^[\w]+$", r"^[\s]+$", r"^(?:(?:ab){2}|c)$"):
         for minimum, maximum in ((0, 100), (2, 4)):
             add({"type": "string", "pattern": pattern, "minLength": minimum,
                  "maxLength": maximum},
                 [json.dumps(word, ensure_ascii=ascii_only)
                  for word in words for ascii_only in (True, False)])
+    short_words = ["".join(chars) for n in range(5)
+                   for chars in itertools.product("abcé", repeat=n)]
+    for pattern in ("^(?:(?:ab){2}|c)$", "^(?:ab)+$", "^(?:[^a-c]{4}|c)$",
+                    "^a{1,3}b?$", "^a*?b+$", "a|b$", r"^[\w]{1,3}$",
+                    "^.{2,4}$", r"^[^ab]{1,2}$", "^(a|bc){1,2}$"):
+        for minimum, maximum in ((0, 3), (2, 4), (3, 3)):
+            add({"type": "string", "pattern": pattern, "minLength": minimum,
+                 "maxLength": maximum},
+                [json.dumps(word, ensure_ascii=False) for word in short_words])
     for format_name, examples in (
         ("date", ["2024-02-29", "2023-02-29", "2000-02-29", "1900-02-29", "2026-04-31"]),
         ("ipv4", ["127.0.0.1", "192.168.1.89", "256.1.2.3", "01.2.3.4"]),
@@ -64,20 +75,52 @@ def main():
         ("uuid", ["12345678-1234-1234-1234-123456789abc", "12345678-1234-1234-1234-123456789abz"]),
     ):
         add({"type": "string", "format": format_name}, [json.dumps(value) for value in examples])
+    # Exhaustive finite-language prefix oracle: checking only complete values
+    # misses prefixes which are admitted but cannot finish within maxLength.
+    prefix_cases = []
+    alphabet_words = ["".join(chars) for n in range(5)
+                      for chars in itertools.product("abc", repeat=n)]
+    for pattern in ("^(?:(?:ab){2}|c)$", "^(?:ab)+$", "^(?:a{2,3}|b[ac])$",
+                    "^(?:a{500}|b{1,500})$"):
+        # minLength=0 makes optional terminal line breaks irrelevant to these
+        # letter-only prefixes (ICU and Python differ in '$' line-break rules).
+        for minimum, maximum in ((0, 1), (0, 2), (0, 3), (0, 4)):
+            schema = {"type": "object", "properties": {
+                "x": {"type": "string", "pattern": pattern, "minLength": minimum,
+                      "maxLength": maximum}}, "required": ["x"], "additionalProperties": False}
+            validator = Draft202012Validator(schema)
+            language = [word for word in alphabet_words if validator.is_valid({"x": word})]
+            prefixes = ['{"x":"' + word for word in alphabet_words]
+            expected = [any(value.startswith(word) for value in language)
+                        for word in alphabet_words]
+            prefix_cases.append((schema, prefixes, expected))
     records = "\n".join(json.dumps({"schema": schema, "texts": texts}) for schema, texts, _ in cases)
+    records += "\n" + "\n".join(json.dumps({"schema": schema, "texts": [], "prefixes": prefixes})
+                              for schema, prefixes, _ in prefix_cases)
     result = subprocess.run([args.probe, "--probe"], input=records + "\n", text=True,
                             capture_output=True, check=True, timeout=120)
     outputs = [json.loads(line) for line in result.stdout.splitlines()]
-    assert len(outputs) == len(cases), (len(outputs), len(cases), result.stderr)
+    assert len(outputs) == len(cases) + len(prefix_cases), (len(outputs), len(cases), result.stderr)
     decisions = 0
     for (schema, texts, expected), output in zip(cases, outputs):
         if "error" in output:
             assert not any(expected), (schema, output)
             continue  # Rejecting an empty numeric interval is expected.
+        assert len(output["accepted"]) == len(expected), (schema, output)
         for text, actual, wanted in zip(texts, output["accepted"], expected):
             assert actual == wanted, (schema, text, actual, wanted)
             decisions += 1
+    prefix_decisions = 0
+    for (schema, prefixes, expected), output in zip(prefix_cases, outputs[len(cases):]):
+        if "error" in output:
+            assert not any(expected), (schema, output)
+            continue
+        assert output["viable"] == expected, (schema, [
+            prefix for prefix, actual, wanted in zip(prefixes, output["viable"], expected)
+            if actual != wanted])
+        prefix_decisions += len(prefixes)
     print(f"JSON Schema oracle: {decisions} acceptance decisions across {len(cases)} schemas passed")
+    print(f"JSON Schema prefix oracle: {prefix_decisions} completion-feasibility decisions passed")
 
 
 if __name__ == "__main__":
