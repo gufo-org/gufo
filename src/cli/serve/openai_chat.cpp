@@ -730,6 +730,44 @@ std::string_view StripFramingNewlines(std::string_view value) {
   return value;
 }
 
+// Qwen's XML-like calls look like Python keyword arguments, and the models
+// sometimes write Python's True, False and None where the schema asks for a
+// JSON boolean or null. Rewrites those words outside JSON string literals.
+std::string PythonLiteralsToJson(std::string_view value) {
+  std::string out;
+  out.reserve(value.size());
+  bool in_string = false;
+  for (std::size_t i = 0; i < value.size();) {
+    const char c = value[i];
+    if (in_string) {
+      const std::size_t length = c == '\\' && i + 1 < value.size() ? 2 : 1;
+      out += value.substr(i, length);
+      in_string = c != '"';
+      i += length;
+      continue;
+    }
+    if (std::isalpha(static_cast<unsigned char>(c)) == 0) {
+      out += c;
+      in_string = c == '"';
+      ++i;
+      continue;
+    }
+    std::size_t word_end = i;
+    while (word_end < value.size() &&
+           (std::isalnum(static_cast<unsigned char>(value[word_end])) != 0 ||
+            value[word_end] == '_')) {
+      ++word_end;
+    }
+    const auto word = value.substr(i, word_end - i);
+    out += word == "True"    ? std::string_view{"true"}
+           : word == "False" ? std::string_view{"false"}
+           : word == "None"  ? std::string_view{"null"}
+                             : word;
+    i = word_end;
+  }
+  return out;
+}
+
 std::optional<json::Value> TryParseJson(std::string_view value) noexcept {
   try {
     return json::parse(value);
@@ -882,16 +920,20 @@ void ParseQwenCalls(std::string_view text,
         // Prefer text if the schema permits it; parsing ambiguous scalars
         // as JSON would silently change a caller's declared string type.
         const bool is_string = string_allowed;
-        const auto raw = is_string ? value : Trim(value);
+        std::string raw(is_string ? value : Trim(value));
         if (!is_string) {
-          const auto parsed = TryParseJson(raw);
+          auto parsed = TryParseJson(raw);
+          if (!parsed || !SchemaAccepts(*property, *parsed)) {
+            raw = PythonLiteralsToJson(raw);
+            parsed = TryParseJson(raw);
+          }
           if (!parsed || !SchemaAccepts(*property, *parsed)) {
             valid = false;
             break;
           }
         }
         call.arguments.push_back(
-            {.name = name, .value = std::string(raw), .is_string = is_string});
+            {.name = name, .value = std::move(raw), .is_string = is_string});
         body.remove_prefix(close + std::string_view{"</parameter>"}.size());
       }
       complete = valid && consume("</function>") && consume(end);
