@@ -643,6 +643,11 @@ Server lifecycle and request logs go to stderr. Each request gets an
 requests log receipt and completion; streaming completion is logged after the
 stream ends. Successful health/metrics and video-status polls are quiet.
 
+Pass `--log-progress` to `gufo serve llm` to log each prefill chunk, each
+50-token decode boundary, and the final decode remainder. Each line includes the
+request ID, completed and total tokens, percentage, current speed and average
+speed. Speculative requests also include accepted and proposed drafts.
+
 Text completion logs include stop/length/cancellation, queue and first-token
 latency, prefill/decode speed, execution width, memory/disk cache hits and reused
 tokens, plus accepted/proposed drafts and acceptance percentage. These metrics
