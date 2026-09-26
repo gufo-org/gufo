@@ -28,6 +28,9 @@ if (ENGINE_ENABLE_HIP)
       select_ops)
     add_qwen38_flash_next_test(${name} gufo_qwen38_flash_next "hip;gpu;gfx1151")
   endforeach()
+  # The rope phase and RMS checks compare against the scalar CPU oracle.
+  target_link_libraries(qwen38_flash_next_attention_ops_test PRIVATE
+    gufo_qwen38_flash_next_reference)
 
   add_executable(qwen38_flash_next_session_test EXCLUDE_FROM_ALL session_test.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_cache.cpp

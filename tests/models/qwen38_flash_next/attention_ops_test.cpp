@@ -8,14 +8,18 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
 
+#include "src/models/qwen38_flash_next/cpu_ops.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace q = gufo::models::qwen38_flash_next::rocm;
+namespace qfn = gufo::models::qwen38_flash_next;
 namespace {
 
 // The model's full-attention geometry: 24 query heads over 2 KV heads,
@@ -102,7 +106,7 @@ std::vector<float> Download(HipBuffer<float>* source, std::size_t count) {
 }
 
 void CheckPreparation(std::uint32_t n, std::uint32_t start,
-                      std::uint32_t rotary) {
+                      std::uint32_t rotary, const qfn::YarnRope& yarn = {}) {
   constexpr std::uint32_t stride = 2 * (kQWidth + kKvWidth);
   const std::size_t count = static_cast<std::size_t>(n) * kQWidth;
   const std::size_t cache_rows = start + n + 2;
@@ -172,8 +176,10 @@ void CheckPreparation(std::uint32_t n, std::uint32_t start,
                    1e-6F, nullptr);
     q::RmsNormRows(k.get(), k_gamma.get(), k.get(), n * kKvHeads, kDim, 1,
                    1e-6F, nullptr);
-    q::Rope(q_ref.get(), n, kHeads, kDim, rotary, pos.get(), 1e7F, nullptr);
-    q::Rope(k.get(), n, kKvHeads, kDim, rotary, pos.get(), 1e7F, nullptr);
+    q::Rope(q_ref.get(), n, kHeads, kDim, rotary, pos.get(), 1e7F, nullptr,
+            nullptr, yarn);
+    q::Rope(k.get(), n, kKvHeads, kDim, rotary, pos.get(), 1e7F, nullptr,
+            nullptr, yarn);
     q::StoreKv(k.get(), k_ref.get(), n, kKvWidth, pos.get(), nullptr);
     q::StoreKv(v.get(), v_ref.get(), n, kKvWidth, pos.get(), nullptr);
     CheckHip(hipDeviceSynchronize(), "preparation reference ready");
@@ -184,7 +190,7 @@ void CheckPreparation(std::uint32_t n, std::uint32_t start,
       const bool supported = q::PrepareAttention(
           packed.get(), stride, q_gamma.get(), k_gamma.get(), q_out.get(),
           gate_out.get(), k_out.get(), v_out.get(), n, kHeads, kKvHeads, kDim,
-          rotary, pos.get(), 1e7F, 1e-6F, capture.stream);
+          rotary, pos.get(), 1e7F, 1e-6F, capture.stream, nullptr, false, yarn);
       CheckHip(hipStreamEndCapture(capture.stream, &capture.graph),
                "preparation capture end");
       if (!supported)
@@ -217,7 +223,7 @@ void CheckPreparation(std::uint32_t n, std::uint32_t start,
                 k_gamma.get(), q_out.get() + std::size_t(off) * kQWidth,
                 gate_out.get() + std::size_t(off) * kQWidth, k_out.get(),
                 v_out.get(), std::min(chunk, n - off), kHeads, kKvHeads, kDim,
-                rotary, pos.get(), 1e7F, 1e-6F, nullptr, nullptr, true))
+                rotary, pos.get(), 1e7F, 1e-6F, nullptr, nullptr, true, yarn))
           throw std::runtime_error("prefill preparation rejected a short tail");
       }
       CheckHip(hipDeviceSynchronize(), "short prefill preparation");
@@ -230,7 +236,126 @@ void CheckPreparation(std::uint32_t n, std::uint32_t start,
     }
   }
   std::cout << "attention preparation n=" << n << " start=" << start
-            << " rotary=" << rotary << ": exact, including graph positions\n";
+            << " rotary=" << rotary << " yarn=" << yarn.enabled
+            << ": exact, including graph positions\n";
+}
+
+qfn::YarnRope Yarn(float factor) {
+  return qfn::MakeYarnRope({.factor = factor, .original_context = 262144}, 64,
+                           1e7F);
+}
+
+// HF frequency of pair i in double (same ramp, 1/factor blend).
+double HfFrequency(float factor, std::uint32_t i) {
+  const double extrapolation = std::pow(1e7, -2.0 * i / 64.0);
+  if (factor == 1.0F)
+    return extrapolation;
+  const double ramp = std::clamp((double(i) - 14.0) / 8.0, 0.0, 1.0);
+  return extrapolation * (1.0 - ramp + ramp / factor);
+}
+
+// Unit input per pair: the Rope kernel's output is mscale * (cos, sin) of
+// the angle, so angle and scale are checked directly against HF.
+void CheckPhase(const std::vector<float>& out, const std::vector<double>& pos,
+                float factor, const char* label) {
+  const double mscale = factor == 1.0F ? 1.0 : 0.1 * std::log(factor) + 1.0;
+  for (std::uint32_t i = 0; i < 32; ++i) {
+    const double angle = pos[i] * HfFrequency(factor, i);
+    const double got = std::atan2(out[i + 32], out[i]);
+    const double diff = std::remainder(got - angle, 2.0 * std::numbers::pi);
+    const double magnitude = std::hypot(out[i], out[i + 32]);
+    if (std::abs(diff) > 1e-6 * angle + 1e-4 ||
+        std::abs(magnitude - mscale) > 1e-5 * mscale) {
+      throw std::runtime_error(
+          std::string(label) + ": pair " + std::to_string(i) + " angle error " +
+          std::to_string(diff) + " magnitude " + std::to_string(magnitude));
+    }
+  }
+  for (std::uint32_t i = 64; i < kDim; ++i)
+    if (out[i] != 0.25F)
+      throw std::runtime_error(std::string(label) + ": tail changed");
+}
+
+std::vector<float> UnitPairs() {
+  std::vector<float> host(kDim, 0.0F);
+  std::fill_n(host.begin(), 32, 1.0F);
+  std::fill(host.begin() + 64, host.end(), 0.25F);
+  return host;
+}
+
+void CheckYarnPhase(float factor, std::uint32_t position) {
+  HipBuffer<float> x(kDim);
+  HipBuffer<std::uint32_t> pos(1);
+  Upload(&x, UnitPairs());
+  Upload(&pos, std::vector<std::uint32_t>{position});
+  q::Rope(x.get(), 1, 1, kDim, 64, pos.get(), 1e7F, nullptr, nullptr,
+          factor == 1.0F ? qfn::YarnRope{} : Yarn(factor));
+  CheckHip(hipDeviceSynchronize(), "phase rope");
+  CheckPhase(Download(&x, kDim), std::vector<double>(32, position), factor,
+             "rope phase");
+  std::cout << "rope phase factor=" << factor << " pos=" << position
+            << ": HF angle and mscale\n";
+}
+
+// mRoPE: pair i reads T, H or W exactly as qwen::vision::RopePosition does.
+void CheckYarnVisionPhase(float factor) {
+  const std::vector<std::int32_t> thw{300000, 200000, 250000};
+  HipBuffer<std::int32_t> positions(3);
+  CheckHip(hipMemcpy(positions.get(), thw.data(), 12, hipMemcpyHostToDevice),
+           "vision positions");
+  const gufo::models::qwen::vision::DeviceRope host_rope{positions.get(), 1, 0};
+  HipBuffer<gufo::models::qwen::vision::DeviceRope> rope(1);
+  CheckHip(hipMemcpy(rope.get(), &host_rope, sizeof(host_rope),
+                     hipMemcpyHostToDevice),
+           "vision rope");
+  HipBuffer<float> x(kDim);
+  HipBuffer<std::uint32_t> pos(1);
+  Upload(&x, UnitPairs());
+  Upload(&pos, std::vector<std::uint32_t>{0});
+  q::Rope(x.get(), 1, 1, kDim, 64, pos.get(), 1e7F, nullptr, rope.get(),
+          Yarn(factor));
+  CheckHip(hipDeviceSynchronize(), "vision phase rope");
+  std::vector<double> coordinate(32);
+  for (std::uint32_t i = 0; i < 32; ++i) {
+    const int axis = i % 3 == 1 && i < 33 ? 1 : i % 3 == 2 && i < 30 ? 2 : 0;
+    coordinate[i] = thw[axis];
+  }
+  CheckPhase(Download(&x, kDim), coordinate, factor, "vision rope phase");
+  std::cout << "vision rope phase factor=" << factor << ": per-axis YaRN\n";
+}
+
+// Relative RMS of the rotated dims, GPU Rope kernel versus cpu::Rope.
+double OracleRms(float factor, std::uint32_t position) {
+  const auto yarn = factor == 1.0F ? qfn::YarnRope{} : Yarn(factor);
+  const auto input = MakeValues(std::size_t(kHeads) * kDim, 0x5EED, 1.0F);
+  HipBuffer<float> x(input.size());
+  HipBuffer<std::uint32_t> pos(1);
+  Upload(&x, input);
+  Upload(&pos, std::vector<std::uint32_t>{position});
+  q::Rope(x.get(), 1, kHeads, kDim, 64, pos.get(), 1e7F, nullptr, nullptr,
+          yarn);
+  const auto gpu = Download(&x, input.size());
+  auto cpu = input;
+  qfn::cpu::Rope(cpu.data(), kHeads, kDim, 64, position, 1e7F, yarn);
+  double num = 0.0, den = 0.0;
+  for (std::uint32_t h = 0; h < kHeads; ++h)
+    for (std::uint32_t i = 0; i < 64; ++i) {
+      const auto k = std::size_t(h) * kDim + i;
+      num += (double(gpu[k]) - cpu[k]) * (double(gpu[k]) - cpu[k]);
+      den += double(cpu[k]) * cpu[k];
+    }
+  return std::sqrt(num / den);
+}
+
+void CheckOracleRms() {
+  for (const std::uint32_t position : {1000U, 300000U, 650000U}) {
+    const double off = OracleRms(1.0F, position);
+    const double on = OracleRms(2.5F, position);
+    std::cout << "rope vs CPU oracle pos=" << position << ": relative RMS off "
+              << off << " on " << on << '\n';
+    if ((position == 1000 && on > 1e-4) || on > 2.0 * off + 1e-5)
+      throw std::runtime_error("YaRN rope drifts from the CPU oracle");
+  }
 }
 
 /// FP64 gated attention over the keys each row can see: every key below
@@ -612,6 +737,14 @@ int main() {
     CheckPreparation(8, 4096, 64);
     CheckPreparation(65, 131069, 64);
     CheckPreparation(7, 131069, 256);
+    CheckPreparation(8, 4096, 64, Yarn(1.5625F));
+    CheckPreparation(65, 300000, 64, Yarn(2.5F));
+    CheckYarnPhase(1.0F, 262143);  // off: sincosf accuracy at native depth
+    for (const float factor : {1.5625F, 2.5F, 4.0F})
+      for (const std::uint32_t position : {1000U, 300000U, 650000U})
+        CheckYarnPhase(factor, position);
+    CheckYarnVisionPhase(2.5F);
+    CheckOracleRms();
     // Structured selections against the sparse path's 1024-block compaction
     // windows and 64-block key tiles. At 131069 the last 512 blocks sit in
     // the final window; 262141 spans all 64 windows of the native context,
