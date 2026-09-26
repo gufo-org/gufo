@@ -18,7 +18,9 @@ namespace gufo::hip {
 namespace {
 
 constexpr std::uint32_t kMaxPromptBatch = 4096;
-constexpr std::size_t kMaxTargetLayerTaps = 5;
+/// Target hidden-layer taps a DFlash2 draft may request: the Qwen3.8 27B draft
+/// uses 5, the Qwen3.6 35B-A3B draft 8. Each tap costs one hidden row.
+constexpr std::size_t kMaxTargetLayerTaps = 16;
 constexpr std::array<std::uint8_t, 8> kCompactSnapshotMagic = {
     'G', 'Q', 'K', 'V', 'S', 'N', 'P', '1'};
 constexpr std::uint32_t kCompactSnapshotVersion = 1;
@@ -830,7 +832,8 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
     HIP_CHECK(hipMalloc(&d_prompt_tokens, std::max<std::size_t>(batch, 2) *
                                               sizeof(std::uint32_t)));
     HIP_CHECK(
-        hipMalloc(&d_target_layer_features, 5 * hidden_size * sizeof(float)));
+        hipMalloc(&d_target_layer_features,
+                  kMaxTargetLayerTaps * hidden_size * sizeof(float)));
 
     const std::size_t scratch_elements =
         batch * std::max<std::size_t>(
