@@ -224,6 +224,19 @@ void CheckCpuOracle() {
   std::cout << "CPU oracle: off bit-identical, on matches HF at pos 1000\n";
 }
 
+void CheckPositionPolicy() {
+  Require(qfn::RopePositionPolicy({}) == "absolute-v1",
+          "off must keep the existing disk-cache identity line");
+  Require(qfn::RopePositionPolicy(Yarn(1.5625F)) ==
+              "absolute-yarn-v1;factor=0x1.9p+0;original=262144;"
+              "beta_fast=0x1p+5;beta_slow=0x1p+0",
+          "YaRN policy must encode every parameter exactly");
+  Require(qfn::RopePositionPolicy(Yarn(2.5F)) !=
+              qfn::RopePositionPolicy(Yarn(1.5625F)),
+          "a factor change must change the identity");
+  std::cout << "position policy strings pinned\n";
+}
+
 }  // namespace
 
 int main() {
@@ -232,6 +245,7 @@ int main() {
     CheckOffAndValidation();
     CheckInvertedCorrectionRange();
     CheckCpuOracle();
+    CheckPositionPolicy();
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';
     return 1;
