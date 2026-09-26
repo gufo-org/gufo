@@ -157,8 +157,21 @@ the short suffix. System instructions, tool definitions and image identities
 must match the retained prefix.
 
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
-before exiting. Disk persistence remains bounded: an exhausted staging budget
-can skip a disk snapshot without invalidating the live conversation state.
+before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
+`--cache-disk-staging-bytes 0` (the default) selects the smallest of 1 GiB,
+one eighth of available host RAM after model/session loading (including cgroup
+limits), and the disk budget. This bounds queued captures/writes and each disk
+read separately; it allocates nothing upfront. Live model state and retained
+RAM snapshots have separate budgets.
+
+Snapshots that exceed either limit are skipped with their required size and
+available budget logged; live conversation reuse remains available. Existing
+files that exceed the current staging limit are preserved subject to disk LRU
+eviction and can be reused after restarting with sufficient staging.
+For Flash-Next/MTP at full 262K context, explicitly set
+`--cache-disk-staging-bytes 8589934592` (8 GiB) if RAM permits.
+Qwen27B at full context needs larger staging and `--cache-disk-bytes` limits;
+use the required size reported in the skip log.
 
 For a focused cancellation check, run
 `python3 tools/serving/check-continuation.py --output /tmp/cache-check.json`

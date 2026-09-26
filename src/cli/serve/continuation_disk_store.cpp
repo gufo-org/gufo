@@ -590,6 +590,14 @@ struct ContinuationDiskStore::Impl {
     if (options.capacity_bytes == 0) {
       throw std::invalid_argument("continuation disk capacity must be nonzero");
     }
+    if (options.staging_capacity_bytes == 0) {
+      // The host snapshot budget already leaves half of available RAM free.
+      // Disk staging gets a quarter of that budget and a conservative hard cap.
+      options.staging_capacity_bytes =
+          std::min({options.capacity_bytes,
+                    TextRunnerDiskCacheOptions::kAutomaticStagingMaxBytes,
+                    HostSnapshotBudgetBytes() / 4});
+    }
     if (options.staging_capacity_bytes < kHeaderBytes) {
       throw std::invalid_argument(
           "continuation disk staging capacity is too small");
@@ -639,7 +647,8 @@ struct ContinuationDiskStore::Impl {
   void Emit(ContinuationDiskEventAction action,
             ContinuationDiskEventReason reason, std::size_t file_bytes,
             std::size_t payload_bytes, std::size_t token_count,
-            double elapsed_ms = 0.0) const noexcept {
+            double elapsed_ms = 0.0,
+            std::size_t staging_used_bytes = 0) const noexcept {
     if (!event_sink) {
       return;
     }
@@ -652,11 +661,38 @@ struct ContinuationDiskStore::Impl {
           .token_count = token_count,
           .retained_bytes = retained,
           .capacity_bytes = options.capacity_bytes,
+          .staging_capacity_bytes = options.staging_capacity_bytes,
+          .staging_used_bytes = staging_used_bytes,
           .elapsed_ms = elapsed_ms,
       });
     } catch (...) {
       return;
     }
+  }
+
+  /// Called with queue_mutex held. Report capacity rejection before allocation
+  /// or enqueue, where it would otherwise look like a successful cache capture.
+  [[nodiscard]] bool CanStage(std::size_t bytes, std::size_t payload_bytes,
+                              std::size_t token_count) const {
+    if (stopping)
+      return false;
+    const auto used =
+        queued_bytes + capture_bytes->load(std::memory_order_relaxed);
+    if (bytes > options.capacity_bytes) {
+      Emit(ContinuationDiskEventAction::kSkipped,
+           ContinuationDiskEventReason::kByteCapacity, bytes, payload_bytes,
+           token_count, 0.0, used);
+      return false;
+    }
+    const auto limit =
+        std::min(options.capacity_bytes, options.staging_capacity_bytes);
+    if (bytes > limit || used > limit - bytes) {
+      Emit(ContinuationDiskEventAction::kSkipped,
+           ContinuationDiskEventReason::kStagingCapacity, bytes, payload_bytes,
+           token_count, 0.0, used);
+      return false;
+    }
+    return true;
   }
 
   [[nodiscard]] std::string Hash(std::span<const std::uint8_t> bytes) const {
@@ -690,9 +726,10 @@ struct ContinuationDiskStore::Impl {
            (status->st_mode & S_IRUSR) != 0;
   }
 
-  [[nodiscard]] bool ReadImage(
-      std::string_view filename, std::vector<std::uint8_t>* image,
-      ContinuationDiskEventReason* failure_reason) const {
+  [[nodiscard]] bool ReadImage(std::string_view filename,
+                               std::vector<std::uint8_t>* image,
+                               ContinuationDiskEventReason* failure_reason,
+                               std::size_t* file_bytes = nullptr) const {
     if (image == nullptr || failure_reason == nullptr) {
       return false;
     }
@@ -701,6 +738,8 @@ struct ContinuationDiskStore::Impl {
       *failure_reason = ContinuationDiskEventReason::kUnsafeFile;
       return false;
     }
+    if (file_bytes != nullptr && status.st_size > 0)
+      *file_bytes = static_cast<std::size_t>(status.st_size);
     if (status.st_size <= 0 ||
         static_cast<std::uint64_t>(status.st_size) >
             static_cast<std::uint64_t>(options.staging_capacity_bytes)) {
@@ -766,7 +805,29 @@ struct ContinuationDiskStore::Impl {
       ContinuationDiskEventReason failure_reason =
           ContinuationDiskEventReason::kCorrupt;
       ParsedImage parsed;
-      if (!ReadImage(filename, &image, &failure_reason)) {
+      std::size_t file_bytes = 0;
+      if (!ReadImage(filename, &image, &failure_reason, &file_bytes)) {
+        if (failure_reason == ContinuationDiskEventReason::kStagingCapacity) {
+          // A smaller RAM budget must not destroy a previously valid cache.
+          // Account the file for LRU/retention, but never index unverified
+          // tokens. A restart with enough staging can validate and reuse it.
+          auto access = directory_entry.last_write_time(error);
+          if (error) {
+            error.clear();
+            access = std::filesystem::file_time_type::min();
+          }
+          entries.push_back({.filename = filename,
+                             .key_hash = {},
+                             .persistence = {},
+                             .tokens = {},
+                             .file_bytes = file_bytes,
+                             .last_access = access});
+          retained += file_bytes;
+          retained_entries.fetch_add(1, std::memory_order_relaxed);
+          Emit(ContinuationDiskEventAction::kSkipped, failure_reason,
+               file_bytes, 0, 0);
+          continue;
+        }
         RemoveFileOnly(filename);
         Emit(ContinuationDiskEventAction::kRemoved, failure_reason, 0, 0, 0);
         continue;
@@ -1313,12 +1374,8 @@ ContinuationDiskStore::ReserveCapture(
   const auto bytes =
       CheckedFileBytes(descriptor.persistence->compatibility_identity.size(),
                        token_count, snapshot_bytes);
-  const auto limit = std::min(impl_->options.capacity_bytes,
-                              impl_->options.staging_capacity_bytes);
   std::lock_guard lock(impl_->queue_mutex);
-  const auto captures = impl_->capture_bytes->load(std::memory_order_relaxed);
-  if (impl_->stopping || bytes > limit || captures > limit - bytes ||
-      impl_->queued_bytes > limit - bytes - captures)
+  if (!impl_->CanStage(bytes, snapshot_bytes, token_count))
     return {};
   auto reservation = std::unique_ptr<CaptureReservation>(
       new CaptureReservation(impl_->capture_bytes, bytes));
@@ -1337,12 +1394,8 @@ bool ContinuationDiskStore::CanSave(
   const auto bytes =
       CheckedFileBytes(descriptor.persistence->compatibility_identity.size(),
                        token_count, snapshot_bytes);
-  const auto limit = std::min(impl_->options.capacity_bytes,
-                              impl_->options.staging_capacity_bytes);
   std::lock_guard lock(impl_->queue_mutex);
-  const auto captures = impl_->capture_bytes->load(std::memory_order_relaxed);
-  return !impl_->stopping && bytes <= limit && captures <= limit - bytes &&
-         impl_->queued_bytes <= limit - bytes - captures;
+  return impl_->CanStage(bytes, snapshot_bytes, token_count);
 }
 
 std::size_t ContinuationDiskStore::SaveAsync(
@@ -1365,8 +1418,6 @@ std::size_t ContinuationDiskStore::SaveAsync(
       checkpoint_tokens.size(),
       std::max(snapshot->PayloadBytes(),
                runner->PersistentSnapshotPayloadBytes(*snapshot)));
-  const auto limit = std::min(impl_->options.capacity_bytes,
-                              impl_->options.staging_capacity_bytes);
   {
     std::lock_guard lock(impl_->queue_mutex);
     if (reservation) {
@@ -1374,9 +1425,8 @@ std::size_t ContinuationDiskStore::SaveAsync(
         return 0;
       reservation.reset();
     }
-    const auto captures = impl_->capture_bytes->load(std::memory_order_relaxed);
-    if (impl_->stopping || charge > limit || captures > limit - charge ||
-        impl_->queued_bytes > limit - charge - captures)
+    if (!impl_->CanStage(charge, snapshot->PayloadBytes(),
+                         checkpoint_tokens.size()))
       return 0;
     impl_->pending.push_back({std::move(runner), std::move(checkpoint_tokens),
                               std::move(snapshot), std::move(input_identity),

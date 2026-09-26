@@ -52,48 +52,6 @@ void SetError(std::string* error, std::string message) {
 }
 
 #if defined(ENGINE_ENABLE_HIP)
-/// Ordinary host allocations use the host budget, not HIP's device capacity.
-std::size_t HostSnapshotBudgetBytes() {
-  const long pages = sysconf(_SC_AVPHYS_PAGES);
-  const long page_size = sysconf(_SC_PAGESIZE);
-  if (pages <= 0 || page_size <= 0)
-    return 0;
-  std::uint64_t available = std::uint64_t(pages) * page_size;
-  std::ifstream meminfo("/proc/meminfo");
-  for (std::string line; std::getline(meminfo, line);) {
-    if (line.starts_with("MemAvailable:")) {
-      std::istringstream fields(line.substr(13));
-      std::uint64_t kib = 0;
-      if (fields >> kib)
-        available = kib * 1024;
-      break;
-    }
-  }
-  // A cgroup limit can be much smaller than the host's available memory.
-  // Walk parents too: a child may say "max" beneath a limited ancestor.
-  std::ifstream membership("/proc/self/cgroup");
-  for (std::string line; std::getline(membership, line);) {
-    if (!line.starts_with("0::/"))
-      continue;
-    const auto relative = std::filesystem::path(line.substr(4));
-    if (std::ranges::any_of(relative,
-                            [](const auto& part) { return part == ".."; }))
-      continue;
-    const std::filesystem::path root("/sys/fs/cgroup");
-    for (auto path = root / relative;; path = path.parent_path()) {
-      std::ifstream limit_file(path / "memory.max");
-      std::ifstream used_file(path / "memory.current");
-      std::uint64_t limit = 0, used = 0;
-      if ((limit_file >> limit) && (used_file >> used))
-        available = std::min(available, limit > used ? limit - used : 0);
-      if (path == root)
-        break;
-    }
-    break;
-  }
-  return static_cast<std::size_t>(std::min<std::uint64_t>(
-      available / 2, std::numeric_limits<std::size_t>::max()));
-}
 
 struct QwenImageContext final : TextPromptContext {
   std::shared_ptr<const models::qwen::vision::Prompt> prompt;
@@ -3093,8 +3051,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
       (!IsSha256Hex(disk_cache_config.model_artifact_fingerprint) ||
        (!disk_cache_config.draft_model_artifact_fingerprint.empty() &&
         !IsSha256Hex(disk_cache_config.draft_model_artifact_fingerprint)) ||
-       disk_cache_config.capacity_bytes == 0 ||
-       disk_cache_config.staging_capacity_bytes == 0)) {
+       disk_cache_config.capacity_bytes == 0)) {
     SetError(error, "Qwen persistent disk cache configuration is invalid");
     return false;
   }
@@ -3242,8 +3199,7 @@ bool InferenceBackend::load(
       (!IsSha256Hex(disk_cache_config.model_artifact_fingerprint) ||
        (use_dspark &&
         !IsSha256Hex(disk_cache_config.draft_model_artifact_fingerprint)) ||
-       disk_cache_config.capacity_bytes == 0 ||
-       disk_cache_config.staging_capacity_bytes == 0)) {
+       disk_cache_config.capacity_bytes == 0)) {
     SetError(error, "DeepSeek persistent disk cache configuration is invalid");
     return false;
   }
@@ -3322,8 +3278,7 @@ bool InferenceBackend::load(
       (!IsSha256Hex(disk_cache_config.model_artifact_fingerprint) ||
        (speculative_config.backend == TextSpeculativeBackend::kMtp &&
         !IsSha256Hex(disk_cache_config.draft_model_artifact_fingerprint)) ||
-       disk_cache_config.capacity_bytes == 0 ||
-       disk_cache_config.staging_capacity_bytes == 0)) {
+       disk_cache_config.capacity_bytes == 0)) {
     SetError(error,
              "Qwen3.8-Flash-Next persistent disk cache configuration is "
              "invalid");

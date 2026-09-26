@@ -37,14 +37,23 @@ struct TextPreparedPrompt {
 };
 
 struct TextRunnerDiskCacheOptions {
+  static constexpr std::size_t kDefaultCapacityBytes =
+      std::size_t{8} * 1024U * 1024U * 1024U;
+  static constexpr std::size_t kAutomaticStagingMaxBytes =
+      std::size_t{1} * 1024U * 1024U * 1024U;
   std::filesystem::path directory;
-  std::size_t capacity_bytes{0};
+  std::size_t capacity_bytes{kDefaultCapacityBytes};
+  /// Zero selects 1/8 of available host RAM, capped at 1 GiB and
+  /// capacity_bytes.
   std::size_t staging_capacity_bytes{0};
   /// Shared prefixes shorter than this are cheaper to prefill than to restore.
   std::size_t shared_prefix_min_tokens{128};
   /// Bound on shared-prefix snapshots written while prefilling one request.
   std::size_t shared_prefix_max_boundaries{4};
 };
+
+/// Host snapshot budget after accounting for cgroup limits and headroom.
+[[nodiscard]] std::size_t HostSnapshotBudgetBytes();
 
 enum class TextExecutionPlanKind : std::uint8_t {
   kSerial,

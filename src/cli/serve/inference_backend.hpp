@@ -50,10 +50,9 @@ struct TextSpeculativeConfig {
 
 struct TextDiskCacheConfig {
   std::filesystem::path directory;
-  std::size_t capacity_bytes{static_cast<std::size_t>(4) * 1024U * 1024U *
-                             1024U};
-  std::size_t staging_capacity_bytes{static_cast<std::size_t>(512) * 1024U *
-                                     1024U};
+  std::size_t capacity_bytes{TextRunnerDiskCacheOptions::kDefaultCapacityBytes};
+  /// Zero selects the automatic host RAM budget after session allocation.
+  std::size_t staging_capacity_bytes{0};
   std::string model_artifact_fingerprint;
   std::string draft_model_artifact_fingerprint;
 };
