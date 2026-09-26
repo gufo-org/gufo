@@ -2,7 +2,7 @@
 // Use the production CLI for generation and the session test for replay.
 //
 // gpu_probe --model FIRST_SHARD.gguf --prompt TEXT [--reference]
-//           [--batch T] [--context N] [--dump logits.bin]
+//           [--batch T] [--context N] [--yarn-factor F] [--dump logits.bin]
 // Independent predictor oracle: --mtp-model MTP.gguf --mtp-audit
 // MTP cost calibration: --mtp-model MTP.gguf --cost-audit C (0 = all)
 //                      [--depth N] (default: 0, 4096, 32768)
@@ -15,6 +15,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -93,6 +94,7 @@ int main(int argc, char** argv) {
   std::optional<std::uint32_t> cost_depth;
   std::uint32_t batch = 512;
   std::uint32_t context = 4096;
+  float yarn_factor = 1.0F;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto next = [&]() -> std::string {
@@ -157,6 +159,15 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "%s requires a positive integer\n", arg.c_str());
         return 2;
       }
+    } else if (arg == "--yarn-factor") {
+      const auto value = next();
+      char* end = nullptr;
+      yarn_factor = std::strtof(value.c_str(), &end);
+      if (value.empty() || end != value.c_str() + value.size() ||
+          !(yarn_factor >= 1.0F)) {
+        std::fprintf(stderr, "--yarn-factor requires a number >= 1\n");
+        return 2;
+      }
     } else if (arg == "--dump") {
       dump_path = next();
     } else {
@@ -205,6 +216,17 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "tokenizer failed: %s\n", error.c_str());
     return 1;
   }
+  if (yarn_factor != 1.0F) {
+    const q::RopeScaling scaling{
+        .factor = yarn_factor,
+        .original_context = weights->config.context_length};
+    if (!q::ValidateRopeScaling(scaling, weights->config.context_length,
+                                &error)) {
+      std::fprintf(stderr, "invalid YaRN factor: %s\n", error.c_str());
+      return 2;
+    }
+    weights->config.rope_scaling = scaling;
+  }
   const auto& c = weights->config;
   if (cost_depth &&
       (c.context_length < 96 || *cost_depth > c.context_length - 96)) {
@@ -243,6 +265,7 @@ int main(int argc, char** argv) {
   }
   q::rocm::Executor::Options options;
   options.max_batch = batch;
+  options.max_context = context;
   options.max_logit_rows = std::min<std::uint32_t>(batch, 64);
   if (mtp_audit || cost_audit)
     options.max_speculative = 8;

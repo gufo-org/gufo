@@ -359,6 +359,9 @@ int main() {
     ok = Run(1, 20000, 0, false, kBudget + 128, false, ScoreLayout::kAligned,
              TiedBlocks::kSuffix) &&
          ok;
+    // 409,600-token capacity: 3,200 mask words per row (YaRN 1.5625).
+    ok = Run(3, 409533, 0x40960000U, false, 0, true, ScoreLayout::kAligned) &&
+         ok;
     return ok ? 0 : 1;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

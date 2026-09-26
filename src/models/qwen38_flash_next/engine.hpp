@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -45,6 +46,10 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  /// Internal YaRN override applied to the artifact configuration before
+  /// upload. Empty keeps the artifact's own setting (off unless its
+  /// metadata enables it).
+  std::optional<RopeScaling> rope_scaling{};
 };
 
 class Session;

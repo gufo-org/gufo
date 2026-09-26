@@ -143,6 +143,9 @@ public:
     std::uint32_t max_logit_rows{1};
     /// Longest speculative batch; bounds the recurrent snapshot storage.
     std::uint32_t max_speculative{1};
+    /// Largest session context. Zero selects the native context; values
+    /// above it require YaRN (Config::MaxContextLength()).
+    std::uint32_t max_context{0};
   };
 
   ~Executor();
@@ -525,6 +528,11 @@ private:
     return selected_logits_ != nullptr ? selected_logits_ : s_.logits;
   }
   std::uint32_t mask_words_{0};
+  /// Session capacity the sparse-mask rows and score scratch are sized for:
+  /// max(native context, Options::max_context).
+  std::uint32_t context_capacity_{0};
+  /// YaRN constants every rope launch receives (disabled: original path).
+  YarnRope yarn_{};
   /// Queries per block-selection launch (its score scratch is chunk x
   /// max_blocks floats: 128 MB at the 262k context).
   std::uint32_t select_chunk_{512};
