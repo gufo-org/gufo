@@ -2152,10 +2152,17 @@ SnapshotHeader MakeSnapshotHeader(const Config& c, bool has_mtp,
   h.image_count = std::ranges::count_if(
       session.VisionLayout().images,
       [&](const auto& image) { return image.offset < h.position; });
-  h.rope_factor = c.rope_scaling.factor;
-  h.rope_original_context = c.rope_scaling.original_context;
-  h.rope_beta_fast = c.rope_scaling.beta_fast;
-  h.rope_beta_slow = c.rope_scaling.beta_slow;
+  // Disabled scaling has one disk-cache identity ("absolute-v1" from
+  // RopePositionPolicy) regardless of whatever original_context/beta the
+  // config happens to carry, so the header must normalize to the same
+  // defaults rather than echo them raw (else two "off" configs that differ
+  // only in those unused fields would collide on identity but disagree on
+  // SameGeometry, and neither could restore the other's snapshot).
+  const RopeScaling rope = NormalizedRopeScaling(c.rope_scaling);
+  h.rope_factor = rope.factor;
+  h.rope_original_context = rope.original_context;
+  h.rope_beta_fast = rope.beta_fast;
+  h.rope_beta_slow = rope.beta_slow;
   return h;
 }
 

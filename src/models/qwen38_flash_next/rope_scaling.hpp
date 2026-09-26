@@ -57,6 +57,16 @@ struct YarnRope {
 /// Disk-cache position policy: "absolute-v1" when off (unchanged identity).
 [[nodiscard]] std::string RopePositionPolicy(const RopeScaling& scaling);
 
+/// Collapses a disabled scaling (`factor == 1`) to the same default fields
+/// regardless of whatever `original_context`/beta values happen to be set on
+/// it (they are unused while off), so two off configurations always compare
+/// equal wherever the raw struct is used as an identity key. An enabled
+/// scaling passes through unchanged.
+[[nodiscard]] inline RopeScaling NormalizedRopeScaling(
+    const RopeScaling& scaling) noexcept {
+  return scaling.Enabled() ? scaling : RopeScaling{};
+}
+
 /// Frequency multiplier of rotary pair `pair`: 1 below `low`, 1 / factor
 /// from `high`, linear between (HF `linear_ramp_factor`).
 QFN_HOST_DEVICE inline float YarnPairMultiplier(const YarnRope& yarn,

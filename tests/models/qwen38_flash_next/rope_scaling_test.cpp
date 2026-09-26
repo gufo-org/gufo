@@ -111,6 +111,27 @@ void CheckInvertedCorrectionRange() {
                "no-interpolation behavior\n";
 }
 
+// The snapshot header uses this to decide whether two configs restore each
+// other's disk cache; it must collapse every disabled config to one
+// identity, since RopePositionPolicy already reports "absolute-v1" for all
+// of them regardless of original_context/beta.
+void CheckNormalizedRopeScaling() {
+  const qfn::RopeScaling default_off;
+  const qfn::RopeScaling leftover_off{
+      .original_context = 262144, .beta_fast = 1.0F, .beta_slow = 32.0F};
+  Require(qfn::NormalizedRopeScaling(default_off) ==
+              qfn::NormalizedRopeScaling(leftover_off),
+          "disabled scaling must normalize to one identity regardless of "
+          "leftover original_context/beta fields");
+  Require(qfn::NormalizedRopeScaling(default_off) == qfn::RopeScaling{},
+          "normalizing an already-default off scaling must be a no-op");
+  const auto on = Yarn(2.5F);
+  Require(qfn::NormalizedRopeScaling(on) == on,
+          "enabled scaling must pass through unchanged");
+  std::cout << "normalized rope scaling collapses disabled configs to one "
+               "identity\n";
+}
+
 void CheckPositionPolicy() {
   Require(qfn::RopePositionPolicy({}) == "absolute-v1",
           "off must keep the existing disk-cache identity line");
@@ -131,6 +152,7 @@ int main() {
     CheckGoldenTable();
     CheckOffAndValidation();
     CheckInvertedCorrectionRange();
+    CheckNormalizedRopeScaling();
     CheckPositionPolicy();
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';
