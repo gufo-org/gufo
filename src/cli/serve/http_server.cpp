@@ -491,7 +491,8 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     const json::Value& body, TextGenerationBackend& backend,
     std::string_view token_field, std::size_t* max_tokens,
     sampling::SamplingConfig* sampling_config, std::string_view stop_field = {},
-    bool allow_stream = false) {
+    bool allow_stream = false, bool allow_stream_options = false,
+    bool allow_ignore_eos = false) {
   if (!body.is_object())
     return InvalidCompatibilityRequest("request body must be an object");
   if (const auto* model = body.find("model"); model != nullptr) {
@@ -517,6 +518,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     }
   }
   for (const std::string field : {"stream_options",
+                                  "ignore_eos",
                                   "stop",
                                   "stop_sequences",
                                   "logprobs",
@@ -538,7 +540,9 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
                                   "truncation",
                                   "modalities",
                                   "audio"}) {
-    if (field != stop_field && body.contains(field)) {
+    if (field != stop_field &&
+        !(field == "stream_options" && allow_stream_options) &&
+        !(field == "ignore_eos" && allow_ignore_eos) && body.contains(field)) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }
@@ -582,6 +586,9 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     model["object"] = "model";
     model["created"] = Now();
     model["owned_by"] = "gufo";
+    if (backend->max_context() > 0)
+      model["context_length"] =
+          static_cast<std::size_t>(backend->max_context());
     data.push_back(std::move(model));
   }
   if (video_jobs != nullptr && video_jobs->ready()) {
@@ -649,8 +656,29 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                            &sampling_config, "stop")) {
+                                            &sampling_config, "stop", true,
+                                            true, true)) {
     return std::move(*error);
+  }
+  const auto* stream_field = body.find("stream");
+  const bool stream = stream_field != nullptr && stream_field->as_bool();
+  bool include_usage = false;
+  if (const auto* options = body.find("stream_options")) {
+    if (!stream || !options->is_object())
+      return InvalidCompatibilityRequest(
+          "'stream_options' requires streaming and must be an object");
+    for (const auto& [key, value] : options->members()) {
+      if (key != "include_usage" || !value.is_bool())
+        return InvalidCompatibilityRequest(
+            "only boolean 'stream_options.include_usage' is supported");
+      include_usage = value.as_bool();
+    }
+  }
+  bool ignore_eos = false;
+  if (const auto* value = body.find("ignore_eos")) {
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'ignore_eos' must be a boolean");
+    ignore_eos = value->as_bool();
   }
   std::vector<std::string> stop_sequences;
   if (const auto error = ParseStopSequences(
@@ -667,15 +695,112 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                "invalid_request_error", "missing_prompt");
   }
 
-  const auto res =
-      b.complete(prompt, max_tokens, sampling_config, req.is_cancelled, {},
-                 req.client_id, stop_sequences);
+  auto generation =
+      b.start_complete(prompt, max_tokens, sampling_config, req.is_cancelled,
+                       stream, ignore_eos, req.client_id, stop_sequences);
+  const std::string id = "cmpl-" + RandomId();
+  const long long created = Now();
+  const std::string model = b.model_id();
+  if (stream) {
+    auto stream_log = std::make_shared<HttpResponse::StreamLog>();
+    return {
+        .status = 200,
+        .reason = "OK",
+        .body = {},
+        .headers = {{"Content-Type", "text/event-stream"},
+                    {"Cache-Control", "no-cache"},
+                    {"X-Accel-Buffering", "no"}},
+        .streaming_body =
+            [generation = std::move(generation), id, created, model,
+             include_usage,
+             stream_log](const HttpResponse::BodyWriter& writer) {
+              const auto write_chunk = [&](std::string_view piece,
+                                           std::string_view finish_reason,
+                                           const json::Value* usage = nullptr) {
+                json::Value chunk = json::Value::object();
+                chunk["id"] = id;
+                chunk["object"] = "text_completion";
+                chunk["created"] = created;
+                chunk["model"] = model;
+                json::Value choices = json::Value::array();
+                if (usage == nullptr) {
+                  json::Value choice = json::Value::object();
+                  choice["text"] = std::string(piece);
+                  choice["index"] = 0;
+                  choice["logprobs"] = json::Value();
+                  choice["finish_reason"] =
+                      finish_reason.empty()
+                          ? json::Value()
+                          : json::Value(std::string(finish_reason));
+                  choices.push_back(std::move(choice));
+                }
+                chunk["choices"] = std::move(choices);
+                if (usage != nullptr)
+                  chunk["usage"] = *usage;
+                return writer("data: " + chunk.dump() + "\n\n");
+              };
+              core::Utf8Decoder decoder;
+              bool connected = true;
+              try {
+                const auto result =
+                    generation->Wait([&](std::string_view piece) {
+                      const auto text = decoder.Push(piece, false);
+                      connected = write_chunk(text, {});
+                      return connected;
+                    });
+                stream_log->details = GenerationLogDetails(result);
+                RecordServerMetrics(result);
+                if (!connected || result.cancelled)
+                  return;
+                const auto trailing = decoder.Push({}, true);
+                if (!write_chunk(
+                        trailing,
+                        result.finish_reason ==
+                                TextGenerationBackend::FinishReason::kLength
+                            ? "length"
+                            : "stop"))
+                  return;
+                if (include_usage) {
+                  const auto usage = UsageJson(result);
+                  if (!write_chunk({}, {}, &usage))
+                    return;
+                }
+                (void)writer("data: [DONE]\n\n");
+              } catch (const TextGenerationError& error) {
+                stream_log->error_code = error.stable_code();
+                json::Value detail = json::Value::object();
+                detail["message"] = error.what();
+                detail["type"] = "server_error";
+                detail["code"] = error.stable_code();
+                json::Value event = json::Value::object();
+                event["error"] = std::move(detail);
+                stream_log->error_event_sent =
+                    writer("data: " + event.dump() + "\n\n");
+                (void)writer("data: [DONE]\n\n");
+              } catch (const std::exception&) {
+                stream_log->error_code = "generation_failed";
+                json::Value detail = json::Value::object();
+                detail["message"] = "generation failed";
+                detail["type"] = "server_error";
+                detail["code"] = "generation_failed";
+                json::Value event = json::Value::object();
+                event["error"] = std::move(detail);
+                stream_log->error_event_sent =
+                    writer("data: " + event.dump() + "\n\n");
+                (void)writer("data: [DONE]\n\n");
+              }
+            },
+        .stream_log = std::move(stream_log),
+    };
+  }
+
+  const auto res = generation->Wait();
 
   json::Value resp = json::Value::object();
-  resp["id"] = "cmpl-" + RandomId();
+  resp["id"] = id;
   resp["object"] = "text_completion";
-  resp["created"] = Now();
-  resp["model"] = b.model_id();
+  resp["created"] = created;
+  resp["model"] = model;
   json::Value choices = json::Value::array();
   json::Value c = json::Value::object();
   c["text"] = core::Utf8Decoder{}.Push(res.text, true);

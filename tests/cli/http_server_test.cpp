@@ -45,6 +45,18 @@ public:
   }
   std::string model_id() const override { return "test"; }
   bool ready() const override { return true; }
+  std::uint32_t max_context() const override { return 65536; }
+  std::shared_ptr<GenerationRequest> start_complete(
+      std::string_view prompt, std::size_t max_tokens,
+      const gufo::sampling::SamplingConfig& sampling,
+      const CancellationCheck& cancellation, bool stream, bool ignore_eos,
+      std::string_view client_id,
+      const std::vector<std::string>& stop_sequences) override {
+    last_ignore_eos = ignore_eos;
+    return TextGenerationBackend::start_complete(prompt, max_tokens, sampling,
+                                                 cancellation, stream, false,
+                                                 client_id, stop_sequences);
+  }
   gufo::ReasoningOptions reasoning_defaults() const override {
     return reasoning;
   }
@@ -115,6 +127,7 @@ public:
     return result;
   }
   std::atomic<int> calls{0};
+  std::atomic<bool> last_ignore_eos{false};
   std::atomic<int> failure{0};
   std::string forced_stop_sequence;
   gufo::ReasoningOptions reasoning;
@@ -411,7 +424,8 @@ void TestCompatibilityRequests() {
     for (const auto field :
          {"stream", "echo", "store", "background", "tools", "stop", "reasoning",
           "output_config", "logit_bias"}) {
-      if (std::string_view(endpoint.path) == "/v1/responses" &&
+      if ((std::string_view(endpoint.path) == "/v1/responses" ||
+           std::string_view(endpoint.path) == "/v1/completions") &&
           std::string_view(field) == "stream")
         continue;
       auto invalid = body;
@@ -509,6 +523,73 @@ void TestCompatibilityRequests() {
           "max_tokens":2})"));
   assert(anthropic.member_str("stop_reason") == "end_turn");
   assert(server.backend->LastCall().chat.messages[0].content == "Be concise.");
+}
+
+void TestRawCompletionStreaming() {
+  RunningServer server;
+  using gufo::json::parse;
+  const auto models = server.Send("GET /v1/models HTTP/1.1\r\n\r\n");
+  ExpectStatus(models, 200);
+  const auto listing = parse(models.substr(models.find("\r\n\r\n") + 4));
+  assert(listing.find("data")->items()[0].member_size("context_length") ==
+         65536);
+
+  const auto response = server.Post(
+      "/v1/completions",
+      R"({"prompt":"hello","max_tokens":256,"stream":true,"stream_options":{"include_usage":true},"ignore_eos":true})");
+  ExpectStatus(response, 200);
+  assert(response.find("text/event-stream") != std::string::npos);
+  std::vector<gufo::json::Value> events;
+  std::size_t offset = 0;
+  while ((offset = response.find("data: ", offset)) != std::string::npos) {
+    const auto begin = offset + 6;
+    const auto end = response.find("\n\n", begin);
+    assert(end != std::string::npos);
+    const auto data = std::string_view(response).substr(begin, end - begin);
+    if (data != "[DONE]")
+      events.push_back(parse(data));
+    offset = end + 2;
+  }
+  assert(events.size() == 3);
+  const auto& content = events[0];
+  assert(content.member_str("object") == "text_completion");
+  assert(content.find("choices")->items().size() == 1);
+  assert(content.find("choices")->items()[0].member_str("text") == "ok");
+  assert(content.find("choices")->items()[0].find("finish_reason")->is_null());
+  assert(content.find("usage") == nullptr);
+  const auto& terminal = events[1];
+  assert(terminal.find("choices")->items().size() == 1);
+  assert(terminal.find("choices")->items()[0].member_str("text").empty());
+  assert(terminal.find("choices")->items()[0].member_str("finish_reason") ==
+         "stop");
+  assert(terminal.find("usage") == nullptr);
+  const auto& usage = events[2];
+  assert(usage.find("choices")->items().empty());
+  assert(usage.find("usage")->member_size("completion_tokens") == 1);
+  assert(usage.find("usage")->member_size("cached_tokens") == 8);
+  assert(response.find("data: [DONE]\n\n") != std::string::npos);
+  assert(server.backend->last_ignore_eos);
+  assert(server.backend->LastCall().max_tokens == 256);
+
+  server.backend->failure = 1;
+  const auto failed = server.Post(
+      "/v1/completions",
+      R"({"prompt":"hello","stream":true,"stream_options":{"include_usage":true}})");
+  ExpectStatus(failed, 200);
+  assert(failed.find("\"code\":\"generation_failed\"") != std::string::npos);
+  assert(failed.find("\"message\":\"generation failed\"") != std::string::npos);
+  assert(failed.find("context exceeded") == std::string::npos);
+  assert(failed.find("data: [DONE]\n\n") != std::string::npos);
+  server.backend->failure = 0;
+
+  for (
+      const auto* body : {
+          R"({"prompt":"hello","stream_options":{"include_usage":true}})",
+          R"({"prompt":"hello","stream":true,"stream_options":{"include_usage":"true"}})",
+          R"({"prompt":"hello","stream":true,"stream_options":{"other":true}})",
+          R"({"prompt":"hello","ignore_eos":1})",
+      })
+    ExpectStatus(server.Post("/v1/completions", body), 400);
 }
 
 void TestInvalidBindSettings() {
@@ -742,6 +823,7 @@ int main() {
   TestAuthorization();
   TestFramingAndMetrics();
   TestCompatibilityRequests();
+  TestRawCompletionStreaming();
   TestCompatibilityStopSequences();
   TestCompatibilityThinkingDefaults();
   TestCompatibilityUtf8();

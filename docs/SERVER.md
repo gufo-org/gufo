@@ -469,18 +469,25 @@ The other compatibility routes are deliberately limited:
 
 | Route | Supported request | Output limit |
 | --- | --- | --- |
-| `/v1/completions` | One prompt string, one non-streaming completion | `max_tokens` |
+| `/v1/completions` | One prompt string, buffered or SSE completion | `max_tokens` |
 | `/v1/messages` | Text messages and optional text system instructions | `max_tokens` |
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
-sampling controls. The three routes above reject streaming; all reject multiple
-candidates. Responses and Messages honor the server's thinking defaults.
+sampling controls. Messages and `/completion` reject streaming; all reject
+multiple candidates. Responses and Messages honor the server's thinking defaults.
 Native Messages rejects tools, `thinking`, and `output_config`; use Chat
 Completions for tool/reasoning controls. Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
 and template-aware message counting are not implemented.
+
+Raw Completions accepts `stream: true` and
+`stream_options: {"include_usage": true}`. The final usage event reports prompt,
+cached and completion token counts before the `[DONE]` sentinel. Local benchmark
+clients can set `ignore_eos: true` to generate exactly `max_tokens`; context
+capacity remains the hard limit. `GET /v1/models` reports that configured limit
+as `context_length` on the loaded text model.
 
 ## Chat Completions Adapter
 
@@ -544,9 +551,10 @@ clients behind the same proxy or NAT share a peer quota.
 ## Model Discovery
 
 `GET /v1/models` lists the configured text model and ready audio/video
-services. Entries provide `id`, `object`, `created` and `owned_by`; audio/video
-entries also describe their capability. Send the returned model ID in requests.
-Text requests naming another model return 404.
+services. Entries provide `id`, `object`, `created` and `owned_by`; the text
+entry also provides `context_length`, while audio/video entries describe their
+capability. Send the returned model ID in requests. Text requests naming another
+model return 404.
 
 ## Errors
 

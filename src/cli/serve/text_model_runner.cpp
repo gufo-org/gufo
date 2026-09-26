@@ -1315,7 +1315,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse_prompt,
-    std::size_t cache_prefix_tokens) {
+    std::size_t cache_prefix_tokens, bool stop_at_eos) {
   sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
@@ -1345,6 +1345,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
       [&](ContinuationState& state) {
         auto& text_state = dynamic_cast<TextRunnerState&>(state);
         text_state.SetCancellationCheck(is_cancelled);
+        text_state.SetStopAtEos(stop_at_eos);
         impl_->validated.runner->SetPromptContext(text_state, context);
       },
       reuse_prompt);
