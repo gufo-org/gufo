@@ -514,6 +514,13 @@ void TestByteAndStagingLimits() {
 }
 
 void TestAutomaticStagingAndAdmissionDiagnostics() {
+  TemporaryDirectory default_directory;
+  ContinuationDiskStore defaults({.directory = default_directory.path()});
+  Expect(defaults.capacity_bytes() == std::size_t{8} * 1024U * 1024U * 1024U &&
+             defaults.staging_capacity_bytes() > kDiskHeaderBytes &&
+             defaults.staging_capacity_bytes() <= 1024U * 1024U * 1024U,
+         "defaults bound RAM staging to 1 GiB independently of disk retention");
+
   TemporaryDirectory directory;
   std::vector<ContinuationDiskEvent> events;
   const FakeRunner runner("automatic");

@@ -38,10 +38,13 @@ struct TextPreparedPrompt {
 
 struct TextRunnerDiskCacheOptions {
   static constexpr std::size_t kDefaultCapacityBytes =
-      std::size_t{32} * 1024U * 1024U * 1024U;
+      std::size_t{8} * 1024U * 1024U * 1024U;
+  static constexpr std::size_t kAutomaticStagingMaxBytes =
+      std::size_t{1} * 1024U * 1024U * 1024U;
   std::filesystem::path directory;
   std::size_t capacity_bytes{kDefaultCapacityBytes};
-  /// Zero selects half the available host RAM, capped by capacity_bytes.
+  /// Zero selects 1/8 of available host RAM, capped at 1 GiB and
+  /// capacity_bytes.
   std::size_t staging_capacity_bytes{0};
   /// Shared prefixes shorter than this are cheaper to prefill than to restore.
   std::size_t shared_prefix_min_tokens{128};

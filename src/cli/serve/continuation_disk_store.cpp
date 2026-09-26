@@ -591,8 +591,12 @@ struct ContinuationDiskStore::Impl {
       throw std::invalid_argument("continuation disk capacity must be nonzero");
     }
     if (options.staging_capacity_bytes == 0) {
+      // The host snapshot budget already leaves half of available RAM free.
+      // Disk staging gets a quarter of that budget and a conservative hard cap.
       options.staging_capacity_bytes =
-          std::min(options.capacity_bytes, HostSnapshotBudgetBytes());
+          std::min({options.capacity_bytes,
+                    TextRunnerDiskCacheOptions::kAutomaticStagingMaxBytes,
+                    HostSnapshotBudgetBytes() / 4});
     }
     if (options.staging_capacity_bytes < kHeaderBytes) {
       throw std::invalid_argument(
