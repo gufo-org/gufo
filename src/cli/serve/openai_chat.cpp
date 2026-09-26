@@ -715,6 +715,21 @@ std::string_view Trim(std::string_view value) {
   return value;
 }
 
+// Qwen writes a parameter as "<parameter=name>\nVALUE\n</parameter>": one
+// newline on each side is framing, everything else (a file's final newline,
+// indentation, blank lines) belongs to the value.
+std::string_view StripFramingNewlines(std::string_view value) {
+  if (value.starts_with("\r\n"))
+    value.remove_prefix(2);
+  else if (value.starts_with('\n'))
+    value.remove_prefix(1);
+  if (value.ends_with("\r\n"))
+    value.remove_suffix(2);
+  else if (value.ends_with('\n'))
+    value.remove_suffix(1);
+  return value;
+}
+
 std::optional<json::Value> TryParseJson(std::string_view value) noexcept {
   try {
     return json::parse(value);
@@ -858,19 +873,22 @@ void ParseQwenCalls(std::string_view text,
           valid = false;
           break;
         }
-        const auto raw = Trim(body.substr(0, close));
-        const auto parsed = TryParseJson(raw);
+        const auto value = StripFramingNewlines(body.substr(0, close));
         const auto* properties = schema ? schema->find("properties") : nullptr;
         const auto* property = properties ? properties->find(name) : nullptr;
         const bool string_allowed =
             !property ||
-            SchemaAccepts(*property, json::Value(std::string(raw)));
+            SchemaAccepts(*property, json::Value(std::string(value)));
         // Prefer text if the schema permits it; parsing ambiguous scalars
         // as JSON would silently change a caller's declared string type.
         const bool is_string = string_allowed;
-        if (!is_string && (!parsed || !SchemaAccepts(*property, *parsed))) {
-          valid = false;
-          break;
+        const auto raw = is_string ? value : Trim(value);
+        if (!is_string) {
+          const auto parsed = TryParseJson(raw);
+          if (!parsed || !SchemaAccepts(*property, *parsed)) {
+            valid = false;
+            break;
+          }
         }
         call.arguments.push_back(
             {.name = name, .value = std::string(raw), .is_string = is_string});

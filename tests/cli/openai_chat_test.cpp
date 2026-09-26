@@ -616,6 +616,18 @@ void TestQwenToolBoundariesAndSchema() {
         Case{"<tool_call><function=f><parameter=text>literal </think>"
              "</parameter></function></tool_call>",
              1, R"({"text":"literal </think>"})"},
+        // One newline on each side of a value is template framing; a file's
+        // final newline, indentation and an empty value survive.
+        Case{"<tool_call>\n<function=f>\n<parameter=text>\n  line 1\n"
+             "line 2\n\n</parameter>\n<parameter=count>\n42\n</parameter>\n"
+             "</function>\n</tool_call>",
+             1, R"({"text":"  line 1\nline 2\n","count":42})"},
+        Case{"<tool_call>\n<function=f>\n<parameter=text>\n\n</parameter>\n"
+             "</function>\n</tool_call>",
+             1, R"({"text":""})"},
+        Case{"<tool_call>\r\n<function=f>\r\n<parameter=text>\r\n\r\nx\r\n"
+             "</parameter>\r\n</function>\r\n</tool_call>",
+             1, R"({"text":"\r\nx"})"},
         Case{"<tool_call>{\"name\":\"f\",\"arguments\":{\"text\":"
              "\"literal </tool_call>\"}}</tool_call>",
              1, R"({"text":"literal </tool_call>"})"}}) {
