@@ -76,6 +76,9 @@ Text serving defaults match llama.cpp for context and generation length:
 | `--sessions` | `1` |
 | Thinking / reasoning effort | Model template defaults |
 
+Qwen chat prompts are bounded by the session context, not a fixed size: the
+rendered template may use up to 128 bytes per context token (at least 1 MiB).
+
 Clients can set a positive `max_tokens` / `max_completion_tokens` (Chat
 Completions) or `max_output_tokens` (Responses). These include reasoning tokens.
 Omitting the field uses the server default. A response cannot exceed remaining

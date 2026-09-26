@@ -104,6 +104,15 @@ struct ChatTemplateOptions {
   std::size_t max_output_bytes{1024ULL * 1024ULL};  ///< 1 MiB upper bound
 };
 
+/// Longest Qwen3.8 vocabulary entry in bytes (Flash-Next GGUF, 248,320
+/// tokens). A prompt of N tokens cannot render to more than N times this.
+inline constexpr std::size_t kMaxRenderedBytesPerToken = 128;
+
+/// Rendered-prompt bound for a session of `context_tokens`: any prompt that
+/// fits the context passes, never below the 1 MiB default.
+[[nodiscard]] std::size_t RenderedPromptBoundBytes(
+    std::uint32_t context_tokens) noexcept;
+
 /// Suffix opened for a new assistant turn, outside the stable conversation.
 [[nodiscard]] std::string_view GenerationPrompt(bool enable_thinking);
 
