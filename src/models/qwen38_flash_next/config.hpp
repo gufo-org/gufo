@@ -39,8 +39,9 @@ struct Config {
   std::uint32_t rotary_dim{0};               ///< 64
   float rope_theta{0.0F};                    ///< 1e7
   std::array<std::uint32_t, 4> rope_sections{};
-  /// Static YaRN. Off unless the loader or the artifact enables it; the
-  /// native `context_length` above is never rewritten.
+  /// Static YaRN, set by `ModelOptions::rope_scaling`; the GGUF loader sets
+  /// no rope-scaling keys of its own today. The native `context_length`
+  /// above is never rewritten.
   RopeScaling rope_scaling{};
 
   // Qwen Sparse Attention indexer (block top-k selection).

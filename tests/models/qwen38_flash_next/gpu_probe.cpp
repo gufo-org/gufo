@@ -161,9 +161,9 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "--yarn-factor") {
       const auto value = next();
-      char* end = nullptr;
-      yarn_factor = std::strtof(value.c_str(), &end);
-      if (value.empty() || end != value.c_str() + value.size() ||
+      const auto [end, ec] = std::from_chars(
+          value.data(), value.data() + value.size(), yarn_factor);
+      if (ec != std::errc{} || end != value.data() + value.size() ||
           !(yarn_factor >= 1.0F)) {
         std::fprintf(stderr, "--yarn-factor requires a number >= 1\n");
         return 2;

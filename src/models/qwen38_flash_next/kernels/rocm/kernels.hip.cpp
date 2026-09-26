@@ -5834,25 +5834,35 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
   }
   if (n_tokens == 0)
     return true;
-  const auto launch = [&]<bool kYarn>() {
+  if (yarn.enabled != 0) {
     if (!prefill && n_tokens < 32) {
-      hipLaunchKernelGGL((PrepareAttentionKernel<1, kYarn>),
+      hipLaunchKernelGGL((PrepareAttentionKernel<1, true>),
                          dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
                          stream, packed, stride, q_gamma, k_gamma, q, gate,
                          k_cache, v_cache, heads, kv_heads, d, rotary_dim,
                          start_pos, theta, eps, rope, yarn);
     } else {
-      hipLaunchKernelGGL((PrepareAttentionKernel<4, kYarn>),
+      hipLaunchKernelGGL((PrepareAttentionKernel<4, true>),
                          dim3(n_tokens, (heads + kv_heads + 3) / 4),
                          dim3(kThreads), 0, stream, packed, stride, q_gamma,
                          k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
                          rotary_dim, start_pos, theta, eps, rope, yarn);
     }
-  };
-  if (yarn.enabled != 0)
-    launch.template operator()<true>();
-  else
-    launch.template operator()<false>();
+  } else {
+    if (!prefill && n_tokens < 32) {
+      hipLaunchKernelGGL((PrepareAttentionKernel<1, false>),
+                         dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
+                         stream, packed, stride, q_gamma, k_gamma, q, gate,
+                         k_cache, v_cache, heads, kv_heads, d, rotary_dim,
+                         start_pos, theta, eps, rope, yarn);
+    } else {
+      hipLaunchKernelGGL((PrepareAttentionKernel<4, false>),
+                         dim3(n_tokens, (heads + kv_heads + 3) / 4),
+                         dim3(kThreads), 0, stream, packed, stride, q_gamma,
+                         k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
+                         rotary_dim, start_pos, theta, eps, rope, yarn);
+    }
+  }
   return true;
 }
 

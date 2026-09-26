@@ -258,7 +258,8 @@ void CheckScaledContext() {
   Require(c.SparseMaskWords(655360) == 5120, "mask rows must cover 655360");
   const auto parsed = Parse(ValidMetadata());
   Require(parsed && parsed->rope_scaling == qfn::RopeScaling{},
-          "an artifact without scaling keys must load with YaRN off");
+          "the GGUF loader must default rope scaling off (it sets no such "
+          "keys today)");
 }
 
 }  // namespace

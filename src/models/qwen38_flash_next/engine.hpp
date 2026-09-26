@@ -47,8 +47,8 @@ struct ModelOptions {
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
   /// Internal YaRN override applied to the artifact configuration before
-  /// upload. Empty keeps the artifact's own setting (off unless its
-  /// metadata enables it).
+  /// upload. Empty keeps the artifact's own setting, which is always off:
+  /// no GGUF metadata key sets it today.
   std::optional<RopeScaling> rope_scaling{};
 };
 
