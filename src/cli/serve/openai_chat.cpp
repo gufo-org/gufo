@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/response_format.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/core/image.hpp"
@@ -557,6 +558,18 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                  "model_not_found");
   }
 
+  try {
+    output->chat.response_format =
+        ParseResponseFormat(body.find("response_format"));
+    if (output->chat.response_format) {
+      if (const auto* specification =
+              body.find("response_format")->find("json_schema"))
+        output->chat.response_format_description =
+            specification->member_str("description");
+    }
+  } catch (const std::exception& error) {
+    return Error(400, "Bad Request", error.what(), "invalid_response_format");
+  }
   output->chat.client_id = request.client_id;
   if (const auto* cache_prompt = body.find("cache_prompt")) {
     if (!cache_prompt->is_bool()) {
@@ -611,6 +624,22 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                      "invalid_template_options");
       output->chat.add_vision_id = vision_id->as_bool();
     }
+  }
+  if (output->chat.response_format) {
+    if (!output->chat.stop_sequences.empty() ||
+        (output->chat.tool_choice != ChatRequest::ToolChoice::kNone &&
+         !output->chat.tools.empty()))
+      return Error(
+          400, "Bad Request",
+          "structured output does not support stop strings or active tools",
+          "invalid_response_format");
+    if (output->chat.reasoning.enabled.value_or(false))
+      return Error(400, "Bad Request",
+                   "structured output requires thinking disabled",
+                   "invalid_response_format");
+    // Output constraints apply to content. Omitted thinking is disabled for
+    // this request; an explicit request for reasoning is rejected above.
+    output->chat.reasoning.enabled = false;
   }
   const ReasoningOptions defaults = backend.reasoning_defaults();
   if (!output->chat.reasoning.enabled.has_value()) {
@@ -683,13 +712,11 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     return Error(400, "Bad Request", "only n=1 is supported", "unsupported_n");
   }
   for (const std::string_view unsupported :
-       {"logprobs", "top_logprobs", "response_format", "modalities", "audio"}) {
+       {"logprobs", "top_logprobs", "modalities", "audio"}) {
     if (const auto* value = body.find(std::string(unsupported));
         value != nullptr && !value->is_null()) {
       if ((unsupported == "logprobs" && value->is_bool() &&
            !value->as_bool()) ||
-          (unsupported == "response_format" && value->is_object() &&
-           value->size() == 1 && value->member_str("type") == "text") ||
           (unsupported == "modalities" && value->is_array() &&
            value->size() == 1 && value->items().front().is_string() &&
            value->items().front().str() == "text"))
@@ -1309,8 +1336,8 @@ public:
 
   StreamingTextFilter(
       TextGenerationBackend::InitialOutputState initial_output_state,
-      EmitCallback emit_piece)
-      : emit_piece_(std::move(emit_piece)) {
+      EmitCallback emit_piece, bool raw_content = false)
+      : emit_piece_(std::move(emit_piece)), raw_content_(raw_content) {
     if (initial_output_state ==
         TextGenerationBackend::InitialOutputState::kReasoning) {
       state_ = State::kThinking;
@@ -1323,6 +1350,8 @@ public:
   bool Push(std::string_view bytes, bool final = false) {
     const auto piece = decoder_.Push(bytes, final);
     raw_.append(piece);
+    if (raw_content_)
+      return piece.empty() || emit_piece_(piece, false);
     if (tool_mode_) {
       hidden_.append(piece);
       return true;
@@ -1453,6 +1482,7 @@ private:
   std::string hidden_;
   State state_{State::kInitial};
   bool tool_mode_{false};
+  bool raw_content_{false};
   bool trim_reasoning_separator_{false};
 };
 
@@ -1636,11 +1666,15 @@ HttpResponse NonStreamingResponse(
     TextGenerationBackend::InitialOutputState initial_output_state) {
   const auto result = generation->Wait();
   core::Utf8Decoder decoder;
+  const auto decoded = decoder.Push(result.text, true);
   const ParsedGeneration generated =
-      ParseGeneration(decoder.Push(result.text, true), initial_output_state,
-                      request.chat.tools, request.chat.tool_choice,
-                      result.finish_reason !=
-                          TextGenerationBackend::FinishReason::kStopSequence);
+      request.chat.response_format
+          ? ParsedGeneration{.text = decoded}
+          : ParseGeneration(
+                decoded, initial_output_state, request.chat.tools,
+                request.chat.tool_choice,
+                result.finish_reason !=
+                    TextGenerationBackend::FinishReason::kStopSequence);
 
   json::Value response = json::Value::object();
   response["id"] = RandomId("chatcmpl-");
@@ -1732,7 +1766,8 @@ HttpResponse StreamingResponse(
                   connected = writer(
                       Sse(ChoiceChunk(id, created, model, std::move(delta))));
                   return connected;
-                });
+                },
+                request.chat.response_format != nullptr);
 
             try {
               const auto result = generation->Wait([&](std::string_view piece) {
@@ -1746,11 +1781,15 @@ HttpResponse StreamingResponse(
               if (!filter.Push({}, true))
                 return;
 
-              const ParsedGeneration generated = ParseGeneration(
-                  filter.raw(), initial_output_state, request.chat.tools,
-                  request.chat.tool_choice,
-                  result.finish_reason !=
-                      TextGenerationBackend::FinishReason::kStopSequence);
+              const ParsedGeneration generated =
+                  request.chat.response_format
+                      ? ParsedGeneration{.text = std::string(filter.raw())}
+                      : ParseGeneration(filter.raw(), initial_output_state,
+                                        request.chat.tools,
+                                        request.chat.tool_choice,
+                                        result.finish_reason !=
+                                            TextGenerationBackend::
+                                                FinishReason::kStopSequence);
               if (!filter.Finish(generated.hide_tool_markup)) {
                 return;
               }

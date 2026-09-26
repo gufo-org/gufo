@@ -494,6 +494,24 @@ struct TextRunnerPool::Impl {
   std::size_t shared_prefix_max_boundaries{0};
 };
 
+std::shared_ptr<const sampling::TokenConstraint>
+TextModelRunner::BindConstraint(
+    std::shared_ptr<const sampling::JsonConstraint> grammar) const {
+  const std::lock_guard lock(constraint_mutex_);
+  for (const auto& binding : constraints_)
+    if (binding->grammar == grammar)
+      return binding;
+  if (!constraint_vocabulary_)
+    constraint_vocabulary_ = BuildConstraintVocabulary();
+  auto binding = std::make_shared<sampling::TokenConstraint>();
+  binding->grammar = std::move(grammar);
+  binding->vocabulary = constraint_vocabulary_;
+  if (constraints_.size() >= 4)
+    constraints_.erase(constraints_.begin());
+  constraints_.push_back(binding);
+  return binding;
+}
+
 void TextModelRunner::StreamPersistentSnapshot(
     const TextRunnerSnapshot& snapshot, const SnapshotSink& sink) const {
   std::vector<std::uint8_t> payload(PersistentSnapshotPayloadBytes(snapshot));

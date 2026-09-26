@@ -534,8 +534,44 @@ labelled executed model state. Stops must be nonempty, at most 4 KiB each and
 Nullable Chat Completions defaults retain server settings, including sampling
 and token limits. `logprobs: false`, empty `logit_bias`,
 `response_format: {"type":"text"}` and `modalities: ["text"]` are accepted.
-Actual log probabilities, token biases, structured outputs and audio output
-remain unsupported and return explicit errors.
+Actual log probabilities, token biases and audio output remain unsupported
+and return explicit errors.
+
+### Structured output
+
+Chat Completions accepts `response_format: {"type":"json_object"}` or
+`{"type":"json_schema","json_schema":{"name":"Reply","strict":true,"schema":…}}`.
+Tokens are constrained during AR and speculative decoding (DFlash2, MTP and
+DSpark). A completed response contains valid JSON; `finish_reason: "length"`
+can contain an incomplete prefix. Images, streaming, sampling and caching work
+with the same request format. The schema and its supplied description are
+included in the prompt, so changing them also changes the reusable prefix.
+
+The supported subset is objects with `properties`, `required` and
+`additionalProperties:false`; arrays with `items`, `minItems` and `maxItems`;
+primitive types and nullable types; primitive `enum`/`const`; `anyOf`; and
+acyclic local `$defs`/`$ref`. Strict schemas require every property; use null
+for optional values. Fields are generated in schema order. Unsupported keywords
+return HTTP 400 `invalid_response_format`, including inside unused definitions.
+Limits: 64 KiB schemas, 8 KiB descriptions, 16 levels of schema expansion,
+128 expanded properties, 256 enum/const values, 512-byte literals, and explicit
+array bounds up to 256. Arrays without `maxItems` have no element limit.
+`json_object` allows up to 16 nested containers. Compiled programs, token masks
+and transitions have bounded caches/work limits.
+
+Structured requests disable omitted thinking. Explicit thinking, active tools
+and stop strings are rejected; use `tool_choice:"none"` for declared but inactive
+tools. Ordinary requests retain their existing behavior. The official SDK's
+`client.chat.completions.parse(..., response_format=YourPydanticModel)` and
+`client.chat.completions.stream(...)` use this schema interface.
+
+References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create),
+[structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
+and [llama.cpp grammar sampling](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/sampling.cpp).
+Gufo applies the grammar before filtering/normalizing the target distribution;
+proposal probabilities remain those actually sampled by each draft backend.
+Verify with `tools/serving/check-openai-sdk.py --suite structured` (add `--vision`
+for an image-capable server).
 
 Admission groups text requests by the socket peer's IP address across chat and
 compatibility endpoints. Caller-provided identity headers do not affect quotas;

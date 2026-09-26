@@ -684,7 +684,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   // Target verification keeps its own draws after this independent seed.
   pending->draft_rng =
       sampled ? sampling::NextRandom(sampler.mutable_rng_state()) : 0;
-  pending->draft_sampler = sampler;
+  pending->draft_sampler = sampler.WithoutConstraint();
   pending->draft_sampler->Accept(static_cast<sampling::TokenId>(anchor));
   pending->chain = {anchor};
   pending->draft = draft_token_;
