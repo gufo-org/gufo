@@ -1,7 +1,10 @@
 #include "src/cli/serve/text_model_runner.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <future>
 #include <limits>
 #include <mutex>
@@ -13,6 +16,50 @@
 #include "src/cli/serve/logging.hpp"
 
 namespace gufo::server {
+
+/// Ordinary host allocations use the host budget, not HIP's device capacity.
+std::size_t HostSnapshotBudgetBytes() {
+  const long pages = sysconf(_SC_AVPHYS_PAGES);
+  const long page_size = sysconf(_SC_PAGESIZE);
+  if (pages <= 0 || page_size <= 0)
+    return 0;
+  std::uint64_t available = std::uint64_t(pages) * page_size;
+  std::ifstream meminfo("/proc/meminfo");
+  for (std::string line; std::getline(meminfo, line);) {
+    if (line.starts_with("MemAvailable:")) {
+      std::istringstream fields(line.substr(13));
+      std::uint64_t kib = 0;
+      if (fields >> kib)
+        available = kib * 1024;
+      break;
+    }
+  }
+  // A cgroup limit can be much smaller than the host's available memory.
+  // Walk parents too: a child may say "max" beneath a limited ancestor.
+  std::ifstream membership("/proc/self/cgroup");
+  for (std::string line; std::getline(membership, line);) {
+    if (!line.starts_with("0::/"))
+      continue;
+    const auto relative = std::filesystem::path(line.substr(4));
+    if (std::ranges::any_of(relative,
+                            [](const auto& part) { return part == ".."; }))
+      continue;
+    const std::filesystem::path root("/sys/fs/cgroup");
+    for (auto path = root / relative;; path = path.parent_path()) {
+      std::ifstream limit_file(path / "memory.max");
+      std::ifstream used_file(path / "memory.current");
+      std::uint64_t limit = 0, used = 0;
+      if ((limit_file >> limit) && (used_file >> used))
+        available = std::min(available, limit > used ? limit - used : 0);
+      if (path == root)
+        break;
+    }
+    break;
+  }
+  return static_cast<std::size_t>(std::min<std::uint64_t>(
+      available / 2, std::numeric_limits<std::size_t>::max()));
+}
+
 namespace {
 
 struct ValidatedRunner {
@@ -269,7 +316,9 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
          << " payload_bytes=" << event.payload_bytes
          << " tokens=" << event.token_count
          << " retained_bytes=" << event.retained_bytes
-         << " capacity_bytes=" << event.capacity_bytes;
+         << " capacity_bytes=" << event.capacity_bytes
+         << " staging_capacity_bytes=" << event.staging_capacity_bytes
+         << " staging_used_bytes=" << event.staging_used_bytes;
     if (event.reason == ContinuationDiskEventReason::kSaved) {
       line << " write_ms=" << event.elapsed_ms;
       Logger::Info("cache", line.str());
@@ -424,6 +473,11 @@ struct TextRunnerPool::Impl {
                   disk_cache_options->staging_capacity_bytes,
           },
           EmitDiskEvent);
+      Logger::Info("cache",
+                   "event=disk_cache_configured capacity_bytes=" +
+                       std::to_string(disk_store->capacity_bytes()) +
+                       " staging_capacity_bytes=" +
+                       std::to_string(disk_store->staging_capacity_bytes()));
       shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
       shared_prefix_max_boundaries =
           disk_cache_options->shared_prefix_max_boundaries;

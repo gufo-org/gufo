@@ -51,12 +51,15 @@ struct ContinuationDiskEvent {
   std::size_t token_count{0};
   std::size_t retained_bytes{0};
   std::size_t capacity_bytes{0};
+  std::size_t staging_capacity_bytes{0};
+  std::size_t staging_used_bytes{0};
   double elapsed_ms{0.0};
 };
 
 struct ContinuationDiskStoreOptions {
   std::filesystem::path directory;
-  std::size_t capacity_bytes{0};
+  std::size_t capacity_bytes{TextRunnerDiskCacheOptions::kDefaultCapacityBytes};
+  /// Zero resolves to the host snapshot budget, capped by capacity_bytes.
   std::size_t staging_capacity_bytes{0};
 };
 

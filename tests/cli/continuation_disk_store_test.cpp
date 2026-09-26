@@ -513,6 +513,96 @@ void TestByteAndStagingLimits() {
          "single entry larger than total disk budget is skipped");
 }
 
+void TestAutomaticStagingAndAdmissionDiagnostics() {
+  TemporaryDirectory directory;
+  std::vector<ContinuationDiskEvent> events;
+  const FakeRunner runner("automatic");
+  ContinuationDiskStore store(
+      {.directory = directory.path(), .capacity_bytes = 1024U * 1024U},
+      [&](const auto& event) { events.push_back(event); });
+  const auto limit = store.staging_capacity_bytes();
+  Expect(limit > kDiskHeaderBytes && limit <= store.capacity_bytes(),
+         "automatic staging resolves to a usable bounded RAM budget");
+  const auto payload = limit / 2;
+  auto first = store.ReserveCapture(runner, 2, payload);
+  Expect(first != nullptr, "automatic staging admits a snapshot");
+  Expect(!store.CanSave(runner, 2, payload) &&
+             !store.ReserveCapture(runner, 2, payload),
+         "automatic staging still accounts for all in-flight captures");
+  Expect(!events.empty() &&
+             events.back().reason ==
+                 ContinuationDiskEventReason::kStagingCapacity &&
+             events.back().staging_capacity_bytes == limit &&
+             events.back().staging_used_bytes > payload &&
+             events.back().payload_bytes == payload,
+         "preflight rejection reports staging usage and required size");
+  first.reset();
+  Expect(store.CanSave(runner, 2, payload),
+         "released staging is reusable without allocating the whole budget");
+
+  Expect(!store.CanSave(runner, 2, store.capacity_bytes()) &&
+             events.back().reason == ContinuationDiskEventReason::kByteCapacity,
+         "disk retention rejection is distinguished from staging pressure");
+
+  TemporaryDirectory explicit_directory;
+  ContinuationDiskStore explicit_limit(
+      StoreOptions(explicit_directory.path(), 4096, 256),
+      [&](const auto& event) { events.push_back(event); });
+  Expect(explicit_limit.staging_capacity_bytes() == 256 &&
+             !explicit_limit.CanSave(runner, 2, 512) &&
+             events.back().reason ==
+                 ContinuationDiskEventReason::kStagingCapacity &&
+             events.back().staging_used_bytes == 0,
+         "an explicit too-small staging limit remains enforced and visible");
+}
+
+void TestSmallerStagingPreservesExistingFiles() {
+  TemporaryDirectory directory;
+  const FakeRunner runner("staging-restart");
+  const auto file_bytes = ExpectedFileBytes(15, 2);
+  {
+    ContinuationDiskStore store(StoreOptions(directory.path()));
+    Expect(
+        SaveTokens(store, runner, {1, 2}, *MakeSnapshot(runner, 42, 2)).stored,
+        "restart fixture stores");
+  }
+  {
+    std::vector<ContinuationDiskEvent> events;
+    ContinuationDiskStore store(
+        StoreOptions(directory.path(), 4096, file_bytes - 1),
+        [&](const auto& event) { events.push_back(event); });
+    Expect(store.entry_count() == 1 && store.retained_bytes() == file_bytes &&
+               CacheFiles(directory.path()).size() == 1,
+           "a smaller RAM budget preserves and accounts for existing files");
+    auto state = runner.CreateState();
+    Expect(!RestoreTokens(store, runner, *state, {1, 2, 3}).restored,
+           "unverified oversized files are not exposed to lookup");
+    Expect(std::ranges::any_of(
+               events,
+               [&](const auto& event) {
+                 return event.action == ContinuationDiskEventAction::kSkipped &&
+                        event.reason ==
+                            ContinuationDiskEventReason::kStagingCapacity &&
+                        event.file_bytes == file_bytes;
+               }),
+           "oversized startup files report a staging skip, not corruption");
+  }
+  {
+    ContinuationDiskStore store(
+        {.directory = directory.path(), .capacity_bytes = 4096});
+    auto state = runner.CreateState();
+    Expect(RestoreTokens(store, runner, *state, {1, 2, 3}).restored &&
+               RequireFakeState(*state).value == 42,
+           "automatic staging validates and restores the preserved file");
+  }
+  {
+    ContinuationDiskStore store(
+        StoreOptions(directory.path(), file_bytes - 1, file_bytes - 1));
+    Expect(store.retained_bytes() == 0 && CacheFiles(directory.path()).empty(),
+           "unindexed files remain subject to the disk retention budget");
+  }
+}
+
 void TestLruEvictionUsesActualFileBytes() {
   TemporaryDirectory directory;
   const FakeRunner runner("12345678");
@@ -964,6 +1054,8 @@ int main() {
   TestLongestPrefixAndForcedHashCollision();
   TestCorruptionBecomesDeterministicMissAndRemoval();
   TestByteAndStagingLimits();
+  TestAutomaticStagingAndAdmissionDiagnostics();
+  TestSmallerStagingPreservesExistingFiles();
   TestLruEvictionUsesActualFileBytes();
   TestAtomicPublicationAndPrivatePermissions();
   TestStartupRejectsUnsafeAndInvalidFiles();

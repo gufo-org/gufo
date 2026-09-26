@@ -466,9 +466,8 @@ void PrintServeHelp(std::string_view program_name,
         server::kDefaultMaxBufferedOutputBytesTotal;
     std::filesystem::path cache_disk_directory;
     std::size_t cache_disk_bytes =
-        static_cast<std::size_t>(4) * 1024U * 1024U * 1024U;
-    std::size_t cache_disk_staging_bytes =
-        static_cast<std::size_t>(512) * 1024U * 1024U;
+        server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
+    std::size_t cache_disk_staging_bytes = 0;
 
     gufo::cli::ArgParser parser(
         std::string(program_name) + " serve llm",
@@ -561,14 +560,14 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--cache-disk", "DIR",
                      "Opt-in restart-safe continuation cache directory",
                      "Cache", &cache_disk_directory);
-    parser.AddOption(
-        "", "--cache-disk-bytes", "N",
-        "Total retained disk-cache byte budget (default: 4294967296)", "Cache",
-        &cache_disk_bytes);
+    parser.AddOption("", "--cache-disk-bytes", "N",
+                     "Retained disk-cache byte budget (default: " +
+                         std::to_string(cache_disk_bytes) + ")",
+                     "Cache", &cache_disk_bytes);
     parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
-        "Single-operation RAM staging byte limit (default: 536870912)", "Cache",
-        &cache_disk_staging_bytes);
+        "RAM limit for queued snapshots and each disk read (0 = auto, default)",
+        "Cache", &cache_disk_staging_bytes);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
     parser.PrintHelp();
@@ -917,9 +916,8 @@ int RunServe(std::span<const char* const> args) {
         server::kDefaultMaxBufferedOutputBytesTotal;
     std::filesystem::path cache_disk_directory;
     std::size_t cache_disk_bytes =
-        static_cast<std::size_t>(4) * 1024U * 1024U * 1024U;
-    std::size_t cache_disk_staging_bytes =
-        static_cast<std::size_t>(512) * 1024U * 1024U;
+        server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
+    std::size_t cache_disk_staging_bytes = 0;
 
     gufo::cli::ArgParser llm_parser(
         "gufo serve llm",
@@ -1008,14 +1006,14 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--cache-disk", "DIR",
                          "Opt-in restart-safe continuation cache directory",
                          "Cache", &cache_disk_directory);
-    llm_parser.AddOption(
-        "", "--cache-disk-bytes", "N",
-        "Total retained disk-cache byte budget (default: 4294967296)", "Cache",
-        &cache_disk_bytes);
+    llm_parser.AddOption("", "--cache-disk-bytes", "N",
+                         "Retained disk-cache byte budget (default: " +
+                             std::to_string(cache_disk_bytes) + ")",
+                         "Cache", &cache_disk_bytes);
     llm_parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
-        "Single-operation RAM staging byte limit (default: 536870912)", "Cache",
-        &cache_disk_staging_bytes);
+        "RAM limit for queued snapshots and each disk read (0 = auto, default)",
+        "Cache", &cache_disk_staging_bytes);
 
     add_server_options(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
@@ -1043,8 +1041,7 @@ int RunServe(std::span<const char* const> args) {
         max_pending_requests_per_client > max_pending_requests ||
         max_output_bytes == 0 || max_buffered_output_bytes == 0 ||
         max_buffered_output_bytes_total == 0 ||
-        (!cache_disk_directory.empty() &&
-         (cache_disk_bytes == 0 || cache_disk_staging_bytes == 0)) ||
+        (!cache_disk_directory.empty() && cache_disk_bytes == 0) ||
         request_timeout_ms > static_cast<std::uint64_t>(
                                  std::chrono::milliseconds::max().count()) ||
         !sampling_valid || sampling_config.temperature > 2.0F) {
