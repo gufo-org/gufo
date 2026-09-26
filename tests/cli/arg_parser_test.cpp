@@ -94,9 +94,13 @@ void TestUnexpectedPositionalsAndParserReuse() {
   assert(parser.Parse(value, &error));
   assert(!parser.IsHelpRequested());
   assert(text == "-v" && !verbose);
+  assert(parser.WasSupplied("--text") && !parser.WasSupplied("-v"));
   const char* inline_value[] = {"--text=audio"};
   assert(parser.Parse(inline_value, &error));
   assert(text == "audio");
+  assert(parser.WasSupplied("--text"));
+  assert(parser.Parse(help, &error));
+  assert(!parser.WasSupplied("--text"));
 }
 
 int main() {

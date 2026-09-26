@@ -666,8 +666,10 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   }
 
   sampling::SamplingConfig parsed_sampling;
-  if (const auto sampling_error =
-          ParseSamplingConfig(body, output->sampling, &parsed_sampling)) {
+  if (const auto sampling_error = ParseSamplingConfig(
+          body,
+          backend.sampling_defaults().Resolve(output->chat.reasoning.enabled),
+          &parsed_sampling)) {
     return Error(400, "Bad Request", sampling_error->message,
                  sampling_error->code.c_str());
   }

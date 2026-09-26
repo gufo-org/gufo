@@ -164,14 +164,13 @@ def main():
                 if args.discard_assistant and measured["prefill"] > 16:
                     raise RuntimeError(f"{name}: discarded assistant caused re-prefill: {measured}")
                 repeated = call(args.url, body)
-                cold = call(args.url, {**body, "cache_prompt": False})
-                if metrics(cold)["cached"] or cold["usage"]["gufo"]["cache_hit"]:
-                    raise RuntimeError(f"{name}: cache_prompt=false was ignored")
                 if digest(resumed) != digest(repeated):
                     raise RuntimeError(f"{name}: prompt snapshot changed seeded output")
-                # Recreate the interrupted history from a cold first turn.
-                # A one-shot full prefill has different matrix shapes; report
-                # that comparison separately from exact cache/history replay.
+                # Recreate the same interrupted history. A one-shot full
+                # prefill control must use another server: cache_prompt=false
+                # bypasses reads but retains its differently shaped checkpoint.
+                # Running that control here would replace the state under test.
+                # The SDK conversation suite separately checks cache bypass.
                 replayed_assistant, _ = call(args.url, initial, field)
                 if not preserve:
                     replayed_assistant.pop("reasoning_content")
@@ -193,7 +192,6 @@ def main():
                 report = {"case": name, "request": body, "sha256": digest(resumed),
                           "discard_assistant": args.discard_assistant,
                           "interrupt_seconds": elapsed, **measured, "exact": True,
-                          "full_prefill_equal": digest(resumed) == digest(cold),
                           "followup": {"request": followup_body,
                                        "sha256": digest(followup), **metrics(followup)}}
                 reports.append(report)

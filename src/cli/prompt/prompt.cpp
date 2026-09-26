@@ -115,7 +115,7 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
   parser.AddOption("-n", "--max-tokens", "N",
                    "Maximum number of new tokens to generate (default: 128)",
                    "Sampling", &opt.max_tokens);
-  RegisterSamplingOptions(parser, &opt.sampling);
+  RegisterSamplingOptions(parser, &opt.sampling, "Sampling", true, true);
 
   // Reasoning
   parser.AddOption("", "--think", "MODE",
@@ -837,6 +837,7 @@ static std::optional<PromptOptions> ParseTextOptions(
   if (parser.IsHelpRequested()) {
     return std::nullopt;
   }
+  opt.sampling_supplied = SamplingOptionsSupplied(parser);
   try {
     opt.sampling.Validate();
   } catch (const std::invalid_argument& exception) {
@@ -985,6 +986,19 @@ int RunPrompt(std::span<const char* const> args) {
   }
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
+  sampling::TextModelPreset preset = sampling::TextModelPreset::kUnspecified;
+  const auto artifact_architecture =
+      reader->GetMetadataString("general.architecture");
+  if (artifact_architecture == "deepseek4") {
+    preset = sampling::TextModelPreset::kDeepSeekV4Flash;
+  } else if (artifact_architecture == "qwen4exp") {
+    preset = sampling::TextModelPreset::kQwen38;
+  } else if (const auto config = reader->ExtractModelConfig()) {
+    preset = sampling::TextPreset(*config);
+  }
+  opt.sampling =
+      sampling::ResolveTextSampling(preset, PromptReasoningOptions(opt).enabled,
+                                    opt.sampling, opt.sampling_supplied);
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsDeepSeekV4Flash(*reader)) {
@@ -1181,7 +1195,7 @@ int RunChat(std::span<const char* const> args) {
     return 0;
   }
 
-  const auto& opt = *opt_res;
+  auto opt = *opt_res;
   if (opt.model_path.empty()) {
     std::cout << "gufo chat: interactive conversation mode\n"
               << "(Specify --model <PATH.gguf> to load model weights)\n";
@@ -1199,6 +1213,19 @@ int RunChat(std::span<const char* const> args) {
   }
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
+  sampling::TextModelPreset preset = sampling::TextModelPreset::kUnspecified;
+  const auto artifact_architecture =
+      reader->GetMetadataString("general.architecture");
+  if (artifact_architecture == "deepseek4") {
+    preset = sampling::TextModelPreset::kDeepSeekV4Flash;
+  } else if (artifact_architecture == "qwen4exp") {
+    preset = sampling::TextModelPreset::kQwen38;
+  } else if (const auto config = reader->ExtractModelConfig()) {
+    preset = sampling::TextPreset(*config);
+  }
+  opt.sampling =
+      sampling::ResolveTextSampling(preset, PromptReasoningOptions(opt).enabled,
+                                    opt.sampling, opt.sampling_supplied);
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsDeepSeekV4Flash(*reader)) {

@@ -45,6 +45,8 @@ public:
   }
   std::string model_id() const override { return "test"; }
   bool ready() const override { return true; }
+  SamplingDefaults sampling_defaults() const override { return defaults; }
+  SamplingDefaults defaults;
   gufo::ReasoningOptions reasoning_defaults() const override {
     return reasoning;
   }
@@ -366,6 +368,23 @@ void TestCompatibilityRequests() {
     auto body = parse(endpoint.body);
     response_body(server.Post(endpoint.path, body.dump()));
     assert(server.backend->LastCall().max_tokens == 0);
+    server.backend->defaults.model = gufo::sampling::TextModelPreset::kQwen38;
+    server.backend->defaults.supplied = {};
+    server.backend->reasoning.enabled = false;
+    response_body(server.Post(endpoint.path, body.dump()));
+    const auto preset = server.backend->LastCall().sampling;
+    assert(preset.temperature == 0.7F && preset.top_p == 0.8F &&
+           preset.top_k == 20 && preset.presence_penalty == 1.5F);
+    server.backend->defaults.sampling.top_k = 0;
+    server.backend->defaults.supplied.top_k = true;
+    body["temperature"] = 0;
+    body["presence_penalty"] = 0;
+    response_body(server.Post(endpoint.path, body.dump()));
+    const auto overridden = server.backend->LastCall().sampling;
+    assert(overridden.temperature == 0 && overridden.top_k == 0 &&
+           overridden.top_p == 0.8F && overridden.presence_penalty == 0);
+    server.backend->defaults = {};
+    server.backend->reasoning = {};
     body["model"] = "test";
     body[endpoint.limit] = 1;
     body["temperature"] = 0.6;

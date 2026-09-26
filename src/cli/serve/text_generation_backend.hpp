@@ -15,6 +15,7 @@
 
 #include "src/core/reasoning.hpp"
 #include "src/core/sampling.hpp"
+#include "src/core/text_sampling_defaults.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
@@ -129,6 +130,13 @@ public:
     /// Zero means generate until EOS or the remaining context is exhausted.
     std::size_t max_tokens{0};
     sampling::SamplingConfig sampling;
+    sampling::TextModelPreset model{sampling::TextModelPreset::kUnspecified};
+    sampling::SamplingOverrides supplied{sampling::SamplingOverrides::All()};
+
+    [[nodiscard]] sampling::SamplingConfig Resolve(
+        std::optional<bool> thinking) const {
+      return sampling::ResolveTextSampling(model, thinking, sampling, supplied);
+    }
   };
 
   struct Result {
