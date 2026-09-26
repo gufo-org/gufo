@@ -21,12 +21,12 @@ MODEL=path/to/Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL.gguf
 ```
 
 Text-only model; there is no matching `mmproj` projector in scope. In prefill,
-layers whose routed experts are all Q8_0 / Q6_K take Flash-Next's routed F16
-WMMA GEMM (gate and up paired for chunks of 1024+ tokens); otherwise each
-projection picks the vendored llama.cpp-derived MMQ kernels (Q8_0 / Q6_K), the
-grouped WMMA GEMM (BF16), or the per-slot GEMV. Decode runs the MMQ vector
-kernels; their device context is bound at model load when the config reports
-an MoE architecture.
+each routed-expert projection picks its route by format: Q8_0 / Q6_K take
+Flash-Next's routed F16 WMMA GEMM (gate and up paired for chunks of 1024+
+tokens when the down projection takes it too), BF16 the grouped WMMA GEMM, and
+anything else the per-slot GEMV. Decode runs the vendored llama.cpp-derived MMQ
+vector kernels; their device context is bound at model load when the config
+reports an MoE architecture.
 
 | Mode | Selection | Behavior |
 | --- | --- | --- |

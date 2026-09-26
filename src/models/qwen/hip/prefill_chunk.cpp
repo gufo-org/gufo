@@ -13,7 +13,6 @@
 #include "src/models/qwen/hip/ops/prefill_fp16.hpp"
 #include "src/models/qwen/modules/moe.hpp"
 
-#include "qfn_mmq.h"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::hip {
@@ -74,14 +73,6 @@ std::optional<routed::WeightType> RoutedWeightType(core::GgmlType type,
   return std::nullopt;
 }
 
-/// Flash-Next's routed F16 GEMM covers every routed projection of the layer.
-bool UseRoutedF16Experts(const models::qwen::MoeLayerView& view,
-                         std::size_t hidden, std::size_t expert_ff) {
-  return RoutedWeightType(view.gate_exps.type, hidden).has_value() &&
-         RoutedWeightType(view.up_exps.type, hidden).has_value() &&
-         RoutedWeightType(view.down_exps.type, expert_ff).has_value();
-}
-
 /// Token rows per routed tile: the wide tile once the mean bucket fills
 /// most of it (the weights are dequantized per tile), as in Flash-Next.
 std::uint32_t RoutedTileRows(std::size_t slots, std::uint32_t n_experts) {
@@ -92,32 +83,17 @@ std::uint32_t RoutedTileRows(std::size_t slots, std::uint32_t n_experts) {
 /// in the epilogue, the gate never written), as in Flash-Next.
 constexpr std::size_t kRoutedPairMinTokens = 1024;
 
-/// Batched routed MoE FFN (qwen35moe) for one prefill chunk. The router and
-/// shared expert reuse the dense prefill GEMM routes; the routed experts run
-/// the llama.cpp-derived tiled MMQ MoE kernels (Q8_0/Q6_K), BF16 experts (kept
-/// by UD quants in a few layers) run the grouped WMMA GEMM, and any remaining
-/// format uses the per-slot warp GEMV fallback.
 /// Smallest prefill chunk that moves MoE-model BF16 dense projections from
 /// the exact small-batch route to the WMMA GEMM.
 constexpr std::size_t kBf16WmmaMinPrefillBatch = 128;
 
-/// Bounds the routed MMQ grid for one chunk. Top-k experts are distinct, so no
-/// expert receives more than n_tokens rows; without the hint the down
-/// projection, which passes every slot as its own row, sizes its grid for all
-/// n_tokens * n_used slots per expert and dispatches mostly empty blocks
-/// (measured +8-10% prefill). Flash-Next's fitted column tile width on top of
-/// this was no faster. The hint is process-wide state, so it is cleared when
-/// the chunk's MoE is done.
-class RoutedMmqHints {
-public:
-  explicit RoutedMmqHints(std::size_t n_tokens) {
-    qfn_mmq_set_routed_max_expert_rows(static_cast<int>(n_tokens));
-  }
-  ~RoutedMmqHints() { qfn_mmq_set_routed_max_expert_rows(0); }
-  RoutedMmqHints(const RoutedMmqHints&) = delete;
-  RoutedMmqHints& operator=(const RoutedMmqHints&) = delete;
-};
-
+/// Batched routed MoE FFN (qwen35moe) for one prefill chunk. The router and
+/// shared expert reuse the dense prefill GEMM routes. Each routed projection
+/// picks its own route: Q8_0 / Q6_K take Flash-Next's routed F16 WMMA GEMM,
+/// BF16 (kept by UD quants in a few layers) the grouped WMMA GEMM, and any
+/// other format the per-slot warp GEMV. Every expert row is its (token, slot)
+/// index, so the SwiGLU activation moves between routes as F32 (`gate_e`) or
+/// F16 (`up_e`) rows.
 template<typename GemmWeight, typename ReadsQ8>
 void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                             const models::QwenLayerWeights& layer,
@@ -145,13 +121,17 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                       moe.weights.data(), batch_size, n_experts, n_used,
                       stream);
 
-  // Q8_0 / Q6_K experts take Flash-Next's routed F16 WMMA GEMMs. The per-expert
-  // counts are downloaded now so the shared expert below hides the copy.
-  const bool routed_f16 = UseRoutedF16Experts(view, hidden, expert_ff);
+  const auto gate_type = RoutedWeightType(view.gate_exps.type, hidden);
+  const auto up_type = RoutedWeightType(view.up_exps.type, hidden);
+  const auto down_type = RoutedWeightType(view.down_exps.type, expert_ff);
+  const bool routed_gate_up = gate_type.has_value() && up_type.has_value();
+  const bool routed_down = down_type.has_value();
+  // The per-expert counts are downloaded now so the shared expert below
+  // hides the copy.
   auto* routed_counts =
       reinterpret_cast<std::uint32_t*>(moe.routed_counts.data());
   RoutedHostState& routed_host = GetRoutedHostState();
-  if (routed_f16) {
+  if (routed_gate_up || routed_down) {
     routed_host.Reserve(n_experts, RoutedTiles(slots, n_experts));
     routed::ExpertCounts(moe.ids.data(), routed_counts,
                          static_cast<std::uint32_t>(batch_size), n_experts,
@@ -183,26 +163,28 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
               moe.shexp_out.data(), hidden, shared_ff,
               arena.d_scratch_q8_act);
 
-  if (routed_f16) {
-    // Tile map from the real bucket sizes: one entry per (expert, token tile)
-    // of its 16-padded bucket, packed expert | tile << 16.
+  // Tile map from the real bucket sizes: one entry per (expert, token tile)
+  // of its 16-padded bucket, packed expert | tile << 16. Large chunks whose
+  // gate/up share a format pair them over a second map of 64 or 128 rows, the
+  // wider one when it launches at most three quarters as many tiles; the
+  // paired kernel writes F16 only, so a layer whose down projection reads F32
+  // rows keeps the unpaired launches.
+  const bool pair = routed_gate_up && routed_down &&
+                    batch_size >= kRoutedPairMinTokens &&
+                    *gate_type == *up_type;
+  std::uint32_t tile_rows = 16;
+  std::uint32_t n_tiles = 0;
+  std::uint32_t n_pair = 0;
+  std::uint32_t pair_rows = 64;
+  if (routed_gate_up || routed_down) {
     HIP_CHECK(hipEventSynchronize(routed_host.counts_ready));
-    const std::uint32_t tile_rows = RoutedTileRows(slots, n_experts);
-    std::uint32_t n_tiles = 0;
+    tile_rows = RoutedTileRows(slots, n_experts);
     for (std::uint32_t e = 0; e < n_experts; ++e) {
       const std::uint32_t padded = (routed_host.counts[e] + 15U) / 16U * 16U;
       for (std::uint32_t j = 0; j * tile_rows < padded; ++j) {
         routed_host.tiles[n_tiles++] = static_cast<std::int32_t>(e | (j << 16));
       }
     }
-    // Large chunks pair gate/up over a second map of 64 or 128 rows, the
-    // wider one when it launches at most three quarters as many tiles.
-    const auto gate_type = RoutedWeightType(view.gate_exps.type, hidden);
-    const auto up_type = RoutedWeightType(view.up_exps.type, hidden);
-    const bool pair =
-        batch_size >= kRoutedPairMinTokens && *gate_type == *up_type;
-    std::uint32_t n_pair = 0;
-    std::uint32_t pair_rows = 64;
     if (pair) {
       std::uint32_t tiles_64 = 0;
       std::uint32_t tiles_128 = 0;
@@ -228,56 +210,7 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                           moe.rows_token.data(), moe.rows_slot.data(),
                           static_cast<std::uint32_t>(batch_size), n_used,
                           n_experts, stream);
-    routed::NarrowActivations(arena.d_normed, moe.x_half.data(), false,
-                              batch_size * hidden, stream);
-    const auto* x_half = reinterpret_cast<const __half*>(moe.x_half.data());
-    // gate -> F32; up applies SwiGLU against it and writes F16; down reads
-    // those F16 rows and writes F16 for the combine. Each output row is its
-    // (token, slot) index.
-    auto* act_half = reinterpret_cast<__half*>(moe.up_e.data());
-    auto* down_half = reinterpret_cast<__half*>(moe.down_e.data());
-    const bool gate_up_ok =
-        pair ? routed::RoutedGatedF16Gemm(
-                   view.gate_exps.data, view.up_exps.data, *gate_type, x_half,
-                   moe.routed_tiles.data() + n_tiles, n_pair, pair_rows,
-                   moe.routed_bounds.data(), moe.rows_token.data(),
-                   moe.rows_slot.data(), act_half, expert_ff, hidden, stream)
-             : (routed::RoutedF16Gemm(
-                    view.gate_exps.data, *gate_type, x_half,
-                    moe.routed_tiles.data(), n_tiles, tile_rows,
-                    moe.routed_bounds.data(), moe.rows_token.data(),
-                    moe.rows_slot.data(), nullptr, moe.gate_e.data(), nullptr,
-                    expert_ff, hidden, stream) &&
-                routed::RoutedF16Gemm(
-                    view.up_exps.data, *up_type, x_half,
-                    moe.routed_tiles.data(), n_tiles, tile_rows,
-                    moe.routed_bounds.data(), moe.rows_token.data(),
-                    moe.rows_slot.data(), moe.gate_e.data(), nullptr,
-                    act_half, expert_ff, hidden, stream));
-    const bool ok =
-        gate_up_ok &&
-        routed::RoutedF16Gemm(view.down_exps.data,
-                              *RoutedWeightType(view.down_exps.type,
-                                                expert_ff),
-                              act_half, moe.routed_tiles.data(), n_tiles,
-                              tile_rows, moe.routed_bounds.data(),
-                              moe.rows_slot.data(), moe.rows_slot.data(),
-                              nullptr, nullptr, down_half, hidden, expert_ff,
-                              stream);
-    if (!ok) {
-      throw std::runtime_error("routed F16 expert GEMM failed");
-    }
-    routed::MoeEpilogueVec4F16(down_half, moe.weights.data(),
-                               moe.shexp_out.data(), moe.shexp_gate.data(), 1,
-                               arena.d_ffn_out,
-                               static_cast<std::uint32_t>(batch_size), n_used,
-                               hidden, stream);
-    LaunchBatchedResidualAdd(arena.d_hidden, arena.d_ffn_out, arena.d_hidden,
-                             batch_size, hidden, stream);
-    return;
   }
-
-  const RoutedMmqHints mmq_hints(batch_size);
 
   // BF16 experts group their slots by expert once per layer, on first use.
   const MoeGroupedScratch grouped{.sorted_slots = moe.ids_dst.data(),
@@ -298,34 +231,52 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     return true;
   };
 
-  // Routed gate/up share one activation quantization when both take the same
-  // MMQ format; BF16 pairs take the grouped GEMM, and other mixed or
-  // unsupported formats fall back to the fused per-slot SwiGLU GEMV.
-  bool swiglu_done = false;
-  if (view.gate_exps.type == core::GgmlType::kQ8_0 &&
-      view.up_exps.type == core::GgmlType::kQ8_0) {
-    if (qfn_mmq_q8_0_moe_pair(view.gate_exps.data, view.up_exps.data,
-                              arena.d_normed, moe.ids.data(),
-                              moe.gate_e.data(), moe.up_e.data(),
-                              static_cast<int>(expert_ff),
-                              static_cast<int>(hidden),
-                              static_cast<int>(batch_size),
-                              static_cast<int>(n_experts),
-                              static_cast<int>(n_used), stream) != 0) {
-      throw std::runtime_error("MoE gate/up expert GEMM failed");
+  // Gate/up and SwiGLU: the activation lands as F16 rows in up_e for a
+  // routed down projection, as F32 rows in gate_e otherwise.
+  auto* act_half = reinterpret_cast<__half*>(moe.up_e.data());
+  bool act_is_half = false;
+  if (routed_gate_up) {
+    routed::NarrowActivations(arena.d_normed, moe.x_half.data(), false,
+                              batch_size * hidden, stream);
+    const auto* x_half = reinterpret_cast<const __half*>(moe.x_half.data());
+    const bool gate_ok =
+        pair ||
+        routed::RoutedF16Gemm(view.gate_exps.data, *gate_type, x_half,
+                              moe.routed_tiles.data(), n_tiles, tile_rows,
+                              moe.routed_bounds.data(), moe.rows_token.data(),
+                              moe.rows_slot.data(), nullptr, moe.gate_e.data(),
+                              nullptr, expert_ff, hidden, stream);
+    // up applies SwiGLU against the gate only on its F16 output; F32 rows for
+    // a non-routed down projection take the separate SwiGLU below.
+    const bool up_ok =
+        gate_ok &&
+        (pair ? routed::RoutedGatedF16Gemm(
+                    view.gate_exps.data, view.up_exps.data, *gate_type, x_half,
+                    moe.routed_tiles.data() + n_tiles, n_pair, pair_rows,
+                    moe.routed_bounds.data(), moe.rows_token.data(),
+                    moe.rows_slot.data(), act_half, expert_ff, hidden, stream)
+         : routed_down
+             ? routed::RoutedF16Gemm(
+                   view.up_exps.data, *up_type, x_half,
+                   moe.routed_tiles.data(), n_tiles, tile_rows,
+                   moe.routed_bounds.data(), moe.rows_token.data(),
+                   moe.rows_slot.data(), moe.gate_e.data(), nullptr, act_half,
+                   expert_ff, hidden, stream)
+             : routed::RoutedF16Gemm(
+                   view.up_exps.data, *up_type, x_half,
+                   moe.routed_tiles.data(), n_tiles, tile_rows,
+                   moe.routed_bounds.data(), moe.rows_token.data(),
+                   moe.rows_slot.data(), nullptr, moe.up_e.data(), nullptr,
+                   expert_ff, hidden, stream));
+    if (!up_ok) {
+      throw std::runtime_error("routed F16 expert gate/up GEMM failed");
     }
-  } else if (view.gate_exps.type == core::GgmlType::kQ6_K &&
-             view.up_exps.type == core::GgmlType::kQ6_K) {
-    if (qfn_mmq_q6_K_moe_pair(view.gate_exps.data, view.up_exps.data,
-                              arena.d_normed, moe.ids.data(),
-                              moe.gate_e.data(), moe.up_e.data(),
-                              static_cast<int>(expert_ff),
-                              static_cast<int>(hidden),
-                              static_cast<int>(batch_size),
-                              static_cast<int>(n_experts),
-                              static_cast<int>(n_used), stream) != 0) {
-      throw std::runtime_error("MoE gate/up expert GEMM failed");
+    if (!routed_down) {
+      LaunchBatchedSwiGLUActivation(moe.gate_e.data(), moe.up_e.data(),
+                                    moe.gate_e.data(), nullptr,
+                                    slots * expert_ff, stream);
     }
+    act_is_half = routed_down;
   } else if (view.gate_exps.type == core::GgmlType::kBF16 &&
              view.up_exps.type == core::GgmlType::kBF16 &&
              grouped_bf16(view.gate_exps, expert_ff, hidden)) {
@@ -337,46 +288,53 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                              moe.up_e.data(), expert_ff, hidden,
                              static_cast<std::uint32_t>(slots), n_experts,
                              n_used, grouped, stream);
+    LaunchBatchedSwiGLUActivation(moe.gate_e.data(), moe.up_e.data(),
+                                  moe.gate_e.data(), nullptr,
+                                  slots * expert_ff, stream);
   } else {
     LaunchMoeSlotSwigluGemv(view.gate_exps.data, view.gate_exps.type,
                             view.up_exps.data, view.up_exps.type,
                             arena.d_normed, moe.ids.data(), moe.gate_e.data(),
                             expert_ff, hidden, static_cast<std::uint32_t>(slots),
                             n_used, stream);
-    swiglu_done = true;
-  }
-  if (!swiglu_done) {
-    LaunchBatchedSwiGLUActivation(moe.gate_e.data(), moe.up_e.data(),
-                                  moe.gate_e.data(), nullptr,
-                                  slots * expert_ff, stream);
   }
 
   // The down projection reads one activation row per (token, slot).
-  if (view.down_exps.type == core::GgmlType::kQ8_0) {
-    if (qfn_mmq_q8_0_moe_raw(view.down_exps.data, moe.gate_e.data(),
-                             moe.ids.data(), moe.down_e.data(),
-                             static_cast<int>(hidden),
-                             static_cast<int>(expert_ff),
-                             static_cast<int>(slots),
-                             static_cast<int>(n_experts), 1, stream) != 0) {
-      throw std::runtime_error("MoE down expert GEMM failed");
+  if (routed_down) {
+    if (!act_is_half) {
+      routed::NarrowActivations(moe.gate_e.data(), act_half, false,
+                                slots * expert_ff, stream);
     }
-  } else if (grouped_bf16(view.down_exps, hidden, expert_ff)) {
-    LaunchMoeGroupedBf16Gemm(view.down_exps.data, moe.gate_e.data(),
-                             moe.down_e.data(), hidden, expert_ff,
-                             static_cast<std::uint32_t>(slots), n_experts,
-                             1, grouped, stream);
+    auto* down_half = reinterpret_cast<__half*>(moe.down_e.data());
+    if (!routed::RoutedF16Gemm(view.down_exps.data, *down_type, act_half,
+                               moe.routed_tiles.data(), n_tiles, tile_rows,
+                               moe.routed_bounds.data(), moe.rows_slot.data(),
+                               moe.rows_slot.data(), nullptr, nullptr,
+                               down_half, hidden, expert_ff, stream)) {
+      throw std::runtime_error("routed F16 expert down GEMM failed");
+    }
+    routed::MoeEpilogueVec4F16(down_half, moe.weights.data(),
+                               moe.shexp_out.data(), moe.shexp_gate.data(), 1,
+                               arena.d_ffn_out,
+                               static_cast<std::uint32_t>(batch_size), n_used,
+                               hidden, stream);
   } else {
-    LaunchMoeSlotGemv(view.down_exps.data, view.down_exps.type,
-                      moe.gate_e.data(), moe.ids.data(), moe.down_e.data(),
-                      hidden, expert_ff, static_cast<std::uint32_t>(slots), 1,
-                      stream);
+    if (grouped_bf16(view.down_exps, hidden, expert_ff)) {
+      LaunchMoeGroupedBf16Gemm(view.down_exps.data, moe.gate_e.data(),
+                               moe.down_e.data(), hidden, expert_ff,
+                               static_cast<std::uint32_t>(slots), n_experts, 1,
+                               grouped, stream);
+    } else {
+      LaunchMoeSlotGemv(view.down_exps.data, view.down_exps.type,
+                        moe.gate_e.data(), moe.ids.data(), moe.down_e.data(),
+                        hidden, expert_ff, static_cast<std::uint32_t>(slots),
+                        1, stream);
+    }
+    LaunchMoeEpilogue(moe.down_e.data(), moe.weights.data(),
+                      moe.shexp_out.data(), moe.shexp_gate.data(),
+                      arena.d_ffn_out, static_cast<std::uint32_t>(batch_size),
+                      n_used, hidden, stream);
   }
-
-  LaunchMoeEpilogue(moe.down_e.data(), moe.weights.data(),
-                    moe.shexp_out.data(), moe.shexp_gate.data(),
-                    arena.d_ffn_out, static_cast<std::uint32_t>(batch_size),
-                    n_used, hidden, stream);
   LaunchBatchedResidualAdd(arena.d_hidden, arena.d_ffn_out, arena.d_hidden,
                            batch_size, hidden, stream);
 }
