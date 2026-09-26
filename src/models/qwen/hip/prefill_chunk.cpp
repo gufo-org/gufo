@@ -1,5 +1,6 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
@@ -60,14 +61,25 @@ RoutedHostState& GetRoutedHostState() {
   return state;
 }
 
-/// Flash-Next's routed F16 GEMM covers Q8_0 experts at any width that is a
-/// whole number of 64-element blocks.
+/// The routed F16 GEMM's decode of an expert tensor, if it has one here:
+/// Q8_0 (whole 64-element blocks) and Q6_K (whole 256-element superblocks).
+std::optional<routed::WeightType> RoutedWeightType(core::GgmlType type,
+                                                   std::size_t k) {
+  if (type == core::GgmlType::kQ8_0 && k % 64 == 0) {
+    return routed::WeightType::kQ8_0;
+  }
+  if (type == core::GgmlType::kQ6_K && k % 256 == 0) {
+    return routed::WeightType::kQ6_K;
+  }
+  return std::nullopt;
+}
+
+/// Flash-Next's routed F16 GEMM covers every routed projection of the layer.
 bool UseRoutedF16Experts(const models::qwen::MoeLayerView& view,
                          std::size_t hidden, std::size_t expert_ff) {
-  return view.gate_exps.type == core::GgmlType::kQ8_0 &&
-         view.up_exps.type == core::GgmlType::kQ8_0 &&
-         view.down_exps.type == core::GgmlType::kQ8_0 && hidden % 64 == 0 &&
-         expert_ff % 64 == 0;
+  return RoutedWeightType(view.gate_exps.type, hidden).has_value() &&
+         RoutedWeightType(view.up_exps.type, hidden).has_value() &&
+         RoutedWeightType(view.down_exps.type, expert_ff).has_value();
 }
 
 /// Token rows per routed tile: the wide tile once the mean bucket fills
@@ -129,7 +141,7 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                       moe.weights.data(), batch_size, n_experts, n_used,
                       stream);
 
-  // Q8_0 experts take Flash-Next's routed F16 WMMA GEMMs. The per-expert
+  // Q8_0 / Q6_K experts take Flash-Next's routed F16 WMMA GEMMs. The per-expert
   // counts are downloaded now so the shared expert below hides the copy.
   const bool routed_f16 = UseRoutedF16Experts(view, hidden, expert_ff);
   auto* routed_counts =
@@ -196,19 +208,23 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     auto* act_half = reinterpret_cast<__half*>(moe.up_e.data());
     auto* down_half = reinterpret_cast<__half*>(moe.down_e.data());
     const bool ok =
-        routed::RoutedF16Gemm(view.gate_exps.data, routed::WeightType::kQ8_0,
+        routed::RoutedF16Gemm(view.gate_exps.data,
+                              *RoutedWeightType(view.gate_exps.type, hidden),
                               x_half, moe.routed_tiles.data(), n_tiles,
                               tile_rows, moe.routed_bounds.data(),
                               moe.rows_token.data(), moe.rows_slot.data(),
                               nullptr, moe.gate_e.data(), nullptr, expert_ff,
                               hidden, stream) &&
-        routed::RoutedF16Gemm(view.up_exps.data, routed::WeightType::kQ8_0,
+        routed::RoutedF16Gemm(view.up_exps.data,
+                              *RoutedWeightType(view.up_exps.type, hidden),
                               x_half, moe.routed_tiles.data(), n_tiles,
                               tile_rows, moe.routed_bounds.data(),
                               moe.rows_token.data(), moe.rows_slot.data(),
                               moe.gate_e.data(), nullptr, act_half, expert_ff,
                               hidden, stream) &&
-        routed::RoutedF16Gemm(view.down_exps.data, routed::WeightType::kQ8_0,
+        routed::RoutedF16Gemm(view.down_exps.data,
+                              *RoutedWeightType(view.down_exps.type,
+                                                expert_ff),
                               act_half, moe.routed_tiles.data(), n_tiles,
                               tile_rows, moe.routed_bounds.data(),
                               moe.rows_slot.data(), moe.rows_slot.data(),

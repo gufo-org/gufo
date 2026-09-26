@@ -566,112 +566,150 @@ void CheckDenseBf16(hipStream_t stream) {
 
 
 
-/// Flash-Next's routed F16 expert GEMM on this model's Q8_0 expert shapes,
-/// against the per-slot GEMV (FP32 activations, same weights). The difference
-/// is the F16 rounding of the activation rows.
+/// Random block_q6_K payload for `rows` x `cols`: arbitrary codes, int8
+/// sub-block scales and a small F16 superblock scale.
+std::vector<std::uint8_t> RandomQ6K(std::size_t rows, std::size_t cols) {
+  constexpr std::size_t kBlockBytes = 210;
+  std::vector<std::uint8_t> out(rows * (cols / 256) * kBlockBytes);
+  for (std::size_t b = 0; b < out.size() / kBlockBytes; ++b) {
+    std::uint8_t* blk = out.data() + (b * kBlockBytes);
+    for (std::size_t i = 0; i < 192; ++i) {
+      blk[i] = static_cast<std::uint8_t>(Rnd() & 0xFFU);
+    }
+    for (std::size_t i = 192; i < 208; ++i) {
+      blk[i] = static_cast<std::uint8_t>(
+          static_cast<std::int8_t>(static_cast<int>(Rnd() % 81) - 40));
+    }
+    const std::uint16_t d = FloatToFp16Bits(RndFloat(0.0002F, 0.0012F));
+    std::memcpy(blk + 208, &d, sizeof(d));
+  }
+  return out;
+}
+
+/// Flash-Next's routed F16 expert GEMM on this model's Q8_0 and Q6_K expert
+/// shapes, against the per-slot GEMV (FP32 activations, same weights). The
+/// difference is the F16 rounding of the activation rows (and, for Q6_K,
+/// of the per-16 scale).
 void CheckRoutedF16(hipStream_t stream) {
   namespace routed = gufo::models::qwen38_flash_next::rocm;
-  constexpr std::uint32_t kExperts = 64;
-  constexpr std::uint32_t kUsed = 8;
-  struct Shape {
-    const char* name;
-    std::size_t m;
-    std::size_t k;
-    bool per_slot_input;
-  };
-  for (const Shape shape : {Shape{"gate/up", 512, 2048, false},
-                            Shape{"down", 2048, 512, true}}) {
-    std::vector<float> w_src(static_cast<std::size_t>(kExperts) * shape.m *
-                             shape.k);
-    for (auto& v : w_src) {
-      v = RndFloat(-0.05F, 0.05F);
-    }
-    const auto w_q = QuantizeQ8_0(w_src.data(), kExperts * shape.m, shape.k);
-    gufo::test::DeviceBuffer<Q8_0Block> d_w(w_q);
-    for (const std::uint32_t tokens : {1U, 7U, 100U, 512U}) {
-      const std::uint32_t slots = tokens * kUsed;
-      std::vector<std::int32_t> ids(slots);
-      for (std::uint32_t t = 0; t < tokens; ++t) {
-        // Distinct experts per token, skewed toward the first few.
-        for (std::uint32_t s = 0; s < kUsed; ++s) {
-          ids[t * kUsed + s] = static_cast<std::int32_t>(
-              (Rnd() % 3 == 0) ? s : (kUsed + (t + s * 5) % (kExperts - kUsed)));
+  for (const GgmlType type : {GgmlType::kQ8_0, GgmlType::kQ6_K}) {
+    const auto weight_type = type == GgmlType::kQ8_0
+                                 ? routed::WeightType::kQ8_0
+                                 : routed::WeightType::kQ6_K;
+    const char* type_name = type == GgmlType::kQ8_0 ? "Q8_0" : "Q6_K";
+    constexpr std::uint32_t kExperts = 64;
+    constexpr std::uint32_t kUsed = 8;
+    struct Shape {
+      const char* name;
+      std::size_t m;
+      std::size_t k;
+      bool per_slot_input;
+    };
+    for (const Shape shape : {Shape{"gate/up", 512, 2048, false},
+                              Shape{"down", 2048, 512, true}}) {
+      std::vector<std::uint8_t> w_bytes;
+      if (type == GgmlType::kQ8_0) {
+        std::vector<float> w_src(static_cast<std::size_t>(kExperts) * shape.m *
+                                 shape.k);
+        for (auto& v : w_src) {
+          v = RndFloat(-0.05F, 0.05F);
         }
+        const auto w_q =
+            QuantizeQ8_0(w_src.data(), kExperts * shape.m, shape.k);
+        w_bytes.resize(w_q.size() * sizeof(Q8_0Block));
+        std::memcpy(w_bytes.data(), w_q.data(), w_bytes.size());
+      } else {
+        w_bytes = RandomQ6K(kExperts * shape.m, shape.k);
       }
-      const std::size_t x_rows = shape.per_slot_input ? slots : tokens;
-      std::vector<float> x(x_rows * shape.k);
-      for (auto& v : x) {
-        v = RndFloat(-1.0F, 1.0F);
-      }
-      gufo::test::DeviceBuffer<std::int32_t> d_ids(ids);
-      gufo::test::DeviceBuffer<float> d_x(x);
-      const std::vector<float> nan_fill(
-          static_cast<std::size_t>(slots) * shape.m,
-          std::numeric_limits<float>::quiet_NaN());
-      gufo::test::DeviceBuffer<float> d_ref(nan_fill);
-      gufo::test::DeviceBuffer<float> d_got(nan_fill);
-      gufo::hip::LaunchMoeSlotGemv(d_w.data(), GgmlType::kQ8_0, d_x.data(),
-                                   d_ids.data(), d_ref.data(), shape.m,
-                                   shape.k, slots,
-                                   shape.per_slot_input ? 1U : kUsed, stream);
+      gufo::test::DeviceBuffer<std::uint8_t> d_w(w_bytes);
+      for (const std::uint32_t tokens : {1U, 7U, 100U, 512U}) {
+        const std::uint32_t slots = tokens * kUsed;
+        std::vector<std::int32_t> ids(slots);
+        for (std::uint32_t t = 0; t < tokens; ++t) {
+          // Distinct experts per token, skewed toward the first few.
+          for (std::uint32_t s = 0; s < kUsed; ++s) {
+            ids[t * kUsed + s] = static_cast<std::int32_t>(
+                (Rnd() % 3 == 0)
+                    ? s
+                    : (kUsed + (t + s * 5) % (kExperts - kUsed)));
+          }
+        }
+        const std::size_t x_rows = shape.per_slot_input ? slots : tokens;
+        std::vector<float> x(x_rows * shape.k);
+        for (auto& v : x) {
+          v = RndFloat(-1.0F, 1.0F);
+        }
+        gufo::test::DeviceBuffer<std::int32_t> d_ids(ids);
+        gufo::test::DeviceBuffer<float> d_x(x);
+        const std::vector<float> nan_fill(
+            static_cast<std::size_t>(slots) * shape.m,
+            std::numeric_limits<float>::quiet_NaN());
+        gufo::test::DeviceBuffer<float> d_ref(nan_fill);
+        gufo::test::DeviceBuffer<float> d_got(nan_fill);
+        gufo::hip::LaunchMoeSlotGemv(d_w.data(), type, d_x.data(),
+                                     d_ids.data(), d_ref.data(), shape.m,
+                                     shape.k, slots,
+                                     shape.per_slot_input ? 1U : kUsed, stream);
 
-      gufo::test::DeviceBuffer<std::uint32_t> d_counts(kExperts);
-      const std::size_t rows = gufo::hip::RoutedRows(slots, kExperts);
-      gufo::test::DeviceBuffer<std::int32_t> d_bounds(kExperts + 1);
-      gufo::test::DeviceBuffer<std::int32_t> d_cursors(kExperts);
-      gufo::test::DeviceBuffer<std::int32_t> d_rows_token(rows);
-      gufo::test::DeviceBuffer<std::int32_t> d_rows_slot(rows);
-      gufo::test::DeviceBuffer<std::uint16_t> d_x_half(x_rows * shape.k);
-      routed::ExpertCounts(d_ids.data(), d_counts.data(), tokens, kExperts,
-                           kUsed, stream);
-      const auto counts = d_counts.CopyToHost();
-      for (const std::uint32_t tile_rows : {16U, 48U}) {
-        std::vector<std::int32_t> tiles;
-        for (std::uint32_t e = 0; e < kExperts; ++e) {
-          const std::uint32_t padded = (counts[e] + 15U) / 16U * 16U;
-          for (std::uint32_t j = 0; j * tile_rows < padded; ++j) {
-            tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+        gufo::test::DeviceBuffer<std::uint32_t> d_counts(kExperts);
+        const std::size_t rows = gufo::hip::RoutedRows(slots, kExperts);
+        gufo::test::DeviceBuffer<std::int32_t> d_bounds(kExperts + 1);
+        gufo::test::DeviceBuffer<std::int32_t> d_cursors(kExperts);
+        gufo::test::DeviceBuffer<std::int32_t> d_rows_token(rows);
+        gufo::test::DeviceBuffer<std::int32_t> d_rows_slot(rows);
+        gufo::test::DeviceBuffer<std::uint16_t> d_x_half(x_rows * shape.k);
+        routed::ExpertCounts(d_ids.data(), d_counts.data(), tokens, kExperts,
+                             kUsed, stream);
+        const auto counts = d_counts.CopyToHost();
+        for (const std::uint32_t tile_rows : {16U, 48U}) {
+          std::vector<std::int32_t> tiles;
+          for (std::uint32_t e = 0; e < kExperts; ++e) {
+            const std::uint32_t padded = (counts[e] + 15U) / 16U * 16U;
+            for (std::uint32_t j = 0; j * tile_rows < padded; ++j) {
+              tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+            }
           }
-        }
-        gufo::test::DeviceBuffer<std::int32_t> d_tiles(tiles);
-        d_got.CopyFrom(std::span<const float>(nan_fill));
-        routed::RoutedCompact(d_ids.data(), d_counts.data(), d_bounds.data(),
-                              d_cursors.data(), d_rows_token.data(),
-                              d_rows_slot.data(), tokens, kUsed, kExperts,
-                              stream);
-        routed::NarrowActivations(d_x.data(), d_x_half.data(), false,
-                                  x_rows * shape.k, stream);
-        const auto* rows_in = shape.per_slot_input ? d_rows_slot.data()
-                                                   : d_rows_token.data();
-        Expect(routed::RoutedF16Gemm(
-                   d_w.data(), routed::WeightType::kQ8_0,
-                   reinterpret_cast<const __half*>(d_x_half.data()),
-                   d_tiles.data(), static_cast<std::uint32_t>(tiles.size()),
-                   tile_rows, d_bounds.data(), rows_in, d_rows_slot.data(),
-                   nullptr, d_got.data(), nullptr, shape.m, shape.k, stream),
-               "routed F16 GEMM rejected the shape");
-        HIP_CHECK(hipStreamSynchronize(stream));
-        const auto ref = d_ref.CopyToHost();
-        const auto got = d_got.CopyToHost();
-        double max_abs = 0.0;
-        double magnitude = 0.0;
-        std::size_t non_finite = 0;
-        for (std::size_t i = 0; i < ref.size(); ++i) {
-          if (!std::isfinite(got[i])) {
-            ++non_finite;
-            continue;
+          gufo::test::DeviceBuffer<std::int32_t> d_tiles(tiles);
+          d_got.CopyFrom(std::span<const float>(nan_fill));
+          routed::RoutedCompact(d_ids.data(), d_counts.data(), d_bounds.data(),
+                                d_cursors.data(), d_rows_token.data(),
+                                d_rows_slot.data(), tokens, kUsed, kExperts,
+                                stream);
+          routed::NarrowActivations(d_x.data(), d_x_half.data(), false,
+                                    x_rows * shape.k, stream);
+          const auto* rows_in = shape.per_slot_input ? d_rows_slot.data()
+                                                     : d_rows_token.data();
+          Expect(routed::RoutedF16Gemm(
+                     d_w.data(), weight_type,
+                     reinterpret_cast<const __half*>(d_x_half.data()),
+                     d_tiles.data(), static_cast<std::uint32_t>(tiles.size()),
+                     tile_rows, d_bounds.data(), rows_in, d_rows_slot.data(),
+                     nullptr, d_got.data(), nullptr, shape.m, shape.k, stream),
+                 "routed F16 GEMM rejected the shape");
+          HIP_CHECK(hipStreamSynchronize(stream));
+          const auto ref = d_ref.CopyToHost();
+          const auto got = d_got.CopyToHost();
+          double max_abs = 0.0;
+          double magnitude = 0.0;
+          std::size_t non_finite = 0;
+          for (std::size_t i = 0; i < ref.size(); ++i) {
+            if (!std::isfinite(got[i])) {
+              ++non_finite;
+              continue;
+            }
+            max_abs = std::max(max_abs, std::fabs(static_cast<double>(got[i]) -
+                                                  static_cast<double>(ref[i])));
+            magnitude =
+                std::max(magnitude, std::fabs(static_cast<double>(ref[i])));
           }
-          max_abs = std::max(max_abs, std::fabs(static_cast<double>(got[i]) -
-                                                static_cast<double>(ref[i])));
-          magnitude =
-              std::max(magnitude, std::fabs(static_cast<double>(ref[i])));
+          const double rel = magnitude > 0.0 ? max_abs / magnitude : max_abs;
+          std::cout << "routed F16 " << type_name << " " << shape.name
+                    << " tokens=" << tokens
+                    << " tile_rows=" << tile_rows << ": rel=" << rel
+                    << " non_finite=" << non_finite << "\n";
+          Expect(non_finite == 0, "routed F16 GEMM left slots unwritten");
+          Expect(rel < 1e-2, "routed F16 GEMM disagrees with the slot GEMV");
         }
-        const double rel = magnitude > 0.0 ? max_abs / magnitude : max_abs;
-        std::cout << "routed F16 " << shape.name << " tokens=" << tokens
-                  << " tile_rows=" << tile_rows << ": rel=" << rel
-                  << " non_finite=" << non_finite << "\n";
-        Expect(non_finite == 0, "routed F16 GEMM left slots unwritten");
-        Expect(rel < 1e-2, "routed F16 GEMM disagrees with the slot GEMV");
       }
     }
   }
