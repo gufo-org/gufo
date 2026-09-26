@@ -150,6 +150,9 @@ class TextRunnerState : public ContinuationState {
 public:
   using CancellationCheck = std::function<bool()>;
 
+  void SetStopAtEos(bool value) noexcept { stop_at_eos_ = value; }
+  [[nodiscard]] bool stop_at_eos() const noexcept { return stop_at_eos_; }
+
   /// Installs a request-scoped cancellation check for model calls that can
   /// yield internally. Implementations that only yield between work units may
   /// keep the default no-op behavior.
@@ -160,6 +163,9 @@ public:
       const noexcept {
     return {};
   }
+
+private:
+  bool stop_at_eos_{true};
 };
 
 /// Immutable model-owned continuation payload.
@@ -415,7 +421,8 @@ public:
       const sampling::SamplingConfig& sampling,
       const CancellationCheck& is_cancelled = {},
       std::shared_ptr<const TextPromptContext> context = {},
-      bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0);
+      bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
+      bool stop_at_eos = true);
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
 
