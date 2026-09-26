@@ -438,8 +438,9 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
   prepared.position = request.position;
   prepared.eos_id = request.eos_id;
   prepared.random_sampling = request.sampler.config().uses_random_sampling();
-  prepared.sampled =
-      prepared.random_sampling || request.sampler.config().penalties_enabled();
+  prepared.sampled = prepared.random_sampling ||
+                     request.sampler.config().penalties_enabled() ||
+                     request.sampler.config().constraint != nullptr;
   if (prepared.sampled)
     prepared.working_sampler.emplace(request.sampler);
   prepared.max_draft_tokens =
