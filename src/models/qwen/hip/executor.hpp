@@ -248,10 +248,12 @@ struct QwenMoeScratch {
   return slots + (15 * n_experts);
 }
 
-/// Tile-map capacity for the narrowest (16-row) tiles.
+/// Tile-map capacity: the narrowest (16-row) map, plus the paired gate/up
+/// map of 64 or more rows that large chunks append after it.
 [[nodiscard]] constexpr std::size_t RoutedTiles(std::size_t slots,
                                                 std::size_t n_experts) {
-  return (RoutedRows(slots, n_experts) / 16) + n_experts + 1;
+  return (RoutedRows(slots, n_experts) / 16) +
+         (RoutedRows(slots, n_experts) / 64) + (2 * n_experts) + 2;
 }
 
 /// Typed non-owning capability views over stable Qwen GPU arena allocations.

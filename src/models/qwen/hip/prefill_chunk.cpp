@@ -88,6 +88,10 @@ std::uint32_t RoutedTileRows(std::size_t slots, std::uint32_t n_experts) {
   return slots >= static_cast<std::size_t>(16) * n_experts ? 48U : 16U;
 }
 
+/// Smallest chunk whose gate/up projections run as one paired launch (SwiGLU
+/// in the epilogue, the gate never written), as in Flash-Next.
+constexpr std::size_t kRoutedPairMinTokens = 1024;
+
 /// Batched routed MoE FFN (qwen35moe) for one prefill chunk. The router and
 /// shared expert reuse the dense prefill GEMM routes; the routed experts run
 /// the llama.cpp-derived tiled MMQ MoE kernels (Q8_0/Q6_K), BF16 experts (kept
@@ -191,8 +195,33 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
         routed_host.tiles[n_tiles++] = static_cast<std::int32_t>(e | (j << 16));
       }
     }
+    // Large chunks pair gate/up over a second map of 64 or 128 rows, the
+    // wider one when it launches at most three quarters as many tiles.
+    const auto gate_type = RoutedWeightType(view.gate_exps.type, hidden);
+    const auto up_type = RoutedWeightType(view.up_exps.type, hidden);
+    const bool pair =
+        batch_size >= kRoutedPairMinTokens && *gate_type == *up_type;
+    std::uint32_t n_pair = 0;
+    std::uint32_t pair_rows = 64;
+    if (pair) {
+      std::uint32_t tiles_64 = 0;
+      std::uint32_t tiles_128 = 0;
+      for (std::uint32_t e = 0; e < n_experts; ++e) {
+        const std::uint32_t padded = (routed_host.counts[e] + 15U) / 16U * 16U;
+        tiles_64 += (padded + 63U) / 64U;
+        tiles_128 += (padded + 127U) / 128U;
+      }
+      pair_rows = tiles_128 * 4 <= tiles_64 * 3 ? 128U : 64U;
+      for (std::uint32_t e = 0; e < n_experts; ++e) {
+        const std::uint32_t padded = (routed_host.counts[e] + 15U) / 16U * 16U;
+        for (std::uint32_t j = 0; j * pair_rows < padded; ++j) {
+          routed_host.tiles[n_tiles + n_pair++] =
+              static_cast<std::int32_t>(e | (j << 16));
+        }
+      }
+    }
     HIP_CHECK(hipMemcpyAsync(moe.routed_tiles.data(), routed_host.tiles,
-                             n_tiles * sizeof(std::int32_t),
+                             (n_tiles + n_pair) * sizeof(std::int32_t),
                              hipMemcpyHostToDevice, stream));
     routed::RoutedCompact(moe.ids.data(), routed_counts,
                           moe.routed_bounds.data(), moe.routed_cursors.data(),
@@ -207,21 +236,26 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     // (token, slot) index.
     auto* act_half = reinterpret_cast<__half*>(moe.up_e.data());
     auto* down_half = reinterpret_cast<__half*>(moe.down_e.data());
+    const bool gate_up_ok =
+        pair ? routed::RoutedGatedF16Gemm(
+                   view.gate_exps.data, view.up_exps.data, *gate_type, x_half,
+                   moe.routed_tiles.data() + n_tiles, n_pair, pair_rows,
+                   moe.routed_bounds.data(), moe.rows_token.data(),
+                   moe.rows_slot.data(), act_half, expert_ff, hidden, stream)
+             : (routed::RoutedF16Gemm(
+                    view.gate_exps.data, *gate_type, x_half,
+                    moe.routed_tiles.data(), n_tiles, tile_rows,
+                    moe.routed_bounds.data(), moe.rows_token.data(),
+                    moe.rows_slot.data(), nullptr, moe.gate_e.data(), nullptr,
+                    expert_ff, hidden, stream) &&
+                routed::RoutedF16Gemm(
+                    view.up_exps.data, *up_type, x_half,
+                    moe.routed_tiles.data(), n_tiles, tile_rows,
+                    moe.routed_bounds.data(), moe.rows_token.data(),
+                    moe.rows_slot.data(), moe.gate_e.data(), nullptr,
+                    act_half, expert_ff, hidden, stream));
     const bool ok =
-        routed::RoutedF16Gemm(view.gate_exps.data,
-                              *RoutedWeightType(view.gate_exps.type, hidden),
-                              x_half, moe.routed_tiles.data(), n_tiles,
-                              tile_rows, moe.routed_bounds.data(),
-                              moe.rows_token.data(), moe.rows_slot.data(),
-                              nullptr, moe.gate_e.data(), nullptr, expert_ff,
-                              hidden, stream) &&
-        routed::RoutedF16Gemm(view.up_exps.data,
-                              *RoutedWeightType(view.up_exps.type, hidden),
-                              x_half, moe.routed_tiles.data(), n_tiles,
-                              tile_rows, moe.routed_bounds.data(),
-                              moe.rows_token.data(), moe.rows_slot.data(),
-                              moe.gate_e.data(), nullptr, act_half, expert_ff,
-                              hidden, stream) &&
+        gate_up_ok &&
         routed::RoutedF16Gemm(view.down_exps.data,
                               *RoutedWeightType(view.down_exps.type,
                                                 expert_ff),

@@ -716,6 +716,151 @@ void CheckRoutedF16(hipStream_t stream) {
   std::cout << "routed F16 experts: OK\n";
 }
 
+
+float Fp16BitsToFloat(std::uint16_t h) {
+  const std::uint32_t sign = (h & 0x8000U) << 16;
+  std::uint32_t exponent = (h >> 10) & 0x1FU;
+  std::uint32_t mantissa = h & 0x3FFU;
+  std::uint32_t bits = 0;
+  if (exponent == 0x1FU) {
+    bits = sign | 0x7F800000U | (mantissa << 13);
+  } else if (exponent == 0) {
+    if (mantissa == 0) {
+      bits = sign;
+    } else {
+      exponent = 127 - 15 + 1;
+      while ((mantissa & 0x400U) == 0) {
+        mantissa <<= 1;
+        --exponent;
+      }
+      bits = sign | (exponent << 23) | ((mantissa & 0x3FFU) << 13);
+    }
+  } else {
+    bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+  }
+  float out;
+  std::memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+/// Paired routed gate/up (SwiGLU in the epilogue, F16 out) against
+/// silu(gate) * up from two per-slot GEMVs on the same weights.
+void CheckRoutedPair(hipStream_t stream) {
+  namespace routed = gufo::models::qwen38_flash_next::rocm;
+  constexpr std::uint32_t kExperts = 64;
+  constexpr std::uint32_t kUsed = 8;
+  constexpr std::size_t kM = 512;
+  constexpr std::size_t kK = 2048;
+  for (const GgmlType type : {GgmlType::kQ6_K, GgmlType::kQ8_0}) {
+    const auto weight_type = type == GgmlType::kQ8_0
+                                 ? routed::WeightType::kQ8_0
+                                 : routed::WeightType::kQ6_K;
+    const char* type_name = type == GgmlType::kQ8_0 ? "Q8_0" : "Q6_K";
+    const auto make = [&] {
+      if (type == GgmlType::kQ6_K) {
+        return RandomQ6K(kExperts * kM, kK);
+      }
+      std::vector<float> src(static_cast<std::size_t>(kExperts) * kM * kK);
+      for (auto& v : src) {
+        v = RndFloat(-0.05F, 0.05F);
+      }
+      const auto q = QuantizeQ8_0(src.data(), kExperts * kM, kK);
+      std::vector<std::uint8_t> bytes(q.size() * sizeof(Q8_0Block));
+      std::memcpy(bytes.data(), q.data(), bytes.size());
+      return bytes;
+    };
+    gufo::test::DeviceBuffer<std::uint8_t> d_gate(make());
+    gufo::test::DeviceBuffer<std::uint8_t> d_up(make());
+    for (const std::uint32_t tokens : {100U, 512U, 1024U}) {
+      const std::uint32_t slots = tokens * kUsed;
+      std::vector<std::int32_t> ids(slots);
+      for (std::uint32_t t = 0; t < tokens; ++t) {
+        for (std::uint32_t s = 0; s < kUsed; ++s) {
+          ids[t * kUsed + s] = static_cast<std::int32_t>(
+              (Rnd() % 3 == 0)
+                  ? s
+                  : (kUsed + (t + s * 5) % (kExperts - kUsed)));
+        }
+      }
+      std::vector<float> x(tokens * kK);
+      for (auto& v : x) {
+        v = RndFloat(-1.0F, 1.0F);
+      }
+      gufo::test::DeviceBuffer<std::int32_t> d_ids(ids);
+      gufo::test::DeviceBuffer<float> d_x(x);
+      gufo::test::DeviceBuffer<float> d_gate_ref(slots * kM);
+      gufo::test::DeviceBuffer<float> d_up_ref(slots * kM);
+      gufo::hip::LaunchMoeSlotGemv(d_gate.data(), type, d_x.data(),
+                                   d_ids.data(), d_gate_ref.data(), kM, kK,
+                                   slots, kUsed, stream);
+      gufo::hip::LaunchMoeSlotGemv(d_up.data(), type, d_x.data(), d_ids.data(),
+                                   d_up_ref.data(), kM, kK, slots, kUsed,
+                                   stream);
+      gufo::test::DeviceBuffer<std::uint32_t> d_counts(kExperts);
+      const std::size_t rows = gufo::hip::RoutedRows(slots, kExperts);
+      gufo::test::DeviceBuffer<std::int32_t> d_bounds(kExperts + 1);
+      gufo::test::DeviceBuffer<std::int32_t> d_cursors(kExperts);
+      gufo::test::DeviceBuffer<std::int32_t> d_rows_token(rows);
+      gufo::test::DeviceBuffer<std::int32_t> d_rows_slot(rows);
+      gufo::test::DeviceBuffer<std::uint16_t> d_x_half(tokens * kK);
+      routed::ExpertCounts(d_ids.data(), d_counts.data(), tokens, kExperts,
+                           kUsed, stream);
+      routed::RoutedCompact(d_ids.data(), d_counts.data(), d_bounds.data(),
+                            d_cursors.data(), d_rows_token.data(),
+                            d_rows_slot.data(), tokens, kUsed, kExperts,
+                            stream);
+      routed::NarrowActivations(d_x.data(), d_x_half.data(), false,
+                                tokens * kK, stream);
+      const auto counts = d_counts.CopyToHost();
+      const auto gate_ref = d_gate_ref.CopyToHost();
+      const auto up_ref = d_up_ref.CopyToHost();
+      for (const std::uint32_t pair_rows : {64U, 128U}) {
+        std::vector<std::int32_t> tiles;
+        for (std::uint32_t e = 0; e < kExperts; ++e) {
+          const std::uint32_t padded = (counts[e] + 15U) / 16U * 16U;
+          for (std::uint32_t j = 0; j * pair_rows < padded; ++j) {
+            tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+          }
+        }
+        gufo::test::DeviceBuffer<std::int32_t> d_tiles(tiles);
+        gufo::test::DeviceBuffer<std::uint16_t> d_out(
+            std::vector<std::uint16_t>(slots * kM, 0x7E00U));  // F16 NaN
+        Expect(routed::RoutedGatedF16Gemm(
+                   d_gate.data(), d_up.data(), weight_type,
+                   reinterpret_cast<const __half*>(d_x_half.data()),
+                   d_tiles.data(), static_cast<std::uint32_t>(tiles.size()),
+                   pair_rows, d_bounds.data(), d_rows_token.data(),
+                   d_rows_slot.data(),
+                   reinterpret_cast<__half*>(d_out.data()), kM, kK, stream),
+               "paired routed GEMM rejected the shape");
+        HIP_CHECK(hipStreamSynchronize(stream));
+        const auto out = d_out.CopyToHost();
+        double max_abs = 0.0;
+        double magnitude = 0.0;
+        std::size_t non_finite = 0;
+        for (std::size_t i = 0; i < out.size(); ++i) {
+          const float got = Fp16BitsToFloat(out[i]);
+          if (!std::isfinite(got)) {
+            ++non_finite;
+            continue;
+          }
+          const double g = gate_ref[i];
+          const double want = g / (1.0 + std::exp(-g)) * up_ref[i];
+          max_abs = std::max(max_abs, std::fabs(got - want));
+          magnitude = std::max(magnitude, std::fabs(want));
+        }
+        const double rel = magnitude > 0.0 ? max_abs / magnitude : max_abs;
+        std::cout << "routed pair " << type_name << " tokens=" << tokens
+                  << " pair_rows=" << pair_rows << ": rel=" << rel
+                  << " non_finite=" << non_finite << "\n";
+        Expect(non_finite == 0, "paired routed GEMM left slots unwritten");
+        Expect(rel < 5e-3, "paired routed GEMM disagrees with the GEMVs");
+      }
+    }
+  }
+  std::cout << "routed pair: OK\n";
+}
+
 }  // namespace
 
 int main() {
@@ -733,6 +878,7 @@ int main() {
     CheckGroupedBf16(nullptr);
     CheckDenseBf16(nullptr);
     CheckRoutedF16(nullptr);
+    CheckRoutedPair(nullptr);
   } catch (const std::exception& e) {
     std::cerr << "qwen35ba3b_moe_ops_test: " << e.what() << "\n";
     return 1;
