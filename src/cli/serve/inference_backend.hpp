@@ -122,7 +122,9 @@ public:
       const ChatRequest& request) const override;
   void set_model_id(const std::string& model_id);
   void set_sampling_defaults(std::size_t max_tokens,
-                             const sampling::SamplingConfig& sampling);
+                             const sampling::SamplingConfig& sampling,
+                             sampling::SamplingOverrides supplied =
+                                 sampling::SamplingOverrides::All());
   void set_reasoning_defaults(const ReasoningOptions& reasoning);
 
   /// Plain text completion (no chat framing).

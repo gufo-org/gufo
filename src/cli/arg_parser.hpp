@@ -30,6 +30,7 @@ public:
     std::string description;
     std::string group;
     bool is_flag = false;
+    mutable bool supplied = false;
     std::function<bool(std::string_view, std::string_view, std::string*)>
         parse_fn;
   };
@@ -160,6 +161,8 @@ public:
   [[nodiscard]] bool Parse(std::span<const char* const> args,
                            std::string* error_msg = nullptr) const {
     help_requested_ = false;
+    for (const auto& option : options_)
+      option.supplied = false;
     if (error_msg != nullptr) {
       error_msg->clear();
     }
@@ -190,6 +193,7 @@ public:
           if (!inline_match->parse_fn(name, val, error_msg)) {
             return false;
           }
+          inline_match->supplied = true;
           continue;
         }
       }
@@ -198,6 +202,7 @@ public:
       const Option* matched = FindOption(arg);
 
       if (matched != nullptr) {
+        matched->supplied = true;
         if (matched->is_flag) {
           if (!matched->parse_fn(arg, "", error_msg)) {
             return false;
@@ -238,6 +243,11 @@ public:
   }
 
   [[nodiscard]] bool IsHelpRequested() const { return help_requested_; }
+
+  [[nodiscard]] bool WasSupplied(std::string_view name) const {
+    const auto* option = FindOption(name);
+    return option != nullptr && option->supplied;
+  }
 
   [[nodiscard]] const Option* FindOption(std::string_view name) const {
     for (const auto& opt : options_) {

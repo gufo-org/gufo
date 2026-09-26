@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/core/sampling.hpp"
+#include "src/core/text_sampling_defaults.hpp"
 
 namespace gufo::cli {
 
@@ -24,6 +25,7 @@ struct PromptOptions {
   std::string system_prompt;
   std::size_t max_tokens = 128;
   sampling::SamplingConfig sampling;
+  sampling::SamplingOverrides sampling_supplied;
   std::string reasoning_mode = "auto";
   std::string reasoning_effort = "auto";
   std::string preserve_thinking = "auto";

@@ -572,7 +572,8 @@ void PrintServeHelp(std::string_view program_name,
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
         "Sampling Defaults", &max_tokens);
-    RegisterSamplingOptions(parser, &sampling_config, "Sampling Defaults");
+    RegisterSamplingOptions(parser, &sampling_config, "Sampling Defaults", true,
+                            true);
 
     // Reasoning Defaults
     parser.AddOption(
@@ -1063,7 +1064,8 @@ int RunServe(std::span<const char* const> args) {
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
         "Sampling Defaults", &max_tokens);
-    RegisterSamplingOptions(llm_parser, &sampling_config, "Sampling Defaults");
+    RegisterSamplingOptions(llm_parser, &sampling_config, "Sampling Defaults",
+                            true, true);
     llm_parser.AddOption(
         "", "--think", "MODE",
         "Default reasoning mode: on, off, or auto (default: model template)",
@@ -1272,7 +1274,7 @@ int RunServe(std::span<const char* const> args) {
     backend->set_model_id(served_model_name);
     backend->set_sampling_defaults(
         max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
-        sampling_config);
+        sampling_config, SamplingOptionsSupplied(llm_parser));
     backend->set_reasoning_defaults(*reasoning_defaults);
     const char* speculation =
         speculative_config.backend == server::TextSpeculativeBackend::kDFlash
