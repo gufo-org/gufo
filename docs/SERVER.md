@@ -83,11 +83,30 @@ context; exhaustion reports `length` or `incomplete`, without discarding earlier
 conversation tokens. Reduce `--context` or `--sessions` if their state exceeds
 available memory.
 
-Gufo retains greedy sampling by default. llama.cpp instead defaults to temperature
-0.8, top-k 40, top-p 0.95 and min-p 0.05; set these explicitly to match its sampler.
-Both leave repetition, frequency and presence penalties disabled.
-Reference: [llama.cpp parameters](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/common.h)
-and [server options](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/tools/server/README.md).
+Text sampling follows each model's recommended defaults in `serve`, `prompt`
+and `chat`. Explicit request values override explicit server options, which
+otherwise inherit the effective thinking preset. Null request values inherit
+where supported; explicit zero disables temperature/penalties/filters as usual.
+
+| Model / mode | Temperature | Top-p | Top-k | Presence penalty |
+| --- | --- | --- | --- | --- |
+| DeepSeek V4 Flash 0731 (agentic) | 1.0 | 0.95 | 0 | 0 |
+| Qwen3.8 27B / Flash-Next, thinking | 1.0 | 0.95 | 20 | 0 |
+| Qwen3.8 27B / Flash-Next, thinking off | 0.7 | 0.8 | 20 | 1.5 |
+
+Min-p and frequency penalty default to zero; repetition penalty is 1.0.
+AR and DFlash2/MTP/DSpark use the same target defaults. Draft sampling is
+unchanged. Use `--temperature 0` or request `"temperature": 0` for greedy
+output; `bench` remains greedy by default. Audio and image generation retain
+their own settings.
+The SDK check `--suite sampling-defaults --sampling-preset qwen38` (or
+`deepseek4`) compares omitted and explicit settings, including C2 replay.
+
+Sources: [Qwen27B](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
+[Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices),
+[DeepSeek 0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/7872f01b1d1fe23eabc4c98b48bffcef5a386062/README.md).
+DeepSeek's 0.95 top-p is its agentic recommendation; neutral penalties and
+disabled unspecified filters are Gufo defaults.
 
 ```sh
 nix build

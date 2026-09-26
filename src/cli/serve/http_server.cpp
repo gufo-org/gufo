@@ -557,8 +557,9 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
           std::size_t{std::numeric_limits<std::uint32_t>::max()}, max_tokens)) {
     return InvalidCompatibilityRequest(error->message);
   }
-  if (const auto error =
-          ParseSamplingConfig(body, defaults.sampling, sampling_config)) {
+  if (const auto error = ParseSamplingConfig(
+          body, defaults.Resolve(backend.reasoning_defaults().enabled),
+          sampling_config)) {
     return Err(400, "Bad Request", error->message.c_str(),
                "invalid_request_error", error->code.c_str());
   }

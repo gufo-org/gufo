@@ -13,6 +13,7 @@ void TestDefaultOptions() {
   assert(opt->prompt_text == "Hello world");
   assert(opt->max_tokens == 128);
   assert(opt->sampling.temperature == 0.0F);
+  assert(!opt->sampling_supplied.temperature && !opt->sampling_supplied.top_k);
   assert(opt->use_chat_template);
   assert(opt->system_prompt.empty());
   assert(opt->reasoning_mode == "auto");
@@ -33,6 +34,7 @@ void TestExplicitFlags() {
   assert(opt->max_tokens == 256);
   assert(opt->sampling.temperature > 0.69F &&
          opt->sampling.temperature < 0.71F);
+  assert(opt->sampling_supplied.temperature && !opt->sampling_supplied.top_p);
   assert(!opt->use_chat_template);
   assert(opt->verbose);
   assert(opt->prompt_text == "Test prompt");

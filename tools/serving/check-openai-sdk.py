@@ -187,6 +187,68 @@ def check_stops(client, model, checks):
     record("stop_invalid_schema", {"status": 400, "cases": 4})
 
 
+def check_sampling_defaults(client, model, checks, preset):
+    """Omission and explicit presets must replay within each execution mode."""
+    def signature(value):
+        return value["text"].strip(), value["reasoning"].strip(), value["finish"]
+
+    def record(name, result):
+        checks[name] = result
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+        return result
+
+    for thinking in (False, True):
+        qwen_off = preset == "qwen38" and not thinking
+        expected = {
+            "temperature": .7 if qwen_off else 1.,
+            "top_p": .8 if qwen_off else .95,
+            "presence_penalty": 1.5 if qwen_off else 0.,
+            "frequency_penalty": 0.,
+        }
+        native = {"top_k": 20 if preset == "qwen38" else 0,
+                  "min_p": 0., "repeat_penalty": 1.}
+        request = {
+            "model": model, "seed": 73, "max_completion_tokens": 8,
+            "messages": [{"role": "user", "content":
+                          "Name three animals and describe each in one sentence."}],
+            "extra_body": {"cache_prompt": False, "chat_template_kwargs": {
+                "enable_thinking": thinking}},
+        }
+        explicit = {**request, **expected,
+                    "extra_body": {**request["extra_body"], **native}}
+        inherited = chat_result(client, request)
+        supplied = chat_result(client, explicit, True)
+        assert signature(inherited) == signature(supplied), (inherited, supplied)
+        nullable = chat_result(client, {**request, "temperature": None,
+                                       "top_p": None, "presence_penalty": None})
+        assert signature(nullable) == signature(inherited), (nullable, inherited)
+        record(f"sampling_preset_thinking{thinking}", inherited)
+
+        # Each change targets one independent control, with and without all
+        # other defaults written out; this also checks explicit neutral values.
+        for label, override, extra in (
+            ("greedy", {"temperature": 0, "presence_penalty": 0}, {"top_k": 0}),
+            ("nucleus", {"temperature": .5, "top_p": .7}, {}),
+            ("min_p", {"temperature": 1.3, "top_p": 1.}, {"top_k": 0, "min_p": .1}),
+            ("penalties", {"frequency_penalty": .3, "presence_penalty": .4},
+             {"repeat_penalty": 1.1, "repeat_last_n": 16}),
+        ):
+            body = {**request, **override, "extra_body": {**request["extra_body"], **extra}}
+            full = {**explicit, **override, "extra_body": {**explicit["extra_body"], **extra}}
+            actual, reference = chat_result(client, body), chat_result(client, full, True)
+            assert signature(actual) == signature(reference), (label, actual, reference)
+            record(f"sampling_{label}_thinking{thinking}", actual)
+
+        # Distinct request-owned samplers must replay when admitted together.
+        peers = [request, {**request, "seed": 91, "temperature": .4}]
+        def batch():
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                return list(pool.map(lambda body: chat_result(client, body, True), peers))
+        first, second = batch(), batch()
+        assert list(map(signature, first)) == list(map(signature, second)), (first, second)
+        record(f"sampling_concurrent_thinking{thinking}", first)
+
+
 def check_conversations(client, model, checks, vision=False):
     """Exercise thinking controls and cache reuse after a client disconnect."""
 
@@ -420,10 +482,14 @@ def main():
     parser.add_argument("--base-url", required=True, help="http://127.0.0.1:PORT/v1")
     parser.add_argument("--model", required=True, help="Gufo served model name")
     parser.add_argument("--expect-reasoning", action="store_true")
-    parser.add_argument("--suite", choices=("all", "stops", "responses", "conversation"), default="all")
+    parser.add_argument("--suite", choices=("all", "stops", "responses", "conversation", "sampling-defaults"), default="all")
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
+    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"),
+                        help="Expected text defaults; required for sampling-defaults suite")
     args = parser.parse_args()
+    if args.suite == "sampling-defaults" and not args.sampling_preset:
+        parser.error("--sampling-preset is required for sampling-defaults")
     if args.vision and args.suite not in ("all", "conversation"):
         parser.error("--vision requires --suite all or conversation")
     url = urlsplit(args.base_url)
@@ -453,6 +519,10 @@ def main():
     with OpenAI(**options, http_client=DefaultHttpxClient(
         trust_env=False, event_hooks={"request": [local_only]}
     )) as client:
+        if args.suite == "sampling-defaults":
+            check_sampling_defaults(client, args.model, checks, args.sampling_preset)
+            print(json.dumps(report, indent=2))
+            return
         if args.suite in ("all", "stops"):
             check_stops(client, args.model, checks)
         if args.suite in ("all", "conversation"):

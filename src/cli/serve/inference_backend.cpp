@@ -3123,6 +3123,9 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     }
 
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextPreset(model->GetConfig());
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<QwenTextRunner>(
         std::move(model), max_context, std::move(dflash_model),
         speculative_options, disk_cache_config.model_artifact_fingerprint,
@@ -3206,6 +3209,9 @@ bool InferenceBackend::load(
 
   try {
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextModelPreset::kDeepSeekV4Flash;
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<DeepSeekTextRunner>(
         std::move(model), max_context, use_dspark,
         speculative_config.max_draft_tokens,
@@ -3286,6 +3292,8 @@ bool InferenceBackend::load(
   }
   try {
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<QwenFlashNextTextRunner>(
         std::move(model), max_context,
         speculative_config.backend == TextSpeculativeBackend::kMtp,
@@ -3393,7 +3401,8 @@ void InferenceBackend::set_model_id(const std::string& model_id) {
 }
 
 void InferenceBackend::set_sampling_defaults(
-    std::size_t max_tokens, const sampling::SamplingConfig& sampling_config) {
+    std::size_t max_tokens, const sampling::SamplingConfig& sampling_config,
+    sampling::SamplingOverrides supplied) {
 #if defined(ENGINE_ENABLE_HIP)
   sampling_config.Validate();
   const std::lock_guard<std::mutex> lock(impl_->state_mutex);
@@ -3401,14 +3410,14 @@ void InferenceBackend::set_sampling_defaults(
     return;
   }
   auto updated = std::make_shared<Impl::State>(*impl_->state);
-  updated->sampling_defaults = {
-      .max_tokens = max_tokens,
-      .sampling = sampling_config,
-  };
+  updated->sampling_defaults.max_tokens = max_tokens;
+  updated->sampling_defaults.sampling = sampling_config;
+  updated->sampling_defaults.supplied = supplied;
   impl_->state = std::move(updated);
 #else
   (void)max_tokens;
   (void)sampling_config;
+  (void)supplied;
 #endif
 }
 

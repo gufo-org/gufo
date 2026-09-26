@@ -808,6 +808,61 @@ void TestBackendSamplingDefaults() {
          "Explicit temperature overrides the backend default");
 }
 
+void TestModelSamplingDefaults() {
+  using gufo::sampling::TextModelPreset;
+  FakeBackend backend;
+  backend.defaults.model = TextModelPreset::kQwen38;
+  backend.defaults.supplied = {};
+  auto send = [&](std::string fields) {
+    const auto response = gufo::server::HandleOpenAiChat(
+        Request("{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\","
+                "\"content\":\"hello\"}]" +
+                fields + "}"),
+        backend);
+    Expect(response.status == 200, "Model default request accepted");
+    return backend.last_sampling;
+  };
+  auto config = send("");
+  Expect(config.temperature == 1.0F && config.top_p == 0.95F &&
+             config.top_k == 20 && config.presence_penalty == 0.0F,
+         "Qwen defaults follow thinking-on template");
+  config = send(R"(,"chat_template_kwargs":{"enable_thinking":false})");
+  Expect(config.temperature == 0.7F && config.top_p == 0.8F &&
+             config.presence_penalty == 1.5F,
+         "Request thinking-off selects its model preset");
+  backend.reasoning_defaults_value.enabled = false;
+  config = send(R"(,"temperature":null,"top_p":null,"presence_penalty":null)");
+  Expect(config.temperature == 0.7F && config.presence_penalty == 1.5F,
+         "Nulls inherit effective server thinking preset");
+  config = send(R"(,"reasoning_effort":"high")");
+  Expect(config.temperature == 1.0F && config.presence_penalty == 0.0F,
+         "Effort enables thinking before sampling resolves");
+  backend.defaults.sampling.temperature = 0.2F;
+  backend.defaults.sampling.top_k = 0;
+  backend.defaults.supplied.temperature = true;
+  backend.defaults.supplied.top_k = true;
+  config = send("");
+  Expect(config.temperature == 0.2F && config.top_k == 0 &&
+             config.top_p == 0.8F && config.presence_penalty == 1.5F,
+         "Partial server override preserves other model defaults");
+  config = send(R"(,"temperature":0,"presence_penalty":0,"top_k":40)");
+  Expect(config.temperature == 0.0F && config.presence_penalty == 0.0F &&
+             config.top_k == 40,
+         "Explicit request zero overrides server and model presets");
+  backend.defaults.model = TextModelPreset::kDeepSeekV4Flash;
+  backend.defaults.supplied = {};
+  for (const bool thinking : {false, true}) {
+    backend.reasoning_defaults_value.enabled = thinking;
+    config = send("");
+    Expect(config.temperature == 1.0F && config.top_p == 0.95F &&
+               config.top_k == 0 && config.min_p == 0.0F &&
+               config.presence_penalty == 0.0F &&
+               config.frequency_penalty == 0.0F &&
+               config.repeat_penalty == 1.0F,
+           "DeepSeek agentic defaults do not depend on reasoning");
+  }
+}
+
 void TestCompleteToolDefinitionsReachTemplate() {
   FakeBackend backend;
   const auto response = gufo::server::HandleOpenAiChat(Request(R"({
@@ -1545,6 +1600,7 @@ int main() {
   TestUtf8Output();
   TestCachedPrefillMetrics();
   TestBackendSamplingDefaults();
+  TestModelSamplingDefaults();
   TestCompleteToolDefinitionsReachTemplate();
   TestFlatToolFieldsReachTemplate();
   TestAllSamplingControlsReachBackend();
