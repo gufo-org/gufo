@@ -212,6 +212,31 @@ void TestBoundedOutputLimit() {
          "Error reports bound exceeded");
 }
 
+void TestRenderedPromptBoundFollowsContext() {
+  using gufo::tokenization::ChatMessage;
+  using gufo::tokenization::ChatRole;
+  using gufo::tokenization::ChatTemplateOptions;
+  using gufo::tokenization::QwenChatTemplate;
+  using gufo::tokenization::RenderedPromptBoundBytes;
+  constexpr std::size_t kMiB = 1024ULL * 1024ULL;
+  Expect(RenderedPromptBoundBytes(0) == kMiB, "zero context keeps 1 MiB");
+  Expect(RenderedPromptBoundBytes(4096) == kMiB,
+         "small contexts keep the 1 MiB floor");
+  Expect(RenderedPromptBoundBytes(262144) == 262144ULL * 128ULL,
+         "native Flash-Next context scales the bound");
+  Expect(RenderedPromptBoundBytes(409600) == 409600ULL * 128ULL,
+         "extended context scales the bound");
+  // gufo #285: ~1.05 MB rendered, far below a 262,144-token context.
+  const std::vector<ChatMessage> messages = {
+      {ChatRole::kUser, std::string(1100000, 'a'), "", ""}};
+  ChatTemplateOptions options;
+  Expect(!QwenChatTemplate::Render(messages, options).has_value(),
+         "the default 1 MiB bound still refuses");
+  options.max_output_bytes = RenderedPromptBoundBytes(262144);
+  Expect(QwenChatTemplate::Render(messages, options).has_value(),
+         "a context-sized bound admits a prompt the context can hold");
+}
+
 void TestGgufTemplateExtraction() {
   GgufTemplateBuilder builder;
   builder.AddMetadataString("general.name", "Qwen3.8-27B");
@@ -593,6 +618,7 @@ int main() {
   TestHistoricalThinkingDoesNotEnableNewThinking();
   TestReasoningEffortAndPreservation();
   TestBoundedOutputLimit();
+  TestRenderedPromptBoundFollowsContext();
   TestGgufTemplateExtraction();
   TestHuggingFaceRenderedGoldens();
   TestRenderAndTokenize();
