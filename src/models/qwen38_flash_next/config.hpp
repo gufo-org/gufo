@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 
@@ -38,6 +39,9 @@ struct Config {
   std::uint32_t rotary_dim{0};               ///< 64
   float rope_theta{0.0F};                    ///< 1e7
   std::array<std::uint32_t, 4> rope_sections{};
+  /// Static YaRN. Off unless the loader or the artifact enables it; the
+  /// native `context_length` above is never rewritten.
+  RopeScaling rope_scaling{};
 
   // Qwen Sparse Attention indexer (block top-k selection).
   std::uint32_t indexer_heads{0};     ///< 4
@@ -106,6 +110,18 @@ struct Config {
   }
   [[nodiscard]] bool IsPleLayer(std::uint32_t layer) const noexcept {
     return ple_layer >= 0 && layer == static_cast<std::uint32_t>(ple_layer);
+  }
+
+  /// Longest session the rope configuration supports.
+  [[nodiscard]] std::uint32_t MaxContextLength() const noexcept {
+    return ScaledContextLength(rope_scaling, context_length);
+  }
+  /// uint32 words per sparse-mask row: one bit per compress_ratio block.
+  [[nodiscard]] std::uint32_t SparseMaskWords(
+      std::uint32_t context) const noexcept {
+    const std::uint32_t blocks =
+        (context + compress_ratio - 1) / compress_ratio;
+    return (blocks + 31) / 32;
   }
 
   /// The draft executes with trunk constants and shared vocabulary weights.
