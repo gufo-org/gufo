@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/response_format.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/core/image.hpp"
@@ -325,6 +326,11 @@ bool ParseTools(const json::Value* tools,
       return false;
     }
     const json::Value* src = function != nullptr ? function : &item;
+    if (const auto* strict = src->find("strict");
+        strict && !strict->is_null() && !strict->is_bool()) {
+      *error = "function strict must be a boolean or null";
+      return false;
+    }
     // OpenAI uses "parameters"; some agent clients send parametersJsonSchema.
     const json::Value* params_src = src->find("parameters");
     if (params_src == nullptr || params_src->is_null()) {
@@ -557,6 +563,18 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                  "model_not_found");
   }
 
+  try {
+    output->chat.response_format =
+        ParseResponseFormat(body.find("response_format"));
+    if (output->chat.response_format) {
+      if (const auto* specification =
+              body.find("response_format")->find("json_schema"))
+        output->chat.response_format_description =
+            specification->member_str("description");
+    }
+  } catch (const std::exception& error) {
+    return Error(400, "Bad Request", error.what(), "invalid_response_format");
+  }
   output->chat.client_id = request.client_id;
   if (const auto* cache_prompt = body.find("cache_prompt")) {
     if (!cache_prompt->is_bool()) {
@@ -683,13 +701,11 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     return Error(400, "Bad Request", "only n=1 is supported", "unsupported_n");
   }
   for (const std::string_view unsupported :
-       {"logprobs", "top_logprobs", "response_format", "modalities", "audio"}) {
+       {"logprobs", "top_logprobs", "modalities", "audio"}) {
     if (const auto* value = body.find(std::string(unsupported));
         value != nullptr && !value->is_null()) {
       if ((unsupported == "logprobs" && value->is_bool() &&
            !value->as_bool()) ||
-          (unsupported == "response_format" && value->is_object() &&
-           value->size() == 1 && value->member_str("type") == "text") ||
           (unsupported == "modalities" && value->is_array() &&
            value->size() == 1 && value->items().front().is_string() &&
            value->items().front().str() == "text"))
@@ -1178,16 +1194,52 @@ ParsedGeneration ParseGeneration(
   return parsed;
 }
 
+ParsedGeneration ParseStructuredGeneration(
+    std::string_view raw, TextGenerationBackend::InitialOutputState initial,
+    std::span<const tokenization::ChatTool> tools = {},
+    ChatRequest::ToolChoice choice = ChatRequest::ToolChoice::kNone,
+    bool enforce_required = false) {
+  ParsedGeneration parsed;
+  if (initial == TextGenerationBackend::InitialOutputState::kReasoning) {
+    if (raw.starts_with("<think>"))
+      raw.remove_prefix(7);
+    const auto end = raw.find("</think>");
+    parsed.reasoning_content = std::string(raw.substr(0, end));
+    if (end == std::string_view::npos)
+      return parsed;
+    raw.remove_prefix(end + 8);
+  }
+  const auto content = Trim(raw);
+  constexpr std::string_view tool_start = "<tool_call>";
+  if (!tools.empty() && choice != ChatRequest::ToolChoice::kNone &&
+      !content.empty() &&
+      (content.starts_with(tool_start) || tool_start.starts_with(content))) {
+    ParsedGeneration call;
+    ParseQwenCalls(raw, tools, &call.tool_calls);
+    call.hide_tool_markup = true;
+    if (call.tool_calls.empty() && enforce_required &&
+        choice == ChatRequest::ToolChoice::kRequired)
+      throw TextGenerationError(TextGenerationErrorCode::kToolChoiceUnsatisfied,
+                                "model did not complete a declared tool call");
+    call.reasoning_content = std::move(parsed.reasoning_content);
+    return call;
+  }
+  // Markers in JSON strings are data. Only the initial reasoning phase has
+  // markup semantics; ordinary tool/reasoning parsing must not run here.
+  parsed.text = std::string(raw);
+  return parsed;
+}
+
 const char* FinishReason(const TextGenerationBackend::Result& result,
                          bool has_tool_calls) {
   if (result.finish_reason ==
       TextGenerationBackend::FinishReason::kStopSequence)
     return "stop";
-  if (has_tool_calls) {
-    return "tool_calls";
-  }
   if (result.finish_reason == TextGenerationBackend::FinishReason::kLength) {
     return "length";
+  }
+  if (has_tool_calls) {
+    return "tool_calls";
   }
   return "stop";
 }
@@ -1309,8 +1361,8 @@ public:
 
   StreamingTextFilter(
       TextGenerationBackend::InitialOutputState initial_output_state,
-      EmitCallback emit_piece)
-      : emit_piece_(std::move(emit_piece)) {
+      EmitCallback emit_piece, bool structured = false)
+      : emit_piece_(std::move(emit_piece)), raw_content_(structured) {
     if (initial_output_state ==
         TextGenerationBackend::InitialOutputState::kReasoning) {
       state_ = State::kThinking;
@@ -1328,6 +1380,8 @@ public:
       return true;
     }
     pending_.append(piece);
+    if (raw_content_ && state_ != State::kThinking)
+      return StructuredContent();
 
     if (state_ == State::kInitial) {
       constexpr std::string_view kThinkStart = "<think>";
@@ -1352,7 +1406,8 @@ public:
     if (state_ == State::kThinking) {
       constexpr std::string_view kThinkEnd = "</think>";
       const std::size_t end_pos = pending_.find(kThinkEnd);
-      const auto marker = EarliestMarker(pending_);
+      const auto marker =
+          raw_content_ ? std::string::npos : EarliestMarker(pending_);
       if (marker < end_pos) {
         if (marker > 0 && !emit_piece_(pending_.substr(0, marker), true))
           return false;
@@ -1371,7 +1426,7 @@ public:
         state_ = State::kContent;
         trim_reasoning_separator_ = true;
       } else {
-        std::size_t held = HeldMarkerPrefix(pending_);
+        std::size_t held = raw_content_ ? 0 : HeldMarkerPrefix(pending_);
         for (std::size_t len = std::min(pending_.size(), kThinkEnd.size() - 1);
              len > 0; --len) {
           if (kThinkEnd.starts_with(pending_.substr(pending_.size() - len))) {
@@ -1389,6 +1444,9 @@ public:
     }
 
     if (state_ == State::kContent) {
+      if (raw_content_) {
+        return StructuredContent();
+      }
       if (trim_reasoning_separator_) {
         const auto first = pending_.find_first_not_of("\r\n");
         if (first == std::string::npos) {
@@ -1422,6 +1480,10 @@ public:
   }
 
   bool Finish(bool hide_tool_markup) {
+    if (raw_content_ && !structured_started_ && hide_tool_markup) {
+      pending_.clear();
+      return true;
+    }
     if (!tool_mode_) {
       if (!pending_.empty()) {
         const bool is_reasoning = (state_ == State::kThinking);
@@ -1440,6 +1502,23 @@ public:
   [[nodiscard]] std::string_view raw() const noexcept { return raw_; }
 
 private:
+  bool StructuredContent() {
+    if (!structured_started_) {
+      constexpr std::string_view start = "<tool_call>";
+      const auto content = Trim(pending_);
+      if (content.empty() ||
+          (content.size() < start.size() && start.starts_with(content)))
+        return true;
+      structured_started_ = true;
+      if (content.starts_with(start)) {
+        tool_mode_ = true;
+        hidden_ = std::exchange(pending_, {});
+        return true;
+      }
+    }
+    auto text = std::exchange(pending_, {});
+    return text.empty() || emit_piece_(text, false);
+  }
   enum class State : std::uint8_t {
     kInitial,
     kThinking,
@@ -1447,12 +1526,14 @@ private:
   };
 
   EmitCallback emit_piece_;
+  bool structured_started_{false};
   core::Utf8Decoder decoder_;
   std::string raw_;
   std::string pending_;
   std::string hidden_;
   State state_{State::kInitial};
   bool tool_mode_{false};
+  bool raw_content_{false};
   bool trim_reasoning_separator_{false};
 };
 
@@ -1636,11 +1717,19 @@ HttpResponse NonStreamingResponse(
     TextGenerationBackend::InitialOutputState initial_output_state) {
   const auto result = generation->Wait();
   core::Utf8Decoder decoder;
+  const auto decoded = decoder.Push(result.text, true);
   const ParsedGeneration generated =
-      ParseGeneration(decoder.Push(result.text, true), initial_output_state,
-                      request.chat.tools, request.chat.tool_choice,
-                      result.finish_reason !=
-                          TextGenerationBackend::FinishReason::kStopSequence);
+      request.chat.response_format
+          ? ParseStructuredGeneration(
+                decoded, initial_output_state, request.chat.tools,
+                request.chat.tool_choice,
+                result.finish_reason ==
+                    TextGenerationBackend::FinishReason::kStop)
+          : ParseGeneration(
+                decoded, initial_output_state, request.chat.tools,
+                request.chat.tool_choice,
+                result.finish_reason !=
+                    TextGenerationBackend::FinishReason::kStopSequence);
 
   json::Value response = json::Value::object();
   response["id"] = RandomId("chatcmpl-");
@@ -1732,7 +1821,8 @@ HttpResponse StreamingResponse(
                   connected = writer(
                       Sse(ChoiceChunk(id, created, model, std::move(delta))));
                   return connected;
-                });
+                },
+                request.chat.response_format != nullptr);
 
             try {
               const auto result = generation->Wait([&](std::string_view piece) {
@@ -1746,11 +1836,19 @@ HttpResponse StreamingResponse(
               if (!filter.Push({}, true))
                 return;
 
-              const ParsedGeneration generated = ParseGeneration(
-                  filter.raw(), initial_output_state, request.chat.tools,
-                  request.chat.tool_choice,
-                  result.finish_reason !=
-                      TextGenerationBackend::FinishReason::kStopSequence);
+              const ParsedGeneration generated =
+                  request.chat.response_format
+                      ? ParseStructuredGeneration(
+                            filter.raw(), initial_output_state,
+                            request.chat.tools, request.chat.tool_choice,
+                            result.finish_reason ==
+                                TextGenerationBackend::FinishReason::kStop)
+                      : ParseGeneration(filter.raw(), initial_output_state,
+                                        request.chat.tools,
+                                        request.chat.tool_choice,
+                                        result.finish_reason !=
+                                            TextGenerationBackend::
+                                                FinishReason::kStopSequence);
               if (!filter.Finish(generated.hide_tool_markup)) {
                 return;
               }
@@ -1824,6 +1922,89 @@ HttpResponse StreamingResponse(
 
 }  // namespace
 
+bool ParseOpenAiResponseMessage(const json::Value& item,
+                                tokenization::ChatMessage* message,
+                                core::ImageReadBudget& budget,
+                                std::string* error) {
+  auto converted = item;
+  if (const auto* parts = item.find("content"); parts && parts->is_array()) {
+    auto content = json::Value::array();
+    for (const auto& part : parts->items()) {
+      auto value = part;
+      const auto type = part.member_str("type");
+      if (type == "input_image") {
+        if (!part.find("image_url") || !part.find("image_url")->is_string() ||
+            part.contains("file_id")) {
+          *error = "input_image requires an image_url";
+          return false;
+        }
+        value = json::Value::object();
+        value["type"] = "image_url";
+        value["image_url"] = json::Value::object();
+        value["image_url"]["url"] = *part.find("image_url");
+        if (const auto* detail = part.find("detail"))
+          value["image_url"]["detail"] = *detail;
+      } else if (type == "input_text" || type == "output_text")
+        value["type"] = "text";
+      else if (type != "text") {
+        *error = "unsupported Responses input content type";
+        return false;
+      }
+      content.push_back(std::move(value));
+    }
+    converted["content"] = std::move(content);
+  }
+  return ParseMessage(converted, message, budget, error);
+}
+
+std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
+                                                        ChatRequest* chat) {
+  if (const auto* reasoning = body.find("reasoning");
+      reasoning && !reasoning->is_null()) {
+    if (!reasoning->is_object())
+      return Error(400, "Bad Request", "'reasoning' must be an object",
+                   "invalid_reasoning");
+    for (const auto& [key, value] : reasoning->members()) {
+      if (key != "effort")
+        return Error(400, "Bad Request", "unsupported reasoning member: " + key,
+                     "invalid_reasoning");
+      if (value.is_null())
+        continue;
+      ReasoningOptions options;
+      std::string error;
+      if (!value.is_string() ||
+          !AssignReasoningEffort(&options, value.str(), &error))
+        return Error(
+            400, "Bad Request",
+            error.empty() ? "'reasoning.effort' must be a string" : error,
+            "invalid_reasoning");
+      if (options.enabled)
+        chat->reasoning.enabled = options.enabled;
+      if (options.effort)
+        chat->reasoning.effort = options.effort;
+    }
+  }
+  if (const auto* text = body.find("text"); text && !text->is_null()) {
+    if (!text->is_object())
+      return Error(400, "Bad Request", "'text' must be an object",
+                   "invalid_response_format");
+    for (const auto& [key, value] : text->members()) {
+      if (key != "format")
+        return Error(400, "Bad Request", "unsupported text member: " + key,
+                     "invalid_response_format");
+      try {
+        chat->response_format = ParseResponseFormat(&value, true);
+        if (chat->response_format)
+          chat->response_format_description = value.member_str("description");
+      } catch (const std::exception& error) {
+        return Error(400, "Bad Request", error.what(),
+                     "invalid_response_format");
+      }
+    }
+  }
+  return {};
+}
+
 HttpResponse CreateOpenAiResponse(const HttpRequest& request,
                                   TextGenerationBackend& backend,
                                   const ChatRequest& chat,
@@ -1835,20 +2016,24 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
                                        request.is_cancelled, stream);
   auto stream_log = std::make_shared<HttpResponse::StreamLog>();
   auto timing = std::make_shared<std::string>();
-  const auto run = [generation, initial, model = backend.model_id(), stream_log,
+  const auto run = [generation, initial,
+                    structured = chat.response_format != nullptr,
+                    model = backend.model_id(), stream_log,
                     timing](const HttpResponse::BodyWriter& writer) {
     ResponsesOutput output(model, writer);
     if (!output.Begin()) {
       generation->Cancel();
       return json::Value();
     }
-    StreamingTextFilter filter(initial,
-                               [&](std::string_view piece, bool reasoning) {
-                                 if (output.Append(piece, reasoning))
-                                   return true;
-                                 generation->Cancel();
-                                 return false;
-                               });
+    StreamingTextFilter filter(
+        initial,
+        [&](std::string_view piece, bool reasoning) {
+          if (output.Append(piece, reasoning))
+            return true;
+          generation->Cancel();
+          return false;
+        },
+        structured);
     try {
       const auto result = writer
                               ? generation->Wait([&](std::string_view piece) {

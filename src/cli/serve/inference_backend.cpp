@@ -53,6 +53,76 @@ void SetError(std::string* error, std::string message) {
 
 #if defined(ENGINE_ENABLE_HIP)
 
+std::optional<ChatRequest> ConstrainChatRequest(
+    const ChatRequest& request, const TextModelRunner& runner,
+    sampling::SamplingConfig* sampling) {
+  if (!request.response_format)
+    return std::nullopt;
+  auto constrained = request;
+  auto instruction = request.response_format->prompt();
+  auto grammar = request.response_format;
+  if (!request.tools.empty() &&
+      request.tool_choice != ChatRequest::ToolChoice::kNone) {
+    std::vector<sampling::JsonConstraint::Tool> tools;
+    for (const auto& tool : request.tools) {
+      const auto definition = tool.definition_json.empty()
+                                  ? json::Value()
+                                  : json::parse(tool.definition_json);
+      const auto* function = definition.find("function");
+      const auto* strict = function ? function->find("strict") : nullptr;
+      const bool enforce = strict && strict->as_bool();
+      auto schema = json::parse(tool.parameters_json);
+      if (!enforce) {
+        if (!schema.contains("type"))
+          schema["type"] = "object";
+        if (!schema.contains("properties"))
+          schema["properties"] = json::Value::object();
+        if (!schema.contains("additionalProperties"))
+          schema["additionalProperties"] = false;
+      }
+      std::shared_ptr<const sampling::JsonConstraint> arguments;
+      try {
+        arguments = sampling::JsonConstraint::Compile(schema, enforce);
+      } catch (const std::invalid_argument&) {
+        if (enforce)
+          throw;
+        // Non-strict tool parameters are guidance, unlike response_format.
+        // An unrestricted/unsupported tool schema must not prevent a valid
+        // structured answer. Keep the declared tool name and JSON arguments.
+        arguments = sampling::JsonConstraint::Object();
+      }
+      tools.emplace_back(tool.name, std::move(arguments));
+    }
+    grammar = sampling::JsonConstraint::WithTools(
+        grammar, std::move(tools),
+        request.tool_choice == ChatRequest::ToolChoice::kRequired);
+    instruction +=
+        "\nIf a tool is needed, respond using the JSON tool-call form "
+        "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
+        "tool_call>. "
+        "The JSON response schema applies to the final answer; "
+        "tool arguments follow the chosen function's schema.";
+  }
+  if (!request.response_format_description.empty())
+    instruction.insert(0, request.response_format_description + "\n\n");
+  if (!constrained.messages.empty() &&
+      (constrained.messages.front().role == tokenization::ChatRole::kSystem ||
+       constrained.messages.front().role ==
+           tokenization::ChatRole::kDeveloper)) {
+    constrained.messages.front().content += "\n\n" + instruction;
+  } else {
+    constrained.messages.insert(
+        constrained.messages.begin(),
+        tokenization::ChatMessage{tokenization::ChatRole::kSystem,
+                                  instruction});
+  }
+  if (runner.InitialOutputState(request) ==
+      TextGenerationBackend::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  sampling->constraint = runner.BindConstraint(grammar);
+  return constrained;
+}
+
 struct QwenImageContext final : TextPromptContext {
   std::shared_ptr<const models::qwen::vision::Prompt> prompt;
 };
@@ -882,6 +952,16 @@ public:
     return plans;
   }
 
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->GetTokenizer().GetVocabSize(), [this](std::uint32_t id) {
+          const auto& tokenizer = model_->GetTokenizer();
+          return sampling::ConstraintVocabulary::Piece{
+              tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
+        });
+  }
+
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     return model_->GetTokenizer().Encode(text);
@@ -1601,6 +1681,16 @@ public:
       });
     }
     return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          return sampling::ConstraintVocabulary::Piece{
+              model_->DecodeToken(static_cast<int>(id)),
+              model_->IsStopToken(static_cast<int>(id))};
+        });
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -2343,6 +2433,16 @@ public:
           {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
     }
     return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->tokenizer().GetVocabSize(), [this](std::uint32_t id) {
+          const auto& tokenizer = model_->tokenizer();
+          return sampling::ConstraintVocabulary::Piece{
+              tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
+        });
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -3466,16 +3566,20 @@ InferenceBackend::Result InferenceBackend::chat(
   if (state == nullptr) {
     return {};
   }
-  auto prompt = state->scheduler->runner().PreparePrompt(request);
+  auto effective_sampling = sampling_config;
+  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
+                                          &effective_sampling);
+  const auto& effective_request = constrained ? *constrained : request;
+  auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return {};
   }
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
-      sampling_config, is_cancelled, on_token, request.client_id,
+      effective_sampling, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
       prompt->cache_prefix_tokens, request.stop_sequences,
-      state->scheduler->runner().InitialOutputState(request));
+      state->scheduler->runner().InitialOutputState(effective_request));
 #else
   (void)request;
   (void)max_tokens;
@@ -3499,7 +3603,11 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
         request, max_tokens, sampling_config, is_cancelled, stream_output);
   }
 
-  auto prompt = state->scheduler->runner().PreparePrompt(request);
+  auto effective_sampling = sampling_config;
+  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
+                                          &effective_sampling);
+  const auto& effective_request = constrained ? *constrained : request;
+  auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return TextGenerationBackend::start_chat(
         request, max_tokens, sampling_config, is_cancelled, stream_output);
@@ -3508,7 +3616,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   auto scheduled_request = state->scheduler->Submit(
-      std::move(prompt->tokens), max_tokens, sampling_config, is_cancelled,
+      std::move(prompt->tokens), max_tokens, effective_sampling, is_cancelled,
       stream_output,
       TextRequestMetadata{
           .client_id = client_id,
@@ -3521,7 +3629,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
       state, std::move(scheduled_request),
-      state->scheduler->runner().InitialOutputState(request));
+      state->scheduler->runner().InitialOutputState(effective_request));
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);

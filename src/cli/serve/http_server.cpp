@@ -434,6 +434,7 @@ bool ReadTextContent(const json::Value* content, std::string* out) {
 bool ReadTextMessages(const json::Value* input,
                       std::vector<tokenization::ChatMessage>* messages,
                       bool responses = false) {
+  core::ImageReadBudget image_budget;
   if (input == nullptr || !input->is_array() || input->empty())
     return false;
   for (const auto& item : input->items()) {
@@ -466,7 +467,11 @@ bool ReadTextMessages(const json::Value* input,
     }
     tokenization::ChatMessage message;
     message.role = RoleFrom(role);
-    if (!ReadTextContent(item.find("content"), &message.content))
+    if (responses) {
+      std::string error;
+      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error))
+        return false;
+    } else if (!ReadTextContent(item.find("content"), &message.content))
       return false;
     if (responses && message.role == tokenization::ChatRole::kAssistant &&
         !messages->empty() &&
@@ -538,7 +543,8 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
                                   "truncation",
                                   "modalities",
                                   "audio"}) {
-    if (field != stop_field && body.contains(field)) {
+    if (field != stop_field && body.contains(field) &&
+        !(allow_stream && (field == "text" || field == "reasoning"))) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }
@@ -729,14 +735,16 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
     messages.push_back({tokenization::ChatRole::kUser, input->str(), "", ""});
   } else if (!ReadTextMessages(input, &messages, true)) {
     return InvalidCompatibilityRequest(
-        "'input' must be nonempty text, text messages or Gufo reasoning items; "
-        "use "
-        "/v1/chat/completions for images and tools");
+        "'input' must contain text, message items with text/images, or Gufo "
+        "reasoning items; "
+        "use /v1/chat/completions for tools");
   }
 
   ChatRequest chat{std::move(messages)};
   chat.client_id = req.client_id;
   chat.reasoning = b.reasoning_defaults();
+  if (auto error = ParseOpenAiResponseControls(body, &chat))
+    return std::move(*error);
   return CreateOpenAiResponse(
       req, b, chat, max_tokens, sampling_config,
       body.find("stream") != nullptr && body.find("stream")->as_bool());

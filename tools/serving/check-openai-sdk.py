@@ -187,32 +187,33 @@ def check_stops(client, model, checks):
     record("stop_invalid_schema", {"status": 400, "cases": 4})
 
 
+def image_content(color):
+    rgb = {"red": (255, 0, 0), "blue": (0, 0, 255)}[color]
+
+    def chunk(kind, payload):
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 128, 128, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress((b"\0" + bytes(rgb) * 128) * 128))
+        + chunk(b"IEND", b"")
+    )
+    return {
+        "type": "image_url",
+        "image_url": {
+            "url": "data:image/png;base64," + base64.b64encode(png).decode()
+        },
+    }
+
+
 def check_conversations(client, model, checks, vision=False):
     """Exercise thinking controls and cache reuse after a client disconnect."""
-
-    def image(color):
-        rgb = {"red": (255, 0, 0), "blue": (0, 0, 255)}[color]
-
-        def chunk(kind, payload):
-            return (
-                struct.pack(">I", len(payload))
-                + kind
-                + payload
-                + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
-            )
-
-        png = (
-            b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", struct.pack(">IIBBBBB", 128, 128, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress((b"\0" + bytes(rgb) * 128) * 128))
-            + chunk(b"IEND", b"")
-        )
-        return {
-            "type": "image_url",
-            "image_url": {
-                "url": "data:image/png;base64," + base64.b64encode(png).decode()
-            },
-        }
 
     def signature(result):
         return result["text"], result["reasoning"], result["finish"]
@@ -295,7 +296,7 @@ def check_conversations(client, model, checks, vision=False):
             request["extra_body"]["chat_template_kwargs"]["preserve_thinking"] = retain
             if vision:
                 request["messages"][-1]["content"] = [
-                    image("red"),
+                    image_content("red"),
                     {"type": "text", "text": request["messages"][-1]["content"]},
                 ]
             assistant = {"role": "assistant", "content": "", "reasoning_content": ""}
@@ -339,7 +340,7 @@ def check_conversations(client, model, checks, vision=False):
         for color in ("red", "blue"):
             request = body(
                 [
-                    image(color),
+                    image_content(color),
                     {
                         "type": "text",
                         "text": "Name the dominant color in the image in a full sentence.",
@@ -385,6 +386,355 @@ def check_conversations(client, model, checks, vision=False):
         ), r
 
 
+def check_structured_outputs(client, model, checks, vision=False):
+    from typing import Literal
+    from pydantic import BaseModel, Field
+
+    class Item(BaseModel):
+        name: Literal["cat", "dog"]
+        count: int = Field(ge=1, le=5)
+
+    class Reply(BaseModel):
+        items: list[Item] = Field(min_length=1, max_length=2)
+        note: str | None
+
+    def record(name, value):
+        checks[name] = value
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+
+    def sdk_result(result):
+        choice = result.choices[0]
+        return {"content": choice.message.content,
+                "parsed": choice.message.parsed.model_dump(),
+                "finish": choice.finish_reason, "usage": result.usage.to_dict()}
+
+    common = dict(model=model, messages=[{"role": "user", "content":
+                  "Return one item named cat with count 1, and a null note."}],
+                  temperature=0, seed=31, max_completion_tokens=128,
+                  extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+    for label, options in (
+        ("greedy", {}),
+        ("sampled", {"temperature": .7, "top_p": .8,
+                     "presence_penalty": .3, "frequency_penalty": .2,
+                     "extra_body": {"top_k": 20, "min_p": .05, "repeat_penalty": 1.1}}),
+    ):
+        body = {**common, **options}
+        body["extra_body"] = {**common["extra_body"], **options.get("extra_body", {})}
+        first = client.chat.completions.parse(**body, response_format=Reply)
+        assert first.choices[0].message.parsed is not None, first
+        assert first.choices[0].finish_reason == "stop", first
+        with client.chat.completions.stream(**body, response_format=Reply,
+                                           stream_options={"include_usage": True}) as stream:
+            events = list(stream)
+            repeated = stream.get_final_completion()
+        assert repeated.choices[0].message.content == first.choices[0].message.content, (first, repeated)
+        assert repeated.choices[0].message.parsed == first.choices[0].message.parsed
+        assert any(e.type == "content.delta" for e in events), events
+        record("schema_sdk_" + label, sdk_result(first))
+
+    class Measurement(BaseModel):
+        score: int = Field(ge=1, le=5)
+        fraction: float = Field(ge=0, le=1, multiple_of=.25)
+        tag: str = Field(pattern=r"^[A-Z]{2}$", min_length=2, max_length=2)
+
+    measured = {**common, "messages": [{"role": "user", "content":
+                "Return score 3, fraction 0.75, and tag OK."}]}
+    for thinking in (False, True):
+        body = {**measured, "max_completion_tokens": 768 if thinking else 128,
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": thinking}}}
+        result = client.chat.completions.parse(**body, response_format=Measurement)
+        assert result.choices[0].message.parsed is not None, result
+        record(f"schema_bounds_thinking_{thinking}", sdk_result(result))
+    response = client.responses.parse(
+        model=model, input=measured["messages"][0]["content"],
+        text_format=Measurement, reasoning={"effort": "none"},
+        temperature=0, max_output_tokens=128)
+    assert response.output_parsed is not None and response.status == "completed", response
+    record("schema_responses", {"text": response.output_text,
+                               "parsed": response.output_parsed.model_dump(),
+                               "usage": response.usage.to_dict()})
+    with client.responses.stream(
+        model=model, input=measured["messages"][0]["content"],
+        text_format=Measurement, reasoning={"effort": "none"},
+        temperature=0, max_output_tokens=128) as stream:
+        list(stream)
+        streamed = stream.get_final_response()
+    assert streamed.output_text == response.output_text, (response, streamed)
+    record("schema_responses_stream", {"text": streamed.output_text})
+
+    object_request = {**common, "response_format": {"type": "json_object"},
+                      "messages": [{"role": "user", "content": "Return JSON with answer 42."}]}
+    result = chat_result(client, object_request, True)
+    assert result["finish"] == "stop" and isinstance(json.loads(result["text"]), dict), result
+    record("json_object", result)
+
+    unbounded = {
+        **common,
+        "messages": [{"role": "user", "content": "Return the first two positive integers."}],
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "Numbers", "description": "A list of the requested integers.",
+            "strict": True, "schema": {
+                "type": "object", "properties": {
+                    "numbers": {"type": "array", "items": {"type": "integer"}}},
+                "required": ["numbers"], "additionalProperties": False}}},
+    }
+    result = chat_result(client, unbounded, True)
+    assert result["finish"] == "stop" and json.loads(result["text"]) == {"numbers": [1, 2]}, result
+    record("schema_unbounded_array", result)
+
+    def constant(text):
+        return {"type": "json_schema", "json_schema": {"name": "constant", "strict": True,
+                "schema": {"type": "object", "properties": {
+                    "text": {"type": "string", "const": text}},
+                    "required": ["text"], "additionalProperties": False}}}
+
+    # Unicode and protocol-looking strings must not be reinterpreted by the
+    # streaming tool/reasoning parser, including tokens split inside UTF-8.
+    literal = '┌ <think>not reasoning</think> <tool_call>not a call</tool_call> "\\'
+    constrained = {**common, "response_format": constant(literal)}
+    for streaming in (False, True):
+        result = chat_result(client, constrained, streaming)
+        assert result["finish"] == "stop" and json.loads(result["text"]) == {"text": literal}, result
+        assert not result["reasoning"] and not result["tools"], result
+        record(f"schema_literal_{streaming}", result)
+
+    # A new grammar starts at its root even when prompt/model state is reused.
+    for text in ("alpha", "beta", "alpha"):
+        body = {**common, "response_format": constant(text)}
+        result = chat_result(client, body, True)
+        assert json.loads(result["text"]) == {"text": text}, result
+        record("schema_cache_" + text, result)
+    assert checks["schema_cache_alpha"]["usage"]["cached_tokens"] > 0
+
+    peers = [{**common, "response_format": constant(text), "temperature": .8, "seed": seed}
+             for text, seed in (("peer-a", 11), ("peer-b", 19))]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda body: chat_result(client, body, True), peers))
+    assert [json.loads(r["text"])["text"] for r in results] == ["peer-a", "peer-b"], results
+    record("schema_concurrent", results)
+    plain = chat_result(client, {**common, "messages": [{"role": "user", "content":
+                        "Reply with just the word hello."}], "extra_body": {
+                        "chat_template_kwargs": {"enable_thinking": False}}})
+    assert "hello" in plain["text"].lower() and not plain["text"].startswith("{"), plain
+    record("schema_does_not_leak", plain)
+
+    interrupted = {**common, "response_format": constant("resume " * 24),
+                   "messages": [{"role": "system", "content": "Follow the schema precisely. " * 48},
+                                {"role": "user", "content": "Return the required object."}]}
+    partial, chunks = "", 0
+    with client.chat.completions.create(**interrupted, stream=True) as stream:
+        for chunk in stream:
+            for choice in chunk.choices:
+                piece = choice.delta.content or ""
+                partial += piece
+                chunks += bool(piece)
+            if chunks >= 3:
+                break
+        else:
+            raise AssertionError("structured stream never reached cancellation point")
+    resumed = {**interrupted, "messages": [*interrupted["messages"],
+               {"role": "assistant", "content": partial},
+               {"role": "user", "content": "Return a fresh complete object."}]}
+    result = chat_result(client, resumed, True)
+    assert json.loads(result["text"]) == {"text": "resume " * 24}, result
+    assert result["usage"]["cached_tokens"] >= 128, result
+    replay = chat_result(client, resumed)
+    assert replay["text"] == result["text"], (result, replay)
+    record("schema_cancel_resume", result)
+    record("schema_cancel_replay", replay)
+
+    truncated = chat_result(client, {**constrained, "max_completion_tokens": 1}, True)
+    assert truncated["finish"] == "length", truncated
+    record("schema_length", truncated)
+    stopped = chat_result(client, {**constrained, "stop": "text"}, True)
+    assert stopped["finish"] == "stop" and "text" not in stopped["text"], stopped
+    record("schema_explicit_stop", stopped)
+    arguments = {
+        "type": "object", "properties": {
+            "score": {"type": "integer", "minimum": 1, "maximum": 5},
+            "text": {"type": "string", "const": "<think>literal</think>"}},
+        "required": ["score", "text"], "additionalProperties": False}
+    tool_request = {**constrained, "tool_choice": "required",
+                    "messages": [{"role": "user", "content": "Call the score tool with score 3."}],
+                    "tools": [{"type": "function", "function": {
+                        "name": "score", "description": "Report a score",
+                        "parameters": arguments, "strict": True}}]}
+    for streaming in (False, True):
+        tool_result = chat_result(client, tool_request, streaming)
+        assert tool_result["finish"] == "tool_calls" and len(tool_result["tools"]) == 1, tool_result
+        function = tool_result["tools"][0]["function"]
+        from jsonschema import Draft202012Validator
+        Draft202012Validator(arguments).validate(json.loads(function["arguments"]))
+        assert function["name"] == "score", tool_result
+        record(f"schema_tool_{streaming}", tool_result)
+    for invalid in (
+        {"response_format": {"type": "json_schema", "json_schema": {
+            "name": "bad", "schema": {"type": "object", "properties": {},
+            "additionalProperties": False, "not": {}}}}},
+    ):
+        try:
+            client.chat.completions.create(**{**constrained, **invalid}, stream=True)
+        except openai.BadRequestError as error:
+            assert error.code == "invalid_response_format", error
+        else:
+            raise AssertionError("unsupported structured combination accepted")
+    record("schema_invalid", {"status": 400, "cases": 1})
+
+    if vision:
+        class Color(BaseModel):
+            color: Literal["red", "blue"]
+        requests = [{**common, "messages": [{"role": "user", "content": [
+            image_content(color), {"type": "text", "text": "What is the dominant color?"}]}]}
+            for color in ("red", "blue")]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda body: client.chat.completions.parse(
+                **body, response_format=Color), requests))
+        for expected, result in zip(("red", "blue"), results):
+            assert result.choices[0].message.parsed.color == expected, result
+        replay = client.chat.completions.parse(**requests[0], response_format=Color)
+        assert replay.choices[0].message.parsed.color == "red", replay
+        assert replay.usage.to_dict()["cached_tokens"] > 0, replay
+        record("schema_vision", [sdk_result(r) for r in results])
+        record("schema_vision_replay", sdk_result(replay))
+        responses_image = client.responses.parse(
+            model=model, input=[{"role": "user", "content": [
+                {"type": "input_image", "image_url": image_content("blue")["image_url"]["url"]},
+                {"type": "input_text", "text": "What is the dominant color?"}]}],
+            text_format=Color, reasoning={"effort": "none"},
+            temperature=0, max_output_tokens=64)
+        assert responses_image.output_parsed.color == "blue", responses_image
+        record("schema_responses_image", {"text": responses_image.output_text,
+                                         "usage": responses_image.usage.to_dict()})
+
+
+def check_structured_limits(client, model, checks, vision=False):
+    """Short boundary checks; valid prefixes may be incomplete at a limit."""
+    schema = {"type": "object", "properties": {
+        "text": {"type": "string", "const": 'é😀 "\\ ' * 24}},
+        "required": ["text"], "additionalProperties": False}
+    specification = {"name": "boundary", "strict": True, "schema": schema}
+    common = dict(model=model, temperature=0, seed=79,
+                  messages=[{"role": "user", "content": "Return the required object."}],
+                  response_format={"type": "json_schema", "json_schema": specification},
+                  extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+
+    def record(name, result):
+        checks[name] = result
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+
+    # Ragged concurrent budgets straddle the maximum speculative block width.
+    bodies = [{**common, "max_completion_tokens": n} for n in range(1, 9)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda body: chat_result(
+            client, body, body["max_completion_tokens"] % 2 == 0), bodies))
+    for n, result in enumerate(results, 1):
+        assert result["finish"] == "length", result
+        assert result["usage"]["completion_tokens"] == n, result
+        assert not result["tools"] and not result["reasoning"], result
+    record("schema_ragged_limits", results)
+
+    sampled = {**common, "temperature": .7, "top_p": .8, "max_completion_tokens": 7,
+               "extra_body": {**common["extra_body"], "top_k": 20, "min_p": .05}}
+    first = chat_result(client, sampled, True)
+    replay = chat_result(client, sampled)
+    assert (first["text"], first["finish"]) == (replay["text"], replay["finish"]), (first, replay)
+    assert first["usage"]["completion_tokens"] == replay["usage"]["completion_tokens"] == 7
+    record("schema_limited_sampled_replay", replay)
+
+    for thinking in (False, True):
+        result = chat_result(client, {
+            **common, "max_completion_tokens": 3,
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": thinking}}}, True)
+        assert result["finish"] == "length" and result["usage"]["completion_tokens"] == 3, result
+        record(f"schema_limited_thinking_{thinking}", result)
+        body = dict(model=model, input="Return the required object.",
+                    temperature=0, max_output_tokens=3,
+                    reasoning={"effort": "low" if thinking else "none"},
+                    text={"format": {"type": "json_schema", **specification}})
+        # Use raw typed events: SDK parse helpers correctly reject incomplete JSON.
+        with client.responses.create(**body, stream=True) as stream:
+            events = list(stream)
+        final = events[-1].response
+        assert events[-1].type == "response.incomplete" and final.status == "incomplete", final
+        assert final.incomplete_details.reason == "max_output_tokens", final
+        assert final.usage.output_tokens == 3, final
+        record(f"schema_responses_limit_{thinking}", final.to_dict())
+
+    tool = {"type": "function", "function": {"name": "echo", "strict": True,
+            "parameters": schema}}
+    for n in (1, 2, 7, 16):
+        result = chat_result(client, {**common, "tools": [tool], "tool_choice": "required",
+                                     "max_completion_tokens": n}, n % 2 == 0)
+        assert result["finish"] == "length" and result["usage"]["completion_tokens"] == n, result
+        assert not result["text"] and not result["tools"], result
+        record(f"schema_tool_limit_{n}", result)
+
+    # A non-strict tool schema can be broader than the response-format subset.
+    result = chat_result(client, {**common, "tools": [{
+        "type": "function", "function": {"name": "optional_tool", "strict": False,
+        "parameters": {"type": "object", "additionalProperties": True,
+                       "dependentRequired": {"a": ["b"]}}}}],
+        "max_completion_tokens": 2}, True)
+    assert result["finish"] == "length" and result["usage"]["completion_tokens"] == 2, result
+    record("schema_non_strict_tool", result)
+    for parameters in (
+        {"type": "object", "properties": {}, "required": []},
+        {"type": "object", "properties": {"x": {"type": "integer"}},
+         "additionalProperties": False},
+    ):
+        try:
+            client.chat.completions.create(**{
+                **common, "max_completion_tokens": 2, "tool_choice": "required",
+                "tools": [{"type": "function", "function": {
+                    "name": "invalid", "strict": True, "parameters": parameters}}]}, stream=True)
+        except openai.BadRequestError:
+            pass
+        else:
+            raise AssertionError("malformed strict tool schema was accepted")
+    record("schema_invalid_strict_tools", {"status": 400, "cases": 2})
+    if vision:
+        result = chat_result(client, {**common, "max_completion_tokens": 2,
+            "messages": [{"role": "user", "content": [
+                image_content("red"), {"type": "text", "text": "Return the required object."}]}]}, True)
+        assert result["finish"] == "length" and result["usage"]["completion_tokens"] == 2, result
+        record("schema_image_limit", result)
+
+    # Request-local grammar and budget must reset after incomplete generations.
+    fresh_schema = {"type": "object", "properties": {"ok": {"type": "boolean", "const": True}},
+                    "required": ["ok"], "additionalProperties": False}
+    fresh = {**common, "max_completion_tokens": 32,
+             "response_format": {"type": "json_schema", "json_schema": {
+                 "name": "fresh", "strict": True, "schema": fresh_schema}}}
+    resumed = chat_result(client, fresh, True)
+    assert resumed["finish"] == "stop" and json.loads(resumed["text"]) == {"ok": True}, resumed
+    repeated = chat_result(client, fresh)
+    assert repeated["text"] == resumed["text"] and repeated["usage"]["cached_tokens"] > 0, repeated
+    record("schema_after_limits", repeated)
+    bounded = {"type": "object", "properties": {
+        "label": {"type": "string", "pattern": "^é😀$", "minLength": 2, "maxLength": 2},
+        "value": {"type": "number", "minimum": -.5, "maximum": .5, "multipleOf": .25}},
+        "required": ["label", "value"], "additionalProperties": False}
+    checked = chat_result(client, {**fresh,
+        "messages": [{"role": "user", "content": "Return label é😀 and value 0.25."}],
+        "max_completion_tokens": 64,
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "unicode_bounds", "strict": True, "schema": bounded}}}, True)
+    from jsonschema import Draft202012Validator
+    assert checked["finish"] == "stop", checked
+    Draft202012Validator(bounded).validate(json.loads(checked["text"]))
+    record("schema_unicode_bounds", checked)
+    alternatives = {"type": "object", "properties": {"x": {
+        "type": "string", "pattern": "^(?:(?:ab){2}|c)$", "maxLength": 3}},
+        "required": ["x"], "additionalProperties": False}
+    checked = chat_result(client, {**fresh, "max_completion_tokens": 32,
+        "messages": [{"role": "user", "content": "Return ab. Start the value with ab."}],
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "bounded_alternatives", "strict": True, "schema": alternatives}}}, True)
+    assert checked["finish"] == "stop", checked
+    Draft202012Validator(alternatives).validate(json.loads(checked["text"]))
+    record("schema_alternative_length", checked)
+
+
 def check_response(response, reasoning):
     assert response.status in ("completed", "incomplete"), response
     assert response.parallel_tool_calls is False
@@ -420,12 +770,12 @@ def main():
     parser.add_argument("--base-url", required=True, help="http://127.0.0.1:PORT/v1")
     parser.add_argument("--model", required=True, help="Gufo served model name")
     parser.add_argument("--expect-reasoning", action="store_true")
-    parser.add_argument("--suite", choices=("all", "stops", "responses", "conversation"), default="all")
+    parser.add_argument("--suite", choices=("all", "stops", "responses", "conversation", "structured", "structured-limits"), default="all")
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
     args = parser.parse_args()
-    if args.vision and args.suite not in ("all", "conversation"):
-        parser.error("--vision requires --suite all or conversation")
+    if args.vision and args.suite not in ("all", "conversation", "structured", "structured-limits"):
+        parser.error("--vision requires a conversation or structured-output suite")
     url = urlsplit(args.base_url)
     if (url.scheme != "http" or url.hostname not in ("127.0.0.1", "::1")
             or url.path.rstrip("/") != "/v1" or url.username or url.password
@@ -453,6 +803,14 @@ def main():
     with OpenAI(**options, http_client=DefaultHttpxClient(
         trust_env=False, event_hooks={"request": [local_only]}
     )) as client:
+        if args.suite == "structured":
+            check_structured_outputs(client, args.model, checks, args.vision)
+            print(json.dumps(report, indent=2))
+            return
+        if args.suite == "structured-limits":
+            check_structured_limits(client, args.model, checks, args.vision)
+            print(json.dumps(report, indent=2))
+            return
         if args.suite in ("all", "stops"):
             check_stops(client, args.model, checks)
         if args.suite in ("all", "conversation"):

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -209,6 +210,14 @@ public:
   [[nodiscard]] virtual std::vector<TextExecutionPlan> SupportedPlans()
       const = 0;
 
+  /// Lazily built only for constrained requests; normal text loads pay nothing.
+  [[nodiscard]] virtual std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const {
+    throw std::invalid_argument("model does not support structured output");
+  }
+  [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
+      std::shared_ptr<const sampling::JsonConstraint> grammar) const;
+
   [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const = 0;
   [[nodiscard]] virtual std::optional<std::vector<TextRunnerToken>>
@@ -322,6 +331,13 @@ public:
   /// Restores a version-compatible serialized payload into an existing state.
   virtual void RestorePersistentSnapshot(
       TextRunnerState& state, std::span<const std::uint8_t> payload) const;
+
+private:
+  mutable std::mutex constraint_mutex_;
+  mutable std::shared_ptr<const sampling::ConstraintVocabulary>
+      constraint_vocabulary_;
+  mutable std::vector<std::shared_ptr<const sampling::TokenConstraint>>
+      constraints_;
 };
 
 /// Bounded pool of opaque runner states with exact-prefix continuation reuse.

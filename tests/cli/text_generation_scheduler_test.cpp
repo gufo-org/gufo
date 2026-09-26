@@ -1586,7 +1586,8 @@ int main() {
       };
       run(0, 254);
       run(1000, 254);
-      run(2, 2);
+      for (std::size_t limit = 1; limit <= 8; ++limit)
+        run(limit, limit);
       control->stop_after = 150;
       const auto stopped = scheduler->Submit({3}, 0, 0.0F).Wait();
       Expect(stopped.tokens.size() == 150 &&
