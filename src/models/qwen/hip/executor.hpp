@@ -231,7 +231,28 @@ struct QwenMoeScratch {
   std::span<std::int32_t> ids_src1;      // [batch*n_used]
   std::span<std::int32_t> ids_dst;       // [batch*n_used]
   std::span<std::int32_t> expert_bounds; // [n_experts + 1]
+  // Routed F16 expert GEMMs (Flash-Next's route): per-expert counts, buckets
+  // padded to 16 rows, the (expert, token tile) map and F16 token rows.
+  std::span<std::int32_t> routed_counts;  // [n_experts], uint32 counts
+  std::span<std::int32_t> routed_bounds;  // [n_experts + 1]
+  std::span<std::int32_t> routed_cursors; // [n_experts]
+  std::span<std::int32_t> rows_token;     // [RoutedRows(slots, experts)]
+  std::span<std::int32_t> rows_slot;      // [RoutedRows(slots, experts)]
+  std::span<std::int32_t> routed_tiles;   // [RoutedTiles(slots, experts)]
+  std::span<std::uint16_t> x_half;        // [batch, hidden] F16
 };
+
+/// Row capacity of the routed buckets: each expert pads to 16 rows.
+[[nodiscard]] constexpr std::size_t RoutedRows(std::size_t slots,
+                                               std::size_t n_experts) {
+  return slots + (15 * n_experts);
+}
+
+/// Tile-map capacity for the narrowest (16-row) tiles.
+[[nodiscard]] constexpr std::size_t RoutedTiles(std::size_t slots,
+                                                std::size_t n_experts) {
+  return (RoutedRows(slots, n_experts) / 16) + n_experts + 1;
+}
 
 /// Typed non-owning capability views over stable Qwen GPU arena allocations.
 /// The nested aggregates carry element counts without owning memory or changing

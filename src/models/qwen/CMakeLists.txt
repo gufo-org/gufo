@@ -26,8 +26,10 @@ if (ENGINE_ENABLE_HIP)
   find_package(OpenSSL REQUIRED COMPONENTS Crypto)
   target_link_libraries(gufo_core PRIVATE OpenSSL::Crypto)
   # Routed-expert MoE (qwen35moe) reuses the vendored llama.cpp-derived MMQ
-  # quantized kernels built for the Flash-Next runner.
-  target_link_libraries(gufo_core PRIVATE gufo_qwen38_flash_next_mmq)
+  # quantized kernels and the routed F16 expert GEMMs built for the
+  # Flash-Next runner.
+  target_link_libraries(gufo_core PRIVATE gufo_qwen38_flash_next_mmq
+    gufo_qwen38_flash_next_kernels)
   target_sources(gufo_core PRIVATE
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/encoder.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/device_input.hip

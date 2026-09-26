@@ -68,6 +68,19 @@ std::size_t MoeScratchBytes(const core::ModelConfig& config,
   total = CheckedSum(total, ints(slots));
   total = CheckedSum(total, ints(slots));
   total = CheckedSum(total, ints(config.expert_count + 1));
+  const std::size_t experts = config.expert_count;
+  total = CheckedSum(total, ints(experts));
+  total = CheckedSum(total, ints(experts + 1));
+  total = CheckedSum(total, ints(experts));
+  total = CheckedSum(total, ints(RoutedRows(slots, experts)));
+  total = CheckedSum(total, ints(RoutedRows(slots, experts)));
+  total = CheckedSum(total, ints(RoutedTiles(slots, experts)));
+  total = CheckedSum(
+      total,
+      ((CheckedMultiply(CheckedMultiply(batch, hidden), sizeof(std::uint16_t)) +
+        255) /
+       256) *
+          256);
   return total;
 }
 
@@ -106,6 +119,16 @@ QwenMoeScratch CarveMoeScratch(std::uint8_t* block,
   scratch.ids_src1 = take_ints(slots);
   scratch.ids_dst = take_ints(slots);
   scratch.expert_bounds = take_ints(config.expert_count + 1);
+  const std::size_t experts = config.expert_count;
+  scratch.routed_counts = take_ints(experts);
+  scratch.routed_bounds = take_ints(experts + 1);
+  scratch.routed_cursors = take_ints(experts);
+  scratch.rows_token = take_ints(RoutedRows(slots, experts));
+  scratch.rows_slot = take_ints(RoutedRows(slots, experts));
+  scratch.routed_tiles = take_ints(RoutedTiles(slots, experts));
+  scratch.x_half = std::span<std::uint16_t>(
+      reinterpret_cast<std::uint16_t*>(block + offset), batch * hidden);
+  offset += ((batch * hidden * sizeof(std::uint16_t) + 255) / 256) * 256;
   return scratch;
 }
 
