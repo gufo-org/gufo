@@ -14,6 +14,7 @@
 #include <optional>
 #include <semaphore>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1528,7 +1529,37 @@ void TestShutdownCancelsRunnerAcquisition() {
   stopped.get();
 }
 
+void TestProgressLoggingIsOptInAndBounded() {
+  auto run = [](bool enabled) {
+    auto control = std::make_shared<FakeControl>();
+    control->prefill_capacity = 2;
+    std::ostringstream output;
+    auto* previous = std::clog.rdbuf(output.rdbuf());
+    {
+      auto scheduler = MakeScheduler(
+          control, 1, {}, TextSchedulerPolicy{.log_progress = enabled});
+      const auto result =
+          scheduler->Submit({7, 70, 71, 72, 73}, 55, 0.0F).Wait();
+      Expect(result.tokens.size() == 55,
+             "progress logging preserves generated tokens");
+    }
+    std::clog.rdbuf(previous);
+    return output.str();
+  };
+
+  Expect(run(false).find("[progress]") == std::string::npos,
+         "progress logging is disabled by default");
+  const auto output = run(true);
+  Expect(output.find("phase=prefill tokens=2/5") != std::string::npos &&
+             output.find("phase=prefill tokens=5/5") != std::string::npos,
+         "progress logging reports model-owned prefill chunks");
+  Expect(output.find("phase=decode tokens=50/55") != std::string::npos &&
+             output.find("phase=decode tokens=55/55") != std::string::npos,
+         "progress logging reports decode intervals and the final remainder");
+}
+
 int main() {
+  TestProgressLoggingIsOptInAndBounded();
   TestStopSequenceChunkBoundaries();
   TestStopSequencesPreserveExecutedState();
   TestStopPrefixFlushAndBatchIsolation();

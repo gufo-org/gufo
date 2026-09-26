@@ -45,6 +45,7 @@ struct TextSchedulerPolicy {
   std::size_t max_buffered_output_bytes_total{
       kDefaultMaxBufferedOutputBytesTotal};
   std::chrono::milliseconds request_timeout{0};
+  bool log_progress{false};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.

@@ -5,19 +5,24 @@
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <iomanip>
 #include <iterator>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <thread>
 #include <utility>
 
+#include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 
 namespace gufo::server {
 namespace {
+
+constexpr std::size_t kDecodeProgressInterval = 50;
 
 struct OutputBudget {
   explicit OutputBudget(std::size_t byte_limit) : limit(byte_limit) {}
@@ -78,6 +83,8 @@ struct ScheduledRequest {
   std::optional<TextGenerationScheduler::Clock::time_point> previous_token;
   std::chrono::duration<double, std::milli> inter_token_total{0};
   std::size_t inter_token_samples{0};
+  std::size_t last_decode_progress_tokens{0};
+  double last_decode_progress_ms{0.0};
   bool decode_due{false};
   std::optional<TextRunnerToken> preview_token;
   bool advance_pending{false};
@@ -246,6 +253,82 @@ struct TextGenerationScheduler::Impl {
   Impl(Impl&&) = delete;
   Impl& operator=(Impl&&) = delete;
 
+  static double TokensPerSecond(std::size_t tokens, double elapsed_ms) {
+    return elapsed_ms > 0.0 ? static_cast<double>(tokens) * 1000.0 / elapsed_ms
+                            : 0.0;
+  }
+
+  void LogPrefillProgress(const std::shared_ptr<ScheduledRequest>& request,
+                          std::size_t chunk_tokens,
+                          double chunk_ms) const noexcept {
+    if (!scheduler_policy.log_progress) {
+      return;
+    }
+    try {
+      const std::size_t cached = std::min(request->result.cached_prompt_tokens,
+                                          request->result.prompt_tokens);
+      const std::size_t total = request->result.prompt_tokens - cached;
+      const std::size_t processed =
+          std::min(request->result.prefill_tokens, total);
+      const double percentage =
+          total > 0 ? static_cast<double>(processed) * 100.0 / total : 100.0;
+      std::ostringstream message;
+      message << "request=" << request->id
+              << " phase=prefill tokens=" << processed << '/' << total
+              << " percentage=" << std::fixed << std::setprecision(1)
+              << percentage
+              << " chunk_tps=" << TokensPerSecond(chunk_tokens, chunk_ms)
+              << " avg_tps="
+              << TokensPerSecond(request->result.prefill_tokens,
+                                 request->result.prefill_ms);
+      Logger::Info("progress", message.str());
+    } catch (...) {
+    }
+  }
+
+  void LogDecodeProgress(const std::shared_ptr<ScheduledRequest>& request,
+                         bool final = false) const noexcept {
+    if (!scheduler_policy.log_progress) {
+      return;
+    }
+    const std::size_t generated = request->result.tokens.size();
+    if (generated == 0 || generated == request->last_decode_progress_tokens ||
+        (!final &&
+         generated / kDecodeProgressInterval ==
+             request->last_decode_progress_tokens / kDecodeProgressInterval)) {
+      return;
+    }
+    try {
+      const std::size_t chunk_tokens =
+          generated - request->last_decode_progress_tokens;
+      const double chunk_ms =
+          request->result.decode_ms - request->last_decode_progress_ms;
+      const double percentage =
+          request->token_limit > 0
+              ? static_cast<double>(generated) * 100.0 / request->token_limit
+              : 100.0;
+      std::ostringstream message;
+      message << "request=" << request->id
+              << " phase=decode tokens=" << generated << '/'
+              << request->token_limit << " percentage=" << std::fixed
+              << std::setprecision(1) << percentage
+              << " chunk_tps=" << TokensPerSecond(chunk_tokens, chunk_ms)
+              << " avg_tps="
+              << TokensPerSecond(generated, request->result.decode_ms);
+      if (request->result.draft_tokens > 0) {
+        message << " draft_accepted=" << request->result.draft_accepted_tokens
+                << " draft_proposed=" << request->result.draft_tokens
+                << " acceptance_percentage="
+                << static_cast<double>(request->result.draft_accepted_tokens) *
+                       100.0 / request->result.draft_tokens;
+      }
+      Logger::Info("progress", message.str());
+      request->last_decode_progress_tokens = generated;
+      request->last_decode_progress_ms = request->result.decode_ms;
+    } catch (...) {
+    }
+  }
+
   [[nodiscard]] std::shared_ptr<ScheduledRequest> PopQueued() {
     const std::lock_guard<std::mutex> lock(queue_mutex);
     if (queued_clients.empty()) {
@@ -321,6 +404,7 @@ struct TextGenerationScheduler::Impl {
       }
       request->result.cancelled = true;
       FinalizeResult(request, TextGenerationBackend::FinishReason::kCancelled);
+      LogDecodeProgress(request, true);
       PublishTerminal(request, {}, true);
     } catch (...) {
       PublishTerminal(request, std::current_exception(), true);
@@ -333,6 +417,7 @@ struct TextGenerationScheduler::Impl {
       request->runner_request.Invalidate();
     }
     request->result.completion_tokens = request->result.tokens.size();
+    LogDecodeProgress(request, true);
     PublishTerminal(request, std::move(failure), true);
   }
 
@@ -388,6 +473,7 @@ struct TextGenerationScheduler::Impl {
         cache_commit.shared_prefix_bytes;
     request->result.cache_shared_prefix_ms = cache_commit.shared_prefix_ms;
     FinalizeResult(request, finish_reason);
+    LogDecodeProgress(request, true);
     PublishTerminal(request);
   }
 
@@ -508,13 +594,15 @@ struct TextGenerationScheduler::Impl {
       }
       const auto start = Clock::now();
       const auto step = request->runner_request.Prefill(budget);
-      request->result.prefill_ms +=
+      const double step_ms =
           std::chrono::duration<double, std::milli>(Clock::now() - start)
               .count();
+      request->result.prefill_ms += step_ms;
       request->result.prefill_tokens += step.consumed_tokens;
       ++request->result.prefill_chunks;
       request->result.max_prefill_chunk_tokens = std::max(
           request->result.max_prefill_chunk_tokens, step.consumed_tokens);
+      LogPrefillProgress(request, step.consumed_tokens, step_ms);
 
       if (decoder_runnable) {
         ++request->result.active_decode_prefill_chunks;
@@ -639,6 +727,7 @@ struct TextGenerationScheduler::Impl {
     request->result.decode_ms +=
         std::chrono::duration<double, std::milli>(Clock::now() - decode_start)
             .count();
+    LogDecodeProgress(request);
     if (CompleteIfStopped(request)) {
       return;
     }
@@ -699,6 +788,7 @@ struct TextGenerationScheduler::Impl {
       request->result.decode_ms +=
           std::chrono::duration<double, std::milli>(Clock::now() - decode_start)
               .count();
+      LogDecodeProgress(request);
       if (request->stop_filter.stopped()) {
         CompleteSuccess(request,
                         TextGenerationBackend::FinishReason::kStopSequence);
@@ -732,6 +822,7 @@ struct TextGenerationScheduler::Impl {
       request->result.decode_ms += std::chrono::duration<double, std::milli>(
                                        Clock::now() - preview_start)
                                        .count();
+      LogDecodeProgress(request);
     }
     if (request->stop_filter.stopped()) {
       CompleteSuccess(request,
@@ -973,6 +1064,7 @@ struct TextGenerationScheduler::Impl {
           std::chrono::duration<double, std::milli>(Clock::now() -
                                                     item.decode_start)
               .count();
+      LogDecodeProgress(item.request);
       if (!published || IsTerminal(item.request)) {
         continue;
       }
