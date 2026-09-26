@@ -77,10 +77,21 @@ QwenScratchArena::QwenScratchArena(const core::ModelConfig& config) {
   const std::size_t ssm_gate_size =
       std::max<std::size_t>(config.ssm_inner_size, q_size);
 
+  const std::size_t moe_slots =
+      config.IsMoE() ? config.expert_used_count : 0;
+  const std::size_t moe_expert_ff =
+      config.IsMoE() ? config.expert_ff_length : 0;
+  const std::size_t moe_shared_ff =
+      config.IsMoE() ? config.expert_shared_ff_length : 0;
+  const std::size_t moe_floats =
+      config.expert_count + (moe_slots * 2) + (moe_slots * moe_expert_ff * 3) +
+      (moe_slots * hidden_size) + (moe_shared_ff * 3) + hidden_size;
+
   const std::size_t total_size = (hidden_size * 4) + q_size + (kv_size * 2) +
                                  max_context + (intermediate_size * 3) +
                                  ssm_qkv_size + ssm_gate_size +
-                                 config.ssm_inner_size + vocab_size;
+                                 config.ssm_inner_size + vocab_size +
+                                 moe_floats;
   buffer.resize(total_size, 0.0F);
 
   std::size_t cur = 0;
@@ -105,6 +116,21 @@ QwenScratchArena::QwenScratchArena(const core::ModelConfig& config) {
   ssm_gate = alloc_span(ssm_gate_size);
   ssm_out_buf = alloc_span(config.ssm_inner_size);
   logits = alloc_span(vocab_size);
+
+  if (config.IsMoE()) {
+    moe_router_logits = alloc_span(config.expert_count);
+    moe_expert_weights = alloc_span(moe_slots);
+    moe_expert_gate = alloc_span(moe_slots * moe_expert_ff);
+    moe_expert_up = alloc_span(moe_slots * moe_expert_ff);
+    moe_expert_act = alloc_span(moe_slots * moe_expert_ff);
+    moe_expert_out = alloc_span(moe_slots * hidden_size);
+    moe_shexp_gate = alloc_span(moe_shared_ff);
+    moe_shexp_up = alloc_span(moe_shared_ff);
+    moe_shexp_act = alloc_span(moe_shared_ff);
+    moe_shexp_out = alloc_span(hidden_size);
+    moe_ids_storage.resize(moe_slots, 0);
+    moe_expert_ids = std::span<std::uint32_t>(moe_ids_storage);
+  }
 }
 
 }  // namespace gufo::models

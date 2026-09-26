@@ -32,6 +32,15 @@ struct ModelConfig {
   float rope_theta{10000000.0F};
   float rope_scale{1.0F};
   bool is_text_only{true};
+  // MoE (qwen35moe): zero expert_count denotes a dense FFN model.
+  std::uint32_t expert_count{0};
+  std::uint32_t expert_used_count{0};
+  std::uint32_t expert_ff_length{0};
+  std::uint32_t expert_shared_ff_length{0};
+
+  [[nodiscard]] constexpr bool IsMoE() const noexcept {
+    return expert_count > 0;
+  }
 
   [[nodiscard]] constexpr std::uint32_t AttentionSize() const noexcept {
     return num_attention_heads * head_dim;

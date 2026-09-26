@@ -41,9 +41,15 @@
 
 namespace {
 
-constexpr std::uint32_t kNumHeads = 24;
-constexpr std::uint32_t kNumKvHeads = 4;
 constexpr std::uint32_t kHeadDim = 256;
+
+// Every head geometry the kernels are instantiated for: Qwen3.6-27B (GQA 6)
+// and Qwen3.6-35B-A3B (GQA 8).
+struct HeadShape {
+  std::uint32_t heads;
+  std::uint32_t kv_heads;
+};
+constexpr std::array<HeadShape, 2> kShapes{{{24, 4}, {16, 2}}};
 
 class Rng {
 public:
@@ -83,9 +89,12 @@ void Compare(const char* label, const std::vector<float>& got,
   }
 }
 
-void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
-             std::uint32_t key_begin = 0) {
-  std::cout << "wmma prefill attention: start_pos=" << start_pos
+void RunCase(HeadShape shape, std::uint32_t start_pos, std::size_t batch_size,
+             bool want_lse, std::uint32_t key_begin = 0) {
+  const std::uint32_t kNumHeads = shape.heads;
+  const std::uint32_t kNumKvHeads = shape.kv_heads;
+  std::cout << "wmma prefill attention: heads=" << kNumHeads << "/"
+            << kNumKvHeads << " start_pos=" << start_pos
             << " batch=" << batch_size << " lse=" << (want_lse ? "yes" : "no")
             << "\n";
 
@@ -193,19 +202,27 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
 
   // Independent FP64 attention over the original FP32 inputs, before the
   // kernel rounds Q/K/V and probabilities. Include the first and last query
-  // of head zero so partial causal tiles cannot hide behind kernel agreement.
+  // so partial causal tiles cannot hide behind kernel agreement, and the first
+  // and last head so a wrong query-to-KV-head mapping cannot either: the two
+  // kernels share that mapping, so their agreement alone would not catch it.
   std::vector<float> oracle, selected;
+  const std::uint32_t group = kNumHeads / kNumKvHeads;
+  for (const std::uint32_t head : {0U, kNumHeads - 1})
   for (const auto row : {std::size_t{0}, batch_size - 1}) {
+    const std::size_t kv_head = head / group;
+    const std::size_t q_base = row * attention_size + head * kHeadDim;
+    const std::size_t cache_base = kv_head * kMaxContext * kHeadDim;
     const auto end = start_pos + row + 1;
     std::vector<double> scores(end, -INFINITY);
     double maximum = -INFINITY;
     for (std::size_t key = key_begin; key < end; ++key) {
       double dot = 0;
       for (std::size_t dim = 0; dim < kHeadDim; ++dim) {
-        const float value = key < start_pos
-                                ? h_cache[key * kHeadDim + dim]
-                                : h_k[(key - start_pos) * kv_size + dim];
-        dot += double(h_q[row * attention_size + dim]) * value;
+        const float value =
+            key < start_pos
+                ? h_cache[cache_base + key * kHeadDim + dim]
+                : h_k[(key - start_pos) * kv_size + kv_head * kHeadDim + dim];
+        dot += double(h_q[q_base + dim]) * value;
       }
       scores[key] = dot / std::sqrt(double(kHeadDim));
       maximum = std::max(maximum, scores[key]);
@@ -218,16 +235,17 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
     for (std::size_t dim = 0; dim < kHeadDim; ++dim) {
       double value = 0;
       for (std::size_t key = key_begin; key < end; ++key) {
-        const float v = key < start_pos
-                            ? h_cache[total_kv + key * kHeadDim + dim]
-                            : h_v[(key - start_pos) * kv_size + dim];
+        const float v =
+            key < start_pos
+                ? h_cache[total_kv + cache_base + key * kHeadDim + dim]
+                : h_v[(key - start_pos) * kv_size + kv_head * kHeadDim + dim];
         value += scores[key] * v;
       }
       value = sum > 0 ? value / sum : 0;
       if (!want_lse)
-        value /= 1 + std::exp(-double(h_gate[row * attention_size + dim]));
+        value /= 1 + std::exp(-double(h_gate[q_base + dim]));
       oracle.push_back(static_cast<float>(value));
-      selected.push_back(got[row * attention_size + dim]);
+      selected.push_back(got[q_base + dim]);
     }
   }
   Compare("FP64 original-input oracle", selected, oracle, 2e-3);
@@ -308,10 +326,14 @@ void RunCase(std::uint32_t start_pos, std::size_t batch_size, bool want_lse,
     if (want_lse)
       HIP_CHECK(hipMemcpy(lse_expected.data(), d_lse_new,
                           lse_elements * sizeof(float), hipMemcpyDeviceToHost));
+    // Workspaces holding every head, a ragged or single-head group on either
+    // side, and too little for one head (the canonical-cache fallback).
+    const std::uint32_t all = kNumKvHeads;
+    const std::uint32_t ragged = std::max(1U, kNumKvHeads - 1);
     for (const auto [key_heads, value_heads] :
-         {std::pair{4u, 4u}, std::pair{3u, 4u}, std::pair{1u, 4u},
-          std::pair{4u, 1u}, std::pair{2u, 3u}, std::pair{3u, 2u},
-          std::pair{0u, 4u}, std::pair{4u, 0u}}) {
+         {std::pair{all, all}, std::pair{ragged, all}, std::pair{1U, all},
+          std::pair{all, 1U}, std::pair{ragged, 1U}, std::pair{1U, ragged},
+          std::pair{0U, all}, std::pair{all, 0U}}) {
       for (std::size_t i = 0; i < storage.size(); ++i)
         HIP_CHECK(hipMemset(storage[i], 0xA5, (words[i] + 32) * sizeof(float)));
       const std::array<std::size_t, 2> sizes{
@@ -399,30 +421,32 @@ int main() {
     return device_status;
   }
 
-  RunCase(0, 256, false);
-  // Not a multiple of the 32-query block, so the last block is partly out of
-  // range.
-  RunCase(0, 100, false);
-  // Exactly one key tile visible, so the prefetch never fires.
-  RunCase(0, 16, false);
-  // Exactly two, so it fires once and then has to be suppressed.
-  RunCase(0, 32, false);
-  // Large shallow chunks use packed heads too, including a ragged final tile.
-  RunCase(0, 1025, false);
-  RunCase(0, 2048, true);
-  // At depth: the whole visible range, prefix and diagonal, in one pass.
-  RunCase(1024, 512, false);
-  // A depth that is not a multiple of the 16-key tile.
-  RunCase(1500, 128, false);
-  // The log-sum-exp path, which also suppresses the gate.
-  RunCase(1024, 256, true);
-  RunCase(8192, 100, false);
-  RunCase(8192, 1023, false);
-  RunCase(8192, 1024, false);
-  RunCase(32781, 1025, true);
-  RunCase(8192, 1024, true, 16);
-  RunCase(8192, 1024, true, 17);
-  RunCase(8192, 1024, false, 9216);
+  for (const HeadShape shape : kShapes) {
+    RunCase(shape, 0, 256, false);
+    // Not a multiple of the 32-query block, so the last block is partly out of
+    // range.
+    RunCase(shape, 0, 100, false);
+    // Exactly one key tile visible, so the prefetch never fires.
+    RunCase(shape, 0, 16, false);
+    // Exactly two, so it fires once and then has to be suppressed.
+    RunCase(shape, 0, 32, false);
+    // Large shallow chunks use packed heads too, including a ragged final tile.
+    RunCase(shape, 0, 1025, false);
+    RunCase(shape, 0, 2048, true);
+    // At depth: the whole visible range, prefix and diagonal, in one pass.
+    RunCase(shape, 1024, 512, false);
+    // A depth that is not a multiple of the 16-key tile.
+    RunCase(shape, 1500, 128, false);
+    // The log-sum-exp path, which also suppresses the gate.
+    RunCase(shape, 1024, 256, true);
+    RunCase(shape, 8192, 100, false);
+    RunCase(shape, 8192, 1023, false);
+    RunCase(shape, 8192, 1024, false);
+    RunCase(shape, 32781, 1025, true);
+    RunCase(shape, 8192, 1024, true, 16);
+    RunCase(shape, 8192, 1024, true, 17);
+    RunCase(shape, 8192, 1024, false, 9216);
+  }
 
   std::cout << "Qwen WMMA prefill attention ops test passed on gfx1151.\n";
   return 0;

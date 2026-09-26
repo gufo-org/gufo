@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <utility>
 
 #include "src/models/qwen/hip/execution_policy.hpp"
@@ -10,9 +11,32 @@
 namespace gufo::hip::detail {
 
 inline constexpr std::size_t kOptimizedAttentionMinBatch{1024};
-inline constexpr std::uint32_t kTiledAttentionQueryHeads{24};
-inline constexpr std::uint32_t kTiledAttentionKvHeads{4};
 inline constexpr std::uint32_t kTiledAttentionHeadDim{256};
+
+/// Head geometries the tiled and WMMA prefill kernels are instantiated for.
+/// The per-block work (two query heads of one KV group) does not depend on the
+/// head counts; they only set strides and the query-to-KV head mapping, so a
+/// new geometry needs an entry here and a matching instantiation in both
+/// kernels' launchers. The GQA ratio must be even.
+struct TiledAttentionHeadShape {
+  std::uint32_t query_heads;
+  std::uint32_t kv_heads;
+};
+inline constexpr TiledAttentionHeadShape kTiledAttentionShape27B{24, 4};
+inline constexpr TiledAttentionHeadShape kTiledAttentionShape35BA3B{16, 2};
+// The launchers pick an instantiation by query-head count alone.
+static_assert(kTiledAttentionShape27B.query_heads !=
+              kTiledAttentionShape35BA3B.query_heads);
+
+[[nodiscard]] constexpr bool IsTiledAttentionHeadShape(
+    std::uint32_t query_heads, std::uint32_t kv_heads) noexcept {
+  for (const auto shape : {kTiledAttentionShape27B, kTiledAttentionShape35BA3B}) {
+    if (query_heads == shape.query_heads && kv_heads == shape.kv_heads) {
+      return true;
+    }
+  }
+  return false;
+}
 inline constexpr std::size_t kSplitKDecodeAttentionMinContext{128};
 inline constexpr std::uint32_t kSplitKDecodeAttentionMaxSplits{32};
 inline constexpr std::uint32_t kFusedQkNormMaxHeadDim{256};
@@ -76,8 +100,7 @@ struct AttentionSupportParams {
 [[nodiscard]] constexpr bool IsTiledAttentionSupported(
     const AttentionSupportParams& params) noexcept {
   return params.batch_size != 0 &&
-         params.num_heads == kTiledAttentionQueryHeads &&
-         params.num_kv_heads == kTiledAttentionKvHeads &&
+         IsTiledAttentionHeadShape(params.num_heads, params.num_kv_heads) &&
          params.head_dim == kTiledAttentionHeadDim &&
          static_cast<std::size_t>(params.start_pos) + params.batch_size <=
              params.max_context &&

@@ -155,6 +155,19 @@ struct QwenLayerWeights {
   QwenTensorRef ffn_gate;
   QwenTensorRef ffn_up;
   QwenTensorRef ffn_down;
+
+  // MoE Feed Forward Network (qwen35moe). Present iff the model config has
+  // expert_count > 0; the dense tensors above stay empty then. The expert
+  // tensors keep their full [cols, rows, experts] payload flat; the expert
+  // axis stride is the encoded size of one expert matrix.
+  QwenTensorRef ffn_gate_inp;       // router, [hidden x n_experts] F32
+  QwenTensorRef ffn_gate_inp_shexp; // shared-expert gate, [hidden] F32
+  QwenTensorRef ffn_gate_exps;      // [hidden x expert_ff x n_experts]
+  QwenTensorRef ffn_up_exps;        // [hidden x expert_ff x n_experts]
+  QwenTensorRef ffn_down_exps;      // [expert_ff x hidden x n_experts]
+  QwenTensorRef ffn_gate_shexp;     // [hidden x shared_ff]
+  QwenTensorRef ffn_up_shexp;       // [hidden x shared_ff]
+  QwenTensorRef ffn_down_shexp;     // [shared_ff x hidden]
 };
 
 /// Full model tensor references mapped directly from GGUF storage.
@@ -227,6 +240,20 @@ struct QwenScratchArena {
   std::span<float> ssm_gate;
   std::span<float> ssm_out_buf;
   std::span<float> logits;
+
+  // MoE scratch (empty spans on dense models).
+  std::span<float> moe_router_logits;
+  std::span<std::uint32_t> moe_expert_ids;
+  std::span<float> moe_expert_weights;
+  std::span<float> moe_expert_gate;
+  std::span<float> moe_expert_up;
+  std::span<float> moe_expert_act;
+  std::span<float> moe_expert_out;
+  std::span<float> moe_shexp_gate;
+  std::span<float> moe_shexp_up;
+  std::span<float> moe_shexp_act;
+  std::span<float> moe_shexp_out;
+  std::vector<std::uint32_t> moe_ids_storage;
 };
 
 }  // namespace gufo::models
