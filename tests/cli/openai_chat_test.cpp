@@ -586,7 +586,8 @@ void TestQwenToolBoundariesAndSchema() {
     "model":"test-model", "messages":[{"role":"user","content":"use f"}],
     "tools":[{"type":"function","function":{"name":"f","parameters":{
       "type":"object","properties":{"text":{"type":"string"},
-      "count":{"type":"integer"}}}}}]
+      "count":{"type":"integer"},"flag":{"type":"boolean"},
+      "limit":{"type":["integer","null"]},"tags":{"type":"array"}}}}}]
   })");
   const std::string good =
       "<tool_call><function=f><parameter=text>42</parameter>"
@@ -616,6 +617,29 @@ void TestQwenToolBoundariesAndSchema() {
         Case{"<tool_call><function=f><parameter=text>literal </think>"
              "</parameter></function></tool_call>",
              1, R"({"text":"literal </think>"})"},
+        // One newline on each side of a value is template framing; a file's
+        // final newline, indentation and an empty value survive.
+        Case{"<tool_call>\n<function=f>\n<parameter=text>\n  line 1\n"
+             "line 2\n\n</parameter>\n<parameter=count>\n42\n</parameter>\n"
+             "</function>\n</tool_call>",
+             1, R"({"text":"  line 1\nline 2\n","count":42})"},
+        Case{"<tool_call>\n<function=f>\n<parameter=text>\n\n</parameter>\n"
+             "</function>\n</tool_call>",
+             1, R"({"text":""})"},
+        Case{"<tool_call>\r\n<function=f>\r\n<parameter=text>\r\n\r\nx\r\n"
+             "</parameter>\r\n</function>\r\n</tool_call>",
+             1, R"({"text":"\r\nx"})"},
+        // Python literals where the schema wants JSON; a string keeps them.
+        Case{"<tool_call><function=f><parameter=flag>\nTrue\n</parameter>"
+             "<parameter=limit>None</parameter><parameter=tags>"
+             "[False, \"None\", \"a \\\" True\"]</parameter>"
+             "<parameter=text>True</parameter></function></tool_call>",
+             1,
+             R"({"flag":true,"limit":null,"tags":[false,"None","a \" True"],)"
+             R"("text":"True"})"},
+        Case{"<tool_call><function=f><parameter=flag>Yes</parameter>"
+             "</function></tool_call>",
+             0, ""},
         Case{"<tool_call>{\"name\":\"f\",\"arguments\":{\"text\":"
              "\"literal </tool_call>\"}}</tool_call>",
              1, R"({"text":"literal </tool_call>"})"}}) {
