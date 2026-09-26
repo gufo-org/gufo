@@ -2858,7 +2858,8 @@ constexpr std::uint32_t kWmmaRatio = 4;
 constexpr std::uint32_t kWmmaKSteps = kWmmaHeadDim / 16;
 // Row padding keeps a 16-byte-per-lane fragment read off a single bank group.
 constexpr std::uint32_t kWmmaKStride = kWmmaHeadDim + 8;
-// Union-mask capacity: one bit per 4-token block, 262,144 tokens of context.
+// Union-mask capacity of the live visible extent: one bit per 4-token block,
+// 262,144 visible tokens. Rows may be strided wider.
 constexpr std::uint32_t kWmmaMaxMaskWords = 2048;
 
 /// Two row layouts share the kernel. The dense window packs 16 queries x 2
@@ -5954,9 +5955,18 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t ratio, hipStream_t stream,
                          bool last_only) {
   if (heads != kWmmaQueryHeads || kv_heads != kWmmaKvHeads ||
-      d != kWmmaHeadDim || ratio != kWmmaRatio || n_tokens == 0 ||
-      (mask != nullptr && mask_words > kWmmaMaxMaskWords)) {
+      d != kWmmaHeadDim || ratio != kWmmaRatio || n_tokens == 0) {
     return false;
+  }
+  if (mask != nullptr) {
+    // The kernel's union mask covers the LIVE visible extent; mask_words is
+    // only the row stride and may be wider when the session capacity
+    // exceeds 262,144 tokens.
+    const std::uint64_t live_blocks =
+        (std::uint64_t{start_pos} + n_tokens + kWmmaRatio - 1) / kWmmaRatio;
+    const std::uint64_t live_words = (live_blocks + 31) / 32;
+    if (live_words > kWmmaMaxMaskWords || live_words > mask_words)
+      return false;
   }
   if (mask != nullptr) {
     constexpr std::uint32_t kPackedQueries = 4;

@@ -421,10 +421,12 @@ std::vector<double> Fp64Attention(
 /// Runs the per-token reference and the fused WMMA route over the same
 /// cache and reports the worst absolute error of the gated context.
 double Compare(std::uint32_t n_tokens, std::uint32_t start_pos, bool masked,
-               std::uint32_t seed, bool sparse = false, bool bounded = false) {
+               std::uint32_t seed, bool sparse = false, bool bounded = false,
+               std::uint32_t mask_words_override = 0) {
   const std::uint32_t n_kv = start_pos + n_tokens;
   const std::uint32_t max_blocks = (n_kv + kRatio - 1) / kRatio;
-  const std::uint32_t mask_words = (max_blocks + 31) / 32;
+  const std::uint32_t mask_words =
+      mask_words_override != 0 ? mask_words_override : (max_blocks + 31) / 32;
   const std::size_t q_count = static_cast<std::size_t>(n_tokens) * kQWidth;
   const std::size_t kv_count = static_cast<std::size_t>(n_kv) * kKvWidth;
 
@@ -727,12 +729,32 @@ void CheckChunks(std::uint32_t n, std::uint32_t split) {
     throw std::runtime_error("attention depends on prefill chunk boundary");
 }
 
+void CheckWmmaLiveExtent() {
+  HipBuffer<float> qv(kQWidth), gate(kQWidth), out(kQWidth);
+  HipBuffer<__half> k(kKvWidth), v(kKvWidth);
+  HipBuffer<std::uint32_t> mask(3200);
+  const auto accepts = [&](std::uint32_t n, std::uint32_t start,
+                           std::uint32_t words) {
+    return q::WmmaCausalAttention(qv.get(), gate.get(), k.get(), v.get(),
+                                  mask.get(), words, out.get(), n, start,
+                                  kHeads, kKvHeads, kDim, kRatio, nullptr);
+  };
+  // 262,141 + 4 visible tokens need 65,537 blocks = 2,049 words.
+  if (accepts(4, 262141, 3200))
+    throw std::runtime_error("WMMA accepted a live extent past 2048 words");
+  // A row stride narrower than the live extent is a caller error.
+  if (accepts(4, 131069, 1024))
+    throw std::runtime_error("WMMA accepted a stride below the live extent");
+  std::cout << "WMMA live extent: rejects past 262,144 visible tokens\n";
+}
+
 }  // namespace
 
 int main() {
   try {
     CheckChunks(136, 94);
     CheckChunks(2048, 1025);
+    CheckWmmaLiveExtent();
     CheckPreparation(1, 0, 64);
     CheckPreparation(8, 4096, 64);
     CheckPreparation(65, 131069, 64);
@@ -846,6 +868,15 @@ int main() {
       // The reference accumulates FP32 probabilities; the WMMA route rounds
       // Q and P to FP16, so the contract is a small absolute envelope on
       // values of order one.
+      ok = ok && worst < 2e-2;
+    }
+    // A capacity wider than 262,144 (3,200 words at 409,600) keeps chunks
+    // whose visible extent fits 2,048 words on the fused kernel.
+    for (const auto& [n, start] :
+         {std::pair{5U, 131069U}, std::pair{4U, 262140U}}) {
+      const double worst = Compare(n, start, true, seed++, true, true, 3200);
+      std::cout << "WMMA attention n=" << n << " start=" << start
+                << " stride=3200 worst absolute error " << worst << '\n';
       ok = ok && worst < 2e-2;
     }
     return ok ? 0 : 1;
