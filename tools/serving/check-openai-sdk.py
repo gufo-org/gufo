@@ -723,6 +723,16 @@ def check_structured_limits(client, model, checks, vision=False):
     assert checked["finish"] == "stop", checked
     Draft202012Validator(bounded).validate(json.loads(checked["text"]))
     record("schema_unicode_bounds", checked)
+    alternatives = {"type": "object", "properties": {"x": {
+        "type": "string", "pattern": "^(?:(?:ab){2}|c)$", "maxLength": 3}},
+        "required": ["x"], "additionalProperties": False}
+    checked = chat_result(client, {**fresh, "max_completion_tokens": 32,
+        "messages": [{"role": "user", "content": "Return ab. Start the value with ab."}],
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "bounded_alternatives", "strict": True, "schema": alternatives}}}, True)
+    assert checked["finish"] == "stop", checked
+    Draft202012Validator(alternatives).validate(json.loads(checked["text"]))
+    record("schema_alternative_length", checked)
 
 
 def check_response(response, reasoning):

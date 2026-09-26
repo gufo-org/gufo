@@ -148,6 +148,29 @@ void TestPrimitiveConstraints() {
   assert(Accepts(*unanchored, R"({"x":"\uD83D\uDE00 cat"})"));
   const auto alternatives = compile(R"({"type":"string","pattern":"^a|😀$"})");
   assert(Accepts(*alternatives, R"({"x":"\uD83D\uDE00"})"));
+  const auto word = compile(R"({"type":"string","pattern":"^[\\w]+$"})");
+  assert(Accepts(*word, R"({"x":"é"})"));
+  assert(Accepts(*word, R"({"x":"\u00e9"})"));
+  const auto bounded_alternatives = compile(
+      R"({"type":"string","pattern":"^(?:(?:ab){2}|c)$","maxLength":3})");
+  assert(Accepts(*bounded_alternatives, R"({"x":"c"})"));
+  assert(!prefix_allowed(*bounded_alternatives, R"({"x":"a)"));
+  assert(!prefix_allowed(*bounded_alternatives, R"({"x":"\u0061)"));
+  const auto large_repeat = compile(
+      R"({"type":"string","pattern":"^(?:a{500}|b{1,500})$","maxLength":3})");
+  assert(Accepts(*large_repeat, R"({"x":"bbb"})"));
+  assert(!prefix_allowed(*large_repeat, R"({"x":"a)"));
+  const auto bounded_repeat = compile(
+      R"({"type":"string","pattern":"^(?:ab)+$","minLength":3,"maxLength":4})");
+  assert(Accepts(*bounded_repeat, R"({"x":"abab"})"));
+  assert(!prefix_allowed(*bounded_repeat, R"({"x":"abab\u0061)"));
+  const auto bounded_class = compile(
+      R"({"type":"string","pattern":"^(?:[^a-c]{4}|x)$","maxLength":3})");
+  assert(Accepts(*bounded_class, R"({"x":"x"})"));
+  assert(!prefix_allowed(*bounded_class, R"({"x":"y)"));
+  const auto repeated_unicode = compile(
+      R"({"type":"string","pattern":"^(?:é😀)+$","minLength":3,"maxLength":4})");
+  assert(Accepts(*repeated_unicode, R"({"x":"\u00e9\uD83D\uDE00é😀"})"));
   const auto number = compile(
       R"({"type":"number","minimum":-0.4,"exclusiveMaximum":0.5,"multipleOf":0.1})");
   for (const auto value : {"-0.4", "-0.3", "0", "0.3", "0.40"})
@@ -378,6 +401,15 @@ int main(int argc, char** argv) {
         output["accepted"] = gufo::json::Value::array();
         for (const auto& text : input.find("texts")->items())
           output["accepted"].push_back(Accepts(*grammar, text.str()));
+        if (const auto* prefixes = input.find("prefixes")) {
+          output["viable"] = gufo::json::Value::array();
+          for (const auto& text : prefixes->items()) {
+            auto state = grammar->Start();
+            for (unsigned char byte : text.str())
+              state = grammar->Advance(state, byte);
+            output["viable"].push_back(!state.empty());
+          }
+        }
       } catch (const std::exception& error) {
         output["error"] = error.what();
       }
