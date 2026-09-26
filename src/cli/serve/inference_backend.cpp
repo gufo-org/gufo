@@ -58,16 +58,51 @@ std::optional<ChatRequest> ConstrainChatRequest(
     sampling::SamplingConfig* sampling) {
   if (!request.response_format)
     return std::nullopt;
-  if (request.reasoning.enabled.value_or(false) ||
-      !request.stop_sequences.empty() ||
-      (!request.tools.empty() &&
-       request.tool_choice != ChatRequest::ToolChoice::kNone))
-    throw std::invalid_argument(
-        "structured output requires content without stop strings or active "
-        "tools");
   auto constrained = request;
-  constrained.reasoning.enabled = false;
   auto instruction = request.response_format->prompt();
+  auto grammar = request.response_format;
+  if (!request.tools.empty() &&
+      request.tool_choice != ChatRequest::ToolChoice::kNone) {
+    std::vector<sampling::JsonConstraint::Tool> tools;
+    for (const auto& tool : request.tools) {
+      const auto definition = tool.definition_json.empty()
+                                  ? json::Value()
+                                  : json::parse(tool.definition_json);
+      const auto* function = definition.find("function");
+      const auto* strict = function ? function->find("strict") : nullptr;
+      const bool enforce = strict && strict->as_bool();
+      auto schema = json::parse(tool.parameters_json);
+      if (!enforce) {
+        if (!schema.contains("type"))
+          schema["type"] = "object";
+        if (!schema.contains("properties"))
+          schema["properties"] = json::Value::object();
+        if (!schema.contains("additionalProperties"))
+          schema["additionalProperties"] = false;
+      }
+      std::shared_ptr<const sampling::JsonConstraint> arguments;
+      try {
+        arguments = sampling::JsonConstraint::Compile(schema, enforce);
+      } catch (const std::invalid_argument&) {
+        if (enforce)
+          throw;
+        // Non-strict tool parameters are guidance, unlike response_format.
+        // An unrestricted/unsupported tool schema must not prevent a valid
+        // structured answer. Keep the declared tool name and JSON arguments.
+        arguments = sampling::JsonConstraint::Object();
+      }
+      tools.emplace_back(tool.name, std::move(arguments));
+    }
+    grammar = sampling::JsonConstraint::WithTools(
+        grammar, std::move(tools),
+        request.tool_choice == ChatRequest::ToolChoice::kRequired);
+    instruction +=
+        "\nIf a tool is needed, respond using the JSON tool-call form "
+        "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
+        "tool_call>. "
+        "The JSON response schema applies to the final answer; "
+        "tool arguments follow the chosen function's schema.";
+  }
   if (!request.response_format_description.empty())
     instruction.insert(0, request.response_format_description + "\n\n");
   if (!constrained.messages.empty() &&
@@ -81,7 +116,10 @@ std::optional<ChatRequest> ConstrainChatRequest(
         tokenization::ChatMessage{tokenization::ChatRole::kSystem,
                                   instruction});
   }
-  sampling->constraint = runner.BindConstraint(request.response_format);
+  if (runner.InitialOutputState(request) ==
+      TextGenerationBackend::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }
 

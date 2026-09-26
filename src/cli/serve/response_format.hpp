@@ -13,9 +13,20 @@ namespace gufo::server {
 // Chat Completions wire contract:
 // https://developers.openai.com/api/docs/guides/structured-outputs
 inline std::shared_ptr<const sampling::JsonConstraint> ParseResponseFormat(
-    const json::Value* format) {
+    const json::Value* format, bool responses = false) {
   if (!format || format->is_null())
     return {};
+  if (responses && format->is_object() &&
+      format->member_str("type") == "json_schema") {
+    auto chat = json::Value::object();
+    chat["type"] = "json_schema";
+    auto specification = json::Value::object();
+    for (const auto& [key, value] : format->members())
+      if (key != "type")
+        specification[key] = value;
+    chat["json_schema"] = std::move(specification);
+    return ParseResponseFormat(&chat);
+  }
   const auto invalid = [](const char* message) {
     throw std::invalid_argument(message);
   };

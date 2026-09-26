@@ -74,6 +74,7 @@
             ps.huggingface-hub
             ps.requests
             ps.openai # official SDK for local API compatibility checks
+            ps.jsonschema # independent structured-output schema oracle
             lpipsRocm
             ps.numpy
             ps.scipy

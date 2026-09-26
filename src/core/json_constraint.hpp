@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "src/core/json.hpp"
+#include "src/core/json_schema_lexeme.hpp"
 
 namespace gufo::sampling {
 
@@ -21,7 +22,11 @@ namespace gufo::sampling {
 // verification.
 class JsonConstraint {
 public:
-  using Stack = std::vector<std::uint32_t>;
+  struct Stack {
+    std::vector<std::uint32_t> symbols;
+    std::string lexeme;
+    auto operator<=>(const Stack&) const = default;
+  };
   using State = std::vector<Stack>;
   using Sequence = std::vector<std::uint32_t>;
   using Rule = std::vector<Sequence>;
@@ -29,6 +34,12 @@ public:
   static std::shared_ptr<const JsonConstraint> Compile(
       const json::Value& schema, bool strict);
   static std::shared_ptr<const JsonConstraint> Object();
+  static std::shared_ptr<const JsonConstraint> WithReasoning(
+      std::shared_ptr<const JsonConstraint> answer);
+  using Tool = std::pair<std::string, std::shared_ptr<const JsonConstraint>>;
+  static std::shared_ptr<const JsonConstraint> WithTools(
+      std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
+      bool required);
 
   [[nodiscard]] State Start() const;
   [[nodiscard]] State Advance(const State& state, unsigned char byte) const;
@@ -41,6 +52,7 @@ private:
   State Expand(State state) const;
   std::vector<Rule> rules_;
   std::vector<std::bitset<256>> classes_;
+  std::vector<std::shared_ptr<const JsonSchemaLexeme>> lexemes_;
   std::uint32_t root_{0};
   std::string prompt_;
 };
